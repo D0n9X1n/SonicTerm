@@ -122,6 +122,13 @@ each side needs.
 | `--counters-runs N` | valid runs of the counters set (default: `--runs`); needs `--counters` |
 | `--keep` | keeps the per-ref worktrees after the comparison; by default they are removed |
 | `--out <dir>` | where `comparison.md` and the raw evidence go |
+| `--require-base` | holds the base to the head's standard: a base that cannot build, `--list` or fill every set's valid runs fails the comparison (exit 1), and `comparison.md` opens with `**Incomplete comparison:**` naming each gap; a counters set on a base without `perf-counters` still reads `n/a`. Every CI comparison passes it |
+| `--build-only <dir>` | builds both refs once, lists both binaries, copies them to `<dir>/base/` and `<dir>/head/` with `manifest.json`, prints `manifest_sha256=<hex>` and measures nothing; needs `--require-base` and takes no run, counters, `--keep` or `--out` option (`--alloc` adds the alloc example); the build logs go to `<dir>/build-logs` |
+| `--prebuilt <dir>` | measures the binaries a `--build-only` run published instead of building; needs `--prebuilt-run-id`, `--prebuilt-attempt` and `--prebuilt-manifest-sha256`, and refuses any manifest or binary that disagrees with the job ([What CI measures](#what-ci-measures)) |
+
+A local run builds both refs itself. Without `--require-base` it stays
+lenient: a base that cannot build or run is reported `blocked` and the head is
+still measured.
 
 A full comparison runs for hours with measurement windows on screen. To run one
 locally, keep the host idle, on AC power, with the display awake and the screen unlocked, for
@@ -517,31 +524,102 @@ every shipping binary, declares no global allocator.
 ### What CI measures
 
 The `Performance comparison` workflow (`.github/workflows/perf.yml`) has two
-modes. Both split the scenario sets across five parallel jobs on GitHub-hosted
-`macos-14` runners and the same five on `windows-latest` runners, balanced by
-measured macOS time (S7; S9 and S10; S2 and S10/sync; S4, S5 and S11; S1, S3,
-S6, S8 and S12). Each job builds both refs and runs its sets' base and head runs
-on its own runner, so a comparison never crosses runners or platforms. Both modes
-add the counters set, on the head and on a base that declares `perf-counters`: a
-pull request takes two counters runs per scenario and side to stay within 30
-minutes, a release takes `--runs`. The Windows runner has no GPU and no user
-session: its table measures the software-rendering path, and a foreground change
-there is recorded, not judged.
+modes, pull request and release, which share one job graph:
+
+```mermaid
+flowchart LR
+  producer["perf-build-macos<br/>builds base and head once"] -->|"binaries + manifest.json"| macos["compare-macos<br/>5 shards, --prebuilt"]
+  windows["compare-windows<br/>5 shards, each builds"]
+  producer --> result["perf-result<br/>Performance comparison result"]
+  macos --> result
+  windows --> result
+```
+
+- `perf-build-macos` (`macos-14`) resolves the refs and builds both once
+  through the gate's reviewed build steps with `--require-base --build-only`.
+  It recomputes the manifest's sha256 from the file, fails if that differs
+  from the digest the script printed, and uploads the binaries as a tarball,
+  which keeps the executable bit, named `perf-binaries-macOS-<run id>-<attempt>`
+  and kept for one day. Its build logs are uploaded as evidence.
+- Each `compare-macos` shard needs the producer's success. It resolves the refs
+  itself and fails when they differ from the producer's, or when a base was
+  resolved and the producer published no manifest. It downloads the producer
+  attempt's tarball and runs `--require-base --prebuilt`, bound to this run's
+  id, the producer's attempt and its manifest digest. Before measuring,
+  `perf-compare.py` refuses a missing directory or manifest or another schema;
+  a manifest whose sha256 is not the producer's; another run or attempt;
+  another base or head SHA; another harness hash; other Cargo features; another
+  target, toolchain (`rustc -vV`, `cargo -V`) or runner image (`ImageOS`,
+  `ImageVersion`); another profile (each side's LTO and the
+  `CARGO_PROFILE_RELEASE_*` overrides); a binary that is missing, a symlink,
+  not executable or misdigested, or an example a set needs that was not built;
+  and a copy that cannot `--list` or would not find its own tree's assets. A
+  toolchain or image rollover between the producer and a shard therefore fails
+  closed. Only the executable moves: the copies sit under the work directory
+  with no `assets` beside them, so each ref still runs from its own worktree
+  with its own assets. The binaries link Homebrew's Cairo dynamically, so each
+  shard still installs it.
+- "Re-run failed jobs" keeps a successful producer, so its `attempt` output
+  stays the attempt that built the artifact, and a rerun shard downloads that
+  one. "Re-run all jobs" runs a new producer, and its shards refuse the earlier
+  attempt's manifest.
+- Each `compare-windows` shard builds both refs itself, with `--require-base`.
+- `perf-result`, named `Performance comparison result`, needs all three jobs
+  and runs with `always()` under the same eligibility. It checks out nothing
+  and uses no action: one inline step passes only when the producer and both
+  comparison jobs succeeded, so it is the one result to read.
+- A first release has no earlier tag: the producer builds nothing, each macOS
+  shard plans no comparison and skips the download, the Windows shards skip
+  their comparison, and all four jobs succeed.
+
+`--require-base` holds the base to the head's standard in every CI comparison:
+a base that cannot build, list or fill a set's valid runs fails the shard, and
+its `comparison.md` opens with `**Incomplete comparison:**`. The one allowed gap
+is a counters set on a base that does not declare `perf-counters`, which still
+reads `n/a`. Both platforms split the scenario sets the same way (S7; S9 and
+S10; S2 and S10/sync; S4, S5 and S11; S1, S3, S6, S8 and S12), and each shard
+runs its sets' base and head runs interleaved on its own runner, so a comparison
+never crosses runners or platforms. The macOS shard count, five today, is
+chosen from measured critical paths. Both modes add the counters set, on the
+head and on a base that declares `perf-counters`: a pull request takes two
+counters runs per scenario and side to stay within 30 minutes, a release takes
+`--runs`. The Windows runner has no GPU and no user session: its table measures
+the software-rendering path, and a foreground change there is recorded, not
+judged.
 
 | Mode | When | Compares | Runs | Release profile | Time |
 | --- | --- | --- | --- | --- | --- |
-| Pull request | a pull request labelled `perf`, when the label is added and on every push while it is set | the merge base with the head | `--short --runs 5 --counters --counters-runs 2` | LTO off, 16 codegen units, for both refs | within 30 minutes |
+| Pull request | a pull request labelled `perf`, when the label is added and on every push while it is set | the merge base with the head | `--short --runs 5 --counters --counters-runs 2` | LTO off, 16 codegen units, for both refs | within 30 minutes of the run's creation, queue included |
 | Release | a pushed `v*` tag | the previous release tag with the tag | full length, `--runs 5 --counters` | the shipping profile | may take hours |
 
-Each job writes its `comparison.md` to the job summary and uploads it with each
-run's logs and records as an artifact. A new push cancels a pull request's
-comparison in progress; a release comparison is never cancelled. The table's
-details record the run length and any release-profile override. The workflow is
-not one of the required CI jobs; its table is the pull request's evidence. A
-pull request's short runs, on a relaxed profile, are a quick check; the release
-comparison measures the shipped profile at full length. A shared runner is
-noisier than an idle desk, so read a change against an A/A comparison from the
-same runner type and mode.
+Each comparison job writes its `comparison.md` to the job summary and uploads
+it, its `timing.json` and each run's logs and records as an artifact whose name
+ends in the run attempt, so a rerun's evidence never replaces the first
+attempt's. A new push cancels a pull request's comparison in progress; a
+release comparison is never cancelled. The table's details record the run
+length, any release-profile override and, on macOS, the producer run, attempt
+and manifest digest. The workflow is not one of the required CI jobs; its table
+is the pull request's evidence. A pull request's short runs, on a relaxed
+profile, are a quick check; the release comparison measures the shipped profile
+at full length. A shared runner is noisier than an idle desk, so read a change
+against an A/A comparison from the same runner type and mode.
+
+The pull-request budget is 30 minutes from the run's creation to its last job's
+finish, queue time and reruns included; shard time alone does not count.
+`python3 scripts/perf-critical-path.py --run <id>` accounts for it (`--fixture
+<file>` reads a recorded run). It partitions the elapsed time into each attempt
+and the waits between reruns, maps each rerun's inherited job rows to the one
+attempt that executed them, and splits each attempt's chains of needs into
+sibling wait, creation wait, runner queue and runtime classes (setup, build,
+package and upload, download and extract, compare, evidence, check, teardown
+and gap), naming the zero-slack critical path. In a run with `timing.json` the
+compare step splits further into prepare, scenarios and report. An older run
+without it is read in historical mode: each job's evidence is the same-name
+artifact created inside its window, and its compare step stays one class.
+`--ci-run <id>` adds the macOS jobs' concurrency across the perf and CI runs, as
+evidence of contention, not of a quota. It exits 0 within budget, 1 over it,
+and 2 when the rows do not reconcile. The author runs it for a pull request's
+evidence; the workflow does not.
 
 The `macos-perf-smoke` gate step runs
 `python3 scripts/perf-compare.py --smoke` in both `macos-smoke` legs. It builds
@@ -557,7 +635,8 @@ same three cases, S1 `wgpu`, S1 `role-exit`, and an S10/sync delivery replay
 adapter, so this checks the tooling, the wgpu presenter and role-exit handling,
 never timing. Linux CI builds the harness without running a scenario, and
 every platform runs
-`scripts/perf-compare_tests.py` through `check-workflow-supply-chain.sh`.
+`scripts/perf-compare_tests.py` and `scripts/perf-critical-path_tests.py`
+through `check-workflow-supply-chain.sh`.
 [Local Gate](Local-Gate#performance-scenario-smoke) has the smoke's failure
 rules.
 

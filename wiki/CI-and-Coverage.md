@@ -16,11 +16,18 @@ cancels in progress, so a later merge cannot erase the exact-SHA verification
 record for an earlier one.
 
 `.github/workflows/perf.yml` (`Performance comparison`) runs separately and is
-not a required job. It measures a quick before/after table, within 30 minutes,
-for pull requests labelled `perf`, and the full comparison for each release tag,
-on GitHub-hosted macOS and Windows runners, with the frame-counter set and its tables on both;
-[Development and Release](Development-and-Release#what-ci-measures) describes
-both modes.
+not a required job. It measures a quick before/after table, within 30 minutes
+of the run's creation, queue included, for pull requests labelled `perf`, and the
+full comparison for each release tag, on GitHub-hosted macOS and Windows
+runners, with the frame-counter set and its tables on both. One macOS job builds
+both refs once and publishes the binaries as a one-day artifact bound to the
+run, its attempt and a manifest digest; the macOS comparison shards measure
+those binaries, and each Windows shard builds its own. Every comparison passes
+`--require-base`, so a base that cannot build or measure fails its shard. The
+last job, `Performance comparison result`, checks out nothing and passes only
+when the build job and both comparison jobs succeeded, so it is the one result
+to read. [Development and Release](Development-and-Release#what-ci-measures)
+describes both modes and the job layout.
 
 Never merge or enable auto-merge while a required pull-request job is queued,
 in progress, missing, cancelled, unexpectedly skipped, or failed. The macOS,

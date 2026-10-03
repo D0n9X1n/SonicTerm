@@ -345,13 +345,18 @@ a reproduction.
   - **PR pipeline:** runs for every PR labelled `perf` and must finish within
     30 minutes. It compares the merge base with the head using
     `--short --runs 5 --counters --counters-runs 2` and a release profile without
-    LTO (the same for both refs), split across five parallel jobs per platform; the
+    LTO (the same for both refs). One macOS job builds both refs once; five macOS
+    shards measure its binaries, bound to the run, attempt and manifest digest;
+    five Windows shards each build; every comparison passes `--require-base`; and
+    the `Performance comparison result` job passes only when all of them did. The
     counters set runs with the frame counters forced on, on the head and on the
     base when it declares `perf-counters`, giving a counters table and a head
     counters-on vs counters-off overhead table. Its table is the PR's before/after
     evidence. Keep it
-    within 30 minutes when you add scenarios or change the workflow: rebalance
-    the shards or shorten the runs, never drop the budget.
+    within 30 minutes, from the run's creation to its last job's finish with
+    queue time included (`scripts/perf-critical-path.py` accounts for it), when
+    you add scenarios or change the workflow: rebalance the shards or shorten
+    the runs, never drop the budget.
   - **Release pipeline:** runs for each pushed release tag and may take hours.
     It compares the previous release tag with the new one using full-length
     runs, `--counters` and the shipping release profile. Put any long or exhaustive perf
