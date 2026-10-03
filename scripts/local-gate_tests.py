@@ -1786,7 +1786,7 @@ class CiParityTests(unittest.TestCase):
         for name, command, timeout, policy in (
             ("windows-perf-build", "cargo build --locked -p sonicterm-app --example perf_scenarios", 1500,
              gate.WindowsPolicy.COMPILE_ONLY),
-            ("windows-perf-smoke", "python scripts/perf-compare.py --smoke", 3600, gate.WindowsPolicy.STRICT),
+            ("windows-perf-smoke", "python scripts/perf-compare.py --smoke", 4200, gate.WindowsPolicy.STRICT),
         ):
             step = by_id[name]
             self.assertEqual(gate.command_text(step), command)

@@ -594,8 +594,10 @@ with `LockSetForegroundWindow`, so its window opens without taking focus; pressi
 Alt or clicking another window ends the lock, and a failed lock is recorded in the
 result's `notes`.
 
-The local budget is 60 minutes: the 25-minute cold-build allowance, then up to 4
-runs of 100 s for each of the five Windows cases, with room for the replay. The
+The local budget is 70 minutes (4200 s): the 25-minute cold-build allowance
+(1500 s), up to 4 runs of 100 s for each of the five Windows cases (2000 s), and
+up to 3 attempts of 100 s for the S10/sync delivery replay (300 s), which makes a
+3800 s worst case, plus 400 s of headroom. The
 required `windows-tests` CI job runs the build and then the smoke, after
 "Verify Windows selection presentation", and uploads the evidence directory when
 the smoke fails. The CI parity check fails when either step gains an `if:` or
