@@ -101,14 +101,9 @@ fn presented_receipts(
     panes
         .iter()
         .enumerate()
-        .filter(|(index, pane)| plan.acknowledges(*index, pane.id, pane.grid.revision()))
-        .map(|(index, pane)| {
-            sonicterm_render_model::AckReceipt::of(
-                index,
-                pane.id,
-                pane.grid,
-                sonicterm_render_model::AckRows::All,
-            )
+        .filter_map(|(index, pane)| {
+            let rows = plan.acknowledged_rows(index, pane.id, pane.grid.revision())?;
+            Some(sonicterm_render_model::AckReceipt::of(index, pane.id, pane.grid, rows))
         })
         .collect()
 }
@@ -5857,6 +5852,7 @@ impl GpuRenderer {
                 is_alt: pane.grid.is_alt(),
                 scrollbar_alpha: pane.scrollbar_alpha,
                 dirty_rows: pane.grid.dirty_rows().collect(),
+                row_ink: Vec::new(),
             }),
             self.last_frame_key.as_ref(),
         );
@@ -8381,6 +8377,7 @@ impl GpuRenderer {
             let total_ms = now.saturating_duration_since(start).as_secs_f32() * 1000.0;
             let mode = match render_mode {
                 RenderMode::Full => "full",
+                RenderMode::Partial => "partial",
                 RenderMode::Noop => "noop",
             };
             let mut line = format!(

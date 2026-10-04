@@ -90,6 +90,7 @@ fn revision_plan(id: u64, revision: u64) -> FramePlan {
             is_alt: false,
             scrollbar_alpha: 0.0,
             dirty_rows: vec![0, 1],
+            row_ink: Vec::new(),
         }],
         None,
     )
@@ -4545,6 +4546,7 @@ fn scrolled_back_cache_plan(dirty_live_rows: Vec<usize>) -> FramePlan {
         is_alt: false,
         scrollbar_alpha: 0.0,
         dirty_rows,
+        row_ink: Vec::new(),
     };
     let baseline = FramePlan::build(frame_facts(), [metadata(1, Vec::new())], None);
     FramePlan::build(frame_facts(), [metadata(2, dirty_live_rows)], Some(&baseline.key))

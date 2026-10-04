@@ -335,6 +335,9 @@ pub(crate) struct PaneMetadata {
     pub is_alt: bool,
     pub scrollbar_alpha: f32,
     pub dirty_rows: Vec<usize>,
+    /// Per viewport slot, the committed ink of the row it presented, when that record still
+    /// describes the slot's current content; `None` when missing or stale.
+    pub row_ink: Vec<Option<PixelRect>>,
 }
 
 /// Resolved physical geometry and row slots consumed with the caller's original grid borrow.
@@ -360,6 +363,10 @@ pub(crate) struct PlannedPane {
     pub dirty_live_rows: Vec<usize>,
     /// Viewport slots that draw a dirty live row; damage and row emission read them.
     pub dirty_slots: Vec<u16>,
+    /// Per viewport slot, whether this frame assembles the row.
+    pub emit_rows: Vec<bool>,
+    /// Per viewport slot, the valid committed ink the planner was given.
+    pub row_ink: Vec<Option<PixelRect>>,
 }
 
 impl PlannedPane {
@@ -482,23 +489,19 @@ impl FramePlan {
                 is_alt: input.is_alt,
                 scrollbar_bucket,
             });
-            // The alternate screen keeps no scrollback, so its slots are its live rows.
-            let dirty_slots: Vec<u16> = if input.is_alt {
-                input
-                    .dirty_rows
-                    .iter()
-                    .filter_map(|&row| u16::try_from(row).ok().filter(|slot| *slot < input.rows))
-                    .collect()
-            } else {
-                // When: `is_alt` is false, a primary view may be scrolled back, so each live row maps to the slot drawing it.
-                input
-                    .dirty_rows
-                    .iter()
-                    .filter_map(|&row| {
-                        live_row_to_slot(input.scrollback_len, view_top_abs, input.rows, row)
-                    })
-                    .collect()
-            };
+            let dirty_slots: Vec<u16> = input
+                .dirty_rows
+                .iter()
+                .filter_map(|&row| {
+                    live_row_slot(
+                        input.is_alt,
+                        input.scrollback_len,
+                        view_top_abs,
+                        input.rows,
+                        row,
+                    )
+                })
+                .collect();
             // One part per dirty slot (one for an alternate pane, which damages whole), so the
             // waste counter sees the gaps between dirty rows. Each group is a borrowed slice, so
             // the loop allocates nothing per dirty row.
@@ -549,6 +552,9 @@ impl FramePlan {
                 scrollbar_alpha: input.scrollbar_alpha,
                 dirty_slots,
                 dirty_live_rows: input.dirty_rows,
+                // Filled once the mode is decided.
+                emit_rows: Vec::new(),
+                row_ink: input.row_ink,
             });
         }
         let active_index = panes.iter().position(|pane| pane.is_active).unwrap_or(0);
@@ -651,7 +657,7 @@ impl FramePlan {
             && !key.window.overlay_active
             && dirt.rect().is_none()
             && panes.iter().all(|pane| pane.dirty_live_rows.is_empty());
-        let mode = if unchanged || offscreen_only || quiet {
+        let decided = if unchanged || offscreen_only || quiet {
             RenderMode::Noop
         } else {
             // When: `unchanged` is false, compose redraw policy using the same key and damage planned for execution.
@@ -665,9 +671,20 @@ impl FramePlan {
                 },
             )
         };
+        let composed = dirt.rect();
+        // A changed hardware frame narrows to the rows its damage can reach only when nothing
+        // forces a whole repaint and every clean visible row has a record bounding its ink.
+        let partial = decided == RenderMode::Full
+            && !facts.degraded
+            && !first_frame
+            && !change.full
+            && !key.window.overlay_active
+            && previous.is_some_and(|previous| !previous.window.overlay_active)
+            && composed.is_some_and(|damage| damage != surface)
+            && panes.iter().all(records_complete);
+        let mode = if partial { RenderMode::Partial } else { decided };
         // A Full plan is one full frame for the counting renderer building it.
         crate::frame_stats::note_full_frame(mode == RenderMode::Full);
-        let composed = dirt.rect();
         let damage = if first_frame || (facts.degraded && mode == RenderMode::Full) {
             surface
         } else {
@@ -681,6 +698,23 @@ impl FramePlan {
             // When: neither `offscreen_only` nor `quiet` holds, keep the damage composed from first-frame, degraded and dirty-row policy.
             damage
         };
+        // The cursor cell is where the block cursor recolors glyphs; the previous recolor bounds are
+        // the glyphs it recolored last frame. A row whose record meets either is assembled, so this
+        // frame's recolor record is complete and widening by it rarely needs the fallback.
+        let cursor_reach =
+            key.window.cursor_cell.and_then(|cell| cursor_cell_rect(&panes, cell, geometry));
+        let active_clip = panes.get(active_index).and_then(|pane| pane.full_clip);
+        let recolor_reach = resolve_recolor(previous_recolor.bounds, active_clip, surface);
+        for pane in &mut panes {
+            let rows = usize::from(pane.row_count);
+            pane.emit_rows = match mode {
+                RenderMode::Full => vec![true; rows],
+                RenderMode::Noop => vec![false; rows],
+                RenderMode::Partial => {
+                    partial_emit_rows(pane, damage, [cursor_reach, recolor_reach], geometry)
+                }
+            };
+        }
         let damage_parts = if Some(damage) == composed {
             dirt.parts
         } else {
@@ -708,11 +742,11 @@ impl FramePlan {
     /// produced (`current`) differs from the last presented one (`previous`), both bounds are
     /// damaged, so a replaced, removed or new recolored glyph is repainted; with the cursor or
     /// focus class set, the current bounds are damaged even when the record is unchanged.
-    /// `Unbounded` damages the active pane. Assembly is whole-frame, so every primitive meeting
-    /// the widened scissor is already in the batches.
+    /// `Unbounded` damages the active pane. A partial plan's widened damage can reach a row it did
+    /// not emit; [`Self::partial_reaches_unemitted_ink`] reports that, and assembly falls back.
     pub(crate) fn widen_for_recolor(&mut self, previous: RecolorRecord, current: RecolorRecord) {
-        if self.mode != RenderMode::Full {
-            // When: `mode` is not Full, the plan presents nothing and no damage is read.
+        if self.mode == RenderMode::Noop {
+            // When: `mode` is Noop, the plan presents nothing and no damage is read.
             return;
         }
         let changed = previous != current;
@@ -737,10 +771,11 @@ impl FramePlan {
     /// Widen a full plan's damage by the tab-title ink the last presented frame and this frame
     /// drew. A title glyph can reach above the padded tab band, so whenever the tab-band or
     /// focus class is set, or the ink changed, both sides' ink is repainted. `Unbounded` ink
-    /// damages the whole surface. Assembly is whole-frame, so the widened scissor is filled.
+    /// damages the whole surface. As with the recolor, a partial plan checks the widened damage
+    /// against the rows it did not emit.
     pub(crate) fn widen_for_tab_ink(&mut self, previous: RecolorBounds, current: RecolorBounds) {
-        if self.mode != RenderMode::Full {
-            // When: `mode` is not Full, the plan presents nothing and no damage is read.
+        if self.mode == RenderMode::Noop {
+            // When: `mode` is Noop, the plan presents nothing and no damage is read.
             return;
         }
         if previous == current && !self.change.tab_band && !self.change.focus {
@@ -767,14 +802,162 @@ impl FramePlan {
         }
     }
 
-    /// Authorize acknowledgement only for the exact planned pane and revision after a full presentation.
-    pub(crate) fn acknowledges(&self, index: usize, id: u64, revision: u64) -> bool {
-        self.mode == RenderMode::Full
-            && self
-                .panes
-                .get(index)
-                .is_some_and(|pane| pane.id == id && pane.expected_revision == revision)
+    /// The rows a presented frame acknowledges for the exact planned pane and revision: a `Full`
+    /// plan every row, a `Partial` plan each dirty live row whose slot it emitted, a `Noop` none. A
+    /// dirty live row below a scrolled view has no slot, so a partial frame keeps its bit.
+    pub(crate) fn acknowledged_rows(
+        &self,
+        index: usize,
+        id: u64,
+        revision: u64,
+    ) -> Option<sonicterm_render_model::AckRows> {
+        let pane = self
+            .panes
+            .get(index)
+            .filter(|pane| pane.id == id && pane.expected_revision == revision)?;
+        match self.mode {
+            RenderMode::Noop => None,
+            RenderMode::Full => Some(sonicterm_render_model::AckRows::All),
+            RenderMode::Partial => Some(sonicterm_render_model::AckRows::Rows(
+                pane.dirty_live_rows
+                    .iter()
+                    .copied()
+                    .filter(|&row| {
+                        live_row_slot(
+                            pane.is_alt,
+                            pane.scrollback_len,
+                            pane.view_top_abs,
+                            pane.row_count,
+                            row,
+                        )
+                        .is_some_and(|slot| {
+                            pane.emit_rows.get(usize::from(slot)).copied().unwrap_or(false)
+                        })
+                    })
+                    .collect(),
+            )),
+        }
     }
+
+    /// Turn a partial plan into the `Full` plan assembly falls back to: every row emitted and
+    /// every pane acknowledged whole. Its damage stays the composed rectangle, as a hardware
+    /// `Full` keeps it, and the reassembled frame counts as one full frame.
+    pub(crate) fn force_full(&mut self) {
+        if self.mode != RenderMode::Partial {
+            // When: `mode` is not Partial, every row is already emitted or none is presented.
+            return;
+        }
+        self.mode = RenderMode::Full;
+        for pane in &mut self.panes {
+            pane.emit_rows.fill(true);
+        }
+        crate::frame_stats::note_full_frame(true);
+    }
+
+    /// Whether a partial plan's final damage, after the recolor and tab-ink widening, reaches the
+    /// committed ink of a row it did not emit. The scissor would then reset pixels that row drew
+    /// without redrawing them, so assembly must fall back to `Full`. A missing record counts as
+    /// reaching, conservatively.
+    pub(crate) fn partial_reaches_unemitted_ink(&self) -> bool {
+        if self.mode != RenderMode::Partial {
+            // When: `mode` is not Partial, every drawn row was emitted.
+            return false;
+        }
+        self.panes.iter().filter(|pane| pane.full_clip.is_some()).any(|pane| {
+            pane.emit_rows.iter().enumerate().any(|(slot, emitted)| {
+                !*emitted
+                    && pane
+                        .row_ink
+                        .get(slot)
+                        .copied()
+                        .flatten()
+                        .is_none_or(|record| meets(record, self.damage))
+            })
+        })
+    }
+}
+
+/// The viewport slot that draws live row `live_row`: on the alternate screen, which keeps no
+/// scrollback, the row itself; otherwise through [`live_row_to_slot`]. `None` when no slot does.
+pub(crate) fn live_row_slot(
+    is_alt: bool,
+    scrollback_len: u64,
+    view_top_abs: u64,
+    rows: u16,
+    live_row: usize,
+) -> Option<u16> {
+    if is_alt {
+        u16::try_from(live_row).ok().filter(|slot| *slot < rows)
+    } else {
+        // When: `is_alt` is false, a primary view may be scrolled back, so the live row maps through its view top.
+        live_row_to_slot(scrollback_len, view_top_abs, rows, live_row)
+    }
+}
+
+/// Whether two rectangles share a positive pixel area.
+fn meets(left: PixelRect, right: PixelRect) -> bool {
+    left.intersect(right).is_some()
+}
+
+/// Whether every row of `pane` a partial frame could leave unemitted has a valid record. Dirty
+/// slots are always emitted, and a pane with no pixels on the surface draws no row.
+fn records_complete(pane: &PlannedPane) -> bool {
+    pane.full_clip.is_none()
+        || (0..pane.row_count).all(|slot| {
+            pane.row_ink.get(usize::from(slot)).is_some_and(Option::is_some)
+                || pane.dirty_slots.contains(&slot)
+        })
+}
+
+/// The rows a partial plan assembles for `pane`: every dirty slot, every slot whose padded strip
+/// meets `damage`, and every slot whose valid record meets `damage` or a `reach` rectangle (the
+/// drawn cursor cell and the last frame's recolor bounds). A record is not clipped to its pane, so
+/// a neighbour's overhanging glyph is assembled. A pane off the surface assembles nothing.
+fn partial_emit_rows(
+    pane: &PlannedPane,
+    damage: PixelRect,
+    reach: [Option<PixelRect>; 2],
+    geometry: DamageGeometry,
+) -> Vec<bool> {
+    let mut emit = vec![false; usize::from(pane.row_count)];
+    if pane.full_clip.is_none() {
+        // When: `full_clip` is None, neither row loop draws this pane, so `emit` stays empty of rows.
+        return emit;
+    }
+    for slot in &pane.dirty_slots {
+        if let Some(row) = emit.get_mut(usize::from(*slot)) {
+            *row = true;
+        }
+    }
+    for slot in 0..pane.row_count {
+        let index = usize::from(slot);
+        if emit[index] {
+            // When: `emit[index]` is set, the dirty slot is assembled whatever its record says.
+            continue;
+        }
+        let strip_meets =
+            slot_damage(pane, slot, geometry).is_some_and(|strip| meets(strip, damage));
+        let record_meets = pane.row_ink.get(index).copied().flatten().is_some_and(|record| {
+            meets(record, damage)
+                || reach.iter().flatten().any(|target| meets(record, *target))
+        });
+        emit[index] = strip_meets || record_meets;
+    }
+    emit
+}
+
+/// The drawn cursor cell in surface pixels, where the block cursor recolors glyphs; `None` when
+/// its pane is not planned.
+fn cursor_cell_rect(
+    panes: &[PlannedPane],
+    cell: CursorCell,
+    geometry: DamageGeometry,
+) -> Option<PixelRect> {
+    let pane = panes.iter().find(|pane| pane.id == cell.pane_id)?;
+    let left = pane.layout.x + f32::from(cell.col) * geometry.cell_w;
+    let top = pane.layout.y + f32::from(cell.slot) * geometry.cell_h;
+    let width = f32::from(cell.span.max(1)) * geometry.cell_w;
+    Some(crate::cursor::outward_rect((left, top, width, geometry.cell_h)))
 }
 
 pub(crate) fn effective_scrollbar_bucket(
@@ -1137,13 +1320,14 @@ where
 pub(crate) fn emits_every_visible_row(mode: RenderMode) -> bool {
     match mode {
         RenderMode::Full => true,
-        RenderMode::Noop => false,
+        RenderMode::Partial | RenderMode::Noop => false,
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RenderMode {
     Full,
+    Partial,
     Noop,
 }
 
