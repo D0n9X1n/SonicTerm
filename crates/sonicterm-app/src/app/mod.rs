@@ -197,6 +197,18 @@ pub enum UserEvent {
         /// The pane whose output was flushed.
         pane_id: u64,
     },
+    /// A pane's VT worker granted a window's request for its next gap between batches and is
+    /// parked, holding no lock, until a window serves `generation` or `park_deadline` passes.
+    ParserYielded {
+        /// The pane's redraw target when the worker sent the grant.
+        window_id: WindowId,
+        /// The pane whose worker is parked.
+        pane_id: u64,
+        /// The request generation the worker granted.
+        generation: u64,
+        /// The deadline the worker fixed before sending; it never parks past it.
+        park_deadline: Instant,
+    },
     /// A previously-deferred font fallback family finished loading in the
     /// `sonicterm_text::async_fallback` background thread. The handler walks
     /// every live window's `GpuRenderer`, calls `clear_shape_cache()` (which

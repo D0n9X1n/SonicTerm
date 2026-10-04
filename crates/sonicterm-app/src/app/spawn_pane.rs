@@ -291,6 +291,7 @@ pub(in crate::app) struct PaneVtHandles {
     inline_images: Arc<Mutex<Vec<InlineImage>>>,
     inline_media_charge: super::media::SharedInlineMediaCharge,
     frame_counters: Option<super::frame_counters::PaneFrameCounters>,
+    parser_yield: Arc<super::parser_yield::ParserYield>,
 }
 
 impl PaneVtHandles {
@@ -311,6 +312,7 @@ impl PaneVtHandles {
             inline_images: pane.inline_images.clone(),
             inline_media_charge: pane.inline_media_charge.clone(),
             frame_counters: pane.frame_counters.clone(),
+            parser_yield: Arc::clone(&pane.parser_yield),
         }
     }
 }
@@ -336,60 +338,150 @@ pub(super) fn spawn_pane_workers(
             let mut command_started: Option<Instant> = None;
             let mut replies_failed = false;
             let mut flush = OutputFlush::new(pane_id, &worker_handles);
+            // The worker registers before its first receive, so a serve can always unpark it.
+            worker_handles.parser_yield.register_worker();
             let send_output = || {
                 if let Some(proxy) = redraw_proxy.as_ref() {
                     // redraw_proxy is Some(proxy): send the output event through its current target.
                     send_pane_output(&worker_handles, proxy, pane_id);
                 }
             };
-            loop {
-                match out_rx.recv_timeout(flush.wait(Instant::now())) {
-                    Ok(bytes) => {
-                        // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
-                        flush.receive(bytes.len(), Instant::now());
-                        process_pane_vt_batch_and_publish(
-                            &worker_handles,
-                            bytes,
-                            &mut command_started,
-                            &mut flush.sync_latch,
-                            redraw_proxy.as_ref(),
-                            |reply| {
-                                if replies_failed {
-                                    // When: replies_failed is latched, keep consuming output and observing exit without repeated errors.
-                                    return;
+            run_vt_worker(
+                &worker_handles,
+                &mut flush,
+                |wait| out_rx.recv_timeout(wait),
+                |bytes, latch, _now| {
+                    process_pane_vt_batch_and_publish(
+                        &worker_handles,
+                        bytes,
+                        &mut command_started,
+                        latch,
+                        redraw_proxy.as_ref(),
+                        |reply| {
+                            if replies_failed {
+                                // When: replies_failed is latched, keep consuming output and observing exit without repeated errors.
+                                return;
+                            }
+                            let rejected_bytes = reply.len();
+                            if let Err(error) = in_tx_reply.send(reply) {
+                                // Report storage/native failure once without abandoning output or exit observation.
+                                replies_failed = true;
+                                if !input_state.is_closing() {
+                                    tracing::warn!(pane_id, rejected_bytes, %error, "terminal reply delivery failed");
                                 }
-                                let rejected_bytes = reply.len();
-                                if let Err(error) = in_tx_reply.send(reply) {
-                                    // Report storage/native failure once without abandoning output or exit observation.
-                                    replies_failed = true;
-                                    if !input_state.is_closing() {
-                                        tracing::warn!(pane_id, rejected_bytes, %error, "terminal reply delivery failed");
-                                    }
-                                }
-                            },
-                        );
-                        flush.after_batch(&worker_handles, Instant::now(), send_output);
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                        // When: recv_timeout returns Timeout, flush any trailing pending redraw.
-                        flush.on_quiet(&worker_handles, Instant::now(), send_output);
-                        #[cfg(windows)]
-                        if exit_probe.has_exited().unwrap_or(false) {
-                            // When: exit_probe reports the child exited on Windows, report it and stop polling.
-                            report_pane_exit(redraw_proxy.as_ref(), &exit_probe, pane_id);
-                            break;
-                        }
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                        // When: recv_timeout returns Disconnected, flush output and report exit.
-                        flush.on_disconnect(send_output);
-                        report_pane_exit(redraw_proxy.as_ref(), &exit_probe, pane_id);
-                        break;
-                    }
-                }
-            }
+                            }
+                        },
+                    );
+                },
+                |window_id, generation, park_deadline| {
+                    redraw_proxy.as_ref().is_some_and(|proxy| {
+                        proxy
+                            .send_event(UserEvent::ParserYielded {
+                                window_id,
+                                pane_id,
+                                generation,
+                                park_deadline,
+                            })
+                            .is_ok()
+                    })
+                },
+                &send_output,
+                || cfg!(windows) && exit_probe.has_exited().unwrap_or(false),
+                || report_pane_exit(redraw_proxy.as_ref(), &exit_probe, pane_id),
+                &mut super::parser_yield::ThreadYieldClock,
+            );
         })
         .expect("spawn pane VT loop");
+}
+
+/// The VT worker's loop: receive, parse and decide each batch, offer the pane's gap to a waiting
+/// window, release an elapsed hold, and on disconnect flush then report the exit.
+///
+/// `receive` waits at most the flush's wait. `quiet_exit` is the probe a quiet wake checks for an
+/// exit the channel never reports (Windows); `report_exit` runs once, as the loop ends.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::app) fn run_vt_worker<Bytes: AsRef<[u8]>>(
+    handles: &PaneVtHandles,
+    flush: &mut OutputFlush,
+    mut receive: impl FnMut(Duration) -> Result<Bytes, crossbeam_channel::RecvTimeoutError>,
+    mut parse: impl FnMut(Bytes, &mut SyncLatch, Instant),
+    mut send_yield: impl FnMut(WindowId, u64, Instant) -> bool,
+    send_output: &impl Fn(),
+    quiet_exit: impl Fn() -> bool,
+    report_exit: impl FnOnce(),
+    clock: &mut impl super::parser_yield::YieldClock,
+) {
+    let mut granted = 0;
+    loop {
+        let wait = flush.wait(clock.now());
+        match receive(wait) {
+            Ok(bytes) => {
+                // A batch arrived: parse and decide it, then offer the gap.
+                let byte_count = bytes.as_ref().len();
+                worker_batch(
+                    handles,
+                    flush,
+                    byte_count,
+                    |latch, now| parse(bytes, latch, now),
+                    &mut granted,
+                    &mut send_yield,
+                    send_output,
+                    clock,
+                );
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                // When: receive returns Timeout, flush any trailing pending redraw.
+                flush.on_quiet(handles, clock.now(), send_output);
+                if quiet_exit() {
+                    // When: quiet_exit reports the child exited, report it and stop polling.
+                    report_exit();
+                    return;
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                // When: receive returns Disconnected, flush output and report exit.
+                flush.on_disconnect(send_output);
+                report_exit();
+                return;
+            }
+        }
+    }
+}
+
+/// One received batch: parse and publish it, decide its flush, offer the pane's next gap to a
+/// waiting window, then release any elapsed synchronized-output hold, whatever the step returned.
+///
+/// The release epilogue is unconditional, so an elapsed hold is serviced before the next batch is
+/// parsed on every exit of the handshake step. The redraw target's guard ends inside `target`,
+/// before the send and the park.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::app) fn worker_batch(
+    handles: &PaneVtHandles,
+    flush: &mut OutputFlush,
+    byte_count: usize,
+    parse: impl FnOnce(&mut SyncLatch, Instant),
+    granted: &mut u64,
+    send_yield: impl FnOnce(WindowId, u64, Instant) -> bool,
+    send_output: &impl Fn(),
+    clock: &mut impl super::parser_yield::YieldClock,
+) -> super::parser_yield::YieldOutcome {
+    flush.receive(byte_count, clock.now());
+    parse(&mut flush.sync_latch, clock.now());
+    flush.after_batch(handles, clock.now(), send_output);
+    let outcome = super::parser_yield::yield_step(
+        &handles.parser_yield,
+        granted,
+        flush.held_deadline(),
+        || *handles.redraw_target.lock(),
+        send_yield,
+        clock,
+    );
+    flush.release_elapsed(handles, clock.now(), send_output);
+    if let Some(counters) = handles.frame_counters.as_ref() {
+        // the App's gate is on, the step's send, timeout, wait and overshoot are counted.
+        counters.vt.record_yield(&outcome);
+    }
+    outcome
 }
 
 /// The VT worker's flush decision: coalesce parsed output and send one output event per flush.
@@ -571,6 +663,29 @@ impl OutputFlush {
         );
         if let Some(counters) = handles.frame_counters.as_ref() {
             counters.vt.sync_timeouts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The open update's stored deadline, if an update holds this pane's output.
+    pub(in crate::app) fn held_deadline(&self) -> Option<Instant> {
+        self.held.map(|(_, deadline)| deadline)
+    }
+
+    /// Release the held update when its deadline has passed at `now`.
+    ///
+    /// `release_timeout` sets `released_epoch` and clears `held`, so repeated calls do nothing
+    /// until a later update is held. Ordinary pending output is not flushed here.
+    pub(in crate::app) fn release_elapsed(
+        &mut self,
+        handles: &PaneVtHandles,
+        now: Instant,
+        send: impl FnOnce(),
+    ) {
+        if let Some((epoch, deadline)) = self.held {
+            if now >= deadline {
+                // The update outlived its bound while the worker yielded; present what it has.
+                self.release_timeout(handles, epoch, send);
+            }
         }
     }
 

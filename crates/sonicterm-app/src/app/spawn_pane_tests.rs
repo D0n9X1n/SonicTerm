@@ -1328,17 +1328,23 @@ fn threshold_and_quiet_flushes_sit_behind_the_hold_and_disconnect_does_not() {
     assert!(!disconnect.contains("held") && !disconnect.contains("sync"), "{disconnect}");
     let arm_start =
         source.find("Err(crossbeam_channel::RecvTimeoutError::Disconnected) =>").unwrap();
-    let arm = &source[arm_start..arm_start + source[arm_start..].find("break;").unwrap()];
+    let arm = &source[arm_start..arm_start + source[arm_start..].find("return;").unwrap()];
     assert!(arm.contains("flush.on_disconnect(") && !arm.contains("held"), "{arm}");
     // The shell's final output is sent before its exit is reported, so the last frame is not lost.
     let final_output = arm.find("flush.on_disconnect(").unwrap();
-    let exit = arm.find("report_pane_exit(").expect("the disconnect arm reports the exit");
+    let exit = arm.find("report_exit()").expect("the disconnect arm reports the exit");
     assert!(final_output < exit, "{arm}");
-    // The worker loop decides only after the batch is published, so a release sees its generation.
-    let ok_arm = &source[source.find("Ok(bytes) =>").unwrap()..arm_start];
-    let publish = ok_arm.find("process_pane_vt_batch_and_publish(").expect("loop publishes");
-    let decide = ok_arm.find("flush.after_batch(").expect("loop decides");
-    assert!(publish < decide, "{ok_arm}");
+    // The production loop's parse step is the publishing batch processor, and the worker decides
+    // only after that parse returns, so a release sees its generation.
+    let spawn = item_body(&source, "pub(super) fn spawn_pane_workers(");
+    assert!(spawn.contains("run_vt_worker("), "{spawn}");
+    assert!(spawn.contains("process_pane_vt_batch_and_publish("), "{spawn}");
+    let batch = item_body(&source, "pub(in crate::app) fn worker_batch(");
+    let publish = batch.find("parse(&mut flush.sync_latch").expect("the batch parses");
+    let decide = batch.find("flush.after_batch(").expect("the batch decides");
+    let step = batch.find("yield_step(").expect("the batch offers its gap");
+    let epilogue = batch.find("flush.release_elapsed(").expect("the batch releases");
+    assert!(publish < decide && decide < step && step < epilogue, "{batch}");
 }
 
 /// The deadline publication stores for a batch parsed at `at`: the bound, at microsecond precision.
@@ -1463,4 +1469,349 @@ fn an_update_after_the_published_epoch_wraps_still_holds() {
     flush.on_quiet(&handles, deadline, || sends.push(0));
     assert_eq!(sends.len(), 3, "and expires once at its deadline");
     assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 2);
+}
+
+/// One entry of a worker's ordered flush log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlushEvent {
+    /// Batch `n` was parsed and published.
+    Parse(u32),
+    /// An output event was sent while update `epoch` was published; in these fixtures every
+    /// output event is the open update's release.
+    Release(u64),
+    /// The worker reported its pane's exit.
+    Exit,
+}
+
+/// The ordered log the parse, output and exit closures of one worker share.
+type FlushLog = std::rc::Rc<std::cell::RefCell<Vec<FlushEvent>>>;
+
+/// A counting worker on the fake clock whose pane holds an open synchronized update with pending
+/// output; the update's stored deadline is `held`.
+struct HeldWorker {
+    _pane: PaneState,
+    handles: PaneVtHandles,
+    stats: Arc<crate::app::frame_counters::VtFrameStats>,
+    flush: OutputFlush,
+    log: FlushLog,
+    held: Instant,
+    epoch: u64,
+}
+
+/// A held worker, with a redraw target when `targeted`.
+fn held_worker(targeted: bool) -> HeldWorker {
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let (pane, handles) = counting_worker_handles(&stats);
+    if targeted {
+        *handles.redraw_target.lock() = Some(WindowId::from(9));
+    }
+    let mut flush = OutputFlush::new(1, &handles);
+    let mut sends = Vec::new();
+    worker_step(&handles, &mut flush, b"\x1b[?2026hrow", test_base(), &mut sends);
+    assert!(sends.is_empty(), "the open update holds its output");
+    let held = published_deadline(&handles);
+    let epoch = read_published_sync(&handles.sync_word, &handles.sync_deadline_word).epoch;
+    HeldWorker { _pane: pane, handles, stats, flush, log: FlushLog::default(), held, epoch }
+}
+
+/// An output sender that logs `Release` with the epoch published when it runs.
+fn release_logger(worker: &HeldWorker) -> impl Fn() {
+    let (log, handles) = (std::rc::Rc::clone(&worker.log), worker.handles.clone());
+    move || {
+        let epoch = read_published_sync(&handles.sync_word, &handles.sync_deadline_word).epoch;
+        log.borrow_mut().push(FlushEvent::Release(epoch));
+    }
+}
+
+/// Run one batch, logged as `Parse(index)`, through the production `worker_batch`.
+fn held_batch(
+    worker: &mut HeldWorker,
+    index: u32,
+    granted: &mut u64,
+    park: &mut crate::app::parser_yield::parser_yield_tests::FakePark,
+    send_yield: impl FnOnce(WindowId, u64, Instant) -> bool,
+) -> crate::app::parser_yield::YieldOutcome {
+    let parse_log = std::rc::Rc::clone(&worker.log);
+    let parse_handles = worker.handles.clone();
+    let send_output = release_logger(worker);
+    worker_batch(
+        &worker.handles,
+        &mut worker.flush,
+        3,
+        |latch, now| {
+            parse_log.borrow_mut().push(FlushEvent::Parse(index));
+            publish_pane_vt_batch_with(
+                &parse_handles,
+                b"row",
+                &mut None,
+                latch,
+                |_| None,
+                |_| {},
+                || now,
+                |_| {},
+            );
+        },
+        granted,
+        send_yield,
+        &send_output,
+        park,
+    )
+}
+
+/// The handshake step's exits, each run with a hold that is unexpired when `after_batch` returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitKind {
+    NoRequest,
+    NoTarget,
+    Expired,
+    SendFailed,
+    SentWithoutPark,
+    SentAfterWait,
+}
+
+/// Every exit, in the order the epilogue test runs them.
+const EXIT_KINDS: [ExitKind; 6] = [
+    ExitKind::NoRequest,
+    ExitKind::NoTarget,
+    ExitKind::Expired,
+    ExitKind::SendFailed,
+    ExitKind::SentWithoutPark,
+    ExitKind::SentAfterWait,
+];
+
+/// `Err(what)` unless `holds`.
+fn expect(holds: bool, what: impl FnOnce() -> String) -> Result<(), String> {
+    if holds {
+        Ok(())
+    } else {
+        Err(what())
+    }
+}
+
+/// Run one exit with its own clock schedule; the hold's deadline passes before the epilogue.
+///
+/// `NoRequest`, `NoTarget`: the clock passes the deadline before the epilogue. `Expired`: it
+/// passes before the step's deadline check. `SendFailed`: a live deadline is computed, then the
+/// failing send passes it. `SentWithoutPark`: the send serves and passes it. `SentAfterWait`:
+/// the fake wait reaches the capped deadline.
+fn run_exit_variant(kind: ExitKind) -> Result<(), String> {
+    use crate::app::parser_yield::{
+        parser_yield_tests::{serve_target, FakePark, Step},
+        YieldOutcome, YieldWait,
+    };
+    use crate::app::redraw::redraw_dispatch_tests::{fake_now, set_fake_now};
+    let mut worker = held_worker(kind != ExitKind::NoTarget);
+    let (held, epoch) = (worker.held, worker.epoch);
+    let past = held + Duration::from_millis(1);
+    set_fake_now(held - Duration::from_millis(1));
+    let handshake = Arc::clone(&worker.handles.parser_yield);
+    serve_target(&handshake);
+    if kind != ExitKind::NoRequest {
+        handshake.request();
+    }
+    let script: Vec<Step> = if kind == ExitKind::SentAfterWait {
+        vec![Step::Timeout(Duration::ZERO)]
+    } else {
+        // When: `kind` is any other exit, the worker never parks.
+        Vec::new()
+    };
+    let max_calls = script.len() as u32;
+    let mut park = FakePark::new(&handshake, script, max_calls);
+    if matches!(kind, ExitKind::NoRequest | ExitKind::NoTarget | ExitKind::Expired) {
+        // Reads 0-2 are the receive, the parse and `after_batch`; read 3 is the step's check or,
+        // with no request or target, the epilogue.
+        park = park.jump_at_read(3, past);
+    }
+    let send_log = std::rc::Rc::clone(&worker.log);
+    let serving = Arc::clone(&handshake);
+    let mut sent_deadline = None;
+    let mut granted = 0;
+    let outcome = held_batch(&mut worker, 1, &mut granted, &mut park, |_, generation, deadline| {
+        sent_deadline = Some(deadline);
+        assert_eq!(*send_log.borrow(), [FlushEvent::Parse(1)], "nothing released before the send");
+        match kind {
+            ExitKind::SendFailed => {
+                set_fake_now(past);
+                false
+            }
+            ExitKind::SentWithoutPark => {
+                serving.serve_outstanding(generation);
+                set_fake_now(past);
+                true
+            }
+            _ => true,
+        }
+    });
+    let outcome_matches = match kind {
+        ExitKind::NoRequest => outcome == YieldOutcome::NoRequest,
+        ExitKind::NoTarget => outcome == YieldOutcome::NoTarget,
+        ExitKind::Expired => outcome == YieldOutcome::Expired && sent_deadline.is_none(),
+        ExitKind::SendFailed => outcome == YieldOutcome::SendFailed,
+        ExitKind::SentWithoutPark => {
+            matches!(outcome, YieldOutcome::Sent(YieldWait { parks: 0, timed_out: false, .. }))
+        }
+        ExitKind::SentAfterWait => {
+            matches!(outcome, YieldOutcome::Sent(YieldWait { parks: 1, timed_out: true, .. }))
+                && sent_deadline == Some(held)
+                && park.deadlines == [held]
+        }
+    };
+    expect(outcome_matches, || format!("{kind:?}: outcome {outcome:?}, sent {sent_deadline:?}"))?;
+    let release = FlushEvent::Release(epoch);
+    let timeouts = |worker: &HeldWorker| worker.stats.sync_timeouts.load(Ordering::Relaxed);
+    expect(*worker.log.borrow() == [FlushEvent::Parse(1), release], || {
+        format!("{kind:?}: after the epilogue {:?}", worker.log.borrow())
+    })?;
+    expect(timeouts(&worker) == 1, || format!("{kind:?}: {} timeouts", timeouts(&worker)))?;
+    // A repeated epilogue releases nothing more.
+    let send_output = release_logger(&worker);
+    worker.flush.release_elapsed(&worker.handles, fake_now(), &send_output);
+    expect(
+        *worker.log.borrow() == [FlushEvent::Parse(1), release] && timeouts(&worker) == 1,
+        || {
+            format!(
+                "{kind:?}: repeated epilogue {:?}, {} timeouts",
+                worker.log.borrow(),
+                timeouts(&worker)
+            )
+        },
+    )?;
+    set_fake_now(past + Duration::from_millis(1));
+    held_batch(&mut worker, 2, &mut granted, &mut park, |_, _, _| panic!("no new request"));
+    expect(*worker.log.borrow() == [FlushEvent::Parse(1), release, FlushEvent::Parse(2)], || {
+        format!("{kind:?}: next batch {:?}", worker.log.borrow())
+    })?;
+    // Only a send counts: one wait sample, a timeout only when unserved, an overshoot only late.
+    let sent = u64::from(matches!(outcome, YieldOutcome::Sent(_)));
+    let stats = &worker.stats;
+    let counted = (
+        stats.parser_yields.load(Ordering::Relaxed),
+        stats.parser_yield_timeouts.load(Ordering::Relaxed),
+        stats.parser_yield_wait.snapshot().count(),
+        stats.parser_yield_overshoot.snapshot().count(),
+    );
+    let wanted = (
+        sent,
+        u64::from(kind == ExitKind::SentAfterWait),
+        sent,
+        u64::from(kind == ExitKind::SentWithoutPark),
+    );
+    expect(counted == wanted, || format!("{kind:?}: counted {counted:?}, wanted {wanted:?}"))
+}
+
+/// S11: whichever way the handshake step exits, an update hold that elapses during the step is
+/// released by the epilogue exactly once, after the batch and before the next batch is parsed,
+/// and a repeated epilogue releases nothing. Each failing exit is named.
+#[test]
+fn every_yield_exit_releases_an_elapsed_hold_before_the_next_batch() {
+    let failed: Vec<String> = EXIT_KINDS
+        .iter()
+        .filter_map(|kind| {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_exit_variant(*kind)))
+            {
+                Ok(Ok(())) => None,
+                Ok(Err(why)) => Some(why),
+                Err(_) => Some(format!("{kind:?}: panicked")),
+            }
+        })
+        .collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// S16 (a): an update whose deadline falls inside the requested park caps the park there, and
+/// the release on waking precedes the next batch.
+#[test]
+fn an_update_deadline_inside_the_park_caps_it_and_is_released_on_waking() {
+    run_exit_variant(ExitKind::SentAfterWait).unwrap();
+}
+
+/// S16 (b): a hold that expired before the step's check sends nothing and parks nothing, and the
+/// epilogue releases it before the next batch.
+#[test]
+fn a_hold_already_due_at_the_check_is_released_without_a_send_or_park() {
+    run_exit_variant(ExitKind::Expired).unwrap();
+}
+
+/// S11 (g), §5.1 10: a pane that disconnects while a request is newer than the last grant
+/// flushes its held final output, then reports its exit, and never parks.
+#[test]
+fn disconnect_with_an_outstanding_request_flushes_then_exits_without_parking() {
+    use crate::app::parser_yield::parser_yield_tests::FakePark;
+    use crate::app::redraw::redraw_dispatch_tests::set_fake_now;
+    let mut worker = held_worker(true);
+    let handshake = Arc::clone(&worker.handles.parser_yield);
+    set_fake_now(worker.held - Duration::from_millis(1));
+    handshake.request();
+    let mut park = FakePark::new(&handshake, [], 0);
+    let send_output = release_logger(&worker);
+    let exit_log = std::rc::Rc::clone(&worker.log);
+    let mut received: std::vec::IntoIter<Result<Vec<u8>, crossbeam_channel::RecvTimeoutError>> =
+        vec![Err(crossbeam_channel::RecvTimeoutError::Disconnected)].into_iter();
+    run_vt_worker(
+        &worker.handles,
+        &mut worker.flush,
+        |_| received.next().expect("one receive"),
+        |_, _, _| panic!("no batch arrives"),
+        |_, _, _| panic!("a disconnecting worker grants nothing"),
+        &send_output,
+        || false,
+        || exit_log.borrow_mut().push(FlushEvent::Exit),
+        &mut park,
+    );
+    assert_eq!(*worker.log.borrow(), [FlushEvent::Release(worker.epoch), FlushEvent::Exit]);
+    assert_eq!(park.calls, 0);
+}
+
+/// §5.1 2: the worker parks between batches with nothing held: the parser, the image store, its
+/// media charge, the command queue and the redraw target are all free, and the batch it follows
+/// is already published.
+#[test]
+fn the_worker_parks_between_batches_holding_no_lock() {
+    use crate::app::parser_yield::{
+        parser_yield_tests::{FakePark, Step},
+        YieldOutcome, YieldWait,
+    };
+    use crate::app::redraw::redraw_dispatch_tests::set_fake_now;
+    let (_pane, handles) = pane_and_worker_handles();
+    *handles.redraw_target.lock() = Some(WindowId::from(9));
+    set_fake_now(test_base());
+    let handshake = Arc::clone(&handles.parser_yield);
+    handshake.request();
+    let probed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let (seen, held) = (std::rc::Rc::clone(&probed), handles.clone());
+    let probe = Step::Probe(Box::new(move || {
+        assert!(held.parser.try_lock().is_some(), "the parser is held while parked");
+        assert!(held.inline_images.try_lock().is_some(), "the image store is held while parked");
+        assert!(held.inline_media_charge.try_lock().is_some(), "the media charge is held");
+        assert!(held.command_events.try_lock().is_some(), "the command queue is held");
+        assert!(held.redraw_target.try_lock().is_some(), "the redraw target is held");
+        assert_eq!(held.output_generation.load(Ordering::Acquire), 1, "parked before the publish");
+        seen.set(true);
+    }));
+    let mut park = FakePark::new(&handshake, [probe], 1);
+    let mut flush = OutputFlush::new(1, &handles);
+    let parse_handles = handles.clone();
+    let outcome = worker_batch(
+        &handles,
+        &mut flush,
+        3,
+        |latch, now| {
+            publish_pane_vt_batch_with(
+                &parse_handles,
+                b"row",
+                &mut None,
+                latch,
+                |_| None,
+                |_| {},
+                || now,
+                |_| {},
+            );
+        },
+        &mut 0,
+        |_, _, _| true,
+        &|| {},
+        &mut park,
+    );
+    assert!(probed.get(), "the worker parked");
+    assert!(matches!(outcome, YieldOutcome::Sent(YieldWait { parks: 1, timed_out: true, .. })));
 }

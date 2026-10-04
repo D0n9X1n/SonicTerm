@@ -502,6 +502,8 @@ const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/redraw_target.rs", "redraw_target", 1),
     ("app/shared_gpu.rs", "proxy", 1),
     ("app/session.rs", "redraw_target", 1),
+    // The VT worker copies its redraw target for a handshake grant; the guard ends in the closure.
+    ("app/spawn_pane.rs", "redraw_target", 1),
     ("app/tab_state.rs", "redraw_target", 1),
     ("app/tear_out.rs", "redraw_target", 1),
     ("app/path_target.rs", "queue", 1),

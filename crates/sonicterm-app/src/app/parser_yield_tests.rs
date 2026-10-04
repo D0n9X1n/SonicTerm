@@ -4,7 +4,6 @@
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
-    rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -20,8 +19,6 @@ pub(in crate::app) enum Step {
     StaleServe(u64),
     /// A spurious return after the duration, before the deadline.
     Spurious(Duration),
-    /// The clock moves by the duration and the park returns.
-    Advance(Duration),
     /// Runs while the worker is parked, then the park times out at its deadline.
     Probe(Box<dyn FnMut()>),
     /// The park times out at its deadline plus the scheduler overshoot.
@@ -33,9 +30,9 @@ pub(in crate::app) enum Step {
 /// `max_calls` bounds the parks; one more panics, so an unbounded wait fails instead of hanging.
 pub(in crate::app) struct FakePark {
     /// Whether an unpark is stored and not yet consumed by a park.
-    token: Rc<Cell<bool>>,
+    token: std::rc::Rc<Cell<bool>>,
     /// The generation the current `Serve` step is serving, read by the unpark hook.
-    serving: Rc<Cell<u64>>,
+    serving: std::rc::Rc<Cell<u64>>,
     script: VecDeque<Step>,
     /// Parks so far.
     pub(in crate::app) calls: u32,
@@ -58,10 +55,10 @@ impl FakePark {
         script: impl IntoIterator<Item = Step>,
         max_calls: u32,
     ) -> Self {
-        let token = Rc::new(Cell::new(false));
-        let serving = Rc::new(Cell::new(0));
+        let token = std::rc::Rc::new(Cell::new(false));
+        let serving = std::rc::Rc::new(Cell::new(0));
         let target = Arc::as_ptr(handshake) as usize;
-        let (hook_token, hook_serving) = (Rc::clone(&token), Rc::clone(&serving));
+        let (hook_token, hook_serving) = (std::rc::Rc::clone(&token), std::rc::Rc::clone(&serving));
         set_unpark_hook(Some(Box::new(move |unparked: &ParserYield| {
             if std::ptr::from_ref(unparked) as usize != target {
                 return;
@@ -137,7 +134,6 @@ impl YieldClock for FakePark {
                 assert!(fake_now() + after < deadline, "a spurious return precedes the deadline");
                 set_fake_now(fake_now() + after);
             }
-            Step::Advance(by) => set_fake_now(fake_now() + by),
             Step::Probe(mut probe) => {
                 probe();
                 set_fake_now(deadline);
@@ -357,7 +353,8 @@ fn an_open_update_caps_the_park_deadline() {
     assert_eq!(sent[0].2, held, "the event carries the capped deadline");
     assert_eq!(park.deadlines, [held]);
     handshake.request();
-    let (outcome, sent) = step(&handshake, &mut handshake.served.load(Ordering::Acquire), Some(base), &mut park);
+    let (outcome, sent) =
+        step(&handshake, &mut handshake.served.load(Ordering::Acquire), Some(base), &mut park);
     assert_eq!((outcome, sent.len(), park.calls), (YieldOutcome::Expired, 0, 1));
 }
 

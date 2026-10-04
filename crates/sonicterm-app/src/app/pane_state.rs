@@ -157,6 +157,8 @@ pub struct PaneState {
     pub(crate) inline_media_charge: media::SharedInlineMediaCharge,
     /// Counter handles shared with this pane's VT worker; `Some` only when the App's gate is on.
     pub(crate) frame_counters: Option<super::frame_counters::PaneFrameCounters>,
+    /// The renderer-waiting handshake with this pane's VT worker; travels with the pane.
+    pub(in crate::app) parser_yield: Arc<super::parser_yield::ParserYield>,
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +233,7 @@ impl PaneState {
             inline_images: Arc::new(Mutex::new(Vec::new())),
             inline_media_charge: media_pool.new_charge(),
             frame_counters: None,
+            parser_yield: Arc::new(super::parser_yield::ParserYield::new()),
         }
     }
 

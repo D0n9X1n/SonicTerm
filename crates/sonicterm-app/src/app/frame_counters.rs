@@ -572,6 +572,11 @@ fn current_tally() -> (u64, u64) {
     })
 }
 
+/// Whole microseconds in `duration`, saturating.
+fn duration_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
 /// Whole microseconds from `from` to `to`; zero when `to` is earlier.
 fn micros_between(from: Instant, to: Instant) -> u64 {
     u64::try_from(to.saturating_duration_since(from).as_micros()).unwrap_or(u64::MAX)
@@ -613,6 +618,14 @@ pub(crate) struct VtFrameStats {
     pub(crate) flushes_suppressed: AtomicU64,
     /// Synchronized updates (DEC 2026) a worker released at the 150 ms bound, not at their reset.
     pub(crate) sync_timeouts: AtomicU64,
+    /// `ParserYielded` events a worker sent to a waiting window.
+    pub(crate) parser_yields: AtomicU64,
+    /// Sends whose wait ended with the generation still unserved.
+    pub(crate) parser_yield_timeouts: AtomicU64,
+    /// One elapsed sample per send, from the pre-send clock reading to the end of the wait.
+    pub(crate) parser_yield_wait: AtomicHistogram,
+    /// How far past its park deadline a wait ended, for each send that ended late.
+    pub(crate) parser_yield_overshoot: AtomicHistogram,
 }
 
 impl Default for VtFrameStats {
@@ -628,6 +641,10 @@ impl Default for VtFrameStats {
             flushes_coalesced: AtomicU64::new(0),
             flushes_suppressed: AtomicU64::new(0),
             sync_timeouts: AtomicU64::new(0),
+            parser_yields: AtomicU64::new(0),
+            parser_yield_timeouts: AtomicU64::new(0),
+            parser_yield_wait: AtomicHistogram::new(HistogramUnit::Micros),
+            parser_yield_overshoot: AtomicHistogram::new(HistogramUnit::Micros),
         }
     }
 }
@@ -640,6 +657,23 @@ impl VtFrameStats {
         self.parse.record_us(micros_between(times.locked_at, times.parsed_at));
         self.parser_lock_hold.record_us(micros_between(times.locked_at, times.released_at));
         self.parse_bytes.fetch_add(parsed_bytes, Ordering::Relaxed);
+    }
+
+    /// Count one handshake step: a send, its timeout, its wait sample and any overshoot.
+    // Ordering: parser_yields and parser_yield_timeouts use Relaxed; they are statistics.
+    pub(in crate::app) fn record_yield(&self, outcome: &super::parser_yield::YieldOutcome) {
+        let super::parser_yield::YieldOutcome::Sent(wait) = outcome else {
+            // When: `outcome` is not a send, nothing was granted to a window and nothing is counted.
+            return;
+        };
+        self.parser_yields.fetch_add(1, Ordering::Relaxed);
+        if wait.timed_out {
+            self.parser_yield_timeouts.fetch_add(1, Ordering::Relaxed);
+        }
+        self.parser_yield_wait.record_us(duration_micros(wait.wait));
+        if let Some(overshoot) = wait.overshoot {
+            self.parser_yield_overshoot.record_us(duration_micros(overshoot));
+        }
     }
 
     /// Count one output batch; a batch may take the lock several times.
@@ -1487,6 +1521,8 @@ impl AppFrameCounters {
             ("flushes_coalesced", &vt.flushes_coalesced),
             ("flushes_suppressed", &vt.flushes_suppressed),
             ("sync_timeouts", &vt.sync_timeouts),
+            ("parser_yields", &vt.parser_yields),
+            ("parser_yield_timeouts", &vt.parser_yield_timeouts),
             ("ui_parser_locks", &dispatch.locks),
             ("fg_worker_probes", &self.fg_worker.probes),
             ("fg_worker_panes", &self.fg_worker.panes),
@@ -1512,6 +1548,8 @@ impl AppFrameCounters {
             ("parser_lock_wait", vt.parser_lock_wait.snapshot()),
             ("parser_lock_hold", vt.parser_lock_hold.snapshot()),
             ("parse", vt.parse.snapshot()),
+            ("parser_yield_wait", vt.parser_yield_wait.snapshot()),
+            ("parser_yield_overshoot", vt.parser_yield_overshoot.snapshot()),
             ("ui_parser_wait", dispatch.wait.snapshot()),
             ("fg_probe", Histogram::new(HistogramUnit::Micros)),
             ("fg_worker_probe", self.fg_worker.probe.snapshot()),

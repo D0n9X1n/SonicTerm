@@ -39,6 +39,7 @@ impl ParserYield {
     /// Publish a new request and return its generation.
     // Ordering: requested fetch_add Release; the worker's Acquire load sees it, and no other data
     // is published through it.
+    #[cfg_attr(not(test), allow(dead_code, reason = "the window side publishes requests"))]
     pub(in crate::app) fn request(&self) -> u64 {
         self.requested.fetch_add(1, Ordering::Release) + 1
     }
@@ -51,8 +52,8 @@ impl ParserYield {
     /// Serve every request up to `generation`, waking the worker only on an effective advance.
     ///
     /// Returns whether `served` advanced. An already-served or older generation does nothing.
-    // Ordering: served fetch_max Release before the unpark, pairing with the worker's Acquire
-    // re-check after each park return, so a woken worker always sees the generation it waits for.
+    // Ordering: served fetch_max Release precedes the unpark; the worker's Acquire re-check
+    // after each park return sees the generation.
     pub(in crate::app) fn serve_outstanding(&self, generation: u64) -> bool {
         let previous = self.served.fetch_max(generation, Ordering::Release);
         if previous >= generation {
@@ -82,6 +83,7 @@ impl ParserYield {
                 true
             })
         }) {
+            // When: a test installed an unpark hook, it stands in for the real unpark.
             return unparked;
         }
         self.worker.get().map(Thread::unpark).is_some()
@@ -187,6 +189,23 @@ pub(in crate::app) fn yield_step<Target>(
     })
 }
 
+impl super::App {
+    /// Answer a worker's grant. No window publishes a request yet, so every grant is served at
+    /// once and the worker resumes; a pane no window holds is left to its own deadline.
+    pub(super) fn handle_parser_yielded(
+        &mut self,
+        _window_id: winit::window::WindowId,
+        pane_id: u64,
+        generation: u64,
+        _park_deadline: Instant,
+    ) {
+        let pane = self.windows.values().find_map(|window| window.panes.get(&pane_id));
+        if let Some(pane) = pane {
+            pane.parser_yield.serve_outstanding(generation);
+        }
+    }
+}
+
 /// Test-only: one effective advance of a handshake's `served`.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,6 +244,8 @@ pub(in crate::app) fn set_unpark_hook(hook: Option<UnparkHook>) {
     UNPARK_HOOK.with(|slot| *slot.borrow_mut() = hook);
 }
 
+// `parser_yield` is private to `app`, so this public declaration reaches no further than `app`;
+// the worker-loop tests in `spawn_pane_tests` share its fake park.
 #[cfg(test)]
 #[path = "parser_yield_tests.rs"]
-pub(in crate::app) mod parser_yield_tests;
+pub mod parser_yield_tests;

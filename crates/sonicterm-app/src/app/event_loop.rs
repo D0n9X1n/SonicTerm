@@ -507,6 +507,9 @@ impl App {
             UserEvent::PaneOutput { window_id, pane_id } => {
                 self.service_output_event(OutputEvent::Pane { window_id, pane_id }, Instant::now());
             }
+            UserEvent::ParserYielded { window_id, pane_id, generation, park_deadline } => {
+                self.handle_parser_yielded(window_id, pane_id, generation, park_deadline);
+            }
             UserEvent::ClearShapeCache => self.handle_clear_shape_cache(),
             UserEvent::FontFallbackReady { window_id, notice_id } => {
                 self.handle_font_fallback_ready(window_id, notice_id);
