@@ -934,3 +934,366 @@ fn sync_word_never_disagrees_with_a_held_parser_across_threads() {
     }
     worker.join().unwrap();
 }
+
+/// Run one batch as the VT worker does: note it, parse and publish it through the production
+/// publisher with the worker's latch, then take the flush decision. Each send records the
+/// output generation it observed, so a test can tell whether the batch was published first.
+fn worker_step(
+    handles: &PaneVtHandles,
+    flush: &mut OutputFlush,
+    bytes: &[u8],
+    at: Instant,
+    sends: &mut Vec<u64>,
+) {
+    flush.receive(bytes.len(), at);
+    process_pane_vt_batch_and_publish(
+        handles,
+        bytes,
+        &mut None,
+        &mut flush.sync_latch,
+        None,
+        |_| {},
+    );
+    flush
+        .after_batch(handles, at, || sends.push(handles.output_generation.load(Ordering::Acquire)));
+}
+
+/// Without synchronized output the worker's flush decision is the coalescer it has always been:
+/// a small batch waits, 128 KiB or 8 ms of pending age flushes, the 3 ms quiet wake flushes once,
+/// and disconnect flushes pending output. Separate workers keep each case to one interval flush,
+/// which the debug coalescer probe spaces in real time.
+#[test]
+fn unbracketed_output_flushes_on_size_age_quiet_and_disconnect() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let start = Instant::now();
+    let mut sends = Vec::new();
+
+    let mut by_size = OutputFlush::new(1, &handles);
+    assert_eq!(by_size.wait(start), PANE_IDLE_WAIT, "an idle worker parks");
+    worker_step(&handles, &mut by_size, b"a", start, &mut sends);
+    assert!(sends.is_empty(), "a small fresh batch is coalesced");
+    assert_eq!(by_size.wait(start), crate::app::PTY_REDRAW_QUIESCENT);
+    let large = vec![b'x'; crate::app::PTY_REDRAW_FLUSH_BYTES];
+    worker_step(&handles, &mut by_size, &large, start, &mut sends);
+    assert_eq!(sends.len(), 1, "128 KiB pending flushes at once");
+    assert_eq!(by_size.wait(start), PANE_IDLE_WAIT);
+
+    let mut by_age = OutputFlush::new(1, &handles);
+    worker_step(&handles, &mut by_age, b"a", start, &mut sends);
+    worker_step(&handles, &mut by_age, b"b", start + Duration::from_millis(7), &mut sends);
+    assert_eq!(sends.len(), 1, "7 ms of pending age is not enough");
+    worker_step(&handles, &mut by_age, b"c", start + Duration::from_millis(8), &mut sends);
+    assert_eq!(sends.len(), 2, "8 ms of pending age flushes");
+
+    let mut quiet = OutputFlush::new(1, &handles);
+    quiet.on_quiet(&handles, start, || sends.push(0));
+    assert_eq!(sends.len(), 2, "a quiet wake with nothing pending sends nothing");
+    worker_step(&handles, &mut quiet, b"a", start, &mut sends);
+    quiet.on_quiet(&handles, start + Duration::from_millis(3), || sends.push(0));
+    assert_eq!(sends.len(), 3, "the quiet wake flushes pending output once");
+
+    let mut disconnect = OutputFlush::new(1, &handles);
+    disconnect.on_disconnect(|| sends.push(0));
+    assert_eq!(sends.len(), 3, "a disconnect with nothing pending sends nothing");
+    worker_step(&handles, &mut disconnect, b"a", start, &mut sends);
+    disconnect.on_disconnect(|| sends.push(0));
+    assert_eq!(sends.len(), 4, "a disconnect flushes pending output");
+}
+
+/// The instant the pane's published synchronized-output deadline names.
+fn published_deadline(handles: &PaneVtHandles) -> Instant {
+    crate::app::sync_clock::origin()
+        + Duration::from_nanos(handles.sync_deadline_ns.load(Ordering::Relaxed))
+}
+
+/// One captured tracing event: its target, message and integer fields.
+#[derive(Clone, Debug, Default)]
+struct SyncLogEvent {
+    target: String,
+    message: String,
+    fields: Vec<(String, u64)>,
+}
+
+impl tracing::field::Visit for SyncLogEvent {
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.fields.push((field.name().to_owned(), value));
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        }
+    }
+}
+
+/// A layer that keeps every event it sees.
+#[derive(Clone, Default)]
+struct SyncLogCapture(Arc<Mutex<Vec<SyncLogEvent>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SyncLogCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut captured =
+            SyncLogEvent { target: event.metadata().target().to_owned(), ..Default::default() };
+        event.record(&mut captured);
+        self.0.lock().push(captured);
+    }
+}
+
+/// Run `body` under a capturing subscriber and return what it logged.
+fn capture_sync_log(body: impl FnOnce()) -> Vec<SyncLogEvent> {
+    use tracing_subscriber::layer::SubscriberExt;
+    let capture = SyncLogCapture::default();
+    let subscriber = tracing_subscriber::Registry::default().with(capture.clone());
+    sonicterm_logging::test_capture::with_default(subscriber, body);
+    let events = capture.0.lock().clone();
+    events
+}
+
+/// While a synchronized update is open the worker keeps parsing but sends nothing, past 128 KiB
+/// and past 8 ms of pending age, and waits only until the update's deadline; the reset sends
+/// exactly one output event and the worker returns to idle.
+#[test]
+fn an_open_update_holds_output_until_its_reset() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let mut flush = OutputFlush::new(1, &handles);
+    let mut sends = Vec::new();
+    let start = Instant::now();
+    worker_step(&handles, &mut flush, b"\x1b[?2026h", start, &mut sends);
+    let deadline = published_deadline(&handles);
+    let large = vec![b'x'; crate::app::PTY_REDRAW_FLUSH_BYTES];
+    worker_step(&handles, &mut flush, &large, start + Duration::from_millis(1), &mut sends);
+    worker_step(&handles, &mut flush, b"row", start + Duration::from_millis(9), &mut sends);
+    assert!(sends.is_empty(), "held output sends nothing past the size and age thresholds");
+    let at = start + Duration::from_millis(10);
+    assert_eq!(flush.wait(at), deadline.saturating_duration_since(at), "wake at the deadline");
+    assert!(flush.wait(at) > crate::app::PTY_REDRAW_QUIESCENT);
+    flush.on_quiet(&handles, start + Duration::from_millis(12), || sends.push(0));
+    assert!(sends.is_empty(), "a quiet wake before the deadline sends nothing");
+    worker_step(
+        &handles,
+        &mut flush,
+        b"\x1b[?2026l",
+        start + Duration::from_millis(20),
+        &mut sends,
+    );
+    assert_eq!(sends.len(), 1, "the reset sends exactly one output event");
+    assert_eq!(flush.wait(start + Duration::from_millis(20)), PANE_IDLE_WAIT);
+}
+
+/// A silent stuck update is released at its deadline, not before: one output event, one
+/// `sync_timeouts`, and one debug line naming the pane and epoch. Later output in that epoch
+/// flushes normally, and a new update holds again.
+#[test]
+fn a_stuck_update_is_released_once_at_its_deadline() {
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let (_pane, handles) = counting_worker_handles(&stats);
+    let mut flush = OutputFlush::new(7, &handles);
+    let mut sends = Vec::new();
+    let start = Instant::now();
+    worker_step(&handles, &mut flush, b"\x1b[?2026hrow", start, &mut sends);
+    let deadline = published_deadline(&handles);
+    flush.on_quiet(&handles, deadline - Duration::from_nanos(1), || sends.push(0));
+    assert!(sends.is_empty(), "one nanosecond early sends nothing");
+    let log = capture_sync_log(|| flush.on_quiet(&handles, deadline, || sends.push(0)));
+    assert_eq!(sends.len(), 1, "the deadline releases the update once");
+    assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 1);
+    let released: Vec<_> =
+        log.iter().filter(|event| event.target == "sonicterm_app::sync_output").collect();
+    assert_eq!(released.len(), 1, "{log:?}");
+    assert!(released[0].message.contains("held past 150 ms"), "{:?}", released[0]);
+    assert!(released[0].fields.contains(&("pane_id".to_owned(), 7)), "{:?}", released[0]);
+    assert!(released[0].fields.contains(&("epoch".to_owned(), 1)), "{:?}", released[0]);
+    flush.on_quiet(&handles, deadline + Duration::from_millis(1), || sends.push(0));
+    assert_eq!(sends.len(), 1, "a released update is not released twice");
+
+    let after = deadline + Duration::from_millis(1);
+    worker_step(&handles, &mut flush, b"more", after, &mut sends);
+    assert_eq!(flush.wait(after), crate::app::PTY_REDRAW_QUIESCENT, "the epoch flushes normally");
+    flush.on_quiet(&handles, after + Duration::from_millis(3), || sends.push(0));
+    assert_eq!(sends.len(), 2);
+    assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 1);
+
+    // The mode is still set after a timeout, so a new update starts with its reset.
+    worker_step(&handles, &mut flush, b"\x1b[?2026l", Instant::now(), &mut sends);
+    assert_eq!(sends.len(), 3, "the late reset flushes");
+    worker_step(&handles, &mut flush, b"\x1b[?2026hnext", Instant::now(), &mut sends);
+    let next_deadline = published_deadline(&handles);
+    flush.on_quiet(&handles, next_deadline - Duration::from_millis(1), || sends.push(0));
+    assert_eq!(sends.len(), 3, "a new update holds again");
+}
+
+/// A pane that closes in the middle of an update still shows its final output: disconnect
+/// flushes whatever the mode.
+#[test]
+fn disconnect_flushes_a_held_update() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let mut flush = OutputFlush::new(1, &handles);
+    let mut sends = Vec::new();
+    worker_step(&handles, &mut flush, b"\x1b[?2026hlast", Instant::now(), &mut sends);
+    assert!(sends.is_empty());
+    flush.on_disconnect(|| sends.push(0));
+    assert_eq!(sends.len(), 1);
+}
+
+/// A batch that ends one update and opens the next (`?2026l … ?2026h`) sends exactly one output
+/// event, and the next update holds from its own epoch until its reset.
+#[test]
+fn a_reset_and_set_in_one_batch_flushes_once_and_holds_again() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let mut flush = OutputFlush::new(1, &handles);
+    let mut sends = Vec::new();
+    let start = Instant::now();
+    worker_step(&handles, &mut flush, b"\x1b[?2026hA", start, &mut sends);
+    worker_step(&handles, &mut flush, b"B\x1b[?2026lC\x1b[?2026hD", start, &mut sends);
+    assert_eq!(sends.len(), 1, "the reset inside the batch flushes it");
+    assert!(!flush.sync_latch.reset_pending);
+    worker_step(&handles, &mut flush, b"E", start + Duration::from_millis(9), &mut sends);
+    let deadline = published_deadline(&handles);
+    flush.on_quiet(&handles, deadline - Duration::from_millis(1), || sends.push(0));
+    assert_eq!(sends.len(), 1, "the new epoch holds");
+    worker_step(
+        &handles,
+        &mut flush,
+        b"\x1b[?2026l",
+        start + Duration::from_millis(20),
+        &mut sends,
+    );
+    assert_eq!(sends.len(), 2);
+}
+
+/// The release event is sent only after the batch is published: the sender sees the advanced
+/// output generation and the batch's host side effect (an OSC 133 command marker), and the event
+/// loop's visible-output filter then requests exactly one frame for it.
+#[test]
+fn release_is_sent_after_the_batch_generation_is_published() {
+    use crate::app::{output_event::OutputEvent, redraw::FrameSettlement};
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let pane_id = app.windows[&main].tab_states[0].active_pane;
+    let pane = &app.windows[&main].panes[&pane_id];
+    *pane.redraw_target.lock() = Some(main);
+    let handles = PaneVtHandles::from_pane_state(pane);
+    let mut flush = OutputFlush::new(pane_id, &handles);
+    let mut queued = Vec::new();
+    let deliver = |handles: &PaneVtHandles, queued: &mut Vec<(u64, usize)>| {
+        send_output_redraw(&handles.redraw_target, &handles.output_outstanding, None, |_| {
+            queued.push((
+                handles.output_generation.load(Ordering::Acquire),
+                handles.command_events.lock().len(),
+            ));
+            true
+        });
+    };
+
+    // A previous batch has been flushed, serviced and presented, so its generation is settled.
+    flush.receive(5, Instant::now());
+    process_pane_vt_batch_and_publish(
+        &handles,
+        b"first",
+        &mut None,
+        &mut flush.sync_latch,
+        None,
+        |_| {},
+    );
+    deliver(&handles, &mut queued);
+    app.service_output_event(OutputEvent::Pane { window_id: main, pane_id }, Instant::now());
+    let snapshot = app.snapshot_window_redraw(main).unwrap();
+    app.finish_window_redraw(main, &snapshot, FrameSettlement::Presented, Instant::now());
+    queued.clear();
+
+    let update = b"\x1b[?2026h\x1b]133;C\x07paint\x1b[?2026l";
+    let now = Instant::now();
+    flush.receive(update.len(), now);
+    process_pane_vt_batch_and_publish(
+        &handles,
+        update,
+        &mut None,
+        &mut flush.sync_latch,
+        None,
+        |_| {},
+    );
+    flush.after_batch(&handles, now, || deliver(&handles, &mut queued));
+    assert_eq!(queued, [(2, 1)], "sent once, after the generation and the side effect");
+    let before = crate::app::window_state::window_redraw_requests();
+    app.service_output_event(OutputEvent::Pane { window_id: main, pane_id }, Instant::now());
+    assert_eq!(crate::app::window_state::window_redraw_requests() - before, 1);
+}
+
+/// The parser sections a counting worker has timed so far.
+fn sections_parsed(stats: &crate::app::frame_counters::VtFrameStats) -> u64 {
+    stats.parse.snapshot().count()
+}
+
+/// A reset survives later parser sections of the same batch: with the reset in the first or the
+/// middle of several reply-split sections and the mode set again at the end, the batch sends
+/// exactly one event after its generation is published, the latch is cleared after that send, and
+/// the new update holds; a batch whose sections hold no reset sends nothing.
+#[test]
+fn a_reset_split_from_the_batch_end_by_replies_still_flushes() {
+    let cases: [(&str, &[u8], usize, u64); 3] = [
+        ("first section", b"\x1b[?2026l\x1b[?2026$pX\x1b[?2026h", 1, 2),
+        ("middle section", b"a\x1b[?2026$p\x1b[?2026l\x1b[?2026h\x1b[?2026$pb", 1, 3),
+        ("no reset", b"a\x1b[?2026$pb\x1b[?2026$pc", 0, 3),
+    ];
+    for (name, batch, expected_sends, expected_sections) in cases {
+        let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+        let (_pane, handles) = counting_worker_handles(&stats);
+        let mut flush = OutputFlush::new(1, &handles);
+        let mut sends = Vec::new();
+        let start = Instant::now();
+        worker_step(&handles, &mut flush, b"\x1b[?2026h", start, &mut sends);
+        let sections_before = sections_parsed(&stats);
+        worker_step(&handles, &mut flush, batch, start + Duration::from_millis(1), &mut sends);
+        assert_eq!(sections_parsed(&stats) - sections_before, expected_sections, "{name}");
+        let generation = handles.output_generation.load(Ordering::Acquire);
+        assert_eq!(sends, vec![generation; expected_sends], "{name}");
+        assert!(!flush.sync_latch.reset_pending, "{name}: cleared after the flush");
+        worker_step(&handles, &mut flush, b"next", start + Duration::from_millis(9), &mut sends);
+        let deadline = published_deadline(&handles);
+        flush.on_quiet(&handles, deadline - Duration::from_millis(1), || sends.push(0));
+        assert_eq!(sends.len(), expected_sends, "{name}: the update still open holds");
+    }
+}
+
+/// The text of the `fn name` item in `source`, through its closing brace at the same indent.
+fn item_body<'source>(source: &'source str, signature: &str) -> &'source str {
+    let start = source.find(signature).unwrap_or_else(|| panic!("{signature} not found"));
+    let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+    let indent = &source[line_start..start];
+    let closing = format!("\n{indent}}}\n");
+    let end = source[start..].find(&closing).expect("item end") + start;
+    &source[start..end]
+}
+
+/// In the worker, the size/age and quiet flushes are reached only past the synchronized-output
+/// hold check, while the disconnect flush, and the loop's disconnect arm, consult no hold; the
+/// loop takes its flush decision only after the batch has been published.
+#[test]
+fn threshold_and_quiet_flushes_sit_behind_the_hold_and_disconnect_does_not() {
+    let source = include_str!("spawn_pane.rs").replace("\r\n", "\n");
+    let after_batch = item_body(&source, "pub(in crate::app) fn after_batch(");
+    let hold = after_batch.find("self.held").expect("after_batch checks the hold");
+    let threshold = after_batch.find("should_flush_pending_pty_redraw").expect("threshold");
+    assert!(hold < threshold, "{after_batch}");
+    let quiet = item_body(&source, "pub(in crate::app) fn on_quiet(");
+    let hold = quiet.find("self.held").expect("on_quiet checks the hold");
+    let flush = quiet.find("if self.pending").expect("quiet flush");
+    assert!(hold < flush, "{quiet}");
+    let disconnect = item_body(&source, "pub(in crate::app) fn on_disconnect(");
+    assert!(disconnect.contains("send()"), "{disconnect}");
+    assert!(!disconnect.contains("held") && !disconnect.contains("sync"), "{disconnect}");
+    let arm_start =
+        source.find("Err(crossbeam_channel::RecvTimeoutError::Disconnected) =>").unwrap();
+    let arm = &source[arm_start..arm_start + source[arm_start..].find("break;").unwrap()];
+    assert!(arm.contains("flush.on_disconnect(") && !arm.contains("held"), "{arm}");
+    // The worker loop decides only after the batch is published, so a release sees its generation.
+    let ok_arm = &source[source.find("Ok(bytes) =>").unwrap()..arm_start];
+    let publish = ok_arm.find("process_pane_vt_batch_and_publish(").expect("loop publishes");
+    let decide = ok_arm.find("flush.after_batch(").expect("loop decides");
+    assert!(publish < decide, "{ok_arm}");
+}

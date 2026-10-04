@@ -254,30 +254,25 @@ pub(super) fn spawn_pane_workers(
     std::thread::Builder::new()
         .name(vt_thread_name.into())
         .spawn(move || {
-            let mut pending = false;
-            let mut pending_since: Option<Instant> = None;
-            let mut pending_bytes: usize = 0;
             let mut command_started: Option<Instant> = None;
             let mut replies_failed = false;
-            let mut sync_latch = SyncLatch::for_pane(&worker_handles);
-            let mut redraw_probe = crate::app::invariants::RedrawCoalescerProbe::new();
+            let mut flush = OutputFlush::new(pane_id, &worker_handles);
+            let send_output = || {
+                if let Some(proxy) = redraw_proxy.as_ref() {
+                    // redraw_proxy is Some(proxy): send the output event through its current target.
+                    send_pane_output(&worker_handles, proxy, pane_id);
+                }
+            };
             loop {
-                match out_rx.recv_timeout(if pending {
-                    crate::app::PTY_REDRAW_QUIESCENT
-                } else {
-                    PANE_IDLE_WAIT
-                }) {
+                match out_rx.recv_timeout(flush.wait(Instant::now())) {
                     Ok(bytes) => {
                         // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
-                        if !bytes.is_empty() {
-                            pending_bytes = pending_bytes.saturating_add(bytes.len());
-                            pending_since.get_or_insert_with(Instant::now);
-                        }
+                        flush.receive(bytes.len(), Instant::now());
                         process_pane_vt_batch_and_publish(
                             &worker_handles,
                             bytes,
                             &mut command_started,
-                            &mut sync_latch,
+                            &mut flush.sync_latch,
                             redraw_proxy.as_ref(),
                             |reply| {
                                 if replies_failed {
@@ -294,44 +289,11 @@ pub(super) fn spawn_pane_workers(
                                 }
                             },
                         );
-                        let pending_for =
-                            pending_since.map(|since| since.elapsed()).unwrap_or(Duration::ZERO);
-                        if crate::app::should_flush_pending_pty_redraw(pending_bytes, pending_for) {
-                            // should_flush_pending_pty_redraw accepted pending_bytes and pending_for: dispatch the coalesced frame.
-                            if let Some(proxy) = redraw_proxy.as_ref() {
-                                // redraw_proxy is Some(proxy): send the output event through its current target.
-                                send_pane_output(&worker_handles, proxy, pane_id);
-                            }
-                            let reason = if pending_bytes >= crate::app::PTY_REDRAW_FLUSH_BYTES {
-                                crate::app::invariants::FlushReason::Buffer
-                            } else {
-                                crate::app::invariants::FlushReason::Interval
-                            };
-                            redraw_probe.note_redraw(crate::app::PTY_REDRAW_QUIESCENT, reason);
-                            pending = false;
-                            pending_since = None;
-                            pending_bytes = 0;
-                        } else {
-                            // When: should_flush_pending_pty_redraw is false, retain the batch for coalescing.
-                            pending = true;
-                        }
+                        flush.after_batch(&worker_handles, Instant::now(), send_output);
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         // When: recv_timeout returns Timeout, flush any trailing pending redraw.
-                        if pending {
-                            // pending is true at Timeout: dispatch the coalesced trailing frame.
-                            if let Some(proxy) = redraw_proxy.as_ref() {
-                                // redraw_proxy is Some(proxy): send the output event through its current target.
-                                send_pane_output(&worker_handles, proxy, pane_id);
-                            }
-                            redraw_probe.note_redraw(
-                                crate::app::PTY_REDRAW_QUIESCENT,
-                                crate::app::invariants::FlushReason::Interval,
-                            );
-                            pending = false;
-                            pending_since = None;
-                            pending_bytes = 0;
-                        }
+                        flush.on_quiet(&worker_handles, Instant::now(), send_output);
                         #[cfg(windows)]
                         if exit_probe.has_exited().unwrap_or(false) {
                             // When: exit_probe reports the child exited on Windows, report it and stop polling.
@@ -341,13 +303,7 @@ pub(super) fn spawn_pane_workers(
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                         // When: recv_timeout returns Disconnected, flush output and report exit.
-                        if let Some(proxy) = redraw_proxy.as_ref() {
-                            // redraw_proxy is Some(proxy), so it can receive the final redraw.
-                            if pending {
-                                // pending is true at Disconnected: dispatch the shell's final output.
-                                send_pane_output(&worker_handles, proxy, pane_id);
-                            }
-                        }
+                        flush.on_disconnect(send_output);
                         report_pane_exit(redraw_proxy.as_ref(), &exit_probe, pane_id);
                         break;
                     }
@@ -355,6 +311,188 @@ pub(super) fn spawn_pane_workers(
             }
         })
         .expect("spawn pane VT loop");
+}
+
+/// The VT worker's flush decision: coalesce parsed output and send one output event per flush.
+pub(in crate::app) struct OutputFlush {
+    /// The pane whose worker owns this decision.
+    pane_id: u64,
+    /// Parsed output no output event has covered yet.
+    pending: bool,
+    /// When the oldest uncovered nonempty batch arrived.
+    pending_since: Option<Instant>,
+    /// Bytes received since the last flush.
+    pending_bytes: usize,
+    /// Synchronized-output resets seen across the current batch's parser sections.
+    pub(in crate::app) sync_latch: SyncLatch,
+    /// The open synchronized update holding this pane's output: its epoch and deadline.
+    held: Option<(u64, Instant)>,
+    /// The newest epoch already released, by its deadline or as inherited; it never holds again.
+    released_epoch: u64,
+    /// Debug check that interval flushes respect the quiescent spacing.
+    redraw_probe: crate::app::invariants::RedrawCoalescerProbe,
+}
+
+impl OutputFlush {
+    /// A decision with nothing pending, whose latch has seen the pane's published resets.
+    // Ordering: sync_word loads Relaxed; this worker is the word's only writer.
+    pub(in crate::app) fn new(pane_id: u64, handles: &PaneVtHandles) -> Self {
+        // An update already open when the worker starts has no deadline of its own, so it never holds.
+        let (_, published_epoch) = sync_word_parts(handles.sync_word.load(Ordering::Relaxed));
+        Self {
+            pane_id,
+            pending: false,
+            pending_since: None,
+            pending_bytes: 0,
+            sync_latch: SyncLatch::for_pane(handles),
+            held: None,
+            released_epoch: published_epoch,
+            redraw_probe: crate::app::invariants::RedrawCoalescerProbe::new(),
+        }
+    }
+
+    /// How long the worker waits for more output at `now`.
+    pub(in crate::app) fn wait(&self, now: Instant) -> Duration {
+        if let Some((_, deadline)) = self.held {
+            // When: `self.held` names an open update, wake at its deadline so a silent one is released.
+            return deadline.saturating_duration_since(now);
+        }
+        if self.pending {
+            crate::app::PTY_REDRAW_QUIESCENT
+        } else {
+            // When: `self.pending` is false and nothing is held, park until output or exit arrives.
+            PANE_IDLE_WAIT
+        }
+    }
+
+    /// Note a batch of `byte_count` bytes received at `now`, before it is parsed.
+    pub(in crate::app) fn receive(&mut self, byte_count: usize, now: Instant) {
+        if byte_count > 0 {
+            self.pending_bytes = self.pending_bytes.saturating_add(byte_count);
+            self.pending_since.get_or_insert(now);
+        }
+    }
+
+    /// Decide after a batch has been parsed and published.
+    ///
+    /// A reset anywhere in the batch flushes at once; an open update holds until its deadline;
+    /// otherwise output flushes on size or age, else coalesces.
+    pub(in crate::app) fn after_batch(
+        &mut self,
+        handles: &PaneVtHandles,
+        now: Instant,
+        send: impl FnOnce(),
+    ) {
+        if self.sync_latch.reset_pending {
+            // When: `reset_pending` latched a reset in any section, the published batch flushes now.
+            send();
+            self.sync_latch.reset_pending = false;
+            self.clear_pending();
+            self.refresh_hold(handles);
+            return;
+        }
+        self.refresh_hold(handles);
+        if let Some((epoch, deadline)) = self.held {
+            // When: `self.held` names an open update, keep coalescing and send only at its deadline.
+            self.pending = true;
+            if now >= deadline {
+                // The update outlived its bound; present what it has.
+                self.release_timeout(handles, epoch, send);
+            }
+            return;
+        }
+        let pending_for = self
+            .pending_since
+            .map(|since| now.saturating_duration_since(since))
+            .unwrap_or(Duration::ZERO);
+        if crate::app::should_flush_pending_pty_redraw(self.pending_bytes, pending_for) {
+            // should_flush_pending_pty_redraw accepted pending_bytes and pending_for: dispatch the coalesced frame.
+            send();
+            let reason = if self.pending_bytes >= crate::app::PTY_REDRAW_FLUSH_BYTES {
+                crate::app::invariants::FlushReason::Buffer
+            } else {
+                crate::app::invariants::FlushReason::Interval
+            };
+            self.redraw_probe.note_redraw(crate::app::PTY_REDRAW_QUIESCENT, reason);
+            self.clear_pending();
+        } else {
+            // When: should_flush_pending_pty_redraw is false, retain the batch for coalescing.
+            self.pending = true;
+        }
+    }
+
+    /// Decide at a quiet wake: pending output flushes once.
+    pub(in crate::app) fn on_quiet(
+        &mut self,
+        handles: &PaneVtHandles,
+        now: Instant,
+        send: impl FnOnce(),
+    ) {
+        if let Some((epoch, deadline)) = self.held {
+            // When: `self.held` names an open update, a quiet wake releases it only at its deadline.
+            if now >= deadline {
+                // The update outlived its bound; present what it has.
+                self.release_timeout(handles, epoch, send);
+            }
+            return;
+        }
+        if self.pending {
+            // pending is true at the quiet wake: dispatch the coalesced trailing frame.
+            send();
+            self.redraw_probe.note_redraw(
+                crate::app::PTY_REDRAW_QUIESCENT,
+                crate::app::invariants::FlushReason::Interval,
+            );
+            self.clear_pending();
+        }
+    }
+
+    /// Decide at disconnect: the shell's final output flushes whatever the mode.
+    pub(in crate::app) fn on_disconnect(&mut self, send: impl FnOnce()) {
+        if self.pending {
+            // pending is true at disconnect: dispatch the shell's final output.
+            send();
+            self.clear_pending();
+        }
+    }
+
+    /// Hold for the published update when it is open in an epoch not yet released.
+    // Ordering: sync_word loads Acquire, pairing with its Release store; sync_deadline_ns then loads Relaxed.
+    fn refresh_hold(&mut self, handles: &PaneVtHandles) {
+        let (set, epoch) = sync_word_parts(handles.sync_word.load(Ordering::Acquire));
+        self.held = (set && epoch > self.released_epoch).then(|| {
+            let deadline_ns = handles.sync_deadline_ns.load(Ordering::Relaxed);
+            (epoch, super::sync_clock::instant_at(deadline_ns))
+        });
+    }
+
+    /// Release update `epoch` at its deadline: flush what it holds, log it, and count it.
+    // Ordering: sync_timeouts uses Relaxed; it is a statistic and orders nothing.
+    fn release_timeout(&mut self, handles: &PaneVtHandles, epoch: u64, send: impl FnOnce()) {
+        if self.pending {
+            // Output parsed during the update is presented now; later output flushes normally.
+            send();
+            self.clear_pending();
+        }
+        self.released_epoch = epoch;
+        self.held = None;
+        tracing::debug!(
+            target: "sonicterm_app::sync_output",
+            pane_id = self.pane_id,
+            epoch,
+            "synchronized output held past 150 ms; released"
+        );
+        if let Some(counters) = handles.frame_counters.as_ref() {
+            counters.vt.sync_timeouts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Forget the output a flush just covered.
+    fn clear_pending(&mut self) {
+        self.pending = false;
+        self.pending_since = None;
+        self.pending_bytes = 0;
+    }
 }
 
 /// Send this pane's output event to its current redraw target.

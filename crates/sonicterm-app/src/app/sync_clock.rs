@@ -5,7 +5,7 @@
 //! as nanoseconds since that origin in an `AtomicU64`.
 
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The shared origin; set on first use, never moved.
 pub(in crate::app) static ORIGIN: OnceLock<Instant> = OnceLock::new();
@@ -18,6 +18,11 @@ pub(in crate::app) fn origin() -> Instant {
 /// Nanoseconds from the origin to `at`; an instant before the origin reads 0.
 pub(in crate::app) fn nanos_at(at: Instant) -> u64 {
     u64::try_from(at.saturating_duration_since(origin()).as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// The instant `nanos` nanoseconds after the origin.
+pub(in crate::app) fn instant_at(nanos: u64) -> Instant {
+    origin() + Duration::from_nanos(nanos)
 }
 
 #[cfg(test)]
