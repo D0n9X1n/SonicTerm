@@ -2,7 +2,7 @@ use super::*;
 use enum_map::enum_map;
 use std::time::{Duration, Instant};
 
-const ALL_CLASSES: [ResourceClass; 24] = [
+const ALL_CLASSES: [ResourceClass; 25] = [
     ResourceClass::GridVisible,
     ResourceClass::GridHistory,
     ResourceClass::GridAlternate,
@@ -14,6 +14,7 @@ const ALL_CLASSES: [ResourceClass; 24] = [
     ResourceClass::GlyphAtlas,
     ResourceClass::RowGlyphCache,
     ResourceClass::RowQuadCache,
+    ResourceClass::RowInk,
     ResourceClass::ParserCapture,
     ResourceClass::InlineMediaDecode,
     ResourceClass::InlineMediaRetained,
@@ -334,6 +335,17 @@ fn classes_with_production_charge_sites_are_recorded_as_charged() {
 fn reaper_work_is_charged_to_retired_transport_not_pane() {
     assert_eq!(ResourceClass::ReaperWork.coverage(), ClassCoverage::Charged);
     assert_eq!(ResourceClass::ReaperWork.pane_seam_term(), PaneSeamTerm::ChargedToAnotherOwnerKind);
+}
+
+/// The renderer's per-row ink records are reported, never charged: a renderer computes them and
+/// `sonicterm-gpu` cannot reserve, so the class records an uncharged envelope and no pane term.
+#[test]
+fn row_ink_is_uncharged_renderer_retention() {
+    assert!(matches!(
+        ResourceClass::RowInk.coverage(),
+        ClassCoverage::UnchargedRetention { per_owner_bytes } if per_owner_bytes > 0
+    ));
+    assert_eq!(ResourceClass::RowInk.pane_seam_term(), PaneSeamTerm::NotChargedInProduction);
 }
 
 /// Nothing is classified negligible without a figure behind it.
