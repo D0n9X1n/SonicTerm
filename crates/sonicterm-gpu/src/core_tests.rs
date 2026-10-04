@@ -4258,7 +4258,8 @@ fn row_invalidation_keeps_the_original_per_pane_order_with_the_gate_on_or_off() 
 }
 
 /// The vertex scratch is renderer-held CPU storage: `retained_amounts` reports the
-/// presentation pipeline's figure, `total()` counts it, and it is tagged as upload staging.
+/// presentation pipeline's figure together with both atlas uploads' rect lists, `total()` counts
+/// it, and it is tagged as upload staging.
 #[test]
 fn vertex_scratch_is_part_of_the_retained_report() {
     let retention =
@@ -4271,7 +4272,9 @@ fn vertex_scratch_is_part_of_the_retained_report() {
     let core: String = include_str!("core.rs").split_whitespace().collect();
     let report = core.find("pubfnretained_amounts(&self)").expect("retained_amounts");
     let body = &core[report..report + 600];
-    assert!(body.contains("vertex_scratch:self.present_pipeline.vertex_scratch_retained(),"));
+    assert!(body.contains("vertex_scratch:self.upload_staging_retained(),"));
+    let staging = core.split_once("fnupload_staging_retained(&self)").expect("helper").1;
+    assert!(staging[..300].contains("self.present_pipeline.vertex_scratch_retained()"));
 }
 
 /// Frame assembly records each emitted row's glyph span on both the cache-hit and miss paths of

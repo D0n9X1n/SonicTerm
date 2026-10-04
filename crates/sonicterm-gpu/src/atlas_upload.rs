@@ -20,6 +20,74 @@ pub struct AtlasUploadStats {
     pub uploaded_bytes: usize,
 }
 
+/// Rect-list capacity above which a synchronized list is shrunk, so the resident-wide list a
+/// growth re-upload builds is held for one sync rather than for the renderer's life.
+pub(crate) const UPLOAD_LIST_SHRINK_ABOVE: usize = 1024;
+/// Capacity a released rect list keeps; ordinary frames dirty fewer rects than this.
+pub(crate) const UPLOAD_LIST_RETAINED: usize = 64;
+
+/// The upload's reusable CPU storage: the drained dirty rects, their same-kind coalescing, and
+/// the staging buffer each texture write is copied through. Device-free, so its release policy is
+/// testable without a queue.
+#[derive(Debug, Default)]
+pub(crate) struct UploadLists {
+    dirty_rects: Vec<DirtyRect>,
+    coalesced_rects: Vec<DirtyRect>,
+    scratch: Vec<u8>,
+}
+
+impl UploadLists {
+    /// Drain `atlas`'s dirty rects, coalesce same-kind neighbours, and hand each staged rect to
+    /// `write`. The stats are computed before the lists are released, so they report the work
+    /// done; both lists are then cleared and shrunk when oversized, on the zero-dirty path too.
+    pub(crate) fn sync_with(
+        &mut self,
+        atlas: &mut GlyphAtlas,
+        mut write: impl FnMut(DirtyRect, &[u8]),
+    ) -> AtlasUploadStats {
+        atlas.drain_dirty_rects_into(&mut self.dirty_rects);
+        let dirty_rects = self.dirty_rects.len();
+        if dirty_rects == 0 {
+            // When: `dirty_rects` is zero, skip queue writes, release any oversized list, and
+            // report an idle synchronization.
+            self.release_rect_lists();
+            return AtlasUploadStats::default();
+        }
+        coalesce_dirty_rects(&self.dirty_rects, &mut self.coalesced_rects);
+        let atlas_w = atlas.width();
+        let pixels = atlas.pixels();
+        let mut uploaded_bytes = 0usize;
+        for &rect in &self.coalesced_rects {
+            copy_rect_into_scratch(pixels, atlas_w, rect, &mut self.scratch);
+            uploaded_bytes = uploaded_bytes.saturating_add(self.scratch.len());
+            write(rect, &self.scratch);
+        }
+        let stats = AtlasUploadStats {
+            dirty_rects,
+            upload_calls: self.coalesced_rects.len(),
+            uploaded_bytes,
+        };
+        self.release_rect_lists();
+        stats
+    }
+
+    /// Clear both rect lists and shrink any whose capacity exceeds 1,024 rects back to 64.
+    fn release_rect_lists(&mut self) {
+        for list in [&mut self.dirty_rects, &mut self.coalesced_rects] {
+            list.clear();
+            if list.capacity() > UPLOAD_LIST_SHRINK_ABOVE {
+                list.shrink_to(UPLOAD_LIST_RETAINED);
+            }
+        }
+    }
+
+    /// Bytes reserved by both rect lists, reported under `UploadStaging` with the vertex scratch.
+    pub(crate) fn retained_list_bytes(&self) -> usize {
+        (self.dirty_rects.capacity() + self.coalesced_rects.capacity())
+            * std::mem::size_of::<DirtyRect>()
+    }
+}
+
 /// Texture binding assembled for this atlas mirror.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AtlasBindingKind {
@@ -56,9 +124,7 @@ pub struct AtlasUpload {
     bind_group: wgpu::BindGroup,
     width: u32,
     height: u32,
-    dirty_rects: Vec<DirtyRect>,
-    coalesced_rects: Vec<DirtyRect>,
-    scratch: Vec<u8>,
+    lists: UploadLists,
 }
 
 /// Build the nearest-filtered sampler descriptor used for glyph-atlas pixels.
@@ -186,35 +252,22 @@ impl AtlasUpload {
             bind_group,
             width,
             height,
-            dirty_rects: Vec::new(),
-            coalesced_rects: Vec::new(),
-            scratch: Vec::new(),
+            lists: UploadLists::default(),
         }
     }
 
     /// Push every kind-bearing dirty rect since the last sync to the GPU.
     pub(crate) fn sync(&mut self, queue: &wgpu::Queue, atlas: &mut GlyphAtlas) -> AtlasUploadStats {
-        atlas.drain_dirty_rects_into(&mut self.dirty_rects);
-        let dirty_rects = self.dirty_rects.len();
-        if dirty_rects == 0 {
-            // When: `dirty_rects` is zero, skip queue writes and report an idle synchronization.
-            return AtlasUploadStats::default();
-        }
-        coalesce_dirty_rects(&self.dirty_rects, &mut self.coalesced_rects);
-        let atlas_w = atlas.width();
-        let pixels = atlas.pixels();
-        let mut uploaded_bytes = 0usize;
-        for &rect in &self.coalesced_rects {
-            copy_rect_into_scratch(pixels, atlas_w, rect, &mut self.scratch);
-            uploaded_bytes = uploaded_bytes.saturating_add(self.scratch.len());
+        let texture = &self.texture;
+        self.lists.sync_with(atlas, |rect, staged| {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &self.texture,
+                    texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d { x: rect.x, y: rect.y, z: 0 },
                     aspect: wgpu::TextureAspect::All,
                 },
-                &self.scratch,
+                staged,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(rect.w * BYTES_PER_PIXEL),
@@ -222,8 +275,12 @@ impl AtlasUpload {
                 },
                 wgpu::Extent3d { width: rect.w, height: rect.h, depth_or_array_layers: 1 },
             );
-        }
-        AtlasUploadStats { dirty_rects, upload_calls: self.coalesced_rects.len(), uploaded_bytes }
+        })
+    }
+
+    /// Bytes reserved by this upload's rect lists.
+    pub(crate) fn retained_list_bytes(&self) -> usize {
+        self.lists.retained_list_bytes()
     }
 
     /// Unorm view used by mask and subpixel coverage consumers.

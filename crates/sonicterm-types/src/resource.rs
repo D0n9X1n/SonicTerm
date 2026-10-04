@@ -221,9 +221,11 @@ impl ResourceClass {
             //
             // `the_tabled_software_frame_bound_is_this_clamp` in
             // `sonicterm-windows` fails if the clamp moves without this.
-            Self::GlyphAtlas => {
-                ClassCoverage::UnchargedRetention { per_owner_bytes: 2048 * 2048 * 4 }
-            }
+            // The glyph atlas grows to at most 2048 square; its pending dirty list holds at most
+            // MAX_ATLAS_ENTRIES (16,384) rects of 20 bytes, doubled for Vec growth.
+            Self::GlyphAtlas => ClassCoverage::UnchargedRetention {
+                per_owner_bytes: 2048 * 2048 * 4 + 2 * 16_384 * 20,
+            },
             // Four viewport working sets at the maximum visible-grid cell seam.
             // Quad output is at most one run per cell. The glyph envelope also
             // leaves headroom for bounded combining-cluster shaping expansion;
@@ -290,9 +292,13 @@ impl ResourceClass {
             // ceiling: it follows the frame's vertex count, under its release
             // policy (shrunk to twice a frame's use once its capacity exceeds
             // four times that use and 1 MiB), so it is not part of this figure.
-            Self::UploadStaging => {
-                ClassCoverage::UnchargedRetention { per_owner_bytes: 2 * 2048 * 2048 * 4 }
-            }
+            //
+            // Each of the two uploads also holds a dirty and a coalesced rect list. A sync releases
+            // both, but during one a list holds at most MAX_ATLAS_ENTRIES (16,384) rects of 20
+            // bytes, doubled for Vec growth: 2 uploads x 2 lists x 2 x 16,384 x 20.
+            Self::UploadStaging => ClassCoverage::UnchargedRetention {
+                per_owner_bytes: 2 * 2048 * 2048 * 4 + 2 * 2 * 2 * 16_384 * 20,
+            },
 
             // No remote-session transport exists in the workspace.
             Self::RemoteInput | Self::RemoteOutput => ClassCoverage::SubsystemAbsent,

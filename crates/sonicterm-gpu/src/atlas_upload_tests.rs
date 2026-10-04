@@ -695,7 +695,14 @@ fn the_recorded_class_figure_matches_the_atlas_constants() {
     let per_upload = ATLAS_DIM as usize * ATLAS_DIM as usize * BYTES_PER_PIXEL as usize;
     // One for glyphs, one for images; `GpuRenderer` holds both for its life.
     let uploads_per_renderer = 2;
-    let derived = per_upload * uploads_per_renderer;
+    // Each upload also holds a dirty and a coalesced rect list of at most MAX_ATLAS_ENTRIES rects,
+    // doubled for Vec growth, until its sync releases them.
+    let rect_lists = uploads_per_renderer
+        * 2
+        * 2
+        * sonicterm_text::glyph_atlas::MAX_ATLAS_ENTRIES
+        * std::mem::size_of::<DirtyRect>();
+    let derived = per_upload * uploads_per_renderer + rect_lists;
 
     let ClassCoverage::UnchargedRetention { per_owner_bytes } =
         ResourceClass::UploadStaging.coverage()
@@ -712,4 +719,144 @@ fn the_recorded_class_figure_matches_the_atlas_constants() {
          atlas constants give {derived} ({uploads_per_renderer} x {per_upload}); the typed \
          figure has drifted from the atlas it describes"
     );
+}
+
+/// A `side × side` tile filled with `value`: one coverage byte per pixel, or BGRA when `is_color`.
+fn list_tile(side: u32, is_color: bool, value: [u8; 4]) -> sonicterm_text::glyph_atlas::RasterTile {
+    let pixels = (side * side) as usize;
+    let coverage = if is_color { value.repeat(pixels) } else { vec![value[3]; pixels] };
+    sonicterm_text::glyph_atlas::RasterTile {
+        width: side,
+        height: side,
+        offset_x: 0,
+        offset_y: 0,
+        advance: side as f32,
+        coverage,
+        is_color,
+        is_subpixel: false,
+    }
+}
+
+/// A distinct key per `index`, from the CJK block so thousands stay valid chars.
+fn list_key(index: u32) -> sonicterm_types::GlyphKey {
+    sonicterm_types::GlyphKey::new(char::from_u32(0x4E00 + index).unwrap(), false, false)
+}
+
+/// Every staged write of one sync through fresh lists, in order.
+fn staged_writes(atlas: &mut GlyphAtlas) -> Vec<(DirtyRect, Vec<u8>)> {
+    let mut writes = Vec::new();
+    let _stats = UploadLists::default()
+        .sync_with(atlas, |rect, staged| writes.push((rect, staged.to_vec())));
+    writes
+}
+
+/// The envelope `class` restates for one owner.
+fn envelope_bytes(class: sonicterm_types::ResourceClass) -> usize {
+    match class.coverage() {
+        sonicterm_types::ClassCoverage::UnchargedRetention { per_owner_bytes } => per_owner_bytes,
+        other => panic!("{class:?} is not an uncharged retention: {other:?}"),
+    }
+}
+
+/// After an earlier sync, growth re-uploads every tile typed by its own kind: the coverage tile is
+/// copied, the translucent color tile converted, and the bytes equal a fresh atlas's first upload.
+#[test]
+fn a_growth_reupload_is_typed_and_equals_a_fresh_first_upload() {
+    let mono = list_tile(4, false, [0, 0, 0, 90]);
+    let color = list_tile(4, true, [40, 30, 20, 128]);
+    let fill = |atlas: &mut GlyphAtlas| {
+        atlas.get_or_insert(list_key(0), &mut TestTileRasterizer(mono.clone()));
+        atlas.get_or_insert(list_key(1), &mut TestTileRasterizer(color.clone()));
+    };
+    let mut grown = GlyphAtlas::growable(sonicterm_text::glyph_atlas::MIN_ATLAS_DIM, ATLAS_DIM);
+    fill(&mut grown);
+    let _earlier_sync = staged_writes(&mut grown);
+    grown.grow_to(512);
+    let reupload = staged_writes(&mut grown);
+    let mut fresh = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);
+    fill(&mut fresh);
+    assert_eq!(reupload, staged_writes(&mut fresh), "the re-upload equals a first upload");
+    let kinds: Vec<AtlasPixelKind> = reupload.iter().map(|(rect, _)| rect.kind).collect();
+    assert_eq!(kinds, [AtlasPixelKind::Coverage, AtlasPixelKind::Color]);
+    assert_eq!(reupload[0].1, vec![90; 4 * 4 * 4], "coverage is copied into all four channels");
+    assert_ne!(reupload[1].1, [40, 30, 20, 128].repeat(16), "translucent color is converted");
+}
+
+/// A sync of 5,000 rects reports its work, then leaves both lists empty with capacity at most 64,
+/// so the reported figures fall; the glyph upload and the image upload behave alike.
+#[test]
+fn a_large_sync_reports_its_work_then_releases_both_lists() {
+    let growable = GlyphAtlas::growable(sonicterm_text::glyph_atlas::MIN_ATLAS_DIM, ATLAS_DIM);
+    for (name, mut atlas) in [("glyph", growable), ("image", GlyphAtlas::default_size())] {
+        let mut rasterizer = TestTileRasterizer(list_tile(8, false, [0, 0, 0, 200]));
+        for index in 0..5000 {
+            atlas.get_or_insert(list_key(index), &mut rasterizer);
+        }
+        let dim = atlas.width() as usize;
+        let atlas_before = atlas.retained_amount().bytes;
+        assert_eq!(atlas_before, dim * dim * 4 + atlas.dirty_capacity() * 20, "{name}");
+        let mut lists = UploadLists::default();
+        // Lists left at 5,000 capacity, as a growth re-upload leaves them during its sync.
+        lists.dirty_rects.reserve(5000);
+        lists.coalesced_rects.reserve(5000);
+        let lists_before = lists.retained_list_bytes();
+        let (mut writes, mut written_bytes) = (0, 0);
+        let stats = lists.sync_with(&mut atlas, |_, staged| {
+            writes += 1;
+            written_bytes += staged.len();
+        });
+        assert_eq!(stats.dirty_rects, 5000, "{name}");
+        assert_eq!((stats.upload_calls, stats.uploaded_bytes), (writes, written_bytes), "{name}");
+        assert!(stats.upload_calls > 0 && stats.uploaded_bytes >= 5000 * 8 * 8 * 4, "{name}");
+        assert!(lists.dirty_rects.is_empty() && lists.coalesced_rects.is_empty(), "{name}");
+        assert!(lists.dirty_rects.capacity() <= UPLOAD_LIST_RETAINED, "{name}");
+        assert!(lists.coalesced_rects.capacity() <= UPLOAD_LIST_RETAINED, "{name}");
+        assert!(atlas.dirty_capacity() <= UPLOAD_LIST_RETAINED, "{name}");
+        assert!(lists.retained_list_bytes() < lists_before, "{name}: UploadStaging falls");
+        assert!(atlas.retained_amount().bytes < atlas_before, "{name}: glyph_atlas falls");
+        let glyph_envelope = envelope_bytes(sonicterm_types::ResourceClass::GlyphAtlas);
+        assert!(atlas_before <= glyph_envelope, "{name}");
+        let staging_envelope = envelope_bytes(sonicterm_types::ResourceClass::UploadStaging);
+        assert!(2 * lists_before <= staging_envelope, "{name}: two uploads' lists fit");
+    }
+}
+
+/// A sync with nothing dirty writes nothing, reports idle stats, and still releases lists left
+/// oversized by an earlier sync.
+#[test]
+fn a_zero_dirty_sync_releases_oversized_lists() {
+    let mut lists = UploadLists::default();
+    lists.dirty_rects.reserve(5000);
+    lists.coalesced_rects.reserve(5000);
+    let mut atlas = GlyphAtlas::new(16, 16);
+    let stats = lists.sync_with(&mut atlas, |_, _| panic!("nothing is dirty"));
+    assert_eq!(stats, AtlasUploadStats::default());
+    assert!(lists.dirty_rects.capacity() <= UPLOAD_LIST_RETAINED);
+    assert!(lists.coalesced_rects.capacity() <= UPLOAD_LIST_RETAINED);
+}
+
+/// The envelopes restate the growth maximum plus the rect lists: one atlas and its dirty list
+/// for `GlyphAtlas`; two atlas scratches and two uploads' two lists for `UploadStaging`. The
+/// renderer reports both uploads' lists inside the `UploadStaging` part.
+#[test]
+fn envelopes_and_the_staging_report_include_the_rect_lists() {
+    use sonicterm_text::glyph_atlas::MAX_ATLAS_ENTRIES;
+    let rect_bytes = std::mem::size_of::<DirtyRect>();
+    assert_eq!(rect_bytes, 20);
+    let atlas_bytes = (ATLAS_DIM * ATLAS_DIM * BYTES_PER_PIXEL) as usize;
+    assert_eq!(
+        envelope_bytes(sonicterm_types::ResourceClass::GlyphAtlas),
+        atlas_bytes + 2 * MAX_ATLAS_ENTRIES * rect_bytes
+    );
+    assert_eq!(
+        envelope_bytes(sonicterm_types::ResourceClass::UploadStaging),
+        2 * atlas_bytes + 2 * 2 * 2 * MAX_ATLAS_ENTRIES * rect_bytes
+    );
+    let core: String = include_str!("core.rs").split_whitespace().collect();
+    assert!(core.contains("vertex_scratch:self.upload_staging_retained(),"));
+    let report = core.split_once("fnupload_staging_retained(&self)").unwrap().1;
+    let report = report.split_once("\n").map_or(report, |(head, _)| head);
+    assert!(report.contains("self.glyph_upload.retained_list_bytes()"));
+    assert!(report.contains("self.image_upload.retained_list_bytes()"));
+    assert!(report.contains("bytes:vertex.bytes+lists"));
 }

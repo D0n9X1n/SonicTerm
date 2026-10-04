@@ -2444,8 +2444,9 @@ pub struct RendererRetention {
     pub row_quad_cache: ResourceAmount,
     /// Windows software presentation buffer. Zero elsewhere.
     pub software_frame: ResourceAmount,
-    /// Reused per-frame vertex assembly storage of the presentation pipeline. CPU memory,
-    /// so the GPU-buffer exclusion does not cover it; one item while it holds an allocation.
+    /// Reused per-frame vertex assembly storage of the presentation pipeline, plus both atlas
+    /// uploads' dirty and coalesced rect lists. CPU memory, so the GPU-buffer exclusion does not
+    /// cover it; one item while the vertex scratch holds an allocation.
     pub vertex_scratch: ResourceAmount,
 }
 
@@ -3407,8 +3408,16 @@ impl GpuRenderer {
             row_glyph_cache: self.row_glyph_cache.retained_amount(),
             row_quad_cache: self.line_quad_cache.retained_amount(),
             software_frame: self.software_frame_retained_amount(),
-            vertex_scratch: self.present_pipeline.vertex_scratch_retained(),
+            vertex_scratch: self.upload_staging_retained(),
         }
+    }
+
+    /// The `UploadStaging` part: the vertex scratch plus both atlas uploads' rect lists.
+    fn upload_staging_retained(&self) -> ResourceAmount {
+        let vertex = self.present_pipeline.vertex_scratch_retained();
+        let lists =
+            self.glyph_upload.retained_list_bytes() + self.image_upload.retained_list_bytes();
+        ResourceAmount { bytes: vertex.bytes + lists, items: vertex.items }
     }
 
     /// Release one permanently removed pane's cached rows without evicting peers.
