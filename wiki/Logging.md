@@ -392,6 +392,7 @@ previous snapshot and takes deltas.
 | `defer_timeout` | count | redraws deferred because a surface timeout is pending within the frame period |
 | `defer_contention` | count | redraws deferred by the lock-contention retry floor |
 | `defer_streaming` | count | redraws deferred by streaming-output pacing |
+| `stream_clock_exempt` | count | hardware attempts for new input that settled without presenting and kept the streaming clock, so the echo they waited for is not paced from them |
 | `contention_retry_armed` | count | lock-contention retries armed |
 | `dirt_ack_dropped` | count | presented-frame receipts dropped at the next collection because the pane was not held, its parser changed, or its grid was resized or switched screens after assembly; output written after assembly does not drop a receipt, it only keeps the rows it dirtied. Each drop costs a later re-assembly, never pixels |
 | `native_request_redraw` | count | native redraw requests for the window, on every request path; a dispatch's requests reach the totals when it ends, so a window line shows them one dispatch late (`final=1` lines are complete) |

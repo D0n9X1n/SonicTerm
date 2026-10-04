@@ -4602,8 +4602,9 @@ def attempt_split(per_run: Sequence[dict], prefix: str) -> tuple[str | None, int
 def presenter_counter_notes(label: str, side_name: str, side: SideRuns) -> list[str]:
     """Notes for each valid counters run whose renderer frame counts disagree with its recorded presenter.
 
-    On Windows result.json records the presenter: frames drawn through GDI count as software_frames and frames
-    presented through wgpu as gpu_frames. A run that recorded no presenter (macOS) is not checked.
+    result.json records the presenter on Windows and macOS: frames drawn through GDI count as software_frames and
+    frames presented through wgpu as gpu_frames. A run that recorded no presenter (a base older than the macOS
+    record) is not checked.
     """
     notes = []
     for index, outcome in enumerate(side.outcomes, 1):

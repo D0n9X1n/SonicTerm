@@ -389,8 +389,10 @@ changed. Transfer changes the shared target without replacing the generation.
 
 Each window owns cause generations, input immediacy, its raw monitor period,
 last actual present, and suppression state. The public `last_render: Instant`
-remains the sole last-attempt pacing clock; `request_redraw(&self)` remains a native
-pass-through. Software degradation is resolved from global policy at decision time.
+is the last-attempt clock. On hardware, streaming is paced from `stream_clock`,
+which a settled input attempt that presented nothing does not advance; timeout,
+contention, software and every other outcome stay paced by attempts.
+`request_redraw(&self)` remains a native pass-through. Software degradation is resolved from global policy at decision time.
 A pre-lock collector callback Acquire-loads pane identities before either lock
 family. Completion consumes only its owner's captured cause/output identities,
 never a sibling's or a later publication. Visible output controls burst pacing;
@@ -439,7 +441,9 @@ Settled Unchanged/Noop/NoPanes outcomes consume the captured request without
 claiming a grid acknowledgement or arming a dirty-row heartbeat. CachedReblit
 also records an actual presentation. Every renderer call updates `last_render`
 once and spends captured input immediacy, including failures and presenter-owned
-retries. Timeout is app-paced and backend Occluded suppresses frames with a
+retries. The same completion, shared by main and child windows, moves
+`stream_clock` too, except for a hardware Settled attempt for new input with no
+timeout or contention floor. Timeout is app-paced and backend Occluded suppresses frames with a
 macOS-only slow availability probe; atlas and other surface reasons retain renderer
 retry ownership. Native occlusion contributes no frame deadlines and visibility
 invalidates the retained frame key; see [Rendering Modes](Rendering-Modes).

@@ -227,7 +227,9 @@ What differs from macOS:
   `gdi` run that did not present through GDI, or a `wgpu` run that degraded, is
   `blocked`. S1's `role-exit` variant is for the smoke.
 - **Table.** Each scenario gets a `presenter` row naming the presenter and
-  adapter. S12's uncover and memory-released-while-covered rows read `n/a`,
+  adapter. macOS results record their presenter too, so a macOS table also has
+  the row, reading `wgpu` or `wgpu, degraded`; a valid macOS result without the
+  record is a schema problem. S12's uncover and memory-released-while-covered rows read `n/a`,
   because Windows reports no occlusion, and every checkpoint's footprint row
   reads `n/a`, because Windows has no `footprint`.
 - **Delivery.** Before its measured runs, a comparison replays S3, S9, S10 and
