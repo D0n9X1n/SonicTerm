@@ -456,8 +456,9 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
 
 /// Parse `bytes` in parser lock sections of at most `section_bytes`, which must be nonzero.
 ///
-/// A section also ends early when the parser stages a reply. Host side effects of each
-/// section run after its guard drops; replies are batched and sent once the batch is parsed.
+/// A section also ends early when the parser stages a reply. Host effects (events, clipboard,
+/// media merge, command records, replies) flush after the guard drops, but only at such a
+/// reply boundary or at batch end, so a byte-bound cut never splits one merge into two.
 // Lock order: inline_images -> inline_media_charge; parser releases before either, and command_events locks after both.
 // Ordering: cursor_visible, keyboard_input and pointer_input use Relaxed; each word is self-contained, not a barrier for parser changes.
 #[allow(clippy::too_many_arguments)]
@@ -478,6 +479,8 @@ fn process_pane_vt_batch_in_sections<Decode, Emit, Now, Send>(
 {
     let mut remaining = bytes;
     let mut reply_batch = Vec::new();
+    // Parsed events not yet applied; a byte-bound cut leaves them here for the next flush.
+    let mut pending_events: Vec<VtEvent> = Vec::new();
     let counters = handles.frame_counters.as_ref();
     if let Some(counters) = counters {
         // the App's gate is on, a nonempty batch counts once however often it takes the lock.
@@ -517,75 +520,83 @@ fn process_pane_vt_batch_in_sections<Decode, Emit, Now, Send>(
             counters.vt.record_section(&times, consumed as u64);
         }
         remaining = &remaining[consumed..];
-
-        let mut clipboard_requests = Vec::new();
-        let mut command_side_effects = Vec::new();
-        let mut media_events = Vec::new();
-        for event in events {
-            match event {
-                VtEvent::CursorVisibility(visible) => {
-                    handles.cursor_visible.store(visible, Ordering::Relaxed);
-                }
-                VtEvent::Clipboard { selection, data } => {
-                    clipboard_requests.push((selection, data));
-                }
-                VtEvent::Command(event) => {
-                    let at = now();
-                    let duration = match event {
-                        CommandEvent::CmdStart => {
-                            *command_started = Some(at);
-                            None
-                        }
-                        CommandEvent::CmdEnd(_) => {
-                            command_started.take().map(|started| at.duration_since(started))
-                        }
-                        CommandEvent::PromptStart | CommandEvent::PromptEnd => None,
-                    };
-                    command_side_effects.push(super::PaneCommandEvent { event, at, duration });
-                }
-                VtEvent::Media(media) => media_events.push(media),
-                VtEvent::SetTitle(_) | VtEvent::Bell | VtEvent::Hyperlink { .. } => {
-                    // When: event is SetTitle, Bell, or Hyperlink, parser state already owns its effect.
+        pending_events.extend(events);
+        // Host effects flush where one unbounded section ended: a reply-producing dispatch or the
+        // batch end. A cut made only by the byte bound carries its events into the next section.
+        let flush_effects = !replies.is_empty() || remaining.is_empty();
+        if flush_effects {
+            let mut clipboard_requests = Vec::new();
+            let mut command_side_effects = Vec::new();
+            let mut media_events = Vec::new();
+            for event in pending_events.drain(..) {
+                match event {
+                    VtEvent::CursorVisibility(visible) => {
+                        handles.cursor_visible.store(visible, Ordering::Relaxed);
+                    }
+                    VtEvent::Clipboard { selection, data } => {
+                        clipboard_requests.push((selection, data));
+                    }
+                    VtEvent::Command(event) => {
+                        let at = now();
+                        let duration = match event {
+                            CommandEvent::CmdStart => {
+                                *command_started = Some(at);
+                                None
+                            }
+                            CommandEvent::CmdEnd(_) => {
+                                command_started.take().map(|started| at.duration_since(started))
+                            }
+                            CommandEvent::PromptStart | CommandEvent::PromptEnd => None,
+                        };
+                        command_side_effects.push(super::PaneCommandEvent { event, at, duration });
+                    }
+                    VtEvent::Media(media) => media_events.push(media),
+                    VtEvent::SetTitle(_) | VtEvent::Bell | VtEvent::Hyperlink { .. } => {
+                        // When: event is SetTitle, Bell, or Hyperlink, parser state already owns its effect.
+                    }
                 }
             }
-        }
 
-        for (selection, data) in clipboard_requests {
-            if let Some(event) = osc52_clipboard_write_event(selection, &data) {
-                emit_event(event);
+            for (selection, data) in clipboard_requests {
+                if let Some(event) = osc52_clipboard_write_event(selection, &data) {
+                    emit_event(event);
+                }
             }
-        }
 
-        let mut decoded_images = Vec::new();
-        for media in media_events {
-            if let Some(image) = decode_media(&media) {
-                decoded_images.push(image);
-                super::media::trim_staged_inline_images(
-                    &mut decoded_images,
-                    &handles.inline_media_charge,
+            let mut decoded_images = Vec::new();
+            for media in media_events {
+                if let Some(image) = decode_media(&media) {
+                    decoded_images.push(image);
+                    super::media::trim_staged_inline_images(
+                        &mut decoded_images,
+                        &handles.inline_media_charge,
+                    );
+                }
+            }
+            if !decoded_images.is_empty() {
+                let evicted = {
+                    let mut images = handles.inline_images.lock();
+                    images.extend(decoded_images);
+                    super::media::trim_inline_images_charged(
+                        &mut images,
+                        &handles.inline_media_charge,
+                    )
+                };
+                drop(evicted);
+            }
+
+            if !command_side_effects.is_empty() {
+                super::append_bounded_command_events(
+                    &mut handles.command_events.lock(),
+                    command_side_effects,
                 );
             }
+            if reply_batch.len() + replies.len() > 32 * 1024 {
+                // Flush before appending a complete dispatch that would exceed the batch bound; never split a reply.
+                send_reply(std::mem::take(&mut reply_batch));
+            }
+            reply_batch.extend(replies);
         }
-        if !decoded_images.is_empty() {
-            let evicted = {
-                let mut images = handles.inline_images.lock();
-                images.extend(decoded_images);
-                super::media::trim_inline_images_charged(&mut images, &handles.inline_media_charge)
-            };
-            drop(evicted);
-        }
-
-        if !command_side_effects.is_empty() {
-            super::append_bounded_command_events(
-                &mut handles.command_events.lock(),
-                command_side_effects,
-            );
-        }
-        if reply_batch.len() + replies.len() > 32 * 1024 {
-            // Flush before appending a complete dispatch that would exceed the batch bound; never split a reply.
-            send_reply(std::mem::take(&mut reply_batch));
-        }
-        reply_batch.extend(replies);
         if remaining.is_empty() {
             // When: remaining is empty, publish trailing replies without waiting for more child output.
             if !reply_batch.is_empty() {

@@ -969,6 +969,8 @@ struct ParseOutcome {
     command_events: Vec<(CommandEvent, Duration, Option<Duration>)>,
     media_events: Vec<MediaEvent>,
     reply_submissions: Vec<Vec<u8>>,
+    retained_images: Vec<RetainedImage>,
+    charged_media_bytes: usize,
 }
 
 /// Resolve `link_id` through `parser`'s registry.
@@ -993,10 +995,11 @@ fn resolve_row(parser: &Parser, row: &sonicterm_grid::grid::Row) -> (Vec<Resolve
     (cells, row.soft_wrapped_from_previous())
 }
 
-/// Parse `batch` on a fresh private-pool pane through `bound`, with a fake clock, and return
-/// its outcome and interior section boundaries.
+/// Parse `batch` on a fresh private-pool pane through `bound`, with a fake clock and the
+/// production media decoder, and return its outcome and interior section boundaries.
 fn parse_through_worker(batch: &[u8], bound: SectionBound) -> (ParseOutcome, Vec<SectionBoundary>) {
-    let (_pane, handles) = pane_and_worker_handles();
+    let media_pool = crate::app::media::InlineMediaPool::new();
+    let (_pane, handles) = pane_and_worker_handles_in_pool(&media_pool);
     let clock_base = Instant::now();
     let mut clock_ticks = 0_u64;
     let fake_clock = || {
@@ -1009,7 +1012,7 @@ fn parse_through_worker(batch: &[u8], bound: SectionBound) -> (ParseOutcome, Vec
     let boundaries = record_section_boundaries(&handles.parser, || {
         let decode_media = |media: &MediaEvent| {
             media_events.push(media.clone());
-            None
+            crate::app::media::decode_inline_image(media)
         };
         let emit_event = |event| emitted_events.push(event);
         let send_reply = |reply| reply_submissions.push(reply);
@@ -1068,6 +1071,8 @@ fn parse_through_worker(batch: &[u8], bound: SectionBound) -> (ParseOutcome, Vec
             .collect(),
         media_events,
         reply_submissions,
+        retained_images: retained_images(&handles.inline_images.lock()),
+        charged_media_bytes: media_pool.bytes(),
     };
     (outcome, boundaries)
 }
@@ -1081,7 +1086,9 @@ struct BoundaryFixture {
 
 /// UTF-8, CSI, OSC 8, OSC 7, DECRQSS, Kitty, iTerm2, OSC 52 and OSC 133 sequences.
 fn boundary_fixtures() -> Vec<BoundaryFixture> {
-    let image_payload = base64::engine::general_purpose::STANDARD.encode([7_u8; 24]);
+    // A real 2 px PNG, so the image fixtures decode, merge and charge through the pane store.
+    let image_payload =
+        base64::engine::general_purpose::STANDARD.encode(solid_png(2, [9, 99, 199, 255]));
     let clipboard_payload = base64::engine::general_purpose::STANDARD.encode("copied");
     vec![
         BoundaryFixture {
@@ -1131,6 +1138,7 @@ fn boundary_fixtures() -> Vec<BoundaryFixture> {
             sequence: format!("\x1b_Gf=100,a=T;{image_payload}\x1b\\").into_bytes(),
             took_effect: |outcome| {
                 outcome.media_events.iter().any(|media| media.protocol == MediaProtocol::Kitty)
+                    && !outcome.retained_images.is_empty()
             },
         },
         BoundaryFixture {
@@ -1138,6 +1146,7 @@ fn boundary_fixtures() -> Vec<BoundaryFixture> {
             sequence: format!("\x1b]1337;File=inline=1:{image_payload}\x07").into_bytes(),
             took_effect: |outcome| {
                 outcome.media_events.iter().any(|media| media.protocol == MediaProtocol::Iterm2File)
+                    && !outcome.retained_images.is_empty()
             },
         },
         BoundaryFixture {
@@ -1184,4 +1193,133 @@ fn bounded_sections_parse_like_one_unbounded_section_at_every_cut() {
             );
         }
     }
+}
+
+/// A pane and its worker handles that stage captures privately and charge media to `pool`.
+fn pane_and_worker_handles_in_pool(
+    pool: &Arc<crate::app::media::InlineMediaPool>,
+) -> (PaneState, PaneVtHandles) {
+    let parser = Parser::new_with_staging_pool(Grid::new(80, 24), None, CaptureStagingPool::new());
+    let pane = PaneState::new_with_media_pool(Arc::new(Mutex::new(parser)), None, pool);
+    let worker = PaneVtHandles::from_pane_state(&pane);
+    (pane, worker)
+}
+
+/// A `side_px` square PNG of one colour: a few hundred encoded bytes that decode to
+/// `side_px * side_px * 4` retained BGRA bytes.
+fn solid_png(side_px: u32, rgba: [u8; 4]) -> Vec<u8> {
+    let buffer = image::RgbaImage::from_pixel(side_px, side_px, image::Rgba(rgba));
+    let mut encoded = Vec::new();
+    image::DynamicImage::ImageRgba8(buffer)
+        .write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png)
+        .expect("encoding a PNG in memory cannot fail");
+    encoded
+}
+
+/// A Kitty transmit-and-display sequence carrying `png`.
+fn kitty_png_sequence(png: &[u8]) -> Vec<u8> {
+    let payload = base64::engine::general_purpose::STANDARD.encode(png);
+    format!("\x1b_Gf=100,a=T;{payload}\x1b\\").into_bytes()
+}
+
+/// A retained image without its process-wide id: anchor, size and first BGRA pixel.
+type RetainedImage = (u16, u16, u32, u32, Vec<u8>);
+
+/// The images a pane retains, oldest first, in id-independent form.
+fn retained_images(images: &[InlineImage]) -> Vec<RetainedImage> {
+    images
+        .iter()
+        .map(|image| {
+            let first_pixel = image.bgra.iter().take(4).copied().collect();
+            (image.row, image.col, image.width, image.height, first_pixel)
+        })
+        .collect()
+}
+
+/// Two images decoded in one reply-free batch merge into the pane's charged store together,
+/// as one unbounded parse merges them, even when their terminators fall in different 4 KiB
+/// sections and idle panes hold the whole process ceiling.
+#[test]
+fn images_from_one_batch_merge_once_however_many_sections_it_takes() {
+    use crate::app::media::{
+        trim_inline_images_charged, InlineMediaPool, MAX_PROCESS_INLINE_MEDIA_BYTES,
+        MAX_RETAINED_INLINE_IMAGE_BYTES,
+    };
+    let pool = InlineMediaPool::new();
+    // Four idle panes at their 64 MiB cap fill the ceiling exactly. Retention charges each
+    // image's allocation length, so sixteen clones of one 4 MiB buffer charge 64 MiB a pane.
+    let shared_pixels: Arc<[u8]> = Arc::from(vec![0_u8; 4 * 1024 * 1024]);
+    let mut idle_panes = Vec::new();
+    for idle_index in 0..4_u64 {
+        let charge = pool.new_charge();
+        let mut images = Vec::new();
+        for image_index in 0..16_u64 {
+            images.push(InlineImage {
+                id: u64::MAX - idle_index * 16 - image_index,
+                row: 0,
+                col: 0,
+                width: 1024,
+                height: 1024,
+                bgra: Arc::clone(&shared_pixels),
+            });
+            drop(trim_inline_images_charged(&mut images, &charge));
+        }
+        idle_panes.push((images, charge));
+    }
+    assert_eq!(pool.bytes(), 4 * MAX_RETAINED_INLINE_IMAGE_BYTES);
+    assert_eq!(pool.bytes(), MAX_PROCESS_INLINE_MEDIA_BYTES);
+
+    // Two 768 px images, 2.25 MiB each: together under the active pane's fair share but over
+    // the 4 MiB floor a pane is trimmed to once the pool is above the ceiling.
+    let first_image = kitty_png_sequence(&solid_png(768, [255, 0, 0, 255]));
+    let second_image = kitty_png_sequence(&solid_png(768, [0, 255, 0, 255]));
+    let mut batch = first_image;
+    let first_image_end = batch.len();
+    // Pad to the next section bound so the second image completes in a later section.
+    let padding = PARSER_SECTION_BYTES - batch.len() % PARSER_SECTION_BYTES;
+    batch.extend(plain_text_batch(padding));
+    batch.extend(second_image);
+    let second_image_end = batch.len();
+
+    let parse = |bound: SectionBound| {
+        let (pane, handles) = pane_and_worker_handles_in_pool(&pool);
+        let boundaries = record_section_boundaries(&handles.parser, || {
+            let section_bytes = match bound {
+                SectionBound::Production => PARSER_SECTION_BYTES,
+                SectionBound::Unbounded => usize::MAX,
+            };
+            process_pane_vt_batch_in_sections(
+                &handles,
+                &batch,
+                section_bytes,
+                &mut None,
+                crate::app::media::decode_inline_image,
+                |_| {},
+                Instant::now,
+                |_| {},
+            );
+        });
+        let retained = retained_images(&handles.inline_images.lock());
+        let charged_bytes = pool.bytes() - MAX_PROCESS_INLINE_MEDIA_BYTES;
+        drop((pane, handles));
+        (retained, charged_bytes, boundaries)
+    };
+    let (unbounded_images, unbounded_charge, _) = parse(SectionBound::Unbounded);
+    let (bounded_images, bounded_charge, bounded_boundaries) = parse(SectionBound::Production);
+    assert_eq!(pool.bytes(), MAX_PROCESS_INLINE_MEDIA_BYTES, "both active panes released");
+
+    // The fixture shape: a bound falls between the two terminators, and the unbounded parse
+    // keeps both images.
+    assert!(
+        bounded_boundaries.iter().any(|boundary| {
+            let cut_at = batch.len() - boundary.remaining_bytes;
+            first_image_end <= cut_at && cut_at < second_image_end
+        }),
+        "no section bound between the two image terminators"
+    );
+    assert_eq!(unbounded_images.len(), 2, "the unbounded parse keeps both images");
+    assert_eq!(unbounded_charge, 2 * 768 * 768 * 4);
+    assert_eq!(bounded_images, unbounded_images, "same retained images as one merge");
+    assert_eq!(bounded_charge, unbounded_charge, "same charge as one merge");
+    drop(idle_panes);
 }
