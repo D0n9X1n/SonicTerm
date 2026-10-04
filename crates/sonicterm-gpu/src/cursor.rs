@@ -452,7 +452,13 @@ pub(crate) fn paint_field_marks(
 /// contains every rectangle the recolor test sees.
 #[inline]
 fn glyph_rect_px(glyph: &GlyphInstance, sw: f32, sh: f32) -> (f32, f32, f32, f32) {
-    let [gx, gy, gw, gh] = glyph.rect;
+    ndc_rect_px(glyph.rect, sw, sh)
+}
+
+/// An NDC `[x, y, w, h]` instance rectangle, as `px_to_ndc` encodes glyphs and quads, inverted to
+/// `(x, y, w, h)` in surface pixels.
+#[inline]
+pub(crate) fn ndc_rect_px([gx, gy, gw, gh]: [f32; 4], sw: f32, sh: f32) -> (f32, f32, f32, f32) {
     // Invert px_to_ndc: nx = (x/sw)*2 - 1 → x = (nx + 1) * sw / 2.
     // ny encodes the BOTTOM of the rect (after the +nh shift), so
     // y_top_px = (1 - gy - gh) * sh / 2.

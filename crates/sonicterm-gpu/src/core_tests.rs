@@ -5712,8 +5712,6 @@ fn damage_classes_are_wired_through_the_renderer() {
     let finish = present.find("self.finish_successful_frame(plan,").unwrap();
     assert!(guard < store && store < finish);
     assert_eq!(source.matches("self.last_recolor = ").count(), 1, "one writer");
-    assert!(compact
-        .contains("letemit_full_rows=crate::frame_plan::emits_every_visible_row(render_mode);"));
     assert!(function_body(&source, "pub fn emit_pane_scrollbar(")
         .contains("crate::frame_plan::pane_scrollbar_geometry("));
 }
@@ -5853,4 +5851,83 @@ fn try_resize_outcome_returns_unchanged_before_any_reconfiguration() {
     let key = body.find("self.last_frame_key = None;").expect("the retained key is cleared");
     assert!(unchanged < configure && unchanged < key, "{body}");
     assert!(body.trim_end().ends_with("ResizeOutcome::Changed"), "{body}");
+}
+
+/// The body of the method whose signature starts at `signature`, through its closing brace at
+/// method indentation.
+fn method_body<'source>(source: &'source str, signature: &str) -> &'source str {
+    let start = source.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
+    let end = source[start..].find("\n    }\n").map_or(source.len(), |offset| start + offset);
+    &source[start..end]
+}
+
+/// Row emission reads the plan's per-slot bitset: no dirty-row scan and no whole-frame flag is
+/// left, and both the glyph and the background row loop test `emit_rows[` right after they
+/// start. Checked on an LF and a CRLF checkout, as Windows CI checks it out.
+#[test]
+fn both_row_loops_emit_by_the_planned_bitset() {
+    for source in
+        [include_str!("core.rs").to_owned(), include_str!("core.rs").replace('\n', "\r\n")]
+    {
+        let source = source.replace("\r\n", "\n");
+        assert!(!source.contains("dirty_rows.contains("), "no dirty-row scan decides emission");
+        assert!(!source.contains("dirty_slots.contains("), "no dirty-slot scan decides emission");
+        assert!(!source.contains("emit_full_rows"), "no whole-frame emission flag");
+        for marker in ["for (r, _) in pv.planned.rows() {", "for (r, row_abs) in pv.planned.rows()"]
+        {
+            let start = source.find(marker).unwrap_or_else(|| panic!("{marker}"));
+            let head: String = source[start..].lines().take(3).collect();
+            assert!(head.contains("pv.planned.emit_rows["), "{marker} tests emit_rows: {head}");
+        }
+    }
+}
+
+/// Ink records describe presented pixels only: assembly opens a fresh stage before the row loops,
+/// only `finish_successful_frame` (reached only after `Presented`) commits them and counts a
+/// partial frame, and the commit precedes the frame key it belongs to.
+#[test]
+fn ink_records_and_partial_frames_commit_only_on_a_presented_frame() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    assert_eq!(source.matches("self.row_ink.commit(").count(), 1, "one commit site");
+    assert_eq!(source.matches("note_partial_frame(").count(), 1, "one partial-frame count");
+    let finish = method_body(&source, "    fn finish_successful_frame(");
+    let commit = finish.find("self.row_ink.commit(").expect("records commit when finishing");
+    let counted =
+        finish.find("note_partial_frame(plan.mode == RenderMode::Partial)").expect("count");
+    let key = finish.find("self.last_frame_key = Some(plan.key);").expect("key");
+    assert!(commit < key && counted < key);
+    let present = method_body(&source, "    fn present_layers(");
+    let guard = present.find("return Ok(FrameOutcome::without_receipts(outcome));").unwrap();
+    let finish_call = present.find("self.finish_successful_frame(plan,").unwrap();
+    assert!(guard < finish_call, "only a presented frame finishes");
+    let assemble = method_body(&source, "    fn assemble_frame(");
+    let begin = assemble.find("self.row_ink.begin_frame();").expect("a fresh stage per assembly");
+    let glyph_loop = assemble.find("for (r, _) in pv.planned.rows() {").unwrap();
+    assert!(begin < glyph_loop);
+}
+
+/// The post-assembly check runs after both widenings and before the layers carry the damage; a
+/// partial plan whose final damage reaches a non-emitted row is reported back, and
+/// `render_releasing` reassembles that frame `Full` in the same call.
+#[test]
+fn a_partial_plan_reaching_unemitted_ink_is_reassembled_full() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let assemble = method_body(&source, "    fn assemble_frame(");
+    let widen = assemble.find("plan.widen_for_tab_ink(").unwrap();
+    let check = assemble.find("plan.partial_reaches_unemitted_ink()").expect("checked");
+    let layers = assemble.find("Ok(Assembled::Layers(Box::new(AssembledLayers {").unwrap();
+    assert!(widen < check && check < layers);
+    assert!(assemble.contains("return Ok(Assembled::PartialFallback);"));
+    assert!(assemble.contains("plan.force_full();"), "the second pass plans Full");
+    let releasing = method_body(&source, "    pub fn render_releasing(");
+    assert!(releasing.contains("Ok(Assembled::PartialFallback)"), "the fallback is caught");
+}
+
+/// The GDI presenter composes every batch into the whole frame and never reads damage, so it
+/// must never receive a partial frame; a debug assertion in `present_software_frame` pins it.
+#[test]
+fn the_software_presenter_asserts_it_never_receives_a_partial_frame() {
+    let source = include_str!("present.rs").replace("\r\n", "\n");
+    let body = method_body(&source, "    fn present_software_frame(");
+    assert!(body.contains("debug_assert!(!layers.partial"), "{body}");
 }

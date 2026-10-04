@@ -243,6 +243,9 @@ pub(super) struct FrameLayers<'a> {
     pub(super) first_frame: bool,
     /// The damage rectangle redrawn inside the retained frame.
     pub(super) damage: PixelRect,
+    /// Whether the plan was partial: rows outside the damage were not assembled.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(super) partial: bool,
     /// The subpixel antialiasing mode resolved for this frame.
     pub(super) subpixel_aa: SubpixelAaMode,
     pub(super) batches: FrameBatches<'a>,
@@ -337,6 +340,9 @@ impl GpuRenderer {
         layers: &FrameLayers<'_>,
         timing: &mut FrameTiming,
     ) -> anyhow::Result<PresentOutcome> {
+        // The GDI presenter composes every batch into the whole frame and reads no damage; it is
+        // reached only when degraded, and degraded plans are never partial.
+        debug_assert!(!layers.partial, "the software presenter received a partial frame");
         let before = self.device_errors.gate();
         let Some(frame_scope) = self.device_errors.enter_gpu_work("render.software") else {
             // When: `enter_gpu_work` refuses, assembly stopped the device; nothing is composed.

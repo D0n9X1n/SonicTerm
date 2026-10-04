@@ -1291,9 +1291,15 @@ fn partial_counters_record_only_inside_a_counting_scope() {
         note_row_cells_hashed(|| 40);
     }
     let stats = sink.snapshot();
-    assert_eq!((stats.partial_frames, stats.partial_fallbacks, stats.row_cells_hashed), (1, 1, 120));
+    assert_eq!(
+        (stats.partial_frames, stats.partial_fallbacks, stats.row_cells_hashed),
+        (1, 1, 120)
+    );
     let mut total = FrameStats::ZERO;
     total.add(&stats);
     total.add(&stats);
-    assert_eq!((total.partial_frames, total.partial_fallbacks, total.row_cells_hashed), (2, 2, 240));
+    assert_eq!(
+        (total.partial_frames, total.partial_fallbacks, total.row_cells_hashed),
+        (2, 2, 240)
+    );
 }

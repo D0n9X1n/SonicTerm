@@ -376,6 +376,11 @@ impl PlannedPane {
     }
 }
 
+/// The absolute row at the top of a pane's view: its requested top, clamped to the live top.
+pub(crate) fn resolved_view_top(viewport_top_abs: Option<u64>, scrollback_len: u64) -> u64 {
+    viewport_top_abs.unwrap_or(scrollback_len).min(scrollback_len)
+}
+
 /// Map a grid dirty row, a live-buffer index, to the viewport slot that draws it.
 ///
 /// Live row `live_row` is absolute row `scrollback_len + live_row`; a view whose top is
@@ -467,8 +472,7 @@ impl FramePlan {
                 ((origin_x + content_w).min(surface.w as f32) - clip_x).max(0.0),
                 ((origin_y + content_h).min(surface.h as f32) - clip_y).max(0.0),
             );
-            let view_top_abs =
-                input.viewport_top_abs.unwrap_or(input.scrollback_len).min(input.scrollback_len);
+            let view_top_abs = resolved_view_top(input.viewport_top_abs, input.scrollback_len);
             let scrollbar_bucket = effective_scrollbar_bucket(
                 facts.scrollbar_mode,
                 input.scrollback_len,
@@ -493,13 +497,7 @@ impl FramePlan {
                 .dirty_rows
                 .iter()
                 .filter_map(|&row| {
-                    live_row_slot(
-                        input.is_alt,
-                        input.scrollback_len,
-                        view_top_abs,
-                        input.rows,
-                        row,
-                    )
+                    live_row_slot(input.is_alt, input.scrollback_len, view_top_abs, input.rows, row)
                 })
                 .collect();
             // One part per dirty slot (one for an alternate pane, which damages whole), so the
@@ -839,6 +837,16 @@ impl FramePlan {
         }
     }
 
+    /// `(pane id, row count)` of every planned pane with pixels on the surface: the rows whose ink
+    /// records a presented frame keeps.
+    pub(crate) fn drawn_row_counts(&self) -> Vec<(u64, u16)> {
+        self.panes
+            .iter()
+            .filter(|pane| pane.full_clip.is_some())
+            .map(|pane| (pane.id, pane.row_count))
+            .collect()
+    }
+
     /// Turn a partial plan into the `Full` plan assembly falls back to: every row emitted and
     /// every pane acknowledged whole. Its damage stays the composed rectangle, as a hardware
     /// `Full` keeps it, and the reassembled frame counts as one full frame.
@@ -939,8 +947,7 @@ fn partial_emit_rows(
         let strip_meets =
             slot_damage(pane, slot, geometry).is_some_and(|strip| meets(strip, damage));
         let record_meets = pane.row_ink.get(index).copied().flatten().is_some_and(|record| {
-            meets(record, damage)
-                || reach.iter().flatten().any(|target| meets(record, *target))
+            meets(record, damage) || reach.iter().flatten().any(|target| meets(record, *target))
         });
         emit[index] = strip_meets || record_meets;
     }
@@ -1314,15 +1321,6 @@ where
         surface_w,
         surface_h,
     )
-}
-
-/// Whether a plan in `mode` emits every visible row into its batches. Exhaustive, so a mode
-/// that emits fewer rows must state its own ink-coverage rule before it compiles.
-pub(crate) fn emits_every_visible_row(mode: RenderMode) -> bool {
-    match mode {
-        RenderMode::Full => true,
-        RenderMode::Partial | RenderMode::Noop => false,
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

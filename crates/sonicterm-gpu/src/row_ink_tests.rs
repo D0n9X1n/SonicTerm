@@ -69,7 +69,11 @@ fn one_frames_stages_for_a_slot_union_into_its_record() {
 fn an_empty_row_has_an_empty_record_rather_than_none() {
     let mut table = RowInkTable::default();
     table.begin_frame();
-    table.stage(7, 0, RowInk { rect: PixelRect { x: 0, y: 0, w: 0, h: 0 }, abs_row: 30, content_seq: None });
+    table.stage(
+        7,
+        0,
+        RowInk { rect: PixelRect { x: 0, y: 0, w: 0, h: 0 }, abs_row: 30, content_seq: None },
+    );
     table.commit(&[(7, 1)]);
     let record = table.valid_rect(7, 0, 30, None).expect("an empty row is recorded");
     assert!(record.is_empty());

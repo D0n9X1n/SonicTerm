@@ -139,16 +139,19 @@ impl RowInkTable {
     }
 
     /// Committed records.
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.committed.len()
     }
 
     /// The committed table's usable capacity.
+    #[cfg(test)]
     pub(crate) fn capacity(&self) -> usize {
         self.committed.capacity()
     }
 
     /// The staging buffer's capacity, in entries.
+    #[cfg(test)]
     pub(crate) fn staged_capacity(&self) -> usize {
         self.staged.capacity()
     }
@@ -217,14 +220,6 @@ impl InkEdges {
         self.edges = Some(self.edges.map_or(added, |acc| {
             [acc[0].min(added[0]), acc[1].min(added[1]), acc[2].max(added[2]), acc[3].max(added[3])]
         }));
-    }
-
-    /// Add another row's accumulated ink.
-    pub(crate) fn merge(&mut self, other: InkEdges) {
-        self.unbounded |= other.unbounded;
-        if let Some([left, top, right, bottom]) = other.edges {
-            self.add_px((left, top, right - left, bottom - top));
-        }
     }
 
     /// The outward-rounded rectangle; the whole `surface` when unbounded, empty when nothing drew.

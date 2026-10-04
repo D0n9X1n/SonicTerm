@@ -192,8 +192,9 @@ fn seeded_with(
     record: impl Fn(u16, PixelRect) -> Option<PixelRect>,
 ) -> PaneMetadata {
     let planned = prior.panes.iter().find(|pane| pane.id == input.id).expect("planned pane");
-    let row_ink =
-        (0..input.rows).map(|slot| record(slot, padded_strip(frame_facts, planned, slot))).collect();
+    let row_ink = (0..input.rows)
+        .map(|slot| record(slot, padded_strip(frame_facts, planned, slot)))
+        .collect();
     PaneMetadata { row_ink, ..input }
 }
 
@@ -1629,7 +1630,13 @@ fn cursor_reach_edit(degraded: bool) -> FramePlan {
 
 /// The indices of the emitted rows of `plan`'s pane `index`.
 fn emitted(plan: &FramePlan, index: usize) -> Vec<usize> {
-    plan.panes[index].emit_rows.iter().enumerate().filter(|(_, emit)| **emit).map(|(row, _)| row).collect()
+    plan.panes[index]
+        .emit_rows
+        .iter()
+        .enumerate()
+        .filter(|(_, emit)| **emit)
+        .map(|(row, _)| row)
+        .collect()
 }
 
 /// A one-row hardware edit narrower than the surface is `Partial` and emits only the rows whose
@@ -1637,7 +1644,8 @@ fn emitted(plan: &FramePlan, index: usize) -> Vec<usize> {
 /// every row, and dirty row 5 of a 10-row pane, padded one cell, reaches rows 3 to 7.
 #[test]
 fn a_one_row_edit_emits_only_rows_meeting_its_padded_damage() {
-    let four = seeded_edit(&FrameFacts { vertical_ink_pad: 20.0, ..facts(false) }, live_pane(7, 1), &[1]);
+    let four =
+        seeded_edit(&FrameFacts { vertical_ink_pad: 20.0, ..facts(false) }, live_pane(7, 1), &[1]);
     assert_eq!(four.mode, RenderMode::Partial);
     assert_eq!(emitted(&four, 0), [0, 1, 2, 3]);
 
@@ -1795,11 +1803,8 @@ fn sixteen_row_pane(id: u64, x: i32, view_top: Option<u64>) -> PaneMetadata {
 /// Plan an edit of `dirty` on each `(pane, dirty)` input against a presented first frame.
 fn seeded_edits(inputs: Vec<(PaneMetadata, Vec<usize>)>) -> FramePlan {
     let frame_facts = sixteen_row_facts();
-    let first = FramePlan::build(
-        frame_facts.clone(),
-        inputs.iter().map(|(input, _)| input.clone()),
-        None,
-    );
+    let first =
+        FramePlan::build(frame_facts.clone(), inputs.iter().map(|(input, _)| input.clone()), None);
     let edited: Vec<_> = inputs
         .into_iter()
         .map(|(input, dirty)| {
@@ -1921,6 +1926,19 @@ fn a_dirty_slot_is_emitted_whatever_its_record_and_a_stale_clean_slot_forces_ful
     assert_eq!(stale_clean.mode, RenderMode::Full);
 }
 
+/// A presented frame keeps records only for panes with pixels on the surface, each up to its
+/// row count; a pane moved off the surface keeps none, since its return is a full-class change.
+#[test]
+fn drawn_row_counts_name_only_panes_on_the_surface() {
+    let off = PaneMetadata {
+        rect: PixelRect { x: 300, y: 0, w: 100, h: 84 },
+        is_active: false,
+        ..live_pane(9, 1)
+    };
+    let plan = FramePlan::build(facts(false), [live_pane(7, 1), off], None);
+    assert_eq!(plan.drawn_row_counts(), [(7, 4)]);
+}
+
 /// Unseeded inputs, as before any frame presented, carry no records and plan `Full`.
 #[test]
 fn a_pane_without_records_plans_full() {
@@ -1954,11 +1972,17 @@ fn widened_damage_reaching_a_non_emitted_record_falls_back_to_full() {
     assert_eq!(emitted(&plan(), 0), [5]);
 
     let mut on_emitted = plan();
-    on_emitted.widen_for_recolor(RecolorRecord::default(), recolored(PixelRect { x: 22, y: 105, w: 10, h: 10 }, 1));
+    on_emitted.widen_for_recolor(
+        RecolorRecord::default(),
+        recolored(PixelRect { x: 22, y: 105, w: 10, h: 10 }, 1),
+    );
     assert!(!on_emitted.partial_reaches_unemitted_ink());
 
     let mut recolor = plan();
-    recolor.widen_for_recolor(RecolorRecord::default(), recolored(PixelRect { x: 22, y: 50, w: 10, h: 10 }, 1));
+    recolor.widen_for_recolor(
+        RecolorRecord::default(),
+        recolored(PixelRect { x: 22, y: 50, w: 10, h: 10 }, 1),
+    );
     assert!(recolor.damage.y <= 50, "the recolor widens a partial plan's damage");
     assert!(recolor.partial_reaches_unemitted_ink());
     // The fallback counts once as a fallback and once as the full frame it reassembles.
@@ -1976,6 +2000,9 @@ fn widened_damage_reaching_a_non_emitted_record_falls_back_to_full() {
     assert!(!recolor.partial_reaches_unemitted_ink());
 
     let mut tab_ink = plan();
-    tab_ink.widen_for_tab_ink(RecolorBounds::Empty, RecolorBounds::Rect(PixelRect { x: 0, y: 10, w: 10, h: 10 }));
+    tab_ink.widen_for_tab_ink(
+        RecolorBounds::Empty,
+        RecolorBounds::Rect(PixelRect { x: 0, y: 10, w: 10, h: 10 }),
+    );
     assert!(tab_ink.partial_reaches_unemitted_ink());
 }
