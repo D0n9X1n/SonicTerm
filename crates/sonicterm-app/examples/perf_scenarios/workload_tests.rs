@@ -1054,6 +1054,54 @@ fn platform_name() -> &'static str {
     }
 }
 
+/// One working-set measurement as the parseable row CI output is recorded from: `key=value`
+/// fields after a fixed prefix, in the order `START_SIZE_INPUTS` rows are keyed, with `source`
+/// naming what measured it (`helper` or `real_renderer`). `fit` is `FitOutcome::label`, which
+/// the helper and the renderer's `GlyphAtlasFacts::fit` both produce.
+fn working_set_row(
+    platform: &str,
+    scale: u32,
+    fixture: &str,
+    source: &str,
+    fit: &str,
+    max_tile: [u32; 2],
+    packed_pixels: u64,
+) -> String {
+    format!(
+        "glyph_atlas_working_set platform={platform} scale={scale} fixture={fixture} \
+         source={source} fit={fit} max_tile={}x{} packed_pixels={packed_pixels}",
+        max_tile[0], max_tile[1]
+    )
+}
+
+/// Whether fallback is complete: the frame presented, and neither its terminal rows nor its
+/// chrome (tab titles, palette, footer) drew a character as tofu.
+fn fallback_settled(presented: bool, terminal_missing: &[char], chrome_missing: &[char]) -> bool {
+    presented && terminal_missing.is_empty() && chrome_missing.is_empty()
+}
+
+/// The palette footer's key-hint symbols the coverage test requires as `PaletteFooter` tiles.
+const REQUIRED_FOOTER_SYMBOLS: &str = "·↑↓↵";
+/// The tab title the coverage test requires as `TabTitle` tiles; short enough never to truncate.
+const REQUIRED_TITLE_TEXT: &str = "zsh";
+
+/// Each required chrome character with no real resident tile at its raster variant, as
+/// `(variant, character)`. Missing sentinels are not resident, so a symbol drawn as tofu is listed.
+fn missing_required_chrome(
+    resident: &std::collections::HashSet<sonicterm_types::GlyphKey>,
+) -> Vec<(sonicterm_types::GlyphRasterVariant, char)> {
+    use sonicterm_types::GlyphRasterVariant;
+    let required = REQUIRED_FOOTER_SYMBOLS
+        .chars()
+        .map(|symbol| (GlyphRasterVariant::PaletteFooter, symbol))
+        .chain(REQUIRED_TITLE_TEXT.chars().map(|symbol| (GlyphRasterVariant::TabTitle, symbol)));
+    required
+        .filter(|&(variant, symbol)| {
+            !resident.iter().any(|key| key.raster_variant == variant && key.ch == symbol)
+        })
+        .collect()
+}
+
 /// 12c, run by CI on each platform: for S9's and S12's working sets at scale 1 and 2, the start
 /// constant is at least this platform's need, and the live helper outcome equals this platform's
 /// recorded `helper` row. With no recorded row the constant must be the maximum: no savings are
@@ -1082,12 +1130,16 @@ fn glyph_atlas_working_set() {
                 measure_glyph_working_set(&lines, &titles, FONT_FAMILY, size, dpi, &font_dirs)
                     .expect("the packaged scenario family loads");
             println!(
-                "glyph_atlas_working_set platform={platform} scale={scale} fixture={name} \
-                 fit={} max_tile={}x{} packed_pixels={}",
-                set.fit_outcome.label(),
-                set.max_tile_dims[0],
-                set.max_tile_dims[1],
-                set.packed_pixels
+                "{}",
+                working_set_row(
+                    platform,
+                    scale,
+                    name,
+                    "helper",
+                    &set.fit_outcome.label(),
+                    set.max_tile_dims,
+                    set.packed_pixels
+                )
             );
             if !set.unresolved_chars.is_empty() || !set.raster_failed.is_empty() {
                 // When: a required tile is tofu on this host, say which, apart from the row.
@@ -1132,6 +1184,85 @@ fn glyph_atlas_working_set() {
         );
         assert!(constant >= need.dim, "{scale}x needs {} but starts at {constant}", need.dim);
     }
+}
+
+/// The working-set step and the real-renderer coverage test print their measurements through one
+/// formatter, so a single `key=value` parser reads both and the rows can become `START_SIZE_INPUTS`
+/// entries: the same keys in the same order, told apart only by `source`.
+#[test]
+fn working_set_rows_share_one_parseable_format() {
+    use sonicterm_text::glyph_atlas::FitOutcome;
+    let parse = |line: &str| -> Vec<(String, String)> {
+        let fields = line.strip_prefix("glyph_atlas_working_set ").expect("the row prefix");
+        fields
+            .split(' ')
+            .map(|field| {
+                let (key, value) = field.split_once('=').expect("a key=value field");
+                (key.to_owned(), value.to_owned())
+            })
+            .collect()
+    };
+    let helper = parse(&working_set_row(
+        "windows",
+        1,
+        "S9",
+        "helper",
+        &FitOutcome::Fits(512).label(),
+        [18, 24],
+        9000,
+    ));
+    let real = parse(&working_set_row(
+        "windows",
+        2,
+        "S12",
+        "real_renderer",
+        &FitOutcome::FitsWithoutHeadroom.label(),
+        [40, 48],
+        123_456,
+    ));
+    let keys =
+        |row: &[(String, String)]| row.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
+    assert_eq!(
+        keys(&helper),
+        ["platform", "scale", "fixture", "source", "fit", "max_tile", "packed_pixels"]
+    );
+    assert_eq!(keys(&helper), keys(&real));
+    assert_eq!(helper[3].1, "helper");
+    assert_eq!(real[3].1, "real_renderer");
+    assert_eq!((real[4].1.as_str(), real[5].1.as_str()), ("no_headroom", "40x48"));
+}
+
+/// Fallback is complete only on a presented frame whose terminal rows and chrome both drew no
+/// tofu: a footer still waiting on its fallback face keeps the check waiting even though the
+/// terminal rows are complete, which a terminal-only check would have accepted.
+#[test]
+fn fallback_settles_only_when_rows_and_chrome_drew_no_tofu() {
+    assert!(fallback_settled(true, &[], &[]));
+    assert!(!fallback_settled(true, &[], &['↵']), "a footer awaiting its face is not settled");
+    assert!(!fallback_settled(true, &['界'], &[]));
+    assert!(!fallback_settled(false, &[], &[]), "a frame that did not present proves nothing");
+}
+
+/// The coverage test compares tiles only after the chrome it exercises is resident: every footer
+/// key-hint symbol under `PaletteFooter` and the short tab title under `TabTitle`, each as a real
+/// tile (missing sentinels are not resident). A symbol drawn only at another variant still counts
+/// as missing.
+#[test]
+fn required_chrome_symbols_are_checked_per_raster_variant() {
+    use sonicterm_types::{GlyphKey, GlyphRasterVariant};
+    // Any real shaped key stands in for a resident tile; only the character and variant matter.
+    let key = |symbol: char, variant| {
+        GlyphKey::shaped(symbol, 1, 7, false, false).with_raster_variant(variant)
+    };
+    let mut resident: std::collections::HashSet<GlyphKey> = REQUIRED_FOOTER_SYMBOLS
+        .chars()
+        .map(|symbol| key(symbol, GlyphRasterVariant::PaletteFooter))
+        .chain(REQUIRED_TITLE_TEXT.chars().map(|symbol| key(symbol, GlyphRasterVariant::TabTitle)))
+        .collect();
+    assert!(missing_required_chrome(&resident).is_empty());
+    resident.remove(&key('↵', GlyphRasterVariant::PaletteFooter));
+    resident.insert(key('↵', GlyphRasterVariant::Normal));
+    assert_eq!(missing_required_chrome(&resident), vec![(GlyphRasterVariant::PaletteFooter, '↵')]);
 }
 
 /// Open the command palette so the main frame draws it: no window is named frontmost, which routes
@@ -1198,7 +1329,6 @@ mod real_renderer_coverage {
     use sonicterm_cfg::theme::Theme;
     use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
     use sonicterm_gpu::glyph_working_set::{measure_glyph_working_set, TileIdentity};
-    use sonicterm_types::GlyphRasterVariant;
     use winit::application::ApplicationHandler;
     use winit::dpi::PhysicalSize;
     use winit::event::WindowEvent;
@@ -1306,13 +1436,14 @@ mod real_renderer_coverage {
         Ok(Some((window, renderer)))
     }
 
-    /// How long a case may wait for a presented frame that draws no tofu.
+    /// How long a case may wait for a presented frame whose rows and chrome draw no tofu.
     const FALLBACK_DEADLINE: Duration = Duration::from_secs(15);
 
     /// Dispatch the real main-window redraw with pacing open until a dispatch presents a frame
-    /// (the renderer's successful-frame count advances) and that frame drew no tofu
-    /// (`last_missing_tofu()` is empty), so every fallback face has landed. Fails at the deadline
-    /// with what was still missing.
+    /// (the renderer's successful-frame count advances) and that frame drew no tofu in its terminal
+    /// rows (`last_missing_tofu()`) or its chrome (`last_missing_chrome()`: titles, palette rows,
+    /// query and footer), so every fallback face has landed. Fails at the deadline with what was
+    /// still missing.
     fn settle(
         app: &mut App,
         active: &ActiveEventLoop,
@@ -1322,6 +1453,7 @@ mod real_renderer_coverage {
         let started = Instant::now();
         let mut presented_any = false;
         let mut last_missing = Vec::new();
+        let mut last_chrome_missing = Vec::new();
         while started.elapsed() < FALLBACK_DEADLINE {
             let before = app
                 .__test_window_renderer_mut(id)
@@ -1333,22 +1465,26 @@ mod real_renderer_coverage {
             let presented = renderer.successful_frame_count() > before;
             presented_any |= presented;
             last_missing = renderer.last_missing_tofu().to_vec();
-            if presented && last_missing.is_empty() {
-                // When: this dispatch presented and drew no tofu, fallback is complete.
+            last_chrome_missing = renderer.last_missing_chrome().to_vec();
+            if super::fallback_settled(presented, &last_missing, &last_chrome_missing) {
+                // When: the frame presented with no row or chrome tofu, fallback is complete.
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
         Err(format!(
             "{case}: no presented frame without tofu within {FALLBACK_DEADLINE:?} \
-             (any frame presented: {presented_any}; still missing: {last_missing:?})"
+             (any frame presented: {presented_any}; terminal rows still missing: \
+             {last_missing:?}; chrome still missing: {last_chrome_missing:?})"
         ))
     }
 
     /// Test 17 for one fixture at one scale: the renderer draws the fixture, three titles, the
-    /// cursor and the open palette until a presented frame draws no tofu. It then holds a footer
-    /// key and a tab-title key, every resident tile resolves to an identity (face, glyph, strike,
-    /// variant and flags), and each identity is in the helper's set with the same raster size.
+    /// cursor and the open palette until a presented frame draws no tofu in its rows or chrome.
+    /// It then holds every required footer symbol and title character as a real tile, prints its
+    /// atlas as a `source=real_renderer` row, every resident tile resolves to an identity (face,
+    /// glyph, strike, variant and flags), and each identity is in the helper's set with the same
+    /// raster size.
     fn covered(
         active: &ActiveEventLoop,
         name: &str,
@@ -1380,9 +1516,18 @@ mod real_renderer_coverage {
         settle(&mut app, active, id, &case)?;
         let renderer = app.__test_window_renderer_mut(id).ok_or("the window has a renderer")?;
         let resident = renderer.__test_resident_tile_keys();
-        let has = |variant| resident.iter().any(|key| key.raster_variant == variant);
-        check(has(GlyphRasterVariant::PaletteFooter), &format!("{case}: a footer key"))?;
-        check(has(GlyphRasterVariant::TabTitle), &format!("{case}: a tab-title key"))?;
+        let absent = super::missing_required_chrome(&resident);
+        check(absent.is_empty(), &format!("{case}: required chrome not resident: {absent:?}"))?;
+        let facts = renderer.glyph_atlas_facts();
+        print_row(&super::working_set_row(
+            super::platform_name(),
+            scale as u32,
+            name,
+            "real_renderer",
+            &facts.fit,
+            facts.max_tile,
+            facts.packed_pixels,
+        ));
         let (identities, unresolved) = renderer.__test_resident_tile_identities();
         check(
             unresolved.is_empty(),
@@ -1416,6 +1561,15 @@ mod real_renderer_coverage {
             resized.is_empty(),
             &format!("{case}: raster sizes differ (identity, renderer, helper): {resized:?}"),
         )
+    }
+
+    /// Write one measurement row straight to stdout. CI runs this test without `--nocapture`, and
+    /// libtest captures only the print macros, so a direct write keeps the row in the job's log.
+    fn print_row(row: &str) {
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        // A row that cannot be written loses only evidence; the coverage assertions still run.
+        let _ = writeln!(stdout, "{row}").and_then(|()| stdout.flush());
     }
 
     fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
