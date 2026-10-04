@@ -156,14 +156,74 @@ pub(super) fn report_pane_exit(
 /// How long one synchronized update (DEC 2026) may hold a pane's output before it is released.
 pub(in crate::app) const SYNC_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
 
-/// Pack synchronized output as the pane publishes it: `epoch << 1 | set`.
+/// The epoch bits a published word carries; epochs compare within this range.
+const SYNC_EPOCH_MASK: u64 = (1 << 31) - 1;
+/// The deadline word keeps the epoch's low 16 bits above 48 bits of microseconds.
+const SYNC_DEADLINE_TAG_SHIFT: u32 = 48;
+
+/// Pack synchronized output as the pane publishes it: the reset count's low 32 bits, the epoch's
+/// low 31 bits, then the set bit. One word, so a reader sees a set bit, epoch and resets together.
 pub(in crate::app) fn sync_word_of(state: SyncState) -> u64 {
-    (state.epoch << 1) | u64::from(state.set)
+    (state.resets << 32) | ((state.epoch & SYNC_EPOCH_MASK) << 1) | u64::from(state.set)
 }
 
-/// Unpack a published synchronized-output word into `(set, epoch)`.
-pub(in crate::app) fn sync_word_parts(word: u64) -> (bool, u64) {
-    (word & 1 == 1, word >> 1)
+/// Pack the deadline of `epoch` with that epoch's tag, so a reader can tell whose deadline it is.
+fn pack_sync_deadline(epoch: u64, deadline: Instant) -> u64 {
+    let micros = super::sync_clock::micros_at(deadline) & ((1 << SYNC_DEADLINE_TAG_SHIFT) - 1);
+    ((epoch & 0xffff) << SYNC_DEADLINE_TAG_SHIFT) | micros
+}
+
+/// A pane's synchronized output as one lock-free read decodes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::app) struct PublishedSync {
+    /// The set bit of the word.
+    pub(in crate::app) set: bool,
+    /// The word's epoch, modulo 2^31.
+    pub(in crate::app) epoch: u64,
+    /// The word's reset count, modulo 2^32.
+    pub(in crate::app) resets: u64,
+    /// The deadline published for this epoch; `None` while the deadline word belongs to another
+    /// epoch, so a reader never pairs this word with a neighbouring epoch's deadline.
+    pub(in crate::app) deadline: Option<Instant>,
+}
+
+/// Decode a pane's synchronized output without the parser lock.
+// Ordering: word loads Acquire, pairing with its Release store; deadline_word loads Relaxed,
+// and its epoch tag rejects any other epoch's deadline.
+pub(in crate::app) fn read_published_sync(
+    word: &AtomicU64,
+    deadline_word: &AtomicU64,
+) -> PublishedSync {
+    let packed = word.load(Ordering::Acquire);
+    let epoch = (packed >> 1) & SYNC_EPOCH_MASK;
+    let deadline = deadline_word.load(Ordering::Relaxed);
+    let tagged = deadline >> SYNC_DEADLINE_TAG_SHIFT == epoch & 0xffff;
+    PublishedSync {
+        set: packed & 1 == 1,
+        epoch,
+        resets: packed >> 32,
+        deadline: tagged.then(|| {
+            super::sync_clock::instant_at_micros(deadline & ((1 << SYNC_DEADLINE_TAG_SHIFT) - 1))
+        }),
+    }
+}
+
+/// The deadline word a new pane starts with: tagged with its parser's epoch and already passed,
+/// so an update already open when the pane is created never holds it.
+pub(in crate::app) fn initial_sync_deadline(state: SyncState) -> u64 {
+    pack_sync_deadline(state.epoch, super::sync_clock::origin())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: run between the deadline store and the word store of a publication on this thread.
+    static PUBLISH_PAUSE: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: pause this thread's publications between their deadline and word stores.
+#[cfg(test)]
+pub(in crate::app) fn set_publish_pause(pause: Option<Box<dyn FnMut()>>) {
+    PUBLISH_PAUSE.with(|slot| *slot.borrow_mut() = pause);
 }
 
 /// The worker's record of synchronized-output resets across the parser sections of a batch.
@@ -205,7 +265,7 @@ pub(in crate::app) struct PaneVtHandles {
     keyboard_input: Arc<AtomicU64>,
     pointer_input: Arc<std::sync::atomic::AtomicU8>,
     sync_word: Arc<AtomicU64>,
-    sync_deadline_ns: Arc<AtomicU64>,
+    sync_deadline_word: Arc<AtomicU64>,
     sync_resets: Arc<AtomicU64>,
     output_generation: Arc<AtomicU64>,
     output_outstanding: Arc<AtomicBool>,
@@ -225,7 +285,7 @@ impl PaneVtHandles {
             keyboard_input: pane.keyboard_input.clone(),
             pointer_input: pane.pointer_input.clone(),
             sync_word: pane.sync_word.clone(),
-            sync_deadline_ns: pane.sync_deadline_ns.clone(),
+            sync_deadline_word: pane.sync_deadline_word.clone(),
             sync_resets: pane.sync_resets.clone(),
             output_generation: pane.output_generation.clone(),
             output_outstanding: pane.output_outstanding.clone(),
@@ -335,10 +395,11 @@ pub(in crate::app) struct OutputFlush {
 
 impl OutputFlush {
     /// A decision with nothing pending, whose latch has seen the pane's published resets.
-    // Ordering: sync_word loads Relaxed; this worker is the word's only writer.
     pub(in crate::app) fn new(pane_id: u64, handles: &PaneVtHandles) -> Self {
-        // An update already open when the worker starts has no deadline of its own, so it never holds.
-        let (_, published_epoch) = sync_word_parts(handles.sync_word.load(Ordering::Relaxed));
+        // A pane runs exactly one worker, so an update already open when it starts was opened by a
+        // parser this worker never published for; it has no deadline of its own and never holds.
+        let published_epoch =
+            read_published_sync(&handles.sync_word, &handles.sync_deadline_word).epoch;
         Self {
             pane_id,
             pending: false,
@@ -457,12 +518,12 @@ impl OutputFlush {
     }
 
     /// Hold for the published update when it is open in an epoch not yet released.
-    // Ordering: sync_word loads Acquire, pairing with its Release store; sync_deadline_ns then loads Relaxed.
     fn refresh_hold(&mut self, handles: &PaneVtHandles) {
-        let (set, epoch) = sync_word_parts(handles.sync_word.load(Ordering::Acquire));
-        self.held = (set && epoch > self.released_epoch).then(|| {
-            let deadline_ns = handles.sync_deadline_ns.load(Ordering::Relaxed);
-            (epoch, super::sync_clock::instant_at(deadline_ns))
+        let published = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
+        self.held = (published.set && published.epoch > self.released_epoch).then(|| {
+            // This worker wrote both words, so the deadline is its epoch's; the origin is the
+            // passed fallback should a store ever be missing.
+            (published.epoch, published.deadline.unwrap_or_else(super::sync_clock::origin))
         });
     }
 
@@ -547,21 +608,26 @@ pub(in crate::app) fn send_output_redraw<Target: Clone>(
 /// Publish the parser's synchronized output to the pane; the caller holds the parser lock.
 ///
 /// A new epoch that is set gets a deadline `SYNC_OUTPUT_TIMEOUT` from `now`; a repeated set keeps it.
-// Ordering: sync_resets and sync_deadline_ns store Relaxed before sync_word's Release store;
-// an Acquire load of sync_word sees the matching resets and deadline.
+// Ordering: sync_resets and sync_deadline_word store Relaxed, then sync_word Release;
+// a later epoch's deadline_word is rejected by its epoch tag.
 fn publish_sync_output(handles: &PaneVtHandles, state: SyncState, now: impl FnOnce() -> Instant) {
     handles.sync_resets.store(state.resets, Ordering::Relaxed);
-    let (_, published_epoch) = sync_word_parts(handles.sync_word.load(Ordering::Relaxed));
-    if state.set && state.epoch != published_epoch {
+    let published_epoch = (handles.sync_word.load(Ordering::Relaxed) >> 1) & SYNC_EPOCH_MASK;
+    if state.set && state.epoch & SYNC_EPOCH_MASK != published_epoch {
         // A newly opened epoch starts its own deadline; a repeated set keeps the old one.
-        let deadline = super::sync_clock::nanos_at(now() + SYNC_OUTPUT_TIMEOUT);
-        handles.sync_deadline_ns.store(deadline, Ordering::Relaxed);
+        let deadline = pack_sync_deadline(state.epoch, now() + SYNC_OUTPUT_TIMEOUT);
+        handles.sync_deadline_word.store(deadline, Ordering::Relaxed);
     }
+    #[cfg(test)]
+    PUBLISH_PAUSE.with(|slot| {
+        if let Some(pause) = slot.borrow_mut().as_mut() {
+            pause();
+        }
+    });
     handles.sync_word.store(sync_word_of(state), Ordering::Release);
 }
 
 /// Publish one completed nonempty batch only after parser, media, and host side effects return.
-// Ordering: output_generation Release pairs with the window's pre-lock Acquire snapshot.
 pub(in crate::app) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
     handles: &PaneVtHandles,
     bytes: Bytes,
@@ -570,23 +636,7 @@ pub(in crate::app) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
     proxy: Option<&EventLoopProxy<UserEvent>>,
     send_reply: impl FnMut(Vec<u8>),
 ) {
-    let nonempty = !bytes.as_ref().is_empty();
-    process_pane_vt_batch(handles, bytes, command_started, sync_latch, proxy, send_reply);
-    if nonempty {
-        handles.output_generation.fetch_add(1, Ordering::Release);
-    }
-}
-
-/// Parse one PTY output batch and apply its app-owned side effects after unlocking.
-pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
-    handles: &PaneVtHandles,
-    bytes: Bytes,
-    command_started: &mut Option<Instant>,
-    sync_latch: &mut SyncLatch,
-    proxy: Option<&EventLoopProxy<UserEvent>>,
-    send_reply: impl FnMut(Vec<u8>),
-) {
-    process_pane_vt_batch_with(
+    publish_pane_vt_batch_with(
         handles,
         bytes,
         command_started,
@@ -600,7 +650,42 @@ pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
         },
         Instant::now,
         send_reply,
-    )
+    );
+}
+
+/// Parse one batch with the given decoder, event sink and clock, then publish its generation.
+// Ordering: output_generation Release pairs with the window's pre-lock Acquire snapshot.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
+    handles: &PaneVtHandles,
+    bytes: Bytes,
+    command_started: &mut Option<Instant>,
+    sync_latch: &mut SyncLatch,
+    decode_media: Decode,
+    emit_event: Emit,
+    now: Now,
+    send_reply: Send,
+) where
+    Bytes: AsRef<[u8]>,
+    Decode: FnMut(&MediaEvent) -> Option<InlineImage>,
+    Emit: FnMut(UserEvent),
+    Now: FnMut() -> Instant,
+    Send: FnMut(Vec<u8>),
+{
+    let nonempty = !bytes.as_ref().is_empty();
+    process_pane_vt_batch_with(
+        handles,
+        bytes,
+        command_started,
+        sync_latch,
+        decode_media,
+        emit_event,
+        now,
+        send_reply,
+    );
+    if nonempty {
+        handles.output_generation.fetch_add(1, Ordering::Release);
+    }
 }
 
 // Lock order: inline_images -> inline_media_charge; parser releases before either, and command_events locks after both.

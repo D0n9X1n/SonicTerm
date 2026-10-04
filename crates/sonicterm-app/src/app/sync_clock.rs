@@ -2,7 +2,7 @@
 //!
 //! An `Instant` is not atomic, so a VT worker cannot hand its hold deadline to the event loop
 //! without a lock. Both threads measure from one shared origin instead, and the deadline crosses
-//! as nanoseconds since that origin in an `AtomicU64`.
+//! as microseconds since that origin, packed with its epoch tag in an `AtomicU64`.
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -15,14 +15,14 @@ pub(in crate::app) fn origin() -> Instant {
     *ORIGIN.get_or_init(Instant::now)
 }
 
-/// Nanoseconds from the origin to `at`; an instant before the origin reads 0.
-pub(in crate::app) fn nanos_at(at: Instant) -> u64 {
-    u64::try_from(at.saturating_duration_since(origin()).as_nanos()).unwrap_or(u64::MAX)
+/// Whole microseconds from the origin to `at`; an instant before the origin reads 0.
+pub(in crate::app) fn micros_at(at: Instant) -> u64 {
+    u64::try_from(at.saturating_duration_since(origin()).as_micros()).unwrap_or(u64::MAX)
 }
 
-/// The instant `nanos` nanoseconds after the origin.
-pub(in crate::app) fn instant_at(nanos: u64) -> Instant {
-    origin() + Duration::from_nanos(nanos)
+/// The instant `micros` microseconds after the origin.
+pub(in crate::app) fn instant_at_micros(micros: u64) -> Instant {
+    origin() + Duration::from_micros(micros)
 }
 
 #[cfg(test)]

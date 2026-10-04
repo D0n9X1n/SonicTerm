@@ -28,7 +28,7 @@ fn real_pty_readonly_parser_reply_uses_production_spool() {
         let before = pty.input_diagnostics().completed_messages;
         let mut submitted = Vec::new();
         phase(pane_id, "parser-query");
-        process_pane_vt_batch(
+        process_pane_vt_batch_and_publish(
             &handles,
             b"\x1b[6n",
             &mut None,
@@ -525,7 +525,7 @@ fn pane_derived_worker_handles_share_every_store_with_the_pane() {
     assert!(Arc::ptr_eq(&worker.pointer_input, &pane.pointer_input));
     assert!(Arc::ptr_eq(&worker.inline_media_charge, &pane.inline_media_charge));
     assert!(Arc::ptr_eq(&worker.sync_word, &pane.sync_word));
-    assert!(Arc::ptr_eq(&worker.sync_deadline_ns, &pane.sync_deadline_ns));
+    assert!(Arc::ptr_eq(&worker.sync_deadline_word, &pane.sync_deadline_word));
     assert!(Arc::ptr_eq(&worker.sync_resets, &pane.sync_resets));
 }
 
@@ -615,8 +615,10 @@ fn worker_spawn_roles_publish_their_own_pane_not_an_app_global() {
     assert!(source.contains("output_generation: pane.output_generation.clone()"));
     assert!(child.contains("super::spawn_pane::spawn_pane_workers("));
     let wrapper = source.find("fn process_pane_vt_batch_and_publish<").unwrap();
-    let parse = source[wrapper..].find("process_pane_vt_batch(handles, bytes,").unwrap();
-    let publish = source[wrapper..]
+    assert!(source[wrapper..].contains("publish_pane_vt_batch_with("));
+    let publisher = source.find("fn publish_pane_vt_batch_with<").unwrap();
+    let parse = source[publisher..].find("process_pane_vt_batch_with(").unwrap();
+    let publish = source[publisher..]
         .find("handles.output_generation.fetch_add(1, Ordering::Release)")
         .unwrap();
     assert!(parse < publish);
@@ -839,11 +841,11 @@ fn gate_off_output_events_still_coalesce_without_reading_the_flush_clock() {
     assert_eq!(flush_clock_reads(), before + 3, "one read per targeted flush with the gate on");
 }
 
-/// The pane's published synchronized-output word, deadline and reset count, read under `parser`.
-fn published_sync(handles: &PaneVtHandles) -> (u64, u64, u64) {
+/// The pane's published synchronized-output word, decoded deadline and reset count.
+fn published_sync(handles: &PaneVtHandles) -> (u64, Option<Instant>, u64) {
     (
         handles.sync_word.load(Ordering::Acquire),
-        handles.sync_deadline_ns.load(Ordering::Relaxed),
+        read_published_sync(&handles.sync_word, &handles.sync_deadline_word).deadline,
         handles.sync_resets.load(Ordering::Relaxed),
     )
 }
@@ -875,16 +877,17 @@ fn sync_word_matches_the_parser_under_its_guard() {
     let check = |expected_deadline_ms: Option<u64>| {
         let parser = handles.parser.lock();
         let state = parser.synchronized_output();
-        let (word, deadline_ns, resets) = published_sync(&handles);
+        let (word, deadline, resets) = published_sync(&handles);
         assert_eq!(word, sync_word_of(state), "{state:?}");
         assert_eq!(resets, state.resets);
         if let Some(deadline_ms) = expected_deadline_ms {
             let expected = Duration::from_millis(deadline_ms) + SYNC_OUTPUT_TIMEOUT;
-            assert_eq!(deadline_ns, sync_clock::nanos_at(origin + expected));
+            assert_eq!(deadline, Some(origin + expected));
         }
     };
     check(None);
-    assert_eq!(published_sync(&handles), (0, 0, 0), "a fresh pane holds nothing");
+    // A fresh pane holds nothing: its word is clear and its deadline has already passed.
+    assert_eq!(published_sync(&handles), (0, Some(origin), 0));
 
     feed(b"\x1b[?2026hrow", clock_ms, &mut latch);
     check(Some(10));
@@ -1002,8 +1005,9 @@ fn unbracketed_output_flushes_on_size_age_quiet_and_disconnect() {
 
 /// The instant the pane's published synchronized-output deadline names.
 fn published_deadline(handles: &PaneVtHandles) -> Instant {
-    crate::app::sync_clock::origin()
-        + Duration::from_nanos(handles.sync_deadline_ns.load(Ordering::Relaxed))
+    read_published_sync(&handles.sync_word, &handles.sync_deadline_word)
+        .deadline
+        .expect("the deadline belongs to the published epoch")
 }
 
 /// One captured tracing event: its target, message and integer fields.
@@ -1296,4 +1300,65 @@ fn threshold_and_quiet_flushes_sit_behind_the_hold_and_disconnect_does_not() {
     let publish = ok_arm.find("process_pane_vt_batch_and_publish(").expect("loop publishes");
     let decide = ok_arm.find("flush.after_batch(").expect("loop decides");
     assert!(publish < decide, "{ok_arm}");
+}
+
+/// The deadline publication stores for a batch parsed at `at`: the bound, at microsecond precision.
+fn stored_deadline(at: Instant) -> Instant {
+    crate::app::sync_clock::instant_at_micros(crate::app::sync_clock::micros_at(
+        at + SYNC_OUTPUT_TIMEOUT,
+    ))
+}
+
+/// A lock-free reader that loads the pane between a new epoch's deadline store and its word store
+/// sees the old epoch, its reset count, and no deadline, never the next epoch's deadline; once the
+/// word is stored, the new epoch, its resets and its own deadline read together.
+#[test]
+fn a_lock_free_reader_never_pairs_a_word_with_another_epochs_deadline() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let base = crate::app::sync_clock::origin() + Duration::from_secs(5);
+    let open = b"\x1b[?2026h";
+    publish_pane_vt_batch_with(
+        &handles,
+        open,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| {},
+        || base,
+        |_| {},
+    );
+    let first = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
+    assert_eq!((first.set, first.epoch, first.resets), (true, 1, 0));
+    assert_eq!(first.deadline, Some(stored_deadline(base)));
+
+    let (paused_tx, paused_rx) = crossbeam_channel::bounded(1);
+    let (resume_tx, resume_rx) = crossbeam_channel::bounded::<()>(1);
+    let worker_handles = handles.clone();
+    let later = base + Duration::from_millis(40);
+    let worker = std::thread::spawn(move || {
+        set_publish_pause(Some(Box::new(move || {
+            paused_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+        })));
+        let renew = b"\x1b[?2026l\x1b[?2026h";
+        publish_pane_vt_batch_with(
+            &worker_handles,
+            renew,
+            &mut None,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            || later,
+            |_| {},
+        );
+    });
+    paused_rx.recv_timeout(Duration::from_secs(3)).expect("the worker pauses before its word");
+    let torn = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
+    resume_tx.send(()).unwrap();
+    worker.join().unwrap();
+    assert_eq!((torn.set, torn.epoch, torn.resets), (true, 1, 0), "the word is not stored yet");
+    assert_eq!(torn.deadline, None, "the next epoch's deadline is not this epoch's");
+    let second = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
+    assert_eq!((second.set, second.epoch, second.resets), (true, 2, 1));
+    assert_eq!(second.deadline, Some(stored_deadline(later)));
 }

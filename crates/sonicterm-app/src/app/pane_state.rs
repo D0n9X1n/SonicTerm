@@ -134,12 +134,12 @@ pub struct PaneState {
     /// Pointer-routing modes (`Parser::pointer_input_snapshot`) published after each parser batch,
     /// so pointer handlers route without taking the parser lock.
     pub pointer_input: Arc<std::sync::atomic::AtomicU8>,
-    /// Synchronized output (DEC 2026) as `epoch << 1 | set`, published by the VT worker under the
+    /// Synchronized output (DEC 2026): resets, epoch and set bit in one word, published by the VT worker under the
     /// parser lock after each parser section; travels with this pane across window transfers.
     pub(crate) sync_word: Arc<AtomicU64>,
-    /// When the current synchronized update stops holding, in `sync_clock` nanoseconds; meaningful
-    /// only while `sync_word` has its set bit.
-    pub(crate) sync_deadline_ns: Arc<AtomicU64>,
+    /// When the current synchronized update stops holding: the epoch's low 16 bits above its
+    /// `sync_clock` microseconds, so a reader can reject a deadline that is not its word's epoch.
+    pub(crate) sync_deadline_word: Arc<AtomicU64>,
     /// The parser's monotonic count of synchronized-output resets, published with `sync_word`.
     pub(crate) sync_resets: Arc<AtomicU64>,
     /// Decoded inline media images captured from terminal protocols.
@@ -220,8 +220,9 @@ impl PaneState {
             keyboard_input: Arc::new(AtomicU64::new(keyboard_input)),
             pointer_input: Arc::new(std::sync::atomic::AtomicU8::new(pointer_input)),
             sync_word: Arc::new(AtomicU64::new(super::spawn_pane::sync_word_of(sync_state))),
-            // A deadline of 0 has already passed, so an inherited open update never holds.
-            sync_deadline_ns: Arc::new(AtomicU64::new(0)),
+            sync_deadline_word: Arc::new(AtomicU64::new(super::spawn_pane::initial_sync_deadline(
+                sync_state,
+            ))),
             sync_resets: Arc::new(AtomicU64::new(sync_state.resets)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
             inline_media_charge: media_pool.new_charge(),
