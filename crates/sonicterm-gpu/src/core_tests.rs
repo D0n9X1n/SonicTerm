@@ -4631,7 +4631,7 @@ fn cursor_draw_path_calls_the_live_view_predicate() {
     let gate =
         "letview_top=plan.active_view_top_abs;ifterminal_cursor_drawn_at_view(view_top,live_top){";
     assert_eq!(core.matches(gate).count(), 1, "cursor path must call the predicate");
-    let identity = "||!terminal_cursor_drawn_at_view(view_top_abs,live_top)";
+    let identity = "&&terminal_cursor_drawn_at_view(view_top_abs,live_top);if!drawn{";
     assert_eq!(core.matches(identity).count(), 1, "the drawn cursor cell must call it");
     assert_eq!(
         core.matches("terminal_cursor_drawn_at_view(").count(),

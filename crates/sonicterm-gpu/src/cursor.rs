@@ -59,9 +59,9 @@ impl RecolorRecord {
 
     /// Record one recolored glyph drawn at `glyph_px` (`x, y, w, h`, finite surface pixels).
     fn note_glyph(&mut self, glyph: &GlyphInstance, glyph_px: (f32, f32, f32, f32)) {
-        self.bounds = self.bounds.merge(RecolorBounds::Rect(outward_rect(glyph_px)));
-        let instance_hash = glyph_hash(glyph);
-        self.hash = if self.hash == 0 { instance_hash } else { mix_hash(self.hash, instance_hash) };
+        let instance =
+            Self { bounds: RecolorBounds::Rect(outward_rect(glyph_px)), hash: glyph_hash(glyph) };
+        *self = self.merge(instance);
     }
 
     /// Record that a non-finite glyph or cursor rectangle was skipped.
@@ -327,7 +327,7 @@ pub fn recolor_cursor_glyphs(
     }
     let target = (cell_x, cell_y, cell_w, cell_h);
     if !finite_rect(target) {
-        // When: the cursor rectangle is not finite, no overlap is decidable and its ink is unbounded.
+        // When: `finite_rect` rejects the cursor `target`, no overlap is decidable and its ink is unbounded.
         record.note_unbounded();
         return record;
     }
@@ -431,8 +431,8 @@ fn recolor_span(
     for glyph in glyphs.iter_mut() {
         let glyph_rect = glyph_rect_px(glyph, sw, sh);
         if !finite_rect(glyph_rect) {
-            // When: the glyph's rectangle is not finite, it is never recolored (the strict overlap
-            // test rejects it) but where it draws cannot be bounded.
+            // When: `finite_rect` rejects `glyph_rect`, the glyph is never recolored (the strict
+            // overlap test rejects it) but where it draws cannot be bounded.
             record.note_unbounded();
             continue;
         }
@@ -476,8 +476,8 @@ impl RowGlyphSpan {
                     let edges = if finite_rect(glyph_rect) {
                         [px, py, px + pw, py + ph]
                     } else {
-                        // When: the glyph is not finite, `min`/`max` would drop its NaN edges, so the
-                        // row's ink is made infinite and the row is always scanned.
+                        // When: `finite_rect` rejects `glyph_rect`, `min`/`max` would drop its NaN
+                        // edges, so the row's ink is made infinite and the row is always scanned.
                         [f32::NEG_INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::INFINITY]
                     };
                     Some(ink.map_or(edges, |acc| {
@@ -519,7 +519,7 @@ pub(crate) fn recolor_cursor_glyphs_in(
     }
     let target = (cell_x, cell_y, cell_w, cell_h);
     if !finite_rect(target) {
-        // When: the cursor rectangle is not finite, the full scan recolors nothing and is unbounded.
+        // When: `finite_rect` rejects the cursor `target`, the full scan recolors nothing and is unbounded.
         outcome.record.note_unbounded();
         return outcome;
     }

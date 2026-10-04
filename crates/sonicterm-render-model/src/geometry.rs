@@ -183,7 +183,7 @@ pub fn covered_area(parts: &[PixelRect]) -> u64 {
                     Some((open_top, open_bottom.max(bottom)))
                 }
                 Some((open_top, open_bottom)) => {
-                    // When: this interval starts past the open one, the open run is complete.
+                    // This interval starts past the open one, so the open run is complete.
                     covered_height += open_bottom - open_top;
                     Some((top, bottom))
                 }

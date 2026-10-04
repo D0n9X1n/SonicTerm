@@ -878,10 +878,12 @@ fn drawn_cursor_cell(
     read_only: bool,
 ) -> Option<CursorCell> {
     let live_top = grid.scrollback_len() as u64;
-    if !(cursor_visible && window_focused && !read_only)
-        || !terminal_cursor_drawn_at_view(view_top_abs, live_top)
-    {
-        // When: any draw condition fails, no cursor pixels exist this frame.
+    let drawn = cursor_visible
+        && window_focused
+        && !read_only
+        && terminal_cursor_drawn_at_view(view_top_abs, live_top);
+    if !drawn {
+        // When: `drawn` is false (hidden, unfocused, read-only or scrolled back), no cursor pixels exist.
         return None;
     }
     let (first_col, span) = terminal_cursor_columns(grid);

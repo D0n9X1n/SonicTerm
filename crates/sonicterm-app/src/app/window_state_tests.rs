@@ -278,6 +278,7 @@ fn tab_reorder_keeps_window_wide_dirt() {
 
 /// The pointer files mark no window-wide dirt, and the remaining callers are exactly the
 /// once-per-state-change paths (config, theme, keyboard, search, redraw, window topology).
+/// Window focus is not one of them: it reaches the renderer as a damage class.
 #[test]
 fn window_wide_dirt_callers_inventory() {
     let call = "mark_all_panes_dirty(";
@@ -306,7 +307,7 @@ fn window_wide_dirt_callers_inventory() {
         ("misc.rs", include_str!("misc.rs"), 4),
         ("redraw.rs", include_str!("redraw.rs"), 1),
         ("search_handle.rs", include_str!("search_handle.rs"), 1),
-        ("window_keyboard.rs", include_str!("window_keyboard.rs"), 3),
+        ("window_keyboard.rs", include_str!("window_keyboard.rs"), 2),
         ("window_state.rs", include_str!("window_state.rs"), 1),
     ] {
         assert_eq!(count(source), expected, "{name} window-wide dirt callers");

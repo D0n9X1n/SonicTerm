@@ -675,10 +675,16 @@ impl FramePlan {
             // An offscreen-only or A7 Noop changes no pixel; any unacknowledged dirt waits for a later frame.
             PixelRect { x: 0, y: 0, w: 0, h: 0 }
         } else {
-            // When: neither empty-damage rule applies, keep the damage composed from first-frame, degraded and dirty-row policy.
+            // When: neither `offscreen_only` nor `quiet` holds, keep the damage composed from first-frame, degraded and dirty-row policy.
             damage
         };
-        let damage_parts = if Some(damage) == composed { dirt.parts } else { vec![damage] };
+        let damage_parts = if Some(damage) == composed {
+            dirt.parts
+        } else {
+            // When: `damage` is not the `composed` union (first frame, degraded, fallback or empty),
+            // the damage itself is its only part, so it is measured as wasting nothing.
+            vec![damage]
+        };
         Self {
             key,
             panes,
@@ -703,7 +709,7 @@ impl FramePlan {
     /// the widened scissor is already in the batches.
     pub(crate) fn widen_for_recolor(&mut self, previous: RecolorRecord, current: RecolorRecord) {
         if self.mode != RenderMode::Full {
-            // When: the plan presents nothing, no pixel is drawn and no damage is read.
+            // When: `mode` is not Full, the plan presents nothing and no damage is read.
             return;
         }
         let changed = previous != current;
@@ -844,7 +850,7 @@ fn add_class_damage(dirt: &mut DamageParts, inputs: ClassDamageInputs<'_>) {
                         dirt.add_clipped(rect, surface);
                     }
                 }
-                // When: the cursor's pane is not planned, its pixels cannot be located.
+                // The cursor's pane is not planned, so its pixels cannot be located.
                 None => dirt.add_clipped(surface, surface),
             }
         }
@@ -870,6 +876,7 @@ fn add_class_damage(dirt: &mut DamageParts, inputs: ClassDamageInputs<'_>) {
         }
     }
     if change.scrollbar {
+        // When: `change.scrollbar` is set, some pane's opacity bucket moved, so its drawn track is repainted.
         for ((before, after), pane) in previous.panes.iter().zip(&key.panes).zip(panes) {
             if before.scrollbar_bucket == after.scrollbar_bucket || pane.full_clip.is_none() {
                 // When: the bucket is unchanged or the pane is off the surface, no track is redrawn.
