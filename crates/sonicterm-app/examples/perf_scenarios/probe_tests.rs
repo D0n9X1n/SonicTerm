@@ -35,7 +35,8 @@ fn a_publication_inside_a_phase_is_credited_to_that_phase() {
     // The meter snapshots at its start and its finish; what is published between them is the
     // phase's, however the counter stood before it began.
     let published = Cell::new(4_u64);
-    let meter = PhaseMeter::start("typing", false, Some(totals_with_attempts(published.get())));
+    let meter =
+        PhaseMeter::start("typing", false, Some(totals_with_attempts(published.get())), None);
     published.set(published.get() + 3);
     let record = meter.finish(Some(totals_with_attempts(published.get())));
     assert_eq!(credited(&record), 3);
@@ -46,11 +47,13 @@ fn a_publication_in_the_gap_between_phases_is_credited_to_neither() {
     // Checkpoints and the progress write run between one phase's finish snapshot and the next
     // phase's start snapshot, so whatever they publish appears in no phase's delta.
     let published = Cell::new(0_u64);
-    let first = PhaseMeter::start("first", false, Some(totals_with_attempts(published.get())));
+    let first =
+        PhaseMeter::start("first", false, Some(totals_with_attempts(published.get())), None);
     published.set(published.get() + 2);
     let first = first.finish(Some(totals_with_attempts(published.get())));
     published.set(published.get() + 5);
-    let second = PhaseMeter::start("second", false, Some(totals_with_attempts(published.get())));
+    let second =
+        PhaseMeter::start("second", false, Some(totals_with_attempts(published.get())), None);
     published.set(published.get() + 1);
     let second = second.finish(Some(totals_with_attempts(published.get())));
     assert_eq!((credited(&first), credited(&second)), (2, 1));
@@ -175,7 +178,7 @@ fn release_probe(name: &str, act: Instant, frames: u64) -> (Probe, PhaseSpec) {
         Probe::new(app, plan, request, PathBuf::from("unused"), act + Duration::from_secs(3600));
     probe.test_readings = Some((frames, ResourceAmount::default()));
     probe.stage = Stage::Steps(index);
-    probe.meter = Some(PhaseMeter::start(phase.name, false, None));
+    probe.meter = Some(PhaseMeter::start(phase.name, false, None, None));
     probe.start_barrier(&phase.end, act);
     (probe, phase)
 }
@@ -847,6 +850,7 @@ fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
             present_interval_ms: vec![16.6],
             allocations_per_frame: None,
             frame_counters: None,
+            updates: None,
         }],
         latency: None,
         throughput: None,
@@ -1098,4 +1102,11 @@ fn atlas_readings_join_the_latest_record_of_their_checkpoint_in_attempt_order() 
     assert!(records[0].atlas_readings.is_empty());
     let attempts: Vec<u32> = records[1].atlas_readings.iter().map(|found| found.attempt).collect();
     assert_eq!(attempts, [1, 2]);
+}
+
+/// A phase meter hands the update count it started with to the record it finishes.
+#[test]
+fn a_phase_meter_records_the_update_count_it_started_with() {
+    assert_eq!(PhaseMeter::start("stream", false, None, Some(300)).finish(None).updates, Some(300));
+    assert_eq!(PhaseMeter::start("idle", false, None, None).finish(None).updates, None);
 }

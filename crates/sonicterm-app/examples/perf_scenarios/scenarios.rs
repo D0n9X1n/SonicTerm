@@ -264,6 +264,9 @@ pub(crate) struct PhaseSpec {
     pub(crate) end: PhaseEnd,
     /// Bytes the workload writes from GO to its sentinel, for a throughput figure.
     pub(crate) throughput_bytes: Option<u64>,
+    /// The logical updates the selected workload plays in this phase, the denominator of a
+    /// comparison's presented frames per update; `None` for a phase that plays no counted updates.
+    pub(crate) updates: Option<u32>,
 }
 
 /// One scenario variant's complete plan: each role's workload, setup before GO, and steps after.
@@ -297,7 +300,14 @@ pub(crate) struct Plan {
 /// A phase with no driver, no entry actions and no throughput figure.
 #[cfg(any(target_os = "macos", windows, test))]
 fn timed(name: &'static str, end: PhaseEnd) -> PhaseSpec {
-    PhaseSpec { name, enter: Vec::new(), driver: Driver::None, end, throughput_bytes: None }
+    PhaseSpec {
+        name,
+        enter: Vec::new(),
+        driver: Driver::None,
+        end,
+        throughput_bytes: None,
+        updates: None,
+    }
 }
 
 /// A phase whose input comes from `driver`.
@@ -438,11 +448,10 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             // 60 frames a second for 20 s, or 5 s short.
             let count = if short { 300 } else { 1_200 };
             let frames = Workload::Frames { count, synchronized: variant == "sync" };
-            (
-                vec![frames],
-                vec![],
-                vec![Step::Phase(timed("stream", PhaseEnd::Sentinels(vec![0]))), idle, end],
-            )
+            // The stream phase records the count this run's workload plays, not a constant.
+            let stream =
+                PhaseSpec { updates: Some(count), ..timed("stream", PhaseEnd::Sentinels(vec![0])) };
+            (vec![frames], vec![], vec![Step::Phase(stream), idle, end])
         }
         ("S11", "release") => (
             // The image tab is left until a media-free frame presents, held 65 s from that frame

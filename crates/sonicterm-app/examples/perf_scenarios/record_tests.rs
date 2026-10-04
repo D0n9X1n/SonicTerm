@@ -223,6 +223,7 @@ fn partial_result(status: Status) -> RunResult {
             present_interval_ms: vec![16.5],
             allocations_per_frame: None,
             frame_counters: None,
+            updates: None,
         }],
         latency: Some(vec![LatencySample {
             inject_unix_s: 2.0,
@@ -362,6 +363,7 @@ fn measured_result() -> RunResult {
         present_interval_ms: vec![100.0],
         allocations_per_frame: Some(vec![950, 940]),
         frame_counters: None,
+        updates: None,
     });
     result.latency = Some(vec![
         LatencySample { inject_unix_s: 2.0, latency_ms: Some(12.5), reason: CREDITED },
@@ -974,4 +976,15 @@ fn atlas_readings_are_written_per_attempt_and_left_out_when_none_were_taken() {
             ])
         );
     }
+}
+
+/// A phase record writes `updates` only when its phase carries one, so a comparison can tell a
+/// harness that records the denominator from one that predates it.
+#[test]
+fn a_phase_record_writes_updates_only_when_it_has_them() {
+    let mut record = measured_result().phases.remove(0);
+    record.updates = None;
+    assert!(serde_json::to_value(&record).unwrap().get("updates").is_none());
+    record.updates = Some(300);
+    assert_eq!(serde_json::to_value(&record).unwrap()["updates"], json!(300));
 }
