@@ -1126,6 +1126,54 @@ fn glyph_atlas_working_set() {
     }
 }
 
+/// Open the command palette so the main frame draws it: no window is named frontmost, which routes
+/// the palette to main (no attached window). Naming the seeded main key would misroute it, since the
+/// attached native window carries another id. Fails when the palette is not open on main.
+fn open_palette_on_main_frame(app: &mut sonicterm_app::app::App) -> Result<(), String> {
+    app.__test_set_frontmost_window(None);
+    if !app.run_action(&sonicterm_cfg::keymap::Action::OpenCommandPalette) {
+        // When: run_action refuses the action, the palette cannot be measured.
+        return Err("the palette open action was refused".to_owned());
+    }
+    if !app.__test_palette_open() {
+        // When: the action ran but the palette is closed, nothing draws a footer.
+        return Err("the palette is not open".to_owned());
+    }
+    match app.__test_palette_attached_window() {
+        None => Ok(()),
+        // When: an attached window is named, the main frame does not draw the palette.
+        Some(window_id) => {
+            Err(format!("the palette attached to {window_id:?}, not the main frame"))
+        }
+    }
+}
+
+/// The real-renderer coverage test seeds its main window under a synthetic key and then attaches a
+/// native window with another id, so naming that key frontmost reads as a torn-out child and the
+/// palette attaches there: the main frame never draws it, and no footer key becomes resident. The
+/// shared setup must open the palette on the main frame (no attached window), on every host.
+#[test]
+fn the_coverage_setup_opens_the_palette_on_the_main_frame() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let fresh = || {
+        let mut app =
+            sonicterm_app::app::App::new(Theme::default(), Config::default(), Keymap::default());
+        app.__test_seed_tab("zsh");
+        app
+    };
+    // The mechanism: the seeded main key named frontmost routes the palette away from main.
+    let mut misrouted = fresh();
+    let main = misrouted.__test_main_window_id().expect("a seeded main window");
+    misrouted.__test_set_frontmost_window(Some(main));
+    assert!(misrouted.run_action(&sonicterm_cfg::keymap::Action::OpenCommandPalette));
+    assert_eq!(misrouted.__test_palette_attached_window(), Some(main));
+    // The setup the coverage test uses draws it on the main frame.
+    let mut app = fresh();
+    open_palette_on_main_frame(&mut app).expect("the palette opens on the main frame");
+    assert!(app.__test_palette_open());
+    assert_eq!(app.__test_palette_attached_window(), None);
+}
+
 /// The working-set helper against the real renderer, compared by tile identity rather than by
 /// configuration-local glyph keys: the S9 and S12 fixtures drawn on a Windows
 /// window with the tab bar and three titles, the cursor and the command palette open with its
@@ -1138,7 +1186,7 @@ mod real_renderer_coverage {
 
     use sonicterm_app::app::App;
     use sonicterm_cfg::config::{Config, ScrollbarMode, SoftwareRenderMode};
-    use sonicterm_cfg::keymap::{Action, Keymap};
+    use sonicterm_cfg::keymap::Keymap;
     use sonicterm_cfg::theme::Theme;
     use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
     use sonicterm_gpu::glyph_working_set::{measure_glyph_working_set, TileIdentity};
@@ -1320,9 +1368,7 @@ mod real_renderer_coverage {
         }
         let id = app.__test_main_window_id().ok_or("no main window")?;
         check(app.__test_attach_window_renderer(id, window, renderer), "renderer attached")?;
-        app.__test_set_frontmost_window(Some(id));
-        check(app.run_action(&Action::OpenCommandPalette), "the palette opens")?;
-        check(app.__test_palette_open(), "the palette is open")?;
+        super::open_palette_on_main_frame(&mut app).map_err(|error| format!("{case}: {error}"))?;
         settle(&mut app, active, id, &case)?;
         let renderer = app.__test_window_renderer_mut(id).ok_or("the window has a renderer")?;
         let resident = renderer.__test_resident_tile_keys();
