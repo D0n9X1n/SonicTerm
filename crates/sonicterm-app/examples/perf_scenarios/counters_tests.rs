@@ -125,6 +125,7 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "flushes_untargeted",
             "flushes_coalesced",
             "flushes_suppressed",
+            "sync_timeouts",
             "parser_lock_wait_us",
             "parser_lock_hold_us",
             "parse_us",
@@ -372,8 +373,9 @@ fn every_counter_api_call_in_the_harness_is_behind_the_feature() {
     assert_eq!(ungated_calls(fixture), vec!["7: frame_counters_snapshot".to_owned()]);
 }
 
-/// The window and renderer fields a base without the newest counters cannot read, by API name.
+/// The window, vt and renderer fields a base without the newest counters cannot read, by API name.
 const NEWER_SOURCES: &[&str] = &[
+    "sync_timeouts",
     "stream_clock_exempt",
     "display_link_ticks",
     "display_link_admissions",
@@ -417,7 +419,7 @@ const NEWER_SOURCES: &[&str] = &[
 #[test]
 fn a_field_the_base_cannot_read_is_omitted_not_reported_as_zero() {
     // perf-compare overlays this harness onto an older base whose records lack the newer
-    // window and renderer counters. Those keys must be absent, so the comparison shows n/a, while every
+    // window, vt and renderer counters. Those keys must be absent, so the comparison shows n/a, while every
     // field the base does report is still written, through the snapshot path and the delta.
     let mut record = HashMap::new();
     for field in FIELDS {

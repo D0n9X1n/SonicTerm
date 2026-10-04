@@ -611,6 +611,8 @@ pub(crate) struct VtFrameStats {
     pub(crate) flushes_coalesced: AtomicU64,
     /// Targeted flushes that sent no event because the pane's output event was outstanding.
     pub(crate) flushes_suppressed: AtomicU64,
+    /// Synchronized updates (DEC 2026) a worker released at the 150 ms bound, not at their reset.
+    pub(crate) sync_timeouts: AtomicU64,
 }
 
 impl Default for VtFrameStats {
@@ -625,6 +627,7 @@ impl Default for VtFrameStats {
             flushes_untargeted: AtomicU64::new(0),
             flushes_coalesced: AtomicU64::new(0),
             flushes_suppressed: AtomicU64::new(0),
+            sync_timeouts: AtomicU64::new(0),
         }
     }
 }
@@ -1473,6 +1476,7 @@ impl AppFrameCounters {
             ("flushes_untargeted", &vt.flushes_untargeted),
             ("flushes_coalesced", &vt.flushes_coalesced),
             ("flushes_suppressed", &vt.flushes_suppressed),
+            ("sync_timeouts", &vt.sync_timeouts),
             ("ui_parser_locks", &dispatch.locks),
             ("fg_worker_probes", &self.fg_worker.probes),
             ("fg_worker_panes", &self.fg_worker.panes),

@@ -1661,3 +1661,23 @@ fn damage_waste_joins_the_renderer_record_after_damaged_frames() {
     let software = fields.find("software_frames=1").expect("software_frames field");
     assert!(damaged < waste && waste < software, "{fields}");
 }
+
+/// `sync_timeouts` joins the App record by name, after `flushes_suppressed` and before
+/// `ui_parser_locks`, so the harness and perf-compare read it in contract order; an App whose
+/// workers never timed out a synchronized update still reports it, as zero.
+#[test]
+fn sync_timeouts_joins_the_app_record_after_flushes_suppressed() {
+    let counters = AppFrameCounters::new();
+    assert_eq!(counters.record().count("sync_timeouts"), Some(0), "supported zero");
+    counters.vt.flushes_suppressed.fetch_add(2, Ordering::Relaxed);
+    counters.vt.sync_timeouts.fetch_add(3, Ordering::Relaxed);
+    counters.dispatch.locks.fetch_add(1, Ordering::Relaxed);
+    let record = counters.record();
+    assert_eq!(record.count("sync_timeouts"), Some(3));
+    let fields = record.line_fields();
+    let order: Vec<usize> = ["flushes_suppressed=2", "sync_timeouts=3", "ui_parser_locks=1"]
+        .iter()
+        .map(|name| fields.find(name).unwrap_or_else(|| panic!("{name} in {fields}")))
+        .collect();
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{fields}");
+}
