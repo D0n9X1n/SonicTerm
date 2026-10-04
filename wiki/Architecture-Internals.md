@@ -192,6 +192,20 @@ correctness, not only speed.
 - A frame whose only change is pane revisions, with all of their dirt scrolled
   out of view and no overlay active, plans `Noop` with empty damage and
   acknowledges nothing, on both paths.
+- Classification is exhaustive: `WindowIdentity::classify` and
+  `PaneIdentity::classify` destructure every field without `..`, so a new field
+  does not compile until it has a class. Cursor, focus, tab-band, selection and
+  scrollbar changes damage only their areas. Every other field, any key change
+  while an overlay is active in the old or new key, the degraded path and the
+  first frame damage the whole surface; a class change on an alternate-screen
+  pane damages that pane.
+- Narrow damage relies on `Full` assembly under the scissor: every batch is
+  assembled and drawn in order and the scissor limits writes, so all ink meeting
+  the damage is redrawn. Ink that can exceed a row's padded strip is damaged by
+  its recorded bounds instead: the glyphs a cursor recolors (previous and current
+  record) and the tab-title glyphs (last presented and current). Both are kept
+  only by a presented frame, and bounds that are not finite fall back to the
+  active pane or the surface.
 - A dirty alternate-screen pane contributes its complete surface-clipped pane.
   A clean alternate-screen pane contributes no damage.
 - Full-surface replacement clears the retained attachment once; partial damage
