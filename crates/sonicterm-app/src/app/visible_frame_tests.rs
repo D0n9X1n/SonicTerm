@@ -725,6 +725,10 @@ fn ticket_for(id: u64, parser: &Arc<Mutex<Parser>>) -> AckTicket {
     AckTicket { receipt, parser: Arc::downgrade(parser) }
 }
 
+/// One ticket case: its label, the change made after the receipt, whether the ticket then applies,
+/// and the dirty rows left (`None` keeps them all).
+type TicketChange = (&'static str, fn(&mut Parser), bool, Option<usize>);
+
 /// The ticket rule on bare grids: a ticket applies only through the guard of its own pane and parser,
 /// and only while size generation and screen epoch match. It clears the rows the frame drew and keeps
 /// every row dirtied after assembly: a parse keeps the row it wrote, `mark_all_dirty` keeps every row.
@@ -736,7 +740,7 @@ fn a_ticket_clears_only_its_own_unchanged_held_grid() {
     let parser = || Arc::new(Mutex::new(Parser::new(Grid::new(8, 3))));
     let rect = Rect::new(0.0, 0.0, 80.0, 60.0);
     // Each change, whether the ticket then applies, and the dirty rows left: `None` keeps them all.
-    let changes: [(&str, fn(&mut Parser), bool, Option<usize>); 5] = [
+    let changes: [TicketChange; 5] = [
         ("a parse", |parser| drop(parser.advance(b"x")), true, Some(1)),
         ("mark_all_dirty", |parser| parser.grid_mut().mark_all_dirty(), true, Some(3)),
         ("a resize", |parser| parser.grid_mut().resize(10, 3), false, None),
