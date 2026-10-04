@@ -143,6 +143,7 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::Window, "defer_contention"),
     count(Section::Window, "defer_streaming"),
     count(Section::Window, "contention_retry_armed"),
+    count(Section::Window, "dirt_ack_dropped"),
     count(Section::Window, "native_request_redraw"),
     count(Section::Window, "user_request_redraw"),
     count(Section::Window, "redraw_requested"),

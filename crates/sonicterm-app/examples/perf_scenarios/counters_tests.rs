@@ -80,6 +80,7 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "defer_contention",
             "defer_streaming",
             "contention_retry_armed",
+            "dirt_ack_dropped",
             "native_request_redraw",
             "user_request_redraw",
             "redraw_requested",
@@ -339,8 +340,9 @@ fn every_counter_api_call_in_the_harness_is_behind_the_feature() {
     assert_eq!(ungated_calls(fixture), vec!["7: frame_counters_snapshot".to_owned()]);
 }
 
-/// The renderer fields a base without the newest counters cannot read, by API name.
-const NEWER_RENDERER_SOURCES: &[&str] = &[
+/// The window and renderer fields a base without the newest counters cannot read, by API name.
+const NEWER_SOURCES: &[&str] = &[
+    "dirt_ack_dropped",
     "full_frames",
     "row_cache_invalidate_visits",
     "row_cache_invalidate_us",
@@ -352,11 +354,11 @@ const NEWER_RENDERER_SOURCES: &[&str] = &[
 #[test]
 fn a_field_the_base_cannot_read_is_omitted_not_reported_as_zero() {
     // perf-compare overlays this harness onto an older base whose records lack the newer
-    // renderer counters. Those keys must be absent, so the comparison shows n/a, while every
+    // window and renderer counters. Those keys must be absent, so the comparison shows n/a, while every
     // field the base does report is still written, through the snapshot path and the delta.
     let mut record = HashMap::new();
     for field in FIELDS {
-        if NEWER_RENDERER_SOURCES.contains(&field.source) {
+        if NEWER_SOURCES.contains(&field.source) {
             continue;
         }
         let value = match field.kind {
@@ -379,7 +381,7 @@ fn a_field_the_base_cannot_read_is_omitted_not_reported_as_zero() {
     for document in [end.to_json(), end.delta_since(&start).to_json()] {
         for field in FIELDS {
             let present = document[field.section.key()].get(field.name).is_some();
-            let expected = !NEWER_RENDERER_SOURCES.contains(&field.source);
+            let expected = !NEWER_SOURCES.contains(&field.source);
             assert_eq!(present, expected, "{}.{}: {document}", field.section.key(), field.name);
         }
     }
