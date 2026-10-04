@@ -397,8 +397,9 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
 }
 
 /// The first frame that applies a fallback generation, with its first attempt forced to an atlas
-/// retry: that attempt carries the apply and folds once, unpresented; the retry that follows is
-/// a new preparation, carries no apply, and presents.
+/// retry: that attempt carries the apply and folds once, unpresented. Each retry is a new
+/// preparation; it carries an apply only when the worker published a newer generation since the
+/// attempt before it, so the expected counts follow the tokens the preparations returned.
 fn forced_retry_on_apply(
     renderer: &mut GpuRenderer,
     scene: &mut Scene,
@@ -413,7 +414,34 @@ fn forced_retry_on_apply(
     if !matches!(first, PresentOutcome::AtlasRetry) {
         return Err(format!("the forced attempt did not retry: {first:?}"));
     }
-    draw(renderer, scene, theme, size)?;
+    // The forced attempt applied a generation; a retry applies again only when its token moved.
+    let mut previous_token = (fonts.notice_id(), fonts.generation());
+    let mut expected_applies = 1_u64;
+    let mut retry_attempts = 0_u64;
+    let mut presented_applied = None;
+    for _ in 0..4 {
+        let fonts = renderer.begin_frame_fonts();
+        let token = (fonts.notice_id(), fonts.generation());
+        let applied_here = token != previous_token;
+        previous_token = token;
+        if applied_here {
+            // When: the worker published a newer generation since the attempt before this one.
+            expected_applies += 1;
+        }
+        let _ = renderer.measure_tab_widths(&fonts, &mut scene.tabs, false, false, Instant::now());
+        retry_attempts += 1;
+        match render_once(renderer, &fonts, scene, theme, size) {
+            PresentOutcome::Presented => {
+                presented_applied = Some(applied_here);
+                break;
+            }
+            PresentOutcome::AtlasRetry => {}
+            other => return Err(format!("the retry did not present: {other:?}")),
+        }
+    }
+    let Some(presented_applied) = presented_applied else {
+        return Err(String::from("the retried frame kept retrying its atlas"));
+    };
     let after = renderer.frame_stats();
     let applies = after.font_generation_applies - before.font_generation_applies;
     let apply = (
@@ -424,9 +452,13 @@ fn forced_retry_on_apply(
         after.attempts.attempts - before.attempts.attempts,
         after.attempts.presented - before.attempts.presented,
     );
-    if applies != 1 || apply != (1, 0) || every != (2, 1) {
+    let expected_apply = (expected_applies, u64::from(presented_applied));
+    if applies != expected_applies || apply != expected_apply || every != (1 + retry_attempts, 1) {
         return Err(format!(
-            "a retried apply: {applies} applies, apply (attempts, presented) {apply:?}, every {every:?}"
+            "a retried apply: {applies} applies (expected {expected_applies}), apply (attempts, \
+             presented) {apply:?} (expected {expected_apply:?}), every {every:?} (expected \
+             ({}, 1))",
+            1 + retry_attempts
         ));
     }
     Ok(())
