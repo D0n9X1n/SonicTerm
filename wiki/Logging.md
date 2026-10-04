@@ -501,6 +501,9 @@ renderer that collected it.
 | `row_cache_misses` | count | row glyph cache lookups that missed |
 | `shape_requests` | count | `FontStack` shaping and measuring requests the renderer made |
 | `full_frames` | count | frames whose render plan was `Full`; a frame whose plan was `Noop` is not counted |
+| `partial_frames` | count | presented frames whose render plan was `Partial` (only the rows that meet the damage were assembled); counted after presentation, so divide by presented frames, not by `full_frames` |
+| `partial_fallbacks` | count | `Partial` plans reassembled `Full` in the same frame because the final damage reached a row they did not assemble |
+| `row_cells_hashed` | count | cells hashed into row glyph cache keys, one row per assembled terminal row |
 | `row_cache_invalidate_visits` | count | row glyph cache entries examined while invalidating dirty rows: one per `invalidate_row_abs` call, a keyed removal of that `(pane, absolute row)` entry |
 | `row_cache_invalidate_us` | µs | total time spent invalidating dirty rows, as a plain sum; one clock pair per pane that invalidates at least one row, taken inside that pane's row loop so counting never changes which cached rows are kept |
 | `recolor_glyphs_visited` | count | glyphs examined when recoloring glyphs under the cursor, the copy-mode cursor or a search match on the frame's main glyph list: the rows whose ink meets the target plus every glyph outside the terminal rows, such as tab titles; overlay text is not counted |

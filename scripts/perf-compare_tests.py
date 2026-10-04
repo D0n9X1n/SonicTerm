@@ -5157,6 +5157,7 @@ COUNTER_CONTRACT = {
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   "damage_waste_permille_sum", "software_frames",
                   "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",
+                  "partial_frames", "partial_fallbacks", "row_cells_hashed",
                   # row_cache_invalidate_us is summed microseconds as a plain count, not a histogram.
                   "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited",
                   # font_fallback_applies is supporting evidence; a base older than the counter shows n/a.
@@ -5768,6 +5769,31 @@ class CounterTableTests(unittest.TestCase):
                          ("n/a", "40 (40–40)", "n/a"))
         self.assertEqual(waste_cells(perf.SideRuns(outcomes=[make_outcome(result=counters_result())])),
                          ("0 (0–0)", "40 (40–40)", perf.percent_change(0, 40)))
+        gate_off = valid_result(frame_counters="off")
+        self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
+
+    def test_partial_counters_are_required_on_the_head_and_n_a_on_an_older_base(self):
+        # partial_frames, partial_fallbacks and row_cells_hashed joined the renderer section: a head must
+        # report each, a base built before them reads n/a with no change shown, a supporting base that
+        # counted none prints a real 0, and a gate-off run carries no phase counters, so it is never checked.
+        for name in ("partial_frames", "partial_fallbacks", "row_cells_hashed"):
+            with self.subTest(name=name):
+                lacking = counters_result()
+                del lacking["phases"][0]["frame_counters"]["renderer"][name]
+                problems = perf.validate_result(lacking, HARNESS_HASH, 0, counters=True)
+                self.assertTrue(any(f"renderer.{name}" in problem for problem in problems), problems)
+                self.assertEqual(
+                    perf.validate_result(lacking, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+                head = counters_side({f"renderer.{name}": 12})
+
+                def partial_cells(base):
+                    rows, _omitted = perf.counter_rows("S2/typing", base, head)
+                    return {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}[f"renderer.{name} (count)"]
+
+                self.assertEqual(partial_cells(perf.SideRuns(outcomes=[make_outcome(result=lacking)])),
+                                 ("n/a", "12 (12–12)", "n/a"))
+                self.assertEqual(partial_cells(perf.SideRuns(outcomes=[make_outcome(result=counters_result())])),
+                                 ("0 (0–0)", "12 (12–12)", perf.percent_change(0, 12)))
         gate_off = valid_result(frame_counters="off")
         self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
 

@@ -400,6 +400,9 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `row_cache_misses` | 次数 | 未命中的行字形缓存查询 |
 | `shape_requests` | 次数 | 渲染器发出的 `FontStack` 塑形与测量请求 |
 | `full_frames` | 次数 | 渲染计划为 `Full` 的帧；计划为 `Noop` 的帧不计入 |
+| `partial_frames` | 次数 | 渲染计划为 `Partial`（只组装与损伤区域相交的行）且已呈现的帧；呈现后才计数，应除以已呈现帧数，而非 `full_frames` |
+| `partial_fallbacks` | 次数 | 因最终损伤区域触及未组装的行，在同一帧内重新按 `Full` 组装的 `Partial` 计划 |
+| `row_cells_hashed` | 次数 | 写入行字形缓存键的单元格数，每个已组装的终端行一行 |
 | `row_cache_invalidate_visits` | 次数 | 使脏行失效时检查的行字形缓存条目：每次 `invalidate_row_abs` 调用检查一个，即按 `(窗格, 绝对行)` 键删除该条目 |
 | `row_cache_invalidate_us` | 微秒 | 使脏行失效所花的总时间，为普通累加和；至少使一行失效的窗格在其行循环内读取一对时钟，因此计数不会改变保留哪些缓存行 |
 | `recolor_glyphs_visited` | 次数 | 在帧的主字形列表上为光标、复制模式光标或搜索匹配下的字形重新着色时检查的字形：墨迹与目标相交的行，加上终端行之外的全部字形（如标签标题）；叠加层文字不计入 |

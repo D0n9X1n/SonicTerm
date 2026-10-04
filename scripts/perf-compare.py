@@ -1972,6 +1972,9 @@ FRAME_COUNTER_FIELDS = {
                   # damaged_frames; a base older than it shows n/a.
                   "damage_waste_permille_sum", "software_frames",
                   "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",
+                  # Partial-assembly counters: presented partial frames, partial plans reassembled Full and
+                  # cells hashed into row-cache keys; a base older than them shows n/a.
+                  "partial_frames", "partial_fallbacks", "row_cells_hashed",
                   # row_cache_invalidate_us is summed microseconds kept as a plain count, not a histogram.
                   "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited",
                   # font_fallback_applies is supporting evidence; a base older than the counter shows n/a.

@@ -1595,6 +1595,10 @@ impl WindowFrameCounters {
                 ("row_cache_misses", stats.row_cache_misses),
                 ("shape_requests", stats.shape_requests),
                 ("full_frames", stats.full_frames),
+                // Presented partial frames, partial plans reassembled Full, and hashed row cells.
+                ("partial_frames", stats.partial_frames),
+                ("partial_fallbacks", stats.partial_fallbacks),
+                ("row_cells_hashed", stats.row_cells_hashed),
                 ("row_cache_invalidate_visits", stats.row_cache_invalidate_visits),
                 ("row_cache_invalidate_us", stats.row_cache_invalidate_us),
                 ("recolor_glyphs_visited", stats.recolor_glyphs_visited),

@@ -1706,3 +1706,32 @@ fn sync_timeouts_joins_the_app_record_after_flushes_suppressed() {
         .collect();
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{fields}");
 }
+
+#[test]
+fn partial_counters_join_the_renderer_record_after_full_frames() {
+    // The harness and perf-compare read the partial-assembly counters by name, after full_frames.
+    // A line omits zero counts, so the neighbours are non-zero to show the order.
+    use sonicterm_gpu::frame_stats::FrameStats;
+    let mut stats = FrameStats::ZERO;
+    stats.full_frames = 2;
+    stats.partial_frames = 5;
+    stats.partial_fallbacks = 1;
+    stats.row_cells_hashed = 400;
+    stats.row_cache_invalidate_visits = 3;
+    let record = WindowFrameCounters::default().record(Some(stats), 0);
+    for (name, value) in [("partial_frames", 5), ("partial_fallbacks", 1), ("row_cells_hashed", 400)] {
+        assert_eq!(record.count(name), Some(value), "{name}");
+    }
+    let fields = record.line_fields();
+    let order: Vec<usize> = [
+        "full_frames=2",
+        "partial_frames=5",
+        "partial_fallbacks=1",
+        "row_cells_hashed=400",
+        "row_cache_invalidate_visits=3",
+    ]
+    .iter()
+    .map(|field| fields.find(field).unwrap_or_else(|| panic!("{field}: {fields}")))
+    .collect();
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{fields}");
+}
