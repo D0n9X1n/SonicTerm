@@ -214,6 +214,33 @@ pub(crate) fn upload_staging_amount(
     ResourceAmount { bytes: vertex.bytes + uploads, items: vertex.items }
 }
 
+/// Settle what a frame's outcome leaves retained: only `Presented` with its plan commits the
+/// staged ink records, counts a partial frame, keeps the plan's key and returns its receipts.
+/// Every other outcome discards the staged records, keeps the committed ones (their pixels are
+/// still on screen), returns no receipt and clears the key, so the retry plans a Full first frame.
+fn settle_retained_frame(
+    last_frame_key: &mut Option<FrameKey>,
+    row_ink: &mut crate::row_ink::RowInkTable,
+    outcome: &PresentOutcome,
+    presented_plan: Option<FramePlan>,
+    receipts: Vec<sonicterm_render_model::AckReceipt>,
+) -> Vec<sonicterm_render_model::AckReceipt> {
+    match (outcome, presented_plan) {
+        (PresentOutcome::Presented, Some(plan)) => {
+            row_ink.commit(&plan.drawn_row_counts());
+            crate::frame_stats::note_partial_frame(plan.mode == RenderMode::Partial);
+            *last_frame_key = Some(plan.key);
+            receipts
+        }
+        _ => {
+            // Nothing this frame assembled reached the screen, so nothing of it is kept.
+            row_ink.begin_frame();
+            *last_frame_key = None;
+            Vec::new()
+        }
+    }
+}
+
 /// Assemble one frame through `assemble`, called with whether the pass is forced Full. A first
 /// pass whose partial plan's final damage reached a row it did not emit is assembled again forced
 /// Full under the same guards, so the scissor never erases unemitted ink; that fallback is counted
@@ -5694,6 +5721,13 @@ impl GpuRenderer {
                     // so the frame takes the reset path with eviction disabled for one retry.
                     self.reset_glyph_atlas_after_invalidation(stamp, evictions);
                 }
+                let _discarded = settle_retained_frame(
+                    &mut self.last_frame_key,
+                    &mut self.row_ink,
+                    &PresentOutcome::AtlasRetry,
+                    None,
+                    Vec::new(),
+                );
                 PresentOutcome::AtlasRetry
             }
             Assembled::Layers(layers) => {
@@ -8487,12 +8521,25 @@ impl GpuRenderer {
         if !matches!(outcome, PresentOutcome::Presented) {
             // When: `matches!` finds any outcome but `Presented`, no receipt is issued, so its dirty rows stay.
             self.finalize_growth_episodes_if_device_stopped();
+            let _discarded = settle_retained_frame(
+                &mut self.last_frame_key,
+                &mut self.row_ink,
+                &outcome,
+                None,
+                receipts,
+            );
             return Ok(FrameOutcome::without_receipts(outcome));
         }
         // Only a presented frame's recolors are on screen, so only it becomes the next baseline.
         self.last_recolor = recolor;
         self.last_tab_ink = tab_ink;
-        self.finish_successful_frame(plan, missing_chars, missing_chrome_chars, gpu_timing);
+        let receipts = self.finish_successful_frame(
+            plan,
+            receipts,
+            missing_chars,
+            missing_chrome_chars,
+            gpu_timing,
+        );
         Ok(FrameOutcome { outcome: PresentOutcome::Presented, receipts })
     }
 
@@ -8533,13 +8580,16 @@ impl GpuRenderer {
         self.request_window_redraw();
     }
 
+    /// Finish a presented frame: record its statistics and settle its plan, returning the receipts
+    /// the settlement keeps.
     fn finish_successful_frame(
         &mut self,
         plan: FramePlan,
+        receipts: Vec<sonicterm_render_model::AckReceipt>,
         missing_chars_this_frame: Vec<char>,
         missing_chrome_chars: Vec<char>,
         gpu_timing: Option<(Instant, Instant, Vec<(&'static str, f32)>)>,
-    ) {
+    ) -> Vec<sonicterm_render_model::AckReceipt> {
         let render_mode = plan.mode;
         let damaged_rows = plan.damaged_rows;
         let (surface_width, surface_height) = (self.config.width, self.config.height);
@@ -8571,9 +8621,13 @@ impl GpuRenderer {
             surface: PixelRect { x: 0, y: 0, w: surface_width.max(1), h: surface_height.max(1) },
         });
         // The presented rows' records replace theirs; records of undrawn or vanished rows are pruned.
-        self.row_ink.commit(&plan.drawn_row_counts());
-        crate::frame_stats::note_partial_frame(plan.mode == RenderMode::Partial);
-        self.last_frame_key = Some(plan.key);
+        let receipts = settle_retained_frame(
+            &mut self.last_frame_key,
+            &mut self.row_ink,
+            &PresentOutcome::Presented,
+            Some(plan),
+            receipts,
+        );
         if self.pane_focus_flash.is_some() {
             self.request_window_redraw();
         }
@@ -8595,6 +8649,7 @@ impl GpuRenderer {
             }
             tracing::debug!(target: "render_timing", %line);
         }
+        receipts
     }
 
     /// This function only emits the quick-select hint background

@@ -161,8 +161,8 @@ fn production_frame_decisions_use_one_plan_and_preserve_retry_boundaries() {
     // The frame finishes once, and only after its presenter reports `Presented`.
     let handoff = render.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
     let guard = render[handoff..].find("PresentOutcome::Presented)").unwrap() + handoff;
-    let finish = render.find("self.finish_successful_frame(plan,").unwrap();
-    assert_eq!(render.matches("self.finish_successful_frame(plan,").count(), 1);
+    let finish = render.find("self.finish_successful_frame(").unwrap();
+    assert_eq!(render.matches("self.finish_successful_frame(").count(), 1);
     assert!(handoff < guard && guard < finish);
     // Each presenter in `present.rs` reports `Presented` only after its success
     // boundary, never acknowledges a plan itself, and every surface exit precedes
@@ -1026,7 +1026,7 @@ fn atlas_frame_detector_production_capture_and_retry_precede_presentation() {
         .unwrap();
     let retry = source[guard..].find("return Ok(Assembled::AtlasRetry {").unwrap() + guard;
     let present = source.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
-    let acknowledge = source.find("self.finish_successful_frame(plan,").unwrap();
+    let acknowledge = source.find("self.finish_successful_frame(").unwrap();
     assert!(start < guard && guard < retry && retry < present && present < acknowledge);
     assert!(source.contains("let atlas_evictions_at_frame_start = self.glyph_atlas.evictions();"));
     let lifecycle = include_str!("atlas_lifecycle.rs");
@@ -5712,7 +5712,7 @@ fn damage_classes_are_wired_through_the_renderer() {
     let present = function_body(&source, "    fn present_layers(");
     let guard = present.find("return Ok(FrameOutcome::without_receipts(outcome));").unwrap();
     let store = present.find("self.last_recolor = recolor;").expect("the record is stored");
-    let finish = present.find("self.finish_successful_frame(plan,").unwrap();
+    let finish = present.find("self.finish_successful_frame(").unwrap();
     assert!(guard < store && store < finish);
     assert_eq!(source.matches("self.last_recolor = ").count(), 1, "one writer");
     assert!(function_body(&source, "pub fn emit_pane_scrollbar(")
@@ -5764,7 +5764,8 @@ fn the_injected_glyph_precedes_every_cursor_recolor_and_damage_is_read_beside_th
     assert!(scrollbar < inject && inject < selection && inject < first_recolor);
     let finish = source.split_once("    fn finish_successful_frame(").expect("finish exists").1;
     let readout = finish.find("self.presented_damage.record(").expect("damage readout");
-    let key = finish.find("self.last_frame_key = Some(plan.key);").expect("key recorded");
+    // The key is kept by the settlement seam, which finishing calls right after the readout.
+    let key = finish.find("settle_retained_frame(").expect("key settled");
     assert!(readout < key, "the readout is written beside the frame key");
 }
 
@@ -5885,24 +5886,34 @@ fn both_row_loops_emit_by_the_planned_bitset() {
     }
 }
 
-/// Ink records describe presented pixels only: assembly opens a fresh stage before the row loops,
-/// only `finish_successful_frame` (reached only after `Presented`) commits them and counts a
-/// partial frame, and the commit precedes the frame key it belongs to.
+/// Ink records describe presented pixels only. Assembly opens a fresh stage before the row loops;
+/// the one commit, the one partial-frame count and the key are in the settlement seam's
+/// `Presented` arm; a presented frame reaches it through `finish_successful_frame`, after the
+/// `Presented` guard, and every other presenter outcome and the atlas retry settle through the
+/// same seam. What each outcome settles is asserted by behaviour in
+/// `every_frame_outcome_settles_records_receipts_counts_and_the_key`.
 #[test]
 fn ink_records_and_partial_frames_commit_only_on_a_presented_frame() {
     let source = include_str!("core.rs").replace("\r\n", "\n");
-    assert_eq!(source.matches("self.row_ink.commit(").count(), 1, "one commit site");
+    assert_eq!(source.matches("row_ink.commit(").count(), 1, "one commit site");
     assert_eq!(source.matches("note_partial_frame(").count(), 1, "one partial-frame count");
+    let settle = source.split_once("fn settle_retained_frame(").expect("settlement seam").1;
+    let presented = settle.find("(PresentOutcome::Presented, Some(plan)) => {").expect("arm");
+    let commit = settle.find("row_ink.commit(").expect("commit");
+    let key = settle.find("*last_frame_key = Some(plan.key);").expect("key");
+    assert!(presented < commit && commit < key);
+    assert_eq!(
+        source.matches("settle_retained_frame(\n").count(),
+        4,
+        "seam, finish, unpresented, retry"
+    );
     let finish = method_body(&source, "    fn finish_successful_frame(");
-    let commit = finish.find("self.row_ink.commit(").expect("records commit when finishing");
-    let counted =
-        finish.find("note_partial_frame(plan.mode == RenderMode::Partial)").expect("count");
-    let key = finish.find("self.last_frame_key = Some(plan.key);").expect("key");
-    assert!(commit < key && counted < key);
+    assert!(finish.contains("&PresentOutcome::Presented,"), "finishing settles as presented");
     let present = method_body(&source, "    fn present_layers(");
     let guard = present.find("return Ok(FrameOutcome::without_receipts(outcome));").unwrap();
-    let finish_call = present.find("self.finish_successful_frame(plan,").unwrap();
-    assert!(guard < finish_call, "only a presented frame finishes");
+    let unpresented = present.find("settle_retained_frame(").unwrap();
+    let finish_call = present.find("self.finish_successful_frame(").unwrap();
+    assert!(unpresented < guard && guard < finish_call, "only a presented frame finishes");
     let assemble = method_body(&source, "    fn assemble_frame(");
     let begin = assemble.find("self.row_ink.begin_frame();").expect("a fresh stage per assembly");
     let glyph_loop = assemble.find("for (r, _) in pv.planned.rows() {").unwrap();
@@ -6074,4 +6085,94 @@ fn an_ordinary_frame_records_one_assembly_sample_and_no_fallback() {
     assert_eq!(stats.partial_fallbacks, 0);
     assert_eq!(stats.assembly_buckets, [0, 1, 0, 0, 0, 0, 0]);
     assert_eq!(stats.assembly_sum_us, 40);
+}
+
+/// A frame's outcome settles what it leaves retained, through the one production seam. Starting
+/// from committed records and a staged replacement of a partial plan: `Presented` commits the
+/// replacement, counts one partial frame, keeps the plan's key and returns its receipts, and the
+/// next edit plans `Partial` against that key. Timeout, `AtlasRetry` and `RenderingUnavailable`
+/// keep the committed records, discard the staged one, count nothing, return no receipt and clear
+/// the key, so the retry plans a `Full` first frame.
+#[test]
+fn every_frame_outcome_settles_records_receipts_counts_and_the_key() {
+    use crate::device_errors::{DeviceGate, DeviceState};
+    use crate::row_ink::{RowInk, RowInkTable};
+    use sonicterm_render_model::{AckReceipt, AckRows};
+    let strip = |slot: i32| PixelRect { x: 0, y: 2 + 20 * slot, w: 100, h: 20 };
+    let records = || (0..4).map(|slot| Some(strip(slot))).collect::<Vec<_>>();
+    let first =
+        FramePlan::build(fallback_facts(), [fallback_pane(1, Vec::new(), Vec::new())], None);
+    let edit = |key: Option<&FrameKey>, revision| {
+        FramePlan::build(fallback_facts(), [fallback_pane(revision, vec![1], records())], key)
+    };
+    let replacement = PixelRect { x: 0, y: 12, w: 100, h: 40 };
+    let retained = || {
+        let mut table = RowInkTable::default();
+        table.begin_frame();
+        for slot in 0..4u16 {
+            let rect = strip(i32::from(slot));
+            table.stage(7, slot, RowInk { rect, abs_row: u64::from(slot), content_seq: Some(1) });
+        }
+        table.commit(&[(7, 4)]);
+        table.begin_frame();
+        table.stage(7, 1, RowInk { rect: replacement, abs_row: 1, content_seq: Some(2) });
+        table
+    };
+    let receipts =
+        || vec![AckReceipt::of(0, 7, &Grid::new(8, 4), AckRows::Rows([1].into_iter().collect()))];
+    let stopped = || {
+        PresentOutcome::RenderingUnavailable(SuspendedContext {
+            generation: 1,
+            gate: DeviceGate { state: DeviceState::Unusable, destroy_requested: false },
+            reports_stop: true,
+        })
+    };
+    let unpresented: [(&str, fn() -> PresentOutcome); 2] = [
+        ("timeout", || PresentOutcome::SurfaceRetry(SurfaceRetryReason::Timeout)),
+        ("atlas retry", || PresentOutcome::AtlasRetry),
+    ];
+    let mut cases: Vec<(&str, PresentOutcome)> =
+        unpresented.iter().map(|(name, outcome)| (*name, outcome())).collect();
+    cases.push(("rendering unavailable", stopped()));
+    for (name, outcome) in cases {
+        let plan = edit(Some(&first.key), 2);
+        assert_eq!(plan.mode, RenderMode::Partial, "{name}: the failing frame is partial");
+        let mut key = Some(first.key.clone());
+        let mut table = retained();
+        let sink = crate::frame_stats::FrameStatsSink::default();
+        let settled = {
+            let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+            settle_retained_frame(&mut key, &mut table, &outcome, None, receipts())
+        };
+        assert!(settled.is_empty(), "{name}: no receipt");
+        assert_eq!(key, None, "{name}: the key is cleared");
+        assert_eq!(sink.snapshot().partial_frames, 0, "{name}: nothing presented");
+        assert_eq!(table.committed_rect(7, 1), Some(strip(1)), "{name}: records unchanged");
+        table.commit(&[(7, 4)]);
+        assert_eq!(table.committed_rect(7, 1), Some(strip(1)), "{name}: the stage is discarded");
+        let retry = edit(key.as_ref(), 2);
+        assert!(retry.first_frame && retry.mode == RenderMode::Full, "{name}: the retry is Full");
+    }
+
+    let plan = edit(Some(&first.key), 2);
+    let plan_key = plan.key.clone();
+    let mut key = Some(first.key.clone());
+    let mut table = retained();
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let settled = {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        settle_retained_frame(
+            &mut key,
+            &mut table,
+            &PresentOutcome::Presented,
+            Some(plan),
+            receipts(),
+        )
+    };
+    assert_eq!(settled, receipts(), "a presented frame returns its receipts");
+    assert_eq!(key.as_ref(), Some(&plan_key), "the presented plan's key is kept");
+    assert_eq!(sink.snapshot().partial_frames, 1);
+    assert_eq!(table.committed_rect(7, 1), Some(replacement), "the replacement commits");
+    let next = edit(key.as_ref(), 3);
+    assert!(!next.first_frame && next.mode == RenderMode::Partial, "the next edit is partial");
 }
