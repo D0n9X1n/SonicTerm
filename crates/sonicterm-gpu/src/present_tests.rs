@@ -456,3 +456,19 @@ fn backend_occlusion_fault_seam_cannot_bypass_device_gate_or_touch_native_surfac
     assert!(render
         .contains("#[cfg(target_os=\"macos\")]ifstd::mem::take(&mutself.fault_surface_occluded)"));
 }
+
+/// Neither presenter reads a grid: both compose only the owned batches, so the frame's source can be
+/// released before either runs.
+#[test]
+fn presenters_read_no_grid() {
+    let source = include_str!("present.rs").replace("\r\n", "\n");
+    for name in ["fn present_software_frame(", "fn present_wgpu_frame("] {
+        let body = source.split_once(name).unwrap_or_else(|| panic!("missing {name}")).1;
+        let end = ["\n    pub(super) fn ", "\n    fn ", "\n}\n"]
+            .iter()
+            .filter_map(|next| body.find(next))
+            .min()
+            .unwrap_or(body.len());
+        assert!(!body[..end].contains("grid"), "{name} reads a grid");
+    }
+}

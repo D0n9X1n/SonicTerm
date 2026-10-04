@@ -765,3 +765,30 @@ fn live_row_to_slot_maps_live_rows_into_the_viewport() {
         );
     }
 }
+
+/// A pane whose only change is a newer dirty generation is never the unchanged key, so unacknowledged
+/// dirt cannot take the shortcut. With a dirty row inside the clipped surface it plans `Full` with
+/// damage on both paths; with dirt only outside it, the existing no-drawable-damage `Noop` is kept.
+#[test]
+fn a_newer_dirty_generation_never_takes_the_unchanged_shortcut() {
+    for degraded in [false, true] {
+        let first = FramePlan::build(facts(degraded), [live_pane(7, 1)], None);
+        let mut marked = live_pane(7, 1);
+        marked.dirty_generation = 1;
+        let same_key = FramePlan::build(facts(degraded), [marked.clone()], Some(&first.key));
+        assert!(!same_key.unchanged, "degraded={degraded}");
+        marked.dirty_rows = vec![1];
+        let drawable = FramePlan::build(facts(degraded), [marked], Some(&first.key));
+        assert_eq!(drawable.mode, RenderMode::Full, "degraded={degraded}");
+        assert!(drawable.damage.h > 0, "the damage covers the dirty row");
+
+        let scrolled = FramePlan::build(tall_facts(degraded), [scrolled_back_pane()], None);
+        let mut offscreen = scrolled_back_pane();
+        offscreen.dirty_generation = 1;
+        offscreen.dirty_rows = vec![22];
+        let plan = FramePlan::build(tall_facts(degraded), [offscreen], Some(&scrolled.key));
+        assert!(!plan.unchanged);
+        assert_eq!(plan.mode, RenderMode::Noop, "degraded={degraded}");
+        assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 0, h: 0 });
+    }
+}

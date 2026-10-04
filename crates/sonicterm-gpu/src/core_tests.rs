@@ -5088,3 +5088,74 @@ fn a_real_space_passes_through_the_atlas_and_emission_without_tofu() {
     assert!(tofu.is_empty(), "the space draws no tofu box");
     assert!(missing.is_empty(), "nothing is reported missing");
 }
+
+/// The compatibility wrapper's acknowledgement applies the four-identity rule through the borrowed
+/// grids: a subset receipt clears only its rows, a receipt naming another pane or taken before a later
+/// mark clears nothing, and an `All` receipt with matching identities clears every row.
+#[test]
+fn borrowed_acknowledgement_clears_only_matching_receipts_and_their_rows() {
+    use sonicterm_render_model::{AckReceipt, AckRows, CursorStyle, PaneRender};
+    let mut grid = Grid::new(8, 3);
+    grid.mark_all_dirty();
+    let subset = AckReceipt::of(0, 7, &grid, AckRows::Rows([1].into_iter().collect()));
+    let other = AckReceipt { pane_id: 8, ..AckReceipt::of(0, 7, &grid, AckRows::All) };
+    let mut panes = [PaneRender {
+        id: 7,
+        rect_px: PixelRect { x: 0, y: 0, w: 80, h: 60 },
+        grid: &mut grid,
+        viewport_top_abs: None,
+        is_active: true,
+        cursor_style: CursorStyle::default(),
+        is_broadcast_participant: false,
+        scrollbar_alpha: 0.0,
+        inline_images: Vec::new(),
+    }];
+    assert_eq!(acknowledge_receipts(&[other], &mut panes), 0, "another pane's receipt");
+    assert_eq!(panes[0].grid.dirty_count(), 3);
+    assert_eq!(acknowledge_receipts(std::slice::from_ref(&subset), &mut panes), 1);
+    assert_eq!(panes[0].grid.dirty_rows().collect::<Vec<_>>(), [0, 2]);
+    panes[0].grid.mark_all_dirty();
+    assert_eq!(acknowledge_receipts(&[subset], &mut panes), 0, "a later mark keeps all dirt");
+    assert_eq!(panes[0].grid.dirty_count(), 3);
+    let all = AckReceipt::of(0, 7, &*panes[0].grid, AckRows::All);
+    assert_eq!(acknowledge_receipts(&[all], &mut panes), 1);
+    assert_eq!(panes[0].grid.dirty_count(), 0);
+}
+
+/// One call assembles inside `lend` and presents only after it returns: no public split API exists,
+/// `Assembled` is private and borrows nothing, and assembly decides the empty and stopped exits
+/// first, in their existing order, without reaching the device or a presenter.
+#[test]
+fn render_releasing_lends_once_and_presents_after_release() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    for split in ["pub fn assemble", "present_assembled", "AssembledFrame", "pub enum Assembled"] {
+        assert!(!source.contains(split), "a split API remains: {split}");
+    }
+    assert!(source.contains("\nenum Assembled {\n"), "Assembled is private and has no lifetime");
+    let call = source.split_once("    pub fn render_releasing(").unwrap().1;
+    let call = call.split_once("\n    }\n").unwrap().0;
+    assert_eq!(call.matches("source.lend(").count(), 1);
+    let lend = call.find("source.lend(").unwrap();
+    for after in [
+        "self.present_layers(",
+        "self.prepare_cached_present()",
+        "self.reset_glyph_atlas_after_invalidation(",
+        "self.rendering_unavailable()",
+    ] {
+        assert!(call.find(after).is_some_and(|at| at > lend), "{after} runs after release");
+    }
+    let assemble = source.split_once("    fn assemble_frame(").unwrap().1;
+    let assemble = assemble.split_once("    /// Hand assembled batches").unwrap().0;
+    let empty = assemble.find("return Ok(Assembled::NoPanes);").unwrap();
+    let stopped = assemble.find("return Ok(Assembled::Unavailable);").unwrap();
+    let plan = assemble.find("FramePlan::build(").unwrap();
+    assert!(empty < stopped && stopped < plan, "typed exits come first, in their order");
+    for presenting in [
+        "present_frame(",
+        "prepare_cached_present(",
+        "enter_gpu_work(",
+        "effective_subpixel_aa_mode(",
+    ] {
+        assert!(!assemble.contains(presenting), "assembly calls {presenting}");
+    }
+}
