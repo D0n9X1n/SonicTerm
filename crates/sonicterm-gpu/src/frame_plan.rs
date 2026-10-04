@@ -814,7 +814,7 @@ fn classify_frame(previous: &FrameKey, key: &FrameKey) -> ChangeClass {
         change.scrollbar |= pane_change.scrollbar;
     }
     if previous != key && (previous.window.overlay_active || key.window.overlay_active) {
-        // When: either key has an active overlay and the key changed at all, repaint the surface.
+        // Either key's overlay may have moved with the live cursor, so the whole surface repaints.
         change.full = true;
     }
     change
