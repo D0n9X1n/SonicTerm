@@ -2410,17 +2410,46 @@ fn method_body<'source>(source: &'source str, signature: &str) -> &'source str {
     &source[start..end]
 }
 
-/// Main and child completions share one writer of both pacing clocks.
+/// The child adapter completes through `finish_window_redraw`, the seam the behavioural tests drive
+/// for both roles, passing the renderer's own settlement and instant; it writes no clock, settles no
+/// cause and picks no software policy itself, so a wrong argument cannot hide in a second writer.
 #[test]
 fn main_and_child_completions_share_one_clock_writer() {
     let child_source = include_str!("child_window_redraw.rs").replace("\r\n", "\n");
+    let main_source = include_str!("window_event.rs").replace("\r\n", "\n");
     let redraw_source = include_str!("redraw.rs").replace("\r\n", "\n");
-    assert!(!child_source.contains("last_render ="), "the child writes no clock inline");
-    assert!(child_source.contains(".complete_attempt("), "the child completes through the helper");
+    let child_call = "self.finish_window_redraw(win_id, snapshot, settlement, at);";
+    assert_eq!(child_source.matches("finish_window_redraw(").count(), 1, "one child completion");
     assert!(
-        method_body(&redraw_source, "pub(super) fn finish_window_redraw(")
-            .contains(".complete_attempt("),
-        "the main completion uses the same helper"
+        child_source.contains(child_call),
+        "the child passes its own snapshot, outcome and instant"
+    );
+    assert!(
+        child_source.contains("let settlement = super::redraw::FrameSettlement::of(&outcome);"),
+        "the child's outcome is the renderer's"
+    );
+    assert!(
+        child_source.contains("frame_completion = Some((settlement, Instant::now()));"),
+        "the instant is taken after the renderer call"
+    );
+    for inline in [
+        ".complete_attempt(",
+        "last_render =",
+        "stream_clock",
+        ".settle(",
+        "software_render_degrade",
+    ] {
+        assert!(!child_source.contains(inline), "the child adapter must not use {inline} itself");
+    }
+    assert_eq!(
+        main_source.matches("self.finish_window_redraw(win_id, snapshot, outcome, at);").count(),
+        1
+    );
+    assert!(
+        method_body(&redraw_source, "pub(super) fn finish_window_redraw(").contains(
+            "window.complete_attempt(snapshot, outcome, at, self.software_render_degrade);"
+        ),
+        "completion reads the App's software policy, never a caller's"
     );
 }
 
@@ -2505,19 +2534,18 @@ fn unchanged_non_input_passes_stay_one_per_period() {
     }
 }
 
-/// Every outcome other than a settled hardware keypress with no retry moves the streaming clock.
+/// Under both software policies and for both window roles, every outcome moves both clocks and
+/// counts no exemption, except the one exempt case: a settled hardware keypress with no retry floor.
 #[test]
 fn outcomes_that_advance_the_streaming_clock() {
-    let mut cases = vec![
-        (RedrawCause::Input, FrameSettlement::Presented, false, false),
-        (RedrawCause::Input, FrameSettlement::Cached, false, false),
-        (RedrawCause::Input, FrameSettlement::Retry(RedrawCause::AtlasRetry), false, false),
-        (RedrawCause::Input, FrameSettlement::Failed, false, false),
-        (RedrawCause::Input, FrameSettlement::Stopped(3), false, false),
-        // A settled attempt without a new input generation.
-        (RedrawCause::Expose, FrameSettlement::Settled, false, false),
-        // A settled keypress while a contention floor is armed.
-        (RedrawCause::Input, FrameSettlement::Settled, true, false),
+    let mut outcomes = vec![
+        FrameSettlement::Presented,
+        FrameSettlement::Cached,
+        FrameSettlement::Settled,
+        FrameSettlement::Retry(RedrawCause::AtlasRetry),
+        FrameSettlement::Retry(RedrawCause::SurfaceRetry),
+        FrameSettlement::Failed,
+        FrameSettlement::Stopped(3),
     ];
     for reason in [
         SurfaceRetryReason::Timeout,
@@ -2526,33 +2554,46 @@ fn outcomes_that_advance_the_streaming_clock() {
         SurfaceRetryReason::Suboptimal,
         SurfaceRetryReason::SurfaceLost,
     ] {
-        cases.push((RedrawCause::Input, FrameSettlement::SurfaceRetry(reason), false, false));
+        outcomes.push(FrameSettlement::SurfaceRetry(reason));
     }
-    // Every outcome on the software path.
-    for outcome in [FrameSettlement::Settled, FrameSettlement::Cached, FrameSettlement::Presented] {
-        cases.push((RedrawCause::Input, outcome, false, true));
-    }
-    for (cause, outcome, retry_armed, software) in cases {
-        let (mut app, main, _) = counting_owners();
-        app.software_render_degrade = software;
-        let now = Instant::now() + Duration::from_secs(1);
-        backdate_clocks(&mut app, main, now - Duration::from_secs(1));
-        if retry_armed {
-            app.windows.get_mut(&main).unwrap().retry_not_before =
-                Some(now + Duration::from_secs(1));
+    let mut cases = Vec::new();
+    for software in [false, true] {
+        for outcome in &outcomes {
+            // The settled hardware keypress is the exempt case; its own tests cover it.
+            if *outcome != FrameSettlement::Settled || software {
+                cases.push((RedrawCause::Input, *outcome, false, software));
+            }
         }
-        app.mark_window_redraw(main, cause);
-        let snapshot = app.snapshot_window_redraw_at(main, now).unwrap();
-        app.finish_window_redraw(main, &snapshot, outcome, now);
-        let window = &app.windows[&main];
-        let case = format!("{cause:?} {outcome:?} retry={retry_armed} software={software}");
-        assert_eq!(window.last_render, now, "{case}");
-        assert_eq!(window.stream_clock, now, "{case}");
-        assert_eq!(
-            window.redraw.frame_counters.as_deref().unwrap().stream_clock_exempt,
-            0,
-            "{case}"
-        );
+        // A settled attempt without a new input generation, and a settled keypress under a contention floor.
+        cases.push((RedrawCause::Expose, FrameSettlement::Settled, false, software));
+        cases.push((RedrawCause::Input, FrameSettlement::Settled, true, software));
+    }
+    for child_owner in [false, true] {
+        for (cause, outcome, retry_armed, software) in cases.iter().copied() {
+            let (mut app, main, child) = counting_owners();
+            let owner = if child_owner { child } else { main };
+            app.software_render_degrade = software;
+            let now = Instant::now() + Duration::from_secs(1);
+            backdate_clocks(&mut app, owner, now - Duration::from_secs(1));
+            if retry_armed {
+                app.windows.get_mut(&owner).unwrap().retry_not_before =
+                    Some(now + Duration::from_secs(1));
+            }
+            app.mark_window_redraw(owner, cause);
+            let snapshot = app.snapshot_window_redraw_at(owner, now).unwrap();
+            app.finish_window_redraw(owner, &snapshot, outcome, now);
+            let window = &app.windows[&owner];
+            let case = format!(
+                "child={child_owner} {cause:?} {outcome:?} retry={retry_armed} software={software}"
+            );
+            assert_eq!(window.last_render, now, "{case}");
+            assert_eq!(window.stream_clock, now, "{case}");
+            assert_eq!(
+                window.redraw.frame_counters.as_deref().unwrap().stream_clock_exempt,
+                0,
+                "{case}"
+            );
+        }
     }
 }
 
