@@ -260,6 +260,7 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
             software_render_mode: SoftwareRenderMode::Force,
         },
         role: "font-fallback-frames",
+        glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
     };
     let mut renderer = match GpuRenderer::new(window.clone(), active, &theme, settings) {
         Ok(renderer) => renderer,

@@ -146,6 +146,7 @@ fn run(active: &ActiveEventLoop) -> Result<(), String> {
                 software_render_mode: SoftwareRenderMode::Force,
             },
             role: "background-output-test",
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         },
     )
     .map_err(|error| error.to_string())?;

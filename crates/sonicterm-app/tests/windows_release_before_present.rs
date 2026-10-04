@@ -124,6 +124,7 @@ fn fixture(active: &ActiveEventLoop, role: Role, software: bool) -> Result<Fixtu
                 software_render_mode: mode,
             },
             role: "release-before-present-test",
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         },
     );
     let mut renderer = match created {

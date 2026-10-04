@@ -747,3 +747,32 @@ fn frame(stack: &FontStack) {
     assert_eq!(blocking_shape_calls(&lf), vec!["fixture.rs:10 shape_text_with_style".to_owned()]);
     assert_eq!(blocking_shape_calls(&crlf), blocking_shape_calls(&lf));
 }
+
+/// Growth counts and growth-to-present times are recorded only inside a counting scope; a time at a
+/// millisecond bound lands in that bucket, a time past the last bound in the overflow, and the sum
+/// is exact in microseconds. A teardown note reaches the sink outside any scope.
+#[test]
+fn growth_counters_and_growth_to_present_buckets() {
+    let sink = FrameStatsSink::default();
+    note_glyph_atlas_growths(5);
+    record_growth_to_present_us(1_000);
+    assert_eq!(sink.snapshot(), FrameStats::ZERO, "no scope, nothing recorded");
+    {
+        let _counting = CollectGuard::enter(Some(&sink));
+        note_glyph_atlas_growths(2);
+        note_atlas_growth_abandoned();
+        for elapsed_us in [4_000, 4_001, 100_000, 100_001] {
+            record_growth_to_present_us(elapsed_us);
+        }
+    }
+    sink.note_teardown_growths(1, 1);
+    let stats = sink.snapshot();
+    assert_eq!((stats.glyph_atlas_growths, stats.atlas_growth_abandoned), (3, 2));
+    let mut expected = [0; GROWTH_TO_PRESENT_BUCKETS];
+    expected[0] = 1; // 4 ms is at the first bound
+    expected[1] = 1; // just past 4 ms
+    expected[8] = 1; // 100 ms is at the last bound
+    expected[9] = 1; // overflow
+    assert_eq!(stats.atlas_growth_to_present_buckets, expected);
+    assert_eq!(stats.atlas_growth_to_present_sum_us, 4_000 + 4_001 + 100_000 + 100_001);
+}

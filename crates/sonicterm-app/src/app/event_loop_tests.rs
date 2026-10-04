@@ -1201,6 +1201,7 @@ fn clear_shape_cache_clears_and_redraws_every_window_with_a_renderer() {
                 software_render_mode: SoftwareRenderMode::Force,
             },
             role: "clear-shape-cache-test",
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         };
         let renderer = GpuRenderer::new(window.clone(), active, &Theme::default(), settings)
             .map_err(|error| error.to_string())?;

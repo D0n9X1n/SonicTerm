@@ -85,6 +85,7 @@ impl ApplicationHandler for Churn {
                     software_render_mode: Default::default(),
                 },
                 role: "churn-probe",
+                glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
             };
 
             match GpuRenderer::new(window.clone(), active, &theme, settings) {

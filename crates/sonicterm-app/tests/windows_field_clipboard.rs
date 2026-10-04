@@ -1057,6 +1057,7 @@ fn renderer(
             software_render_mode: SoftwareRenderMode::Force,
         },
         role,
+        glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
     };
     let mut renderer = match shared {
         Some(app) => GpuRenderer::new_with_shared_context(

@@ -215,6 +215,7 @@ fn run_readonly_native_matrix(event_loop: &winit::event_loop::ActiveEventLoop) {
                 software_render_mode: SoftwareRenderMode::Force,
             },
             role: "readonly-input-test",
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         },
     )
     .unwrap();

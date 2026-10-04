@@ -1160,6 +1160,7 @@ fn run_stopped_spare_tear_out(event_loop: &winit::event_loop::ActiveEventLoop) {
             software_render_mode: SoftwareRenderMode::Force,
         },
         role: "stopped-spare-tear-out-test",
+        glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
     };
     let mut renderer =
         GpuRenderer::new(window.clone(), event_loop, &app.theme, settings).expect("spare renderer");

@@ -107,6 +107,7 @@ fn fixture(
                 software_render_mode: mode,
             },
             role,
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         },
     )
     .map_err(|error| error.to_string())?;

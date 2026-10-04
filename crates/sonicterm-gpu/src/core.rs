@@ -468,6 +468,36 @@ pub struct RendererSettings<'a> {
     pub appearance: SurfaceAppearance,
     /// Stable renderer role used by memory and timing diagnostics.
     pub role: &'static str,
+    /// Size the renderer's glyph atlas starts at before it grows on demand.
+    pub glyph_atlas_start: GlyphAtlasStart,
+}
+
+/// Which start size a renderer's glyph atlas takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlyphAtlasStart {
+    /// The measured start size for the window's scale factor.
+    #[default]
+    Normal,
+    /// The 256-pixel floor, for warm-pool renderers that may never draw.
+    Minimum,
+}
+
+/// Square start dimension of a glyph atlas for `scale_factor` and `start`.
+///
+/// `Normal` takes the scale-1 start up to 1.5 and the scale-2 start above it; `Minimum` is the
+/// floor. A later scale change resets the atlas in place at its current size and never shrinks it.
+#[must_use]
+pub fn start_dim(scale_factor: f32, start: GlyphAtlasStart) -> u32 {
+    let GlyphAtlasStart::Normal = start else {
+        // When: start is Minimum the renderer may never draw, so its atlas takes the 256 floor.
+        return sonicterm_text::glyph_atlas::MIN_ATLAS_DIM;
+    };
+    if scale_factor <= 1.5 {
+        sonicterm_text::glyph_atlas::START_ATLAS_DIM_1X
+    } else {
+        // When: scale_factor is above 1.5 the window rasterizes at scale 2, so it takes that start.
+        sonicterm_text::glyph_atlas::START_ATLAS_DIM_2X
+    }
 }
 
 fn cursor_color_from_theme(theme: &Theme) -> [f32; 4] {
@@ -1919,6 +1949,10 @@ pub struct GpuRenderer {
     /// eviction disabled until one frame presents successfully, bounding
     /// retries when the visible glyph working set exceeds atlas capacity.
     glyph_atlas_retry_without_eviction: bool,
+    /// Glyph atlas growths already added to the frame counters.
+    counted_growths: u64,
+    /// Start of the first frame that grew the atlas since the last successful present.
+    growth_pending_since: Option<Instant>,
 
     font_family: String,
     font_dirs: Vec<PathBuf>,
@@ -2112,12 +2146,34 @@ struct GlyphContentStamp {
     device_generation: u64,
     allocation_generation: u64,
     content_identity: u64,
+    /// The atlas's monotonic growth count, so a growth is told apart from a reset or eviction.
+    growths: u64,
 }
 
 impl GlyphContentStamp {
     fn capture(device_generation: u64, allocation_generation: u64, atlas: &GlyphAtlas) -> Self {
-        Self { device_generation, allocation_generation, content_identity: atlas.identity() }
+        Self {
+            device_generation,
+            allocation_generation,
+            content_identity: atlas.identity(),
+            growths: atlas.growths(),
+        }
     }
+}
+
+/// Whether the atlas changed during a frame only by growing: same device, same allocation, no
+/// eviction since `frame_evictions`, and a higher growth count. Growth moves no tile, so the
+/// frame retries without resetting the atlas or disabling eviction.
+fn growth_only_change(
+    before: GlyphContentStamp,
+    after: GlyphContentStamp,
+    frame_evictions: u64,
+    current_evictions: u64,
+) -> bool {
+    before.device_generation == after.device_generation
+        && before.allocation_generation == after.allocation_generation
+        && frame_evictions == current_evictions
+        && after.growths > before.growths
 }
 
 struct PreeditGlyphCache {
@@ -2576,6 +2632,7 @@ impl GpuRenderer {
             padding,
             appearance,
             role,
+            glyph_atlas_start,
         } = settings;
         let font_weight_scale = effective_font_weight_scale(font_weight_scale);
         let [padding_left, padding_right, padding_top, padding_bottom] = padding;
@@ -2751,7 +2808,12 @@ impl GpuRenderer {
         let frame_blitter = wgpu::util::TextureBlitter::new(&device, format);
         InitTiming::finish(timing, InitOutcome::Returned);
         let timing = InitTiming::begin("glyph_atlas");
-        let glyph_atlas = GlyphAtlas::default_size();
+        // The glyph atlas is the only growable atlas: it starts at its measured size and doubles
+        // up to ATLAS_DIM before it evicts.
+        let glyph_atlas = GlyphAtlas::growable(
+            start_dim(sf, glyph_atlas_start),
+            sonicterm_text::glyph_atlas::ATLAS_DIM,
+        );
         InitTiming::finish(timing, InitOutcome::Returned);
         let timing = InitTiming::begin("image_atlas");
         let image_atlas = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
@@ -2902,6 +2964,8 @@ impl GpuRenderer {
             image_upload_rebuild_pending: false,
             inline_media_absent_since: None,
             glyph_atlas_retry_without_eviction: false,
+            counted_growths: 0,
+            growth_pending_since: None,
             font_family: font_family.to_string(),
             font_dirs: font_dirs.to_vec(),
             font_size,
@@ -4929,6 +4993,10 @@ impl GpuRenderer {
     ) -> FrameOutcome {
         let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
         self.debug_assert_prepared(fonts);
+        let frame_start = Instant::now();
+        // A growth outside assembly, or one a reset retry left behind, resizes the texture here,
+        // before lending, so presentation never syncs a grown atlas into a smaller texture.
+        self.rebuild_glyph_upload_if_needed();
         // Read before lending, so assembly itself never reaches the device.
         let subpixel_aa = self.effective_subpixel_aa_mode();
         let accepts_gpu_work = self.device_errors.accepts_gpu_work();
@@ -4953,6 +5021,8 @@ impl GpuRenderer {
         });
         // The source is gone here: every arm below runs with no parser guard held.
         self.flush_image_upload_rebuild();
+        self.count_glyph_atlas_growths(frame_start);
+        self.abandon_growth_timing_if_device_stopped();
         let assembled = match assembled {
             Ok(assembled) => assembled,
             Err(error) => {
@@ -5004,8 +5074,15 @@ impl GpuRenderer {
                 PresentOutcome::Skipped(SkipReason::Noop)
             }
             Assembled::AtlasRetry { stamp, evictions } => {
-                // The atlas changed during assembly: discard its stale UVs; the reset requests its own redraw.
-                self.reset_glyph_atlas_after_invalidation(stamp, evictions);
+                // The atlas changed during assembly, so its UVs are stale; each path requests a redraw.
+                let after = self.glyph_atlas_stamp();
+                if growth_only_change(stamp, after, evictions, self.glyph_atlas.evictions()) {
+                    self.retry_after_glyph_atlas_growth();
+                } else {
+                    // When: growth_only_change is false the atlas was evicted, reset or replaced,
+                    // so the frame takes the reset path with eviction disabled for one retry.
+                    self.reset_glyph_atlas_after_invalidation(stamp, evictions);
+                }
                 PresentOutcome::AtlasRetry
             }
             Assembled::Layers(layers) => {
@@ -7662,6 +7739,7 @@ impl GpuRenderer {
             .settle(field_candidates, matches!(outcome, PresentOutcome::Presented));
         if !matches!(outcome, PresentOutcome::Presented) {
             // When: `matches!` finds any outcome but `Presented`, no receipt is issued, so its dirty rows stay.
+            self.abandon_growth_timing_if_device_stopped();
             return Ok(FrameOutcome::without_receipts(outcome));
         }
         self.finish_successful_frame(plan, missing_chars, gpu_timing);
@@ -7722,6 +7800,10 @@ impl GpuRenderer {
             crate::frame_stats::presents_software(self.software_render_degrade);
         crate::frame_stats::note_frame(software_presenter);
         self.successful_frame_count = self.successful_frame_count.saturating_add(1);
+        // The successful-present seam both presenters share closes any pending growth timing.
+        if let Some(pending_since) = self.growth_pending_since.take() {
+            crate::frame_stats::note_atlas_growth_presented(pending_since);
+        }
         self.finish_glyph_atlas_retry();
         self.last_missing_chars = missing_chars_this_frame;
         self.last_frame_key = Some(plan.key);
@@ -8482,10 +8564,17 @@ impl GpuRenderer {
 
 // Lifecycle: `GpuRenderer` releases its `LIVE_RENDERERS` slot here — the sole
 // decrement, paired with the increment in `new_async`.
+// Lifecycle: teardown counts any glyph atlas growth not yet counted and abandons a pending
+// growth timing, since no later frame can present it.
 impl Drop for GpuRenderer {
     // Ordering: `LIVE_RENDERERS.fetch_sub(1, Ordering::AcqRel)`, pairing with
     // the `Ordering::AcqRel` increment in `new_async`. Publishes no payload.
     fn drop(&mut self) {
+        let growths = self.glyph_atlas.growths().saturating_sub(self.counted_growths);
+        let abandoned = u64::from(self.growth_pending_since.take().is_some() || growths > 0);
+        if let Some(sink) = &self.frame_sink {
+            sink.note_teardown_growths(growths, abandoned);
+        }
         // Paired with the increment in `new`. Together they make the live
         // count return to its starting value across balanced open/close
         // churn, and stay above it when a renderer survives.

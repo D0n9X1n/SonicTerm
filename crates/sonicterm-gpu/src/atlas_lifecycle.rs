@@ -56,6 +56,51 @@ impl GpuRenderer {
         )
     }
 
+    /// Retry a frame whose assembly only grew the glyph atlas.
+    ///
+    /// Growth moved no tile, so the atlas is kept as it is: no reset, eviction stays enabled. The
+    /// UV caches are dropped because their UVs were normalized to the old size, the GPU texture
+    /// is recreated at the new size (the grown atlas already queued every resident tile for one
+    /// re-upload), and one redraw presents the frame again.
+    pub(super) fn retry_after_glyph_atlas_growth(&mut self) {
+        self.row_glyph_cache.invalidate_all();
+        self.preedit_glyph_cache = None;
+        self.rebuild_glyph_upload_if_needed();
+        self.last_frame_key = None;
+        tracing::debug!(
+            target: "sonic::glyph_atlas",
+            width = self.glyph_atlas.width(),
+            growths = self.glyph_atlas.growths(),
+            "glyph atlas grew during frame assembly; retrying without a reset"
+        );
+        self.request_window_redraw();
+    }
+
+    /// Add growths since the last check to the frame counters and start their timing at
+    /// `frame_start`, unless an earlier growth's timing is still pending.
+    pub(super) fn count_glyph_atlas_growths(&mut self, frame_start: std::time::Instant) {
+        let growths = self.glyph_atlas.growths().saturating_sub(self.counted_growths);
+        if growths == 0 {
+            // When: growths is zero the atlas kept its size since the last check; nothing to count.
+            return;
+        }
+        self.counted_growths = self.glyph_atlas.growths();
+        crate::frame_stats::note_glyph_atlas_growths(growths);
+        self.growth_pending_since.get_or_insert(frame_start);
+    }
+
+    /// Clear a pending growth timing once the device stops, counting it abandoned: no frame on
+    /// this device will present it. A reset in place keeps the device, so it abandons nothing.
+    pub(super) fn abandon_growth_timing_if_device_stopped(&mut self) {
+        if self.device_errors.accepts_gpu_work() {
+            // When: accepts_gpu_work is true a later frame can still present the grown atlas.
+            return;
+        }
+        if self.growth_pending_since.take().is_some() {
+            crate::frame_stats::note_atlas_growth_abandoned();
+        }
+    }
+
     fn mark_glyph_atlas_replaced(&mut self) {
         self.glyph_atlas_generation = self.glyph_atlas_generation.wrapping_add(1);
         self.preedit_glyph_cache = None;

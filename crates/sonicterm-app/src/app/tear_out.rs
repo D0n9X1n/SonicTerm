@@ -333,6 +333,7 @@ impl App {
                 software_render_mode: self.config.appearance.software_render_mode,
             },
             role,
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         }
     }
 

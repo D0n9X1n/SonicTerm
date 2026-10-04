@@ -895,13 +895,18 @@ fn preedit_cache_matches_only_on_identical_inputs_and_atlas_stamp() {
             device_generation: 7,
             allocation_generation: 1,
             content_identity: 7,
+            growths: 0,
         },
         glyphs: Vec::new(),
         missing_boxes: Vec::new(),
     };
     // Exact match.
-    let epoch =
-        GlyphContentStamp { device_generation: 7, allocation_generation: 1, content_identity: 7 };
+    let epoch = GlyphContentStamp {
+        device_generation: 7,
+        allocation_generation: 1,
+        content_identity: 7,
+        growths: 0,
+    };
     assert!(c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, epoch));
     // Any single field differing must miss.
     assert!(!c.matches("ni'ha", 14.0, 100.0, 50.0, 0xAABBCCFF, epoch)); // text grew
@@ -909,16 +914,24 @@ fn preedit_cache_matches_only_on_identical_inputs_and_atlas_stamp() {
     assert!(!c.matches("ni'hao", 14.0, 101.0, 50.0, 0xAABBCCFF, epoch)); // x (scroll)
     assert!(!c.matches("ni'hao", 14.0, 100.0, 51.0, 0xAABBCCFF, epoch)); // y
     assert!(!c.matches("ni'hao", 14.0, 100.0, 50.0, 0x11223344, epoch)); // color
-    let evicted_epoch =
-        GlyphContentStamp { device_generation: 7, allocation_generation: 1, content_identity: 8 };
+    let evicted_epoch = GlyphContentStamp {
+        device_generation: 7,
+        allocation_generation: 1,
+        content_identity: 8,
+        growths: 0,
+    };
     assert!(!c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, evicted_epoch));
 }
 
 #[test]
 fn preedit_cache_rejects_same_content_identity_after_atlas_replacement() {
     // Equal local content identities cannot validate UVs from another allocation.
-    let old_epoch =
-        GlyphContentStamp { device_generation: 7, allocation_generation: 3, content_identity: 0 };
+    let old_epoch = GlyphContentStamp {
+        device_generation: 7,
+        allocation_generation: 3,
+        content_identity: 0,
+        growths: 0,
+    };
     let c = PreeditGlyphCache {
         text: "ni'hao".to_string(),
         font_size: 14.0,
@@ -929,8 +942,12 @@ fn preedit_cache_rejects_same_content_identity_after_atlas_replacement() {
         glyphs: Vec::new(),
         missing_boxes: Vec::new(),
     };
-    let replacement_epoch =
-        GlyphContentStamp { device_generation: 7, allocation_generation: 4, content_identity: 0 };
+    let replacement_epoch = GlyphContentStamp {
+        device_generation: 7,
+        allocation_generation: 4,
+        content_identity: 0,
+        growths: 0,
+    };
 
     assert!(
         !c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, replacement_epoch),
@@ -5303,4 +5320,80 @@ fn an_empty_source_is_no_panes_and_is_dropped_before_the_call_returns() {
     });
     assert!(usable.is_ok());
     assert_eq!(assembled_panes, 2, "a usable device assembles the lent panes once");
+}
+
+/// A stamp at `allocation`, `identity` and `growths` on device generation 7.
+fn growth_stamp(allocation: u64, identity: u64, growths: u64) -> GlyphContentStamp {
+    GlyphContentStamp {
+        device_generation: 7,
+        allocation_generation: allocation,
+        content_identity: identity,
+        growths,
+    }
+}
+
+/// Only a change that grew the atlas, on the same device and allocation and with no eviction,
+/// takes the growth retry; an eviction, a reset or a device change takes the reset path.
+#[test]
+fn only_a_pure_growth_takes_the_growth_retry() {
+    let before = growth_stamp(1, 4, 0);
+    assert!(growth_only_change(before, growth_stamp(1, 5, 1), 3, 3), "growth alone");
+    assert!(growth_only_change(before, growth_stamp(1, 7, 2), 3, 3), "two growths in one frame");
+    assert!(!growth_only_change(before, growth_stamp(1, 6, 1), 3, 4), "growth with eviction");
+    assert!(!growth_only_change(before, growth_stamp(2, 6, 1), 3, 3), "a reset in place");
+    assert!(!growth_only_change(before, growth_stamp(1, 5, 0), 3, 4), "eviction alone");
+    let other_device = GlyphContentStamp { device_generation: 8, ..growth_stamp(1, 5, 1) };
+    assert!(!growth_only_change(before, other_device, 3, 3), "a new device");
+}
+
+/// `Normal` takes the scale-1 start up to 1.5 and the scale-2 start above it; `Minimum` is the floor.
+#[test]
+fn start_dim_follows_scale_and_start_kind() {
+    use sonicterm_text::glyph_atlas::{MIN_ATLAS_DIM, START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
+    for scale in [1.0, 1.25, 1.5] {
+        assert_eq!(start_dim(scale, GlyphAtlasStart::Normal), START_ATLAS_DIM_1X, "{scale}");
+    }
+    for scale in [1.75, 2.0, 3.0] {
+        assert_eq!(start_dim(scale, GlyphAtlasStart::Normal), START_ATLAS_DIM_2X, "{scale}");
+    }
+    for scale in [1.0, 2.0] {
+        assert_eq!(start_dim(scale, GlyphAtlasStart::Minimum), MIN_ATLAS_DIM);
+    }
+    assert_eq!(GlyphAtlasStart::default(), GlyphAtlasStart::Normal);
+}
+
+/// Only the renderer's glyph atlas is growable: `GlyphAtlas::growable(` appears once in production
+/// gpu sources, at the glyph atlas construction, and the image atlas keeps fixed constructors.
+#[test]
+fn only_the_glyph_atlas_is_built_growable() {
+    let sources = [
+        ("core.rs", include_str!("core.rs")),
+        ("atlas_lifecycle.rs", include_str!("atlas_lifecycle.rs")),
+        ("present.rs", include_str!("present.rs")),
+        ("atlas_upload.rs", include_str!("atlas_upload.rs")),
+        ("chrome_text.rs", include_str!("chrome_text.rs")),
+    ]
+    .map(|(name, text)| (name, text.replace("\r\n", "\n")));
+    let calls: Vec<&str> = sources
+        .iter()
+        .flat_map(|(name, text)| text.matches("GlyphAtlas::growable(").map(move |_| *name))
+        .collect();
+    assert_eq!(calls, ["core.rs"]);
+    let core = &sources[0].1;
+    let at = core.find("GlyphAtlas::growable(").unwrap();
+    assert!(
+        core[..at].trim_end().ends_with("let glyph_atlas ="),
+        "the call builds the glyph atlas"
+    );
+    let lifecycle = &sources[1].1;
+    assert!(lifecycle.contains("self.image_atlas = GlyphAtlas::default_size();"));
+}
+
+/// The promoted image atlas is the fixed 2048 atlas and never grows.
+#[test]
+fn the_promoted_image_atlas_is_fixed_at_the_maximum() {
+    let promoted = GlyphAtlas::default_size();
+    assert_eq!((promoted.width(), promoted.height()), (2048, 2048));
+    assert_eq!(promoted.growth_policy(), sonicterm_text::glyph_atlas::GrowthPolicy::Fixed);
+    assert_eq!(promoted.growths(), 0);
 }

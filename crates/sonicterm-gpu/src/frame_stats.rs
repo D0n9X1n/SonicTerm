@@ -51,7 +51,22 @@ pub struct FrameStats {
     pub assembly_buckets: [u64; ASSEMBLY_BUCKETS],
     /// The exact sum of assembly times, in microseconds.
     pub assembly_sum_us: u64,
+    /// Glyph atlas size doublings, counted once each at the end-of-frame check or at teardown.
+    pub glyph_atlas_growths: u64,
+    /// Growths whose next presented frame never came: device loss or teardown cleared them.
+    pub atlas_growth_abandoned: u64,
+    /// Growths by the time from the growing frame's start to the next presented frame, per
+    /// [`GROWTH_TO_PRESENT_BOUNDS_MS`] bucket, overflow last.
+    pub atlas_growth_to_present_buckets: [u64; GROWTH_TO_PRESENT_BUCKETS],
+    /// The exact sum of growth-to-present times, in microseconds.
+    pub atlas_growth_to_present_sum_us: u64,
 }
+
+/// Upper bounds of the `atlas_growth_to_present_ms` buckets in milliseconds, the App's frame bounds.
+pub const GROWTH_TO_PRESENT_BOUNDS_MS: [u64; 9] = [4, 7, 9, 12, 17, 25, 34, 50, 100];
+
+/// Buckets of `atlas_growth_to_present_ms`: one per bound and one for the overflow.
+pub const GROWTH_TO_PRESENT_BUCKETS: usize = GROWTH_TO_PRESENT_BOUNDS_MS.len() + 1;
 
 /// Upper bounds of the `assembly_us` buckets in microseconds, the App's microsecond bounds.
 pub const ASSEMBLY_BOUNDS_US: [u64; 6] = [10, 50, 100, 500, 1_000, 5_000];
@@ -79,6 +94,10 @@ impl FrameStats {
         font_fallback_applies: 0,
         assembly_buckets: [0; ASSEMBLY_BUCKETS],
         assembly_sum_us: 0,
+        glyph_atlas_growths: 0,
+        atlas_growth_abandoned: 0,
+        atlas_growth_to_present_buckets: [0; GROWTH_TO_PRESENT_BUCKETS],
+        atlas_growth_to_present_sum_us: 0,
     };
 
     /// Add `other`'s counts to these.
@@ -102,6 +121,16 @@ impl FrameStats {
             *slot += count;
         }
         self.assembly_sum_us += other.assembly_sum_us;
+        self.glyph_atlas_growths += other.glyph_atlas_growths;
+        self.atlas_growth_abandoned += other.atlas_growth_abandoned;
+        for (slot, count) in self
+            .atlas_growth_to_present_buckets
+            .iter_mut()
+            .zip(other.atlas_growth_to_present_buckets)
+        {
+            *slot += count;
+        }
+        self.atlas_growth_to_present_sum_us += other.atlas_growth_to_present_sum_us;
     }
 }
 
@@ -121,6 +150,13 @@ impl FrameStatsSink {
     /// Add one closed scope's notes.
     fn absorb(&self, other: &FrameStats) {
         self.stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner).add(other);
+    }
+
+    /// Count growths and abandoned growth timings found at teardown, outside any frame scope.
+    pub(crate) fn note_teardown_growths(&self, growths: u64, abandoned: u64) {
+        let mut stats = self.stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        stats.glyph_atlas_growths += growths;
+        stats.atlas_growth_abandoned += abandoned;
     }
 
     /// Count one native redraw request the renderer issued.
@@ -298,6 +334,33 @@ fn record_assembly_us(elapsed_us: u64) {
     record(|stats| {
         stats.assembly_buckets[bucket] += 1;
         stats.assembly_sum_us += elapsed_us;
+    });
+}
+
+/// Count `growths` glyph atlas doublings found at an end-of-frame check.
+pub(crate) fn note_glyph_atlas_growths(growths: u64) {
+    record(|stats| stats.glyph_atlas_growths += growths);
+}
+
+/// Count one growth whose timing was cleared before any frame presented.
+pub(crate) fn note_atlas_growth_abandoned() {
+    record(|stats| stats.atlas_growth_abandoned += 1);
+}
+
+/// Record the time from a growing frame's start, `pending_since`, to this successful present.
+pub(crate) fn note_atlas_growth_presented(pending_since: Instant) {
+    record_growth_to_present_us(micros_since(pending_since));
+}
+
+/// Record one growth-to-present time of `elapsed_us`; a value at a bound is in that bucket.
+fn record_growth_to_present_us(elapsed_us: u64) {
+    let bucket = GROWTH_TO_PRESENT_BOUNDS_MS
+        .iter()
+        .position(|bound_ms| elapsed_us <= bound_ms * 1_000)
+        .unwrap_or(GROWTH_TO_PRESENT_BOUNDS_MS.len());
+    record(|stats| {
+        stats.atlas_growth_to_present_buckets[bucket] += 1;
+        stats.atlas_growth_to_present_sum_us += elapsed_us;
     });
 }
 
