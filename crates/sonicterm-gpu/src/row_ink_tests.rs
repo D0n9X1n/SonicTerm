@@ -50,18 +50,53 @@ fn a_non_emitted_row_keeps_its_record_and_an_emitted_row_replaces_it() {
     assert_eq!(table.len(), 4);
 }
 
-/// The glyph and background loops each stage a row they emit; one frame's stages for one slot
-/// are unioned into the single record that slot presented.
+/// Each emitted row is staged once, by the glyph loop; its background and decoration quads merge
+/// their rectangles into that one record, which commits as the union. An empty rectangle (a loop
+/// that drew nothing for the row) adds no area.
 #[test]
-fn one_frames_stages_for_a_slot_union_into_its_record() {
+fn one_staged_record_per_row_merges_its_background_and_decorations() {
     let mut table = RowInkTable::default();
     table.begin_frame();
-    table.stage(7, 2, ink(rect(10, 40, 5, 30), 2, 9));
-    table.stage(7, 2, ink(rect(0, 44, 100, 20), 2, 9));
-    // An empty stage (a row that emitted nothing in one loop) adds no area.
-    table.stage(7, 2, ink(PixelRect { x: 500, y: 500, w: 0, h: 0 }, 2, 9));
+    let staged = table.stage(7, 2, ink(rect(10, 40, 5, 30), 2, 9));
+    table.merge_staged(staged, rect(0, 44, 100, 20));
+    table.merge_staged(staged, PixelRect { x: 500, y: 500, w: 0, h: 0 });
+    assert_eq!(table.staged_len(), 1);
     table.commit(&[(7, 4)]);
     assert_eq!(table.valid_rect(7, 2, 2, Some(9)), Some(rect(0, 40, 100, 30)));
+}
+
+/// A heavily decorated row still holds one staging record: fifty underline runs merge into it,
+/// so staging is bounded by the emitted rows, not by their decorations.
+#[test]
+fn a_decorated_row_stays_one_staged_record() {
+    let mut table = RowInkTable::default();
+    table.begin_frame();
+    let staged = table.stage(7, 0, ink(rect(0, 0, 100, 20), 0, 1));
+    for run in 0..50 {
+        table.merge_staged(staged, rect(run * 2, 18, 2, 3));
+    }
+    assert_eq!(table.staged_len(), 1);
+    table.commit(&[(7, 1)]);
+    assert_eq!(table.valid_rect(7, 0, 0, Some(1)), Some(rect(0, 0, 100, 21)));
+}
+
+/// Staging capacity follows the rows a frame can stage, not the empty length after a commit:
+/// repeated identical 200-row frames keep one staging allocation, and a narrow 5-row frame in
+/// between keeps it too, so neither a full nor a partial frame regrows it.
+#[test]
+fn staging_capacity_is_reused_across_frames() {
+    let mut table = RowInkTable::default();
+    present_rows(&mut table, 7, 200);
+    let capacity = table.staged_capacity();
+    assert!(capacity >= 200, "staging keeps room for the rows it staged: {capacity}");
+    for _ in 0..3 {
+        present_rows(&mut table, 7, 200);
+        assert_eq!(table.staged_capacity(), capacity);
+        table.begin_frame();
+        table.stage(7, 5, ink(rect(0, 100, 100, 20), 5, 2));
+        table.commit(&[(7, 200)]);
+        assert_eq!(table.staged_capacity(), capacity, "a narrow frame keeps the allocation");
+    }
 }
 
 /// A row that emitted nothing has a valid, empty record, which is not a missing record.

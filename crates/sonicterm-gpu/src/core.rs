@@ -6087,9 +6087,12 @@ impl GpuRenderer {
             u16,
             sonicterm_text::row_glyph_cache::UnderlineRun,
         )> = Vec::new();
-        // Per entry of `underlines`, the pane, slot, view top and grid of the row that pushed it,
-        // so each underline's quads join that row's ink record.
-        let mut underline_owners: Vec<(u64, u16, u64, &Grid)> = Vec::new();
+        // Per entry of `underlines`, the staging index of the row that pushed it, so each
+        // underline's quads merge into that row's one ink record.
+        let mut underline_owners: Vec<usize> = Vec::new();
+        // Per drawn pane, the staging indices its glyph rows took, in ascending slot order, so
+        // the background loop merges each row's quads into the record the glyph loop staged.
+        let mut staged_ranges: Vec<(u64, std::ops::Range<usize>)> = Vec::new();
         let mut glyph_instances: Vec<GlyphInstance> =
             Vec::with_capacity(grid.cols as usize * grid.rows as usize);
         // Overlay glyph instances — palette text + (future) other modals.
@@ -6187,6 +6190,7 @@ impl GpuRenderer {
                 // `scrollback_len()`. Otherwise it's the explicit absolute
                 // index requested by the scroll action (e.g. a prompt row).
                 let view_top_abs = pv.planned.view_top_abs;
+                let pane_staged_start = self.row_ink.staged_len();
                 // Drop cache entries for every row the VT thread mutated
                 // since the last frame. `grid.dirty_rows()` already covers
                 // theme/font/resize/scroll/focus/selection changes via the
@@ -6277,18 +6281,16 @@ impl GpuRenderer {
                             .iter()
                             .map(|(left, top, width, height, _)| (*left, *top, *width, *height)),
                     );
-                    underline_owners.extend(
-                        (underlines_before..underlines.len())
-                            .map(|_| (pane_id, r, view_top_abs, grid)),
-                    );
-                    self.row_ink.stage_row(
+                    let staged = self.row_ink.stage_row(
                         pane_id,
                         r,
                         grid,
                         view_top_abs,
                         ink.to_rect(plan.surface),
                     );
+                    underline_owners.extend((underlines_before..underlines.len()).map(|_| staged));
                 }
+                staged_ranges.push((pane_id, pane_staged_start..self.row_ink.staged_len()));
             } // end per-pane loop
         }
 
@@ -6386,6 +6388,10 @@ impl GpuRenderer {
             let pane_id: crate::row_quad_cache::PaneId = pv.pane_id;
             let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
             let view_top_abs_bg = pv.planned.view_top_abs;
+            let pane_staged = staged_ranges
+                .iter()
+                .find(|(staged_pane, _)| *staged_pane == pane_id)
+                .map(|(_, range)| range.clone());
             // Mirror RowGlyphCache's dirty-row invalidation: drop the absolute
             // rows of every live row the VT thread mutated since the last frame.
             invalidate_planned_quad_rows(&mut self.line_quad_cache, pv.planned);
@@ -6439,13 +6445,15 @@ impl GpuRenderer {
                 for quad in &quads[quads_before..] {
                     ink.add_px(crate::cursor::ndc_rect_px(quad.rect, sw, sh));
                 }
-                self.row_ink.stage_row(
-                    pane_id,
-                    r,
-                    pv_grid,
-                    view_top_abs_bg,
-                    ink.to_rect(plan.surface),
-                );
+                let rect = ink.to_rect(plan.surface);
+                match pane_staged.clone().and_then(|range| self.row_ink.staged_index(range, r)) {
+                    Some(staged) => self.row_ink.merge_staged(staged, rect),
+                    None => {
+                        // When: `staged_index` finds no glyph-loop record for `r`, stage one here
+                        // so the row's background ink is never dropped.
+                        let _ = self.row_ink.stage_row(pane_id, r, pv_grid, view_top_abs_bg, rect);
+                    }
+                }
             }
         }
 
@@ -6750,18 +6758,12 @@ impl GpuRenderer {
                 underline_color,
             );
             // Dotted and curly underlines reach below the cell, so the drawn quads join the record.
-            if let Some((pane_id, slot, view_top_abs, owner_grid)) = underline_owners.get(entry) {
+            if let Some(staged) = underline_owners.get(entry) {
                 let mut ink = crate::row_ink::InkEdges::default();
                 for quad in &quads[quads_before..] {
                     ink.add_px(crate::cursor::ndc_rect_px(quad.rect, sw, sh));
                 }
-                self.row_ink.stage_row(
-                    *pane_id,
-                    *slot,
-                    owner_grid,
-                    *view_top_abs,
-                    ink.to_rect(plan.surface),
-                );
+                self.row_ink.merge_staged(*staged, ink.to_rect(plan.surface));
             }
         }
 

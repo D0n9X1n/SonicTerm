@@ -38,15 +38,40 @@ pub(crate) struct RowInkTable {
 }
 
 impl RowInkTable {
-    /// Discard whatever an unpresented frame staged, before a new frame stages its rows.
+    /// Discard whatever an unpresented frame staged, before a new frame stages its rows; the
+    /// allocation is kept for the new frame.
     pub(crate) fn begin_frame(&mut self) {
-        self.clear_staged();
+        self.staged.clear();
     }
 
-    /// Stage what the row at `slot` of `pane_id` emitted this frame. A slot staged more than once
-    /// (by the glyph and the background loop) commits the union of its stages.
-    pub(crate) fn stage(&mut self, pane_id: u64, slot: u16, ink: RowInk) {
+    /// Stage the one record of the row at `slot` of `pane_id`, emitted this frame, and return its
+    /// staging index; the row's later primitives merge into it through [`Self::merge_staged`].
+    pub(crate) fn stage(&mut self, pane_id: u64, slot: u16, ink: RowInk) -> usize {
         self.staged.push(((pane_id, slot), ink));
+        self.staged.len() - 1
+    }
+
+    /// Union `rect` into the staged record at `index`; an empty rectangle adds no area.
+    pub(crate) fn merge_staged(&mut self, index: usize, rect: PixelRect) {
+        if let Some((_, ink)) = self.staged.get_mut(index) {
+            ink.rect = union_non_empty(ink.rect, rect);
+        }
+    }
+
+    /// The staging index of `slot` within `range`, the indices one pane's rows were staged at in
+    /// ascending slot order.
+    pub(crate) fn staged_index(&self, range: std::ops::Range<usize>, slot: u16) -> Option<usize> {
+        let start = range.start;
+        self.staged
+            .get(range)?
+            .binary_search_by_key(&slot, |((_, staged_slot), _)| *staged_slot)
+            .ok()
+            .map(|offset| start + offset)
+    }
+
+    /// Records staged so far this frame.
+    pub(crate) fn staged_len(&self) -> usize {
+        self.staged.len()
     }
 
     /// The committed ink of `slot` of `pane_id`, if it still describes that slot's content: the
@@ -66,29 +91,12 @@ impl RowInkTable {
 
     /// Commit a presented frame's stages, replacing each emitted slot's record, then prune every
     /// record whose pane is not in `surviving` (`(pane_id, row_count)`) or whose slot is at or past
-    /// that pane's row count, and release capacity the table no longer needs.
+    /// that pane's row count, and release capacity the table no longer needs. The staging buffer
+    /// keeps its allocation for the next frame unless it exceeds four times the committed rows.
     pub(crate) fn commit(&mut self, surviving: &[(u64, u16)]) {
-        // Sorting groups one slot's stages together; their row and content are the same, so only
-        // the rectangles need merging.
-        self.staged.sort_unstable_by_key(|(key, _)| *key);
-        let mut pending: Option<(RowInkKey, RowInk)> = None;
+        // Each slot was staged once, so its record replaces the committed one.
         for (key, ink) in self.staged.drain(..) {
-            pending = match pending {
-                Some((pending_key, mut merged)) if pending_key == key => {
-                    merged.rect = union_non_empty(merged.rect, ink.rect);
-                    Some((pending_key, merged))
-                }
-                other => {
-                    // A new key starts a new slot, so the previous slot's merged record is complete.
-                    if let Some((done_key, done)) = other {
-                        self.committed.insert(done_key, done);
-                    }
-                    Some((key, ink))
-                }
-            };
-        }
-        if let Some((done_key, done)) = pending {
-            self.committed.insert(done_key, done);
+            self.committed.insert(key, ink);
         }
         self.committed.retain(|(pane_id, slot), _| {
             surviving.iter().any(|(survivor, rows)| survivor == pane_id && slot < rows)
@@ -97,11 +105,15 @@ impl RowInkTable {
         if shrink_target(len, self.committed.capacity()).is_some() {
             self.committed.shrink_to((2 * len).max(SHRINK_FLOOR));
         }
-        self.clear_staged();
+        // The committed rows bound what a frame can stage; a narrow frame staging few rows does
+        // not shrink the buffer the next full frame would regrow.
+        if let Some(target) = shrink_target(len, self.staged.capacity()) {
+            self.staged.shrink_to(target);
+        }
     }
 
-    /// Stage what the row at `slot` of a view whose top is `view_top_abs` emitted, with the
-    /// absolute row it showed and that row's content stamp in `grid`.
+    /// Stage the one record of the row at `slot` of a view whose top is `view_top_abs`, with the
+    /// absolute row it showed and that row's content stamp in `grid`; returns its staging index.
     pub(crate) fn stage_row(
         &mut self,
         pane_id: u64,
@@ -109,10 +121,10 @@ impl RowInkTable {
         grid: &Grid,
         view_top_abs: u64,
         rect: PixelRect,
-    ) {
+    ) -> usize {
         let abs_row = view_top_abs.saturating_add(u64::from(slot));
         let content_seq = grid.row_content_seq_at_abs(abs_row);
-        self.stage(pane_id, slot, RowInk { rect, abs_row, content_seq });
+        self.stage(pane_id, slot, RowInk { rect, abs_row, content_seq })
     }
 
     /// Per slot of a `rows`-row view whose top is `view_top_abs`, the committed record of
@@ -169,15 +181,6 @@ impl RowInkTable {
             bytes: retained_hash_table_bytes::<RowInkKey, RowInk>(self.committed.capacity())
                 .saturating_add(self.staged.capacity().saturating_mul(entry)),
             items: self.committed.len(),
-        }
-    }
-
-    /// Empty the staging buffer, shrinking it by the table's rule from the length it reached.
-    fn clear_staged(&mut self) {
-        let peak = self.staged.len();
-        self.staged.clear();
-        if let Some(target) = shrink_target(peak, self.staged.capacity()) {
-            self.staged.shrink_to(target);
         }
     }
 }
