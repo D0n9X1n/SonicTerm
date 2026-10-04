@@ -1451,6 +1451,12 @@ impl Parser {
         }
     }
 
+    /// Test-only: start synchronized output's epoch at `epoch`, so a test can reach an epoch boundary.
+    #[doc(hidden)]
+    pub fn __test_set_sync_epoch(&mut self, epoch: u64) {
+        self.performer.sync_epoch = epoch;
+    }
+
     /// Pack the pointer-routing modes into one byte; decode it with [`PointerModes::from_bits`].
     pub fn pointer_input_snapshot(&self) -> u8 {
         PointerModes::new(

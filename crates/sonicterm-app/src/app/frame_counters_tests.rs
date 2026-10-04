@@ -524,7 +524,8 @@ const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/pane_state.rs", 1),
     ("app/scroll.rs", 1),
     ("app/search_handle.rs", 2),
-    ("app/spawn_pane.rs", 1),
+    // The pane spawn, and the worker latch reading the parser once before its first batch.
+    ("app/spawn_pane.rs", 2),
     ("app/viewport_anchor.rs", 1),
     ("app/window_keyboard.rs", 2),
 ];

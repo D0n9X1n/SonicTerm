@@ -243,17 +243,24 @@ pub(in crate::app) struct SyncLatch {
     pub(in crate::app) seen_resets: u64,
     /// A reset arrived since the last flush decision sent.
     pub(in crate::app) reset_pending: bool,
+    /// The parser's full epoch at the last section, read under its lock; never truncated.
+    pub(in crate::app) epoch: u64,
+    /// Whether an update was open at the last section.
+    pub(in crate::app) set: bool,
 }
 
 impl SyncLatch {
-    /// A latch that has seen every reset the pane has already published.
-    // Ordering: sync_resets loads Relaxed; the worker that owns the latch is the only writer.
+    /// A latch that has seen every reset and the epoch of the pane's parser as it is now.
     pub(in crate::app) fn for_pane(handles: &PaneVtHandles) -> Self {
-        Self { seen_resets: handles.sync_resets.load(Ordering::Relaxed), reset_pending: false }
+        let state = super::frame_counters::lock_parser(&handles.parser).synchronized_output();
+        Self { seen_resets: state.resets, reset_pending: false, epoch: state.epoch, set: state.set }
     }
 
-    /// Note the parser's reset count after one section; a new reset sets `reset_pending`.
-    fn note_resets(&mut self, resets: u64) {
+    /// Note the parser's state after one section; a new reset sets `reset_pending`.
+    fn note_section(&mut self, state: SyncState) {
+        self.epoch = state.epoch;
+        self.set = state.set;
+        let resets = state.resets;
         if resets > self.seen_resets {
             // A reset happened in this section; it stays pending until the batch is flushed.
             self.reset_pending = true;
@@ -405,16 +412,15 @@ impl OutputFlush {
     pub(in crate::app) fn new(pane_id: u64, handles: &PaneVtHandles) -> Self {
         // A pane runs exactly one worker, so an update already open when it starts was opened by a
         // parser this worker never published for; it has no deadline of its own and never holds.
-        let published_epoch =
-            read_published_sync(&handles.sync_word, &handles.sync_deadline_word).epoch;
+        let sync_latch = SyncLatch::for_pane(handles);
         Self {
             pane_id,
             pending: false,
             pending_since: None,
             pending_bytes: 0,
-            sync_latch: SyncLatch::for_pane(handles),
+            released_epoch: sync_latch.epoch,
+            sync_latch,
             held: None,
-            released_epoch: published_epoch,
             redraw_probe: crate::app::invariants::RedrawCoalescerProbe::new(),
         }
     }
@@ -524,13 +530,21 @@ impl OutputFlush {
         }
     }
 
-    /// Hold for the published update when it is open in an epoch not yet released.
+    /// Hold for the parser's update when it is open in an epoch after the released one.
+    ///
+    /// Release identity is the parser's full epoch, which the latch read under the lock; the
+    /// published epoch is truncated and is compared only for equality, never for order.
     fn refresh_hold(&mut self, handles: &PaneVtHandles) {
-        let published = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
-        self.held = (published.set && published.epoch > self.released_epoch).then(|| {
-            // This worker wrote both words, so the deadline is its epoch's; the origin is the
-            // passed fallback should a store ever be missing.
-            (published.epoch, published.deadline.unwrap_or_else(super::sync_clock::origin))
+        let (set, epoch) = (self.sync_latch.set, self.sync_latch.epoch);
+        self.held = (set && epoch > self.released_epoch).then(|| {
+            let published = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
+            let deadline = published
+                .deadline
+                .filter(|_| published.epoch == epoch & SYNC_EPOCH_MASK)
+                // This worker published the deadline with its epoch; the origin is the passed
+                // fallback should that store ever be missing.
+                .unwrap_or_else(super::sync_clock::origin);
+            (epoch, deadline)
         });
     }
 
@@ -748,7 +762,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             handles.pointer_input.store(parser.pointer_input_snapshot(), Ordering::Relaxed);
             let sync_state = parser.synchronized_output();
             publish_sync_output(handles, sync_state, &mut now);
-            sync_latch.note_resets(sync_state.resets);
+            sync_latch.note_section(sync_state);
             let released_at = before_lock.map(|_| now());
             (result, (locked_at, parsed_at, released_at))
         };

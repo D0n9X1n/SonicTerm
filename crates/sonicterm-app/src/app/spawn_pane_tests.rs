@@ -1433,3 +1433,34 @@ fn a_busy_worker_releases_an_update_on_the_batch_at_its_deadline() {
     assert_eq!(sends.len(), 2, "and flushes on age");
     assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 1);
 }
+
+/// The worker identifies released updates by the parser's full epoch, not the published 31-bit
+/// one: an update timed out as the last epoch before the published epoch wraps does not stop the
+/// next update, published as epoch 0, from holding and then expiring normally.
+#[test]
+fn an_update_after_the_published_epoch_wraps_still_holds() {
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let (_pane, handles) = counting_worker_handles(&stats);
+    handles.parser.lock().__test_set_sync_epoch((1 << 31) - 2);
+    let mut flush = OutputFlush::new(5, &handles);
+    let mut sends = Vec::new();
+    let base = test_base();
+    worker_step(&handles, &mut flush, b"\x1b[?2026hlast", base, &mut sends);
+    let last_deadline = published_deadline(&handles);
+    flush.on_quiet(&handles, last_deadline, || sends.push(0));
+    assert_eq!((sends.len(), stats.sync_timeouts.load(Ordering::Relaxed)), (1, 1));
+    let reset_at = last_deadline + Duration::from_millis(10);
+    worker_step(&handles, &mut flush, b"\x1b[?2026l", reset_at, &mut sends);
+    assert_eq!(sends.len(), 2, "the late reset flushes");
+
+    let opened = reset_at + Duration::from_millis(10);
+    worker_step(&handles, &mut flush, b"\x1b[?2026hfirst", opened, &mut sends);
+    let published = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
+    assert_eq!((published.set, published.epoch), (true, 0), "the published epoch wrapped");
+    let deadline = published_deadline(&handles);
+    flush.on_quiet(&handles, opened + Duration::from_millis(3), || sends.push(0));
+    assert_eq!(sends.len(), 2, "the wrapped epoch holds");
+    flush.on_quiet(&handles, deadline, || sends.push(0));
+    assert_eq!(sends.len(), 3, "and expires once at its deadline");
+    assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 2);
+}
