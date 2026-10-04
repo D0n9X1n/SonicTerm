@@ -20,6 +20,16 @@ impl App {
         Some(self.windows.get(&id)?.renderer.as_ref()?.retained_amounts().image_atlas.bytes)
     }
 
+    /// Test seam: every part the window renderer's own reading reports, so a test can account for
+    /// each part a release frees rather than the image atlas alone.
+    #[doc(hidden)]
+    pub fn __test_window_retained_amounts(
+        &self,
+        id: WindowId,
+    ) -> Option<sonicterm_gpu::core::RendererRetention> {
+        Some(self.windows.get(&id)?.renderer.as_ref()?.retained_amounts())
+    }
+
     /// Test seam: when the window's promoted image atlas may be released, through the app's adapter.
     #[doc(hidden)]
     pub fn __test_window_image_atlas_release_deadline(&self, id: WindowId) -> Option<Instant> {

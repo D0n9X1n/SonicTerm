@@ -912,3 +912,50 @@ fn the_staging_part_counts_each_uploads_staging_buffer_after_a_large_sync() {
     let staging_envelope = envelope_bytes(sonicterm_types::ResourceClass::UploadStaging);
     assert!(kept <= staging_envelope, "the uploads stay inside the UploadStaging envelope");
 }
+
+/// Releasing a promoted image atlas replaces its upload with a 1x1 mirror, which also frees the old
+/// upload's staging buffer and rect lists, so the renderer's `UploadStaging` part drops by them as
+/// well as the image atlas part dropping. After a 32x32 image sync, the old upload keeps at least one
+/// 32x32 staged write and the 1x1 replacement keeps nothing, and the reported part moves by exactly
+/// what the old upload kept. A caller checking the aggregate must count both parts.
+#[test]
+fn releasing_the_image_upload_frees_its_staging_from_the_upload_staging_part() {
+    let (device, queue) = headless_device();
+    let pipeline = crate::wezterm_pipeline::WeztermPipeline::new(
+        &device,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        1,
+    );
+    let glyph_upload = AtlasUpload::new_sized(
+        &device,
+        1,
+        1,
+        pipeline.glyph_bind_group_layout(),
+        AtlasBindingKind::Glyph,
+    );
+    let mut images = GlyphAtlas::default_size();
+    images.get_or_insert(list_key(0), &mut TestTileRasterizer(list_tile(32, true, [9, 8, 7, 255])));
+    let mut promoted = AtlasUpload::new(
+        &device,
+        &images,
+        pipeline.image_bind_group_layout(),
+        AtlasBindingKind::Image,
+    );
+    let _stats = promoted.sync(&queue, &mut images);
+    let vertex = pipeline.vertex_scratch_retained();
+    let before = crate::core::upload_staging_amount(vertex, &glyph_upload, &promoted).bytes;
+    let promoted_kept = upload_retained_bytes(&promoted);
+    assert!(promoted_kept >= 32 * 32 * 4, "the 32x32 write stays staged: {promoted_kept}");
+    // The release body: the image mirror is rebuilt at the placeholder size.
+    let released = AtlasUpload::new_sized(
+        &device,
+        1,
+        1,
+        pipeline.image_bind_group_layout(),
+        AtlasBindingKind::Image,
+    );
+    assert_eq!(upload_retained_bytes(&released), 0, "a fresh mirror keeps no staging");
+    let after = crate::core::upload_staging_amount(vertex, &glyph_upload, &released).bytes;
+    println!("image upload staging released: {promoted_kept} bytes ({before} -> {after})");
+    assert_eq!(before - after, promoted_kept, "the part drops by everything the upload kept");
+}
