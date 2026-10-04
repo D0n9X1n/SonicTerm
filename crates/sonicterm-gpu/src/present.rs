@@ -434,29 +434,35 @@ impl GpuRenderer {
         lap(timing, "glyph_upload");
 
         frame_scope.set_operation("render.acquire");
-        let acquired = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => Ok(frame),
-            // Acquisition timed out without a texture to draw into.
-            wgpu::CurrentSurfaceTexture::Timeout => Err(SurfaceRetryReason::Timeout),
-            // The window is minimized or covered, so no texture was handed back.
-            wgpu::CurrentSurfaceTexture::Occluded => Err(SurfaceRetryReason::Occluded),
-            // The swapchain no longer matches the window (a resize landed
-            // between configure and acquire).
-            wgpu::CurrentSurfaceTexture::Outdated => Err(SurfaceRetryReason::Outdated),
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                // The swapchain still works but no longer matches the surface.
-                // wgpu 29: Surface::configure panics if a SurfaceTexture is
-                // still alive. Drop the frame BEFORE reconfiguring.
-                drop(frame);
-                Err(SurfaceRetryReason::Suboptimal)
-            }
-            // The surface itself is gone (display change, driver reset).
-            wgpu::CurrentSurfaceTexture::Lost => Err(SurfaceRetryReason::SurfaceLost),
-            wgpu::CurrentSurfaceTexture::Validation => {
-                // When: `Validation` — wgpu routed the acquisition error to this
-                // device's handler, so the device stops instead of retrying.
-                self.device_errors.record_observed_validation("surface acquisition validation");
-                return Ok(self.rendering_unavailable());
+        // An armed test seam stands in for a surface that handed back no texture.
+        let acquired = if let Some(reason) = self.fault_surface_acquire.take() {
+            Err(reason)
+        } else {
+            // When: `fault_surface_acquire` holds no `reason`, the real surface is asked for a texture.
+            match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(frame) => Ok(frame),
+                // Acquisition timed out without a texture to draw into.
+                wgpu::CurrentSurfaceTexture::Timeout => Err(SurfaceRetryReason::Timeout),
+                // The window is minimized or covered, so no texture was handed back.
+                wgpu::CurrentSurfaceTexture::Occluded => Err(SurfaceRetryReason::Occluded),
+                // The swapchain no longer matches the window (a resize landed
+                // between configure and acquire).
+                wgpu::CurrentSurfaceTexture::Outdated => Err(SurfaceRetryReason::Outdated),
+                wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                    // The swapchain still works but no longer matches the surface.
+                    // wgpu 29: Surface::configure panics if a SurfaceTexture is
+                    // still alive. Drop the frame BEFORE reconfiguring.
+                    drop(frame);
+                    Err(SurfaceRetryReason::Suboptimal)
+                }
+                // The surface itself is gone (display change, driver reset).
+                wgpu::CurrentSurfaceTexture::Lost => Err(SurfaceRetryReason::SurfaceLost),
+                wgpu::CurrentSurfaceTexture::Validation => {
+                    // When: `Validation` — wgpu routed the acquisition error to this
+                    // device's handler, so the device stops instead of retrying.
+                    self.device_errors.record_observed_validation("surface acquisition validation");
+                    return Ok(self.rendering_unavailable());
+                }
             }
         };
         let frame = match acquired {

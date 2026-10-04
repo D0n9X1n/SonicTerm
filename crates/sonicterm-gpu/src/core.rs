@@ -125,6 +125,21 @@ pub fn acknowledge_receipts(
         .count()
 }
 
+/// A test glyph attached to one terminal row: the row's pane and viewport slot, and the glyph's
+/// `(x, y, w, h)` rectangle in surface pixels and color.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InjectedRowGlyph {
+    /// The pane whose row draws the glyph.
+    pub pane_id: u64,
+    /// The viewport slot of that row.
+    pub slot: u16,
+    /// The glyph's rectangle in surface pixels.
+    pub rect_px: (f32, f32, f32, f32),
+    /// The glyph's color.
+    pub color: [f32; 4],
+}
+
 /// The glyph atlas facts a memory snapshot reports per renderer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GlyphAtlasFacts {
@@ -2295,6 +2310,12 @@ pub struct GpuRenderer {
     /// Test seam: a glyph `(x, y, w, h)` surface-pixel rectangle and color appended before the
     /// cursor recolors; only `__inject_test_glyph` sets it, so production keeps `None`.
     injected_test_glyph: Option<((f32, f32, f32, f32), [f32; 4])>,
+    /// Test seam: a glyph `(x, y, w, h)` and color attached to the row at `(pane, slot)`, drawn
+    /// only when that row is emitted; only `__inject_row_glyph` sets it, so production keeps `None`.
+    injected_row_glyph: Option<InjectedRowGlyph>,
+    /// Test seam: the reason the next wgpu acquisition reports instead of asking the surface; only
+    /// `__fail_next_surface_acquire` sets it, so production keeps `None`.
+    fault_surface_acquire: Option<SurfaceRetryReason>,
     /// Where each presented row drew, per `(pane, slot)`; staged during assembly and committed
     /// beside `last_frame_key` only when a frame presents. A partial plan emits by these records.
     row_ink: crate::row_ink::RowInkTable,
@@ -3271,6 +3292,8 @@ impl GpuRenderer {
             last_recolor: crate::cursor::RecolorRecord::default(),
             last_tab_ink: crate::cursor::RecolorBounds::Empty,
             injected_test_glyph: None,
+            injected_row_glyph: None,
+            fault_surface_acquire: None,
             row_ink: crate::row_ink::RowInkTable::default(),
             presented_damage: PresentedDamageRecorder::default(),
             presented_fields: PresentedFields::default(),
@@ -4590,6 +4613,68 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn __inject_test_glyph(&mut self, glyph: Option<((f32, f32, f32, f32), [f32; 4])>) {
         self.injected_test_glyph = glyph;
+    }
+
+    /// Test hook: attach a glyph `(x, y, w, h)` in surface pixels and its color to the row at viewport
+    /// slot `slot` of pane `pane_id`, drawn after that row's own glyphs whenever the row is emitted,
+    /// so its ink joins the row's record; `None` removes it. It is not part of the frame key: a test
+    /// changes it together with that row's dirt, as a real glyph change would.
+    #[doc(hidden)]
+    pub fn __inject_row_glyph(&mut self, glyph: Option<InjectedRowGlyph>) {
+        self.injected_row_glyph = glyph;
+    }
+
+    /// Test hook: the committed ink record of viewport slot `slot` of pane `pane_id`, as the last
+    /// presented frame left it; `None` when no record is kept.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_row_ink(&self, pane_id: u64, slot: u16) -> Option<PixelRect> {
+        self.row_ink.committed_rect(pane_id, slot)
+    }
+
+    /// Test hook: the next wgpu presentation reports `reason` at the acquire point instead of
+    /// asking the surface, after its plan was assembled, and takes the production retry branch.
+    /// Arming it keeps the frame key, so the failing frame plans against the last presented one.
+    #[doc(hidden)]
+    pub fn __fail_next_surface_acquire(&mut self, reason: SurfaceRetryReason) {
+        self.fault_surface_acquire = Some(reason);
+    }
+
+    /// Test hook: the next presented frame's submission fails validation after its retained draw,
+    /// as `GpuFaultKind::FrameValidation` makes it, but arming it keeps the frame key, so the failing
+    /// frame plans against the last presented one; the failure path clears the key itself.
+    #[doc(hidden)]
+    pub fn __fail_next_frame_submission(&mut self) {
+        self.fault_frame_probe = self
+            .device_errors
+            .gpu_work("fault.frame_probe", || create_frame_fault_probe(&self.device));
+    }
+
+    /// Append the row glyph seam's instance after the row at `slot` of `pane_id`, as its own span,
+    /// when the seam names that row.
+    fn push_injected_row_glyph(
+        &self,
+        pane_id: u64,
+        slot: u16,
+        glyphs: &mut Vec<GlyphInstance>,
+        row_spans: &mut Vec<RowGlyphSpan>,
+        surface: (f32, f32),
+    ) {
+        let Some(InjectedRowGlyph { pane_id: owner, slot: owner_slot, rect_px, color }) =
+            self.injected_row_glyph
+        else {
+            // When: injected_row_glyph is None, as in production, nothing is appended.
+            return;
+        };
+        if owner != pane_id || owner_slot != slot {
+            // When: `owner` or `owner_slot` names another row than `pane_id` and `slot`, nothing is drawn here.
+            return;
+        }
+        let (sw, sh) = surface;
+        let base = glyphs.len();
+        let template = glyphs.first().copied();
+        glyphs.extend(crate::cursor::injected_glyph(template.as_ref(), rect_px, color, sw, sh));
+        row_spans.push(RowGlyphSpan::new(glyphs, base..glyphs.len(), sw, sh));
     }
 
     /// Test hook: keep each later presented frame's damage for `__take_presented_damage`.
@@ -6179,6 +6264,13 @@ impl GpuRenderer {
                     );
                     // The row's ink: its glyphs' union and its tofu outlines. Its underlines join
                     // when they are drawn below.
+                    self.push_injected_row_glyph(
+                        pane_id,
+                        r,
+                        &mut glyph_instances,
+                        &mut row_spans,
+                        (sw, sh),
+                    );
                     let ink = crate::row_ink::emitted_row_ink(
                         &row_spans[spans_before..],
                         missing_tofu[tofu_before..]

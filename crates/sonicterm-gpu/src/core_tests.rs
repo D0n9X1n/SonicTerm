@@ -4345,7 +4345,10 @@ fn row_spans_viewports_and_title_order_follow_the_assembly() {
         .find("forpvinpane_views.iter().filter(|pane|pane.planned.full_clip.is_some()){")
         .expect("per-pane loop");
     assert!(resize < begin && begin < pane_loop, "viewports are named before any insert");
-    assert_eq!(core.matches("row_spans.push(RowGlyphSpan::new(").count(), 2);
+    // Two sites record a row's own glyphs; the third is the test row-glyph seam's own span.
+    assert_eq!(core.matches("row_spans.push(RowGlyphSpan::new(").count(), 3);
+    let seam = core.find("fnpush_injected_row_glyph(").expect("row glyph seam");
+    assert!(core[seam..].find("row_spans.push(RowGlyphSpan::new(").is_some());
     let hit = core.find("glyph_instances.extend_from_slice(&cached.glyphs);").expect("hit replay");
     let hit_span = hit + core[hit..].find("row_spans.push(").expect("hit span");
     let hit_return = hit + core[hit..].find("returntrue;").expect("hit return");
@@ -5930,4 +5933,35 @@ fn the_software_presenter_asserts_it_never_receives_a_partial_frame() {
     let source = include_str!("present.rs").replace("\r\n", "\n");
     let body = method_body(&source, "    fn present_software_frame(");
     assert!(body.contains("debug_assert!(!layers.partial"), "{body}");
+}
+
+/// The seams that fail a frame after its plan keep the frame key when armed, so the failing frame
+/// plans against the last presented key and can be partial; the failure paths clear it themselves.
+/// The submission seam arms the same probe as `GpuFaultKind::FrameValidation`, which clears the key.
+#[test]
+fn partial_failure_seams_keep_the_frame_key_when_armed() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    for signature in
+        ["    pub fn __fail_next_surface_acquire(", "    pub fn __fail_next_frame_submission("]
+    {
+        let body = method_body(&source, signature);
+        assert!(!body.contains("last_frame_key"), "{signature} touches the key");
+        assert!(!body.contains("invalidate_retained_frame"), "{signature} clears the key");
+    }
+    let submission = method_body(&source, "    pub fn __fail_next_frame_submission(");
+    assert!(submission.contains("create_frame_fault_probe(&self.device)"));
+}
+
+/// The row glyph seam joins its row: inside the glyph row loop it is pushed after that row's own
+/// glyphs and before the row's ink is computed, so it is in the row's span and committed record and
+/// is drawn only when that row is emitted.
+#[test]
+fn an_injected_row_glyph_joins_its_rows_span_and_record() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let assemble = method_body(&source, "    fn assemble_frame(");
+    let row_loop = assemble.find("for (r, _) in pv.planned.rows() {").unwrap();
+    let emit = row_loop + assemble[row_loop..].find("emit_row_glyphs(").unwrap();
+    let inject = assemble.find("self.push_injected_row_glyph(").expect("the seam is pushed");
+    let ink = assemble.find("crate::row_ink::emitted_row_ink(").unwrap();
+    assert!(row_loop < emit && emit < inject && inject < ink);
 }

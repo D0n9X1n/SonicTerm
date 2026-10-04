@@ -247,9 +247,13 @@ fn frame_batches_preserve_borrowed_slice_identity_and_order() {
 #[test]
 fn surface_acquisition_wires_every_reason_and_drops_suboptimal_before_recovery() {
     let source = compact(include_str!("present.rs"));
+    // The acquisition-failure test seam wraps the real acquire; every real status still maps here.
+    assert!(source.contains(
+        "letacquired=ifletSome(reason)=self.fault_surface_acquire.take(){Err(reason)}else{"
+    ));
     let acquire = source_between(
         &source,
-        "letacquired=matchself.surface.get_current_texture(){",
+        "matchself.surface.get_current_texture(){",
         "lap(timing,\"surface_acquire\");",
     );
     for (status, reason) in [
@@ -490,4 +494,21 @@ fn presenters_read_no_grid() {
             .unwrap_or(body.len());
         assert!(!body[..end].contains("grid"), "{name} reads a grid");
     }
+}
+
+/// The acquisition-failure seam stands in for the surface at the acquire point: the armed reason is
+/// taken after the atlas upload and instead of `get_current_texture`, so it is reached only after a
+/// plan was assembled and fails that plan through the production `Err(reason)` branch, which clears
+/// the frame key and recovers the surface as a real failure would.
+#[test]
+fn an_armed_acquire_failure_takes_the_production_retry_branch() {
+    let source = include_str!("present.rs").replace("\r\n", "\n");
+    let render = source.split_once("fn present_wgpu_frame(").unwrap().1;
+    let render = &render[..render.find("\n    fn ").unwrap_or(render.len())];
+    let upload = render.find("self.glyph_upload.sync(").unwrap();
+    let fault = render.find("self.fault_surface_acquire.take()").expect("the seam is consumed");
+    let acquire = render.find("self.surface.get_current_texture()").unwrap();
+    let branch = render.find("Err(reason) => {").unwrap();
+    let retained = render.find("draw_retained_frame(").unwrap();
+    assert!(upload < fault && fault < acquire && acquire < branch && branch < retained);
 }
