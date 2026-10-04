@@ -478,13 +478,12 @@ impl GlyphAtlas {
 
     /// The next doubled dimension when this atlas may still grow, else `None`.
     fn next_growth_dim(&self) -> Option<u32> {
-        match self.growth {
-            GrowthPolicy::Growable { max } if self.width < max => {
-                Some(self.width.saturating_mul(2).min(max))
-            }
-            // When: growth is Fixed or width already reached max, packing failure must evict.
-            _ => None,
-        }
+        let GrowthPolicy::Growable { max } = self.growth else {
+            // When: growth is Fixed the atlas keeps its constructed size, so packing failure evicts.
+            return None;
+        };
+        // At the maximum there is nothing left to double into, so packing failure evicts there too.
+        (self.width < max).then(|| self.width.saturating_mul(2).min(max))
     }
 
     /// Enlarge the atlas to `dim × dim` without re-rasterizing anything.
@@ -552,6 +551,7 @@ impl GlyphAtlas {
     fn alloc_rect_growing(&mut self, width: u32, height: u32) -> Option<AtlasAllocation> {
         loop {
             if let Some(allocation) = self.alloc_rect(width, height) {
+                // When: alloc_rect placed the tile at the current size, no growth is needed.
                 return Some(allocation);
             }
             // Each pass doubles toward the maximum, so the loop ends after at most three
