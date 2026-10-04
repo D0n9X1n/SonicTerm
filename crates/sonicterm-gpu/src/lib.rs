@@ -69,6 +69,11 @@ pub mod core;
 /// shaping requests, collected only while a renderer counts.
 pub mod frame_stats;
 
+/// Measures a fixture's glyph working set through the renderer's own font stacks, without a
+/// window or device, so CI can choose the glyph atlas start size.
+#[doc(hidden)]
+pub mod glyph_working_set;
+
 mod frame_plan;
 
 #[cfg(test)]

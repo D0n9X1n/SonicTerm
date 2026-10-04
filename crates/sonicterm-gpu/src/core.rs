@@ -306,7 +306,7 @@ fn hovered_url_span_rect(
     (width > 0.0).then_some((x, origin_y + f32::from(span.row) * cell_h, width, cell_h))
 }
 
-fn palette_footer_font_size(body_font_size: f32) -> f32 {
+pub(crate) fn palette_footer_font_size(body_font_size: f32) -> f32 {
     (body_font_size - 1.0).max(1.0)
 }
 
@@ -530,13 +530,13 @@ fn effective_font_weight_scale(scale: f32) -> f32 {
 mod tab_title_font;
 use tab_title_font::TabTitleFont;
 
-struct RendererFontStacks {
-    body: Option<sonicterm_engine::FontStack>,
-    tab_title: Option<sonicterm_engine::FontStack>,
-    palette_footer: Option<sonicterm_engine::FontStack>,
+pub(crate) struct RendererFontStacks {
+    pub(crate) body: Option<sonicterm_engine::FontStack>,
+    pub(crate) tab_title: Option<sonicterm_engine::FontStack>,
+    pub(crate) palette_footer: Option<sonicterm_engine::FontStack>,
 }
 
-fn renderer_font_stacks(
+pub(crate) fn renderer_font_stacks(
     family: &str,
     body_size: f32,
     dpi: usize,
