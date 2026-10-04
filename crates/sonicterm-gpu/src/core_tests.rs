@@ -4622,18 +4622,21 @@ fn terminal_cursor_is_drawn_only_at_the_live_view_top() {
     assert!(!terminal_cursor_drawn_at_view(scrolled_view_top, scrollback_len), "scrolled back");
 }
 
-/// The cursor draw path gates on the active view top through the tested predicate, once,
-/// so the predicate cannot drift from the condition the renderer applies.
+/// The cursor draw path gates on the active view top through the tested predicate, once, and
+/// the frame identity's drawn cursor cell gates through the same predicate, so neither can
+/// drift from the condition the renderer applies.
 #[test]
 fn cursor_draw_path_calls_the_live_view_predicate() {
     let core: String = include_str!("core.rs").split_whitespace().collect();
     let gate =
         "letview_top=plan.active_view_top_abs;ifterminal_cursor_drawn_at_view(view_top,live_top){";
     assert_eq!(core.matches(gate).count(), 1, "cursor path must call the predicate");
+    let identity = "||!terminal_cursor_drawn_at_view(view_top_abs,live_top)";
+    assert_eq!(core.matches(identity).count(), 1, "the drawn cursor cell must call it");
     assert_eq!(
         core.matches("terminal_cursor_drawn_at_view(").count(),
-        2,
-        "definition and one call"
+        3,
+        "definition, the draw call and the identity call"
     );
     assert_eq!(core.matches("ifview_top==live_top{").count(), 0, "no inline duplicate");
 }
@@ -5605,4 +5608,89 @@ fn tab_bar_hash_ignores_the_running_seconds_of_an_unbadged_tab() {
     let early = tab_bar_hash_with_limits(&tabs, at(1), 240.0, 320.0);
     assert_eq!(early, tab_bar_hash_with_limits(&tabs, at(4), 240.0, 320.0));
     assert_ne!(early, tab_bar_hash_with_limits(&tabs, at(6), 240.0, 320.0), "inactive badge");
+}
+
+/// The frame identity's cursor cell follows the draw's own rule: a cursor is drawn only when it
+/// is visible, the window is focused, the pane is not read-only and the view is at the live top;
+/// it sits at the cursor's viewport slot, and on either half of a wide character covers both.
+#[test]
+fn drawn_cursor_cell_follows_the_draw_condition_and_wide_span() {
+    use sonicterm_render_model::boundary::grid::grid::{CellFlags, Color, Grid};
+    let mut grid = Grid::new(8, 4);
+    grid.linefeed();
+    grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+    let live_top = grid.scrollback_len() as u64;
+    let narrow = drawn_cursor_cell(&grid, 7, live_top, true, true, false);
+    assert_eq!(narrow, Some(CursorCell { pane_id: 7, slot: 1, col: 1, span: 1 }));
+    for (visible, focused, read_only) in
+        [(false, true, false), (true, false, false), (true, true, true)]
+    {
+        assert_eq!(drawn_cursor_cell(&grid, 7, live_top, visible, focused, read_only), None);
+    }
+    for _ in 0..6 {
+        grid.linefeed();
+    }
+    let scrolled_live_top = grid.scrollback_len() as u64;
+    assert!(scrolled_live_top > 0, "history exists to scroll back into");
+    assert_eq!(drawn_cursor_cell(&grid, 7, scrolled_live_top - 1, true, true, false), None);
+
+    let mut wide = Grid::new(8, 4);
+    wide.put_char('中', Color::Default, Color::Default, CellFlags::empty());
+    assert!(wide.row(0)[0].flags.contains(CellFlags::WIDE), "the lead half is marked wide");
+    wide.cursor.col = 1;
+    let on_trail = drawn_cursor_cell(&wide, 7, 0, true, true, false);
+    assert_eq!(on_trail, Some(CursorCell { pane_id: 7, slot: 0, col: 0, span: 2 }));
+    wide.cursor.col = 0;
+    let on_lead = drawn_cursor_cell(&wide, 7, 0, true, true, false);
+    assert_eq!(on_lead, Some(CursorCell { pane_id: 7, slot: 0, col: 0, span: 2 }));
+}
+
+/// The source of `name`'s body in `source`, from its signature to the next top-level item.
+fn function_body<'source>(source: &'source str, signature: &str) -> &'source str {
+    let start = source.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
+    let end = source[start + signature.len()..]
+        .find("\n    pub fn ")
+        .map_or(source.len(), |offset| start + signature.len() + offset);
+    &source[start..end]
+}
+
+/// Cursor, blink and focus changes reach the planner as damage classes, so their setters keep
+/// the retained frame key: the next frame is not a whole-surface first frame. Line endings are
+/// normalized before scanning.
+#[test]
+fn cursor_and_focus_setters_keep_the_frame_key() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    for signature in [
+        "    pub fn set_cursor_shape(",
+        "    pub fn set_cursor_blink(",
+        "    pub fn set_window_focused(",
+    ] {
+        let body = function_body(&source, signature);
+        assert!(!body.contains("last_frame_key = None"), "{signature} clears the frame key");
+    }
+    // Blink still restarts its phase when the setting changes.
+    assert!(function_body(&source, "    pub fn set_cursor_blink(").contains("self.blink_epoch ="));
+}
+
+/// Production wiring of the damage classes: the identity records the drawn cursor cell, both
+/// cursor recolor sites accumulate one record, the plan's damage is widened by it before the
+/// presenter reads damage, the record is kept only by a presented frame and fed back to the next
+/// plan, row emission follows the coverage helper, and the scrollbar draws from the geometry the
+/// planner damages.
+#[test]
+fn damage_classes_are_wired_through_the_renderer() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let compact: String = source.split_whitespace().collect();
+    assert!(compact.contains("cursor_cell:drawn_cursor_cell("));
+    assert!(compact.contains("previous_recolor:self.last_recolor,"));
+    assert_eq!(compact.matches("frame_recolor=frame_recolor.merge(record);").count(), 2);
+    let widen = source.find("plan.widen_for_recolor(self.last_recolor, frame_recolor);").unwrap();
+    let layers = source.find("Ok(Assembled::Layers(Box::new(AssembledLayers {").unwrap();
+    assert!(widen < layers, "damage is widened before the layers carry it");
+    let finish = function_body(&source, "    fn finish_successful_frame(");
+    assert!(finish.contains("self.last_recolor = recolor;"));
+    assert!(compact
+        .contains("letemit_full_rows=crate::frame_plan::emits_every_visible_row(render_mode);"));
+    assert!(function_body(&source, "pub fn emit_pane_scrollbar(")
+        .contains("crate::frame_plan::pane_scrollbar_geometry("));
 }
