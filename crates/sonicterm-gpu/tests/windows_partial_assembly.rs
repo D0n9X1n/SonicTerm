@@ -141,6 +141,8 @@ struct ScenePane {
 
 /// What a case draws, besides the renderer's own state.
 struct Scene {
+    /// The terminal background opacity the renderer draws this scene at.
+    opacity: f32,
     panes: Vec<ScenePane>,
     cursor_visible: bool,
     selection: Option<Selection>,
@@ -312,6 +314,7 @@ fn single(layout: &Layout) -> Scene {
     let mut tabs = TabBar::new();
     tabs.push(Tab::new("shell"));
     Scene {
+        opacity: OPACITY,
         panes: vec![ScenePane {
             id: PANE_ID,
             rect: layout.pane,
@@ -427,7 +430,8 @@ enum Expect {
 }
 
 /// Present `scene` with narrow damage, check how it was assembled, then repaint the same state in
-/// full and require the two retained frames equal byte for byte over a translucent background.
+/// full and require the two retained frames equal byte for byte, with the ground's alpha following
+/// the scene's background opacity.
 /// Returns the narrow frame's damage and its counter deltas.
 fn narrow_matches_full(
     renderer: &mut GpuRenderer,
@@ -474,26 +478,85 @@ fn narrow_matches_full(
             narrow.damage
         ),
     )?;
-    // The background is translucent, so the cleared ground keeps an alpha below opaque.
+    // The cleared ground is opaque at opacity 1 and keeps an alpha below opaque under it.
     let corner = &full_pixels[..4];
-    check(corner[3] < u8::MAX, &format!("{case}: the background is translucent: {corner:?}"))?;
+    check(
+        (corner[3] == u8::MAX) == (scene.opacity >= 1.0),
+        &format!("{case}: the ground's alpha {corner:?} follows opacity {}", scene.opacity),
+    )?;
     Ok((narrow, moved))
 }
 
 /// Test 6: every acceptance case presents `Partial`, emitting fewer rows than the pane has, and
 /// equals a full repaint: a one-row edit, a tall glyph overhanging from the row above and from the
 /// row below, combining marks, wide CJK and emoji at the pane's right edge, every underline style,
-/// an inline image crossing the damage edge, a selection change and a cursor toggle, each over the
-/// translucent background.
+/// an inline image crossing the damage edge, a selection change and a cursor toggle. The matrix
+/// runs at opacity 1 and 0.6, each over default row backgrounds and over ANSI row backgrounds.
 fn pixel_parity(
     renderer: &mut GpuRenderer,
     layout: &Layout,
     _active: &ActiveEventLoop,
 ) -> Result<(), String> {
-    let mut edit = single(layout);
+    let theme = Theme::default();
+    let mut cases = Ok(());
+    for opacity in [1.0, OPACITY] {
+        renderer.set_theme_with_opacity(&theme, opacity);
+        for ansi_rows in [false, true] {
+            cases = cases.and_then(|()| parity_cases(renderer, layout, opacity, ansi_rows));
+        }
+    }
+    // Later cases draw at the shared translucent opacity, whatever this matrix ended on.
+    renderer.set_theme_with_opacity(&theme, OPACITY);
+    cases
+}
+
+/// Give the rows around the edit row non-default ANSI backgrounds: the rows above and below keep
+/// dense text over palette backgrounds 4 and 2, and the edit row holds blank cells over palette
+/// background 1, so an edit redraws text over a painted row between painted neighbours.
+fn paint_ansi_rows(grid: &mut Grid, cols: u16) {
+    for (row, background) in [(EDIT_ROW - 1, 4), (EDIT_ROW, 1), (EDIT_ROW + 1, 2)] {
+        grid.goto(row, 0);
+        for col in 0..cols {
+            let character = if row == EDIT_ROW {
+                ' '
+            } else if col % 2 == 0 {
+                'M'
+            } else {
+                'W'
+            };
+            grid.put_char(
+                character,
+                Color::Default,
+                Color::Indexed(background),
+                CellFlags::empty(),
+            );
+        }
+    }
+    grid.goto(EDIT_ROW, 0);
+}
+
+/// Test 6's cases at one background `opacity`, over ANSI row backgrounds when `ansi_rows`.
+fn parity_cases(
+    renderer: &mut GpuRenderer,
+    layout: &Layout,
+    opacity: f32,
+    ansi_rows: bool,
+) -> Result<(), String> {
+    let scene = || {
+        let mut scene = single(layout);
+        scene.opacity = opacity;
+        if ansi_rows {
+            paint_ansi_rows(scene.grid(), layout.cols);
+        }
+        scene
+    };
+    let label = |case: &str| {
+        format!("{case} at opacity {opacity}{}", if ansi_rows { " over ANSI rows" } else { "" })
+    };
+    let mut edit = scene();
     baseline(renderer, &mut edit)?;
     write(edit.grid(), EDIT_ROW, 0, "edit");
-    narrow_matches_full(renderer, &mut edit, "one-row edit", Expect::Partial)?;
+    narrow_matches_full(renderer, &mut edit, &label("one-row edit"), Expect::Partial)?;
 
     // A glyph two and a half rows tall attached to the row above, and one attached to the row
     // below reaching up into the edit row: each row's record reaches the damage.
@@ -513,22 +576,27 @@ fn pixel_parity(
             rect_px,
             color: INJECTED_COLOR,
         }));
-        let mut overhang = single(layout);
+        let mut overhang = scene();
         baseline(renderer, &mut overhang)?;
         write(overhang.grid(), EDIT_ROW, 0, "xyz");
-        narrow_matches_full(renderer, &mut overhang, case, Expect::Partial)?;
+        narrow_matches_full(renderer, &mut overhang, &label(case), Expect::Partial)?;
     }
     renderer.__inject_row_glyph(None);
 
-    let mut marks = single(layout);
+    let mut marks = scene();
     baseline(renderer, &mut marks)?;
     write(marks.grid(), EDIT_ROW, 0, "e\u{301}a\u{308}o\u{302}");
-    narrow_matches_full(renderer, &mut marks, "combining marks", Expect::Partial)?;
+    narrow_matches_full(renderer, &mut marks, &label("combining marks"), Expect::Partial)?;
 
-    let mut wide = single(layout);
+    let mut wide = scene();
     baseline(renderer, &mut wide)?;
     write(wide.grid(), EDIT_ROW, layout.cols - 4, "中😀");
-    narrow_matches_full(renderer, &mut wide, "wide CJK and emoji at the edge", Expect::Partial)?;
+    narrow_matches_full(
+        renderer,
+        &mut wide,
+        &label("wide CJK and emoji at the edge"),
+        Expect::Partial,
+    )?;
 
     // Every underline style on the edit row, under an unchanged underlined neighbour row.
     let styles = [
@@ -538,7 +606,7 @@ fn pixel_parity(
         UnderlineStyle::Dotted,
         UnderlineStyle::Dashed,
     ];
-    let mut underlined = single(layout);
+    let mut underlined = scene();
     let styled = |grid: &mut Grid, row: u16| {
         grid.goto(row, 0);
         for (style, character) in styles.into_iter().zip("uline".chars()) {
@@ -557,12 +625,17 @@ fn pixel_parity(
     underlined.grid().goto(EDIT_ROW, 0);
     baseline(renderer, &mut underlined)?;
     styled(underlined.grid(), EDIT_ROW);
-    narrow_matches_full(renderer, &mut underlined, "every underline style", Expect::Partial)?;
+    narrow_matches_full(
+        renderer,
+        &mut underlined,
+        &label("every underline style"),
+        Expect::Partial,
+    )?;
 
     // An unchanged image anchored on the row after the edit, three rows tall: the edit damages its
     // own row padded by one row each way, so the image's top row lies inside the damage and its
     // lower two rows outside it.
-    let mut image = single(layout);
+    let mut image = scene();
     let (image_row, image_col) = (EDIT_ROW + 1, 6);
     let (width, height) = ((3.0 * layout.cell_w) as u32, (3.0 * layout.cell_h) as u32);
     image.panes[0].images.push(InlineImage {
@@ -585,7 +658,7 @@ fn pixel_parity(
     let (damage, _) = narrow_matches_full(
         renderer,
         &mut image,
-        "inline image crossing the damage",
+        &label("inline image crossing the damage"),
         Expect::Partial,
     )?;
     let image_rect = PixelRect {
@@ -604,7 +677,7 @@ fn pixel_parity(
         ),
     )?;
 
-    let mut select = single(layout);
+    let mut select = scene();
     let selected_row = select.grid().scrollback_len() as u64 + u64::from(EDIT_ROW - 1);
     let mut selection = Selection::new(selected_row, 0);
     selection.extend(selected_row, 3);
@@ -613,14 +686,14 @@ fn pixel_parity(
     if let Some(selection) = select.selection.as_mut() {
         selection.extend(selected_row, 9);
     }
-    narrow_matches_full(renderer, &mut select, "selection change", Expect::Partial)?;
+    narrow_matches_full(renderer, &mut select, &label("selection change"), Expect::Partial)?;
 
-    let mut cursor = single(layout);
+    let mut cursor = scene();
     cursor.grid().goto(CURSOR_ROW, CURSOR_COL);
     baseline(renderer, &mut cursor)?;
     for visible in [true, false] {
         cursor.cursor_visible = visible;
-        narrow_matches_full(renderer, &mut cursor, "cursor toggle", Expect::Partial)?;
+        narrow_matches_full(renderer, &mut cursor, &label("cursor toggle"), Expect::Partial)?;
     }
     Ok(())
 }
@@ -675,6 +748,7 @@ fn overhanging_records(
     let mut tabs = TabBar::new();
     tabs.push(Tab::new("shell"));
     let mut split = Scene {
+        opacity: OPACITY,
         panes: vec![
             ScenePane {
                 id: PANE_ID,
