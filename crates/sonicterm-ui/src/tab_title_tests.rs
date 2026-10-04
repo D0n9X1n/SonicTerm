@@ -551,23 +551,40 @@ fn process_matching_is_exact_and_does_not_parse_paths_arguments_or_titles() {
     assert_eq!(format_tab_title(0, None, Some("unknown"), Some("node")), "#1 \u{f489} node");
 }
 
-/// Every glyph `icon_for_process` can return is listed in `PROGRAM_ICONS`, which the glyph
-/// working-set helper measures in the tab-title strike: each `'\u{…}'` literal in the mapping's
-/// source, every approved family's icon and both fallbacks. A new match arm whose glyph is not
-/// listed fails here instead of leaving a resident tab-title tile the helper never measured.
-#[test]
-fn program_icons_list_every_glyph_the_mapping_returns() {
-    let source = include_str!("tab_title.rs");
+/// Every `'\u{…}'` literal inside `icon_for_process` in `source`, the text of `tab_title.rs`.
+fn mapped_icons(source: &str) -> std::collections::BTreeSet<char> {
+    // A CRLF checkout ends the mapping with "\r\n}\r\n"; normalize so the LF delimiter matches.
+    let source = source.replace("\r\n", "\n");
     let start = source.find("fn icon_for_process(").expect("the mapping");
     let end = start + source[start..].find("\n}\n").expect("the mapping's end");
-    let mapped: std::collections::BTreeSet<char> = source[start..end]
+    source[start..end]
         .split("'\\u{")
         .skip(1)
         .map(|rest| {
             let hex = rest.split('}').next().expect("a closing brace");
             char::from_u32(u32::from_str_radix(hex, 16).expect("hex")).expect("a scalar value")
         })
-        .collect();
+        .collect()
+}
+
+/// The icon scan reads the same glyphs from an LF and a CRLF checkout of `tab_title.rs`, so a
+/// Windows checkout with CRLF line endings finds the mapping's end instead of panicking.
+#[test]
+fn program_icon_scan_is_independent_of_line_endings() {
+    let lf_source = include_str!("tab_title.rs").replace("\r\n", "\n");
+    let crlf_source = lf_source.replace('\n', "\r\n");
+    let from_lf = mapped_icons(&lf_source);
+    assert!(!from_lf.is_empty(), "the LF scan finds the mapping's icons");
+    assert_eq!(mapped_icons(&crlf_source), from_lf);
+}
+
+/// Every glyph `icon_for_process` can return is listed in `PROGRAM_ICONS`, which the glyph
+/// working-set helper measures in the tab-title strike: each `'\u{…}'` literal in the mapping's
+/// source, every approved family's icon and both fallbacks. A new match arm whose glyph is not
+/// listed fails here instead of leaving a resident tab-title tile the helper never measured.
+#[test]
+fn program_icons_list_every_glyph_the_mapping_returns() {
+    let mapped = mapped_icons(include_str!("tab_title.rs"));
     let listed: std::collections::BTreeSet<char> = PROGRAM_ICONS.iter().copied().collect();
     assert_eq!(listed.len(), PROGRAM_ICONS.len(), "no icon is listed twice");
     assert_eq!(mapped, listed, "the mapping's glyphs and PROGRAM_ICONS differ");
