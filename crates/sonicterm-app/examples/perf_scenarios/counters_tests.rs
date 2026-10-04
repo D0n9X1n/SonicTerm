@@ -143,6 +143,29 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "row_cache_invalidate_us",
             "recolor_glyphs_visited",
             "font_fallback_applies",
+            "shape_ns",
+            "raster_ns",
+            "raster_calls",
+            "raster_tiles",
+            "font_generation_applies",
+            "font_prepare_ns",
+            "font_generation_prepare_ns",
+            "render_attempts",
+            "render_attempts_presented",
+            "render_attempt_ns",
+            "render_attempt_shape_ns",
+            "render_attempt_raster_ns",
+            "render_attempt_shape_requests",
+            "render_attempt_raster_calls",
+            "render_attempt_raster_tiles",
+            "apply_attempts",
+            "apply_attempts_presented",
+            "apply_attempt_ns",
+            "apply_attempt_shape_ns",
+            "apply_attempt_raster_ns",
+            "apply_attempt_shape_requests",
+            "apply_attempt_raster_calls",
+            "apply_attempt_raster_tiles",
             "assembly_us",
         ],
     ),
@@ -348,6 +371,29 @@ const NEWER_SOURCES: &[&str] = &[
     "row_cache_invalidate_us",
     "recolor_glyphs_visited",
     "font_fallback_applies",
+    "shape_ns",
+    "raster_ns",
+    "raster_calls",
+    "raster_tiles",
+    "font_generation_applies",
+    "font_prepare_ns",
+    "font_generation_prepare_ns",
+    "render_attempts",
+    "render_attempts_presented",
+    "render_attempt_ns",
+    "render_attempt_shape_ns",
+    "render_attempt_raster_ns",
+    "render_attempt_shape_requests",
+    "render_attempt_raster_calls",
+    "render_attempt_raster_tiles",
+    "apply_attempts",
+    "apply_attempts_presented",
+    "apply_attempt_ns",
+    "apply_attempt_shape_ns",
+    "apply_attempt_raster_ns",
+    "apply_attempt_shape_requests",
+    "apply_attempt_raster_calls",
+    "apply_attempt_raster_tiles",
     "assembly",
 ];
 
@@ -433,4 +479,74 @@ fn the_feature_gate_scan_reads_a_crlf_checkout_as_it_reads_an_lf_one() {
         let crlf_text = lf_text.replace('\n', "\r\n");
         assert_eq!(ungated_calls(&crlf_text), ungated_calls(&lf_text), "{name}");
     }
+}
+
+/// The fixture perf-compare's attempt-split test reads, written by this harness.
+const ATTEMPT_FIXTURE: &str = "../../scripts/perf-compare_attempt_fixture.json";
+
+/// A renderer record whose two attempt classes are both at these cumulative totals: attempts,
+/// presented, attempt ns, shape ns, raster ns, shape requests, raster calls and raster tiles.
+fn attempt_record(totals: [u64; 8]) -> HashMap<&'static str, SourceValue> {
+    let roles = [
+        "attempts",
+        "attempts_presented",
+        "attempt_ns",
+        "attempt_shape_ns",
+        "attempt_raster_ns",
+        "attempt_shape_requests",
+        "attempt_raster_calls",
+        "attempt_raster_tiles",
+    ];
+    let mut record = HashMap::new();
+    for prefix in ["render_", "apply_"] {
+        for (role, value) in roles.iter().zip(totals) {
+            let name: &'static str = Box::leak(format!("{prefix}{role}").into_boxed_str());
+            record.insert(name, SourceValue::Count(value));
+        }
+    }
+    record
+}
+
+#[test]
+fn attempt_nanoseconds_survive_the_phase_delta_and_reach_perf_compare_exactly() {
+    // Two runs, each a phase's start and end cumulative totals. Run 1 moves from
+    // (1999, 999, 999) to (2999, 1499, 1499) ns: whole-microsecond rounding before the delta
+    // would leave a negative remainder, while nanoseconds give (1000, 500, 500) and none. The
+    // deltas are written through the production serializer to the fixture perf-compare reads,
+    // so the reader sees exactly what the harness writes. `SONICTERM_WRITE_ATTEMPT_FIXTURE=1`
+    // rewrites it; otherwise the committed fixture must match.
+    let phases = [
+        ([1, 1, 1_999, 999, 999, 2, 2, 1], [2, 2, 2_999, 1_499, 1_499, 4, 4, 2]),
+        ([2, 2, 5_000, 2_000, 2_000, 4, 4, 2], [5, 5, 8_000, 3_000, 3_500, 10, 8, 5]),
+    ];
+    let mut runs = Vec::new();
+    for (start, end) in phases {
+        let mut totals = [CounterTotals::unsupported(), CounterTotals::unsupported()];
+        for (total, values) in totals.iter_mut().zip([start, end]) {
+            total.add_record(&[Section::Renderer], reader(&attempt_record(values))).unwrap();
+        }
+        let delta = totals[1].delta_since(&totals[0]).to_json();
+        runs.push(serde_json::json!({ "renderer": delta[Section::Renderer.key()] }));
+    }
+    let first = &runs[0]["renderer"];
+    assert_eq!(
+        (
+            &first["apply_attempt_ns"],
+            &first["apply_attempt_shape_ns"],
+            &first["apply_attempt_raster_ns"]
+        ),
+        (&serde_json::json!(1_000), &serde_json::json!(500), &serde_json::json!(500))
+    );
+    let produced = serde_json::json!({ "runs": runs });
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(ATTEMPT_FIXTURE);
+    if std::env::var_os("SONICTERM_WRITE_ATTEMPT_FIXTURE").is_some() {
+        let text = serde_json::to_string_pretty(&produced).expect("fixture serializes") + "\n";
+        std::fs::write(&fixture_path, text).expect("fixture written");
+        return;
+    }
+    let committed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&fixture_path).expect("the attempt fixture is committed"),
+    )
+    .expect("the attempt fixture is JSON");
+    assert_eq!(committed, produced, "the fixture is what this harness writes");
 }

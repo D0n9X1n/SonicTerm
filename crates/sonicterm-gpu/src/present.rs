@@ -385,6 +385,7 @@ impl GpuRenderer {
             // When: `acknowledges` is false, the plan stays dirty for a later frame.
             return Ok(self.rendering_unavailable());
         }
+        crate::frame_stats::note_attempt_presented();
         Ok(PresentOutcome::Presented)
     }
 
@@ -530,6 +531,7 @@ impl GpuRenderer {
             // When: `acknowledges` is false, the plan stays dirty for a later frame.
             return Ok(self.rendering_unavailable());
         }
+        crate::frame_stats::note_attempt_presented();
         Ok(PresentOutcome::Presented)
     }
 

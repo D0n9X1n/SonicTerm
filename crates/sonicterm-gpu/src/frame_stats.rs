@@ -13,6 +13,55 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use sonicterm_render_model::geometry::PixelRect;
+use sonicterm_text::glyph_atlas::{RasterTile, Rasterizer};
+use sonicterm_types::GlyphKey;
+
+/// Counts and times inside one class of render attempts; all durations are nanoseconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AttemptStats {
+    /// `render_releasing` calls in this class.
+    pub attempts: u64,
+    /// Of those, the ones that presented.
+    pub presented: u64,
+    /// Time inside those calls.
+    pub attempt_ns: u64,
+    /// Time inside shaping and measuring requests made during them, face merging included.
+    pub shape_ns: u64,
+    /// Time inside rasterizer calls made during them, glyph-zero resolution included.
+    pub raster_ns: u64,
+    /// Shaping and measuring requests made during them.
+    pub shape_requests: u64,
+    /// Rasterizer calls made during them; a call can return no tile.
+    pub raster_calls: u64,
+    /// Rasterizer calls that returned a tile with pixels.
+    pub raster_tiles: u64,
+}
+
+impl AttemptStats {
+    /// All zero.
+    pub const ZERO: Self = Self {
+        attempts: 0,
+        presented: 0,
+        attempt_ns: 0,
+        shape_ns: 0,
+        raster_ns: 0,
+        shape_requests: 0,
+        raster_calls: 0,
+        raster_tiles: 0,
+    };
+
+    /// Add `other`'s counts to these.
+    pub fn add(&mut self, other: &Self) {
+        self.attempts += other.attempts;
+        self.presented += other.presented;
+        self.attempt_ns += other.attempt_ns;
+        self.shape_ns += other.shape_ns;
+        self.raster_ns += other.raster_ns;
+        self.shape_requests += other.shape_requests;
+        self.raster_calls += other.raster_calls;
+        self.raster_tiles += other.raster_tiles;
+    }
+}
 
 /// Cumulative renderer statistics; nobody resets them, so readers take deltas.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,6 +100,24 @@ pub struct FrameStats {
     pub assembly_buckets: [u64; ASSEMBLY_BUCKETS],
     /// The exact sum of assembly times, in microseconds.
     pub assembly_sum_us: u64,
+    /// Nanoseconds inside every shaping and measuring request, rendering or not.
+    pub shape_ns: u64,
+    /// Nanoseconds inside every glyph-atlas rasterizer call.
+    pub raster_ns: u64,
+    /// Glyph-atlas rasterizer calls.
+    pub raster_calls: u64,
+    /// Glyph-atlas rasterizer calls that returned a tile with pixels.
+    pub raster_tiles: u64,
+    /// Preparations that applied a newer generation of the notice already applied.
+    pub font_generation_applies: u64,
+    /// Nanoseconds inside frame font preparation, invalidation included.
+    pub font_prepare_ns: u64,
+    /// Of `font_prepare_ns`, the preparations that applied a newer generation.
+    pub font_generation_prepare_ns: u64,
+    /// Every render attempt.
+    pub attempts: AttemptStats,
+    /// Render attempts that carried a fallback generation apply.
+    pub apply_attempts: AttemptStats,
 }
 
 /// Upper bounds of the `assembly_us` buckets in microseconds, the App's microsecond bounds.
@@ -79,6 +146,15 @@ impl FrameStats {
         font_fallback_applies: 0,
         assembly_buckets: [0; ASSEMBLY_BUCKETS],
         assembly_sum_us: 0,
+        shape_ns: 0,
+        raster_ns: 0,
+        raster_calls: 0,
+        raster_tiles: 0,
+        font_generation_applies: 0,
+        font_prepare_ns: 0,
+        font_generation_prepare_ns: 0,
+        attempts: AttemptStats::ZERO,
+        apply_attempts: AttemptStats::ZERO,
     };
 
     /// Add `other`'s counts to these.
@@ -102,6 +178,15 @@ impl FrameStats {
             *slot += count;
         }
         self.assembly_sum_us += other.assembly_sum_us;
+        self.shape_ns += other.shape_ns;
+        self.raster_ns += other.raster_ns;
+        self.raster_calls += other.raster_calls;
+        self.raster_tiles += other.raster_tiles;
+        self.font_generation_applies += other.font_generation_applies;
+        self.font_prepare_ns += other.font_prepare_ns;
+        self.font_generation_prepare_ns += other.font_generation_prepare_ns;
+        self.attempts.add(&other.attempts);
+        self.apply_attempts.add(&other.apply_attempts);
     }
 }
 
@@ -123,6 +208,11 @@ impl FrameStatsSink {
         self.stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner).add(other);
     }
 
+    /// This sink's identity: the address of its shared statistics, never 0.
+    fn identity(&self) -> usize {
+        Arc::as_ptr(&self.stats) as usize
+    }
+
     /// Count one native redraw request the renderer issued.
     pub(crate) fn note_native_request(&self) {
         self.stats
@@ -137,6 +227,19 @@ thread_local! {
     static COLLECTING: Cell<bool> = const { Cell::new(false) };
     /// Notes taken since the last drain.
     static PENDING: Cell<FrameStats> = const { Cell::new(FrameStats::ZERO) };
+    /// Open shaping and rasterizing timers; only the outermost one measures.
+    static TIMING_DEPTH: Cell<u32> = const { Cell::new(0) };
+    /// The open render attempt's notes; `None` outside an attempt of a counting renderer.
+    static ATTEMPT: Cell<Option<AttemptStats>> = const { Cell::new(None) };
+    /// The innermost counting scope's sink identity, 0 for none.
+    static SCOPE_SINK: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The attempt and timer state an isolated scope replaced, restored when it closes.
+#[derive(Clone, Copy)]
+struct IsolatedState {
+    attempt: Option<AttemptStats>,
+    timing_depth: u32,
 }
 
 /// A renderer entry point's collection scope. It starts an empty collector, and when dropped
@@ -146,6 +249,10 @@ pub(crate) struct CollectGuard {
     sink: Option<FrameStatsSink>,
     /// The enclosing scope's flag and pending notes, when this guard replaced them.
     enclosing: Option<(bool, FrameStats)>,
+    /// The enclosing scope's sink identity, restored on drop.
+    enclosing_sink: usize,
+    /// The attempt and timer state this guard replaced; `None` when the same renderer re-entered.
+    isolated: Option<IsolatedState>,
 }
 
 impl CollectGuard {
@@ -154,11 +261,24 @@ impl CollectGuard {
         let enclosing = COLLECTING.with(Cell::get);
         if sink.is_none() && !enclosing {
             // When: `sink` is None and no `enclosing` scope counts, nothing is written.
-            return Self { sink: None, enclosing: None };
+            return Self { sink: None, enclosing: None, enclosing_sink: 0, isolated: None };
         }
         let outer_pending = PENDING.with(|cell| cell.replace(FrameStats::ZERO));
         COLLECTING.with(|cell| cell.set(sink.is_some()));
-        Self { sink: sink.cloned(), enclosing: Some((enclosing, outer_pending)) }
+        let sink_id = sink.map_or(0, FrameStatsSink::identity);
+        let enclosing_sink = SCOPE_SINK.with(|cell| cell.replace(sink_id));
+        // A helper of the renderer already counting keeps the open attempt and timers, so its
+        // shaping joins that attempt; any other renderer starts from none and restores them.
+        let isolated = (sink_id == 0 || sink_id != enclosing_sink).then(|| IsolatedState {
+            attempt: ATTEMPT.with(|cell| cell.replace(None)),
+            timing_depth: TIMING_DEPTH.with(|cell| cell.replace(0)),
+        });
+        Self {
+            sink: sink.cloned(),
+            enclosing: Some((enclosing, outer_pending)),
+            enclosing_sink,
+            isolated,
+        }
     }
 }
 
@@ -172,6 +292,12 @@ impl Drop for CollectGuard {
         };
         let collected = PENDING.with(|cell| cell.replace(outer_pending));
         COLLECTING.with(|cell| cell.set(enclosing));
+        SCOPE_SINK.with(|cell| cell.set(self.enclosing_sink));
+        if let Some(state) = self.isolated.take() {
+            // the scope isolated another renderer's attempt and timers; they resume as they were.
+            ATTEMPT.with(|cell| cell.set(state.attempt));
+            TIMING_DEPTH.with(|cell| cell.set(state.timing_depth));
+        }
         if let Some(sink) = &self.sink {
             // the opening renderer counts, so its notes join its statistics.
             sink.absorb(&collected);
@@ -192,9 +318,260 @@ fn record(update: impl FnOnce(&mut FrameStats)) {
     });
 }
 
-/// Count one `FontStack` shaping or measuring request.
+/// Count one `FontStack` shaping or measuring request, and in the open attempt.
 pub(crate) fn note_shape_request() {
     record(|stats| stats.shape_requests += 1);
+    note_attempt(|attempt| attempt.shape_requests += 1);
+}
+
+/// Apply `update` to the open render attempt, if a counting renderer has one.
+fn note_attempt(update: impl FnOnce(&mut AttemptStats)) {
+    ATTEMPT.with(|cell| {
+        if let Some(mut attempt) = cell.get() {
+            // the innermost scope belongs to a counting renderer drawing an attempt.
+            update(&mut attempt);
+            cell.set(Some(attempt));
+        }
+    });
+}
+
+/// Nanoseconds on this thread's counter clock: a monotonic process clock, or under test a
+/// stepping clock when one is installed.
+fn now_ns() -> u64 {
+    #[cfg(test)]
+    {
+        if let Some(reading) = test_clock::read() {
+            // When: a test installed a stepping clock, every reading is exact and counted.
+            return reading;
+        }
+    }
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let epoch = EPOCH.get_or_init(Instant::now);
+    u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// A stepping clock for tests: each reading returns the current value and advances it.
+#[cfg(test)]
+pub(crate) mod test_clock {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// The next reading and the step after it; `None` when no clock is installed.
+        static CLOCK: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+        /// Readings taken since the clock was installed.
+        static READS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Install a clock that starts at `start_ns` and advances `step_ns` per reading.
+    pub(crate) fn install(start_ns: u64, step_ns: u64) {
+        CLOCK.with(|cell| cell.set(Some((start_ns, step_ns))));
+        READS.with(|cell| cell.set(0));
+    }
+
+    /// Remove the clock.
+    pub(crate) fn remove() {
+        CLOCK.with(|cell| cell.set(None));
+    }
+
+    /// Readings taken since `install`.
+    pub(crate) fn reads() -> u64 {
+        READS.with(Cell::get)
+    }
+
+    /// Take one reading, or `None` with no clock installed.
+    pub(super) fn read() -> Option<u64> {
+        let (reading, step) = CLOCK.with(Cell::get)?;
+        CLOCK.with(|cell| cell.set(Some((reading + step, step))));
+        READS.with(|cell| cell.set(cell.get() + 1));
+        Some(reading)
+    }
+}
+
+/// What a timer measures.
+#[derive(Clone, Copy)]
+enum TimedWork {
+    /// A shaping or measuring request.
+    Shape,
+    /// A rasterizer call.
+    Raster,
+}
+
+/// One shaping or rasterizing timer. Only the outermost timer on the thread reads the clock, so
+/// nested work is counted once, by the outer category.
+struct WorkTimer {
+    work: TimedWork,
+    /// The start reading; `None` when not counting or nested inside another timer.
+    started_ns: Option<u64>,
+    /// Whether this timer raised `TIMING_DEPTH`.
+    counted: bool,
+}
+
+impl WorkTimer {
+    /// Start timing `work`; with the gate off this reads one flag and no clock.
+    fn start(work: TimedWork) -> Self {
+        if !COLLECTING.with(Cell::get) {
+            // When: `COLLECTING` is false, no counting renderer is drawing, so nothing is timed.
+            return Self { work, started_ns: None, counted: false };
+        }
+        let depth = TIMING_DEPTH.with(|cell| cell.replace(cell.get() + 1));
+        let started_ns = (depth == 0).then(now_ns);
+        Self { work, started_ns, counted: true }
+    }
+}
+
+// Lifecycle: WorkTimer lowers TIMING_DEPTH and records the outermost timer's duration, on unwind
+// too, so a panicking request never leaves later timers suppressed.
+impl Drop for WorkTimer {
+    fn drop(&mut self) {
+        if self.counted {
+            // this timer raised the depth when it started, so it lowers it.
+            TIMING_DEPTH.with(|cell| cell.set(cell.get().saturating_sub(1)));
+        }
+        let Some(started_ns) = self.started_ns else {
+            // When: `started_ns` is None, the timer was nested or not counting; nothing to add.
+            return;
+        };
+        let elapsed_ns = now_ns().saturating_sub(started_ns);
+        match self.work {
+            TimedWork::Shape => {
+                record(|stats| stats.shape_ns += elapsed_ns);
+                note_attempt(|attempt| attempt.shape_ns += elapsed_ns);
+            }
+            TimedWork::Raster => {
+                record(|stats| stats.raster_ns += elapsed_ns);
+                note_attempt(|attempt| attempt.raster_ns += elapsed_ns);
+            }
+        }
+    }
+}
+
+/// A rasterizer that counts and times each call of the one it wraps. Every glyph-atlas insertion
+/// in this crate passes one, so no rasterization goes uncounted.
+pub(crate) struct CountingRasterizer<'inner, Inner: Rasterizer + ?Sized> {
+    inner: &'inner mut Inner,
+}
+
+impl<'inner, Inner: Rasterizer + ?Sized> CountingRasterizer<'inner, Inner> {
+    /// Wrap `inner`.
+    pub(crate) fn new(inner: &'inner mut Inner) -> Self {
+        Self { inner }
+    }
+}
+
+impl<Inner: Rasterizer + ?Sized> Rasterizer for CountingRasterizer<'_, Inner> {
+    fn rasterize(&mut self, key: GlyphKey) -> Option<RasterTile> {
+        let tile = {
+            let _timer = WorkTimer::start(TimedWork::Raster);
+            self.inner.rasterize(key)
+        };
+        let drawn = tile.as_ref().is_some_and(|tile| !tile.is_empty());
+        note_raster_call(drawn);
+        tile
+    }
+}
+
+/// Count one rasterizer call, and a tile when `drawn`.
+fn note_raster_call(drawn: bool) {
+    record(|stats| {
+        stats.raster_calls += 1;
+        stats.raster_tiles += u64::from(drawn);
+    });
+    note_attempt(|attempt| {
+        attempt.raster_calls += 1;
+        attempt.raster_tiles += u64::from(drawn);
+    });
+}
+
+/// A render entry's scopes in their only valid order: the renderer's collection scope, then the
+/// attempt inside it. Fields drop in declaration order, so the attempt folds into the collector
+/// before the collector closes into the renderer's sink.
+pub(crate) struct RenderScope {
+    _attempt: AttemptScope,
+    _collect: CollectGuard,
+}
+
+impl RenderScope {
+    /// Open the scopes for a renderer whose sink is `sink`, taking its owed fallback apply, so
+    /// exactly one attempt carries each apply however often the frame's token is reused.
+    pub(crate) fn enter(sink: Option<&FrameStatsSink>, owed_apply: &mut bool) -> Self {
+        let collect = CollectGuard::enter(sink);
+        let attempt = AttemptScope::enter(std::mem::take(owed_apply));
+        Self { _attempt: attempt, _collect: collect }
+    }
+}
+
+/// One render attempt's scope: it collects the attempt's notes and, when it closes, adds them to
+/// every attempt and, for an attempt carrying a fallback apply, to the apply attempts.
+pub(crate) struct AttemptScope {
+    /// Whether the attempt carries a fallback generation apply.
+    applied: bool,
+    /// The start reading; `None` when the renderer does not count.
+    started_ns: Option<u64>,
+}
+
+impl AttemptScope {
+    /// Open an attempt; open it inside the renderer's `CollectGuard`. With the gate off this
+    /// reads one flag and no clock.
+    pub(crate) fn enter(applied: bool) -> Self {
+        if !COLLECTING.with(Cell::get) {
+            // When: `COLLECTING` is false, the renderer does not count and the attempt records nothing.
+            return Self { applied, started_ns: None };
+        }
+        ATTEMPT.with(|cell| cell.set(Some(AttemptStats::ZERO)));
+        Self { applied, started_ns: Some(now_ns()) }
+    }
+}
+
+// Lifecycle: AttemptScope folds its attempt into the open collector on every exit, unwind included,
+// then closes it; the CollectGuard restores any enclosing attempt.
+impl Drop for AttemptScope {
+    fn drop(&mut self) {
+        let Some(started_ns) = self.started_ns else {
+            // When: `started_ns` is None, the renderer does not count; nothing was opened.
+            return;
+        };
+        let mut attempt = ATTEMPT.with(|cell| cell.replace(None)).unwrap_or(AttemptStats::ZERO);
+        attempt.attempts = 1;
+        attempt.presented = attempt.presented.min(1);
+        attempt.attempt_ns = now_ns().saturating_sub(started_ns);
+        let applied = self.applied;
+        record(|stats| {
+            stats.attempts.add(&attempt);
+            if applied {
+                // An attempt carrying a fallback apply also counts as an apply attempt.
+                stats.apply_attempts.add(&attempt);
+            }
+        });
+    }
+}
+
+/// Mark the open render attempt as presented; both presenters call it where a frame passes the
+/// present boundary.
+pub(crate) fn note_attempt_presented() {
+    note_attempt(|attempt| attempt.presented = 1);
+}
+
+/// The start of a frame's font preparation; the clock is read only inside a counting scope.
+pub(crate) fn prepare_clock() -> Option<u64> {
+    COLLECTING.with(Cell::get).then(now_ns)
+}
+
+/// Add one font preparation's time from `started_ns`; `generation` when it applied a newer
+/// generation. `None` (gate off) records nothing.
+pub(crate) fn note_font_prepare(started_ns: Option<u64>, generation: bool) {
+    if let Some(started_ns) = started_ns {
+        // the preparation ran under a counting scope, so its clock pair closes here.
+        let elapsed_ns = now_ns().saturating_sub(started_ns);
+        record(|stats| {
+            stats.font_prepare_ns += elapsed_ns;
+            stats.font_generation_prepare_ns += if generation { elapsed_ns } else { 0 };
+        });
+    }
+}
+
+/// Count one preparation that applied a newer generation of the notice already applied.
+pub(crate) fn note_font_generation_apply() {
+    record(|stats| stats.font_generation_applies += 1);
 }
 
 /// Count the bytes one frame wrote to the vertex and index buffers.
@@ -321,6 +698,7 @@ pub(crate) fn presents_software_on(windows: bool, degrade: bool) -> bool {
 /// Every such call in this crate goes through here, so no caller counts it again.
 pub(crate) fn shape_request<Output>(shape: impl FnOnce() -> Output) -> Output {
     note_shape_request();
+    let _timer = WorkTimer::start(TimedWork::Shape);
     shape()
 }
 

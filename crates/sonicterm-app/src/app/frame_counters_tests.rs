@@ -1276,6 +1276,64 @@ fn renderer_work_counters_join_the_window_record_with_assembly_in_us_buckets() {
     );
 }
 
+#[test]
+fn attempt_and_preparation_counters_leave_the_renderer_each_under_its_own_name() {
+    // Every attempt, apply-attempt and preparation field reaches the window record with its own
+    // value, so a field wired to the wrong source, or left out, shows as a mismatch here.
+    use sonicterm_gpu::frame_stats::{AttemptStats, FrameStats};
+    let attempt = |base: u64| AttemptStats {
+        attempts: base,
+        presented: base + 1,
+        attempt_ns: base + 2,
+        shape_ns: base + 3,
+        raster_ns: base + 4,
+        shape_requests: base + 5,
+        raster_calls: base + 6,
+        raster_tiles: base + 7,
+    };
+    let mut stats = FrameStats::ZERO;
+    stats.shape_ns = 1;
+    stats.raster_ns = 2;
+    stats.raster_calls = 3;
+    stats.raster_tiles = 4;
+    stats.font_generation_applies = 5;
+    stats.font_prepare_ns = 6;
+    stats.font_generation_prepare_ns = 7;
+    stats.attempts = attempt(10);
+    stats.apply_attempts = attempt(20);
+    let record = WindowFrameCounters::default().record(Some(stats), 0);
+    let mut expected = vec![
+        ("shape_ns", 1),
+        ("raster_ns", 2),
+        ("raster_calls", 3),
+        ("raster_tiles", 4),
+        ("font_generation_applies", 5),
+        ("font_prepare_ns", 6),
+        ("font_generation_prepare_ns", 7),
+    ];
+    for (prefix, base) in [("render_", 10), ("apply_", 20)] {
+        for (offset, suffix) in [
+            "attempts",
+            "attempts_presented",
+            "attempt_ns",
+            "attempt_shape_ns",
+            "attempt_raster_ns",
+            "attempt_shape_requests",
+            "attempt_raster_calls",
+            "attempt_raster_tiles",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let name: &'static str = Box::leak(format!("{prefix}{suffix}").into_boxed_str());
+            expected.push((name, base + offset as u64));
+        }
+    }
+    for (name, value) in expected {
+        assert_eq!(record.count(name), Some(value), "{name}");
+    }
+}
+
 /// `text` with CRLF line ends turned into LF, the form every scan reads.
 fn to_lf(text: &str) -> String {
     text.replace("\r\n", "\n")

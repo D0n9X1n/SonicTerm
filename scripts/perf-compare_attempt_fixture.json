@@ -1,0 +1,44 @@
+{
+  "runs": [
+    {
+      "renderer": {
+        "apply_attempt_ns": 1000,
+        "apply_attempt_raster_calls": 2,
+        "apply_attempt_raster_ns": 500,
+        "apply_attempt_raster_tiles": 1,
+        "apply_attempt_shape_ns": 500,
+        "apply_attempt_shape_requests": 2,
+        "apply_attempts": 1,
+        "apply_attempts_presented": 1,
+        "render_attempt_ns": 1000,
+        "render_attempt_raster_calls": 2,
+        "render_attempt_raster_ns": 500,
+        "render_attempt_raster_tiles": 1,
+        "render_attempt_shape_ns": 500,
+        "render_attempt_shape_requests": 2,
+        "render_attempts": 1,
+        "render_attempts_presented": 1
+      }
+    },
+    {
+      "renderer": {
+        "apply_attempt_ns": 3000,
+        "apply_attempt_raster_calls": 4,
+        "apply_attempt_raster_ns": 1500,
+        "apply_attempt_raster_tiles": 3,
+        "apply_attempt_shape_ns": 1000,
+        "apply_attempt_shape_requests": 6,
+        "apply_attempts": 3,
+        "apply_attempts_presented": 3,
+        "render_attempt_ns": 3000,
+        "render_attempt_raster_calls": 4,
+        "render_attempt_raster_ns": 1500,
+        "render_attempt_raster_tiles": 3,
+        "render_attempt_shape_ns": 1000,
+        "render_attempt_shape_requests": 6,
+        "render_attempts": 3,
+        "render_attempts_presented": 3
+      }
+    }
+  ]
+}
