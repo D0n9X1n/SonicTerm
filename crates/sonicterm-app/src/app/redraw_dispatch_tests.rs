@@ -314,3 +314,33 @@ fn redraw_handlers_reach_pacing_only_through_the_adapters() {
     }
     assert_eq!(checked, 7, "six frame-unavailable sites and one contention site");
 }
+
+/// A timer wake services due frames at the dispatch clock's instant, not the wall clock's: with the
+/// fake clock ahead of real time, a Frame deadline the fake clock has not reached stays queued, and
+/// one it has passed is serviced. Any other start cause services nothing.
+#[test]
+fn a_timer_wake_services_due_frames_at_the_dispatch_clock() {
+    use crate::app::redraw::{DueCause, DueWork};
+    use winit::event::StartCause;
+    let base = test_base();
+    let (mut app, main, _child) = paced_owners(base);
+    let deadline = at_ms(base, 16);
+    let resume = StartCause::ResumeTimeReached { start: base, requested_resume: deadline };
+    app.redraw_due = vec![DueWork { owner: Some(main), cause: DueCause::Frame, deadline }];
+    // The wall clock is about a second before `base`; only the fake clock decides.
+    set_fake_now(at_ms(base, 20));
+    app.service_resume_time(&StartCause::Poll);
+    assert_eq!(app.redraw_due.len(), 1, "a non-timer wake services nothing");
+    set_fake_now(at_ms(base, 10));
+    app.service_resume_time(&resume);
+    assert_eq!(
+        app.redraw_due.len(),
+        1,
+        "a deadline the dispatch clock has not reached stays queued"
+    );
+    assert!(!app.windows[&main].redraw.request_in_flight);
+    set_fake_now(at_ms(base, 20));
+    app.service_resume_time(&resume);
+    assert!(app.redraw_due.is_empty(), "a passed deadline is serviced");
+    assert!(app.windows[&main].redraw.request_in_flight);
+}

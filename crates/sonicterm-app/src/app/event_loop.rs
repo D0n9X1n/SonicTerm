@@ -465,9 +465,16 @@ impl App {
     }
 
     pub(super) fn do_new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
+        self.service_resume_time(&cause);
+    }
+
+    /// On a timer wake, service every elapsed due identity at the dispatch clock's instant, the
+    /// clock admission and the wait fold read, so all three agree on which deadlines have passed.
+    pub(super) fn service_resume_time(&mut self, cause: &winit::event::StartCause) {
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
             // Service every elapsed identity without turning maintenance into a repaint.
-            self.service_redraw_due(Instant::now());
+            let now = self.dispatch_now();
+            self.service_redraw_due(now);
         }
     }
 
