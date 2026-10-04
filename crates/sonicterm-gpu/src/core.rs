@@ -1679,7 +1679,13 @@ fn create_frame_texture(
     width: u32,
     height: u32,
     format: TextureFormat,
+    copy_source: bool,
 ) -> (Texture, TextureView) {
+    let mut usage = TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
+    if copy_source {
+        // Only a test that enabled retained-frame readback copies the frame out.
+        usage |= TextureUsages::COPY_SRC;
+    }
     let texture = device.create_texture(&TextureDescriptor {
         label: Some("sonic-retained-frame"),
         size: wgpu::Extent3d {
@@ -1691,7 +1697,7 @@ fn create_frame_texture(
         sample_count: 1,
         dimension: TextureDimension::D2,
         format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+        usage,
         view_formats: &[],
     });
     let view = texture.create_view(&TextureViewDescriptor::default());
@@ -1717,15 +1723,61 @@ fn frame_texture_payload_bytes(extent: (u32, u32)) -> u64 {
 }
 
 /// Build the retained frame texture sized for the presenter; the only caller of `create_frame_texture`.
+/// `copy_source` is the test-only readback flag; production passes false.
 fn build_frame_texture(
     device: &wgpu::Device,
     software_presenter: bool,
     width: u32,
     height: u32,
     format: TextureFormat,
+    copy_source: bool,
 ) -> (Texture, TextureView) {
     let (texture_width, texture_height) = frame_texture_extent(software_presenter, width, height);
-    create_frame_texture(device, texture_width, texture_height, format)
+    create_frame_texture(device, texture_width, texture_height, format, copy_source)
+}
+
+/// Bytes per row of a readback buffer for a `width_px`-wide 4-byte frame, padded to wgpu's copy
+/// alignment.
+#[doc(hidden)]
+#[must_use]
+pub fn padded_readback_row_bytes(width_px: u32) -> u32 {
+    let tight_bytes = width_px.max(1) * 4;
+    tight_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
+}
+
+/// The tightly packed 4-byte pixels of a mapped readback whose `height_px` rows are each
+/// `padded_row_bytes` long, the padding dropped.
+#[doc(hidden)]
+#[must_use]
+pub fn unpad_readback_rows(
+    mapped: &[u8],
+    width_px: u32,
+    height_px: u32,
+    padded_row_bytes: u32,
+) -> Vec<u8> {
+    let tight_bytes = width_px as usize * 4;
+    mapped
+        .chunks(padded_row_bytes as usize)
+        .take(height_px as usize)
+        .flat_map(|row| &row[..tight_bytes])
+        .copied()
+        .collect()
+}
+
+/// A copy of the retained frame in a buffer the test maps itself; production code under `src/`
+/// never maps or polls.
+#[doc(hidden)]
+pub struct RetainedFrameReadback {
+    /// The device that owns `buffer`, which the test polls until the map completes.
+    pub device: wgpu::Device,
+    /// The `MAP_READ` buffer the frame was copied into.
+    pub buffer: wgpu::Buffer,
+    /// Frame width in pixels.
+    pub width_px: u32,
+    /// Frame height in pixels.
+    pub height_px: u32,
+    /// Bytes per buffer row, padded to wgpu's copy alignment.
+    pub padded_row_bytes: u32,
 }
 
 /// Create a wgpu instance for `event_loop`'s display, honoring `WGPU_BACKEND`.
@@ -1994,6 +2046,9 @@ pub struct GpuRenderer {
     glyph_atlas_retry_without_eviction: bool,
     /// Growths already counted and the growth episode awaiting its present.
     growth_episodes: crate::frame_stats::GrowthEpisodes,
+    /// Test-only: the retained frame texture is built with `COPY_SRC` so a test can read it back.
+    /// Only `__enable_retained_frame_readback` sets it; production keeps it false.
+    retained_frame_readback: bool,
     /// In-place glyph atlas resets since construction, read only by tests through
     /// [`Self::__test_glyph_atlas_resets`] to prove a growth retry never resets.
     glyph_atlas_resets: u64,
@@ -2846,8 +2901,14 @@ impl GpuRenderer {
         InitTiming::finish(timing, InitOutcome::Returned);
         let software_presenter = cfg!(target_os = "windows") && software_render_degrade;
         let timing = InitTiming::begin("frame_texture");
-        let (frame_texture, frame_view) =
-            build_frame_texture(&device, software_presenter, config.width, config.height, format);
+        let (frame_texture, frame_view) = build_frame_texture(
+            &device,
+            software_presenter,
+            config.width,
+            config.height,
+            format,
+            false,
+        );
         InitTiming::finish(timing, InitOutcome::Returned);
         let timing = InitTiming::begin("frame_blitter");
         let frame_blitter = wgpu::util::TextureBlitter::new(&device, format);
@@ -3010,6 +3071,7 @@ impl GpuRenderer {
             inline_media_absent_since: None,
             glyph_atlas_retry_without_eviction: false,
             growth_episodes: crate::frame_stats::GrowthEpisodes::default(),
+            retained_frame_readback: false,
             glyph_atlas_resets: 0,
             font_family: font_family.to_string(),
             font_dirs: font_dirs.to_vec(),
@@ -4339,9 +4401,78 @@ impl GpuRenderer {
             self.config.width,
             self.config.height,
             self.config.format,
+            self.retained_frame_readback,
         );
         self.frame_texture = frame_texture;
         self.frame_view = frame_view;
+    }
+
+    /// Test hook: recreate the retained frame texture copyable (`COPY_SRC`), now and on every later
+    /// recreation, so [`Self::__copy_retained_frame`] can read it back. Production never calls it,
+    /// so production frame textures keep their usage. The next frame draws in full.
+    #[doc(hidden)]
+    pub fn __enable_retained_frame_readback(&mut self) {
+        self.retained_frame_readback = true;
+        self.rebuild_frame_texture();
+        self.last_frame_key = None;
+    }
+
+    /// Test hook: copy the retained frame into a new readback buffer, through the device gate, and
+    /// return what the test needs to map it. `None` until readback is enabled, or once the device
+    /// stopped. The test maps and polls; this never does.
+    #[doc(hidden)]
+    pub fn __copy_retained_frame(&mut self) -> Option<RetainedFrameReadback> {
+        if !self.retained_frame_readback {
+            // When: retained_frame_readback is false the texture has no COPY_SRC to copy from.
+            return None;
+        }
+        let Some(_scope) = self.device_errors.enter_gpu_work("frame_texture.readback") else {
+            // When: enter_gpu_work refuses, a stopped device copies nothing.
+            return None;
+        };
+        let (width_px, height_px) = (self.frame_texture.width(), self.frame_texture.height());
+        let padded_row_bytes = padded_readback_row_bytes(width_px);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sonic-retained-frame-readback"),
+            size: u64::from(padded_row_bytes) * u64::from(height_px),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("sonic-retained-frame-readback"),
+        });
+        encoder.copy_texture_to_buffer(
+            self.frame_texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row_bytes),
+                    rows_per_image: Some(height_px),
+                },
+            },
+            wgpu::Extent3d { width: width_px, height: height_px, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+        Some(RetainedFrameReadback {
+            device: self.device.clone(),
+            buffer,
+            width_px,
+            height_px,
+            padded_row_bytes,
+        })
+    }
+
+    /// Test hook: resident glyph tiles that hold colour pixels, so a native test can tell a colour
+    /// face resolved before it compares colour tiles.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_resident_color_tiles(&self) -> usize {
+        self.glyph_atlas
+            .resident_tile_keys()
+            .into_iter()
+            .filter(|key| self.glyph_atlas.get(*key).is_some_and(|info| info.is_color))
+            .count()
     }
 
     /// The retained frame texture's actual extent: 1x1 under the Windows software presenter, else

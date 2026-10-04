@@ -5278,6 +5278,44 @@ fn the_stopped_report_finalizes_growth_episodes_before_any_early_return() {
     assert!(finalize < first_return, "finalization precedes the early return");
 }
 
+/// A readback row is padded to wgpu's copy alignment, and unpadding keeps each row's pixels and
+/// drops the padding, so two renderers' frames compare byte for byte whatever their padding.
+#[test]
+fn readback_rows_pad_to_the_copy_alignment_and_unpad_to_tight_rows() {
+    assert_eq!(padded_readback_row_bytes(1), 256, "one pixel pads to one alignment unit");
+    assert_eq!(padded_readback_row_bytes(64), 256, "exactly one unit needs no padding");
+    assert_eq!(padded_readback_row_bytes(65), 512);
+    // Two rows of one pixel each, padded to 256 bytes; the padding holds a marker byte.
+    let mut mapped = vec![0xEE; 2 * 256];
+    mapped[..4].copy_from_slice(&[1, 2, 3, 4]);
+    mapped[256..260].copy_from_slice(&[5, 6, 7, 8]);
+    assert_eq!(unpad_readback_rows(&mapped, 1, 2, 256), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+/// Production never asks for a copyable retained frame: the constructor and every rebuild pass the
+/// test-only readback flag, which only `__enable_retained_frame_readback` sets, and only that flag
+/// adds `COPY_SRC`.
+#[test]
+fn only_the_test_readback_flag_makes_the_retained_frame_copyable() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let create = source.split_once("\nfn create_frame_texture(").unwrap().1;
+    let create = create.split_once("\n}\n").unwrap().0;
+    assert!(create.contains("if copy_source"), "COPY_SRC is conditional");
+    let compact: String = source.split_whitespace().collect();
+    let constructor = compact.split_once("asyncfnnew_async(").unwrap().1;
+    let build =
+        "build_frame_texture(&device,software_presenter,config.width,config.height,format,false,)";
+    assert!(constructor.contains(build), "the constructor builds without COPY_SRC");
+    assert!(source.contains("            retained_frame_readback: false,\n"));
+    let enable = source.split_once("    pub fn __enable_retained_frame_readback(").unwrap().1;
+    assert!(enable
+        .split_once("\n    }\n")
+        .unwrap()
+        .0
+        .contains("self.retained_frame_readback = true;"));
+    assert_eq!(source.matches("self.retained_frame_readback = true;").count(), 1);
+}
+
 /// A source that owns its grids and records when it is lent and when it is dropped.
 struct OwningSource {
     grids: Vec<Grid>,

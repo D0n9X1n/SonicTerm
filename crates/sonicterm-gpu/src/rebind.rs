@@ -184,6 +184,7 @@ impl GpuRenderer {
             validated.width,
             validated.height,
             format,
+            self.retained_frame_readback,
         );
         let frame_blitter = wgpu::util::TextureBlitter::new(&context.device, format);
         let glyph_dimensions = desired_gpu_atlas_dimensions(software_presenter, &self.glyph_atlas);

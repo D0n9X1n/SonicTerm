@@ -10,7 +10,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use sonicterm_gpu::core::{
-    GlyphAtlasStart, GpuRenderer, PresentOutcome, RendererSettings, SurfaceAppearance,
+    unpad_readback_rows, GlyphAtlasStart, GpuRenderer, PresentOutcome, RendererSettings,
+    SurfaceAppearance,
 };
 use sonicterm_gpu::device_errors::GpuFaultKind;
 use sonicterm_gpu::frame_stats::FrameStats;
@@ -38,6 +39,10 @@ use winit::{
 const SLIDING_COLS: u16 = 8;
 /// Body size of the incremental cases, large enough that the 256 start fills within 376 keys.
 const SLIDING_FONT_PX: f32 = 40.0;
+/// The colour glyph the wgpu case draws beside the sliding keys, two cells wide after them.
+const COLOUR_GLYPH: char = '\u{1F600}';
+/// How long the wgpu case waits for the colour glyph's fallback face to resolve.
+const COLOUR_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 /// Body size of the two-growth case, so one screen of distinct glyphs outgrows 512 at once.
 const LARGE_FONT_PX: f32 = 160.0;
 
@@ -163,6 +168,136 @@ fn key_count() -> usize {
 /// The one-row grid the incremental cases rewrite for every frame.
 fn sliding_grid() -> Grid {
     Grid::new(SLIDING_COLS, 1)
+}
+
+/// The wgpu case's grid: the sliding keys, then two cells for the colour glyph.
+fn colour_grid() -> Grid {
+    Grid::new(SLIDING_COLS + 2, 1)
+}
+
+/// Draw the colour glyph after the sliding keys and present until a frame presents with no missing
+/// character, so its fallback face has resolved and its tile is resident. `Ok(false)` when no
+/// colour face resolves by the deadline or the tile holds no colour: that sub-case is reported as
+/// `HOST_INCAPABLE`, the glyph is blanked, and the coverage comparison still runs.
+fn settle_colour(
+    renderer: &mut GpuRenderer,
+    window: &Window,
+    grid: &mut Grid,
+    role: &str,
+) -> Result<bool, String> {
+    grid.goto(0, SLIDING_COLS);
+    grid.put_char(COLOUR_GLYPH, Color::Default, Color::Default, CellFlags::empty());
+    let started = std::time::Instant::now();
+    let mut resolved = false;
+    while started.elapsed() < COLOUR_DEADLINE {
+        grid.mark_all_dirty();
+        let outcome = frame(renderer, window, grid);
+        if matches!(outcome, PresentOutcome::Presented) && renderer.last_missing_tofu().is_empty() {
+            // When: a presented frame drew every character, the fallback face has resolved.
+            resolved = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if resolved && renderer.__test_resident_color_tiles() > 0 {
+        // When: the glyph resolved to a colour tile, the colour sub-case runs.
+        return Ok(true);
+    }
+    println!(
+        "capability=HOST_INCAPABLE case={role}-colour reason=no colour face resolved \
+         (resolved={resolved}, missing={:?})",
+        renderer.last_missing_tofu()
+    );
+    grid.goto(0, SLIDING_COLS);
+    for _ in 0..2 {
+        grid.put_char(' ', Color::Default, Color::Default, CellFlags::empty());
+    }
+    present(renderer, window, grid)?;
+    Ok(false)
+}
+
+/// The retained GPU frame's tightly packed pixels, read back through the renderer's test copy.
+/// This test maps and polls; the renderer never does.
+fn retained_pixels(renderer: &mut GpuRenderer) -> Result<(Vec<u8>, u32), String> {
+    let readback =
+        renderer.__copy_retained_frame().ok_or("readback is enabled and the device works")?;
+    let slice = readback.buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    readback
+        .device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|error| format!("poll the retained-frame readback: {error}"))?;
+    let mapped = slice
+        .get_mapped_range()
+        .map_err(|error| format!("map the retained-frame readback: {error}"))?;
+    let pixels = unpad_readback_rows(
+        &mapped,
+        readback.width_px,
+        readback.height_px,
+        readback.padded_row_bytes,
+    );
+    drop(mapped);
+    readback.buffer.unmap();
+    Ok((pixels, readback.width_px))
+}
+
+/// Test 7 on wgpu: a fresh renderer, whose atlas never grew, draws the same frame (the colour glyph
+/// too when `colour`), and its retained GPU frame equals the grown renderer's byte for byte. The
+/// frame must hold glyph ink, and colour pixels in the colour glyph's cells when `colour`.
+fn compare_with_fresh_wgpu(
+    active: &ActiveEventLoop,
+    grown: &mut GpuRenderer,
+    window: &Window,
+    newest: usize,
+    colour: bool,
+) -> Result<(), String> {
+    let role = "atlas-growth-fresh-wgpu";
+    let (fresh_window, mut fresh) =
+        counting_renderer(active, role, false, SLIDING_FONT_PX, window.inner_size())?;
+    check(fresh_window.inner_size() == window.inner_size(), "both windows are one size")?;
+    fresh.__enable_retained_frame_readback();
+    let mut grid = colour_grid();
+    if colour {
+        // When: the grown renderer drew a colour tile, the fresh one must resolve the same face.
+        check(
+            settle_colour(&mut fresh, &fresh_window, &mut grid, role)?,
+            "the fresh renderer resolves the colour face the grown one did",
+        )?;
+    }
+    slide_to(&mut grid, newest);
+    present(&mut fresh, &fresh_window, &mut grid)?;
+    check(fresh.glyph_atlas_facts().growths == 0, "the fresh atlas never grew")?;
+    let (grown_pixels, width_px) = retained_pixels(grown)?;
+    let (fresh_pixels, _) = retained_pixels(&mut fresh)?;
+    check(!grown_pixels.is_empty(), "the grown frame read back")?;
+    let first_difference = grown_pixels
+        .chunks(4)
+        .zip(fresh_pixels.chunks(4))
+        .position(|(grown_pixel, fresh_pixel)| grown_pixel != fresh_pixel);
+    check(
+        grown_pixels.len() == fresh_pixels.len() && first_difference.is_none(),
+        &format!("the grown GPU frame equals a fresh renderer's; first differing pixel {first_difference:?}"),
+    )?;
+    let background = &grown_pixels[grown_pixels.len() - 4..];
+    check(
+        grown_pixels.chunks(4).any(|pixel| pixel != background),
+        "the compared frame holds glyph ink",
+    )?;
+    if colour {
+        // The colour glyph covers the two cells after the sliding keys on the first row.
+        let (cell_w, cell_h) = grown.cell_size();
+        let first_col = (f32::from(SLIDING_COLS) * cell_w) as usize;
+        let last_col = ((f32::from(SLIDING_COLS) + 2.0) * cell_w) as usize;
+        let colour_ink = (0..cell_h as usize).any(|pixel_y| {
+            (first_col..last_col.min(width_px as usize)).any(|pixel_x| {
+                let at = (pixel_y * width_px as usize + pixel_x) * 4;
+                let pixel = &grown_pixels[at..at + 4];
+                pixel != background && (pixel[0] != pixel[1] || pixel[1] != pixel[2])
+            })
+        });
+        check(colour_ink, "the colour glyph's cells hold colour pixels")?;
+    }
+    Ok(())
 }
 
 /// Rewrite `grid` to hold keys `newest - 7 ..= newest` and mark it dirty. Writing the cells
@@ -301,7 +436,9 @@ fn slide_until_growth(
 /// Tests 7 and 8 (case a of test 15): the growing frame retries through the growth path, with no
 /// reset and no tile rasterized again; the GPU upload follows the new size under wgpu and stays 1x1
 /// under GDI; the retried frame presents; one growth and exactly one growth-to-present sample are
-/// counted. Under GDI the presented frame equals a fresh renderer's pixels for the same cells.
+/// counted. The presented frame equals a fresh renderer's pixels for the same cells: the software
+/// frame under GDI, the retained GPU frame read back under wgpu, where a colour glyph is drawn too
+/// when the host resolves a colour face.
 fn growth_retry(active: &ActiveEventLoop, software: bool) -> Result<(), String> {
     let size = PhysicalSize::new(480, 120);
     let role = if software { "atlas-growth-gdi" } else { "atlas-growth-wgpu" };
@@ -314,7 +451,15 @@ fn growth_retry(active: &ActiveEventLoop, software: bool) -> Result<(), String> 
             }
             other => other?,
         };
-    let mut grid = sliding_grid();
+    let mut grid = if software { sliding_grid() } else { colour_grid() };
+    let colour = if software {
+        false
+    } else {
+        // When: the wgpu case compares retained GPU frames, so its frame texture must be copyable,
+        // and a resident colour tile must be re-uploaded by the growth too.
+        renderer.__enable_retained_frame_readback();
+        settle_colour(&mut renderer, &window, &mut grid, role)?
+    };
     let (before, outcome) = slide_until_growth(&mut renderer, &window, &mut grid)?;
     check(
         matches!(outcome, PresentOutcome::AtlasRetry),
@@ -374,6 +519,9 @@ fn growth_retry(active: &ActiveEventLoop, software: bool) -> Result<(), String> 
             !grown.is_empty() && grown == expected,
             "the grown atlas draws a fresh renderer's pixels",
         )?;
+    } else {
+        // When: the case runs on wgpu, compare the retained GPU frames instead.
+        compare_with_fresh_wgpu(active, &mut renderer, &window, before.newest, colour)?;
     }
     Ok(())
 }
