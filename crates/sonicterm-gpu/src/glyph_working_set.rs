@@ -35,6 +35,11 @@ fn printable_ascii() -> String {
     (' '..='~').collect()
 }
 
+/// Symbols the chrome itself draws beside ASCII: the palette footer's and detail rows' `·`
+/// separators, its `↑↓` and `↵` key hints, the tab-colour row's `—`, and the tab badges' `✓` and
+/// `✗`. Every strike measures them, so a locale's footer cannot hold a key the helper missed.
+const CHROME_SYMBOLS: &str = "·↑↓↵—✓✗";
+
 /// Every style face a cell or chrome run can request.
 const STYLES: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
 
@@ -42,10 +47,12 @@ const STYLES: [(bool, bool); 4] = [(false, false), (true, false), (false, true),
 /// `dpi`, using `family` from the system and `font_dirs`. `None` when the body stack cannot load.
 ///
 /// Sources, each in its own stack, size and raster variant:
-/// - body (`Normal`): the texts, printable ASCII, `…`, and each non-ASCII character in text and
-///   emoji presentation, in the four style faces, shaped and as ASCII fast-path keys;
-/// - tab titles (`TabTitle`, body + 1): printable ASCII, `…` and the titles;
-/// - palette footer (`PaletteFooter`, max(body − 1, 1)): printable ASCII and `…`.
+/// - body (`Normal`): the texts, printable ASCII, `…`, the chrome symbols, and each non-ASCII
+///   character in text and emoji presentation, in the four style faces, shaped and as ASCII
+///   fast-path keys;
+/// - tab titles (`TabTitle`, body + 1): printable ASCII, `…`, the chrome symbols and the titles;
+/// - palette footer (`PaletteFooter`, max(body − 1, 1)): printable ASCII, `…` and the chrome
+///   symbols.
 #[must_use]
 pub fn measure_glyph_working_set(
     texts: &[&str],
@@ -62,15 +69,18 @@ pub fn measure_glyph_working_set(
     let mut body_text: String = texts.concat();
     body_text.push_str(&printable_ascii());
     body_text.push('…');
+    body_text.push_str(CHROME_SYMBOLS);
     for character in texts.iter().flat_map(|text| text.chars()).filter(|ch| !ch.is_ascii()) {
         // Both presentations: a cell can carry either selector after an emoji-capable char.
         body_text.extend([character, '\u{FE0E}', character, '\u{FE0F}']);
     }
     let mut tab_text = printable_ascii();
     tab_text.push('…');
+    tab_text.push_str(CHROME_SYMBOLS);
     tab_text.push_str(&chrome_texts.concat());
     let mut footer_text = printable_ascii();
     footer_text.push('…');
+    footer_text.push_str(CHROME_SYMBOLS);
 
     // A fixed maximum atlas never grows, so the replay sees every tile the sources produce.
     let mut atlas = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);

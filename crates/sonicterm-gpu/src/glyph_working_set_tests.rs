@@ -42,3 +42,26 @@ fn the_working_set_covers_the_footer_and_tab_title_at_their_own_sizes() {
         set.packed_pixels
     );
 }
+
+/// The palette footer and each command's detail row draw `·` separators in the footer's own
+/// strike, so the helper must measure that symbol as a `PaletteFooter` key, or the real renderer
+/// holds a footer key the helper never counted.
+#[test]
+fn the_working_set_covers_the_footer_separator() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK.lock().unwrap();
+    let set = measure_glyph_working_set(
+        &["hello"],
+        &["shell"],
+        "Rec Mono St.Helens",
+        14.0,
+        72,
+        &packaged_fonts(),
+    )
+    .expect("the packaged family loads");
+    assert!(
+        set.tile_keys
+            .iter()
+            .any(|key| key.raster_variant == GlyphRasterVariant::PaletteFooter && key.ch == '·'),
+        "the footer separator is measured in the footer strike"
+    );
+}
