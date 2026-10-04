@@ -5714,3 +5714,37 @@ fn presented_frames_record_damage_waste_beside_damage() {
         "crate::frame_stats::damage_waste_permille(&plan.damage,&plan.damage_parts,surface_width,surface_height,)"
     ));
 }
+
+/// A presented frame's damage is narrow only when it is not a first frame and covers less than
+/// the surface, so a whole-surface repaint can never pass a narrow-damage assertion: a first
+/// frame, a surface-sized rectangle and a larger-than-surface rectangle are all not narrow.
+#[test]
+fn presented_damage_is_narrow_only_below_the_surface_and_after_the_first_frame() {
+    let surface = PixelRect { x: 0, y: 0, w: 200, h: 100 };
+    let row = PixelRect { x: 0, y: 40, w: 200, h: 24 };
+    let narrow = PresentedDamage { first_frame: false, damage: row, surface };
+    assert!(narrow.is_narrow());
+    assert!(!PresentedDamage { first_frame: true, ..narrow }.is_narrow());
+    assert!(!PresentedDamage { damage: surface, ..narrow }.is_narrow());
+    let oversized = PixelRect { x: -10, y: -10, w: 400, h: 400 };
+    assert!(!PresentedDamage { damage: oversized, ..narrow }.is_narrow());
+}
+
+/// The test glyph seam is appended after every terminal row and the scrollbar and before the
+/// selection, copy-mode and block-cursor recolors, so those recolors see it as a real glyph; the
+/// presented-damage readout is written beside the frame key, so it describes presented pixels.
+/// Line endings are normalized before scanning.
+#[test]
+fn the_injected_glyph_precedes_every_cursor_recolor_and_damage_is_read_beside_the_key() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let assembly = source.split_once("    fn assemble_frame(").expect("assemble_frame exists").1;
+    let scrollbar = assembly.find("emit_pane_scrollbar(").expect("scrollbar emit");
+    let inject = assembly.find("self.push_injected_test_glyph(").expect("the seam is called");
+    let selection = assembly.find("if let Some(sel) = selection {").expect("selection quads");
+    let first_recolor = assembly.find("recolor_cursor_glyphs_in(").expect("a cursor recolor");
+    assert!(scrollbar < inject && inject < selection && inject < first_recolor);
+    let finish = source.split_once("    fn finish_successful_frame(").expect("finish exists").1;
+    let readout = finish.find("self.last_presented_damage = Some(").expect("damage readout");
+    let key = finish.find("self.last_frame_key = Some(plan.key);").expect("key recorded");
+    assert!(readout < key, "the readout is written beside the frame key");
+}

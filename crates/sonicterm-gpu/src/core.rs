@@ -1811,6 +1811,28 @@ pub fn unpad_readback_rows(
         .collect()
 }
 
+/// The damage a presented frame carried to the presenter, read back by real-renderer tests.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentedDamage {
+    /// Whether the frame was a first frame, which repaints the whole surface.
+    pub first_frame: bool,
+    /// The damage rectangle the presenter drew under its scissor.
+    pub damage: PixelRect,
+    /// The whole surface.
+    pub surface: PixelRect,
+}
+
+impl PresentedDamage {
+    /// Whether the frame redrew less than the whole surface: not a first frame, and its damage
+    /// covers a smaller area than the surface, so a full repaint can never count as narrow.
+    #[must_use]
+    pub fn is_narrow(&self) -> bool {
+        let area = |rect: PixelRect| u64::from(rect.w) * u64::from(rect.h);
+        !self.first_frame && area(self.damage) < area(self.surface)
+    }
+}
+
 /// A copy of the retained frame in a buffer the test maps itself; production code under `src/`
 /// never maps or polls.
 #[doc(hidden)]
@@ -2213,6 +2235,12 @@ pub struct GpuRenderer {
     /// What the last presented frame's cursor recolors rewrote; written only beside
     /// `last_frame_key` on a presented frame, so it always describes the pixels on screen.
     last_recolor: crate::cursor::RecolorRecord,
+    /// Test seam: a glyph `(x, y, w, h)` surface-pixel rectangle and color appended before the
+    /// cursor recolors; only `__inject_test_glyph` sets it, so production keeps `None`.
+    injected_test_glyph: Option<((f32, f32, f32, f32), [f32; 4])>,
+    /// The last presented frame's damage, written beside `last_frame_key` and taken by
+    /// `__take_presented_damage`.
+    last_presented_damage: Option<PresentedDamage>,
     /// Constant-size geometry of the palette and search query fields as last presented.
     presented_fields: PresentedFields,
     /// Preedit glyphs keyed by text, placement, color, and qualified atlas identity to reject stale UVs.
@@ -3177,6 +3205,8 @@ impl GpuRenderer {
             drag_chip_visual: None,
             last_frame_key: None,
             last_recolor: crate::cursor::RecolorRecord::default(),
+            injected_test_glyph: None,
+            last_presented_damage: None,
             presented_fields: PresentedFields::default(),
             preedit_glyph_cache: None,
             skipped_frames: 0,
@@ -4465,6 +4495,40 @@ impl GpuRenderer {
         );
         self.frame_texture = frame_texture;
         self.frame_view = frame_view;
+    }
+
+    /// Test hook: append one glyph drawing `rect_px` (`x, y, w, h` in surface pixels) in `color`
+    /// to every later frame's terminal glyphs, before the cursor recolors, with the atlas
+    /// coordinates of the frame's first terminal glyph; `None` removes it. It is not part of the
+    /// frame key: a test changes it together with grid dirt, as a real glyph change would.
+    #[doc(hidden)]
+    pub fn __inject_test_glyph(&mut self, glyph: Option<((f32, f32, f32, f32), [f32; 4])>) {
+        self.injected_test_glyph = glyph;
+    }
+
+    /// Test hook: the damage of the last presented frame, cleared by this read, so a frame that
+    /// presents nothing reads `None` instead of an older frame's damage.
+    #[doc(hidden)]
+    pub fn __take_presented_damage(&mut self) -> Option<PresentedDamage> {
+        self.last_presented_damage.take()
+    }
+
+    /// Test hook: whether a retained frame key is kept, so the next changed frame is not a
+    /// first frame.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_has_frame_key(&self) -> bool {
+        self.last_frame_key.is_some()
+    }
+
+    /// Append the test glyph seam's instance, if one is set, after the terminal rows.
+    fn push_injected_test_glyph(&self, glyphs: &mut Vec<GlyphInstance>, sw: f32, sh: f32) {
+        let Some((rect_px, color)) = self.injected_test_glyph else {
+            // When: injected_test_glyph is None, as in production, nothing is appended.
+            return;
+        };
+        let template = glyphs.first().copied();
+        glyphs.extend(crate::cursor::injected_glyph(template.as_ref(), rect_px, color, sw, sh));
     }
 
     /// Test hook: recreate the retained frame texture copyable (`COPY_SRC`), now and on every later
@@ -6157,6 +6221,9 @@ impl GpuRenderer {
                 self.scale_factor,
             );
         }
+
+        // The test glyph seam joins the terminal glyphs before any recolor reads them.
+        self.push_injected_test_glyph(&mut glyph_instances, sw, sh);
 
         if let Some(sel) = selection {
             if !sel.is_empty() {
@@ -8194,6 +8261,11 @@ impl GpuRenderer {
         self.finish_glyph_atlas_retry();
         self.last_missing_chars = missing_chars_this_frame;
         self.last_missing_chrome_chars = missing_chrome_chars;
+        self.last_presented_damage = Some(PresentedDamage {
+            first_frame: plan.first_frame,
+            damage: plan.damage,
+            surface: PixelRect { x: 0, y: 0, w: surface_width.max(1), h: surface_height.max(1) },
+        });
         self.last_frame_key = Some(plan.key);
         if self.pane_focus_flash.is_some() {
             self.request_window_redraw();

@@ -335,6 +335,27 @@ pub fn recolor_cursor_glyphs(
     record
 }
 
+/// A glyph drawing `rect_px` (`x, y, w, h` in surface pixels) in `color` with `template`'s atlas
+/// coordinates and flags; `None` without a template or on an empty surface.
+///
+/// Only the renderer's test glyph seam calls it, to place an instance whose ink a cursor recolor
+/// reaches but whose row strip does not.
+pub(crate) fn injected_glyph(
+    template: Option<&GlyphInstance>,
+    rect_px: (f32, f32, f32, f32),
+    color: [f32; 4],
+    sw: f32,
+    sh: f32,
+) -> Option<GlyphInstance> {
+    let template = template?;
+    if sw <= 0.0 || sh <= 0.0 {
+        // When: `sw` or `sh` is nonpositive, no NDC rectangle can place the glyph.
+        return None;
+    }
+    let (left, top, width, height) = rect_px;
+    Some(GlyphInstance { rect: px_to_ndc(left, top, width, height, sw, sh), color, ..*template })
+}
+
 /// Recolor every quad in `quads` that overlaps `target` (`x, y, w, h` in surface px) to `rgba`.
 ///
 /// Field tofu outlines are quads, not glyphs; a selection or caret drawn under them recolors

@@ -520,3 +520,28 @@ fn the_recolor_hash_follows_the_recolored_atlas_coordinates() {
     assert_eq!(first.bounds, moved.bounds);
     assert_ne!(first.hash, moved.hash);
 }
+
+/// The test-only injected glyph draws exactly the requested surface rectangle with the template's
+/// atlas coordinates, so a block cursor recolors it as it would a real tall glyph: the cursor at
+/// (50,100,10,12) reports the injected (50,72,10,40) as its bounds. With no template glyph, or on
+/// an empty surface, nothing is injected.
+#[test]
+fn an_injected_glyph_draws_its_rectangle_with_the_template_atlas_coordinates() {
+    let template = GlyphInstance {
+        rect: [0.0; 4],
+        uv: [0.25, 0.5, 0.375, 0.625],
+        color: INK,
+        flags: [0.0, 1.0, 0.0, 0.0],
+    };
+    let injected =
+        injected_glyph(Some(&template), (50.0, 72.0, 10.0, 40.0), MARK, EXACT_SURFACE.0, EXACT_SURFACE.1)
+            .expect("a template on a real surface injects a glyph");
+    assert_eq!(glyph_rect_px(&injected, EXACT_SURFACE.0, EXACT_SURFACE.1), (50.0, 72.0, 10.0, 40.0));
+    assert_eq!((injected.uv, injected.flags, injected.color), (template.uv, template.flags, MARK));
+    let glyphs = vec![injected];
+    let rows = vec![RowGlyphSpan::new(&glyphs, 0..1, EXACT_SURFACE.0, EXACT_SURFACE.1)];
+    let ((_, record), _) = recolor_both(&glyphs, &rows, (50.0, 100.0, 10.0, 12.0));
+    assert_eq!(record.bounds, RecolorBounds::Rect(PixelRect { x: 50, y: 72, w: 10, h: 40 }));
+    assert!(injected_glyph(None, (50.0, 72.0, 10.0, 40.0), MARK, 512.0, 512.0).is_none());
+    assert!(injected_glyph(Some(&template), (50.0, 72.0, 10.0, 40.0), MARK, 0.0, 512.0).is_none());
+}
