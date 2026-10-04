@@ -2254,6 +2254,36 @@ def row_for(rows, metric):
 
 
 class ComparisonTableTests(unittest.TestCase):
+    def test_presented_frames_per_update_divides_by_each_runs_recorded_updates(self):
+        # S10's stream phase records the updates its workload played. The row divides each run's presented
+        # frames by that run's own count, never a constant: runs of 300 and 1,200 updates give 0.5 and 1.0.
+        # A base whose harness predates the field reads n/a with no change; a phase without the field (any
+        # non-S10 phase) gets no row; a malformed count is a result problem.
+        def stream_outcome(presented, updates):
+            phase = dict(valid_result()["phases"][0], name="stream", presented_frames=presented)
+            if updates is not None:
+                phase["updates"] = updates
+            return make_outcome(result=valid_result(phases=[phase]))
+
+        metric = "stream presented frames per update (ratio)"
+        head = perf.SideRuns([stream_outcome(150, 300), stream_outcome(1200, 1200)])
+        for label in ("S10/default", "S10/sync"):
+            with self.subTest(label=label):
+                older = perf.SideRuns([stream_outcome(300, None)])
+                self.assertEqual(row_for(perf.comparison_rows(label, older, head), metric)[2:],
+                                 ["n/a", "0.75 (0.50–1.00)", "n/a"])
+                recorded = perf.SideRuns([stream_outcome(600, 300)])
+                self.assertEqual(row_for(perf.comparison_rows(label, recorded, head), metric)[2:],
+                                 ["2.00 (2.00–2.00)", "0.75 (0.50–1.00)", perf.percent_change(2.0, 0.75)])
+        rows = perf.comparison_rows("S1/default", perf.SideRuns([timed_outcome([1.0])]),
+                                    perf.SideRuns([timed_outcome([1.0])]))
+        self.assertFalse([row for row in rows if "per update" in row[1]], rows)
+        for bad in (0, -3, 1.5, "300"):
+            with self.subTest(updates=bad):
+                phase = dict(valid_result()["phases"][0], name="stream", updates=bad)
+                problems = perf.validate_result(valid_result(phases=[phase]), HARNESS_HASH, 0)
+                self.assertTrue(any("updates" in problem for problem in problems), problems)
+
     def test_frame_rows_show_pooled_statistics_with_the_per_run_spread(self):
         # Each cell is the pooled figure followed by the min-max of per-run figures.
         base = perf.SideRuns([timed_outcome([1.0, 2.0]), timed_outcome([3.0, 4.0])])

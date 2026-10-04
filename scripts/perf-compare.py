@@ -1934,6 +1934,8 @@ _PHASE_FIELDS = {
         isinstance(item, dict) and all(_finite_non_negative(item.get(key)) for key in SLOW_DISPATCH_KEYS)
         for item in value),
     "dispatch_count": lambda value: _is_int(value) and value >= 0,
+    # The logical updates S10's stream phase played; a harness older than the field leaves it out.
+    "updates": lambda value: _is_int(value) and value > 0,
 }
 
 # result.json's `frame_counters`: whether the binary has the perf-counters feature and the run forced the gate on.
@@ -3867,6 +3869,11 @@ def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
             metrics[(f"{name} wall", "s", "run")] = wall_s
         if wall_s and _is_int(phase.get("presented_frames")):
             metrics[(f"{name} presented frames", "fps", "run")] = phase["presented_frames"] / wall_s
+        # Presented frames per logical update, divided by this run's own recorded count, never a constant;
+        # a phase without `updates` (every phase but S10's stream, or an older harness) has no figure.
+        if _is_int(phase.get("presented_frames")) and _is_int(phase.get("updates")) and phase["updates"] > 0:
+            metrics[(f"{name} presented frames per update", "ratio", "run")] = \
+                phase["presented_frames"] / phase["updates"]
         if wall_s and _is_int(phase.get("redraw_requested")):
             metrics[(f"{name} redraws requested", "per s", "run")] = phase["redraw_requested"] / wall_s
         if _is_number(phase.get("cpu_user_s")) and _is_number(phase.get("cpu_system_s")):
