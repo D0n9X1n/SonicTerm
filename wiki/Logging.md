@@ -79,6 +79,10 @@ the configured filters. Very hot font-shaper dumps are `trace`; no configured
 level admits them. Use a targeted `RUST_LOG` directive only when investigating
 that path.
 
+At `debug`, the `sonicterm_app::sync_output` target records each synchronized update
+(DEC 2026) a pane's worker released at the 150 ms bound, with its `pane_id` and
+`epoch`: `synchronized output held past 150 ms; released`.
+
 ## Font diagnostics
 
 A missing configured font emits an `error` on the `config` target, naming its
@@ -391,6 +395,7 @@ previous snapshot and takes deltas.
 | `contention_images` | count | frame collections that found a visible image store busy |
 | `defer_timeout` | count | redraws deferred because a surface timeout is pending within the frame period |
 | `defer_contention` | count | redraws deferred by the lock-contention retry floor |
+| `defer_sync` | count | redraws held because a visible pane's synchronized update (DEC 2026) was open, at admission or by the recheck under the parser guards |
 | `defer_streaming` | count | redraws deferred by streaming-output pacing |
 | `stream_clock_exempt` | count | hardware attempts for new input that settled without presenting and kept the streaming clock, so the echo they waited for is not paced from them |
 | `display_link_ticks` | count | display-link ticks the window accepted: the tick's generation was the running link's and a `Link` admission was pending; stale ticks are not counted |
@@ -469,6 +474,7 @@ or whose worker finishes after it, still adds to it.
 | `flushes_untargeted` | count | flushes while the pane had no redraw target; no timestamp is stored |
 | `flushes_coalesced` | count | flushes that found an earlier flush still pending, which keeps its time |
 | `flushes_suppressed` | count | targeted flushes that sent no event because the pane's output event was still outstanding; a send the event loop refused is not counted |
+| `sync_timeouts` | count | synchronized updates (DEC 2026) a worker released at the 150 ms bound rather than at their reset |
 
 No identity holds between `flushes`, `flushes_untargeted`, `flushes_coalesced`,
 and the `flush_to_redraw` count. A pane that closes drops its pending timestamp,

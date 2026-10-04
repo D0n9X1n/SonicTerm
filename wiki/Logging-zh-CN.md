@@ -67,6 +67,9 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 级别。字体塑形热路径的海量输出位于 `trace`，任何配置级别都不会启用；只有专门排查该
 路径时才使用精确的 `RUST_LOG` 指令。
 
+在 `debug` 级别，`sonicterm_app::sync_output` target 记录窗格工作线程在 150 ms 时限释放的
+每次同步更新（DEC 2026），带 `pane_id` 和 `epoch`：`synchronized output held past 150 ms; released`。
+
 ## 字体诊断
 
 配置的字体无法匹配时，会在 `config` target 输出 `error`，注明字体族、字重、字宽和样式。
@@ -306,6 +309,7 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `contention_images` | 次数 | 发现某个可见图像存储忙碌的帧收集 |
 | `defer_timeout` | 次数 | 因帧周期内有待处理的表面超时而推迟的重绘 |
 | `defer_contention` | 次数 | 因锁争用重试下限而推迟的重绘 |
+| `defer_sync` | 次数 | 因某个可见窗格的同步更新（DEC 2026）仍在进行而保持的重绘，包括准入时和在解析器锁下重新检查时 |
 | `defer_streaming` | 次数 | 因流式输出节奏而推迟的重绘 |
 | `stream_clock_exempt` | 次数 | 硬件路径上针对新输入、未呈现而结算并保留流式时钟的尝试；它们等待的回显不从这些尝试开始计节奏 |
 | `display_link_ticks` | 次数 | 窗口接受的显示链接 tick：tick 的代际是运行中链接的代际，且有待准入的 `Link`；过期 tick 不计入 |
@@ -372,6 +376,7 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `flushes_untargeted` | 次数 | 窗格没有重绘目标时的 flush；不保存时间戳 |
 | `flushes_coalesced` | 次数 | 发现更早的 flush 仍待处理的 flush；更早的那次保留其时间 |
 | `flushes_suppressed` | 次数 | 有目标、但因窗格的输出事件仍未处理而未发送事件的 flush；事件循环拒收的发送不计入 |
+| `sync_timeouts` | 次数 | 工作线程在 150 ms 时限而非重置时释放的同步更新（DEC 2026） |
 
 `flushes`、`flushes_untargeted`、`flushes_coalesced` 与 `flush_to_redraw` 的计数之间没有恒等关系。
 关闭的窗格会丢弃其待处理时间戳，而且各计数器并非作为一次快照读取，因此要分别解读。

@@ -206,8 +206,20 @@ Current protocol support includes:
   focus reporting, and kitty keyboard flag set/push/pop/query;
 - OSC 0/2 titles, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
   clipboard events, OSC 4/10/11/12 color queries, and OSC 133 prompt markers;
-- DSR, DA, XTVERSION, DECRQSS SGR, palette, and kitty keyboard replies;
-- iTerm2, kitty, and Sixel media events.
+- DSR, DA, XTVERSION, DECRQSS SGR, DECRQM for mode 2026, palette, and kitty keyboard replies;
+- iTerm2, kitty, and Sixel media events;
+- synchronized output (DEC 2026).
+
+Synchronized output: `CSI ? 2026 h` opens an update and `CSI ? 2026 l` ends it.
+RIS also ends it; leaving the alternate screen does not. A repeated `h` keeps the
+update it opened, so it cannot extend its own bound. While an update is open, the
+pane's worker keeps parsing but sends no output event, and a window that shows the
+pane presents no frame, until the update ends or 150 ms pass. The first frame, a
+visibility change, device recovery, a changed surface size and surface recovery
+still present the live grid. DECRQM `CSI ? 2026 $ p` is answered with
+`CSI ? 2026 ; Ps $ y`, where `Ps` is 1 while an update is open and 2 otherwise; no
+other mode is answered. On Windows, ConPTY may move or drop the brackets, and the
+hold acts only on brackets that reach the parser.
 
 On Windows, a pane's program writes to a ConPTY pseudoconsole. ConPTY
 interprets that output and passes its own rendition to SonicTerm, so the

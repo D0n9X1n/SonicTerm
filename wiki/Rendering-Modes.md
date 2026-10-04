@@ -221,6 +221,21 @@ for destruction, and on a different generation; a recovery cause alone is not pr
 This scheduling adapter does not rebuild devices; the shared recovery coordinator
 below installs the replacement before the owner-local adapter admits a frame.
 
+Synchronized output (DEC 2026) adds the `Sync` deferral rule, after the surface-timeout
+and contention rules and before streaming. A pane holds its window while it is in the
+active tab's visible set, its published update is open, its 150 ms deadline has not
+passed, and every reset it has published has reached a successful frame. The window
+holds for at most 150 ms from the first `Sync` deferral of a stretch, whatever pane
+caused it; a `Presented`, `Cached` or `Settled` outcome ends the stretch and a failed
+outcome keeps it. A held window wakes at its earliest held deadline or its cap, and
+its display link neither runs nor accepts ticks. The first frame, a pending
+`Visibility` or `DeviceRecovered`, a changed surface size and a reconfigured or
+recreated surface (`Outdated`, `Suboptimal`, `SurfaceLost`) force the frame through
+the hold; only a presented frame clears the last two. A cleared retained key, such as
+on a focus change, does not. Both redraw adapters recheck the hold under the collected
+parser guards before applying receipts and abandon a held frame without settling it,
+so no clock, retry floor, receipt or cause changes.
+
 ### Occlusion and surface availability
 
 Native `Occluded` events are handled per window on macOS and X11, before either

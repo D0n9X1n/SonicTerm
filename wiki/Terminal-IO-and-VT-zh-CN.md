@@ -162,8 +162,17 @@ writer 不会新增任何合成输入。普通终端输入和解析器生成的�
   set/push/pop/query；
 - OSC 0/2 标题、带主机校验的 OSC 7 工作目录、OSC 8 超链接、OSC 52 剪贴板事件、
   OSC 4/10/11/12 颜色查询、OSC 133 提示符标记；
-- DSR、DA、XTVERSION、DECRQSS SGR、调色板和 kitty 键盘回复；
-- iTerm2、kitty 与 Sixel 媒体事件。
+- DSR、DA、XTVERSION、DECRQSS SGR、针对模式 2026 的 DECRQM、调色板和 kitty 键盘回复；
+- iTerm2、kitty 与 Sixel 媒体事件；
+- 同步输出（DEC 2026）。
+
+同步输出：`CSI ? 2026 h` 开始一次更新，`CSI ? 2026 l` 结束它。RIS 也会结束更新；
+离开备用屏幕不会。重复的 `h` 保留它已开始的那次更新，因此不能延长自身的时限。更新
+进行期间，窗格的工作线程继续解析但不发送输出事件，显示该窗格的窗口也不呈现帧，直到
+更新结束或经过 150 ms。首帧、可见性变化、设备恢复、表面尺寸改变和表面恢复仍会呈现
+当前网格。DECRQM `CSI ? 2026 $ p` 的回复是 `CSI ? 2026 ; Ps $ y`：更新进行中时 `Ps`
+为 1，否则为 2；其他模式都不回复。在 Windows 上，ConPTY 可能移动或丢弃这些括号，
+保持只作用于到达解析器的括号。
 
 在 Windows 上，窗格中的程序写入 ConPTY 伪控制台。ConPTY 先解释这些输出，
 再把它自己生成的版本交给 SonicTerm，所以解析器只能收到 ConPTY 转发的内容。
