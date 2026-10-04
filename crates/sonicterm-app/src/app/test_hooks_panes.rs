@@ -415,6 +415,17 @@ impl App {
         queued
     }
 
+    /// Test-only: a stand-in for pane `pane_id`'s VT worker in window `id`, keeping the worker's
+    /// flush decision across batches; `None` when the window has no such pane.
+    #[doc(hidden)]
+    pub fn __test_pane_worker(&self, id: WindowId, pane_id: u64) -> Option<TestPaneWorker> {
+        let pane = self.windows.get(&id)?.panes.get(&pane_id)?;
+        *pane.redraw_target.lock() = Some(id);
+        let handles = super::spawn_pane::PaneVtHandles::from_pane_state(pane);
+        let flush = super::spawn_pane::OutputFlush::new(pane_id, &handles);
+        Some(TestPaneWorker { handles, flush })
+    }
+
     /// Test-only invoker for [`Self::activate_tab_in_child`].
     #[doc(hidden)]
     pub fn __test_invoke_activate_tab_in_child(&mut self, id: WindowId, idx: usize) -> bool {
@@ -683,5 +694,42 @@ impl App {
     #[doc(hidden)]
     pub fn __test_pane_pty_present(&self, id: u64) -> Option<bool> {
         self.main()?.panes.get(&id).map(|pane| pane.pty.is_some())
+    }
+}
+
+/// Test-only: one pane's VT worker without its thread. Each batch runs the production publisher,
+/// `publish_pane_vt_batch_with`, then the worker's flush decision, so the pane's synchronized-output
+/// state is published exactly as the worker publishes it.
+#[doc(hidden)]
+pub struct TestPaneWorker {
+    handles: super::spawn_pane::PaneVtHandles,
+    flush: super::spawn_pane::OutputFlush,
+}
+
+impl TestPaneWorker {
+    /// Parse and publish `bytes` at `at`, then decide as the worker does; returns the windows a
+    /// `UserEvent::PaneOutput` would have been sent to, which the caller delivers itself.
+    #[doc(hidden)]
+    pub fn batch(&mut self, bytes: &[u8], at: Instant) -> Vec<WindowId> {
+        self.flush.receive(bytes.len(), at);
+        super::spawn_pane::publish_pane_vt_batch_with(
+            &self.handles,
+            bytes,
+            &mut None,
+            &mut self.flush.sync_latch,
+            super::media::decode_inline_image,
+            |_| {},
+            || at,
+            |_| {},
+        );
+        let handles = &self.handles;
+        let mut queued = Vec::new();
+        self.flush.after_batch(handles, at, || {
+            handles.send_output_with(|window| {
+                queued.push(window);
+                true
+            });
+        });
+        queued
     }
 }

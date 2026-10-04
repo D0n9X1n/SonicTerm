@@ -537,3 +537,22 @@ fn only_a_changed_resize_forces_a_frame_through_a_hold() {
         assert!(classify < note);
     }
 }
+
+/// The worker hook test 12 drives runs the production publisher and the worker's decision: bytes
+/// inside an update queue no output event and publish a held word with its own deadline, and the
+/// reset queues exactly one event for the pane's window.
+#[test]
+fn the_pane_worker_hook_holds_an_update_and_releases_it_once() {
+    let (app, main, _, base) = held_owners();
+    let pane = pane_of(&app, main, 0);
+    let mut worker = app.__test_pane_worker(main, pane).expect("the pane exists");
+    assert!(worker.batch(b"\x1b[?2026h", base).is_empty());
+    assert!(worker.batch(b"row", at_ms(base, 1)).is_empty());
+    let published = {
+        let pane = &app.windows[&main].panes[&pane];
+        read_published_sync(&pane.sync_word, &pane.sync_deadline_word)
+    };
+    assert!(published.set);
+    assert_eq!(published.deadline, Some(base + crate::app::spawn_pane::SYNC_OUTPUT_TIMEOUT));
+    assert_eq!(worker.batch(b"\x1b[?2026l", at_ms(base, 2)), [main]);
+}

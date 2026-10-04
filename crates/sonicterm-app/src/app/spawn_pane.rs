@@ -563,6 +563,18 @@ impl OutputFlush {
     }
 }
 
+impl PaneVtHandles {
+    /// Flush this pane's output through `send`, coalesced on its outstanding token as the worker does.
+    pub(in crate::app) fn send_output_with(&self, send: impl FnOnce(WindowId) -> bool) {
+        send_output_redraw(
+            &self.redraw_target,
+            &self.output_outstanding,
+            self.frame_counters.as_ref(),
+            send,
+        );
+    }
+}
+
 /// Send this pane's output event to its current redraw target.
 fn send_pane_output(handles: &PaneVtHandles, proxy: &EventLoopProxy<UserEvent>, pane_id: u64) {
     send_output_redraw(
