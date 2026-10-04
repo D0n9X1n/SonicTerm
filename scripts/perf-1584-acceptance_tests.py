@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -228,6 +229,14 @@ PRODUCER = evaluator.PRODUCER_JOB
 WINDOWS_S7 = "Windows before/after comparison (S7)"
 WINDOWS_S9 = "Windows before/after comparison (S9-S10)"
 MACOS_COMPARISONS = [name for name in evaluator.REQUIRED_JOBS if name.startswith("macOS before/after")]
+WINDOWS_COMPARISONS = [name for name in evaluator.REQUIRED_JOBS if name.startswith("Windows before/after")]
+# Cause evidence bound to a failed job: a remote fetch that failed, an `actions/*` transfer's HTTP 5xx, and the
+# runner annotation GitHub writes when it loses or cannot provision a runner.
+FETCH_EVIDENCE = {"kind": "fetch", "url": "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe",
+                  "error": "HTTP 503 Service Unavailable"}
+TRANSFER_EVIDENCE = {"kind": "http", "status": 503, "source": "actions/cache/restore"}
+RUNNER_EVIDENCE = {"kind": "runner", "annotation": "The hosted runner lost communication with the server."}
+PULL_URL = f"https://github.com/{evaluator.DEFAULT_REPOSITORY}/pull/{PULL_REQUEST}"
 
 
 def job_id(attempt, name):
@@ -236,7 +245,7 @@ def job_id(attempt, name):
 
 
 def jobs_record(conclusions=None, completed_at="2026-10-05T10:28:00Z", attempt=1, run_attempts=None,
-                failed_steps=None, timing=None, started_at="2026-10-05T10:01:00Z"):
+                failed_steps=None, timing=None, started_at="2026-10-05T10:01:00Z", created_at="2026-10-05T10:00:05Z"):
     """One attempt's jobs API page: every required job completed, `success` unless overridden, with its ID,
     the attempt that ran it, its queue and run times, and its steps (`failed_steps` names a failed one)."""
     conclusions, run_attempts = conclusions or {}, run_attempts or {}
@@ -248,18 +257,59 @@ def jobs_record(conclusions=None, completed_at="2026-10-05T10:28:00Z", attempt=1
             steps.append({"name": failed_steps[name], "conclusion": "failure"})
         job = {"id": job_id(attempt, name), "run_attempt": run_attempts.get(name, attempt), "name": name,
                "status": "completed", "conclusion": conclusions.get(name, "success"),
-               "created_at": "2026-10-05T10:00:05Z", "started_at": started_at, "completed_at": completed_at,
+               "created_at": created_at, "started_at": started_at, "completed_at": completed_at,
                "steps": steps}
         job.update(timing.get(name, {}))
         jobs.append(job)
     return jobs
 
 
-def record_body(first=(RUN_ID, 1), exclusion=None, recorded_at="2026-10-05T10:30:00Z", head=None):
-    """The operator's record: the first eligible run and, when one is excluded, the exclusion."""
+def record_body(first=(RUN_ID, 1), exclusion=None, recorded_at="2026-10-05T10:30:00Z", head=None,
+                published_at=None, published=True):
+    """The operator's record: the first eligible run, the exclusion or null, and where and when the record was
+    published (at `recorded_at` unless `published_at` says otherwise; none when `published` is false)."""
+    publication = {"url": f"{PULL_URL}#issuecomment-1", "published_at": published_at or recorded_at}
     return {"schema_version": 1, "head_sha": head or HEAD_SHA, "merge_base": BASE_SHA,
             "first_eligible_run": {"run_id": first[0], "attempt": first[1]},
-            "recorded_at": recorded_at, "exclusion": exclusion}
+            "recorded_at": recorded_at, "publication": publication if published else None, "exclusion": exclusion}
+
+
+def infra_entry(name, step, evidence=None):
+    """One listed infrastructure failure of attempt 1: the job, the step that failed, and its cause evidence."""
+    return {"name": name, "id": job_id(1, name), "failed_step": step, "evidence": evidence or FETCH_EVIDENCE}
+
+
+def stamp(offset_s):
+    """The fixture run's creation time plus `offset_s` seconds, as GitHub writes it."""
+    created = datetime(2026, 10, 5, 10, 0, 0, tzinfo=timezone.utc)
+    return (created + timedelta(seconds=offset_s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def timeline(producer_queue_s=900, producer_run_s=600, mac_run_s=900, windows_end_s=1500, mac_created_s=None):
+    """Every required job's times on a run created at CREATED_AT, and the run's B. The producer queues for
+    `producer_queue_s`; the macOS comparisons, created when it finishes (or at `mac_created_s`), start 10 s
+    later; the Windows comparisons run on their own until `windows_end_s`; the result job ends 10 s after the
+    last of them."""
+    producer_end_s = 5 + producer_queue_s + producer_run_s
+    times = {PRODUCER: (5, 5 + producer_queue_s, producer_end_s)}
+    for name in MACOS_COMPARISONS:
+        created_s = producer_end_s if mac_created_s is None else mac_created_s
+        times[name] = (created_s, producer_end_s + 10, producer_end_s + 10 + mac_run_s)
+    for name in WINDOWS_COMPARISONS:
+        times[name] = (5, 15, windows_end_s)
+    ready_s = max(finished_s for _created_s, _started_s, finished_s in times.values())
+    times[evaluator.RESULT_JOB] = (ready_s, ready_s + 5, ready_s + 10)
+    timing = {name: {"created_at": stamp(created_s), "started_at": stamp(started_s), "completed_at": stamp(finished_s)}
+              for name, (created_s, started_s, finished_s) in times.items()}
+    return timing, ready_s + 10
+
+
+def ineligible_jobs():
+    """An ineligible run's jobs: every one skipped, the result job under its unevaluated name expression."""
+    jobs = jobs_record({name: "skipped" for name in evaluator.REQUIRED_JOBS})
+    jobs[-1]["name"] = ("${{ (github.event_name == 'push' || ...) && 'Performance comparison result' || "
+                        "'Performance comparison result (not run)' }}")
+    return jobs
 
 
 class GhShim:
@@ -853,40 +903,41 @@ class SelectTests(AcceptanceFixture):
         code, output, _shim = self.select(record=record_body(head="e" * 40))
         self.assertEqual(code, evaluator.EXIT_INVALID, output)
 
-    def infra_runs(self, conclusions=None, failed_steps=None, run_attempts=None):
-        """The first eligible run: attempt 1 failed S7 at `Install Rust`, and attempt 2 re-ran all jobs."""
+    def infra_runs(self, conclusions=None, failed_steps=None, run_attempts=None,
+                   rerun_created="2026-10-05T10:34:00Z"):
+        """The first eligible run: attempt 1 failed S7 at `Install Rust`, and attempt 2, its jobs created at
+        `rerun_created`, re-ran all jobs."""
         conclusions = {WINDOWS_S7: "failure"} if conclusions is None else conclusions
         failed_steps = {WINDOWS_S7: "Install Rust"} if failed_steps is None else failed_steps
         return {RUN_ID: {"view": run_view(attempt=2), "jobs": {
             1: jobs_record(conclusions, failed_steps=failed_steps),
-            2: jobs_record(attempt=2, run_attempts=run_attempts, started_at="2026-10-05T10:35:00Z",
-                           completed_at="2026-10-05T10:58:00Z")}}}
+            2: jobs_record(attempt=2, run_attempts=run_attempts, created_at=rerun_created,
+                           started_at="2026-10-05T10:35:00Z", completed_at="2026-10-05T10:58:00Z")}}}
 
-    def infra_record(self, category="toolchain-fetch", jobs=None, recorded_at="2026-10-05T10:30:00Z"):
+    def infra_record(self, category="toolchain-fetch", jobs=None, recorded_at="2026-10-05T10:30:00Z", **publication):
         """The record of an infrastructure exclusion of the first execution."""
-        jobs = jobs if jobs is not None else [{"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S7),
-                                               "failed_step": "Install Rust"}]
+        jobs = jobs if jobs is not None else [infra_entry(WINDOWS_S7, "Install Rust")]
         return record_body(recorded_at=recorded_at, exclusion={"run_id": RUN_ID, "attempt": 1,
-                                                               "category": category, "jobs": jobs})
+                                                               "category": category, "jobs": jobs}, **publication)
 
     def test_a_listed_infrastructure_failure_allows_one_rerun_of_all_jobs(self):
-        # A toolchain fetch that failed before any comparison step, recorded before the rerun, admits
-        # attempt 2 of the same run, which re-ran every required job.
+        # A toolchain fetch that failed with evidence, recorded and published before the rerun's jobs exist,
+        # admits attempt 2 of the same run, which re-ran every required job.
         code, output, _shim = self.select(self.infra_runs(), record=self.infra_record())
         self.assertEqual(code, 0, output)
         selection = json.loads((self.temp / "selection.json").read_text(encoding="utf-8"))
         self.assertTrue(selection["replacement"]["used"])
         self.assertEqual(selection["replacement"]["category"], "toolchain-fetch")
 
-    def test_a_lost_runner_fails_its_job_outside_every_step(self):
-        # A runner that lost communication fails the job with no failed step; a failed step is not that.
-        lost = [{"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S7), "failed_step": None}]
-        code, output, _shim = self.select(self.infra_runs(failed_steps={}),
-                                          record=self.infra_record("runner-lost", lost))
-        self.assertEqual(code, 0, output)
-        listed = [{"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S7), "failed_step": "Install Rust"}]
-        code, output, _shim = self.select(self.infra_runs(), record=self.infra_record("runner-lost", listed))
-        self.assertEqual(code, evaluator.EXIT_INVALID, output)
+    def test_a_lost_runner_may_fail_in_or_outside_a_step(self):
+        # A runner that lost communication fails its job between steps or in the middle of one, the comparison
+        # step included; the annotation, not the step, is the cause evidence.
+        for label, step in (("between steps", None), ("mid-step", "Compare the base and the head")):
+            with self.subTest(failed=label):
+                runs = self.infra_runs(failed_steps={} if step is None else {WINDOWS_S7: step})
+                record = self.infra_record("runner-lost", [infra_entry(WINDOWS_S7, step, RUNNER_EVIDENCE)])
+                code, output, _shim = self.select(runs, record=record)
+                self.assertEqual(code, 0, output)
 
     def test_a_failed_producer_explains_its_skipped_comparisons(self):
         # When the producer fails on a listed cause, the macOS comparisons it feeds are skipped and the result
@@ -894,19 +945,17 @@ class SelectTests(AcceptanceFixture):
         conclusions = {PRODUCER: "failure", evaluator.RESULT_JOB: "failure",
                        **{name: "skipped" for name in MACOS_COMPARISONS}}
         failed_steps = {PRODUCER: "Install Rust", evaluator.RESULT_JOB: "Require every comparison job to succeed"}
-        jobs = [{"name": PRODUCER, "id": job_id(1, PRODUCER), "failed_step": "Install Rust"}]
-        code, output, _shim = self.select(self.infra_runs(conclusions, failed_steps), record=self.infra_record(jobs=jobs))
+        record = self.infra_record(jobs=[infra_entry(PRODUCER, "Install Rust")])
+        code, output, _shim = self.select(self.infra_runs(conclusions, failed_steps), record=record)
         self.assertEqual(code, 0, output)
 
     def test_unlisted_causes_never_qualify_as_infrastructure(self):
-        # A build, test or comparison failure, a cancellation, a skip, an unknown category, or an unlisted
-        # failed job never admits a replacement.
-        compare_step = [{"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S7),
-                         "failed_step": "Compare the base and the head"}]
-        skipped = [{"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S7), "failed_step": None}]
+        # A build, test or comparison failure, a cancellation, a skip, an unknown category, an unlisted failed
+        # job, a misreported step or another job's ID never admits a replacement.
+        skipped = [infra_entry(WINDOWS_S7, None, RUNNER_EVIDENCE)]
         cases = {
             "comparison step": (self.infra_runs(failed_steps={WINDOWS_S7: "Compare the base and the head"}),
-                                self.infra_record(jobs=compare_step)),
+                                self.infra_record(jobs=[infra_entry(WINDOWS_S7, "Compare the base and the head")])),
             "cancelled": (self.infra_runs(conclusions={WINDOWS_S7: "cancelled"}, failed_steps={}),
                           self.infra_record("runner-lost", skipped)),
             "skipped": (self.infra_runs(conclusions={WINDOWS_S7: "skipped"}, failed_steps={}),
@@ -919,7 +968,30 @@ class SelectTests(AcceptanceFixture):
             "misreported step": (self.infra_runs(failed_steps={WINDOWS_S7: "Compare the base and the head"}),
                                  self.infra_record()),
             "wrong job ID": (self.infra_runs(), self.infra_record(jobs=[
-                {"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S9), "failed_step": "Install Rust"}])),
+                {**infra_entry(WINDOWS_S7, "Install Rust"), "id": job_id(1, WINDOWS_S9)}])),
+        }
+        for label, (runs, record) in cases.items():
+            with self.subTest(case=label):
+                code, output, _shim = self.select(runs, record=record)
+                self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
+    def test_cause_evidence_must_prove_the_listed_category(self):
+        # The step map is only a consistency check: each listed job carries evidence of its category's cause. A
+        # local setup error, a non-5xx or non-`actions/*` transfer, a fetch with no URL, an unannotated runner
+        # loss and the local `git rev-parse` of the vcpkg commit never pass as infrastructure.
+        def case(category, step, evidence):
+            return (self.infra_runs(failed_steps={WINDOWS_S7: step}),
+                    self.infra_record(category, [infra_entry(WINDOWS_S7, step, evidence)]))
+        cases = {
+            "local setup error": case("toolchain-fetch", "Install Cairo for Windows", {
+                "kind": "local", "url": "https://github.com/microsoft/vcpkg", "error": "cairo-2.dll was not found"}),
+            "non-5xx transfer": case("actions-transfer", "Restore vcpkg binaries (Cairo)",
+                                     {**TRANSFER_EVIDENCE, "status": 404}),
+            "not an actions transfer": case("actions-transfer", "Upload the comparison evidence",
+                                            {**TRANSFER_EVIDENCE, "source": "curl"}),
+            "fetch with no URL": case("toolchain-fetch", "Install Rust", {"kind": "fetch", "error": "timed out"}),
+            "unannotated runner loss": case("runner-lost", "Install Rust", {"kind": "runner", "annotation": ""}),
+            "local vcpkg commit resolution": case("toolchain-fetch", "Resolve vcpkg commit", FETCH_EVIDENCE),
         }
         for label, (runs, record) in cases.items():
             with self.subTest(case=label):
@@ -927,10 +999,12 @@ class SelectTests(AcceptanceFixture):
                 self.assertEqual(code, evaluator.EXIT_INVALID, output)
 
     def test_an_infrastructure_replacement_is_recorded_before_a_full_rerun(self):
-        # The exclusion is recorded after the failed attempt and before the rerun starts, and Re-run all jobs
-        # leaves no required job inherited from attempt 1.
+        # The exclusion is recorded after the failed attempt and before the rerun's first job is created, and
+        # Re-run all jobs leaves no required job inherited from attempt 1.
         cases = {
             "inherited job": (self.infra_runs(run_attempts={WINDOWS_S9: 1}), self.infra_record()),
+            "jobs created before the record": (self.infra_runs(rerun_created="2026-10-05T10:29:00Z"),
+                                               self.infra_record()),
             "recorded after the rerun began": (self.infra_runs(), self.infra_record(recorded_at="2026-10-05T10:40:00Z")),
             "recorded before the failure finished": (self.infra_runs(),
                                                      self.infra_record(recorded_at="2026-10-05T10:20:00Z")),
@@ -942,88 +1016,149 @@ class SelectTests(AcceptanceFixture):
                 code, output, _shim = self.select(runs, record=record)
                 self.assertEqual(code, evaluator.EXIT_INVALID, output)
 
-    def queue_runs(self, predecessor_attempt=1, replacement_created="2026-10-05T11:00:00Z", timing=None,
-                   extra_runs=(), conclusions=None, completed_at="2026-10-05T10:41:00Z"):
-        """The first eligible run over budget with the producer queued 15 minutes, then the replacement."""
-        excluded = RUN_ID - 1
-        timing = timing or {PRODUCER: {"created_at": "2026-10-05T10:00:05Z", "started_at": "2026-10-05T10:15:05Z"}}
-        listed = [{"id": excluded, "name": evaluator.WORKFLOW_NAME, "event": "pull_request",
-                   "head_sha": HEAD_SHA, "created_at": CREATED_AT},
-                  *extra_runs,
-                  {"id": RUN_ID, "name": evaluator.WORKFLOW_NAME, "event": "pull_request", "head_sha": HEAD_SHA,
-                   "created_at": replacement_created}]
-        return {RUN_ID: {"view": run_view(created_at=replacement_created),
-                         "jobs": {1: jobs_record(completed_at="2026-10-05T11:28:00Z")}},
-                excluded: {"view": run_view(run_id=excluded, attempt=predecessor_attempt),
-                           "jobs": {1: jobs_record(conclusions, completed_at=completed_at, timing=timing)}},
-                "head_runs": listed}
-
-    def queue_record(self, intervals=None, counterfactual_s=1560, elapsed_s=2460, recorded_at="2026-10-05T10:45:00Z"):
-        """The record of a queue exclusion: the producer's 900 s queue on the critical path."""
-        intervals = intervals if intervals is not None else [
-            {"name": PRODUCER, "id": job_id(1, PRODUCER), "start": "2026-10-05T10:00:05Z",
-             "end": "2026-10-05T10:15:05Z"}]
-        return record_body(first=(RUN_ID - 1, 1), recorded_at=recorded_at, exclusion={
-            "run_id": RUN_ID - 1, "attempt": 1, "category": "queue", "elapsed_s": elapsed_s,
-            "counterfactual_s": counterfactual_s, "intervals": intervals})
-
-    def test_a_queue_budget_replacement_is_the_first_new_run_on_the_same_head(self):
-        # Every excluded job succeeded but B failed by 660 s; the producer's reconciled 900 s macOS queue
-        # interval accounts for it (2460 - 900 = 1560 <= 1800), so the first later run on the head replaces it.
-        code, output, _shim = self.select(self.queue_runs(), record=self.queue_record())
-        self.assertEqual(code, 0, output)
-        selection = json.loads((self.temp / "selection.json").read_text(encoding="utf-8"))
-        self.assertEqual(selection["replacement"]["counterfactual_s"], 1560)
-
-    def test_a_queue_exclusion_must_reconcile_with_the_job_record(self):
-        # The intervals are macOS required jobs' own queue windows, disjoint, and without them the run meets
-        # B; the recorded figures must equal the recomputed ones.
-        short = [{"name": PRODUCER, "id": job_id(1, PRODUCER), "start": "2026-10-05T10:00:05Z",
-                  "end": "2026-10-05T10:05:05Z"}]
-        outside = [{"name": PRODUCER, "id": job_id(1, PRODUCER), "start": "2026-10-05T10:00:05Z",
-                    "end": "2026-10-05T10:20:05Z"}]
-        windows = [{"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S7), "start": "2026-10-05T10:00:05Z",
-                    "end": "2026-10-05T10:15:05Z"}]
-        overlapping = [{"name": PRODUCER, "id": job_id(1, PRODUCER), "start": "2026-10-05T10:00:05Z",
-                        "end": "2026-10-05T10:15:05Z"}] * 2
-        windows_timing = {WINDOWS_S7: {"created_at": "2026-10-05T10:00:05Z", "started_at": "2026-10-05T10:15:05Z"}}
+    def test_the_exclusion_is_published_before_the_trigger(self):
+        # The operator's record carries where it was published and when: no earlier than it was written and
+        # before the replacement was triggered, for either kind of exclusion.
         cases = {
-            "too short to recover B": (self.queue_runs(), self.queue_record(short, counterfactual_s=2160)),
-            "wrong counterfactual": (self.queue_runs(), self.queue_record(counterfactual_s=1500)),
-            "wrong elapsed": (self.queue_runs(), self.queue_record(elapsed_s=2400)),
-            "outside the queue window": (self.queue_runs(), self.queue_record(outside, counterfactual_s=1260)),
-            "a Windows job": (self.queue_runs(timing=windows_timing), self.queue_record(windows)),
-            "overlapping": (self.queue_runs(), self.queue_record(overlapping, counterfactual_s=660)),
+            "no publication": (self.infra_runs(), self.infra_record(published=False)),
+            "published after the rerun's jobs were created": (
+                self.infra_runs(), self.infra_record(published_at="2026-10-05T10:34:30Z")),
+            "published before it was recorded": (self.infra_runs(),
+                                                 self.infra_record(published_at="2026-10-05T10:29:00Z")),
+            "queue record published at the replacement": (
+                self.queue_runs(), self.queue_record(published_at="2026-10-05T11:00:00Z")),
         }
         for label, (runs, record) in cases.items():
             with self.subTest(case=label):
                 code, output, _shim = self.select(runs, record=record)
                 self.assertEqual(code, evaluator.EXIT_INVALID, output)
 
+    def queue_runs(self, predecessor_attempt=1, replacement_created="2026-10-05T11:00:00Z", timing=None,
+                   extra_runs=(), conclusions=None):
+        """The first eligible run over budget (the producer queued 900 s, B 2425 s), then the replacement; each
+        `extra_runs` entry is a (listed run, its jobs) created between them."""
+        excluded = RUN_ID - 1
+        listed = [{"id": excluded, "name": evaluator.WORKFLOW_NAME, "event": "pull_request",
+                   "head_sha": HEAD_SHA, "created_at": CREATED_AT},
+                  *(listed_run for listed_run, _jobs in extra_runs),
+                  {"id": RUN_ID, "name": evaluator.WORKFLOW_NAME, "event": "pull_request", "head_sha": HEAD_SHA,
+                   "created_at": replacement_created}]
+        runs = {RUN_ID: {"view": run_view(created_at=replacement_created),
+                         "jobs": {1: jobs_record(completed_at="2026-10-05T11:28:00Z")}},
+                excluded: {"view": run_view(run_id=excluded, attempt=predecessor_attempt),
+                           "jobs": {1: jobs_record(conclusions, timing=timing or timeline()[0])}},
+                "head_runs": listed}
+        for listed_run, jobs in extra_runs:
+            runs[listed_run["id"]] = {"jobs": {1: jobs}}
+        return runs
+
+    def queue_record(self, intervals=None, counterfactual_s=1525, elapsed_s=2425,
+                     recorded_at="2026-10-05T10:45:00Z", trigger=None, **publication):
+        """The record of a queue exclusion: the producer's 900 s runner queue, which B through the dependency graph
+        loses (2425 s becomes 1525 s), and the label event that triggers the replacement."""
+        intervals = intervals if intervals is not None else [self.interval(PRODUCER, 5, 905)]
+        trigger = trigger if trigger is not None else {"action": "labeled", "label": "perf", "url": PULL_URL}
+        return record_body(first=(RUN_ID - 1, 1), recorded_at=recorded_at, exclusion={
+            "run_id": RUN_ID - 1, "attempt": 1, "category": "queue", "elapsed_s": elapsed_s,
+            "counterfactual_s": counterfactual_s, "intervals": intervals, "replacement_trigger": trigger},
+            **publication)
+
+    @staticmethod
+    def interval(name, start_s, end_s):
+        """A claimed runner-queue interval of `name` in the excluded run, in seconds after its creation."""
+        return {"name": name, "id": job_id(1, name), "start": stamp(start_s), "end": stamp(end_s)}
+
+    def test_a_queue_budget_replacement_is_the_first_new_run_on_the_same_head(self):
+        # Every excluded job succeeded but B failed by 625 s; without the producer's 900 s runner queue the
+        # dependency graph finishes at 1525 s <= 1800 s, so the first later eligible run on the head replaces it.
+        code, output, _shim = self.select(self.queue_runs(), record=self.queue_record())
+        self.assertEqual(code, 0, output)
+        selection = json.loads((self.temp / "selection.json").read_text(encoding="utf-8"))
+        self.assertEqual(selection["replacement"]["counterfactual_s"], 1525)
+
+    def test_a_queue_exclusion_must_reconcile_with_the_job_record(self):
+        # The intervals are macOS required jobs' own runner-queue windows, disjoint within a job, and the recorded
+        # B and counterfactual equal the recomputed ones.
+        windows_timing = {**timeline()[0], WINDOWS_S7: {"created_at": stamp(5), "started_at": stamp(905),
+                                                         "completed_at": stamp(1500)}}
+        cases = {
+            "too short to recover B": (self.queue_runs(), self.queue_record([self.interval(PRODUCER, 5, 305)], 2125)),
+            "wrong counterfactual": (self.queue_runs(), self.queue_record(counterfactual_s=1500)),
+            "wrong elapsed": (self.queue_runs(), self.queue_record(elapsed_s=2400)),
+            "outside the queue window": (self.queue_runs(),
+                                         self.queue_record([self.interval(PRODUCER, 5, 1205)], 1225)),
+            "a Windows job": (self.queue_runs(timing=windows_timing),
+                              self.queue_record([self.interval(WINDOWS_S7, 5, 905)])),
+            "overlapping": (self.queue_runs(), self.queue_record([self.interval(PRODUCER, 5, 905)] * 2, 625)),
+            "partially overlapping": (self.queue_runs(), self.queue_record(
+                [self.interval(PRODUCER, 5, 405), self.interval(PRODUCER, 305, 630)], 1700)),
+        }
+        for label, (runs, record) in cases.items():
+            with self.subTest(case=label):
+                code, output, _shim = self.select(runs, record=record)
+                self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
+    def test_the_counterfactual_follows_the_dependency_graph(self):
+        # Removing a runner queue moves only its job and what depends on it: a queue off the critical path saves
+        # nothing, a Windows branch can still miss B, a shorter branch can become critical, and time spent waiting
+        # for the producer is dependency wait, never runner queue.
+        cases = {
+            "a queue off the critical path": (
+                timeline(producer_run_s=100, mac_run_s=85, windows_end_s=2390), 2400, 1500, None, 2),
+            "a Windows branch still over budget": (timeline(windows_end_s=2000), 2425, 1525, None, 2),
+            "a shorter branch becomes critical": (timeline(windows_end_s=1700), 2425, 1710, None, 0),
+            "dependency wait submitted as queue": (
+                timeline(mac_created_s=5), 2425, 925, [self.interval(MACOS_COMPARISONS[0], 5, 1505)], 2),
+            # Read as queue, every comparison's wait for the producer would finish the run at 1515 s.
+            "dependency wait on every comparison": (
+                timeline(mac_created_s=5), 2425, 1515, [self.interval(name, 5, 1505) for name in MACOS_COMPARISONS], 2),
+        }
+        for label, ((timing, elapsed_s), recorded_elapsed_s, counterfactual_s, intervals, expected) in cases.items():
+            with self.subTest(case=label):
+                self.assertEqual(elapsed_s, recorded_elapsed_s)
+                code, output, _shim = self.select(self.queue_runs(timing=timing), record=self.queue_record(
+                    intervals, counterfactual_s, elapsed_s))
+                self.assertEqual(code, expected, output)
+
     def test_a_queue_replacement_follows_the_record_and_takes_the_one_allowance(self):
         # The excluded run is the recorded first eligible run, still on attempt 1; the replacement was created
-        # after the record and is the first later run on the head.
+        # after the record, is the first later eligible run on the head, and a perf label triggered it.
         not_first = self.queue_record()
         not_first["first_eligible_run"]["run_id"] = RUN_ID - 5
-        between = {"id": RUN_ID - 2 + 100, "name": evaluator.WORKFLOW_NAME, "event": "pull_request",
-                   "head_sha": HEAD_SHA, "created_at": "2026-10-05T10:50:00Z"}
+        between = ({"id": RUN_ID + 100, "name": evaluator.WORKFLOW_NAME, "event": "pull_request",
+                    "head_sha": HEAD_SHA, "created_at": "2026-10-05T10:50:00Z"}, jobs_record())
         cases = {
             "predecessor re-run": (self.queue_runs(predecessor_attempt=2), self.queue_record()),
             "excluded run is not the first eligible": (self.queue_runs(), not_first),
-            "not the first new run": (self.queue_runs(extra_runs=(between,)), self.queue_record()),
+            "not the first new eligible run": (self.queue_runs(extra_runs=(between,)), self.queue_record()),
             "recorded after the replacement": (self.queue_runs(),
                                                self.queue_record(recorded_at="2026-10-05T11:05:00Z")),
             "recorded before the run finished": (self.queue_runs(),
                                                  self.queue_record(recorded_at="2026-10-05T10:40:00Z")),
+            "not triggered by a label": (self.queue_runs(), self.queue_record(
+                trigger={"action": "reopened", "url": PULL_URL})),
+            "reopened with the label": (self.queue_runs(), self.queue_record(
+                trigger={"action": "reopened", "label": "perf", "url": PULL_URL})),
+            "another label": (self.queue_runs(), self.queue_record(
+                trigger={"action": "labeled", "label": "bug", "url": PULL_URL})),
         }
         for label, (runs, record) in cases.items():
             with self.subTest(case=label):
                 code, output, _shim = self.select(runs, record=record)
                 self.assertEqual(code, evaluator.EXIT_INVALID, output)
 
+    def test_an_ineligible_run_in_between_is_not_the_replacement(self):
+        # A run another label started on the head skips every job and its result job keeps the unevaluated name
+        # expression, so it is not eligible and the later eligible run is the replacement.
+        ineligible = ({"id": RUN_ID + 100, "name": evaluator.WORKFLOW_NAME, "event": "pull_request",
+                       "head_sha": HEAD_SHA, "created_at": "2026-10-05T10:50:00Z"}, ineligible_jobs())
+        code, output, _shim = self.select(self.queue_runs(extra_runs=(ineligible,)), record=self.queue_record())
+        self.assertEqual(code, 0, output)
+
     def test_a_queue_budget_replacement_of_a_run_within_budget_is_refused(self):
-        code, output, _shim = self.select(self.queue_runs(completed_at="2026-10-05T10:28:00Z"),
-                                          record=self.queue_record(elapsed_s=1680, counterfactual_s=780))
+        timing, elapsed_s = timeline(producer_queue_s=0)
+        code, output, _shim = self.select(self.queue_runs(timing=timing),
+                                          record=self.queue_record(elapsed_s=elapsed_s, counterfactual_s=elapsed_s))
         self.assertEqual(code, evaluator.EXIT_INVALID, output)
 
     def test_a_queue_budget_replacement_needs_every_excluded_job_to_succeed(self):

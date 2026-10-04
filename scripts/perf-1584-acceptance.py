@@ -98,15 +98,18 @@ SHA = re.compile(r"[0-9a-f]{40}")
 # A git read of one frozen file; the child is killed and reaped at this bound.
 GIT_TIMEOUT_S = 60
 
-# The listed external-infrastructure failures, each with the failed step it can explain: None is a job that
-# failed outside every step. Build, test, comparison, cancellation and skip causes are never listed.
-INFRASTRUCTURE_STEPS = {
-    "runner-lost": frozenset({None}),
-    "runner-provisioning": frozenset({None, "Set up job"}),
-    "actions-transfer": frozenset({"Upload the binaries", "Upload the build evidence", "Download the binaries",
-                                   "Upload the comparison evidence", "Restore vcpkg binaries (Cairo)"}),
-    "toolchain-fetch": frozenset({"Install Rust", "Install native dependencies", "Resolve vcpkg commit",
-                                  "Restore vcpkg binaries (Cairo)", "Install Cairo for Windows"}),
+# The listed external-infrastructure failures: the kind of cause evidence each needs, and the failed steps that
+# evidence can be consistent with (None is a job that failed outside every step; a lost runner may fail in any
+# step). The step map is only a consistency check; the evidence is the cause. Build, test, comparison,
+# cancellation and skip causes are never listed, and `Resolve vcpkg commit` is a local `git rev-parse`.
+ANY_STEP = "any step"
+INFRASTRUCTURE_CAUSES = {
+    "runner-lost": ("runner", ANY_STEP),
+    "runner-provisioning": ("runner", frozenset({None, "Set up job"})),
+    "actions-transfer": ("http", frozenset({"Upload the binaries", "Upload the build evidence", "Download the binaries",
+                                            "Upload the comparison evidence", "Restore vcpkg binaries (Cairo)"})),
+    "toolchain-fetch": ("fetch", frozenset({"Install Rust", "Install native dependencies",
+                                            "Install Cairo for Windows"})),
 }
 QUEUE_CATEGORY = "queue"
 # The result job's own check, which fails whenever a comparison job did not succeed.
@@ -260,12 +263,43 @@ def failed_steps(job: Mapping) -> list:
             if isinstance(step, dict) and step.get("conclusion") == "failure"]
 
 
-def check_infrastructure(args, runner, critical, view: Mapping, exclusion: Mapping, recorded_s: int) -> dict:
-    """An infrastructure exclusion: each listed job failed on a listed cause's step, every other unsuccessful
-    job follows from a listed failure, and Re-run all jobs of the same run, recorded first, is decisive."""
+def check_cause(category: str, entry: Mapping) -> None:
+    """The listed job's cause evidence proves `category`: an `actions/*` transfer's HTTP 5xx, a remote fetch that
+    failed, or GitHub's runner-loss or provisioning annotation. A step name alone proves nothing."""
+    kind, _steps = INFRASTRUCTURE_CAUSES[category]
+    evidence = entry.get("evidence")
+    if not isinstance(evidence, dict) or evidence.get("kind") != kind:
+        raise EvidenceInvalid(f"{entry.get('name')}: a {category} failure needs {kind} cause evidence")
+    status = evidence.get("status")
+    proven = {
+        "http": isinstance(status, int) and not isinstance(status, bool) and 500 <= status <= 599
+        and str(evidence.get("source", "")).startswith("actions/"),
+        "fetch": str(evidence.get("url", "")).startswith("https://") and bool(evidence.get("error")),
+        "runner": bool(str(evidence.get("annotation", "")).strip()),
+    }[kind]
+    if not proven:
+        raise EvidenceInvalid(f"{entry.get('name')}: the {kind} evidence {evidence!r} does not prove {category}")
+
+
+def check_publication(critical, record: Mapping, recorded_s: int) -> int:
+    """When the record was published, on GitHub, no earlier than it was written; the trigger must follow it."""
+    publication = record.get("publication")
+    if not isinstance(publication, dict) or not str(publication.get("url", "")).startswith("https://github.com/"):
+        raise EvidenceInvalid("the record carries no evidence of where it was published before the trigger")
+    published_s = critical.parse_time(publication.get("published_at"))
+    if published_s < recorded_s:
+        raise EvidenceInvalid("the record was published before it was written")
+    return published_s
+
+
+def check_infrastructure(args, runner, critical, view: Mapping, exclusion: Mapping, recorded_s: int,
+                         published_s: int) -> dict:
+    """An infrastructure exclusion: each listed job failed with evidence of a listed cause at a consistent step,
+    every other unsuccessful job follows from a listed failure, and Re-run all jobs of the same run, triggered
+    after the record was published, is decisive."""
     if args.run != exclusion["run_id"] or view.get("attempt") != 2:
         raise EvidenceInvalid("an infrastructure replacement is Re-run all jobs: the same run ID, attempt 2")
-    allowed = INFRASTRUCTURE_STEPS[exclusion["category"]]
+    _kind, allowed = INFRASTRUCTURE_CAUSES[exclusion["category"]]
     excluded = required_jobs(attempt_jobs(runner, args.repo, args.run, 1), f"excluded run {args.run} attempt 1")
     listed = exclusion.get("jobs")
     if not isinstance(listed, list) or not listed:
@@ -276,9 +310,11 @@ def check_infrastructure(args, runner, critical, view: Mapping, exclusion: Mappi
         if job is None or job.get("id") != entry.get("id") or entry["name"] in names:
             raise EvidenceInvalid(f"listed job {entry!r} is not one required job of the excluded attempt")
         step = entry.get("failed_step")
-        if job.get("conclusion") != "failure" or step not in allowed or failed_steps(job) != ([] if step is None else [step]):
+        consistent = allowed == ANY_STEP or step in allowed
+        if job.get("conclusion") != "failure" or not consistent or failed_steps(job) != ([] if step is None else [step]):
             raise EvidenceInvalid(f"{entry['name']}: {job.get('conclusion')} at {failed_steps(job)} is not "
                                   f"a listed {exclusion['category']} failure")
+        check_cause(exclusion["category"], entry)
         names.add(entry["name"])
     for name, job in excluded.items():
         if name in names or job.get("conclusion") == "success":
@@ -293,16 +329,65 @@ def check_infrastructure(args, runner, critical, view: Mapping, exclusion: Mappi
     if inherited:
         raise EvidenceInvalid(f"attempt 2 inherited {inherited} instead of re-running all jobs")
     failed_end = max(critical.parse_time(job.get("completed_at")) for job in excluded.values())
-    rerun_start = min(critical.parse_time(job.get("started_at")) for job in rerun.values())
-    if not failed_end <= recorded_s < rerun_start:
-        raise EvidenceInvalid("the exclusion must be recorded after the failed attempt and before the rerun")
+    # The rerun's first job exists once the trigger has happened, so the record must precede its creation.
+    rerun_created = min(critical.parse_time(job.get("created_at")) for job in rerun.values())
+    if not (failed_end <= recorded_s and published_s < rerun_created):
+        raise EvidenceInvalid("the exclusion must be recorded after the failed attempt and published before the "
+                              "rerun's first job was created")
     return {"used": True, "category": exclusion["category"], "excluded_run": args.run, "excluded_attempt": 1,
             "jobs": sorted(names)}
 
 
-def check_queue(args, runner, critical, view: Mapping, exclusion: Mapping, recorded_s: int) -> dict:
-    """A queue exclusion: every required job succeeded but B failed, and reconciled macOS queue intervals on the
-    critical path account for the overrun; the first new run on the head, created after the record, is decisive."""
+def queue_counterfactual(critical, created_at: str, jobs: Mapping[str, Mapping], removed: Mapping[str, int]) -> tuple:
+    """B through the frozen workflow graph with `removed` seconds of runner queue taken from each job: (B, each
+    job's runner-queue window). A job is ready when every job it needs has finished (or at the run's creation);
+    its runner queue is S - max(C, ready), perf-critical-path's rule, so dependency wait is never queue. Removing
+    queue moves the job and everything after it, and B is the latest required completion."""
+    created_s = critical.parse_time(created_at)
+    holders = {"producer": [PRODUCER_JOB], "comparison": [name for name in REQUIRED_JOBS
+                                                          if name not in (PRODUCER_JOB, RESULT_JOB)]}
+    finished, windows = {}, {}
+    pending = list(REQUIRED_JOBS)
+    while pending:
+        progressed = False
+        for name in list(pending):
+            needed = [holder for role in critical.needs_of(name, "new-design") for holder in holders[role]]
+            if any(holder not in finished for holder in needed):
+                continue
+            job = jobs[name]
+            ready_s = max([critical.parse_time(jobs[holder].get("completed_at")) for holder in needed], default=created_s)
+            segment = critical.Segment(name, ready_s, ready_s, critical.parse_time(job.get("created_at")),
+                                       critical.parse_time(job.get("started_at")),
+                                       critical.parse_time(job.get("completed_at")))
+            # The caller bounds `removed` by this job's disjoint intervals inside its runner-queue window.
+            if segment.runner_queue_s < 0 or segment.runtime_s < 0:
+                raise EvidenceInvalid(f"{name}: its times are inconsistent")
+            windows[name] = (max(segment.created_s, ready_s), segment.started_s)
+            moved_ready_s = max([finished[holder] for holder in needed], default=created_s)
+            finished[name] = (moved_ready_s + segment.creation_wait_s + segment.runner_queue_s - removed.get(name, 0)
+                              + segment.runtime_s)
+            pending.remove(name)
+            progressed = True
+        if not progressed:
+            raise EvidenceInvalid(f"the workflow graph does not resolve: {pending}")
+    return max(finished.values()) - created_s, windows
+
+
+def eligible(runner, critical, repository: str, run_id: object) -> bool:
+    """Whether a run on the head is an eligible comparison: its result job took the real name. An ineligible run
+    (another label) skips every job and shows the result job's unevaluated name expression."""
+    results = [job for job in attempt_jobs(runner, repository, run_id, 1)
+               if isinstance(job, dict) and critical.is_result_row(job.get("name"))]
+    if len(results) != 1:
+        raise EvidenceInvalid(f"run {run_id} lists {len(results)} result jobs, not one")
+    return results[0].get("name") == RESULT_JOB
+
+
+def check_queue(args, runner, critical, view: Mapping, exclusion: Mapping, recorded_s: int,
+                published_s: int) -> dict:
+    """A queue exclusion: every required job succeeded but B failed, and without the evidenced macOS runner-queue
+    intervals the dependency graph meets B; the first later eligible run on the head, triggered by the perf label
+    after the record was published, is decisive."""
     excluded_run = exclusion["run_id"]
     if args.run == excluded_run or view.get("attempt") != 1:
         raise EvidenceInvalid("a queue-budget replacement is the first new run ID, attempt 1")
@@ -317,35 +402,47 @@ def check_queue(args, runner, critical, view: Mapping, exclusion: Mapping, recor
     budget = budget_of(critical, excluded_view.get("createdAt"), found)
     if not budget["measurable"] or budget["within"] or budget["elapsed_s"] != exclusion.get("elapsed_s"):
         raise EvidenceInvalid(f"the excluded run's B {budget} does not match a recorded over-budget run")
-    intervals, queued_s = [], 0
+    # With nothing removed the walk reproduces every job's own finish, so only the queue windows are needed here.
+    _measured_s, windows = queue_counterfactual(critical, excluded_view.get("createdAt"), found, {})
+    spans, removed = {}, {}
     for entry in exclusion.get("intervals") or []:
         job = found.get(entry.get("name")) if isinstance(entry, dict) else None
         if job is None or job.get("id") != entry.get("id") or not entry["name"].startswith("macOS"):
             raise EvidenceInvalid(f"interval {entry!r} is not a required macOS job of the excluded run")
         start, end = critical.parse_time(entry.get("start")), critical.parse_time(entry.get("end"))
-        if not critical.parse_time(job.get("created_at")) <= start < end <= critical.parse_time(job.get("started_at")):
-            raise EvidenceInvalid(f"interval {entry!r} is outside {entry['name']}'s queue window")
-        intervals.append((start, end))
-        queued_s += end - start
-    intervals.sort()
-    if not intervals or any(later[0] < earlier[1] for earlier, later in zip(intervals, intervals[1:])):
-        raise EvidenceInvalid("the queue intervals are missing or overlap")
-    counterfactual_s = budget["elapsed_s"] - queued_s
+        window_start, window_end = windows[entry["name"]]
+        if not window_start <= start < end <= window_end:
+            raise EvidenceInvalid(f"interval {entry!r} is outside {entry['name']}'s runner-queue window")
+        spans.setdefault(entry["name"], []).append((start, end))
+        removed[entry["name"]] = removed.get(entry["name"], 0) + end - start
+    for name, intervals in spans.items():
+        intervals.sort()
+        if any(later[0] < earlier[1] for earlier, later in zip(intervals, intervals[1:])):
+            raise EvidenceInvalid(f"{name}'s queue intervals overlap")
+    if not spans:
+        raise EvidenceInvalid("the queue exclusion lists no interval")
+    counterfactual_s, _windows = queue_counterfactual(critical, excluded_view.get("createdAt"), found, removed)
     if counterfactual_s != exclusion.get("counterfactual_s") or counterfactual_s > critical.BUDGET_S:
         raise EvidenceInvalid(f"without the queue intervals the run takes {counterfactual_s} s; the record says "
                               f"{exclusion.get('counterfactual_s')} and B is {critical.BUDGET_S} s")
     finished_s = max(critical.parse_time(job.get("completed_at")) for job in found.values())
-    if not finished_s <= recorded_s < critical.parse_time(view.get("createdAt")):
-        raise EvidenceInvalid("the exclusion must be recorded after the excluded run and before its replacement")
+    if not (finished_s <= recorded_s and published_s < critical.parse_time(view.get("createdAt"))):
+        raise EvidenceInvalid("the exclusion must be recorded after the excluded run and published before its "
+                              "replacement")
+    trigger = exclusion.get("replacement_trigger")
+    if not (isinstance(trigger, dict) and trigger.get("action") == "labeled" and trigger.get("label") == "perf"
+            and str(trigger.get("url", "")).startswith("https://github.com/")):
+        raise EvidenceInvalid(f"the replacement must be triggered by adding the perf label: {trigger!r}")
     excluded_created = critical.parse_time(excluded_view.get("createdAt"))
     later = sorted((critical.parse_time(run.get("created_at")), run.get("id"))
                    for run in head_runs(runner, args.repo, args.head)
                    if isinstance(run, dict) and run.get("name") == WORKFLOW_NAME and run.get("event") == EVENT
                    and critical.parse_time(run.get("created_at")) > excluded_created)
-    if not later or later[0][1] != args.run:
-        raise EvidenceInvalid(f"run {args.run} is not the first new {WORKFLOW_NAME} run on the head")
+    first_eligible = next((run_id for _created, run_id in later if eligible(runner, critical, args.repo, run_id)), None)
+    if first_eligible != args.run:
+        raise EvidenceInvalid(f"run {args.run} is not the first later eligible {WORKFLOW_NAME} run on the head")
     return {"used": True, "category": QUEUE_CATEGORY, "excluded_run": excluded_run, "excluded_attempt": 1,
-            "excluded_budget": budget, "queued_s": queued_s, "counterfactual_s": counterfactual_s}
+            "excluded_budget": budget, "queued_s": sum(removed.values()), "counterfactual_s": counterfactual_s}
 
 
 def check_replacement(args, runner, critical, view: Mapping, record: Mapping) -> dict:
@@ -361,12 +458,13 @@ def check_replacement(args, runner, critical, view: Mapping, record: Mapping) ->
         raise EvidenceInvalid("only the first eligible run's first execution may be excluded, once")
     try:
         recorded_s = critical.parse_time(record.get("recorded_at"))
+        published_s = check_publication(critical, record, recorded_s)
     except critical.AccountingError as error:
-        raise EvidenceInvalid(f"the record's recorded_at is unreadable: {error}") from error
-    if exclusion.get("category") in INFRASTRUCTURE_STEPS:
-        return check_infrastructure(args, runner, critical, view, exclusion, recorded_s)
+        raise EvidenceInvalid(f"the record's times are unreadable: {error}") from error
+    if exclusion.get("category") in INFRASTRUCTURE_CAUSES:
+        return check_infrastructure(args, runner, critical, view, exclusion, recorded_s, published_s)
     if exclusion.get("category") == QUEUE_CATEGORY:
-        return check_queue(args, runner, critical, view, exclusion, recorded_s)
+        return check_queue(args, runner, critical, view, exclusion, recorded_s, published_s)
     raise EvidenceInvalid(f"exclusion category {exclusion.get('category')!r} is not listed")
 
 
