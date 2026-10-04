@@ -254,7 +254,9 @@ On the worker side, a VT worker parses each output batch in parser lock sections
 of at most 4 KiB (`PARSER_SECTION_BYTES`) and drops the guard between sections,
 so a frame's `try_lock` can find a gap during a long batch instead of missing for
 the whole batch. The parser keeps UTF-8, CSI, OSC and DCS state across sections,
-so the cut does not change what is parsed.
+so the cut does not change what is parsed. Host effects (events, image merges and
+their media charge, command records, replies) are flushed only at reply boundaries
+and at batch end, as before, so a 4 KiB cut does not change what is retained.
 
 ### Windows CPU presentation
 

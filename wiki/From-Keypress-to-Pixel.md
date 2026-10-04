@@ -225,10 +225,13 @@ spawn fails remains visible but has no PTY reader, writer, or VT worker.
 
 The pane worker receives a chunk and parses it in sections of at most 4 KiB,
 holding that pane's parser lock for each section's
-`Parser::advance_with_replies` and its keyboard-input snapshot. A section also
-ends early at a reply-producing dispatch, which yields the consumed prefix,
-events, and replies. After each section the worker releases the lock before
-handling events and batching replies, then resumes the remaining suffix. Complete replies reach the separate reply FIFO outside parser locks.
+`Parser::advance_with_replies` and its keyboard-input snapshot, and releasing it
+between sections. A section also ends early at a reply-producing dispatch, which
+yields the consumed prefix, events, and replies. Host effects are flushed only at
+such a reply boundary and at the chunk's end: there, outside the lock, the worker
+handles the events collected since the last flush, merges decoded images once, and
+batches replies, then resumes the remaining suffix. A cut made only by the 4 KiB
+bound carries its events into the next section. Complete replies reach the separate reply FIFO outside parser locks.
 
 Plain ASCII `A` takes the parser's printable fast path to
 `Performer::print_graphic`. Other printable UTF-8 reaches the same operation
