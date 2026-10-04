@@ -730,15 +730,40 @@ impl FramePlan {
                 // When: the bounds are empty, nothing was recolored on that side.
                 continue;
             };
-            if let Some(clipped) = rect.intersect(self.surface) {
-                self.damage = if self.damage.is_empty() {
-                    clipped
-                } else {
-                    // When: damage is non-empty, the single rectangle grows to the union.
-                    self.damage.union(clipped)
-                };
-                self.damage_parts.push(clipped);
+            self.add_damage(rect);
+        }
+    }
+
+    /// Widen a full plan's damage by the tab-title ink the last presented frame and this frame
+    /// drew. A title glyph can reach above the padded tab band, so whenever the tab-band or
+    /// focus class is set, or the ink changed, both sides' ink is repainted. `Unbounded` ink
+    /// damages the whole surface. Assembly is whole-frame, so the widened scissor is filled.
+    pub(crate) fn widen_for_tab_ink(&mut self, previous: RecolorBounds, current: RecolorBounds) {
+        if self.mode != RenderMode::Full {
+            // When: `mode` is not Full, the plan presents nothing and no damage is read.
+            return;
+        }
+        if previous == current && !self.change.tab_band && !self.change.focus {
+            // When: the ink is unchanged and no tab-band or focus class is set, it is on screen.
+            return;
+        }
+        for bounds in [previous, current] {
+            if let Some(rect) = resolve_recolor(bounds, Some(self.surface), self.surface) {
+                self.add_damage(rect);
             }
+        }
+    }
+
+    /// Union `rect`, clipped to the surface, into the damage and record it as a part.
+    fn add_damage(&mut self, rect: PixelRect) {
+        if let Some(clipped) = rect.intersect(self.surface) {
+            self.damage = if self.damage.is_empty() {
+                clipped
+            } else {
+                // When: damage is non-empty, the single rectangle grows to the union.
+                self.damage.union(clipped)
+            };
+            self.damage_parts.push(clipped);
         }
     }
 

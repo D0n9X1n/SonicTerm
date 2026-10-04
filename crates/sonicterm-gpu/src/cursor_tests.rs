@@ -545,3 +545,23 @@ fn an_injected_glyph_draws_its_rectangle_with_the_template_atlas_coordinates() {
     assert!(injected_glyph(None, (50.0, 72.0, 10.0, 40.0), MARK, 512.0, 512.0).is_none());
     assert!(injected_glyph(Some(&template), (50.0, 72.0, 10.0, 40.0), MARK, 0.0, 512.0).is_none());
 }
+
+/// The ink bounds of emitted chrome glyphs are the outward union of their pixel rectangles, so
+/// a tall title glyph reaching above its band is bounded where it really draws; no glyph is
+/// `Empty`, and a non-finite glyph makes the bounds `Unbounded`.
+#[test]
+fn glyph_ink_bounds_union_every_glyph_and_refuse_non_finite_ones() {
+    let tall = glyph_px(20.0, 100.0, 10.0, 80.0, EXACT_SURFACE);
+    let short = glyph_px(40.0, 142.0, 10.0, 12.0, EXACT_SURFACE);
+    assert_eq!(
+        glyph_ink_bounds(&[tall, short], EXACT_SURFACE.0, EXACT_SURFACE.1),
+        RecolorBounds::Rect(PixelRect { x: 20, y: 100, w: 30, h: 80 })
+    );
+    assert_eq!(glyph_ink_bounds(&[], EXACT_SURFACE.0, EXACT_SURFACE.1), RecolorBounds::Empty);
+    let broken = GlyphInstance { rect: [f32::NAN; 4], uv: [0.0; 4], color: INK, flags: [0.0; 4] };
+    assert_eq!(
+        glyph_ink_bounds(&[short, broken], EXACT_SURFACE.0, EXACT_SURFACE.1),
+        RecolorBounds::Unbounded
+    );
+    assert_eq!(glyph_ink_bounds(&[short], 0.0, 512.0), RecolorBounds::Unbounded);
+}

@@ -1435,3 +1435,41 @@ fn dirty_slot_damage_allocates_no_vector_per_slot() {
     assert!(!build.contains("vec![slot]"), "a Vec is built per dirty slot");
     assert!(!build.contains("Vec<Vec<u16>>"), "dirty slots are regrouped into vectors");
 }
+
+/// Tab-title ink can reach above the padded tab band: a title glyph drawn at y=100..180 over a
+/// band starting at y=140. A retitle or focus change widens the damage by the previous and the
+/// current title ink, so y=100 is repainted; changed ink with no class change adds both sides;
+/// unchanged ink with no class adds nothing; unknown ink damages the whole surface.
+#[test]
+fn tab_title_ink_above_the_band_is_damaged_on_a_tab_band_or_focus_change() {
+    let surface = PixelRect { x: 0, y: 0, w: 240, h: 160 };
+    let tall = RecolorBounds::Rect(PixelRect { x: 20, y: 100, w: 10, h: 80 });
+    let short = RecolorBounds::Rect(PixelRect { x: 20, y: 142, w: 10, h: 12 });
+    let mut retitled = facts(false);
+    retitled.window.tab_hash = 1;
+    let mut plan = transition(facts(false), retitled, live_pane(7, 1));
+    assert_eq!(plan.damage, TAB_BAND);
+    plan.widen_for_tab_ink(tall, short);
+    assert_eq!(plan.damage, PixelRect { x: 0, y: 100, w: 240, h: 60 });
+
+    let mut unfocused = cursor_facts();
+    unfocused.window.window_focused = false;
+    unfocused.window.cursor_cell = None;
+    let mut plan = transition(cursor_facts(), unfocused, live_pane(7, 1));
+    plan.widen_for_tab_ink(short, tall);
+    assert!(plan.damage.y <= 100, "focus repaints the current title ink: {:?}", plan.damage);
+
+    let dirty = PaneMetadata { dirty_rows: vec![1], ..live_pane(7, 2) };
+    let mut plan = transition(facts(false), facts(false), dirty.clone());
+    let before = plan.damage;
+    plan.widen_for_tab_ink(short, short);
+    assert_eq!(plan.damage, before, "unchanged ink with no tab class adds nothing");
+    plan.widen_for_tab_ink(tall, short);
+    assert!(plan.damage.y <= 100, "changed ink adds the previous bounds");
+
+    let mut retitled = facts(false);
+    retitled.window.tab_hash = 1;
+    let mut plan = transition(facts(false), retitled, live_pane(7, 1));
+    plan.widen_for_tab_ink(RecolorBounds::Unbounded, short);
+    assert_eq!(plan.damage, surface);
+}

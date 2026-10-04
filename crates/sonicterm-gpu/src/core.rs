@@ -275,6 +275,8 @@ struct AssembledLayers {
     receipts: Vec<sonicterm_render_model::AckReceipt>,
     /// This frame's cursor recolors; kept as `last_recolor` only if the frame presents.
     recolor: crate::cursor::RecolorRecord,
+    /// Where this frame's tab-title glyphs draw; kept as `last_tab_ink` only if it presents.
+    tab_ink: crate::cursor::RecolorBounds,
 }
 
 fn pane_focus_flash_sample(elapsed: Duration) -> Option<(u8, f32)> {
@@ -2235,6 +2237,9 @@ pub struct GpuRenderer {
     /// What the last presented frame's cursor recolors rewrote; written only beside
     /// `last_frame_key` on a presented frame, so it always describes the pixels on screen.
     last_recolor: crate::cursor::RecolorRecord,
+    /// Where the last presented frame's tab-title glyphs draw; written only beside
+    /// `last_recolor` on a presented frame, so it always describes the title pixels on screen.
+    last_tab_ink: crate::cursor::RecolorBounds,
     /// Test seam: a glyph `(x, y, w, h)` surface-pixel rectangle and color appended before the
     /// cursor recolors; only `__inject_test_glyph` sets it, so production keeps `None`.
     injected_test_glyph: Option<((f32, f32, f32, f32), [f32; 4])>,
@@ -3205,6 +3210,7 @@ impl GpuRenderer {
             drag_chip_visual: None,
             last_frame_key: None,
             last_recolor: crate::cursor::RecolorRecord::default(),
+            last_tab_ink: crate::cursor::RecolorBounds::Empty,
             injected_test_glyph: None,
             last_presented_damage: None,
             presented_fields: PresentedFields::default(),
@@ -6600,6 +6606,8 @@ impl GpuRenderer {
         // -------- Tab bar ---------------------------------------------------
         // The insertion gap below opens 8 px at the current drop slot when a
         // drag is active over this bar.
+        // Title glyphs can reach above the padded band, so their ink is measured from here.
+        let tab_glyph_start = glyph_instances.len();
         if self.tab_bar_visible {
             // When: `self.tab_bar_visible` — a hidden bar reserves no height,
             // so its strip, tab quads, and titles are all skipped.
@@ -6762,6 +6770,7 @@ impl GpuRenderer {
                 }
             }
         }
+        let tab_ink = crate::cursor::glyph_ink_bounds(&glyph_instances[tab_glyph_start..], sw, sh);
         // -------- Search highlights + badge --------------------------------
         if let Some(s) = search {
             // When: `search` is Some — a search session is live, so its match
@@ -8122,6 +8131,7 @@ impl GpuRenderer {
 
         // Widen the damage by this frame's recolors before the layers carry it to the presenter.
         plan.widen_for_recolor(self.last_recolor, frame_recolor);
+        plan.widen_for_tab_ink(self.last_tab_ink, tab_ink);
         // Receipts are read under the same guards the plan was built from; they carry no borrow.
         let receipts = presented_receipts(&plan, panes);
         Ok(Assembled::Layers(Box::new(AssembledLayers {
@@ -8140,6 +8150,7 @@ impl GpuRenderer {
             plan,
             receipts,
             recolor: frame_recolor,
+            tab_ink,
         })))
     }
 
@@ -8161,6 +8172,7 @@ impl GpuRenderer {
             plan,
             receipts,
             recolor,
+            tab_ink,
         } = assembled;
         // The presenter borrows only the owned drawable layers; no grid or parser guard is held.
         let layers = FrameLayers {
@@ -8188,6 +8200,7 @@ impl GpuRenderer {
         }
         // Only a presented frame's recolors are on screen, so only it becomes the next baseline.
         self.last_recolor = recolor;
+        self.last_tab_ink = tab_ink;
         self.finish_successful_frame(plan, missing_chars, missing_chrome_chars, gpu_timing);
         Ok(FrameOutcome { outcome: PresentOutcome::Presented, receipts })
     }

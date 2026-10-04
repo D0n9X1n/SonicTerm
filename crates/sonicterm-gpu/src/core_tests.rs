@@ -5748,3 +5748,25 @@ fn the_injected_glyph_precedes_every_cursor_recolor_and_damage_is_read_beside_th
     let key = finish.find("self.last_frame_key = Some(plan.key);").expect("key recorded");
     assert!(readout < key, "the readout is written beside the frame key");
 }
+
+/// Production wiring of tab-title ink: assembly measures the glyphs the tab bar emitted, widens
+/// the plan's damage by the last presented and the current title ink before the layers carry it,
+/// and keeps the current ink only after the `Presented` guard, beside the recolor record. Line
+/// endings are normalized before scanning.
+#[test]
+fn tab_title_ink_is_measured_widened_and_kept_only_by_a_presented_frame() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let assembly = source.split_once("    fn assemble_frame(").expect("assemble_frame exists").1;
+    let start = assembly.find("let tab_glyph_start = glyph_instances.len();").expect("start");
+    let bar = assembly.find("        if self.tab_bar_visible {\n").expect("tab bar block");
+    let measure = assembly.find("glyph_ink_bounds(&glyph_instances[tab_glyph_start..]").expect("ink");
+    let search = assembly.find("// -------- Search highlights").expect("search block");
+    assert!(start < bar && bar < measure && measure < search);
+    let widen = assembly.find("plan.widen_for_tab_ink(self.last_tab_ink, tab_ink);").expect("widen");
+    let receipts = assembly.find("let receipts = presented_receipts(").expect("receipts");
+    assert!(widen < receipts, "damage is widened before the layers carry it");
+    let present = source.split_once("    fn present_layers(").expect("present_layers").1;
+    let guard = present.find("if !matches!(outcome, PresentOutcome::Presented)").expect("guard");
+    let kept = present.find("self.last_tab_ink = tab_ink;").expect("ink kept");
+    assert!(guard < kept, "only a presented frame keeps its title ink");
+}

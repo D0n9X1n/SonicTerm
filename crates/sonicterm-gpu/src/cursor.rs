@@ -335,6 +335,30 @@ pub fn recolor_cursor_glyphs(
     record
 }
 
+/// Where `glyphs` draw on a `sw` x `sh` surface: the outward union of their pixel rectangles,
+/// `Empty` for no glyph, and `Unbounded` for a non-finite glyph or an empty surface, whose ink
+/// cannot be located.
+pub(crate) fn glyph_ink_bounds(glyphs: &[GlyphInstance], sw: f32, sh: f32) -> RecolorBounds {
+    if glyphs.is_empty() {
+        // When: `glyphs` is empty, nothing was drawn.
+        return RecolorBounds::Empty;
+    }
+    if sw <= 0.0 || sh <= 0.0 {
+        // When: `sw` or `sh` is nonpositive, no NDC rectangle maps back to pixels.
+        return RecolorBounds::Unbounded;
+    }
+    glyphs.iter().fold(RecolorBounds::Empty, |bounds, glyph| {
+        let glyph_px = glyph_rect_px(glyph, sw, sh);
+        let this = if finite_rect(glyph_px) {
+            RecolorBounds::Rect(outward_rect(glyph_px))
+        } else {
+            // When: `finite_rect` rejects `glyph_px`, where the glyph draws is unknown.
+            RecolorBounds::Unbounded
+        };
+        bounds.merge(this)
+    })
+}
+
 /// A glyph drawing `rect_px` (`x, y, w, h` in surface pixels) in `color` with `template`'s atlas
 /// coordinates and flags; `None` without a template or on an empty surface.
 ///
