@@ -497,27 +497,32 @@ fn retained_pixel_parity(renderer: &mut GpuRenderer, layout: &Layout) -> Result<
         "compressed-row cursor: the rows above the pad hold recolored ink",
     )?;
 
-    // The shrinking recolored glyph: the cursor stays, and the tall glyph is replaced through its
-    // row's dirt by one the cursor's size, with no class change; then removed; then a tall one
-    // is written again under the cursor.
-    let mut shrink = scene(layout);
-    renderer.__inject_test_glyph(Some((tall, INJECTED_COLOR)));
-    baseline(renderer, layout, &mut shrink)?;
-    for (step, injected) in [
-        ("shrinking glyph", Some(layout.cursor_rect())),
-        ("removed glyph", None),
-        ("tall glyph written", Some(tall)),
+    // The recolored glyph changes through its row's dirt with no class change, the cursor
+    // staying put. Each step starts from its own baseline of the state it changes from: a tall
+    // glyph shrinking to the cursor's size, a tall glyph removed, and a tall glyph written where
+    // there was none. The tall glyph's top must be damaged only when one side draws it.
+    let tall_glyph = Some(tall);
+    for (step, before, after) in [
+        ("tall to short", tall_glyph, Some(layout.cursor_rect())),
+        ("tall to absent", tall_glyph, None),
+        ("absent to tall", None, tall_glyph),
     ] {
-        renderer.__inject_test_glyph(injected.map(|rect| (rect, INJECTED_COLOR)));
+        let mut shrink = scene(layout);
+        renderer.__inject_test_glyph(before.map(|rect| (rect, INJECTED_COLOR)));
+        baseline(renderer, layout, &mut shrink)?;
+        renderer.__inject_test_glyph(after.map(|rect| (rect, INJECTED_COLOR)));
         // Rewrite a cell of the cursor's row so the row is dirty, then park the cursor again.
         shrink.grid.goto(CURSOR_ROW, 0);
         shrink.grid.put_char('M', Color::Default, Color::Default, CellFlags::empty());
         shrink.grid.goto(CURSOR_ROW, CURSOR_COL);
         let (damage, ..) = narrow_matches_full(renderer, layout, &mut shrink, step)?;
-        check(
-            covers_rows(damage.damage, tall.1, cursor_top + cursor_h),
-            &format!("{step}: damage {damage:?} reaches the tall glyph's top {}", tall.1),
-        )?;
+        if before == tall_glyph || after == tall_glyph {
+            // When: either frame draws the tall glyph, its top above the row pad must repaint.
+            check(
+                covers_rows(damage.damage, tall.1, cursor_top + cursor_h),
+                &format!("{step}: damage {damage:?} reaches the tall glyph's top {}", tall.1),
+            )?;
+        }
     }
     renderer.__inject_test_glyph(None);
 
