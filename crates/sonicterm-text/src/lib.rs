@@ -34,6 +34,7 @@
 pub mod glyph_atlas;
 pub mod row_glyph_cache;
 pub mod shape;
+pub mod start_size_inputs;
 
 /// One drawable glyph in NDC space with its atlas UV rect and color.
 ///
