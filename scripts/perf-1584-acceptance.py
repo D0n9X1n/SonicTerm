@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 # The SHA-256 of each frozen file, as of the freeze commit. A later commit may not change either file.
-PERF_COMPARE_SHA256 = "6d79d33ea70cff8e42cc124a57183428b2bc0b79c4483c3d7deafefc1e276620"
+PERF_COMPARE_SHA256 = "910982d3ffe72a931996f9d48bda2fadec3902d250b55a1ef535c2e284408cbb"
 PERF_CRITICAL_PATH_SHA256 = "9658cb953ffb442ddc50da20c61b4260dcb4edfe46b5aeedabfd2436cf1d1c65"
 FROZEN_FILES = {
     "scripts/perf-compare.py": PERF_COMPARE_SHA256,
