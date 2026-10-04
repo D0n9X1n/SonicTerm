@@ -388,11 +388,43 @@ impl<'text> ChromeShapedRun<'text> {
         }
     }
 
+    /// `(cluster byte, lead character, atlas key)` for each glyph in left-to-right order, keyed
+    /// as [`layout_prepared`] keys it for `raster_variant`; the key is `None` for a notdef blank,
+    /// which draws no tile.
+    pub fn tile_keys(
+        &self,
+        raster_variant: GlyphRasterVariant,
+    ) -> impl Iterator<Item = (usize, char, Option<GlyphKey>)> + '_ {
+        self.glyphs.iter().map(move |glyph| {
+            (glyph.cluster, glyph.lead_ch, glyph_tile_key(glyph, self.attrs, raster_variant))
+        })
+    }
+
     /// `(cluster byte, pen advance)` pairs in left-to-right order, exactly as
     /// [`layout_prepared`] moves the pen.
     pub fn advances(&self) -> impl Iterator<Item = (usize, f32)> + '_ {
         self.glyphs.iter().map(|glyph| (glyph.cluster, self.pen_advance(glyph)))
     }
+}
+
+/// The atlas key `glyph` draws with under `attrs` and `raster_variant`, or `None` for a notdef
+/// blank. A real glyph id keys by `(font slot, glyph id)`, as the grid path does; a visible notdef
+/// keys by `(char, slot 0)` so the rasterizer resolves it through the charmap.
+fn glyph_tile_key(
+    glyph: &ChromeShapedGlyph,
+    attrs: ChromeAttrs,
+    raster_variant: GlyphRasterVariant,
+) -> Option<GlyphKey> {
+    let key = if glyph.glyph_pos != 0 {
+        GlyphKey::shaped(glyph.lead_ch, glyph.font_idx, glyph.glyph_pos, attrs.bold, attrs.italic)
+    } else if glyph.is_blank() {
+        // When: glyph.is_blank() is a notdef space, control or NUL, it has no pixels and no slot.
+        return None;
+    } else {
+        // When: glyph_pos is zero for a visible character, the charmap resolves it from slot 0.
+        GlyphKey::with_slot(glyph.lead_ch, 0, attrs.bold, attrs.italic)
+    };
+    Some(key.with_raster_variant(raster_variant))
 }
 
 /// Pen advances of one chrome run as `(cluster byte offset, advance)` pairs in
@@ -493,27 +525,11 @@ pub fn layout_prepared(
 
     for glyph in &run.glyphs {
         let advance = run.pen_advance(glyph);
-        // Mirror the grid path: a real glyph id keys by `(font slot, glyph id)`; notdef keys
-        // by `(char, slot 0)` so the rasterizer resolves it through the charmap.
-        let key = if glyph.glyph_pos != 0 {
-            GlyphKey::shaped(
-                glyph.lead_ch,
-                glyph.font_idx,
-                glyph.glyph_pos,
-                attrs.bold,
-                attrs.italic,
-            )
-            .with_raster_variant(raster_variant)
-        } else if glyph.is_blank() {
+        let Some(key) = glyph_tile_key(glyph, attrs, raster_variant) else {
             // When: a notdef blank (space, control, NUL) has no pixels, the pen advances
             // without consuming an atlas slot that a visible glyph needs.
             pen_x += advance;
             continue;
-        } else {
-            // When: glyph_pos is zero for a visible character, the key carries lead_ch and
-            // slot 0 for the rasterizer to resolve through the charmap.
-            GlyphKey::with_slot(glyph.lead_ch, 0, attrs.bold, attrs.italic)
-                .with_raster_variant(raster_variant)
         };
 
         let Some(info) = atlas.get_or_insert(key, &mut CountingRasterizer::new(wt_raster)) else {

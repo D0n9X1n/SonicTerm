@@ -6,8 +6,14 @@
 //! grid's ASCII fast-path keys, all into a fixed 2048 atlas. Waiting means a cold measurement
 //! holds the fallback faces' CJK and emoji tiles rather than the frame path's tofu. The result is
 //! a conservative superset: over-inclusion can only raise the start size.
+//!
+//! A measurement is complete or rejected. A failed warm-up, a glyph the warm-up resolved that the
+//! frame path still draws as notdef, a resolved glyph that fails to rasterize or is not placed, and
+//! a resident key without a face identity each reject it with a [`WorkingSetError`]; characters no
+//! face covers are drawn as tofu by the renderer too, so they are measured and listed in
+//! [`GlyphWorkingSet::unresolved_chars`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use sonicterm_text::glyph_atlas::{FitOutcome, GlyphAtlas, GlyphInfo, ATLAS_DIM};
@@ -97,6 +103,106 @@ pub struct GlyphWorkingSet {
     pub tile_identities: HashMap<TileIdentity, [u32; 2]>,
     /// The point size each raster variant was drawn at.
     pub variant_sizes: Vec<(GlyphRasterVariant, f32)>,
+    /// Characters no face covers: measured as the renderer draws them, as tofu, and listed here.
+    pub unresolved_chars: Vec<char>,
+}
+
+/// Why a working-set measurement is incomplete, so it is rejected rather than classified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkingSetError {
+    /// The body font stack did not load.
+    BodyStackUnavailable,
+    /// The blocking warm-up could not shape a source in one style.
+    WarmUp {
+        /// The source's raster variant.
+        variant: GlyphRasterVariant,
+        /// Whether the style was bold.
+        bold: bool,
+        /// Whether the style was italic.
+        italic: bool,
+        /// The shaper's error.
+        message: String,
+    },
+    /// The frame-path layout could not shape a source in one style.
+    FrameShape {
+        /// The source's raster variant.
+        variant: GlyphRasterVariant,
+        /// Whether the style was bold.
+        bold: bool,
+        /// Whether the style was italic.
+        italic: bool,
+    },
+    /// The warm-up resolved `character` but the frame path still drew it as notdef: its fallback
+    /// face was not published when the layout ran.
+    FallbackPending {
+        /// The source's raster variant.
+        variant: GlyphRasterVariant,
+        /// Whether the style was bold.
+        bold: bool,
+        /// Whether the style was italic.
+        italic: bool,
+        /// The cluster's lead character.
+        character: char,
+    },
+    /// A resolved glyph rasterized to nothing: the atlas cached it as missing.
+    RasterFailed {
+        /// The glyph's key.
+        key: GlyphKey,
+    },
+    /// The atlas did not place a required tile and evicted nothing to explain it.
+    NotPlaced {
+        /// The tile's key.
+        key: GlyphKey,
+    },
+    /// Resident keys that resolve to no face identity, so they cannot be compared with a renderer.
+    UnresolvedIdentity {
+        /// The keys.
+        keys: Vec<GlyphKey>,
+    },
+}
+
+impl std::fmt::Display for WorkingSetError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BodyStackUnavailable => formatter.write_str("the body font stack did not load"),
+            Self::WarmUp { variant, bold, italic, message } => write!(
+                formatter,
+                "warm-up of {variant:?} (bold {bold}, italic {italic}) failed: {message}"
+            ),
+            Self::FrameShape { variant, bold, italic } => write!(
+                formatter,
+                "frame-path layout of {variant:?} (bold {bold}, italic {italic}) could not shape"
+            ),
+            Self::FallbackPending { variant, bold, italic, character } => write!(
+                formatter,
+                "{character:?} in {variant:?} (bold {bold}, italic {italic}) resolved in the \
+                 warm-up but the frame path drew notdef"
+            ),
+            Self::RasterFailed { key } => write!(formatter, "{key:?} rasterized to nothing"),
+            Self::NotPlaced { key } => write!(formatter, "{key:?} was not placed"),
+            Self::UnresolvedIdentity { keys } => {
+                write!(formatter, "resident keys without a face identity: {keys:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorkingSetError {}
+
+/// The production warm-up: the stack's blocking styled shaping, which waits for fallback faces.
+/// Returns the cluster byte offsets it drew with a real glyph.
+fn blocking_warm_up(
+    stack: &sonicterm_engine::FontStack,
+    text: &str,
+    bold: bool,
+    italic: bool,
+) -> anyhow::Result<HashSet<usize>> {
+    let shaped = stack.shape_text_with_style(text, bold, italic)?;
+    Ok(shaped
+        .iter()
+        .filter(|glyph| glyph.glyph_pos != 0)
+        .map(|glyph| glyph.cluster as usize)
+        .collect())
 }
 
 /// Printable ASCII, which the renderer can draw in every chrome surface.
@@ -113,7 +219,7 @@ const CHROME_SYMBOLS: &str = "·↑↓↵—✓✗";
 const STYLES: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
 
 /// Measure the working set of `texts` (body) and `chrome_texts` (tab titles) at `size` points and
-/// `dpi`, using `family` from the system and `font_dirs`. `None` when the body stack cannot load.
+/// `dpi`, using `family` from the system and `font_dirs`. An incomplete measurement is an `Err`.
 ///
 /// Sources, each in its own stack, size and raster variant:
 /// - body (`Normal`): the texts, printable ASCII, `…`, the chrome symbols, and each non-ASCII
@@ -122,7 +228,6 @@ const STYLES: [(bool, bool); 4] = [(false, false), (true, false), (false, true),
 /// - tab titles (`TabTitle`, body + 1): printable ASCII, `…`, the chrome symbols and the titles;
 /// - palette footer (`PaletteFooter`, max(body − 1, 1)): printable ASCII, `…` and the chrome
 ///   symbols.
-#[must_use]
 pub fn measure_glyph_working_set(
     texts: &[&str],
     chrome_texts: &[&str],
@@ -130,25 +235,29 @@ pub fn measure_glyph_working_set(
     size: f32,
     dpi: usize,
     font_dirs: &[PathBuf],
-) -> Option<GlyphWorkingSet> {
+) -> Result<GlyphWorkingSet, WorkingSetError> {
     measure_with_stacks(
         texts,
         chrome_texts,
         renderer_font_stacks(family, size, dpi, 1.0, font_dirs),
         size,
         dpi,
+        blocking_warm_up,
     )
 }
 
-/// [`measure_glyph_working_set`] over the renderer stacks `stacks`, built for `size` and `dpi`.
+/// [`measure_glyph_working_set`] over the renderer stacks `stacks`, built for `size` and `dpi`,
+/// warming each source up with `warm_up` before its frame-path layout. `warm_up` shapes a text in
+/// a style and returns the cluster byte offsets it drew with a real glyph.
 fn measure_with_stacks(
     texts: &[&str],
     chrome_texts: &[&str],
     stacks: RendererFontStacks,
     size: f32,
     dpi: usize,
-) -> Option<GlyphWorkingSet> {
-    let body = stacks.body?;
+    warm_up: impl Fn(&sonicterm_engine::FontStack, &str, bool, bool) -> anyhow::Result<HashSet<usize>>,
+) -> Result<GlyphWorkingSet, WorkingSetError> {
+    let body = stacks.body.ok_or(WorkingSetError::BodyStackUnavailable)?;
     let tab_size = sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size(size);
     let footer_size = palette_footer_font_size(size);
     let mut body_text: String = texts.concat();
@@ -183,6 +292,7 @@ fn measure_with_stacks(
         ));
     }
     let mut variant_sizes = Vec::new();
+    let mut unresolved_chars = BTreeSet::new();
     for (stack, point_size, variant, text) in surfaces {
         variant_sizes.push((variant, point_size));
         let raster_px = point_size * px_per_pt;
@@ -190,44 +300,69 @@ fn measure_with_stacks(
         for (bold, italic) in STYLES {
             // Wait for fallback discovery before the frame-path layout: the stack's loaded face
             // for this style and size is shared, so the layout below shapes the faces discovery
-            // published instead of notdef, and the atlas holds real tiles rather than tofu. A
-            // failed warm-up leaves the layout to report what the frame path would draw.
-            let _warmed = stack.shape_text_with_style(text, bold, italic);
-            let _layout = chrome_text::layout_with_raster_variant(
-                stack,
+            // published instead of notdef, and the atlas holds real tiles rather than tofu.
+            // Clusters the warm-up drew with a real glyph; the frame path must agree on each.
+            let resolved = warm_up(stack, text, bold, italic).map_err(|error| {
+                WorkingSetError::WarmUp { variant, bold, italic, message: error.to_string() }
+            })?;
+            let attrs = ChromeAttrs { bold, italic };
+            let run = chrome_text::ChromeShapedRun::shape(stack, text, attrs, raster_px, raster_px)
+                .ok_or(WorkingSetError::FrameShape { variant, bold, italic })?;
+            let _layout = chrome_text::layout_prepared(
+                &run,
                 &mut raster,
                 &mut atlas,
-                text,
                 ChromeColor::WHITE,
-                ChromeAttrs { bold, italic },
-                raster_px,
-                raster_px,
                 (0.0, raster_px),
                 (65_536.0, 65_536.0),
                 None,
                 variant,
             );
+            for (cluster, character, key) in run.tile_keys(variant) {
+                let Some(key) = key else {
+                    // When: key is None the glyph is a notdef blank, which draws no tile and needs none.
+                    continue;
+                };
+                if key.glyph_id == 0 && resolved.contains(&cluster) {
+                    // When: key.glyph_id is 0 yet resolved holds the cluster, the fallback face lagged.
+                    return Err(WorkingSetError::FallbackPending {
+                        variant,
+                        bold,
+                        italic,
+                        character,
+                    });
+                }
+                account_tile(&atlas, key, &mut unresolved_chars)?;
+            }
         }
     }
     // The grid's ASCII fast path keys cells by character, not by shaped glyph id.
     let mut body_raster = body.clone();
     for character in printable_ascii().chars() {
         for (bold, italic) in STYLES {
+            let key = GlyphKey::new(character, bold, italic);
             // Counted like every insertion; outside a frame's counting scope this records nothing.
-            let _info = atlas.get_or_insert(
-                GlyphKey::new(character, bold, italic),
-                &mut CountingRasterizer::new(&mut body_raster),
-            );
+            let _info = atlas.get_or_insert(key, &mut CountingRasterizer::new(&mut body_raster));
+            account_tile(&atlas, key, &mut unresolved_chars)?;
         }
     }
     let tile_keys = atlas.resident_tile_keys();
-    let (tile_identities, _unresolved) =
-        resident_tile_identities(&atlas, |variant| match variant {
-            GlyphRasterVariant::Normal => Some(&body),
-            GlyphRasterVariant::TabTitle => stacks.tab_title.as_ref(),
-            GlyphRasterVariant::PaletteFooter => stacks.palette_footer.as_ref(),
-        });
-    Some(GlyphWorkingSet {
+    let (tile_identities, unresolved) = resident_tile_identities(&atlas, |variant| match variant {
+        GlyphRasterVariant::Normal => Some(&body),
+        GlyphRasterVariant::TabTitle => stacks.tab_title.as_ref(),
+        GlyphRasterVariant::PaletteFooter => stacks.palette_footer.as_ref(),
+    });
+    // A tofu tile names no face, so only a real glyph without an identity is a failure.
+    let unidentified: Vec<GlyphKey> = unresolved
+        .into_iter()
+        .filter(|key| atlas.get(*key).is_some_and(|info| !info.missing))
+        .collect();
+    if !unidentified.is_empty() {
+        // When: unidentified is not empty, a real resident tile has no face identity to compare.
+        return Err(WorkingSetError::UnresolvedIdentity { keys: unidentified });
+    }
+    Ok(GlyphWorkingSet {
+        unresolved_chars: unresolved_chars.into_iter().collect(),
         tile_identities,
         fit_outcome: atlas.fit_outcome(),
         max_tile_dims: atlas.max_tile_dims(),
@@ -239,6 +374,29 @@ fn measure_with_stacks(
         tile_keys,
         variant_sizes,
     })
+}
+
+/// Check that `key`, which a layout or the fast path required, is resident: a missing tile is
+/// tofu for a character no face covers (listed in `unresolved_chars`) unless the key named a real
+/// glyph, which then failed to rasterize; an absent tile is only allowed once the atlas evicted.
+fn account_tile(
+    atlas: &GlyphAtlas,
+    key: GlyphKey,
+    unresolved_chars: &mut BTreeSet<char>,
+) -> Result<(), WorkingSetError> {
+    match atlas.get(key) {
+        Some(info) if info.missing && key.glyph_id != 0 => {
+            Err(WorkingSetError::RasterFailed { key })
+        }
+        Some(info) if info.missing => {
+            unresolved_chars.insert(key.ch);
+            Ok(())
+        }
+        Some(_) => Ok(()),
+        // An evicting atlas reports `evicted` as its fit, so the lost tile cannot hide.
+        None if atlas.evictions() > 0 => Ok(()),
+        None => Err(WorkingSetError::NotPlaced { key }),
+    }
 }
 
 #[cfg(test)]

@@ -1338,7 +1338,9 @@ mod real_renderer_coverage {
         let dpi = (72.0 * scale).round() as usize;
         let helper =
             measure_glyph_working_set(&lines, &TITLES, FONT_FAMILY, size_pt, dpi, &font_dirs())
-                .ok_or("the packaged scenario family loads")?;
+                .map_err(|error| {
+                    format!("{case}: the helper measurement is incomplete: {error}")
+                })?;
         let missing: Vec<&TileIdentity> = identities
             .keys()
             .filter(|identity| !helper.tile_identities.contains_key(*identity))

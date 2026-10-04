@@ -83,8 +83,8 @@ fn a_cold_measurement_holds_the_fallback_face_glyph_not_tofu() {
     let fixture = crate::lib_tests::fallback_stack("working-set-cold");
     let size = 14.0;
     let stacks = crate::core::renderer_font_views(Some(fixture.stack.clone()), size);
-    let set =
-        measure_with_stacks(&["é"], &["shell"], stacks, size, 96).expect("the fixture stack loads");
+    let set = measure_with_stacks(&["é"], &["shell"], stacks, size, 96, blocking_warm_up)
+        .expect("the fixture stack loads");
     for (bold, italic) in STYLES {
         let fallback = set.tile_keys.iter().find(|key| {
             key.ch == 'é'
@@ -160,8 +160,15 @@ fn a_cold_measurement_holds_real_cjk_and_emoji_tiles() {
     )
     .expect("the packaged family loads");
     let stacks = crate::core::renderer_font_views(Some(body), size);
-    let set = measure_with_stacks(&["中文 漢字 \u{1F600}\u{1F680}"], &["shell"], stacks, size, 72)
-        .expect("the packaged family loads");
+    let set = measure_with_stacks(
+        &["中文 漢字 \u{1F600}\u{1F680}"],
+        &["shell"],
+        stacks,
+        size,
+        72,
+        blocking_warm_up,
+    )
+    .expect("the packaged family loads");
     // (character, whether only a fallback face covers it)
     for (character, needs_fallback) in
         [('中', false), ('漢', false), ('\u{1F600}', true), ('\u{1F680}', true)]
@@ -236,4 +243,74 @@ fn a_tile_identity_is_the_same_face_and_strike_whatever_slot_holds_it() {
     assert_ne!(larger.as_ref(), Some(&identity), "another strike is another tile");
     let (_, tab_title) = shaped_tile(&primary(14.0), &mut atlas, 'é', GlyphRasterVariant::TabTitle);
     assert_ne!(tab_title.as_ref(), Some(&identity), "another raster variant is another tile");
+}
+
+/// A warm-up that cannot shape a source is a failed measurement, never a silent fall-through to the
+/// frame path: the helper names the source and style whose warm-up failed instead of classifying
+/// whatever that style's frame-path layout happened to place.
+#[test]
+fn a_failing_warm_up_rejects_the_measurement() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let size = 14.0;
+    let stacks = renderer_font_stacks("Rec Mono St.Helens", size, 72, 1.0, &packaged_fonts());
+    let failing_bold = |stack: &sonicterm_engine::FontStack, text: &str, bold, italic| {
+        if bold {
+            // When: the style is bold, the fake shaper fails as a broken face would.
+            anyhow::bail!("the bold face cannot shape")
+        }
+        blocking_warm_up(stack, text, bold, italic)
+    };
+    let outcome = measure_with_stacks(&["hello"], &["shell"], stacks, size, 72, failing_bold);
+    assert!(
+        matches!(
+            outcome,
+            Err(WorkingSetError::WarmUp {
+                variant: GlyphRasterVariant::Normal,
+                bold: true,
+                italic: false,
+                ..
+            })
+        ),
+        "{outcome:?}"
+    );
+}
+
+/// A warm-up that reports a real glyph for a cluster the frame path still draws as notdef did not
+/// wait for that fallback face, so the atlas would hold tofu for a glyph the renderer later draws
+/// for real: the measurement is rejected rather than counted. The warm-up here answers from the
+/// packaged family, which covers é, so it never asks the cold fixture stack to discover its fallback.
+#[test]
+fn a_fallback_the_warm_up_did_not_wait_for_rejects_the_measurement() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = crate::lib_tests::fallback_stack("working-set-pending");
+    let packaged = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
+        &[("Rec Mono St.Helens", false)],
+        packaged_fonts(),
+        14.0,
+        96,
+        1.0,
+    )
+    .expect("the packaged family loads");
+    let size = 14.0;
+    let stacks = crate::core::renderer_font_views(Some(fixture.stack.clone()), size);
+    let not_waiting = |_stack: &sonicterm_engine::FontStack, text: &str, bold, italic| {
+        blocking_warm_up(&packaged, text, bold, italic)
+    };
+    let outcome = measure_with_stacks(&["é"], &["shell"], stacks, size, 96, not_waiting);
+    assert!(
+        matches!(
+            outcome,
+            Err(WorkingSetError::FallbackPending {
+                variant: GlyphRasterVariant::Normal,
+                bold: false,
+                italic: false,
+                character: 'é',
+            })
+        ),
+        "{outcome:?}"
+    );
 }
