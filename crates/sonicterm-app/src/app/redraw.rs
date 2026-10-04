@@ -643,19 +643,27 @@ impl WindowState {
     }
 
     /// Refresh the raw native-monitor period, preserving the last known rate when unavailable.
+    /// A changed period is passed on to the window's display link, so its ticks follow the display.
     pub(super) fn refresh_monitor_period(&mut self) {
+        let before = self.redraw.monitor_period;
+        let rate = self.read_monitor_rate();
+        self.redraw.apply_monitor_rate(rate);
+        if self.redraw.monitor_period != before {
+            self.push_preferred_period();
+        }
+    }
+
+    /// The native monitor's refresh rate in millihertz, or a test's override of it.
+    fn read_monitor_rate(&self) -> Option<u32> {
         #[cfg(test)]
         if let Some(rate) = self.redraw.monitor_rate_override {
             // When: a test supplies `monitor_rate_override`, it stands in for the native monitor.
-            self.redraw.apply_monitor_rate(rate);
-            return;
+            return rate;
         }
-        let rate = self
-            .window
+        self.window
             .as_ref()
             .and_then(|window| window.current_monitor())
-            .and_then(|monitor| monitor.refresh_rate_millihertz());
-        self.redraw.apply_monitor_rate(rate);
+            .and_then(|monitor| monitor.refresh_rate_millihertz())
     }
 }
 

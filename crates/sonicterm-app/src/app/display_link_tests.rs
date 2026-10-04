@@ -824,3 +824,32 @@ fn a_stored_timer_survives_link_invalidation() {
         }
     }
 }
+
+/// The link's preferred rate follows the window's monitor period: installation sets the current
+/// period, a refresh from 60 to 120 Hz sets the new one, and a refresh that keeps the rate, or finds
+/// it unavailable, sets nothing. Both roles.
+#[test]
+fn the_preferred_period_follows_the_window_monitor_period() {
+    let hz_60 = Duration::from_micros(16_666);
+    let hz_120 = Duration::from_micros(8_333);
+    for child_owner in [false, true] {
+        let base = test_base();
+        let (mut app, main, child) = paced_owners(base);
+        let owner = if child_owner { child } else { main };
+        let window = app.windows.get_mut(&owner).unwrap();
+        window.redraw.monitor_rate_override = Some(Some(60_000));
+        window.refresh_monitor_period();
+        let log = std::rc::Rc::new(RefCell::new(FakeLinkLog::default()));
+        app.install_display_link(owner, Box::new(FakeLink(std::rc::Rc::clone(&log))));
+        assert_eq!(log.borrow().periods, vec![hz_60], "installation (child: {child_owner})");
+        let window = app.windows.get_mut(&owner).unwrap();
+        window.redraw.monitor_rate_override = Some(Some(120_000));
+        window.refresh_monitor_period();
+        assert_eq!(log.borrow().periods, vec![hz_60, hz_120], "60 to 120 Hz");
+        window.refresh_monitor_period();
+        window.redraw.monitor_rate_override = Some(None);
+        window.refresh_monitor_period();
+        assert_eq!(log.borrow().periods, vec![hz_60, hz_120], "an unchanged rate sets nothing");
+        assert!(log.borrow().calls.is_empty(), "installation does not start the link");
+    }
+}

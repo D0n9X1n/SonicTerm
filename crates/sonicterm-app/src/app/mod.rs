@@ -318,6 +318,9 @@ pub use frame_pacing::{
     should_flush_pending_pty_redraw, software_render_frame_period,
 };
 mod display_link;
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use display_link::{probe_native_display_link, NativeDisplayLinkReport};
 mod gpu_recovery;
 mod gpu_recovery_worker;
 pub mod hovered_url;
@@ -861,6 +864,8 @@ impl App {
             native.set_title(&compose_window_title(key, &window.custom_window_name));
         }
         self.windows.insert(id, window);
+        // The link takes the period the refresh above just read; only macOS installs one.
+        self.install_native_display_link(id);
         if !owner_prepared {
             self.register_window_owner(id);
         }
