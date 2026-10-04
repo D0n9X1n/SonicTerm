@@ -294,6 +294,8 @@ impl App {
         let now = self.dispatch_now();
         let motion_wake = self.flush_pointer_motion(now);
         let mut due = self.refresh_frame_due_work_at(now);
+        // Links follow the modes the frame deadlines above already read; the deadlines do not depend on it.
+        self.sync_display_links();
         if let Some(deadline) = self.memory_sample_deadline() {
             due.push(super::redraw::DueWork {
                 owner: None,
@@ -414,7 +416,7 @@ impl App {
                 due.push(DueWork {
                     owner: Some(*id),
                     cause: DueCause::Frame,
-                    deadline: window.redraw_not_before(period, self.software_render_degrade),
+                    deadline: window.frame_deadline(period, self.software_render_degrade),
                 });
             }
             if let Some(deadline) =
@@ -488,6 +490,9 @@ impl App {
             }
             UserEvent::RequestRedraw(window_id) => {
                 self.service_output_event(OutputEvent::Explicit(window_id), Instant::now());
+            }
+            UserEvent::DisplayLinkTick { window_id, generation, target } => {
+                self.handle_display_link_tick(window_id, generation, target);
             }
             UserEvent::PaneOutput { window_id, pane_id } => {
                 self.service_output_event(OutputEvent::Pane { window_id, pane_id }, Instant::now());
@@ -853,10 +858,11 @@ impl App {
         // renderer (and its adapter) exists. Combine the config mode with
         // runtime software-rasterizer detection, then clamp the frame period
         // so the CPU isn't asked to rasterize at the monitor's full refresh.
-        self.software_render_degrade = crate::app::should_degrade_for_software_render(
+        let degrade = crate::app::should_degrade_for_software_render(
             self.config.appearance.software_render_mode,
             renderer.is_software_rendering(),
         );
+        self.set_software_render_degrade(degrade);
         renderer.set_software_render_degrade(self.software_render_degrade);
         if let Some(recorder) = &self.breadcrumb_recorder {
             // When: a breadcrumb_recorder is installed; the adapter class is only
@@ -967,6 +973,7 @@ impl App {
             retry_not_before: None,
             visible_frame_invalid: false,
             redraw: Default::default(),
+            display_link: Default::default(),
             hover_link: false,
             pressed_tab: None,
             drag_session: None,

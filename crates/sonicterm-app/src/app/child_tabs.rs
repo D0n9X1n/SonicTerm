@@ -88,6 +88,7 @@ impl App {
         }
         if let Some(window) = self.main_mut() {
             window.hidden = true;
+            window.redraw.invalidate_link_pacing();
             window.redraw.cancel_surface_probe();
             window.redraw.request_in_flight = false;
             window.redraw.deferred = false;

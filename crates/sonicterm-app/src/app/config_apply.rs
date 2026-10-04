@@ -424,12 +424,13 @@ impl App {
         }
 
         if new_cfg.appearance.software_render_mode != self.config.appearance.software_render_mode {
-            self.software_render_degrade = self.main_renderer().is_some_and(|renderer| {
+            let degrade = self.main_renderer().is_some_and(|renderer| {
                 super::should_degrade_for_software_render(
                     new_cfg.appearance.software_render_mode,
                     renderer.is_software_rendering(),
                 )
             });
+            self.set_software_render_degrade(degrade);
             if let Some(renderer) = self.main_renderer_mut() {
                 let degrade = super::should_degrade_for_software_render(
                     new_cfg.appearance.software_render_mode,

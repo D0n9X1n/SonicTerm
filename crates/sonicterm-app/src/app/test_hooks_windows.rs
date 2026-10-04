@@ -127,6 +127,7 @@ impl App {
             retry_not_before: None,
             visible_frame_invalid: false,
             redraw: Default::default(),
+            display_link: Default::default(),
             hover_link: false,
             pressed_tab: None,
             drag_session: None,
@@ -413,7 +414,7 @@ impl App {
     /// pacing on a machine that has a working GPU.
     #[doc(hidden)]
     pub fn __test_set_software_render_degrade(&mut self, degrade: bool) {
-        self.software_render_degrade = degrade;
+        self.set_software_render_degrade(degrade);
     }
 
     /// Test seam: whether the main window has a redraw waiting on the gate.
@@ -686,6 +687,7 @@ impl App {
             retry_not_before: None,
             visible_frame_invalid: false,
             redraw: Default::default(),
+            display_link: Default::default(),
             hover_link: false,
             pressed_tab: None,
             drag_session: None,

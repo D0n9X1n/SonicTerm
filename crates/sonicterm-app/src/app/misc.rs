@@ -742,6 +742,7 @@ impl App {
             retry_not_before: None,
             visible_frame_invalid: false,
             redraw: Default::default(),
+            display_link: Default::default(),
             hover_link: false,
             pressed_tab: None,
             drag_session: None,

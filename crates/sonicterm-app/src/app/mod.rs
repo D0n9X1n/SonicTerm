@@ -178,6 +178,16 @@ pub enum UserEvent {
     /// Request a frame of this window unconditionally, after command maintenance. The
     /// application itself no longer sends it; harnesses and tests do.
     RequestRedraw(WindowId),
+    /// A window's display link fired. Accepted only while `generation` is the window's running link
+    /// interval and a link-paced admission is pending.
+    DisplayLinkTick {
+        /// The window whose link fired.
+        window_id: WindowId,
+        /// The link generation the native target read when it fired.
+        generation: u64,
+        /// The display's target time for the frame, for diagnostics only.
+        target: Instant,
+    },
     /// A VT worker flushed output for this pane, which `window_id` held when it was sent. At
     /// most one is outstanding per pane; the event loop acknowledges it and requests a frame
     /// only when the pane's window shows new output or changed chrome.
@@ -307,6 +317,7 @@ pub use frame_pacing::{
     effective_frame_period, should_defer_streaming_redraw, should_degrade_for_software_render,
     should_flush_pending_pty_redraw, software_render_frame_period,
 };
+mod display_link;
 mod gpu_recovery;
 mod gpu_recovery_worker;
 pub mod hovered_url;
