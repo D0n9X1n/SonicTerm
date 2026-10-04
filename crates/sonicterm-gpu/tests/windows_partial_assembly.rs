@@ -699,8 +699,10 @@ fn parity_cases(
 }
 
 /// Test 7: a one-row edit on a pane of at least 20 rows presents one partial frame, no full frame,
-/// hashes a whole number of rows (the edited row and the rows its one-row ink pad reaches, about
-/// five), and uploads fewer bytes than the same state planned `Full`.
+/// and hashes exactly the rows the planner emits, computed from the captured geometry: the edited
+/// row, every row whose padded strip meets the edit's strip, and every row whose record meets it.
+/// With line height 1 the pad is one row, so that is the edited row and two rows either side,
+/// rows 8 to 12. The frame uploads fewer bytes than the same state planned `Full`.
 fn emission_and_upload_shrink(
     renderer: &mut GpuRenderer,
     layout: &Layout,
@@ -708,17 +710,41 @@ fn emission_and_upload_shrink(
 ) -> Result<(), String> {
     let mut scene = single(layout);
     baseline(renderer, &mut scene)?;
+    // The edit damages its own padded strip; a row is emitted when its strip meets that strip
+    // with positive area, or when its baseline record does.
+    let as_rect = |(top, bottom): (f32, f32)| PixelRect {
+        x: layout.pane.x,
+        y: top as i32,
+        w: layout.pane.w,
+        h: (bottom - top) as u32,
+    };
+    let damage = as_rect(layout.strip(EDIT_ROW));
+    let expected: Vec<u16> = (0..layout.rows)
+        .filter(|row| {
+            *row == EDIT_ROW
+                || as_rect(layout.strip(*row)).intersect(damage).is_some()
+                || renderer
+                    .__test_row_ink(PANE_ID, *row)
+                    .is_some_and(|record| record.intersect(damage).is_some())
+        })
+        .collect();
+    check(
+        expected == (EDIT_ROW - 2..=EDIT_ROW + 2).collect::<Vec<_>>(),
+        &format!("the edit's strip and records reach rows 8 to 12: {expected:?}"),
+    )?;
     write(scene.grid(), EDIT_ROW, 0, "edit");
     let before = counts(renderer);
     present(renderer, &mut scene)?;
     let partial = delta(before, counts(renderer));
     let cols = u64::from(layout.cols);
+    let expected_cells = expected.len() as u64 * cols;
     check(
         partial.partial_frames == 1
             && partial.full_frames == 0
-            && partial.row_cells_hashed.is_multiple_of(cols)
-            && (3 * cols..=7 * cols).contains(&partial.row_cells_hashed),
-        &format!("one partial frame hashing about five rows of {cols} cells: {partial:?}"),
+            && partial.row_cells_hashed == expected_cells,
+        &format!(
+            "one partial frame hashing rows {expected:?}, {expected_cells} cells: {partial:?}"
+        ),
     )?;
     renderer.invalidate_retained_frame();
     let before = counts(renderer);
