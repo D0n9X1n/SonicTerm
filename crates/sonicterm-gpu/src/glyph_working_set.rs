@@ -9,10 +9,12 @@
 //!
 //! A measurement is complete or rejected. A failed warm-up, a glyph the warm-up resolved that the
 //! frame path still draws as notdef, a required tile the atlas did not place, and a resident key
-//! without a face identity each reject it with a [`WorkingSetError`]. A character no face covers,
-//! and a resolved glyph whose face rasterizes nothing, are drawn by the renderer as the same tofu
-//! box, so they are measured as it draws them and listed in [`GlyphWorkingSet::unresolved_chars`]
-//! and [`GlyphWorkingSet::raster_failed`].
+//! without a face identity each reject it with a
+//! [`WorkingSetError`](crate::glyph_working_set::WorkingSetError). A character no face covers, and
+//! a resolved glyph whose face rasterizes nothing, are drawn by the renderer as the same tofu box,
+//! so they are measured as it draws them and listed in
+//! [`GlyphWorkingSet::unresolved_chars`](crate::glyph_working_set::GlyphWorkingSet::unresolved_chars)
+//! and [`GlyphWorkingSet::raster_failed`](crate::glyph_working_set::GlyphWorkingSet::raster_failed).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
