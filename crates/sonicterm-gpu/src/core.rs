@@ -3852,6 +3852,14 @@ impl GpuRenderer {
             .map(|pane| [pane.origin_x_logical, pane.origin_y_logical])
     }
 
+    /// Test-only: the configured surface size `(width, height)` in physical pixels, which a
+    /// `Resized` at the same size leaves `Unchanged`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
     /// Rendered layout of a pane from the most recent frame, absent before layout.
     #[doc(hidden)]
     pub fn pane_layout(&self, pane_id: u64) -> Option<PaneLayoutSnapshot> {
