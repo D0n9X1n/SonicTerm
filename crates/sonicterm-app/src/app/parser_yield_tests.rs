@@ -1652,3 +1652,237 @@ fn a_yield_changes_nothing_the_batch_produced() {
     };
     assert_eq!(run(true), run(false));
 }
+
+/// Attach a real software-forced renderer and native window to `id`, as a launched window has.
+#[cfg_attr(not(windows), allow(dead_code, reason = "the real adapters run only on Windows CI"))]
+fn attach_renderer(
+    fixture: &mut Fixture,
+    event_loop: &winit::event_loop::ActiveEventLoop,
+    id: WindowId,
+) -> Result<(), String> {
+    use sonicterm_cfg::config::{ScrollbarMode, SoftwareRenderMode};
+    use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
+    let window = Arc::new(
+        event_loop
+            .create_window(
+                winit::window::Window::default_attributes()
+                    .with_visible(true)
+                    .with_inner_size(winit::dpi::PhysicalSize::new(800, 600)),
+            )
+            .map_err(|error| error.to_string())?,
+    );
+    let font_dirs =
+        [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    let settings = RendererSettings {
+        font_family: "Rec Mono St.Helens",
+        font_dirs: &font_dirs,
+        font_size: 14.0,
+        line_height_mult: 1.0,
+        font_weight_scale: 1.0,
+        subpixel_aa: Default::default(),
+        padding: [0.0; 4],
+        appearance: SurfaceAppearance {
+            backdrop: Default::default(),
+            opacity: 1.0,
+            scrollbar: ScrollbarMode::Never,
+            panel_padding: 0.0,
+            software_render_mode: SoftwareRenderMode::Force,
+        },
+        role: "parser-yield-adapter-test",
+        glyph_atlas_start: GlyphAtlasStart::Minimum,
+    };
+    let renderer = GpuRenderer::new(
+        window.clone(),
+        event_loop,
+        &sonicterm_cfg::theme::Theme::default(),
+        settings,
+    )
+    .map_err(|error| error.to_string())?;
+    if fixture.app.__test_attach_window_renderer(id, window, renderer) {
+        Ok(())
+    } else {
+        Err("the renderer attaches".into())
+    }
+}
+
+/// Deliver one real `RedrawRequested` to `id` through the App's window-event dispatcher at `at_us`.
+#[cfg_attr(not(windows), allow(dead_code, reason = "the real adapters run only on Windows CI"))]
+fn redraw_through_adapter(
+    fixture: &mut Fixture,
+    event_loop: &winit::event_loop::ActiveEventLoop,
+    id: WindowId,
+    at_us: i64,
+) {
+    use winit::application::ApplicationHandler;
+    set_fake_now(fixture.at(at_us));
+    ApplicationHandler::window_event(
+        &mut fixture.app,
+        event_loop,
+        id,
+        winit::event::WindowEvent::RedrawRequested,
+    );
+}
+
+/// One real-adapter case: it reaches one exit with an accepted grant and returns its window.
+type AdapterCase =
+    fn(&mut Fixture, &winit::event_loop::ActiveEventLoop) -> Result<WindowId, String>;
+
+/// S17 (b) and S14 through production code with a real event loop: each redraw adapter's exits,
+/// reached by `RedrawRequested`, and the three renderer-gated returns of `begin_window_redraw`
+/// each resolve the grant `lost` once, with one effective serve and no token left. Returns the
+/// names of the cases that failed.
+#[cfg_attr(not(windows), allow(dead_code, reason = "the real adapters run only on Windows CI"))]
+fn real_adapter_failures(event_loop: &winit::event_loop::ActiveEventLoop) -> Vec<String> {
+    let cases: Vec<(&str, AdapterCase)> = vec![
+        ("main: no renderer", |fixture, event_loop| {
+            let main = fixture.main;
+            fixture.granted(main);
+            redraw_through_adapter(fixture, event_loop, main, 4_000);
+            Ok(main)
+        }),
+        ("main: image miss", |fixture, event_loop| {
+            let main = fixture.main;
+            attach_renderer(fixture, event_loop, main)?;
+            let pane = fixture.granted(main);
+            let images = Arc::clone(&fixture.app.windows[&main].panes[&pane].inline_images);
+            let _busy = images.lock();
+            redraw_through_adapter(fixture, event_loop, main, 4_000);
+            Ok(main)
+        }),
+        ("main: guarded Sync abandonment", |fixture, event_loop| {
+            let main = fixture.main;
+            attach_renderer(fixture, event_loop, main)?;
+            let pane = fixture.granted(main);
+            fixture.app.windows[&main].panes[&pane].parser.lock().advance(b"\x1b[?2026h");
+            redraw_through_adapter(fixture, event_loop, main, 4_000);
+            Ok(main)
+        }),
+        ("child: no renderer", |fixture, event_loop| {
+            let (child, _) = fixture.child();
+            fixture.granted(child);
+            redraw_through_adapter(fixture, event_loop, child, 4_000);
+            Ok(child)
+        }),
+        ("child: image miss", |fixture, event_loop| {
+            let (child, _) = fixture.child();
+            attach_renderer(fixture, event_loop, child)?;
+            let pane = fixture.granted(child);
+            let images = Arc::clone(&fixture.app.windows[&child].panes[&pane].inline_images);
+            let _busy = images.lock();
+            redraw_through_adapter(fixture, event_loop, child, 4_000);
+            Ok(child)
+        }),
+        ("child: guarded Sync abandonment", |fixture, event_loop| {
+            let (child, _) = fixture.child();
+            attach_renderer(fixture, event_loop, child)?;
+            let pane = fixture.granted(child);
+            fixture.app.windows[&child].panes[&pane].parser.lock().advance(b"\x1b[?2026h");
+            redraw_through_adapter(fixture, event_loop, child, 4_000);
+            Ok(child)
+        }),
+        ("admission: device refusal", |fixture, event_loop| {
+            let main = fixture.main;
+            attach_renderer(fixture, event_loop, main)?;
+            fixture.granted(main);
+            let renderer = fixture.app.windows.get_mut(&main).unwrap().renderer.as_mut().unwrap();
+            renderer.__inject_gpu_fault(sonicterm_gpu::device_errors::GpuFaultKind::DestroyDevice);
+            set_fake_now(fixture.at(4_000));
+            if fixture.app.admit_window_redraw(main) {
+                return Err("a refused device admits nothing".into());
+            }
+            Ok(main)
+        }),
+        ("admission: renderer-gated occlusion", |fixture, event_loop| {
+            let main = fixture.main;
+            attach_renderer(fixture, event_loop, main)?;
+            fixture.granted(main);
+            fixture.app.windows.get_mut(&main).unwrap().redraw.native_occluded = true;
+            set_fake_now(fixture.at(4_000));
+            if fixture.app.admit_window_redraw(main) {
+                return Err("an occluded window admits nothing".into());
+            }
+            Ok(main)
+        }),
+        ("admission: refused recovery", |fixture, event_loop| {
+            let main = fixture.main;
+            attach_renderer(fixture, event_loop, main)?;
+            fixture.granted(main);
+            let window = fixture.app.windows.get_mut(&main).unwrap();
+            let generation = window.renderer.as_ref().unwrap().device_generation();
+            // The stopped generation is the live one, so recovery is refused.
+            window.redraw.stopped_generation = Some(generation);
+            set_fake_now(fixture.at(4_000));
+            if fixture.app.admit_window_redraw(main) {
+                return Err("a refused recovery admits nothing".into());
+            }
+            Ok(main)
+        }),
+    ];
+    cases
+        .iter()
+        .filter_map(|(name, case)| {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut fixture = Fixture::new(true);
+                let id = case(&mut fixture, event_loop)?;
+                let (_, wakes, _, frames, lost) = fixture.counts(id);
+                if (wakes, frames, lost) != (1, 0, 1) {
+                    return Err(format!("W F L {wakes} {frames} {lost}"));
+                }
+                if fixture.token_stage(id).is_some() {
+                    return Err("a token is left".into());
+                }
+                let serves = take_serve_log().len();
+                if serves != 1 {
+                    return Err(format!("{serves} effective serves"));
+                }
+                Ok(())
+            }));
+            match outcome {
+                Ok(Ok(())) => None,
+                Ok(Err(why)) => Some(format!("{name}: {why}")),
+                Err(_) => Some(format!("{name}: panicked")),
+            }
+        })
+        .collect()
+}
+
+/// S17 (b), S14 on Windows: the real main and child redraw adapters, driven by `RedrawRequested`
+/// through a real event loop, and `begin_window_redraw`'s device-refusal, occlusion and
+/// refused-recovery returns with a real renderer, each resolve an accepted grant `lost` once.
+#[cfg(windows)]
+#[test]
+fn real_adapters_resolve_a_grant_at_every_exit() {
+    use crate::app::pty_test_support::isolated;
+    use winit::{
+        application::ApplicationHandler,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+    };
+    if isolated() {
+        return;
+    }
+    struct Probe {
+        failures: Option<Vec<String>>,
+    }
+    impl ApplicationHandler<crate::app::UserEvent> for Probe {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            self.failures = Some(real_adapter_failures(event_loop));
+            event_loop.exit();
+        }
+        fn window_event(
+            &mut self,
+            _: &ActiveEventLoop,
+            _: winit::window::WindowId,
+            _: winit::event::WindowEvent,
+        ) {
+        }
+    }
+    let event_loop = EventLoop::<crate::app::UserEvent>::with_user_event()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let mut probe = Probe { failures: None };
+    event_loop.run_app(&mut probe).unwrap();
+    let failures = probe.failures.expect("resumed runs");
+    assert!(failures.is_empty(), "{failures:#?}");
+}
