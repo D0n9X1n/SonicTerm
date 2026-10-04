@@ -1992,10 +1992,8 @@ pub struct GpuRenderer {
     /// eviction disabled until one frame presents successfully, bounding
     /// retries when the visible glyph working set exceeds atlas capacity.
     glyph_atlas_retry_without_eviction: bool,
-    /// Glyph atlas growths already added to the frame counters.
-    counted_growths: u64,
-    /// Start of the first frame that grew the atlas since the last successful present.
-    growth_pending_since: Option<Instant>,
+    /// Growths already counted and the growth episode awaiting its present.
+    growth_episodes: crate::frame_stats::GrowthEpisodes,
     /// In-place glyph atlas resets since construction, read only by tests through
     /// [`Self::__test_glyph_atlas_resets`] to prove a growth retry never resets.
     glyph_atlas_resets: u64,
@@ -3011,8 +3009,7 @@ impl GpuRenderer {
             image_upload_rebuild_pending: false,
             inline_media_absent_since: None,
             glyph_atlas_retry_without_eviction: false,
-            counted_growths: 0,
-            growth_pending_since: None,
+            growth_episodes: crate::frame_stats::GrowthEpisodes::default(),
             glyph_atlas_resets: 0,
             font_family: font_family.to_string(),
             font_dirs: font_dirs.to_vec(),
@@ -3929,6 +3926,14 @@ impl GpuRenderer {
         self.frame_sink = counting.then(crate::frame_stats::FrameStatsSink::default);
     }
 
+    /// Settle this renderer's statistics for a final read: count glyph atlas growths not yet
+    /// counted and abandon a pending growth episode. The App calls it before it copies a retiring
+    /// or exiting window's statistics; it is idempotent, and `Drop` repeats it as a fallback that
+    /// then adds nothing.
+    pub fn finalize_frame_stats(&mut self) {
+        self.finalize_growth_episodes();
+    }
+
     /// The cumulative frame statistics; zero while the renderer does not count.
     #[must_use]
     pub fn frame_stats(&self) -> crate::frame_stats::FrameStats {
@@ -4014,6 +4019,9 @@ impl GpuRenderer {
 
     /// Take the device's one-time stopped-frame report without assembling or presenting a frame.
     pub fn take_stopped_render_outcome(&mut self) -> Option<PresentOutcome> {
+        // The App's stopped path refuses rendering before any assembly, so a pending growth
+        // episode ends here, even when the stop was already reported.
+        self.finalize_growth_episodes_if_device_stopped();
         if self.device_errors.accepts_gpu_work() || self.device_stop_reported {
             // When: `device_errors` accepts work or `device_stop_reported` is set, no stop report remains.
             return None;
@@ -5121,7 +5129,7 @@ impl GpuRenderer {
         // texture and recreating one never holds the parser guards. Assembly reads no texture.
         self.rebuild_glyph_upload_if_needed();
         self.count_glyph_atlas_growths(frame_start);
-        self.abandon_growth_timing_if_device_stopped();
+        self.finalize_growth_episodes_if_device_stopped();
         let assembled = match assembled {
             Ok(assembled) => assembled,
             Err(error) => {
@@ -7838,7 +7846,7 @@ impl GpuRenderer {
             .settle(field_candidates, matches!(outcome, PresentOutcome::Presented));
         if !matches!(outcome, PresentOutcome::Presented) {
             // When: `matches!` finds any outcome but `Presented`, no receipt is issued, so its dirty rows stay.
-            self.abandon_growth_timing_if_device_stopped();
+            self.finalize_growth_episodes_if_device_stopped();
             return Ok(FrameOutcome::without_receipts(outcome));
         }
         self.finish_successful_frame(plan, missing_chars, gpu_timing);
@@ -7900,9 +7908,7 @@ impl GpuRenderer {
         crate::frame_stats::note_frame(software_presenter);
         self.successful_frame_count = self.successful_frame_count.saturating_add(1);
         // The successful-present seam both presenters share closes any pending growth timing.
-        if let Some(pending_since) = self.growth_pending_since.take() {
-            crate::frame_stats::note_atlas_growth_presented(pending_since);
-        }
+        self.growth_episodes.present();
         self.finish_glyph_atlas_retry();
         self.last_missing_chars = missing_chars_this_frame;
         self.last_frame_key = Some(plan.key);
@@ -8669,11 +8675,7 @@ impl Drop for GpuRenderer {
     // Ordering: `LIVE_RENDERERS.fetch_sub(1, Ordering::AcqRel)`, pairing with
     // the `Ordering::AcqRel` increment in `new_async`. Publishes no payload.
     fn drop(&mut self) {
-        let growths = self.glyph_atlas.growths().saturating_sub(self.counted_growths);
-        let abandoned = u64::from(self.growth_pending_since.take().is_some() || growths > 0);
-        if let Some(sink) = &self.frame_sink {
-            sink.note_teardown_growths(growths, abandoned);
-        }
+        self.finalize_frame_stats();
         // Paired with the increment in `new`. Together they make the live
         // count return to its starting value across balanced open/close
         // churn, and stay above it when a renderer survives.

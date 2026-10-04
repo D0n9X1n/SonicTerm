@@ -79,26 +79,24 @@ impl GpuRenderer {
     /// Add growths since the last check to the frame counters and start their timing at
     /// `frame_start`, unless an earlier growth's timing is still pending.
     pub(super) fn count_glyph_atlas_growths(&mut self, frame_start: std::time::Instant) {
-        let growths = self.glyph_atlas.growths().saturating_sub(self.counted_growths);
-        if growths == 0 {
-            // When: growths is zero the atlas kept its size since the last check; nothing to count.
-            return;
-        }
-        self.counted_growths = self.glyph_atlas.growths();
-        crate::frame_stats::note_glyph_atlas_growths(growths);
-        self.growth_pending_since.get_or_insert(frame_start);
+        self.growth_episodes.count(self.glyph_atlas.growths(), frame_start);
     }
 
-    /// Clear a pending growth timing once the device stops, counting it abandoned: no frame on
-    /// this device will present it. A reset in place keeps the device, so it abandons nothing.
-    pub(super) fn abandon_growth_timing_if_device_stopped(&mut self) {
+    /// Finalize the growth episodes once the device stops: no frame on this device will present
+    /// a pending growth, so it is counted abandoned. A reset in place keeps the device, so it
+    /// abandons nothing.
+    pub(super) fn finalize_growth_episodes_if_device_stopped(&mut self) {
         if self.device_errors.accepts_gpu_work() {
             // When: accepts_gpu_work is true a later frame can still present the grown atlas.
             return;
         }
-        if self.growth_pending_since.take().is_some() {
-            crate::frame_stats::note_atlas_growth_abandoned();
-        }
+        self.finalize_growth_episodes();
+    }
+
+    /// Count uncounted growths and abandon a pending growth episode straight into this
+    /// renderer's sink; idempotent, and safe outside any collection scope.
+    pub(super) fn finalize_growth_episodes(&mut self) {
+        self.growth_episodes.finalize(self.glyph_atlas.growths(), self.frame_sink.as_ref());
     }
 
     fn mark_glyph_atlas_replaced(&mut self) {

@@ -5264,6 +5264,20 @@ fn render_releasing_resizes_the_glyph_texture_after_release_and_before_present()
     }
 }
 
+/// A stopped device finalizes its growth episodes before the stopped report can return early, so
+/// the App's non-rendering stopped path abandons a pending episode even when it never assembles.
+#[test]
+fn the_stopped_report_finalizes_growth_episodes_before_any_early_return() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let body = source.split_once("    pub fn take_stopped_render_outcome(").unwrap().1;
+    let body = body.split_once("\n    }\n").unwrap().0;
+    let finalize = body
+        .find("self.finalize_growth_episodes_if_device_stopped();")
+        .expect("the stop finalizes");
+    let first_return = body.find("return None;").expect("the early return");
+    assert!(finalize < first_return, "finalization precedes the early return");
+}
+
 /// A source that owns its grids and records when it is lent and when it is dropped.
 struct OwningSource {
     grids: Vec<Grid>,

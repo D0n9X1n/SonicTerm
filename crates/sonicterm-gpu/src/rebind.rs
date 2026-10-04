@@ -263,6 +263,9 @@ impl GpuRenderer {
             surface.window.id(),
             self.window.id(),
         )?;
+        // No frame on the old device will present a pending growth, so its episode ends before
+        // the device is replaced and the first recovered present never times across recovery.
+        self.finalize_growth_episodes();
         // Dropping the old surface unconfigures it on its own device first, so the
         // window never holds two configured swapchains.
         self.surface = surface.surface;

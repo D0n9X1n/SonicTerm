@@ -1371,3 +1371,19 @@ fn source_scans_read_a_crlf_checkout_as_they_read_an_lf_one() {
     }
     assert!(differs.is_empty(), "{differs:#?}");
 }
+
+/// A retiring or exiting window's renderer finalizes its statistics before the App copies them, so
+/// growth episodes the renderer would only settle in `Drop` reach the final line and the closed
+/// totals.
+#[test]
+fn retirement_and_exit_finalize_renderer_statistics_before_reading_them() {
+    let source = to_lf(include_str!("frame_counters.rs"));
+    for (name, end) in
+        [("fn retire_window_counters(", "\n    }\n"), ("fn finish_frame_lines(", "\n    }\n")]
+    {
+        let body = source_span(&source, name, end).expect(name);
+        let finalize = body.find("finalize_frame_stats()").unwrap_or_else(|| panic!("{name}"));
+        let read = body.find("GpuRenderer::frame_stats").expect("the statistics read");
+        assert!(finalize < read, "{name} finalizes before it reads");
+    }
+}

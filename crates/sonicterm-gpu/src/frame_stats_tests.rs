@@ -750,7 +750,8 @@ fn frame(stack: &FontStack) {
 
 /// Growth counts and growth-to-present times are recorded only inside a counting scope; a time at a
 /// millisecond bound lands in that bucket, a time past the last bound in the overflow, and the sum
-/// is exact in microseconds. A teardown note reaches the sink outside any scope.
+/// is exact in microseconds. An abandoned episode reaches the sink only through a finalization
+/// note, which lands outside any scope.
 #[test]
 fn growth_counters_and_growth_to_present_buckets() {
     let sink = FrameStatsSink::default();
@@ -760,14 +761,13 @@ fn growth_counters_and_growth_to_present_buckets() {
     {
         let _counting = CollectGuard::enter(Some(&sink));
         note_glyph_atlas_growths(2);
-        note_atlas_growth_abandoned();
         for elapsed_us in [4_000, 4_001, 100_000, 100_001] {
             record_growth_to_present_us(elapsed_us);
         }
     }
     sink.note_teardown_growths(1, 1);
     let stats = sink.snapshot();
-    assert_eq!((stats.glyph_atlas_growths, stats.atlas_growth_abandoned), (3, 2));
+    assert_eq!((stats.glyph_atlas_growths, stats.atlas_growth_abandoned), (3, 1));
     let mut expected = [0; GROWTH_TO_PRESENT_BUCKETS];
     expected[0] = 1; // 4 ms is at the first bound
     expected[1] = 1; // just past 4 ms
@@ -775,4 +775,23 @@ fn growth_counters_and_growth_to_present_buckets() {
     expected[9] = 1; // overflow
     assert_eq!(stats.atlas_growth_to_present_buckets, expected);
     assert_eq!(stats.atlas_growth_to_present_sum_us, 4_000 + 4_001 + 100_000 + 100_001);
+}
+
+/// Finalizing growth episodes is idempotent: the first call adds the uncounted growths and one
+/// abandoned episode to the sink outside any scope, and a second call, as `Drop` makes after the
+/// App's own finalization, adds nothing.
+#[test]
+fn finalizing_growth_episodes_twice_counts_them_once() {
+    let sink = FrameStatsSink::default();
+    let mut episodes = GrowthEpisodes::default();
+    {
+        let _counting = CollectGuard::enter(Some(&sink));
+        episodes.count(1, Instant::now());
+    }
+    // One growth counted at a frame check, then one more outside any frame before teardown.
+    episodes.finalize(2, Some(&sink));
+    let first = sink.snapshot();
+    assert_eq!((first.glyph_atlas_growths, first.atlas_growth_abandoned), (2, 1));
+    episodes.finalize(2, Some(&sink));
+    assert_eq!(sink.snapshot(), first, "a second finalization adds nothing");
 }

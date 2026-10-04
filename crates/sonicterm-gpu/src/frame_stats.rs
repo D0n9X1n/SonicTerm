@@ -152,7 +152,8 @@ impl FrameStatsSink {
         self.stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner).add(other);
     }
 
-    /// Count growths and abandoned growth timings found at teardown, outside any frame scope.
+    /// Count growths and abandoned growth timings found when an episode is finalized, outside
+    /// any frame scope.
     pub(crate) fn note_teardown_growths(&self, growths: u64, abandoned: u64) {
         let mut stats = self.stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         stats.glyph_atlas_growths += growths;
@@ -337,14 +338,58 @@ fn record_assembly_us(elapsed_us: u64) {
     });
 }
 
+/// One renderer's glyph atlas growth episodes: the growths already counted, and the start of
+/// the first growing frame no successful present has completed yet.
+#[derive(Debug, Default)]
+pub(crate) struct GrowthEpisodes {
+    /// Glyph atlas growths already added to the frame counters.
+    counted_growths: u64,
+    /// Start of the first frame that grew the atlas since the last successful present.
+    pending_since: Option<Instant>,
+}
+
+impl GrowthEpisodes {
+    /// At an end-of-frame check, count the growths `atlas_growths` gained since the last reading
+    /// and start their timing at `frame_start`, unless an earlier growth's timing is pending.
+    pub(crate) fn count(&mut self, atlas_growths: u64, frame_start: Instant) {
+        let growths = atlas_growths.saturating_sub(self.counted_growths);
+        if growths == 0 {
+            // When: growths is zero the atlas kept its size since the last check; nothing to count.
+            return;
+        }
+        self.counted_growths = atlas_growths;
+        note_glyph_atlas_growths(growths);
+        self.pending_since.get_or_insert(frame_start);
+    }
+
+    /// At a successful present, record the pending episode's growth-to-present time.
+    pub(crate) fn present(&mut self) {
+        if let Some(pending_since) = self.pending_since.take() {
+            note_atlas_growth_presented(pending_since);
+        }
+    }
+
+    /// End the open episode where no later frame can present it (device stop, rebind, a final
+    /// read, teardown): add the growths `atlas_growths` gained since the last reading, and one
+    /// abandoned episode if one was pending or uncounted, straight into `sink`, so it works
+    /// outside any collection scope. Idempotent: a second call finds nothing left to add.
+    pub(crate) fn finalize(&mut self, atlas_growths: u64, sink: Option<&FrameStatsSink>) {
+        let growths = atlas_growths.saturating_sub(self.counted_growths);
+        self.counted_growths = atlas_growths;
+        let abandoned = u64::from(self.pending_since.take().is_some() || growths > 0);
+        if growths == 0 && abandoned == 0 {
+            // When: `growths` and `abandoned` are both zero, finalization already ran; add nothing.
+            return;
+        }
+        if let Some(sink) = sink {
+            sink.note_teardown_growths(growths, abandoned);
+        }
+    }
+}
+
 /// Count `growths` glyph atlas doublings found at an end-of-frame check.
 pub(crate) fn note_glyph_atlas_growths(growths: u64) {
     record(|stats| stats.glyph_atlas_growths += growths);
-}
-
-/// Count one growth whose timing was cleared before any frame presented.
-pub(crate) fn note_atlas_growth_abandoned() {
-    record(|stats| stats.atlas_growth_abandoned += 1);
 }
 
 /// Record the time from a growing frame's start, `pending_since`, to this successful present.

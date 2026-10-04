@@ -1618,6 +1618,10 @@ impl super::App {
             // When: `frame_counters` is None, the gate is off and there is nothing to retire.
             return;
         };
+        if let Some(renderer) = window.renderer.as_mut() {
+            // the window is leaving, so its renderer settles its growth episodes before the read.
+            renderer.finalize_frame_stats();
+        }
         let stats = window.renderer.as_ref().map(sonicterm_gpu::core::GpuRenderer::frame_stats);
         let Some(counters) = window.redraw.frame_counters.as_deref_mut() else {
             // When: the window never counted, there is nothing to retire.
@@ -1698,6 +1702,10 @@ impl super::App {
         app.finish_closing();
         let now = Instant::now();
         for (id, window) in &mut self.windows {
+            if let Some(renderer) = window.renderer.as_mut() {
+                // the App is exiting, so each renderer settles its growth episodes before the read.
+                renderer.finalize_frame_stats();
+            }
             let stats = window.renderer.as_ref().map(sonicterm_gpu::core::GpuRenderer::frame_stats);
             if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
                 // the window counts, its pending counts get a final line.
