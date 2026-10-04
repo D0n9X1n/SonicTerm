@@ -1423,7 +1423,10 @@ def cell_layout_reading(run: CellLayoutRun) -> CellLayoutReading:
         return invalid("result.json is not an object")
     if run.result.get("checkpoint_memory") != "supported":
         return invalid("checkpoint sampling unsupported")
-    point = next((point for point in run.result.get("checkpoints") or []
+    checkpoints = run.result.get("checkpoints")
+    if not isinstance(checkpoints, list):
+        return invalid("result.json checkpoints is not a list")
+    point = next((point for point in checkpoints
                   if isinstance(point, dict) and point.get("label") == CELL_LAYOUT_CHECKPOINT), None)
     if point is None or not isinstance(point.get("index"), int):
         return invalid("no end checkpoint")
@@ -1530,17 +1533,22 @@ def _cell_layout_artifact_problem(artifact: Path, head_sha: str, workflow_run: s
     return None
 
 
-def _cell_layout_memory(run_dir: Path) -> list[MemorySample]:
-    """The App's memory lines from its own log files, or from the colored console output when those were not kept."""
-    memory = read_memory_samples(run_dir / "scratch" / "logs")
-    harness_log = run_dir / "01-harness.log"
-    if not memory and harness_log.is_file():
-        # When: the App's log files were not kept, its lines are read from the colored console output.
-        lines = (ANSI_ESCAPE.sub("", line)
-                 for line in harness_log.read_text(encoding="utf-8", errors="replace").splitlines())
-        memory = sorted((sample for sample in map(parse_memory_line, lines) if sample),
-                        key=lambda sample: sample.unix_s)
-    return memory
+def _cell_layout_memory(run_dir: Path) -> tuple[list[MemorySample], str | None]:
+    """The App's memory lines from its own log files, or from the colored console output when those were not kept;
+    returns ([], why) when a log cannot be read or a memory line cannot be parsed."""
+    try:
+        memory = read_memory_samples(run_dir / "scratch" / "logs")
+        harness_log = run_dir / "01-harness.log"
+        if not memory and harness_log.is_file():
+            # When: the App's log files were not kept, its lines are read from the colored console output.
+            lines = (ANSI_ESCAPE.sub("", line)
+                     for line in harness_log.read_text(encoding="utf-8", errors="replace").splitlines())
+            memory = sorted((sample for sample in map(parse_memory_line, lines) if sample),
+                            key=lambda sample: sample.unix_s)
+    except (OSError, ValueError, OverflowError) as error:
+        # An unreadable log or an impossible timestamp makes this run invalid, not the whole decision.
+        return [], f"memory log unreadable: {error}"
+    return memory, None
 
 
 def read_cell_layout_runs(artifact_root: Path, workflow_run: str, head_sha: str) -> dict[str, list[CellLayoutRun]]:
@@ -1568,10 +1576,11 @@ def read_cell_layout_runs(artifact_root: Path, workflow_run: str, head_sha: str)
                     problem = f"outcome.json describes side={identity[0]} scenario={identity[1]} variant={identity[2]}"
             result, result_problem = _read_json_object(run_dir / "scratch" / "result.json")
             classification = outcome.get("kind", "missing") if isinstance(outcome, dict) else "missing"
+            memory, memory_problem = _cell_layout_memory(run_dir)
             runs[named["platform"]].append(CellLayoutRun(
-                f"{artifact.name}/{run_dir.name}", recorded_run, result, _cell_layout_memory(run_dir),
-                classification, named["head"],
-                artifact_problem or problem or (result_problem if result_problem != "result.json missing" else None)))
+                f"{artifact.name}/{run_dir.name}", recorded_run, result, memory, classification, named["head"],
+                artifact_problem or problem
+                or (result_problem if result_problem != "result.json missing" else None) or memory_problem))
     return runs
 
 

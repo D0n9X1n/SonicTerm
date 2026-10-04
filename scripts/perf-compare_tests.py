@@ -7520,6 +7520,10 @@ class CellLayoutParsedLineTests(unittest.TestCase):
         decision, valid = self.decide(self.run_from(
             "retried", [cell_line(2, "end", 1, False, 1), cell_line(2, "end", 2, True, 7)]))
         self.assertEqual((decision.outcome, valid), ("NoGo", 5))
+        # The candidate contributes attempt 2's grid bytes, not attempt 1's.
+        candidate = decision.platforms["macOS"].readings[-1]
+        self.assertEqual((candidate.name, candidate.grid_bytes, candidate.resident_bytes),
+                         ("retried", 7, 100 * CELL_MIB))
 
     def test_exhausted_sampling_is_inconclusive_not_nogo(self):
         decision, valid = self.decide(self.run_from(
@@ -7608,6 +7612,55 @@ class CellLayoutArtifactTests(unittest.TestCase):
             # Every rejected run is named: the four macOS runs and the Windows run of the other head.
             for run in runs["macOS"] + runs["Windows"]:
                 self.assertTrue(any(run.name in reason for reason in decision.reasons), run.name)
+
+
+class CellLayoutDamagedEvidenceTests(unittest.TestCase):
+    """Damaged result, timing and log evidence becomes a named invalid run; collection and the other platform's
+    decision continue."""
+
+    def test_damaged_files_are_named_and_a_passing_platform_still_decides(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            macos = write_cell_artifact(root, "macOS", [(f"0{index}-head", HEAD_OUTCOME) for index in range(1, 6)])
+            timed = macos / "runs" / "S12-default" / "timed"
+            (timed / "01-head" / "scratch" / "result.json").write_text(
+                json.dumps({"checkpoint_memory": "supported", "checkpoints": 1}), encoding="utf-8")
+            (timed / "02-head" / "scratch" / "result.json").write_text("[1]", encoding="utf-8")
+            (timed / "03-head" / "scratch" / "result.json").write_text("{broken", encoding="utf-8")
+            (timed / "04-head" / "01-harness.log").write_text(
+                cell_line(2, "end", 1, True, 7).replace(STAMP[:10], "2026-99-03"), encoding="utf-8")
+            unreadable = timed / "05-head" / "scratch" / "logs"
+            unreadable.mkdir()
+            (unreadable / "app.log").write_text("x", encoding="utf-8")
+            (unreadable / "app.log").chmod(0)
+            try:
+                runs = perf.read_cell_layout_runs(root, "1", CELL_HEAD)
+            finally:
+                (unreadable / "app.log").chmod(0o644)
+            problems = [perf.cell_layout_reading(run).problem for run in runs["macOS"]]
+            self.assertEqual(problems[0], "result.json checkpoints is not a list")
+            self.assertEqual(problems[1], "result.json is not an object")
+            self.assertIn("result.json unreadable", problems[2])
+            self.assertIn("memory log unreadable", problems[3])
+            if os.geteuid() != 0:
+                self.assertIn("memory log unreadable", problems[4])
+            # Windows' own five passing runs still decide a go.
+            windows = [cell_layout_run(f"win{index}", 30 * CELL_MIB, 100 * CELL_MIB, workflow_run="1")
+                       for index in range(5)]
+            windows = [perf.CellLayoutRun(run.name, run.workflow_run, run.result, run.memory, head_sha=CELL_HEAD)
+                       for run in windows]
+            self.assertEqual(perf.cell_layout_decision({"macOS": runs["macOS"], "Windows": windows}).outcome, "Go")
+
+    def test_a_damaged_timing_file_names_every_run_of_its_artifact(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            artifact = write_cell_artifact(root, "macOS", [("01-head", HEAD_OUTCOME)])
+            (artifact / "timing.json").write_text("{broken", encoding="utf-8")
+            broken = perf.read_cell_layout_runs(root, "1", CELL_HEAD)["macOS"][0]
+            self.assertIn("timing.json unreadable", broken.problem)
+            (artifact / "timing.json").write_text("[1]", encoding="utf-8")
+            self.assertEqual(perf.read_cell_layout_runs(root, "1", CELL_HEAD)["macOS"][0].problem,
+                             "timing.json is not an object")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
