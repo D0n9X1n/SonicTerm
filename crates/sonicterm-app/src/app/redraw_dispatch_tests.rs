@@ -259,3 +259,58 @@ fn the_completion_adapter_has_one_settlement_path() {
     assert_eq!(finish.matches("complete_attempt(").count(), 1, "{finish}");
     assert!(!finish.contains(".settle("), "{finish}");
 }
+
+/// Both redraw handlers reach pacing only through the adapters: the main handler and the child
+/// event route admit through `admit_window_redraw`, both complete through `complete_window_redraw`,
+/// and neither calls `begin_window_redraw` or `complete_attempt` itself. Every frame-unavailable
+/// and lock-contention call in the handler files passes a `now` read from the dispatch clock, never
+/// the real one. CRLF-normalized, comments blanked.
+#[test]
+fn redraw_handlers_reach_pacing_only_through_the_adapters() {
+    let code_of = |source: &str| crate::app::source_scan_support::code_views(source).0;
+    let main = code_of(include_str!("window_event.rs"));
+    let child_route = code_of(include_str!("child_window.rs"));
+    let child_redraw = code_of(include_str!("child_window_redraw.rs"));
+    let main_handler = method_body(&main, "fn handle_main_redraw_requested(");
+    let child_admission = method_body(&child_route, "pub(super) fn handle_child_window_event(");
+    let child_handler = method_body(&child_redraw, "pub(super) fn handle_child_redraw_requested(");
+    for (name, body, adapter) in [
+        ("main admission", main_handler, "self.admit_window_redraw(win_id)"),
+        ("main completion", main_handler, "self.complete_window_redraw(win_id,"),
+        ("child admission", child_admission, "self.admit_window_redraw(win_id)"),
+        ("child completion", child_handler, "self.complete_window_redraw(win_id,"),
+    ] {
+        assert!(body.contains(adapter), "{name} calls {adapter}");
+    }
+    for (name, body) in
+        [("main", main_handler), ("child route", child_admission), ("child", child_handler)]
+    {
+        for direct in ["begin_window_redraw(", "complete_attempt("] {
+            assert!(!body.contains(direct), "the {name} handler calls {direct} directly");
+        }
+    }
+    let frame_pacing = code_of(include_str!("frame_pacing.rs"));
+    let mut checked = 0;
+    for (file, source) in [
+        ("window_event.rs", &main),
+        ("child_window_redraw.rs", &child_redraw),
+        ("frame_pacing.rs", &frame_pacing),
+    ] {
+        for callee in ["visible_frame_unavailable(", "defer_window_lock_contention("] {
+            for (offset, _) in source.match_indices(callee) {
+                if source[..offset].ends_with("fn ") {
+                    // The definition, not a call.
+                    continue;
+                }
+                let call = &source[offset..offset + source[offset..].find(");").unwrap()];
+                assert!(!call.contains("Instant::now"), "{file}: {call}");
+                assert!(call.trim_end().ends_with(", now"), "{file}: {call} passes `now`");
+                let binding = source[..offset].rfind("let now =").expect("`now` is bound first");
+                let read = &source[binding..binding + source[binding..].find(';').unwrap()];
+                assert_eq!(read, "let now = self.dispatch_now()", "{file}: {call}");
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 7, "six frame-unavailable sites and one contention site");
+}
