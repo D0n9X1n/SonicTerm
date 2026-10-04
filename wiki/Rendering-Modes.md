@@ -396,7 +396,9 @@ shows them, which is a whole-surface `Full` because scrolling changes the
 viewport. While an overlay is active (IME preedit, search, palette,
 notification, link preview, drag chip, or focus flash) in the old or new key, any
 change to the frame key repaints the whole surface instead, because a preedit
-follows the live cursor and the frame key does not carry the cursor position. A
+follows the live cursor, while the frame key records only the drawn cursor cell,
+which is absent when the cursor is hidden, the window unfocused, the pane
+read-only or the view scrolled back. A
 revision change with no dirty live row and no other damage, such as one from
 `set_autowrap`, also plans `Noop` on both paths.
 

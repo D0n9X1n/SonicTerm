@@ -704,10 +704,15 @@ compile until it has a class.
 | tab band | `tab_hash`, `hover_tab`, `close_override`, `process_privileged` | the tab band, padded upward by one native font-cell height, plus the last presented and the current tab-title glyph ink; nothing while the bar is hidden |
 | selection | `selection` | the active pane's rows whose selection quads differ |
 | scrollbar | a pane's `scrollbar_bucket` alone | the drawn scrollbar track, from the geometry the draw uses |
-| full | every other field | the whole surface |
+| full | every other field, except the dirt and hover fields below | the whole surface |
 
-The command badge's hash changes only when the drawn badge changes, so a running
-tab does not repaint the band every second. A block cursor recolors whole glyph
+A pane's `revision` and `dirty_generation` are dirt fields, not a class: they are
+damaged through the ink-padded strips of the slots that draw the dirty live rows.
+`hovered_url_cells` keeps its own narrow path, the old and new hovered rows.
+
+The command badge's hash covers the status kind and the drawn badge, so a running
+tab does not repaint the band every second, but a change of kind, such as Idle to
+Running before any badge is drawn, repaints it once. A block cursor recolors whole glyph
 instances, which can be taller than the cursor row plus its pad, so after
 assembly the damage also covers the recolored glyphs: both the previous and the
 current bounds whenever the recolor changed, and the current bounds when only the
@@ -720,7 +725,9 @@ Some changes stay whole-surface or whole-pane:
 
 - while an overlay is active in the old or new key, any key change damages the
   whole surface, because overlays draw over everything and a preedit follows the
-  live cursor, which the key omits;
+  live cursor, while the key records only the drawn cursor cell, which is absent
+  when the cursor is hidden, the window unfocused, the pane read-only or the view
+  scrolled back;
 - a class change on an alternate-screen pane damages that whole pane;
 - the degraded path repaints the whole surface for any class change, and the
   first frame is the whole surface.

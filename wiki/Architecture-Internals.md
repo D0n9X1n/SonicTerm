@@ -195,10 +195,12 @@ correctness, not only speed.
 - Classification is exhaustive: `WindowIdentity::classify` and
   `PaneIdentity::classify` destructure every field without `..`, so a new field
   does not compile until it has a class. Cursor, focus, tab-band, selection and
-  scrollbar changes damage only their areas. Every other field, any key change
-  while an overlay is active in the old or new key, the degraded path and the
-  first frame damage the whole surface; a class change on an alternate-screen
-  pane damages that pane.
+  scrollbar changes damage only their areas. A pane's `revision` and
+  `dirty_generation` are dirt fields, damaged through their dirty slots, and
+  `hovered_url_cells` damages the old and new hovered rows. Every other field,
+  any key change while an overlay is active in the old or new key, the degraded
+  path and the first frame damage the whole surface; a class change on an
+  alternate-screen pane damages that pane.
 - Narrow damage relies on `Full` assembly under the scissor: every batch is
   assembled and drawn in order and the scissor limits writes, so all ink meeting
   the damage is redrawn. Ink that can exceed a row's padded strip is damaged by
