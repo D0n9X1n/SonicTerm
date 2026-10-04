@@ -9,6 +9,10 @@ Two commands, run in this order and never the other way round:
             writes selection.json: the decisive run and attempt, its head and merge base, the twelve
             required jobs with their conclusions and times, the budget accounting (B), and the single
             replacement allowance with its checked exclusion. No performance value can reach it.
+            Cause evidence, the label trigger and the publication are operator-attested: select checks
+            their shape only, and selection.json and its summary label them so. The operator verifies
+            the linked records of publication, cause and the labeled/perf event before triggering the
+            replacement and before reading measurements; a successful select is not authenticated proof.
   evaluate  Reads selection.json and the downloaded comparison artifacts, checks run and artifact
             identity, selects perf-compare's final `valid` runs, validates each selected result, and
             prints every row with its operands. Exit 0 accepts, 1 rejects, 2 means the evidence is invalid.
@@ -112,6 +116,12 @@ INFRASTRUCTURE_CAUSES = {
                                             "Install Cairo for Windows"})),
 }
 QUEUE_CATEGORY = "queue"
+# What select cannot check against GitHub: it reads run metadata only, so these record fields are shape-checked.
+OPERATOR_ATTESTED_STATUS = ("operator-attested, shape-checked only: the operator verifies the linked records of "
+                            "publication, cause and the labeled/perf event before triggering the replacement and "
+                            "before reading measurements; a successful select is not authenticated proof")
+OPERATOR_ATTESTED_FIELDS = {"infrastructure": ["exclusion.jobs[].evidence", "publication"],
+                            QUEUE_CATEGORY: ["exclusion.replacement_trigger", "publication"]}
 # The result job's own check, which fails whenever a comparison job did not succeed.
 RESULT_STEP = "Require every comparison job to succeed"
 
@@ -263,6 +273,11 @@ def failed_steps(job: Mapping) -> list:
             if isinstance(step, dict) and step.get("conclusion") == "failure"]
 
 
+def is_text(value: object) -> bool:
+    """Whether `value` is a string with content once stripped; null, booleans, objects and lists never are."""
+    return isinstance(value, str) and bool(value.strip())
+
+
 def check_cause(category: str, entry: Mapping) -> None:
     """The listed job's cause evidence proves `category`: an `actions/*` transfer's HTTP 5xx, a remote fetch that
     failed, or GitHub's runner-loss or provisioning annotation. A step name alone proves nothing."""
@@ -274,8 +289,8 @@ def check_cause(category: str, entry: Mapping) -> None:
     proven = {
         "http": isinstance(status, int) and not isinstance(status, bool) and 500 <= status <= 599
         and str(evidence.get("source", "")).startswith("actions/"),
-        "fetch": str(evidence.get("url", "")).startswith("https://") and bool(evidence.get("error")),
-        "runner": bool(str(evidence.get("annotation", "")).strip()),
+        "fetch": str(evidence.get("url", "")).startswith("https://") and is_text(evidence.get("error")),
+        "runner": is_text(evidence.get("annotation")),
     }[kind]
     if not proven:
         raise EvidenceInvalid(f"{entry.get('name')}: the {kind} evidence {evidence!r} does not prove {category}")
@@ -462,10 +477,16 @@ def check_replacement(args, runner, critical, view: Mapping, record: Mapping) ->
     except critical.AccountingError as error:
         raise EvidenceInvalid(f"the record's times are unreadable: {error}") from error
     if exclusion.get("category") in INFRASTRUCTURE_CAUSES:
-        return check_infrastructure(args, runner, critical, view, exclusion, recorded_s, published_s)
-    if exclusion.get("category") == QUEUE_CATEGORY:
-        return check_queue(args, runner, critical, view, exclusion, recorded_s, published_s)
-    raise EvidenceInvalid(f"exclusion category {exclusion.get('category')!r} is not listed")
+        replacement = check_infrastructure(args, runner, critical, view, exclusion, recorded_s, published_s)
+        kind = "infrastructure"
+    elif exclusion.get("category") == QUEUE_CATEGORY:
+        replacement = check_queue(args, runner, critical, view, exclusion, recorded_s, published_s)
+        kind = QUEUE_CATEGORY
+    else:
+        raise EvidenceInvalid(f"exclusion category {exclusion.get('category')!r} is not listed")
+    # These fields are the operator's word; selection.json says so rather than reading as GitHub-verified.
+    replacement["operator_attested"] = {"fields": OPERATOR_ATTESTED_FIELDS[kind], "status": OPERATOR_ATTESTED_STATUS}
+    return replacement
 
 
 def select(args, runner, critical) -> dict:
@@ -990,6 +1011,9 @@ def main(argv: Sequence[str] | None = None, runner: Callable[[Sequence[str]], by
                     args.output.write_text(json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                     print(f"selected run {selection['run_id']} attempt {selection['attempt']}; "
                           f"B {selection['budget']}; replacement {selection['replacement']}")
+                    attested = selection["replacement"].get("operator_attested")
+                    if attested:
+                        print(f"operator-attested {attested['fields']}: {attested['status']}")
                     return EXIT_ACCEPT
                 rows, report = evaluate(compare, critical, selection_document, args.artifacts)
             except critical.AccountingError as error:

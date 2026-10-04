@@ -998,6 +998,49 @@ class SelectTests(AcceptanceFixture):
                 code, output, _shim = self.select(runs, record=record)
                 self.assertEqual(code, evaluator.EXIT_INVALID, output)
 
+    def test_cause_text_must_be_a_non_blank_string(self):
+        # A runner-loss annotation and a fetch error are each a string that is non-blank once stripped: null, true,
+        # false, an object, a list, an empty or a blank string never pass as one, and real text does.
+        not_text = (("null", None), ("true", True), ("false", False), ("object", {}), ("list", []), ("empty", ""),
+                    ("blank", "   "))
+        fields = {
+            "annotation": ("runner-lost", None, lambda value: {"kind": "runner", "annotation": value}, RUNNER_EVIDENCE),
+            "error": ("toolchain-fetch", "Install Rust", lambda value: {**FETCH_EVIDENCE, "error": value},
+                      FETCH_EVIDENCE),
+        }
+        for field, (category, step, evidence, real) in fields.items():
+            runs = self.infra_runs(failed_steps={} if step is None else {WINDOWS_S7: step})
+            for label, value in not_text:
+                with self.subTest(field=field, value=label):
+                    record = self.infra_record(category, [infra_entry(WINDOWS_S7, step, evidence(value))])
+                    code, output, _shim = self.select(runs, record=record)
+                    self.assertEqual(code, evaluator.EXIT_INVALID, output)
+            with self.subTest(field=field, value="real text"):
+                code, output, _shim = self.select(runs, record=self.infra_record(
+                    category, [infra_entry(WINDOWS_S7, step, real)]))
+                self.assertEqual(code, 0, output)
+
+    def test_select_marks_operator_attested_evidence(self):
+        # Cause evidence, the label trigger and the publication are the operator's word: select checks only their
+        # shape, so selection.json and its printed summary label them operator-attested. The operator verifies the
+        # linked records before triggering the replacement and before reading measurements; a successful select is
+        # not authenticated proof.
+        for label, runs, record, fields in (
+                ("infrastructure", self.infra_runs(), self.infra_record(), ["exclusion.jobs[].evidence", "publication"]),
+                ("queue", self.queue_runs(), self.queue_record(), ["exclusion.replacement_trigger", "publication"])):
+            with self.subTest(exclusion=label):
+                code, output, _shim = self.select(runs, record=record)
+                self.assertEqual(code, 0, output)
+                selection = json.loads((self.temp / "selection.json").read_text(encoding="utf-8"))
+                attested = selection["replacement"].get("operator_attested") or {}
+                self.assertEqual(attested.get("fields"), fields)
+                status = str(attested.get("status"))
+                for phrase in ("before triggering the replacement", "before reading measurements",
+                               "not authenticated proof"):
+                    self.assertIn(phrase, status)
+                # The summary gives the label its own line, naming the fields, not only inside the replacement dict.
+                self.assertIn(f"operator-attested {fields}: ", output)
+
     def test_an_infrastructure_replacement_is_recorded_before_a_full_rerun(self):
         # The exclusion is recorded after the failed attempt and before the rerun's first job is created, and
         # Re-run all jobs leaves no required job inherited from attempt 1.
