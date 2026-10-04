@@ -580,6 +580,29 @@ fn first_difference(first: &[u8], second: &[u8], width_px: u32) -> Option<(usize
         .map(|index| (index % width, index / width))
 }
 
+/// The narrow frame's own checks: it applied the baseline's font-fallback generation, and it damaged
+/// less than the surface. A generation applied before the narrow frame clears the frame key, so
+/// production repaints that frame in full; the generation is checked first so that case fails by
+/// name rather than as a whole-surface narrow frame.
+fn check_narrow_frame(
+    case: &str,
+    baseline_generation: Option<u64>,
+    narrow_generation: Option<u64>,
+    narrow: &PresentedDamage,
+) -> Result<(), String> {
+    check(
+        baseline_generation == narrow_generation,
+        &format!(
+            "{case}: font fallback changed between baseline {baseline_generation:?} and narrow \
+             {narrow_generation:?}; rerun after warm-up"
+        ),
+    )?;
+    check(
+        !narrow.first_frame && narrow.is_narrow(),
+        &format!("{case}: the frame damages less than the surface: {narrow:?}"),
+    )
+}
+
 /// How a narrowed frame is expected to be assembled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Expect {
@@ -612,10 +635,7 @@ fn narrow_matches_full(
     let narrow_generation = scene.font_generation;
     // The full comparison frame below replaces the scene's receipts, so keep the narrow frame's.
     let narrow_receipts = std::mem::take(&mut scene.receipts);
-    check(
-        !narrow.first_frame && narrow.is_narrow(),
-        &format!("{case}: the frame damages less than the surface: {narrow:?}"),
-    )?;
+    check_narrow_frame(case, baseline_generation, narrow_generation, &narrow)?;
     let assembled = match expect {
         Expect::Partial => {
             moved.partial_frames == 1
@@ -1301,8 +1321,9 @@ type Case = fn(&mut GpuRenderer, &Layout, &ActiveEventLoop) -> Result<(), String
 /// Repaint every glyph the cases draw until the font-fallback generation the renderer applies has
 /// held still. A fallback search runs on a worker: a publication applied between a case's narrow
 /// frame and its full reference clears the frame key and redraws glyphs outside the narrow damage
-/// with the new faces, so the reference would no longer show the narrow frame's state. Waiting
-/// here leaves no search outstanding for any case.
+/// with the new faces, so the reference would no longer show the narrow frame's state. This is a
+/// bounded quiet heuristic, not a worker-completion barrier; each parity case rejects a later
+/// apply.
 fn settle_fallback(renderer: &mut GpuRenderer, layout: &Layout) -> Result<(), String> {
     // The dense grid's last row holds every text an edit writes; the underline case adds styles,
     // not glyphs.
@@ -1315,7 +1336,7 @@ fn settle_fallback(renderer: &mut GpuRenderer, layout: &Layout) -> Result<(), St
         let generation = scene.font_generation.ok_or("a presented frame records its fonts")?;
         let tofu = !renderer.last_missing_tofu().is_empty();
         if quiet.observe(generation, tofu, Instant::now()) {
-            // When: the generation held still for the quiet period, no search is outstanding.
+            // When: the applied generation stays quiet, start cases; their checks reject a later apply.
             return Ok(());
         }
         check(
@@ -1508,6 +1529,28 @@ fn differing_pixels_are_counted_and_bounded_outside_the_exclusion() {
         (2, Some(PixelRect { x: 1, y: 1, w: 3, h: 2 }))
     );
     assert_eq!(differing_pixels(&first, &first, width_px, None), (0, None));
+}
+
+/// A fallback applied between the baseline and the narrow frame makes production repaint the narrow
+/// frame in full; the check names the generation change, not the whole-surface damage. Matching
+/// generations with narrow damage pass, and a whole-surface frame at one generation still fails.
+#[test]
+fn a_generation_change_before_the_narrow_frame_fails_by_name() {
+    let surface = PixelRect { x: 0, y: 0, w: 640, h: 480 };
+    let repainted = PresentedDamage { first_frame: true, damage: surface, surface };
+    let error = check_narrow_frame("edit", Some(0), Some(1), &repainted).unwrap_err();
+    assert!(
+        error.contains("font fallback changed between baseline Some(0) and narrow Some(1)"),
+        "{error}"
+    );
+    let narrow = PresentedDamage {
+        first_frame: false,
+        damage: PixelRect { x: 0, y: 191, w: 640, h: 60 },
+        surface,
+    };
+    assert_eq!(check_narrow_frame("edit", Some(0), Some(0), &narrow), Ok(()));
+    let error = check_narrow_frame("edit", Some(0), Some(0), &repainted).unwrap_err();
+    assert!(error.contains("damages less than the surface"), "{error}");
 }
 
 /// Partial assembly on a real wgpu renderer: narrowed frames equal full repaints, failures after
