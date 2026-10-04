@@ -108,12 +108,17 @@ pub struct WindowState {
     // `cursor_visible` lives on `PaneState`, not here: its per-pane Arc travels
     // with the pane through tear-out. Read it via
     // `ws.panes.get(&active_pane).map(|p| p.cursor_visible.load(...))`.
+    /// The attempt clock: the instant of the last renderer call, whatever its outcome.
     pub last_render: Instant,
+    /// The streaming clock on the hardware path: `last_render`, except that a settled input
+    /// attempt that presented nothing leaves it where it was, so the echo it waited for is not paced
+    /// from a frame that drew nothing.
+    pub(crate) stream_clock: Instant,
     /// Earliest collection retry after lock contention, independent of completed-frame pacing.
     pub(crate) retry_not_before: Option<Instant>,
     /// Invalid-topology episode latch; collection never arms a retry for it.
     pub(crate) visible_frame_invalid: bool,
-    /// Owner-local redraw causes and native-monitor cadence; last_render remains the pacing clock.
+    /// Owner-local redraw causes and native-monitor cadence; the pacing clocks live beside it.
     pub(crate) redraw: redraw::WindowRedrawState,
     /// pointer-cursor-is-link latch. Mirrors
     /// `App.hover_link` (now deleted). Per-window so a torn-out child can
@@ -381,13 +386,55 @@ impl WindowState {
         }
     }
 
-    pub(super) fn redraw_not_before(&self, period: Duration) -> Instant {
-        let paced = self.last_render + period;
+    /// The clock streaming pacing reads: every attempt on the software path, `stream_clock` on hardware.
+    pub(super) fn pacing_clock(&self, software: bool) -> Instant {
+        if software {
+            // On the CPU rasterizer every attempt is costly, so all of them pace.
+            self.last_render
+        } else {
+            // When: `software` is false, a settled keypress that drew nothing does not pace the echo.
+            self.stream_clock
+        }
+    }
+
+    /// The first instant `begin_window_redraw` admits this window: a surface timeout waits from the
+    /// attempt, other pacing from the pacing clock, and a later contention floor wins.
+    pub(super) fn redraw_not_before(&self, period: Duration, software: bool) -> Instant {
+        let base = if self.redraw.timeout_pending {
+            // A surface timeout retry waits one period from the attempt itself.
+            self.last_render
+        } else {
+            // When: `timeout_pending` is clear, streaming pacing reads the pacing clock.
+            self.pacing_clock(software)
+        };
+        let paced = base + period;
         self.retry_not_before.map_or(paced, |retry| paced.max(retry))
     }
 
-    pub(super) fn contention_blocks_redraw(&self, now: Instant, period: Duration) -> bool {
-        self.retry_not_before.is_some() && now < self.redraw_not_before(period)
+    /// Whether an armed contention floor still holds this window back at `now`.
+    pub(super) fn contention_blocks_redraw(
+        &self,
+        now: Instant,
+        period: Duration,
+        software: bool,
+    ) -> bool {
+        self.retry_not_before.is_some() && now < self.redraw_not_before(period, software)
+    }
+
+    /// Complete one renderer call through the shared writer of both pacing clocks.
+    pub(super) fn complete_attempt(
+        &mut self,
+        snapshot: &redraw::FrameSnapshot,
+        outcome: redraw::FrameSettlement,
+        at: Instant,
+        software: bool,
+    ) {
+        let clocks = redraw::AttemptClocks {
+            last_render: &mut self.last_render,
+            stream_clock: &mut self.stream_clock,
+            retry_armed: self.retry_not_before.is_some(),
+        };
+        self.redraw.complete_attempt(clocks, snapshot, outcome, at, software);
     }
 
     /// Clear collection backoff and its invalidity warning only after held-frame reconciliation succeeds.

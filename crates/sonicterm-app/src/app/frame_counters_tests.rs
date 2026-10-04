@@ -1415,3 +1415,22 @@ fn source_scans_read_a_crlf_checkout_as_they_read_an_lf_one() {
     }
     assert!(differs.is_empty(), "{differs:#?}");
 }
+
+#[test]
+fn stream_clock_exempt_joins_the_window_record_after_defer_streaming() {
+    // The harness and perf-compare read the new window count by name, in the record's order.
+    // A line omits zero counts, so the neighbours are non-zero to show the order.
+    let counters = WindowFrameCounters {
+        defer_streaming: 2,
+        stream_clock_exempt: 4,
+        contention_retry_armed: 1,
+        ..WindowFrameCounters::default()
+    };
+    let record = counters.record(None, 0);
+    assert_eq!(record.count("stream_clock_exempt"), Some(4));
+    let fields = record.line_fields();
+    let defer = fields.find("defer_streaming=").expect("defer_streaming field");
+    let exempt = fields.find("stream_clock_exempt=4").expect("stream_clock_exempt field");
+    let armed = fields.find("contention_retry_armed=").expect("contention_retry_armed field");
+    assert!(defer < exempt && exempt < armed, "{fields}");
+}

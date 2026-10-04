@@ -318,3 +318,46 @@ fn window_wide_dirt_callers_inventory() {
         "the remaining window_state caller is the TopologyDirt::Window branch"
     );
 }
+
+/// Every constructor starts both pacing clocks at one instant, so neither paces a new window.
+#[test]
+fn every_window_constructor_starts_both_clocks_together() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_synthetic_main();
+    let child = app.__test_seed_child_window(&["child"]);
+    for window in app.windows.values() {
+        assert_eq!(window.stream_clock, window.last_render);
+    }
+    assert!(app.windows.contains_key(&child));
+    // The native constructors cannot run headless, so their literals are pinned by source.
+    for (name, source) in [
+        ("event_loop.rs", include_str!("event_loop.rs")),
+        ("misc.rs", include_str!("misc.rs")),
+        ("tear_out.rs", include_str!("tear_out.rs")),
+        ("test_hooks_windows.rs", include_str!("test_hooks_windows.rs")),
+    ] {
+        let source = source.replace("\r\n", "\n");
+        let literals = source.matches("last_render: created_at,\n").count();
+        assert!(literals > 0, "{name} builds a window");
+        assert_eq!(
+            source
+                .matches("last_render: created_at,\n            stream_clock: created_at,")
+                .count(),
+            literals,
+            "{name} sets both clocks from one instant"
+        );
+        assert!(!source.contains("last_render: Instant::now()"), "{name}");
+        assert!(!source.contains("last_render: std::time::Instant::now()"), "{name}");
+    }
+}
+
+/// The test hook that backdates a window moves both clocks, so native tests still cross a frame.
+#[test]
+fn backdating_hook_moves_both_clocks() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let child = app.__test_seed_child_window(&["child"]);
+    let backdated = Instant::now() - Duration::from_millis(500);
+    assert!(app.__test_set_window_last_render(child, backdated));
+    assert_eq!(app.windows[&child].last_render, backdated);
+    assert_eq!(app.windows[&child].stream_clock, backdated);
+}

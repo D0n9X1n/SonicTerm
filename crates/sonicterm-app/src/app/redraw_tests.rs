@@ -703,6 +703,7 @@ fn mixed_monitor_deadlines_follow_each_owner() {
                 ..WindowRedrawState::default()
             };
             state.last_render = now;
+            state.stream_clock = now;
             state.retry_not_before = None;
         }
 
@@ -748,6 +749,7 @@ fn mixed_monitor_deadlines_follow_each_owner() {
             assert!(state.redraw.request_in_flight);
             assert_eq!(state.redraw.snapshot().0, expected_causes);
             assert_eq!(state.last_render, now);
+            assert_eq!(state.stream_clock, now);
             assert_eq!(state.redraw.last_present, None);
         }
         assert!(app.frame_due_work().is_empty());
@@ -767,6 +769,7 @@ fn owner_monitor_pacing_preserves_hardware_software_ime_and_contention() {
                     let state = app.windows.get_mut(&id).unwrap();
                     state.redraw.monitor_period = period;
                     state.last_render = now;
+                    state.stream_clock = now;
                     state.redraw.deferred = true;
                     if composing {
                         state.ime.handle_preedit("中", None);
@@ -824,31 +827,92 @@ fn typed_due_service_wakes_only_due_owners_and_keeps_maintenance_ties() {
     );
 }
 
-/// Settled no-op/cached frames do not turn retained grid dirt into scheduling work; retries spend input once.
+/// Drawn, retried and failed input attempts spend input once, keep dirt off the timer, and pace from the attempt.
 #[test]
 fn repeated_outcomes_spend_input_immediacy_without_dirty_row_heartbeats() {
     for outcome in [
-        FrameSettlement::Settled,
         FrameSettlement::Cached,
         FrameSettlement::Presented,
         FrameSettlement::Retry(RedrawCause::SurfaceRetry),
         FrameSettlement::Failed,
     ] {
-        let (mut app, main, _) = owners();
+        assert_paced_repeat(RedrawCause::Input, outcome);
+    }
+}
+
+/// A settled attempt without a new input generation keeps every pacing guarantee of a drawn one.
+#[test]
+fn settled_attempt_without_new_input_stays_paced_without_heartbeats() {
+    assert_paced_repeat(RedrawCause::Expose, FrameSettlement::Settled);
+}
+
+/// One attempt for `cause` ending in `outcome` moves both clocks and is followed by a paced repeat.
+fn assert_paced_repeat(cause: RedrawCause, outcome: FrameSettlement) {
+    let (mut app, main, _) = owners();
+    let pane = app.windows[&main].tab_states[0].active_pane;
+    app.windows[&main].panes[&pane].parser.lock().grid_mut().mark_all_dirty();
+    let now = Instant::now();
+    app.mark_window_redraw(main, cause);
+    let snapshot = app.snapshot_window_redraw(main).unwrap();
+    app.finish_window_redraw(main, &snapshot, outcome, now);
+    assert_eq!(app.windows[&main].last_render, now);
+    assert_eq!(app.windows[&main].stream_clock, now, "{outcome:?} paces streaming from itself");
+    assert!(!app.windows[&main].redraw.input_pending());
+    assert!(app.windows[&main].panes[&pane].parser.lock().grid().dirty_count() > 0);
+    assert!(app.frame_due_work().is_empty(), "dirt or retained causes alone never arm a timer");
+    assert!(
+        !app.begin_window_redraw(main, now + Duration::from_micros(1)),
+        "presenter-owned repeats stay paced ({outcome:?})"
+    );
+}
+
+/// A settled hardware keypress spends its input without a heartbeat, keeps the streaming clock, and
+/// the next non-input completion moves that clock again and restores streaming deferral.
+#[test]
+fn settled_keypress_keeps_the_streaming_clock_until_the_next_non_input_completion() {
+    use super::super::frame_counters::DeferRule;
+    let period = Duration::from_micros(16_667);
+    for following in [FrameSettlement::Presented, FrameSettlement::Settled] {
+        let (mut app, main, _) = counting_owners();
         let pane = app.windows[&main].tab_states[0].active_pane;
         app.windows[&main].panes[&pane].parser.lock().grid_mut().mark_all_dirty();
-        let now = Instant::now();
+        let now = Instant::now() + Duration::from_secs(1);
+        let backdated = now - period * 2;
+        backdate_clocks(&mut app, main, backdated);
         app.mark_window_redraw(main, RedrawCause::Input);
         let snapshot = app.snapshot_window_redraw(main).unwrap();
-        app.finish_window_redraw(main, &snapshot, outcome, now);
+        app.finish_window_redraw(main, &snapshot, FrameSettlement::Settled, now);
         assert_eq!(app.windows[&main].last_render, now);
         assert!(!app.windows[&main].redraw.input_pending());
         assert!(app.windows[&main].panes[&pane].parser.lock().grid().dirty_count() > 0);
         assert!(app.frame_due_work().is_empty(), "dirt or retained causes alone never arm a timer");
-        assert!(
-            !app.begin_window_redraw(main, now + Duration::from_micros(1)),
-            "presenter-owned repeats stay paced"
-        );
+        assert_eq!(app.windows[&main].stream_clock, backdated, "the keypress drew nothing");
+        let exempt = |app: &App| {
+            app.windows[&main].redraw.frame_counters.as_deref().unwrap().stream_clock_exempt
+        };
+        assert_eq!(exempt(&app), 1);
+        // The echo lands one microsecond later and is admitted at once.
+        let echo_at = now + Duration::from_micros(1);
+        publish_visible_output(&app, main);
+        app.mark_window_redraw(main, RedrawCause::Output);
+        assert!(app.begin_window_redraw(main, echo_at), "the echo is not paced from the keypress");
+        let snapshot = app.snapshot_window_redraw_at(main, echo_at).unwrap();
+        app.finish_window_redraw(main, &snapshot, following, echo_at);
+        assert_eq!(app.windows[&main].stream_clock, echo_at, "{following:?} moves the clock");
+        assert_eq!(exempt(&app), 1, "only input attempts are exempt");
+        // Further output is streaming work, paced one period from the echo frame.
+        publish_visible_output(&app, main);
+        app.mark_window_redraw(main, RedrawCause::Output);
+        let probe = echo_at + Duration::from_micros(1);
+        assert!(!app.begin_window_redraw(main, probe));
+        assert_eq!(defer_count(&app, main, DeferRule::Streaming), 1);
+        let frames: Vec<_> = app
+            .frame_due_work_at(probe)
+            .into_iter()
+            .filter(|work| work.owner == Some(main) && work.cause == DueCause::Frame)
+            .collect();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].deadline, echo_at + period);
     }
 }
 
@@ -1330,6 +1394,7 @@ fn native_occlusion_transitions_preserve_dirt_and_ignore_duplicate_or_stale_even
         let snapshot = app.windows[&owner].capture_redraw_snapshot();
         let other_before = app.windows[&other].redraw.snapshot();
         let last_render = app.windows[&owner].last_render;
+        let stream_clock = app.windows[&owner].stream_clock;
         app.windows.get_mut(&owner).unwrap().retry_not_before = Some(now + Duration::from_secs(2));
         app.windows.get_mut(&owner).unwrap().redraw.deferred = true;
         app.redraw_due = vec![
@@ -1349,6 +1414,7 @@ fn native_occlusion_transitions_preserve_dirt_and_ignore_duplicate_or_stale_even
         );
         assert_eq!(app.windows[&owner].redraw.snapshot().0, snapshot.causes.0);
         assert_eq!(app.windows[&owner].last_render, last_render);
+        assert_eq!(app.windows[&owner].stream_clock, stream_clock);
         assert_eq!(app.windows[&owner].retry_not_before, Some(now + Duration::from_secs(2)));
         assert_eq!(app.windows[&owner].panes[&pane].observed_output_generation, 0);
         assert!(app.windows[&owner].panes[&pane].parser.lock().grid().dirty_count() > 0);
@@ -1407,6 +1473,7 @@ fn occluded_real_owner_gate_invokes_no_collector_or_frame_deadlines_but_drains_c
         let pane = window.tab_states[0].active_pane;
         window.redraw.mark(RedrawCause::Input);
         window.last_render = now;
+        window.stream_clock = now;
         window.retry_not_before = Some(now + Duration::from_secs(5));
         window.notification = Some(NotificationBubble {
             level: NotificationLevel::Info,
@@ -1442,6 +1509,7 @@ fn occluded_real_owner_gate_invokes_no_collector_or_frame_deadlines_but_drains_c
         assert!(window.panes[&pane].command_events.lock().is_empty());
         assert!(matches!(window.tabs.tabs()[0].command, CommandStatus::Done { .. }));
         assert_eq!(window.last_render, now);
+        assert_eq!(window.stream_clock, now);
         assert_eq!(window.retry_not_before, Some(now + Duration::from_secs(5)));
         assert_eq!(app.pending_redraw, pending_main);
         assert_eq!(app.pending_redraw_windows, pending_children);
@@ -2163,4 +2231,365 @@ fn explicit_request_with_settled_output_requests_one_output_frame() {
 
     assert_eq!(crate::app::window_state::window_redraw_requests(), before + 1);
     assert!(app.windows[&child].redraw.cause_generation(RedrawCause::Output) > output);
+}
+
+/// Owners whose App counts frames, so a test can read each window's deferral rule counts.
+fn counting_owners() -> (App, WindowId, WindowId) {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.force_frame_counters_on().expect("no window exists yet");
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child", "background"]);
+    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    (app, main, child)
+}
+
+/// Move both of a window's pacing clocks back, so pacing does not depend on when the test built it.
+fn backdate_clocks(app: &mut App, id: WindowId, at: Instant) {
+    let window = app.windows.get_mut(&id).unwrap();
+    window.last_render = at;
+    window.stream_clock = at;
+}
+
+/// Publish one completed output batch on the window's visible active pane.
+fn publish_visible_output(app: &App, id: WindowId) {
+    let window = &app.windows[&id];
+    let pane = window.tab_states[window.tabs.active_index()].active_pane;
+    window.panes[&pane].output_generation.fetch_add(1, Ordering::Release);
+}
+
+/// Run one admitted attempt for `cause` through the production begin, snapshot and finish adapters.
+fn admitted_attempt(
+    app: &mut App,
+    id: WindowId,
+    cause: RedrawCause,
+    outcome: FrameSettlement,
+    at: Instant,
+) {
+    app.mark_window_redraw(id, cause);
+    assert!(app.begin_window_redraw(id, at), "{cause:?} attempt at the test instant is admitted");
+    let snapshot = app.snapshot_window_redraw_at(id, at).unwrap();
+    app.finish_window_redraw(id, &snapshot, outcome, at);
+}
+
+/// How many times this window deferred under `rule`.
+fn defer_count(app: &App, id: WindowId, rule: super::super::frame_counters::DeferRule) -> u64 {
+    use super::super::frame_counters::DeferRule;
+    let counters = app.windows[&id].redraw.frame_counters.as_deref().expect("counting App");
+    match rule {
+        DeferRule::Timeout => counters.defer_timeout,
+        DeferRule::Contention => counters.defer_contention,
+        DeferRule::Streaming => counters.defer_streaming,
+    }
+}
+
+/// A hardware keypress frame that presented nothing must not delay the shell's echo by one period.
+#[test]
+fn echo_after_a_settled_keypress_is_not_paced_from_the_keypress() {
+    use super::super::frame_counters::DeferRule;
+    for child_owner in [false, true] {
+        let (mut app, main, child) = counting_owners();
+        let owner = if child_owner { child } else { main };
+        let keypress_at = Instant::now() + Duration::from_secs(1);
+        backdate_clocks(&mut app, owner, keypress_at - Duration::from_secs(1));
+        // An output-only frame presented 20 ms before the keypress.
+        publish_visible_output(&app, owner);
+        admitted_attempt(
+            &mut app,
+            owner,
+            RedrawCause::Output,
+            FrameSettlement::Presented,
+            keypress_at - Duration::from_millis(20),
+        );
+        // The keypress frame finds no echo yet and settles without presenting.
+        admitted_attempt(
+            &mut app,
+            owner,
+            RedrawCause::Input,
+            FrameSettlement::Settled,
+            keypress_at,
+        );
+        // The echo arrives 4 ms later: 24 ms after the last streaming frame, more than a 60 Hz period.
+        publish_visible_output(&app, owner);
+        app.mark_window_redraw(owner, RedrawCause::Output);
+        assert!(
+            app.begin_window_redraw(owner, keypress_at + Duration::from_millis(4)),
+            "the echo is admitted at once (child: {child_owner})"
+        );
+        assert_eq!(defer_count(&app, owner, DeferRule::Streaming), 0);
+        let counters = app.windows[&owner].redraw.frame_counters.as_deref().unwrap();
+        assert_eq!(counters.stream_clock_exempt, 1, "only the keypress kept the streaming clock");
+    }
+}
+
+/// For every deferral rule, the armed Frame deadline is the first instant begin admits.
+#[test]
+fn frame_deadlines_match_admission_for_every_rule() {
+    use super::super::frame_counters::DeferRule;
+    let period = Duration::from_micros(16_667);
+    for case in 0..4 {
+        let (mut app, main, _) = counting_owners();
+        let start = Instant::now() + Duration::from_secs(1);
+        backdate_clocks(&mut app, main, start - Duration::from_secs(1));
+        let (rule, deadline, probe) = match case {
+            0 => {
+                // Streaming after a presented input frame.
+                admitted_attempt(
+                    &mut app,
+                    main,
+                    RedrawCause::Input,
+                    FrameSettlement::Presented,
+                    start,
+                );
+                (DeferRule::Streaming, start + period, start + Duration::from_millis(1))
+            }
+            1 => {
+                // Streaming after an exempt settled keypress that followed a non-input attempt at `start`.
+                admitted_attempt(
+                    &mut app,
+                    main,
+                    RedrawCause::Output,
+                    FrameSettlement::Presented,
+                    start,
+                );
+                let keypress = start + Duration::from_millis(5);
+                admitted_attempt(
+                    &mut app,
+                    main,
+                    RedrawCause::Input,
+                    FrameSettlement::Settled,
+                    keypress,
+                );
+                (DeferRule::Streaming, start + period, keypress + Duration::from_millis(1))
+            }
+            2 => {
+                // A surface timeout waits one period from the attempt.
+                admitted_attempt(
+                    &mut app,
+                    main,
+                    RedrawCause::Input,
+                    FrameSettlement::SurfaceRetry(SurfaceRetryReason::Timeout),
+                    start,
+                );
+                (DeferRule::Timeout, start + period, start + Duration::from_millis(1))
+            }
+            _ => {
+                // A contention floor later than the paced instant wins.
+                admitted_attempt(
+                    &mut app,
+                    main,
+                    RedrawCause::Input,
+                    FrameSettlement::Presented,
+                    start,
+                );
+                app.windows.get_mut(&main).unwrap().retry_not_before = Some(start + period * 2);
+                (DeferRule::Contention, start + period * 2, start + Duration::from_millis(1))
+            }
+        };
+        publish_visible_output(&app, main);
+        app.mark_window_redraw(main, RedrawCause::Output);
+        assert!(!app.begin_window_redraw(main, probe), "case {case} defers");
+        let frames: Vec<_> = app
+            .frame_due_work_at(probe)
+            .into_iter()
+            .filter(|work| work.owner == Some(main) && work.cause == DueCause::Frame)
+            .collect();
+        assert_eq!(frames.len(), 1, "case {case} arms one frame deadline");
+        assert_eq!(frames[0].deadline, deadline, "case {case} deadline");
+        let before = defer_count(&app, main, rule);
+        assert!(!app.begin_window_redraw(main, deadline - Duration::from_nanos(1)), "case {case}");
+        assert_eq!(defer_count(&app, main, rule), before + 1, "case {case} defers with {rule:?}");
+        assert!(app.begin_window_redraw(main, deadline), "case {case} admits at its deadline");
+    }
+}
+
+/// The text of the method `signature` names, up to the closing brace of an impl-level method.
+fn method_body<'source>(source: &'source str, signature: &str) -> &'source str {
+    let start = source.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
+    let end = source[start..].find("\n    }\n").map_or(source.len(), |offset| start + offset);
+    &source[start..end]
+}
+
+/// Main and child completions share one writer of both pacing clocks.
+#[test]
+fn main_and_child_completions_share_one_clock_writer() {
+    let child_source = include_str!("child_window_redraw.rs").replace("\r\n", "\n");
+    let redraw_source = include_str!("redraw.rs").replace("\r\n", "\n");
+    assert!(!child_source.contains("last_render ="), "the child writes no clock inline");
+    assert!(child_source.contains(".complete_attempt("), "the child completes through the helper");
+    assert!(
+        method_body(&redraw_source, "pub(super) fn finish_window_redraw(")
+            .contains(".complete_attempt("),
+        "the main completion uses the same helper"
+    );
+}
+
+/// A surface timeout waits one period from its own attempt, even when an exempt keypress came first.
+#[test]
+fn surface_timeout_retry_still_waits_one_period_from_the_attempt() {
+    use super::super::frame_counters::DeferRule;
+    let period = Duration::from_micros(16_667);
+    for after_keypress in [false, true] {
+        let (mut app, main, _) = counting_owners();
+        let start = Instant::now() + Duration::from_secs(1);
+        backdate_clocks(&mut app, main, start - Duration::from_secs(1));
+        let timeout_at = if after_keypress {
+            admitted_attempt(&mut app, main, RedrawCause::Input, FrameSettlement::Settled, start);
+            start + Duration::from_millis(1)
+        } else {
+            start
+        };
+        admitted_attempt(
+            &mut app,
+            main,
+            RedrawCause::Input,
+            FrameSettlement::SurfaceRetry(SurfaceRetryReason::Timeout),
+            timeout_at,
+        );
+        let deadline = timeout_at + period;
+        let frames: Vec<_> = app
+            .frame_due_work_at(timeout_at)
+            .into_iter()
+            .filter(|work| work.owner == Some(main) && work.cause == DueCause::Frame)
+            .collect();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].deadline, deadline, "the deadline comes from the attempt clock");
+        assert!(!app.begin_window_redraw(main, deadline - Duration::from_nanos(1)));
+        assert_eq!(defer_count(&app, main, DeferRule::Timeout), 1);
+        assert!(app.begin_window_redraw(main, deadline), "the retry is admitted at its deadline");
+    }
+}
+
+/// Output-only attempts stay one per period, even with exempt keypresses interleaved at 240 Hz.
+#[test]
+fn unchanged_non_input_passes_stay_one_per_period() {
+    let period = Duration::from_micros(16_667);
+    let horizon_ms = 200_u32;
+    let bound = u64::from(horizon_ms * 1_000).div_ceil(16_667) + 1;
+    for with_input in [false, true] {
+        let (mut app, main, _) = counting_owners();
+        let start = Instant::now() + Duration::from_secs(1);
+        backdate_clocks(&mut app, main, start - period * 2);
+        let mut output_admitted = 0_u64;
+        let mut input_events = 0_u64;
+        let mut last_output: Option<Instant> = None;
+        for tick_ms in 0..horizon_ms {
+            let at = start + Duration::from_millis(u64::from(tick_ms));
+            publish_visible_output(&app, main);
+            app.mark_window_redraw(main, RedrawCause::Output);
+            // Every 4 ms is about 240 Hz of keypresses.
+            if with_input && tick_ms % 4 == 0 {
+                app.mark_window_redraw(main, RedrawCause::Input);
+                input_events += 1;
+            }
+            let carries_input = app.windows[&main].redraw.input_pending();
+            if !app.begin_window_redraw(main, at) {
+                continue;
+            }
+            let snapshot = app.snapshot_window_redraw_at(main, at).unwrap();
+            app.finish_window_redraw(main, &snapshot, FrameSettlement::Settled, at);
+            if !carries_input {
+                // When: the admitted attempt carried no input, it must be a period after the previous one.
+                if let Some(previous) = last_output {
+                    assert!(at - previous >= period, "output passes {previous:?} and {at:?}");
+                }
+                last_output = Some(at);
+                output_admitted += 1;
+            }
+        }
+        let exempt =
+            app.windows[&main].redraw.frame_counters.as_deref().unwrap().stream_clock_exempt;
+        assert!(output_admitted <= bound, "{output_admitted} > {bound}");
+        assert!(exempt <= input_events, "exempt attempts never outnumber input events");
+        assert_eq!(exempt > 0, with_input, "the exemption is exercised only with input");
+    }
+}
+
+/// Every outcome other than a settled hardware keypress with no retry moves the streaming clock.
+#[test]
+fn outcomes_that_advance_the_streaming_clock() {
+    let mut cases = vec![
+        (RedrawCause::Input, FrameSettlement::Presented, false, false),
+        (RedrawCause::Input, FrameSettlement::Cached, false, false),
+        (RedrawCause::Input, FrameSettlement::Retry(RedrawCause::AtlasRetry), false, false),
+        (RedrawCause::Input, FrameSettlement::Failed, false, false),
+        (RedrawCause::Input, FrameSettlement::Stopped(3), false, false),
+        // A settled attempt without a new input generation.
+        (RedrawCause::Expose, FrameSettlement::Settled, false, false),
+        // A settled keypress while a contention floor is armed.
+        (RedrawCause::Input, FrameSettlement::Settled, true, false),
+    ];
+    for reason in [
+        SurfaceRetryReason::Timeout,
+        SurfaceRetryReason::Occluded,
+        SurfaceRetryReason::Outdated,
+        SurfaceRetryReason::Suboptimal,
+        SurfaceRetryReason::SurfaceLost,
+    ] {
+        cases.push((RedrawCause::Input, FrameSettlement::SurfaceRetry(reason), false, false));
+    }
+    // Every outcome on the software path.
+    for outcome in [FrameSettlement::Settled, FrameSettlement::Cached, FrameSettlement::Presented] {
+        cases.push((RedrawCause::Input, outcome, false, true));
+    }
+    for (cause, outcome, retry_armed, software) in cases {
+        let (mut app, main, _) = counting_owners();
+        app.software_render_degrade = software;
+        let now = Instant::now() + Duration::from_secs(1);
+        backdate_clocks(&mut app, main, now - Duration::from_secs(1));
+        if retry_armed {
+            app.windows.get_mut(&main).unwrap().retry_not_before =
+                Some(now + Duration::from_secs(1));
+        }
+        app.mark_window_redraw(main, cause);
+        let snapshot = app.snapshot_window_redraw_at(main, now).unwrap();
+        app.finish_window_redraw(main, &snapshot, outcome, now);
+        let window = &app.windows[&main];
+        let case = format!("{cause:?} {outcome:?} retry={retry_armed} software={software}");
+        assert_eq!(window.last_render, now, "{case}");
+        assert_eq!(window.stream_clock, now, "{case}");
+        assert_eq!(
+            window.redraw.frame_counters.as_deref().unwrap().stream_clock_exempt,
+            0,
+            "{case}"
+        );
+    }
+}
+
+/// Degraded software keeps its exact 25 ms cadence after a keypress, and 83,333 µs while composing.
+#[test]
+fn degraded_software_keeps_its_cadence_after_a_keypress() {
+    use super::super::frame_counters::DeferRule;
+    for composing in [false, true] {
+        for outcome in [FrameSettlement::Settled, FrameSettlement::Cached] {
+            let (mut app, main, _) = counting_owners();
+            app.software_render_degrade = true;
+            let period = if composing {
+                Duration::from_micros(83_333)
+            } else {
+                Duration::from_micros(25_000)
+            };
+            if composing {
+                app.windows.get_mut(&main).unwrap().ime.handle_preedit("中", None);
+            }
+            let at = Instant::now() + Duration::from_secs(1);
+            backdate_clocks(&mut app, main, at - Duration::from_secs(1));
+            app.mark_window_redraw(main, RedrawCause::Input);
+            let snapshot = app.snapshot_window_redraw_at(main, at).unwrap();
+            app.finish_window_redraw(main, &snapshot, outcome, at);
+            publish_visible_output(&app, main);
+            app.mark_window_redraw(main, RedrawCause::Output);
+            assert!(!app.begin_window_redraw(main, at + Duration::from_micros(1)));
+            assert_eq!(defer_count(&app, main, DeferRule::Streaming), 1);
+            let frames: Vec<_> = app
+                .frame_due_work_at(at)
+                .into_iter()
+                .filter(|work| work.owner == Some(main) && work.cause == DueCause::Frame)
+                .collect();
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].deadline, at + period, "composing={composing} {outcome:?}");
+            assert!(!app.begin_window_redraw(main, at + period - Duration::from_micros(1)));
+            assert!(app.begin_window_redraw(main, at + period), "admitted at exactly one period");
+        }
+    }
 }

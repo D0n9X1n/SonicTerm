@@ -114,6 +114,8 @@ impl App {
             win_id,
             guards.iter().map(|(id, parser, _)| (*id, &**parser)),
         );
+        // Read before the child borrow: completion paces streaming by attempts on the software path.
+        let software_render_degrade = self.software_render_degrade;
         let Some(child) = self.windows.get_mut(&win_id) else {
             // When: windows no longer contains win_id, discard its collected frame instead of presenting retained hover.
             return;
@@ -307,10 +309,20 @@ impl App {
                 }
                 if let Some(snapshot) = frame_snapshot.as_ref() {
                     let at = Instant::now();
-                    child.last_render = at;
                     let settlement = super::redraw::FrameSettlement::of(&outcome);
                     frame_settlement = Some(settlement);
-                    child.redraw.settle(snapshot.causes, settlement, at);
+                    // The clocks are borrowed apart from the pane, renderer and search borrows still live here.
+                    child.redraw.complete_attempt(
+                        super::redraw::AttemptClocks {
+                            last_render: &mut child.last_render,
+                            stream_clock: &mut child.stream_clock,
+                            retry_armed: child.retry_not_before.is_some(),
+                        },
+                        snapshot,
+                        settlement,
+                        at,
+                        software_render_degrade,
+                    );
                     if child.hidden {
                         child.redraw.cancel_surface_probe();
                     }

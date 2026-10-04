@@ -710,6 +710,8 @@ impl App {
         let mut tabs = TabBar::new();
         tabs.push(Tab::new("shell 1".to_string()));
 
+        // Both pacing clocks start at one instant, so neither paces a new window differently.
+        let created_at = Instant::now();
         let child = WindowState {
             // Registered when the window is inserted; construction has no
             // governor in scope.
@@ -734,7 +736,8 @@ impl App {
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             pty_pressed_keys: std::collections::HashMap::new(),
-            last_render: Instant::now(),
+            last_render: created_at,
+            stream_clock: created_at,
             retry_not_before: None,
             visible_frame_invalid: false,
             redraw: Default::default(),

@@ -1,8 +1,9 @@
 //! Owner-local redraw identities, pacing, and deadline service.
 //!
 //! Scheduling acknowledgement is independent of grid dirty acknowledgement.
-//! `last_render` remains the public last-attempt clock; this state adds no second
-//! pacing timestamp and never turns retained grid dirt into a timer.
+//! `last_render` remains the public last-attempt clock. On the hardware path streaming is
+//! paced from the window's `stream_clock`, which a settled input attempt that presented nothing
+//! leaves in place; this state never turns retained grid dirt into a timer.
 
 use std::{
     collections::HashMap,
@@ -81,6 +82,17 @@ impl FrameSettlement {
     }
 }
 
+/// A window's two pacing clocks and its contention floor, borrowed apart from its other fields so a
+/// role adapter that still holds pane or renderer borrows can complete an attempt.
+pub(super) struct AttemptClocks<'clocks> {
+    /// The attempt clock, `WindowState::last_render`.
+    pub(super) last_render: &'clocks mut Instant,
+    /// The hardware streaming clock, `WindowState::stream_clock`.
+    pub(super) stream_clock: &'clocks mut Instant,
+    /// Whether a contention retry floor is armed for the window.
+    pub(super) retry_armed: bool,
+}
+
 /// Per-window scheduling state, separate from public compatibility clocks and native redraw requests.
 #[derive(Debug, Clone)]
 pub(crate) struct WindowRedrawState {
@@ -142,6 +154,11 @@ impl WindowRedrawState {
     /// Whether an input generation has not yet spent its immediate-attempt privilege.
     pub(super) fn input_pending(&self) -> bool {
         self.pending[RedrawCause::Input as usize] != self.observed[RedrawCause::Input as usize]
+    }
+
+    /// Whether `snapshot` carries an input generation this state has not yet observed.
+    pub(super) fn captures_new_input(&self, snapshot: CauseSnapshot) -> bool {
+        snapshot.0[RedrawCause::Input as usize] != self.observed[RedrawCause::Input as usize]
     }
 
     /// Whether any captured request remains unsettled.
@@ -212,6 +229,36 @@ impl WindowRedrawState {
             FrameSettlement::Failed => {
                 // When: `Failed` retains pending work, the failure itself must not create a retry timer.
             }
+        }
+    }
+
+    /// Complete one renderer call: the attempt clock always moves, and the streaming clock moves
+    /// unless a hardware attempt for new input settled with nothing presented and no retry pending.
+    pub(super) fn complete_attempt(
+        &mut self,
+        clocks: AttemptClocks<'_>,
+        snapshot: &FrameSnapshot,
+        outcome: FrameSettlement,
+        at: Instant,
+        software: bool,
+    ) {
+        // Read before `settle`, which records the snapshot's input generation as observed.
+        let new_input = self.captures_new_input(snapshot.causes);
+        *clocks.last_render = at;
+        self.settle(snapshot.causes, outcome, at);
+        let exempt = outcome == FrameSettlement::Settled
+            && new_input
+            && !software
+            && !self.timeout_pending
+            && !clocks.retry_armed;
+        if exempt {
+            if let Some(counters) = self.frame_counters.as_deref_mut() {
+                // the App's gate is on, each attempt that kept the streaming clock is counted.
+                counters.stream_clock_exempt += 1;
+            }
+        } else {
+            // When: `exempt` is false, the attempt drew, retried, failed, lacked new input or ran in software, so it paces.
+            *clocks.stream_clock = at;
         }
     }
 
@@ -776,13 +823,13 @@ impl App {
         let software = self.software_render_degrade;
         let rule = super::frame_counters::defer_rule(
             || window.redraw.timeout_pending && now < window.last_render + period,
-            || window.contention_blocks_redraw(now, period),
+            || window.contention_blocks_redraw(now, period, software),
             || {
                 super::should_defer_streaming_redraw(
                     window.redraw.input_pending(),
                     window.visible_output_advanced(),
                     software,
-                    now.saturating_duration_since(window.last_render),
+                    now.saturating_duration_since(window.pacing_clock(software)),
                     period,
                 )
             },
@@ -849,8 +896,7 @@ impl App {
         at: Instant,
     ) {
         if let Some(window) = self.windows.get_mut(&id) {
-            window.last_render = at;
-            window.redraw.settle(snapshot.causes, outcome, at);
+            window.complete_attempt(snapshot, outcome, at, self.software_render_degrade);
             if window.hidden {
                 window.redraw.cancel_surface_probe();
             }
