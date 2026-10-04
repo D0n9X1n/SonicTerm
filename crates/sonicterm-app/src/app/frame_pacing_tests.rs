@@ -197,3 +197,13 @@ fn resolving_from_the_monitor_period_is_reversible() {
         }
     }
 }
+
+/// A 144 Hz monitor never changes the exact software and IME periods.
+#[test]
+fn software_and_ime_periods_ignore_a_faster_monitor() {
+    let fast = period_from_millihertz(144_000);
+    assert_eq!(fast, Duration::from_micros(6_944));
+    assert_eq!(effective_frame_period(false, false, fast), fast);
+    assert_eq!(effective_frame_period(true, false, fast), Duration::from_micros(25_000));
+    assert_eq!(effective_frame_period(true, true, fast), Duration::from_micros(83_333));
+}

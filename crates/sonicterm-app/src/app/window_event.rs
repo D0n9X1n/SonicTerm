@@ -394,10 +394,9 @@ impl App {
             self.handle_window_occlusion(win_id, *occluded);
             return;
         }
+        // Main and child windows share one refresh, before the child dispatch below.
+        self.refresh_monitor_for_event(win_id, &event);
         if let Some(window) = self.windows.get_mut(&win_id) {
-            if matches!(event, WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. }) {
-                window.refresh_monitor_period();
-            }
             if matches!(
                 event,
                 WindowEvent::KeyboardInput { .. }
