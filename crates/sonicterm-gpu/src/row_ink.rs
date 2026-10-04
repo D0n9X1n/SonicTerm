@@ -5,6 +5,7 @@
 //! outward-rounded union of what each row last presented, per `(pane, slot)`, and the content it
 //! drew it from, so a row whose content has since changed is never trusted.
 
+use sonicterm_render_model::boundary::grid::grid::Grid;
 use sonicterm_render_model::PixelRect;
 use sonicterm_types::{retained_hash_table_bytes, ResourceAmount};
 
@@ -97,6 +98,38 @@ impl RowInkTable {
             self.committed.shrink_to((2 * len).max(SHRINK_FLOOR));
         }
         self.clear_staged();
+    }
+
+    /// Stage what the row at `slot` of a view whose top is `view_top_abs` emitted, with the
+    /// absolute row it showed and that row's content stamp in `grid`.
+    pub(crate) fn stage_row(
+        &mut self,
+        pane_id: u64,
+        slot: u16,
+        grid: &Grid,
+        view_top_abs: u64,
+        rect: PixelRect,
+    ) {
+        let abs_row = view_top_abs.saturating_add(u64::from(slot));
+        let content_seq = grid.row_content_seq_at_abs(abs_row);
+        self.stage(pane_id, slot, RowInk { rect, abs_row, content_seq });
+    }
+
+    /// Per slot of a `rows`-row view whose top is `view_top_abs`, the committed record of
+    /// `pane_id` that still describes the slot's content in `grid`; `None` when missing or stale.
+    pub(crate) fn valid_records(
+        &self,
+        pane_id: u64,
+        grid: &Grid,
+        view_top_abs: u64,
+        rows: u16,
+    ) -> Vec<Option<PixelRect>> {
+        (0..rows)
+            .map(|slot| {
+                let abs_row = view_top_abs.saturating_add(u64::from(slot));
+                self.valid_rect(pane_id, slot, abs_row, grid.row_content_seq_at_abs(abs_row))
+            })
+            .collect()
     }
 
     /// Drop every record of a pane that was closed.

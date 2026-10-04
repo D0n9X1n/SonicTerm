@@ -169,3 +169,30 @@ fn ink_edges_round_outward_and_make_non_finite_ink_the_surface() {
     edges.add_px((f32::NAN, 0.0, 1.0, 1.0));
     assert_eq!(edges.to_rect(surface), surface);
 }
+
+/// The planner receives a record only while it describes the slot's current content: a staged
+/// row records the absolute row and content stamp the grid shows, an edit to one row invalidates
+/// only that slot, a history row keeps its record, and a view whose top moved shows other
+/// absolute rows, so none of its old records apply.
+#[test]
+fn valid_records_follow_the_grids_rows_and_content_stamps() {
+    use sonicterm_render_model::boundary::grid::grid::{CellFlags, Color, Grid};
+    let mut grid = Grid::new(4, 3);
+    let strips = [rect(0, 0, 40, 20), rect(0, 20, 40, 20), rect(0, 40, 40, 20)];
+    let mut table = RowInkTable::default();
+    table.begin_frame();
+    for (slot, strip) in (0..3).zip(strips) {
+        table.stage_row(7, slot, &grid, 0, strip);
+    }
+    table.commit(&[(7, 3)]);
+    assert_eq!(table.valid_records(7, &grid, 0, 3), strips.map(Some));
+    assert_eq!(table.valid_records(9, &grid, 0, 3), [None; 3], "another pane has none");
+
+    grid.goto(1, 0);
+    grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+    assert_eq!(table.valid_records(7, &grid, 0, 3), [Some(strips[0]), None, Some(strips[2])]);
+
+    grid.scroll_up(1);
+    assert_eq!(table.valid_records(7, &grid, 0, 3)[0], Some(strips[0]), "history keeps its stamp");
+    assert_eq!(table.valid_records(7, &grid, 1, 3), [None; 3], "the view top moved");
+}
