@@ -354,6 +354,7 @@ pub use pane_refresh::{
 };
 mod pane_state;
 use pane_state::pane_id_at_point;
+mod parser_yield;
 pub use pane_state::{next_pane_id, PaneCommandEvent, PaneState};
 mod path_target;
 mod privilege;
