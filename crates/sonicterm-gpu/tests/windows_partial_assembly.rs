@@ -559,20 +559,50 @@ fn pixel_parity(
     styled(underlined.grid(), EDIT_ROW);
     narrow_matches_full(renderer, &mut underlined, "every underline style", Expect::Partial)?;
 
-    // An unchanged image anchored on the row above, two rows tall, so it crosses the damage edge.
+    // An unchanged image anchored on the row after the edit, three rows tall: the edit damages its
+    // own row padded by one row each way, so the image's top row lies inside the damage and its
+    // lower two rows outside it.
     let mut image = single(layout);
-    let (width, height) = ((3.0 * layout.cell_w) as u32, (2.0 * layout.cell_h) as u32);
+    let (image_row, image_col) = (EDIT_ROW + 1, 6);
+    let (width, height) = ((3.0 * layout.cell_w) as u32, (3.0 * layout.cell_h) as u32);
     image.panes[0].images.push(InlineImage {
         id: 1,
-        row: EDIT_ROW - 1,
-        col: 6,
+        row: image_row,
+        col: image_col,
         width,
         height,
         bgra: Arc::from(vec![200u8; (width * height * 4) as usize]),
     });
+    let image_top = layout.row_top(image_row);
+    let image_bottom = image_top + height as f32;
+    let (_, strip_bottom) = layout.strip(EDIT_ROW);
+    check(
+        image_top < strip_bottom && strip_bottom < image_bottom,
+        &format!("the image {image_top}..{image_bottom} crosses the strip's edge {strip_bottom}"),
+    )?;
     baseline(renderer, &mut image)?;
     write(image.grid(), EDIT_ROW, 0, "edit");
-    narrow_matches_full(renderer, &mut image, "inline image crossing the damage", Expect::Partial)?;
+    let (damage, _) = narrow_matches_full(
+        renderer,
+        &mut image,
+        "inline image crossing the damage",
+        Expect::Partial,
+    )?;
+    let image_rect = PixelRect {
+        x: layout.col_left(image_col) as i32,
+        y: image_top as i32,
+        w: width,
+        h: height,
+    };
+    let inside = image_rect.intersect(damage.damage);
+    check(
+        inside.is_some_and(|inside| inside.h > 0 && inside.h < image_rect.h),
+        &format!(
+            "part of the image {image_rect:?} lies inside the damage {:?} and part outside: \
+             {inside:?}",
+            damage.damage
+        ),
+    )?;
 
     let mut select = single(layout);
     let selected_row = select.grid().scrollback_len() as u64 + u64::from(EDIT_ROW - 1);
