@@ -146,6 +146,17 @@ impl App {
         self.windows.get(&id).map(|child| child.panes.keys().copied().collect())
     }
 
+    /// Test-only: a child pane's parser handle, so a test can hold its lock and make a memory
+    /// sample find that pane contended.
+    #[doc(hidden)]
+    pub fn __test_child_pane_parser(
+        &self,
+        id: WindowId,
+        pane_id: u64,
+    ) -> Option<Arc<Mutex<Parser>>> {
+        self.windows.get(&id)?.panes.get(&pane_id).map(|pane| Arc::clone(&pane.parser))
+    }
+
     /// Test-only: install the headless pane-viewport seam on the main window
     /// so resize wiring runs without a renderer.
     #[doc(hidden)]

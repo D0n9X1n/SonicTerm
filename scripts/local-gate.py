@@ -220,11 +220,12 @@ STEPS = (
          ("rust",), _CORE_CHECKS),
     Step("clippy", ("cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
-    # perf-counters marks only that the App has the counter API, and the perf_scenarios example is its sole
-    # reader, so every host lints that example with the feature as well as without it.
+    # perf-counters marks only that the App has the counter API, and perf-hook-checkpoint-memory that it has
+    # the checkpoint memory hook; the perf_scenarios example is their sole reader, so every host lints that
+    # example with both as well as without them.
     Step("perf-scenarios-counters-clippy",
          ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
-          "--features", "perf-counters", "--", "-D", "warnings"),
+          "--features", "perf-counters,perf-hook-checkpoint-memory", "--", "-D", "warnings"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     # perf-frame-texture marks only that the renderer reports its frame texture's extent; the same example
     # is its sole reader, so every host lints it with that feature too.
@@ -259,10 +260,11 @@ STEPS = (
     # workspace-crates' `--lib --bins --tests` skips examples, so the scenario harness's unit tests run here.
     Step("perf-scenarios-tests", ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
-    # The same unit tests with the counter API compiled in, wherever the plain ones run.
+    # The same unit tests with the counter API and the checkpoint memory hook compiled in, wherever the plain
+    # ones run.
     Step("perf-scenarios-counters-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
-          "--features", "perf-counters"),
+          "--features", "perf-counters,perf-hook-checkpoint-memory"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
     # The same unit tests with the frame-texture reading compiled in, wherever the plain ones run.
     Step("perf-scenarios-frame-texture-tests",
@@ -353,22 +355,37 @@ PERF_BUILDS = {step.id: step for step in (
 PERF_COUNTER_BUILDS = {step.id: step for step in (
     _perf_build(f"build-{side}-{example}", example, release=True, timeout_s=3600, counters=True)
     for side in ("head", "base") for example in ("perf_scenarios", "perf_scenarios_alloc"))}
+# Every perf feature a tree may declare, in the canonical order a build passes them; later hooks append.
+# perf-compare.py's PERF_FEATURES must equal this.
+PERF_FEATURES = ("perf-counters", "perf-frame-texture", "perf-hook-checkpoint-memory")
+
+
+def _feature_subsets(features: tuple[str, ...]) -> list[tuple[str, ...]]:
+    """Every subset of `features`, each kept in `features` order, smallest first."""
+    subsets: list[tuple[str, ...]] = [()]
+    for feature in features:
+        subsets += [subset + (feature,) for subset in subsets]
+    return sorted(subsets, key=lambda subset: (len(subset), [features.index(name) for name in subset]))
+
+
 # Every comparison build, keyed by the perf features a tree declares. The plain and counters sets are the
-# two above; a tree that declares perf-frame-texture builds with it, alone or with perf-counters.
+# two above; every other ordered subset of PERF_FEATURES has its own reviewed steps.
 PERF_FEATURE_BUILDS = {
     (): {step_id: built for step_id, built in PERF_BUILDS.items() if step_id != "build-perf_scenarios"},
     ("perf-counters",): PERF_COUNTER_BUILDS,
     **{features: {step.id: step for step in (
         _perf_build(f"build-{side}-{example}", example, release=True, timeout_s=3600, features=features)
         for side in ("head", "base") for example in ("perf_scenarios", "perf_scenarios_alloc"))}
-       for features in (("perf-frame-texture",), ("perf-counters", "perf-frame-texture"))},
+       for features in _feature_subsets(PERF_FEATURES) if features not in ((), ("perf-counters",))},
 }
+# The same catalog flattened to `(step id, features)`, for a lookup by both halves of a build's identity.
+PERF_BUILD_CATALOG = {(step_id, features): built
+                      for features, catalog in PERF_FEATURE_BUILDS.items() for step_id, built in catalog.items()}
 
 
 def _reviewed_step(step: Step) -> bool:
     """Whether `step` is one of the gate's own step objects, not a copy that could claim their authority."""
-    reviewed = (*STEPS, *PERF_BUILDS.values(),
-                *(built for catalog in PERF_FEATURE_BUILDS.values() for built in catalog.values()))
+    reviewed = (*STEPS, *PERF_BUILDS.values(), *PERF_BUILD_CATALOG.values())
     return any(step is canonical for canonical in reviewed)
 
 

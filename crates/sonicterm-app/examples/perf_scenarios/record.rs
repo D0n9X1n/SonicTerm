@@ -471,6 +471,16 @@ pub(crate) struct CheckpointRecord {
     /// `perf-frame-texture` reads it. Absent elsewhere.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) frame_texture_bytes: Option<u64>,
+    /// How this checkpoint's memory sampling ended: `complete`, `exhausted`, or `active` for a run
+    /// that stopped before it did. Absent from a build without the checkpoint-memory hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sampling: Option<&'static str>,
+    /// Memory samples attempted for this checkpoint; absent without the hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) attempts: Option<u32>,
+    /// Whether the last attempted sample measured every pane; absent without the hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_attempt_complete: Option<bool>,
 }
 
 /// Bytes a workload wrote from GO to its sentinel, and how long that took.
@@ -626,6 +636,7 @@ impl RunResult {
         put("native_focus_events_dropped", json!(self.native_focus_events_dropped));
         put("native_cursor_rest_events_dropped", json!(self.native_cursor_rest_events_dropped));
         put("finish_session_settled", json!(self.finish_session_settled));
+        put("checkpoint_memory", json!(checkpoint_memory_support()));
         // The measurement fields come from the serializer progress.json streams, so both
         // documents record them identically. Every field converts; a non-finite float is null.
         let measured =
@@ -682,6 +693,24 @@ pub(crate) fn presenter_blocked(
             presenter.windows_gdi
         )),
         _ => None,
+    }
+}
+
+/// Whether this build samples memory at each checkpoint through the App's hook.
+#[cfg(feature = "perf-hook-checkpoint-memory")]
+pub(crate) const CHECKPOINT_MEMORY: bool = true;
+/// Whether this build samples memory at each checkpoint through the App's hook.
+#[cfg(not(feature = "perf-hook-checkpoint-memory"))]
+pub(crate) const CHECKPOINT_MEMORY: bool = false;
+
+/// `result.json`'s `checkpoint_memory`: `supported` when this build has the hook, else `unsupported`.
+/// The serializer reads it here, so no caller can record a value the build does not have.
+pub(crate) fn checkpoint_memory_support() -> &'static str {
+    if CHECKPOINT_MEMORY {
+        "supported"
+    } else {
+        // When: `CHECKPOINT_MEMORY` is false, this build takes no checkpoint sample.
+        "unsupported"
     }
 }
 

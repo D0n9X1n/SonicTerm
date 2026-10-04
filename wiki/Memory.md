@@ -186,6 +186,12 @@ One pane report contains eight disjoint seams:
 `total_bytes` is their sum. `largest_seam` names the largest part. A
 `session retention` line sums the same fields across sampled panes.
 
+A `memory snapshot` line taken for a perf checkpoint carries the same fields plus
+four tags: `checkpoint_index`, `checkpoint_label`, `checkpoint_attempt`, and
+`checkpoint_complete` (no pane contended and every pane sampled). Taking it
+changes nothing the periodic sample does: no retention pass, reclamation, trim,
+or reset of the sampling cadence.
+
 Renderer memory is separate because it is window-owned rather than pane-owned:
 
 - `glyph_atlas_bytes`: CPU glyph atlas capacity;

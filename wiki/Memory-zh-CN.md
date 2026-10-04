@@ -152,6 +152,10 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 `total_bytes` 是八项之和，`largest_seam` 指出最大项。`session retention` 行会对所有
 已采样窗格汇总同样字段。
 
+为性能检查点采集的 `memory snapshot` 行包含同样字段，另加四个标注：`checkpoint_index`、
+`checkpoint_label`、`checkpoint_attempt` 与 `checkpoint_complete`（没有窗格被锁占用且每个窗格都已采样）。
+采集它不会改变周期性采样所做的任何事：不运行保留量处理、回收或裁剪，也不重置采样节奏。
+
 渲染器内存单独报告，因为它属于窗口而不是窗格：
 
 - `glyph_atlas_bytes`：CPU 字形图集容量；

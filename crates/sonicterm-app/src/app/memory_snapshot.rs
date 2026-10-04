@@ -419,6 +419,41 @@ fn counted_delta(previous: Option<usize>, current: usize) -> MemoryDelta {
 /// which defeats the diffing this line exists for and leaves a reader unable to
 /// tell "held nothing" from "stopped being reported".
 pub fn emit_memory_snapshot(snapshot: &MemorySnapshot, previous: Option<MemoryTotals>) {
+    emit_tagged_memory_snapshot(snapshot, previous, None);
+}
+
+/// A perf checkpoint a memory sample was taken for: which one, and which attempt at it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckpointTag<'label> {
+    /// The checkpoint's position among the run's checkpoints, from 0.
+    pub index: usize,
+    /// The checkpoint's label from the scenario plan.
+    pub label: &'label str,
+    /// Which attempt at this checkpoint's sample, from 1.
+    pub attempt: u32,
+}
+
+/// What a checkpoint sample found: whether every pane was measured, and how many were not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckpointMemory {
+    /// No pane was contended and every pane was sampled.
+    pub complete: bool,
+    /// Panes skipped because their lock was held.
+    pub panes_contended: usize,
+}
+
+/// Whether a snapshot measured every pane: none contended and every pane sampled.
+fn snapshot_complete(snapshot: &MemorySnapshot) -> bool {
+    snapshot.panes_contended == 0 && snapshot.panes_sampled == snapshot.panes_total
+}
+
+/// Emit the aggregate snapshot, tagged with the perf checkpoint it was taken for when `checkpoint`
+/// is set. A periodic sample passes `None` and carries none of the four checkpoint fields.
+fn emit_tagged_memory_snapshot(
+    snapshot: &MemorySnapshot,
+    previous: Option<MemoryTotals>,
+    checkpoint: Option<CheckpointTag<'_>>,
+) {
     let session = &snapshot.session;
     let session_bytes = snapshot.session_bytes();
     let renderer_bytes = snapshot.renderer_bytes();
@@ -479,6 +514,11 @@ pub fn emit_memory_snapshot(snapshot: &MemorySnapshot, previous: Option<MemoryTo
         allocator_allocations = %snapshot.allocator_metric(|allocator| u64::from(allocator.allocations)),
         allocator_blocks = %snapshot.allocator_metric(|allocator| u64::from(allocator.blocks)),
         allocator_largest_block_bytes = %snapshot.allocator_metric(|allocator| allocator.largest_block_bytes),
+        // A checkpoint sample's identity; absent from a periodic sample.
+        checkpoint_index = checkpoint.map(|tag| tag.index as u64),
+        checkpoint_label = checkpoint.map(|tag| tag.label),
+        checkpoint_attempt = checkpoint.map(|tag| u64::from(tag.attempt)),
+        checkpoint_complete = checkpoint.map(|_| snapshot_complete(snapshot)),
         "memory snapshot"
     );
 }
@@ -555,6 +595,34 @@ impl super::App {
             allocator,
             live_renderers: sonicterm_gpu::core::live_renderer_count(),
             live_fg_probe_workers: self.fg_probes.live_workers(),
+        }
+    }
+}
+
+impl super::App {
+    /// Take one memory sample for perf checkpoint `index` (`label`), attempt `attempt`, and emit
+    /// it as the periodic line plus the four checkpoint fields.
+    ///
+    /// The sample is only a measurement: it leaves the periodic cadence (`last_retention_sample`)
+    /// and the previous-cycle totals alone, and runs no retention pass, reclamation or trim, so a
+    /// perf run's checkpoints do not change what the session does between them.
+    #[cfg(any(test, feature = "perf-hook-checkpoint-memory"))]
+    #[doc(hidden)]
+    pub fn __perf_checkpoint_memory(
+        &mut self,
+        index: usize,
+        label: &str,
+        attempt: u32,
+    ) -> CheckpointMemory {
+        let snapshot = self.build_memory_snapshot();
+        emit_tagged_memory_snapshot(
+            &snapshot,
+            self.last_memory_totals,
+            Some(CheckpointTag { index, label, attempt }),
+        );
+        CheckpointMemory {
+            complete: snapshot_complete(&snapshot),
+            panes_contended: snapshot.panes_contended,
         }
     }
 }

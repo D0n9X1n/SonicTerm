@@ -439,6 +439,166 @@ pub(crate) fn fresh_after_unix_s(anchor_unix_s: f64, delay: Duration) -> f64 {
     anchor_unix_s + delay.as_secs_f64()
 }
 
+/// How long a checkpoint's memory sampling may retry, from its first attempt.
+pub(crate) const SAMPLE_WINDOW: Duration = Duration::from_millis(500);
+/// The least time between two attempts at a checkpoint's memory sample.
+pub(crate) const SAMPLE_RETRY: Duration = Duration::from_millis(50);
+/// The most attempts at one checkpoint's memory sample.
+pub(crate) const SAMPLE_ATTEMPTS: u32 = 10;
+
+/// Where a checkpoint's memory sampling stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SamplingState {
+    /// Every attempt so far was partial and another may still be taken.
+    Active,
+    /// An attempt measured every pane.
+    Complete,
+    /// Every attempt was partial and the window or the attempt count ran out.
+    Exhausted,
+}
+
+impl SamplingState {
+    /// The spelling `result.json` records.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            SamplingState::Active => "active",
+            SamplingState::Complete => "complete",
+            SamplingState::Exhausted => "exhausted",
+        }
+    }
+}
+
+/// One checkpoint's memory sampling: attempts are taken until one is complete, at most
+/// `SAMPLE_ATTEMPTS` of them, `SAMPLE_RETRY` apart, all inside `SAMPLE_WINDOW` from creation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CheckpointSampling {
+    /// The checkpoint's index; its samples carry it.
+    pub(crate) index: usize,
+    /// Attempts recorded so far.
+    pub(crate) attempts: u32,
+    /// When the last attempt was recorded; the creation time before any.
+    pub(crate) last_attempt_at: Instant,
+    /// Whether the last attempt measured every pane.
+    pub(crate) last_attempt_complete: bool,
+    /// Creation plus `SAMPLE_WINDOW`; no attempt is issued at or after it.
+    pub(crate) deadline: Instant,
+    pub(crate) state: SamplingState,
+}
+
+impl CheckpointSampling {
+    /// A fresh sampling for checkpoint `index`, created at `now`, with its own deadline.
+    pub(crate) fn new(index: usize, now: Instant) -> Self {
+        CheckpointSampling {
+            index,
+            attempts: 0,
+            last_attempt_at: now,
+            last_attempt_complete: false,
+            deadline: now + SAMPLE_WINDOW,
+            state: SamplingState::Active,
+        }
+    }
+}
+
+/// What the probe should do for a checkpoint's sampling this turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SamplingAction {
+    /// Take nothing this turn.
+    Idle,
+    /// Take attempt `attempt`, from 1.
+    Sample { attempt: u32 },
+}
+
+/// Decide, before any sample is taken, whether `sampling` takes an attempt at `now`. Expiry is
+/// checked before a retry is issued, so however late a turn arrives no attempt falls outside the
+/// window. The first attempt is always issued: the probe creates the state at that attempt's own
+/// clock read, so it is taken at creation, inside the window.
+pub(crate) fn sampling_step(sampling: &mut CheckpointSampling, now: Instant) -> SamplingAction {
+    if sampling.state != SamplingState::Active {
+        // When: the state is `Complete` or `Exhausted`, the checkpoint takes no more samples.
+        return SamplingAction::Idle;
+    }
+    if sampling.attempts > 0 && now >= sampling.deadline {
+        // When: an attempt was taken and `now >= sampling.deadline`, the window is spent; give up.
+        sampling.state = SamplingState::Exhausted;
+        return SamplingAction::Idle;
+    }
+    if sampling.attempts > 0 && now < sampling.last_attempt_at + SAMPLE_RETRY {
+        // When: the last attempt was under `SAMPLE_RETRY` ago, the next is not yet due.
+        return SamplingAction::Idle;
+    }
+    SamplingAction::Sample { attempt: sampling.attempts + 1 }
+}
+
+/// Record an attempt taken at `now` and whether it measured every pane.
+pub(crate) fn sampling_record(sampling: &mut CheckpointSampling, complete: bool, now: Instant) {
+    sampling.attempts += 1;
+    sampling.last_attempt_at = now;
+    sampling.last_attempt_complete = complete;
+    sampling.state = if complete {
+        SamplingState::Complete
+    } else if sampling.attempts >= SAMPLE_ATTEMPTS {
+        SamplingState::Exhausted
+    } else {
+        // When: the attempt was partial and attempts remain, sampling stays `Active`.
+        SamplingState::Active
+    };
+}
+
+/// One turn of a checkpoint's sampling at `now`: take the attempt `sampling_step` asks for, if any,
+/// with `sample` (given the attempt number, returning whether it measured every pane), and record
+/// it. Returns whether an attempt was taken; `sample` is not called otherwise.
+pub(crate) fn sampling_turn(
+    sampling: &mut CheckpointSampling,
+    now: Instant,
+    sample: impl FnOnce(u32) -> bool,
+) -> bool {
+    match sampling_step(sampling, now) {
+        SamplingAction::Idle => false,
+        SamplingAction::Sample { attempt } => {
+            let complete = sample(attempt);
+            sampling_record(sampling, complete, now);
+            true
+        }
+    }
+}
+
+/// Where a pending checkpoint's footprint wait stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FootprintStatus {
+    /// Unmanaged: no footprint is requested.
+    Absent,
+    /// Waiting for `.done`.
+    Pending,
+    /// `.done` arrived.
+    Answered,
+}
+
+/// Whether a checkpoint may move on: its footprint is absent or answered, and its sampling is absent
+/// or no longer `Active`.
+pub(crate) fn checkpoint_ready(
+    footprint: FootprintStatus,
+    sampling: Option<&CheckpointSampling>,
+) -> bool {
+    footprint != FootprintStatus::Pending
+        && sampling.is_none_or(|sampling| sampling.state != SamplingState::Active)
+}
+
+/// A pending checkpoint's next wake: `poll` after `now` while its footprint is pending, and the next
+/// due attempt or the sampling deadline while sampling is `Active`, whichever is soonest. `None`
+/// when nothing is pending.
+pub(crate) fn checkpoint_wake(
+    footprint: FootprintStatus,
+    sampling: Option<&CheckpointSampling>,
+    now: Instant,
+    poll: Duration,
+) -> Option<Instant> {
+    let footprint_wake = (footprint == FootprintStatus::Pending).then(|| now + poll);
+    let sampling_wake = sampling
+        .filter(|sampling| sampling.state == SamplingState::Active)
+        .map(|sampling| (sampling.last_attempt_at + SAMPLE_RETRY).min(sampling.deadline));
+    [footprint_wake, sampling_wake].into_iter().flatten().min()
+}
+
 #[cfg(test)]
 #[path = "waits_tests.rs"]
 mod waits_tests;

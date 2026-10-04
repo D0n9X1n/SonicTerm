@@ -253,6 +253,7 @@ fn result_json_carries_every_contract_field_even_for_a_partial_run() {
         keys,
         [
             "alloc_counting",
+            "checkpoint_memory",
             "checkpoints",
             "exit_code",
             "finish_session_settled",

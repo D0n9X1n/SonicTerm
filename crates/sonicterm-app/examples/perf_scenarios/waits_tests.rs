@@ -411,3 +411,169 @@ fn the_hold_counts_from_its_anchor_however_late_the_checkpoint_resolves() {
     );
     assert_eq!(fresh_after_unix_s(1_000.5, Duration::from_secs(30)), 1_030.5);
 }
+
+/// A sampler for the lifecycle tests: answers `complete_from(attempt)` and counts its calls.
+struct FakeSampler {
+    calls: u32,
+    complete: fn(u32) -> bool,
+}
+
+impl FakeSampler {
+    fn new(complete: fn(u32) -> bool) -> Self {
+        FakeSampler { calls: 0, complete }
+    }
+
+    /// One sampling turn at `at`; returns whether an attempt was taken.
+    fn turn(&mut self, sampling: &mut CheckpointSampling, at: Instant) -> bool {
+        sampling_turn(sampling, at, |attempt| {
+            self.calls += 1;
+            (self.complete)(attempt)
+        })
+    }
+}
+
+#[test]
+fn a_partial_first_attempt_retries_after_the_interval_and_stops_when_complete() {
+    // Attempt 1 at creation is partial; a turn 20 ms later is not yet due; attempt 2 at 50 ms is
+    // complete and ends sampling, after which no turn takes another sample.
+    let start = Instant::now();
+    let mut sampling = CheckpointSampling::new(0, start);
+    let mut sampler = FakeSampler::new(|attempt| attempt >= 2);
+    assert!(sampler.turn(&mut sampling, start));
+    assert_eq!((sampling.state, sampling.attempts), (SamplingState::Active, 1));
+    assert_eq!(sampling_step(&mut sampling, after(start, 20)), SamplingAction::Idle);
+    assert_eq!(
+        sampling_step(&mut sampling, after(start, 50)),
+        SamplingAction::Sample { attempt: 2 }
+    );
+    assert!(sampler.turn(&mut sampling, after(start, 50)));
+    assert_eq!((sampling.state, sampling.attempts), (SamplingState::Complete, 2));
+    assert!(!sampler.turn(&mut sampling, after(start, 100)));
+    assert_eq!(sampling_step(&mut sampling, after(start, 400)), SamplingAction::Idle);
+    assert_eq!(sampler.calls, 2, "nothing is sampled once complete");
+}
+
+#[test]
+fn ten_partial_attempts_exhaust_sampling_by_count() {
+    // Attempts every 50 ms, all partial: the tenth, at 450 ms, exhausts sampling, and a turn at
+    // 500 ms takes nothing.
+    let start = Instant::now();
+    let mut sampling = CheckpointSampling::new(0, start);
+    let mut sampler = FakeSampler::new(|_| false);
+    for turn in 0..10 {
+        assert!(sampler.turn(&mut sampling, after(start, turn * 50)), "attempt {}", turn + 1);
+    }
+    assert_eq!((sampling.state, sampling.attempts), (SamplingState::Exhausted, 10));
+    assert!(!sampling.last_attempt_complete);
+    assert_eq!(sampling_step(&mut sampling, after(start, 500)), SamplingAction::Idle);
+    assert_eq!(sampler.calls, 10);
+}
+
+#[test]
+fn the_deadline_exhausts_sampling_before_another_attempt_is_taken() {
+    // Eight partial attempts at 0, 70, ..., 490 ms; the next turn at 560 ms finds the window spent
+    // and exhausts sampling without calling a sampler that would have answered complete.
+    let start = Instant::now();
+    let mut sampling = CheckpointSampling::new(0, start);
+    let mut partial = FakeSampler::new(|_| false);
+    for turn in 0..8 {
+        assert!(partial.turn(&mut sampling, after(start, turn * 70)));
+    }
+    assert_eq!((sampling.state, sampling.attempts), (SamplingState::Active, 8));
+    let mut would_complete = FakeSampler::new(|_| true);
+    assert!(!would_complete.turn(&mut sampling, after(start, 560)));
+    assert_eq!(would_complete.calls, 0, "no sample outside the window");
+    assert_eq!((sampling.state, sampling.attempts), (SamplingState::Exhausted, 8));
+    assert!(!sampling.last_attempt_complete, "attempt 8, partial, is the last sample");
+}
+
+#[test]
+fn a_late_turn_exhausts_sampling_without_sampling() {
+    // A stalled event loop: attempt 1 at 0 is partial and the next turn arrives at 600 ms. Sampling
+    // is exhausted with one partial attempt and the would-be-complete sampler is never called.
+    let start = Instant::now();
+    let mut sampling = CheckpointSampling::new(0, start);
+    assert!(FakeSampler::new(|_| false).turn(&mut sampling, start));
+    let mut would_complete = FakeSampler::new(|_| true);
+    assert!(!would_complete.turn(&mut sampling, after(start, 600)));
+    assert_eq!(would_complete.calls, 0);
+    assert_eq!(sampling.state.as_str(), "exhausted");
+    assert_eq!((sampling.attempts, sampling.last_attempt_complete), (1, false));
+}
+
+#[test]
+fn the_deadline_survives_re_entry_and_a_new_index_gets_its_own() {
+    // Turns every 10 ms to 700 ms with partial samples: none is taken at or after 500 ms, attempts
+    // never exceed ten and the deadline never moves. The next index starts a fresh window, and the
+    // previous index's state is not revived by it.
+    let start = Instant::now();
+    let mut sampling = CheckpointSampling::new(0, start);
+    let mut sampled_at = Vec::new();
+    for millis in (0..=700).step_by(10) {
+        let at = after(start, millis);
+        if sampling_turn(&mut sampling, at, |_| false) {
+            sampled_at.push(millis);
+        }
+        assert!(sampling.attempts <= SAMPLE_ATTEMPTS);
+        assert_eq!(sampling.deadline, after(start, 500));
+    }
+    assert!(sampled_at.iter().all(|millis| *millis < 500), "sampled at {sampled_at:?}");
+    assert_eq!(sampling.state, SamplingState::Exhausted);
+
+    let finished = sampling;
+    let next = CheckpointSampling::new(1, after(start, 700));
+    assert_eq!(next.deadline, after(start, 1_200));
+    assert_eq!((next.index, next.attempts, next.state), (1, 0, SamplingState::Active));
+    assert_eq!(sampling_step(&mut sampling, after(start, 710)), SamplingAction::Idle);
+    assert_eq!(sampling, finished, "the previous index stays exhausted");
+}
+
+#[test]
+fn readiness_needs_an_answered_or_absent_footprint_and_finished_sampling() {
+    // All nine combinations of footprint (absent, pending, answered) and sampling (absent, active,
+    // done): only a pending footprint or active sampling holds the checkpoint.
+    let start = Instant::now();
+    let active = CheckpointSampling::new(0, start);
+    let done = CheckpointSampling { state: SamplingState::Exhausted, ..active };
+    for footprint in [FootprintStatus::Absent, FootprintStatus::Pending, FootprintStatus::Answered]
+    {
+        for (sampling, sampling_done) in [(None, true), (Some(&active), false), (Some(&done), true)]
+        {
+            let expected = footprint != FootprintStatus::Pending && sampling_done;
+            assert_eq!(
+                checkpoint_ready(footprint, sampling),
+                expected,
+                "{footprint:?} with {:?}",
+                sampling.map(|sampling| sampling.state)
+            );
+        }
+    }
+    let complete = CheckpointSampling { state: SamplingState::Complete, ..active };
+    assert!(checkpoint_ready(FootprintStatus::Answered, Some(&complete)));
+}
+
+#[test]
+fn a_pending_checkpoint_wakes_for_its_poll_its_retry_or_its_deadline() {
+    // A pending footprint wakes one poll later; active sampling wakes at its next retry or its
+    // deadline, whichever is first; the soonest wins; nothing pending means no wake.
+    let start = Instant::now();
+    let poll = Duration::from_millis(50);
+    let mut sampling = CheckpointSampling::new(0, start);
+    sampling_record(&mut sampling, false, after(start, 480));
+    assert_eq!(
+        checkpoint_wake(FootprintStatus::Absent, Some(&sampling), after(start, 480), poll),
+        Some(after(start, 500))
+    );
+    sampling_record(&mut sampling, false, after(start, 100));
+    assert_eq!(
+        checkpoint_wake(FootprintStatus::Pending, Some(&sampling), after(start, 140), poll),
+        Some(after(start, 150))
+    );
+    assert_eq!(
+        checkpoint_wake(FootprintStatus::Pending, None, after(start, 140), poll),
+        Some(after(start, 190))
+    );
+    let done = CheckpointSampling { state: SamplingState::Complete, ..sampling };
+    assert_eq!(checkpoint_wake(FootprintStatus::Answered, Some(&done), start, poll), None);
+    assert_eq!(checkpoint_wake(FootprintStatus::Absent, None, start, poll), None);
+}

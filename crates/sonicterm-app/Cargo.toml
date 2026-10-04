@@ -93,6 +93,9 @@ perf-counters = []
 # Marks that this tree's renderer reports its frame texture's extent; only the perf_scenarios
 # example reads it, so the same harness source also builds against a tree without it.
 perf-frame-texture = []
+# Marks that this tree's App can take a memory sample tagged with a perf checkpoint; only the
+# perf_scenarios example calls it, so the same harness source also builds against a tree without it.
+perf-hook-checkpoint-memory = []
 
 # macOS window probes run on the main thread only when explicitly requested.
 [[example]]

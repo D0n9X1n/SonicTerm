@@ -1,0 +1,461 @@
+{
+  "supported": {
+    "deadline-500": {
+      "logs": [
+        "2026-10-03T23:18:56.348780Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19218432 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=unavailable process_virtual_delta=unavailable session_total_bytes=94512 session_delta=unavailable grid_visible_bytes=94512 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=2 panes_contended=0 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=unavailable live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none",
+        "2026-10-03T23:18:56.348886Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19218432 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+0 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=1 checkpoint_complete=false",
+        "2026-10-03T23:18:56.348892Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19218432 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+0 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=2 checkpoint_complete=false",
+        "2026-10-03T23:18:56.348898Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19218432 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+0 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=3 checkpoint_complete=false",
+        "2026-10-03T23:18:56.348903Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19218432 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+0 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=4 checkpoint_complete=false",
+        "2026-10-03T23:18:56.348908Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19218432 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+0 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=5 checkpoint_complete=false"
+      ],
+      "result": {
+        "alloc_counting": false,
+        "checkpoint_memory": "supported",
+        "checkpoints": [
+          {
+            "attempts": 5,
+            "footprint_file": null,
+            "index": 0,
+            "label": "end",
+            "last_attempt_complete": false,
+            "sampling": "exhausted",
+            "unix_s": 1000.0
+          }
+        ],
+        "exit_code": 0,
+        "finish_session_settled": true,
+        "frame_counters": "unsupported",
+        "grid": {
+          "cols": 80,
+          "rows": 24
+        },
+        "harness_hash": "abababababababababababababababababababababababababababababababab",
+        "harness_pid": 4242,
+        "invalid_reason": null,
+        "laps": false,
+        "latency": null,
+        "managed": true,
+        "monitor": {
+          "name": "Built-in Display",
+          "refresh_rate_millihertz": 60000,
+          "scale_factor": 2.0
+        },
+        "native_cursor_rest_events_dropped": 0,
+        "native_focus_events_dropped": 0,
+        "notes": [],
+        "phases": [
+          {
+            "allocations_per_frame": null,
+            "cpu_system_s": 0.5,
+            "cpu_user_s": 1.5,
+            "dispatch_count": 2,
+            "dispatch_ms": [
+              1.0,
+              2.0
+            ],
+            "end_unix_s": 1000.0,
+            "name": "workload",
+            "present_interval_ms": [
+              16.6
+            ],
+            "presented_frames": 120,
+            "redraw_requested": 130,
+            "slow_dispatches": [],
+            "start_unix_s": 990.0
+          }
+        ],
+        "presenter": null,
+        "scenario": "S1",
+        "schema_version": 1,
+        "scrollback_rows_retained": null,
+        "short": true,
+        "status": "valid",
+        "synthetic_occlusion": false,
+        "throughput": null,
+        "uncover_ms": null,
+        "variant": "default",
+        "window_path": "production"
+      }
+    },
+    "deadline-610": {
+      "logs": [
+        "2026-10-03T23:18:56.349461Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19267584 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=unavailable process_virtual_delta=unavailable session_total_bytes=94512 session_delta=unavailable grid_visible_bytes=94512 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=2 panes_contended=0 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=unavailable live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none",
+        "2026-10-03T23:18:56.349537Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19267584 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+0 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=1 checkpoint_complete=false",
+        "2026-10-03T23:18:56.349542Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19267584 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+0 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=2 checkpoint_complete=false",
+        "2026-10-03T23:18:56.349547Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19267584 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+0 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=3 checkpoint_complete=false",
+        "2026-10-03T23:18:56.349552Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19267584 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+0 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=4 checkpoint_complete=false",
+        "2026-10-03T23:18:56.349557Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19267584 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+0 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=5 checkpoint_complete=false"
+      ],
+      "result": {
+        "alloc_counting": false,
+        "checkpoint_memory": "supported",
+        "checkpoints": [
+          {
+            "attempts": 5,
+            "footprint_file": null,
+            "index": 0,
+            "label": "end",
+            "last_attempt_complete": false,
+            "sampling": "exhausted",
+            "unix_s": 1000.0
+          }
+        ],
+        "exit_code": 0,
+        "finish_session_settled": true,
+        "frame_counters": "unsupported",
+        "grid": {
+          "cols": 80,
+          "rows": 24
+        },
+        "harness_hash": "abababababababababababababababababababababababababababababababab",
+        "harness_pid": 4242,
+        "invalid_reason": null,
+        "laps": false,
+        "latency": null,
+        "managed": true,
+        "monitor": {
+          "name": "Built-in Display",
+          "refresh_rate_millihertz": 60000,
+          "scale_factor": 2.0
+        },
+        "native_cursor_rest_events_dropped": 0,
+        "native_focus_events_dropped": 0,
+        "notes": [],
+        "phases": [
+          {
+            "allocations_per_frame": null,
+            "cpu_system_s": 0.5,
+            "cpu_user_s": 1.5,
+            "dispatch_count": 2,
+            "dispatch_ms": [
+              1.0,
+              2.0
+            ],
+            "end_unix_s": 1000.0,
+            "name": "workload",
+            "present_interval_ms": [
+              16.6
+            ],
+            "presented_frames": 120,
+            "redraw_requested": 130,
+            "slow_dispatches": [],
+            "start_unix_s": 990.0
+          }
+        ],
+        "presenter": null,
+        "scenario": "S1",
+        "schema_version": 1,
+        "scrollback_rows_retained": null,
+        "short": true,
+        "status": "valid",
+        "synthetic_occlusion": false,
+        "throughput": null,
+        "uncover_ms": null,
+        "variant": "default",
+        "window_path": "production"
+      }
+    },
+    "eight-attempts": {
+      "logs": [
+        "2026-10-03T23:18:56.344847Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=18006016 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=unavailable process_virtual_delta=unavailable session_total_bytes=94512 session_delta=unavailable grid_visible_bytes=94512 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=2 panes_contended=0 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=unavailable live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none",
+        "2026-10-03T23:18:56.345253Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=18530304 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+524288 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=1 checkpoint_complete=false",
+        "2026-10-03T23:18:56.345260Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=18530304 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+524288 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=2 checkpoint_complete=false",
+        "2026-10-03T23:18:56.345265Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=18530304 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+524288 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=3 checkpoint_complete=false",
+        "2026-10-03T23:18:56.345272Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=18546688 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+540672 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=4 checkpoint_complete=false",
+        "2026-10-03T23:18:56.345277Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=18546688 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+540672 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=5 checkpoint_complete=false",
+        "2026-10-03T23:18:56.345282Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=18546688 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+540672 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=6 checkpoint_complete=false",
+        "2026-10-03T23:18:56.345287Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=18546688 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+540672 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=7 checkpoint_complete=false",
+        "2026-10-03T23:18:56.345294Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=18563072 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+557056 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=8 checkpoint_complete=false"
+      ],
+      "result": {
+        "alloc_counting": false,
+        "checkpoint_memory": "supported",
+        "checkpoints": [
+          {
+            "attempts": 8,
+            "footprint_file": null,
+            "index": 0,
+            "label": "end",
+            "last_attempt_complete": false,
+            "sampling": "exhausted",
+            "unix_s": 1000.0
+          }
+        ],
+        "exit_code": 0,
+        "finish_session_settled": true,
+        "frame_counters": "unsupported",
+        "grid": {
+          "cols": 80,
+          "rows": 24
+        },
+        "harness_hash": "abababababababababababababababababababababababababababababababab",
+        "harness_pid": 4242,
+        "invalid_reason": null,
+        "laps": false,
+        "latency": null,
+        "managed": true,
+        "monitor": {
+          "name": "Built-in Display",
+          "refresh_rate_millihertz": 60000,
+          "scale_factor": 2.0
+        },
+        "native_cursor_rest_events_dropped": 0,
+        "native_focus_events_dropped": 0,
+        "notes": [],
+        "phases": [
+          {
+            "allocations_per_frame": null,
+            "cpu_system_s": 0.5,
+            "cpu_user_s": 1.5,
+            "dispatch_count": 2,
+            "dispatch_ms": [
+              1.0,
+              2.0
+            ],
+            "end_unix_s": 1000.0,
+            "name": "workload",
+            "present_interval_ms": [
+              16.6
+            ],
+            "presented_frames": 120,
+            "redraw_requested": 130,
+            "slow_dispatches": [],
+            "start_unix_s": 990.0
+          }
+        ],
+        "presenter": null,
+        "scenario": "S1",
+        "schema_version": 1,
+        "scrollback_rows_retained": null,
+        "short": true,
+        "status": "valid",
+        "synthetic_occlusion": false,
+        "throughput": null,
+        "uncover_ms": null,
+        "variant": "default",
+        "window_path": "production"
+      }
+    },
+    "single-at-600": {
+      "logs": [
+        "2026-10-03T23:18:56.348209Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19070976 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=unavailable process_virtual_delta=unavailable session_total_bytes=94512 session_delta=unavailable grid_visible_bytes=94512 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=2 panes_contended=0 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=unavailable live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none",
+        "2026-10-03T23:18:56.348294Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19087360 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+16384 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=1 checkpoint_complete=false"
+      ],
+      "result": {
+        "alloc_counting": false,
+        "checkpoint_memory": "supported",
+        "checkpoints": [
+          {
+            "attempts": 1,
+            "footprint_file": null,
+            "index": 0,
+            "label": "end",
+            "last_attempt_complete": false,
+            "sampling": "exhausted",
+            "unix_s": 1000.0
+          }
+        ],
+        "exit_code": 0,
+        "finish_session_settled": true,
+        "frame_counters": "unsupported",
+        "grid": {
+          "cols": 80,
+          "rows": 24
+        },
+        "harness_hash": "abababababababababababababababababababababababababababababababab",
+        "harness_pid": 4242,
+        "invalid_reason": null,
+        "laps": false,
+        "latency": null,
+        "managed": true,
+        "monitor": {
+          "name": "Built-in Display",
+          "refresh_rate_millihertz": 60000,
+          "scale_factor": 2.0
+        },
+        "native_cursor_rest_events_dropped": 0,
+        "native_focus_events_dropped": 0,
+        "notes": [],
+        "phases": [
+          {
+            "allocations_per_frame": null,
+            "cpu_system_s": 0.5,
+            "cpu_user_s": 1.5,
+            "dispatch_count": 2,
+            "dispatch_ms": [
+              1.0,
+              2.0
+            ],
+            "end_unix_s": 1000.0,
+            "name": "workload",
+            "present_interval_ms": [
+              16.6
+            ],
+            "presented_frames": 120,
+            "redraw_requested": 130,
+            "slow_dispatches": [],
+            "start_unix_s": 990.0
+          }
+        ],
+        "presenter": null,
+        "scenario": "S1",
+        "schema_version": 1,
+        "scrollback_rows_retained": null,
+        "short": true,
+        "status": "valid",
+        "synthetic_occlusion": false,
+        "throughput": null,
+        "uncover_ms": null,
+        "variant": "default",
+        "window_path": "production"
+      }
+    },
+    "stale-clock": {
+      "logs": [
+        "2026-10-03T23:18:56.347547Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19005440 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=unavailable process_virtual_delta=unavailable session_total_bytes=94512 session_delta=unavailable grid_visible_bytes=94512 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=2 panes_contended=0 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=unavailable live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none",
+        "2026-10-03T23:18:56.347650Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=19021824 process_virtual_bytes=445791633408 process_private_committed_delta=unavailable process_resident_delta=+16384 process_virtual_delta=+0 session_total_bytes=47256 session_delta=-47256 grid_visible_bytes=47256 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=1 panes_contended=1 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=+0 live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=1 checkpoint_complete=false"
+      ],
+      "result": {
+        "alloc_counting": false,
+        "checkpoint_memory": "supported",
+        "checkpoints": [
+          {
+            "attempts": 1,
+            "footprint_file": "checkpoints/0-end.json",
+            "index": 0,
+            "label": "end",
+            "last_attempt_complete": false,
+            "sampling": "exhausted",
+            "unix_s": 1000.0
+          }
+        ],
+        "exit_code": 0,
+        "finish_session_settled": true,
+        "frame_counters": "unsupported",
+        "grid": {
+          "cols": 80,
+          "rows": 24
+        },
+        "harness_hash": "abababababababababababababababababababababababababababababababab",
+        "harness_pid": 4242,
+        "invalid_reason": null,
+        "laps": false,
+        "latency": null,
+        "managed": true,
+        "monitor": {
+          "name": "Built-in Display",
+          "refresh_rate_millihertz": 60000,
+          "scale_factor": 2.0
+        },
+        "native_cursor_rest_events_dropped": 0,
+        "native_focus_events_dropped": 0,
+        "notes": [],
+        "phases": [
+          {
+            "allocations_per_frame": null,
+            "cpu_system_s": 0.5,
+            "cpu_user_s": 1.5,
+            "dispatch_count": 2,
+            "dispatch_ms": [
+              1.0,
+              2.0
+            ],
+            "end_unix_s": 1000.0,
+            "name": "workload",
+            "present_interval_ms": [
+              16.6
+            ],
+            "presented_frames": 120,
+            "redraw_requested": 130,
+            "slow_dispatches": [],
+            "start_unix_s": 990.0
+          }
+        ],
+        "presenter": null,
+        "scenario": "S1",
+        "schema_version": 1,
+        "scrollback_rows_retained": null,
+        "short": true,
+        "status": "valid",
+        "synthetic_occlusion": false,
+        "throughput": null,
+        "uncover_ms": null,
+        "variant": "default",
+        "window_path": "production"
+      }
+    }
+  },
+  "unsupported": {
+    "unsupported": {
+      "logs": [
+        "2026-10-03T23:19:20.538201Z  INFO memory: memory snapshot process_private_committed_bytes=unsupported process_resident_bytes=17989632 process_virtual_bytes=445791191040 process_private_committed_delta=unavailable process_resident_delta=unavailable process_virtual_delta=unavailable session_total_bytes=94512 session_delta=unavailable grid_visible_bytes=94512 grid_history_bytes=0 grid_alternate_bytes=0 parser_bytes=0 hyperlink_bytes=0 inline_media_bytes=0 pty_output_bytes=0 pty_input_bytes=0 panes_total=2 panes_sampled=2 panes_contended=0 renderer_total_bytes=0 renderer_total_items=0 renderer_row_glyph_cache_bytes=0 renderer_row_glyph_cache_items=0 renderer_row_quad_cache_bytes=0 renderer_row_quad_cache_items=0 renderer_delta=unavailable live_renderers=0 live_fg_probe_workers=0 renderers=none allocator_state=none allocator_source=\"none\" allocator_label=\"none\" allocator_allocated_bytes=none allocator_reserved_bytes=none allocator_allocations=none allocator_blocks=none allocator_largest_block_bytes=none"
+      ],
+      "result": {
+        "alloc_counting": false,
+        "checkpoint_memory": "unsupported",
+        "checkpoints": [
+          {
+            "footprint_file": null,
+            "index": 0,
+            "label": "end",
+            "unix_s": 1000.0
+          }
+        ],
+        "exit_code": 0,
+        "finish_session_settled": true,
+        "frame_counters": "unsupported",
+        "grid": {
+          "cols": 80,
+          "rows": 24
+        },
+        "harness_hash": "abababababababababababababababababababababababababababababababab",
+        "harness_pid": 4242,
+        "invalid_reason": null,
+        "laps": false,
+        "latency": null,
+        "managed": true,
+        "monitor": {
+          "name": "Built-in Display",
+          "refresh_rate_millihertz": 60000,
+          "scale_factor": 2.0
+        },
+        "native_cursor_rest_events_dropped": 0,
+        "native_focus_events_dropped": 0,
+        "notes": [],
+        "phases": [
+          {
+            "allocations_per_frame": null,
+            "cpu_system_s": 0.5,
+            "cpu_user_s": 1.5,
+            "dispatch_count": 2,
+            "dispatch_ms": [
+              1.0,
+              2.0
+            ],
+            "end_unix_s": 1000.0,
+            "name": "workload",
+            "present_interval_ms": [
+              16.6
+            ],
+            "presented_frames": 120,
+            "redraw_requested": 130,
+            "slow_dispatches": [],
+            "start_unix_s": 990.0
+          }
+        ],
+        "presenter": null,
+        "scenario": "S1",
+        "schema_version": 1,
+        "scrollback_rows_retained": null,
+        "short": true,
+        "status": "valid",
+        "synthetic_occlusion": false,
+        "throughput": null,
+        "uncover_ms": null,
+        "variant": "default",
+        "window_path": "production"
+      }
+    }
+  }
+}
