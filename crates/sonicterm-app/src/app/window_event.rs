@@ -633,8 +633,8 @@ impl App {
             .and_then(|window| window.renderer.as_ref())
             .and_then(|renderer| renderer.tab_bar_band());
         let hold_tab_widths = self.tab_widths_held_in(win_id, tab_bar_band);
-        if !self.begin_window_redraw(win_id, Instant::now()) {
-            // When: `begin_window_redraw` refuses this owner, no parser or image collection follows.
+        if !self.admit_window_redraw(win_id) {
+            // When: `admit_window_redraw` refuses this owner, no parser or image collection follows.
             return;
         }
         let was_dirty = self.main().is_some_and(|window| window.redraw.input_pending());
@@ -680,7 +680,8 @@ impl App {
             Ok(sources) => sources,
             Err(why) => {
                 // When: `why` rejects topology, skip all assembly without treating it as contention.
-                self.visible_frame_unavailable(win_id, why, was_dirty, Instant::now());
+                let now = self.dispatch_now();
+                self.visible_frame_unavailable(win_id, why, was_dirty, now);
                 return;
             }
         };
@@ -762,7 +763,8 @@ impl App {
                     // When: `why` is contention, the collector already released every partial guard and image clone.
                     drop(collected);
                     drop(sources);
-                    self.visible_frame_unavailable(win_id, why, was_dirty, Instant::now());
+                    let now = self.dispatch_now();
+                    self.visible_frame_unavailable(win_id, why, was_dirty, now);
                     return;
                 }
             }
@@ -782,7 +784,8 @@ impl App {
                 drop(guards);
                 drop(images);
                 drop(sources);
-                self.visible_frame_unavailable(win_id, why, was_dirty, Instant::now());
+                let now = self.dispatch_now();
+                self.visible_frame_unavailable(win_id, why, was_dirty, now);
                 return;
             }
         };
@@ -1041,8 +1044,7 @@ impl App {
                 {
                     smoke.observe_recovery_frame(win_id, r.device_generation(), sample, &outcome);
                 }
-                frame_completion =
-                    Some((super::redraw::FrameSettlement::of(&outcome), Instant::now()));
+                frame_completion = Some(super::redraw::FrameSettlement::of(&outcome));
                 // Map the typed outcome back to the compatibility result: only a
                 // failure or the device's first stopped frame is an error here.
                 if let Err(error) = outcome.into_render_result() {
@@ -1123,8 +1125,8 @@ impl App {
             // A presented frame's receipts replace the pending set emptied at collection.
             sources.store_presented(&mut window.pending_receipts, presented_receipts);
         }
-        if let (Some(snapshot), Some((outcome, at))) = (frame_snapshot.as_ref(), frame_completion) {
-            self.finish_window_redraw(win_id, snapshot, outcome, at);
+        if let (Some(snapshot), Some(outcome)) = (frame_snapshot.as_ref(), frame_completion) {
+            self.complete_window_redraw(win_id, snapshot, outcome);
         }
         if let Some(presented) = smoke_presented_count {
             // When: `smoke_presented_count` contains `presented`, classify the marker-bearing frame.

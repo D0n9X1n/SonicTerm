@@ -127,7 +127,8 @@ impl App {
     #[doc(hidden)]
     pub fn defer_redraw_on_lock_contention(&mut self, was_dirty: bool) {
         if let Some(id) = self.main_window_id {
-            self.defer_window_lock_contention(id, was_dirty, Instant::now());
+            let now = self.dispatch_now();
+            self.defer_window_lock_contention(id, was_dirty, now);
         }
     }
 

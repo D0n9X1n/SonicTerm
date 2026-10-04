@@ -949,6 +949,28 @@ impl App {
         self.pending_redraw_windows.remove(&id);
     }
 
+    /// The instant every pacing read uses, from the App's dispatch clock.
+    pub(super) fn dispatch_now(&self) -> Instant {
+        (self.dispatch_clock)()
+    }
+
+    /// Admit or defer one `RedrawRequested` for either window role at the dispatch clock's instant.
+    pub(super) fn admit_window_redraw(&mut self, id: WindowId) -> bool {
+        let now = self.dispatch_now();
+        self.begin_window_redraw(id, now)
+    }
+
+    /// Complete one renderer call for either window role at the dispatch clock's instant.
+    pub(super) fn complete_window_redraw(
+        &mut self,
+        id: WindowId,
+        snapshot: &FrameSnapshot,
+        outcome: FrameSettlement,
+    ) {
+        let at = self.dispatch_now();
+        self.finish_window_redraw(id, snapshot, outcome, at);
+    }
+
     /// Consume a still-current badge transition without borrowing parser state or waking another owner.
     fn consume_command_badge_due(
         &mut self,
@@ -1100,6 +1122,12 @@ impl App {
 #[cfg(test)]
 #[path = "redraw_tests.rs"]
 mod redraw_tests;
+
+// The fake dispatch clock and paced owners are shared with the display-link tests; `redraw` is
+// private to `app`, so this public declaration reaches no further than `app`.
+#[cfg(test)]
+#[path = "redraw_dispatch_tests.rs"]
+pub mod redraw_dispatch_tests;
 
 /// Each tab's drawn command badge and its frame-key `command_status_hash` at `now`.
 fn command_chrome(

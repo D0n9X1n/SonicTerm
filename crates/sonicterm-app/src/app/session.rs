@@ -205,6 +205,7 @@ impl App {
             monitor_frame_period: Duration::from_micros(16_667),
             // Resolved after the renderer is created in `do_resumed`.
             software_render_degrade: false,
+            dispatch_clock: Instant::now,
             pending_redraw: false,
             pending_redraw_windows: HashSet::new(),
             redraw_due: Vec::new(),

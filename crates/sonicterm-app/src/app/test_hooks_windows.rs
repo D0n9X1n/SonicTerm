@@ -401,6 +401,12 @@ impl App {
         self.windows.get(&id)?.renderer.as_ref()?.__test_software_frame_pixel_bgra(pixel_x, pixel_y)
     }
 
+    /// Test seam: replace the dispatch clock that every pacing read goes through.
+    #[doc(hidden)]
+    pub fn __test_set_dispatch_clock(&mut self, clock: fn() -> Instant) {
+        self.dispatch_clock = clock;
+    }
+
     /// Test seam: force the no-GPU degrade path on or off.
     ///
     /// Bypasses runtime detection so a test can exercise software-render

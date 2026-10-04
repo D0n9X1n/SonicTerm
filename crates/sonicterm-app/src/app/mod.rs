@@ -709,6 +709,10 @@ pub struct App {
     /// refresh. Resolved after the renderer is created and re-resolved on an
     /// explicit config reload.
     pub(super) software_render_degrade: bool,
+    /// The one clock every pacing read goes through: redraw admission and completion for both window
+    /// roles, collection contention, the display-link tick and the wait fold. `Instant::now` in
+    /// production; a test installs a fake through [`Self::__test_set_dispatch_clock`].
+    pub(super) dispatch_clock: fn() -> Instant,
     /// Legacy observation of main pacing deferral; owner redraw state, not this flag, arms deadlines.
     pub(super) pending_redraw: bool,
     /// Legacy child-deferral observation, never the runtime wake-fold authority.

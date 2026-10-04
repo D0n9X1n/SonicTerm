@@ -206,10 +206,8 @@ impl App {
                 .map(GpuRenderer::is_software_render_degraded),
             software_render_degrade,
         );
-        if matches!(event, WindowEvent::RedrawRequested)
-            && !self.begin_window_redraw(win_id, Instant::now())
-        {
-            // When: `begin_window_redraw` refuses `win_id`, no child parser or image collection follows.
+        if matches!(event, WindowEvent::RedrawRequested) && !self.admit_window_redraw(win_id) {
+            // When: `admit_window_redraw` refuses `win_id`, no child parser or image collection follows.
             return;
         }
         // Scrollbar input is handled HERE, before the long-lived `child` borrow

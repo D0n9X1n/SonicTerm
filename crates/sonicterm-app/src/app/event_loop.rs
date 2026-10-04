@@ -291,7 +291,7 @@ impl App {
         // sample that changes nothing cannot become a heartbeat redraw. An idle
         // session has neither a frame nor foreground-probe contributor; only the
         // retention cadence wakes it, and that wake remains draw-free.
-        let now = Instant::now();
+        let now = self.dispatch_now();
         let motion_wake = self.flush_pointer_motion(now);
         let mut due = self.refresh_frame_due_work_at(now);
         if let Some(deadline) = self.memory_sample_deadline() {

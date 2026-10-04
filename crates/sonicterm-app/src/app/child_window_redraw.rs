@@ -83,7 +83,8 @@ impl App {
             Ok(sources) => sources,
             Err(why) => {
                 // When: `why` rejects topology, skip all assembly rather than presenting a partial pane set.
-                self.visible_frame_unavailable(win_id, why, was_dirty, Instant::now());
+                let now = self.dispatch_now();
+                self.visible_frame_unavailable(win_id, why, was_dirty, now);
                 return;
             }
         };
@@ -105,7 +106,8 @@ impl App {
                     // When: `why` is contention, partial guards and image clones have already been released.
                     drop(collected);
                     drop(sources);
-                    self.visible_frame_unavailable(win_id, why, was_dirty, Instant::now());
+                    let now = self.dispatch_now();
+                    self.visible_frame_unavailable(win_id, why, was_dirty, now);
                     return;
                 }
             }
@@ -127,7 +129,8 @@ impl App {
                 drop(images);
                 drop(sources);
                 let _ = child;
-                self.visible_frame_unavailable(win_id, why, was_dirty, Instant::now());
+                let now = self.dispatch_now();
+                self.visible_frame_unavailable(win_id, why, was_dirty, now);
                 return;
             }
         };
@@ -237,7 +240,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|smoke| smoke.is_waiting_for_adopted_present(win_id));
             let mut smoke_presented_count = None;
-            // The renderer call's settlement and instant, completed once the frame's borrows end.
+            // The renderer call's settlement, completed once the frame's borrows end.
             let mut frame_completion = None;
             // Named by source-text tests that embed this file.
             #[allow(clippy::min_ident_chars)]
@@ -307,9 +310,9 @@ impl App {
                     smoke.observe_recovery_frame(win_id, r.device_generation(), sample, &outcome);
                 }
                 if frame_snapshot.is_some() {
-                    // A captured pre-lock snapshot completes at this instant, after the renderer call.
+                    // A captured pre-lock snapshot completes with the renderer's own settlement.
                     let settlement = super::redraw::FrameSettlement::of(&outcome);
-                    frame_completion = Some((settlement, Instant::now()));
+                    frame_completion = Some(settlement);
                 }
                 // Map the typed outcome back to the compatibility result: only a
                 // failure or the device's first stopped frame is an error here.
@@ -333,12 +336,11 @@ impl App {
                 // When: the child has no renderer, nothing is drawn; release the frame's guards here too.
                 drop(guards);
             }
-            if let (Some(snapshot), Some((settlement, at))) =
-                (frame_snapshot.as_ref(), frame_completion)
+            if let (Some(snapshot), Some(settlement)) = (frame_snapshot.as_ref(), frame_completion)
             {
-                // The renderer ran for a captured snapshot: complete through the main window's writer
-                // of both clocks, pane generations and the surface probe.
-                self.finish_window_redraw(win_id, snapshot, settlement, at);
+                // The renderer ran for a captured snapshot: complete through the shared adapter, which
+                // stamps the dispatch clock and writes both clocks, pane generations and the surface probe.
+                self.complete_window_redraw(win_id, snapshot, settlement);
             }
             let Some(child) = self.windows.get_mut(&win_id) else {
                 // When: completion found `win_id` gone, no child remains to anchor IME or a drag bar.
