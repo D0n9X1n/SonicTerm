@@ -7371,10 +7371,13 @@ def atlas_facts(renderer="main[1]", dim=512, packed=4000, growths=1, evictions=0
     return perf.GlyphAtlasFacts(renderer, dim, packed, growths, evictions, fit, tile)
 
 
-def atlas_outcome(facts, phase_growths=None, checkpoint_unix_s=70.0):
+def atlas_outcome(facts, phase_growths=None, checkpoint_unix_s=70.0, readings=None):
     """A valid run whose `end` checkpoint sample reports `facts`; `phase_growths` gives each phase's counted
-    `renderer.glyph_atlas_growths` delta, one phase per entry ending at 20 s steps, or no counters when None."""
+    `renderer.glyph_atlas_growths` delta, one phase per entry ending at 20 s steps, or no counters when None;
+    `readings` is the checkpoint's `atlas_readings` list, absent when None (a harness that predates it)."""
     point = {"index": 0, "label": "end", "unix_s": checkpoint_unix_s, "footprint_file": None}
+    if readings is not None:
+        point["atlas_readings"] = readings
     phases = valid_result()["phases"]
     if phase_growths is not None:
         phases = [{**phases[0], "name": f"phase{number}", "start_unix_s": 20.0 * number,
@@ -7427,30 +7430,87 @@ class GlyphAtlasReportTests(unittest.TestCase):
         rows = perf.comparison_rows("S1/default", side, side)
         self.assertFalse([row for row in rows if "glyph_atlas" in row[1]], rows)
 
-    def test_reconciliation_compares_snapshot_growths_with_the_counted_growths_up_to_each_checkpoint(self):
-        # The snapshot's growths summed over renderers must cover the growths the phases ending by the
-        # checkpoint counted: more counted than the snapshot holds is a mismatch, reported per run.
-        consistent = atlas_outcome([atlas_facts(growths=2), atlas_facts("warm[0]", growths=1)], [1, 2])
-        mismatch = atlas_outcome([atlas_facts(growths=1)], [2, 1])
-        # Phases end at 10, 30 and 50 s; a checkpoint at 40 s counts only the first two.
-        late = atlas_outcome([atlas_facts(growths=3)], [1, 2, 9], checkpoint_unix_s=40.0)
+    def test_rows_aggregate_each_window_by_its_logical_identity_across_runs_and_sides(self):
+        # A native window id (an object address on macOS, an HWND on Windows) differs in every run, so rows
+        # group the run's main window as `main` through the checkpoint reading's `main_window`, keep the warm
+        # pool slot, and list each run's native id as evidence; a run without a reading never guesses `main`.
+        def run(native, dim):
+            reading = {"attempt": 1, "main_window": native, "counted_glyph_atlas_growths": None,
+                       "closed_glyph_atlas_growths": None}
+            return atlas_outcome([atlas_facts(f"visible[{native}]", dim=dim),
+                                  atlas_facts("warm[0]", dim=256, fit="256")], readings=[reading])
+        base = perf.SideRuns([run("WindowId(0x1a)", 256), run("WindowId(0x2b)", 256)])
+        head = perf.SideRuns([run("WindowId(0x3c)", 512), run("WindowId(0x4d)", 512)])
+        rows = perf.comparison_rows("S9/default", base, head)
+        self.assertEqual(row_for(rows, "end main glyph_atlas_dim (px)")[2:5], ["256", "512", "+100.0%"])
+        self.assertEqual(row_for(rows, "end main renderer_native_id (id)")[2:5],
+                         ["WindowId(0x1a) ×1; WindowId(0x2b) ×1", "WindowId(0x3c) ×1; WindowId(0x4d) ×1", ""])
+        self.assertEqual(row_for(rows, "end warm[0] glyph_atlas_dim (px)")[2:4], ["256", "256"])
+        self.assertFalse([row for row in rows if "WindowId(" in row[1]], "a native id never keys a row")
+        unread = perf.SideRuns([atlas_outcome([atlas_facts("visible[WindowId(0x5e)]", dim=512)])])
+        unread_rows = perf.comparison_rows("S9/default", unread, unread)
+        self.assertEqual(row_for(unread_rows, "end visible#1 glyph_atlas_dim (px)")[2:4], ["512", "512"])
+
+    def test_reconciliation_compares_each_windows_snapshot_and_counted_growths_at_the_same_sample(self):
+        # Each live window's snapshot growths must equal the growths its own counters recorded at the same
+        # sample. Dropped counts and duplicates that startup growth would mask under an inequality both read
+        # as mismatches; a closed window's counted growths are listed apart, so retiring one is consistent.
+        main = "WindowId(0x1a)"
+
+        def run(snapshot, counted, phase_growths, closed=0):
+            reading = {"attempt": 1, "main_window": main, "counted_glyph_atlas_growths": counted,
+                       "closed_glyph_atlas_growths": closed}
+            return atlas_outcome([atlas_facts(f"visible[{main}]", growths=snapshot),
+                                  atlas_facts("warm[0]", growths=0)], phase_growths, readings=[reading])
+        # Every growth went uncounted: the phases count 0, which an inequality would call consistent.
+        missing = run(2, {main: 0}, [0])
+        # Two startup growths outside any phase, then one phase growth counted twice: the phases count 2,
+        # below the snapshot's 3, while the window's own lifetime count is 4.
+        duplicated = run(3, {main: 4}, [2])
+        # A closed window grew 3 times; the phases count 4 across both windows, the snapshot holds only main.
+        retired = run(1, {main: 1}, [4], closed=3)
         rows = perf.glyph_atlas_reconciliation_rows(
-            "S9/default", perf.SideRuns([consistent, late]), perf.SideRuns([consistent, mismatch]))
+            "S9/default", perf.SideRuns([missing, duplicated]), perf.SideRuns([retired]))
         self.assertEqual(rows, [
             ["S9/default", "end", "glyph_atlas_growths, snapshot/counted",
-             "consistent: 3/3, 3/3", "mismatch in 1 of 2 runs: 3/3, 1/3", ""]])
+             "mismatch in 2 of 2 runs: main 2/0; main 3/4", "consistent: main 1/1, closed 3", ""]])
 
-    def test_reconciliation_reads_n_a_without_counters_facts_or_a_base(self):
-        # No counted growths, no facts, or a head-only counters set leave nothing to reconcile.
+    def test_reconciliation_without_a_per_window_reading_is_inconclusive_with_both_figures(self):
+        # Without a same-sample per-window count only the summed figures exist, and an inequality between them
+        # proves nothing either way, so the run is inconclusive and shows both; so is a visible window the
+        # reading did not count. Without counters, facts or a base there is nothing to reconcile.
+        no_reading = atlas_outcome([atlas_facts(growths=3)], [1, 2])
+        uncounted = atlas_outcome(
+            [atlas_facts("visible[WindowId(0x1a)]", growths=2)], [2],
+            readings=[{"attempt": 1, "main_window": "WindowId(0x1a)", "counted_glyph_atlas_growths": {},
+                       "closed_glyph_atlas_growths": 0}])
+        rows = perf.glyph_atlas_reconciliation_rows(
+            "S9/default", perf.SideRuns([no_reading]), perf.SideRuns([uncounted]))
+        self.assertEqual(rows, [
+            ["S9/default", "end", "glyph_atlas_growths, snapshot/counted",
+             "inconclusive in 1 of 1 runs: snapshot 3, counted 3", "inconclusive in 1 of 1 runs: main 2/none", ""]])
         no_counters = atlas_outcome([atlas_facts(growths=2)])
         no_facts = atlas_outcome([], [1])
-        with_both = atlas_outcome([atlas_facts(growths=2)], [2])
         self.assertEqual(perf.glyph_atlas_reconciliation_rows(
             "S9/default", perf.SideRuns([no_counters]), perf.SideRuns([no_facts])), [])
         head_only = perf.SideRuns(blocked=perf.COUNTERS_HEAD_ONLY)
-        self.assertEqual(perf.glyph_atlas_reconciliation_rows("S9/default", head_only, perf.SideRuns([with_both])),
+        self.assertEqual(perf.glyph_atlas_reconciliation_rows("S9/default", head_only, perf.SideRuns([no_reading])),
                          [["S9/default", "end", "glyph_atlas_growths, snapshot/counted", "n/a",
-                           "consistent: 2/2", ""]])
+                           "inconclusive in 1 of 1 runs: snapshot 3, counted 3", ""]])
+
+    def test_a_malformed_atlas_reading_is_a_schema_problem(self):
+        # A reading names its attempt, the main window's label or null, and per-window and closed counts or
+        # null; anything else would let the report compare a figure the harness never recorded.
+        good = {"attempt": 1, "main_window": "WindowId(1)", "counted_glyph_atlas_growths": {"WindowId(1)": 2},
+                "closed_glyph_atlas_growths": 0}
+        point = {"index": 0, "label": "end", "unix_s": 70.0, "footprint_file": None, "atlas_readings": [good]}
+        self.assertEqual(perf.validate_result(valid_result(checkpoints=[point]), HARNESS_HASH, 0), [])
+        for bad in ({**good, "attempt": "1"}, {**good, "main_window": 3},
+                    {**good, "counted_glyph_atlas_growths": {"WindowId(1)": -1}},
+                    {**good, "closed_glyph_atlas_growths": 1.5}, "reading"):
+            with self.subTest(bad=bad):
+                self.assertTrue(perf.validate_result(
+                    valid_result(checkpoints=[{**point, "atlas_readings": [bad]}]), HARNESS_HASH, 0))
 
 
 class CheckpointFixtureTests(unittest.TestCase):

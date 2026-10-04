@@ -481,6 +481,26 @@ pub(crate) struct CheckpointRecord {
     /// Whether the last attempted sample measured every pane; absent without the hook.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) last_attempt_complete: Option<bool>,
+    /// One glyph atlas reading per memory sampling attempt, taken in the same turn as that attempt's
+    /// memory line; absent when no attempt was taken.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) atlas_readings: Vec<AtlasReading>,
+}
+
+/// The window identities and counted glyph atlas growths at one memory sampling attempt, so a report
+/// can compare each live window's counted growths with its renderer's snapshot growths at one instant.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct AtlasReading {
+    /// The sampling attempt this reading was taken with, from 1.
+    pub(crate) attempt: u32,
+    /// The main window's native label, spelled as the memory line labels its renderer; `None` before
+    /// the App has a main window.
+    pub(crate) main_window: Option<String>,
+    /// Each live window's `glyph_atlas_growths` since it was created, by native label; only windows
+    /// with a renderer have one. `None` when the run does not count.
+    pub(crate) counted_glyph_atlas_growths: Option<std::collections::BTreeMap<String, u64>>,
+    /// Every closed window's `glyph_atlas_growths`, summed; `None` when the run does not count.
+    pub(crate) closed_glyph_atlas_growths: Option<u64>,
 }
 
 /// Bytes a workload wrote from GO to its sentinel, and how long that took.

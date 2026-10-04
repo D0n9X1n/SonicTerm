@@ -559,3 +559,57 @@ fn attempt_nanoseconds_survive_the_phase_delta_and_reach_perf_compare_exactly() 
     .expect("the attempt fixture is JSON");
     assert_eq!(committed, produced, "the fixture is what this harness writes");
 }
+
+#[test]
+fn growth_counts_key_each_counted_window_by_the_memory_lines_native_label() {
+    // perf-compare matches a window's counted growths to its renderer in the memory line by the native
+    // label, so both must spell a window id the same way: the memory snapshot's `{window_id:?}`. A
+    // window without a renderer has no count and is left out rather than reported as 0, and a run that
+    // closed no counted window has a closed total of 0.
+    let counted = winit::window::WindowId::from(7_u64);
+    let unrendered = winit::window::WindowId::from(9_u64);
+    let (live, closed) = growth_counts([(counted, Some(3)), (unrendered, None)], None);
+    assert_eq!(live, std::collections::BTreeMap::from([(format!("{counted:?}"), 3)]));
+    assert_eq!(closed, 0);
+    assert_eq!(growth_counts([], Some(4)).1, 4);
+    let memory_snapshot = include_str!("../../src/app/memory_snapshot.rs").replace("\r\n", "\n");
+    assert!(
+        memory_snapshot.contains("let label = format!(\"{window_id:?}\");"),
+        "the memory line no longer labels a visible renderer with its window id's Debug form"
+    );
+}
+
+#[cfg(feature = "perf-counters")]
+#[test]
+fn an_atlas_reading_counts_only_windows_with_a_renderer_while_the_app_counts() {
+    // A counting App with no main window yet reports no main label, an empty per-window map (a seeded
+    // window has no renderer, so no growth count) and a closed total of 0, at the attempt it was asked for.
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let mut app =
+        sonicterm_app::app::App::new(Theme::default(), Config::default(), Keymap::default());
+    enable(&mut app).expect("no window yet");
+    let _child = app.__test_seed_child_window(&[]);
+    assert_eq!(
+        atlas_reading(&app, 3),
+        AtlasReading {
+            attempt: 3,
+            main_window: None,
+            counted_glyph_atlas_growths: Some(std::collections::BTreeMap::new()),
+            closed_glyph_atlas_growths: Some(0),
+        }
+    );
+}
+
+#[cfg(not(feature = "perf-counters"))]
+#[test]
+fn an_atlas_reading_without_the_counter_feature_has_no_counts() {
+    // A build without the counter API cannot count growths, so its reading says so with nulls rather
+    // than zeros that perf-compare would compare as figures.
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let app = sonicterm_app::app::App::new(Theme::default(), Config::default(), Keymap::default());
+    let reading = atlas_reading(&app, 1);
+    assert_eq!(
+        (reading.counted_glyph_atlas_growths, reading.closed_glyph_atlas_growths),
+        (None, None)
+    );
+}

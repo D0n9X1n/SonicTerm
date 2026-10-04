@@ -1079,3 +1079,23 @@ fn startup_records_the_presenter_on_every_host() {
     let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
     assert!(body.contains("presenter_record_for("), "{body}");
 }
+
+#[test]
+fn atlas_readings_join_the_latest_record_of_their_checkpoint_in_attempt_order() {
+    // Each sampling attempt's atlas reading belongs to the checkpoint that attempt sampled, and only to
+    // its latest record, so perf-compare can pair a memory sample with the reading of the same attempt.
+    let reading = |attempt| AtlasReading {
+        attempt,
+        main_window: None,
+        counted_glyph_atlas_growths: None,
+        closed_glyph_atlas_growths: None,
+    };
+    let mut records = vec![
+        CheckpointRecord { index: 0, label: "settled", ..CheckpointRecord::default() },
+        CheckpointRecord { index: 1, label: "end", ..CheckpointRecord::default() },
+    ];
+    attach_atlas_readings(&mut records, vec![(1, reading(1)), (1, reading(2))]);
+    assert!(records[0].atlas_readings.is_empty());
+    let attempts: Vec<u32> = records[1].atlas_readings.iter().map(|found| found.attempt).collect();
+    assert_eq!(attempts, [1, 2]);
+}

@@ -33,10 +33,10 @@ use crate::counters::{CounterTotals, CountersMode};
 use crate::record::{
     attribute_dispatch, bulk_tail_mismatch, echo_target, line_row_near_cursor, missing_wide_tokens,
     planned_rows, presenter_blocked, presenter_record_for, prompt_origin, protocol_rows,
-    retained_text, row_count_mismatch, snapshot_echo, wide_tokens, write_progress, Attribution,
-    CheckpointRecord, DispatchObservation, EchoSnapshot, EchoTarget, LatencySample, Measurements,
-    MonitorInfo, PhaseRecord, PresenterRecord, RunResult, SlowDispatch, SlowDispatches, Status,
-    Throughput, UnattributedReason, CHECKPOINT_MEMORY, CREDITED,
+    retained_text, row_count_mismatch, snapshot_echo, wide_tokens, write_progress, AtlasReading,
+    Attribution, CheckpointRecord, DispatchObservation, EchoSnapshot, EchoTarget, LatencySample,
+    Measurements, MonitorInfo, PhaseRecord, PresenterRecord, RunResult, SlowDispatch,
+    SlowDispatches, Status, Throughput, UnattributedReason, CHECKPOINT_MEMORY, CREDITED,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{
@@ -410,6 +410,16 @@ fn checkpoint_turn(
         // When: the footprint or the sampling is still pending, keep the checkpoint for the next wake.
         *pending = Some(current);
         CheckpointOutcome::Wait
+    }
+}
+
+/// Append each `(checkpoint index, reading)` to the latest record of that checkpoint, in the order the
+/// attempts were taken.
+fn attach_atlas_readings(records: &mut [CheckpointRecord], readings: Vec<(usize, AtlasReading)>) {
+    for (index, reading) in readings {
+        if let Some(record) = records.iter_mut().rev().find(|record| record.index == index) {
+            record.atlas_readings.push(reading);
+        }
     }
 }
 
@@ -2154,13 +2164,20 @@ impl Probe {
             exists: &exists,
         };
         let app = &mut self.app;
+        // Each attempt's atlas reading is taken right after its memory line, with no frame between.
+        let mut readings = Vec::new();
         let outcome = checkpoint_turn(
             &mut self.checkpoint_pending,
             &mut self.checkpoints,
             &site,
             &step,
-            |index, label, attempt| sample_checkpoint_memory(app, index, label, attempt),
+            |index, label, attempt| {
+                let complete = sample_checkpoint_memory(app, index, label, attempt);
+                readings.push((index, crate::counters::atlas_reading(app, attempt)));
+                complete
+            },
         );
+        attach_atlas_readings(&mut self.checkpoints, readings);
         let moves_on = plan_moves_on(&outcome);
         if let CheckpointOutcome::Invalid(reason) = outcome {
             self.invalidate(event_loop, reason);

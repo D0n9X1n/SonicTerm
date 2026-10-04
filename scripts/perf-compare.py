@@ -1902,7 +1902,24 @@ def _checkpoint_ok(point: object) -> bool:
                  or (_is_int(point["frame_texture_bytes"]) and point["frame_texture_bytes"] >= 0))
             and ("sampling" not in point or point["sampling"] in CHECKPOINT_SAMPLING_STATES)
             and ("attempts" not in point or (_is_int(point["attempts"]) and point["attempts"] >= 0))
-            and ("last_attempt_complete" not in point or isinstance(point["last_attempt_complete"], bool)))
+            and ("last_attempt_complete" not in point or isinstance(point["last_attempt_complete"], bool))
+            and ("atlas_readings" not in point
+                 or (isinstance(point["atlas_readings"], list)
+                     and all(map(_atlas_reading_ok, point["atlas_readings"])))))
+
+
+def _atlas_reading_ok(reading: object) -> bool:
+    """One sampling attempt's atlas reading: its attempt, the main window's native label or null, each live
+    window's counted glyph atlas growths by native label or null, and the closed windows' count or null."""
+    if not isinstance(reading, dict) or not _is_int(reading.get("attempt")):
+        return False
+    counted = reading.get("counted_glyph_atlas_growths")
+    closed = reading.get("closed_glyph_atlas_growths")
+    return ((reading.get("main_window") is None or isinstance(reading.get("main_window"), str))
+            and (counted is None or (isinstance(counted, dict)
+                                     and all(isinstance(label, str) and _count_ok(value)
+                                             for label, value in counted.items())))
+            and (closed is None or _count_ok(closed)))
 
 
 # The longest dispatches a phase records with their times; a harness that predates them records none.
@@ -4394,6 +4411,12 @@ GLYPH_ATLAS_ROW_FACTS = (
 )
 
 
+# The per-run native renderer id row each logical renderer carries after its facts: categorical evidence,
+# read by `glyph_atlas_rows` itself rather than through a facts reader.
+NATIVE_ID_FIELD = "renderer_native_id"
+NATIVE_ID_ROW = (NATIVE_ID_FIELD, "id", None, False)
+
+
 def _checkpoint_sample(outcome: RunOutcome, point: Mapping) -> MemorySample | None:
     """A checkpoint's own memory sample by the rules `run_metrics` reads it with, or None when the run has no
     usable one: no hook, no tagged line, a conflicting reading, or a sample older than its freshness time."""
@@ -4408,15 +4431,57 @@ def _checkpoint_sample(outcome: RunOutcome, point: Mapping) -> MemorySample | No
     return reading.sample
 
 
-def _checkpoint_atlases(outcome: RunOutcome) -> list[tuple[Mapping, tuple]]:
-    """Each well-formed checkpoint of a run with its sample's glyph atlas facts; empty facts when it has none."""
+def _checkpoint_atlases(outcome: RunOutcome) -> list[tuple[Mapping, tuple, Mapping | None]]:
+    """Each well-formed checkpoint of a run with its sample's glyph atlas facts (empty when it has none) and the
+    harness's atlas reading taken at the same sampling attempt, or None when the harness recorded none."""
     found = []
     for point in (outcome.result or {}).get("checkpoints") or []:
         if not _checkpoint_ok(point):
             continue
         sample = _checkpoint_sample(outcome, point)
-        found.append((point, sample.glyph_atlases if sample is not None else ()))
+        if sample is None:
+            found.append((point, (), None))
+            continue
+        # The reading belongs to the sample only when both come from the same attempt.
+        reading = next((reading for reading in point.get("atlas_readings") or []
+                        if reading["attempt"] == sample.checkpoint_attempt), None)
+        found.append((point, sample.glyph_atlases, reading))
     return found
+
+
+# A renderer breakdown identity: `role[native label]`.
+_RENDERER_IDENTITY = re.compile(r"([A-Za-z_][\w-]*)\[(.*)\]")
+
+
+def logical_renderers(atlases: Sequence[GlyphAtlasFacts], reading: Mapping | None) -> list[tuple[str, GlyphAtlasFacts]]:
+    """Each renderer's facts under a logical identity that is the same in every run and on both sides.
+
+    A visible renderer's label is its native window id (an object address on macOS, an HWND on Windows), new
+    in every run, so the visible renderer the harness's reading names as its main window is `main`. A warm
+    renderer keeps its pool slot, `warm[slot]`, which is already stable. Any other visible renderer is
+    `visible#k`, numbered in label order, which is stable only while a run has one of them; a run without a
+    reading has no `main`, so its visible renderers are all numbered rather than guessed. Any other role keeps
+    its identity as reported.
+    """
+    main_window = (reading or {}).get("main_window")
+    named, others = [], []
+    for facts in atlases:
+        parsed = _RENDERER_IDENTITY.fullmatch(facts.renderer)
+        if parsed is None or parsed.group(1) != "visible":
+            named.append((facts.renderer, facts))
+        elif main_window is not None and parsed.group(2) == main_window:
+            named.append(("main", facts))
+        else:
+            others.append(facts)
+    others.sort(key=lambda facts: facts.renderer)
+    named.extend((f"visible#{number}", facts) for number, facts in enumerate(others, start=1))
+    return named
+
+
+def _native_label(facts: GlyphAtlasFacts) -> str:
+    """The native label inside a renderer's `role[label]` identity, or the whole identity when it has none."""
+    parsed = _RENDERER_IDENTITY.fullmatch(facts.renderer)
+    return parsed.group(2) if parsed else facts.renderer
 
 
 def _distinct_cell(values: Sequence[object]) -> str:
@@ -4430,28 +4495,32 @@ def _distinct_cell(values: Sequence[object]) -> str:
 
 
 def glyph_atlas_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
-    """Per checkpoint and renderer, each glyph atlas fact on each side, from the checkpoint's memory sample.
+    """Per checkpoint and logical renderer, each glyph atlas fact on each side, from the checkpoint's memory sample.
 
-    A cell shows the value every run reported, or each distinct value with its run count (a categorical fit
+    Rows are keyed by `logical_renderers`, so the same window lines up across runs and sides although its
+    native id differs in each; a `renderer_native_id` row lists those ids per run as evidence. A cell shows the value every run reported, or each distinct value with its run count (a categorical fit
     such as `no_headroom`, `does_not_fit` or `evicted` included), and how many runs had it when not all did. A
     side without the facts, such as a base built before them, reads `n/a`. A numeric fact's change compares the
     sides' medians; a categorical one has none. No row is added when neither side reports facts.
     """
     sides = (base, head)
-    # values[side][(checkpoint label, renderer, field)] = one value per run that reported it
+    # values[side][(checkpoint label, logical renderer, field)] = one value per run that reported it
     values: list[dict[tuple[str, str, str], list[object]]] = [{}, {}]
     order: list[tuple[str, str]] = []
     for side_values, side in zip(values, sides):
         for outcome in side.outcomes:
-            for point, atlases in _checkpoint_atlases(outcome):
-                for facts in atlases:
-                    if (point["label"], facts.renderer) not in order:
-                        order.append((point["label"], facts.renderer))
+            for point, atlases, reading in _checkpoint_atlases(outcome):
+                for renderer, facts in logical_renderers(atlases, reading):
+                    if (point["label"], renderer) not in order:
+                        order.append((point["label"], renderer))
                     for field_name, _unit, read, _numeric in GLYPH_ATLAS_ROW_FACTS:
-                        side_values.setdefault((point["label"], facts.renderer, field_name), []).append(read(facts))
+                        side_values.setdefault((point["label"], renderer, field_name), []).append(read(facts))
+                    # The native id stays as per-run evidence; it never keys a row.
+                    side_values.setdefault((point["label"], renderer, NATIVE_ID_FIELD), []).append(
+                        _native_label(facts))
     rows = []
     for checkpoint_label, renderer in order:
-        for field_name, unit, _read, numeric in GLYPH_ATLAS_ROW_FACTS:
+        for field_name, unit, _read, numeric in (*GLYPH_ATLAS_ROW_FACTS, NATIVE_ID_ROW):
             key = (checkpoint_label, renderer, field_name)
             cells, figures = [], []
             for side, side_values in zip(sides, values):
@@ -4484,43 +4553,95 @@ def _counted_growths_by(outcome: RunOutcome, unix_s: float) -> int | None:
     return counted
 
 
+# A run's reconciliation verdicts, from the one that decides a cell to the one that decides it last.
+RECONCILE_MISMATCH, RECONCILE_INCONCLUSIVE, RECONCILE_CONSISTENT = "mismatch", "inconclusive", "consistent"
+
+
+def _reconcile_run(atlases: Sequence[GlyphAtlasFacts], reading: Mapping | None,
+                   phase_counted: int | None) -> tuple[str, str] | None:
+    """One run's verdict at one checkpoint and the figures behind it; None when it has nothing to compare.
+
+    The comparison is an equality at one boundary: a renderer's snapshot growths count since it was built, and
+    the reading's per-window counted growths, taken in the same sampling attempt, count since its window was
+    created, so each live window's two figures must be equal. Its figures read `logical snapshot/counted`. A
+    warm renderer has no window and draws nothing, so it is not compared. A visible renderer the reading did
+    not count, a counted window the snapshot does not hold, or a run without a per-window reading is
+    inconclusive: the summed figures alone differ by startup growth and closed windows, so neither their
+    equality nor their inequality proves anything, and both are shown. Closed windows' counted growths are
+    listed apart; their renderers are no longer in the snapshot.
+    """
+    if not atlases:
+        return None
+    counted = (reading or {}).get("counted_glyph_atlas_growths")
+    if counted is None:
+        if phase_counted is None:
+            return None
+        snapshot = sum(facts.growths for facts in atlases)
+        return RECONCILE_INCONCLUSIVE, f"snapshot {snapshot}, counted {phase_counted}"
+    verdict = RECONCILE_CONSISTENT
+    figures = []
+    held = set()
+    for renderer, facts in logical_renderers(atlases, reading):
+        if renderer.startswith("warm["):
+            continue
+        native = _native_label(facts)
+        held.add(native)
+        window_counted = counted.get(native)
+        if window_counted is None:
+            # When: the window has no counted figure, nothing the snapshot holds can be checked against it.
+            figures.append(f"{renderer} {facts.growths}/none")
+            verdict = RECONCILE_MISMATCH if verdict == RECONCILE_MISMATCH else RECONCILE_INCONCLUSIVE
+            continue
+        figures.append(f"{renderer} {facts.growths}/{window_counted}")
+        if window_counted != facts.growths:
+            verdict = RECONCILE_MISMATCH
+    for native in sorted(set(counted) - held):
+        figures.append(f"unheld {native} none/{counted[native]}")
+        verdict = RECONCILE_MISMATCH if verdict == RECONCILE_MISMATCH else RECONCILE_INCONCLUSIVE
+    closed = reading.get("closed_glyph_atlas_growths")
+    if closed:
+        figures.append(f"closed {closed}")
+    return verdict, ", ".join(figures)
+
+
 def glyph_atlas_reconciliation_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
     """Counters-table rows reconciling each checkpoint's snapshot growths with the frame counters' growths.
 
-    Per run, the snapshot figure sums `glyph_atlas_growths` over the checkpoint's renderers, each counted since
-    the renderer was built; the counted figure sums `renderer.glyph_atlas_growths` over the phases that ended
-    by the checkpoint. Growth outside the timed phases (startup, untimed actions) reaches only the snapshot, so
-    the figures need not be equal, but every counted growth belongs to a renderer the snapshot holds: a counted
-    figure above the snapshot is a mismatch. A cell lists each run's `snapshot/counted`; a side with nothing to
-    compare reads `n/a`, and no row is added when neither side has anything.
+    Each run's verdict comes from `_reconcile_run`; a cell names the worst verdict across its runs (a mismatch,
+    then an inconclusive run, else consistent), how many runs had it when it is not consistent, and every run's
+    figures separated by `; `. "Consistent" is printed only when every live window's figures are equal. A side
+    with nothing to compare reads `n/a`, and no row is added when neither side has anything.
     """
     sides = (base, head)
-    pairs: list[dict[str, list[tuple[int, int]]]] = [{}, {}]
+    verdicts: list[dict[str, list[tuple[str, str]]]] = [{}, {}]
     order: list[str] = []
-    for side_pairs, side in zip(pairs, sides):
+    for side_verdicts, side in zip(verdicts, sides):
         if side.blocked or side.failed:
             continue
         for outcome in side.outcomes:
-            for point, atlases in _checkpoint_atlases(outcome):
-                counted = _counted_growths_by(outcome, point["unix_s"])
-                if not atlases or counted is None:
+            for point, atlases, reading in _checkpoint_atlases(outcome):
+                found = _reconcile_run(atlases, reading, _counted_growths_by(outcome, point["unix_s"]))
+                if found is None:
                     continue
                 if point["label"] not in order:
                     order.append(point["label"])
-                snapshot = sum(facts.growths for facts in atlases)
-                side_pairs.setdefault(point["label"], []).append((snapshot, counted))
+                side_verdicts.setdefault(point["label"], []).append(found)
     rows = []
     for checkpoint_label in order:
         cells = []
-        for side, side_pairs in zip(sides, pairs):
-            found = side_pairs.get(checkpoint_label)
+        for side, side_verdicts in zip(sides, verdicts):
+            found = side_verdicts.get(checkpoint_label)
             if not found:
                 cells.append("n/a" if side.blocked == COUNTERS_HEAD_ONLY else _missing_cell(side))
                 continue
-            figures = ", ".join(f"{snapshot}/{counted}" for snapshot, counted in found)
-            mismatched = sum(counted > snapshot for snapshot, counted in found)
-            cells.append(f"mismatch in {mismatched} of {len(found)} runs: {figures}" if mismatched
-                         else f"consistent: {figures}")
+            figures = "; ".join(figure for _verdict, figure in found)
+            for verdict in (RECONCILE_MISMATCH, RECONCILE_INCONCLUSIVE):
+                count = sum(run_verdict == verdict for run_verdict, _figure in found)
+                if count:
+                    cells.append(f"{verdict} in {count} of {len(found)} runs: {figures}")
+                    break
+            else:
+                cells.append(f"{RECONCILE_CONSISTENT}: {figures}")
         rows.append([label, checkpoint_label, "glyph_atlas_growths, snapshot/counted", cells[0], cells[1], ""])
     return rows
 
@@ -6093,9 +6214,10 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                          "unit. A change compares a count's medians or a histogram's means. The baseline reads n/a "
                          "when the base does not declare perf-counters, or for a field its contract lacks. "
                          f"{omitted} counter(s) that were 0 on both sides are left out. "
-                         "A glyph_atlas_growths, snapshot/counted row lists each run's growths in the checkpoint's "
-                         "memory snapshot against those its phases counted; growth outside a timed phase reaches "
-                         "only the snapshot, so a counted figure above the snapshot is the mismatch.")
+                         "A glyph_atlas_growths, snapshot/counted row compares, per run and live window, the "
+                         "growths in the checkpoint's memory snapshot with those the window's counters recorded at "
+                         "the same sample; only equal figures are consistent. A run without that per-window "
+                         "reading is inconclusive and shows the snapshot's and its phases' sums.")
         # A run whose frame counts contradict its recorded presenter is named, never passed silently.
         counters_note += "".join(f" Presenter mismatch: {note}." for note in presenter_notes)
     if sys.platform == "win32":

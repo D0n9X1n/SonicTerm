@@ -440,9 +440,14 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   per pane` row: `grid_visible_bytes + grid_history_bytes + grid_alternate_bytes`
   divided by `panes_sampled`.
   When the sample carries glyph atlas facts, each renderer it lists adds six rows
-  under its `role[label]` identity, such as `end main[1] glyph_atlas_dim (px)`:
+  under a logical identity, such as `end main glyph_atlas_dim (px)`:
   `glyph_atlas_dim`, `glyph_atlas_packed_pixels`, `glyph_atlas_fit`,
-  `glyph_atlas_growths`, `glyph_atlas_evictions` and `glyph_atlas_max_tile`. A
+  `glyph_atlas_growths`, `glyph_atlas_evictions` and `glyph_atlas_max_tile`.
+  A visible renderer's breakdown label is its native window id, new in every
+  run, so the one the checkpoint's `atlas_readings` entry names as the main
+  window is `main`; a warm renderer keeps its pool slot, `warm[slot]`; any other
+  visible renderer, or every one in a run without that reading, is `visible#k`
+  in label order. A `renderer_native_id` row lists each run's native id. A
   cell shows the value every run reported, or each distinct value with its run
   count, such as `evicted ×1; no_headroom ×1`. The fit is one of `256`, `512`,
   `1024`, `2048`, `no_headroom`, `does_not_fit` or `evicted`. The change
@@ -480,13 +485,19 @@ head, one row per scenario, phase and non-zero counter;
 - A counter that was 0 in every run on both sides is left out, and the note
   above the table says how many.
 - Each checkpoint whose memory sample has glyph atlas facts adds a
-  `glyph_atlas_growths, snapshot/counted` row. Per run, the snapshot figure sums
-  the renderers' `glyph_atlas_growths`, each counted since its renderer was
-  built. The counted figure sums `renderer.glyph_atlas_growths` over the phases
-  that ended by the checkpoint. Growth outside a timed phase, at startup or in
-  an untimed action, reaches only the snapshot, so the figures need not be
-  equal. A counted figure above the snapshot is a mismatch, and the cell says
-  `mismatch in N of M runs`. A head-only counters set reads `n/a` on the base.
+  `glyph_atlas_growths, snapshot/counted` row. At each memory sampling attempt
+  the harness records, in the checkpoint's `atlas_readings`, the main window's
+  native label, each live window's counted `glyph_atlas_growths` since it was
+  created, and the closed windows' total. Per run and live window, the
+  snapshot's growths (counted since the renderer was built) must equal that
+  window's counted growths from the same attempt, shown as `main 2/2`; any
+  difference is a mismatch. Warm renderers draw nothing and are not compared;
+  closed windows' growths are listed as `closed N`. A visible window without a
+  counted figure, or a run without the reading, is inconclusive and shows the
+  snapshot's sum and its phases' counted sum, since startup growth and closed
+  windows make an inequality between those prove nothing. A cell names the worst
+  verdict, `mismatch in N of M runs`, then `inconclusive in N of M runs`, else
+  `consistent`. A head-only counters set reads `n/a` on the base.
 
 The Counters overhead table, for S2 and S3 only, compares the head's counters
 runs with its timed runs on the timed table's metrics. The two sets run one
