@@ -1,11 +1,13 @@
 //! A fixture's glyph working set, measured through the renderer's own font stacks.
 //!
 //! The helper builds the renderer's body, tab-title and palette-footer stacks with
-//! `renderer_font_stacks`, lays every source the renderer can draw for a text out through the
-//! same chrome layout path, and inserts the grid's ASCII fast-path keys, all into a fixed 2048
-//! atlas. The result is a conservative superset: over-inclusion can only raise the start size.
+//! `renderer_font_stacks`, waits for fallback discovery on every source the renderer can draw for a
+//! text, lays each source out through the same chrome layout path, and inserts the
+//! grid's ASCII fast-path keys, all into a fixed 2048 atlas. Waiting means a cold measurement
+//! holds the fallback faces' CJK and emoji tiles rather than the frame path's tofu. The result is
+//! a conservative superset: over-inclusion can only raise the start size.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use sonicterm_text::glyph_atlas::{FitOutcome, GlyphAtlas, ATLAS_DIM};
@@ -13,7 +15,7 @@ use sonicterm_types::{GlyphKey, GlyphRasterVariant};
 
 use crate::chrome_text::{self, ChromeAttrs};
 use crate::color::ChromeColor;
-use crate::core::{palette_footer_font_size, renderer_font_stacks};
+use crate::core::{palette_footer_font_size, renderer_font_stacks, RendererFontStacks};
 
 /// The working set the renderer could hold for a text at one DPI.
 #[derive(Debug, Clone)]
@@ -26,6 +28,8 @@ pub struct GlyphWorkingSet {
     pub packed_pixels: u64,
     /// Every resident tile's key.
     pub tile_keys: HashSet<GlyphKey>,
+    /// Every resident tile's raster width and height in pixels, by key.
+    pub tile_sizes: HashMap<GlyphKey, [u32; 2]>,
     /// The point size each raster variant was drawn at.
     pub variant_sizes: Vec<(GlyphRasterVariant, f32)>,
 }
@@ -62,7 +66,23 @@ pub fn measure_glyph_working_set(
     dpi: usize,
     font_dirs: &[PathBuf],
 ) -> Option<GlyphWorkingSet> {
-    let stacks = renderer_font_stacks(family, size, dpi, 1.0, font_dirs);
+    measure_with_stacks(
+        texts,
+        chrome_texts,
+        renderer_font_stacks(family, size, dpi, 1.0, font_dirs),
+        size,
+        dpi,
+    )
+}
+
+/// [`measure_glyph_working_set`] over the renderer stacks `stacks`, built for `size` and `dpi`.
+fn measure_with_stacks(
+    texts: &[&str],
+    chrome_texts: &[&str],
+    stacks: RendererFontStacks,
+    size: f32,
+    dpi: usize,
+) -> Option<GlyphWorkingSet> {
     let body = stacks.body?;
     let tab_size = sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size(size);
     let footer_size = palette_footer_font_size(size);
@@ -103,6 +123,11 @@ pub fn measure_glyph_working_set(
         let raster_px = point_size * px_per_pt;
         let mut raster = stack.clone();
         for (bold, italic) in STYLES {
+            // Wait for fallback discovery before the frame-path layout: the stack's loaded face
+            // for this style and size is shared, so the layout below shapes the faces discovery
+            // published instead of notdef, and the atlas holds real tiles rather than tofu. A
+            // failed warm-up leaves the layout to report what the frame path would draw.
+            let _warmed = stack.shape_text_with_style(text, bold, italic);
             let _layout = chrome_text::layout_with_raster_variant(
                 stack,
                 &mut raster,
@@ -127,11 +152,16 @@ pub fn measure_glyph_working_set(
                 atlas.get_or_insert(GlyphKey::new(character, bold, italic), &mut body_raster);
         }
     }
+    let tile_keys = atlas.resident_tile_keys();
     Some(GlyphWorkingSet {
         fit_outcome: atlas.fit_outcome(),
         max_tile_dims: atlas.max_tile_dims(),
         packed_pixels: atlas.packed_pixels(),
-        tile_keys: atlas.resident_tile_keys(),
+        tile_sizes: tile_keys
+            .iter()
+            .filter_map(|key| atlas.get(*key).map(|info| (*key, info.px_size)))
+            .collect(),
+        tile_keys,
         variant_sizes,
     })
 }

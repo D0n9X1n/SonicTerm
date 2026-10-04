@@ -214,74 +214,6 @@ fn a_scale_change_keeps_the_notice_and_its_waker() {
     assert!(!acknowledge_fallback_wake(Some(&stack), Some((notice_id, 1)), notice_id));
 }
 
-/// A primary face lacking é, a locator that answers every fallback request with Rec Mono, and the
-/// temporary directory holding the primary face, removed on drop.
-struct FallbackStack {
-    stack: sonicterm_engine::FontStack,
-    directory: std::path::PathBuf,
-}
-
-impl Drop for FallbackStack {
-    // Lifecycle: dropping `FallbackStack` removes its temporary font `directory`.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.directory);
-    }
-}
-
-/// Answers every fallback request with Rec Mono, which has é.
-struct RecMonoLocator;
-
-impl sonicterm_font::locator::FontLocator for RecMonoLocator {
-    fn load_fonts(
-        &self,
-        _: &[config::FontAttributes],
-        _: &mut std::collections::HashSet<config::FontAttributes>,
-        _: u16,
-    ) -> anyhow::Result<Vec<sonicterm_font::parser::ParsedFont>> {
-        Ok(Vec::new())
-    }
-
-    fn locate_fallback_for_codepoints(
-        &self,
-        _: &[char],
-    ) -> anyhow::Result<Vec<sonicterm_font::parser::ParsedFont>> {
-        use sonicterm_font::locator::{FontDataHandle, FontDataSource, FontOrigin};
-        let handle = FontDataHandle {
-            source: FontDataSource::OnDisk(
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
-            ),
-            index: 0,
-            variation: 0,
-            origin: FontOrigin::BuiltIn,
-            coverage: None,
-        };
-        Ok(vec![sonicterm_font::parser::ParsedFont::from_locator(&handle)?])
-    }
-}
-
-fn fallback_stack(name: &str) -> FallbackStack {
-    let directory =
-        std::env::temp_dir().join(format!("sonicterm-gpu-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
-    std::fs::copy(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../sonicterm-harfbuzz/harfbuzz/src/wasm/sample/c/test.ttf"),
-        directory.join("primary.ttf"),
-    )
-    .unwrap();
-    let stack = sonicterm_engine::FontStack::try_new_with_locator_for_test(
-        "Roboto",
-        vec![directory.clone()],
-        std::sync::Arc::new(RecMonoLocator),
-        14.0,
-        96,
-    )
-    .unwrap();
-    FallbackStack { stack, directory }
-}
-
 /// A one-shot gate: `open` releases every `wait`, which gives up after ten seconds.
 #[derive(Default)]
 struct Latch {
@@ -318,7 +250,7 @@ fn a_mid_frame_merge_lags_until_the_frame_that_applies_its_generation_remeasures
     // frame is due, and that frame applies generation 1 once, bumps the epoch, counts the apply and
     // remeasures the title with é's real advance. The next frame applies nothing.
     let _lock = font_fixture_lock();
-    let fixture = fallback_stack("mid-frame");
+    let fixture = crate::lib_tests::fallback_stack("mid-frame");
     let stack = &fixture.stack;
     let (entered, release) =
         (std::sync::Arc::new(Latch::default()), std::sync::Arc::new(Latch::default()));

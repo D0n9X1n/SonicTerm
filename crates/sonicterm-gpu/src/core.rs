@@ -599,7 +599,7 @@ pub(crate) fn renderer_font_stacks(
 
 /// The renderer's three stacks from `body`: the tab-title and palette-footer views share its
 /// configuration at their own sizes for a `body_size` grid font.
-fn renderer_font_views(
+pub(crate) fn renderer_font_views(
     body: Option<sonicterm_engine::FontStack>,
     body_size: f32,
 ) -> RendererFontStacks {

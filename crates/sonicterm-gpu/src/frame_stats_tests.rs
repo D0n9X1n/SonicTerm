@@ -721,8 +721,13 @@ fn blocking_shape_calls(sources: &[(String, String)]) -> Vec<String> {
 fn no_frame_code_calls_a_shaping_entry_point_that_may_wait() {
     // The renderer shapes and measures only through the frame entry points, which never wait for
     // fallback discovery; the blocking ones stay for explicit callers and tests.
+    // The working-set helper is the one explicit caller: it measures outside any frame and must
+    // wait for fallback faces. It must exist, so a rename cannot silently widen the exemption.
     let mut sources = Vec::new();
     crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
+    let is_measurement = |file: &str| Path::new(file).ends_with("glyph_working_set.rs");
+    assert!(sources.iter().any(|(file, _)| is_measurement(file)), "the helper's file exists");
+    sources.retain(|(file, _)| !is_measurement(file));
     assert_eq!(blocking_shape_calls(&sources), Vec::<String>::new());
 }
 
