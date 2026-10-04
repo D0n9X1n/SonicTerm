@@ -5542,3 +5542,61 @@ fn glyph_atlas_facts_read_a_grown_atlas() {
     assert_eq!((facts.packed_pixels, facts.max_tile), (30 * 40, [30, 40]));
     assert_eq!(facts.fit, atlas.fit_outcome().label());
 }
+
+/// The command-status hash changes only when the drawn badge changes: an inactive running tab
+/// keeps one hash until its badge appears past five seconds, an active running tab (never badged)
+/// keeps one hash throughout, a finished badge changes at its expiry, and an idle tab differs from
+/// a running one so a state change still repaints once.
+#[test]
+fn command_status_hash_follows_only_the_drawn_badge() {
+    use sonicterm_render_model::boundary::ui::tabs::CommandStatus;
+    use std::time::Duration;
+    let started = Instant::now();
+    let running = CommandStatus::Running(started);
+    let at = |seconds: u64| started + Duration::from_secs(seconds);
+    let inactive_early: Vec<u64> =
+        (0..=5).map(|seconds| command_status_hash(&running, at(seconds), false)).collect();
+    assert!(inactive_early.iter().all(|hash| *hash == inactive_early[0]), "{inactive_early:?}");
+    let inactive_late = command_status_hash(&running, at(6), false);
+    assert_ne!(inactive_late, inactive_early[0], "the badge appears past five seconds");
+    assert_eq!(inactive_late, command_status_hash(&running, at(30), false));
+    let active: Vec<u64> =
+        (0..=30).map(|seconds| command_status_hash(&running, at(seconds), true)).collect();
+    assert!(active.iter().all(|hash| *hash == active[0]), "an active tab draws no badge");
+
+    let until = at(5);
+    let done = CommandStatus::Done { exit: Some(0), until };
+    for is_active in [false, true] {
+        assert_eq!(
+            command_status_hash(&done, at(1), is_active),
+            command_status_hash(&done, at(4), is_active)
+        );
+        assert_ne!(
+            command_status_hash(&done, at(4), is_active),
+            command_status_hash(&done, until, is_active),
+            "the finished badge expires at `until`"
+        );
+    }
+
+    let idle = command_status_hash(&CommandStatus::Idle, at(1), true);
+    assert_ne!(idle, command_status_hash(&running, at(1), true), "idle and running differ");
+}
+
+/// The tab-bar hash judges each tab's badge as drawn for its activity: a running active tab
+/// leaves the bar's hash unchanged as seconds pass, so no frame is planned for an invisible tick.
+#[test]
+fn tab_bar_hash_ignores_the_running_seconds_of_an_unbadged_tab() {
+    use sonicterm_render_model::boundary::ui::tabs::{CommandStatus, Tab};
+    use std::time::Duration;
+    let mut tabs = TabBar::new();
+    tabs.push(Tab::new("active"));
+    tabs.push(Tab::new("inactive"));
+    tabs.activate(0);
+    let started = Instant::now();
+    tabs.set_command_status(0, CommandStatus::Running(started));
+    tabs.set_command_status(1, CommandStatus::Running(started));
+    let at = |seconds: u64| started + Duration::from_secs(seconds);
+    let early = tab_bar_hash_with_limits(&tabs, at(1), 240.0, 320.0);
+    assert_eq!(early, tab_bar_hash_with_limits(&tabs, at(4), 240.0, 320.0));
+    assert_ne!(early, tab_bar_hash_with_limits(&tabs, at(6), 240.0, 320.0), "inactive badge");
+}

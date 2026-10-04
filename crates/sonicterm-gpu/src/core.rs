@@ -713,14 +713,15 @@ fn tab_bar_hash_with_limits(
     min_tab_width_px.to_bits().hash(&mut hash);
     max_tab_width_px.to_bits().hash(&mut hash);
     tabs.active_index().hash(&mut hash);
-    for tab in tabs.tabs() {
+    let active_index = tabs.active_index();
+    for (index, tab) in tabs.tabs().iter().enumerate() {
         tab.id.0.hash(&mut hash);
         tab.title.hash(&mut hash);
         // A stored width moves the bar with an unchanged title, as when a held width applies.
         tab.content_width_px().map(f32::to_bits).hash(&mut hash);
         tab.custom_color.hash(&mut hash);
         tab.foreground_privileged.hash(&mut hash);
-        command_status_hash(&tab.command, now).hash(&mut hash);
+        command_status_hash(&tab.command, now, index == active_index).hash(&mut hash);
     }
     hash.finish()
 }
@@ -10103,25 +10104,27 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     runs
 }
 
-/// Stable fingerprint for command badges, including wall-clock buckets that
-/// change when badge visibility can transition without a tab model mutation.
+/// Stable fingerprint of a tab's command chrome: the status kind and the badge drawn for it at
+/// `now` on a tab whose activity is `is_active`. It changes only when the drawn badge appears,
+/// changes or disappears, or when the status kind changes, never on an undrawn elapsed second.
 #[doc(hidden)]
 pub fn command_status_hash(
     status: &sonicterm_render_model::boundary::ui::tabs::CommandStatus,
     now: Instant,
+    is_active: bool,
 ) -> u64 {
-    match status {
-        sonicterm_render_model::boundary::ui::tabs::CommandStatus::Idle => 0,
-        sonicterm_render_model::boundary::ui::tabs::CommandStatus::Running(started_at) => {
-            let elapsed_secs = now.duration_since(*started_at).as_secs().min(5);
-            let badge_visible = u64::from(now.duration_since(*started_at).as_secs() > 5);
-            1 | (elapsed_secs << 32) | (badge_visible << 40)
-        }
-        sonicterm_render_model::boundary::ui::tabs::CommandStatus::Done { exit, until } => {
-            let is_past_expiry = u64::from(now >= *until);
-            2 | (u64::from(exit.unwrap_or(255)) << 8) | (is_past_expiry << 32)
-        }
-    }
+    use sonicterm_render_model::boundary::ui::tabs::CommandStatus;
+    use std::hash::{Hash, Hasher};
+    // The kind keeps Idle and an unbadged running tab apart; `exit` picks the drawn mark.
+    let kind: u8 = match status {
+        CommandStatus::Idle => 0,
+        CommandStatus::Running(_) => 1,
+        CommandStatus::Done { .. } => 2,
+    };
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    kind.hash(&mut hash);
+    status.clone().badge(now, is_active).hash(&mut hash);
+    hash.finish()
 }
 
 /// Compute the per-row selection quad rects (in physical pixels) that the
