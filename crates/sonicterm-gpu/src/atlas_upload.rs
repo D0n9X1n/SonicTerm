@@ -81,10 +81,17 @@ impl UploadLists {
         }
     }
 
-    /// Bytes reserved by both rect lists, reported under `UploadStaging` with the vertex scratch.
+    /// Bytes reserved by both rect lists.
     pub(crate) fn retained_list_bytes(&self) -> usize {
         (self.dirty_rects.capacity() + self.coalesced_rects.capacity())
             * std::mem::size_of::<DirtyRect>()
+    }
+
+    /// Bytes this storage keeps between syncs, reported under `UploadStaging` with the vertex
+    /// scratch: both rect lists plus the staging buffer, which keeps its largest write's capacity
+    /// (at most one whole atlas, since a staged rect never exceeds the atlas it is copied from).
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_list_bytes() + self.scratch.capacity()
     }
 }
 
@@ -278,9 +285,9 @@ impl AtlasUpload {
         })
     }
 
-    /// Bytes reserved by this upload's rect lists.
-    pub(crate) fn retained_list_bytes(&self) -> usize {
-        self.lists.retained_list_bytes()
+    /// Bytes this upload's CPU storage keeps: its rect lists and its staging buffer.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.lists.retained_bytes()
     }
 
     /// Unorm view used by mask and subpixel coverage consumers.

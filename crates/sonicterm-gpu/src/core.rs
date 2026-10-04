@@ -192,6 +192,17 @@ impl FrameOutcome {
     }
 }
 
+/// The renderer's `UploadStaging` part from its `vertex` scratch and its two atlas uploads; a
+/// free function so a headless test sums exactly what the renderer reports.
+pub(crate) fn upload_staging_amount(
+    vertex: ResourceAmount,
+    glyph_upload: &AtlasUpload,
+    image_upload: &AtlasUpload,
+) -> ResourceAmount {
+    let uploads = glyph_upload.retained_bytes() + image_upload.retained_bytes();
+    ResourceAmount { bytes: vertex.bytes + uploads, items: vertex.items }
+}
+
 /// Lend `source` once and decide the exits that need no renderer, in their existing order: an empty
 /// source is `NoPanes`, then a device that no longer accepts work is `Unavailable`; only otherwise does
 /// `assemble` run. The source is dropped before this returns.
@@ -3454,12 +3465,13 @@ impl GpuRenderer {
         GlyphAtlasFacts::of(&self.glyph_atlas)
     }
 
-    /// The `UploadStaging` part: the vertex scratch plus both atlas uploads' rect lists.
+    /// The `UploadStaging` part: the vertex scratch plus both atlas uploads' CPU storage.
     fn upload_staging_retained(&self) -> ResourceAmount {
-        let vertex = self.present_pipeline.vertex_scratch_retained();
-        let lists =
-            self.glyph_upload.retained_list_bytes() + self.image_upload.retained_list_bytes();
-        ResourceAmount { bytes: vertex.bytes + lists, items: vertex.items }
+        upload_staging_amount(
+            self.present_pipeline.vertex_scratch_retained(),
+            &self.glyph_upload,
+            &self.image_upload,
+        )
     }
 
     /// Release one permanently removed pane's cached rows without evicting peers.

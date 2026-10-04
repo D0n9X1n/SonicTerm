@@ -855,8 +855,60 @@ fn envelopes_and_the_staging_report_include_the_rect_lists() {
     let core: String = include_str!("core.rs").split_whitespace().collect();
     assert!(core.contains("vertex_scratch:self.upload_staging_retained(),"));
     let report = core.split_once("fnupload_staging_retained(&self)").unwrap().1;
-    let report = report.split_once("\n").map_or(report, |(head, _)| head);
-    assert!(report.contains("self.glyph_upload.retained_list_bytes()"));
-    assert!(report.contains("self.image_upload.retained_list_bytes()"));
-    assert!(report.contains("bytes:vertex.bytes+lists"));
+    let report = report.split_once("pubfninvalidate_pane_caches").expect("next method").0;
+    let call = "upload_staging_amount(self.present_pipeline.vertex_scratch_retained(),\
+                &self.glyph_upload,&self.image_upload,)";
+    assert!(report.contains(call), "the renderer reports through the tested sum");
+}
+
+/// Bytes `upload` keeps between syncs: both rect lists and the staging buffer each write is
+/// copied through.
+fn upload_retained_bytes(upload: &AtlasUpload) -> usize {
+    (upload.lists.dirty_rects.capacity() + upload.lists.coalesced_rects.capacity())
+        * std::mem::size_of::<DirtyRect>()
+        + upload.lists.scratch.capacity()
+}
+
+/// The renderer's `UploadStaging` part counts every byte its two uploads keep after a real sync,
+/// the staging buffer included: after a 5,000-tile glyph sync and an image sync on a headless
+/// queue, it equals the vertex scratch plus both uploads' lists and staging buffers.
+#[test]
+fn the_staging_part_counts_each_uploads_staging_buffer_after_a_large_sync() {
+    let (device, queue) = headless_device();
+    let pipeline = crate::wezterm_pipeline::WeztermPipeline::new(
+        &device,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        1,
+    );
+    let mut glyphs = GlyphAtlas::growable(sonicterm_text::glyph_atlas::MIN_ATLAS_DIM, ATLAS_DIM);
+    let mut rasterizer = TestTileRasterizer(list_tile(8, false, [0, 0, 0, 200]));
+    for index in 0..5000 {
+        glyphs.get_or_insert(list_key(index), &mut rasterizer);
+    }
+    let mut images = GlyphAtlas::new(64, 64);
+    images.get_or_insert(list_key(0), &mut TestTileRasterizer(list_tile(16, true, [9, 8, 7, 255])));
+    let mut glyph_upload = AtlasUpload::new_sized(
+        &device,
+        glyphs.width(),
+        glyphs.height(),
+        pipeline.glyph_bind_group_layout(),
+        AtlasBindingKind::Glyph,
+    );
+    let mut image_upload = AtlasUpload::new(
+        &device,
+        &images,
+        pipeline.image_bind_group_layout(),
+        AtlasBindingKind::Image,
+    );
+    let glyph_stats = glyph_upload.sync(&queue, &mut glyphs);
+    let _image_stats = image_upload.sync(&queue, &mut images);
+    assert_eq!(glyph_stats.dirty_rects, 5000, "the large sync ran");
+    assert!(glyph_upload.lists.scratch.capacity() > 0, "precondition: staging is retained");
+
+    let vertex = pipeline.vertex_scratch_retained();
+    let reported = crate::core::upload_staging_amount(vertex, &glyph_upload, &image_upload);
+    let kept = upload_retained_bytes(&glyph_upload) + upload_retained_bytes(&image_upload);
+    assert_eq!(reported.bytes, vertex.bytes + kept, "every retained upload byte is reported");
+    let staging_envelope = envelope_bytes(sonicterm_types::ResourceClass::UploadStaging);
+    assert!(kept <= staging_envelope, "the uploads stay inside the UploadStaging envelope");
 }
