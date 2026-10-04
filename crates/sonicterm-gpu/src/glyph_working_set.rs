@@ -233,7 +233,8 @@ const STYLES: [(bool, bool); 4] = [(false, false), (true, false), (false, true),
 /// - body (`Normal`): the texts, printable ASCII, `…`, the chrome symbols, and each non-ASCII
 ///   character in text and emoji presentation, in the four style faces, shaped and as ASCII
 ///   fast-path keys;
-/// - tab titles (`TabTitle`, body + 1): printable ASCII, `…`, the chrome symbols and the titles;
+/// - tab titles (`TabTitle`, body + 1): printable ASCII, `…`, the chrome symbols, every program
+///   icon a title can carry (`tab_title::PROGRAM_ICONS`) and the titles;
 /// - palette footer (`PaletteFooter`, max(body − 1, 1)): printable ASCII, `…` and the chrome
 ///   symbols.
 pub fn measure_glyph_working_set(
@@ -279,6 +280,8 @@ fn measure_with_stacks(
     let mut tab_text = printable_ascii();
     tab_text.push('…');
     tab_text.push_str(CHROME_SYMBOLS);
+    // Every icon a tab title can carry, not only those the fixture's processes would select.
+    tab_text.extend(sonicterm_render_model::boundary::ui::tab_title::PROGRAM_ICONS);
     tab_text.push_str(&chrome_texts.concat());
     let mut footer_text = printable_ascii();
     footer_text.push('…');

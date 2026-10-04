@@ -550,3 +550,31 @@ fn process_matching_is_exact_and_does_not_parse_paths_arguments_or_titles() {
     assert_eq!(icon_for_process(Some("node.exe"), false), '\u{f489}');
     assert_eq!(format_tab_title(0, None, Some("unknown"), Some("node")), "#1 \u{f489} node");
 }
+
+/// Every glyph `icon_for_process` can return is listed in `PROGRAM_ICONS`, which the glyph
+/// working-set helper measures in the tab-title strike: each `'\u{…}'` literal in the mapping's
+/// source, every approved family's icon and both fallbacks. A new match arm whose glyph is not
+/// listed fails here instead of leaving a resident tab-title tile the helper never measured.
+#[test]
+fn program_icons_list_every_glyph_the_mapping_returns() {
+    let source = include_str!("tab_title.rs");
+    let start = source.find("fn icon_for_process(").expect("the mapping");
+    let end = start + source[start..].find("\n}\n").expect("the mapping's end");
+    let mapped: std::collections::BTreeSet<char> = source[start..end]
+        .split("'\\u{")
+        .skip(1)
+        .map(|rest| {
+            let hex = rest.split('}').next().expect("a closing brace");
+            char::from_u32(u32::from_str_radix(hex, 16).expect("hex")).expect("a scalar value")
+        })
+        .collect();
+    let listed: std::collections::BTreeSet<char> = PROGRAM_ICONS.iter().copied().collect();
+    assert_eq!(listed.len(), PROGRAM_ICONS.len(), "no icon is listed twice");
+    assert_eq!(mapped, listed, "the mapping's glyphs and PROGRAM_ICONS differ");
+    for family in PROCESS_FAMILIES {
+        assert!(listed.contains(&family.icon), "{} is not listed", family.glyph);
+    }
+    for fallback in [icon_for_process(None, true), icon_for_process(None, false)] {
+        assert!(listed.contains(&fallback), "fallback {fallback:?} is not listed");
+    }
+}

@@ -389,3 +389,42 @@ fn a_resident_colour_tile_reports_its_alpha_census() {
     assert!(colour_tile_alpha(&atlas, 'a').is_none(), "a coverage tile is not a colour tile");
     assert!(colour_tile_alpha(&atlas, 'z').is_none(), "no tile at all");
 }
+
+/// A tab draws its program icon in the tab-title strike even when no fixture title holds it (the
+/// generic shell glyph U+F489 when a pane reports no process or directory), so the helper's set
+/// must hold every icon the tab-title mapping can return, as a real glyph at scale 1 and 2.
+#[test]
+fn the_tab_title_set_holds_every_program_icon_at_both_scales() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for dpi in [72, 144] {
+        let set = measure_glyph_working_set(
+            &["ls"],
+            &["shell"],
+            "Rec Mono St.Helens",
+            14.0,
+            dpi,
+            &packaged_fonts(),
+        )
+        .expect("the packaged family loads");
+        let tab_title_real = |icon: char| {
+            set.tile_keys.iter().any(|key| {
+                key.ch == icon
+                    && key.raster_variant == GlyphRasterVariant::TabTitle
+                    && key.glyph_id != 0
+            })
+        };
+        assert!(tab_title_real('\u{F489}'), "the generic shell icon at {dpi} dpi");
+        let absent: Vec<char> = sonicterm_render_model::boundary::ui::tab_title::PROGRAM_ICONS
+            .iter()
+            .copied()
+            .filter(|icon| {
+                !set.tile_keys.iter().any(|key| {
+                    key.ch == *icon && key.raster_variant == GlyphRasterVariant::TabTitle
+                })
+            })
+            .collect();
+        assert!(absent.is_empty(), "icons never measured at {dpi} dpi: {absent:?}");
+    }
+}
