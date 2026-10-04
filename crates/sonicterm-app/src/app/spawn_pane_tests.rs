@@ -1175,17 +1175,22 @@ fn a_reset_and_set_in_one_batch_flushes_once_and_holds_again() {
     assert_eq!(sends.len(), 2);
 }
 
-/// The release event is sent only after the batch is published: the sender sees the advanced
-/// output generation and the batch's host side effect (an OSC 133 command marker), and the event
-/// loop's visible-output filter then requests exactly one frame for it.
+/// The release event is sent only after the batch is published: when the sender runs, the
+/// generation has advanced and the batch's decoded image is already installed. Servicing the event
+/// then advances the window's `Output` cause, and no other cause, through the visible-output filter.
 #[test]
 fn release_is_sent_after_the_batch_generation_is_published() {
-    use crate::app::{output_event::OutputEvent, redraw::FrameSettlement};
+    use crate::app::{
+        output_event::OutputEvent,
+        redraw::{FrameSettlement, RedrawCause},
+    };
     let mut app = App::new(
         sonicterm_cfg::theme::Theme::default(),
         sonicterm_cfg::config::Config::default(),
         sonicterm_cfg::keymap::Keymap::default(),
-    );
+    )
+    .with_capture_staging_pool(CaptureStagingPool::new())
+    .with_inline_media_pool(crate::app::media::InlineMediaPool::new());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
     let pane_id = app.windows[&main].tab_states[0].active_pane;
@@ -1193,49 +1198,68 @@ fn release_is_sent_after_the_batch_generation_is_published() {
     *pane.redraw_target.lock() = Some(main);
     let handles = PaneVtHandles::from_pane_state(pane);
     let mut flush = OutputFlush::new(pane_id, &handles);
+    let base = test_base();
+    let decode = |media: &MediaEvent| {
+        Some(InlineImage {
+            id: 1,
+            row: media.row,
+            col: media.col,
+            width: 1,
+            height: 1,
+            bgra: Arc::from([1, 2, 3, 255]),
+        })
+    };
     let mut queued = Vec::new();
     let deliver = |handles: &PaneVtHandles, queued: &mut Vec<(u64, usize)>| {
         send_output_redraw(&handles.redraw_target, &handles.output_outstanding, None, |_| {
             queued.push((
                 handles.output_generation.load(Ordering::Acquire),
-                handles.command_events.lock().len(),
+                handles.inline_images.lock().len(),
             ));
             true
         });
     };
 
     // A previous batch has been flushed, serviced and presented, so its generation is settled.
-    flush.receive(5, Instant::now());
-    process_pane_vt_batch_and_publish(
+    flush.receive(5, base);
+    publish_pane_vt_batch_with(
         &handles,
         b"first",
         &mut None,
         &mut flush.sync_latch,
-        None,
+        decode,
+        |_| {},
+        || base,
         |_| {},
     );
     deliver(&handles, &mut queued);
-    app.service_output_event(OutputEvent::Pane { window_id: main, pane_id }, Instant::now());
-    let snapshot = app.snapshot_window_redraw(main).unwrap();
-    app.finish_window_redraw(main, &snapshot, FrameSettlement::Presented, Instant::now());
+    app.service_output_event(OutputEvent::Pane { window_id: main, pane_id }, base);
+    let snapshot = app.snapshot_window_redraw_at(main, base).unwrap();
+    app.finish_window_redraw(main, &snapshot, FrameSettlement::Presented, base);
     queued.clear();
 
-    let update = b"\x1b[?2026h\x1b]133;C\x07paint\x1b[?2026l";
-    let now = Instant::now();
-    flush.receive(update.len(), now);
-    process_pane_vt_batch_and_publish(
+    let update = b"\x1b[?2026h\x1b_Gf=100,a=T;image\x1b\\paint\x1b[?2026l";
+    let at = base + Duration::from_millis(5);
+    flush.receive(update.len(), at);
+    publish_pane_vt_batch_with(
         &handles,
         update,
         &mut None,
         &mut flush.sync_latch,
-        None,
+        decode,
+        |_| {},
+        || at,
         |_| {},
     );
-    flush.after_batch(&handles, now, || deliver(&handles, &mut queued));
-    assert_eq!(queued, [(2, 1)], "sent once, after the generation and the side effect");
-    let before = crate::app::window_state::window_redraw_requests();
-    app.service_output_event(OutputEvent::Pane { window_id: main, pane_id }, Instant::now());
-    assert_eq!(crate::app::window_state::window_redraw_requests() - before, 1);
+    flush.after_batch(&handles, at, || deliver(&handles, &mut queued));
+    assert_eq!(queued, [(2, 1)], "sent once, after the generation and the decoded image");
+    let causes = |app: &App| {
+        let redraw = &app.windows[&main].redraw;
+        (redraw.cause_generation(RedrawCause::Output), redraw.cause_generation(RedrawCause::Chrome))
+    };
+    let (output_before, chrome_before) = causes(&app);
+    app.service_output_event(OutputEvent::Pane { window_id: main, pane_id }, at);
+    assert_eq!(causes(&app), (output_before + 1, chrome_before), "the Output route, not Chrome");
 }
 
 /// The parser sections a counting worker has timed so far.
