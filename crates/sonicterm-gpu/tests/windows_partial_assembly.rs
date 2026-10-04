@@ -89,20 +89,39 @@ fn host_has_no_adapter() -> bool {
     pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty()
 }
 
-/// Pixel geometry the cases share: the whole surface as the pane, the cell size and grid size.
+/// Pixel geometry the cases share: the whole surface as the pane, its text grid's origin (the
+/// grid is bottom-aligned, so it starts below the pane's top), the cell size, the planner's
+/// vertical ink pad and the grid size.
 #[derive(Clone, Copy)]
 struct Layout {
     pane: PixelRect,
+    grid_x: f32,
+    grid_y: f32,
     cell_w: f32,
     cell_h: f32,
+    ink_pad: f32,
     cols: u16,
     rows: u16,
 }
 
 impl Layout {
-    /// The top of viewport row `row` in surface pixels, for a pane whose grid starts at `grid_y`.
+    /// The top of viewport row `row` in surface pixels.
     fn row_top(&self, row: u16) -> f32 {
-        self.pane.y as f32 + f32::from(row) * self.cell_h
+        self.grid_y + f32::from(row) * self.cell_h
+    }
+
+    /// The left edge of column `col` in surface pixels.
+    fn col_left(&self, col: u16) -> f32 {
+        self.grid_x + f32::from(col) * self.cell_w
+    }
+
+    /// The top and bottom of row `row`'s ink-padded damage strip, rounded outward as the planner
+    /// rounds them.
+    fn strip(&self, row: u16) -> (f32, f32) {
+        (
+            (self.row_top(row) - self.ink_pad).floor(),
+            (self.row_top(row) + self.cell_h + self.ink_pad).ceil(),
+        )
     }
 
     /// Every cell of one pane of this layout.
@@ -231,14 +250,31 @@ fn wgpu_renderer(active: &ActiveEventLoop) -> Result<(Arc<Window>, GpuRenderer),
     Ok((window, renderer))
 }
 
-/// The whole surface as one pane, and the grid it holds.
+/// The whole surface as one pane, the grid it holds and where that grid draws. With line height 1
+/// the cell height is the font's integer raster height, and the ink pad is that height rounded up.
 fn layout(renderer: &GpuRenderer, window: &Window) -> Layout {
     let size = window.inner_size();
     let (cell_w, cell_h) = renderer.cell_size();
     let pane = PixelRect { x: 0, y: 0, w: size.width, h: size.height };
-    let cols = ((pane.w as f32 / cell_w).floor() as u16).max(1);
-    let rows = ((pane.h as f32 / cell_h).floor() as u16).max(1);
-    Layout { pane, cell_w, cell_h, cols, rows }
+    let padding = [
+        renderer.padding_left_px(),
+        renderer.padding_right_px(),
+        renderer.padding_top_px(),
+        renderer.padding_bottom_px(),
+    ];
+    let cols = (((pane.w as f32 - padding[0] - padding[1]) / cell_w).floor() as u16).max(1);
+    let rows = (((pane.h as f32 - padding[2] - padding[3]) / cell_h).floor() as u16).max(1);
+    let geometry = sonicterm_render_model::pane_content_geometry(pane, padding, cell_h, rows);
+    Layout {
+        pane,
+        grid_x: geometry.grid.x,
+        grid_y: geometry.grid.y,
+        cell_w,
+        cell_h,
+        ink_pad: cell_h.ceil(),
+        cols,
+        rows,
+    }
 }
 
 /// Write `text` from `(row, col)`.
@@ -466,8 +502,8 @@ fn pixel_parity(
         ("tall glyph from the row below", EDIT_ROW + 1, f32::from(EDIT_ROW) - 0.5),
     ] {
         let rect_px = (
-            3.0 * layout.cell_w,
-            layout.pane.y as f32 + top_row * layout.cell_h,
+            layout.col_left(3),
+            layout.grid_y + top_row * layout.cell_h,
             layout.cell_w,
             2.5 * layout.cell_h,
         );
@@ -648,7 +684,7 @@ fn overhanging_records(
         pane_id: PANE_ID,
         slot: tall_slot,
         rect_px: (
-            3.0 * layout.cell_w,
+            layout.col_left(3),
             layout.row_top(tall_slot),
             layout.cell_w,
             4.5 * layout.cell_h,
@@ -674,21 +710,54 @@ fn overhanging_records(
 /// emit, so the frame is reassembled `Full` in the same frame, counted as one fallback and one
 /// full frame, and equals a full repaint. Hiding it again emits the rows the previous recolor
 /// reached, so no fallback is needed.
+///
+/// Before presenting, the geometry is checked: the cursor cell covers at least the recolorer's
+/// 20% of the glyph, and the glyph reaches a dense row whose padded strip misses the cursor rows'
+/// strips and whose record misses the cursor cell, so only the post-assembly check can catch it.
 fn post_assembly_fallback(
     renderer: &mut GpuRenderer,
     layout: &Layout,
     _active: &ActiveEventLoop,
 ) -> Result<(), String> {
-    let cursor_left = f32::from(CURSOR_COL) * layout.cell_w;
-    let cursor_bottom = layout.row_top(CURSOR_ROW) + layout.cell_h;
+    let cursor_left = layout.col_left(CURSOR_COL);
+    let cursor_top = layout.row_top(CURSOR_ROW);
+    let cursor_bottom = cursor_top + layout.cell_h;
     let tall_h = 4.5 * layout.cell_h;
+    let glyph_top = cursor_bottom - tall_h;
+    let covered = (layout.cell_w * layout.cell_h) / (layout.cell_w * tall_h);
+    check(covered >= 0.20, &format!("the cursor covers {covered} of the glyph, at least 20%"))?;
+    // The cursor toggle damages the cursor row's padded strip; the row three above it is the
+    // nearest whose strip ends at or above that strip's top while its cell meets the glyph.
+    let (damage_top, _) = layout.strip(CURSOR_ROW);
+    let reached = CURSOR_ROW - 3;
+    let (_, reached_strip_bottom) = layout.strip(reached);
+    check(
+        reached_strip_bottom <= damage_top
+            && glyph_top < layout.row_top(reached) + layout.cell_h
+            && reached != EDIT_ROW,
+        &format!(
+            "row {reached} ({}..{reached_strip_bottom}) misses the cursor strip from {damage_top} \
+             and meets the glyph from {glyph_top}",
+            layout.strip(reached).0
+        ),
+    )?;
     renderer.__inject_test_glyph(Some((
-        (cursor_left, cursor_bottom - tall_h, layout.cell_w, tall_h),
+        (cursor_left, glyph_top, layout.cell_w, tall_h),
         INJECTED_COLOR,
     )));
     let mut scene = single(layout);
     scene.grid().goto(CURSOR_ROW, CURSOR_COL);
     baseline(renderer, &mut scene)?;
+    let record = renderer.__test_row_ink(PANE_ID, reached).ok_or("the reached row's record")?;
+    check(
+        (record.y as f32) < cursor_top
+            && record.bottom() as f32 > glyph_top
+            && record.bottom() as f32 <= damage_top,
+        &format!(
+            "row {reached}'s record {record:?} meets the glyph from {glyph_top} and misses the \
+             cursor strip from {damage_top}"
+        ),
+    )?;
     scene.cursor_visible = true;
     narrow_matches_full(renderer, &mut scene, "recolor reaching a skipped row", Expect::Fallback)?;
     scene.cursor_visible = false;
