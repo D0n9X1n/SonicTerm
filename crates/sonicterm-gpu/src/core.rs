@@ -4952,7 +4952,10 @@ impl GpuRenderer {
             }
         };
         let assembled = match settle_without_renderer(assembled) {
-            Ok(outcome) => return outcome,
+            Ok(outcome) => {
+                // When: `settle_without_renderer` settled an empty source, return it with no receipts.
+                return outcome;
+            }
             Err(assembled) => assembled,
         };
         let outcome = match assembled {

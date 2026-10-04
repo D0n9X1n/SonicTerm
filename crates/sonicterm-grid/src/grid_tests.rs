@@ -2181,7 +2181,7 @@ fn check_dirty_writer_pin(checkout: &str) {
 /// The dirty-bit writers stay closed on an LF and on a CRLF checkout, as Windows CI checks it out.
 #[test]
 fn dirty_bits_are_set_only_by_writers_that_advance_the_generation() {
-    let lf = include_str!("grid.rs").replace("\r\n", "\n");
-    check_dirty_writer_pin(&lf);
-    check_dirty_writer_pin(&lf.replace('\n', "\r\n"));
+    let lf_source = include_str!("grid.rs").replace("\r\n", "\n");
+    check_dirty_writer_pin(&lf_source);
+    check_dirty_writer_pin(&lf_source.replace('\n', "\r\n"));
 }
