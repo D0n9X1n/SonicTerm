@@ -1642,3 +1642,22 @@ fn display_link_counts_join_the_window_record_after_stream_clock_exempt() {
         assert_eq!(idle.count(name), Some(0), "{name}");
     }
 }
+
+#[test]
+fn damage_waste_joins_the_renderer_record_after_damaged_frames() {
+    // The harness and perf-compare read the union-rect waste count by name, beside its denominator.
+    // A line omits zero counts, so the neighbours are non-zero to show the order.
+    use sonicterm_gpu::frame_stats::FrameStats;
+    let mut stats = FrameStats::ZERO;
+    stats.damaged_frames = 3;
+    stats.damage_waste_permille_sum = 37;
+    stats.software_frames = 1;
+    let record = WindowFrameCounters::default().record(Some(stats), 0);
+    assert_eq!(record.count("damage_waste_permille_sum"), Some(37));
+    let fields = record.line_fields();
+    let damaged = fields.find("damaged_frames=3").expect("damaged_frames field");
+    let waste =
+        fields.find("damage_waste_permille_sum=37").expect("damage_waste_permille_sum field");
+    let software = fields.find("software_frames=1").expect("software_frames field");
+    assert!(damaged < waste && waste < software, "{fields}");
+}

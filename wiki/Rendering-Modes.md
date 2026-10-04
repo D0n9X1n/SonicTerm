@@ -394,10 +394,20 @@ scrolled out of view, presents nothing on either path: the plan is `Noop` with
 empty damage and acknowledges no dirt. The rows stay dirty until a frame that
 shows them, which is a whole-surface `Full` because scrolling changes the
 viewport. While an overlay is active (IME preedit, search, palette,
-notification, link preview, drag chip, or focus flash), such a frame keeps its
-`Full`, because a preedit follows the live cursor and the frame key does not
-carry the cursor position. A revision change with no dirty rows is not covered
-by this rule.
+notification, link preview, drag chip, or focus flash) in the old or new key, any
+change to the frame key repaints the whole surface instead, because a preedit
+follows the live cursor, while the frame key records only the drawn cursor cell,
+which is absent when the cursor is hidden, the window unfocused, the pane
+read-only or the view scrolled back. A
+revision change with no dirty live row and no other damage, such as one from
+`set_autowrap`, also plans `Noop` on both paths.
+
+Cursor, focus, tab-band, selection and scrollbar changes damage only their own
+areas ([Rendering and Fonts](Rendering-and-Fonts)). That narrow damage takes
+effect only where the wgpu retained path draws: macOS, and Windows or Linux
+through wgpu. The degraded path repaints the whole surface for any of these
+changes, and the Windows GDI presenter composes the whole frame without reading
+damage.
 
 ### Diagnostics
 

@@ -388,6 +388,7 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `index_bytes` | 字节 | 写入索引缓冲区的字节数：首帧以及缓冲区增长后的首帧写入整个索引模式，其余帧为 0 |
 | `damage_permille_sum` | 千分比 | 每帧损伤区域占表面比例之和；除以 `damaged_frames` 得到平均值 |
 | `damaged_frames` | 次数 | 记录了损伤区域的帧 |
+| `damage_waste_permille_sum` | 千分比 | 每帧合并矩形占表面的比例减去其各部分实际覆盖的比例之和；除以 `damaged_frames` 得到平均浪费 |
 | `software_frames` | 次数 | 软件呈现器绘制的帧，即启用软件渲染降级的 Windows |
 | `gpu_frames` | 次数 | 通过 wgpu 绘制的帧，包括 macOS 与 Linux 上降级时的帧 |
 | `row_cache_hits` | 次数 | 命中的行字形缓存查询 |

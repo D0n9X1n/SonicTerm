@@ -9,6 +9,9 @@ fn facts(degraded: bool) -> FrameFacts {
         vertical_ink_pad: 0.0,
         scrollbar_mode: ScrollbarMode::Auto,
         degraded,
+        tab_bar_top: Some(140.0),
+        scale: 1.0,
+        previous_recolor: RecolorRecord::default(),
     }
 }
 
@@ -337,15 +340,15 @@ fn compact_copy_identity_covers_every_drawn_and_owned_field() {
     }
 }
 
-/// Every window-level presentation discriminator rejects the old key without requiring a grid mutation.
+/// Every window-level field without a narrow damage class rejects the old key and repaints the
+/// whole surface without requiring a grid mutation. Narrow-class fields are covered by their own
+/// tests (cursor, focus, tab band, selection).
 #[test]
 fn window_identity_mutations_require_full_repaint() {
     let baseline = FramePlan::build(facts(false), [pane(7, 1)], None);
     let changes: Vec<fn(&mut WindowIdentity)> = vec![
-        |w| w.selection = Some(Selection::new(0, 0)),
         |w| w.copy_mode = Some(CopyModeIdentity::from(&CopyModeState::new_at((0, 0)))),
         |w| w.quick_select_hint_count = 1,
-        |w| w.cursor_visible = true,
         |w| w.tab = 3,
         |w| w.search_hash = 1,
         |w| w.palette_hash = 1,
@@ -353,17 +356,10 @@ fn window_identity_mutations_require_full_repaint() {
         |w| w.notification_hash = 1,
         |w| w.width += 1,
         |w| w.height += 1,
-        |w| w.tab_hash = 1,
         |w| w.viewport_top_abs = Some(9),
-        |w| w.cursor_shape = 1,
-        |w| w.cursor_blink = true,
-        |w| w.window_focused = true,
         |w| w.pane_focus_flash_bucket = 1,
-        |w| w.hover_tab = 1,
-        |w| w.close_override = 1,
         |w| w.broadcast_participants_hash = 1,
         |w| w.inline_media_hash = 1,
-        |w| w.process_privileged = true,
         |w| w.subpixel_aa = SubpixelAaMode::Rgb,
         |w| w.background[3] = 0.5_f64.to_bits(),
         |w| w.style_rev = 1,
@@ -466,29 +462,36 @@ fn planned_clips_and_background_bounds_use_actual_pane_surface_intersection() {
 }
 
 /// A revision-only change with no visible damage is a distinct Noop exit, not
-/// an unchanged frame; recording its key must never acknowledge its revision.
+/// an unchanged frame; recording its key must never acknowledge its revision. The degraded
+/// path always planned it so; the hardware path does too (A7), on a live view as on a scrolled one.
 #[test]
 fn changed_revision_without_damage_is_noop_and_never_acknowledged() {
-    let baseline = FramePlan::build(facts(true), [pane(7, 1)], None);
-    let noop = FramePlan::build(facts(true), [pane(7, 2)], Some(&baseline.key));
-    assert!(!noop.unchanged);
-    assert_eq!(noop.mode, RenderMode::Noop);
-    assert_ne!(noop.key, baseline.key);
-    assert!(!noop.acknowledges(0, 7, 2));
+    for (degraded, input) in [(true, pane as fn(u64, u64) -> PaneMetadata), (false, live_pane)] {
+        let baseline = FramePlan::build(facts(degraded), [input(7, 1)], None);
+        let noop = FramePlan::build(facts(degraded), [input(7, 2)], Some(&baseline.key));
+        assert!(!noop.unchanged);
+        assert_eq!(noop.mode, RenderMode::Noop, "degraded={degraded}");
+        assert_ne!(noop.key, baseline.key);
+        assert_eq!(noop.key.panes[0].revision, 2, "the key records the new revision");
+        assert!(!noop.acknowledges(0, 7, 2));
+    }
 }
 
-/// On the hardware path, a revision bump with no dirty rows on a scrolled-back pane is not
-/// offscreen-only dirt: the offscreen-only rule needs a non-empty live dirty set, so this
-/// frame keeps its whole-surface Full repaint rather than becoming a Noop.
+/// On the hardware path, a revision bump with no dirty row anywhere (the grid's `set_autowrap`)
+/// and no class or hover change draws nothing new: it is the A7 `Noop` with empty damage, its key
+/// recorded and nothing acknowledged, as the degraded path already planned it. This is not the
+/// offscreen-only rule, which needs non-empty live dirt.
 #[test]
-fn hardware_revision_change_without_dirty_rows_stays_a_whole_surface_full() {
+fn hardware_revision_change_without_dirty_rows_is_an_a7_noop() {
     let baseline = FramePlan::build(facts(false), [pane(7, 1)], None);
     let bumped = FramePlan::build(facts(false), [pane(7, 2)], Some(&baseline.key));
     assert!(bumped.panes[0].view_top_abs < bumped.panes[0].scrollback_len, "scrolled back");
     assert!(bumped.panes[0].dirty_live_rows.is_empty());
     assert!(!bumped.unchanged);
-    assert_eq!(bumped.mode, RenderMode::Full);
-    assert_eq!(bumped.damage, PixelRect { x: 0, y: 0, w: 240, h: 160 });
+    assert_eq!(bumped.mode, RenderMode::Noop);
+    assert_eq!(bumped.damage, PixelRect { x: 0, y: 0, w: 0, h: 0 });
+    assert_eq!(bumped.key.panes[0].revision, 2);
+    assert!(!bumped.acknowledges(0, 7, 2));
 }
 
 /// A renderer that clears its retained frame key, as a device rebuild does, draws
@@ -791,4 +794,708 @@ fn a_newer_dirty_generation_never_takes_the_unchanged_shortcut() {
         assert_eq!(plan.mode, RenderMode::Noop, "degraded={degraded}");
         assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 0, h: 0 });
     }
+}
+
+/// The tab bar band `facts` draws: full width from y=140 to the 160 px surface bottom.
+const TAB_BAND: PixelRect = PixelRect { x: 0, y: 140, w: 240, h: 20 };
+
+/// The ink-padded damage of viewport slot `slot` of the default 100 px pane (zero ink pad).
+fn row_rect(slot: i32) -> PixelRect {
+    PixelRect { x: 0, y: 2 + 20 * slot, w: 100, h: 20 }
+}
+
+/// A drawn cursor on pane 7 at viewport slot `slot`, column 2.
+fn cursor_at(slot: u16) -> Option<CursorCell> {
+    Some(CursorCell { pane_id: 7, slot, col: 2, span: 1 })
+}
+
+/// Hardware facts with a visible, focused cursor at slot 1 of pane 7.
+fn cursor_facts() -> FrameFacts {
+    let mut cursor = facts(false);
+    cursor.window.cursor_visible = true;
+    cursor.window.window_focused = true;
+    cursor.window.cursor_cell = cursor_at(1);
+    cursor
+}
+
+/// Plan `after` against a presented `before` frame of the same pane input.
+fn transition(before: FrameFacts, after: FrameFacts, input: PaneMetadata) -> FramePlan {
+    let first = FramePlan::build(before, [input.clone()], None);
+    FramePlan::build(after, [input], Some(&first.key))
+}
+
+/// Cursor visibility, shape and blink changes damage only the drawn cursor row on the hardware
+/// path, plus the previous frame's recolor bounds when they reach past that row.
+#[test]
+fn cursor_class_changes_damage_only_the_cursor_row() {
+    let changes: [fn(&mut FrameFacts); 3] = [
+        |after| {
+            after.window.cursor_visible = false;
+            after.window.cursor_cell = None;
+        },
+        |after| after.window.cursor_shape = 1,
+        |after| after.window.cursor_blink = true,
+    ];
+    for change in changes {
+        let mut after = cursor_facts();
+        change(&mut after);
+        let plan = transition(cursor_facts(), after.clone(), live_pane(7, 1));
+        assert_eq!(plan.mode, RenderMode::Full);
+        assert!(plan.change.cursor && !plan.change.full);
+        assert_eq!(plan.damage, row_rect(1));
+
+        // A recolored glyph presented last frame reaching above the row is restored too.
+        after.previous_recolor = RecolorRecord {
+            bounds: RecolorBounds::Rect(PixelRect { x: 50, y: 10, w: 10, h: 40 }),
+            hash: 9,
+        };
+        let plan = transition(cursor_facts(), after, live_pane(7, 1));
+        assert_eq!(plan.damage, PixelRect { x: 0, y: 10, w: 100, h: 40 });
+    }
+}
+
+/// A drawn cursor that moves with no grid dirt damages its old and new rows, and the parts
+/// record both rows rather than the gap between them.
+#[test]
+fn cursor_cell_move_damages_old_and_new_rows() {
+    let mut after = cursor_facts();
+    after.window.cursor_cell = cursor_at(3);
+    let plan = transition(cursor_facts(), after, live_pane(7, 1));
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, row_rect(1).union(row_rect(3)));
+    assert_eq!(sonicterm_render_model::covered_area(&plan.damage_parts), 2 * 100 * 20);
+}
+
+/// Focus damages the cursor rows and the tab band (its active marker and title); with the tab
+/// bar hidden it damages the cursor rows only.
+#[test]
+fn focus_change_damages_cursor_rows_and_the_tab_band() {
+    let mut blurred = cursor_facts();
+    blurred.window.window_focused = false;
+    blurred.window.cursor_cell = None;
+    let plan = transition(cursor_facts(), blurred.clone(), live_pane(7, 1));
+    assert!(plan.change.focus && !plan.change.full);
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, row_rect(1).union(TAB_BAND));
+
+    let mut hidden_before = cursor_facts();
+    hidden_before.tab_bar_top = None;
+    blurred.tab_bar_top = None;
+    let plan = transition(hidden_before, blurred, live_pane(7, 1));
+    assert_eq!(plan.damage, row_rect(1));
+}
+
+/// Each tab-bar field damages only the tab band.
+#[test]
+fn tab_band_fields_damage_only_the_tab_band() {
+    let changes: [fn(&mut WindowIdentity); 4] = [
+        |window| window.tab_hash = 1,
+        |window| window.hover_tab = 1,
+        |window| window.close_override = 1,
+        |window| window.process_privileged = true,
+    ];
+    for change in changes {
+        let mut after = facts(false);
+        change(&mut after.window);
+        let plan = transition(facts(false), after, pane(7, 1));
+        assert!(plan.change.tab_band && !plan.change.full);
+        assert_eq!(plan.mode, RenderMode::Full);
+        assert_eq!(plan.damage, TAB_BAND);
+    }
+}
+
+/// Facts whose pane padding leaves 12 px on the right, at `scale`.
+fn padded_facts(scale: f32) -> FrameFacts {
+    FrameFacts { padding: [2.0, 12.0, 2.0, 2.0], scale, ..facts(false) }
+}
+
+/// Plan a scrollbar opacity change from `alpha_before` to `alpha_after` on `input`.
+fn scrollbar_fade(
+    frame_facts: FrameFacts,
+    mut input: PaneMetadata,
+    alpha_before: f32,
+    alpha_after: f32,
+) -> FramePlan {
+    input.scrollbar_alpha = alpha_before;
+    let first = FramePlan::build(frame_facts.clone(), [input.clone()], None);
+    input.scrollbar_alpha = alpha_after;
+    FramePlan::build(frame_facts, [input], Some(&first.key))
+}
+
+/// A scrollbar opacity step damages exactly the drawn track: inside the padded chrome (x=80-88
+/// for a 100 px pane with 12 px right padding), 16 px wide at scale 2, clamped to a narrow
+/// pane's chrome, still damaged when fading below the emit floor, and nothing in mode `Never`.
+#[test]
+fn scrollbar_fade_damages_exactly_the_drawn_track() {
+    let plan = scrollbar_fade(padded_facts(1.0), pane(7, 1), 1.0, 0.5);
+    assert!(plan.change.scrollbar && !plan.change.full);
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, PixelRect { x: 80, y: 2, w: 8, h: 80 });
+
+    let plan = scrollbar_fade(padded_facts(2.0), pane(7, 1), 1.0, 0.5);
+    assert_eq!(plan.damage, PixelRect { x: 72, y: 2, w: 16, h: 80 });
+
+    // A 10 px chrome (the one-cell floor) is narrower than the 16 px bar: the track is the chrome.
+    let mut narrow = pane(7, 1);
+    narrow.rect.w = 10;
+    let plan = scrollbar_fade(padded_facts(2.0), narrow, 1.0, 0.5);
+    assert_eq!(plan.damage, PixelRect { x: 2, y: 2, w: 10, h: 80 });
+
+    let floor = sonicterm_render_model::boundary::ui::scrollbar::ALPHA_EMIT_FLOOR;
+    let plan = scrollbar_fade(padded_facts(1.0), pane(7, 1), 0.5, floor / 2.0);
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, PixelRect { x: 80, y: 2, w: 8, h: 80 });
+
+    let never = FrameFacts { scrollbar_mode: ScrollbarMode::Never, ..padded_facts(1.0) };
+    let plan = scrollbar_fade(never, pane(7, 1), 1.0, 0.5);
+    assert!(plan.unchanged);
+    assert_eq!(plan.mode, RenderMode::Noop);
+}
+
+/// Extending a selection by one row damages only the rows whose selection quads differ: the
+/// old and new end rows, never the unchanged middle rows, and needs no grid dirt.
+#[test]
+fn selection_extension_damages_only_the_changed_end_rows() {
+    // A live view: slot `s` draws absolute row 20 + s.
+    let mut before = facts(false);
+    let mut selection = Selection::new(21, 0);
+    selection.extend(22, 3);
+    before.window.selection = Some(selection);
+    let mut after = before.clone();
+    selection.extend(23, 1);
+    after.window.selection = Some(selection);
+    let plan = transition(before.clone(), after, live_pane(7, 1));
+    assert!(plan.change.selection && !plan.change.full);
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, row_rect(2).union(row_rect(3)));
+
+    let mut same_row = before.clone();
+    let mut widened = Selection::new(21, 0);
+    widened.extend(22, 5);
+    same_row.window.selection = Some(widened);
+    let plan = transition(before, same_row, live_pane(7, 1));
+    assert_eq!(plan.damage, row_rect(2));
+}
+
+/// A hover-only change on a clean grid, even with a revision bump, is repainted: it plans a
+/// `Full` frame damaging the hovered row, never the A7 `Noop`, because composed damage is not empty.
+#[test]
+fn hover_only_change_on_a_clean_grid_is_repainted() {
+    let mut hovering = facts(false);
+    hovering.window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, false);
+    for revision in [1, 2] {
+        let first = FramePlan::build(facts(false), [live_pane(7, 1)], None);
+        let plan = FramePlan::build(hovering.clone(), [live_pane(7, revision)], Some(&first.key));
+        assert!(plan.panes[0].dirty_live_rows.is_empty());
+        assert_eq!(plan.mode, RenderMode::Full, "revision {revision}");
+        assert_eq!(plan.damage, row_rect(1));
+    }
+}
+
+/// A scrolled-back edit (history 100, view top 97, live row 5 at slot 8) in the same frame as a
+/// cursor toggle damages slot 8's strip and invalidates absolute row 105; the cursor is not drawn
+/// in a scrolled-back view, so its class adds no row.
+#[test]
+fn scrolled_back_edit_with_a_cursor_toggle_keeps_its_slot_and_invalidation() {
+    let mut before = tall_facts(false);
+    before.window.cursor_visible = true;
+    before.window.window_focused = true;
+    before.tab_bar_top = None;
+    let mut after = before.clone();
+    after.window.cursor_visible = false;
+    let first = FramePlan::build(before, [scrolled_back_pane()], None);
+    let mut edited = scrolled_back_pane();
+    edited.revision = 2;
+    edited.dirty_rows = vec![5];
+    let plan = FramePlan::build(after.clone(), [edited], Some(&first.key));
+    assert!(plan.change.cursor && !plan.change.full);
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, slot_rect(&after, &plan.panes[0], 8));
+    let invalidated: Vec<u64> = plan.panes[0]
+        .dirty_live_rows
+        .iter()
+        .map(|&row| plan.panes[0].scrollback_len + row as u64)
+        .collect();
+    assert_eq!(invalidated, [105]);
+}
+
+/// A 10-row pane with 100 history rows viewed from row 90, so live row 5 (slot 15) is offscreen.
+fn offscreen_dirt_pane() -> PaneMetadata {
+    PaneMetadata {
+        rect: PixelRect { x: 0, y: 0, w: 100, h: 204 },
+        rows: 10,
+        scrollback_len: 100,
+        viewport_top_abs: Some(90),
+        ..pane(7, 1)
+    }
+}
+
+/// Offscreen-only dirt stays the existing `Noop` with empty damage; adding a tab-bar change
+/// makes the frame `Full` damaging only the tab band, with the dirt still invalidated (row 105).
+#[test]
+fn offscreen_dirt_with_and_without_a_tab_band_change() {
+    let with_band = FrameFacts { tab_bar_top: Some(580.0), ..tall_facts(false) };
+    let first = FramePlan::build(with_band.clone(), [offscreen_dirt_pane()], None);
+    let mut edited = offscreen_dirt_pane();
+    edited.revision = 2;
+    edited.dirty_rows = vec![5];
+    let plan = FramePlan::build(with_band.clone(), [edited.clone()], Some(&first.key));
+    assert_eq!(plan.mode, RenderMode::Noop);
+    assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 0, h: 0 });
+    assert!(!plan.acknowledges(0, 7, 2));
+
+    let mut retitled = with_band;
+    retitled.window.tab_hash = 1;
+    let plan = FramePlan::build(retitled, [edited], Some(&first.key));
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, PixelRect { x: 0, y: 580, w: 240, h: 20 });
+    assert_eq!(plan.panes[0].scrollback_len + plan.panes[0].dirty_live_rows[0] as u64, 105);
+}
+
+/// A tab-band and a cursor change in one frame damage one rectangle, their union, while the
+/// parts cover only the two areas, which is what the waste counter measures.
+#[test]
+fn two_classes_union_into_one_rect_with_measured_parts() {
+    let mut after = cursor_facts();
+    after.window.cursor_visible = false;
+    after.window.cursor_cell = None;
+    after.window.tab_hash = 1;
+    let plan = transition(cursor_facts(), after, live_pane(7, 1));
+    assert_eq!(plan.damage, row_rect(1).union(TAB_BAND));
+    let covered = sonicterm_render_model::covered_area(&plan.damage_parts);
+    assert_eq!(covered, 100 * 20 + 240 * 20);
+    assert!(plan.damage_parts.iter().all(|part| part.intersect(plan.damage) == Some(*part)));
+}
+
+/// Conservative rules keep the whole surface: an active overlay with a class change, a degraded
+/// plan with a class change, and the first frame. An alternate-screen pane's class damage is
+/// the whole pane, not the cursor row.
+#[test]
+fn conservative_rules_keep_whole_surface_or_whole_pane_damage() {
+    let surface = PixelRect { x: 0, y: 0, w: 240, h: 160 };
+    let mut overlay_before = facts(false);
+    overlay_before.window.overlay_active = true;
+    overlay_before.window.palette_hash = 1;
+    let mut overlay_after = overlay_before.clone();
+    overlay_after.window.tab_hash = 1;
+    let plan = transition(overlay_before, overlay_after, pane(7, 1));
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, surface);
+
+    let mut degraded_after = facts(true);
+    degraded_after.window.tab_hash = 1;
+    let plan = transition(facts(true), degraded_after, pane(7, 1));
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, surface);
+
+    // A class change whose area is not drawn (the tab bar is hidden) still repaints the whole
+    // surface on the degraded path; the hardware path draws nothing new and plans the A7 Noop.
+    let hidden_bar = |degraded| FrameFacts { tab_bar_top: None, ..facts(degraded) };
+    let mut degraded_retitled = hidden_bar(true);
+    degraded_retitled.window.tab_hash = 1;
+    let plan = transition(hidden_bar(true), degraded_retitled, pane(7, 1));
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, surface);
+    let mut hardware_retitled = hidden_bar(false);
+    hardware_retitled.window.tab_hash = 1;
+    let plan = transition(hidden_bar(false), hardware_retitled, pane(7, 1));
+    assert_eq!(plan.mode, RenderMode::Noop);
+    assert!(!plan.acknowledges(0, 7, 1));
+
+    let alternate = PaneMetadata { is_alt: true, ..live_pane(7, 1) };
+    let mut toggled = cursor_facts();
+    toggled.window.cursor_visible = false;
+    toggled.window.cursor_cell = None;
+    let plan = transition(cursor_facts(), toggled, alternate);
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 100, h: 84 });
+
+    let first = FramePlan::build(cursor_facts(), [live_pane(7, 1)], None);
+    assert_eq!(first.damage, surface);
+    // A first frame that also carries dirty rows repaints the whole surface, not only those rows.
+    let dirty_first = PaneMetadata { dirty_rows: vec![1], ..live_pane(7, 1) };
+    let first = FramePlan::build(cursor_facts(), [dirty_first], None);
+    assert_eq!(first.mode, RenderMode::Full);
+    assert_eq!(first.damage, surface);
+}
+
+/// Every window field is classified: each narrow field sets exactly its class, and every other
+/// field (but hover, which has its own row path) is `full`.
+#[test]
+fn each_window_field_has_exactly_its_class() {
+    let narrow = |class: fn(&mut ChangeClass)| {
+        let mut expected = ChangeClass::default();
+        class(&mut expected);
+        expected
+    };
+    let full = ChangeClass { full: true, ..ChangeClass::default() };
+    let cases: Vec<(fn(&mut WindowIdentity), ChangeClass)> = vec![
+        (
+            |window| window.selection = Some(Selection::new(0, 0)),
+            narrow(|class| class.selection = true),
+        ),
+        (|window| window.cursor_visible = true, narrow(|class| class.cursor = true)),
+        (|window| window.cursor_shape = 1, narrow(|class| class.cursor = true)),
+        (|window| window.cursor_blink = true, narrow(|class| class.cursor = true)),
+        (|window| window.cursor_cell = cursor_at(0), narrow(|class| class.cursor = true)),
+        (|window| window.window_focused = true, narrow(|class| class.focus = true)),
+        (|window| window.tab_hash = 1, narrow(|class| class.tab_band = true)),
+        (|window| window.hover_tab = 1, narrow(|class| class.tab_band = true)),
+        (|window| window.close_override = 1, narrow(|class| class.tab_band = true)),
+        (|window| window.process_privileged = true, narrow(|class| class.tab_band = true)),
+        (
+            |window| window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, false),
+            ChangeClass::default(),
+        ),
+        (
+            |window| {
+                window.copy_mode = Some(CopyModeIdentity::from(&CopyModeState::new_at((0, 0))))
+            },
+            full,
+        ),
+        (|window| window.quick_select_hint_count = 1, full),
+        (|window| window.tab = 3, full),
+        (|window| window.search_hash = 1, full),
+        (|window| window.palette_hash = 1, full),
+        (|window| window.ime_hash = 1, full),
+        (|window| window.notification_hash = 1, full),
+        (|window| window.width += 1, full),
+        (|window| window.height += 1, full),
+        (|window| window.viewport_top_abs = Some(9), full),
+        (|window| window.pane_focus_flash_bucket = 1, full),
+        (|window| window.broadcast_participants_hash = 1, full),
+        (|window| window.inline_media_hash = 1, full),
+        (|window| window.subpixel_aa = SubpixelAaMode::Rgb, full),
+        (|window| window.background[3] = 1, full),
+        (|window| window.style_rev = 1, full),
+        (|window| window.renderer_hash = 1, full),
+        (|window| window.overlay_active = true, full),
+    ];
+    let baseline = facts(false).window;
+    for (index, (change, expected)) in cases.into_iter().enumerate() {
+        let mut changed = baseline.clone();
+        change(&mut changed);
+        assert_eq!(changed.classify(&baseline), expected, "case {index}");
+    }
+    assert_eq!(baseline.classify(&baseline), ChangeClass::default());
+}
+
+/// A pane's scrollbar bucket alone is the `scrollbar` class, revision and dirty generation are
+/// dirt (no class), and every other pane field is `full`.
+#[test]
+fn each_pane_field_has_exactly_its_class() {
+    let baseline = FramePlan::build(facts(false), [pane(7, 1)], None).key.panes[0];
+    let full = ChangeClass { full: true, ..ChangeClass::default() };
+    let cases: Vec<(fn(&mut PaneIdentity), ChangeClass)> = vec![
+        (
+            |pane| pane.scrollbar_bucket = 9,
+            ChangeClass { scrollbar: true, ..ChangeClass::default() },
+        ),
+        (|pane| pane.revision += 1, ChangeClass::default()),
+        (|pane| pane.dirty_generation += 1, ChangeClass::default()),
+        (|pane| pane.id += 1, full),
+        (|pane| pane.rect.x += 1, full),
+        (|pane| pane.cols += 1, full),
+        (|pane| pane.rows += 1, full),
+        (|pane| pane.scrollback_len += 1, full),
+        (|pane| pane.viewport_top_abs = None, full),
+        (|pane| pane.view_top_abs += 1, full),
+        (|pane| pane.is_active = false, full),
+        (|pane| pane.is_alt = true, full),
+    ];
+    for (index, (change, expected)) in cases.into_iter().enumerate() {
+        let mut changed = baseline;
+        change(&mut changed);
+        assert_eq!(changed.classify(&baseline), expected, "case {index}");
+    }
+}
+
+/// Compile-time exhaustiveness: these destructures name every identity field without `..`, so a
+/// new field fails to compile here until it is classified.
+#[test]
+fn identity_destructures_name_every_field() {
+    let WindowIdentity {
+        selection: _,
+        copy_mode: _,
+        quick_select_hint_count: _,
+        cursor_visible: _,
+        tab: _,
+        search_hash: _,
+        palette_hash: _,
+        ime_hash: _,
+        notification_hash: _,
+        width: _,
+        height: _,
+        tab_hash: _,
+        viewport_top_abs: _,
+        cursor_shape: _,
+        cursor_blink: _,
+        window_focused: _,
+        pane_focus_flash_bucket: _,
+        hover_tab: _,
+        close_override: _,
+        broadcast_participants_hash: _,
+        inline_media_hash: _,
+        hovered_url_cells: _,
+        process_privileged: _,
+        subpixel_aa: _,
+        background: _,
+        style_rev: _,
+        renderer_hash: _,
+        overlay_active: _,
+        cursor_cell: _,
+    } = WindowIdentity::default();
+    let PaneIdentity {
+        id: _,
+        revision: _,
+        dirty_generation: _,
+        rect: _,
+        cols: _,
+        rows: _,
+        scrollback_len: _,
+        viewport_top_abs: _,
+        view_top_abs: _,
+        is_active: _,
+        is_alt: _,
+        scrollbar_bucket: _,
+    } = FramePlan::build(facts(false), [pane(7, 1)], None).key.panes[0];
+}
+
+/// Source scan: both `classify` bodies destructure without a rest pattern, so the compiler, not
+/// a reviewer, rejects an unclassified field. Line endings are normalized before scanning.
+#[test]
+fn classify_bodies_use_no_rest_pattern() {
+    let source = include_str!("frame_plan.rs").replace("\r\n", "\n");
+    let mut bodies = 0;
+    for (offset, _) in source.match_indices("fn classify(") {
+        let open = offset + source[offset..].find('{').expect("a body");
+        let mut depth = 0usize;
+        let mut close = open;
+        for (index, character) in source[open..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = open + index;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &source[open..=close];
+        assert!(!body.contains(".."), "a classify body uses `..`:\n{body}");
+        bodies += 1;
+    }
+    assert_eq!(bodies, 2, "WindowIdentity::classify and PaneIdentity::classify");
+}
+
+/// Facts for a 24-row live pane with a visible, focused cursor at slot 5 (y=102..122).
+fn tall_cursor_facts() -> FrameFacts {
+    let mut cursor = tall_facts(false);
+    cursor.tab_bar_top = None;
+    cursor.window.cursor_visible = true;
+    cursor.window.window_focused = true;
+    cursor.window.cursor_cell = cursor_at(5);
+    cursor
+}
+
+/// The 24-row live pane `tall_cursor_facts` draws its cursor in.
+fn tall_live_pane() -> PaneMetadata {
+    PaneMetadata { viewport_top_abs: None, ..scrolled_back_pane() }
+}
+
+/// A recolor record over `rect`.
+fn recolored(rect: PixelRect, hash: u64) -> RecolorRecord {
+    RecolorRecord { bounds: RecolorBounds::Rect(rect), hash }
+}
+
+/// The tall glyph a block cursor at slot 5 recolors, reaching y=72 above the cursor row.
+const TALL_GLYPH: PixelRect = PixelRect { x: 50, y: 72, w: 10, h: 40 };
+/// A glyph exactly under the slot-5 cursor cell.
+const SHORT_GLYPH: PixelRect = PixelRect { x: 50, y: 102, w: 10, h: 20 };
+
+/// Recolor damage in the planner: a cursor toggle restores the previous record's tall glyph
+/// (y=72); an `Unbounded` record damages the active pane's clip; without a cursor or focus class
+/// an unchanged record adds nothing; a changed record adds both old and new bounds, including
+/// `Rect` to `Empty` (the old) and `Empty` to `Rect` (the new).
+#[test]
+fn recolor_bounds_widen_cursor_and_changed_record_damage() {
+    let mut toggled = tall_cursor_facts();
+    toggled.window.cursor_visible = false;
+    toggled.window.cursor_cell = None;
+    toggled.previous_recolor = recolored(TALL_GLYPH, 1);
+    let plan = transition(tall_cursor_facts(), toggled.clone(), tall_live_pane());
+    assert!(plan.damage.y <= 72 && plan.damage.bottom() >= 122, "{:?}", plan.damage);
+
+    toggled.previous_recolor = RecolorRecord { bounds: RecolorBounds::Unbounded, hash: 1 };
+    let plan = transition(tall_cursor_facts(), toggled, tall_live_pane());
+    assert_eq!(Some(plan.damage), plan.panes[0].full_clip);
+
+    // A dirty row elsewhere, no cursor or focus class: only a changed record widens.
+    let dirty_frame = || {
+        let first = FramePlan::build(tall_cursor_facts(), [tall_live_pane()], None);
+        let mut edited = tall_live_pane();
+        edited.revision = 2;
+        edited.dirty_rows = vec![15];
+        FramePlan::build(tall_cursor_facts(), [edited], Some(&first.key))
+    };
+    let row_damage = dirty_frame().damage;
+    assert!(!dirty_frame().change.any_class());
+
+    let mut unchanged = dirty_frame();
+    unchanged.widen_for_recolor(recolored(TALL_GLYPH, 1), recolored(TALL_GLYPH, 1));
+    assert_eq!(unchanged.damage, row_damage, "an unchanged record adds nothing");
+
+    let mut shrunk = dirty_frame();
+    shrunk.widen_for_recolor(recolored(TALL_GLYPH, 1), recolored(SHORT_GLYPH, 2));
+    assert_eq!(shrunk.damage, row_damage.union(TALL_GLYPH).union(SHORT_GLYPH));
+    assert!(shrunk.damage_parts.contains(&TALL_GLYPH));
+
+    let mut removed = dirty_frame();
+    removed.widen_for_recolor(recolored(TALL_GLYPH, 1), RecolorRecord::default());
+    assert_eq!(removed.damage, row_damage.union(TALL_GLYPH));
+
+    let mut appeared = dirty_frame();
+    appeared.widen_for_recolor(RecolorRecord::default(), recolored(TALL_GLYPH, 1));
+    assert_eq!(appeared.damage, row_damage.union(TALL_GLYPH));
+
+    // With the cursor class set, the new bounds join the damage even when the record is unchanged.
+    let mut shape = tall_cursor_facts();
+    shape.window.cursor_shape = 1;
+    shape.previous_recolor = recolored(TALL_GLYPH, 1);
+    let mut plan = transition(tall_cursor_facts(), shape, tall_live_pane());
+    plan.widen_for_recolor(recolored(TALL_GLYPH, 1), recolored(TALL_GLYPH, 1));
+    assert!(plan.damage.y <= 72);
+}
+
+/// Coverage contract while assembly stays whole-frame: every mode that presents emits every
+/// visible row, so an unchanged row whose tall ink the cursor recolors is always in the batches
+/// and the post-assembly widening covers it. The match has no wildcard arm, so a partial mode
+/// fails to compile here until it carries its own ink-coverage rule.
+#[test]
+fn every_presenting_mode_emits_every_visible_row() {
+    for mode in [RenderMode::Full, RenderMode::Noop] {
+        match mode {
+            RenderMode::Full => assert!(emits_every_visible_row(mode)),
+            RenderMode::Noop => assert!(!emits_every_visible_row(mode)),
+        }
+    }
+    // The tall glyph sits in an unchanged row whose padded strip misses the cursor row.
+    let mut toggled = tall_cursor_facts();
+    toggled.window.cursor_shape = 1;
+    let mut plan = transition(tall_cursor_facts(), toggled, tall_live_pane());
+    assert!(plan.damage.y > 72, "the row damage alone misses the tall glyph");
+    assert!(emits_every_visible_row(plan.mode));
+    plan.widen_for_recolor(RecolorRecord::default(), recolored(TALL_GLYPH, 1));
+    assert!(plan.damage.y <= 72);
+}
+
+/// While an overlay is active on either side, any change to the frame key repaints the whole
+/// surface on both paths, not only a class change: an overlay such as a preedit draws at the
+/// live cursor, which the key omits, so a revision-only, dirty-generation-only or hover-only
+/// change can move it. An unchanged key still skips.
+#[test]
+fn any_key_change_under_an_active_overlay_damages_the_whole_surface() {
+    let surface = PixelRect { x: 0, y: 0, w: 240, h: 160 };
+    for degraded in [false, true] {
+        let mut composing = facts(degraded);
+        composing.window.ime_hash = 0xFEED;
+        composing.window.overlay_active = true;
+        let first = FramePlan::build(composing.clone(), [live_pane(7, 1)], None);
+
+        let revised = PaneMetadata { dirty_rows: vec![1], ..live_pane(7, 2) };
+        let plan = FramePlan::build(composing.clone(), [revised], Some(&first.key));
+        assert_eq!((plan.mode, plan.damage), (RenderMode::Full, surface), "revision, {degraded}");
+
+        let marked = PaneMetadata { dirty_generation: 1, dirty_rows: vec![1], ..live_pane(7, 1) };
+        let plan = FramePlan::build(composing.clone(), [marked], Some(&first.key));
+        assert_eq!((plan.mode, plan.damage), (RenderMode::Full, surface), "generation, {degraded}");
+
+        let mut hovering = composing.clone();
+        hovering.window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, false);
+        let plan = FramePlan::build(hovering, [live_pane(7, 1)], Some(&first.key));
+        assert_eq!((plan.mode, plan.damage), (RenderMode::Full, surface), "hover, {degraded}");
+
+        let plan = FramePlan::build(composing, [live_pane(7, 1)], Some(&first.key));
+        assert!(plan.unchanged);
+        assert_eq!(plan.mode, RenderMode::Noop, "unchanged, {degraded}");
+    }
+}
+
+/// Building dirty-row damage allocates nothing per dirty slot: each primary slot is damaged
+/// from a one-element iterator, not a collected `Vec`, so a plan with counters off pays no
+/// per-row allocation for the waste parts. Line endings are normalized before scanning.
+#[test]
+fn dirty_slot_damage_allocates_no_vector_per_slot() {
+    let source = include_str!("frame_plan.rs").replace("\r\n", "\n");
+    let build = source.split_once("    pub(crate) fn build(").expect("FramePlan::build exists").1;
+    let build = &build[..build.find("\n    }\n").expect("build ends")];
+    assert!(!build.contains("vec![slot]"), "a Vec is built per dirty slot");
+    assert!(!build.contains("Vec<Vec<u16>>"), "dirty slots are regrouped into vectors");
+}
+
+/// Tab-title ink can reach above the padded tab band: a title glyph drawn at y=100..180 over a
+/// band starting at y=140. Each case passes only through the widening it names: a focus change
+/// with no drawn cursor and identical tall ink, a tab color change (it reaches the key through
+/// `tab_hash`) with identical tall ink, and changed ink under a dirty-row frame with no class,
+/// whose damage is exactly the row strip and both sides' ink. Unchanged ink with no class adds
+/// nothing, and unknown ink damages the whole surface.
+#[test]
+fn tab_title_ink_above_the_band_is_damaged_on_a_tab_band_or_focus_change() {
+    let surface = PixelRect { x: 0, y: 0, w: 240, h: 160 };
+    let tall = RecolorBounds::Rect(PixelRect { x: 20, y: 100, w: 10, h: 80 });
+    let short_rect = PixelRect { x: 20, y: 142, w: 10, h: 12 };
+    let short = RecolorBounds::Rect(short_rect);
+    // The tall ink clipped to the 160 px surface, unioned with the full-width band.
+    let band_with_tall = PixelRect { x: 0, y: 100, w: 240, h: 60 };
+
+    // Focus with no drawn cursor: the band alone is planned, and only the focus widening adds
+    // the unchanged tall ink above it.
+    let focused = FrameFacts {
+        window: WindowIdentity { window_focused: true, ..facts(false).window },
+        ..facts(false)
+    };
+    let unfocused = FrameFacts {
+        window: WindowIdentity { window_focused: false, ..focused.window.clone() },
+        ..focused.clone()
+    };
+    let mut plan = transition(focused, unfocused, live_pane(7, 1));
+    assert!(plan.change.focus && !plan.change.cursor);
+    assert_eq!(plan.damage, TAB_BAND);
+    plan.widen_for_tab_ink(tall, tall);
+    assert_eq!(plan.damage, band_with_tall, "focus repaints the unchanged title ink");
+
+    // A tab color change keeps the title's ink where it was; the tab-band widening repaints it.
+    let colored = |tab_hash| FrameFacts {
+        window: WindowIdentity { tab_hash, ..facts(false).window },
+        ..facts(false)
+    };
+    let mut plan = transition(colored(1), colored(2), live_pane(7, 1));
+    assert!(plan.change.tab_band);
+    assert_eq!(plan.damage, TAB_BAND);
+    plan.widen_for_tab_ink(tall, tall);
+    assert_eq!(plan.damage, band_with_tall, "a recolored title repaints its unchanged ink");
+
+    // Changed ink with no class: a revision with a dirty row whose strip misses the overhang.
+    let first = FramePlan::build(facts(false), [live_pane(7, 1)], None);
+    let dirty_frame = || {
+        let dirty = PaneMetadata { dirty_rows: vec![3], ..live_pane(7, 2) };
+        FramePlan::build(facts(false), [dirty], Some(&first.key))
+    };
+    let mut unchanged_ink = dirty_frame();
+    assert_eq!(unchanged_ink.mode, RenderMode::Full);
+    assert_eq!(unchanged_ink.change, ChangeClass::default(), "no narrow or full class is set");
+    assert_eq!(unchanged_ink.damage, row_rect(3));
+    unchanged_ink.widen_for_tab_ink(short, short);
+    assert_eq!(unchanged_ink.damage, row_rect(3), "unchanged ink with no class adds nothing");
+    let mut plan = dirty_frame();
+    plan.widen_for_tab_ink(tall, short);
+    let tall_clipped = PixelRect { x: 20, y: 100, w: 10, h: 60 };
+    assert_eq!(plan.damage, row_rect(3).union(tall_clipped).union(short_rect));
+
+    let mut plan = transition(colored(1), colored(2), live_pane(7, 1));
+    plan.widen_for_tab_ink(RecolorBounds::Unbounded, short);
+    assert_eq!(plan.damage, surface);
 }

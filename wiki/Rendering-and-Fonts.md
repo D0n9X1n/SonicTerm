@@ -648,7 +648,7 @@ them, and the row caches key on selection overlap and row position. Pointer focu
 and splitter drags complete their topology change with `TopologyDirt::ResizeOnly`:
 a grid whose size changed is dirty on every row, a moved pane forces a full frame,
 and an unchanged pane keeps its rows. Tab activation, reorder and transfer keep
-window-wide dirt.
+window-wide dirt. A window focus change adds no grid dirt either.
 
 ```mermaid
 flowchart TD
@@ -691,6 +691,58 @@ A scissor limits redraw to the damage rectangle. The renderer’s
 submit and present. The surface format is fixed to
 `TextureFormat::Bgra8UnormSrgb`; colors are converted to linear values before
 shader use so the sRGB target performs the only gamma encoding.
+
+When the frame key changes, the planner classifies every changed field rather
+than repainting the whole surface. `WindowIdentity::classify` and
+`PaneIdentity::classify` destructure every field, so a new field does not
+compile until it has a class.
+
+| Class | Fields | Damage |
+| --- | --- | --- |
+| cursor | `cursor_visible`, `cursor_shape`, `cursor_blink`, `cursor_cell` | the old and new drawn-cursor rows, ink-padded, plus the last presented cursor recolor bounds |
+| focus | `window_focused` | the cursor damage and the tab band |
+| tab band | `tab_hash`, `hover_tab`, `close_override`, `process_privileged` | the tab band, padded upward by one native font-cell height, plus the last presented and the current tab-title glyph ink; nothing while the bar is hidden |
+| selection | `selection` | the active pane's rows whose selection quads differ |
+| scrollbar | a pane's `scrollbar_bucket` alone | the drawn scrollbar track, from the geometry the draw uses |
+| full | every other field, except the dirt and hover fields below | the whole surface |
+
+A pane's `revision` and `dirty_generation` are dirt fields, not a class: they are
+damaged through the ink-padded strips of the slots that draw the dirty live rows.
+`hovered_url_cells` keeps its own narrow path, the old and new hovered rows.
+
+The command badge's hash covers the status kind and the drawn badge, so a running
+tab does not repaint the band every second, but a change of kind, such as Idle to
+Running before any badge is drawn, repaints it once. A block cursor recolors whole glyph
+instances, which can be taller than the cursor row plus its pad, so after
+assembly the damage also covers the recolored glyphs: both the previous and the
+current bounds whenever the recolor changed, and the current bounds when only the
+cursor or focus class is set. Recolor bounds that are not finite add the active
+pane, and tab-title ink that is not finite adds the surface. The cursor-shape,
+cursor-blink and focus setters keep the frame key, so these changes reach the
+planner as classes rather than as a first frame.
+
+Some changes stay whole-surface or whole-pane:
+
+- while an overlay is active in the old or new key, any key change damages the
+  whole surface, because overlays draw over everything and a preedit follows the
+  live cursor, while the key records only the drawn cursor cell, which is absent
+  when the cursor is hidden, the window unfocused, the pane read-only or the view
+  scrolled back;
+- a class change on an alternate-screen pane damages that whole pane;
+- the degraded path repaints the whole surface for any class change, and the
+  first frame is the whole surface.
+
+Classes changed in one frame union into the single damage rectangle, so a tab-band
+and a cursor change also repaint everything between them. The
+`damage_waste_permille_sum` counter ([Logging](Logging#renderer-fields))
+measures the area that rectangle covers beyond its parts. A changed key with no
+dirty live row and empty damage, such as a revision bump from `set_autowrap`,
+plans `Noop` and acknowledges nothing.
+
+Narrow damage is correct because assembly stays `Full`: every batch is drawn in
+order, and the scissor limits writes to the damage. All ink that meets the damage
+is redrawn, including glyph overhang from neighbouring rows, the background reset
+and overlays.
 
 ### Presentation outcomes
 

@@ -143,7 +143,7 @@ fn row_pruned_recolor_matches_the_full_scan() {
                 let mut full = frame.glyphs.clone();
                 recolor_cursor_glyphs(&mut full, x, y, w, h, surface.0, surface.1, MARK);
                 let mut pruned = frame.glyphs.clone();
-                let visited = recolor_cursor_glyphs_in(
+                let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
                     &mut pruned,
                     &frame.rows,
                     x,
@@ -202,7 +202,7 @@ fn search_recolor_visits_only_matching_rows_and_the_non_row_glyphs() {
         let _counting = crate::frame_stats::CollectGuard::enter(Some(&sink));
         for match_row in [2_usize, 4] {
             let y = 30.0 + match_row as f32 * cell_h;
-            let visited = recolor_cursor_glyphs_in(
+            let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
                 &mut glyphs,
                 &rows,
                 20.0,
@@ -236,7 +236,7 @@ fn recolor_in_real_call_order_reaches_titles_only_after_they_are_appended() {
     }
     let row_glyphs = glyphs.len();
 
-    let cursor_visits = recolor_cursor_glyphs_in(
+    let RecolorOutcome { visited: cursor_visits, .. } = recolor_cursor_glyphs_in(
         &mut glyphs,
         &rows,
         0.0,
@@ -251,7 +251,7 @@ fn recolor_in_real_call_order_reaches_titles_only_after_they_are_appended() {
 
     glyphs.push(glyph_px(5.0, 2.0, 8.0, 10.0, surface));
     glyphs.push(glyph_px(30.0, 2.0, 8.0, 10.0, surface));
-    let search_visits = recolor_cursor_glyphs_in(
+    let RecolorOutcome { visited: search_visits, .. } = recolor_cursor_glyphs_in(
         &mut glyphs,
         &rows,
         4.0,
@@ -404,4 +404,172 @@ fn a_field_draws_its_marks_before_its_tofu_and_recolors_what_they_cover() {
     assert_eq!(quads[0].color, [0.0, 0.0, 1.0, 1.0], "the selection block is drawn first");
     assert_eq!(quads[1].color, [1.0, 1.0, 1.0, 1.0], "the tofu edge is drawn after it, recolored");
     assert_eq!(glyphs[0].color, [1.0, 1.0, 1.0, 1.0], "the covered glyph is recolored");
+}
+
+/// A power-of-two surface, so pixel rectangles survive the NDC round trip exactly.
+const EXACT_SURFACE: (f32, f32) = (512.0, 512.0);
+
+/// The whole-list and row-pruned recolor of `glyphs` under `target`, each with its record.
+fn recolor_both(
+    glyphs: &[GlyphInstance],
+    rows: &[RowGlyphSpan],
+    target: (f32, f32, f32, f32),
+) -> ((Vec<GlyphInstance>, RecolorRecord), (Vec<GlyphInstance>, RecolorRecord)) {
+    let (left, top, width, height) = target;
+    let (sw, sh) = EXACT_SURFACE;
+    let mut full = glyphs.to_vec();
+    let full_record = recolor_cursor_glyphs(&mut full, left, top, width, height, sw, sh, MARK);
+    let mut pruned = glyphs.to_vec();
+    let RecolorOutcome { record: pruned_record, .. } =
+        recolor_cursor_glyphs_in(&mut pruned, rows, left, top, width, height, sw, sh, MARK);
+    ((full, full_record), (pruned, pruned_record))
+}
+
+/// A recolored glyph taller than the cursor row reports its own pixel rectangle: the cursor at
+/// (50,100,10,12) covers 30% of a glyph at (50,72,10,40), so the whole glyph is recolored and the
+/// bounds are the glyph's, reaching y=72 above the cursor row. Both recolor entry points agree.
+#[test]
+fn recolor_reports_the_bounds_of_a_tall_recolored_glyph() {
+    let tall = glyph_px(50.0, 72.0, 10.0, 40.0, EXACT_SURFACE);
+    let far = glyph_px(200.0, 300.0, 10.0, 12.0, EXACT_SURFACE);
+    let glyphs = vec![tall, far];
+    let rows = vec![RowGlyphSpan::new(&glyphs, 0..2, EXACT_SURFACE.0, EXACT_SURFACE.1)];
+    let ((full, full_record), (pruned, pruned_record)) =
+        recolor_both(&glyphs, &rows, (50.0, 100.0, 10.0, 12.0));
+    let expected = RecolorBounds::Rect(PixelRect { x: 50, y: 72, w: 10, h: 40 });
+    assert_eq!(full_record.bounds, expected);
+    assert_eq!(pruned_record, full_record);
+    assert!(marked(&full[0]) && marked(&pruned[0]));
+    assert!(!marked(&full[1]) && !marked(&pruned[1]));
+}
+
+/// A glyph under less than a fifth of the cursor is not recolored, so the call reports no
+/// bounds: 19% of the (50,72,10,40) glyph lies inside the cursor rectangle.
+#[test]
+fn recolor_below_a_fifth_reports_empty_bounds() {
+    let glyphs = vec![glyph_px(50.0, 72.0, 10.0, 40.0, EXACT_SURFACE)];
+    let rows = vec![RowGlyphSpan::new(&glyphs, 0..1, EXACT_SURFACE.0, EXACT_SURFACE.1)];
+    // The cursor's top at 104.4 leaves 7.6 of the glyph's 40 rows inside it: 19% of its area.
+    let ((full, full_record), (_, pruned_record)) =
+        recolor_both(&glyphs, &rows, (50.0, 104.4, 10.0, 12.0));
+    assert!(!marked(&full[0]));
+    assert_eq!(full_record, RecolorRecord::default());
+    assert_eq!(full_record.bounds, RecolorBounds::Empty);
+    assert_eq!(pruned_record, full_record);
+}
+
+/// Where a glyph with a non-finite rectangle draws cannot be bounded, so it is never recolored
+/// and the call reports `Unbounded` wherever it sits in the list, even beside a recolored glyph.
+/// The row-pruned scan must still see it: a row holding it is scanned, never skipped by ink.
+#[test]
+fn a_non_finite_glyph_makes_the_recolor_unbounded() {
+    let broken = GlyphInstance { rect: [f32::NAN; 4], uv: [0.0; 4], color: INK, flags: [0.0; 4] };
+    let under = glyph_px(50.0, 100.0, 10.0, 12.0, EXACT_SURFACE);
+    let far = glyph_px(200.0, 300.0, 10.0, 12.0, EXACT_SURFACE);
+    for glyphs in [vec![broken, under], vec![under, broken]] {
+        let rows = vec![RowGlyphSpan::new(&glyphs, 0..2, EXACT_SURFACE.0, EXACT_SURFACE.1)];
+        let ((full, full_record), (pruned, pruned_record)) =
+            recolor_both(&glyphs, &rows, (50.0, 100.0, 10.0, 12.0));
+        assert_eq!(full_record.bounds, RecolorBounds::Unbounded);
+        assert_eq!(pruned_record.bounds, RecolorBounds::Unbounded);
+        for list in [&full, &pruned] {
+            let broken_index = usize::from(list[0].rect[0].is_finite());
+            assert!(!marked(&list[broken_index]), "a non-finite glyph is never recolored");
+            assert!(marked(&list[1 - broken_index]), "the finite glyph under the cursor is");
+        }
+    }
+    // The broken glyph shares a row with a far glyph whose finite ink misses the cursor: the
+    // row is still scanned, so the pruned scan reports `Unbounded` as the full scan does.
+    let glyphs = vec![far, broken];
+    let rows = vec![RowGlyphSpan::new(&glyphs, 0..2, EXACT_SURFACE.0, EXACT_SURFACE.1)];
+    let ((_, full_record), (_, pruned_record)) =
+        recolor_both(&glyphs, &rows, (50.0, 100.0, 10.0, 12.0));
+    assert_eq!(full_record.bounds, RecolorBounds::Unbounded);
+    assert_eq!(pruned_record.bounds, RecolorBounds::Unbounded);
+}
+
+/// A non-finite cursor rectangle recolors nothing and reports `Unbounded`, never `Empty`.
+#[test]
+fn a_non_finite_cursor_makes_the_recolor_unbounded() {
+    let glyphs = vec![glyph_px(50.0, 100.0, 10.0, 12.0, EXACT_SURFACE)];
+    let rows = vec![RowGlyphSpan::new(&glyphs, 0..1, EXACT_SURFACE.0, EXACT_SURFACE.1)];
+    let ((full, full_record), (pruned, pruned_record)) =
+        recolor_both(&glyphs, &rows, (f32::NAN, 100.0, 10.0, 12.0));
+    assert_eq!(full_record.bounds, RecolorBounds::Unbounded);
+    assert_eq!(pruned_record.bounds, RecolorBounds::Unbounded);
+    assert!(!marked(&full[0]) && !marked(&pruned[0]));
+}
+
+/// The record's hash identifies what was recolored, not only where: the same rectangle with
+/// different atlas coordinates hashes differently, and an identical frame hashes the same.
+#[test]
+fn the_recolor_hash_follows_the_recolored_atlas_coordinates() {
+    let glyph = glyph_px(50.0, 100.0, 10.0, 12.0, EXACT_SURFACE);
+    let moved_uv = GlyphInstance { uv: [0.25, 0.0, 0.25, 0.25], ..glyph };
+    let record_of = |instance: GlyphInstance| {
+        let glyphs = vec![instance];
+        let rows = vec![RowGlyphSpan::new(&glyphs, 0..1, EXACT_SURFACE.0, EXACT_SURFACE.1)];
+        let ((_, full_record), (_, pruned_record)) =
+            recolor_both(&glyphs, &rows, (50.0, 100.0, 10.0, 12.0));
+        assert_eq!(full_record, pruned_record);
+        full_record
+    };
+    let first = record_of(glyph);
+    assert_eq!(first, record_of(glyph), "an identical frame reports an identical record");
+    let moved = record_of(moved_uv);
+    assert_eq!(first.bounds, moved.bounds);
+    assert_ne!(first.hash, moved.hash);
+}
+
+/// The test-only injected glyph draws exactly the requested surface rectangle with the template's
+/// atlas coordinates, so a block cursor recolors it as it would a real tall glyph: the cursor at
+/// (50,100,10,12) reports the injected (50,72,10,40) as its bounds. With no template glyph, or on
+/// an empty surface, nothing is injected.
+#[test]
+fn an_injected_glyph_draws_its_rectangle_with_the_template_atlas_coordinates() {
+    let template = GlyphInstance {
+        rect: [0.0; 4],
+        uv: [0.25, 0.5, 0.375, 0.625],
+        color: INK,
+        flags: [0.0, 1.0, 0.0, 0.0],
+    };
+    let injected = injected_glyph(
+        Some(&template),
+        (50.0, 72.0, 10.0, 40.0),
+        MARK,
+        EXACT_SURFACE.0,
+        EXACT_SURFACE.1,
+    )
+    .expect("a template on a real surface injects a glyph");
+    assert_eq!(
+        glyph_rect_px(&injected, EXACT_SURFACE.0, EXACT_SURFACE.1),
+        (50.0, 72.0, 10.0, 40.0)
+    );
+    assert_eq!((injected.uv, injected.flags, injected.color), (template.uv, template.flags, MARK));
+    let glyphs = vec![injected];
+    let rows = vec![RowGlyphSpan::new(&glyphs, 0..1, EXACT_SURFACE.0, EXACT_SURFACE.1)];
+    let ((_, record), _) = recolor_both(&glyphs, &rows, (50.0, 100.0, 10.0, 12.0));
+    assert_eq!(record.bounds, RecolorBounds::Rect(PixelRect { x: 50, y: 72, w: 10, h: 40 }));
+    assert!(injected_glyph(None, (50.0, 72.0, 10.0, 40.0), MARK, 512.0, 512.0).is_none());
+    assert!(injected_glyph(Some(&template), (50.0, 72.0, 10.0, 40.0), MARK, 0.0, 512.0).is_none());
+}
+
+/// The ink bounds of emitted chrome glyphs are the outward union of their pixel rectangles, so
+/// a tall title glyph reaching above its band is bounded where it really draws; no glyph is
+/// `Empty`, and a non-finite glyph makes the bounds `Unbounded`.
+#[test]
+fn glyph_ink_bounds_union_every_glyph_and_refuse_non_finite_ones() {
+    let tall = glyph_px(20.0, 100.0, 10.0, 80.0, EXACT_SURFACE);
+    let short = glyph_px(40.0, 142.0, 10.0, 12.0, EXACT_SURFACE);
+    assert_eq!(
+        glyph_ink_bounds(&[tall, short], EXACT_SURFACE.0, EXACT_SURFACE.1),
+        RecolorBounds::Rect(PixelRect { x: 20, y: 100, w: 30, h: 80 })
+    );
+    assert_eq!(glyph_ink_bounds(&[], EXACT_SURFACE.0, EXACT_SURFACE.1), RecolorBounds::Empty);
+    let broken = GlyphInstance { rect: [f32::NAN; 4], uv: [0.0; 4], color: INK, flags: [0.0; 4] };
+    assert_eq!(
+        glyph_ink_bounds(&[short, broken], EXACT_SURFACE.0, EXACT_SURFACE.1),
+        RecolorBounds::Unbounded
+    );
+    assert_eq!(glyph_ink_bounds(&[short], 0.0, 512.0), RecolorBounds::Unbounded);
 }

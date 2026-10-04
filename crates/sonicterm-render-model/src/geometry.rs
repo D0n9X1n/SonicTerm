@@ -140,6 +140,65 @@ impl DamageRect {
     }
 }
 
+/// Exact pixel area covered by the union of `parts`, counting every pixel once.
+///
+/// Coordinate compression over the parts' x edges: within each x slab, the parts spanning it
+/// contribute y intervals that are merged and summed. The cost is quadratic in the part count,
+/// which stays small (a frame's damage contributions). Empty parts cover nothing.
+#[must_use]
+pub fn covered_area(parts: &[PixelRect]) -> u64 {
+    // Edges are widened to i64 so a saturated right or bottom edge cannot overflow the span.
+    let spans: Vec<[i64; 4]> = parts
+        .iter()
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            [
+                i64::from(part.x),
+                i64::from(part.y),
+                i64::from(part.right()),
+                i64::from(part.bottom()),
+            ]
+        })
+        .collect();
+    let mut x_edges: Vec<i64> = spans.iter().flat_map(|span| [span[0], span[2]]).collect();
+    x_edges.sort_unstable();
+    x_edges.dedup();
+    let mut area: u64 = 0;
+    let mut y_intervals: Vec<(i64, i64)> = Vec::with_capacity(spans.len());
+    for slab in x_edges.windows(2) {
+        let (slab_left, slab_right) = (slab[0], slab[1]);
+        y_intervals.clear();
+        y_intervals.extend(
+            spans
+                .iter()
+                .filter(|span| span[0] <= slab_left && span[2] >= slab_right)
+                .map(|span| (span[1], span[3])),
+        );
+        y_intervals.sort_unstable();
+        let mut covered_height: i64 = 0;
+        let mut open: Option<(i64, i64)> = None;
+        for &(top, bottom) in &y_intervals {
+            open = match open {
+                Some((open_top, open_bottom)) if top <= open_bottom => {
+                    Some((open_top, open_bottom.max(bottom)))
+                }
+                Some((open_top, open_bottom)) => {
+                    // This interval starts past the open one, so the open run is complete.
+                    covered_height += open_bottom - open_top;
+                    Some((top, bottom))
+                }
+                None => Some((top, bottom)),
+            };
+        }
+        if let Some((open_top, open_bottom)) = open {
+            covered_height += open_bottom - open_top;
+        }
+        let slab_width = (slab_right - slab_left).unsigned_abs();
+        area = area.saturating_add(slab_width.saturating_mul(covered_height.unsigned_abs()));
+    }
+    area
+}
+
 /// Snap a logical-space `(left, top, width, height)` rect so that its four edges
 /// land exactly on device pixels (i.e. `edge * scale` is an integer).
 ///

@@ -99,17 +99,27 @@ fn child_focus_blur_updates_renderer_focus_state() {
     );
 }
 
+/// A child focus change repaints through the renderer's focus state, which is a frame-key damage
+/// class covering the cursor rows and the tab band, not through grid dirt: the pane stays clean, so
+/// a focus change never locks or dirties a pane, while the changed key still forces the repaint.
 #[test]
-fn child_focus_blur_marks_child_panes_dirty_for_redraw() {
+fn child_focus_blur_repaints_through_the_renderer_without_pane_dirt() {
     let (mut app, _main_pane, child, child_pane) = main_and_child();
     assert!(app.__test_clear_child_pane_dirty(child, child_pane));
+    assert!(app.__test_set_child_renderer_focus_marker(child, true));
     assert_eq!(app.__test_child_pane_dirty_count(child, child_pane), Some(0));
 
     app.__test_handle_child_focus_changed(child, false);
 
-    assert!(
-        app.__test_child_pane_dirty_count(child, child_pane).unwrap_or(0) > 0,
-        "child focus transition must mark panes dirty so the cursor/focus repaint is not deferred indefinitely"
+    assert_eq!(
+        app.__test_child_renderer_focus_marker(child),
+        Some(false),
+        "child focus loss must reach the renderer, whose focus class repaints the cursor rows and tab band"
+    );
+    assert_eq!(
+        app.__test_child_pane_dirty_count(child, child_pane),
+        Some(0),
+        "child focus loss must not dirty the pane grid; the renderer's focus class carries the repaint"
     );
 }
 

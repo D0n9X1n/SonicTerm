@@ -5,7 +5,116 @@
 //! renderer-model boundary.
 
 use crate::quad::{px_to_ndc, QuadInstance};
+use sonicterm_render_model::PixelRect;
 use sonicterm_text::GlyphInstance;
+
+/// Where a cursor recolor rewrote glyph colors, in surface pixels.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RecolorBounds {
+    /// No glyph was recolored.
+    #[default]
+    Empty,
+    /// The outward-rounded union of every recolored glyph's pixel rectangle.
+    Rect(PixelRect),
+    /// A glyph or the cursor rectangle was not finite, so where recolored ink lands is unknown.
+    Unbounded,
+}
+
+impl RecolorBounds {
+    /// The bounds covering both `self` and `other`; `Unbounded` absorbs everything.
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unbounded, _) | (_, Self::Unbounded) => Self::Unbounded,
+            (Self::Empty, bounds) | (bounds, Self::Empty) => bounds,
+            (Self::Rect(first), Self::Rect(second)) => Self::Rect(first.union(second)),
+        }
+    }
+}
+
+/// What one frame's cursor recolors rewrote: where, and a digest of the recolored instances.
+///
+/// Two records are equal only when the same instances (rectangle, atlas coordinates and color)
+/// were recolored in the same order, so a replaced glyph under a stationary cursor changes it.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecolorRecord {
+    /// Where the recolored glyphs draw.
+    pub bounds: RecolorBounds,
+    /// Order-sensitive digest of every recolored instance; 0 when nothing was recolored.
+    pub hash: u64,
+}
+
+impl RecolorRecord {
+    /// The record of `self` followed by `other`, as one sequence of recolors.
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        let hash = match (self.hash, other.hash) {
+            (0, hash) | (hash, 0) => hash,
+            (first, second) => mix_hash(first, second),
+        };
+        Self { bounds: self.bounds.merge(other.bounds), hash }
+    }
+
+    /// Record one recolored glyph drawn at `glyph_px` (`x, y, w, h`, finite surface pixels).
+    fn note_glyph(&mut self, glyph: &GlyphInstance, glyph_px: (f32, f32, f32, f32)) {
+        let instance =
+            Self { bounds: RecolorBounds::Rect(outward_rect(glyph_px)), hash: glyph_hash(glyph) };
+        *self = self.merge(instance);
+    }
+
+    /// Record that a non-finite glyph or cursor rectangle was skipped.
+    fn note_unbounded(&mut self) {
+        self.bounds = RecolorBounds::Unbounded;
+    }
+}
+
+/// The row-pruned recolor's result: glyphs examined, and what was recolored.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RecolorOutcome {
+    /// Glyphs examined, for the `recolor_glyphs_visited` counter.
+    pub visited: usize,
+    /// Where and what the recolor rewrote.
+    pub record: RecolorRecord,
+}
+
+/// Order-sensitive combination of two nonzero digests; never returns 0 for nonzero input.
+fn mix_hash(first: u64, second: u64) -> u64 {
+    let mixed = first.rotate_left(17) ^ second.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    mixed.max(1)
+}
+
+/// Digest of one glyph instance's rectangle, atlas coordinates and color bits; never 0.
+fn glyph_hash(glyph: &GlyphInstance) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    glyph.rect.map(f32::to_bits).hash(&mut hasher);
+    glyph.uv.map(f32::to_bits).hash(&mut hasher);
+    glyph.color.map(f32::to_bits).hash(&mut hasher);
+    glyph.flags.map(f32::to_bits).hash(&mut hasher);
+    hasher.finish().max(1)
+}
+
+/// The smallest whole-pixel rectangle containing finite `(x, y, w, h)`.
+pub(crate) fn outward_rect((left, top, width, height): (f32, f32, f32, f32)) -> PixelRect {
+    // Float-to-int `as` saturates, so huge finite ink clamps rather than wrapping.
+    let x0 = left.floor() as i32;
+    let y0 = top.floor() as i32;
+    let x1 = (left + width).ceil() as i32;
+    let y1 = (top + height).ceil() as i32;
+    PixelRect {
+        x: x0,
+        y: y0,
+        w: (i64::from(x1) - i64::from(x0)).clamp(0, i64::from(u32::MAX)) as u32,
+        h: (i64::from(y1) - i64::from(y0)).clamp(0, i64::from(u32::MAX)) as u32,
+    }
+}
+
+/// True when every component of a pixel rectangle is finite.
+fn finite_rect((left, top, width, height): (f32, f32, f32, f32)) -> bool {
+    left.is_finite() && top.is_finite() && width.is_finite() && height.is_finite()
+}
 
 /// Inactive pane cursor: grid row/column plus scalar pane bounds in physical window pixels.
 #[derive(Clone, Debug, PartialEq)]
@@ -196,6 +305,9 @@ fn aabb_overlap_area(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> f32 {
 /// O(N) over visible glyphs, with N being one frame's instance count.
 /// In practice only a handful of glyphs overlap the cursor cell, so
 /// this is effectively a single rewrite per frame.
+///
+/// Returns where the recolored glyphs draw and a digest of them. A non-finite glyph or
+/// cursor rectangle is never recolored and makes the bounds [`RecolorBounds::Unbounded`].
 #[allow(clippy::too_many_arguments)]
 #[doc(hidden)]
 pub fn recolor_cursor_glyphs(
@@ -207,12 +319,65 @@ pub fn recolor_cursor_glyphs(
     sw: f32,
     sh: f32,
     bg_rgba: [f32; 4],
-) {
+) -> RecolorRecord {
+    let mut record = RecolorRecord::default();
     if sw <= 0.0 || sh <= 0.0 {
         // When: `sw` or `sh` is nonpositive, NDC inversion cannot produce a meaningful cursor overlap.
-        return;
+        return record;
     }
-    recolor_span(glyphs, (cell_x, cell_y, cell_w, cell_h), sw, sh, bg_rgba);
+    let target = (cell_x, cell_y, cell_w, cell_h);
+    if !finite_rect(target) {
+        // When: `finite_rect` rejects the cursor `target`, no overlap is decidable and its ink is unbounded.
+        record.note_unbounded();
+        return record;
+    }
+    recolor_span(glyphs, target, sw, sh, bg_rgba, &mut record);
+    record
+}
+
+/// Where `glyphs` draw on a `sw` x `sh` surface: the outward union of their pixel rectangles,
+/// `Empty` for no glyph, and `Unbounded` for a non-finite glyph or an empty surface, whose ink
+/// cannot be located.
+pub(crate) fn glyph_ink_bounds(glyphs: &[GlyphInstance], sw: f32, sh: f32) -> RecolorBounds {
+    if glyphs.is_empty() {
+        // When: `glyphs` is empty, nothing was drawn.
+        return RecolorBounds::Empty;
+    }
+    if sw <= 0.0 || sh <= 0.0 {
+        // When: `sw` or `sh` is nonpositive, no NDC rectangle maps back to pixels.
+        return RecolorBounds::Unbounded;
+    }
+    glyphs.iter().fold(RecolorBounds::Empty, |bounds, glyph| {
+        let glyph_px = glyph_rect_px(glyph, sw, sh);
+        let this = if finite_rect(glyph_px) {
+            RecolorBounds::Rect(outward_rect(glyph_px))
+        } else {
+            // When: `finite_rect` rejects `glyph_px`, where the glyph draws is unknown.
+            RecolorBounds::Unbounded
+        };
+        bounds.merge(this)
+    })
+}
+
+/// A glyph drawing `rect_px` (`x, y, w, h` in surface pixels) in `color` with `template`'s atlas
+/// coordinates and flags; `None` without a template or on an empty surface.
+///
+/// Only the renderer's test glyph seam calls it, to place an instance whose ink a cursor recolor
+/// reaches but whose row strip does not.
+pub(crate) fn injected_glyph(
+    template: Option<&GlyphInstance>,
+    rect_px: (f32, f32, f32, f32),
+    color: [f32; 4],
+    sw: f32,
+    sh: f32,
+) -> Option<GlyphInstance> {
+    let template = template?;
+    if sw <= 0.0 || sh <= 0.0 {
+        // When: `sw` or `sh` is nonpositive, no NDC rectangle can place the glyph.
+        return None;
+    }
+    let (left, top, width, height) = rect_px;
+    Some(GlyphInstance { rect: px_to_ndc(left, top, width, height, sw, sh), color, ..*template })
 }
 
 /// Recolor every quad in `quads` that overlaps `target` (`x, y, w, h` in surface px) to `rgba`.
@@ -274,7 +439,8 @@ pub(crate) fn paint_field_marks(
             color: mark.background,
             ..Default::default()
         });
-        recolor_cursor_glyphs(glyphs, left, top, width, height, sw, sh, mark.foreground);
+        // Field marks draw on overlay slices whose changes are full-surface, so the record is unused.
+        let _ = recolor_cursor_glyphs(glyphs, left, top, width, height, sw, sh, mark.foreground);
         recolor_cursor_quads(&mut tofu, mark.rect, sw, sh, mark.foreground);
     }
     quads.extend(tofu);
@@ -297,16 +463,24 @@ fn glyph_rect_px(glyph: &GlyphInstance, sw: f32, sh: f32) -> (f32, f32, f32, f32
     (px, py, pw, ph)
 }
 
-/// Recolor every glyph in `glyphs` that lies at least 20% inside `target`.
+/// Recolor every glyph in `glyphs` that lies at least 20% inside `target`, noting each
+/// recolored glyph, and any non-finite glyph, in `record`.
 fn recolor_span(
     glyphs: &mut [GlyphInstance],
     target: (f32, f32, f32, f32),
     sw: f32,
     sh: f32,
     bg_rgba: [f32; 4],
+    record: &mut RecolorRecord,
 ) {
     for glyph in glyphs.iter_mut() {
         let glyph_rect = glyph_rect_px(glyph, sw, sh);
+        if !finite_rect(glyph_rect) {
+            // When: `finite_rect` rejects `glyph_rect`, the glyph is never recolored (the strict
+            // overlap test rejects it) but where it draws cannot be bounded.
+            record.note_unbounded();
+            continue;
+        }
         let (_, _, pw, ph) = glyph_rect;
         let overlap = aabb_overlap_area(target, glyph_rect);
         let glyph_area = (pw * ph).max(1.0);
@@ -315,6 +489,7 @@ fn recolor_span(
         // should not recolor the whole glyph to background and make it vanish.
         if aabb_intersects(target, glyph_rect) && overlap >= glyph_area * 0.20 {
             glyph.color = bg_rgba;
+            record.note_glyph(glyph, glyph_rect);
         }
     }
 }
@@ -325,7 +500,8 @@ pub(crate) struct RowGlyphSpan {
     /// The row's glyph indices in the main glyph list.
     pub glyphs: std::ops::Range<usize>,
     /// `[left, top, right, bottom]` in surface pixels over every glyph rectangle the
-    /// recolor test reconstructs; `None` for a row with no glyphs or no surface.
+    /// recolor test reconstructs; `None` for a row with no glyphs or no surface. A row
+    /// holding a non-finite glyph has infinite ink, so every target meets it and it is scanned.
     pub ink_px: Option<[f32; 4]>,
 }
 
@@ -340,8 +516,15 @@ impl RowGlyphSpan {
         let ink_px = (sw > 0.0 && sh > 0.0)
             .then(|| {
                 glyphs[range.clone()].iter().fold(None, |ink: Option<[f32; 4]>, glyph| {
-                    let (px, py, pw, ph) = glyph_rect_px(glyph, sw, sh);
-                    let edges = [px, py, px + pw, py + ph];
+                    let glyph_rect = glyph_rect_px(glyph, sw, sh);
+                    let (px, py, pw, ph) = glyph_rect;
+                    let edges = if finite_rect(glyph_rect) {
+                        [px, py, px + pw, py + ph]
+                    } else {
+                        // When: `finite_rect` rejects `glyph_rect`, `min`/`max` would drop its NaN
+                        // edges, so the row's ink is made infinite and the row is always scanned.
+                        [f32::NEG_INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::INFINITY]
+                    };
                     Some(ink.map_or(edges, |acc| {
                         [
                             acc[0].min(edges[0]),
@@ -360,8 +543,8 @@ impl RowGlyphSpan {
 /// Recolor the main glyph list's glyphs under `(cell_x, cell_y, cell_w, cell_h)`, scanning
 /// only rows whose ink meets the target plus every glyph outside the recorded rows.
 ///
-/// Recolors exactly what [`recolor_cursor_glyphs`] over the whole list would. Returns the
-/// number of glyphs examined.
+/// Recolors exactly what [`recolor_cursor_glyphs`] over the whole list would, and returns the
+/// same record with the number of glyphs examined.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn recolor_cursor_glyphs_in(
     glyphs: &mut [GlyphInstance],
@@ -373,12 +556,19 @@ pub(crate) fn recolor_cursor_glyphs_in(
     sw: f32,
     sh: f32,
     bg_rgba: [f32; 4],
-) -> usize {
+) -> RecolorOutcome {
+    let mut outcome = RecolorOutcome::default();
     if sw <= 0.0 || sh <= 0.0 {
         // When: `sw` or `sh` is nonpositive, the full scan recolors nothing, so neither does this.
-        return 0;
+        return outcome;
     }
     let target = (cell_x, cell_y, cell_w, cell_h);
+    if !finite_rect(target) {
+        // When: `finite_rect` rejects the cursor `target`, the full scan recolors nothing and is unbounded.
+        outcome.record.note_unbounded();
+        return outcome;
+    }
+    let record = &mut outcome.record;
     let total = glyphs.len();
     let mut visited = 0;
     let mut next = 0;
@@ -387,17 +577,18 @@ pub(crate) fn recolor_cursor_glyphs_in(
         // from indexing past the list.
         let start = row.glyphs.start.clamp(next, total);
         let end = row.glyphs.end.clamp(start, total);
-        recolor_span(&mut glyphs[next..start], target, sw, sh, bg_rgba);
+        recolor_span(&mut glyphs[next..start], target, sw, sh, bg_rgba, record);
         visited += start - next;
         if row.ink_px.is_some_and(|ink| ink_meets(ink, target)) {
             // The row's ink union meets the target, so one of its glyphs may; scan them all.
-            recolor_span(&mut glyphs[start..end], target, sw, sh, bg_rgba);
+            recolor_span(&mut glyphs[start..end], target, sw, sh, bg_rgba, record);
             visited += end - start;
         }
         next = end;
     }
-    recolor_span(&mut glyphs[next..], target, sw, sh, bg_rgba);
-    visited + (total - next)
+    recolor_span(&mut glyphs[next..], target, sw, sh, bg_rgba, record);
+    outcome.visited = visited + (total - next);
+    outcome
 }
 
 /// Whether `ink` (`[left, top, right, bottom]`) meets `target` under the strict test

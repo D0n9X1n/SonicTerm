@@ -488,6 +488,7 @@ renderer that collected it.
 | `index_bytes` | bytes | bytes written to the index buffer: the whole index pattern on the first frame and the first frame after the buffer grows, 0 on every other frame |
 | `damage_permille_sum` | permille | sum of each frame's damaged share of the surface; divide by `damaged_frames` for the mean |
 | `damaged_frames` | count | frames whose damage was recorded |
+| `damage_waste_permille_sum` | permille | sum of each frame's union-rectangle share of the surface minus the share its parts exactly cover; divide by `damaged_frames` for the mean waste |
 | `software_frames` | count | frames the software presenter drew, on Windows with software-render degradation |
 | `gpu_frames` | count | frames drawn through wgpu, including degraded frames on macOS and Linux |
 | `row_cache_hits` | count | row glyph cache lookups that hit |

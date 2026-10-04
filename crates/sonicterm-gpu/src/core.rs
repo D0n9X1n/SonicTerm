@@ -43,7 +43,7 @@ use crate::color::{
     chrome_color_to_linear_rgba, dim_toward, hex_to_chrome_color, hex_to_premultiplied_rgba,
     hex_to_wgpu_with_alpha, ChromeColor,
 };
-use crate::cursor::{recolor_cursor_glyphs_in, InactivePaneCursor, RowGlyphSpan};
+use crate::cursor::{recolor_cursor_glyphs_in, InactivePaneCursor, RecolorOutcome, RowGlyphSpan};
 use crate::device_errors::{
     create_frame_fault_probe, destroy_and_await_loss, install_device_error_handlers,
     run_isolated_validation, DeviceErrorSnapshot, DeviceErrorState, DeviceStateWaker, GpuFaultKind,
@@ -60,8 +60,8 @@ use crate::frame_plan::{
     pane_damage_rect_with_ink_pad, pane_scrollbar_identity, RenderSignals,
 };
 use crate::frame_plan::{
-    CopyModeIdentity, FrameFacts, FrameKey, FramePlan, PaneMetadata, PlannedPane, RenderMode,
-    WindowIdentity,
+    CopyModeIdentity, CursorCell, FrameFacts, FrameKey, FramePlan, PaneMetadata, PlannedPane,
+    RenderMode, WindowIdentity,
 };
 
 #[path = "atlas_lifecycle.rs"]
@@ -273,6 +273,10 @@ struct AssembledLayers {
     gpu_timing: present::FrameTiming,
     plan: FramePlan,
     receipts: Vec<sonicterm_render_model::AckReceipt>,
+    /// This frame's cursor recolors; kept as `last_recolor` only if the frame presents.
+    recolor: crate::cursor::RecolorRecord,
+    /// Where this frame's tab-title glyphs draw; kept as `last_tab_ink` only if it presents.
+    tab_ink: crate::cursor::RecolorBounds,
 }
 
 fn pane_focus_flash_sample(elapsed: Duration) -> Option<(u8, f32)> {
@@ -713,14 +717,15 @@ fn tab_bar_hash_with_limits(
     min_tab_width_px.to_bits().hash(&mut hash);
     max_tab_width_px.to_bits().hash(&mut hash);
     tabs.active_index().hash(&mut hash);
-    for tab in tabs.tabs() {
+    let active_index = tabs.active_index();
+    for (index, tab) in tabs.tabs().iter().enumerate() {
         tab.id.0.hash(&mut hash);
         tab.title.hash(&mut hash);
         // A stored width moves the bar with an unchanged title, as when a held width applies.
         tab.content_width_px().map(f32::to_bits).hash(&mut hash);
         tab.custom_color.hash(&mut hash);
         tab.foreground_privileged.hash(&mut hash);
-        command_status_hash(&tab.command, now).hash(&mut hash);
+        command_status_hash(&tab.command, now, index == active_index).hash(&mut hash);
     }
     hash.finish()
 }
@@ -841,6 +846,55 @@ fn invalidate_planned_quad_rows(
 /// hides it, even one whose rows still include the cursor's live row.
 fn terminal_cursor_drawn_at_view(view_top_abs: u64, live_top_abs: u64) -> bool {
     view_top_abs == live_top_abs
+}
+
+/// The first column and width in columns of the terminal cursor's block on `grid`: a cursor on
+/// either half of a wide character covers both halves.
+fn terminal_cursor_columns(grid: &Grid) -> (usize, usize) {
+    let row = grid.row(grid.cursor.row);
+    let mut first_col = grid.cursor.col as usize;
+    let mut span = 1usize;
+    if let Some(cell) = row.get(first_col) {
+        if cell.flags.contains(CellFlags::WIDE_CONT) && first_col > 0 {
+            first_col -= 1;
+            span = 2;
+        } else if cell.flags.contains(CellFlags::WIDE) {
+            // When: `WIDE` — the cursor is on the lead half, so the
+            // block spans two columns from where it already is.
+            span = 2;
+        }
+    }
+    (first_col, span)
+}
+
+/// The cell the terminal cursor is drawn in on `grid` (pane `pane_id`, view top `view_top_abs`),
+/// by the draw's own rule: only when `cursor_visible`, `window_focused` and not `read_only`, and
+/// only while the view is at the live top. The frame identity records it so the planner can
+/// damage the old and new cursor rows.
+fn drawn_cursor_cell(
+    grid: &Grid,
+    pane_id: u64,
+    view_top_abs: u64,
+    cursor_visible: bool,
+    window_focused: bool,
+    read_only: bool,
+) -> Option<CursorCell> {
+    let live_top = grid.scrollback_len() as u64;
+    let drawn = cursor_visible
+        && window_focused
+        && !read_only
+        && terminal_cursor_drawn_at_view(view_top_abs, live_top);
+    if !drawn {
+        // When: `drawn` is false (hidden, unfocused, read-only or scrolled back), no cursor pixels exist.
+        return None;
+    }
+    let (first_col, span) = terminal_cursor_columns(grid);
+    Some(CursorCell {
+        pane_id,
+        slot: grid.cursor.row,
+        col: u16::try_from(first_col).unwrap_or(u16::MAX),
+        span: u16::try_from(span).unwrap_or(u16::MAX),
+    })
 }
 
 fn tab_content_width_px(
@@ -1225,22 +1279,14 @@ pub fn emit_pane_scrollbar(
         return 0;
     }
     let alpha = alpha.clamp(0.0, 1.0);
-    // Bar width in raster px. Authored at 8 logical px; scale with DPI so the
-    // bar keeps a constant physical size across displays, min 1px.
-    let scrollbar_width_px: f32 = (8.0 * scale).max(1.0);
-    let geom_rect = sonicterm_render_model::boundary::ui::scrollbar::Rect::new(
-        pane_rect.x,
-        pane_rect.y,
-        pane_rect.w,
-        pane_rect.h,
-    );
-    let Some(geom) = sonicterm_render_model::boundary::ui::scrollbar::compute(
+    // The planner damages the same track, so drawing and damage cannot diverge.
+    let Some(geom) = crate::frame_plan::pane_scrollbar_geometry(
+        pane_rect,
         viewport_rows,
         total_rows,
         view_top,
-        geom_rect,
         mode,
-        scrollbar_width_px,
+        scale,
     ) else {
         // When: `scrollbar::compute` yields None — nothing beyond the viewport
         // to scroll, or mode is `Never`. No track or thumb to place.
@@ -1767,6 +1813,59 @@ pub fn unpad_readback_rows(
         .collect()
 }
 
+/// The damage a presented frame carried to the presenter, read back by real-renderer tests.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentedDamage {
+    /// Whether the frame was a first frame, which repaints the whole surface.
+    pub first_frame: bool,
+    /// The damage rectangle the presenter drew under its scissor.
+    pub damage: PixelRect,
+    /// The whole surface.
+    pub surface: PixelRect,
+}
+
+impl PresentedDamage {
+    /// Whether the frame redrew less than the whole surface: not a first frame, and its damage
+    /// covers a smaller area than the surface, so a full repaint can never count as narrow.
+    #[must_use]
+    pub fn is_narrow(&self) -> bool {
+        let area = |rect: PixelRect| u64::from(rect.w) * u64::from(rect.h);
+        !self.first_frame && area(self.damage) < area(self.surface)
+    }
+}
+
+/// Keeps the last presented frame's damage for a real-renderer test, only once enabled.
+///
+/// Disabled by default, as in production: `record` then tests one bool and builds nothing.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct PresentedDamageRecorder {
+    enabled: bool,
+    last: Option<PresentedDamage>,
+}
+
+impl PresentedDamageRecorder {
+    /// Start keeping each presented frame's damage.
+    pub fn enable(&mut self) {
+        self.enabled = true;
+    }
+
+    /// Keep the snapshot `build` makes, only when enabled; a disabled recorder never calls it.
+    #[inline]
+    pub fn record(&mut self, build: impl FnOnce() -> PresentedDamage) {
+        if self.enabled {
+            // Only a test hook sets `enabled`; production skips the snapshot entirely.
+            self.last = Some(build());
+        }
+    }
+
+    /// The last kept snapshot, cleared by this read.
+    pub fn take(&mut self) -> Option<PresentedDamage> {
+        self.last.take()
+    }
+}
+
 /// A copy of the retained frame in a buffer the test maps itself; production code under `src/`
 /// never maps or polls.
 #[doc(hidden)]
@@ -2166,6 +2265,18 @@ pub struct GpuRenderer {
     /// Last rendered frame key — when the next frame would produce an
     /// identical key, render() short-circuits before any GPU work.
     last_frame_key: Option<FrameKey>,
+    /// What the last presented frame's cursor recolors rewrote; written only beside
+    /// `last_frame_key` on a presented frame, so it always describes the pixels on screen.
+    last_recolor: crate::cursor::RecolorRecord,
+    /// Where the last presented frame's tab-title glyphs draw; written only beside
+    /// `last_recolor` on a presented frame, so it always describes the title pixels on screen.
+    last_tab_ink: crate::cursor::RecolorBounds,
+    /// Test seam: a glyph `(x, y, w, h)` surface-pixel rectangle and color appended before the
+    /// cursor recolors; only `__inject_test_glyph` sets it, so production keeps `None`.
+    injected_test_glyph: Option<((f32, f32, f32, f32), [f32; 4])>,
+    /// The last presented frame's damage, kept beside `last_frame_key` only after
+    /// `__enable_presented_damage`; production never enables it.
+    presented_damage: PresentedDamageRecorder,
     /// Constant-size geometry of the palette and search query fields as last presented.
     presented_fields: PresentedFields,
     /// Preedit glyphs keyed by text, placement, color, and qualified atlas identity to reject stale UVs.
@@ -3129,6 +3240,10 @@ impl GpuRenderer {
             search_bg,
             drag_chip_visual: None,
             last_frame_key: None,
+            last_recolor: crate::cursor::RecolorRecord::default(),
+            last_tab_ink: crate::cursor::RecolorBounds::Empty,
+            injected_test_glyph: None,
+            presented_damage: PresentedDamageRecorder::default(),
             presented_fields: PresentedFields::default(),
             preedit_glyph_cache: None,
             skipped_frames: 0,
@@ -3435,16 +3550,10 @@ impl GpuRenderer {
         true
     }
 
-    /// Update the cursor shape. Invalidates the cached frame so the
-    /// next render redraws with the new geometry.
+    /// Update the cursor shape. The frame key carries the shape, so the next
+    /// render damages only the cursor row rather than the whole surface.
     pub fn set_cursor_shape(&mut self, shape: CursorShape) {
-        if self.cursor_shape == shape {
-            // When: `self.cursor_shape == shape` — every config reload calls
-            // this, so clearing `last_frame_key` would redraw for no change.
-            return;
-        }
         self.cursor_shape = shape;
-        self.last_frame_key = None;
     }
 
     /// Current cursor shape.
@@ -3463,7 +3572,6 @@ impl GpuRenderer {
         }
         self.cursor_blink = blink;
         self.blink_epoch = Instant::now();
-        self.last_frame_key = None;
     }
 
     /// Whether the cursor is currently configured to blink.
@@ -3575,16 +3683,11 @@ impl GpuRenderer {
 
     /// Update the cached keyboard-focus flag for the OS window.
     ///
-    /// The text cursor is hidden while the window is unfocused, so a change
-    /// here alters what the next frame paints and invalidates the frame key.
+    /// The text cursor is hidden while the window is unfocused. The frame key
+    /// carries focus, so the next render damages only the cursor rows and the
+    /// tab bar rather than the whole surface.
     pub fn set_window_focused(&mut self, focused: bool) {
-        if self.window_focused == focused {
-            // When: `window_focused == focused` — winit re-delivers focus
-            // events, and clearing the key would redraw for no visible change.
-            return;
-        }
         self.window_focused = focused;
-        self.last_frame_key = None;
     }
 
     /// Whether the OS window currently has keyboard focus.
@@ -4429,6 +4532,47 @@ impl GpuRenderer {
         );
         self.frame_texture = frame_texture;
         self.frame_view = frame_view;
+    }
+
+    /// Test hook: append one glyph drawing `rect_px` (`x, y, w, h` in surface pixels) in `color`
+    /// to every later frame's terminal glyphs, before the cursor recolors, with the atlas
+    /// coordinates of the frame's first terminal glyph; `None` removes it. It is not part of the
+    /// frame key: a test changes it together with grid dirt, as a real glyph change would.
+    #[doc(hidden)]
+    pub fn __inject_test_glyph(&mut self, glyph: Option<((f32, f32, f32, f32), [f32; 4])>) {
+        self.injected_test_glyph = glyph;
+    }
+
+    /// Test hook: keep each later presented frame's damage for `__take_presented_damage`.
+    /// Production never calls it, so a presented frame builds and keeps no snapshot.
+    #[doc(hidden)]
+    pub fn __enable_presented_damage(&mut self) {
+        self.presented_damage.enable();
+    }
+
+    /// Test hook: the damage of the last presented frame, cleared by this read, so a frame that
+    /// presents nothing reads `None` instead of an older frame's damage. `None` until enabled.
+    #[doc(hidden)]
+    pub fn __take_presented_damage(&mut self) -> Option<PresentedDamage> {
+        self.presented_damage.take()
+    }
+
+    /// Test hook: whether a retained frame key is kept, so the next changed frame is not a
+    /// first frame.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_has_frame_key(&self) -> bool {
+        self.last_frame_key.is_some()
+    }
+
+    /// Append the test glyph seam's instance, if one is set, after the terminal rows.
+    fn push_injected_test_glyph(&self, glyphs: &mut Vec<GlyphInstance>, sw: f32, sh: f32) {
+        let Some((rect_px, color)) = self.injected_test_glyph else {
+            // When: injected_test_glyph is None, as in production, nothing is appended.
+            return;
+        };
+        let template = glyphs.first().copied();
+        glyphs.extend(crate::cursor::injected_glyph(template.as_ref(), rect_px, color, sw, sh));
     }
 
     /// Test hook: recreate the retained frame texture copyable (`COPY_SRC`), now and on every later
@@ -5581,7 +5725,11 @@ impl GpuRenderer {
             }
             hash.finish()
         };
-        let plan = FramePlan::build(
+        // The active pane and view the cursor is drawn from, resolved as `FramePlan::build` does.
+        let cursor_pane = panes.iter().find(|pane| pane.is_active).unwrap_or(&panes[0]);
+        let cursor_live_top = cursor_pane.grid.scrollback_len() as u64;
+        let cursor_view_top = viewport_top_abs.unwrap_or(cursor_live_top).min(cursor_live_top);
+        let mut plan = FramePlan::build(
             FrameFacts {
                 window: WindowIdentity {
                     selection: selection.copied(),
@@ -5617,6 +5765,14 @@ impl GpuRenderer {
                     style_rev: self.style_rev,
                     renderer_hash,
                     overlay_active,
+                    cursor_cell: drawn_cursor_cell(
+                        &*cursor_pane.grid,
+                        cursor_pane.id,
+                        cursor_view_top,
+                        cursor_visible,
+                        self.window_focused,
+                        read_only_mode,
+                    ),
                 },
                 cell_w: self.cell_w,
                 cell_h: self.cell_h,
@@ -5632,6 +5788,9 @@ impl GpuRenderer {
                 ),
                 scrollbar_mode: self.scrollbar_mode,
                 degraded: self.software_render_degrade,
+                tab_bar_top: self.tab_bar_visible.then(|| self.tab_bar_y_offset()),
+                scale: self.scale_factor,
+                previous_recolor: self.last_recolor,
             },
             panes.iter().map(|pane| PaneMetadata {
                 id: pane.id,
@@ -5678,7 +5837,9 @@ impl GpuRenderer {
             previous.window.inline_media_hash != plan.key.window.inline_media_hash
         });
         let render_mode = plan.mode;
-        let emit_full_rows = render_mode == RenderMode::Full;
+        let emit_full_rows = crate::frame_plan::emits_every_visible_row(render_mode);
+        // The cursor recolors this frame performs, accumulated across the copy-mode and block sites.
+        let mut frame_recolor = crate::cursor::RecolorRecord::default();
         let pane_rects: Vec<_> = plan
             .panes
             .iter()
@@ -6105,6 +6266,11 @@ impl GpuRenderer {
             );
         }
 
+        if self.injected_test_glyph.is_some() {
+            // An injected test glyph joins the terminal glyphs before any recolor reads them.
+            self.push_injected_test_glyph(&mut glyph_instances, sw, sh);
+        }
+
         if let Some(sel) = selection {
             if !sel.is_empty() {
                 // Selection highlights are anchored to the active pane's
@@ -6173,7 +6339,7 @@ impl GpuRenderer {
                 &mut quads,
                 &active_snapped_cell_x,
             ) {
-                let visited = recolor_cursor_glyphs_in(
+                let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
                     &mut glyph_instances,
                     &row_spans,
                     cx,
@@ -6185,6 +6351,7 @@ impl GpuRenderer {
                     self.cursor_text_color,
                 );
                 crate::frame_stats::note_recolor_glyphs_visited(|| visited);
+                frame_recolor = frame_recolor.merge(record);
             }
         }
         if cursor_visible && self.window_focused && !read_only_mode {
@@ -6197,19 +6364,8 @@ impl GpuRenderer {
                 // read both cursor cell left edge AND width from the
                 // shared snapped-edge cache so the cursor (block / bar /
                 // underline) lines up with its glyph cell at fractional DPI.
-                let row = grid.row(grid.cursor.row);
-                let mut cur_col = grid.cursor.col as usize;
-                let mut cursor_span = 1usize;
-                if let Some(cell) = row.get(cur_col) {
-                    if cell.flags.contains(CellFlags::WIDE_CONT) && cur_col > 0 {
-                        cur_col -= 1;
-                        cursor_span = 2;
-                    } else if cell.flags.contains(CellFlags::WIDE) {
-                        // When: `WIDE` — the cursor is on the lead half, so the
-                        // block spans two columns from where it already is.
-                        cursor_span = 2;
-                    }
-                }
+                // The same columns `drawn_cursor_cell` records in the frame identity.
+                let (cur_col, cursor_span) = terminal_cursor_columns(grid);
                 let cur_col_clamped = cur_col.min(active_snapped_cell_x.len().saturating_sub(2));
                 let end_col = (cur_col_clamped + cursor_span)
                     .min(active_snapped_cell_x.len().saturating_sub(1));
@@ -6264,7 +6420,7 @@ impl GpuRenderer {
                                 ..Default::default()
                             });
                         }
-                        let visited = recolor_cursor_glyphs_in(
+                        let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
                             &mut glyph_instances,
                             &row_spans,
                             cx,
@@ -6276,6 +6432,7 @@ impl GpuRenderer {
                             self.cursor_text_color,
                         );
                         crate::frame_stats::note_recolor_glyphs_visited(|| visited);
+                        frame_recolor = frame_recolor.merge(record);
                     }
                     CursorShape::Bar => {
                         if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
@@ -6489,6 +6646,8 @@ impl GpuRenderer {
         // -------- Tab bar ---------------------------------------------------
         // The insertion gap below opens 8 px at the current drop slot when a
         // drag is active over this bar.
+        // Title glyphs can reach above the padded band, so their ink is measured from here.
+        let tab_glyph_start = glyph_instances.len();
         if self.tab_bar_visible {
             // When: `self.tab_bar_visible` — a hidden bar reserves no height,
             // so its strip, tab quads, and titles are all skipped.
@@ -6651,6 +6810,7 @@ impl GpuRenderer {
                 }
             }
         }
+        let tab_ink = crate::cursor::glyph_ink_bounds(&glyph_instances[tab_glyph_start..], sw, sh);
         // -------- Search highlights + badge --------------------------------
         if let Some(s) = search {
             // When: `search` is Some — a search session is live, so its match
@@ -6720,7 +6880,7 @@ impl GpuRenderer {
                     });
                     // The tab titles were appended after the rows; they lie outside every
                     // recorded row span, so this scan still examines each of them.
-                    let visited = recolor_cursor_glyphs_in(
+                    let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
                         &mut glyph_instances,
                         &row_spans,
                         qx,
@@ -8009,6 +8169,9 @@ impl GpuRenderer {
             crate::quad::debug_assert_premultiplied_quads("overlay", &quads_overlay);
         }
 
+        // Widen the damage by this frame's recolors before the layers carry it to the presenter.
+        plan.widen_for_recolor(self.last_recolor, frame_recolor);
+        plan.widen_for_tab_ink(self.last_tab_ink, tab_ink);
         // Receipts are read under the same guards the plan was built from; they carry no borrow.
         let receipts = presented_receipts(&plan, panes);
         Ok(Assembled::Layers(Box::new(AssembledLayers {
@@ -8026,6 +8189,8 @@ impl GpuRenderer {
             gpu_timing,
             plan,
             receipts,
+            recolor: frame_recolor,
+            tab_ink,
         })))
     }
 
@@ -8046,6 +8211,8 @@ impl GpuRenderer {
             mut gpu_timing,
             plan,
             receipts,
+            recolor,
+            tab_ink,
         } = assembled;
         // The presenter borrows only the owned drawable layers; no grid or parser guard is held.
         let layers = FrameLayers {
@@ -8071,6 +8238,9 @@ impl GpuRenderer {
             self.finalize_growth_episodes_if_device_stopped();
             return Ok(FrameOutcome::without_receipts(outcome));
         }
+        // Only a presented frame's recolors are on screen, so only it becomes the next baseline.
+        self.last_recolor = recolor;
+        self.last_tab_ink = tab_ink;
         self.finish_successful_frame(plan, missing_chars, missing_chrome_chars, gpu_timing);
         Ok(FrameOutcome { outcome: PresentOutcome::Presented, receipts })
     }
@@ -8125,6 +8295,15 @@ impl GpuRenderer {
         crate::frame_stats::note_damage(|| {
             crate::frame_stats::damage_permille(&plan.damage, surface_width, surface_height)
         });
+        // The single rectangle's waste over the parts it unions decides whether a rect list pays.
+        crate::frame_stats::note_damage_waste(|| {
+            crate::frame_stats::damage_waste_permille(
+                &plan.damage,
+                &plan.damage_parts,
+                surface_width,
+                surface_height,
+            )
+        });
         // The frame counts by the presenter `present_frame` used, via the same predicate.
         let software_presenter =
             crate::frame_stats::presents_software(self.software_render_degrade);
@@ -8135,6 +8314,11 @@ impl GpuRenderer {
         self.finish_glyph_atlas_retry();
         self.last_missing_chars = missing_chars_this_frame;
         self.last_missing_chrome_chars = missing_chrome_chars;
+        self.presented_damage.record(|| PresentedDamage {
+            first_frame: plan.first_frame,
+            damage: plan.damage,
+            surface: PixelRect { x: 0, y: 0, w: surface_width.max(1), h: surface_height.max(1) },
+        });
         self.last_frame_key = Some(plan.key);
         if self.pane_focus_flash.is_some() {
             self.request_window_redraw();
@@ -10103,25 +10287,27 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     runs
 }
 
-/// Stable fingerprint for command badges, including wall-clock buckets that
-/// change when badge visibility can transition without a tab model mutation.
+/// Stable fingerprint of a tab's command chrome: the status kind and the badge drawn for it at
+/// `now` on a tab whose activity is `is_active`. It changes only when the drawn badge appears,
+/// changes or disappears, or when the status kind changes, never on an undrawn elapsed second.
 #[doc(hidden)]
 pub fn command_status_hash(
     status: &sonicterm_render_model::boundary::ui::tabs::CommandStatus,
     now: Instant,
+    is_active: bool,
 ) -> u64 {
-    match status {
-        sonicterm_render_model::boundary::ui::tabs::CommandStatus::Idle => 0,
-        sonicterm_render_model::boundary::ui::tabs::CommandStatus::Running(started_at) => {
-            let elapsed_secs = now.duration_since(*started_at).as_secs().min(5);
-            let badge_visible = u64::from(now.duration_since(*started_at).as_secs() > 5);
-            1 | (elapsed_secs << 32) | (badge_visible << 40)
-        }
-        sonicterm_render_model::boundary::ui::tabs::CommandStatus::Done { exit, until } => {
-            let is_past_expiry = u64::from(now >= *until);
-            2 | (u64::from(exit.unwrap_or(255)) << 8) | (is_past_expiry << 32)
-        }
-    }
+    use sonicterm_render_model::boundary::ui::tabs::CommandStatus;
+    use std::hash::{Hash, Hasher};
+    // The kind keeps Idle and an unbadged running tab apart; `exit` picks the drawn mark.
+    let kind: u8 = match status {
+        CommandStatus::Idle => 0,
+        CommandStatus::Running(_) => 1,
+        CommandStatus::Done { .. } => 2,
+    };
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    kind.hash(&mut hash);
+    status.clone().badge(now, is_active).hash(&mut hash);
+    hash.finish()
 }
 
 /// Compute the per-row selection quad rects (in physical pixels) that the

@@ -13,6 +13,43 @@ use sonicterm_render_model::{
     DamageRect, PixelRect,
 };
 
+use crate::cursor::{RecolorBounds, RecolorRecord};
+
+/// The terminal cursor cell as the frame draws it: its pane, viewport slot, first column and
+/// width in columns. Absent when no cursor is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CursorCell {
+    pub pane_id: u64,
+    pub slot: u16,
+    pub col: u16,
+    pub span: u16,
+}
+
+/// Which damage classes a changed frame key touches. `full` damages the whole surface; each other
+/// class damages only the area its fields draw.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ChangeClass {
+    /// A field without a narrow class changed, so the whole surface is damaged.
+    pub full: bool,
+    /// The tab bar's content, hover, close control or privilege marker changed.
+    pub tab_band: bool,
+    /// The cursor's visibility, shape, blink or drawn cell changed.
+    pub cursor: bool,
+    /// Window focus changed: the cursor and the tab bar's active marker and title.
+    pub focus: bool,
+    /// The active pane's selection changed.
+    pub selection: bool,
+    /// A pane's scrollbar opacity bucket changed.
+    pub scrollbar: bool,
+}
+
+impl ChangeClass {
+    /// True when any narrow class, but not necessarily `full`, is set.
+    pub(crate) fn any_class(self) -> bool {
+        self.tab_band || self.cursor || self.focus || self.selection || self.scrollbar
+    }
+}
+
 /// Fixed-size identity of copy-mode state without retained quick-select text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CopyModeIdentity {
@@ -78,11 +115,108 @@ pub(crate) struct WindowIdentity {
     pub style_rev: u64,
     pub renderer_hash: u64,
     pub overlay_active: bool,
+    pub cursor_cell: Option<CursorCell>,
 }
 
 impl WindowIdentity {
-    fn same_chrome(&self, other: &Self) -> bool {
-        Self { hovered_url_cells: other.hovered_url_cells, ..self.clone() } == *other
+    /// Classify every field that differs from `previous`.
+    ///
+    /// Both identities are destructured without a rest pattern, so a new field fails to compile
+    /// here until it is given a class. `hovered_url_cells` has its own row path in the planner.
+    pub(crate) fn classify(&self, previous: &Self) -> ChangeClass {
+        let Self {
+            selection,
+            copy_mode,
+            quick_select_hint_count,
+            cursor_visible,
+            tab,
+            search_hash,
+            palette_hash,
+            ime_hash,
+            notification_hash,
+            width,
+            height,
+            tab_hash,
+            viewport_top_abs,
+            cursor_shape,
+            cursor_blink,
+            window_focused,
+            pane_focus_flash_bucket,
+            hover_tab,
+            close_override,
+            broadcast_participants_hash,
+            inline_media_hash,
+            hovered_url_cells: _,
+            process_privileged,
+            subpixel_aa,
+            background,
+            style_rev,
+            renderer_hash,
+            overlay_active,
+            cursor_cell,
+        } = self;
+        let Self {
+            selection: previous_selection,
+            copy_mode: previous_copy_mode,
+            quick_select_hint_count: previous_quick_select_hint_count,
+            cursor_visible: previous_cursor_visible,
+            tab: previous_tab,
+            search_hash: previous_search_hash,
+            palette_hash: previous_palette_hash,
+            ime_hash: previous_ime_hash,
+            notification_hash: previous_notification_hash,
+            width: previous_width,
+            height: previous_height,
+            tab_hash: previous_tab_hash,
+            viewport_top_abs: previous_viewport_top_abs,
+            cursor_shape: previous_cursor_shape,
+            cursor_blink: previous_cursor_blink,
+            window_focused: previous_window_focused,
+            pane_focus_flash_bucket: previous_pane_focus_flash_bucket,
+            hover_tab: previous_hover_tab,
+            close_override: previous_close_override,
+            broadcast_participants_hash: previous_broadcast_participants_hash,
+            inline_media_hash: previous_inline_media_hash,
+            hovered_url_cells: _,
+            process_privileged: previous_process_privileged,
+            subpixel_aa: previous_subpixel_aa,
+            background: previous_background,
+            style_rev: previous_style_rev,
+            renderer_hash: previous_renderer_hash,
+            overlay_active: previous_overlay_active,
+            cursor_cell: previous_cursor_cell,
+        } = previous;
+        ChangeClass {
+            full: copy_mode != previous_copy_mode
+                || quick_select_hint_count != previous_quick_select_hint_count
+                || tab != previous_tab
+                || search_hash != previous_search_hash
+                || palette_hash != previous_palette_hash
+                || ime_hash != previous_ime_hash
+                || notification_hash != previous_notification_hash
+                || width != previous_width
+                || height != previous_height
+                || viewport_top_abs != previous_viewport_top_abs
+                || pane_focus_flash_bucket != previous_pane_focus_flash_bucket
+                || broadcast_participants_hash != previous_broadcast_participants_hash
+                || inline_media_hash != previous_inline_media_hash
+                || subpixel_aa != previous_subpixel_aa
+                || background != previous_background
+                || style_rev != previous_style_rev
+                || renderer_hash != previous_renderer_hash
+                || overlay_active != previous_overlay_active,
+            tab_band: tab_hash != previous_tab_hash
+                || hover_tab != previous_hover_tab
+                || close_override != previous_close_override
+                || process_privileged != previous_process_privileged,
+            cursor: cursor_visible != previous_cursor_visible
+                || cursor_shape != previous_cursor_shape
+                || cursor_blink != previous_cursor_blink
+                || cursor_cell != previous_cursor_cell,
+            focus: window_focused != previous_window_focused,
+            selection: selection != previous_selection,
+            scrollbar: false,
+        }
     }
 }
 
@@ -106,11 +240,53 @@ pub(crate) struct PaneIdentity {
 }
 
 impl PaneIdentity {
-    fn same_projection(&self, other: &Self) -> bool {
-        // Grid revisions and dirty generations alone use dirty-row damage; every other pane identity
-        // change invalidates its projection.
-        Self { revision: other.revision, dirty_generation: other.dirty_generation, ..*self }
-            == *other
+    /// Classify every field that differs from `previous`. Revision and dirty generation are dirt,
+    /// damaged through the plan's dirty slots, so they set no class.
+    pub(crate) fn classify(&self, previous: &Self) -> ChangeClass {
+        let Self {
+            id,
+            revision: _,
+            dirty_generation: _,
+            rect,
+            cols,
+            rows,
+            scrollback_len,
+            viewport_top_abs,
+            view_top_abs,
+            is_active,
+            is_alt,
+            scrollbar_bucket,
+        } = self;
+        let Self {
+            id: previous_id,
+            revision: _,
+            dirty_generation: _,
+            rect: previous_rect,
+            cols: previous_cols,
+            rows: previous_rows,
+            scrollback_len: previous_scrollback_len,
+            viewport_top_abs: previous_viewport_top_abs,
+            view_top_abs: previous_view_top_abs,
+            is_active: previous_is_active,
+            is_alt: previous_is_alt,
+            scrollbar_bucket: previous_scrollbar_bucket,
+        } = previous;
+        ChangeClass {
+            full: id != previous_id
+                || rect != previous_rect
+                || cols != previous_cols
+                || rows != previous_rows
+                || scrollback_len != previous_scrollback_len
+                || viewport_top_abs != previous_viewport_top_abs
+                || view_top_abs != previous_view_top_abs
+                || is_active != previous_is_active
+                || is_alt != previous_is_alt,
+            scrollbar: scrollbar_bucket != previous_scrollbar_bucket,
+            tab_band: false,
+            cursor: false,
+            focus: false,
+            selection: false,
+        }
     }
 }
 
@@ -135,6 +311,12 @@ pub(crate) struct FrameFacts {
     pub vertical_ink_pad: f32,
     pub scrollbar_mode: ScrollbarMode,
     pub degraded: bool,
+    /// Top edge of the drawn tab bar in surface pixels; `None` while the bar is hidden.
+    pub tab_bar_top: Option<f32>,
+    /// Display scale factor, which sizes the scrollbar.
+    pub scale: f32,
+    /// What the last presented frame's cursor recolors rewrote.
+    pub previous_recolor: RecolorRecord,
 }
 
 /// Visible-pane metadata contains row indices but no cells or hidden-history payloads.
@@ -172,6 +354,7 @@ pub(crate) struct PlannedPane {
     pub background_cols: u16,
     pub background_rows: u16,
     pub is_active: bool,
+    pub is_alt: bool,
     pub scrollbar_alpha: f32,
     /// The grid's dirty rows as live-buffer indices, unmapped and unfiltered; only cache invalidation reads them.
     pub dirty_live_rows: Vec<usize>,
@@ -216,6 +399,12 @@ pub(crate) struct FramePlan {
     pub damaged_rows: usize,
     pub first_frame: bool,
     pub unchanged: bool,
+    /// The damage classes this frame's key changed.
+    pub change: ChangeClass,
+    /// The whole surface, which bounds every damage rectangle.
+    pub surface: PixelRect,
+    /// The rectangles `damage` is the union of, for measuring its waste.
+    pub damage_parts: Vec<PixelRect>,
 }
 
 impl FramePlan {
@@ -229,8 +418,17 @@ impl FramePlan {
             PixelRect { x: 0, y: 0, w: facts.window.width.max(1), h: facts.window.height.max(1) };
         let mut identities = Vec::new();
         let mut panes = Vec::new();
-        let mut dirt = DamageRect::empty();
+        let mut dirt = DamageParts::default();
         let mut damaged_rows = 0;
+        let geometry = DamageGeometry {
+            cell_w: facts.cell_w,
+            cell_h: facts.cell_h,
+            vertical_ink_pad: facts.vertical_ink_pad,
+            surface,
+        };
+        let tab_bar_top = facts.tab_bar_top;
+        let scale = facts.scale;
+        let previous_recolor = facts.previous_recolor;
         for input in inputs {
             let geometry = sonicterm_render_model::pane_content_geometry(
                 input.rect,
@@ -301,20 +499,33 @@ impl FramePlan {
                     })
                     .collect()
             };
-            if let Some(rect) = pane_damage_rect_with_ink_pad(
-                input.is_alt,
-                dirty_slots.iter().copied().map(usize::from),
-                input.rect,
-                origin_x,
-                origin_y,
-                input.cols,
-                facts.cell_w,
-                facts.cell_h,
-                facts.vertical_ink_pad,
-                surface.w,
-                surface.h,
-            ) {
-                dirt.add_clipped(rect, surface);
+            // One part per dirty slot (one for an alternate pane, which damages whole), so the
+            // waste counter sees the gaps between dirty rows. Each group is a borrowed slice, so
+            // the loop allocates nothing per dirty row.
+            let mut add_slot_group = |slots: &[u16]| {
+                if let Some(rect) = pane_damage_rect_with_ink_pad(
+                    input.is_alt,
+                    slots.iter().map(|&slot| usize::from(slot)),
+                    input.rect,
+                    origin_x,
+                    origin_y,
+                    input.cols,
+                    facts.cell_w,
+                    facts.cell_h,
+                    facts.vertical_ink_pad,
+                    surface.w,
+                    surface.h,
+                ) {
+                    dirt.add_clipped(rect, surface);
+                }
+            };
+            if input.is_alt {
+                add_slot_group(&dirty_slots);
+            } else {
+                // When: `is_alt` is false, each dirty row is its own ink-padded strip.
+                for slot in &dirty_slots {
+                    add_slot_group(std::slice::from_ref(slot));
+                }
             }
             damaged_rows += dirty_slots.len();
             panes.push(PlannedPane {
@@ -334,6 +545,7 @@ impl FramePlan {
                 background_rows: ((layout.h / facts.cell_h).floor() as i32)
                     .clamp(0, i32::from(input.rows)) as u16,
                 is_active: input.is_active,
+                is_alt: input.is_alt,
                 scrollbar_alpha: input.scrollbar_alpha,
                 dirty_slots,
                 dirty_live_rows: input.dirty_rows,
@@ -357,23 +569,17 @@ impl FramePlan {
         };
         let first_frame = previous.is_none();
         let unchanged = previous.is_some_and(|previous| previous == &key);
-        let chrome_changed = previous.is_none_or(|previous| {
-            !previous.window.same_chrome(&key.window)
-                || previous.metrics != key.metrics
-                || previous.padding != key.padding
-                || previous.degraded != key.degraded
-                || previous.scrollbar_mode != key.scrollbar_mode
-                || previous.panes.len() != key.panes.len()
-                || previous
-                    .panes
-                    .iter()
-                    .zip(&key.panes)
-                    .any(|(before, after)| !before.same_projection(after))
-        });
-        if chrome_changed {
+        let change = previous
+            .map_or(ChangeClass { full: true, ..ChangeClass::default() }, |previous| {
+                classify_frame(previous, &key)
+            });
+        // Any class change repaints the whole surface on the degraded path, as every window
+        // change did before classes existed; the hardware path damages only the class areas.
+        let window_changed = change.full || change.any_class();
+        if change.full {
             dirt.add_clipped(surface, surface);
         } else if let Some(previous) = previous {
-            // When: previous exists with unchanged chrome, hover transitions replace only old and new glyph-row ink.
+            // When: previous exists without a full-class change, hover transitions replace only old and new glyph-row ink.
             if previous.window.hovered_url_cells != key.window.hovered_url_cells {
                 for hovered in [previous.window.hovered_url_cells, key.window.hovered_url_cells]
                     .into_iter()
@@ -402,11 +608,27 @@ impl FramePlan {
                     }
                 }
             }
+            add_class_damage(
+                &mut dirt,
+                ClassDamageInputs {
+                    change,
+                    previous,
+                    key: &key,
+                    panes: &panes,
+                    active_index,
+                    active_view_top_abs,
+                    tab_bar_top,
+                    scale,
+                    scrollbar_mode: facts.scrollbar_mode,
+                    previous_recolor,
+                    geometry,
+                },
+            );
         }
         // A revision-only change whose dirt is all scrolled out of view draws nothing new. An
         // active overlay is excluded: a preedit follows the live cursor, which the key omits.
         let offscreen_only = !unchanged
-            && !chrome_changed
+            && !window_changed
             && !key.window.overlay_active
             && dirt.rect().is_none()
             && previous.is_some_and(|previous| {
@@ -419,7 +641,17 @@ impl FramePlan {
                         },
                     )
             });
-        let mode = if unchanged || offscreen_only {
+        // A7: a changed hardware key whose composed damage (dirt, hover and every class) is empty
+        // and whose panes hold no live dirt draws nothing new and has nothing to acknowledge. An
+        // active overlay is excluded for the same reason as above.
+        let quiet = !unchanged
+            && !first_frame
+            && !facts.degraded
+            && !change.full
+            && !key.window.overlay_active
+            && dirt.rect().is_none()
+            && panes.iter().all(|pane| pane.dirty_live_rows.is_empty());
+        let mode = if unchanged || offscreen_only || quiet {
             RenderMode::Noop
         } else {
             // When: `unchanged` is false, compose redraw policy using the same key and damage planned for execution.
@@ -427,7 +659,7 @@ impl FramePlan {
                 facts.degraded,
                 RenderSignals {
                     first_frame,
-                    overlay_active_or_toggled: chrome_changed || key.window.overlay_active,
+                    overlay_active_or_toggled: window_changed || key.window.overlay_active,
                     dirty_damage: dirt.rect(),
                     ..Default::default()
                 },
@@ -435,18 +667,26 @@ impl FramePlan {
         };
         // A Full plan is one full frame for the counting renderer building it.
         crate::frame_stats::note_full_frame(mode == RenderMode::Full);
+        let composed = dirt.rect();
         let damage = if first_frame || (facts.degraded && mode == RenderMode::Full) {
             surface
         } else {
             // When: `first_frame` is false outside a degraded full repaint, replace only the composed `dirt`.
-            dirt.rect().unwrap_or(surface)
+            composed.unwrap_or(surface)
         };
-        let damage = if offscreen_only {
-            // An offscreen-only Noop changes no pixel; its unacknowledged dirt waits for a later frame.
+        let damage = if offscreen_only || quiet {
+            // An offscreen-only or A7 Noop changes no pixel; any unacknowledged dirt waits for a later frame.
             PixelRect { x: 0, y: 0, w: 0, h: 0 }
         } else {
-            // When: `offscreen_only` is false, keep the damage composed from first-frame, degraded and dirty-row policy.
+            // When: neither `offscreen_only` nor `quiet` holds, keep the damage composed from first-frame, degraded and dirty-row policy.
             damage
+        };
+        let damage_parts = if Some(damage) == composed {
+            dirt.parts
+        } else {
+            // When: `damage` is not the `composed` union (first frame, degraded, fallback or empty),
+            // the damage itself is its only part, so it is measured as wasting nothing.
+            vec![damage]
         };
         Self {
             key,
@@ -458,6 +698,72 @@ impl FramePlan {
             damaged_rows,
             first_frame,
             unchanged,
+            change,
+            surface,
+            damage_parts,
+        }
+    }
+
+    /// Widen a presenting plan's damage by the cursor recolors: whenever the record assembly
+    /// produced (`current`) differs from the last presented one (`previous`), both bounds are
+    /// damaged, so a replaced, removed or new recolored glyph is repainted; with the cursor or
+    /// focus class set, the current bounds are damaged even when the record is unchanged.
+    /// `Unbounded` damages the active pane. Assembly is whole-frame, so every primitive meeting
+    /// the widened scissor is already in the batches.
+    pub(crate) fn widen_for_recolor(&mut self, previous: RecolorRecord, current: RecolorRecord) {
+        if self.mode != RenderMode::Full {
+            // When: `mode` is not Full, the plan presents nothing and no damage is read.
+            return;
+        }
+        let changed = previous != current;
+        let class = self.change.cursor || self.change.focus;
+        let mut records = Vec::with_capacity(2);
+        if changed {
+            records.push(previous.bounds);
+        }
+        if changed || class {
+            records.push(current.bounds);
+        }
+        let active_clip = self.panes.get(self.active_index).and_then(|pane| pane.full_clip);
+        for bounds in records {
+            let Some(rect) = resolve_recolor(bounds, active_clip, self.surface) else {
+                // When: the bounds are empty, nothing was recolored on that side.
+                continue;
+            };
+            self.add_damage(rect);
+        }
+    }
+
+    /// Widen a full plan's damage by the tab-title ink the last presented frame and this frame
+    /// drew. A title glyph can reach above the padded tab band, so whenever the tab-band or
+    /// focus class is set, or the ink changed, both sides' ink is repainted. `Unbounded` ink
+    /// damages the whole surface. Assembly is whole-frame, so the widened scissor is filled.
+    pub(crate) fn widen_for_tab_ink(&mut self, previous: RecolorBounds, current: RecolorBounds) {
+        if self.mode != RenderMode::Full {
+            // When: `mode` is not Full, the plan presents nothing and no damage is read.
+            return;
+        }
+        if previous == current && !self.change.tab_band && !self.change.focus {
+            // When: the ink is unchanged and no tab-band or focus class is set, it is on screen.
+            return;
+        }
+        for bounds in [previous, current] {
+            if let Some(rect) = resolve_recolor(bounds, Some(self.surface), self.surface) {
+                self.add_damage(rect);
+            }
+        }
+    }
+
+    /// Union `rect`, clipped to the surface, into the damage and record it as a part.
+    fn add_damage(&mut self, rect: PixelRect) {
+        if let Some(clipped) = rect.intersect(self.surface) {
+            self.damage = if self.damage.is_empty() {
+                clipped
+            } else {
+                // When: damage is non-empty, the single rectangle grows to the union.
+                self.damage.union(clipped)
+            };
+            self.damage_parts.push(clipped);
         }
     }
 
@@ -486,6 +792,253 @@ pub(crate) fn effective_scrollbar_bucket(
         return 0;
     }
     (alpha.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
+}
+
+/// Classify a changed key against the previous one: window fields, frame-wide policy and every
+/// pane pair. While an overlay is active on either side, any change to the key is `full`:
+/// overlays draw over everything in batch order, and a preedit follows the live cursor, which
+/// the key omits, so even a revision, dirty-generation or hover change can move overlay pixels.
+fn classify_frame(previous: &FrameKey, key: &FrameKey) -> ChangeClass {
+    let mut change = key.window.classify(&previous.window);
+    if previous.metrics != key.metrics
+        || previous.padding != key.padding
+        || previous.degraded != key.degraded
+        || previous.scrollbar_mode != key.scrollbar_mode
+        || previous.panes.len() != key.panes.len()
+    {
+        change.full = true;
+    }
+    for (before, after) in previous.panes.iter().zip(&key.panes) {
+        let pane_change = after.classify(before);
+        change.full |= pane_change.full;
+        change.scrollbar |= pane_change.scrollbar;
+    }
+    if previous != key && (previous.window.overlay_active || key.window.overlay_active) {
+        // Either key's overlay may have moved with the live cursor, so the whole surface repaints.
+        change.full = true;
+    }
+    change
+}
+
+/// Cell metrics and surface bounds every class-damage rectangle is computed with.
+#[derive(Debug, Clone, Copy)]
+struct DamageGeometry {
+    cell_w: f32,
+    cell_h: f32,
+    vertical_ink_pad: f32,
+    surface: PixelRect,
+}
+
+/// Everything class damage reads, borrowed from the plan under construction.
+struct ClassDamageInputs<'plan> {
+    change: ChangeClass,
+    previous: &'plan FrameKey,
+    key: &'plan FrameKey,
+    panes: &'plan [PlannedPane],
+    active_index: usize,
+    active_view_top_abs: u64,
+    tab_bar_top: Option<f32>,
+    scale: f32,
+    scrollbar_mode: ScrollbarMode,
+    previous_recolor: RecolorRecord,
+    geometry: DamageGeometry,
+}
+
+/// Add the damage of every narrow class set in `inputs.change` to `dirt`.
+fn add_class_damage(dirt: &mut DamageParts, inputs: ClassDamageInputs<'_>) {
+    let ClassDamageInputs {
+        change,
+        previous,
+        key,
+        panes,
+        active_index,
+        active_view_top_abs,
+        tab_bar_top,
+        scale,
+        scrollbar_mode,
+        previous_recolor,
+        geometry,
+    } = inputs;
+    let surface = geometry.surface;
+    if change.tab_band || change.focus {
+        if let Some(top) = tab_bar_top {
+            // The bar is pinned to the surface bottom; ink above its top edge is padded in.
+            let band_top = (top - geometry.vertical_ink_pad.max(0.0)).floor() as i32;
+            let band_h =
+                (i64::from(surface.bottom()) - i64::from(band_top)).clamp(0, i64::from(u32::MAX));
+            dirt.add_clipped(
+                PixelRect { x: surface.x, y: band_top, w: surface.w, h: band_h as u32 },
+                surface,
+            );
+        }
+    }
+    if change.cursor || change.focus {
+        for cell in [previous.window.cursor_cell, key.window.cursor_cell].into_iter().flatten() {
+            match panes.iter().find(|pane| pane.id == cell.pane_id) {
+                Some(pane) => {
+                    if let Some(rect) = slot_damage(pane, cell.slot, geometry) {
+                        dirt.add_clipped(rect, surface);
+                    }
+                }
+                // The cursor's pane is not planned, so its pixels cannot be located.
+                None => dirt.add_clipped(surface, surface),
+            }
+        }
+        let active_clip = panes.get(active_index).and_then(|pane| pane.full_clip);
+        if let Some(rect) = resolve_recolor(previous_recolor.bounds, active_clip, surface) {
+            dirt.add_clipped(rect, surface);
+        }
+    }
+    if change.selection {
+        if let (Some(pane), Some(identity)) = (panes.get(active_index), key.panes.get(active_index))
+        {
+            for slot in changed_selection_slots(
+                previous.window.selection.as_ref(),
+                key.window.selection.as_ref(),
+                active_view_top_abs,
+                identity.rows,
+                identity.cols,
+            ) {
+                if let Some(rect) = slot_damage(pane, slot, geometry) {
+                    dirt.add_clipped(rect, surface);
+                }
+            }
+        }
+    }
+    if change.scrollbar {
+        // When: `change.scrollbar` is set, some pane's opacity bucket moved, so its drawn track is repainted.
+        for ((before, after), pane) in previous.panes.iter().zip(&key.panes).zip(panes) {
+            if before.scrollbar_bucket == after.scrollbar_bucket || pane.full_clip.is_none() {
+                // When: the bucket is unchanged or the pane is off the surface, no track is redrawn.
+                continue;
+            }
+            // A bucket-only change keeps every geometry input, so old and new tracks coincide.
+            if let Some(track) = pane_scrollbar_geometry(
+                pane.chrome,
+                pane.row_count,
+                pane.scrollback_len + u64::from(pane.row_count),
+                pane.view_top_abs,
+                scrollbar_mode,
+                scale,
+            ) {
+                let track = track.track_rect;
+                let rect = crate::cursor::outward_rect((track.x, track.y, track.w, track.h));
+                dirt.add_clipped(rect, surface);
+            }
+        }
+    }
+}
+
+/// The damage one viewport slot of `pane` occupies: the ink-padded row, or the whole clipped
+/// pane on the alternate screen.
+fn slot_damage(pane: &PlannedPane, slot: u16, geometry: DamageGeometry) -> Option<PixelRect> {
+    pane_damage_rect_with_ink_pad(
+        pane.is_alt,
+        [usize::from(slot)],
+        pane.full_rect,
+        pane.layout.x,
+        pane.layout.y,
+        pane.cols,
+        geometry.cell_w,
+        geometry.cell_h,
+        geometry.vertical_ink_pad,
+        geometry.surface.w,
+        geometry.surface.h,
+    )
+}
+
+/// The viewport slots whose selection quads differ between `before` and `after`, computed with
+/// the draw's own `selection_quad_rects` in unit cells so each quad's y is its slot.
+fn changed_selection_slots(
+    before: Option<&Selection>,
+    after: Option<&Selection>,
+    view_top_abs: u64,
+    rows: u16,
+    cols: u16,
+) -> Vec<u16> {
+    let quads = |selection: Option<&Selection>| -> Vec<(u16, u32, u32)> {
+        selection
+            .map(|selection| {
+                crate::core::selection_quad_rects(
+                    selection,
+                    view_top_abs,
+                    rows,
+                    cols,
+                    0.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                    &[],
+                )
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(left, top, width, _)| (top as u16, left.to_bits(), width.to_bits()))
+            .collect()
+    };
+    let (old_quads, new_quads) = (quads(before), quads(after));
+    let mut slots: Vec<u16> = old_quads
+        .iter()
+        .filter(|quad| !new_quads.contains(quad))
+        .chain(new_quads.iter().filter(|quad| !old_quads.contains(quad)))
+        .map(|quad| quad.0)
+        .collect();
+    slots.sort_unstable();
+    slots.dedup();
+    slots
+}
+
+/// Where recolor `bounds` draw: nothing when empty, the rectangle itself, or, when unbounded,
+/// the active pane's clip (the whole surface without one).
+fn resolve_recolor(
+    bounds: RecolorBounds,
+    active_clip: Option<PixelRect>,
+    surface: PixelRect,
+) -> Option<PixelRect> {
+    match bounds {
+        RecolorBounds::Empty => None,
+        RecolorBounds::Rect(rect) => Some(rect),
+        RecolorBounds::Unbounded => Some(active_clip.unwrap_or(surface)),
+    }
+}
+
+/// A frame's damage as one union rectangle plus the parts it unions, for the waste counter.
+#[derive(Debug, Default)]
+struct DamageParts {
+    union: DamageRect,
+    parts: Vec<PixelRect>,
+}
+
+impl DamageParts {
+    /// Add `rect` clipped to `bounds`; a rectangle outside `bounds` adds nothing.
+    fn add_clipped(&mut self, rect: PixelRect, bounds: PixelRect) {
+        if let Some(clipped) = rect.intersect(bounds) {
+            self.union.add_clipped(clipped, bounds);
+            self.parts.push(clipped);
+        }
+    }
+
+    /// The union of every part added, if any.
+    fn rect(&self) -> Option<PixelRect> {
+        self.union.rect()
+    }
+}
+
+/// The scrollbar geometry a pane draws: the track at the right edge of its padded `chrome`,
+/// `max(8 * scale, 1)` pixels wide and clamped to the chrome. Drawing and damage both read it.
+pub(crate) fn pane_scrollbar_geometry(
+    chrome: PaneRect,
+    viewport_rows: u16,
+    total_rows: u64,
+    view_top: u64,
+    mode: ScrollbarMode,
+    scale: f32,
+) -> Option<sonicterm_render_model::boundary::ui::scrollbar::ScrollbarGeometry> {
+    use sonicterm_render_model::boundary::ui::scrollbar;
+    // Authored at 8 logical px and scaled with DPI so the bar keeps a constant physical size, min 1px.
+    let width_px = (8.0 * scale).max(1.0);
+    let rect = scrollbar::Rect::new(chrome.x, chrome.y, chrome.w, chrome.h);
+    scrollbar::compute(viewport_rows, total_rows, view_top, rect, mode, width_px)
 }
 
 #[cfg(test)]
@@ -577,6 +1130,15 @@ where
         surface_w,
         surface_h,
     )
+}
+
+/// Whether a plan in `mode` emits every visible row into its batches. Exhaustive, so a mode
+/// that emits fewer rows must state its own ink-coverage rule before it compiles.
+pub(crate) fn emits_every_visible_row(mode: RenderMode) -> bool {
+    match mode {
+        RenderMode::Full => true,
+        RenderMode::Noop => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

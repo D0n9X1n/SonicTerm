@@ -5124,7 +5124,8 @@ COUNTER_CONTRACT = {
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced",
             "flushes_suppressed"),
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
-    "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames", "software_frames",
+    "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
+                  "damage_waste_permille_sum", "software_frames",
                   "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",
                   # row_cache_invalidate_us is summed microseconds as a plain count, not a histogram.
                   "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited",
@@ -5715,6 +5716,28 @@ class CounterTableTests(unittest.TestCase):
                                  ("n/a", "4 (4–4)", "n/a"))
                 self.assertEqual(link_cells(perf.SideRuns(outcomes=[make_outcome(result=counters_result())])),
                                  ("0 (0–0)", "4 (4–4)", perf.percent_change(0, 4)))
+        gate_off = valid_result(frame_counters="off")
+        self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
+
+    def test_damage_waste_is_required_on_the_head_and_n_a_on_an_older_base(self):
+        # damage_waste_permille_sum joined the renderer section: a head must report it, a base built before it
+        # reads n/a with no change shown, a supporting base that wasted nothing prints a real 0, and a gate-off
+        # run carries no phase counters, so it is never checked for the field.
+        lacking = counters_result()
+        del lacking["phases"][0]["frame_counters"]["renderer"]["damage_waste_permille_sum"]
+        problems = perf.validate_result(lacking, HARNESS_HASH, 0, counters=True)
+        self.assertTrue(any("renderer.damage_waste_permille_sum" in problem for problem in problems), problems)
+        self.assertEqual(perf.validate_result(lacking, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        head = counters_side({"renderer.damage_waste_permille_sum": 40})
+
+        def waste_cells(base):
+            rows, _omitted = perf.counter_rows("S6/sweep", base, head)
+            return {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}["renderer.damage_waste_permille_sum (count)"]
+
+        self.assertEqual(waste_cells(perf.SideRuns(outcomes=[make_outcome(result=lacking)])),
+                         ("n/a", "40 (40–40)", "n/a"))
+        self.assertEqual(waste_cells(perf.SideRuns(outcomes=[make_outcome(result=counters_result())])),
+                         ("0 (0–0)", "40 (40–40)", perf.percent_change(0, 40)))
         gate_off = valid_result(frame_counters="off")
         self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
 

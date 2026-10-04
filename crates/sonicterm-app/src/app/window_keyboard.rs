@@ -333,7 +333,8 @@ impl App {
             if window.test_renderer_focus_marker.is_some() {
                 window.test_renderer_focus_marker = Some(focused);
             }
-            mark_all_panes_dirty(&window.panes);
+            // Focus reaches the renderer as a damage class (cursor rows and tab bar), so no pane
+            // is dirtied and no peer parser is locked; only the active pane's reporting is read.
             if let Some(active_pane) =
                 window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane)
             {

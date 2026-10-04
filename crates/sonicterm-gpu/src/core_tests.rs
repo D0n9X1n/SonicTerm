@@ -73,6 +73,9 @@ fn revision_plan(id: u64, revision: u64) -> FramePlan {
             vertical_ink_pad: 0.0,
             scrollbar_mode: ScrollbarMode::Never,
             degraded: false,
+            tab_bar_top: None,
+            scale: 1.0,
+            previous_recolor: crate::cursor::RecolorRecord::default(),
         },
         [PaneMetadata {
             id,
@@ -4509,6 +4512,9 @@ fn scrolled_back_cache_plan(dirty_live_rows: Vec<usize>) -> FramePlan {
         vertical_ink_pad: 0.0,
         scrollbar_mode: ScrollbarMode::Never,
         degraded: false,
+        tab_bar_top: None,
+        scale: 1.0,
+        previous_recolor: crate::cursor::RecolorRecord::default(),
     };
     let metadata = |revision, dirty_rows| PaneMetadata {
         id: 7,
@@ -4616,18 +4622,21 @@ fn terminal_cursor_is_drawn_only_at_the_live_view_top() {
     assert!(!terminal_cursor_drawn_at_view(scrolled_view_top, scrollback_len), "scrolled back");
 }
 
-/// The cursor draw path gates on the active view top through the tested predicate, once,
-/// so the predicate cannot drift from the condition the renderer applies.
+/// The cursor draw path gates on the active view top through the tested predicate, once, and
+/// the frame identity's drawn cursor cell gates through the same predicate, so neither can
+/// drift from the condition the renderer applies.
 #[test]
 fn cursor_draw_path_calls_the_live_view_predicate() {
     let core: String = include_str!("core.rs").split_whitespace().collect();
     let gate =
         "letview_top=plan.active_view_top_abs;ifterminal_cursor_drawn_at_view(view_top,live_top){";
     assert_eq!(core.matches(gate).count(), 1, "cursor path must call the predicate");
+    let identity = "&&terminal_cursor_drawn_at_view(view_top_abs,live_top);if!drawn{";
+    assert_eq!(core.matches(identity).count(), 1, "the drawn cursor cell must call it");
     assert_eq!(
         core.matches("terminal_cursor_drawn_at_view(").count(),
-        2,
-        "definition and one call"
+        3,
+        "definition, the draw call and the identity call"
     );
     assert_eq!(core.matches("ifview_top==live_top{").count(), 0, "no inline duplicate");
 }
@@ -5541,4 +5550,258 @@ fn glyph_atlas_facts_read_a_grown_atlas() {
     assert_eq!((facts.dim, facts.growths, facts.evictions), (512, 1, 0));
     assert_eq!((facts.packed_pixels, facts.max_tile), (30 * 40, [30, 40]));
     assert_eq!(facts.fit, atlas.fit_outcome().label());
+}
+
+/// The command-status hash changes only when the drawn badge changes: an inactive running tab
+/// keeps one hash until its badge appears past five seconds, an active running tab (never badged)
+/// keeps one hash throughout, a finished badge changes at its expiry, and an idle tab differs from
+/// a running one so a state change still repaints once.
+#[test]
+fn command_status_hash_follows_only_the_drawn_badge() {
+    use sonicterm_render_model::boundary::ui::tabs::CommandStatus;
+    use std::time::Duration;
+    let started = Instant::now();
+    let running = CommandStatus::Running(started);
+    let at = |seconds: u64| started + Duration::from_secs(seconds);
+    let inactive_early: Vec<u64> =
+        (0..=5).map(|seconds| command_status_hash(&running, at(seconds), false)).collect();
+    assert!(inactive_early.iter().all(|hash| *hash == inactive_early[0]), "{inactive_early:?}");
+    let inactive_late = command_status_hash(&running, at(6), false);
+    assert_ne!(inactive_late, inactive_early[0], "the badge appears past five seconds");
+    assert_eq!(inactive_late, command_status_hash(&running, at(30), false));
+    let active: Vec<u64> =
+        (0..=30).map(|seconds| command_status_hash(&running, at(seconds), true)).collect();
+    assert!(active.iter().all(|hash| *hash == active[0]), "an active tab draws no badge");
+
+    let until = at(5);
+    let done = CommandStatus::Done { exit: Some(0), until };
+    for is_active in [false, true] {
+        assert_eq!(
+            command_status_hash(&done, at(1), is_active),
+            command_status_hash(&done, at(4), is_active)
+        );
+        assert_ne!(
+            command_status_hash(&done, at(4), is_active),
+            command_status_hash(&done, until, is_active),
+            "the finished badge expires at `until`"
+        );
+    }
+
+    let idle = command_status_hash(&CommandStatus::Idle, at(1), true);
+    assert_ne!(idle, command_status_hash(&running, at(1), true), "idle and running differ");
+}
+
+/// The tab-bar hash judges each tab's badge as drawn for its activity: a running active tab
+/// leaves the bar's hash unchanged as seconds pass, so no frame is planned for an invisible tick.
+#[test]
+fn tab_bar_hash_ignores_the_running_seconds_of_an_unbadged_tab() {
+    use sonicterm_render_model::boundary::ui::tabs::{CommandStatus, Tab};
+    use std::time::Duration;
+    let mut tabs = TabBar::new();
+    tabs.push(Tab::new("active"));
+    tabs.push(Tab::new("inactive"));
+    tabs.activate(0);
+    let started = Instant::now();
+    tabs.set_command_status(0, CommandStatus::Running(started));
+    tabs.set_command_status(1, CommandStatus::Running(started));
+    let at = |seconds: u64| started + Duration::from_secs(seconds);
+    let early = tab_bar_hash_with_limits(&tabs, at(1), 240.0, 320.0);
+    assert_eq!(early, tab_bar_hash_with_limits(&tabs, at(4), 240.0, 320.0));
+    assert_ne!(early, tab_bar_hash_with_limits(&tabs, at(6), 240.0, 320.0), "inactive badge");
+}
+
+/// The frame identity's cursor cell follows the draw's own rule: a cursor is drawn only when it
+/// is visible, the window is focused, the pane is not read-only and the view is at the live top;
+/// it sits at the cursor's viewport slot, and on either half of a wide character covers both.
+#[test]
+fn drawn_cursor_cell_follows_the_draw_condition_and_wide_span() {
+    use sonicterm_render_model::boundary::grid::grid::{CellFlags, Color, Grid};
+    let mut grid = Grid::new(8, 4);
+    grid.linefeed();
+    grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+    let live_top = grid.scrollback_len() as u64;
+    let narrow = drawn_cursor_cell(&grid, 7, live_top, true, true, false);
+    assert_eq!(narrow, Some(CursorCell { pane_id: 7, slot: 1, col: 1, span: 1 }));
+    for (visible, focused, read_only) in
+        [(false, true, false), (true, false, false), (true, true, true)]
+    {
+        assert_eq!(drawn_cursor_cell(&grid, 7, live_top, visible, focused, read_only), None);
+    }
+    for _ in 0..6 {
+        grid.linefeed();
+    }
+    let scrolled_live_top = grid.scrollback_len() as u64;
+    assert!(scrolled_live_top > 0, "history exists to scroll back into");
+    assert_eq!(drawn_cursor_cell(&grid, 7, scrolled_live_top - 1, true, true, false), None);
+
+    let mut wide = Grid::new(8, 4);
+    wide.put_char('中', Color::Default, Color::Default, CellFlags::empty());
+    assert!(wide.row(0)[0].flags.contains(CellFlags::WIDE), "the lead half is marked wide");
+    wide.cursor.col = 1;
+    let on_trail = drawn_cursor_cell(&wide, 7, 0, true, true, false);
+    assert_eq!(on_trail, Some(CursorCell { pane_id: 7, slot: 0, col: 0, span: 2 }));
+    wide.cursor.col = 0;
+    let on_lead = drawn_cursor_cell(&wide, 7, 0, true, true, false);
+    assert_eq!(on_lead, Some(CursorCell { pane_id: 7, slot: 0, col: 0, span: 2 }));
+}
+
+/// The source of `name`'s body in `source`, from its signature to the next top-level item.
+fn function_body<'source>(source: &'source str, signature: &str) -> &'source str {
+    let start = source.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
+    let end = source[start + signature.len()..]
+        .find("\n    pub fn ")
+        .map_or(source.len(), |offset| start + signature.len() + offset);
+    &source[start..end]
+}
+
+/// Cursor, blink and focus changes reach the planner as damage classes, so their setters keep
+/// the retained frame key: the next frame is not a whole-surface first frame. Line endings are
+/// normalized before scanning.
+#[test]
+fn cursor_and_focus_setters_keep_the_frame_key() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    for signature in [
+        "    pub fn set_cursor_shape(",
+        "    pub fn set_cursor_blink(",
+        "    pub fn set_window_focused(",
+    ] {
+        let body = function_body(&source, signature);
+        assert!(!body.contains("last_frame_key = None"), "{signature} clears the frame key");
+    }
+    // Blink still restarts its phase when the setting changes.
+    assert!(function_body(&source, "    pub fn set_cursor_blink(").contains("self.blink_epoch ="));
+}
+
+/// Production wiring of the damage classes: the identity records the drawn cursor cell, both
+/// cursor recolor sites accumulate one record, the plan's damage is widened by it before the
+/// presenter reads damage, the record is kept only by a presented frame and fed back to the next
+/// plan, row emission follows the coverage helper, and the scrollbar draws from the geometry the
+/// planner damages.
+#[test]
+fn damage_classes_are_wired_through_the_renderer() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let compact: String = source.split_whitespace().collect();
+    assert!(compact.contains("cursor_cell:drawn_cursor_cell("));
+    assert!(compact.contains("previous_recolor:self.last_recolor,"));
+    assert_eq!(compact.matches("frame_recolor=frame_recolor.merge(record);").count(), 2);
+    let widen = source.find("plan.widen_for_recolor(self.last_recolor, frame_recolor);").unwrap();
+    let layers = source.find("Ok(Assembled::Layers(Box::new(AssembledLayers {").unwrap();
+    assert!(widen < layers, "damage is widened before the layers carry it");
+    // The record is stored after the presenter reports `Presented` and before the frame finishes.
+    let present = function_body(&source, "    fn present_layers(");
+    let guard = present.find("return Ok(FrameOutcome::without_receipts(outcome));").unwrap();
+    let store = present.find("self.last_recolor = recolor;").expect("the record is stored");
+    let finish = present.find("self.finish_successful_frame(plan,").unwrap();
+    assert!(guard < store && store < finish);
+    assert_eq!(source.matches("self.last_recolor = ").count(), 1, "one writer");
+    assert!(compact
+        .contains("letemit_full_rows=crate::frame_plan::emits_every_visible_row(render_mode);"));
+    assert!(function_body(&source, "pub fn emit_pane_scrollbar(")
+        .contains("crate::frame_plan::pane_scrollbar_geometry("));
+}
+
+/// Every presented frame that records its damage share also records its waste, from the same
+/// final damage and the parts it unions.
+#[test]
+fn presented_frames_record_damage_waste_beside_damage() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let finish: String =
+        function_body(&source, "    fn finish_successful_frame(").split_whitespace().collect();
+    let damage = finish.find("crate::frame_stats::note_damage(||").expect("damage recorded");
+    let waste = finish.find("crate::frame_stats::note_damage_waste(||").expect("waste recorded");
+    assert!(damage < waste);
+    assert!(finish.contains(
+        "crate::frame_stats::damage_waste_permille(&plan.damage,&plan.damage_parts,surface_width,surface_height,)"
+    ));
+}
+
+/// A presented frame's damage is narrow only when it is not a first frame and covers less than
+/// the surface, so a whole-surface repaint can never pass a narrow-damage assertion: a first
+/// frame, a surface-sized rectangle and a larger-than-surface rectangle are all not narrow.
+#[test]
+fn presented_damage_is_narrow_only_below_the_surface_and_after_the_first_frame() {
+    let surface = PixelRect { x: 0, y: 0, w: 200, h: 100 };
+    let row = PixelRect { x: 0, y: 40, w: 200, h: 24 };
+    let narrow = PresentedDamage { first_frame: false, damage: row, surface };
+    assert!(narrow.is_narrow());
+    assert!(!PresentedDamage { first_frame: true, ..narrow }.is_narrow());
+    assert!(!PresentedDamage { damage: surface, ..narrow }.is_narrow());
+    let oversized = PixelRect { x: -10, y: -10, w: 400, h: 400 };
+    assert!(!PresentedDamage { damage: oversized, ..narrow }.is_narrow());
+}
+
+/// The test glyph seam is appended after every terminal row and the scrollbar and before the
+/// selection, copy-mode and block-cursor recolors, so those recolors see it as a real glyph; the
+/// presented-damage readout is written beside the frame key, so it describes presented pixels.
+/// Line endings are normalized before scanning.
+#[test]
+fn the_injected_glyph_precedes_every_cursor_recolor_and_damage_is_read_beside_the_key() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let assembly = source.split_once("    fn assemble_frame(").expect("assemble_frame exists").1;
+    let scrollbar = assembly.find("emit_pane_scrollbar(").expect("scrollbar emit");
+    let inject = assembly.find("self.push_injected_test_glyph(").expect("the seam is called");
+    let selection = assembly.find("if let Some(sel) = selection {").expect("selection quads");
+    let first_recolor = assembly.find("recolor_cursor_glyphs_in(").expect("a cursor recolor");
+    assert!(scrollbar < inject && inject < selection && inject < first_recolor);
+    let finish = source.split_once("    fn finish_successful_frame(").expect("finish exists").1;
+    let readout = finish.find("self.presented_damage.record(").expect("damage readout");
+    let key = finish.find("self.last_frame_key = Some(plan.key);").expect("key recorded");
+    assert!(readout < key, "the readout is written beside the frame key");
+}
+
+/// Production wiring of tab-title ink: assembly measures the glyphs the tab bar emitted, widens
+/// the plan's damage by the last presented and the current title ink before the layers carry it,
+/// and keeps the current ink only after the `Presented` guard, beside the recolor record. Line
+/// endings are normalized before scanning.
+#[test]
+fn tab_title_ink_is_measured_widened_and_kept_only_by_a_presented_frame() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let assembly = source.split_once("    fn assemble_frame(").expect("assemble_frame exists").1;
+    let start = assembly.find("let tab_glyph_start = glyph_instances.len();").expect("start");
+    let bar = assembly.find("        if self.tab_bar_visible {\n").expect("tab bar block");
+    let measure =
+        assembly.find("glyph_ink_bounds(&glyph_instances[tab_glyph_start..]").expect("ink");
+    let search = assembly.find("// -------- Search highlights").expect("search block");
+    assert!(start < bar && bar < measure && measure < search);
+    let widen =
+        assembly.find("plan.widen_for_tab_ink(self.last_tab_ink, tab_ink);").expect("widen");
+    let receipts = assembly.find("let receipts = presented_receipts(").expect("receipts");
+    assert!(widen < receipts, "damage is widened before the layers carry it");
+    let present = source.split_once("    fn present_layers(").expect("present_layers").1;
+    let guard = present.find("if !matches!(outcome, PresentOutcome::Presented)").expect("guard");
+    let kept = present.find("self.last_tab_ink = tab_ink;").expect("ink kept");
+    assert!(guard < kept, "only a presented frame keeps its title ink");
+}
+
+/// A presented-damage recorder that was never enabled, as in production, keeps no snapshot and
+/// never builds one: its builder is not called, so a presented frame pays only the branch. Once
+/// enabled it keeps the last snapshot until a read takes it.
+#[test]
+fn a_recorder_never_enabled_keeps_no_presented_damage_snapshot() {
+    let mut recorder = PresentedDamageRecorder::default();
+    recorder.record(|| panic!("a disabled recorder builds no snapshot"));
+    assert_eq!(recorder.take(), None);
+    let surface = PixelRect { x: 0, y: 0, w: 200, h: 100 };
+    let snapshot = PresentedDamage { first_frame: false, damage: surface, surface };
+    recorder.enable();
+    recorder.record(|| snapshot);
+    assert_eq!(recorder.take(), Some(snapshot));
+    assert_eq!(recorder.take(), None, "a read takes the snapshot");
+}
+
+/// The test hooks are opt-in: the renderer starts with a disabled recorder, only
+/// `__enable_presented_damage` enables it, and assembly tests the injected glyph's `Option`
+/// before calling the seam. Line endings are normalized before scanning.
+#[test]
+fn presented_damage_recording_and_glyph_injection_are_opt_in() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    assert!(source.contains("            presented_damage: PresentedDamageRecorder::default(),\n"));
+    assert_eq!(source.matches("self.presented_damage.enable();").count(), 1);
+    let enable = source.split_once("    pub fn __enable_presented_damage(").expect("hook").1;
+    let enable = enable.split_once("\n    }\n").expect("hook body").0;
+    assert!(enable.contains("self.presented_damage.enable();"));
+    let assembly = source.split_once("    fn assemble_frame(").expect("assemble_frame exists").1;
+    let guard = assembly.find("if self.injected_test_glyph.is_some() {").expect("Option guard");
+    let call = assembly.find("self.push_injected_test_glyph(").expect("seam call");
+    assert!(guard < call, "the seam is reached only when a glyph is injected");
 }

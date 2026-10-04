@@ -1233,3 +1233,42 @@ fn the_attempt_and_the_owed_apply_are_wired_through_the_production_entry_points(
     assert!(!prepare.contains("prepare_frame_fonts("), "preparation goes through the seam only");
     assert!(body("notification_layout").contains("CollectGuard::enter(self.frame_sink.as_ref())"));
 }
+
+/// A frame's damage waste is the permille of its single union rectangle minus the permille of the
+/// exact area its parts cover: a tab band and a cursor row 100 px apart on a 240x160 surface waste
+/// the gap between them; parts that exactly fill the union waste nothing; no surface wastes 0.
+#[test]
+fn damage_waste_is_the_union_share_minus_the_covered_share() {
+    let cursor_row = PixelRect { x: 0, y: 22, w: 100, h: 20 };
+    let tab_band = PixelRect { x: 0, y: 140, w: 240, h: 20 };
+    let union = cursor_row.union(tab_band);
+    // Union 240x138 = 33120 px is 862 permille; the parts cover 6800 px, 177 permille.
+    assert_eq!(damage_waste_permille(&union, &[cursor_row, tab_band], 240, 160), 862 - 177);
+    assert_eq!(damage_waste_permille(&tab_band, &[tab_band], 240, 160), 0);
+    let halves =
+        [PixelRect { x: 0, y: 0, w: 120, h: 160 }, PixelRect { x: 120, y: 0, w: 120, h: 160 }];
+    let whole = PixelRect { x: 0, y: 0, w: 240, h: 160 };
+    assert_eq!(damage_waste_permille(&whole, &halves, 240, 160), 0);
+    assert_eq!(damage_waste_permille(&union, &[cursor_row], 0, 160), 0);
+}
+
+/// The waste is summed per damaged frame beside the damage share, and is never computed with the
+/// counting gate off.
+#[test]
+fn damage_waste_is_summed_only_inside_a_counting_scope() {
+    note_damage_waste(|| panic!("waste computed with no counting scope"));
+    let sink = FrameStatsSink::default();
+    {
+        let _collect = CollectGuard::enter(Some(&sink));
+        note_damage(|| 862);
+        note_damage_waste(|| 685);
+        note_damage(|| 100);
+        note_damage_waste(|| 0);
+    }
+    let stats = sink.snapshot();
+    assert_eq!((stats.damage_waste_permille_sum, stats.damaged_frames), (685, 2));
+    let mut total = FrameStats::ZERO;
+    total.add(&stats);
+    total.add(&stats);
+    assert_eq!(total.damage_waste_permille_sum, 1370);
+}

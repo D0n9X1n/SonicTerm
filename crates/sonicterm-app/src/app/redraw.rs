@@ -1226,7 +1226,7 @@ fn command_chrome(
         .map(|(index, tab)| {
             (
                 tab.command.clone().badge(now, index == active),
-                sonicterm_gpu::core::command_status_hash(&tab.command, now),
+                sonicterm_gpu::core::command_status_hash(&tab.command, now, index == active),
             )
         })
         .collect()

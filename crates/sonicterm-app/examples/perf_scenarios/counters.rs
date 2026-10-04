@@ -189,6 +189,7 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::Renderer, "index_bytes"),
     count(Section::Renderer, "damage_permille_sum"),
     count(Section::Renderer, "damaged_frames"),
+    count(Section::Renderer, "damage_waste_permille_sum"),
     count(Section::Renderer, "software_frames"),
     count(Section::Renderer, "gpu_frames"),
     count(Section::Renderer, "row_cache_hits"),
