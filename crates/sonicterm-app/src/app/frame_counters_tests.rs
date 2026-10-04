@@ -1656,7 +1656,8 @@ fn damage_waste_joins_the_renderer_record_after_damaged_frames() {
     assert_eq!(record.count("damage_waste_permille_sum"), Some(37));
     let fields = record.line_fields();
     let damaged = fields.find("damaged_frames=3").expect("damaged_frames field");
-    let waste = fields.find("damage_waste_permille_sum=37").expect("damage_waste_permille_sum field");
+    let waste =
+        fields.find("damage_waste_permille_sum=37").expect("damage_waste_permille_sum field");
     let software = fields.find("software_frames=1").expect("software_frames field");
     assert!(damaged < waste && waste < software, "{fields}");
 }
