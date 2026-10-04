@@ -5,7 +5,7 @@ use sonicterm_cfg::{
     keymap::{Direction, Keymap},
     theme::Theme,
 };
-use sonicterm_grid::grid::Grid;
+use sonicterm_grid::grid::{CellFlags, Color, Grid};
 use sonicterm_ui::pane::PaneTree;
 use std::{sync::Barrier, time::Duration};
 
@@ -1108,5 +1108,118 @@ fn a_rows_receipt_keeps_the_dirty_generation_and_a_mismatch_keeps_every_bit() {
         collect_next(&mut app, window, child).unwrap();
         assert_eq!(dirty(&app, window, right), all_rows(&app, window, right), "child={child}");
         assert_eq!(dropped(&app, window), dropped_before + 1, "the mismatched receipt is dropped");
+    }
+}
+
+/// Present a frame that issues, per held pane, the receipt `rows_for` gives its id (`None` issues
+/// none for that pane, as a `Noop` plan does), and store them as the pending set.
+fn present_pane_receipts(
+    app: &mut App,
+    window: WindowId,
+    child: bool,
+    rows_for: impl Fn(u64) -> Option<sonicterm_render_model::AckRows>,
+) {
+    let sources = sources(app, window, child).ok().unwrap();
+    let held = sources.try_collect(|| {}).ok().unwrap();
+    let receipts = held
+        .guards
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (id, parser, _))| {
+            Some(AckReceipt::of(index, *id, parser.grid(), rows_for(*id)?))
+        })
+        .collect();
+    drop(held);
+    let tickets = sources.bind(receipts);
+    app.windows.get_mut(&window).unwrap().pending_receipts = tickets;
+}
+
+/// The viewport slot that draws live row `live_row` of a `rows`-row view whose top is
+/// `view_top_abs`, over `scrollback_len` history rows; `None` below the view.
+fn slot_of_live_row(
+    scrollback_len: u64,
+    view_top_abs: u64,
+    rows: u16,
+    live_row: u64,
+) -> Option<u64> {
+    (scrollback_len + live_row).checked_sub(view_top_abs).filter(|slot| *slot < u64::from(rows))
+}
+
+/// Test 20 at the App seam, both adapters, through the pending set. The scrolled pane has 16 rows
+/// and 100 history rows viewed from absolute row 97, so live rows 5 and 15 are slots 8 and 18, and
+/// slot 18 is below the view. An offscreen-only `Noop` issues no receipt; another pane's partial
+/// frame gives this pane `Rows(empty)`; `Rows({5})` clears live row 5 and keeps live row 15. No
+/// application advances the grid's dirty generation.
+#[test]
+fn scrolled_view_row_receipts_clear_only_drawn_live_rows_at_the_next_collection() {
+    type Receipts = fn(u64, u64) -> Option<sonicterm_render_model::AckRows>;
+    let cases: [(&str, Receipts, &[usize]); 3] = [
+        ("offscreen-only Noop", |_, _| None, &[5, 15]),
+        (
+            "another pane's partial frame",
+            |pane, scrolled| {
+                Some(if pane == scrolled {
+                    sonicterm_render_model::AckRows::Rows(Default::default())
+                } else {
+                    sonicterm_render_model::AckRows::Rows([0].into_iter().collect())
+                })
+            },
+            &[5, 15],
+        ),
+        (
+            "live row 5 drawn",
+            |pane, scrolled| {
+                (pane == scrolled)
+                    .then(|| sonicterm_render_model::AckRows::Rows([5].into_iter().collect()))
+            },
+            &[15],
+        ),
+    ];
+    for child in [false, true] {
+        for (name, receipts_for, kept) in cases {
+            let (mut app, window, _left, scrolled, _) = fixture(child, false);
+            let parser = Arc::clone(&app.windows[&window].panes[&scrolled].parser);
+            {
+                let mut parser = parser.lock();
+                let grid = parser.grid_mut();
+                grid.resize(20, 16);
+                grid.goto(15, 0);
+                for _ in 0..100 {
+                    grid.linefeed();
+                }
+                grid.clear_dirty();
+                for (row, character) in [(5, 'x'), (15, 'y')] {
+                    grid.goto(row, 0);
+                    grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+                }
+            }
+            app.windows
+                .get_mut(&window)
+                .unwrap()
+                .panes
+                .get_mut(&scrolled)
+                .unwrap()
+                .viewport_top_abs = Some(97);
+            let (scrollback_len, view_rows, generation) = {
+                let parser = parser.lock();
+                let grid = parser.grid();
+                (grid.scrollback_len() as u64, grid.rows, grid.dirty_generation())
+            };
+            assert_eq!((view_rows, scrollback_len), (16, 100), "{name}: the fixture's dimensions");
+            assert_eq!(slot_of_live_row(scrollback_len, 97, view_rows, 5), Some(8), "{name}");
+            assert_eq!(scrollback_len + 15 - 97, 18, "{name}: live row 15 is slot 18");
+            assert_eq!(slot_of_live_row(scrollback_len, 97, view_rows, 15), None, "{name}: below");
+            assert_eq!(dirty(&app, window, scrolled), [5, 15], "{name}: the dirt before the frame");
+
+            present_pane_receipts(&mut app, window, child, |pane| receipts_for(pane, scrolled));
+            collect_next(&mut app, window, child).unwrap();
+            assert_eq!(dirty(&app, window, scrolled), kept, "child={child} {name}");
+            assert_eq!(
+                parser.lock().grid().dirty_generation(),
+                generation,
+                "child={child} {name}: acknowledging never advances the generation"
+            );
+            assert_eq!(dropped(&app, window), 0, "child={child} {name}: no receipt is dropped");
+        }
     }
 }
