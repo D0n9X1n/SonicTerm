@@ -1125,3 +1125,223 @@ fn glyph_atlas_working_set() {
         assert!(constant >= need.dim, "{scale}x needs {} but starts at {constant}", need.dim);
     }
 }
+
+/// The working-set helper against the real renderer: the S9 and S12 fixtures drawn on a Windows
+/// window with the tab bar and three titles, the cursor and the command palette open with its
+/// footer and detail rows, at scale 1 and 2. It lives beside the fixtures it draws.
+#[cfg(target_os = "windows")]
+mod real_renderer_coverage {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use sonicterm_app::app::App;
+    use sonicterm_cfg::config::{Config, ScrollbarMode, SoftwareRenderMode};
+    use sonicterm_cfg::keymap::{Action, Keymap};
+    use sonicterm_cfg::theme::Theme;
+    use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
+    use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
+    use sonicterm_types::{GlyphKey, GlyphRasterVariant};
+    use winit::application::ApplicationHandler;
+    use winit::dpi::PhysicalSize;
+    use winit::event::WindowEvent;
+    use winit::event_loop::{ActiveEventLoop, EventLoop};
+    use winit::platform::windows::EventLoopBuilderExtWindows;
+    use winit::window::{Window, WindowId};
+
+    use super::super::{fixture_bytes, FONT_FAMILY, FONT_SIZE};
+    use crate::scenarios::Fixture;
+
+    /// The tab titles the harness measures with.
+    const TITLES: [&str; 3] = ["zsh", "perf_scenarios", "S12 covered window"];
+
+    struct Probe {
+        outcome: Option<Result<(), String>>,
+    }
+
+    impl ApplicationHandler for Probe {
+        fn resumed(&mut self, active: &ActiveEventLoop) {
+            // winit allows one event loop per process, so every case runs inside this one.
+            self.outcome = Some(run_cases(active));
+            active.exit();
+        }
+
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+
+    fn check(condition: bool, message: &str) -> Result<(), String> {
+        if condition {
+            Ok(())
+        } else {
+            Err(message.to_owned())
+        }
+    }
+
+    /// Whether this host enumerates no wgpu adapter at all, established apart from renderer
+    /// construction. That is the only limitation that turns a failed wgpu renderer into a skip.
+    fn host_has_no_adapter() -> bool {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty()
+    }
+
+    /// The packaged scenario fonts, so the renderer and the helper load the same faces.
+    fn font_dirs() -> Vec<PathBuf> {
+        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")]
+    }
+
+    /// A wgpu renderer (WARP on the hosted runner) at `scale` on its own window, with the tab bar
+    /// on. `Ok(None)` only when the host enumerates no adapter; any other error fails.
+    fn renderer(
+        active: &ActiveEventLoop,
+        scale: f32,
+        size_pt: f32,
+    ) -> Result<Option<(Arc<Window>, GpuRenderer)>, String> {
+        let window = Arc::new(
+            active
+                .create_window(
+                    Window::default_attributes()
+                        .with_visible(true)
+                        .with_inner_size(PhysicalSize::new(1000, 640))
+                        .with_title("SonicTerm working-set coverage"),
+                )
+                .map_err(|error| error.to_string())?,
+        );
+        let dirs = font_dirs();
+        let created = GpuRenderer::new(
+            window.clone(),
+            active,
+            &Theme::default(),
+            RendererSettings {
+                font_family: FONT_FAMILY,
+                font_dirs: &dirs,
+                font_size: size_pt,
+                line_height_mult: 1.2,
+                font_weight_scale: 1.0,
+                subpixel_aa: Default::default(),
+                padding: [0.0; 4],
+                appearance: SurfaceAppearance {
+                    backdrop: Default::default(),
+                    opacity: 1.0,
+                    scrollbar: ScrollbarMode::Never,
+                    panel_padding: 0.0,
+                    software_render_mode: SoftwareRenderMode::Off,
+                },
+                role: "working-set-coverage",
+                glyph_atlas_start: GlyphAtlasStart::Normal,
+            },
+        );
+        let mut renderer = match created {
+            Ok(renderer) => renderer,
+            Err(error) if host_has_no_adapter() => {
+                // When: the host enumerates no adapter, report the capability, not a pass.
+                println!("capability=HOST_INCAPABLE case=working-set-coverage reason={error}");
+                return Ok(None);
+            }
+            Err(error) => {
+                // When: an adapter exists, so the construction error is a defect.
+                return Err(format!("wgpu renderer construction failed with an adapter: {error}"));
+            }
+        };
+        renderer.set_scale_factor(scale);
+        renderer.set_tab_bar_visible(true);
+        renderer.set_cursor_blink(false);
+        Ok(Some((window, renderer)))
+    }
+
+    /// Dispatch the real main-window redraw with pacing open until the resident keys stop
+    /// changing for three frames, so late fallback faces have landed; at most 3 s.
+    fn settle(app: &mut App, active: &ActiveEventLoop, id: WindowId) -> HashSet<GlyphKey> {
+        let started = Instant::now();
+        let mut last = HashSet::new();
+        let mut unchanged = 0;
+        while unchanged < 3 && started.elapsed() < Duration::from_secs(3) {
+            app.__test_set_window_last_render(id, Instant::now() - Duration::from_secs(1));
+            ApplicationHandler::window_event(app, active, id, WindowEvent::RedrawRequested);
+            let keys = app
+                .__test_window_renderer_mut(id)
+                .map(|renderer| renderer.__test_resident_tile_keys())
+                .unwrap_or_default();
+            unchanged = if keys == last { unchanged + 1 } else { 0 };
+            last = keys;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        last
+    }
+
+    /// Test 17 for one fixture at one scale: the renderer draws the fixture, three titles, the
+    /// cursor and the open palette; it then holds a footer key and a tab-title key, and every key
+    /// it holds is in the helper's key set for the same text, titles and DPI.
+    fn covered(
+        active: &ActiveEventLoop,
+        name: &str,
+        fixture: Fixture,
+        scale: f32,
+    ) -> Result<(), String> {
+        let size_pt: f32 = FONT_SIZE.parse().map_err(|_| "the scenario font size")?;
+        let Some((window, renderer)) = renderer(active, scale, size_pt)? else {
+            return Ok(());
+        };
+        let mut config = Config::default();
+        config.font.family = FONT_FAMILY.into();
+        config.font.size = size_pt;
+        config.appearance.software_render_mode = SoftwareRenderMode::Off;
+        config.locale = "en".into();
+        let mut app = App::new(Theme::default(), config, Keymap::default());
+        let bytes = fixture_bytes(fixture);
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        // A pty's ONLCR turns each LF into CR LF before the parser sees it.
+        let terminal_bytes = text.replace('\n', "\r\n").into_bytes();
+        for title in TITLES {
+            let pane = app.__test_seed_tab(title);
+            check(app.__test_advance_pane_parser(pane, &terminal_bytes), "fixture written")?;
+        }
+        let id = app.__test_main_window_id().ok_or("no main window")?;
+        check(app.__test_attach_window_renderer(id, window, renderer), "renderer attached")?;
+        app.__test_set_frontmost_window(Some(id));
+        check(app.run_action(&Action::OpenCommandPalette), "the palette opens")?;
+        check(app.__test_palette_open(), "the palette is open")?;
+        let resident = settle(&mut app, active, id);
+        let has = |variant| resident.iter().any(|key| key.raster_variant == variant);
+        check(has(GlyphRasterVariant::PaletteFooter), &format!("{name}@{scale}: a footer key"))?;
+        check(has(GlyphRasterVariant::TabTitle), &format!("{name}@{scale}: a tab-title key"))?;
+        let lines: Vec<&str> = text.lines().collect();
+        let dpi = (72.0 * scale).round() as usize;
+        let helper =
+            measure_glyph_working_set(&lines, &TITLES, FONT_FAMILY, size_pt, dpi, &font_dirs())
+                .ok_or("the packaged scenario family loads")?;
+        let missing: Vec<&GlyphKey> = resident.difference(&helper.tile_keys).take(20).collect();
+        check(
+            missing.is_empty(),
+            &format!("{name}@{scale}: resident keys the helper missed: {missing:?}"),
+        )
+    }
+
+    fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
+        let mut failures = Vec::new();
+        for (name, fixture) in [("S9", Fixture::EmojiCjk), ("S12", Fixture::HistoryScreen)] {
+            for scale in [1.0, 2.0] {
+                if let Err(error) = covered(active, name, fixture, scale) {
+                    failures.push(error);
+                }
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+
+    /// The helper's key set covers every key the real renderer holds for S9 and S12 with the tab
+    /// bar, titles, cursor and an open palette, at scale 1 and 2.
+    #[test]
+    fn the_helper_covers_the_real_renderer() {
+        let event_loop =
+            EventLoop::builder().with_any_thread(true).build().expect("Windows event loop");
+        let mut probe = Probe { outcome: None };
+        event_loop.run_app(&mut probe).expect("working-set coverage event loop");
+        probe.outcome.expect("resumed runs").unwrap_or_else(|error| panic!("{error}"));
+    }
+}

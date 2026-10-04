@@ -4362,6 +4362,16 @@ impl GpuRenderer {
         )
     }
 
+    /// Test hook: the keys of every glyph tile resident in the atlas, sentinels excluded, so a
+    /// native test can compare them with the working-set helper's key set.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_resident_tile_keys(
+        &self,
+    ) -> std::collections::HashSet<sonicterm_types::GlyphKey> {
+        self.glyph_atlas.resident_tile_keys()
+    }
+
     /// Apply a new font family / size / line-height multiplier without
     /// reconstructing the renderer.
     ///
