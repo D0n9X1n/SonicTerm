@@ -63,6 +63,10 @@ cargo build -p sonicterm-app
   original result; only actual teardown settlement permits a clean-session marker.
 - Render paths use `try_lock`, not blocking `lock`; avoid AB-BA deadlocks
   with PTY/parser work on the main thread.
+- Parser guards end before presentation: both redraw adapters move them into
+  `HeldFrameSource` and call `render_releasing`; every reader after the call copies from
+  the held guards first. Presented receipts are applied only through
+  `reconcile_and_apply_receipts` at the window's next successful collection.
 - Frame collection validates unique live leaves and active/zoom agreement before
   capturing visible handles. Owned sources outlive borrowed parser guards; all visible
   parsers are acquired before visible image snapshots. This is not an atomic grid/media

@@ -228,7 +228,10 @@ the effective frame period. The retry is a floor over normal pacing, including
 degraded IME pacing. Earlier input or redraw events cannot bypass or postpone
 it. A due failure rearms it; coherent collection clears it before atlas/surface
 retry policy runs. Closing the window discards it. No unconditional redraw
-heartbeat or blocking parser/image lock is introduced.
+heartbeat or blocking parser/image lock is introduced. A frame holds the visible
+parser guards only while it assembles; they are released before the surface is
+acquired and the frame presented, on the GPU and GDI paths alike. The retry floor
+stays one full frame period.
 
 ### Windows CPU presentation
 

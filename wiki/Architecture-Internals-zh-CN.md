@@ -264,8 +264,13 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 
 一个 `FramePlan` 从捕获的元数据组合帧键、模式、损伤、裁剪和视口行槽。复制模式身份覆盖每个
 字段和快速选择提示，但不克隆其文本。计划只保留可见窗格和脏行元数据，不持有隐藏历史或
-单元格行。现有解析器保护对象仍覆盖有状态组装和呈现；在这些借用期间，PTY 写入无法交错
-修改同一网格。
+单元格行。解析器保护对象只覆盖有状态组装：`render_releasing` 在帧源唯一一次 `lend` 中组帧，
+并在帧源连同保护对象被丢弃之后才呈现，因此 PTY 写入可以落在组帧与呈现之间。渲染器不清除任何
+网格脏行。已呈现的帧为每个被确认的窗格返回一个仅含元数据的 `AckReceipt`：索引、窗格 id、
+修订号、脏代次、尺寸代次、屏幕纪元和行。窗口把它们保存为待处理集合。在下一次成功收集时，
+视口协调之后、规划之前，只有持有同一解析器且四个身份全部仍然一致时，回执才清除它的行；否则
+回执被丢弃，脏行保留，并计入 `dirt_ack_dropped`。每次设置脏位的写入都会推进
+`dirty_generation`，它是帧键的一部分，因此已呈现但未确认的脏行永远不会走未变化帧键的捷径。
 
 脏行只在 `finish_successful_frame` 中清除，并且窗格编号和当前网格修订号必须与计划捕获的
 预期值完全匹配：
@@ -339,11 +344,11 @@ flowchart LR
 - `try_resize` 照常验证尺寸；通过验证的尺寸会被记录并返回 `true`，但不配置表面；
 - `set_software_render_degrade` 记录标志，跳过表面配置和 GPU 图集上传重建；
 - `set_scale_factor` 与 `force_rebuild_for_scale` 重新计算 CPU 侧字体度量，跳过 GPU 上传重建；
-- `allocator_snapshot` 返回 `None`，`render_with_outcome` 与 `render` 不做任何工作。
+- `allocator_snapshot` 返回 `None`，`render_releasing`、`render_with_outcome` 与 `render` 不做任何工作。
 
 为 LCD 策略读取设备特性不算 GPU 工作。
 
-`render_with_outcome` 在空窗格检查之后检查这道闸门，并把已停止的设备报告为
+`render_releasing` 在组帧期间、紧接空窗格出口之后检查这道闸门，并把已停止的设备报告为
 `PresentOutcome::RenderingUnavailable`，附带设备代次编号和闸门读数。每个渲染器只有第一个这样的
 结果携带停止报告：`render` 把它映射为 `Err`，应用只记录一次；之后的结果映射为 `Ok(())`。这些帧
 不做任何事，因此脏行保持未确认。只有提交之后设备仍接受

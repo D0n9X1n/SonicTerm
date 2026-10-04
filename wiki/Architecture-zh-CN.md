@@ -107,10 +107,13 @@ crate 中身份不变的类型。
 窗格的解析器/图像句柄及视口元数据。先用 `try_lock` 取得所有可见解析器保护对象，再短暂锁住
 并复制这些窗格的图像列表。非活动标签页和缩放隐藏的图像存储不会推迟可见帧，也不会被克隆。
 拥有所有权的句柄通过普通借用活得比保护对象更久，无需转换生命周期。共享构建器创建真正的
-`PaneRender` 网格借用，并且每份图像快照只移动一次；解析器保护对象覆盖 `GpuRenderer::render_with_outcome`
-和修订号确认。任一可见锁获取失败都会先丢弃整份收集，再进入现有锁争用重试。
+`PaneRender` 网格借用，并且每份图像快照只移动一次，这一过程发生在持有解析器保护对象的帧源
+（`HeldFrameSource`）内部。`GpuRenderer::render_releasing` 只从该帧源借用一次窗格，用于组帧。
+组帧一结束保护对象就被释放，早于获取表面、位块传输保留帧以及提交和呈现，因此 VT 工作线程可以在
+呈现期间继续解析。已呈现的帧返回元数据回执，窗口在下一次成功收集时、在该次收集持有的保护对象下
+应用它们。任一可见锁获取失败都会先丢弃整份收集，再进入现有锁争用重试。
 
-`GpuRenderer::render_with_outcome` 接收可见窗格的 `PaneRender` 及独立 UI 参数。仅含元数据的
+`GpuRenderer::render_releasing` 接收借出可见窗格 `PaneRender` 的帧源及独立 UI 参数。仅含元数据的
 `FramePlan` 选择帧身份、模式、损伤、裁剪、视口槽和预期修订号；它不是网格快照或多线程
 渲染边界。生产使用 `PaneRender` 和 `WeztermPipeline`，而不是公开的兼容
 `RenderInputs`/`Painter` 接缝。组帧见[渲染与字体](Rendering-and-Fonts-zh-CN)，锁守卫和

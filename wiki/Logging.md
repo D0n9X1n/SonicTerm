@@ -393,6 +393,7 @@ previous snapshot and takes deltas.
 | `defer_contention` | count | redraws deferred by the lock-contention retry floor |
 | `defer_streaming` | count | redraws deferred by streaming-output pacing |
 | `contention_retry_armed` | count | lock-contention retries armed |
+| `dirt_ack_dropped` | count | presented-frame receipts dropped at the next collection because the pane was not held, its parser changed, or its grid changed after assembly; each costs a later re-assembly, never pixels |
 | `native_request_redraw` | count | native redraw requests for the window, on every request path; a dispatch's requests reach the totals when it ends, so a window line shows them one dispatch late (`final=1` lines are complete) |
 | `user_request_redraw` | count | output events serviced for the window: `PaneOutput` from a VT worker's flush (at most one outstanding per pane) and `RequestRedraw` from a harness or test, counted before the visible-output filter |
 | `redraw_requested` | count | `RedrawRequested` events for the window |

@@ -36,8 +36,9 @@ cargo build -p sonicterm-gpu
   unit tests, with no native imports or unsafe code. Preserve pixel assertions and
   tolerances, including the headless wgpu comparisons. Only the Windows bridge
   receives a borrowed `BgraFrame`; non-Windows production has no CPU presenter.
-- Production consumes `FramePlan` decisions once; keep grids, UI controllers, native handles, and copied rows out of the plan. Parser guards still span presentation.
-- A presented plan acknowledges only matching pane ids and grid revisions; retry and failure paths retain dirt.
+- Production consumes `FramePlan` decisions once; keep grids, UI controllers, native handles, and copied rows out of the plan.
+- Assembly, the release of the frame source and presentation happen in one `render_releasing` call; no assembled frame leaves the renderer, and assembly never reaches the device or a presenter.
+- The renderer clears no grid dirt. A presented frame issues metadata `AckReceipt`s; production applies them at the window's next collection, and the `render_with_outcome` compatibility wrapper applies them through its borrowed grids. Retry and failure paths issue none.
 - Only `PresentOutcome::Presented` acknowledges a plan. A stopped device is always
   `RenderingUnavailable`, never a surface retry or a presented frame; `render`
   keeps its `Result<()>` by mapping the outcome.
