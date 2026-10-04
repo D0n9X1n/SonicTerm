@@ -7629,21 +7629,23 @@ class CellLayoutDamagedEvidenceTests(unittest.TestCase):
             (timed / "03-head" / "scratch" / "result.json").write_text("{broken", encoding="utf-8")
             (timed / "04-head" / "01-harness.log").write_text(
                 cell_line(2, "end", 1, True, 7).replace(STAMP[:10], "2026-99-03"), encoding="utf-8")
-            unreadable = timed / "05-head" / "scratch" / "logs"
-            unreadable.mkdir()
-            (unreadable / "app.log").write_text("x", encoding="utf-8")
-            (unreadable / "app.log").chmod(0)
-            try:
+            unreadable = timed / "05-head" / "01-harness.log"
+            original_read_text = Path.read_text
+
+            def refuse_one_log(path, *args, **kwargs):
+                # A portable unreadable file: chmod cannot make one on Windows, so this one read is refused.
+                if path == unreadable:
+                    raise PermissionError(13, "Permission denied", str(path))
+                return original_read_text(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", refuse_one_log):
                 runs = perf.read_cell_layout_runs(root, "1", CELL_HEAD)
-            finally:
-                (unreadable / "app.log").chmod(0o644)
             problems = [perf.cell_layout_reading(run).problem for run in runs["macOS"]]
             self.assertEqual(problems[0], "result.json checkpoints is not a list")
             self.assertEqual(problems[1], "result.json is not an object")
             self.assertIn("result.json unreadable", problems[2])
             self.assertIn("memory log unreadable", problems[3])
-            if os.geteuid() != 0:
-                self.assertIn("memory log unreadable", problems[4])
+            self.assertIn("memory log unreadable", problems[4])
             # Windows' own five passing runs still decide a go.
             windows = [cell_layout_run(f"win{index}", 30 * CELL_MIB, 100 * CELL_MIB, workflow_run="1")
                        for index in range(5)]
@@ -7661,6 +7663,30 @@ class CellLayoutDamagedEvidenceTests(unittest.TestCase):
             (artifact / "timing.json").write_text("[1]", encoding="utf-8")
             self.assertEqual(perf.read_cell_layout_runs(root, "1", CELL_HEAD)["macOS"][0].problem,
                              "timing.json is not an object")
+
+
+class CellLayoutUndecodableEvidenceTests(unittest.TestCase):
+    """JSON that fails to decode for any reason, and an unavailable download, leave named or missing evidence instead
+    of an exception."""
+
+    def test_an_over_long_integer_and_deep_nesting_are_named(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            artifact = write_cell_artifact(root, "macOS", [("01-head", HEAD_OUTCOME), ("02-head", HEAD_OUTCOME)])
+            timed = artifact / "runs" / "S12-default" / "timed"
+            # Python refuses to convert an integer string past its default 4,300-digit limit (ValueError).
+            (timed / "01-head" / "scratch" / "result.json").write_text('{"n": ' + "9" * 5000 + "}", encoding="utf-8")
+            first = perf.read_cell_layout_runs(root, "1", CELL_HEAD)["macOS"][0]
+            self.assertIn("result.json unreadable", first.problem)
+            # Whether deep nesting overflows depends on the interpreter, so the RecursionError is injected.
+            with mock.patch.object(perf.json, "loads", side_effect=RecursionError("maximum recursion depth")):
+                nested = perf.read_cell_layout_runs(root, "1", CELL_HEAD)["macOS"]
+            self.assertTrue(all("unreadable: maximum recursion depth" in run.problem for run in nested))
+
+    def test_an_unavailable_download_is_missing_evidence(self):
+        runs = perf.read_cell_layout_runs(Path(tempfile.gettempdir()) / "no-such-download-1586", "1", CELL_HEAD)
+        self.assertEqual(runs, {"macOS": [], "Windows": []})
+        self.assertEqual(perf.cell_layout_decision(runs).outcome, "Inconclusive")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

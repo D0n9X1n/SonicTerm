@@ -1512,7 +1512,8 @@ def _read_json_object(path: Path) -> tuple[object, str | None]:
         return None, f"{path.name} missing"
     try:
         return json.loads(path.read_text(encoding="utf-8")), None
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (OSError, ValueError, RecursionError) as error:
+        # ValueError covers JSONDecodeError, UnicodeDecodeError and an over-long integer; RecursionError, deep nesting.
         return None, f"{path.name} unreadable: {error}"
 
 
@@ -1559,7 +1560,12 @@ def read_cell_layout_runs(artifact_root: Path, workflow_run: str, head_sha: str)
     or that describes another side, scenario or variant makes that run invalid with the reason.
     """
     runs: dict[str, list[CellLayoutRun]] = {platform: [] for platform in CELL_LAYOUT_PLATFORMS}
-    for artifact in sorted(artifact_root.iterdir()):
+    try:
+        artifacts = sorted(artifact_root.iterdir())
+    except OSError:
+        # An unavailable download holds no evidence: every platform then has no valid runs and is inconclusive.
+        return runs
+    for artifact in artifacts:
         named = CELL_LAYOUT_ARTIFACT.fullmatch(artifact.name)
         if named is None or named["shard"] != CELL_LAYOUT_SHARD or not artifact.is_dir():
             continue
