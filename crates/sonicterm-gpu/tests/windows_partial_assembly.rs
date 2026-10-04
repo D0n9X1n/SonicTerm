@@ -7,6 +7,12 @@
 //! the key and retry as a `Full` frame. The row-ink table grows with a 2,000-row pane and releases
 //! its records when the pane shrinks or closes, and a degraded frame is never partial.
 //!
+//! Content-keyed glyph rows: a warm renderer whose scrolled rows replay from the row glyph cache
+//! draws what a cold oracle draws, through wgpu (scrolled Full and edited Partial frames) and
+//! through GDI, at four scales; the oracle is built alike, presents the target frame, then drops
+//! its pane caches and retained frame, which leave the atlas warm. An `Err` from assembly or from
+//! the presenter call discards the staged glyph-row keys and keeps the committed ones.
+//!
 //! Only the event-loop entry point is Windows-only (winit allows a test-thread event loop there);
 //! the case logic compiles on every host, so a non-Windows lint pass type-checks it.
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -282,6 +288,17 @@ fn delta(before: Counts, after: Counts) -> Counts {
 /// height 1 (so the vertical ink pad is about one row), no scrollbar and no tab bar; `Err` names a
 /// host with no adapter as `HOST_INCAPABLE`.
 fn wgpu_renderer(active: &ActiveEventLoop) -> Result<(Arc<Window>, GpuRenderer), String> {
+    let (window, renderer) = renderer_in_mode(active, SoftwareRenderMode::Off)?;
+    check(!renderer.is_software_render_degraded(), "the renderer presents through wgpu")?;
+    Ok((window, renderer))
+}
+
+/// A visible window and a counting renderer on it in software render `mode`, configured as
+/// [`wgpu_renderer`] configures one; `Err` names a host with no adapter as `HOST_INCAPABLE`.
+fn renderer_in_mode(
+    active: &ActiveEventLoop,
+    mode: SoftwareRenderMode,
+) -> Result<(Arc<Window>, GpuRenderer), String> {
     let window = Arc::new(
         active
             .create_window(
@@ -306,7 +323,7 @@ fn wgpu_renderer(active: &ActiveEventLoop) -> Result<(Arc<Window>, GpuRenderer),
             opacity: OPACITY,
             scrollbar: ScrollbarMode::Never,
             panel_padding: 0.0,
-            software_render_mode: SoftwareRenderMode::Off,
+            software_render_mode: mode,
         },
         role: "partial-assembly",
         glyph_atlas_start: GlyphAtlasStart::Normal,
@@ -319,7 +336,6 @@ fn wgpu_renderer(active: &ActiveEventLoop) -> Result<(Arc<Window>, GpuRenderer),
         }
         Err(error) => return Err(format!("wgpu renderer construction failed: {error}")),
     };
-    check(!renderer.is_software_render_degraded(), "the renderer presents through wgpu")?;
     renderer.set_tab_bar_visible(false);
     renderer.set_cursor_blink(false);
     renderer.set_cursor_shape(CursorShape::Block);
@@ -1315,6 +1331,274 @@ fn degraded_is_never_partial(
     check(damage.damage == damage.surface, &format!("degraded damage is the surface: {damage:?}"))
 }
 
+/// A grid holding only unique, non-blank rows of packaged ASCII and block glyphs, so a cold
+/// renderer's frame misses on every emitted row and no row can hit another's entry.
+fn unique_grid(cols: u16, rows: u16) -> Grid {
+    let mut grid = Grid::new(cols, rows);
+    for row in 0..rows {
+        write(&mut grid, row, 0, &unique_row(u32::from(row), cols));
+    }
+    grid
+}
+
+/// The text of unique row `index`, at most `cols` characters: its index, then ASCII and blocks.
+fn unique_row(index: u32, cols: u16) -> String {
+    format!("{index:04} ab=>cd █▌│─ {index:x} MW").chars().take(usize::from(cols)).collect()
+}
+
+/// One active pane over the whole surface holding `unique_grid`, with a hidden cursor.
+fn unique_scene(layout: &Layout) -> Scene {
+    let mut scene = single(layout);
+    scene.panes[0].grid = unique_grid(layout.cols, layout.rows);
+    scene
+}
+
+/// Scroll the scene's grid one line and write a new unique row at the bottom.
+fn scroll_one_line(scene: &mut Scene, rows: u16, cols: u16, index: u32) {
+    let grid = scene.grid();
+    grid.goto(rows - 1, 0);
+    grid.carriage_return();
+    grid.linefeed();
+    write(grid, rows - 1, 0, &unique_row(index, cols));
+}
+
+/// The row-cache hits and misses `renderer` has counted.
+fn row_cache_counts(renderer: &GpuRenderer) -> (u64, u64) {
+    let stats = renderer.frame_stats();
+    (stats.row_cache_hits, stats.row_cache_misses)
+}
+
+/// Draw `scene` once and require `Presented`, the presenter `degraded` names (a software frame
+/// counted under GDI), and return the row-cache hits and misses the frame added.
+fn presented_frame(
+    renderer: &mut GpuRenderer,
+    scene: &mut Scene,
+    degraded: bool,
+    case: &str,
+) -> Result<(u64, u64), String> {
+    let (hits, misses) = row_cache_counts(renderer);
+    let before = counts(renderer);
+    let outcome = frame(renderer, scene);
+    check(
+        matches!(outcome, PresentOutcome::Presented),
+        &format!("{case}: presented: {outcome:?}"),
+    )?;
+    let moved = delta(before, counts(renderer));
+    check(
+        renderer.is_software_render_degraded() == degraded
+            && (!degraded || moved.software_frames >= 1),
+        &format!("{case}: the expected presenter drew the frame: {moved:?}"),
+    )?;
+    let (hits_after, misses_after) = row_cache_counts(renderer);
+    Ok((hits_after - hits, misses_after - misses))
+}
+
+/// The cold oracle: `oracle` first presents `scene` itself, so its atlas and font preparation are
+/// warm, then drops every test pane's cached rows and the retained frame, which leave the atlas
+/// alone, and presents `scene` again. That frame must hit no row and miss every emitted row.
+fn cold_oracle_frame(
+    oracle: &mut GpuRenderer,
+    scene: &mut Scene,
+    degraded: bool,
+    case: &str,
+) -> Result<(), String> {
+    presented_frame(oracle, scene, degraded, case)?;
+    for pane in &scene.panes {
+        oracle.invalidate_pane_caches(pane.id);
+    }
+    oracle.invalidate_retained_frame();
+    let rows: u64 = scene.panes.iter().map(|pane| u64::from(pane.grid.rows)).sum();
+    let (hits, misses) = presented_frame(oracle, scene, degraded, case)?;
+    check(
+        hits == 0 && misses == rows,
+        &format!("{case}: the oracle's row cache is cold: {hits} hits, {misses} misses of {rows}"),
+    )
+}
+
+/// T8a and T8b at scales 1, 1.25, 1.5 and 2 on two wgpu renderers built alike: a warm candidate
+/// scrolls one line (its moved rows hit) and must equal a cold oracle's Full repaint; then a
+/// one-cell edit and a cursor toggle present one `Partial` frame that also equals the oracle.
+fn warm_rows_match_a_cold_renderer(
+    _renderer: &mut GpuRenderer,
+    _layout: &Layout,
+    active: &ActiveEventLoop,
+) -> Result<(), String> {
+    for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+        let case = format!("wgpu scale {scale}");
+        let (window, mut candidate) = wgpu_renderer(active)?;
+        let (_oracle_window, mut oracle) = wgpu_renderer(active)?;
+        candidate.set_scale_factor(scale);
+        oracle.set_scale_factor(scale);
+        let layout = layout(&candidate, &window);
+        let (mut warm_scene, mut cold_scene) = (unique_scene(&layout), unique_scene(&layout));
+        baseline(&mut candidate, &mut warm_scene)?;
+        scroll_one_line(&mut warm_scene, layout.rows, layout.cols, 9_000);
+        scroll_one_line(&mut cold_scene, layout.rows, layout.cols, 9_000);
+        let (hits, _) = presented_frame(&mut candidate, &mut warm_scene, false, &case)?;
+        check(
+            hits + 1 >= u64::from(layout.rows),
+            &format!("{case}: every moved row hits on the warm renderer: {hits}"),
+        )?;
+        let (warm, width) = retained_pixels(&mut candidate)?;
+        cold_oracle_frame(&mut oracle, &mut cold_scene, false, &case)?;
+        let (cold, _) = retained_pixels(&mut oracle)?;
+        check(
+            first_difference(&warm, &cold, width).is_none(),
+            &format!(
+                "{case}: scrolled warm frame differs from the cold one at {:?}",
+                first_difference(&warm, &cold, width)
+            ),
+        )?;
+
+        for scene in [&mut warm_scene, &mut cold_scene] {
+            write(scene.grid(), EDIT_ROW, 3, "Z");
+            scene.cursor_visible = true;
+        }
+        let before = counts(&candidate);
+        let narrow = present(&mut candidate, &mut warm_scene)?;
+        let moved = delta(before, counts(&candidate));
+        check(
+            moved.partial_frames == 1 && !narrow.first_frame && narrow.is_narrow(),
+            &format!("{case}: the edit presents one Partial frame: {moved:?} {narrow:?}"),
+        )?;
+        let (warm, width) = retained_pixels(&mut candidate)?;
+        cold_oracle_frame(&mut oracle, &mut cold_scene, false, &case)?;
+        let (cold, _) = retained_pixels(&mut oracle)?;
+        check(
+            first_difference(&warm, &cold, width).is_none(),
+            &format!("{case}: the Partial frame differs from the cold Full repaint"),
+        )?;
+    }
+    Ok(())
+}
+
+/// Every BGRA pixel of a GDI renderer's software frame, each read through the test hook and
+/// required to exist. The hook and the GDI presenter exist only on Windows.
+#[cfg(not(target_os = "windows"))]
+fn gdi_pixels(_renderer: &GpuRenderer) -> Result<Vec<[u8; 4]>, String> {
+    Err(String::from("the GDI presenter exists only on Windows"))
+}
+
+/// Every BGRA pixel of a GDI renderer's software frame, each read through the test hook and
+/// required to exist.
+#[cfg(target_os = "windows")]
+fn gdi_pixels(renderer: &GpuRenderer) -> Result<Vec<[u8; 4]>, String> {
+    let (width, height) = renderer.surface_size();
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for pixel_y in 0..height {
+        for pixel_x in 0..width {
+            pixels.push(
+                renderer
+                    .__test_software_frame_pixel_bgra(pixel_x, pixel_y)
+                    .ok_or(format!("GDI pixel ({pixel_x}, {pixel_y}) is readable"))?,
+            );
+        }
+    }
+    Ok(pixels)
+}
+
+/// Pixels that differ from the frame's most common colour, its background.
+fn foreground_pixels(pixels: &[[u8; 4]]) -> usize {
+    let mut tally = std::collections::HashMap::new();
+    for pixel in pixels {
+        *tally.entry(*pixel).or_insert(0usize) += 1;
+    }
+    let background = tally.into_iter().max_by_key(|(_, count)| *count).map(|(pixel, _)| pixel);
+    pixels.iter().filter(|pixel| Some(**pixel) != background).count()
+}
+
+/// T8c at scales 1, 1.25, 1.5 and 2: two renderers forced onto the GDI presenter, one warm (its
+/// scrolled rows hit) and one cold, compose byte-identical software frames with visible text.
+fn gdi_warm_and_cold_frames_match(
+    _renderer: &mut GpuRenderer,
+    _layout: &Layout,
+    active: &ActiveEventLoop,
+) -> Result<(), String> {
+    for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+        let case = format!("GDI scale {scale}");
+        let (window, mut candidate) = renderer_in_mode(active, SoftwareRenderMode::Force)?;
+        let (_oracle_window, mut oracle) = renderer_in_mode(active, SoftwareRenderMode::Force)?;
+        candidate.set_scale_factor(scale);
+        oracle.set_scale_factor(scale);
+        let layout = layout(&candidate, &window);
+        let (mut warm_scene, mut cold_scene) = (unique_scene(&layout), unique_scene(&layout));
+        candidate.invalidate_retained_frame();
+        presented_frame(&mut candidate, &mut warm_scene, true, &case)?;
+        scroll_one_line(&mut warm_scene, layout.rows, layout.cols, 9_100);
+        scroll_one_line(&mut cold_scene, layout.rows, layout.cols, 9_100);
+        let (hits, _) = presented_frame(&mut candidate, &mut warm_scene, true, &case)?;
+        check(hits > 0, &format!("{case}: the warm GDI renderer replays moved rows"))?;
+        let warm = gdi_pixels(&candidate)?;
+        cold_oracle_frame(&mut oracle, &mut cold_scene, true, &case)?;
+        let cold = gdi_pixels(&oracle)?;
+        check(
+            foreground_pixels(&warm) > 100 && foreground_pixels(&cold) > 100,
+            &format!("{case}: both GDI frames draw text"),
+        )?;
+        check(warm == cold, &format!("{case}: warm and cold GDI frames differ"))?;
+    }
+    Ok(())
+}
+
+/// T11's direct `Err` exits, each apart from an ordinary failed outcome: an `Err` from assembly
+/// and an `Err` from the presenter call each return `Failed` with no receipt, discard the
+/// staged glyph-row keys, keep the committed ones and the retained pixels, and the next
+/// presented frame commits only its own keys and equals a full repaint.
+fn error_exits_discard_staged_keys(
+    renderer: &mut GpuRenderer,
+    layout: &Layout,
+    _active: &ActiveEventLoop,
+) -> Result<(), String> {
+    for (case, assembly) in [("assembly Err", true), ("presenter Err", false)] {
+        let (mut scene, record, pixels, before) = failing_edit(renderer, layout)?;
+        let committed = renderer.__test_glyph_slot_keys(PANE_ID, EDIT_ROW);
+        if assembly {
+            renderer.__fail_next_assembly();
+        } else {
+            // When: the presenter seam is armed instead, the `Err` comes from presentation.
+            renderer.__fail_next_present();
+        }
+        let outcome = frame(renderer, &mut scene);
+        check(
+            matches!(outcome, PresentOutcome::Failed(_)),
+            &format!("{case}: Failed: {outcome:?}"),
+        )?;
+        let moved = delta(before, counts(renderer));
+        check(
+            moved.partial_frames == 0 && moved.full_frames == 0,
+            &format!("{case}: nothing presented: {moved:?}"),
+        )?;
+        check(
+            scene.panes[0].grid.dirty_rows().any(|row| row == usize::from(EDIT_ROW)),
+            &format!("{case}: no receipt cleared the edit's dirt"),
+        )?;
+        let keys = renderer.__test_glyph_slot_keys(PANE_ID, EDIT_ROW);
+        check(
+            keys.map(|(_, staged)| staged) == Some(0)
+                && keys.map(|(kept, _)| kept) == committed.map(|(kept, _)| kept),
+            &format!("{case}: staged keys discarded, committed kept: {committed:?} -> {keys:?}"),
+        )?;
+        check(
+            renderer.__test_row_ink(PANE_ID, EDIT_ROW) == record,
+            &format!("{case}: the edited row's record is unchanged"),
+        )?;
+        let (after, _) = retained_pixels(renderer)?;
+        check(after == pixels, &format!("{case}: the retained frame was not drawn"))?;
+        present(renderer, &mut scene)?;
+        let next = renderer.__test_glyph_slot_keys(PANE_ID, EDIT_ROW);
+        check(
+            next.is_some_and(|(kept, _)| Some(kept) != committed.map(|(old, _)| old)),
+            &format!("{case}: the next presented frame commits its own key: {next:?}"),
+        )?;
+        let (next_pixels, _) = retained_pixels(renderer)?;
+        renderer.invalidate_retained_frame();
+        present(renderer, &mut scene)?;
+        let (full, _) = retained_pixels(renderer)?;
+        check(next_pixels == full, &format!("{case}: the next frame equals a full repaint"))?;
+    }
+    Ok(())
+}
+
 /// One case: a renderer and its layout, and the event loop recovery runs on.
 type Case = fn(&mut GpuRenderer, &Layout, &ActiveEventLoop) -> Result<(), String>;
 
@@ -1365,13 +1649,16 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
     settle_fallback(&mut renderer, &layout)?;
     let mut failures = Vec::new();
     // Recovery rebinds the device and degrading switches presenters, so those run last.
-    let cases: [(&str, Case); 9] = [
+    let cases: [(&str, Case); 12] = [
         ("pixel parity", pixel_parity),
         ("emission and upload", emission_and_upload_shrink),
         ("overhanging records", overhanging_records),
         ("post-assembly fallback", post_assembly_fallback),
         ("acquisition failure", acquisition_failure),
         ("atlas change", atlas_change),
+        ("error exits discard staged glyph keys", error_exits_discard_staged_keys),
+        ("warm glyph rows match a cold renderer", warm_rows_match_a_cold_renderer),
+        ("GDI warm and cold frames", gdi_warm_and_cold_frames_match),
         ("row ink grows and shrinks", row_ink_grows_and_shrinks),
         ("submission failure", submission_failure),
         ("degraded is never partial", degraded_is_never_partial),
