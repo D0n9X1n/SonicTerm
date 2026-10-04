@@ -179,7 +179,8 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
 - **变体。** S1、S5 与 S11 有 `gdi` 和 `wgpu` 变体，分别把 `[appearance].software_render_mode` 设为
   `force` 与 `off`。在 CPU 适配器上默认通过 GDI 呈现，因此只有 `wgpu` 测量 wgpu 呈现。没有通过 GDI 呈现
   的 `gdi` 运行，或发生降级的 `wgpu` 运行，为 `blocked`。S1 的 `role-exit` 变体用于 smoke。
-- **对比表。** 每个场景有一行 `presenter`，写出呈现器与适配器。S12 的 uncover 与遮挡期间释放内存两行
+- **对比表。** 每个场景有一行 `presenter`，写出呈现器与适配器。macOS 结果也记录呈现器，因此 macOS 对比表
+  也有这一行，内容为 `wgpu` 或 `wgpu, degraded`；有效的 macOS 结果缺少该记录属于模式问题。S12 的 uncover 与遮挡期间释放内存两行
   为 `n/a`，因为 Windows 不报告遮挡；每个检查点的 footprint 行为 `n/a`，因为 Windows 没有 `footprint`。
 - **交付。** 在测量运行之前，对比用 head 构建的 `--capture-delivery` 通过 ConPTY 回放 S3、S9、S10 与 S11，
   写出 `delivery.json`。每项检查成为双方共用的一行 `delivery:`；检查未通过，或记录与回放的退出码

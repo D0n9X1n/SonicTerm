@@ -1056,6 +1056,8 @@ pub(crate) struct WindowFrameCounters {
     pub(crate) defer_contention: u64,
     /// Redraws deferred by streaming pacing.
     pub(crate) defer_streaming: u64,
+    /// Attempts whose completion kept the streaming clock: hardware input attempts that settled.
+    pub(crate) stream_clock_exempt: u64,
     /// Contention retries armed.
     pub(crate) contention_retry_armed: u64,
     /// Pending acknowledgement receipts dropped at a collection: the pane was not held, its parser
@@ -1103,6 +1105,7 @@ impl Default for WindowFrameCounters {
             defer_timeout: 0,
             defer_contention: 0,
             defer_streaming: 0,
+            stream_clock_exempt: 0,
             contention_retry_armed: 0,
             dirt_ack_dropped: 0,
             present_interval: Histogram::new(HistogramUnit::Millis),
@@ -1524,6 +1527,7 @@ impl WindowFrameCounters {
             ("defer_timeout", self.defer_timeout),
             ("defer_contention", self.defer_contention),
             ("defer_streaming", self.defer_streaming),
+            ("stream_clock_exempt", self.stream_clock_exempt),
             ("contention_retry_armed", self.contention_retry_armed),
             ("dirt_ack_dropped", self.dirt_ack_dropped),
             ("native_request_redraw", native_requests + renderer_requests),

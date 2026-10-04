@@ -79,6 +79,7 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "defer_timeout",
             "defer_contention",
             "defer_streaming",
+            "stream_clock_exempt",
             "contention_retry_armed",
             "dirt_ack_dropped",
             "native_request_redraw",
@@ -365,6 +366,7 @@ fn every_counter_api_call_in_the_harness_is_behind_the_feature() {
 
 /// The window and renderer fields a base without the newest counters cannot read, by API name.
 const NEWER_SOURCES: &[&str] = &[
+    "stream_clock_exempt",
     "dirt_ack_dropped",
     "full_frames",
     "row_cache_invalidate_visits",

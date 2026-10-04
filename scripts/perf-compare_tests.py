@@ -727,8 +727,20 @@ class RenderTimingTests(unittest.TestCase):
 HARNESS_HASH = "ab" * 32
 
 
+def without_presenter(result):
+    """`result` with its presenter record removed, for a test of a run that recorded none."""
+    result.pop("presenter", None)
+    return result
+
+
+# The presenter a macOS run on the hardware path records: wgpu, not degraded, never Windows GDI.
+MACOS_PRESENTER = {"software_render_mode": "auto", "software_rendering": False, "software_render_degraded": False,
+                   "windows_gdi": False}
+
+
 def valid_result(**overrides):
-    """A result.json body that satisfies the schema; overrides replace top-level keys."""
+    """A result.json body that satisfies the schema; overrides replace top-level keys. It carries the presenter a
+    valid macOS result must record; a test of a run that recorded none removes it with `without_presenter`."""
     phase = {"name": "workload", "start_unix_s": 10.0, "end_unix_s": 70.0, "cpu_user_s": 1.5,
              "cpu_system_s": 0.5, "presented_frames": 120, "redraw_requested": 130,
              "dispatch_ms": [1.0, 2.0], "present_interval_ms": [16.6, 16.7], "allocations_per_frame": None}
@@ -737,7 +749,7 @@ def valid_result(**overrides):
               "latency": None, "throughput": {"bytes": 1000, "seconds": 2.0}, "uncover_ms": None,
               "scrollback_rows_retained": None,
               "checkpoints": [{"index": 0, "label": "end", "unix_s": 70.0, "footprint_file": None}],
-              "finish_session_settled": True, "notes": []}
+              "finish_session_settled": True, "notes": [], "presenter": dict(MACOS_PRESENTER)}
     result.update(overrides)
     return result
 
@@ -2660,12 +2672,15 @@ class RunSetTests(unittest.TestCase):
     def test_a_renderer_or_presenter_mismatch_invalidates_the_pair(self):
         # Both sides must draw through the same adapter and presenter, or the pair compares two renderers.
         other_adapter = dict(HARDWARE_RENDERER, name="Intel(R) Arc(TM) A770 Graphics")
-        cases = {"renderer": windows_run(renderer=other_adapter), "presenter": windows_run(software_render_mode="gpu")}
-        for kind, mismatched in cases.items():
-            with self.subTest(kind):
-                result, calls = self.run_set({"base": [windows_run()], "head": [mismatched, windows_run()]}, runs=1)
+        cases = {"renderer": (windows_run(), windows_run(renderer=other_adapter)),
+                 "presenter": (windows_run(), windows_run(software_render_mode="gpu")),
+                 # A degraded macOS run beside one on the hardware path compares two presenters too.
+                 "macos presenter": (macos_run(), macos_run(software_render_degraded=True))}
+        for case, (matched, mismatched) in cases.items():
+            with self.subTest(case):
+                result, calls = self.run_set({"base": [matched], "head": [mismatched, matched]}, runs=1)
                 self.assertEqual(calls, ["base", "head", "head"])
-                self.assertEqual(result.attempts[1][2], kind)
+                self.assertEqual(result.attempts[1][2], case.split()[-1])
                 self.assertEqual(len(result.head.outcomes), 1)
 
     def test_a_windows_run_without_an_adapter_never_pairs(self):
@@ -5078,8 +5093,8 @@ class WindowsComparisonLegTests(unittest.TestCase):
 COUNTER_CONTRACT = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
                 "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_streaming",
-                "contention_retry_armed", "dirt_ack_dropped", "native_request_redraw", "user_request_redraw",
-                "redraw_requested"),
+                "stream_clock_exempt", "contention_retry_armed", "dirt_ack_dropped", "native_request_redraw",
+                "user_request_redraw", "redraw_requested"),
                ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
     "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
              "fg_probe_calls", "fg_probe_panes", "fg_worker_probes", "fg_worker_panes", "fg_results_stale",
@@ -5383,14 +5398,15 @@ def counters_side(*values_per_run):
 
 class CounterTableTests(unittest.TestCase):
     def test_a_counters_run_whose_frames_disagree_with_its_presenter_is_noted(self):
-        # On Windows result.json records the presenter: GDI frames count as software_frames, wgpu frames as
-        # gpu_frames. A run whose counts contradict its record is named in a note, never passed silently; a
-        # consistent run, or one that recorded no presenter (macOS), adds nothing.
+        # result.json records the presenter on Windows and macOS: GDI frames count as software_frames, wgpu frames
+        # as gpu_frames. A run whose counts contradict its record is named in a note, never passed silently; a
+        # consistent run, or one that recorded no presenter (an older base), adds nothing.
         gdi = dict(WGPU_PRESENTER, software_render_degraded=True, windows_gdi=True)
         consistent = perf.SideRuns(outcomes=[
             make_outcome(result=counters_result({"renderer.software_frames": 40}, presenter=gdi)),
             make_outcome(result=counters_result({"renderer.gpu_frames": 40}, presenter=WGPU_PRESENTER)),
-            make_outcome(result=counters_result({"renderer.gpu_frames": 40}))])
+            make_outcome(result=counters_result({"renderer.gpu_frames": 40})),
+            make_outcome(result=without_presenter(counters_result({"renderer.software_frames": 40})))])
         self.assertEqual(perf.presenter_counter_notes("S1/default", "head", consistent), [])
         wrong = perf.SideRuns(outcomes=[
             make_outcome(result=counters_result({"renderer.gpu_frames": 3, "renderer.software_frames": 37},
@@ -5630,6 +5646,28 @@ class CounterTableTests(unittest.TestCase):
                          ("n/a", "3 (3–3)", "n/a"))
         self.assertEqual(dropped_cells(perf.SideRuns(outcomes=[make_outcome(result=counters_result())])),
                          ("0 (0–0)", "3 (3–3)", perf.percent_change(0, 3)))
+        gate_off = valid_result(frame_counters="off")
+        self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
+
+    def test_stream_clock_exemptions_are_required_on_the_head_and_n_a_on_an_older_base(self):
+        # stream_clock_exempt joined the window section: a head must report it, a base built before it reads n/a
+        # with no change shown, a supporting base that exempted nothing prints a real 0, and a gate-off run
+        # carries no phase counters, so it is never checked for the field.
+        lacking = counters_result()
+        del lacking["phases"][0]["frame_counters"]["window"]["stream_clock_exempt"]
+        problems = perf.validate_result(lacking, HARNESS_HASH, 0, counters=True)
+        self.assertTrue(any("window.stream_clock_exempt" in problem for problem in problems), problems)
+        self.assertEqual(perf.validate_result(lacking, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        head = counters_side({"window.stream_clock_exempt": 5})
+
+        def exempt_cells(base):
+            rows, _omitted = perf.counter_rows("S2/default", base, head)
+            return {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}["window.stream_clock_exempt (count)"]
+
+        self.assertEqual(exempt_cells(perf.SideRuns(outcomes=[make_outcome(result=lacking)])),
+                         ("n/a", "5 (5–5)", "n/a"))
+        self.assertEqual(exempt_cells(perf.SideRuns(outcomes=[make_outcome(result=counters_result())])),
+                         ("0 (0–0)", "5 (5–5)", perf.percent_change(0, 5)))
         gate_off = valid_result(frame_counters="off")
         self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
 
@@ -5942,6 +5980,14 @@ WGPU_PRESENTER = {"software_render_mode": "auto", "software_rendering": False, "
                   "windows_gdi": False}
 
 
+def macos_run(**presenter):
+    """A factory for a valid macOS run, which logs no adapter; overrides change the presenter's fields."""
+    def build(plan):
+        result = valid_result(presenter=dict(WGPU_PRESENTER, **presenter))
+        return make_outcome(plan=plan, platform="darwin", result=result)
+    return build
+
+
 def windows_run(renderer=None, grid=None, **presenter):
     """A factory for a valid Windows run on one adapter and presenter; overrides change the presenter's fields."""
     def build(plan):
@@ -6038,14 +6084,15 @@ class WindowsTableTests(unittest.TestCase):
                 self.assertEqual(rows[f"{label} footprint (MiB)"][2:], ["n/a", "n/a", "Windows has no `footprint`"])
 
     def test_a_macos_comparison_keeps_its_measured_rows(self):
-        # macOS measures uncover and footprint, so its rows keep their figures and no Windows note appears.
+        # macOS measures uncover and footprint, so its rows keep their figures and no Windows note appears; its
+        # presenter row names wgpu, so a reader sees the run stayed on the hardware path.
         outcome = checkpoint_outcome("darwin", ["end"], uncover_ms=120.0,
                                      footprints={"1-end": {"bytes": 64 * perf.MIB}})
         rows = self.rows("S12/default", outcome)
         self.assertTrue(rows["uncover (ms)"][2].startswith("120.00"), rows["uncover (ms)"])
         self.assertTrue(rows["end footprint (MiB)"][2].startswith("64.00"), rows["end footprint (MiB)"])
         self.assertFalse(any("Windows" in cell for row in rows.values() for cell in row))
-        self.assertNotIn("presenter", rows)
+        self.assertEqual(rows["presenter"][2:4], ["wgpu", "wgpu"])
 
     def test_synthetic_occlusion_on_windows_is_a_schema_failure(self):
         # Windows reports no occlusion, so a synthetic one there means the harness did what it must not.
@@ -6062,16 +6109,25 @@ class WindowsTableTests(unittest.TestCase):
             with self.subTest(broken=broken):
                 self.assertTrue(perf.validate_result(valid_result(presenter=broken), HARNESS_HASH, 0))
 
-    def test_a_valid_windows_result_must_carry_its_presenter(self):
-        # Every Windows run records how it presented, so a valid win32 result without one is a schema
-        # problem; macOS results carry none, and a Windows run that ended early need not have one.
-        problems = perf.validate_result(valid_result(), HARNESS_HASH, 0, platform_name="win32")
-        self.assertTrue(any("presenter" in problem for problem in problems), problems)
-        self.assertEqual(perf.validate_result(valid_result(), HARNESS_HASH, 0, platform_name="darwin"), [])
-        self.assertEqual(perf.validate_result(valid_result(presenter=WGPU_PRESENTER), HARNESS_HASH, 0,
-                                              platform_name="win32"), [])
-        invalid = valid_result(status="invalid", exit_code=3)
-        self.assertEqual(perf.validate_result(invalid, HARNESS_HASH, 3, platform_name="win32"), [])
+    def test_a_valid_windows_or_macos_result_must_carry_its_presenter(self):
+        # Every Windows and macOS run records how it presented, so a valid win32 or darwin result without one is a
+        # schema problem; a run that ended early need not have one.
+        for platform in ("win32", "darwin"):
+            with self.subTest(platform=platform):
+                missing = without_presenter(valid_result())
+                problems = perf.validate_result(missing, HARNESS_HASH, 0, platform_name=platform)
+                self.assertTrue(any("presenter" in problem for problem in problems), problems)
+                self.assertEqual(perf.validate_result(valid_result(presenter=WGPU_PRESENTER), HARNESS_HASH, 0,
+                                                      platform_name=platform), [])
+                invalid = without_presenter(valid_result(status="invalid", exit_code=3))
+                self.assertEqual(perf.validate_result(invalid, HARNESS_HASH, 3, platform_name=platform), [])
+
+    def test_a_macos_presenter_reads_wgpu_or_wgpu_degraded(self):
+        # macOS never presents through GDI, so its row names wgpu and says when the degrade path was taken.
+        for degraded, expected in ((False, "wgpu"), (True, "wgpu, degraded")):
+            with self.subTest(degraded=degraded):
+                result = valid_result(presenter=dict(WGPU_PRESENTER, software_render_degraded=degraded))
+                self.assertEqual(perf.presenter_text(make_outcome(platform="darwin", result=result)), expected)
 
     def test_a_gdi_or_wgpu_run_without_its_presenter_record_is_blocked(self):
         # gdi and wgpu exist to measure one presenter, so a run that recorded none proves neither; the
@@ -6079,9 +6135,10 @@ class WindowsTableTests(unittest.TestCase):
         for variant in ("gdi", "wgpu"):
             with self.subTest(variant=variant):
                 plan = perf.RunPlan(IDLE_SCENARIO, variant, "head", Path("/b"), HARNESS_HASH)
-                reason = perf.presenter_blocked(make_outcome(plan=plan))
+                reason = perf.presenter_blocked(make_outcome(plan=plan, result=without_presenter(valid_result())))
                 self.assertIsNotNone(reason)
                 self.assertIn("presenter", reason)
+        self.assertIsNone(perf.presenter_blocked(make_outcome(result=without_presenter(valid_result()))))
         self.assertIsNone(perf.presenter_blocked(make_outcome()))
 
 
@@ -7185,7 +7242,12 @@ def fixture_run(build, case):
     """One golden run's result and its memory samples, parsed as a real run's logs are."""
     run = json.loads(CHECKPOINT_FIXTURE.read_text(encoding="utf-8"))[build][case]
     samples = sorted(filter(None, map(perf.parse_memory_line, run["logs"])), key=lambda sample: sample.unix_s)
-    return run["result"], samples
+    result = run["result"]
+    # The golden runs come from the harness's headless probe, which has no renderer and so records no presenter;
+    # a real macOS run records one, and these tests read checkpoints, not the presenter.
+    if result.get("presenter") is None:
+        result["presenter"] = dict(MACOS_PRESENTER)
+    return result, samples
 
 
 def fixture_outcome(build, case, plan=None):

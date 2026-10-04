@@ -89,7 +89,9 @@ cargo build -p sonicterm-app
 - Do not add unconditional heartbeat redraws at the tail of event handling.
 - Pane output generations publish after complete batches; the collector Acquire-loads
   identities before locking. Frame completion settles only captured owner generations.
-  `last_render` stays the sole pacing clock and `request_redraw(&self)` stays native-only.
+  `last_render` is the attempt clock. On hardware, streaming is paced from `stream_clock`,
+  which a settled input attempt that presented nothing does not advance. Timeout, contention,
+  software and every other outcome stay paced by attempts. `request_redraw(&self)` stays native-only.
   Structural parking excludes every frame deadline; Output maintains commands but cannot
   unpark. Device-stop reporting runs before this suppression. Native evidence is separate
   from the fake-clock and source-contract tests.

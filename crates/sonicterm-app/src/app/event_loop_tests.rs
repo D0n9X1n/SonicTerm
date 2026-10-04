@@ -262,6 +262,7 @@ fn arm_pending_redraw_composing(app: &mut App, last_render: Instant) {
     app.main_mut().unwrap().redraw.deferred = true;
     let window = app.main_mut().expect("synthetic main window");
     window.last_render = last_render;
+    window.stream_clock = last_render;
     window.ime.handle_preedit("あ", Some((0, 1)));
     assert!(window.ime.is_composing(), "preedit must put the window on the composing cadence");
 }
@@ -273,11 +274,13 @@ fn contended_redraw_after_idle_arms_a_future_deadline_without_faking_a_frame() {
     let now = Instant::now();
     let previous = now - Duration::from_secs(1);
     app.main_mut().unwrap().last_render = previous;
+    app.main_mut().unwrap().stream_clock = previous;
 
     app.defer_redraw_on_lock_contention(true);
 
     assert!(app.wake_deadline(None).unwrap() > now);
     assert_eq!(app.main().unwrap().last_render, previous);
+    assert_eq!(app.main().unwrap().stream_clock, previous, "contention moves neither clock");
     assert!(app.pending_redraw);
     assert!(app.__test_input_dirty());
 }
@@ -299,6 +302,7 @@ fn contention_retry_is_nonstarving_per_window_across_frame_policies() {
                 app.software_render_degrade = software;
                 let window = app.windows.get_mut(&id).unwrap();
                 window.last_render = previous;
+                window.stream_clock = previous;
                 if composing {
                     window.ime.handle_preedit("中", None);
                 }
@@ -310,17 +314,21 @@ fn contention_retry_is_nonstarving_per_window_across_frame_policies() {
                 assert_eq!(app.wake_deadline(None), Some(due));
                 for offset in [1, 2, 3] {
                     let event_at = now + period * offset / 4;
-                    assert!(app.windows[&id].contention_blocks_redraw(event_at, period));
+                    assert!(app.windows[&id].contention_blocks_redraw(event_at, period, software));
                     app.defer_window_lock_contention(id, false, event_at);
                     assert_eq!(app.windows[&id].retry_not_before, Some(due));
                 }
-                assert!(!app.windows[&id].contention_blocks_redraw(due, period));
+                assert!(!app.windows[&id].contention_blocks_redraw(due, period, software));
                 app.defer_window_lock_contention(id, false, due);
                 assert_eq!(app.windows[&id].retry_not_before, Some(due + period));
                 assert_eq!(app.windows[&id].last_render, previous);
+                assert_eq!(
+                    app.windows[&id].stream_clock, previous,
+                    "contention moves neither clock"
+                );
                 app.windows.get_mut(&id).unwrap().coherent_frame_collected();
                 assert_eq!(app.windows[&id].retry_not_before, None);
-                assert!(!app.windows[&id].contention_blocks_redraw(due, period));
+                assert!(!app.windows[&id].contention_blocks_redraw(due, period, software));
                 app.windows.get_mut(&id).unwrap().redraw.deferred = false;
                 if is_main {
                     app.pending_redraw = false;
@@ -605,6 +613,7 @@ fn measure_frame_gaps(app: &mut App, frames: usize, start: Instant) -> Vec<Durat
         {
             let window = app.main_mut().expect("synthetic main window");
             window.last_render = last;
+            window.stream_clock = last;
         }
         let at = app.wake_deadline(None).expect("a pending redraw must arm a wake");
         gaps.push(at.duration_since(last));
@@ -747,6 +756,7 @@ fn a_deferred_keystroke_waits_at_most_one_frame_period() {
     {
         let window = app.main_mut().expect("synthetic main window");
         window.last_render = rendered_at;
+        window.stream_clock = rendered_at;
     }
 
     let wake = app.wake_deadline(None).expect("a pending redraw must arm a wake");

@@ -16,7 +16,10 @@ use super::*;
 ///   a burst, and counts as streaming so it coalesces rather
 ///   than rendering per echo chunk.
 /// - `since_last_render < frame_period` — we already drew inside this vsync
-///   window, so another draw now would just burn a frame.
+///   window, so another draw now would just burn a frame. Callers pass the
+///   time since the window's pacing clock: every attempt on the software path,
+///   and on hardware the streaming clock, which a settled keypress frame that
+///   presented nothing does not move.
 ///
 /// Extracted as a pure fn so main and child use byte-identical
 /// coalescing logic AND it is unit-testable without a winit loop. Deferral
@@ -36,7 +39,7 @@ pub fn should_defer_streaming_redraw(
     // expensive (full-screen software raster), so even *pure* input redraws
     // are coalesced to the frame cap — fast typing in a TUI like Claude Code
     // would otherwise force a full-screen raster per keystroke and peg the
-    // CPU. Costs at most one frame (~33ms) of extra input latency, which is
+    // CPU. Costs at most one frame (25 ms) of extra input latency, which is
     // an acceptable trade only because rendering is already slow here. The
     // hardware-GPU path passes `false` and keeps input redraws immediate.
     let streaming = software_render || pty_burst || !was_dirty;

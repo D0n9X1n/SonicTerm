@@ -1892,7 +1892,9 @@ FRAME_COUNTER_STATES = ("unsupported", "off", "on")
 FRAME_COUNTER_FIELDS = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
                 "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_streaming",
-                "contention_retry_armed",
+                # stream_clock_exempt counts settled hardware keypress attempts that kept the streaming clock; a
+                # base older than it shows n/a.
+                "stream_clock_exempt", "contention_retry_armed",
                 # dirt_ack_dropped counts receipts dropped at a collection; a base older than it shows n/a.
                 "dirt_ack_dropped", "native_request_redraw", "user_request_redraw", "redraw_requested"),
                ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
@@ -2068,14 +2070,16 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
     # The measurement window's display after startup; absent or null when the harness did not report one.
     if data.get("monitor") is not None and not _monitor_ok(data["monitor"]):
         problems.append("monitor needs name, refresh_rate_millihertz and scale_factor of the documented types")
-    # Off Windows the harness reports no presenter; when present each field has its type.
+    # Windows and macOS runs record their presenter; when present each field has its type.
     presenter = data.get("presenter")
     if presenter is not None and not _presenter_ok(presenter):
         problems.append("presenter needs software_render_mode (a string or null) and the booleans "
                         "software_rendering, software_render_degraded and windows_gdi")
-    if platform_name == "win32" and status == "valid" and presenter is None:
-        # When: every Windows run records how it presented, so a valid one without the record cannot be trusted.
-        problems.append("a valid Windows result has no presenter")
+    if platform_name in ("win32", "darwin") and status == "valid" and presenter is None:
+        # When: every Windows and macOS run records how it presented, so a valid one without the record cannot be
+        # trusted; a macOS row counts only when that record shows the hardware path.
+        host = "Windows" if platform_name == "win32" else "macOS"
+        problems.append(f"a valid {host} result has no presenter")
     if platform_name == "win32" and data.get("synthetic_occlusion") is True:
         # When: Windows reports no occlusion, so the harness must never deliver a synthetic one there.
         problems.append("synthetic_occlusion is true, but Windows reports no occlusion")
@@ -3960,7 +3964,7 @@ def latency_acceptance(base: tuple[int, int] | None, head: tuple[int, int] | Non
 
 
 def presenter_text(outcome: RunOutcome) -> str | None:
-    """Name a run's presenter and adapter, or None when it reported neither (macOS)."""
+    """Name a run's presenter and adapter, or None when it reported neither (a base older than the macOS record)."""
     presenter = (outcome.result or {}).get("presenter")
     if outcome.renderer is None and not isinstance(presenter, Mapping):
         return None
@@ -4598,8 +4602,9 @@ def attempt_split(per_run: Sequence[dict], prefix: str) -> tuple[str | None, int
 def presenter_counter_notes(label: str, side_name: str, side: SideRuns) -> list[str]:
     """Notes for each valid counters run whose renderer frame counts disagree with its recorded presenter.
 
-    On Windows result.json records the presenter: frames drawn through GDI count as software_frames and frames
-    presented through wgpu as gpu_frames. A run that recorded no presenter (macOS) is not checked.
+    result.json records the presenter on Windows and macOS: frames drawn through GDI count as software_frames and
+    frames presented through wgpu as gpu_frames. A run that recorded no presenter (a base older than the macOS
+    record) is not checked.
     """
     notes = []
     for index, outcome in enumerate(side.outcomes, 1):
