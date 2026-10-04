@@ -115,19 +115,89 @@ impl Layout {
         self.grid_x + f32::from(col) * self.cell_w
     }
 
-    /// The top and bottom of row `row`'s ink-padded damage strip, rounded outward as the planner
-    /// rounds them.
-    fn strip(&self, row: u16) -> (f32, f32) {
-        (
-            (self.row_top(row) - self.ink_pad).floor(),
-            (self.row_top(row) + self.cell_h + self.ink_pad).ceil(),
-        )
-    }
-
     /// Every cell of one pane of this layout.
     fn cells(&self) -> u64 {
         u64::from(self.cols) * u64::from(self.rows)
     }
+
+    /// Row `row`'s ink-padded damage strip as the planner rounds it: its top floored from the
+    /// row's top less the pad, its bottom ceiled from the next row's top plus the pad, spanning the
+    /// grid and the pane, clipped to the pane. Neither the pitch nor the origin need be integral.
+    fn strip_rect(&self, row: u16) -> Option<PixelRect> {
+        let left = (self.grid_x.floor() as i32).min(self.pane.x);
+        let right = ((self.grid_x + f32::from(self.cols) * self.cell_w).ceil() as i32)
+            .max(self.pane.right());
+        let top = (self.grid_y + f32::from(row) * self.cell_h - self.ink_pad).floor() as i32;
+        let bottom =
+            (self.grid_y + (f32::from(row) + 1.0) * self.cell_h + self.ink_pad).ceil() as i32;
+        PixelRect {
+            x: left,
+            y: top,
+            w: (right - left).max(1) as u32,
+            h: (bottom - top).max(1) as u32,
+        }
+        .intersect(self.pane)
+    }
+
+    /// A glyph `rows_tall` rows tall under the cursor cell at (`row`, `col`), bottom-aligned with
+    /// it, as `(x, y, w, h)` in surface pixels.
+    fn cursor_glyph(&self, row: u16, col: u16, rows_tall: f32) -> (f32, f32, f32, f32) {
+        let height = rows_tall * self.cell_h;
+        (self.col_left(col), self.row_top(row) + self.cell_h - height, self.cell_w, height)
+    }
+
+    /// The share of `glyph`'s area the cursor cell at (`row`, `col`) covers; the block cursor
+    /// recolors a glyph it covers by at least 20%.
+    fn cursor_coverage(&self, row: u16, col: u16, glyph: (f32, f32, f32, f32)) -> f32 {
+        let (left, top, width, height) = glyph;
+        let (cell_left, cell_top) = (self.col_left(col), self.row_top(row));
+        let overlap_w =
+            ((left + width).min(cell_left + self.cell_w) - left.max(cell_left)).max(0.0);
+        let overlap_h = ((top + height).min(cell_top + self.cell_h) - top.max(cell_top)).max(0.0);
+        overlap_w * overlap_h / (width * height)
+    }
+}
+
+/// `(x, y, w, h)` in surface pixels rounded outward to whole pixels, as the renderer bounds ink.
+fn outward((left, top, width, height): (f32, f32, f32, f32)) -> PixelRect {
+    let (x, y) = (left.floor() as i32, top.floor() as i32);
+    let (right, bottom) = ((left + width).ceil() as i32, (top + height).ceil() as i32);
+    PixelRect { x, y, w: (right - x).max(0) as u32, h: (bottom - y).max(0) as u32 }
+}
+
+/// The rows a one-row edit at `edit_row` must emit, from the geometry alone: the edited row, every
+/// row whose strip meets the edited row's strip with positive area, and every row whose `record`
+/// meets that strip.
+fn edit_rows(
+    layout: &Layout,
+    edit_row: u16,
+    record: impl Fn(u16) -> Option<PixelRect>,
+) -> Vec<u16> {
+    let Some(damage) = layout.strip_rect(edit_row) else {
+        // When: the edited row's strip is off the pane, it damages nothing but is still emitted.
+        return vec![edit_row];
+    };
+    let meets = |rect: Option<PixelRect>| rect.is_some_and(|rect| rect.intersect(damage).is_some());
+    (0..layout.rows)
+        .filter(|row| *row == edit_row || meets(layout.strip_rect(*row)) || meets(record(*row)))
+        .collect()
+}
+
+/// The nearest row above `cursor_row` that showing the cursor skips while the recolored `glyph`
+/// reaches it: its strip and its `record` both miss the cursor row's strip, and its record meets
+/// `glyph`. `None` when no row qualifies.
+fn skipped_reached_row(
+    layout: &Layout,
+    cursor_row: u16,
+    glyph: PixelRect,
+    record: impl Fn(u16) -> Option<PixelRect>,
+) -> Option<u16> {
+    let damage = layout.strip_rect(cursor_row)?;
+    let misses = |rect: PixelRect| rect.intersect(damage).is_none();
+    (0..cursor_row).rev().find(|row| {
+        layout.strip_rect(*row).is_none_or(misses)
+            && record(*row).is_some_and(|ink| misses(ink) && ink.intersect(glyph).is_some())
+    })
 }
 
 /// One pane a case draws: its id, rectangle, grid and inline images.
@@ -255,7 +325,8 @@ fn wgpu_renderer(active: &ActiveEventLoop) -> Result<(Arc<Window>, GpuRenderer),
 }
 
 /// The whole surface as one pane, the grid it holds and where that grid draws. With line height 1
-/// the cell height is the font's integer raster height, and the ink pad is that height rounded up.
+/// the ink pad is the font's cell height rounded up; neither the cell height nor the grid origin
+/// need be whole pixels, so every row set the cases expect is computed from this geometry.
 fn layout(renderer: &GpuRenderer, window: &Window) -> Layout {
     let size = window.inner_size();
     let (cell_w, cell_h) = renderer.cell_size();
@@ -660,12 +731,16 @@ fn parity_cases(
         height,
         bgra: Arc::from(vec![200u8; (width * height * 4) as usize]),
     });
-    let image_top = layout.row_top(image_row);
-    let image_bottom = image_top + height as f32;
-    let (_, strip_bottom) = layout.strip(EDIT_ROW);
+    let image_rect = outward((
+        layout.col_left(image_col),
+        layout.row_top(image_row),
+        width as f32,
+        height as f32,
+    ));
+    let strip_bottom = layout.strip_rect(EDIT_ROW).ok_or("the edit row's strip")?.bottom();
     check(
-        image_top < strip_bottom && strip_bottom < image_bottom,
-        &format!("the image {image_top}..{image_bottom} crosses the strip's edge {strip_bottom}"),
+        image_rect.y < strip_bottom && strip_bottom < image_rect.bottom(),
+        &format!("the image {image_rect:?} crosses the strip's edge {strip_bottom}"),
     )?;
     baseline(renderer, &mut image)?;
     write(image.grid(), EDIT_ROW, 0, "edit");
@@ -675,12 +750,6 @@ fn parity_cases(
         &label("inline image crossing the damage"),
         Expect::Partial,
     )?;
-    let image_rect = PixelRect {
-        x: layout.col_left(image_col) as i32,
-        y: image_top as i32,
-        w: width,
-        h: height,
-    };
     let inside = image_rect.intersect(damage.damage);
     check(
         inside.is_some_and(|inside| inside.h > 0 && inside.h < image_rect.h),
@@ -713,10 +782,11 @@ fn parity_cases(
 }
 
 /// Test 7: a one-row edit on a pane of at least 20 rows presents one partial frame, no full frame,
-/// and hashes exactly the rows the planner emits, computed from the captured geometry: the edited
-/// row, every row whose padded strip meets the edit's strip, and every row whose record meets it.
-/// With line height 1 the pad is one row, so that is the edited row and two rows either side,
-/// rows 8 to 12. The frame uploads fewer bytes than the same state planned `Full`.
+/// and hashes exactly the rows the planner emits, computed from the captured geometry and the
+/// baseline records by [`edit_rows`]: the edited row, every row whose rounded strip meets the
+/// edit's strip, and every row whose record meets it. How many rows that is depends on the pitch
+/// (seven at 19.2 px, five at 20 px). The frame uploads fewer bytes than the same state planned
+/// `Full`.
 fn emission_and_upload_shrink(
     renderer: &mut GpuRenderer,
     layout: &Layout,
@@ -724,27 +794,10 @@ fn emission_and_upload_shrink(
 ) -> Result<(), String> {
     let mut scene = single(layout);
     baseline(renderer, &mut scene)?;
-    // The edit damages its own padded strip; a row is emitted when its strip meets that strip
-    // with positive area, or when its baseline record does.
-    let as_rect = |(top, bottom): (f32, f32)| PixelRect {
-        x: layout.pane.x,
-        y: top as i32,
-        w: layout.pane.w,
-        h: (bottom - top) as u32,
-    };
-    let damage = as_rect(layout.strip(EDIT_ROW));
-    let expected: Vec<u16> = (0..layout.rows)
-        .filter(|row| {
-            *row == EDIT_ROW
-                || as_rect(layout.strip(*row)).intersect(damage).is_some()
-                || renderer
-                    .__test_row_ink(PANE_ID, *row)
-                    .is_some_and(|record| record.intersect(damage).is_some())
-        })
-        .collect();
+    let expected = edit_rows(layout, EDIT_ROW, |row| renderer.__test_row_ink(PANE_ID, row));
     check(
-        expected == (EDIT_ROW - 2..=EDIT_ROW + 2).collect::<Vec<_>>(),
-        &format!("the edit's strip and records reach rows 8 to 12: {expected:?}"),
+        expected.contains(&EDIT_ROW) && expected.len() < usize::from(layout.rows),
+        &format!("the edit reaches some rows, not all {}: {expected:?}", layout.rows),
     )?;
     write(scene.grid(), EDIT_ROW, 0, "edit");
     let before = counts(renderer);
@@ -842,9 +895,14 @@ fn overhanging_records(
     let (damage, _, _) =
         narrow_matches_full(renderer, &mut vertical, "tall glyph five rows up", Expect::Partial)?;
     let record = renderer.__test_row_ink(PANE_ID, tall_slot).ok_or("the tall row's record")?;
+    let strip = layout.strip_rect(tall_slot);
     check(
-        record.bottom() > damage.damage.y,
-        &format!("the tall row's record {record:?} reaches the damage {:?}", damage.damage),
+        record.intersect(damage.damage).is_some()
+            && strip.is_none_or(|strip| strip.intersect(damage.damage).is_none()),
+        &format!(
+            "the tall row's record {record:?} reaches the damage {:?} its strip {strip:?} misses",
+            damage.damage
+        ),
     )?;
     renderer.__inject_row_glyph(None);
     Ok(())
@@ -857,51 +915,32 @@ fn overhanging_records(
 /// reached, so no fallback is needed. Both frames go through the releasing call: the fallback's
 /// receipt acknowledges every row (`AckRows::All`), the partial frame's only the rows it drew.
 ///
-/// Before presenting, the geometry is checked: the cursor cell covers at least the recolorer's
-/// 20% of the glyph, and the glyph reaches a dense row whose padded strip misses the cursor rows'
-/// strips and whose record misses the cursor cell, so only the post-assembly check can catch it.
+/// The geometry is checked first: the cursor cell covers at least the recolorer's 20% of the
+/// glyph, and after the baseline [`skipped_reached_row`] finds, from the rounded strips and the
+/// committed records, a dense row whose strip and record both miss the cursor's strip while its
+/// record meets the glyph, so only the post-assembly check can catch it.
 fn post_assembly_fallback(
     renderer: &mut GpuRenderer,
     layout: &Layout,
     _active: &ActiveEventLoop,
 ) -> Result<(), String> {
-    let cursor_left = layout.col_left(CURSOR_COL);
-    let cursor_top = layout.row_top(CURSOR_ROW);
-    let cursor_bottom = cursor_top + layout.cell_h;
-    let tall_h = 4.5 * layout.cell_h;
-    let glyph_top = cursor_bottom - tall_h;
-    let covered = (layout.cell_w * layout.cell_h) / (layout.cell_w * tall_h);
+    let glyph = layout.cursor_glyph(CURSOR_ROW, CURSOR_COL, 4.5);
+    let covered = layout.cursor_coverage(CURSOR_ROW, CURSOR_COL, glyph);
     check(covered >= 0.20, &format!("the cursor covers {covered} of the glyph, at least 20%"))?;
-    // The cursor toggle damages the cursor row's padded strip; the row three above it is the
-    // nearest whose strip ends at or above that strip's top while its cell meets the glyph.
-    let (damage_top, _) = layout.strip(CURSOR_ROW);
-    let reached = CURSOR_ROW - 3;
-    let (_, reached_strip_bottom) = layout.strip(reached);
-    check(
-        reached_strip_bottom <= damage_top
-            && glyph_top < layout.row_top(reached) + layout.cell_h
-            && reached != EDIT_ROW,
-        &format!(
-            "row {reached} ({}..{reached_strip_bottom}) misses the cursor strip from {damage_top} \
-             and meets the glyph from {glyph_top}",
-            layout.strip(reached).0
-        ),
-    )?;
-    renderer.__inject_test_glyph(Some((
-        (cursor_left, glyph_top, layout.cell_w, tall_h),
-        INJECTED_COLOR,
-    )));
+    renderer.__inject_test_glyph(Some((glyph, INJECTED_COLOR)));
     let mut scene = single(layout);
     scene.grid().goto(CURSOR_ROW, CURSOR_COL);
     baseline(renderer, &mut scene)?;
-    let record = renderer.__test_row_ink(PANE_ID, reached).ok_or("the reached row's record")?;
+    let reached = skipped_reached_row(layout, CURSOR_ROW, outward(glyph), |row| {
+        renderer.__test_row_ink(PANE_ID, row)
+    });
     check(
-        (record.y as f32) < cursor_top
-            && record.bottom() as f32 > glyph_top
-            && record.bottom() as f32 <= damage_top,
+        reached.is_some(),
         &format!(
-            "row {reached}'s record {record:?} meets the glyph from {glyph_top} and misses the \
-             cursor strip from {damage_top}"
+            "a row above {CURSOR_ROW} misses the cursor strip {:?} in strip and record, and its \
+             record meets the glyph {:?}",
+            layout.strip_rect(CURSOR_ROW),
+            outward(glyph)
         ),
     )?;
     scene.cursor_visible = true;
@@ -1189,6 +1228,108 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
     } else {
         Err(failures.join("; "))
     }
+}
+
+/// A 640 x 480 single-pane layout at `cell_h` pitch from grid origin `grid_y`, with the ink pad
+/// production derives at line height 1, `ceil(cell_h)`.
+fn fixture_layout(cell_h: f32, grid_y: f32) -> Layout {
+    Layout {
+        pane: PixelRect { x: 0, y: 0, w: 640, h: 480 },
+        grid_x: 0.0,
+        grid_y,
+        cell_w: 9.6,
+        cell_h,
+        ink_pad: cell_h.ceil(),
+        cols: 66,
+        rows: 24,
+    }
+}
+
+/// Each row's record as dense text leaves it: its cell box rounded outward, across the grid.
+fn cell_box_records(layout: &Layout) -> impl Fn(u16) -> Option<PixelRect> + '_ {
+    move |row| {
+        Some(outward((
+            layout.grid_x,
+            layout.row_top(row),
+            f32::from(layout.cols) * layout.cell_w,
+            layout.cell_h,
+        )))
+    }
+}
+
+/// The strips round outward as the planner does at a fractional pitch: at 19.2 px with a 20 px
+/// pad, row 10's strip is [172, 232), row 8's starts at 133 and row 5's ends at 136; at 20 px,
+/// row 10's strip is [180, 240).
+#[test]
+fn strips_round_outward_at_fractional_and_integral_pitch() {
+    let fractional = fixture_layout(19.2, 0.0);
+    let edit = fractional.strip_rect(10).unwrap();
+    assert_eq!((edit.y, edit.bottom()), (172, 232));
+    assert_eq!(fractional.strip_rect(8).unwrap().y, 133);
+    assert_eq!(fractional.strip_rect(5).unwrap().bottom(), 136);
+    let integral = fixture_layout(20.0, 0.0).strip_rect(10).unwrap();
+    assert_eq!((integral.y, integral.bottom()), (180, 240));
+}
+
+/// A one-row edit emits the rows whose rounded strips or records meet its strip: rows 7 to 13 at
+/// 19.2 px (from origin 0 or 7.5), rows 8 to 12 at 20 px, and a row whose record reaches into the
+/// strip from far above as well.
+#[test]
+fn edit_rows_follow_the_rounded_strips_and_records() {
+    for (cell_h, grid_y, expected) in
+        [(19.2, 0.0, 7..=13), (19.2, 7.5, 7..=13), (20.0, 0.0, 8..=12)]
+    {
+        let layout = fixture_layout(cell_h, grid_y);
+        let rows = edit_rows(&layout, 10, cell_box_records(&layout));
+        assert_eq!(rows, expected.collect::<Vec<u16>>(), "cell_h {cell_h} from {grid_y}");
+    }
+    // Row 3's tall ink reaches y 175, inside row 10's strip [172, 232) at 19.2 px.
+    let layout = fixture_layout(19.2, 0.0);
+    let boxes = cell_box_records(&layout);
+    let tall_row_three = |row: u16| {
+        if row == 3 {
+            Some(PixelRect { x: 0, y: 57, w: 640, h: 118 })
+        } else {
+            boxes(row)
+        }
+    };
+    assert_eq!(edit_rows(&layout, 10, tall_row_three), [3, 7, 8, 9, 10, 11, 12, 13]);
+}
+
+/// Showing the cursor at row 8 over a glyph four and a half rows tall covers 1/4.5 of it, above
+/// the recolorer's 20%, and the nearest row whose strip and record miss the cursor's strip while
+/// its record meets the glyph is row 4 at 19.2 px (from origin 0 or 7.5) and row 5 at 20 px.
+#[test]
+fn the_skipped_reached_row_is_computed_from_strips_and_records() {
+    for (cell_h, grid_y, expected) in [(19.2, 0.0, 4), (19.2, 7.5, 4), (20.0, 0.0, 5)] {
+        let layout = fixture_layout(cell_h, grid_y);
+        let glyph = layout.cursor_glyph(8, 4, 4.5);
+        let coverage = layout.cursor_coverage(8, 4, glyph);
+        assert!(coverage >= 0.20, "cell_h {cell_h}: the cursor covers {coverage}");
+        let reached = skipped_reached_row(&layout, 8, outward(glyph), cell_box_records(&layout));
+        assert_eq!(reached, Some(expected), "cell_h {cell_h} from {grid_y}");
+    }
+}
+
+/// A row qualifies only when its record meets the glyph and misses the cursor's strip: at 19.2 px
+/// a glyph two rows tall (from y 134) reaches no row whose strip misses the cursor's strip [133,
+/// 193), and when row 4's record runs down to y 140, inside that strip, row 4 no longer qualifies
+/// and no row above it meets the four-and-a-half-row glyph.
+#[test]
+fn a_skipped_row_must_meet_the_glyph_and_miss_the_cursor_strip_with_its_record() {
+    let layout = fixture_layout(19.2, 0.0);
+    let short = layout.cursor_glyph(8, 4, 2.0);
+    assert_eq!(skipped_reached_row(&layout, 8, outward(short), cell_box_records(&layout)), None);
+    let boxes = cell_box_records(&layout);
+    let reaching_row_four = |row: u16| {
+        if row == 4 {
+            Some(PixelRect { x: 0, y: 76, w: 640, h: 64 })
+        } else {
+            boxes(row)
+        }
+    };
+    let tall = outward(layout.cursor_glyph(8, 4, 4.5));
+    assert_eq!(skipped_reached_row(&layout, 8, tall, reaching_row_four), None);
 }
 
 /// Partial assembly on a real wgpu renderer: narrowed frames equal full repaints, failures after
