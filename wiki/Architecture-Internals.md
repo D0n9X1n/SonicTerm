@@ -201,10 +201,16 @@ correctness, not only speed.
   any key change while an overlay is active in the old or new key, the degraded
   path and the first frame damage the whole surface; a class change on an
   alternate-screen pane damages that pane.
-- Narrow damage relies on `Full` assembly under the scissor: every batch is
-  assembled and drawn in order and the scissor limits writes, so all ink meeting
-  the damage is redrawn. Ink that can exceed a row's padded strip is damaged by
-  its recorded bounds instead: the glyphs a cursor recolors (previous and current
+- Narrow damage relies on assembling every primitive that meets it, drawn in
+  order under the scissor. `Full` assembles every row; `Partial` assembles every
+  dirty slot and every row whose padded strip or ink record meets the damage, the
+  drawn cursor cell or the last recolor bounds, and every non-row primitive
+  whole. Ink records are committed only by a presented frame and trusted only for
+  the absolute row and content stamp they were drawn from; a clean visible row
+  without one makes the frame `Full`, and a final damage that reaches a skipped
+  row's record reassembles the frame `Full` in the same call. This supersedes the
+  earlier rule that narrow damage needs `Full` assembly. Ink that can exceed a
+  row's padded strip is also damaged by its recorded bounds: the glyphs a cursor recolors (previous and current
   record) and the tab-title glyphs (last presented and current). Both are kept
   only by a presented frame, and bounds that are not finite fall back to the
   active pane or the surface.
