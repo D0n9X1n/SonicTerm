@@ -223,11 +223,12 @@ spawn fails remains visible but has no PTY reader, writer, or VT worker.
 
 ### 7. The VT parser updates the grid
 
-The pane worker receives a chunk and holds that pane's parser lock for
-`Parser::advance_with_replies` and its keyboard-input snapshot. A reply-producing
-dispatch yields the consumed prefix, events, and replies; the worker releases
-the lock before handling events and batching replies, then resumes the remaining
-suffix. Complete replies reach the separate reply FIFO outside parser locks.
+The pane worker receives a chunk and parses it in sections of at most 4 KiB,
+holding that pane's parser lock for each section's
+`Parser::advance_with_replies` and its keyboard-input snapshot. A section also
+ends early at a reply-producing dispatch, which yields the consumed prefix,
+events, and replies. After each section the worker releases the lock before
+handling events and batching replies, then resumes the remaining suffix. Complete replies reach the separate reply FIFO outside parser locks.
 
 Plain ASCII `A` takes the parser's printable fast path to
 `Performer::print_graphic`. Other printable UTF-8 reaches the same operation

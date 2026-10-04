@@ -105,7 +105,8 @@ The exact order, cascade bound, and dormant queue are recorded in
 
 A `PtyHandle` owns the child process boundary, input/output channels, and native
 reader and writer threads. A pane VT worker owns parser advancement. It holds the
-pane parser lock while applying a batch, then releases it before sending
+pane parser lock for each section of at most 4 KiB while applying a batch, and
+releases it between sections and before sending
 `UserEvent::PaneOutput`, at most one outstanding per pane.
 
 Worker threads do not resolve `WindowId` or call native window APIs. The winit

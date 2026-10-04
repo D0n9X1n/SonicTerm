@@ -379,7 +379,9 @@ missing source never falls through to a different terminal.
 ### Redraw and wait lifecycle
 
 A pane VT worker coalesces output and, after 128 KiB, 8 ms maximum age, or 3 ms
-of quiet, sends `UserEvent::PaneOutput`; at most one is outstanding per pane. Each pane owns an `Arc<AtomicU64>` output generation and a plain observed
+of quiet, sends `UserEvent::PaneOutput`; at most one is outstanding per pane.
+It parses each batch in parser lock sections of at most 4 KiB and releases the
+guard between them, so a frame can find a gap during a long batch. Each pane owns an `Arc<AtomicU64>` output generation and a plain observed
 generation; both travel with its `PaneState` on transfer. The worker publishes a
 Release increment only after a nonempty batch has returned from parser, media,
 and host-event processing. The event-loop thread acknowledges the pane in the window that holds it now,

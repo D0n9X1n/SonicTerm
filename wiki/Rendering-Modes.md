@@ -250,6 +250,12 @@ parser guards only while it assembles; they are released before the surface is
 acquired and the frame presented, on the GPU and GDI paths alike. The retry floor
 stays one full frame period.
 
+On the worker side, a VT worker parses each output batch in parser lock sections
+of at most 4 KiB (`PARSER_SECTION_BYTES`) and drops the guard between sections,
+so a frame's `try_lock` can find a gap during a long batch instead of missing for
+the whole batch. The parser keeps UTF-8, CSI, OSC and DCS state across sections,
+so the cut does not change what is parsed.
+
 ### Windows CPU presentation
 
 When degradation is active on Windows, `software_frame::SoftwareFrame` composes

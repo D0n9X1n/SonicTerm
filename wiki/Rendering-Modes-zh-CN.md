@@ -190,6 +190,10 @@ surface acquire，因此已设置的故障会等到 wgpu 帧。Windows 释放顺
 组帧期间持有可见解析器保护对象；在 GPU 和 GDI 路径上，它们都会在获取表面和呈现之前释放。重试
 下限仍为一个完整帧周期。
 
+在工作线程一侧，VT 工作线程把每个输出批次分成最多 4 KiB（`PARSER_SECTION_BYTES`）的解析器锁
+区段解析，并在区段之间释放保护对象；因此在长批次期间，帧的 `try_lock` 可以碰到空隙，而不会
+在整个批次期间都失败。解析器跨区段保留 UTF-8、CSI、OSC 和 DCS 状态，切分不改变解析结果。
+
 ### Windows CPU 呈现
 
 Windows 上启用降级时，`software_frame::SoftwareFrame` 把同一套上游生成的矩形、文字字形、
