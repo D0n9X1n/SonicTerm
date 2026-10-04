@@ -1985,6 +1985,9 @@ pub struct GpuRenderer {
     counted_growths: u64,
     /// Start of the first frame that grew the atlas since the last successful present.
     growth_pending_since: Option<Instant>,
+    /// In-place glyph atlas resets since construction, read only by tests through
+    /// [`Self::__test_glyph_atlas_resets`] to prove a growth retry never resets.
+    glyph_atlas_resets: u64,
 
     font_family: String,
     font_dirs: Vec<PathBuf>,
@@ -2999,6 +3002,7 @@ impl GpuRenderer {
             glyph_atlas_retry_without_eviction: false,
             counted_growths: 0,
             growth_pending_since: None,
+            glyph_atlas_resets: 0,
             font_family: font_family.to_string(),
             font_dirs: font_dirs.to_vec(),
             font_size,
@@ -4331,6 +4335,31 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn glyph_atlas_len(&self) -> usize {
         self.glyph_atlas.len()
+    }
+
+    /// Test hook: in-place glyph atlas resets since construction.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_glyph_atlas_resets(&self) -> u64 {
+        self.glyph_atlas_resets
+    }
+
+    /// Test hook: glyph atlas lookups that missed, each one a rasterization; a reset zeroes it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_glyph_atlas_misses(&self) -> u64 {
+        self.glyph_atlas.misses()
+    }
+
+    /// Test hook: the glyph atlas's CPU size and its GPU upload's size, so a native test can check
+    /// that the upload follows a growth (or stays the 1x1 placeholder under the software presenter).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_glyph_atlas_dimensions(&self) -> ((u32, u32), (u32, u32)) {
+        (
+            (self.glyph_atlas.width(), self.glyph_atlas.height()),
+            (self.glyph_upload.width(), self.glyph_upload.height()),
+        )
     }
 
     /// Apply a new font family / size / line-height multiplier without

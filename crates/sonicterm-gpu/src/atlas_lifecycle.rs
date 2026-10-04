@@ -112,6 +112,7 @@ impl GpuRenderer {
         let height = self.glyph_atlas.height();
         self.glyph_atlas.reset_in_place();
         self.mark_glyph_atlas_replaced();
+        self.glyph_atlas_resets = self.glyph_atlas_resets.saturating_add(1);
         tracing::debug!(
             target: "memory",
             renderer_role = self.render_timing_label,
