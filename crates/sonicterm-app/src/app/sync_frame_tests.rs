@@ -428,47 +428,37 @@ fn a_no_draw_update_spends_its_reset_credit() {
     ));
 }
 
-/// A successful no-draw outcome (`Settled`, which an offscreen-only `Noop` plan settles as) ends
-/// the stretch, so the next update is held for its full stretch; a surface timeout keeps it.
+/// An offscreen-only `Noop` ends the stretch: the pane is scrolled back (view top 90 of 100 history
+/// rows) and its only new dirt is below the view, which the planner turns into a `Noop` plan
+/// (`offscreen_only_edit_is_a_noop_on_the_hardware_path` in the gpu crate) and the presenter into
+/// `PresentOutcome::Skipped(SkipReason::Noop)`. Settled through the production mapping, it clears the
+/// stretch, so the next update is held for its full stretch; a surface timeout keeps the stretch.
 #[test]
-fn a_settled_outcome_ends_the_stretch_and_a_failure_keeps_it() {
+fn an_offscreen_only_noop_ends_the_stretch_and_a_failure_keeps_it() {
+    use sonicterm_gpu::core::{PresentOutcome, SkipReason};
+    let noop = FrameSettlement::of(&PresentOutcome::Skipped(SkipReason::Noop));
+    assert_eq!(noop, FrameSettlement::Settled, "a Noop plan settles as a success");
     let (mut app, main, _, base) = held_owners();
     let pane = pane_of(&app, main, 0);
+    {
+        let state = app.windows.get_mut(&main).unwrap().panes.get_mut(&pane).unwrap();
+        let history: String = (0..124).map(|row| format!("history {row}\r\n")).collect();
+        state.parser.lock().advance(history.as_bytes());
+        state.pin_viewport_top(Some(90));
+        // The only new dirt lands on the live bottom rows, below the scrolled-back view.
+        state.parser.lock().advance(b"\x1b[24;1Hoffscreen edit");
+    }
     hold(&app, main, pane, 1, at_ms(base, 400));
-    assert!(!attempt(&mut app, main, RedrawCause::Output, base, FrameSettlement::Settled));
+    assert!(!attempt(&mut app, main, RedrawCause::Output, base, noop));
     let timeout = FrameSettlement::SurfaceRetry(SurfaceRetryReason::Timeout);
     assert!(attempt(&mut app, main, RedrawCause::Output, at_ms(base, 150), timeout));
     assert_eq!(app.windows[&main].redraw.sync_stretch_start, Some(base), "a failure keeps it");
     app.windows.get_mut(&main).unwrap().redraw.timeout_pending = false;
-    assert!(attempt(
-        &mut app,
-        main,
-        RedrawCause::Output,
-        at_ms(base, 200),
-        FrameSettlement::Settled
-    ));
-    assert_eq!(app.windows[&main].redraw.sync_stretch_start, None);
-    assert!(!attempt(
-        &mut app,
-        main,
-        RedrawCause::Output,
-        at_ms(base, 210),
-        FrameSettlement::Settled
-    ));
-    assert!(!attempt(
-        &mut app,
-        main,
-        RedrawCause::Output,
-        at_ms(base, 359),
-        FrameSettlement::Settled
-    ));
-    assert!(attempt(
-        &mut app,
-        main,
-        RedrawCause::Output,
-        at_ms(base, 360),
-        FrameSettlement::Settled
-    ));
+    assert!(attempt(&mut app, main, RedrawCause::Output, at_ms(base, 200), noop));
+    assert_eq!(app.windows[&main].redraw.sync_stretch_start, None, "the Noop ends the stretch");
+    assert!(!attempt(&mut app, main, RedrawCause::Output, at_ms(base, 210), noop));
+    assert!(!attempt(&mut app, main, RedrawCause::Output, at_ms(base, 359), noop));
+    assert!(attempt(&mut app, main, RedrawCause::Output, at_ms(base, 360), noop));
 }
 
 /// A DECSET that lands between admission and collection abandons the collected frame under its
