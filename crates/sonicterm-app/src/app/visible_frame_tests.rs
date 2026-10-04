@@ -1077,3 +1077,37 @@ fn a_suppressed_window_keeps_its_pending_set_until_its_next_collection() {
         }
     }
 }
+
+/// A partial frame's `Rows` receipt, applied at the next collection through the pending set in
+/// both adapters, clears only its rows and never advances the grid's dirty generation; once a
+/// resize renumbers the rows, the same receipt is dropped and every dirty bit is kept.
+#[test]
+fn a_rows_receipt_keeps_the_dirty_generation_and_a_mismatch_keeps_every_bit() {
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        let generation = |app: &App| {
+            app.windows[&window].panes[&right].parser.lock().grid().dirty_generation()
+        };
+        counted_and_dirty(&mut app, window, &[left, right]);
+        let rows = sonicterm_render_model::AckRows::Rows([1].into_iter().collect());
+        present_receipts(&mut app, window, child, rows.clone());
+        let before = generation(&app);
+        collect_next(&mut app, window, child).unwrap();
+        assert_eq!(dirty(&app, window, right), [0, 2], "only the receipt's row is cleared");
+        assert_eq!(generation(&app), before, "acknowledging never advances the generation");
+
+        counted_and_dirty(&mut app, window, &[left, right]);
+        present_receipts(&mut app, window, child, rows);
+        {
+            let parser = Arc::clone(&app.windows[&window].panes[&right].parser);
+            let mut parser = parser.lock();
+            let grid = parser.grid_mut();
+            let (cols, rows) = (grid.cols, grid.rows);
+            grid.resize(cols, rows + 1);
+        }
+        let dropped_before = dropped(&app, window);
+        collect_next(&mut app, window, child).unwrap();
+        assert_eq!(dirty(&app, window, right), all_rows(&app, window, right), "child={child}");
+        assert_eq!(dropped(&app, window), dropped_before + 1, "the mismatched receipt is dropped");
+    }
+}
