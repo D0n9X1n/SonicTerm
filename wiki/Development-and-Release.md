@@ -437,6 +437,15 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   When the sample carries the grid fields, the checkpoint also gets a `grid bytes
   per pane` row: `grid_visible_bytes + grid_history_bytes + grid_alternate_bytes`
   divided by `panes_sampled`.
+  When the sample carries glyph atlas facts, each renderer it lists adds six rows
+  under its `role[label]` identity, such as `end main[1] glyph_atlas_dim (px)`:
+  `glyph_atlas_dim`, `glyph_atlas_packed_pixels`, `glyph_atlas_fit`,
+  `glyph_atlas_growths`, `glyph_atlas_evictions` and `glyph_atlas_max_tile`. A
+  cell shows the value every run reported, or each distinct value with its run
+  count, such as `evicted ×1; no_headroom ×1`. The fit is one of `256`, `512`,
+  `1024`, `2048`, `no_headroom`, `does_not_fit` or `evicted`. The change
+  compares medians for the four numeric facts; the fit and the largest tile have
+  none. A base built before the facts reads `n/a`.
 - S2 credits a keypress-to-present latency only when it can attribute the
   sample to one frame unambiguously, and reports the attribution coverage; read
   the latency together with its coverage.
@@ -457,6 +466,14 @@ head, one row per scenario, phase and non-zero counter;
   base, but it is on the head.
 - A counter that was 0 in every run on both sides is left out, and the note
   above the table says how many.
+- Each checkpoint whose memory sample has glyph atlas facts adds a
+  `glyph_atlas_growths, snapshot/counted` row. Per run, the snapshot figure sums
+  the renderers' `glyph_atlas_growths`, each counted since its renderer was
+  built. The counted figure sums `renderer.glyph_atlas_growths` over the phases
+  that ended by the checkpoint. Growth outside a timed phase, at startup or in
+  an untimed action, reaches only the snapshot, so the figures need not be
+  equal. A counted figure above the snapshot is a mismatch, and the cell says
+  `mismatch in N of M runs`. A head-only counters set reads `n/a` on the base.
 
 The Counters overhead table, for S2 and S3 only, compares the head's counters
 runs with its timed runs on the timed table's metrics. The two sets run one

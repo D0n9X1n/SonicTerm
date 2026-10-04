@@ -1260,8 +1260,10 @@ def _optional_text(fields: str, name: str) -> str | None:
     return value[1:-1] if len(value) >= 2 and value[0] == value[-1] == '"' else value
 
 
-# One renderer's six glyph atlas facts inside the quoted renderer breakdown.
+# One renderer's `role[label]` identity and its six glyph atlas facts inside the quoted renderer breakdown.
+# The identity opens each renderer's entry; the lazy gap stops at that renderer's own facts.
 _GLYPH_ATLAS_FACTS = re.compile(
+    r"([A-Za-z_][\w-]*\[[^\]]*\])[^;]*? "
     r"glyph_atlas_dim=(\d+) glyph_atlas_packed_pixels=(\d+) glyph_atlas_growths=(\d+) "
     r"glyph_atlas_evictions=(\d+) glyph_atlas_fit=(256|512|1024|2048|no_headroom|does_not_fit|evicted) "
     r"glyph_atlas_max_tile=(\d+)x(\d+)")
@@ -1269,8 +1271,10 @@ _GLYPH_ATLAS_FACTS = re.compile(
 
 @dataclass(frozen=True)
 class GlyphAtlasFacts:
-    """One renderer's glyph atlas: dimension, packed area, growths, evictions, fit and largest tile."""
+    """One renderer's glyph atlas: its `role[label]` identity, dimension, packed area, growths, evictions,
+    fit and largest tile."""
 
+    renderer: str
     dim: int
     packed_pixels: int
     growths: int
@@ -1282,8 +1286,9 @@ class GlyphAtlasFacts:
 def parse_glyph_atlases(fields: str) -> tuple:
     """Every renderer's glyph atlas facts on a memory line, in order; empty when none are reported."""
     return tuple(
-        GlyphAtlasFacts(int(dim), int(packed), int(growths), int(evictions), fit, (int(width), int(height)))
-        for dim, packed, growths, evictions, fit, width, height in _GLYPH_ATLAS_FACTS.findall(fields))
+        GlyphAtlasFacts(renderer, int(dim), int(packed), int(growths), int(evictions), fit,
+                        (int(width), int(height)))
+        for renderer, dim, packed, growths, evictions, fit, width, height in _GLYPH_ATLAS_FACTS.findall(fields))
 
 
 def parse_memory_line(line: str) -> MemorySample | None:
@@ -4360,7 +4365,151 @@ def comparison_rows(label: str, base: SideRuns, head: SideRuns,
     if include is None:
         # The presenter and grid rows follow the status row; Windows n/a rows close the scenario.
         rows[1:1] = presenter_rows(label, base, head) + grid_rows(label, base, head)
+        rows.extend(glyph_atlas_rows(label, base, head))
         rows.extend(windows_na_rows(label, base, head, rows))
+    return rows
+
+
+# Each glyph atlas fact a checkpoint row reports: its field, unit, the value it reads from the facts, and
+# whether it is numeric (a change compares the sides' medians) or categorical (no change).
+GLYPH_ATLAS_ROW_FACTS = (
+    ("glyph_atlas_dim", "px", lambda facts: facts.dim, True),
+    ("glyph_atlas_packed_pixels", "px", lambda facts: facts.packed_pixels, True),
+    ("glyph_atlas_fit", "outcome", lambda facts: facts.fit, False),
+    ("glyph_atlas_growths", "count", lambda facts: facts.growths, True),
+    ("glyph_atlas_evictions", "count", lambda facts: facts.evictions, True),
+    ("glyph_atlas_max_tile", "px", lambda facts: f"{facts.max_tile[0]}x{facts.max_tile[1]}", False),
+)
+
+
+def _checkpoint_sample(outcome: RunOutcome, point: Mapping) -> MemorySample | None:
+    """A checkpoint's own memory sample by the rules `run_metrics` reads it with, or None when the run has no
+    usable one: no hook, no tagged line, a conflicting reading, or a sample older than its freshness time."""
+    if (outcome.result or {}).get("checkpoint_memory") != "supported":
+        return None
+    reading = checkpoint_memory(outcome.memory, point["index"])
+    if reading is None or reading.problem is not None:
+        return None
+    fresh_after = point.get("fresh_after_unix_s")
+    if fresh_after is not None and reading.sample.unix_s < fresh_after:
+        return None
+    return reading.sample
+
+
+def _checkpoint_atlases(outcome: RunOutcome) -> list[tuple[Mapping, tuple]]:
+    """Each well-formed checkpoint of a run with its sample's glyph atlas facts; empty facts when it has none."""
+    found = []
+    for point in (outcome.result or {}).get("checkpoints") or []:
+        if not _checkpoint_ok(point):
+            continue
+        sample = _checkpoint_sample(outcome, point)
+        found.append((point, sample.glyph_atlases if sample is not None else ()))
+    return found
+
+
+def _distinct_cell(values: Sequence[object]) -> str:
+    """One value when every run agrees, otherwise each distinct value with how many runs reported it."""
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[str(value)] = counts.get(str(value), 0) + 1
+    if len(counts) == 1:
+        return next(iter(counts))
+    return "; ".join(f"{text} ×{count}" for text, count in sorted(counts.items()))
+
+
+def glyph_atlas_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
+    """Per checkpoint and renderer, each glyph atlas fact on each side, from the checkpoint's memory sample.
+
+    A cell shows the value every run reported, or each distinct value with its run count (a categorical fit
+    such as `no_headroom`, `does_not_fit` or `evicted` included), and how many runs had it when not all did. A
+    side without the facts, such as a base built before them, reads `n/a`. A numeric fact's change compares the
+    sides' medians; a categorical one has none. No row is added when neither side reports facts.
+    """
+    sides = (base, head)
+    # values[side][(checkpoint label, renderer, field)] = one value per run that reported it
+    values: list[dict[tuple[str, str, str], list[object]]] = [{}, {}]
+    order: list[tuple[str, str]] = []
+    for side_values, side in zip(values, sides):
+        for outcome in side.outcomes:
+            for point, atlases in _checkpoint_atlases(outcome):
+                for facts in atlases:
+                    if (point["label"], facts.renderer) not in order:
+                        order.append((point["label"], facts.renderer))
+                    for field_name, _unit, read, _numeric in GLYPH_ATLAS_ROW_FACTS:
+                        side_values.setdefault((point["label"], facts.renderer, field_name), []).append(read(facts))
+    rows = []
+    for checkpoint_label, renderer in order:
+        for field_name, unit, _read, numeric in GLYPH_ATLAS_ROW_FACTS:
+            key = (checkpoint_label, renderer, field_name)
+            cells, figures = [], []
+            for side, side_values in zip(sides, values):
+                reported = side_values.get(key, [])
+                if not reported or side.blocked or side.failed:
+                    cells.append(_missing_cell(side))
+                    figures.append(None)
+                    continue
+                cell = _distinct_cell(reported)
+                if len(reported) < len(side.outcomes):
+                    cell += f", {len(reported)}/{len(side.outcomes)} runs"
+                cells.append(cell)
+                figures.append(median(reported) if numeric else None)
+            change = percent_change(*figures) if numeric else ""
+            rows.append([label, f"{checkpoint_label} {renderer} {field_name} ({unit})", cells[0], cells[1], change])
+    return rows
+
+
+def _counted_growths_by(outcome: RunOutcome, unix_s: float) -> int | None:
+    """The `renderer.glyph_atlas_growths` deltas of every phase that ended by `unix_s`, summed; None when no
+    such phase counted, or one that ended by then has no count."""
+    counted = None
+    for phase in (outcome.result or {}).get("phases") or []:
+        if not isinstance(phase, dict) or not _is_number(phase.get("end_unix_s")) or phase["end_unix_s"] > unix_s:
+            continue
+        renderer = (phase.get("frame_counters") or {}).get("renderer")
+        if not isinstance(renderer, Mapping) or not _count_ok(renderer.get("glyph_atlas_growths")):
+            return None
+        counted = (counted or 0) + renderer["glyph_atlas_growths"]
+    return counted
+
+
+def glyph_atlas_reconciliation_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
+    """Counters-table rows reconciling each checkpoint's snapshot growths with the frame counters' growths.
+
+    Per run, the snapshot figure sums `glyph_atlas_growths` over the checkpoint's renderers, each counted since
+    the renderer was built; the counted figure sums `renderer.glyph_atlas_growths` over the phases that ended
+    by the checkpoint. Growth outside the timed phases (startup, untimed actions) reaches only the snapshot, so
+    the figures need not be equal, but every counted growth belongs to a renderer the snapshot holds: a counted
+    figure above the snapshot is a mismatch. A cell lists each run's `snapshot/counted`; a side with nothing to
+    compare reads `n/a`, and no row is added when neither side has anything.
+    """
+    sides = (base, head)
+    pairs: list[dict[str, list[tuple[int, int]]]] = [{}, {}]
+    order: list[str] = []
+    for side_pairs, side in zip(pairs, sides):
+        if side.blocked or side.failed:
+            continue
+        for outcome in side.outcomes:
+            for point, atlases in _checkpoint_atlases(outcome):
+                counted = _counted_growths_by(outcome, point["unix_s"])
+                if not atlases or counted is None:
+                    continue
+                if point["label"] not in order:
+                    order.append(point["label"])
+                snapshot = sum(facts.growths for facts in atlases)
+                side_pairs.setdefault(point["label"], []).append((snapshot, counted))
+    rows = []
+    for checkpoint_label in order:
+        cells = []
+        for side, side_pairs in zip(sides, pairs):
+            found = side_pairs.get(checkpoint_label)
+            if not found:
+                cells.append("n/a" if side.blocked == COUNTERS_HEAD_ONLY else _missing_cell(side))
+                continue
+            figures = ", ".join(f"{snapshot}/{counted}" for snapshot, counted in found)
+            mismatched = sum(counted > snapshot for snapshot, counted in found)
+            cells.append(f"mismatch in {mismatched} of {len(found)} runs: {figures}" if mismatched
+                         else f"consistent: {figures}")
+        rows.append([label, checkpoint_label, "glyph_atlas_growths, snapshot/counted", cells[0], cells[1], ""])
     return rows
 
 
@@ -5824,6 +5973,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         elif result.set_name == "counters":
             rows, left_out = counter_rows(shown, result.base, result.head)
             counters_table.extend(rows)
+            counters_table.extend(glyph_atlas_reconciliation_rows(shown, result.base, result.head))
             omitted += left_out
             for side_name, side in (("base", result.base), ("head", result.head)):
                 presenter_notes.extend(presenter_counter_notes(result.label, side_name, side))
@@ -5840,7 +5990,10 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                          "p95 and max are bucket bounds over every run's events, its mean is sum_us/count in its "
                          "unit. A change compares a count's medians or a histogram's means. The baseline reads n/a "
                          "when the base does not declare perf-counters, or for a field its contract lacks. "
-                         f"{omitted} counter(s) that were 0 on both sides are left out.")
+                         f"{omitted} counter(s) that were 0 on both sides are left out. "
+                         "A glyph_atlas_growths, snapshot/counted row lists each run's growths in the checkpoint's "
+                         "memory snapshot against those its phases counted; growth outside a timed phase reaches "
+                         "only the snapshot, so a counted figure above the snapshot is the mismatch.")
         # A run whose frame counts contradict its recorded presenter is named, never passed silently.
         counters_note += "".join(f" Presenter mismatch: {note}." for note in presenter_notes)
     if sys.platform == "win32":

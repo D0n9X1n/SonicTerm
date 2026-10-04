@@ -686,8 +686,8 @@ class MemoryLineTests(unittest.TestCase):
                 self.assertIsNone(sample.grid_bytes_per_pane())
 
     def test_each_renderers_glyph_atlas_facts_parse_in_order_with_every_fit_label(self):
-        # The renderer breakdown carries six glyph atlas facts per renderer; every fit label parses, an
-        # older line without them gives no facts, and an unknown fit label is not read as a fact.
+        # The renderer breakdown carries six glyph atlas facts per renderer under its identity; every fit
+        # label parses, an older line without them gives no facts, and an unknown fit label is not a fact.
         def facts(dim, fit):
             return (f"glyph_atlas_dim={dim} glyph_atlas_packed_pixels=4000 glyph_atlas_growths=1 "
                     f"glyph_atlas_evictions=0 glyph_atlas_fit={fit} glyph_atlas_max_tile=25x16")
@@ -695,10 +695,11 @@ class MemoryLineTests(unittest.TestCase):
             with self.subTest(fit=fit):
                 line = memory_line().replace(
                     "renderers=[main warm]",
-                    f'renderers="visible[1] total=9/1 {facts(512, fit)}, warm[0] total=1/1 {facts(256, "256")}"')
+                    f'renderers="main[1] total=9/1 {facts(512, fit)}; warm[0] total=1/1 {facts(256, "256")}"')
                 atlases = perf.parse_memory_line(line).glyph_atlases
-                self.assertEqual(atlases, (perf.GlyphAtlasFacts(512, 4000, 1, 0, fit, (25, 16)),
-                                           perf.GlyphAtlasFacts(256, 4000, 1, 0, "256", (25, 16))))
+                # Each renderer's facts carry its `role[label]` identity from the breakdown.
+                self.assertEqual(atlases, (perf.GlyphAtlasFacts("main[1]", 512, 4000, 1, 0, fit, (25, 16)),
+                                           perf.GlyphAtlasFacts("warm[0]", 256, 4000, 1, 0, "256", (25, 16))))
         self.assertEqual(perf.parse_memory_line(memory_line()).glyph_atlases, ())
         unknown = memory_line().replace("renderers=[main warm]", f"renderers={facts(512, 'tiny')}")
         self.assertEqual(perf.parse_memory_line(unknown).glyph_atlases, ())
@@ -7195,6 +7196,93 @@ class CheckpointMemoryTests(unittest.TestCase):
         self.assertTrue(perf.validate_result(valid_result(checkpoint_memory="maybe"), HARNESS_HASH, 0))
         point = {"index": 0, "label": "end", "unix_s": 70.0, "footprint_file": None, "sampling": "late"}
         self.assertTrue(perf.validate_result(valid_result(checkpoints=[point]), HARNESS_HASH, 0))
+
+
+def atlas_facts(renderer="main[1]", dim=512, packed=4000, growths=1, evictions=0, fit="512", tile=(25, 16)):
+    """One renderer's glyph atlas facts as a memory line reports them."""
+    return perf.GlyphAtlasFacts(renderer, dim, packed, growths, evictions, fit, tile)
+
+
+def atlas_outcome(facts, phase_growths=None, checkpoint_unix_s=70.0):
+    """A valid run whose `end` checkpoint sample reports `facts`; `phase_growths` gives each phase's counted
+    `renderer.glyph_atlas_growths` delta, one phase per entry ending at 20 s steps, or no counters when None."""
+    point = {"index": 0, "label": "end", "unix_s": checkpoint_unix_s, "footprint_file": None}
+    phases = valid_result()["phases"]
+    if phase_growths is not None:
+        phases = [{**phases[0], "name": f"phase{number}", "start_unix_s": 20.0 * number,
+                   "end_unix_s": 20.0 * number + 10.0,
+                   "frame_counters": {"renderer": {"glyph_atlas_growths": growths}}}
+                  for number, growths in enumerate(phase_growths)]
+    sample = dataclasses.replace(tagged_sample(0, 1, True), glyph_atlases=tuple(facts))
+    return make_outcome(result=valid_result(checkpoints=[point], checkpoint_memory="supported", phases=phases),
+                        memory=[sample])
+
+
+class GlyphAtlasReportTests(unittest.TestCase):
+    """The memory line's per-renderer glyph atlas facts become per-checkpoint report rows."""
+
+    def test_each_checkpoint_reports_every_renderers_atlas_facts_and_a_base_without_them_reads_n_a(self):
+        # A base built before the facts reads n/a; the head's two runs show each fact per renderer, a
+        # categorical fit that differs between runs lists each outcome with its run count, and numeric
+        # facts compare medians only when both sides have them.
+        base = perf.SideRuns([make_outcome(result=valid_result(checkpoint_memory="supported"),
+                                           memory=[tagged_sample(0, 1, True)])])
+        head = perf.SideRuns([
+            atlas_outcome([atlas_facts(fit="no_headroom", growths=2, evictions=0),
+                           atlas_facts("warm[0]", dim=256, packed=0, growths=0, fit="256", tile=(0, 0))]),
+            atlas_outcome([atlas_facts(fit="evicted", growths=2, evictions=7),
+                           atlas_facts("warm[0]", dim=256, packed=0, growths=0, fit="256", tile=(0, 0))])])
+        rows = perf.comparison_rows("S9/default", base, head)
+        expected = {
+            "end main[1] glyph_atlas_dim (px)": "512",
+            "end main[1] glyph_atlas_packed_pixels (px)": "4000",
+            "end main[1] glyph_atlas_fit (outcome)": "evicted ×1; no_headroom ×1",
+            "end main[1] glyph_atlas_growths (count)": "2",
+            "end main[1] glyph_atlas_evictions (count)": "0 ×1; 7 ×1",
+            "end main[1] glyph_atlas_max_tile (px)": "25x16",
+            "end warm[0] glyph_atlas_fit (outcome)": "256",
+        }
+        for metric, head_cell in expected.items():
+            with self.subTest(metric=metric):
+                # A numeric fact's change is n/a without a base figure; a categorical fact has no change.
+                change = "" if "_fit " in metric or "_max_tile " in metric else "n/a"
+                self.assertEqual(row_for(rows, metric)[2:5], ["n/a", head_cell, change])
+        both = perf.comparison_rows("S9/default", perf.SideRuns([atlas_outcome([atlas_facts(dim=256)])]),
+                                    perf.SideRuns([atlas_outcome([atlas_facts(dim=512, fit="does_not_fit")])]))
+        self.assertEqual(row_for(both, "end main[1] glyph_atlas_dim (px)")[2:5], ["256", "512", "+100.0%"])
+        self.assertEqual(row_for(both, "end main[1] glyph_atlas_fit (outcome)")[2:5], ["512", "does_not_fit", ""])
+
+    def test_a_run_without_atlas_facts_adds_no_atlas_rows(self):
+        # Neither side reports facts, so the table keeps its existing rows only.
+        side = perf.SideRuns([make_outcome(result=valid_result(checkpoint_memory="supported"),
+                                           memory=[tagged_sample(0, 1, True)])])
+        rows = perf.comparison_rows("S1/default", side, side)
+        self.assertFalse([row for row in rows if "glyph_atlas" in row[1]], rows)
+
+    def test_reconciliation_compares_snapshot_growths_with_the_counted_growths_up_to_each_checkpoint(self):
+        # The snapshot's growths summed over renderers must cover the growths the phases ending by the
+        # checkpoint counted: more counted than the snapshot holds is a mismatch, reported per run.
+        consistent = atlas_outcome([atlas_facts(growths=2), atlas_facts("warm[0]", growths=1)], [1, 2])
+        mismatch = atlas_outcome([atlas_facts(growths=1)], [2, 1])
+        # Phases end at 10, 30 and 50 s; a checkpoint at 40 s counts only the first two.
+        late = atlas_outcome([atlas_facts(growths=3)], [1, 2, 9], checkpoint_unix_s=40.0)
+        rows = perf.glyph_atlas_reconciliation_rows(
+            "S9/default", perf.SideRuns([consistent, late]), perf.SideRuns([consistent, mismatch]))
+        self.assertEqual(rows, [
+            ["S9/default", "end", "glyph_atlas_growths, snapshot/counted",
+             "consistent: 3/3, 3/3", "mismatch in 1 of 2 runs: 3/3, 1/3", ""]])
+
+    def test_reconciliation_reads_n_a_without_counters_facts_or_a_base(self):
+        # No counted growths, no facts, or a head-only counters set leave nothing to reconcile.
+        no_counters = atlas_outcome([atlas_facts(growths=2)])
+        no_facts = atlas_outcome([], [1])
+        with_both = atlas_outcome([atlas_facts(growths=2)], [2])
+        self.assertEqual(perf.glyph_atlas_reconciliation_rows(
+            "S9/default", perf.SideRuns([no_counters]), perf.SideRuns([no_facts])), [])
+        head_only = perf.SideRuns(blocked=perf.COUNTERS_HEAD_ONLY)
+        self.assertEqual(perf.glyph_atlas_reconciliation_rows("S9/default", head_only, perf.SideRuns([with_both])),
+                         [["S9/default", "end", "glyph_atlas_growths, snapshot/counted", "n/a",
+                           "consistent: 2/2", ""]])
 
 
 class CheckpointFixtureTests(unittest.TestCase):
