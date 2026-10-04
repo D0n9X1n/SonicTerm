@@ -605,8 +605,9 @@ impl App {
     }
 
     /// Test-only: give `id` an accepted parser-yield grant through the production request and
-    /// answer path: a miss arms the floor 16 ms ahead, a request is published for the active pane,
-    /// and its worker's grant, parked for 5 ms, is answered at once. Returns whether it was accepted.
+    /// answer path: a miss arms the floor 1 s ahead, a request is published for the active pane, and
+    /// its worker's grant, parked for 900 ms, is answered on the real clock well inside both bounds.
+    /// Returns whether it was accepted.
     #[doc(hidden)]
     pub fn __test_grant_yield_token(&mut self, id: WindowId) -> bool {
         let now = self.dispatch_now();
@@ -620,7 +621,7 @@ impl App {
             // When: the window has no active tab state, no pane can be asked.
             return false;
         };
-        window.retry_not_before = Some(now + Duration::from_millis(16));
+        window.retry_not_before = Some(now + Duration::from_secs(1));
         self.publish_parser_yield(id, pane_id, false, now);
         let Some(generation) =
             self.windows[&id].redraw.yield_ask.as_ref().map(|ask| ask.generation)
@@ -628,7 +629,7 @@ impl App {
             // When: `yield_ask` is None, no request was published for a grant to answer.
             return false;
         };
-        self.handle_parser_yielded(id, pane_id, generation, now + Duration::from_millis(5));
+        self.handle_parser_yielded(id, pane_id, generation, now + Duration::from_millis(900));
         self.windows[&id].redraw.yield_token.is_some()
     }
 
