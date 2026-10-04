@@ -410,8 +410,10 @@ their pixel positions, their pixels are copied, their UVs are recomputed, and
 one typed re-upload rectangle per tile is queued; nothing is rasterized again.
 Growth advances the atlas identity, so the frame that grew it is discarded and
 retried once without a reset. Eviction happens only at 2048 or at the entry
-cap. The image atlas stays fixed at 2048 and never grows. A shelf packer reuses freed
-rectangles before extending shelves. Keys include font slot, glyph id,
+cap. The image atlas uses only the fixed-size constructors and never grows:
+it starts as a 1×1 placeholder, is replaced with fixed 2048×2048 storage when
+renderable media is promoted, and is demoted back to the placeholder when idle.
+A shelf packer reuses freed rectangles before extending shelves. Keys include font slot, glyph id,
 character, style, and native raster role.
 
 Insertion follows these rules:
