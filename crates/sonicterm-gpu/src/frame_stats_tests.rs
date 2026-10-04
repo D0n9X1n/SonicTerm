@@ -1021,6 +1021,10 @@ fn an_attempt_nested_in_another_renderers_attempt_folds_into_its_own_renderer_ev
         let mut outer_owed = false;
         let _outer = RenderScope::enter(Some(&outer), &mut outer_owed);
         shape_request(|| ());
+        // An outer raster timer stays open across both inner attempts, so the depth they must
+        // restore is 1, not 0: restoring 0 would let the outer renderer time nested work twice.
+        let _outer_timer = WorkTimer::start(TimedWork::Raster);
+        assert_eq!(TIMING_DEPTH.with(Cell::get), 1);
         {
             let mut inner_owed = true;
             let _inner = RenderScope::enter(Some(&inner), &mut inner_owed);
@@ -1035,9 +1039,11 @@ fn an_attempt_nested_in_another_renderers_attempt_folds_into_its_own_renderer_ev
         }));
         assert!(caught.is_err());
         assert!(ATTEMPT.with(Cell::get).is_some(), "the outer attempt resumes");
-        assert_eq!(TIMING_DEPTH.with(Cell::get), 0);
+        assert_eq!(TIMING_DEPTH.with(Cell::get), 1, "the outer timer is still open");
+        // Nested inside the open outer timer, this request is counted but not timed again.
         shape_request(|| ());
     }
+    assert_eq!(TIMING_DEPTH.with(Cell::get), 0);
     let inner = inner.snapshot();
     assert_eq!((inner.apply_attempts.attempts, inner.apply_attempts.presented), (2, 1));
     assert_eq!((inner.attempts.attempts, inner.attempts.shape_requests), (2, 2));

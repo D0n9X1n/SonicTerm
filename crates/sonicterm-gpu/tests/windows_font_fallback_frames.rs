@@ -21,6 +21,7 @@ use sonicterm_render_model::{
         grid::grid::{CellFlags, Color, Grid, Pos},
         ui::{
             ime::ImeState,
+            overlays::{NotificationBubble, NotificationLevel},
             tabs::{Tab, TabBar},
         },
     },
@@ -139,11 +140,50 @@ impl Drop for GateRelease {
     }
 }
 
-/// The state one frame draws from: the grid, the tab bar and the IME preedit.
+/// The state one frame draws from: the grid, the tab bar, the IME preedit and a notification.
 struct Scene {
     grid: Grid,
     tabs: TabBar,
     ime: ImeState,
+    notification: NotificationBubble,
+}
+
+/// Render one attempt of `fonts` for `scene`, as the App's redraw does after preparing fonts.
+fn render_once(
+    renderer: &mut GpuRenderer,
+    fonts: &sonicterm_gpu::core::FrameFonts,
+    scene: &mut Scene,
+    theme: &Theme,
+    size: PhysicalSize<u32>,
+) -> PresentOutcome {
+    let mut panes = [PaneRender {
+        id: 1,
+        rect_px: PixelRect { x: 0, y: 0, w: size.width, h: size.height },
+        grid: &mut scene.grid,
+        viewport_top_abs: None,
+        is_active: true,
+        cursor_style: CursorStyle::BlockSteady,
+        is_broadcast_participant: false,
+        scrollbar_alpha: 0.0,
+        inline_images: Vec::new(),
+    }];
+    renderer.render_with_outcome(
+        fonts,
+        &mut panes,
+        theme,
+        false,
+        None,
+        None,
+        &scene.tabs,
+        false,
+        None,
+        None,
+        Some(&scene.ime),
+        None,
+        Some(&scene.notification),
+        None,
+        None,
+    )
 }
 
 /// One frame in production order: prepare fonts, measure tab widths, render. An atlas retry
@@ -157,34 +197,7 @@ fn draw(
     for _ in 0..4 {
         let fonts = renderer.begin_frame_fonts();
         let _ = renderer.measure_tab_widths(&fonts, &mut scene.tabs, false, false, Instant::now());
-        let mut panes = [PaneRender {
-            id: 1,
-            rect_px: PixelRect { x: 0, y: 0, w: size.width, h: size.height },
-            grid: &mut scene.grid,
-            viewport_top_abs: None,
-            is_active: true,
-            cursor_style: CursorStyle::BlockSteady,
-            is_broadcast_participant: false,
-            scrollbar_alpha: 0.0,
-            inline_images: Vec::new(),
-        }];
-        match renderer.render_with_outcome(
-            &fonts,
-            &mut panes,
-            theme,
-            false,
-            None,
-            None,
-            &scene.tabs,
-            false,
-            None,
-            None,
-            Some(&scene.ime),
-            None,
-            None,
-            None,
-            None,
-        ) {
+        match render_once(renderer, &fonts, scene, theme, size) {
             PresentOutcome::Presented => return Ok(()),
             PresentOutcome::AtlasRetry => {}
             other => return Err(format!("the frame did not present: {other:?}")),
@@ -269,6 +282,8 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
     };
     renderer.set_cursor_blink(false);
     renderer.set_tab_bar_visible(true);
+    // The renderer counts, as a perf run's renderer does, so the attempts below are measured.
+    renderer.set_frame_counting(true);
     // The renderer draws with a stack whose coverage the test controls, through the path a font
     // reload takes, so frame 1's tofu and the later glyph never depend on the host's fonts.
     let (stack, _primary_face) = controlled_stack()?;
@@ -293,7 +308,13 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
     let _release_on_exit = GateRelease(Arc::clone(&gate));
 
     let size = window.inner_size();
-    let mut scene = Scene { grid: Grid::new(16, 3), tabs: TabBar::new(), ime: ImeState::new() };
+    let notification = NotificationBubble {
+        level: NotificationLevel::Info,
+        message: String::from("fallback"),
+        expires_at: None,
+    };
+    let mut scene =
+        Scene { grid: Grid::new(16, 3), tabs: TabBar::new(), ime: ImeState::new(), notification };
     scene.grid.put_char(UNRESOLVED, Color::Default, Color::Default, CellFlags::empty());
     scene.grid.cursor = Pos { row: 1, col: 0 };
     scene.tabs.push(Tab::new(format!("{UNRESOLVED}{UNRESOLVED}{UNRESOLVED}")));
@@ -358,7 +379,61 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
     if tabs_after == tabs_before {
         return Err(String::from("the tab bar still shows the tofu title"));
     }
+    attempt_attribution(&mut renderer, &mut scene, &theme, size)?;
     Ok(Outcome::Exercised)
+}
+
+/// The counted attempts of the real renderer: every fallback generation the frames applied is
+/// carried by exactly one render attempt, however many retries or redraws followed, and that
+/// attempt rasterized and shaped. Then one prepared token is rendered twice: both are attempts,
+/// neither is an apply, and the notification text laid out inside them is shaped inside the
+/// attempt rather than outside it.
+fn attempt_attribution(
+    renderer: &mut GpuRenderer,
+    scene: &mut Scene,
+    theme: &Theme,
+    size: PhysicalSize<u32>,
+) -> Result<(), String> {
+    let stats = renderer.frame_stats();
+    let applied = stats.apply_attempts;
+    if stats.font_generation_applies == 0 {
+        return Err(String::from("the frames counted no fallback generation apply"));
+    }
+    if applied.attempts != stats.font_generation_applies {
+        return Err(format!(
+            "{} generation applies but {} apply attempts",
+            stats.font_generation_applies, applied.attempts
+        ));
+    }
+    if applied.raster_calls == 0 || applied.shape_requests == 0 || applied.attempt_ns == 0 {
+        return Err(format!("the apply attempt measured no work: {applied:?}"));
+    }
+    let before = renderer.frame_stats();
+    let fonts = renderer.begin_frame_fonts();
+    for pass in 0..2 {
+        // A full redraw each time, so the notification is laid out again.
+        scene.grid.mark_all_dirty();
+        let outcome = render_once(renderer, &fonts, scene, theme, size);
+        if !matches!(outcome, PresentOutcome::Presented | PresentOutcome::AtlasRetry) {
+            return Err(format!("reused-token pass {pass} did not present: {outcome:?}"));
+        }
+    }
+    let after = renderer.frame_stats();
+    let attempts = after.attempts.attempts - before.attempts.attempts;
+    let shaped = after.shape_requests - before.shape_requests;
+    let shaped_in_attempts = after.attempts.shape_requests - before.attempts.shape_requests;
+    if attempts != 2 || after.apply_attempts != before.apply_attempts {
+        return Err(format!(
+            "a reused token: {attempts} attempts, applies {:?}",
+            after.apply_attempts
+        ));
+    }
+    if shaped == 0 || shaped_in_attempts != shaped {
+        return Err(format!(
+            "shaping in the passes {shaped}, inside their attempts {shaped_in_attempts}"
+        ));
+    }
+    Ok(())
 }
 
 /// A character the font lacks draws tofu at once, and after the fallback worker publishes its

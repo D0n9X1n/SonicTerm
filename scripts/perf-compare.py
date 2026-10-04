@@ -4677,19 +4677,22 @@ def _attempt_split_rows(label: str, phase_name: str, sides: Sequence[SideRuns], 
 
 
 def attempt_split_details(label: str, base: SideRuns, head: SideRuns) -> list[str]:
-    """Each run's own split, for every phase in which some run drew a fallback apply attempt, so the pooled
-    row's runs can be compared one by one. Lines for the details block; none when no run applied."""
+    """Each run's own split, for every phase in which any run on either side drew a fallback apply attempt, so
+    the pooled row's whole population can be read run by run: every run of that phase is listed, including
+    runs that applied nothing and runs that lack the fields (`n/a`). Lines for the details block."""
+    sides = (("base", base), ("head", head))
+    applying = {name for _side_name, side in sides for name, phases in _counter_phases(side).items()
+                if any(attempt_split([counters], "apply_")[1] for counters in phases)}
     lines = []
-    for side_name, side in (("base", base), ("head", head)):
+    for side_name, side in sides:
         for index, outcome in enumerate(side.outcomes, 1):
             for phase in (outcome.result or {}).get("phases") or []:
+                if str(phase.get("name")) not in applying:
+                    continue
                 counters = phase.get("frame_counters")
-                if not isinstance(counters, dict):
-                    continue
-                apply_text, apply_attempts = attempt_split([counters], "apply_")
-                if not apply_attempts:
-                    continue
-                every_text, _attempts = attempt_split([counters], "render_")
+                texts = [attempt_split([counters], prefix)[0] if isinstance(counters, dict) else None
+                         for prefix in ("render_", "apply_")]
+                every_text, apply_text = (text or "n/a" for text in texts)
                 lines.append(f"- {label} {side_name} run {index} {phase.get('name')}: every attempt {every_text}; "
                              f"fallback apply attempts {apply_text}")
     return lines
