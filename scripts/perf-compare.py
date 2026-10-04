@@ -1892,7 +1892,9 @@ FRAME_COUNTER_STATES = ("unsupported", "off", "on")
 FRAME_COUNTER_FIELDS = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
                 "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_streaming",
-                "contention_retry_armed",
+                # stream_clock_exempt counts settled hardware keypress attempts that kept the streaming clock; a
+                # base older than it shows n/a.
+                "stream_clock_exempt", "contention_retry_armed",
                 # dirt_ack_dropped counts receipts dropped at a collection; a base older than it shows n/a.
                 "dirt_ack_dropped", "native_request_redraw", "user_request_redraw", "redraw_requested"),
                ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
