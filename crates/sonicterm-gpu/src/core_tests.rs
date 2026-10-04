@@ -5089,9 +5089,9 @@ fn a_real_space_passes_through_the_atlas_and_emission_without_tofu() {
     assert!(missing.is_empty(), "nothing is reported missing");
 }
 
-/// The compatibility wrapper's acknowledgement applies the four-identity rule through the borrowed
-/// grids: a subset receipt clears only its rows, a receipt naming another pane or taken before a later
-/// mark clears nothing, and an `All` receipt with matching identities clears every row.
+/// The compatibility wrapper's acknowledgement applies receipts through the borrowed grids: a subset
+/// receipt clears only its rows, a receipt naming another pane clears nothing, a receipt taken before a
+/// later mark applies but keeps every row that mark dirtied, and an `All` receipt clears every row.
 #[test]
 fn borrowed_acknowledgement_clears_only_matching_receipts_and_their_rows() {
     use sonicterm_render_model::{AckReceipt, AckRows, CursorStyle, PaneRender};
@@ -5115,8 +5115,8 @@ fn borrowed_acknowledgement_clears_only_matching_receipts_and_their_rows() {
     assert_eq!(acknowledge_receipts(std::slice::from_ref(&subset), &mut panes), 1);
     assert_eq!(panes[0].grid.dirty_rows().collect::<Vec<_>>(), [0, 2]);
     panes[0].grid.mark_all_dirty();
-    assert_eq!(acknowledge_receipts(&[subset], &mut panes), 0, "a later mark keeps all dirt");
-    assert_eq!(panes[0].grid.dirty_count(), 3);
+    assert_eq!(acknowledge_receipts(&[subset], &mut panes), 1, "the receipt still applies");
+    assert_eq!(panes[0].grid.dirty_count(), 3, "a later mark keeps all dirt");
     let all = AckReceipt::of(0, 7, &*panes[0].grid, AckRows::All);
     assert_eq!(acknowledge_receipts(&[all], &mut panes), 1);
     assert_eq!(panes[0].grid.dirty_count(), 0);

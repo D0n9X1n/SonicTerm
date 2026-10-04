@@ -308,7 +308,7 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `defer_contention` | 次数 | 因锁争用重试下限而推迟的重绘 |
 | `defer_streaming` | 次数 | 因流式输出节奏而推迟的重绘 |
 | `contention_retry_armed` | 次数 | 设置的锁争用重试 |
-| `dirt_ack_dropped` | 次数 | 下一次收集时因窗格未被持有、解析器已变化或网格在组帧后变化而丢弃的已呈现帧回执；每次只代价一次之后的重新组装，从不影响像素 |
+| `dirt_ack_dropped` | 次数 | 下一次收集时因窗格未被持有、解析器已变化，或网格在组帧后改变尺寸或切换屏幕而丢弃的已呈现帧回执；组帧后写入的输出不会丢弃回执，只保留它标脏的行。每次丢弃只代价一次之后的重新组装，从不影响像素 |
 | `native_request_redraw` | 次数 | 该窗口的原生重绘请求，覆盖每条请求路径；一次 dispatch 的请求在其结束时计入汇总，因此窗口行晚一次 dispatch 显示它们（`final=1` 行是完整的） |
 | `user_request_redraw` | 次数 | 该窗口已服务的输出事件：VT 工作线程 flush 发出的 `PaneOutput`（每个窗格最多一个未处理）和测试框架或测试发出的 `RequestRedraw`，在可见输出过滤之前计数 |
 | `redraw_requested` | 次数 | 该窗口的 `RedrawRequested` 事件 |

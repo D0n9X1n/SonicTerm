@@ -368,11 +368,15 @@ after the source, with its guards, is dropped, so a PTY write can land between a
 presentation. The renderer clears no grid dirt. A presented frame returns one metadata
 `AckReceipt` per acknowledged pane: its index, pane id, revision, dirty generation, size
 generation, screen epoch, and rows. The window keeps them as its pending set. At its next
-successful collection, after viewport reconciliation and before planning, a receipt clears its
-rows only when the same parser is held and all four identities still match. Otherwise it is
-dropped, its dirt is kept, and the drop is counted in `dirt_ack_dropped`. Every write that sets
-a dirty bit advances `dirty_generation`, which is part of the frame key, so presented but
-unacknowledged dirt never takes the unchanged-key shortcut.
+successful collection, after viewport reconciliation and before planning, a receipt applies
+only when the same parser is held and the grid's size generation and screen epoch still match.
+It then clears the receipt's rows that were last dirtied at or before the receipt's dirty
+generation, and keeps every row dirtied after assembly: each dirty row records the generation
+that set it. A resize or a screen switch renumbers the rows, so such a receipt is dropped, its
+dirt is kept, and the drop is counted in `dirt_ack_dropped`, as is a receipt whose pane is not
+held or whose parser changed. Every write that sets a dirty bit advances `dirty_generation`,
+which is part of the frame key, so presented but unacknowledged dirt never takes the
+unchanged-key shortcut.
 
 The renderer clears no grid dirt. A frame issues its metadata receipts only when it is
 `Presented`, which `finish_successful_frame` follows:
@@ -383,8 +387,8 @@ The renderer clears no grid dirt. A frame issues its metadata receipts only when
 
 On both paths the frame's device must also still accept GPU work, as described
 under GPU error containment below. The receipts clear dirt only at the window's next
-successful collection, and only when the same parser is held and the pane's revision,
-dirty generation, size generation and screen epoch still match.
+successful collection, only when the same parser is held and the pane's size generation and
+screen epoch still match, and only for rows not dirtied again after assembly.
 
 `SetDIBitsToDevice` can report failure. wgpu's present call has no result that
 reports a later presentation failure. Surface timeout, occlusion, outdated,

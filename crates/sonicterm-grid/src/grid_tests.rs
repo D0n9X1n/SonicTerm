@@ -1550,6 +1550,7 @@ fn row_containers_are_counted_in_the_retained_figure() {
     let line = std::mem::size_of::<Line>();
     let container = (grid.visible.capacity() + grid.scrollback.capacity()) * line
         + grid.dirty_rows.capacity() * std::mem::size_of::<bool>()
+        + grid.dirty_stamps.capacity() * std::mem::size_of::<u64>()
         + grid.row_content_seq.capacity() * std::mem::size_of::<u64>();
     assert!(container > 0, "precondition: the deques reserved slots");
 
@@ -1611,7 +1612,8 @@ fn entering_an_alternate_screen_counts_the_saved_primarys_containers() {
     let saved = grid.alt_screen.as_ref().expect("the alternate screen holds the saved primary");
     let saved_rows = saved.visible.capacity().saturating_add(saved.scrollback.capacity())
         * std::mem::size_of::<Line>();
-    let saved_dirty = saved.dirty_rows.capacity() * std::mem::size_of::<bool>();
+    let saved_dirty = saved.dirty_rows.capacity() * std::mem::size_of::<bool>()
+        + saved.dirty_stamps.capacity() * std::mem::size_of::<u64>();
     let saved_content_stamps = saved.row_content_seq.capacity() * std::mem::size_of::<u64>();
     let saved_prompts = saved.prompts.capacity() * std::mem::size_of::<PromptRegion>();
     let expected_saved = saved_rows
@@ -1622,7 +1624,8 @@ fn entering_an_alternate_screen_counts_the_saved_primarys_containers() {
 
     let live_rows = grid.visible.capacity().saturating_add(grid.scrollback.capacity())
         * std::mem::size_of::<Line>();
-    let live_dirty = grid.dirty_rows.capacity() * std::mem::size_of::<bool>();
+    let live_dirty = grid.dirty_rows.capacity() * std::mem::size_of::<bool>()
+        + grid.dirty_stamps.capacity() * std::mem::size_of::<u64>();
     let live_content_stamps = grid.row_content_seq.capacity() * std::mem::size_of::<u64>();
 
     assert!(
@@ -2017,13 +2020,58 @@ fn clear_dirty_rows_clears_only_the_listed_rows() {
     assert_eq!(every.dirty_count(), 0);
 }
 
+/// A generation-bounded clear keeps exactly the rows dirtied after the generation it is given:
+/// the dirt a renderer drew is cleared, while a row written after assembly, even one the frame
+/// also drew, stays dirty. Clearing never advances the generation.
+#[test]
+fn a_bounded_clear_keeps_rows_dirtied_after_its_generation() {
+    let mut grid = Grid::new(6, 4);
+    grid.clear_dirty();
+    grid.goto(0, 0);
+    grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+    grid.goto(2, 0);
+    grid.put_char('b', Color::Default, Color::Default, CellFlags::empty());
+    let assembled = grid.dirty_generation();
+    grid.goto(2, 1);
+    grid.put_char('c', Color::Default, Color::Default, CellFlags::empty());
+    grid.goto(3, 0);
+    grid.put_char('d', Color::Default, Color::Default, CellFlags::empty());
+    let generation = grid.dirty_generation();
+    grid.clear_dirty_through(assembled);
+    assert_eq!(dirty_rows_vec(&grid), vec![2, 3], "rows 2 and 3 were written after assembly");
+    assert_eq!(grid.dirty_generation(), generation);
+
+    // Moving the cursor marks the rows it leaves and enters, so the generation is read after it.
+    let mut limited = Grid::new(6, 4);
+    limited.goto(1, 0);
+    let assembled = limited.dirty_generation();
+    limited.put_char('e', Color::Default, Color::Default, CellFlags::empty());
+    limited.clear_dirty_rows_through(&[0, 1, 9].into_iter().collect(), assembled);
+    assert_eq!(dirty_rows_vec(&limited), vec![1, 2, 3], "row 0 cleared; 1 newer; 2 and 3 unlisted");
+
+    // A whole-grid mark after assembly, such as a scroll, keeps every row.
+    let mut scrolled = Grid::new(6, 4);
+    let assembled = scrolled.dirty_generation();
+    scrolled.mark_all_dirty();
+    scrolled.clear_dirty_through(assembled);
+    assert_eq!(dirty_rows_vec(&scrolled), vec![0, 1, 2, 3]);
+
+    // A resize stamps the rows it adds as new dirt, never as older than any receipt.
+    let mut grown = Grid::new(6, 2);
+    let assembled = grown.dirty_generation();
+    grown.resize(6, 4);
+    grown.clear_dirty_through(assembled);
+    assert_eq!(dirty_rows_vec(&grown), vec![0, 1, 2, 3]);
+}
+
 /// The problems with `source`'s writers of `dirty_rows`: every write that sets a bit sits in
 /// `mark_row`, `mark_all`, `mark_range` or `resize`, each of which advances the generation, or in
 /// the two struct literals that start a grid at generation 0; `clear_dirty` and `clear_dirty_rows`
 /// only store `false` and never advance it; nothing else writes the bits or the generation.
 fn dirty_writer_problems(source: &str) -> Vec<String> {
     const SETTERS: [&str; 4] = ["mark_row", "mark_all", "mark_range", "resize"];
-    const CLEARERS: [&str; 2] = ["clear_dirty", "clear_dirty_rows"];
+    const CLEARERS: [&str; 4] =
+        ["clear_dirty", "clear_dirty_rows", "clear_dirty_through", "clear_dirty_rows_through"];
     const LITERALS: [&str; 2] = ["new", "enter_alt_screen"];
     let source = source.replace("\r\n", "\n");
     let production = source.split("#[cfg(test)]\n#[path = \"grid_tests.rs\"]").next().unwrap_or("");

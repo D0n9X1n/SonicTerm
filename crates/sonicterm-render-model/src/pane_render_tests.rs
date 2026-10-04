@@ -2,6 +2,7 @@
 //! once, and a receipt clears only the rows it names, and only from the grid it was taken from.
 
 use sonicterm_grid::grid::{Grid, RowSet};
+use sonicterm_types::cell::{CellFlags, Color};
 
 use super::*;
 
@@ -46,13 +47,38 @@ fn a_matching_receipt_clears_exactly_its_rows_or_every_row() {
 }
 
 #[test]
-fn a_receipt_whose_grid_moved_since_assembly_clears_nothing() {
-    // Dirt written after assembly advances the dirty generation, so the receipt no longer matches
-    // and that dirt stays for the next frame.
+fn a_receipt_clears_the_rows_it_drew_and_keeps_rows_written_after_assembly() {
+    // Output after assembly dirties one row: the receipt still applies, clearing the rows the
+    // frame drew and keeping that row. A later whole-grid mark keeps every row.
+    // Moving the cursor marks the rows it leaves and enters, so the frame is assembled after it.
     let mut grid = Grid::new(4, 3);
+    grid.goto(1, 0);
+    let receipt = AckReceipt::of(0, 1, &grid, AckRows::All);
+    grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+    assert!(!receipt.matches(&grid), "the grid moved on");
+    assert!(receipt.try_apply(&mut grid));
+    assert_eq!(dirty(&grid), vec![1]);
     let receipt = AckReceipt::of(0, 1, &grid, AckRows::All);
     grid.mark_all_dirty();
-    assert!(!receipt.matches(&grid));
-    assert!(!receipt.try_apply(&mut grid));
+    assert!(receipt.try_apply(&mut grid));
     assert_eq!(dirty(&grid), vec![0, 1, 2]);
+}
+
+#[test]
+fn a_receipt_from_another_size_or_screen_clears_nothing() {
+    // A resize or a screen switch renumbers the rows, so the receipt does not apply at all.
+    let mut grid = Grid::new(4, 3);
+    let receipt = AckReceipt::of(0, 1, &grid, AckRows::All);
+    grid.resize(5, 3);
+    grid.clear_dirty();
+    grid.goto(0, 0);
+    grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+    assert!(!receipt.same_structure(&grid));
+    assert!(!receipt.try_apply(&mut grid));
+    assert_eq!(dirty(&grid), vec![0]);
+    let mut alternate = Grid::new(4, 3);
+    let receipt = AckReceipt::of(0, 1, &alternate, AckRows::All);
+    alternate.enter_alt_screen();
+    assert!(!receipt.try_apply(&mut alternate));
+    assert_eq!(dirty(&alternate), vec![0, 1, 2]);
 }

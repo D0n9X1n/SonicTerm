@@ -725,33 +725,35 @@ fn ticket_for(id: u64, parser: &Arc<Mutex<Parser>>) -> AckTicket {
     AckTicket { receipt, parser: Arc::downgrade(parser) }
 }
 
-/// The ticket rule on bare grids: a ticket clears only through the guard of its own pane and parser,
-/// and only while revision, dirty generation, size generation and screen epoch all match. A parse,
-/// `mark_all_dirty`, a resize or a screen switch after the receipt keeps the dirt, as does a pane
-/// that is not held (switched away or removed while the VT worker still holds the parser) or an id
-/// now naming a new parser.
+/// The ticket rule on bare grids: a ticket applies only through the guard of its own pane and parser,
+/// and only while size generation and screen epoch match. It clears the rows the frame drew and keeps
+/// every row dirtied after assembly: a parse keeps the row it wrote, `mark_all_dirty` keeps every row.
+/// A resize or a screen switch renumbers the rows, so it does not apply; nor does a pane that is not
+/// held (switched away or removed while the VT worker still holds the parser) or an id now naming a
+/// new parser.
 #[test]
 fn a_ticket_clears_only_its_own_unchanged_held_grid() {
     let parser = || Arc::new(Mutex::new(Parser::new(Grid::new(8, 3))));
     let rect = Rect::new(0.0, 0.0, 80.0, 60.0);
-    let changes: [(&str, fn(&mut Parser)); 5] = [
-        ("a parse", |parser| drop(parser.advance(b"x"))),
-        ("mark_all_dirty", |parser| parser.grid_mut().mark_all_dirty()),
-        ("a resize", |parser| parser.grid_mut().resize(10, 3)),
-        ("a screen switch", |parser| parser.grid_mut().enter_alt_screen()),
-        ("nothing", |_| {}),
+    // Each change, whether the ticket then applies, and the dirty rows left: `None` keeps them all.
+    let changes: [(&str, fn(&mut Parser), bool, Option<usize>); 5] = [
+        ("a parse", |parser| drop(parser.advance(b"x")), true, Some(1)),
+        ("mark_all_dirty", |parser| parser.grid_mut().mark_all_dirty(), true, Some(3)),
+        ("a resize", |parser| parser.grid_mut().resize(10, 3), false, None),
+        ("a screen switch", |parser| parser.grid_mut().enter_alt_screen(), false, None),
+        ("nothing", |_| {}, true, Some(0)),
     ];
-    for (label, change) in changes {
+    for (label, change, applies, left) in changes {
         let shared = parser();
         let ticket = ticket_for(7, &shared);
         change(&mut shared.lock());
         let before = shared.lock().grid().dirty_count();
         let mut guards = vec![(7, shared.lock(), rect)];
-        let cleared = apply_ticket(&ticket, &mut guards);
+        let applied = apply_ticket(&ticket, &mut guards);
         drop(guards);
-        assert_eq!(cleared, label == "nothing", "{label}");
+        assert_eq!(applied, applies, "{label}");
         let after = shared.lock().grid().dirty_count();
-        assert_eq!(after, if cleared { 0 } else { before }, "{label} keeps its dirt");
+        assert_eq!(after, left.unwrap_or(before), "{label} keeps the dirt written after the frame");
     }
 
     let held_elsewhere = parser();
@@ -769,8 +771,8 @@ fn a_ticket_clears_only_its_own_unchanged_held_grid() {
 }
 
 /// Frame N's receipts are applied at N+1's collection, under its guards, after reconciliation: an
-/// unchanged grid is cleared and the set emptied; a print after present keeps that pane's dirt and
-/// counts one drop; a contended collection keeps the set for the next successful one; and a
+/// unchanged grid is cleared and the set emptied; a print after present keeps the row it wrote and
+/// clears the rest, with no drop; a contended collection keeps the set for the next successful one; and a
 /// structural failure returns before any receipt is touched. Both roles.
 #[test]
 fn receipts_from_one_frame_are_applied_at_the_next_collection() {
@@ -789,7 +791,11 @@ fn receipts_from_one_frame_are_applied_at_the_next_collection() {
         collect_next(&mut app, window, child).unwrap();
         assert!(dirty(&app, window, left).is_empty());
         assert!(!dirty(&app, window, right).is_empty(), "dirt written after present is kept");
-        assert_eq!(dropped(&app, window), 1);
+        assert!(
+            dirty(&app, window, right).len() < all_rows(&app, window, right).len(),
+            "rows the frame drew and the print left alone are cleared"
+        );
+        assert_eq!(dropped(&app, window), 0, "the receipt still applies");
 
         counted_and_dirty(&mut app, window, &[left, right]);
         present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
@@ -855,7 +861,7 @@ fn a_switched_away_pane_keeps_its_dirt_until_it_is_drawn_again() {
 }
 
 /// A subset receipt applied at the next collection clears only its rows; after a later mark the same
-/// receipt clears nothing and is counted as dropped.
+/// receipt still applies but keeps every row that mark dirtied, so nothing is dropped.
 #[test]
 fn a_subset_receipt_clears_only_its_rows_at_the_next_collection() {
     for child in [false, true] {
@@ -871,7 +877,7 @@ fn a_subset_receipt_clears_only_its_rows_at_the_next_collection() {
         app.windows[&window].panes[&right].parser.lock().grid_mut().mark_all_dirty();
         collect_next(&mut app, window, child).unwrap();
         assert_eq!(dirty(&app, window, right), [0, 1, 2], "a later mark keeps every row");
-        assert!(dropped(&app, window) >= 1);
+        assert_eq!(dropped(&app, window), 0);
     }
 }
 
@@ -1045,7 +1051,7 @@ fn a_suppressed_window_keeps_its_pending_set_until_its_next_collection() {
             assert!(app.windows[&window].pending_receipts.is_empty(), "{mode}: the set is applied");
             if mode == "stop" {
                 assert_eq!(dirty(&app, window, left), all_rows(&app, window, left));
-                assert_eq!(dropped(&app, window), 2, "changed receipts are dropped");
+                assert_eq!(dropped(&app, window), 0, "receipts apply and keep the recovery's dirt");
             } else {
                 assert!(
                     dirty(&app, window, left).is_empty() && dirty(&app, window, right).is_empty()

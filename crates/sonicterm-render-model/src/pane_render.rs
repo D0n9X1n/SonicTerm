@@ -141,6 +141,12 @@ impl AckReceipt {
         }
     }
 
+    /// Whether `grid` still has the size and screen this receipt was assembled from, so its row
+    /// slots still name the same rows. Content and dirt may have moved on since.
+    pub fn same_structure(&self, grid: &sonicterm_grid::grid::Grid) -> bool {
+        self.size_generation == grid.size_generation() && self.screen_epoch == grid.screen_epoch()
+    }
+
     /// Whether `grid` is still exactly the grid this receipt was assembled from.
     pub fn matches(&self, grid: &sonicterm_grid::grid::Grid) -> bool {
         self.revision == grid.revision()
@@ -149,16 +155,16 @@ impl AckReceipt {
             && self.screen_epoch == grid.screen_epoch()
     }
 
-    /// Clear the receipt's rows from `grid` when every identity still matches; returns whether it did.
-    /// A mismatch clears nothing, so dirt written after the frame was assembled is kept.
+    /// Clear the receipt's rows from `grid`, keeping every row dirtied after the frame was assembled;
+    /// returns whether the receipt applied. A grid whose size or screen changed clears nothing.
     pub fn try_apply(&self, grid: &mut sonicterm_grid::grid::Grid) -> bool {
-        if !self.matches(grid) {
-            // When: `matches` finds an identity of `grid` moved since assembly, the dirt may not be what the frame drew; keep it.
+        if !self.same_structure(grid) {
+            // When: `same_structure` is false, a resize or screen switch renumbered the rows; keep all dirt.
             return false;
         }
         match &self.rows {
-            AckRows::All => grid.clear_dirty(),
-            AckRows::Rows(rows) => grid.clear_dirty_rows(rows),
+            AckRows::All => grid.clear_dirty_through(self.dirty_generation),
+            AckRows::Rows(rows) => grid.clear_dirty_rows_through(rows, self.dirty_generation),
         }
         true
     }

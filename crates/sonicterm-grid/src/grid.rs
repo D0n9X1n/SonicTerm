@@ -266,6 +266,10 @@ pub struct Grid {
     /// advances it. A renderer that presented a frame compares it to tell "the dirt I drew" from
     /// dirt written after the frame was assembled.
     dirty_generation: u64,
+    /// Per row, the `dirty_generation` its dirty bit was last set at. A renderer that assembled at
+    /// generation `g` may clear exactly the rows stamped at or before `g`; a row set after that
+    /// carries a newer stamp and stays dirty.
+    dirty_stamps: Vec<u64>,
     /// Prompt regions recorded from OSC 133. Oldest first.
     prompts: VecDeque<PromptRegion>,
     autowrap: bool,
@@ -302,6 +306,7 @@ impl Grid {
             // clear_dirty(), the flags drop to all-false.
             dirty_rows: vec![true; rows as usize],
             dirty_generation: 0,
+            dirty_stamps: vec![0; rows as usize],
             prompts: VecDeque::new(),
             autowrap: true,
             pending_wrap: false,
@@ -362,6 +367,33 @@ impl Grid {
         }
     }
 
+    /// Clear every dirty row last set at or before `generation`, keeping rows set after it. A
+    /// renderer passes the generation it assembled at, so dirt written after assembly survives.
+    /// Like [`Self::clear_dirty`] it does not advance [`Self::dirty_generation`].
+    pub fn clear_dirty_through(&mut self, generation: u64) {
+        for (dirty, stamp) in self.dirty_rows.iter_mut().zip(&self.dirty_stamps) {
+            if *stamp <= generation {
+                // When: `stamp <= generation`, the row's last dirt is what the renderer drew.
+                *dirty = false;
+            }
+        }
+    }
+
+    /// [`Self::clear_dirty_through`] limited to the rows in `rows`; slots past the visible row
+    /// count are ignored.
+    pub fn clear_dirty_rows_through(&mut self, rows: &RowSet, generation: u64) {
+        for row in rows.iter() {
+            if let (Some(dirty), Some(stamp)) =
+                (self.dirty_rows.get_mut(row), self.dirty_stamps.get(row))
+            {
+                if *stamp <= generation {
+                    // When: `stamp <= generation`, the row's last dirt is what the renderer drew.
+                    *dirty = false;
+                }
+            }
+        }
+    }
+
     /// The count of dirty-bit writes so far; see the `dirty_generation` field.
     #[inline]
     pub fn dirty_generation(&self) -> u64 {
@@ -380,6 +412,9 @@ impl Grid {
         if let Some(slot) = self.dirty_rows.get_mut(row as usize) {
             *slot = true;
             self.dirty_generation = self.dirty_generation.wrapping_add(1);
+            if let Some(stamp) = self.dirty_stamps.get_mut(row as usize) {
+                *stamp = self.dirty_generation;
+            }
         }
     }
 
@@ -387,6 +422,7 @@ impl Grid {
     fn mark_all(&mut self) {
         self.dirty_rows.fill(true);
         self.dirty_generation = self.dirty_generation.wrapping_add(1);
+        self.dirty_stamps.fill(self.dirty_generation);
     }
 
     /// Mark every row dirty. Public alias of the internal `mark_all`
@@ -432,6 +468,9 @@ impl Grid {
             *slot = true;
         }
         self.dirty_generation = self.dirty_generation.wrapping_add(1);
+        for stamp in &mut self.dirty_stamps[low..=high] {
+            *stamp = self.dirty_generation;
+        }
     }
 
     /// Current cell-content sequence. Cursor movement and presentation-only
@@ -675,6 +714,7 @@ impl Grid {
             rows_since_budget_check: 0,
             dirty_rows: vec![true; rows as usize],
             dirty_generation: 0,
+            dirty_stamps: vec![0; rows as usize],
             prompts: std::mem::take(&mut self.prompts),
             autowrap: self.autowrap,
             pending_wrap: false,
@@ -800,6 +840,7 @@ impl Grid {
         // Re-size the row metadata to the new row count, then mark everything:
         // geometry and cell content both changed for the visible screen.
         self.dirty_rows.resize(rows as usize, true);
+        self.dirty_stamps.resize(rows as usize, 0);
         self.row_content_seq.resize(rows as usize, self.content_seq);
         self.mark_all();
         self.content_changed_all();
@@ -2130,7 +2171,8 @@ impl Grid {
         let saved = self.alt_screen.as_ref().map_or(0, |screen| {
             let rows =
                 screen.visible.capacity().saturating_add(screen.scrollback.capacity()) * line;
-            let dirty = screen.dirty_rows.capacity() * std::mem::size_of::<bool>();
+            let dirty = screen.dirty_rows.capacity() * std::mem::size_of::<bool>()
+                + screen.dirty_stamps.capacity() * std::mem::size_of::<u64>();
             let content_stamps = screen.row_content_seq.capacity() * std::mem::size_of::<u64>();
             let prompts = screen.prompts.capacity() * prompt;
             // The `Box<Grid>` holding it all.
@@ -2139,7 +2181,8 @@ impl Grid {
                 .saturating_add(prompts)
                 .saturating_add(std::mem::size_of::<Grid>())
         });
-        let dirty = self.dirty_rows.capacity() * std::mem::size_of::<bool>();
+        let dirty = self.dirty_rows.capacity() * std::mem::size_of::<bool>()
+            + self.dirty_stamps.capacity() * std::mem::size_of::<u64>();
         let content_stamps = self.row_content_seq.capacity() * std::mem::size_of::<u64>();
         primary.saturating_add(saved).saturating_add(dirty).saturating_add(content_stamps)
     }

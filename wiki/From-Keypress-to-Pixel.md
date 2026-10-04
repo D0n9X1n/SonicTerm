@@ -399,8 +399,8 @@ later compositor failure.
 
 `finish_successful_frame` stores the new `FrameKey` and increments the successful
 frame count; it clears no dirt. The presented frame's receipts are applied at the
-window's next collection, clearing a pane's dirty rows only when the same parser is held
-and its revision, dirty generation, size generation and screen epoch still match.
+window's next collection: when the same parser is held and the pane's size generation and
+screen epoch still match, it clears the pane's dirty rows except those dirtied after assembly.
 
 Before a wgpu draw:
 
