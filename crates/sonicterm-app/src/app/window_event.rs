@@ -1121,7 +1121,7 @@ impl App {
             }
         }
         if !presented_receipts.is_empty() {
-            // When: the frame presented, its receipts replace the pending set emptied at collection.
+            // A presented frame's receipts replace the pending set emptied at collection.
             let tickets = sources.bind(presented_receipts);
             if let Some(window) = self.main_mut() {
                 window.pending_receipts = tickets;

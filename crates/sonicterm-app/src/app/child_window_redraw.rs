@@ -299,7 +299,7 @@ impl App {
                     recovery.observe_frame(r.device_generation(), &outcome, Instant::now());
                 }
                 if !receipts.is_empty() {
-                    // When: the frame presented, its receipts replace the pending set emptied at collection.
+                    // A presented frame's receipts replace the pending set emptied at collection.
                     child.pending_receipts = sources.bind(receipts);
                 }
                 if let (Some(smoke), Some(sample)) =

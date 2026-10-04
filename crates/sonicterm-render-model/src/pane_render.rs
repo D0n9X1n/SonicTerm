@@ -153,7 +153,7 @@ impl AckReceipt {
     /// A mismatch clears nothing, so dirt written after the frame was assembled is kept.
     pub fn try_apply(&self, grid: &mut sonicterm_grid::grid::Grid) -> bool {
         if !self.matches(grid) {
-            // When: any identity moved since assembly, the dirt may not be what the frame drew; keep it.
+            // When: `matches` finds an identity of `grid` moved since assembly, the dirt may not be what the frame drew; keep it.
             return false;
         }
         match &self.rows {

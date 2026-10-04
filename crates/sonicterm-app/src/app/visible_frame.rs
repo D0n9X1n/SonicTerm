@@ -304,7 +304,7 @@ impl VisibleFrameSources {
 pub(super) fn apply_ticket(ticket: &AckTicket, guards: &mut ParserGuards<'_>) -> bool {
     let Some((_, parser, _)) = guards.iter_mut().find(|(id, _, _)| *id == ticket.receipt.pane_id)
     else {
-        // When: the pane is not held (switched away, removed or moved), its dirt stays.
+        // When: no held guard has the receipt's `pane_id` (switched away, removed or moved), its dirt stays.
         return false;
     };
     if !std::ptr::eq(MutexGuard::mutex(parser), ticket.parser.as_ptr()) {

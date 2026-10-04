@@ -4825,7 +4825,7 @@ impl GpuRenderer {
             link_preview,
         );
         if matches!(outcome, PresentOutcome::Presented) {
-            // When: the frame presented, nothing could change the borrowed grids since assembly.
+            // Presented: nothing could change the borrowed grids since assembly, so apply the receipts.
             acknowledge_receipts(&receipts, panes);
         }
         outcome
@@ -4885,13 +4885,16 @@ impl GpuRenderer {
         // The source is gone here: every arm below runs with no parser guard held.
         let assembled = match assembled {
             Ok(assembled) => assembled,
-            Err(error) => return FrameOutcome::without_receipts(PresentOutcome::Failed(error)),
+            Err(error) => {
+                // When: assembly returned `error`, nothing was drawn; report it as failed, with no receipts.
+                return FrameOutcome::without_receipts(PresentOutcome::Failed(error));
+            }
         };
         let outcome = match assembled {
             Assembled::NoPanes => PresentOutcome::Skipped(SkipReason::NoPanes),
             Assembled::Unavailable => self.rendering_unavailable(),
             Assembled::Unchanged { focus_flash } => {
-                // When: the key is unchanged, retain the no-assembly fast path and the Windows cached-frame reblit.
+                // When: `Unchanged`, retain the no-assembly fast path and the Windows cached-frame reblit.
                 self.skipped_frames = self.skipped_frames.wrapping_add(1);
                 tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
                 let outcome = if let Some(before) = self.prepare_cached_present() {
@@ -4918,16 +4921,17 @@ impl GpuRenderer {
                 outcome
             }
             Assembled::Noop(key) => {
-                // When: nothing drawable changed, remember the key without acknowledging any dirt.
+                // Nothing drawable changed: remember the key without acknowledging any dirt.
                 self.last_frame_key = Some(*key);
                 PresentOutcome::Skipped(SkipReason::Noop)
             }
             Assembled::AtlasRetry { stamp, evictions } => {
-                // When: the atlas changed during assembly, discard its stale UVs; it requests its own redraw.
+                // The atlas changed during assembly: discard its stale UVs; the reset requests its own redraw.
                 self.reset_glyph_atlas_after_invalidation(stamp, evictions);
                 PresentOutcome::AtlasRetry
             }
             Assembled::Layers(layers) => {
+                // When: `Layers` carries owned batches, present them; only a presented frame returns receipts.
                 return self.present_layers(*layers).unwrap_or_else(|error| {
                     FrameOutcome::without_receipts(PresentOutcome::Failed(error))
                 });
