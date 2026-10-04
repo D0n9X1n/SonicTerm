@@ -151,6 +151,15 @@ The verdict cell shows the coverage, `unparsed` (malformed `fallback_receive`
 records) and the `unmatched_enter` and `unmatched_return` pairing counts, which
 never change the verdict.
 
+S10's `stream` phase records `updates` in `result.json`: the logical updates its
+workload played, read from the run's `Workload::Frames` count (300 with
+`--short`, 1,200 at full length). No other phase writes the key. The timed table
+adds the row `stream presented frames per update (ratio)` for S10/default and
+S10/sync: each run's `presented_frames` divided by that run's own `updates`,
+never by a constant, summarized like the other per-run rows. A side whose
+harness predates the field reads `n/a` with no change shown, and a result whose
+`updates` is not a positive integer is invalid.
+
 Under `--short`, a variant whose harness `--list` entry declares a cap
 (`run_caps`) takes min(requested, cap) valid runs per side in every set (timed,
 laps, counters and alloc); its rows read `(runs N of M)`, and `comparison.md`

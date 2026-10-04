@@ -132,6 +132,11 @@ lap 运行还会记录字体 crate 的 `font operation` 计时记录，lap 表�
 或覆盖不完整（不低于 p95 的分发多于所记录的）。不存在“被否定”的结论。结论单元格写明覆盖情况、`unparsed`（格式错误的
 `fallback_receive` 记录）以及配对计数 `unmatched_enter` 与 `unmatched_return`，配对计数从不改变结论。
 
+S10 的 `stream` 阶段在 `result.json` 中记录 `updates`：其工作负载播放的逻辑更新数，取自该次运行的 `Workload::Frames`
+次数（`--short` 时 300，完整长度时 1,200）。其他阶段都不写这个键。计时表为 S10/default 与 S10/sync 增加
+`stream presented frames per update (ratio)` 行：每次运行的 `presented_frames` 除以该次运行自己的 `updates`，从不除以常数，
+并像其他按运行统计的行一样汇总。harness 早于该字段的一侧显示 `n/a`，不显示变化；`updates` 不是正整数的结果无效。
+
 在 `--short` 下，harness 的 `--list` 条目声明了上限（`run_caps`）的变体在每个组（计时、lap、计数器与分配）中每侧取
 min(请求次数, 上限) 次有效运行；其行显示 `(runs N of M)`，`comparison.md` 列出被限制的变体。release 对比不受限制。
 每棵树在构建、`--build-only` 与 `--prebuilt` 对比中都恰好以它支持的 perf feature 构建，每次构建都是本地
