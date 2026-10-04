@@ -1391,3 +1391,35 @@ fn every_presenting_mode_emits_every_visible_row() {
     plan.widen_for_recolor(RecolorRecord::default(), recolored(TALL_GLYPH, 1));
     assert!(plan.damage.y <= 72);
 }
+
+/// While an overlay is active on either side, any change to the frame key repaints the whole
+/// surface on both paths, not only a class change: an overlay such as a preedit draws at the
+/// live cursor, which the key omits, so a revision-only, dirty-generation-only or hover-only
+/// change can move it. An unchanged key still skips.
+#[test]
+fn any_key_change_under_an_active_overlay_damages_the_whole_surface() {
+    let surface = PixelRect { x: 0, y: 0, w: 240, h: 160 };
+    for degraded in [false, true] {
+        let mut composing = facts(degraded);
+        composing.window.ime_hash = 0xFEED;
+        composing.window.overlay_active = true;
+        let first = FramePlan::build(composing.clone(), [live_pane(7, 1)], None);
+
+        let revised = PaneMetadata { dirty_rows: vec![1], ..live_pane(7, 2) };
+        let plan = FramePlan::build(composing.clone(), [revised], Some(&first.key));
+        assert_eq!((plan.mode, plan.damage), (RenderMode::Full, surface), "revision, {degraded}");
+
+        let marked = PaneMetadata { dirty_generation: 1, dirty_rows: vec![1], ..live_pane(7, 1) };
+        let plan = FramePlan::build(composing.clone(), [marked], Some(&first.key));
+        assert_eq!((plan.mode, plan.damage), (RenderMode::Full, surface), "generation, {degraded}");
+
+        let mut hovering = composing.clone();
+        hovering.window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, false);
+        let plan = FramePlan::build(hovering, [live_pane(7, 1)], Some(&first.key));
+        assert_eq!((plan.mode, plan.damage), (RenderMode::Full, surface), "hover, {degraded}");
+
+        let plan = FramePlan::build(composing, [live_pane(7, 1)], Some(&first.key));
+        assert!(plan.unchanged);
+        assert_eq!(plan.mode, RenderMode::Noop, "unchanged, {degraded}");
+    }
+}

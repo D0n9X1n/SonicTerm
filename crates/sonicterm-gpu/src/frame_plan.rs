@@ -767,8 +767,9 @@ pub(crate) fn effective_scrollbar_bucket(
 }
 
 /// Classify a changed key against the previous one: window fields, frame-wide policy and every
-/// pane pair. While an overlay is active on either side, any class change is `full`, because
-/// overlays draw over everything in batch order.
+/// pane pair. While an overlay is active on either side, any change to the key is `full`:
+/// overlays draw over everything in batch order, and a preedit follows the live cursor, which
+/// the key omits, so even a revision, dirty-generation or hover change can move overlay pixels.
 fn classify_frame(previous: &FrameKey, key: &FrameKey) -> ChangeClass {
     let mut change = key.window.classify(&previous.window);
     if previous.metrics != key.metrics
@@ -784,7 +785,8 @@ fn classify_frame(previous: &FrameKey, key: &FrameKey) -> ChangeClass {
         change.full |= pane_change.full;
         change.scrollbar |= pane_change.scrollbar;
     }
-    if change.any_class() && (previous.window.overlay_active || key.window.overlay_active) {
+    if previous != key && (previous.window.overlay_active || key.window.overlay_active) {
+        // When: either key has an active overlay and the key changed at all, repaint the surface.
         change.full = true;
     }
     change
