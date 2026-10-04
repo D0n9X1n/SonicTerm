@@ -11,7 +11,11 @@
 //! the case logic compiles on every host, so a non-Windows lint pass type-checks it.
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use sonicterm_gpu::{
     core::{
@@ -215,6 +219,8 @@ struct Scene {
     opacity: f32,
     /// The receipts of the last frame of this scene that presented.
     receipts: Vec<AckReceipt>,
+    /// The font-fallback generation the last presented frame of this scene applied.
+    font_generation: Option<u64>,
     panes: Vec<ScenePane>,
     cursor_visible: bool,
     selection: Option<Selection>,
@@ -389,6 +395,7 @@ fn single(layout: &Layout) -> Scene {
     Scene {
         opacity: OPACITY,
         receipts: Vec::new(),
+        font_generation: None,
         panes: vec![ScenePane {
             id: PANE_ID,
             rect: layout.pane,
@@ -407,6 +414,7 @@ fn single(layout: &Layout) -> Scene {
 fn frame(renderer: &mut GpuRenderer, scene: &mut Scene) -> PresentOutcome {
     let theme = Theme::default();
     let fonts = renderer.begin_frame_fonts();
+    let generation = fonts.generation();
     let mut panes: Vec<PaneRender<'_>> = scene
         .panes
         .iter_mut()
@@ -445,6 +453,7 @@ fn frame(renderer: &mut GpuRenderer, scene: &mut Scene) -> PresentOutcome {
     if matches!(outcome, PresentOutcome::Presented) {
         // Only a presented frame issues receipts; a retry keeps the last presented frame's.
         scene.receipts = receipts;
+        scene.font_generation = Some(generation);
     }
     outcome
 }
@@ -493,6 +502,74 @@ fn retained_pixels(renderer: &mut GpuRenderer) -> Result<(Vec<u8>, u32), String>
     Ok((pixels, readback.width_px))
 }
 
+/// Watches the font-fallback generation the renderer applies until it has held still: for
+/// `quiet` when the last frame drew no tofu, or for five times as long while tofu remains (a host
+/// may lack a face, or its worker may still be searching).
+struct FallbackQuiet {
+    quiet: Duration,
+    since: Option<(u64, Instant)>,
+}
+
+impl FallbackQuiet {
+    fn new(quiet: Duration) -> Self {
+        Self { quiet, since: None }
+    }
+
+    /// Record that a frame at `now` applied `generation`, drawing tofu when `tofu`; true once the
+    /// generation has not changed for the quiet period.
+    fn observe(&mut self, generation: u64, tofu: bool, now: Instant) -> bool {
+        let since = match self.since {
+            Some((held, since)) if held == generation => since,
+            _ => {
+                // A first observation or a publication restarts the wait.
+                self.since = Some((generation, now));
+                now
+            }
+        };
+        let needed = if tofu { self.quiet * 5 } else { self.quiet };
+        now.duration_since(since) >= needed
+    }
+}
+
+/// How many pixels differ between two equally sized BGRA frames outside `excluded` (everywhere
+/// when `None`), and the rectangle bounding them.
+fn differing_pixels(
+    first: &[u8],
+    second: &[u8],
+    width_px: u32,
+    excluded: Option<PixelRect>,
+) -> (usize, Option<PixelRect>) {
+    let width = width_px as usize;
+    let mut count = 0;
+    let mut bounds: Option<(i32, i32, i32, i32)> = None;
+    for (index, (before, after)) in first.chunks(4).zip(second.chunks(4)).enumerate() {
+        let (column_px, row_px) = ((index % width) as i32, (index / width) as i32);
+        let inside = excluded.is_some_and(|rect| {
+            (rect.x..rect.right()).contains(&column_px) && (rect.y..rect.bottom()).contains(&row_px)
+        });
+        if before == after || inside {
+            continue;
+        }
+        count += 1;
+        bounds = Some(match bounds {
+            None => (column_px, row_px, column_px, row_px),
+            Some((left_px, top_px, right_px, bottom_px)) => (
+                left_px.min(column_px),
+                top_px.min(row_px),
+                right_px.max(column_px),
+                bottom_px.max(row_px),
+            ),
+        });
+    }
+    let rect = bounds.map(|(left_px, top_px, right_px, bottom_px)| PixelRect {
+        x: left_px,
+        y: top_px,
+        w: (right_px - left_px + 1) as u32,
+        h: (bottom_px - top_px + 1) as u32,
+    });
+    (count, rect)
+}
+
 /// The first pixel `(x, y)` where two equally sized frames differ, if any.
 fn first_difference(first: &[u8], second: &[u8], width_px: u32) -> Option<(usize, usize)> {
     let width = width_px as usize;
@@ -512,9 +589,14 @@ enum Expect {
     Fallback,
 }
 
-/// Present `scene` with narrow damage, check how it was assembled, then repaint the same state in
-/// full and require the two retained frames equal byte for byte, with the ground's alpha following
-/// the scene's background opacity.
+/// Present `scene` with narrow damage, check how it was assembled and that it changed no retained
+/// pixel outside its damage, then repaint the same state in full and require the two retained
+/// frames equal byte for byte, with the ground's alpha following the scene's background opacity.
+///
+/// The comparison is valid only within one font state: a fallback publication applied between the
+/// frames clears the frame key and changes how a glyph outside the damage draws, which production
+/// repaints in full on the next frame. All three frames must apply one fallback generation, and a
+/// change fails by name, not as a pixel difference.
 /// Returns the narrow frame's damage, its counter deltas and its receipts.
 fn narrow_matches_full(
     renderer: &mut GpuRenderer,
@@ -522,9 +604,12 @@ fn narrow_matches_full(
     case: &str,
     expect: Expect,
 ) -> Result<(PresentedDamage, Counts, Vec<AckReceipt>), String> {
+    let baseline_generation = scene.font_generation;
+    let (previous_pixels, _) = retained_pixels(renderer)?;
     let before = counts(renderer);
     let narrow = present(renderer, scene)?;
     let moved = delta(before, counts(renderer));
+    let narrow_generation = scene.font_generation;
     // The full comparison frame below replaces the scene's receipts, so keep the narrow frame's.
     let narrow_receipts = std::mem::take(&mut scene.receipts);
     check(
@@ -547,10 +632,27 @@ fn narrow_matches_full(
         &format!("{case}: expected {expect:?}, counted {moved:?} over {} cells", scene.cells()),
     )?;
     let (narrow_pixels, width_px) = retained_pixels(renderer)?;
+    // The narrow frame draws under its damage scissor, so every pixel outside it is retained.
+    let outside = differing_pixels(&previous_pixels, &narrow_pixels, width_px, Some(narrow.damage));
+    check(
+        outside.0 == 0,
+        &format!(
+            "{case}: the narrow frame changed no pixel outside its damage {:?}: {outside:?}",
+            narrow.damage
+        ),
+    )?;
     renderer.invalidate_retained_frame();
     let full = present(renderer, scene)?;
     check(full.first_frame, &format!("{case}: the comparison frame repaints in full"))?;
     let (full_pixels, _) = retained_pixels(renderer)?;
+    let generations = [baseline_generation, narrow_generation, scene.font_generation];
+    check(
+        generations.iter().all(|generation| *generation == generations[0]),
+        &format!(
+            "{case}: a font fallback was published during the case (baseline, narrow, full \
+             generations {generations:?}); settle_fallback must run first"
+        ),
+    )?;
     check(
         narrow_pixels.len() == full_pixels.len(),
         &format!("{case}: both frames read back at one size"),
@@ -559,8 +661,10 @@ fn narrow_matches_full(
     check(
         difference.is_none(),
         &format!(
-            "{case}: narrow damage {:?} equals a full repaint; first differing pixel {difference:?}",
-            narrow.damage
+            "{case}: narrow damage {:?} equals a full repaint; first differing pixel \
+             {difference:?}, differing {:?}, generations {generations:?}",
+            narrow.damage,
+            differing_pixels(&narrow_pixels, &full_pixels, width_px, None)
         ),
     )?;
     // The cleared ground is opaque at opacity 1 and keeps an alpha below opaque under it.
@@ -843,6 +947,7 @@ fn overhanging_records(
     let mut split = Scene {
         opacity: OPACITY,
         receipts: Vec::new(),
+        font_generation: None,
         panes: vec![
             ScenePane {
                 id: PANE_ID,
@@ -1193,6 +1298,37 @@ fn degraded_is_never_partial(
 /// One case: a renderer and its layout, and the event loop recovery runs on.
 type Case = fn(&mut GpuRenderer, &Layout, &ActiveEventLoop) -> Result<(), String>;
 
+/// Repaint every glyph the cases draw until the font-fallback generation the renderer applies has
+/// held still. A fallback search runs on a worker: a publication applied between a case's narrow
+/// frame and its full reference clears the frame key and redraws glyphs outside the narrow damage
+/// with the new faces, so the reference would no longer show the narrow frame's state. Waiting
+/// here leaves no search outstanding for any case.
+fn settle_fallback(renderer: &mut GpuRenderer, layout: &Layout) -> Result<(), String> {
+    // The dense grid's last row holds every text an edit writes; the underline case adds styles,
+    // not glyphs.
+    let mut scene = single(layout);
+    let mut quiet = FallbackQuiet::new(Duration::from_secs(1));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        renderer.invalidate_retained_frame();
+        present(renderer, &mut scene)?;
+        let generation = scene.font_generation.ok_or("a presented frame records its fonts")?;
+        let tofu = !renderer.last_missing_tofu().is_empty();
+        if quiet.observe(generation, tofu, Instant::now()) {
+            // When: the generation held still for the quiet period, no search is outstanding.
+            return Ok(());
+        }
+        check(
+            Instant::now() < deadline,
+            &format!(
+                "the font fallback settles; generation {generation}, tofu {:?}",
+                renderer.last_missing_tofu()
+            ),
+        )?;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
     let (window, mut renderer) = match wgpu_renderer(active) {
         Ok(built) => built,
@@ -1205,6 +1341,7 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
     };
     let layout = layout(&renderer, &window);
     check(layout.rows >= 20, &format!("the pane holds at least 20 rows: {}", layout.rows))?;
+    settle_fallback(&mut renderer, &layout)?;
     let mut failures = Vec::new();
     // Recovery rebinds the device and degrading switches presenters, so those run last.
     let cases: [(&str, Case); 9] = [
@@ -1330,6 +1467,47 @@ fn a_skipped_row_must_meet_the_glyph_and_miss_the_cursor_strip_with_its_record()
     };
     let tall = outward(layout.cursor_glyph(8, 4, 4.5));
     assert_eq!(skipped_reached_row(&layout, 8, tall, reaching_row_four), None);
+}
+
+/// The fallback watch settles only after the generation holds still: one second without tofu,
+/// restarted by a change, and five seconds while tofu remains.
+#[test]
+fn fallback_quiet_waits_for_the_generation_to_hold_still() {
+    let start = Instant::now();
+    let at = |millis: u64| start + Duration::from_millis(millis);
+    let mut quiet = FallbackQuiet::new(Duration::from_secs(1));
+    assert!(!quiet.observe(0, false, at(0)));
+    assert!(!quiet.observe(0, false, at(500)));
+    // A publication restarts the wait.
+    assert!(!quiet.observe(1, false, at(1_200)));
+    assert!(!quiet.observe(1, false, at(2_000)));
+    assert!(quiet.observe(1, false, at(2_200)));
+    let mut searching = FallbackQuiet::new(Duration::from_secs(1));
+    assert!(!searching.observe(0, true, at(0)));
+    assert!(!searching.observe(0, true, at(2_000)));
+    assert!(searching.observe(0, true, at(5_000)));
+}
+
+/// Differing pixels are counted and bounded outside the excluded rectangle only, or everywhere
+/// without one; identical frames differ nowhere.
+#[test]
+fn differing_pixels_are_counted_and_bounded_outside_the_exclusion() {
+    let width_px = 4;
+    let first = vec![0u8; 4 * 4 * 3];
+    let mut second = first.clone();
+    for (column, row) in [(1usize, 1usize), (3, 2)] {
+        second[(row * 4 + column) * 4] = 9;
+    }
+    let edit_row = PixelRect { x: 0, y: 1, w: 2, h: 1 };
+    assert_eq!(
+        differing_pixels(&first, &second, width_px, Some(edit_row)),
+        (1, Some(PixelRect { x: 3, y: 2, w: 1, h: 1 }))
+    );
+    assert_eq!(
+        differing_pixels(&first, &second, width_px, None),
+        (2, Some(PixelRect { x: 1, y: 1, w: 3, h: 2 }))
+    );
+    assert_eq!(differing_pixels(&first, &first, width_px, None), (0, None));
 }
 
 /// Partial assembly on a real wgpu renderer: narrowed frames equal full repaints, failures after
