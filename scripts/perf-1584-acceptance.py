@@ -3,18 +3,21 @@
 
 Two commands, run in this order and never the other way round:
 
-  select    Reads only run metadata (`gh run view --json` and the run's attempt jobs API), never an
-            artifact, and writes selection.json: the decisive run and attempt, its head and merge base,
-            the twelve required jobs with their conclusions and times, the budget accounting (B) and
-            whether the single replacement allowance is used, and why. No performance value can reach it.
+  select    Reads the operator's record (the first eligible run and, when one is excluded, the
+            structured exclusion, written before any replacement was triggered) and only run metadata
+            (`gh run view --json`, the attempt jobs API and the head's run list), never an artifact. It
+            writes selection.json: the decisive run and attempt, its head and merge base, the twelve
+            required jobs with their conclusions and times, the budget accounting (B), and the single
+            replacement allowance with its checked exclusion. No performance value can reach it.
   evaluate  Reads selection.json and the downloaded comparison artifacts, checks run and artifact
             identity, selects perf-compare's final `valid` runs, validates each selected result, and
             prints every row with its operands. Exit 0 accepts, 1 rejects, 2 means the evidence is invalid.
 
 The statistics and validation are perf-compare's own. Before anything else both commands read
-`scripts/perf-compare.py` and `scripts/perf-critical-path.py` from the tree being evaluated, check each
-file's SHA-256 against FROZEN_FILES, copy the verified bytes to a private temp directory and import only
-those copies. A missing or changed file exits 2. perf-compare's `load_gate` is never called. This file's
+`scripts/perf-compare.py` and `scripts/perf-critical-path.py` as committed at the evaluated head (`--head`
+for select, selection.json's `head_sha` for evaluate) with `git cat-file`, never from a working tree, check
+each file's SHA-256 against FROZEN_FILES, copy the verified bytes to a private temp directory and import only
+those copies. A missing commit or file, or a changed file, exits 2. perf-compare's `load_gate` is never called. This file's
 own SHA-256 is published before any run, and the operator checks it before running it.
 """
 
@@ -26,6 +29,7 @@ import importlib.util
 import json
 import math
 import re
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -91,21 +95,49 @@ BASE_LINE = re.compile(r"- Base: `[^`]*` = `(?P<sha>[0-9a-f]{40})`")
 HEAD_LINE = re.compile(r"- Head: `[^`]*` = `(?P<sha>[0-9a-f]{40})`")
 HARNESS_LINE = re.compile(r"- Harness hash \(both trees\): `(?P<digest>[0-9a-f]+)`")
 SHA = re.compile(r"[0-9a-f]{40}")
+# A git read of one frozen file; the child is killed and reaped at this bound.
+GIT_TIMEOUT_S = 60
+
+# The listed external-infrastructure failures, each with the failed step it can explain: None is a job that
+# failed outside every step. Build, test, comparison, cancellation and skip causes are never listed.
+INFRASTRUCTURE_STEPS = {
+    "runner-lost": frozenset({None}),
+    "runner-provisioning": frozenset({None, "Set up job"}),
+    "actions-transfer": frozenset({"Upload the binaries", "Upload the build evidence", "Download the binaries",
+                                   "Upload the comparison evidence", "Restore vcpkg binaries (Cairo)"}),
+    "toolchain-fetch": frozenset({"Install Rust", "Install native dependencies", "Resolve vcpkg commit",
+                                  "Restore vcpkg binaries (Cairo)", "Install Cairo for Windows"}),
+}
+QUEUE_CATEGORY = "queue"
+# The result job's own check, which fails whenever a comparison job did not succeed.
+RESULT_STEP = "Require every comparison job to succeed"
 
 
 class EvidenceInvalid(Exception):
     """The evidence cannot be evaluated: exit 2."""
 
 
-def load_frozen(tree: Path, workdir: Path) -> dict:
-    """Verify each frozen file in `tree`, copy the verified bytes into `workdir` and import only the copies."""
+def git_blob(tree: Path, commit: str, relative: str) -> bytes:
+    """`relative`'s bytes as committed at `commit` in the repository at `tree`; a missing commit or file is invalid."""
+    try:
+        completed = subprocess.run(["git", "-C", str(tree), "cat-file", "blob", f"{commit}:{relative}"],
+                                   capture_output=True, timeout=GIT_TIMEOUT_S, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EvidenceInvalid(f"frozen file {relative} cannot be read at {commit}: {error}") from error
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip()
+        raise EvidenceInvalid(f"frozen file {relative} cannot be read at {commit}: {detail}")
+    return completed.stdout
+
+
+def load_frozen(tree: Path, commit: object, workdir: Path) -> dict:
+    """Verify each frozen file as committed at `commit`, copy the verified bytes into `workdir` and import only
+    the copies. A working tree is never read, so a checkout cannot hide a changed commit."""
+    if not SHA.fullmatch(str(commit)):
+        raise EvidenceInvalid(f"the evaluated head {commit!r} is not a full commit SHA")
     modules = {}
     for relative, expected in FROZEN_FILES.items():
-        source = tree / relative
-        try:
-            content = source.read_bytes()
-        except OSError as error:
-            raise EvidenceInvalid(f"frozen file {relative} cannot be read: {error}") from error
+        content = git_blob(tree, str(commit), relative)
         digest = hashlib.sha256(content).hexdigest()
         if digest != expected:
             raise EvidenceInvalid(f"frozen file {relative} has SHA-256 {digest}, not {expected}")
@@ -192,62 +224,163 @@ def check_identity(view: Mapping, run_id: int, head_sha: str) -> None:
         raise EvidenceInvalid(f"run {run_id} ran head {view.get('headSha')!r}, not the frozen head {head_sha}")
 
 
-def check_replacement(args, runner, critical, view: Mapping) -> dict:
-    """The single replacement allowance: absent, a same-run re-run of all jobs after a listed infrastructure
-    failure, or a new run on the same head after an all-success run that missed B only by queueing."""
-    attempt = view.get("attempt")
-    if args.replaces is None:
-        if attempt != 1:
-            raise EvidenceInvalid(f"attempt {attempt} is a re-run; a replacement must be declared with --replaces")
-        return {"used": False}
-    match = re.fullmatch(r"(\d+):(\d+)", args.replaces)
-    if match is None:
-        raise EvidenceInvalid("--replaces takes RUN_ID:ATTEMPT")
-    excluded_run, excluded_attempt = int(match[1]), int(match[2])
-    evidence = (args.replacement_evidence or "").strip()
-    if args.replacement_kind is None or not evidence:
-        raise EvidenceInvalid("a replacement needs --replacement-kind and --replacement-evidence")
-    if excluded_attempt != 1:
-        raise EvidenceInvalid("only the first execution may be excluded; one replacement is allowed in total")
-    excluded_jobs = attempt_jobs(runner, args.repo, excluded_run, excluded_attempt)
-    record = {"used": True, "kind": args.replacement_kind, "excluded_run": excluded_run,
-              "excluded_attempt": excluded_attempt, "evidence": evidence}
-    if args.replacement_kind == "infrastructure":
-        if excluded_run != args.run or attempt != 2:
-            raise EvidenceInvalid("an infrastructure replacement is Re-run all jobs: the same run ID, attempt 2")
-        conclusions = {job.get("name"): job.get("conclusion") for job in excluded_jobs if isinstance(job, dict)}
-        failed = sorted(name for name in REQUIRED_JOBS if conclusions.get(name) != "success")
-        if not failed:
-            raise EvidenceInvalid("the excluded attempt has no failed required job to attribute to infrastructure")
-        record["excluded_failures"] = failed
-        return record
-    if excluded_run == args.run or attempt != 1:
-        raise EvidenceInvalid("a queue-budget replacement is the first new run ID, attempt 1")
-    excluded_view = view_run(runner, args.repo, excluded_run)
-    check_identity(excluded_view, excluded_run, args.head)
-    if critical.parse_time(excluded_view.get("createdAt")) >= critical.parse_time(view.get("createdAt")):
-        raise EvidenceInvalid("the replacement run must be created after the run it replaces")
-    found = required_jobs(excluded_jobs, f"excluded run {excluded_run}")
-    unsuccessful = sorted(name for name, job in found.items() if job.get("conclusion") != "success")
-    if unsuccessful:
-        raise EvidenceInvalid(f"a queue-budget replacement needs every excluded job to succeed: {unsuccessful}")
-    excluded_budget = budget_of(critical, excluded_view.get("createdAt"), found)
-    if not excluded_budget["measurable"] or excluded_budget["within"]:
-        raise EvidenceInvalid(f"the excluded run satisfied B or cannot be measured: {excluded_budget}")
-    record["excluded_budget"] = excluded_budget
+def head_runs(runner, repository: str, head_sha: str) -> list:
+    """Every workflow run on `head_sha`, page by page."""
+    listed, page = [], 1
+    while True:
+        path = f"repos/{repository}/actions/runs?head_sha={head_sha}&per_page={PAGE_SIZE}&page={page}"
+        batch = gh_json(runner, ["gh", "api", path])
+        if not isinstance(batch, dict) or not isinstance(batch.get("workflow_runs"), list):
+            raise EvidenceInvalid(f"head {head_sha}: the runs API returned no run list")
+        listed.extend(batch["workflow_runs"])
+        if len(batch["workflow_runs"]) < PAGE_SIZE:
+            return listed
+        page += 1
+
+
+def read_record(args) -> dict:
+    """The operator's record: this head and merge base, the first eligible run (attempt 1), when it was
+    recorded, and the one exclusion or null."""
+    record = read_json(args.record)
+    if not isinstance(record, dict) or record.get("schema_version") != 1:
+        raise EvidenceInvalid("the record is not a schema 1 object")
+    if (record.get("head_sha"), record.get("merge_base")) != (args.head, args.merge_base):
+        raise EvidenceInvalid("the record names another head or merge base")
+    first = record.get("first_eligible_run")
+    if not isinstance(first, dict) or not isinstance(first.get("run_id"), int) or first.get("attempt") != 1:
+        raise EvidenceInvalid("the record's first eligible run must be a run ID at attempt 1")
+    if not (record.get("exclusion") is None or isinstance(record.get("exclusion"), dict)):
+        raise EvidenceInvalid("the record's exclusion is neither null nor an object")
     return record
 
 
+def failed_steps(job: Mapping) -> list:
+    """The names of a job's failed steps."""
+    return [step.get("name") for step in job.get("steps") or []
+            if isinstance(step, dict) and step.get("conclusion") == "failure"]
+
+
+def check_infrastructure(args, runner, critical, view: Mapping, exclusion: Mapping, recorded_s: int) -> dict:
+    """An infrastructure exclusion: each listed job failed on a listed cause's step, every other unsuccessful
+    job follows from a listed failure, and Re-run all jobs of the same run, recorded first, is decisive."""
+    if args.run != exclusion["run_id"] or view.get("attempt") != 2:
+        raise EvidenceInvalid("an infrastructure replacement is Re-run all jobs: the same run ID, attempt 2")
+    allowed = INFRASTRUCTURE_STEPS[exclusion["category"]]
+    excluded = required_jobs(attempt_jobs(runner, args.repo, args.run, 1), f"excluded run {args.run} attempt 1")
+    listed = exclusion.get("jobs")
+    if not isinstance(listed, list) or not listed:
+        raise EvidenceInvalid("an infrastructure exclusion lists no failed job")
+    names = set()
+    for entry in listed:
+        job = excluded.get(entry.get("name")) if isinstance(entry, dict) else None
+        if job is None or job.get("id") != entry.get("id") or entry["name"] in names:
+            raise EvidenceInvalid(f"listed job {entry!r} is not one required job of the excluded attempt")
+        step = entry.get("failed_step")
+        if job.get("conclusion") != "failure" or step not in allowed or failed_steps(job) != ([] if step is None else [step]):
+            raise EvidenceInvalid(f"{entry['name']}: {job.get('conclusion')} at {failed_steps(job)} is not "
+                                  f"a listed {exclusion['category']} failure")
+        names.add(entry["name"])
+    for name, job in excluded.items():
+        if name in names or job.get("conclusion") == "success":
+            continue
+        follows_producer = name.startswith("macOS before/after") and job.get("conclusion") == "skipped" \
+            and PRODUCER_JOB in names
+        follows_result = name == RESULT_JOB and job.get("conclusion") == "failure" and failed_steps(job) == [RESULT_STEP]
+        if not (follows_producer or follows_result):
+            raise EvidenceInvalid(f"{name}: {job.get('conclusion')} is not explained by a listed failure")
+    rerun = required_jobs(attempt_jobs(runner, args.repo, args.run, 2), f"run {args.run} attempt 2")
+    inherited = sorted(name for name, job in rerun.items() if job.get("run_attempt") != 2)
+    if inherited:
+        raise EvidenceInvalid(f"attempt 2 inherited {inherited} instead of re-running all jobs")
+    failed_end = max(critical.parse_time(job.get("completed_at")) for job in excluded.values())
+    rerun_start = min(critical.parse_time(job.get("started_at")) for job in rerun.values())
+    if not failed_end <= recorded_s < rerun_start:
+        raise EvidenceInvalid("the exclusion must be recorded after the failed attempt and before the rerun")
+    return {"used": True, "category": exclusion["category"], "excluded_run": args.run, "excluded_attempt": 1,
+            "jobs": sorted(names)}
+
+
+def check_queue(args, runner, critical, view: Mapping, exclusion: Mapping, recorded_s: int) -> dict:
+    """A queue exclusion: every required job succeeded but B failed, and reconciled macOS queue intervals on the
+    critical path account for the overrun; the first new run on the head, created after the record, is decisive."""
+    excluded_run = exclusion["run_id"]
+    if args.run == excluded_run or view.get("attempt") != 1:
+        raise EvidenceInvalid("a queue-budget replacement is the first new run ID, attempt 1")
+    excluded_view = view_run(runner, args.repo, excluded_run)
+    check_identity(excluded_view, excluded_run, args.head)
+    if excluded_view.get("attempt") != 1:
+        raise EvidenceInvalid(f"the excluded run is at attempt {excluded_view.get('attempt')}, not 1")
+    found = required_jobs(attempt_jobs(runner, args.repo, excluded_run, 1), f"excluded run {excluded_run}")
+    unsuccessful = sorted(name for name, job in found.items() if job.get("conclusion") != "success")
+    if unsuccessful:
+        raise EvidenceInvalid(f"a queue-budget replacement needs every excluded job to succeed: {unsuccessful}")
+    budget = budget_of(critical, excluded_view.get("createdAt"), found)
+    if not budget["measurable"] or budget["within"] or budget["elapsed_s"] != exclusion.get("elapsed_s"):
+        raise EvidenceInvalid(f"the excluded run's B {budget} does not match a recorded over-budget run")
+    intervals, queued_s = [], 0
+    for entry in exclusion.get("intervals") or []:
+        job = found.get(entry.get("name")) if isinstance(entry, dict) else None
+        if job is None or job.get("id") != entry.get("id") or not entry["name"].startswith("macOS"):
+            raise EvidenceInvalid(f"interval {entry!r} is not a required macOS job of the excluded run")
+        start, end = critical.parse_time(entry.get("start")), critical.parse_time(entry.get("end"))
+        if not critical.parse_time(job.get("created_at")) <= start < end <= critical.parse_time(job.get("started_at")):
+            raise EvidenceInvalid(f"interval {entry!r} is outside {entry['name']}'s queue window")
+        intervals.append((start, end))
+        queued_s += end - start
+    intervals.sort()
+    if not intervals or any(later[0] < earlier[1] for earlier, later in zip(intervals, intervals[1:])):
+        raise EvidenceInvalid("the queue intervals are missing or overlap")
+    counterfactual_s = budget["elapsed_s"] - queued_s
+    if counterfactual_s != exclusion.get("counterfactual_s") or counterfactual_s > critical.BUDGET_S:
+        raise EvidenceInvalid(f"without the queue intervals the run takes {counterfactual_s} s; the record says "
+                              f"{exclusion.get('counterfactual_s')} and B is {critical.BUDGET_S} s")
+    finished_s = max(critical.parse_time(job.get("completed_at")) for job in found.values())
+    if not finished_s <= recorded_s < critical.parse_time(view.get("createdAt")):
+        raise EvidenceInvalid("the exclusion must be recorded after the excluded run and before its replacement")
+    excluded_created = critical.parse_time(excluded_view.get("createdAt"))
+    later = sorted((critical.parse_time(run.get("created_at")), run.get("id"))
+                   for run in head_runs(runner, args.repo, args.head)
+                   if isinstance(run, dict) and run.get("name") == WORKFLOW_NAME and run.get("event") == EVENT
+                   and critical.parse_time(run.get("created_at")) > excluded_created)
+    if not later or later[0][1] != args.run:
+        raise EvidenceInvalid(f"run {args.run} is not the first new {WORKFLOW_NAME} run on the head")
+    return {"used": True, "category": QUEUE_CATEGORY, "excluded_run": excluded_run, "excluded_attempt": 1,
+            "excluded_budget": budget, "queued_s": queued_s, "counterfactual_s": counterfactual_s}
+
+
+def check_replacement(args, runner, critical, view: Mapping, record: Mapping) -> dict:
+    """The single replacement allowance: unused, so the decisive run is the recorded first eligible run, or
+    used once, on that run's first execution, for a listed infrastructure failure or a queue overrun."""
+    first, exclusion = record["first_eligible_run"], record["exclusion"]
+    if exclusion is None:
+        if (args.run, view.get("attempt")) != (first["run_id"], 1):
+            raise EvidenceInvalid(f"run {args.run} attempt {view.get('attempt')} is not the recorded first "
+                                  f"eligible run {first['run_id']} attempt 1, and no exclusion is recorded")
+        return {"used": False}
+    if (exclusion.get("run_id"), exclusion.get("attempt")) != (first["run_id"], 1):
+        raise EvidenceInvalid("only the first eligible run's first execution may be excluded, once")
+    try:
+        recorded_s = critical.parse_time(record.get("recorded_at"))
+    except critical.AccountingError as error:
+        raise EvidenceInvalid(f"the record's recorded_at is unreadable: {error}") from error
+    if exclusion.get("category") in INFRASTRUCTURE_STEPS:
+        return check_infrastructure(args, runner, critical, view, exclusion, recorded_s)
+    if exclusion.get("category") == QUEUE_CATEGORY:
+        return check_queue(args, runner, critical, view, exclusion, recorded_s)
+    raise EvidenceInvalid(f"exclusion category {exclusion.get('category')!r} is not listed")
+
+
 def select(args, runner, critical) -> dict:
-    """Build selection.json from metadata alone."""
+    """Build selection.json from the operator's record and run metadata alone."""
     if not SHA.fullmatch(args.head or "") or not SHA.fullmatch(args.merge_base or ""):
         raise EvidenceInvalid("--head and --merge-base must be full 40-character SHAs")
+    record = read_record(args)
     view = view_run(runner, args.repo, args.run)
     check_identity(view, args.run, args.head)
     attempt = view.get("attempt")
     if not isinstance(attempt, int) or attempt < 1:
         raise EvidenceInvalid(f"run {args.run} reports attempt {attempt!r}")
-    replacement = check_replacement(args, runner, critical, view)
+    replacement = check_replacement(args, runner, critical, view, record)
     jobs = required_jobs(attempt_jobs(runner, args.repo, args.run, attempt), f"run {args.run} attempt {attempt}")
     viewed = required_jobs(view.get("jobs") or [], f"gh run view of run {args.run}")
     for name in REQUIRED_JOBS:
@@ -261,6 +394,8 @@ def select(args, runner, critical) -> dict:
                   "started_at": jobs[name].get("started_at"), "completed_at": jobs[name].get("completed_at")}
                  for name in REQUIRED_JOBS],
         "budget": budget_of(critical, view.get("createdAt"), jobs),
+        "first_eligible_run": record["first_eligible_run"],
+        "record": record,
         "replacement": replacement,
     }
 
@@ -274,6 +409,8 @@ class SelectedRun:
     directory: Path
     outcome: dict
     result: dict
+    # The same result.json with every decimal read as an exact Fraction; the rows read only these operands.
+    exact: dict
 
 
 def read_json(path: Path) -> object:
@@ -281,6 +418,14 @@ def read_json(path: Path) -> object:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise EvidenceInvalid(f"{path} cannot be read: {error}") from error
+
+
+def read_exact(path: Path) -> object:
+    """A JSON document whose decimals are exact Fractions, so a threshold compares the values as written."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"), parse_float=Fraction)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         raise EvidenceInvalid(f"{path} cannot be read: {error}") from error
 
 
@@ -431,6 +576,8 @@ def check_result(compare, run: SelectedRun, platform: str, scenario: str, set_na
         if not (isinstance(latency, dict) and compare.latency_values(latency)
                 and is_count(latency.get("attributed")) and is_count(latency.get("total"))):
             raise EvidenceInvalid(f"{where}: latency needs samples and integer attributed and total")
+        if not all(math.isfinite(value) for value in compare.latency_values(latency)):
+            raise EvidenceInvalid(f"{where}: an attributed latency sample is not finite")
 
 
 def collect(compare, selection: Mapping, root: Path) -> tuple[dict, list]:
@@ -463,10 +610,11 @@ def collect(compare, selection: Mapping, root: Path) -> tuple[dict, list]:
                                                      outcome.get("variant")) != (side, scenario_id, variant):
                     raise EvidenceInvalid(f"{directory}: outcome.json disagrees with its raw-log line")
                 result = read_json(directory / "scratch" / "result.json")
-                if not isinstance(result, dict):
-                    raise EvidenceInvalid(f"{directory}: result.json is not an object")
-                run = SelectedRun(directory, outcome, result)
+                run = SelectedRun(directory, outcome, result, read_exact(directory / "scratch" / "result.json"))
                 try:
+                    # Shape and schema failures stay inside this catch, so a base counters run only notes them.
+                    if not isinstance(result, dict) or not isinstance(run.exact, dict):
+                        raise EvidenceInvalid(f"{directory}: result.json is not an object")
                     check_result(compare, run, platform, scenario, set_name, side, harness)
                 except EvidenceInvalid as problem:
                     if set_name == "counters" and side == "base":
@@ -499,21 +647,56 @@ class Row:
     detail: str
 
 
-def finite(value: object) -> float | None:
-    """`value` when it is a finite number; else None, which fails its row."""
-    return value if isinstance(value, (int, float)) and math.isfinite(value) else None
+def exact_number(value: object) -> Fraction | None:
+    """`value` as an exact Fraction when it is a finite number; else None, which fails its row."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, Fraction)):
+        return Fraction(value)
+    if isinstance(value, float) and math.isfinite(value):
+        return Fraction(value)
+    return None
 
 
-def presented_fps(run: SelectedRun, scenario: str) -> float | None:
-    """The relevant phase's presented frames per second."""
-    phase = relevant_phase(run.result, scenario)
-    return finite(phase["presented_frames"] / (phase["end_unix_s"] - phase["start_unix_s"]))
+def shown(value: Fraction) -> str:
+    """An exact operand as the report prints it."""
+    return f"{float(value):.4f}"
 
 
-def throughput_mbps(run: SelectedRun) -> float | None:
-    """The run's throughput in MB/s."""
-    throughput = run.result["throughput"]
-    return finite(throughput["bytes"] / throughput["seconds"] / 1_000_000)
+def presented_fps(run: SelectedRun, scenario: str) -> Fraction | None:
+    """The relevant phase's presented frames per second, exactly."""
+    phase = relevant_phase(run.exact, scenario)
+    frames, start, end = (exact_number(phase.get(key)) for key in ("presented_frames", "start_unix_s", "end_unix_s"))
+    if frames is None or start is None or end is None or end == start:
+        return None
+    return frames / (end - start)
+
+
+def throughput_mbps(run: SelectedRun) -> Fraction | None:
+    """The run's throughput in MB/s, exactly, from its integer bytes and its seconds."""
+    throughput = run.exact["throughput"]
+    count, seconds = exact_number(throughput.get("bytes")), exact_number(throughput.get("seconds"))
+    if count is None or seconds is None or seconds == 0:
+        return None
+    return count / seconds / 1_000_000
+
+
+def exact_latencies(run: SelectedRun) -> list:
+    """The run's attributed latencies, exactly; a non-finite one reads None and fails the row."""
+    values = []
+    for sample in run.exact["latency"]["samples"]:
+        value = sample.get("latency_ms") if isinstance(sample, dict) else sample
+        if isinstance(sample, dict) and value is None:
+            continue
+        values.append(exact_number(value))
+    return values
+
+
+def coverage_of(selected: Sequence[SelectedRun]) -> tuple[int, int] | None:
+    """Pooled (attributed, total); None when no sample was counted, which never meets the coverage bound."""
+    attributed = sum(run.result["latency"]["attributed"] for run in selected)
+    total = sum(run.result["latency"]["total"] for run in selected)
+    return (attributed, total) if total > 0 else None
 
 
 def summaries(compare, values_by_side: Mapping[str, list]) -> dict | None:
@@ -542,10 +725,9 @@ def rows_of(compare, critical, selection: Mapping, population: Mapping) -> list:
         rows.append(Row("A1", False, "a selected run lacks a finite fps"))
     else:
         base, head = fps["base"], fps["head"]
-        passed = Fraction(head.median) >= A1_MEDIAN_FACTOR * Fraction(base.median) \
-            and Fraction(head.minimum) > Fraction(base.median)
-        rows.append(Row("A1", passed, f"head median {head.median:.4f} vs 2 x base median {base.median:.4f}; "
-                                      f"head min {head.minimum:.4f} vs base median {base.median:.4f}"))
+        passed = head.median >= A1_MEDIAN_FACTOR * base.median and head.minimum > base.median
+        rows.append(Row("A1", passed, f"head median {shown(head.median)} vs 2 x base median {shown(base.median)}; "
+                                      f"head min {shown(head.minimum)} vs base median {shown(base.median)}"))
 
     frames_total = lost_total = 0
     presence = []
@@ -572,34 +754,34 @@ def rows_of(compare, critical, selection: Mapping, population: Mapping) -> list:
             rows.append(Row(f"G1 {platform}", False, "a selected run lacks a finite throughput"))
             continue
         base, head = throughput["base"], throughput["head"]
-        passed = Fraction(head.median) >= G1_MEDIAN_FACTOR * Fraction(base.median) \
-            and Fraction(head.median) >= Fraction(base.minimum)
+        passed = head.median >= G1_MEDIAN_FACTOR * base.median and head.median >= base.minimum
         rows.append(Row(f"G1 {platform}", passed,
-                        f"head median {head.median:.4f} MB/s vs 0.9 x base median {base.median:.4f} "
-                        f"and base min {base.minimum:.4f}"))
+                        f"head median {shown(head.median)} MB/s vs 0.9 x base median {shown(base.median)} "
+                        f"and base min {shown(base.minimum)}"))
 
     windows_fps = summaries(compare, by_side("Windows", "S3-default", lambda run: presented_fps(run, "S3-default")))
     if windows_fps is None:
         rows.append(Row("G2", False, "a selected run lacks a finite fps"))
     else:
         base, head = windows_fps["base"], windows_fps["head"]
-        rows.append(Row("G2", Fraction(head.median) >= Fraction(base.minimum),
-                        f"head median {head.median:.4f} vs base min {base.minimum:.4f}"))
+        rows.append(Row("G2", head.median >= base.minimum,
+                        f"head median {shown(head.median)} vs base min {shown(base.minimum)}"))
 
     for platform in PLATFORM_NAMES:
         coverage, pooled = {}, {}
         for side in ("base", "head"):
             selected = runs(platform, "S2-flood", "timed", side)
-            coverage[side] = (sum(run.result["latency"]["attributed"] for run in selected),
-                              sum(run.result["latency"]["total"] for run in selected))
-            pooled[side] = [value for run in selected for value in compare.latency_values(run.result["latency"])]
+            coverage[side] = coverage_of(selected)
+            pooled[side] = [value for run in selected for value in exact_latencies(run)]
         accepted = compare.latency_acceptance(coverage["base"], coverage["head"])
+        if any(value is None for values in pooled.values() for value in values):
+            rows.append(Row(f"G3 {platform}", False, "a selected run has a non-finite latency"))
+            continue
         base_p95, head_p95 = compare.percentile_95(pooled["base"]), compare.percentile_95(pooled["head"])
-        passed = accepted and Fraction(head_p95) <= G3_P95_FACTOR * Fraction(base_p95)
+        passed = accepted and head_p95 <= G3_P95_FACTOR * base_p95
         rows.append(Row(f"G3 {platform}", passed,
-                        f"coverage base {coverage['base'][0]}/{coverage['base'][1]}, head "
-                        f"{coverage['head'][0]}/{coverage['head'][1]} (acceptance {accepted}); "
-                        f"head p95 {head_p95} vs 1.1 x base p95 {base_p95}"))
+                        f"coverage base {coverage['base']}, head {coverage['head']} (acceptance {accepted}); "
+                        f"head p95 {shown(head_p95)} vs 1.1 x base p95 {shown(base_p95)}"))
 
     for platform in PLATFORM_NAMES:
         stream = summaries(compare, by_side(platform, "S4-default", lambda run: presented_fps(run, "S4-default")))
@@ -607,8 +789,8 @@ def rows_of(compare, critical, selection: Mapping, population: Mapping) -> list:
             rows.append(Row(f"G4 {platform}", False, "a selected run lacks a finite fps"))
             continue
         base, head = stream["base"], stream["head"]
-        rows.append(Row(f"G4 {platform}", Fraction(head.median) >= Fraction(base.minimum),
-                        f"head median {head.median:.4f} vs base min {base.minimum:.4f}"))
+        rows.append(Row(f"G4 {platform}", head.median >= base.minimum,
+                        f"head median {shown(head.median)} vs base min {shown(base.minimum)}"))
 
     inert = [(window_counters(run)["vt"]["parser_yields"], window_counters(run)["window"]["parser_yield_requests"])
              for run in runs("Windows", "S3-default", "counters", "head")]
@@ -681,9 +863,9 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     chooser.add_argument("--output", type=Path, required=True, help="where selection.json goes")
     chooser.add_argument("--repo", default=DEFAULT_REPOSITORY, help=f"owner/name (default {DEFAULT_REPOSITORY})")
     chooser.add_argument("--tree", type=Path, default=tree_default, help="the tree holding the frozen files")
-    chooser.add_argument("--replaces", help="RUN_ID:ATTEMPT of the one excluded execution")
-    chooser.add_argument("--replacement-kind", choices=("infrastructure", "queue-budget"))
-    chooser.add_argument("--replacement-evidence", help="the job evidence and accounting for the exclusion")
+    chooser.add_argument("--record", type=Path, required=True,
+                         help="the operator's record of the first eligible run and any exclusion, written before "
+                              "a replacement was triggered")
     judge = commands.add_parser("evaluate", help="judge the rule from selection.json and the artifacts")
     judge.add_argument("--selection", type=Path, required=True)
     judge.add_argument("--artifacts", type=Path, required=True, help="the downloaded artifacts, one folder each")
@@ -696,7 +878,13 @@ def main(argv: Sequence[str] | None = None, runner: Callable[[Sequence[str]], by
     args = parse_args(argv)
     with tempfile.TemporaryDirectory(prefix="perf-1584-frozen-") as workdir:
         try:
-            modules = load_frozen(args.tree, Path(workdir))
+            # The frozen files are read at the evaluated head: --head for select, selection.json's for evaluate.
+            selection_document = None if args.command == "select" else read_json(args.selection)
+            if args.command == "select":
+                commit = args.head
+            else:
+                commit = selection_document.get("head_sha") if isinstance(selection_document, dict) else None
+            modules = load_frozen(args.tree, commit, Path(workdir))
             compare, critical = modules[COMPARE], modules[CRITICAL]
             try:
                 if args.command == "select":
@@ -705,7 +893,7 @@ def main(argv: Sequence[str] | None = None, runner: Callable[[Sequence[str]], by
                     print(f"selected run {selection['run_id']} attempt {selection['attempt']}; "
                           f"B {selection['budget']}; replacement {selection['replacement']}")
                     return EXIT_ACCEPT
-                rows, report = evaluate(compare, critical, read_json(args.selection), args.artifacts)
+                rows, report = evaluate(compare, critical, selection_document, args.artifacts)
             except critical.AccountingError as error:
                 raise EvidenceInvalid(str(error)) from error
         except EvidenceInvalid as error:

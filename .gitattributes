@@ -12,3 +12,9 @@ crates/sonicterm-freetype/libpng/**    linguist-vendored -text
 crates/sonicterm-freetype/zlib/**      linguist-vendored -text
 crates/sonicterm-harfbuzz/harfbuzz/**  linguist-vendored -text
 crates/sonicterm-winit/**             linguist-vendored -text
+
+# Frozen-evaluator inputs are hashed byte for byte, so a CRLF checkout must never rewrite them.
+scripts/perf-compare.py text eol=lf
+scripts/perf-critical-path.py text eol=lf
+scripts/perf-1584-acceptance.py text eol=lf
+scripts/perf-1584-acceptance_tests.py text eol=lf

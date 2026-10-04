@@ -309,16 +309,17 @@ acquired and the frame presented, on the GPU and GDI paths alike. The retry floo
 stays one full frame period.
 
 On the hardware path a parser miss may also ask the missed pane's VT worker for
-its next gap between batches, once per contention episode; an episode opens when
-the window is created and at each coherent collection, and an image miss asks
-nothing. The worker sends `ParserYielded` with a park deadline it fixed before
+its next gap between batches. A contention episode has at most one outstanding
+request and one accepted fast retry; a request that resolves unaccepted (declined,
+stale or expired) leaves the episode open for another. An episode opens when the
+window is created and at each coherent collection, and an image miss asks nothing. The worker sends `ParserYielded` with a park deadline it fixed before
 sending, 2 ms after its clock reading and never past an open synchronized update's
 stored deadline, then parks holding no lock. A window accepts the grant only for the
 exact pane, request generation and handshake, before both the floor and the
 worker's deadline, while the pane is visible and no surface timeout or
 synchronized-output hold is pending. One accepted grant is the episode's one fast
 retry: the next admission before the worker's deadline bypasses the retry floor and
-the streaming carry once. It never clears or arms the floor; Timeout and Sync
+streaming deferral once. It never clears or arms the floor; Timeout and Sync
 deferrals still win, and a retry that misses again waits for the floor. A
 successful collection serves the worker under the held parser guards; every other
 outcome serves it too, except a pane retired or moved after acceptance, which

@@ -4,12 +4,15 @@ per-result validation, every row of the rule, and the whole-file freeze of the s
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import copy
 import importlib.util
 import io
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -31,7 +34,33 @@ compare = importlib.util.module_from_spec(COMPARE_SPEC)
 sys.modules[COMPARE_SPEC.name] = compare
 COMPARE_SPEC.loader.exec_module(compare)
 
-HEAD_SHA = "c" * 40
+# Fixture commits use a fixed identity and keep their bytes, whatever the user's git configuration says.
+GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+               GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+
+
+def git(directory, *arguments):
+    """Run git in `directory` and return its output; any failure fails the test run."""
+    return subprocess.run(["git", "-C", str(directory), "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false",
+                           *arguments], env=GIT_ENV, capture_output=True, text=True, check=True, timeout=60).stdout
+
+
+def fixture_repository():
+    """A git repository whose one commit holds both frozen files byte for byte; returns (path, commit)."""
+    repository = Path(tempfile.mkdtemp(prefix="perf-1584-fixture-repo-"))
+    atexit.register(shutil.rmtree, repository, ignore_errors=True)
+    git(repository, "init", "-q")
+    for relative in evaluator.FROZEN_FILES:
+        (repository / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, repository / relative)
+    git(repository, "add", "-A")
+    git(repository, "commit", "-q", "-m", "frozen files")
+    return repository, git(repository, "rev-parse", "HEAD").strip()
+
+
+# Every fixture's head is a real commit of this repository: the evaluator reads the frozen files from the
+# head's commit, never from a working tree.
+FIXTURE_TREE, HEAD_SHA = fixture_repository()
 BASE_SHA = "b" * 40
 RUN_ID = 4242
 PULL_REQUEST = 9001
@@ -147,14 +176,15 @@ def write_json(path, value):
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
-def build_artifacts(root, figures=None, edit=None, attempt=1, extra_lines=None):
+def build_artifacts(root, figures=None, edit=None, attempt=1, extra_lines=None, head=None):
     """Write every comparison artifact the rule reads; `edit(context, result, outcome)` may change a run
     before it is written. Returns {(platform, shard): artifact path}."""
     figures = figures or default_figures()
+    head = head or HEAD_SHA
     artifacts = {}
     for platform, shards in LAYOUT.items():
         for shard, scenarios in shards.items():
-            artifact = root / f"perf-comparison-{PULL_REQUEST}-{HEAD_SHA}-{platform}-{shard}-{attempt}"
+            artifact = root / f"perf-comparison-{PULL_REQUEST}-{head}-{platform}-{shard}-{attempt}"
             artifacts[(platform, shard)] = artifact
             write_json(artifact / "timing.json", {
                 "schema_version": 1, "run_id": str(RUN_ID), "run_attempt": str(attempt),
@@ -187,19 +217,49 @@ def build_artifacts(root, figures=None, edit=None, attempt=1, extra_lines=None):
                                 evidence = f"/Users/runner/out/runs/{scenario}/{set_name}/{folder}"
                             lines.append(f"- {label} {set_name} {side} {outcome['kind']}: `{evidence}/01-harness.log`")
             lines.extend((extra_lines or {}).get((platform, shard), []))
-            document = "\n".join([f"- Base: `origin/main` = `{BASE_SHA}`", f"- Head: `HEAD` = `{HEAD_SHA}`",
+            document = "\n".join([f"- Base: `origin/main` = `{BASE_SHA}`", f"- Head: `HEAD` = `{head}`",
                                   f"- Harness hash (both trees): `{HARNESS[platform]}`", "", "Raw logs:", "",
                                   *lines, ""])
             (artifact / "comparison.md").write_text(document, encoding="utf-8")
     return artifacts
 
 
-def jobs_record(conclusions=None, completed_at="2026-10-05T10:28:00Z"):
-    """The run's jobs API page: every required job completed, `success` unless overridden."""
-    conclusions = conclusions or {}
-    return [{"name": name, "status": "completed", "conclusion": conclusions.get(name, "success"),
-             "started_at": "2026-10-05T10:01:00Z", "completed_at": completed_at}
-            for name in evaluator.REQUIRED_JOBS]
+PRODUCER = evaluator.PRODUCER_JOB
+WINDOWS_S7 = "Windows before/after comparison (S7)"
+WINDOWS_S9 = "Windows before/after comparison (S9-S10)"
+MACOS_COMPARISONS = [name for name in evaluator.REQUIRED_JOBS if name.startswith("macOS before/after")]
+
+
+def job_id(attempt, name):
+    """The fixture's job ID for `name` in `attempt`; each attempt's jobs have their own IDs."""
+    return attempt * 1000 + evaluator.REQUIRED_JOBS.index(name)
+
+
+def jobs_record(conclusions=None, completed_at="2026-10-05T10:28:00Z", attempt=1, run_attempts=None,
+                failed_steps=None, timing=None, started_at="2026-10-05T10:01:00Z"):
+    """One attempt's jobs API page: every required job completed, `success` unless overridden, with its ID,
+    the attempt that ran it, its queue and run times, and its steps (`failed_steps` names a failed one)."""
+    conclusions, run_attempts = conclusions or {}, run_attempts or {}
+    failed_steps, timing = failed_steps or {}, timing or {}
+    jobs = []
+    for name in evaluator.REQUIRED_JOBS:
+        steps = [{"name": "Set up job", "conclusion": "success"}]
+        if name in failed_steps:
+            steps.append({"name": failed_steps[name], "conclusion": "failure"})
+        job = {"id": job_id(attempt, name), "run_attempt": run_attempts.get(name, attempt), "name": name,
+               "status": "completed", "conclusion": conclusions.get(name, "success"),
+               "created_at": "2026-10-05T10:00:05Z", "started_at": started_at, "completed_at": completed_at,
+               "steps": steps}
+        job.update(timing.get(name, {}))
+        jobs.append(job)
+    return jobs
+
+
+def record_body(first=(RUN_ID, 1), exclusion=None, recorded_at="2026-10-05T10:30:00Z", head=None):
+    """The operator's record: the first eligible run and, when one is excluded, the exclusion."""
+    return {"schema_version": 1, "head_sha": head or HEAD_SHA, "merge_base": BASE_SHA,
+            "first_eligible_run": {"run_id": first[0], "attempt": first[1]},
+            "recorded_at": recorded_at, "exclusion": exclusion}
 
 
 class GhShim:
@@ -217,6 +277,9 @@ class GhShim:
             run = self.runs[int(argv[3])]
             assert argv[4:] == ["--repo", evaluator.DEFAULT_REPOSITORY, "--json", evaluator.VIEW_FIELDS], argv
             return json.dumps(run["view"]).encode("utf-8")
+        if argv[:2] == ["gh", "api"] and len(argv) == 3 and "/actions/runs?head_sha=" in argv[2]:
+            listed = self.runs.get("head_runs", [])
+            return json.dumps({"total_count": len(listed), "workflow_runs": listed}).encode("utf-8")
         if argv[:2] == ["gh", "api"] and len(argv) == 3 and "/attempts/" in argv[2] and "/jobs?" in argv[2]:
             path = argv[2]
             run_id = int(path.split("/actions/runs/")[1].split("/")[0])
@@ -253,19 +316,41 @@ class AcceptanceFixture(unittest.TestCase):
         self.artifacts = self.temp / "artifacts"
         self.artifacts.mkdir()
 
-    def select(self, runs=None, extra=(), run_id=RUN_ID):
-        """Write selection.json through `select` and the shim; return (exit code, output, shim)."""
+    def select(self, runs=None, extra=(), run_id=RUN_ID, record=None, head=None, tree=None):
+        """Write the operator's record and selection.json through `select` and the shim; return (exit code,
+        output, shim)."""
         runs = runs or {RUN_ID: {"view": run_view(), "jobs": {1: jobs_record()}}}
+        record_path = self.temp / "record.json"
+        write_json(record_path, record or record_body())
         shim = GhShim(runs)
-        code, output = call_main(["select", "--run", str(run_id), "--head", HEAD_SHA, "--merge-base", BASE_SHA,
-                                  "--output", str(self.temp / "selection.json"), "--tree", str(ROOT), *extra],
-                                 runner=shim)
+        code, output = call_main(["select", "--run", str(run_id), "--head", head or HEAD_SHA, "--merge-base",
+                                  BASE_SHA, "--output", str(self.temp / "selection.json"), "--record",
+                                  str(record_path), "--tree", str(tree or FIXTURE_TREE), *extra], runner=shim)
         return code, output, shim
 
-    def evaluate(self, tree=ROOT):
+    def evaluate(self, tree=None):
         """Evaluate the fixture's selection and artifacts; return (exit code, output)."""
         return call_main(["evaluate", "--selection", str(self.temp / "selection.json"),
-                          "--artifacts", str(self.artifacts), "--tree", str(tree)])
+                          "--artifacts", str(self.artifacts), "--tree", str(tree or FIXTURE_TREE)])
+
+    def row_verdict(self, name, figures=None, edit=None, completed_at=None):
+        """A fresh selection and artifact set, evaluated: (exit code, row `name`'s verdict, output)."""
+        self.artifacts = Path(tempfile.mkdtemp(prefix="artifacts-", dir=self.temp))
+        runs = None
+        if completed_at is not None:
+            runs = {RUN_ID: {"view": run_view(), "jobs": {1: jobs_record(completed_at=completed_at)}}}
+        code, output, _shim = self.select(runs)
+        self.assertEqual(code, 0, output)
+        build_artifacts(self.artifacts, figures=figures, edit=edit)
+        code, output = self.evaluate()
+        return code, self.row(output, name), output
+
+    def assert_inclusive(self, name, at, outside):
+        """`at` sits exactly on row `name`'s threshold and passes; `outside` is just past it and fails."""
+        for label, build, expected in (("at", at, "PASS"), ("outside", outside, "FAIL")):
+            with self.subTest(boundary=label):
+                _code, verdict, output = self.row_verdict(name, **build)
+                self.assertEqual(verdict, expected, output)
 
     def passing(self, **build):
         """A selection and an artifact set built with `build`."""
@@ -414,6 +499,85 @@ class RuleTests(AcceptanceFixture):
         self.assertEqual(code, evaluator.EXIT_REJECT, output)
         self.assertEqual(self.row(output, "A1"), "FAIL")
         self.assertEqual(self.row(output, "G1 macOS"), "PASS")
+
+
+    def test_every_inclusive_threshold_passes_at_equality_and_fails_just_outside(self):
+        # Each inclusive bound compares exact rationals built from the results' integers and decimals, so a
+        # figure exactly on the bound passes and one just past it fails; no float rounding decides a row.
+        def figures(changes):
+            changed = default_figures()
+            changed.update(changes)
+            return {"figures": changed}
+
+        def counters(*runs):
+            return figures({("macOS", "counters"): [dict(wakes=wakes, frames=frames, lost=lost, start=0, end=0,
+                                                         yields=wakes, requests=wakes)
+                                                    for wakes, frames, lost in runs]})
+
+        def flat(values, unattributed=0):
+            return [latency_run(values, unattributed) for _ in range(2)]
+
+        g1_base = {"base": [9.0, 9.0, 9.0, 8.0, 9.5]}
+        cases = {
+            "A1": (figures({("macOS", "S3-default", "fps"): {"base": [4.0, 4.1, 3.9, 4.2, 4.0], "head": [8.0] * 5}}),
+                   figures({("macOS", "S3-default", "fps"): {"base": [4.0, 4.1, 3.9, 4.2, 4.0], "head": [7.99] * 5}})),
+            "A2": (counters((100, 80, 20), (100, 80, 20)), counters((100, 80, 20), (100, 79, 21))),
+            "G1 macOS": (figures({("macOS", "S3-default", "throughput"): {**g1_base, "head": [8.1] * 5}}),
+                         figures({("macOS", "S3-default", "throughput"): {**g1_base, "head": [8.0999999] * 5}})),
+            "G1 Windows": (figures({("Windows", "S3-default", "throughput"): {"base": [9.0, 9.1, 8.9, 9.2, 9.0],
+                                                                               "head": [8.9] * 5}}),
+                           figures({("Windows", "S3-default", "throughput"): {"base": [9.0, 9.1, 8.9, 9.2, 9.0],
+                                                                               "head": [8.8999999] * 5}})),
+            "G2": (figures({("Windows", "S3-default", "fps"): {"base": [20.0, 21.0, 19.0, 22.0, 20.0],
+                                                               "head": [19.0] * 5}}),
+                   figures({("Windows", "S3-default", "fps"): {"base": [20.0, 21.0, 19.0, 22.0, 20.0],
+                                                               "head": [18.99] * 5}})),
+            "G3 macOS": (figures({("macOS", "S2-flood", "latency"): {"base": flat([1.0] * 100),
+                                                                    "head": flat([1.1] * 100)}}),
+                         figures({("macOS", "S2-flood", "latency"): {"base": flat([1.0] * 100),
+                                                                    "head": flat([1.1000001] * 100)}})),
+            "G3 Windows": (figures({("Windows", "S2-flood", "latency"): {
+                               "base": flat([10.0 + step for step in range(80)], 20),
+                               "head": flat([10.0 + step for step in range(80)], 20)}}),
+                           figures({("Windows", "S2-flood", "latency"): {
+                               "base": flat([10.0 + step for step in range(80)], 21),
+                               "head": flat([10.0 + step for step in range(80)], 20)}})),
+            "G4 macOS": (figures({}), figures({("macOS", "S4-default", "fps"): {"base": [30.0] * 5,
+                                                                              "head": [29.99] * 5}})),
+            "B": ({"completed_at": "2026-10-05T10:30:00Z"}, {"completed_at": "2026-10-05T10:30:01Z"}),
+        }
+        for name, (at, outside) in cases.items():
+            with self.subTest(row=name):
+                self.assert_inclusive(name, at, outside)
+
+    def test_a1_minimum_clause_is_strict(self):
+        # A1's minimum clause is the one strict bound: a head minimum equal to the base median fails.
+        changed = default_figures()
+        changed[("macOS", "S3-default", "fps")] = {"base": [4.0, 4.1, 3.9, 4.2, 4.0], "head": [9.0] * 4 + [4.0]}
+        _code, verdict, output = self.row_verdict("A1", figures=changed)
+        self.assertEqual(verdict, "FAIL", output)
+
+    def test_g3_fails_when_a_side_counts_no_samples(self):
+        # A zero total on either side, on either platform, has no coverage, so G3 fails there: a zero
+        # denominator never satisfies the 80% and 10-point bounds.
+        for platform in ("macOS", "Windows"):
+            for side in ("base", "head"):
+                def edit(context, result, _outcome, platform=platform, side=side):
+                    if (context["platform"], context["scenario"], context["side"]) == (platform, "S2-flood", side):
+                        result["latency"]["attributed"] = 0
+                        result["latency"]["total"] = 0
+                with self.subTest(platform=platform, side=side):
+                    code, verdict, output = self.row_verdict(f"G3 {platform}", edit=edit)
+                    self.assertEqual((code, verdict), (evaluator.EXIT_REJECT, "FAIL"), output)
+
+    def test_a2_an_open_token_is_not_a_frame(self):
+        # Runs (W2 F1 L0, start 0 end 1) and (W3 F2 L1, start 0 end 0) resolve 3 frames of 4, below 4/5; a
+        # token still open at the phase's end is never credited as a frame, which would read 4 of 5.
+        changed = default_figures()
+        changed[("macOS", "counters")] = [dict(wakes=2, frames=1, lost=0, start=0, end=1, yields=2, requests=2),
+                                         dict(wakes=3, frames=2, lost=1, start=0, end=0, yields=3, requests=3)]
+        code, verdict, output = self.row_verdict("A2", figures=changed)
+        self.assertEqual((code, verdict), (evaluator.EXIT_REJECT, "FAIL"), output)
 
 
 class EvidenceTests(AcceptanceFixture):
@@ -581,6 +745,84 @@ class EvidenceTests(AcceptanceFixture):
         self.assertEqual(code, evaluator.EXIT_INVALID, output)
 
 
+    def test_a_non_finite_latency_sample_is_invalid(self):
+        # Every attributed sample must be finite, whether the bad one would be the selected p95 or not.
+        def away(context, result, _outcome):
+            if (context["platform"], context["scenario"], context["side"], context["index"]) \
+                    == ("macOS", "S2-flood", "head", 0):
+                result["latency"]["samples"][0]["latency_ms"] = float("nan")
+
+        def at_p95(context, result, _outcome):
+            if (context["platform"], context["scenario"], context["side"]) == ("macOS", "S2-flood", "head"):
+                for sample in result["latency"]["samples"]:
+                    if sample["latency_ms"] is not None and sample["latency_ms"] >= 100.0:
+                        sample["latency_ms"] = float("inf")
+        for label, edit in (("away from the p95", away), ("at the p95", at_p95)):
+            with self.subTest(sample=label):
+                code, output = self.invalid_with(edit)
+                self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
+    def invalid_with(self, edit=None, extra_lines=None):
+        """A fresh selection and artifact set built with `edit` or `extra_lines`, evaluated."""
+        self.artifacts = Path(tempfile.mkdtemp(prefix="artifacts-", dir=self.temp))
+        code, output, _shim = self.select()
+        self.assertEqual(code, 0, output)
+        build_artifacts(self.artifacts, edit=edit, extra_lines=extra_lines)
+        return self.evaluate()
+
+    def counters_result(self, folder):
+        """The macOS S3/default counters run `folder`'s result.json."""
+        artifact = self.artifacts / f"perf-comparison-{PULL_REQUEST}-{HEAD_SHA}-macOS-S1-S3-S6-S8-S12-1"
+        return artifact / "runs" / "S3-default" / "counters" / folder / "scratch" / "result.json"
+
+    def test_a_non_object_base_counters_result_is_only_a_note(self):
+        # A base counters run feeds only the report, so a result.json that is not an object is a note and
+        # every row is unchanged.
+        self.passing()
+        self.counters_result("01-base").write_text("[]", encoding="utf-8")
+        code, output = self.evaluate()
+        self.assertEqual(code, evaluator.EXIT_ACCEPT, output)
+        self.assertIn("base counters run excluded", output)
+
+    def test_a_non_object_head_counters_result_is_invalid(self):
+        # The same shape in a head counters run is evidence the rule reads, so it is invalid.
+        self.passing()
+        self.counters_result("02-head").write_text("[]", encoding="utf-8")
+        code, output = self.evaluate()
+        self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
+    def test_a_duplicated_path_on_an_unselected_line_is_invalid(self):
+        # A raw-log path listed twice is invalid even when the second line is a kind the rule never selects.
+        line = "- S3/default timed head display: `/Users/runner/out/runs/S3-default/timed/02-head/01-harness.log`"
+        code, output = self.invalid_with(extra_lines={("macOS", "S1-S3-S6-S8-S12"): [line]})
+        self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
+    def test_a_missing_directory_on_an_unselected_line_is_invalid(self):
+        # Every raw-log line needs its attempt directory, even one of a kind the rule never selects.
+        line = "- S3/default timed head display: `/Users/runner/out/runs/S3-default/timed/99-head/01-harness.log`"
+        code, output = self.invalid_with(extra_lines={("macOS", "S1-S3-S6-S8-S12"): [line]})
+        self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
+    def test_a_negative_duration_phase_is_invalid(self):
+        # A phase that ends before it starts is invalid evidence; read as a figure it would leave the
+        # median untouched and the rule would accept.
+        def edit(context, result, _outcome):
+            if (context["platform"], context["scenario"], context["set_name"], context["side"], context["index"]) \
+                    == ("macOS", "S3-default", "timed", "base", 0):
+                phase = next(phase for phase in result["phases"] if phase["name"] == "flood")
+                phase["end_unix_s"] = phase["start_unix_s"] - PHASE_WALL_S
+        code, output = self.invalid_with(edit)
+        self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
+    def test_the_frozen_and_evaluator_files_check_out_with_lf(self):
+        # A CRLF checkout would change the frozen bytes, so these files always check out with LF.
+        names = ["scripts/perf-compare.py", "scripts/perf-critical-path.py", "scripts/perf-1584-acceptance.py",
+                 "scripts/perf-1584-acceptance_tests.py"]
+        output = git(ROOT, "check-attr", "eol", "--", *names)
+        for name in names:
+            self.assertIn(f"{name}: eol: lf", output)
+
+
 class SelectTests(AcceptanceFixture):
     def test_select_reads_only_run_metadata_and_records_the_decision(self):
         # select runs `gh run view` and the run's jobs API, nothing else: it never downloads an artifact, so no
@@ -598,58 +840,198 @@ class SelectTests(AcceptanceFixture):
         self.assertFalse(selection["replacement"]["used"])
 
     def test_an_undeclared_rerun_is_refused(self):
-        # A second attempt is the replacement execution; without --replaces it cannot be decisive.
-        runs = {RUN_ID: {"view": run_view(attempt=2), "jobs": {2: jobs_record()}}}
+        # A second attempt is the replacement execution; with no recorded exclusion it cannot be decisive.
+        runs = {RUN_ID: {"view": run_view(attempt=2), "jobs": {2: jobs_record(attempt=2)}}}
         code, output, _shim = self.select(runs)
         self.assertEqual(code, evaluator.EXIT_INVALID, output)
 
+    def test_selection_is_bound_to_the_recorded_first_eligible_run(self):
+        # Without an exclusion the decisive run is the operator's recorded first eligible run, and the record
+        # must name this head and merge base.
+        code, output, _shim = self.select(record=record_body(first=(RUN_ID - 1, 1)))
+        self.assertEqual(code, evaluator.EXIT_INVALID, output)
+        code, output, _shim = self.select(record=record_body(head="e" * 40))
+        self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
+    def infra_runs(self, conclusions=None, failed_steps=None, run_attempts=None):
+        """The first eligible run: attempt 1 failed S7 at `Install Rust`, and attempt 2 re-ran all jobs."""
+        conclusions = {WINDOWS_S7: "failure"} if conclusions is None else conclusions
+        failed_steps = {WINDOWS_S7: "Install Rust"} if failed_steps is None else failed_steps
+        return {RUN_ID: {"view": run_view(attempt=2), "jobs": {
+            1: jobs_record(conclusions, failed_steps=failed_steps),
+            2: jobs_record(attempt=2, run_attempts=run_attempts, started_at="2026-10-05T10:35:00Z",
+                           completed_at="2026-10-05T10:58:00Z")}}}
+
+    def infra_record(self, category="toolchain-fetch", jobs=None, recorded_at="2026-10-05T10:30:00Z"):
+        """The record of an infrastructure exclusion of the first execution."""
+        jobs = jobs if jobs is not None else [{"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S7),
+                                               "failed_step": "Install Rust"}]
+        return record_body(recorded_at=recorded_at, exclusion={"run_id": RUN_ID, "attempt": 1,
+                                                               "category": category, "jobs": jobs})
+
     def test_a_listed_infrastructure_failure_allows_one_rerun_of_all_jobs(self):
-        failed = {"Windows before/after comparison (S7)": "failure"}
-        runs = {RUN_ID: {"view": run_view(attempt=2), "jobs": {1: jobs_record(failed), 2: jobs_record()}}}
-        code, output, _shim = self.select(runs, extra=(
-            "--replaces", f"{RUN_ID}:1", "--replacement-kind", "infrastructure",
-            "--replacement-evidence", "runner lost communication in Windows before/after comparison (S7)"))
+        # A toolchain fetch that failed before any comparison step, recorded before the rerun, admits
+        # attempt 2 of the same run, which re-ran every required job.
+        code, output, _shim = self.select(self.infra_runs(), record=self.infra_record())
         self.assertEqual(code, 0, output)
         selection = json.loads((self.temp / "selection.json").read_text(encoding="utf-8"))
         self.assertTrue(selection["replacement"]["used"])
+        self.assertEqual(selection["replacement"]["category"], "toolchain-fetch")
 
-    def test_an_infrastructure_replacement_needs_a_failed_excluded_attempt(self):
-        runs = {RUN_ID: {"view": run_view(attempt=2), "jobs": {1: jobs_record(), 2: jobs_record()}}}
-        code, output, _shim = self.select(runs, extra=(
-            "--replaces", f"{RUN_ID}:1", "--replacement-kind", "infrastructure", "--replacement-evidence", "none"))
+    def test_a_lost_runner_fails_its_job_outside_every_step(self):
+        # A runner that lost communication fails the job with no failed step; a failed step is not that.
+        lost = [{"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S7), "failed_step": None}]
+        code, output, _shim = self.select(self.infra_runs(failed_steps={}),
+                                          record=self.infra_record("runner-lost", lost))
+        self.assertEqual(code, 0, output)
+        listed = [{"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S7), "failed_step": "Install Rust"}]
+        code, output, _shim = self.select(self.infra_runs(), record=self.infra_record("runner-lost", listed))
         self.assertEqual(code, evaluator.EXIT_INVALID, output)
 
-    def test_a_queue_budget_replacement_is_a_new_run_on_the_same_head(self):
-        # The excluded run succeeded in every job but over budget; the replacement is a later run ID.
-        excluded = RUN_ID - 1
-        runs = {RUN_ID: {"view": run_view(created_at="2026-10-05T11:00:00Z"),
-                         "jobs": {1: jobs_record(completed_at="2026-10-05T11:28:00Z")}},
-                excluded: {"view": run_view(run_id=excluded),
-                           "jobs": {1: jobs_record(completed_at="2026-10-05T10:41:00Z")}}}
-        code, output, _shim = self.select(runs, extra=(
-            "--replaces", f"{excluded}:1", "--replacement-kind", "queue-budget",
-            "--replacement-evidence", "macOS provisioning queued 14 min on the critical path"))
+    def test_a_failed_producer_explains_its_skipped_comparisons(self):
+        # When the producer fails on a listed cause, the macOS comparisons it feeds are skipped and the result
+        # job fails at its own check; both follow from the listed failure.
+        conclusions = {PRODUCER: "failure", evaluator.RESULT_JOB: "failure",
+                       **{name: "skipped" for name in MACOS_COMPARISONS}}
+        failed_steps = {PRODUCER: "Install Rust", evaluator.RESULT_JOB: "Require every comparison job to succeed"}
+        jobs = [{"name": PRODUCER, "id": job_id(1, PRODUCER), "failed_step": "Install Rust"}]
+        code, output, _shim = self.select(self.infra_runs(conclusions, failed_steps), record=self.infra_record(jobs=jobs))
         self.assertEqual(code, 0, output)
 
-    def test_a_queue_budget_replacement_of_a_run_within_budget_is_refused(self):
+    def test_unlisted_causes_never_qualify_as_infrastructure(self):
+        # A build, test or comparison failure, a cancellation, a skip, an unknown category, or an unlisted
+        # failed job never admits a replacement.
+        compare_step = [{"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S7),
+                         "failed_step": "Compare the base and the head"}]
+        skipped = [{"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S7), "failed_step": None}]
+        cases = {
+            "comparison step": (self.infra_runs(failed_steps={WINDOWS_S7: "Compare the base and the head"}),
+                                self.infra_record(jobs=compare_step)),
+            "cancelled": (self.infra_runs(conclusions={WINDOWS_S7: "cancelled"}, failed_steps={}),
+                          self.infra_record("runner-lost", skipped)),
+            "skipped": (self.infra_runs(conclusions={WINDOWS_S7: "skipped"}, failed_steps={}),
+                        self.infra_record("runner-lost", skipped)),
+            "unknown category": (self.infra_runs(), self.infra_record("flaky")),
+            "unlisted failure": (self.infra_runs(
+                conclusions={WINDOWS_S7: "failure", WINDOWS_S9: "failure"},
+                failed_steps={WINDOWS_S7: "Install Rust", WINDOWS_S9: "Compare the base and the head"}),
+                self.infra_record()),
+            "misreported step": (self.infra_runs(failed_steps={WINDOWS_S7: "Compare the base and the head"}),
+                                 self.infra_record()),
+            "wrong job ID": (self.infra_runs(), self.infra_record(jobs=[
+                {"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S9), "failed_step": "Install Rust"}])),
+        }
+        for label, (runs, record) in cases.items():
+            with self.subTest(case=label):
+                code, output, _shim = self.select(runs, record=record)
+                self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
+    def test_an_infrastructure_replacement_is_recorded_before_a_full_rerun(self):
+        # The exclusion is recorded after the failed attempt and before the rerun starts, and Re-run all jobs
+        # leaves no required job inherited from attempt 1.
+        cases = {
+            "inherited job": (self.infra_runs(run_attempts={WINDOWS_S9: 1}), self.infra_record()),
+            "recorded after the rerun began": (self.infra_runs(), self.infra_record(recorded_at="2026-10-05T10:40:00Z")),
+            "recorded before the failure finished": (self.infra_runs(),
+                                                     self.infra_record(recorded_at="2026-10-05T10:20:00Z")),
+            "another run excluded": (self.infra_runs(), record_body(exclusion={
+                "run_id": RUN_ID - 1, "attempt": 1, "category": "toolchain-fetch", "jobs": []})),
+        }
+        for label, (runs, record) in cases.items():
+            with self.subTest(case=label):
+                code, output, _shim = self.select(runs, record=record)
+                self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
+    def queue_runs(self, predecessor_attempt=1, replacement_created="2026-10-05T11:00:00Z", timing=None,
+                   extra_runs=(), conclusions=None, completed_at="2026-10-05T10:41:00Z"):
+        """The first eligible run over budget with the producer queued 15 minutes, then the replacement."""
         excluded = RUN_ID - 1
-        runs = {RUN_ID: {"view": run_view(created_at="2026-10-05T11:00:00Z"),
+        timing = timing or {PRODUCER: {"created_at": "2026-10-05T10:00:05Z", "started_at": "2026-10-05T10:15:05Z"}}
+        listed = [{"id": excluded, "name": evaluator.WORKFLOW_NAME, "event": "pull_request",
+                   "head_sha": HEAD_SHA, "created_at": CREATED_AT},
+                  *extra_runs,
+                  {"id": RUN_ID, "name": evaluator.WORKFLOW_NAME, "event": "pull_request", "head_sha": HEAD_SHA,
+                   "created_at": replacement_created}]
+        return {RUN_ID: {"view": run_view(created_at=replacement_created),
                          "jobs": {1: jobs_record(completed_at="2026-10-05T11:28:00Z")}},
-                excluded: {"view": run_view(run_id=excluded), "jobs": {1: jobs_record()}}}
-        code, output, _shim = self.select(runs, extra=(
-            "--replaces", f"{excluded}:1", "--replacement-kind", "queue-budget", "--replacement-evidence", "queue"))
+                excluded: {"view": run_view(run_id=excluded, attempt=predecessor_attempt),
+                           "jobs": {1: jobs_record(conclusions, completed_at=completed_at, timing=timing)}},
+                "head_runs": listed}
+
+    def queue_record(self, intervals=None, counterfactual_s=1560, elapsed_s=2460, recorded_at="2026-10-05T10:45:00Z"):
+        """The record of a queue exclusion: the producer's 900 s queue on the critical path."""
+        intervals = intervals if intervals is not None else [
+            {"name": PRODUCER, "id": job_id(1, PRODUCER), "start": "2026-10-05T10:00:05Z",
+             "end": "2026-10-05T10:15:05Z"}]
+        return record_body(first=(RUN_ID - 1, 1), recorded_at=recorded_at, exclusion={
+            "run_id": RUN_ID - 1, "attempt": 1, "category": "queue", "elapsed_s": elapsed_s,
+            "counterfactual_s": counterfactual_s, "intervals": intervals})
+
+    def test_a_queue_budget_replacement_is_the_first_new_run_on_the_same_head(self):
+        # Every excluded job succeeded but B failed by 660 s; the producer's reconciled 900 s macOS queue
+        # interval accounts for it (2460 - 900 = 1560 <= 1800), so the first later run on the head replaces it.
+        code, output, _shim = self.select(self.queue_runs(), record=self.queue_record())
+        self.assertEqual(code, 0, output)
+        selection = json.loads((self.temp / "selection.json").read_text(encoding="utf-8"))
+        self.assertEqual(selection["replacement"]["counterfactual_s"], 1560)
+
+    def test_a_queue_exclusion_must_reconcile_with_the_job_record(self):
+        # The intervals are macOS required jobs' own queue windows, disjoint, and without them the run meets
+        # B; the recorded figures must equal the recomputed ones.
+        short = [{"name": PRODUCER, "id": job_id(1, PRODUCER), "start": "2026-10-05T10:00:05Z",
+                  "end": "2026-10-05T10:05:05Z"}]
+        outside = [{"name": PRODUCER, "id": job_id(1, PRODUCER), "start": "2026-10-05T10:00:05Z",
+                    "end": "2026-10-05T10:20:05Z"}]
+        windows = [{"name": WINDOWS_S7, "id": job_id(1, WINDOWS_S7), "start": "2026-10-05T10:00:05Z",
+                    "end": "2026-10-05T10:15:05Z"}]
+        overlapping = [{"name": PRODUCER, "id": job_id(1, PRODUCER), "start": "2026-10-05T10:00:05Z",
+                        "end": "2026-10-05T10:15:05Z"}] * 2
+        windows_timing = {WINDOWS_S7: {"created_at": "2026-10-05T10:00:05Z", "started_at": "2026-10-05T10:15:05Z"}}
+        cases = {
+            "too short to recover B": (self.queue_runs(), self.queue_record(short, counterfactual_s=2160)),
+            "wrong counterfactual": (self.queue_runs(), self.queue_record(counterfactual_s=1500)),
+            "wrong elapsed": (self.queue_runs(), self.queue_record(elapsed_s=2400)),
+            "outside the queue window": (self.queue_runs(), self.queue_record(outside, counterfactual_s=1260)),
+            "a Windows job": (self.queue_runs(timing=windows_timing), self.queue_record(windows)),
+            "overlapping": (self.queue_runs(), self.queue_record(overlapping, counterfactual_s=660)),
+        }
+        for label, (runs, record) in cases.items():
+            with self.subTest(case=label):
+                code, output, _shim = self.select(runs, record=record)
+                self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
+    def test_a_queue_replacement_follows_the_record_and_takes_the_one_allowance(self):
+        # The excluded run is the recorded first eligible run, still on attempt 1; the replacement was created
+        # after the record and is the first later run on the head.
+        not_first = self.queue_record()
+        not_first["first_eligible_run"]["run_id"] = RUN_ID - 5
+        between = {"id": RUN_ID - 2 + 100, "name": evaluator.WORKFLOW_NAME, "event": "pull_request",
+                   "head_sha": HEAD_SHA, "created_at": "2026-10-05T10:50:00Z"}
+        cases = {
+            "predecessor re-run": (self.queue_runs(predecessor_attempt=2), self.queue_record()),
+            "excluded run is not the first eligible": (self.queue_runs(), not_first),
+            "not the first new run": (self.queue_runs(extra_runs=(between,)), self.queue_record()),
+            "recorded after the replacement": (self.queue_runs(),
+                                               self.queue_record(recorded_at="2026-10-05T11:05:00Z")),
+            "recorded before the run finished": (self.queue_runs(),
+                                                 self.queue_record(recorded_at="2026-10-05T10:40:00Z")),
+        }
+        for label, (runs, record) in cases.items():
+            with self.subTest(case=label):
+                code, output, _shim = self.select(runs, record=record)
+                self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
+    def test_a_queue_budget_replacement_of_a_run_within_budget_is_refused(self):
+        code, output, _shim = self.select(self.queue_runs(completed_at="2026-10-05T10:28:00Z"),
+                                          record=self.queue_record(elapsed_s=1680, counterfactual_s=780))
         self.assertEqual(code, evaluator.EXIT_INVALID, output)
 
     def test_a_queue_budget_replacement_needs_every_excluded_job_to_succeed(self):
-        excluded = RUN_ID - 1
-        runs = {RUN_ID: {"view": run_view(created_at="2026-10-05T11:00:00Z"),
-                         "jobs": {1: jobs_record(completed_at="2026-10-05T11:28:00Z")}},
-                excluded: {"view": run_view(run_id=excluded),
-                           "jobs": {1: jobs_record({evaluator.RESULT_JOB: "failure"},
-                                                   completed_at="2026-10-05T10:41:00Z")}}}
-        code, output, _shim = self.select(runs, extra=(
-            "--replaces", f"{excluded}:1", "--replacement-kind", "queue-budget", "--replacement-evidence", "queue"))
-        self.assertEqual(code, evaluator.EXIT_INVALID, output)
+        for conclusion in ("failure", "skipped", "cancelled"):
+            with self.subTest(conclusion=conclusion):
+                code, output, _shim = self.select(self.queue_runs(conclusions={evaluator.RESULT_JOB: conclusion}),
+                                                  record=self.queue_record())
+                self.assertEqual(code, evaluator.EXIT_INVALID, output)
 
     def test_a_run_of_another_head_is_refused(self):
         runs = {RUN_ID: {"view": run_view(head_sha="d" * 40), "jobs": {1: jobs_record()}}}
@@ -667,34 +1049,76 @@ class SelectTests(AcceptanceFixture):
 
 
 class FreezeTests(AcceptanceFixture):
-    def frozen_tree(self, change=None):
-        """A copy of the two frozen files, optionally edited by `change(text) -> text` on perf-compare."""
+    def committed_change(self, change=None, remove=None):
+        """Clone the fixture repository, change perf-compare with `change(text) -> text` or delete `remove`,
+        commit, and return (clone, the new commit)."""
         tree = self.temp / "tree"
-        (tree / "scripts").mkdir(parents=True)
-        for relative in evaluator.FROZEN_FILES:
-            shutil.copyfile(ROOT / relative, tree / relative)
+        git(self.temp, "clone", "-q", str(FIXTURE_TREE), str(tree))
         if change is not None:
             path = tree / "scripts" / "perf-compare.py"
             original = path.read_text(encoding="utf-8")
             changed = change(original)
             self.assertNotEqual(changed, original, "the mutation changed nothing")
-            path.write_text(changed, encoding="utf-8")
-        return tree
+            path.write_bytes(changed.encode("utf-8"))
+        if remove is not None:
+            (tree / remove).unlink()
+        git(tree, "commit", "-q", "-a", "-m", "change")
+        return tree, git(tree, "rev-parse", "HEAD").strip()
+
+    def evaluate_commit(self, tree, commit):
+        """Select as usual, then evaluate artifacts and a selection that name `commit` as the head."""
+        code, output, _shim = self.select()
+        self.assertEqual(code, 0, output)
+        path = self.temp / "selection.json"
+        selection = json.loads(path.read_text(encoding="utf-8"))
+        selection["head_sha"] = commit
+        path.write_text(json.dumps(selection), encoding="utf-8")
+        build_artifacts(self.artifacts, head=commit)
+        return self.evaluate(tree)
 
     def test_the_frozen_hashes_match_the_current_tree(self):
         # The embedded hashes name these exact bytes; a later change to a frozen file fails here first.
         for relative, digest in evaluator.FROZEN_FILES.items():
             self.assertEqual(evaluator.hashlib.sha256((ROOT / relative).read_bytes()).hexdigest(), digest, relative)
 
-    def test_an_unchanged_copy_is_accepted(self):
-        # The control: a byte-identical tree evaluates exactly as the repository does.
-        self.passing()
-        code, output = self.evaluate(self.frozen_tree())
+    def test_an_unchanged_commit_is_accepted(self):
+        # The control: the fixture commit holds the frozen bytes, so the rule evaluates and accepts.
+        tree = self.temp / "tree"
+        git(self.temp, "clone", "-q", str(FIXTURE_TREE), str(tree))
+        self.assertEqual(self.evaluate_commit(tree, HEAD_SHA)[0], evaluator.EXIT_ACCEPT)
+
+    def test_a_working_tree_change_is_never_read(self):
+        # The frozen files come from the head's commit, so an uncommitted edit in the checkout changes nothing.
+        tree = self.temp / "tree"
+        git(self.temp, "clone", "-q", str(FIXTURE_TREE), str(tree))
+        with (tree / "scripts" / "perf-compare.py").open("a", encoding="utf-8") as handle:
+            handle.write("\nrun_summary = None\n")
+        code, output = self.evaluate_commit(tree, HEAD_SHA)
         self.assertEqual(code, evaluator.EXIT_ACCEPT, output)
 
+    def test_a_pristine_checkout_cannot_hide_a_changed_commit(self):
+        # The head's commit changed a frozen file; restoring the old bytes in the checkout does not hide it.
+        tree, commit = self.committed_change(lambda text: text + "\nrun_summary = None\n")
+        git(tree, "checkout", "-q", "HEAD~1", "--", "scripts/perf-compare.py")
+        code, output = self.evaluate_commit(tree, commit)
+        self.assertEqual(code, evaluator.EXIT_INVALID, output)
+        self.assertIn("scripts/perf-compare.py", output)
+
+    def test_select_reads_the_frozen_files_at_its_head(self):
+        # select reads the frozen files from --head's commit, so a head that changed one is refused.
+        tree, commit = self.committed_change(lambda text: text + "\nrun_summary = None\n")
+        runs = {RUN_ID: {"view": run_view(head_sha=commit), "jobs": {1: jobs_record()}}}
+        code, output, _shim = self.select(runs, record=record_body(head=commit), head=commit, tree=tree)
+        self.assertEqual(code, evaluator.EXIT_INVALID, output)
+        self.assertIn("scripts/perf-compare.py", output)
+
+    def test_an_unknown_commit_is_refused(self):
+        code, output = self.evaluate_commit(FIXTURE_TREE, "e" * 40)
+        self.assertEqual(code, evaluator.EXIT_INVALID, output)
+
     def assert_mutation_refused(self, change):
-        self.passing()
-        code, output = self.evaluate(self.frozen_tree(change))
+        tree, commit = self.committed_change(change)
+        code, output = self.evaluate_commit(tree, commit)
         self.assertEqual(code, evaluator.EXIT_INVALID, output)
         self.assertIn("scripts/perf-compare.py", output)
 
@@ -715,18 +1139,16 @@ class FreezeTests(AcceptanceFixture):
         self.assert_mutation_refused(lambda text: text + "\nrun_summary = frame_summary\n")
 
     def test_a_missing_frozen_file_is_refused(self):
-        self.passing()
-        tree = self.frozen_tree()
-        (tree / "scripts" / "perf-critical-path.py").unlink()
-        code, output = self.evaluate(tree)
+        tree, commit = self.committed_change(remove="scripts/perf-critical-path.py")
+        code, output = self.evaluate_commit(tree, commit)
         self.assertEqual(code, evaluator.EXIT_INVALID, output)
         self.assertIn("scripts/perf-critical-path.py", output)
 
     def test_only_the_verified_copy_is_imported(self):
-        # The module the evaluator uses is the private copy, never the file it read from the tree.
+        # The module the evaluator uses is the private copy of the commit's bytes, never a checkout file.
         workdir = self.temp / "work"
         workdir.mkdir()
-        modules = evaluator.load_frozen(ROOT, workdir)
+        modules = evaluator.load_frozen(FIXTURE_TREE, HEAD_SHA, workdir)
         for module in modules.values():
             self.assertEqual(Path(module.__file__).parent, workdir)
 
@@ -735,8 +1157,8 @@ class FreezeTests(AcceptanceFixture):
         # the evaluation still completes.
         original = evaluator.load_frozen
 
-        def load_without_gate(tree, workdir):
-            modules = original(tree, workdir)
+        def load_without_gate(tree, commit, workdir):
+            modules = original(tree, commit, workdir)
 
             def refuse():
                 raise AssertionError("load_gate was called")
