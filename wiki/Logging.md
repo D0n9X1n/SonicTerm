@@ -392,6 +392,7 @@ previous snapshot and takes deltas.
 | `defer_timeout` | count | redraws deferred because a surface timeout is pending within the frame period |
 | `defer_contention` | count | redraws deferred by the lock-contention retry floor |
 | `defer_streaming` | count | redraws deferred by streaming-output pacing |
+| `stream_clock_exempt` | count | hardware attempts for new input that settled without presenting and kept the streaming clock, so the echo they waited for is not paced from them |
 | `contention_retry_armed` | count | lock-contention retries armed |
 | `dirt_ack_dropped` | count | presented-frame receipts dropped at the next collection because the pane was not held, its parser changed, or its grid was resized or switched screens after assembly; output written after assembly does not drop a receipt, it only keeps the rows it dirtied. Each drop costs a later re-assembly, never pixels |
 | `native_request_redraw` | count | native redraw requests for the window, on every request path; a dispatch's requests reach the totals when it ends, so a window line shows them one dispatch late (`final=1` lines are complete) |
@@ -484,6 +485,16 @@ renderer that collected it.
 | `font_fallback_applies` | count | frames whose font preparation applied a newer fallback notice or generation, clearing shaped rows, missing-glyph atlas entries and the tab-title width epoch once; supporting evidence that a resolved fallback face reached the screen, which tests prove by pixels |
 | `glyph_atlas_growths` | count | glyph atlas doublings, counted at every end-of-frame check and when the renderer settles its statistics; a frame that grows the atlas starts a growth episode |
 | `atlas_growth_abandoned` | count | growth episodes no frame presented: settled when the device stops, before a rebind replaces the device, and when the App settles a retiring or exiting window's statistics; a reset in place abandons nothing |
+| `shape_ns` | ns | time inside every shaping and measuring request, face merging included; a request made inside a timed rasterizer call counts as rasterizing |
+| `raster_ns` | ns | time inside every glyph-atlas rasterizer call, glyph-zero resolution, rasterizer creation and tile conversion included; shaping inside it is not counted again |
+| `raster_calls` | count | glyph-atlas rasterizer calls, terminal and chrome text alike; an atlas hit calls nothing |
+| `raster_tiles` | count | rasterizer calls that returned a tile with pixels; no tile and an empty tile are calls, not tiles |
+| `font_generation_applies` | count | preparations that applied a newer generation of the fallback notice already applied; unlike `font_fallback_applies` it leaves out the first preparation and a replaced font stack |
+| `font_prepare_ns`, `font_generation_prepare_ns` | ns | time inside frame font preparation, invalidation included, for every preparation and for those that applied a newer generation; outside every render attempt |
+| `render_attempts`, `render_attempts_presented` | count | `render_releasing` calls, and those that presented |
+| `render_attempt_ns`, `render_attempt_shape_ns`, `render_attempt_raster_ns` | ns | time inside those calls, and the shaping and rasterizing time spent inside them |
+| `render_attempt_shape_requests`, `render_attempt_raster_calls`, `render_attempt_raster_tiles` | count | shaping requests, rasterizer calls and tiles inside those calls |
+| `apply_attempts`, `apply_attempts_presented`, `apply_attempt_*` | as `render_*` | the same for the render attempts that carried a fallback generation apply |
 | `assembly` | µs histogram | CPU frame assembly in the renderer: from the frame-key check to the end of overlay assembly, before the atlas-retry check, upload, surface acquire, submit and present; one sample per assembled frame, including frames that later retry or fail to present; a `Noop` or skipped frame adds none. It is not the app's `render` lap |
 | `atlas_growth_to_present` | ms histogram | from the start of the first frame that grew the glyph atlas to the next successful present; one sample per presented growth episode |
 
@@ -496,6 +507,17 @@ counts as `gpu_frames`.
 `shape_text`, or `measure_text_width`, failures included; a call skipped for empty
 text is not a request. It counts requests, not HarfBuzz attempts or fallback
 retries.
+
+Each fallback generation apply is carried by exactly one render attempt: a
+preparation that applies a newer generation owes it, and the next
+`render_releasing` call takes it, however many preparations or copies of the
+font token come between. A retry is a later call and carries none. A helper the
+same renderer opens during an attempt, such as notification text layout, joins
+that attempt; another renderer's work does not. Every `_ns` field is summed
+nanoseconds; perf-compare subtracts and pools them exactly and shows them in
+microseconds. Per phase it adds a pooled split of every attempt and of the apply
+attempts: the matched totals of the runs that carry them all are summed, then
+divided into shaping, rasterizing and remaining shares, with means per attempt.
 
 ### Histograms
 

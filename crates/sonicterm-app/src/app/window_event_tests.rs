@@ -1338,3 +1338,73 @@ fn unbound_super_q_is_not_quit_chord_off_macos() {
     // quits.
     assert!(!is_quit_chord("super+q", None));
 }
+
+/// The monitor refresh runs before the child dispatch, and un-occlusion refreshes before visibility settles.
+#[test]
+fn monitor_refresh_precedes_child_dispatch_and_occlusion_settlement() {
+    let event_source = include_str!("window_event.rs").replace("\r\n", "\n");
+    let dispatch_start = event_source.find("pub(super) fn do_window_event(").unwrap();
+    let dispatch = &event_source[dispatch_start..];
+    let refresh = dispatch.find("refresh_monitor_for_event(").expect("the dispatcher refreshes");
+    let child =
+        dispatch.find("handle_child_window_event(").expect("the dispatcher routes children");
+    assert!(refresh < child, "main and child windows share the refresh");
+    let redraw_source = include_str!("redraw.rs").replace("\r\n", "\n");
+    let occlusion_start = redraw_source.find("pub(super) fn handle_window_occlusion(").unwrap();
+    let occlusion = &redraw_source[occlusion_start..];
+    let refresh = occlusion.find("refresh_monitor_period(").expect("un-occlusion refreshes");
+    let observe = occlusion.find("observe_native_occlusion(").unwrap();
+    assert!(refresh < observe, "the period is current before the visible frame is requested");
+}
+
+/// Focus, resize, move and un-occlusion refresh each window's monitor period from its own
+/// monitor; losing focus and becoming occluded do not, and an unavailable rate keeps the last one.
+#[test]
+fn monitor_period_refreshes_on_focus_resize_move_and_unocclusion() {
+    use std::time::Duration;
+    use winit::{
+        dpi::{PhysicalPosition, PhysicalSize},
+        event::WindowEvent,
+    };
+    let refreshed = Duration::from_micros(6_944);
+    let initial = Duration::from_micros(16_667);
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_synthetic_main();
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    for id in [main, child] {
+        let reset = |app: &mut App, rate: Option<u32>| {
+            let window = app.windows.get_mut(&id).unwrap();
+            window.redraw.monitor_period = initial;
+            window.redraw.monitor_rate_override = Some(rate);
+        };
+        let period = |app: &App| app.windows[&id].redraw.monitor_period;
+        for (event, refreshes) in [
+            (WindowEvent::Focused(true), true),
+            (WindowEvent::Resized(PhysicalSize::new(800, 600)), true),
+            (WindowEvent::Moved(PhysicalPosition::new(10, 20)), true),
+            (WindowEvent::Focused(false), false),
+        ] {
+            reset(&mut app, Some(144_000));
+            app.refresh_monitor_for_event(id, &event);
+            let expected = if refreshes { refreshed } else { initial };
+            assert_eq!(period(&app), expected, "{event:?} on {id:?}");
+        }
+        reset(&mut app, Some(144_000));
+        app.handle_window_occlusion(id, true);
+        assert_eq!(period(&app), initial, "becoming occluded does not refresh");
+        app.handle_window_occlusion(id, false);
+        assert_eq!(period(&app), refreshed, "un-occlusion refreshes");
+        // An unavailable or zero rate keeps the last known period.
+        for rate in [None, Some(0)] {
+            app.windows.get_mut(&id).unwrap().redraw.monitor_rate_override = Some(rate);
+            app.refresh_monitor_for_event(id, &WindowEvent::Focused(true));
+            assert_eq!(period(&app), refreshed, "rate {rate:?} keeps the last period");
+        }
+    }
+    // A test cannot build `ScaleFactorChanged`, whose size writer is private to winit; pin its arm.
+    let source = include_str!("redraw.rs").replace("\r\n", "\n");
+    let start = source.find("pub(super) fn refresh_monitor_for_event(").unwrap();
+    let helper = &source[start..start + source[start..].find("\n    }\n").unwrap()];
+    assert!(helper.contains("WindowEvent::ScaleFactorChanged { .. }"), "{helper}");
+}

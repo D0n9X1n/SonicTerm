@@ -1066,3 +1066,16 @@ fn the_checkpoint_fixture_matches_what_this_build_writes() {
         assert_eq!(lines(&committed[name]), lines(run), "{name}: memory lines");
     }
 }
+
+#[test]
+fn startup_records_the_presenter_on_every_host() {
+    // macOS results need the presenter to show whether a run stayed on the hardware path.
+    let source = include_str!("probe.rs").replace("\r\n", "\n");
+    let start = source.find("fn end_startup(").expect("end_startup exists");
+    let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
+    assert!(body.contains("self.presenter = self.presenter_record();"), "{body}");
+    assert!(!body.contains("cfg!(windows)"), "no host gate: {body}");
+    let start = source.find("fn presenter_record(&self)").expect("presenter_record exists");
+    let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
+    assert!(body.contains("presenter_record_for("), "{body}");
+}

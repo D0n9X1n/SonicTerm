@@ -307,6 +307,7 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `defer_timeout` | 次数 | 因帧周期内有待处理的表面超时而推迟的重绘 |
 | `defer_contention` | 次数 | 因锁争用重试下限而推迟的重绘 |
 | `defer_streaming` | 次数 | 因流式输出节奏而推迟的重绘 |
+| `stream_clock_exempt` | 次数 | 硬件路径上针对新输入、未呈现而结算并保留流式时钟的尝试；它们等待的回显不从这些尝试开始计节奏 |
 | `contention_retry_armed` | 次数 | 设置的锁争用重试 |
 | `dirt_ack_dropped` | 次数 | 下一次收集时因窗格未被持有、解析器已变化，或网格在组帧后改变尺寸或切换屏幕而丢弃的已呈现帧回执；组帧后写入的输出不会丢弃回执，只保留它标脏的行。每次丢弃只代价一次之后的重新组装，从不影响像素 |
 | `native_request_redraw` | 次数 | 该窗口的原生重绘请求，覆盖每条请求路径；一次 dispatch 的请求在其结束时计入汇总，因此窗口行晚一次 dispatch 显示它们（`final=1` 行是完整的） |
@@ -389,6 +390,16 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `font_fallback_applies` | 次数 | 字体准备应用了更新的回退通知或代次的帧，每次清除一次已塑形的行、图集中缺失字形的条目与标签标题宽度纪元；它只是已解析的回退字体到达屏幕的佐证，像素由测试证明 |
 | `glyph_atlas_growths` | 次数 | 字形图集翻倍次数，在每次帧末检查以及渲染器结算统计时计入；让图集增长的帧开始一个增长片段 |
 | `atlas_growth_abandoned` | 次数 | 没有帧呈现的增长片段：在设备停止时、重新绑定替换设备之前，以及 App 为退役或退出的窗口结算统计时结算；就地重置不放弃任何片段 |
+| `shape_ns` | 纳秒 | 所有塑形与测量请求内的时间，包括字体合并；在计时的光栅化调用内发出的请求计为光栅化 |
+| `raster_ns` | 纳秒 | 所有字形图集光栅化调用内的时间，包括字形零的解析、光栅化器创建与图块转换；其中的塑形不重复计入 |
+| `raster_calls` | 次数 | 字形图集光栅化调用，终端文字与界面文字都计入；图集命中不调用 |
+| `raster_tiles` | 次数 | 返回有像素图块的光栅化调用；无图块与空图块算调用，不算图块 |
+| `font_generation_applies` | 次数 | 应用了已应用回退通知的更新代次的字体准备；与 `font_fallback_applies` 不同，它不含首次准备与替换字体栈 |
+| `font_prepare_ns`、`font_generation_prepare_ns` | 纳秒 | 帧字体准备内的时间（含失效），分别为全部准备与应用了更新代次的准备；不在任何渲染尝试之内 |
+| `render_attempts`、`render_attempts_presented` | 次数 | `render_releasing` 调用，及其中完成呈现的调用 |
+| `render_attempt_ns`、`render_attempt_shape_ns`、`render_attempt_raster_ns` | 纳秒 | 这些调用内的时间，及其中的塑形与光栅化时间 |
+| `render_attempt_shape_requests`、`render_attempt_raster_calls`、`render_attempt_raster_tiles` | 次数 | 这些调用内的塑形请求、光栅化调用与图块 |
+| `apply_attempts`、`apply_attempts_presented`、`apply_attempt_*` | 同 `render_*` | 携带回退代次应用的渲染尝试的相同字段 |
 | `assembly` | 微秒直方图 | 渲染器中的 CPU 帧组装：从帧键检查到叠加层组装结束，在图集重试检查、上传、获取表面、提交与呈现之前；每个组装完成的帧记录一个样本，包括之后重试或呈现失败的帧；`Noop` 帧与被跳过的帧不记录。它不是应用的 `render` 计时段 |
 | `atlas_growth_to_present` | 毫秒直方图 | 从第一个让字形图集增长的帧开始，到下一次成功呈现；每个已呈现的增长片段一个样本 |
 
@@ -398,6 +409,12 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 `shape_requests` 统计对 `FontStack::shape_text_with_style`、`shape_text` 或 `measure_text_width` 的每次
 调用，失败的调用也计入；因文本为空而跳过的调用不算请求。它统计的是请求，而不是 HarfBuzz 尝试或回退
 重试。
+
+每次回退代次应用恰好由一个渲染尝试携带：应用了更新代次的准备记下它，下一次 `render_releasing` 调用取走它，
+无论其间有多少次准备或字体令牌副本。重试是之后的调用，不携带它。同一渲染器在尝试期间打开的辅助作用域（如通知
+文字布局）并入该尝试；其他渲染器的工作不并入。每个 `_ns` 字段都是累加的纳秒；perf-compare 精确地相减与汇总，
+并以微秒显示。它为每个阶段增加全部尝试与应用尝试的汇总拆分：先对具备全部字段的运行求匹配总和，再分为塑形、
+光栅化与其余部分的占比，并给出每次尝试的平均值。
 
 ### 直方图
 

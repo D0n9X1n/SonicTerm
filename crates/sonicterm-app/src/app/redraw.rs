@@ -1,8 +1,9 @@
 //! Owner-local redraw identities, pacing, and deadline service.
 //!
 //! Scheduling acknowledgement is independent of grid dirty acknowledgement.
-//! `last_render` remains the public last-attempt clock; this state adds no second
-//! pacing timestamp and never turns retained grid dirt into a timer.
+//! `last_render` remains the public last-attempt clock. On the hardware path streaming is
+//! paced from the window's `stream_clock`, which a settled input attempt that presented nothing
+//! leaves in place; this state never turns retained grid dirt into a timer.
 
 use std::{
     collections::HashMap,
@@ -15,7 +16,7 @@ use sonicterm_gpu::{
     device_errors::{DeviceErrorSnapshot, DeviceState},
 };
 use sonicterm_ui::tabs::{CommandStatus, TabId};
-use winit::window::WindowId;
+use winit::{event::WindowEvent, window::WindowId};
 
 use super::{App, WindowState};
 
@@ -81,6 +82,17 @@ impl FrameSettlement {
     }
 }
 
+/// A window's two pacing clocks and its contention floor, borrowed apart from its other fields so a
+/// role adapter that still holds pane or renderer borrows can complete an attempt.
+pub(super) struct AttemptClocks<'clocks> {
+    /// The attempt clock, `WindowState::last_render`.
+    pub(super) last_render: &'clocks mut Instant,
+    /// The hardware streaming clock, `WindowState::stream_clock`.
+    pub(super) stream_clock: &'clocks mut Instant,
+    /// Whether a contention retry floor is armed for the window.
+    pub(super) retry_armed: bool,
+}
+
 /// Per-window scheduling state, separate from public compatibility clocks and native redraw requests.
 #[derive(Debug, Clone)]
 pub(crate) struct WindowRedrawState {
@@ -100,6 +112,9 @@ pub(crate) struct WindowRedrawState {
     pub(super) frame_counters: Option<Box<super::frame_counters::WindowFrameCounters>>,
     #[cfg(target_os = "macos")]
     pub(super) surface_probe_at: Option<Instant>,
+    /// Test-only monitor source: `Some(rate)` replaces the native refresh-rate read.
+    #[cfg(test)]
+    pub(super) monitor_rate_override: Option<Option<u32>>,
 }
 
 impl Default for WindowRedrawState {
@@ -120,6 +135,8 @@ impl Default for WindowRedrawState {
             timeout_pending: false,
             #[cfg(target_os = "macos")]
             surface_probe_at: None,
+            #[cfg(test)]
+            monitor_rate_override: None,
         }
     }
 }
@@ -142,6 +159,18 @@ impl WindowRedrawState {
     /// Whether an input generation has not yet spent its immediate-attempt privilege.
     pub(super) fn input_pending(&self) -> bool {
         self.pending[RedrawCause::Input as usize] != self.observed[RedrawCause::Input as usize]
+    }
+
+    /// Adopt a monitor rate in millihertz; an unavailable or zero rate keeps the last known period.
+    pub(super) fn apply_monitor_rate(&mut self, rate_millihertz: Option<u32>) {
+        if let Some(rate) = rate_millihertz.filter(|rate| *rate > 0) {
+            self.monitor_period = Duration::from_micros(1_000_000_000 / u64::from(rate));
+        }
+    }
+
+    /// Whether `snapshot` carries an input generation this state has not yet observed.
+    pub(super) fn captures_new_input(&self, snapshot: CauseSnapshot) -> bool {
+        snapshot.0[RedrawCause::Input as usize] != self.observed[RedrawCause::Input as usize]
     }
 
     /// Whether any captured request remains unsettled.
@@ -212,6 +241,36 @@ impl WindowRedrawState {
             FrameSettlement::Failed => {
                 // When: `Failed` retains pending work, the failure itself must not create a retry timer.
             }
+        }
+    }
+
+    /// Complete one renderer call: the attempt clock always moves, and the streaming clock moves
+    /// unless a hardware attempt for new input settled with nothing presented and no retry pending.
+    pub(super) fn complete_attempt(
+        &mut self,
+        clocks: AttemptClocks<'_>,
+        snapshot: &FrameSnapshot,
+        outcome: FrameSettlement,
+        at: Instant,
+        software: bool,
+    ) {
+        // Read before `settle`, which records the snapshot's input generation as observed.
+        let new_input = self.captures_new_input(snapshot.causes);
+        *clocks.last_render = at;
+        self.settle(snapshot.causes, outcome, at);
+        let exempt = outcome == FrameSettlement::Settled
+            && new_input
+            && !software
+            && !self.timeout_pending
+            && !clocks.retry_armed;
+        if exempt {
+            if let Some(counters) = self.frame_counters.as_deref_mut() {
+                // the App's gate is on, each attempt that kept the streaming clock is counted.
+                counters.stream_clock_exempt += 1;
+            }
+        } else {
+            // When: `exempt` is false, the attempt drew, retried, failed, lacked new input or ran in software, so it paces.
+            *clocks.stream_clock = at;
         }
     }
 
@@ -565,19 +624,39 @@ impl WindowState {
 
     /// Refresh the raw native-monitor period, preserving the last known rate when unavailable.
     pub(super) fn refresh_monitor_period(&mut self) {
-        if let Some(rate) = self
+        #[cfg(test)]
+        if let Some(rate) = self.redraw.monitor_rate_override {
+            // When: a test supplies `monitor_rate_override`, it stands in for the native monitor.
+            self.redraw.apply_monitor_rate(rate);
+            return;
+        }
+        let rate = self
             .window
             .as_ref()
             .and_then(|window| window.current_monitor())
-            .and_then(|monitor| monitor.refresh_rate_millihertz())
-            .filter(|rate| *rate > 0)
-        {
-            self.redraw.monitor_period = Duration::from_micros(1_000_000_000 / u64::from(rate));
-        }
+            .and_then(|monitor| monitor.refresh_rate_millihertz());
+        self.redraw.apply_monitor_rate(rate);
     }
 }
 
 impl App {
+    /// Refresh a window's monitor period on the events that can change or reveal its display.
+    pub(super) fn refresh_monitor_for_event(&mut self, id: WindowId, event: &WindowEvent) {
+        if !matches!(
+            event,
+            WindowEvent::Moved(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Resized(_)
+                | WindowEvent::Focused(true)
+        ) {
+            // When: matches! excludes `event`, it cannot move the window to another display, so the period stays.
+            return;
+        }
+        if let Some(window) = self.windows.get_mut(&id) {
+            window.refresh_monitor_period();
+        }
+    }
+
     /// Consume native occlusion centrally for either role, after excluding warm and stale identities.
     pub(super) fn handle_window_occlusion(&mut self, id: WindowId, occluded: bool) {
         if self.is_warm_window_id(id) {
@@ -588,6 +667,10 @@ impl App {
             // When: `id` is stale, no other window may inherit its visibility transition.
             return;
         };
+        if !occluded {
+            // A window that reappears may be on another display, so read its rate first.
+            window.refresh_monitor_period();
+        }
         if window.redraw.observe_native_occlusion(occluded) {
             window.invalidate_visibility_frame();
             window.request_visible_frame();
@@ -776,13 +859,13 @@ impl App {
         let software = self.software_render_degrade;
         let rule = super::frame_counters::defer_rule(
             || window.redraw.timeout_pending && now < window.last_render + period,
-            || window.contention_blocks_redraw(now, period),
+            || window.contention_blocks_redraw(now, period, software),
             || {
                 super::should_defer_streaming_redraw(
                     window.redraw.input_pending(),
                     window.visible_output_advanced(),
                     software,
-                    now.saturating_duration_since(window.last_render),
+                    now.saturating_duration_since(window.pacing_clock(software)),
                     period,
                 )
             },
@@ -849,8 +932,7 @@ impl App {
         at: Instant,
     ) {
         if let Some(window) = self.windows.get_mut(&id) {
-            window.last_render = at;
-            window.redraw.settle(snapshot.causes, outcome, at);
+            window.complete_attempt(snapshot, outcome, at, self.software_render_degrade);
             if window.hidden {
                 window.redraw.cancel_surface_probe();
             }

@@ -1066,6 +1066,8 @@ pub(crate) struct WindowFrameCounters {
     pub(crate) defer_contention: u64,
     /// Redraws deferred by streaming pacing.
     pub(crate) defer_streaming: u64,
+    /// Attempts whose completion kept the streaming clock: hardware input attempts that settled.
+    pub(crate) stream_clock_exempt: u64,
     /// Contention retries armed.
     pub(crate) contention_retry_armed: u64,
     /// Pending acknowledgement receipts dropped at a collection: the pane was not held, its parser
@@ -1113,6 +1115,7 @@ impl Default for WindowFrameCounters {
             defer_timeout: 0,
             defer_contention: 0,
             defer_streaming: 0,
+            stream_clock_exempt: 0,
             contention_retry_armed: 0,
             dirt_ack_dropped: 0,
             present_interval: Histogram::new(HistogramUnit::Millis),
@@ -1534,6 +1537,7 @@ impl WindowFrameCounters {
             ("defer_timeout", self.defer_timeout),
             ("defer_contention", self.defer_contention),
             ("defer_streaming", self.defer_streaming),
+            ("stream_clock_exempt", self.stream_clock_exempt),
             ("contention_retry_armed", self.contention_retry_armed),
             ("dirt_ack_dropped", self.dirt_ack_dropped),
             ("native_request_redraw", native_requests + renderer_requests),
@@ -1568,6 +1572,30 @@ impl WindowFrameCounters {
                 ("font_fallback_applies", stats.font_fallback_applies),
                 ("glyph_atlas_growths", stats.glyph_atlas_growths),
                 ("atlas_growth_abandoned", stats.atlas_growth_abandoned),
+                // Attempt and preparation timings are nanoseconds, kept as plain counts.
+                ("shape_ns", stats.shape_ns),
+                ("raster_ns", stats.raster_ns),
+                ("raster_calls", stats.raster_calls),
+                ("raster_tiles", stats.raster_tiles),
+                ("font_generation_applies", stats.font_generation_applies),
+                ("font_prepare_ns", stats.font_prepare_ns),
+                ("font_generation_prepare_ns", stats.font_generation_prepare_ns),
+                ("render_attempts", stats.attempts.attempts),
+                ("render_attempts_presented", stats.attempts.presented),
+                ("render_attempt_ns", stats.attempts.attempt_ns),
+                ("render_attempt_shape_ns", stats.attempts.shape_ns),
+                ("render_attempt_raster_ns", stats.attempts.raster_ns),
+                ("render_attempt_shape_requests", stats.attempts.shape_requests),
+                ("render_attempt_raster_calls", stats.attempts.raster_calls),
+                ("render_attempt_raster_tiles", stats.attempts.raster_tiles),
+                ("apply_attempts", stats.apply_attempts.attempts),
+                ("apply_attempts_presented", stats.apply_attempts.presented),
+                ("apply_attempt_ns", stats.apply_attempts.attempt_ns),
+                ("apply_attempt_shape_ns", stats.apply_attempts.shape_ns),
+                ("apply_attempt_raster_ns", stats.apply_attempts.raster_ns),
+                ("apply_attempt_shape_requests", stats.apply_attempts.shape_requests),
+                ("apply_attempt_raster_calls", stats.apply_attempts.raster_calls),
+                ("apply_attempt_raster_tiles", stats.apply_attempts.raster_tiles),
             ] {
                 record.push_count(name, value);
             }

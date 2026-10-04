@@ -620,6 +620,26 @@ fn result_json_carries_the_presenter_block() {
     let expected = json!({"software_render_mode": "force", "software_rendering": false,
                           "software_render_degraded": true, "windows_gdi": true});
     assert_eq!(result.to_json()["presenter"], expected);
+    // A macOS run records its presenter too: wgpu, never Windows GDI.
+    result.presenter = Some(presenter_record_for(Host::Posix, "auto", false, false));
+    let expected = json!({"software_render_mode": "auto", "software_rendering": false,
+                          "software_render_degraded": false, "windows_gdi": false});
+    assert_eq!(result.to_json()["presenter"], expected);
+}
+
+#[test]
+fn the_presenter_record_names_gdi_only_for_a_degraded_windows_run() {
+    // macOS stays on wgpu whether or not it degrades; only Windows' degrade path presents through GDI.
+    let record = |host, degraded| {
+        let presenter = presenter_record_for(host, "auto", degraded, degraded);
+        (presenter.software_render_degraded, presenter.windows_gdi)
+    };
+    assert_eq!(record(Host::Posix, false), (false, false));
+    assert_eq!(record(Host::Posix, true), (true, false));
+    assert_eq!(record(Host::Windows, true), (true, true));
+    assert_eq!(record(Host::Windows, false), (false, false));
+    let presenter = presenter_record_for(Host::Posix, "force", true, false);
+    assert_eq!((presenter.software_render_mode, presenter.software_rendering), ("force", true));
 }
 
 #[test]

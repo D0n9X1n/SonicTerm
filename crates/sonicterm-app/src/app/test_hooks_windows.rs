@@ -97,6 +97,8 @@ impl App {
             tabs.push(Tab::new(*title));
             tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
+        // Both pacing clocks start at one instant, so neither paces a new window differently.
+        let created_at = Instant::now();
         let child = WindowState {
             // Registered when the window is inserted.
             owner: None,
@@ -120,7 +122,8 @@ impl App {
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             pty_pressed_keys: HashMap::new(),
-            last_render: Instant::now(),
+            last_render: created_at,
+            stream_clock: created_at,
             retry_not_before: None,
             visible_frame_invalid: false,
             redraw: Default::default(),
@@ -421,11 +424,11 @@ impl App {
         self.windows.get(&id).map(|window| window.last_render)
     }
 
-    /// Test seam: backdate a window's last-render instant.
+    /// Test seam: backdate a window's last-render instant and its streaming clock together.
     ///
-    /// Frame pacing measures elapsed time since the last render, so moving
-    /// this lets a test cross a frame boundary without waiting. `false` when
-    /// `id` is unknown.
+    /// Frame pacing measures elapsed time since the last render (the streaming clock on the
+    /// hardware path), so moving both lets a test cross a frame boundary without waiting.
+    /// `false` when `id` is unknown.
     #[doc(hidden)]
     pub fn __test_set_window_last_render(&mut self, id: WindowId, last_render: Instant) -> bool {
         let Some(state) = self.windows.get_mut(&id) else {
@@ -434,6 +437,7 @@ impl App {
             return false;
         };
         state.last_render = last_render;
+        state.stream_clock = last_render;
         true
     }
 
@@ -646,6 +650,8 @@ impl App {
             return;
         }
         let id = synthetic_main_window_id();
+        // Both pacing clocks start at one instant, so neither paces a new window differently.
+        let created_at = Instant::now();
         let main = WindowState {
             // Registered when the window is inserted.
             owner: None,
@@ -669,7 +675,8 @@ impl App {
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             pty_pressed_keys: HashMap::new(),
-            last_render: Instant::now(),
+            last_render: created_at,
+            stream_clock: created_at,
             retry_not_before: None,
             visible_frame_invalid: false,
             redraw: Default::default(),

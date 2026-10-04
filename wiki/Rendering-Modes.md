@@ -142,8 +142,21 @@ target at 1.
 Window input and output causes never share an application-wide dirty latch.
 Hardware pure input may bypass pacing only for its live source window; input with
 visible output stays paced. Monitor periods are refreshed for each window on
-creation/adoption and move/scale events. The exact 25,000 µs degraded and 83,333 µs
+creation/adoption, move, scale, resize, focus gain and un-occlusion; an unavailable
+or zero rate keeps the last period. The exact 25,000 µs degraded and 83,333 µs
 IME periods still come from global degradation policy, not a per-window copy.
+
+Each window keeps two pacing clocks. `last_render` is the attempt clock: every
+renderer call moves it. `stream_clock` paces streaming output on the hardware path.
+It moves with every attempt except one: a hardware attempt for a new input
+generation that settled without presenting (`Skipped`), with no surface timeout or
+contention floor pending. A keypress frame that found no echo yet therefore does
+not delay the echo by a period; the echo is still streaming work, paced from the
+previous non-exempt attempt. The surface-timeout retry waits from `last_render`,
+the degraded software path paces every attempt from `last_render`, and presented,
+cached, retried, failed and stopped attempts move both clocks. The armed Frame
+deadline uses the same clock choice as admission. The window counter
+`stream_clock_exempt` counts the attempts that kept `stream_clock`.
 Owner-addressed wake entries service only due windows; maintenance does not wake
 unrelated windows or suppress a coincident repaint. A native frame request already
 in flight suppresses only duplicate Frame deadlines: notification and scrollbar
@@ -182,7 +195,7 @@ and grid dirt, but contribute no frame, cursor, scrollbar, or notification
 deadlines and collect no parser/media state. PTY output and command maintenance
 continue. App-hidden main windows and unadopted warm windows remain separate.
 The device-refusal boundary, including smoke-only evidence and its one-time error
-report, runs first; suppression changes neither `last_render` nor the contention
+report, runs first; suppression changes neither pacing clock nor the contention
 retry floor. A transition back to visible clears the retained renderer frame key,
 marks one Visibility cause, and requests at most one frame on a usable device.
 Duplicate visible events add nothing; visibility cannot revive a stopped device.

@@ -234,11 +234,13 @@ fn visible_parser_and_image_barriers_release_everything_before_retry_in_either_r
                     assert_eq!(Arc::strong_count(&pane.inline_images), stores);
                 }
                 let before = app.windows[&window].last_render;
+                let stream_before = app.windows[&window].stream_clock;
                 let now = Instant::now();
                 app.visible_frame_unavailable(window, why, true, now);
                 let floor = app.windows[&window].retry_not_before.unwrap();
                 assert!(floor > now);
                 assert_eq!(app.windows[&window].last_render, before);
+                assert_eq!(app.windows[&window].stream_clock, stream_before);
                 assert!(if child {
                     app.pending_redraw_windows.contains(&window)
                 } else {
@@ -355,6 +357,7 @@ fn structural_invalidity_is_not_contention_in_either_role() {
             let (mut app, window, left, right, _) = fixture(child, false);
             let state = app.windows.get_mut(&window).unwrap();
             let before = state.last_render;
+            let stream_before = state.stream_clock;
             let tab = &mut state.tab_states[0];
             let reason = match defect {
                 0 => {
@@ -404,6 +407,7 @@ fn structural_invalidity_is_not_contention_in_either_role() {
                 assert!(state.visible_frame_invalid);
                 assert_eq!(state.retry_not_before, None);
                 assert_eq!(state.last_render, before);
+                assert_eq!(state.stream_clock, stream_before);
                 assert!(!app.pending_redraw_windows.contains(&window));
                 assert!(!app.pending_redraw);
             }
@@ -574,6 +578,7 @@ fn postlock_structural_invalidity_stays_latched_until_valid_reconciliation() {
     for child in [false, true] {
         let (mut app, window, left, right, _) = fixture(child, false);
         let last_render = app.windows[&window].last_render;
+        let stream_clock = app.windows[&window].stream_clock;
         for attempt in 0..3 {
             let sources = sources(&mut app, window, child).ok().unwrap();
             assert_eq!(
@@ -600,6 +605,7 @@ fn postlock_structural_invalidity_stays_latched_until_valid_reconciliation() {
             assert!(state.visible_frame_invalid);
             assert_eq!(state.retry_not_before, None);
             assert_eq!(state.last_render, last_render);
+            assert_eq!(state.stream_clock, stream_clock);
             assert!(!app.pending_redraw && !app.pending_redraw_windows.contains(&window));
         }
         let valid = sources(&mut app, window, child).ok().unwrap();
@@ -611,6 +617,7 @@ fn postlock_structural_invalidity_stays_latched_until_valid_reconciliation() {
         state.coherent_frame_collected();
         assert!(!state.visible_frame_invalid);
         assert_eq!(state.last_render, last_render);
+        assert_eq!(state.stream_clock, stream_clock);
     }
 }
 
@@ -1029,8 +1036,9 @@ fn a_suppressed_window_keeps_its_pending_set_until_its_next_collection() {
             present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
             // Pacing would allow a frame now, so only the suppression can refuse it.
             let paced = |app: &mut App| {
-                app.windows.get_mut(&window).unwrap().last_render =
-                    Instant::now() - Duration::from_secs(1);
+                let state = app.windows.get_mut(&window).unwrap();
+                state.last_render = Instant::now() - Duration::from_secs(1);
+                state.stream_clock = state.last_render;
             };
             suppress(&mut app, window, child, mode, true);
             paced(&mut app);

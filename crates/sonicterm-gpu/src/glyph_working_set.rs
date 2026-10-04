@@ -16,6 +16,7 @@ use sonicterm_types::{GlyphKey, GlyphRasterVariant};
 use crate::chrome_text::{self, ChromeAttrs};
 use crate::color::ChromeColor;
 use crate::core::{palette_footer_font_size, renderer_font_stacks, RendererFontStacks};
+use crate::frame_stats::CountingRasterizer;
 
 /// A resident tile's identity across font configurations: its resolved face, glyph and strike,
 /// its raster variant and its presentation flags. Unlike a [`GlyphKey`], it carries no font slot,
@@ -212,8 +213,11 @@ fn measure_with_stacks(
     let mut body_raster = body.clone();
     for character in printable_ascii().chars() {
         for (bold, italic) in STYLES {
-            let _info =
-                atlas.get_or_insert(GlyphKey::new(character, bold, italic), &mut body_raster);
+            // Counted like every insertion; outside a frame's counting scope this records nothing.
+            let _info = atlas.get_or_insert(
+                GlyphKey::new(character, bold, italic),
+                &mut CountingRasterizer::new(&mut body_raster),
+            );
         }
     }
     let tile_keys = atlas.resident_tile_keys();

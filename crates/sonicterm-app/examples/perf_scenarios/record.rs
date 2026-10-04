@@ -664,6 +664,22 @@ pub(crate) struct PresenterRecord {
     pub(crate) windows_gdi: bool,
 }
 
+/// The presenter record for a run on `host`: Windows GDI only for a degraded Windows run, since
+/// every other host's degrade path stays on wgpu.
+pub(crate) fn presenter_record_for(
+    host: Host,
+    software_render_mode: &'static str,
+    software_rendering: bool,
+    degraded: bool,
+) -> PresenterRecord {
+    PresenterRecord {
+        software_render_mode,
+        software_rendering,
+        software_render_degraded: degraded,
+        windows_gdi: host == Host::Windows && degraded,
+    }
+}
+
 /// Seconds in a FILETIME duration given as its two 32-bit words; it counts 100 ns ticks.
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 pub(crate) fn filetime_seconds(low: u32, high: u32) -> f64 {

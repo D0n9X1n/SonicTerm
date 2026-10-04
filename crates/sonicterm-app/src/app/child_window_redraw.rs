@@ -237,7 +237,8 @@ impl App {
                 .as_ref()
                 .is_some_and(|smoke| smoke.is_waiting_for_adopted_present(win_id));
             let mut smoke_presented_count = None;
-            let mut frame_settlement = None;
+            // The renderer call's settlement and instant, completed once the frame's borrows end.
+            let mut frame_completion = None;
             // Named by source-text tests that embed this file.
             #[allow(clippy::min_ident_chars)]
             if let Some(r) = child.renderer.as_mut() {
@@ -305,28 +306,10 @@ impl App {
                 {
                     smoke.observe_recovery_frame(win_id, r.device_generation(), sample, &outcome);
                 }
-                if let Some(snapshot) = frame_snapshot.as_ref() {
-                    let at = Instant::now();
-                    child.last_render = at;
+                if frame_snapshot.is_some() {
+                    // A captured pre-lock snapshot completes at this instant, after the renderer call.
                     let settlement = super::redraw::FrameSettlement::of(&outcome);
-                    frame_settlement = Some(settlement);
-                    child.redraw.settle(snapshot.causes, settlement, at);
-                    if child.hidden {
-                        child.redraw.cancel_surface_probe();
-                    }
-                    if matches!(
-                        settlement,
-                        super::redraw::FrameSettlement::Presented
-                            | super::redraw::FrameSettlement::Cached
-                            | super::redraw::FrameSettlement::Settled
-                    ) {
-                        for captured in &snapshot.panes {
-                            // Other panes are reconciled after the active PaneState borrow ends.
-                            if captured.id == active_id {
-                                pane.observed_output_generation = captured.generation;
-                            }
-                        }
-                    }
+                    frame_completion = Some((settlement, Instant::now()));
                 }
                 // Map the typed outcome back to the compatibility result: only a
                 // failure or the device's first stopped frame is an error here.
@@ -350,21 +333,20 @@ impl App {
                 // When: the child has no renderer, nothing is drawn; release the frame's guards here too.
                 drop(guards);
             }
-            let request_consumed = matches!(
-                frame_settlement,
-                Some(
-                    super::redraw::FrameSettlement::Presented
-                        | super::redraw::FrameSettlement::Cached
-                        | super::redraw::FrameSettlement::Settled
-                )
-            );
-            if request_consumed {
-                // When: `request_consumed` is true, record every captured pane identity after releasing the active borrow.
-                let _ = pane;
-                if let Some(snapshot) = frame_snapshot.as_ref() {
-                    super::redraw::settle_pane_generations(&mut child.panes, snapshot);
-                }
+            if let (Some(snapshot), Some((settlement, at))) =
+                (frame_snapshot.as_ref(), frame_completion)
+            {
+                // The renderer ran for a captured snapshot: complete through the main window's writer
+                // of both clocks, pane generations and the surface probe.
+                self.finish_window_redraw(win_id, snapshot, settlement, at);
             }
+            let Some(child) = self.windows.get_mut(&win_id) else {
+                // When: completion found `win_id` gone, no child remains to anchor IME or a drag bar.
+                return;
+            };
+            // Borrowed again after completion; the frame's earlier borrow of the search ended there.
+            let search =
+                child.tab_states.get(tab_idx).and_then(|tab_state| tab_state.search.as_ref());
             if let Some(timing) = timing.as_mut() {
                 timing.lap("render");
             }

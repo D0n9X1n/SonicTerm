@@ -33,6 +33,7 @@ use sonicterm_types::{GlyphKey, GlyphRasterVariant};
 use unicode_width::UnicodeWidthChar;
 
 use crate::color::{chrome_color_to_linear_rgba, ChromeColor};
+use crate::frame_stats::CountingRasterizer;
 use crate::quad::{with_premultiplied_alpha, QuadInstance};
 
 #[cfg(test)]
@@ -515,7 +516,7 @@ pub fn layout_prepared(
                 .with_raster_variant(raster_variant)
         };
 
-        let Some(info) = atlas.get_or_insert(key, wt_raster) else {
+        let Some(info) = atlas.get_or_insert(key, &mut CountingRasterizer::new(wt_raster)) else {
             // When: get_or_insert returns None the tile was not placed; the glyph is dropped
             // this frame but the pen still advances, matching the shaped advances.
             pen_x += advance;

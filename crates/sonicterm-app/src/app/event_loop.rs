@@ -414,7 +414,7 @@ impl App {
                 due.push(DueWork {
                     owner: Some(*id),
                     cause: DueCause::Frame,
-                    deadline: window.redraw_not_before(period),
+                    deadline: window.redraw_not_before(period, self.software_render_degrade),
                 });
             }
             if let Some(deadline) =
@@ -936,6 +936,8 @@ impl App {
         // the authoritative source for `main_window_id`.
         self.retire_previous_main();
         self.main_window_id = Some(main_id);
+        // Both pacing clocks start at one instant, so neither paces a new window differently.
+        let created_at = std::time::Instant::now();
         let shadow = super::WindowState {
             // Registered when the window is inserted; construction has no
             // governor in scope.
@@ -960,7 +962,8 @@ impl App {
             copy_mode: None,
             modifiers: ModifiersState::empty(),
             pty_pressed_keys: std::collections::HashMap::new(),
-            last_render: std::time::Instant::now(),
+            last_render: created_at,
+            stream_clock: created_at,
             retry_not_before: None,
             visible_frame_invalid: false,
             redraw: Default::default(),

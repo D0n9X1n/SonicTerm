@@ -746,8 +746,20 @@ class RenderTimingTests(unittest.TestCase):
 HARNESS_HASH = "ab" * 32
 
 
+def without_presenter(result):
+    """`result` with its presenter record removed, for a test of a run that recorded none."""
+    result.pop("presenter", None)
+    return result
+
+
+# The presenter a macOS run on the hardware path records: wgpu, not degraded, never Windows GDI.
+MACOS_PRESENTER = {"software_render_mode": "auto", "software_rendering": False, "software_render_degraded": False,
+                   "windows_gdi": False}
+
+
 def valid_result(**overrides):
-    """A result.json body that satisfies the schema; overrides replace top-level keys."""
+    """A result.json body that satisfies the schema; overrides replace top-level keys. It carries the presenter a
+    valid macOS result must record; a test of a run that recorded none removes it with `without_presenter`."""
     phase = {"name": "workload", "start_unix_s": 10.0, "end_unix_s": 70.0, "cpu_user_s": 1.5,
              "cpu_system_s": 0.5, "presented_frames": 120, "redraw_requested": 130,
              "dispatch_ms": [1.0, 2.0], "present_interval_ms": [16.6, 16.7], "allocations_per_frame": None}
@@ -756,7 +768,7 @@ def valid_result(**overrides):
               "latency": None, "throughput": {"bytes": 1000, "seconds": 2.0}, "uncover_ms": None,
               "scrollback_rows_retained": None,
               "checkpoints": [{"index": 0, "label": "end", "unix_s": 70.0, "footprint_file": None}],
-              "finish_session_settled": True, "notes": []}
+              "finish_session_settled": True, "notes": [], "presenter": dict(MACOS_PRESENTER)}
     result.update(overrides)
     return result
 
@@ -2679,12 +2691,15 @@ class RunSetTests(unittest.TestCase):
     def test_a_renderer_or_presenter_mismatch_invalidates_the_pair(self):
         # Both sides must draw through the same adapter and presenter, or the pair compares two renderers.
         other_adapter = dict(HARDWARE_RENDERER, name="Intel(R) Arc(TM) A770 Graphics")
-        cases = {"renderer": windows_run(renderer=other_adapter), "presenter": windows_run(software_render_mode="gpu")}
-        for kind, mismatched in cases.items():
-            with self.subTest(kind):
-                result, calls = self.run_set({"base": [windows_run()], "head": [mismatched, windows_run()]}, runs=1)
+        cases = {"renderer": (windows_run(), windows_run(renderer=other_adapter)),
+                 "presenter": (windows_run(), windows_run(software_render_mode="gpu")),
+                 # A degraded macOS run beside one on the hardware path compares two presenters too.
+                 "macos presenter": (macos_run(), macos_run(software_render_degraded=True))}
+        for case, (matched, mismatched) in cases.items():
+            with self.subTest(case):
+                result, calls = self.run_set({"base": [matched], "head": [mismatched, matched]}, runs=1)
                 self.assertEqual(calls, ["base", "head", "head"])
-                self.assertEqual(result.attempts[1][2], kind)
+                self.assertEqual(result.attempts[1][2], case.split()[-1])
                 self.assertEqual(len(result.head.outcomes), 1)
 
     def test_a_windows_run_without_an_adapter_never_pairs(self):
@@ -5097,8 +5112,8 @@ class WindowsComparisonLegTests(unittest.TestCase):
 COUNTER_CONTRACT = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
                 "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_streaming",
-                "contention_retry_armed", "dirt_ack_dropped", "native_request_redraw", "user_request_redraw",
-                "redraw_requested"),
+                "stream_clock_exempt", "contention_retry_armed", "dirt_ack_dropped", "native_request_redraw",
+                "user_request_redraw", "redraw_requested"),
                ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
     "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
              "fg_probe_calls", "fg_probe_panes", "fg_worker_probes", "fg_worker_panes", "fg_results_stale",
@@ -5114,6 +5129,13 @@ COUNTER_CONTRACT = {
                   "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited",
                   # font_fallback_applies is supporting evidence; a base older than the counter shows n/a.
                   "font_fallback_applies",
+                  "shape_ns", "raster_ns", "raster_calls", "raster_tiles", "font_generation_applies",
+                  "font_prepare_ns", "font_generation_prepare_ns", "render_attempts", "render_attempts_presented",
+                  "render_attempt_ns", "render_attempt_shape_ns", "render_attempt_raster_ns",
+                  "render_attempt_shape_requests", "render_attempt_raster_calls", "render_attempt_raster_tiles",
+                  "apply_attempts", "apply_attempts_presented", "apply_attempt_ns", "apply_attempt_shape_ns",
+                  "apply_attempt_raster_ns", "apply_attempt_shape_requests", "apply_attempt_raster_calls",
+                  "apply_attempt_raster_tiles",
                   # Glyph atlas growths and growths no frame presented; a base older than them shows n/a.
                   "glyph_atlas_growths", "atlas_growth_abandoned"),
                  ("assembly_us", "atlas_growth_to_present_ms")),
@@ -5397,14 +5419,15 @@ def counters_side(*values_per_run):
 
 class CounterTableTests(unittest.TestCase):
     def test_a_counters_run_whose_frames_disagree_with_its_presenter_is_noted(self):
-        # On Windows result.json records the presenter: GDI frames count as software_frames, wgpu frames as
-        # gpu_frames. A run whose counts contradict its record is named in a note, never passed silently; a
-        # consistent run, or one that recorded no presenter (macOS), adds nothing.
+        # result.json records the presenter on Windows and macOS: GDI frames count as software_frames, wgpu frames
+        # as gpu_frames. A run whose counts contradict its record is named in a note, never passed silently; a
+        # consistent run, or one that recorded no presenter (an older base), adds nothing.
         gdi = dict(WGPU_PRESENTER, software_render_degraded=True, windows_gdi=True)
         consistent = perf.SideRuns(outcomes=[
             make_outcome(result=counters_result({"renderer.software_frames": 40}, presenter=gdi)),
             make_outcome(result=counters_result({"renderer.gpu_frames": 40}, presenter=WGPU_PRESENTER)),
-            make_outcome(result=counters_result({"renderer.gpu_frames": 40}))])
+            make_outcome(result=counters_result({"renderer.gpu_frames": 40})),
+            make_outcome(result=without_presenter(counters_result({"renderer.software_frames": 40})))])
         self.assertEqual(perf.presenter_counter_notes("S1/default", "head", consistent), [])
         wrong = perf.SideRuns(outcomes=[
             make_outcome(result=counters_result({"renderer.gpu_frames": 3, "renderer.software_frames": 37},
@@ -5435,7 +5458,8 @@ class CounterTableTests(unittest.TestCase):
              "p95 ≤17 ms, max >100 ms, mean 15.00 ms (20 events)", "n/a"],
             ["S1/default", "workload", "app.wake_user (count)", "n/a", "1.5 (0–3)", "n/a"],
             ["S1/default", "workload", "vt.parse_us (us)", "n/a",
-             "p95 >5000 us, max >5000 us, mean 3025.00 us (2 events)", "n/a"]])
+             "p95 >5000 us, max >5000 us, mean 3025.00 us (2 events)", "n/a"],
+            ["S1/default", "workload", "renderer attempt split (pooled)", "n/a", "no render attempts (2/2 runs)", ""]])
         self.assertEqual(omitted, CONTRACT_FIELD_COUNT - 4)
 
     def test_the_s11_release_reshow_phase_prints_full_frames_max_assembly_and_presented(self):
@@ -5487,7 +5511,10 @@ class CounterTableTests(unittest.TestCase):
             ["S1/default", "workload", "window.attempts (count)", "4 (4–4)", "6 (6–6)", "+50.0%"],
             ["S1/default", "workload", "window.handler_ms (ms)", "p95 ≤12 ms, max ≤12 ms, mean 10.00 ms (2 events)",
              "p95 ≤12 ms, max ≤12 ms, mean 12.00 ms (2 events)", "+20.0%"],
-            ["S1/default", "workload", "renderer.full_frames (count)", "n/a", "3 (3–3)", "n/a"]])
+            ["S1/default", "workload", "renderer.full_frames (count)", "n/a", "3 (3–3)", "n/a"],
+            # Both sides carry the attempt fields and drew none, which reads as one explicit row.
+            ["S1/default", "workload", "renderer attempt split (pooled)", "no render attempts (1/1 runs)",
+             "no render attempts (1/1 runs)", ""]])
         self.assertEqual(omitted, CONTRACT_FIELD_COUNT - 3)
 
     def test_foreground_worker_fields_are_required_on_the_head_and_n_a_on_an_older_base(self):
@@ -5512,6 +5539,99 @@ class CounterTableTests(unittest.TestCase):
         rows, _omitted = perf.counter_rows("S2/flood", supported_zero, head)
         cells = {row[2]: (row[3], row[4]) for row in rows[1:]}
         self.assertEqual(cells["app.fg_worker_probes (count)"], ("0 (0–0)", "2 (2–2)"))
+
+    def test_nanosecond_fields_are_labelled_and_shown_in_microseconds_without_rounding_the_figure(self):
+        # A _ns field is summed nanoseconds: its cell shows microseconds with two decimals, while the change
+        # compares the exact nanosecond medians, so 1,999 ns and 2,999 ns read 2.00 and 3.00 us and +50.0%.
+        base = counters_side({"renderer.shape_ns": 1999})
+        head = counters_side({"renderer.shape_ns": 2999})
+        rows, _omitted = perf.counter_rows("S9/default", base, head)
+        cells = {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}
+        self.assertEqual(cells["renderer.shape_ns (us, summed from ns)"], ("2.00 (2.00–2.00)", "3.00 (3.00–3.00)",
+                                                                          "+50.0%"))
+
+    def test_the_attempt_split_pools_raw_totals_so_its_shares_add_up(self):
+        # Three runs (attempt, shape, raster ns) = (100, 90, 0), (100, 0, 90), (1000, 500, 500): field-by-field
+        # medians would give (100, 90, 90), a negative remainder. Pooling gives (1200, 590, 590): 49.2%, 49.2%
+        # and 1.7% for the other 20 ns, with per-attempt means over the 3 pooled attempts.
+        def run(attempt_ns, shape_ns, raster_ns):
+            return {"renderer.apply_attempts": 1, "renderer.apply_attempt_ns": attempt_ns,
+                    "renderer.apply_attempt_shape_ns": shape_ns, "renderer.apply_attempt_raster_ns": raster_ns,
+                    "renderer.apply_attempt_shape_requests": 4, "renderer.apply_attempt_raster_calls": 2,
+                    "renderer.render_attempts": 1, "renderer.render_attempt_ns": attempt_ns}
+        head = counters_side(run(100, 90, 0), run(100, 0, 90), run(1000, 500, 500))
+        text, attempts = perf.attempt_split(perf._counter_phases(head)["workload"], "apply_")
+        self.assertEqual(attempts, 3)
+        self.assertEqual(text, "3 attempts (3/3 runs): shaping 49.2%, rasterizing 49.2%, other 1.7%; per attempt "
+                               "0.40 us, 4.0 shape requests, 2.0 raster calls, 0.0 tiles")
+        # The two splits join the counters table after the phase's fields, once each.
+        rows, _omitted = perf.counter_rows("S9/default", counters_side(), head)
+        names = [row[2] for row in rows if row[2].startswith("renderer attempt split")]
+        self.assertEqual(names, ["renderer attempt split: every attempt (pooled)",
+                                 "renderer attempt split: fallback apply attempts (pooled)"])
+
+    def test_the_attempt_split_reports_no_attempts_excludes_incomplete_runs_and_reads_n_a_on_an_older_base(self):
+        # Zero apply attempts reads "no apply attempts", never 0%. A run missing any field of the class is left
+        # out of every field of it, and the scope names how many runs counted. A base built before the counters
+        # reads n/a for the split, and a phase where no side drew an attempt adds no split rows.
+        quiet = counters_side({"renderer.render_attempts": 2, "renderer.render_attempt_ns": 50})
+        phases = perf._counter_phases(quiet)["workload"]
+        self.assertEqual(perf.attempt_split(phases, "apply_"), ("no apply attempts (1/1 runs)", 0))
+        complete = counters_result({"renderer.apply_attempts": 1, "renderer.apply_attempt_ns": 10})
+        lacking = counters_result({"renderer.apply_attempts": 5, "renderer.apply_attempt_ns": 999})
+        del lacking["phases"][0]["frame_counters"]["renderer"]["apply_attempt_raster_tiles"]
+        side = perf.SideRuns(outcomes=[make_outcome(result=complete), make_outcome(result=lacking)])
+        text, attempts = perf.attempt_split(perf._counter_phases(side)["workload"], "apply_")
+        self.assertEqual(attempts, 1)
+        self.assertTrue(text.startswith("1 attempts (1/2 runs): "), text)
+        older = counters_result()
+        for name in list(older["phases"][0]["frame_counters"]["renderer"]):
+            if "attempt" in name:
+                del older["phases"][0]["frame_counters"]["renderer"][name]
+        rows, _omitted = perf.counter_rows("S9/default", perf.SideRuns(outcomes=[make_outcome(result=older)]), quiet)
+        split = {row[2]: (row[3], row[4]) for row in rows if row[2].startswith("renderer attempt split")}
+        self.assertEqual(split["renderer attempt split: fallback apply attempts (pooled)"],
+                         ("n/a", "no apply attempts (1/1 runs)"))
+        # A phase where neither side drew an attempt reads as one explicit row, never omitted.
+        rows, _omitted = perf.counter_rows("S9/default", counters_side({}), counters_side({}))
+        split = [row for row in rows if row[2].startswith("renderer attempt split")]
+        self.assertEqual([row[2:5] for row in split], [["renderer attempt split (pooled)",
+                                                        "no render attempts (1/1 runs)",
+                                                        "no render attempts (1/1 runs)"]])
+
+    def test_the_harness_attempt_fixture_pools_to_exact_shares_and_lists_each_run(self):
+        # The fixture is written by the harness from cumulative totals through its own delta and serializer
+        # (counters_tests.rs). Run 1's (1999, 999, 999) -> (2999, 1499, 1499) ns arrives as (1000, 500, 500),
+        # so pooling with run 2 gives (4000, 1500, 2000): 37.5%, 50.0% and 12.5%, never a negative remainder.
+        fixture = json.loads(ATTEMPT_FIXTURE.read_text(encoding="utf-8"))
+        def run(renderer):
+            result = counters_result()
+            result["phases"][0]["frame_counters"]["renderer"].update(renderer)
+            return make_outcome(result=result)
+        head = perf.SideRuns(outcomes=[run(entry["renderer"]) for entry in fixture["runs"]])
+        text, attempts = perf.attempt_split(perf._counter_phases(head)["workload"], "apply_")
+        self.assertEqual(attempts, 4)
+        self.assertEqual(text, "4 attempts (2/2 runs): shaping 37.5%, rasterizing 50.0%, other 12.5%; per attempt "
+                               "1.00 us, 2.0 shape requests, 1.5 raster calls, 1.0 tiles")
+        rows, _omitted = perf.counter_rows("S9/default", counters_side(), head)
+        cells = {row[2]: row[4] for row in rows[1:]}
+        self.assertEqual(cells["renderer.apply_attempt_ns (us, summed from ns)"], "2.00 (1.00–3.00)")
+        details = perf.attempt_split_details("S9/default", counters_side(), head)
+        self.assertEqual(len(details), 2)
+        self.assertTrue(details[0].startswith("- S9/default head run 1 workload: every attempt 1 attempts"), details)
+        self.assertIn("shaping 50.0%, rasterizing 50.0%, other 0.0%", details[0])
+        # A run of a phase with attempts is listed even when it applied nothing, so both pooled rows' whole
+        # populations can be read run by run; a phase with only ordinary attempts is listed too.
+        quiet = counters_result({"renderer.render_attempts": 2, "renderer.render_attempt_ns": 50})
+        mixed = perf.SideRuns(outcomes=[*head.outcomes, make_outcome(result=quiet)])
+        details = perf.attempt_split_details("S9/default", counters_side({}), mixed)
+        self.assertEqual(len(details), 4, details)
+        self.assertIn("head run 3 workload: every attempt 2 attempts (1/1 runs)", details[-1])
+        self.assertIn("fallback apply attempts no apply attempts (1/1 runs)", details[-1])
+        ordinary = perf.attempt_split_details("S9/default", counters_side({}), perf.SideRuns(
+            outcomes=[make_outcome(result=quiet)]))
+        self.assertEqual(len(ordinary), 2, ordinary)
+        self.assertIn("head run 1 workload: every attempt 2 attempts", ordinary[-1])
 
     def test_fallback_applies_read_n_a_on_an_older_base_and_a_real_zero_on_a_supporting_one(self):
         # font_fallback_applies joined the renderer section: a base built before it reads n/a with no change, a
@@ -5547,6 +5667,28 @@ class CounterTableTests(unittest.TestCase):
                          ("n/a", "3 (3–3)", "n/a"))
         self.assertEqual(dropped_cells(perf.SideRuns(outcomes=[make_outcome(result=counters_result())])),
                          ("0 (0–0)", "3 (3–3)", perf.percent_change(0, 3)))
+        gate_off = valid_result(frame_counters="off")
+        self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
+
+    def test_stream_clock_exemptions_are_required_on_the_head_and_n_a_on_an_older_base(self):
+        # stream_clock_exempt joined the window section: a head must report it, a base built before it reads n/a
+        # with no change shown, a supporting base that exempted nothing prints a real 0, and a gate-off run
+        # carries no phase counters, so it is never checked for the field.
+        lacking = counters_result()
+        del lacking["phases"][0]["frame_counters"]["window"]["stream_clock_exempt"]
+        problems = perf.validate_result(lacking, HARNESS_HASH, 0, counters=True)
+        self.assertTrue(any("window.stream_clock_exempt" in problem for problem in problems), problems)
+        self.assertEqual(perf.validate_result(lacking, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        head = counters_side({"window.stream_clock_exempt": 5})
+
+        def exempt_cells(base):
+            rows, _omitted = perf.counter_rows("S2/default", base, head)
+            return {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}["window.stream_clock_exempt (count)"]
+
+        self.assertEqual(exempt_cells(perf.SideRuns(outcomes=[make_outcome(result=lacking)])),
+                         ("n/a", "5 (5–5)", "n/a"))
+        self.assertEqual(exempt_cells(perf.SideRuns(outcomes=[make_outcome(result=counters_result())])),
+                         ("0 (0–0)", "5 (5–5)", perf.percent_change(0, 5)))
         gate_off = valid_result(frame_counters="off")
         self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
 
@@ -5859,6 +6001,14 @@ WGPU_PRESENTER = {"software_render_mode": "auto", "software_rendering": False, "
                   "windows_gdi": False}
 
 
+def macos_run(**presenter):
+    """A factory for a valid macOS run, which logs no adapter; overrides change the presenter's fields."""
+    def build(plan):
+        result = valid_result(presenter=dict(WGPU_PRESENTER, **presenter))
+        return make_outcome(plan=plan, platform="darwin", result=result)
+    return build
+
+
 def windows_run(renderer=None, grid=None, **presenter):
     """A factory for a valid Windows run on one adapter and presenter; overrides change the presenter's fields."""
     def build(plan):
@@ -5955,14 +6105,15 @@ class WindowsTableTests(unittest.TestCase):
                 self.assertEqual(rows[f"{label} footprint (MiB)"][2:], ["n/a", "n/a", "Windows has no `footprint`"])
 
     def test_a_macos_comparison_keeps_its_measured_rows(self):
-        # macOS measures uncover and footprint, so its rows keep their figures and no Windows note appears.
+        # macOS measures uncover and footprint, so its rows keep their figures and no Windows note appears; its
+        # presenter row names wgpu, so a reader sees the run stayed on the hardware path.
         outcome = checkpoint_outcome("darwin", ["end"], uncover_ms=120.0,
                                      footprints={"1-end": {"bytes": 64 * perf.MIB}})
         rows = self.rows("S12/default", outcome)
         self.assertTrue(rows["uncover (ms)"][2].startswith("120.00"), rows["uncover (ms)"])
         self.assertTrue(rows["end footprint (MiB)"][2].startswith("64.00"), rows["end footprint (MiB)"])
         self.assertFalse(any("Windows" in cell for row in rows.values() for cell in row))
-        self.assertNotIn("presenter", rows)
+        self.assertEqual(rows["presenter"][2:4], ["wgpu", "wgpu"])
 
     def test_synthetic_occlusion_on_windows_is_a_schema_failure(self):
         # Windows reports no occlusion, so a synthetic one there means the harness did what it must not.
@@ -5979,16 +6130,25 @@ class WindowsTableTests(unittest.TestCase):
             with self.subTest(broken=broken):
                 self.assertTrue(perf.validate_result(valid_result(presenter=broken), HARNESS_HASH, 0))
 
-    def test_a_valid_windows_result_must_carry_its_presenter(self):
-        # Every Windows run records how it presented, so a valid win32 result without one is a schema
-        # problem; macOS results carry none, and a Windows run that ended early need not have one.
-        problems = perf.validate_result(valid_result(), HARNESS_HASH, 0, platform_name="win32")
-        self.assertTrue(any("presenter" in problem for problem in problems), problems)
-        self.assertEqual(perf.validate_result(valid_result(), HARNESS_HASH, 0, platform_name="darwin"), [])
-        self.assertEqual(perf.validate_result(valid_result(presenter=WGPU_PRESENTER), HARNESS_HASH, 0,
-                                              platform_name="win32"), [])
-        invalid = valid_result(status="invalid", exit_code=3)
-        self.assertEqual(perf.validate_result(invalid, HARNESS_HASH, 3, platform_name="win32"), [])
+    def test_a_valid_windows_or_macos_result_must_carry_its_presenter(self):
+        # Every Windows and macOS run records how it presented, so a valid win32 or darwin result without one is a
+        # schema problem; a run that ended early need not have one.
+        for platform in ("win32", "darwin"):
+            with self.subTest(platform=platform):
+                missing = without_presenter(valid_result())
+                problems = perf.validate_result(missing, HARNESS_HASH, 0, platform_name=platform)
+                self.assertTrue(any("presenter" in problem for problem in problems), problems)
+                self.assertEqual(perf.validate_result(valid_result(presenter=WGPU_PRESENTER), HARNESS_HASH, 0,
+                                                      platform_name=platform), [])
+                invalid = without_presenter(valid_result(status="invalid", exit_code=3))
+                self.assertEqual(perf.validate_result(invalid, HARNESS_HASH, 3, platform_name=platform), [])
+
+    def test_a_macos_presenter_reads_wgpu_or_wgpu_degraded(self):
+        # macOS never presents through GDI, so its row names wgpu and says when the degrade path was taken.
+        for degraded, expected in ((False, "wgpu"), (True, "wgpu, degraded")):
+            with self.subTest(degraded=degraded):
+                result = valid_result(presenter=dict(WGPU_PRESENTER, software_render_degraded=degraded))
+                self.assertEqual(perf.presenter_text(make_outcome(platform="darwin", result=result)), expected)
 
     def test_a_gdi_or_wgpu_run_without_its_presenter_record_is_blocked(self):
         # gdi and wgpu exist to measure one presenter, so a run that recorded none proves neither; the
@@ -5996,9 +6156,10 @@ class WindowsTableTests(unittest.TestCase):
         for variant in ("gdi", "wgpu"):
             with self.subTest(variant=variant):
                 plan = perf.RunPlan(IDLE_SCENARIO, variant, "head", Path("/b"), HARNESS_HASH)
-                reason = perf.presenter_blocked(make_outcome(plan=plan))
+                reason = perf.presenter_blocked(make_outcome(plan=plan, result=without_presenter(valid_result())))
                 self.assertIsNotNone(reason)
                 self.assertIn("presenter", reason)
+        self.assertIsNone(perf.presenter_blocked(make_outcome(result=without_presenter(valid_result()))))
         self.assertIsNone(perf.presenter_blocked(make_outcome()))
 
 
@@ -7094,13 +7255,20 @@ COUNTERS_HOOK_MANIFEST = HEAD_MANIFEST + "\n[features]\nperf-counters = []\nperf
 # Golden runs the harness's own test writes: `result.json` from the production serializer and the
 # `memory` lines the App's hook logged, keyed by build ("supported" or "unsupported") and case.
 CHECKPOINT_FIXTURE = Path(__file__).with_name("perf-compare_checkpoint_fixture.json")
+# Two runs' renderer attempt deltas, written by the harness test that computes them.
+ATTEMPT_FIXTURE = Path(__file__).with_name("perf-compare_attempt_fixture.json")
 
 
 def fixture_run(build, case):
     """One golden run's result and its memory samples, parsed as a real run's logs are."""
     run = json.loads(CHECKPOINT_FIXTURE.read_text(encoding="utf-8"))[build][case]
     samples = sorted(filter(None, map(perf.parse_memory_line, run["logs"])), key=lambda sample: sample.unix_s)
-    return run["result"], samples
+    result = run["result"]
+    # The golden runs come from the harness's headless probe, which has no renderer and so records no presenter;
+    # a real macOS run records one, and these tests read checkpoints, not the presenter.
+    if result.get("presenter") is None:
+        result["presenter"] = dict(MACOS_PRESENTER)
+    return result, samples
 
 
 def fixture_outcome(build, case, plan=None):
