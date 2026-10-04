@@ -127,6 +127,16 @@ impl Histogram {
         histogram
     }
 
+    /// A millisecond histogram from a renderer's bucket `counts` (overflow last) and exact sum.
+    pub(crate) fn from_millis(counts: &[u64], sum_us: u64) -> Self {
+        let mut histogram = Self::new(HistogramUnit::Millis);
+        for (slot, count) in histogram.buckets.iter_mut().zip(counts) {
+            *slot = *count;
+        }
+        histogram.sum_us = sum_us;
+        histogram
+    }
+
     /// The unit, bounds, used bucket counts (overflow last) and exact sum, borrowed.
     fn buckets(&self) -> HistogramBuckets<'_> {
         let bounds = self.unit.bounds();
@@ -1556,11 +1566,18 @@ impl WindowFrameCounters {
                 ("row_cache_invalidate_us", stats.row_cache_invalidate_us),
                 ("recolor_glyphs_visited", stats.recolor_glyphs_visited),
                 ("font_fallback_applies", stats.font_fallback_applies),
+                ("glyph_atlas_growths", stats.glyph_atlas_growths),
+                ("atlas_growth_abandoned", stats.atlas_growth_abandoned),
             ] {
                 record.push_count(name, value);
             }
             let assembly = Histogram::from_micros(&stats.assembly_buckets, stats.assembly_sum_us);
             record.push_histogram("assembly", assembly);
+            let growth = Histogram::from_millis(
+                &stats.atlas_growth_to_present_buckets,
+                stats.atlas_growth_to_present_sum_us,
+            );
+            record.push_histogram("atlas_growth_to_present", growth);
         }
         record
     }

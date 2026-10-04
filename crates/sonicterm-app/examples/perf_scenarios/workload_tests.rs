@@ -1041,3 +1041,87 @@ fn role_exit_program_exits_1_after_go() {
     assert_eq!(program_steps(Workload::ExitAfterGo), [ProgramStep::ExitAfterGo]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The running platform's name as `START_SIZE_INPUTS` rows record it.
+fn platform_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        // When: neither macos nor windows matches, the platform has no recorded rows.
+        "linux"
+    }
+}
+
+/// 12c, run by CI on each platform: for S9's and S12's working sets at scale 1 and 2, the start
+/// constant is at least this platform's need, and the live helper outcome equals this platform's
+/// recorded `helper` row. With no recorded row the constant must be the maximum: no savings are
+/// claimed without a measurement. Prints each figure so CI's output can become the table's rows.
+#[test]
+#[ignore = "measures with the real font stack; CI runs it in its own step"]
+fn glyph_atlas_working_set() {
+    use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
+    use sonicterm_text::glyph_atlas::{ATLAS_DIM, START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
+    use sonicterm_text::start_size_inputs::{
+        start_rule, InputSource, RuleInput, START_SIZE_INPUTS,
+    };
+    let font_dirs =
+        vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    let size: f32 = FONT_SIZE.parse().expect("the scenario font size");
+    let fixtures = [("S9", Fixture::EmojiCjk), ("S12", Fixture::HistoryScreen)];
+    let titles = ["zsh", "perf_scenarios", "S12 covered window"];
+    let platform = platform_name();
+    for (scale, dpi, constant) in [(1, 72, START_ATLAS_DIM_1X), (2, 144, START_ATLAS_DIM_2X)] {
+        let mut local = Vec::new();
+        for (name, fixture) in fixtures {
+            let bytes = fixture_bytes(fixture);
+            let text = String::from_utf8_lossy(&bytes);
+            let lines: Vec<&str> = text.lines().collect();
+            let set =
+                measure_glyph_working_set(&lines, &titles, FONT_FAMILY, size, dpi, &font_dirs)
+                    .expect("the packaged scenario family loads");
+            println!(
+                "glyph_atlas_working_set platform={platform} scale={scale} fixture={name} \
+                 fit={} max_tile={}x{} packed_pixels={}",
+                set.fit_outcome.label(),
+                set.max_tile_dims[0],
+                set.max_tile_dims[1],
+                set.packed_pixels
+            );
+            let recorded = START_SIZE_INPUTS.iter().find(|row| {
+                row.platform == platform
+                    && row.scale == scale
+                    && row.fixture == name
+                    && row.source == InputSource::Helper
+            });
+            match recorded {
+                Some(row) => {
+                    assert_eq!(
+                        (row.outcome, row.max_tile),
+                        (set.fit_outcome, set.max_tile_dims),
+                        "{name} at {scale}x drifted from its recorded helper row ({})",
+                        row.run_url
+                    );
+                }
+                None => {
+                    // When: no helper row is recorded for this input, savings need a measurement.
+                    assert_eq!(constant, ATLAS_DIM, "{name} at {scale}x has no recorded row");
+                    println!("  no recorded helper row: maximum selected, no savings");
+                }
+            }
+            local.push(RuleInput {
+                label: format!("{platform} {scale}x {name} helper"),
+                outcome: set.fit_outcome,
+                max_tile: set.max_tile_dims,
+            });
+        }
+        let need = start_rule(&local).expect("two measured inputs");
+        println!(
+            "glyph_atlas_working_set platform={platform} scale={scale} need={} constant={constant} \
+             verdict={}",
+            need.dim, need.verdict
+        );
+        assert!(constant >= need.dim, "{scale}x needs {} but starts at {constant}", need.dim);
+    }
+}

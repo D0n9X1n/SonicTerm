@@ -1240,8 +1240,9 @@ fn histogram_buckets_export_the_used_slots_and_the_exact_sum() {
 
 #[test]
 fn renderer_work_counters_join_the_window_record_with_assembly_in_us_buckets() {
-    // The six renderer work counters reach the window's line, snapshot and closed totals;
-    // assembly is a microsecond histogram with the App's own bounds and an exact sum.
+    // The renderer work counters, glyph atlas growth counts included, reach the window's line,
+    // snapshot and closed totals; assembly is a microsecond histogram and growth-to-present a
+    // millisecond one, each with the App's own bounds and an exact sum.
     use sonicterm_gpu::frame_stats::{FrameStats, ASSEMBLY_BOUNDS_US};
     assert_eq!(ASSEMBLY_BOUNDS_US, MICROS_BOUNDS);
     let mut stats = FrameStats::ZERO;
@@ -1253,6 +1254,11 @@ fn renderer_work_counters_join_the_window_record_with_assembly_in_us_buckets() {
     stats.assembly_buckets[2] = 1;
     stats.assembly_buckets[6] = 1;
     stats.assembly_sum_us = 6_080;
+    stats.glyph_atlas_growths = 2;
+    stats.atlas_growth_abandoned = 1;
+    stats.atlas_growth_to_present_buckets[1] = 1;
+    stats.atlas_growth_to_present_buckets[9] = 1;
+    stats.atlas_growth_to_present_sum_us = 130_000;
     let record = WindowFrameCounters::default().record(Some(stats), 0);
     for (name, value) in [
         ("full_frames", 2),
@@ -1260,9 +1266,17 @@ fn renderer_work_counters_join_the_window_record_with_assembly_in_us_buckets() {
         ("row_cache_invalidate_us", 900),
         ("recolor_glyphs_visited", 120),
         ("font_fallback_applies", 3),
+        ("glyph_atlas_growths", 2),
+        ("atlas_growth_abandoned", 1),
     ] {
         assert_eq!(record.count(name), Some(value), "{name}");
     }
+    // Growth-to-present time is a millisecond histogram on the App's frame bounds.
+    use sonicterm_gpu::frame_stats::GROWTH_TO_PRESENT_BOUNDS_MS;
+    assert_eq!(GROWTH_TO_PRESENT_BOUNDS_MS, MILLIS_BOUNDS);
+    let growth = record.histogram_buckets("atlas_growth_to_present").expect("growth histogram");
+    assert_eq!((growth.unit, growth.bounds, growth.sum_us), ("ms", &MILLIS_BOUNDS[..], 130_000));
+    assert_eq!(growth.counts, &[0, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
     let assembly = record.histogram_buckets("assembly").expect("assembly histogram");
     assert_eq!(
         (assembly.unit, assembly.bounds, assembly.sum_us),

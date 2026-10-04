@@ -192,6 +192,14 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::Renderer, "recolor_glyphs_visited"),
     count(Section::Renderer, "font_fallback_applies"),
     histogram(Section::Renderer, "assembly_us", Unit::Micros, "assembly"),
+    count(Section::Renderer, "glyph_atlas_growths"),
+    count(Section::Renderer, "atlas_growth_abandoned"),
+    histogram(
+        Section::Renderer,
+        "atlas_growth_to_present_ms",
+        Unit::Millis,
+        "atlas_growth_to_present",
+    ),
 ];
 
 /// One field's value.

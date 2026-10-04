@@ -144,6 +144,9 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "recolor_glyphs_visited",
             "font_fallback_applies",
             "assembly_us",
+            "glyph_atlas_growths",
+            "atlas_growth_abandoned",
+            "atlas_growth_to_present_ms",
         ],
     ),
 ];
@@ -186,10 +189,11 @@ fn every_contract_field_serializes_present_and_zero_with_the_right_histogram_sha
         }
     }
     // Every field ending in _ms or _us is a histogram; the names above with those suffixes
-    // are exactly the thirteen contract histograms (the retired event-loop fg_probe_us beside the
-    // worker's fg_worker_probe_us); row_cache_invalidate_us is a plain sum.
+    // are exactly the fourteen contract histograms (the retired event-loop fg_probe_us beside the
+    // worker's fg_worker_probe_us, and the renderer's atlas_growth_to_present_ms);
+    // row_cache_invalidate_us is a plain sum.
     let histograms = FIELDS.iter().filter(|field| matches!(field.kind, FieldKind::Histogram(_)));
-    assert_eq!(histograms.count(), 13);
+    assert_eq!(histograms.count(), 14);
 }
 
 #[test]
@@ -349,6 +353,9 @@ const NEWER_SOURCES: &[&str] = &[
     "recolor_glyphs_visited",
     "font_fallback_applies",
     "assembly",
+    "glyph_atlas_growths",
+    "atlas_growth_abandoned",
+    "atlas_growth_to_present",
 ];
 
 #[test]
