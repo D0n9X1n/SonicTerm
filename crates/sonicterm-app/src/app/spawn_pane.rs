@@ -195,6 +195,11 @@ pub(in crate::app) struct PublishedSync {
 }
 
 /// Decode a pane's synchronized output without the parser lock.
+///
+/// The deadline is matched to the word by a 16-bit epoch tag, so a reader that loads a word and
+/// then a deadline published 65,536 epochs later accepts that later deadline. A later epoch's
+/// deadline is never earlier, so this can only extend a hold, which the window's 150 ms cap
+/// bounds; the recheck under the parser guard reads both words where the writer cannot run.
 // Ordering: word loads Acquire, pairing with its Release store; deadline_word loads Relaxed,
 // and its epoch tag rejects any other epoch's deadline.
 pub(in crate::app) fn read_published_sync(

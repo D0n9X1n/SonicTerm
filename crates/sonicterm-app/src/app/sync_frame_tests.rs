@@ -556,3 +556,32 @@ fn the_pane_worker_hook_holds_an_update_and_releases_it_once() {
     assert_eq!(published.deadline, Some(base + crate::app::spawn_pane::SYNC_OUTPUT_TIMEOUT));
     assert_eq!(worker.batch(b"\x1b[?2026l", at_ms(base, 2)), [main]);
 }
+
+/// The lock-free deadline read is approximate across 65,536 epochs: a later epoch's deadline whose
+/// 16-bit tag aliases the word's epoch is accepted. A later epoch's deadline is never earlier, so
+/// the alias only extends a hold, and the window cap still bounds it: the frame is held past the
+/// true deadline and admitted at the cap, never released early.
+#[test]
+fn an_aliased_deadline_extends_a_hold_only_up_to_the_cap() {
+    let (mut app, main, _, base) = held_owners();
+    let pane = pane_of(&app, main, 0);
+    hold(&app, main, pane, 1, at_ms(base, 100));
+    let aliased = pack_sync_deadline(1 + (1 << 16), at_ms(base, 400));
+    app.windows[&main].panes[&pane].sync_deadline_word.store(aliased, Ordering::Relaxed);
+    assert!(!attempt(&mut app, main, RedrawCause::Output, base, FrameSettlement::Presented));
+    let past_true_deadline = at_ms(base, 120);
+    assert!(!attempt(
+        &mut app,
+        main,
+        RedrawCause::Output,
+        past_true_deadline,
+        FrameSettlement::Presented
+    ));
+    assert!(attempt(
+        &mut app,
+        main,
+        RedrawCause::Output,
+        at_ms(base, 150),
+        FrameSettlement::Presented
+    ));
+}
