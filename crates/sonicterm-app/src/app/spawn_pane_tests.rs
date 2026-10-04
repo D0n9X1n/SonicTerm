@@ -939,7 +939,8 @@ fn sync_word_never_disagrees_with_a_held_parser_across_threads() {
 }
 
 /// Run one batch as the VT worker does: note it, parse and publish it through the production
-/// publisher with the worker's latch, then take the flush decision. Each send records the
+/// publisher with the worker's latch, then take the flush decision. One instant, `at`, is both the
+/// publication's clock (the deadline) and the decision's. Each send records the
 /// output generation it observed, so a test can tell whether the batch was published first.
 fn worker_step(
     handles: &PaneVtHandles,
@@ -949,12 +950,14 @@ fn worker_step(
     sends: &mut Vec<u64>,
 ) {
     flush.receive(bytes.len(), at);
-    process_pane_vt_batch_and_publish(
+    publish_pane_vt_batch_with(
         handles,
         bytes,
         &mut None,
         &mut flush.sync_latch,
-        None,
+        |_| None,
+        |_| {},
+        || at,
         |_| {},
     );
     flush
@@ -1061,7 +1064,7 @@ fn an_open_update_holds_output_until_its_reset() {
     let (_pane, handles) = pane_and_worker_handles();
     let mut flush = OutputFlush::new(1, &handles);
     let mut sends = Vec::new();
-    let start = Instant::now();
+    let start = test_base();
     worker_step(&handles, &mut flush, b"\x1b[?2026h", start, &mut sends);
     let deadline = published_deadline(&handles);
     let large = vec![b'x'; crate::app::PTY_REDRAW_FLUSH_BYTES];
@@ -1093,7 +1096,7 @@ fn a_stuck_update_is_released_once_at_its_deadline() {
     let (_pane, handles) = counting_worker_handles(&stats);
     let mut flush = OutputFlush::new(7, &handles);
     let mut sends = Vec::new();
-    let start = Instant::now();
+    let start = test_base();
     worker_step(&handles, &mut flush, b"\x1b[?2026hrow", start, &mut sends);
     let deadline = published_deadline(&handles);
     flush.on_quiet(&handles, deadline - Duration::from_nanos(1), || sends.push(0));
@@ -1118,9 +1121,16 @@ fn a_stuck_update_is_released_once_at_its_deadline() {
     assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 1);
 
     // The mode is still set after a timeout, so a new update starts with its reset.
-    worker_step(&handles, &mut flush, b"\x1b[?2026l", Instant::now(), &mut sends);
+    worker_step(
+        &handles,
+        &mut flush,
+        b"\x1b[?2026l",
+        after + Duration::from_millis(10),
+        &mut sends,
+    );
     assert_eq!(sends.len(), 3, "the late reset flushes");
-    worker_step(&handles, &mut flush, b"\x1b[?2026hnext", Instant::now(), &mut sends);
+    let reopened = after + Duration::from_millis(20);
+    worker_step(&handles, &mut flush, b"\x1b[?2026hnext", reopened, &mut sends);
     let next_deadline = published_deadline(&handles);
     flush.on_quiet(&handles, next_deadline - Duration::from_millis(1), || sends.push(0));
     assert_eq!(sends.len(), 3, "a new update holds again");
@@ -1133,7 +1143,7 @@ fn disconnect_flushes_a_held_update() {
     let (_pane, handles) = pane_and_worker_handles();
     let mut flush = OutputFlush::new(1, &handles);
     let mut sends = Vec::new();
-    worker_step(&handles, &mut flush, b"\x1b[?2026hlast", Instant::now(), &mut sends);
+    worker_step(&handles, &mut flush, b"\x1b[?2026hlast", test_base(), &mut sends);
     assert!(sends.is_empty());
     flush.on_disconnect(|| sends.push(0));
     assert_eq!(sends.len(), 1);
@@ -1146,7 +1156,7 @@ fn a_reset_and_set_in_one_batch_flushes_once_and_holds_again() {
     let (_pane, handles) = pane_and_worker_handles();
     let mut flush = OutputFlush::new(1, &handles);
     let mut sends = Vec::new();
-    let start = Instant::now();
+    let start = test_base();
     worker_step(&handles, &mut flush, b"\x1b[?2026hA", start, &mut sends);
     worker_step(&handles, &mut flush, b"B\x1b[?2026lC\x1b[?2026hD", start, &mut sends);
     assert_eq!(sends.len(), 1, "the reset inside the batch flushes it");
@@ -1249,7 +1259,7 @@ fn a_reset_split_from_the_batch_end_by_replies_still_flushes() {
         let (_pane, handles) = counting_worker_handles(&stats);
         let mut flush = OutputFlush::new(1, &handles);
         let mut sends = Vec::new();
-        let start = Instant::now();
+        let start = test_base();
         worker_step(&handles, &mut flush, b"\x1b[?2026h", start, &mut sends);
         let sections_before = sections_parsed(&stats);
         worker_step(&handles, &mut flush, batch, start + Duration::from_millis(1), &mut sends);
@@ -1361,4 +1371,36 @@ fn a_lock_free_reader_never_pairs_a_word_with_another_epochs_deadline() {
     let second = read_published_sync(&handles.sync_word, &handles.sync_deadline_word);
     assert_eq!((second.set, second.epoch, second.resets), (true, 2, 1));
     assert_eq!(second.deadline, Some(stored_deadline(later)));
+}
+
+/// A test timeline's start: a whole number of microseconds after the deadline origin, so a
+/// published deadline is exactly its batch's instant plus the bound.
+fn test_base() -> Instant {
+    crate::app::sync_clock::origin() + Duration::from_secs(5)
+}
+
+/// A worker that keeps receiving output during an update releases it on the batch that reaches
+/// the deadline, with one clock for publication and decision: a batch one nanosecond earlier
+/// sends nothing, the batch at the deadline sends one release and counts one timeout, and later
+/// output in that epoch flushes normally.
+#[test]
+fn a_busy_worker_releases_an_update_on_the_batch_at_its_deadline() {
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let (_pane, handles) = counting_worker_handles(&stats);
+    let mut flush = OutputFlush::new(3, &handles);
+    let mut sends = Vec::new();
+    let base = test_base();
+    worker_step(&handles, &mut flush, b"\x1b[?2026hrow", base, &mut sends);
+    let deadline = published_deadline(&handles);
+    assert_eq!(deadline, base + SYNC_OUTPUT_TIMEOUT, "published from the decision's clock");
+    worker_step(&handles, &mut flush, b"a", deadline - Duration::from_nanos(1), &mut sends);
+    assert!(sends.is_empty(), "one nanosecond early sends nothing");
+    worker_step(&handles, &mut flush, b"b", deadline, &mut sends);
+    assert_eq!(sends.len(), 1, "the batch at the deadline releases once");
+    assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 1);
+    worker_step(&handles, &mut flush, b"c", deadline + Duration::from_millis(1), &mut sends);
+    assert_eq!(sends.len(), 1, "later output coalesces normally");
+    worker_step(&handles, &mut flush, b"d", deadline + Duration::from_millis(9), &mut sends);
+    assert_eq!(sends.len(), 2, "and flushes on age");
+    assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 1);
 }
