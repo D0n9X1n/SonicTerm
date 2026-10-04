@@ -433,19 +433,14 @@ fn every_renderer_redraw_request_goes_through_the_counting_helper() {
 
 #[test]
 fn each_work_counter_moves_as_defined_inside_a_counting_scope() {
-    // full_frames, invalidation visits and time, recolor visits and assembly each record once
-    // per note, into the scope's renderer. Buckets are asserted only for injected durations; a
+    // full_frames, recolor visits and assembly each record once per note, into the scope's
+    // renderer; the glyph cache's invalidation counters have no note and stay 0. Buckets are asserted only for injected durations; a
     // real-clock sample could land in any bucket on a preempted runner.
     let sink = FrameStatsSink::default();
     {
         let _counting = CollectGuard::enter(Some(&sink));
         note_full_frame(true);
         note_full_frame(false);
-        note_row_cache_invalidate_visits(|| 40);
-        note_row_cache_invalidate_visits(|| 39);
-        assert!(invalidation_clock(|| 0).is_none(), "a pane with no dirty row reads no clock");
-        assert!(invalidation_clock(|| 3).is_some());
-        note_row_cache_invalidate_us(Some(Instant::now() - std::time::Duration::from_millis(2)));
         note_recolor_glyphs_visited(|| 120);
         record_assembly_us(70);
         record_assembly_us(6_000);
@@ -453,9 +448,9 @@ fn each_work_counter_moves_as_defined_inside_a_counting_scope() {
     let stats = sink.snapshot();
     assert_eq!(
         (stats.full_frames, stats.row_cache_invalidate_visits, stats.recolor_glyphs_visited),
-        (1, 79, 120)
+        (1, 0, 120)
     );
-    assert!(stats.row_cache_invalidate_us >= 2_000, "{}", stats.row_cache_invalidate_us);
+    assert_eq!(stats.row_cache_invalidate_us, 0);
     assert_eq!(stats.assembly_buckets, [0, 0, 1, 0, 0, 0, 1]);
     assert_eq!(stats.assembly_sum_us, 6_070);
     // Smoke: one real-clock assembly adds exactly one sample in some bucket, and the sum never falls.
@@ -477,12 +472,9 @@ fn with_the_gate_off_no_work_counter_moves_or_reads_a_clock() {
     for counting in [false, true] {
         let _scope = counting.then(|| CollectGuard::enter(None));
         note_full_frame(true);
-        note_row_cache_invalidate_visits(|| panic!("table read with the gate off"));
-        assert!(invalidation_clock(|| panic!("rows read with the gate off")).is_none());
         note_recolor_glyphs_visited(|| panic!("glyphs read with the gate off"));
         assert!(assembly_clock().is_none());
         note_assembly(None);
-        note_row_cache_invalidate_us(None);
     }
     assert_eq!(sink.snapshot(), FrameStats::ZERO);
 }
@@ -531,51 +523,34 @@ fn assembly_runs_from_the_frame_key_lap_to_the_overlays_lap_after_the_noop_retur
 }
 
 #[test]
-fn row_invalidation_is_timed_per_pane_inside_each_panes_row_loop() {
-    // Each pane invalidates its dirty rows in its own row loop, before that pane's lookups, as
-    // it did before counting existed: the one helper holds the only clock pair and the glyph
-    // cache's only invalidate_row_abs call, and nothing invalidates ahead of the loop. Both
-    // caches are reached through planned-pane wrappers that key rows by absolute live index.
+fn only_the_quad_cache_drops_dirty_rows_inside_each_panes_loop() {
+    // The glyph cache is keyed by content, so changed content misses by itself and nothing drops
+    // a glyph row for dirt: no glyph-cache row removal, no invalidation clock and no counter note
+    // remain. The quad cache still drops each dirty live row's absolute entry, once per drawn
+    // pane, inside the background loop, uncounted.
     let core = core_code();
-    assert_eq!(core.matches("self.row_glyph_cache.invalidate_row_abs(").count(), 0);
-    // The quad cache invalidates its own rows uncounted, in its wrapper; the glyph cache's call is the helper's.
-    assert_eq!(core.matches("self.line_quad_cache.invalidate_row_abs(").count(), 0);
-    assert_eq!(core.matches("cache.invalidate_row_abs(").count(), 2);
+    assert_eq!(core.matches("invalidate_row_abs(").count(), 1, "only the quad wrapper drops rows");
     assert_eq!(
         core.matches("cache.invalidate_row_abs(planned.id,planned.scrollback_len+rowasu64);")
             .count(),
         1,
         "the quad cache drops the absolute row the live dirty row is stored at"
     );
-    assert_eq!(core.matches("frame_stats::invalidation_clock(").count(), 1);
-    let helper = core.find("fninvalidate_dirty_rows(").expect("helper");
-    let body = &core[helper..helper + core[helper..].find("\n}").unwrap_or(600).min(900)];
-    let clock = body.find("crate::frame_stats::invalidation_clock(").expect("clock");
-    // Each call is one keyed removal, so it examines one entry and never reads the table size.
-    let visits = body.find("note_row_cache_invalidate_visits(||1);").expect("visits");
-    let call = body
-        .find("cache.invalidate_row_abs(pane_id,scrollback_len+rowasu64);")
-        .expect("call keyed by scrollback_len");
-    let elapsed = body.find("crate::frame_stats::note_row_cache_invalidate_us(").expect("time");
-    assert!(clock < visits && visits < call && call < elapsed, "{body}");
-    assert_eq!(
-        core.matches(
-            "invalidate_dirty_rows(cache,planned.id,planned.scrollback_len,&planned.dirty_live_rows);"
-        )
-        .count(),
-        1,
-        "the glyph wrapper forwards the live rows with the planned scrollback length"
-    );
+    for gone in [
+        "invalidate_planned_glyph_rows(",
+        "fninvalidate_dirty_rows(",
+        "invalidation_clock(",
+        "note_row_cache_invalidate_visits(",
+        "note_row_cache_invalidate_us(",
+    ] {
+        assert_eq!(core.matches(gone).count(), 0, "{gone} is gone");
+    }
+    let quad_call = "invalidate_planned_quad_rows(&mutself.line_quad_cache,pv.planned);";
+    assert_eq!(core.matches(quad_call).count(), 1);
     let pane_loop = core
         .find("forpvinpane_views.iter().filter(|pane|pane.planned.full_clip.is_some()){")
         .expect("per-pane loop");
-    let glyph_call = "invalidate_planned_glyph_rows(&mutself.row_glyph_cache,pv.planned);";
-    let invoke = core.find(glyph_call).expect("call site");
-    let lookups = pane_loop + core[pane_loop..].find("letsel_bbox").expect("row lookups");
-    assert!(pane_loop < invoke && invoke < lookups, "invalidation is not in the pane's loop");
-    assert_eq!(core.matches(glyph_call).count(), 1);
-    let quad_call = "invalidate_planned_quad_rows(&mutself.line_quad_cache,pv.planned);";
-    assert_eq!(core.matches(quad_call).count(), 1);
+    assert!(pane_loop < core.find(quad_call).expect("quad call"), "inside a pane loop");
 }
 
 #[test]

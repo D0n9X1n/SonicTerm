@@ -1600,3 +1600,22 @@ fn a_degraded_frame_is_composed_whole_with_no_stale_pixel() {
         }
     }
 }
+
+/// The CPU compositor draws a scrolled frame whose rows replay from the content-keyed cache
+/// exactly as one whose rows were all shaped cold: every composed pixel matches, and the
+/// frame draws visible text, so the comparison is not of two empty frames.
+#[test]
+fn software_frames_from_warm_and_cold_rows_are_identical() {
+    let (atlas, cold, warm, (width, height)) = crate::core::warm_and_cold_row_glyphs();
+    let background = [0.05, 0.05, 0.08, 1.0];
+    let compose = |glyphs: &[GlyphInstance]| {
+        let mut frame = SoftwareFrame::new(width, height, background).unwrap();
+        frame.draw_layers(&atlas, &atlas, &[], &[], glyphs, &[], &[]);
+        frame.pixels
+    };
+    let (warm_pixels, cold_pixels) = (compose(&warm), compose(&cold));
+    let blank = SoftwareFrame::new(width, height, background).unwrap().pixels;
+    let inked = cold_pixels.chunks(4).zip(blank.chunks(4)).filter(|(drawn, bare)| drawn != bare);
+    assert!(inked.count() > 50, "the fixture draws text");
+    assert!(warm_pixels == cold_pixels, "warm and cold software frames differ");
+}

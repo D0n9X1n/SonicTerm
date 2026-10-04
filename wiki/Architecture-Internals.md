@@ -309,8 +309,8 @@ correctness, not only speed.
   the lower fragment; a rule or border glyph is not blank. Activation opens the stored destination, so this changes
   only the underline. Hover-only changes on the accelerated path damage the old and new
   pane rows, including glyph ink padding, rather than the whole window. Preview
-  and other chrome changes retain full-surface damage. Active recoloring salts
-  only each intersecting row cache key; underline geometry emits one clipped
+  and other chrome changes retain full-surface damage. Active recoloring folds
+  only each intersecting row's fragment columns into its glyph content key; underline geometry emits one clipped
   quad per fragment. A busy event-time lookup preserves the existing hint but
   drops modifier-only feedback when the modifier is released, and requests a
   source-window redraw. Main and child frames resolve hover from their held parser
@@ -335,8 +335,9 @@ correctness, not only speed.
   dirty rows; an unchanged Windows CPU frame may still be reblitted while its
   device accepts work.
 - Windows software glyph presentation stabilizes NDC roundoff at integer and
-  half-pixel origins before one-to-one raster placement. The row glyph cache also
-  keys the viewport row slot because cached instances carry screen coordinates.
+  half-pixel origins before one-to-one raster placement. The row glyph cache keys
+  rows by content and projects position-free records at the current slot; a
+  software block row is accepted only where each block keeps its rasterized size.
 - Every authored quad color is finite premultiplied linear RGBA. Opacity and
   coverage changes scale RGB and alpha together; debug builds validate both quad
   layers immediately before the GPU/software presenter split. Windows software
@@ -667,22 +668,29 @@ upload gates. `FrameBatches` groups only borrowed slices of the owned batches; g
 guards stay with assembly and are released before presentation, and acknowledgement
 happens at the window's next collection.
 
-`RowGlyphCache` and `LineQuadCache` hold one entry per `(pane id, absolute row)`
-and validate it by the stored row hash; glyph entries also by atlas content
-identity. Their capacities are about four times the sum of visible rows across
-all panes. A capacity or geometry-size change clears the affected cache. Every
-assembled frame, `Full` or `Partial`, drops absolute row `scrollback_len + r` for each dirty live row `r`
-of each pane on the surface, on screen or not, from both caches; each drop is one
-keyed removal of that entry. At capacity, a new glyph row first evicts rows
-outside the viewports the frame named through `begin_frame`, and clears the
-table only when nothing was evictable. Font, theme, scale, surface resize,
-and atlas replacement invalidate the corresponding caches. Retention counts the
-hash table's allocated key/entry buckets and every nested vector's capacity.
-Ordinary clearing leaves table capacity reusable, so bounded churn forms a
-high-water envelope rather than a flat byte line. When a pane leaves a renderer,
-one event-loop-owned operation removes its glyph-cache entries first and its
-quad-cache entries second, preserves peer hits, then asks each table to shrink.
-No concurrent retention snapshot can observe only half that ordered eviction.
+`RowGlyphCache` holds one entry per `(pane id, content key)`, validated by atlas
+content identity and, for software block rows, by each block's size at the
+current position; only complete rows are admitted. Each assembly pass starts
+with one `begin_frame` that releases undrawn and resized panes; each pane pins
+its committed slot keys and every row it will emit before its first admission,
+stages each emitted slot's key, and commits the stage through the settlement
+seam only when the frame presents. Per-pane quotas (`4 × rows` entries,
+`4 × rows × cols` cells of payload) evict unpinned rows, oldest first; the
+renderer-wide 448 MiB payload and 64 MiB tracking budgets refuse admission or
+leave a pane untracked, so its retention never exceeds the 512 MiB envelope.
+Dirt drops no glyph row. `LineQuadCache` holds one entry per `(pane id,
+absolute row)`, validated by its row hash, with about four times the sum of
+visible rows; every assembled frame, `Full` or `Partial`, drops absolute row
+`scrollback_len + r` for each dirty live row `r` of each pane on the surface, on
+screen or not, as one keyed removal, and it clears at capacity. Font, theme,
+scale, surface resize and atlas replacement invalidate both caches. Retention
+counts allocated table buckets, slot and pin vectors and every nested vector's
+capacity. Ordinary clearing leaves table capacity reusable, so bounded churn
+forms a high-water envelope rather than a flat byte line. When a pane leaves a
+renderer, one event-loop-owned operation removes its glyph-cache entries and
+slots first and its quad-cache entries second, preserves peer hits, then asks
+each table to shrink. No concurrent retention snapshot can observe only half
+that ordered eviction.
 
 The inline-image atlas starts as a 1 × 1 CPU/GPU placeholder. It promotes to a
 2,048 × 2,048 atlas when renderable media appears. After 240 rendered frames

@@ -504,8 +504,8 @@ renderer that collected it.
 | `partial_frames` | count | presented frames whose render plan was `Partial` (only the rows that meet the damage were assembled); counted after presentation, so divide by presented frames, not by `full_frames` |
 | `partial_fallbacks` | count | `Partial` plans reassembled `Full` in the same frame because the final damage reached a row they did not assemble |
 | `row_cells_hashed` | count | cells hashed into row glyph cache keys, one row per assembled terminal row |
-| `row_cache_invalidate_visits` | count | row glyph cache entries examined while invalidating dirty rows: one per `invalidate_row_abs` call, a keyed removal of that `(pane, absolute row)` entry |
-| `row_cache_invalidate_us` | µs | total time spent invalidating dirty rows, as a plain sum; one clock pair per pane that invalidates at least one row, taken inside that pane's row loop so counting never changes which cached rows are kept |
+| `row_cache_invalidate_visits` | count | kept for counter-contract compatibility and always 0: the content-keyed row glyph cache drops no row for dirt |
+| `row_cache_invalidate_us` | µs | kept for counter-contract compatibility and always 0 |
 | `recolor_glyphs_visited` | count | glyphs examined when recoloring glyphs under the cursor, the copy-mode cursor or a search match on the frame's main glyph list: the rows whose ink meets the target plus every glyph outside the terminal rows, such as tab titles; overlay text is not counted |
 | `font_fallback_applies` | count | frames whose font preparation applied a newer fallback notice or generation, clearing shaped rows, missing-glyph atlas entries and the tab-title width epoch once; supporting evidence that a resolved fallback face reached the screen, which tests prove by pixels |
 | `glyph_atlas_growths` | count | glyph atlas doublings, counted at every end-of-frame check and when the renderer settles its statistics; a frame that grows the atlas starts a growth episode |
@@ -711,7 +711,7 @@ SonicTerm's own seams do not count.
 | `panes_sampled` | panes included in `session_total_bytes` |
 | `panes_contended` | panes skipped because a parser or inline-image lock was busy; non-zero makes the session total partial |
 | `renderer_total_bytes` / `renderer_total_items` | CPU-side storage across visible and warm renderers |
-| `renderer_row_glyph_cache_bytes` / `renderer_row_glyph_cache_items` | per-row glyph-instance and decoration cache storage and cached row count across renderers |
+| `renderer_row_glyph_cache_bytes` / `renderer_row_glyph_cache_items` | row glyph cache payload plus tracking storage and cached row count, summed across renderers (each bounded to 512 MiB) |
 | `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | per-row background/decoration quad cache storage and cached row count across renderers |
 | `live_renderers` | process-wide renderer count; a count above the `renderers` entries can expose an unreachable live renderer |
 | `live_fg_probe_workers` | this App's foreground-probe worker threads: 0 before the first demand or after the worker stops, otherwise 1 |
@@ -816,7 +816,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `glyph_atlas_items` | glyph entries in that atlas | use with bytes to distinguish occupancy from capacity |
 | `image_atlas_bytes` | CPU inline-image atlas pixel-buffer capacity, including the nonempty 1×1 placeholder allocation | reduce image use or renderer count |
 | `image_atlas_items` | inline-image atlas entries | use with bytes to identify image occupancy |
-| `row_glyph_cache_bytes` | hash-table backing plus cached glyph, underline, tofu, and missing-character vector capacities | compare with cached rows; pane departure releases that pane's payload while table capacity can remain at its high-water mark |
+| `row_glyph_cache_bytes` | cached glyph-record, underline, tofu and missing-character vector capacities plus tables, slot vectors and pin lists | at most 512 MiB per renderer; a pane not drawn in a frame is released at the next frame |
 | `row_glyph_cache_items` | cached glyph rows | a falling count with flat bytes can mean reusable table capacity remains |
 | `row_quad_cache_bytes` | hash-table backing plus cached background/decoration quad vector capacities | compare with cached rows and pane/window churn |
 | `row_quad_cache_items` | cached quad rows | a falling count confirms row eviction even when table capacity is sticky |

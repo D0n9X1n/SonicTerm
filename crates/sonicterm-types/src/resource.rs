@@ -228,10 +228,11 @@ impl ResourceClass {
             Self::GlyphAtlas => ClassCoverage::UnchargedRetention {
                 per_owner_bytes: 2048 * 2048 * 4 + 2 * 16_384 * 20,
             },
-            // Four viewport working sets at the maximum visible-grid cell seam.
-            // Quad output is at most one run per cell. The glyph envelope also
-            // leaves headroom for bounded combining-cluster shaping expansion;
-            // live reports remain exact rather than using either envelope.
+            // The row glyph cache enforces this figure per renderer: admission is refused past
+            // its 448 MiB payload budget and a pane is left untracked past its 64 MiB tracking
+            // budget, so its reported storage never exceeds their sum. The quad envelope is four
+            // viewport working sets at the maximum visible-grid cell seam, at most one run per
+            // cell. Live reports remain exact rather than using either envelope.
             Self::RowGlyphCache => {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 512 * 1024 * 1024 }
             }

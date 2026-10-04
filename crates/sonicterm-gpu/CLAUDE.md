@@ -47,6 +47,16 @@ cargo build -p sonicterm-gpu
   semantics when moving data through the renderer.
 - Row glyph cache reads and writes use the atlas content identity; eviction
   counts remain diagnostic and must not become UV-bearing cache keys.
+- The row glyph cache is keyed by content, never by absolute row, slot, origin,
+  surface or selection. Hit and miss both project position-free records through
+  `project_cached_row`, in the order cell origin, raster offset, shaping offset,
+  marker fit, snap, NDC. Admit only complete rows: an atlas refusal (read before
+  `drawable_or_tofu`), an empty block, a failed shaping run or a missing shaper
+  or rasterizer keeps the row out. Software block rows are revalidated per
+  position. Call `begin_frame` once per assembly pass, pin every emitted key with
+  the committed slots before the first admission, stage slot keys, and commit
+  them only through `settle_retained_frame` on `Presented`; every `Err` exit
+  discards the stage. Nothing drops a glyph row for dirt; only the quad cache does.
 - Only the glyph atlas is built growable (`start_dim`, then doubling to 2048);
   the promoted image atlas stays fixed. A growth-only stamp change retries
   through `retry_after_glyph_atlas_growth`, reached only from the retry arm

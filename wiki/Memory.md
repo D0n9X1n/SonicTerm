@@ -197,8 +197,10 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
 - `glyph_atlas_bytes`: CPU glyph atlas pixel capacity plus its dirty-rect list's capacity, so it rises as the atlas grows;
 - per renderer, after `total=`: `glyph_atlas_dim`, `glyph_atlas_packed_pixels`, `glyph_atlas_growths`, `glyph_atlas_evictions`, `glyph_atlas_fit` and `glyph_atlas_max_tile`. The fit is the smallest of 256, 512, 1024 and 2048 that holds the resident tiles with a quarter of its height free. Otherwise it is `no_headroom` (every tile packs at 2048 but no size leaves that quarter free), `does_not_fit` (some tile cannot be placed even at 2048) or `evicted` (the atlas has evicted, so its resident set is no longer its working set). `glyph_atlas_growths` counts the renderer's doublings since it was built; a reset does not clear it;
 - `image_atlas_bytes`: CPU inline-image atlas capacity;
-- `row_glyph_cache_bytes` / `row_glyph_cache_items`: hash-table backing, cached
-  glyph instances, underline runs, tofu geometry, missing characters, and row count;
+- `row_glyph_cache_bytes` / `row_glyph_cache_items`: the payload of cached glyph
+  records, underline runs, tofu boxes and missing characters, plus tracking
+  storage (tables, slot vectors and pin lists), and the cached row count. Payload
+  stays within 448 MiB and tracking within 64 MiB per renderer;
 - `row_quad_cache_bytes` / `row_quad_cache_items`: hash-table backing, cached
   background/decoration quad vectors, and row count;
 - `software_frame_bytes`: Windows CPU/GDI frame, zero elsewhere;

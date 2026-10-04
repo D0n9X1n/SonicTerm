@@ -3,8 +3,9 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use sonicterm_text::row_glyph_cache::{CachedRow, RowGlyphCache, UnderlineRun};
-use sonicterm_text::GlyphInstance;
+use sonicterm_text::row_glyph_cache::{
+    CachedRow, RowGlyph, RowGlyphBits, RowGlyphCache, RowGlyphKind, RowTofu, UnderlineRun,
+};
 use sonicterm_types::{Color, UnderlineStyle};
 
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -43,14 +44,28 @@ fn held() -> usize {
     LIVE_BYTES.load(Ordering::Relaxed)
 }
 
+/// A row of `width` glyph records with proportionate underlines, tofu and missing characters.
 fn row(width: usize) -> CachedRow {
+    let bits = RowGlyphBits {
+        kind: RowGlyphKind::Natural,
+        is_color: false,
+        is_subpixel: false,
+        marker_fit_eligible: false,
+        is_wide: false,
+        has_extras: false,
+        cluster_cells: 1,
+    };
     CachedRow {
         glyphs: vec![
-            GlyphInstance {
-                rect: [0.0; 4],
+            RowGlyph {
                 uv: [0.0; 4],
                 color: [0.0; 4],
-                flags: [0.0; 4],
+                raster_offset: [0.0; 2],
+                shape_offset: [0.0; 2],
+                raster_size: [0.0; 2],
+                lead_col: 0,
+                end_col: 1,
+                kind_and_bits: bits.pack(),
             };
             width
         ],
@@ -63,26 +78,31 @@ fn row(width: usize) -> CachedRow {
             };
             width / 8
         ],
-        tofu: vec![(0.0, 0.0, 1.0, 1.0, [0; 4]); width / 16],
+        tofu: vec![
+            RowTofu { lead_col: 0, inset: 1.0, width: 1.0, height: 1.0, color: [0; 4] };
+            width / 16
+        ],
         missing_chars: vec!['x'; width / 32],
     }
 }
 
-/// Reported table and nested-vector capacities track the heap the cache retains.
+/// Reported payload and tracking capacities track the heap the cache retains, through quota
+/// eviction, and dropping the cache returns every byte.
 #[test]
 fn reported_glyph_cache_bytes_track_live_heap() {
     const ROWS: u16 = 32;
     const WIDTH: usize = 512;
     let before = held();
     let mut cache = RowGlyphCache::new();
-    cache.resize(ROWS);
+    cache.begin_frame(&[(7, ROWS, WIDTH as u16)]);
     for index in 0..usize::from(ROWS) * 4 {
-        cache.insert(7, index as u64, index as u64, 1, row(WIDTH));
+        assert!(cache.insert(7, index as u64 + 1, 1, row(WIDTH)));
     }
 
     let truth = held().saturating_sub(before);
     let reported = cache.retained_amount();
-    assert_eq!(reported.items, usize::from(ROWS) * 4);
+    assert_eq!(reported.items, cache.len());
+    assert!(reported.items > usize::from(ROWS), "the fixture holds more than one viewport");
     assert!(truth > 1024 * 1024, "fixture retained only {truth} bytes");
     assert!(
         reported.bytes + truth / 100 + 4096 >= truth,

@@ -240,12 +240,14 @@ pub(crate) fn upload_staging_amount(
 }
 
 /// Settle what a frame's outcome leaves retained: only `Presented` with its plan commits the
-/// staged ink records, counts a partial frame, keeps the plan's key and returns its receipts.
-/// Every other outcome discards the staged records, keeps the committed ones (their pixels are
-/// still on screen), returns no receipt and clears the key, so the retry plans a Full first frame.
+/// staged ink records and glyph slot keys, counts a partial frame, keeps the plan's key and
+/// returns its receipts. Every other outcome discards the staged records and slot keys, keeps
+/// the committed ones (their pixels are still on screen), returns no receipt and clears the key,
+/// so the retry plans a Full first frame.
 fn settle_retained_frame(
     last_frame_key: &mut Option<FrameKey>,
     row_ink: &mut crate::row_ink::RowInkTable,
+    row_glyphs: &mut sonicterm_text::row_glyph_cache::RowGlyphCache,
     outcome: &PresentOutcome,
     presented_plan: Option<FramePlan>,
     receipts: Vec<sonicterm_render_model::AckReceipt>,
@@ -253,6 +255,7 @@ fn settle_retained_frame(
     match (outcome, presented_plan) {
         (PresentOutcome::Presented, Some(plan)) => {
             row_ink.commit(&plan.drawn_row_counts());
+            row_glyphs.commit_slots();
             crate::frame_stats::note_partial_frame(plan.mode == RenderMode::Partial);
             *last_frame_key = Some(plan.key);
             receipts
@@ -260,6 +263,7 @@ fn settle_retained_frame(
         _ => {
             // Nothing this frame assembled reached the screen, so nothing of it is kept.
             row_ink.begin_frame();
+            row_glyphs.discard_staged();
             *last_frame_key = None;
             Vec::new()
         }
@@ -388,26 +392,15 @@ fn hovered_url_for_pane_row(
     sonicterm_render_model::inputs::HoveredUrlCells::new(pane_id, [span], hovered.active)
 }
 
-fn hovered_url_row_cache_key(
-    key: u64,
+/// The inclusive columns of `row`'s active (recoloring) hover fragment, folded into that row's
+/// content key; `None` for an absent or hint-only hover, which leaves glyph colours unchanged.
+fn hovered_url_row_key_span(
     hovered: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
     row: u16,
-) -> u64 {
-    let Some(hovered) = hovered.filter(|hovered| hovered.active) else {
-        // When: `hovered` is absent or inactive, glyph colors match the ordinary row cache entry.
-        return key;
-    };
-    let Some(span) = hovered.span_for_row(row) else {
-        // When: `hovered` has no `row` fragment, this row's glyph colors are unchanged.
-        return key;
-    };
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    0x55_524C_u64.hash(&mut hasher); // "URL" salt
-    span.start_col.hash(&mut hasher);
-    span.end_col.hash(&mut hasher);
-    hasher.finish()
+) -> Option<(u16, u16)> {
+    let hovered = hovered.filter(|hovered| hovered.active)?;
+    let span = hovered.span_for_row(row)?;
+    Some((span.start_col, span.end_col))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -744,7 +737,42 @@ fn terminal_vertical_ink_pad(cell_h: f32, metrics: Option<sonicterm_engine::Cell
     metrics.map(|metrics| metrics.cell_h as f32).unwrap_or(cell_h).max(0.0).ceil()
 }
 
-/// Normalizes standalone Claude Code circle markers inside one cell without distortion.
+/// Whether a glyph is a standalone Claude Code circle marker that projection fits inside its
+/// cell: an approved codepoint in a one-cell, narrow cluster with no combining extras.
+pub(crate) fn status_marker_fit_eligible(
+    ch: char,
+    cluster_cells: usize,
+    is_wide: bool,
+    has_extras: bool,
+) -> bool {
+    matches!(ch, '\u{23fa}' | '\u{25ef}' | '\u{25cf}')
+        && cluster_cells == 1
+        && !is_wide
+        && !has_extras
+}
+
+/// Scale `natural` uniformly to fit `cell` and centre it; a non-positive size on either side has
+/// no meaningful ratio, so the natural rectangle is kept.
+pub(crate) fn fit_status_marker_rect(
+    natural: (f32, f32, f32, f32),
+    cell: (f32, f32, f32, f32),
+) -> (f32, f32, f32, f32) {
+    let (_, _, glyph_w, glyph_h) = natural;
+    let (cell_x, cell_y, cell_w, cell_h) = cell;
+    // When: glyph_w, glyph_h, cell_w, or cell_h is non-positive, no meaningful
+    // fit ratio exists, so preserve the natural rectangle.
+    if glyph_w <= 0.0 || glyph_h <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
+        return natural;
+    }
+    let scale = (cell_w / glyph_w).min(cell_h / glyph_h);
+    let fitted_w = glyph_w * scale;
+    let fitted_h = glyph_h * scale;
+    (cell_x + (cell_w - fitted_w) * 0.5, cell_y + (cell_h - fitted_h) * 0.5, fitted_w, fitted_h)
+}
+
+/// Normalizes standalone Claude Code circle markers inside one cell without distortion: the
+/// eligibility predicate and the fit composed, as shaping decides and projection applies them.
+#[cfg(test)]
 pub(crate) fn fit_single_cell_status_marker(
     ch: char,
     cluster_cells: usize,
@@ -753,28 +781,12 @@ pub(crate) fn fit_single_cell_status_marker(
     natural: (f32, f32, f32, f32),
     cell: (f32, f32, f32, f32),
 ) -> (f32, f32, f32, f32) {
-    // When: ch is not approved, cluster_cells is not one, is_wide is true, or
-    // has_extras is true, preserve the font rasterizer's geometry exactly.
-    if !matches!(ch, '\u{23fa}' | '\u{25ef}' | '\u{25cf}')
-        || cluster_cells != 1
-        || is_wide
-        || has_extras
-    {
-        return natural;
+    if status_marker_fit_eligible(ch, cluster_cells, is_wide, has_extras) {
+        fit_status_marker_rect(natural, cell)
+    } else {
+        // When: `status_marker_fit_eligible` is false, the rasterizer's geometry is kept exactly.
+        natural
     }
-
-    let (_, _, glyph_w, glyph_h) = natural;
-    let (cell_x, cell_y, cell_w, cell_h) = cell;
-    // When: glyph_w, glyph_h, cell_w, or cell_h is non-positive, no meaningful
-    // fit ratio exists, so preserve the natural rectangle.
-    if glyph_w <= 0.0 || glyph_h <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
-        return natural;
-    }
-
-    let scale = (cell_w / glyph_w).min(cell_h / glyph_h);
-    let fitted_w = glyph_w * scale;
-    let fitted_h = glyph_h * scale;
-    (cell_x + (cell_w - fitted_w) * 0.5, cell_y + (cell_h - fitted_h) * 0.5, fitted_w, fitted_h)
 }
 
 fn tab_bar_hash(tabs: &TabBar, now: Instant) -> u64 {
@@ -880,40 +892,9 @@ fn privilege_marker_reserve_px(privileged: bool, scale: f32) -> f32 {
     }
 }
 
-/// Drawn width of one tab's content in raster pixels: the privilege-marker
-/// reserve plus the shaped advance of the badge and title in the tab font.
-/// Returns `None` when the text cannot be shaped; with no tab font only the
-/// reserve counts, because no text is drawn.
-/// Drop one pane's cached rows for its dirty live rows, stored at absolute row
-/// `scrollback_len + row`, before that pane's rows are looked up. It
-/// runs inside each pane's row loop, so capacity eviction drops the same entries whether or
-/// not the renderer counts. With the gate on and at least one dirty row, one clock pair times
-/// this pane's calls; each call is one keyed removal and counts one examined entry.
-fn invalidate_dirty_rows(
-    cache: &mut sonicterm_text::row_glyph_cache::RowGlyphCache,
-    pane_id: sonicterm_text::row_glyph_cache::PaneId,
-    scrollback_len: u64,
-    dirty_live_rows: &[usize],
-) {
-    let started = crate::frame_stats::invalidation_clock(|| dirty_live_rows.len());
-    for &row in dirty_live_rows {
-        crate::frame_stats::note_row_cache_invalidate_visits(|| 1);
-        cache.invalidate_row_abs(pane_id, scrollback_len + row as u64);
-    }
-    crate::frame_stats::note_row_cache_invalidate_us(started);
-}
-
-/// Drop the row glyph cache entries of every live row `planned` carries as dirty, on- or
-/// offscreen, so dirt a Full frame acknowledges can never leave a stale cached row.
-fn invalidate_planned_glyph_rows(
-    cache: &mut sonicterm_text::row_glyph_cache::RowGlyphCache,
-    planned: &PlannedPane,
-) {
-    invalidate_dirty_rows(cache, planned.id, planned.scrollback_len, &planned.dirty_live_rows);
-}
-
-/// Drop the background-quad cache entries of the same absolute rows as
-/// [`invalidate_planned_glyph_rows`]; this cache is uncounted.
+/// Drop the background-quad cache entries of every live row `planned` carries as dirty, stored at
+/// absolute row `scrollback_len + row`; this cache is uncounted. The glyph cache drops nothing for
+/// dirt: its rows are keyed by content, so changed content misses by itself.
 fn invalidate_planned_quad_rows(
     cache: &mut crate::row_quad_cache::LineQuadCache,
     planned: &PlannedPane,
@@ -979,6 +960,10 @@ fn drawn_cursor_cell(
     })
 }
 
+/// Drawn width of one tab's content in raster pixels: the privilege-marker
+/// reserve plus the shaped advance of the badge and title in the tab font.
+/// Returns `None` when the text cannot be shaped; with no tab font only the
+/// reserve counts, because no text is drawn.
 fn tab_content_width_px(
     stack: Option<&sonicterm_engine::FontStack>,
     content: &TabContent<'_>,
@@ -2199,6 +2184,10 @@ pub struct GpuRenderer {
     fault_invalid_glyph_upload: bool,
     /// Test fault: every later frame records an invalid clear of this buffer.
     fault_frame_probe: Option<wgpu::Buffer>,
+    /// Test seam: the next assembly returns `Err` after its glyph rows were staged.
+    fault_assembly_error: bool,
+    /// Test seam: the next presentation returns `Err` from the presenter call.
+    fault_present_error: bool,
     /// Test seam: return one backend occlusion after the normal frame device gate.
     fault_surface_occluded: bool,
     /// Test seam: replace the glyph atlas identity during the next assembly, as an atlas reset
@@ -3287,6 +3276,8 @@ impl GpuRenderer {
             device_stop_reported: false,
             fault_invalid_glyph_upload: false,
             fault_frame_probe: None,
+            fault_assembly_error: false,
+            fault_present_error: false,
             fault_surface_occluded: false,
             #[cfg(target_os = "windows")]
             fault_stop_before_cached_present: false,
@@ -4694,6 +4685,15 @@ impl GpuRenderer {
         self.injected_row_glyph = glyph;
     }
 
+    /// Test hook: the committed and staged glyph-row keys of `slot` of `pane_id` (0 for none),
+    /// or `None` while the pane is untracked by the row glyph cache.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_glyph_slot_keys(&self, pane_id: u64, slot: u16) -> Option<(u64, u64)> {
+        let committed = self.row_glyph_cache.committed_slot(pane_id, slot)?;
+        Some((committed, self.row_glyph_cache.staged_slot(pane_id, slot)?))
+    }
+
     /// Test hook: the committed ink record of viewport slot `slot` of pane `pane_id`, as the last
     /// presented frame left it; `None` when no record is kept.
     #[doc(hidden)]
@@ -4718,6 +4718,20 @@ impl GpuRenderer {
         self.fault_frame_probe = self
             .device_errors
             .gpu_work("fault.frame_probe", || create_frame_fault_probe(&self.device));
+    }
+
+    /// Test hook: the next assembly fails with `Err` after its glyph rows are staged, reaching
+    /// the assembly error arm of `render_releasing` rather than an ordinary failed outcome.
+    #[doc(hidden)]
+    pub fn __fail_next_assembly(&mut self) {
+        self.fault_assembly_error = true;
+    }
+
+    /// Test hook: the next presentation fails with `Err` from the presenter call itself, rather
+    /// than the ordinary failed outcome `__fail_next_frame_submission` produces.
+    #[doc(hidden)]
+    pub fn __fail_next_present(&mut self) {
+        self.fault_present_error = true;
     }
 
     /// Test hook: keep each later presented frame's damage for `__take_presented_damage`.
@@ -5654,7 +5668,9 @@ impl GpuRenderer {
         let assembled = match assembled {
             Ok(assembled) => assembled,
             Err(error) => {
-                // When: assembly returned `error`, nothing was drawn; report it as failed, with no receipts.
+                // When: assembly returned `error`, nothing was drawn; report it as failed, with no
+                // receipts, and forget the glyph slot keys its passes staged.
+                self.row_glyph_cache.discard_staged();
                 return FrameOutcome::without_receipts(PresentOutcome::Failed(error));
             }
         };
@@ -5673,6 +5689,7 @@ impl GpuRenderer {
                 // Only a forced-Full pass reaches here, and force_full makes a fallback impossible;
                 // present nothing and plan the next frame from scratch rather than trust the key.
                 self.last_frame_key = None;
+                self.row_glyph_cache.discard_staged();
                 self.request_window_redraw();
                 PresentOutcome::Skipped(SkipReason::Noop)
             }
@@ -5721,6 +5738,7 @@ impl GpuRenderer {
                 let _discarded = settle_retained_frame(
                     &mut self.last_frame_key,
                     &mut self.row_ink,
+                    &mut self.row_glyph_cache,
                     &PresentOutcome::AtlasRetry,
                     None,
                     Vec::new(),
@@ -5728,8 +5746,10 @@ impl GpuRenderer {
                 PresentOutcome::AtlasRetry
             }
             Assembled::Layers(layers) => {
-                // When: `Layers` carries owned batches, present them; only a presented frame returns receipts.
+                // When: `Layers` carries owned batches, present them; only a presented frame returns
+                // receipts. A presenter `Err` skips settlement, so it discards staged slot keys here.
                 return self.present_layers(*layers).unwrap_or_else(|error| {
+                    self.row_glyph_cache.discard_staged();
                     FrameOutcome::without_receipts(PresentOutcome::Failed(error))
                 });
             }
@@ -6197,145 +6217,72 @@ impl GpuRenderer {
                 // the underline, so the accent is never sampled.
                 [0.0, 0.0, 0.0, 0.0]
             };
-            // Each pane supplies its grid and origin; pane_id prevents row-cache collisions across splits.
-            // Size the row glyph cache ONCE for the whole frame using the
-            // total visible rows across all panes — NOT per-pane inside the
-            // loop. Resizing to a single pane's `grid.rows` on every iteration
-            // changed the cap each time in an unequal-height split and cleared
-            // the entire cache per pane per frame, forcing all rows to
-            // re-shape every keystroke. Mirrors the quad
-            // cache's total-visible-rows sizing below.
-            let total_glyph_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
-            self.row_glyph_cache.resize(total_glyph_rows.max(1));
-            // Name every drawn pane's visible absolute rows before any insert, so an admission
-            // at capacity evicts only rows no pane shows this frame.
-            let visible_rows: Vec<(sonicterm_text::row_glyph_cache::PaneId, std::ops::Range<u64>)> =
-                pane_views
-                    .iter()
-                    .filter(|pane| pane.planned.full_clip.is_some())
-                    .map(|pane| {
-                        let top = pane.planned.view_top_abs;
-                        (pane.pane_id, top..top.saturating_add(u64::from(pane.planned.row_count)))
-                    })
-                    .collect();
-            self.row_glyph_cache.begin_frame(&visible_rows);
+            // One cache pass per assembly pass, before any pane pins or admits a row: it releases
+            // panes not drawn or resized, clears every stage and pin list, and tracks new panes.
+            let drawn_panes: Vec<(sonicterm_text::row_glyph_cache::PaneId, u16, u16)> = pane_views
+                .iter()
+                .filter(|pane| pane.planned.full_clip.is_some())
+                .map(|pane| (pane.pane_id, pane.planned.row_count, pane.grid.cols))
+                .collect();
+            self.row_glyph_cache.begin_frame(&drawn_panes);
             // A fresh stage: records an unpresented frame staged are discarded.
             self.row_ink.begin_frame();
             for pv in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
-                let grid: &Grid = pv.grid;
-                let pane_id: sonicterm_text::row_glyph_cache::PaneId = pv.pane_id;
-                let pad = pv.origin_x;
-                let top_inset = pv.origin_y;
-                // Resolve which absolute row sits at the top of the rendered
-                // viewport. When the user hasn't scrolled (or hasn't scrolled
-                // past the visible bottom), this is the live-buffer top, i.e.
-                // `scrollback_len()`. Otherwise it's the explicit absolute
-                // index requested by the scroll action (e.g. a prompt row).
-                let view_top_abs = pv.planned.view_top_abs;
                 let pane_staged_start = self.row_ink.staged_len();
-                // Drop cache entries for every row the VT thread mutated
-                // since the last frame. `grid.dirty_rows()` already covers
-                // theme/font/resize/scroll/focus/selection changes via the
-                // invalidation hooks; renderer-side state changes
-                // (font/theme/scale/resize) already cleared the cache
-                // wholesale above. Dirty rows index the live buffer, so the
-                // absolute row is `scrollback_len + row` whatever the view top,
-                // and offscreen dirt is dropped too.
-                invalidate_planned_glyph_rows(&mut self.row_glyph_cache, pv.planned);
-                // Normalise selection once outside the loop so we hash a
-                // canonical bbox per row. Rows are scrollback-ABSOLUTE; the
-                // per-row membership test inside `row_hash_cells` compares
-                // them against each row's `view_top_abs + r`.
-                let sel_bbox: Option<(u64, u16, u64, u16)> = selection.map(|s| {
-                    let (a, b) = s.normalized();
-                    (a.0, a.1, b.0, b.1)
-                });
-                // per-cell device-pixel snapping rounds each cell's left
-                // edge independently. At fractional DPI (1.25/1.5/1.75) that
-                // produces a 14/15/14/15 device-pixel alternation in cell
-                // pitch, which shows as 1-px gaps between adjacent Powerline
-                // chevrons. Precompute snapped column edges once per pane so
-                // every glyph-emit path in `flush_shape_run` derives `cx` and
-                // the per-cell width from the SAME snapped edges — adjacent
-                // cells then share an edge by construction. Integer-scale
-                // fast path in `snap_to_device_pixels` makes this a no-op at
-                // scale 1.0/2.0 (mac dHash snapshots stay green).
-                let snapped_cell_x: Vec<f32> = build_snapped_cell_x(pad, cell_w, grid.cols);
-                // Hover recolor applies only to the pane named by the hit-test.
-                // Filtering by identity prevents a split at the same row/columns
-                // from inheriting another pane's target accent.
+                // Per-cell device-pixel snapping rounds each cell's left edge independently, which
+                // at fractional DPI alternates the cell pitch; every glyph path derives its cell
+                // edges from these shared snapped edges, so adjacent cells share an edge.
+                let snapped_cell_x: Vec<f32> =
+                    build_snapped_cell_x(pv.origin_x, cell_w, pv.grid.cols);
+                // Hover recolor applies only to the pane named by the hit-test, so a split at the
+                // same row and columns never inherits another pane's accent.
                 let pane_hovered_url =
                     hovered_url_cells.filter(|hovered| hovered.pane_id == pv.pane_id);
-                for (r, _) in pv.planned.rows() {
-                    if !pv.planned.emit_rows[usize::from(r)] {
-                        // When: the plan does not emit slot `r`, its retained pixels and record stay.
-                        continue;
-                    }
-                    let (spans_before, tofu_before, underlines_before) =
-                        (row_spans.len(), missing_tofu.len(), underlines.len());
-                    let _replayed = emit_row_glyphs(
-                        GlyphShaping {
-                            atlas: &mut self.glyph_atlas,
-                            row_cache: &mut self.row_glyph_cache,
-                            font_family: &self.font_family,
-                            font_stack: self.font_stack.as_ref(),
-                            wt_raster: wt_raster.as_mut(),
-                            style_rev: self.style_rev,
-                            theme,
-                            fg_default,
-                            raster_px,
-                            cell_size: (cell_w, cell_h),
-                            surface: (sw, sh),
-                            baseline_y_in_cell,
-                            hovered_url_accent,
-                            software_presenter,
-                        },
-                        GlyphRow {
-                            pane_id,
-                            grid,
-                            view_top_abs,
-                            slot: r,
-                            origin: (pad, top_inset),
-                            snapped_cell_x: &snapped_cell_x,
-                            selection: sel_bbox,
-                            pane_hovered_url,
-                        },
-                        GlyphFrame {
-                            glyph_instances: &mut glyph_instances,
-                            underlines: &mut underlines,
-                            missing_tofu: &mut missing_tofu,
-                            missing_chars_this_frame: &mut missing_chars_this_frame,
-                            row_spans: &mut row_spans,
-                        },
-                    );
-                    // The row's ink: its glyphs' union and its tofu outlines. Its underlines join
-                    // when they are drawn below.
-                    push_injected_row_glyph(
-                        &mut self.glyph_atlas,
-                        self.injected_row_glyph,
-                        pane_id,
-                        r,
-                        &mut glyph_instances,
-                        &mut row_spans,
-                        (sw, sh),
-                    );
-                    let ink = crate::row_ink::emitted_row_ink(
-                        &row_spans[spans_before..],
-                        missing_tofu[tofu_before..]
-                            .iter()
-                            .map(|(left, top, width, height, _)| (*left, *top, *width, *height)),
-                    );
-                    let staged = self.row_ink.stage_row(
-                        pane_id,
-                        r,
-                        grid,
-                        view_top_abs,
-                        ink.to_rect(plan.surface),
-                    );
-                    underline_owners.extend((underlines_before..underlines.len()).map(|_| staged));
-                }
-                staged_ranges.push((pane_id, pane_staged_start..self.row_ink.staged_len()));
+                assemble_pane_glyph_rows(
+                    GlyphShaping {
+                        atlas: &mut self.glyph_atlas,
+                        row_cache: &mut self.row_glyph_cache,
+                        font_stack: self.font_stack.as_ref(),
+                        wt_raster: wt_raster.as_mut(),
+                        style_rev: self.style_rev,
+                        theme,
+                        fg_default,
+                        raster_px,
+                        cell_size: (cell_w, cell_h),
+                        surface: (sw, sh),
+                        baseline_y_in_cell,
+                        hovered_url_accent,
+                        software_presenter,
+                    },
+                    PaneGlyphRows {
+                        pane_id: pv.pane_id,
+                        grid: pv.grid,
+                        planned: pv.planned,
+                        origin: (pv.origin_x, pv.origin_y),
+                        snapped_cell_x: &snapped_cell_x,
+                        pane_hovered_url,
+                    },
+                    GlyphFrame {
+                        glyph_instances: &mut glyph_instances,
+                        underlines: &mut underlines,
+                        missing_tofu: &mut missing_tofu,
+                        missing_chars_this_frame: &mut missing_chars_this_frame,
+                        row_spans: &mut row_spans,
+                    },
+                    PaneGlyphSinks {
+                        row_ink: &mut self.row_ink,
+                        ink_surface: plan.surface,
+                        underline_owners: &mut underline_owners,
+                        injected_row_glyph: self.injected_row_glyph,
+                    },
+                );
+                staged_ranges.push((pv.pane_id, pane_staged_start..self.row_ink.staged_len()));
             } // end per-pane loop
+        }
+        if std::mem::take(&mut self.fault_assembly_error) {
+            // When: `fault_assembly_error` is armed, assembly fails as a real `Err` would, after
+            // its glyph rows were staged, so the error arm must discard them.
+            return Err(anyhow!("injected assembly failure"));
         }
 
         let mut quads: Vec<QuadInstance> = Vec::new();
@@ -8513,6 +8460,10 @@ impl GpuRenderer {
                 overlay_glyphs: &overlay_glyphs,
             },
         };
+        if std::mem::take(&mut self.fault_present_error) {
+            // When: `fault_present_error` is armed, the presenter call fails as a real `Err` would.
+            return Err(anyhow!("injected presentation failure"));
+        }
         let outcome = self.present_frame(&layers, &mut gpu_timing)?;
         // Only a presented frame's field geometry is what the user sees and may be hit-tested.
         self.presented_fields
@@ -8523,6 +8474,7 @@ impl GpuRenderer {
             let _discarded = settle_retained_frame(
                 &mut self.last_frame_key,
                 &mut self.row_ink,
+                &mut self.row_glyph_cache,
                 &outcome,
                 None,
                 receipts,
@@ -8623,6 +8575,7 @@ impl GpuRenderer {
         let receipts = settle_retained_frame(
             &mut self.last_frame_key,
             &mut self.row_ink,
+            &mut self.row_glyph_cache,
             &PresentOutcome::Presented,
             Some(plan),
             receipts,
@@ -8704,43 +8657,34 @@ impl GpuRenderer {
         }
     }
 
-    /// Shape a single style-run worth of cells and append the
-    /// resulting glyph instances + missing-glyph tofus to the frame's
-    /// queues. Factored out of the per-row loop so the loop body stays
-    /// readable; otherwise it would inline ~80 lines of placement +
-    /// fallback handling four times (run start, mid-row flush, end of
-    /// row, etc.).
+    /// Shape one style run of `cells` into position-free row records: glyph records into
+    /// `records.glyphs`, missing-glyph boxes into `records.tofu` and their codepoints into
+    /// `records.missing_chars`. Projection onto the surface happens afterwards, once per row,
+    /// on a hit and on a miss alike.
     ///
-    /// Non-ASCII clusters drive through
-    /// `shape_run_with_wezterm` only — the cosmic-text path plus the
-    /// legacy wezterm-cluster-width overlay are gone. Each cluster
-    /// lead cell dispatches on
-    /// [`sonicterm_block_glyph::BlockKey::from_char`]: on `Some`, the
-    /// atlas pulls a [`sonicterm_block_glyph::block_sprite`] tile
-    /// keyed under the block-glyph sentinel
-    /// (`GlyphKey { font_slot: 0xFF, glyph_id: <hashed SizedBlockKey>,
-    /// .. }`) so the wezterm shape path and the block-sprite path
-    /// share the atlas without colliding; on `None`, the cluster
-    /// follows the normal sonicterm-font rasterize path. Box drawing,
-    /// Powerline, Sextant, Octant, and Braille all reach the renderer
-    /// through this dispatch — there is no fallback to the font's own
-    /// glyph for codepoints `BlockKey` recognizes.
-    // Hot inner-loop helper called per shaped run per row. Every
-    // argument is an exclusive `&mut` borrow of a *different* field of
-    // `GpuRenderer` (atlas, rasterizer, instance buffers, missing-glyph
-    // trackers) — bundling them into a struct would force a single
-    // `&mut Ctx` that conflicts with the surrounding loop's own
-    // borrows. Suppression stays with this explanatory comment.
+    /// Returns whether the run is complete. A run is incomplete when an attempted glyph was
+    /// refused by the atlas (a `None` from `get_or_insert`, read before `drawable_or_tofu` folds
+    /// it with the stable missing sentinel), when a block glyph drew nothing, when shaping failed,
+    /// or when no shaper or rasterizer was available; such outcomes depend on atlas or font
+    /// state, not on content, so the row they belong to is drawn but never cached. Intentional
+    /// empty work is complete: an empty run, a run of wide continuations, whitespace and
+    /// zero-area non-block tiles, and a glyph the atlas caches as missing.
+    ///
+    /// Non-ASCII clusters are shaped through the font stack. Each cluster's lead cell dispatches
+    /// on [`sonicterm_block_glyph::BlockKey::from_char`]: on `Some`, the atlas holds a
+    /// [`sonicterm_block_glyph::block_sprite`] tile keyed under the block-glyph sentinel
+    /// (`GlyphKey { font_slot: 0xFF, glyph_id: <hashed SizedBlockKey>, .. }`), so the shaped
+    /// path and the block-sprite path share the atlas without colliding; on `None`, the cluster
+    /// takes the normal rasterize path. Box drawing, Powerline, Sextant, Octant and Braille all
+    /// reach the renderer through this dispatch.
+    // Hot inner-loop helper called per style run per row. Every argument is an exclusive `&mut`
+    // borrow of a different renderer field or a per-run value; bundling them into one struct
+    // would conflict with the surrounding loop's own borrows.
     #[allow(clippy::too_many_arguments)]
-    fn flush_shape_run(
+    fn build_shape_run(
         glyph_atlas: &mut GlyphAtlas,
-        _font_family: &str,
-        _font_size: f32,
-        glyph_instances: &mut Vec<GlyphInstance>,
-        missing_tofu: &mut Vec<(f32, f32, f32, f32, ChromeColor)>,
-        missing_chars_this_frame: &mut Vec<char>,
+        records: &mut sonicterm_text::row_glyph_cache::CachedRow,
         row: u16,
-        _run_first_col: u16,
         style: RunStyle,
         cells: &[(u16, Cell)],
         theme: &Theme,
@@ -8748,36 +8692,24 @@ impl GpuRenderer {
         cell_w: f32,
         cell_h: f32,
         top_inset: f32,
-        _pad: f32,
-        sw: f32,
-        sh: f32,
-        baseline_y_in_cell: f32,
         snapped_cell_x: &[f32],
-        // `font_stack` is now the sole
-        // shape entry point — when None, the non-ASCII branch can
-        // emit nothing (test fixtures without bundled fonts hit
-        // this; the ASCII branch still drives through `wt_raster`
-        // if it's been wired). The Option shape is kept so
-        // `GpuRenderer::new` can continue to construct a partly-
-        // degraded renderer in tests.
+        // The sole shape entry point; `None` only in test fixtures without bundled fonts, where
+        // non-ASCII runs emit nothing and are reported incomplete.
         font_stack: Option<&sonicterm_engine::FontStack>,
-        // Without a FontStack rasterizer no glyphs are emitted, but background, cursor, and underline quads remain.
+        // The rasterizer; `None` only in test fixtures, where no glyph is drawn and the run is
+        // reported incomplete, while background, cursor and underline quads remain.
         mut wt_raster: Option<&mut sonicterm_engine::FontStack>,
-        // Cmd-hovered URL cell range for this pane (viewport coords),
-        // already gated to the active pane by the caller. When a cell's
-        // (row, col) falls inside this span the glyph's foreground is
-        // overridden with `hovered_url_accent`. `None` = no recolor.
+        // This row's hover span, already gated to the drawing pane. An ACTIVE hover recolors the
+        // glyphs inside it to `hovered_url_accent`; it is folded into the row's content key.
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
-        // Theme accent in linear-sRGB `[f32;4]` (alpha 1.0) used for the
-        // recolor above. Same color space the per-glyph `color` field
-        // already carries, so it is assigned with no conversion.
         hovered_url_accent: [f32; 4],
         software_presenter: bool,
-    ) {
+    ) -> bool {
+        use sonicterm_text::row_glyph_cache::{RowGlyphKind, RowTofu};
         if cells.is_empty() {
             // When: `cells.is_empty()` — the run carries no cells, so there is
-            // nothing to shape and no glyph to emit.
-            return;
+            // nothing to shape and nothing missing.
+            return true;
         }
 
         let style_span = tracing::enabled!(target: "render_timing", tracing::Level::DEBUG).then(|| {
@@ -8785,32 +8717,30 @@ impl GpuRenderer {
         });
         let _entered = style_span.as_ref().map(tracing::Span::enter);
 
-        // Resolve a monochrome glyph's foreground to linear-sRGB rgba,
-        // swapping in the theme accent when this cell sits inside the
-        // Cmd-hovered URL span. `row` is fixed for the whole run; only
-        // `col` varies per glyph. Used by every non-color emit path
-        // below so the recolor is applied uniformly (ASCII fast path,
-        // char-fallback, and the main shaped path). Color glyphs
-        // (`info.is_color`) bypass this and keep their own tile color.
+        // A monochrome glyph's foreground in linear sRGB, swapped for the theme accent inside an
+        // ACTIVE hover span; a plain hint leaves the colour and is marked by its underline only.
         let resolve_fg = |col: u16, base: ChromeColor| -> [f32; 4] {
             match hovered_url_cells {
-                // Only the ACTIVE (modifier-held) hover recolors glyphs to the
-                // accent. A plain-hover hint leaves the text color alone and is
-                // marked by the yellow underline only. #URL-hint
                 Some(h) if h.active && h.contains(row, col) => hovered_url_accent,
                 _ => chrome_color_to_linear_rgba(base),
             }
         };
+        // The tofu box of a cell `width` raster pixels wide, inset from the cell edges.
+        let tofu_box = |lead_col: u16, width: f32, color: ChromeColor| {
+            let inset = (cell_h * 0.12).max(1.0);
+            RowTofu {
+                lead_col,
+                inset,
+                width: width - inset * 2.0,
+                height: cell_h - inset * 2.0,
+                color: [color.r(), color.g(), color.b(), color.a()],
+            }
+        };
+        let mut complete = true;
 
-        // ASCII fast path: every cell is printable-ASCII (0x20..=0x7E)
-        // with no cluster extras and no ligature trigger, so the shaper
-        // would emit a 1:1 mapping anyway. Skip the shape call entirely
-        // and drive the glyph atlas straight from each cell's GlyphKey.
-        //
-        // ASCII codepoints (0x20..=0x7E) never overlap the
-        // `BlockKey::from_char` ranges (≥ U+2500) and never carry a
-        // Powerline / NF PUA codepoint, so the BlockKey dispatch is
-        // safely skipped here.
+        // ASCII fast path: every cell is printable ASCII with no cluster extras and no ligature
+        // trigger, so the shaper would map 1:1 anyway; the atlas is driven from each cell's key.
+        // These codepoints never overlap the `BlockKey` ranges, so block dispatch is skipped.
         if run_is_ascii_fast(cells) {
             // When: `run_is_ascii_fast` — every cell is 0x20..=0x7E, which
             // cannot shape or need `BlockKey`, so each maps 1:1 to a tile.
@@ -8823,33 +8753,21 @@ impl GpuRenderer {
                     glyph_id: 0,
                     raster_variant: GlyphRasterVariant::Normal,
                 };
-                // Sonicterm-font owns the atlas. No swash
-                // fallback — when `wt_raster` is None (test fixture
-                // without a FontStack) the glyph is silently skipped
-                // so the renderer still paints quads.
                 let Some(wt) = wt_raster.as_deref_mut() else {
-                    // When: `wt_raster` is None — a test fixture with no
-                    // FontStack; quads still paint, glyphs are skipped.
+                    // When: `wt_raster` is None — a test fixture with no FontStack; the glyph is
+                    // skipped and the row is not cached.
+                    complete = false;
                     continue;
                 };
-                let info_opt = drawable_or_tofu(
-                    glyph_atlas.get_or_insert(key, &mut CountingRasterizer::new(wt)),
-                );
-                let Some(info) = info_opt else {
-                    // When: `info_opt` is None — the atlas refused the glyph or cached it as
-                    // missing, so a printable cell draws the same outline box as the shaped path.
+                let inserted = glyph_atlas.get_or_insert(key, &mut CountingRasterizer::new(wt));
+                complete &= inserted.is_some();
+                let Some(info) = drawable_or_tofu(inserted) else {
+                    // When: `drawable_or_tofu` is None — the atlas refused the glyph or cached it
+                    // as missing, so a printable cell draws the same outline box as the shaped path.
                     if !cell.ch.is_whitespace() {
-                        // Blanks are intentionally tile-less and are not
-                        // reported as missing.
-                        let inset = (cell_h * 0.12).max(1.0);
-                        missing_tofu.push((
-                            snapped_cell_x[*col as usize] + inset,
-                            top_inset + f32::from(row) * cell_h + inset,
-                            cell_w - inset * 2.0,
-                            cell_h - inset * 2.0,
-                            cell_fg(cell, theme, fg_default),
-                        ));
-                        missing_chars_this_frame.push(cell.ch);
+                        // Blanks are intentionally tile-less and are not reported as missing.
+                        records.tofu.push(tofu_box(*col, cell_w, cell_fg(cell, theme, fg_default)));
+                        records.missing_chars.push(cell.ch);
                     }
                     continue;
                 };
@@ -8858,21 +8776,6 @@ impl GpuRenderer {
                     // tile, which is what a space rasterizes to.
                     continue;
                 }
-                let cx = snapped_cell_x[*col as usize];
-                let cy = top_inset + f32::from(row) * cell_h;
-                // Atlas offsets and destination geometry share raster pixels; no scale conversion is needed.
-                let inv_s = 1.0_f32;
-                let gx = cx + info.px_offset[0] as f32 * inv_s;
-                let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
-                let gw = info.px_size[0] as f32 * inv_s;
-                let gh = info.px_size[1] as f32 * inv_s;
-                // The legacy `apply_symbol_fit_v2` +
-                // `block_element_rect` overlay tracks the SwashRasterizer
-                // path; sonicterm-font handles cell fit natively. ASCII
-                // glyphs are always `Natural` (identity) so dropping
-                // the overlay is a no-op for the steady-state hot path.
-                let (gx, gy, gw, gh) =
-                    sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
                 let color = cell_fg(cell, theme, fg_default);
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
@@ -8895,21 +8798,16 @@ impl GpuRenderer {
                     );
                     continue;
                 }
-                glyph_instances.push(GlyphInstance {
-                    rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
-                    uv: info.uv,
-                    color: rgba,
-                    flags: glyph_flags(info.is_color, info.is_subpixel),
-                });
+                records.glyphs.push(tile_record(RowGlyphKind::Natural, *col, &info, rgba));
             }
-            return;
+            return complete;
         }
 
         // The non-ASCII path maps UTF-8 cluster offsets back to terminal columns before shaping.
         let Some(stack) = font_stack else {
             // When: `font_stack` is None — no shaper, so non-ASCII clusters
-            // emit nothing. Test-only path; production always carries a stack.
-            return;
+            // emit nothing and the row is not cached.
+            return false;
         };
         let mut text = String::with_capacity(cells.len() * 2);
         let mut cell_cols: Vec<u16> = Vec::with_capacity(cells.len() * 2);
@@ -8929,33 +8827,31 @@ impl GpuRenderer {
         if text.is_empty() {
             // When: `text.is_empty()` — every cell in the run was a wide
             // continuation, so the shaper has no bytes to work on.
-            return;
+            return true;
         }
 
-        let infos = match crate::frame_stats::shape_request(|| {
+        let shaped_text = crate::frame_stats::shape_request(|| {
             stack.shape_text_for_frame(&text, style.bold, style.italic)
-        }) {
-            Ok(v) => v,
+        });
+        let infos = match inject_shape_failure(shaped_text) {
+            Ok(infos) => infos,
             Err(_) => {
-                // When: `shape_text_for_frame` returns `Err` — the face
-                // rejected the run, so no glyph ids exist to place.
-                return;
+                // When: `inject_shape_failure` passes on an `Err` — the face rejected the run or the
+                // frame's shaping allowance ran out, so the run draws nothing and is not cached.
+                return false;
             }
         };
 
-        // Build a lookup from col → cell so we can recover per-cell
-        // attributes (color, WIDE flag, the actual codepoint for tofu
-        // diagnostics) from the shaped output's `lead_col`.
+        // A lookup from column to cell recovers per-cell attributes (colour, WIDE flag, the
+        // codepoint for tofu diagnostics) from the shaped output's `lead_col`.
         let mut cell_by_col: std::collections::HashMap<u16, Cell> =
             std::collections::HashMap::with_capacity(cells.len());
         for (col, c) in cells {
             cell_by_col.insert(*col, c.clone());
         }
 
-        // We consume WezTerm's GlyphInfo directly here and project it into the
-        // Sonic glyph record the rest of the renderer already uses. No
-        // WtShapedGlyph wrapper: cluster byte offsets map straight back through
-        // `cell_cols`.
+        // Shaped output projects straight into the shaped-glyph record; cluster byte offsets map
+        // back through `cell_cols`.
         let mut shaped = Vec::with_capacity(infos.len());
         let mut last_col: u16 = cell_cols.first().copied().unwrap_or(0);
         for info in infos {
@@ -8993,23 +8889,9 @@ impl GpuRenderer {
             let cells_to_span = if is_wide { 2 } else { cluster_cells };
             let cell_pixel_width = cell_w * cells_to_span as f32;
 
-            // BlockKey dispatch at the cluster lead cell.
-            //
-            // Box-drawing (U+2500..=U+259F), Powerline (U+E0A0..=U+E0D7),
-            // Sextant (U+1FB00..), Octant, and Braille (U+2800..) all
-            // recognize via `BlockKey::from_char`. When the lead cell
-            // resolves, the vendored wezterm geometry produces the
-            // glyph; the atlas keys it under
-            // `(font_slot = 0xFF, glyph_id = hashed SizedBlockKey)` so
-            // it never collides with a wezterm-shaped glyph
-            // (`FallbackIdx` truncated to u8 cannot reach 0xFF in
-            // practice — wezterm chains a handful of fallbacks, never
-            // 255). The shaper-reported `glyph_id` is intentionally
-            // ignored for this branch — wezterm itself draws block
-            // glyphs through the same `customglyph::block_sprite` we
-            // vendored, so taking the font glyph would produce the
-            // wrong rendering (or tofu, if the chosen face lacks the
-            // codepoint).
+            // Block dispatch at the cluster lead cell: box drawing, block elements, Powerline,
+            // Sextant, Octant and Braille draw from vendored geometry under the block-glyph
+            // sentinel key, never from the font's own glyph.
             if let Some(block_key) = sonicterm_block_glyph::BlockKey::from_char(lead_cell.ch) {
                 // When: `BlockKey::from_char` is Some — a box/block codepoint,
                 // drawn from vendored geometry rather than the font's glyph.
@@ -9018,54 +8900,33 @@ impl GpuRenderer {
                 let span = if is_wide { 2usize } else { cluster_cells };
                 let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
                 let cell_right = snapped_cell_x[end_col];
-                let (gx, gy, gw, gh) = if software_presenter {
+                // The software presenter rasterizes to the exact integer destination so atlas
+                // sampling stays one-to-one; that destination depends on the row's position,
+                // which a cache lookup revalidates. The GPU keeps the fractional cell geometry.
+                let (target_w, target_h) = if software_presenter {
                     let cell_bottom = top_inset + (f32::from(row) + 1.0) * cell_h;
-                    software_block_glyph_target_rect(cx, cy, cell_right, cell_bottom)
+                    let (_, _, width, height) =
+                        software_block_glyph_target_rect(cx, cy, cell_right, cell_bottom);
+                    (width, height)
                 } else {
                     // When: `!software_presenter` — the GPU path keeps the
                     // established fractional font-cell geometry unchanged.
-                    (cx, cy, cell_right - cx, cell_h)
+                    (cell_w, cell_h)
                 };
-                // Hardware keeps the established font-cell geometry unchanged.
-                // The software presenter rasterizes to the exact integer
-                // destination so glyph-atlas sampling stays one-to-one.
-                let cell_w_i =
-                    if software_presenter { gw } else { cell_w }.round().max(1.0) as isize;
-                let cell_h_i =
-                    if software_presenter { gh } else { cell_h }.round().max(1.0) as isize;
-                // Bug 4 / wezterm-takeover: stroke width for the
-                // `PolyStyle::Outline` box-drawing path comes from the
-                // font's actual `underline_thickness`, mirroring
-                // wezterm-gui's `utilsprites.rs:29` (`metrics
-                // .underline_thickness.get().round().max(1.) as isize`).
-                // A hardcoded 1 was producing nearly-invisible 1-device-px
-                // strokes that looked like tofu rectangles at every font
-                // size — the user-reported "U+2500 renders as a single
-                // tofu box" symptom. Use the font metric when we have
-                // it; fall back to a 1/16-cell-height heuristic for the
-                // test fixture path with no FontStack.
+                let cell_w_i = target_w.round().max(1.0) as isize;
+                let cell_h_i = target_h.round().max(1.0) as isize;
+                // The outline stroke width comes from the font's underline thickness, as
+                // WezTerm's sprite utilities take it; a hardcoded single pixel made box-drawing
+                // strokes nearly invisible. With no font stack, a 1/16-cell heuristic is used.
                 let underline_h_isize: isize = font_stack
                     .and_then(|s| s.cell_metrics_raster_px().ok())
                     .map(|m| m.underline_h.round().max(1.0) as isize)
                     .unwrap_or_else(|| ((cell_h / 16.0).round().max(1.0)) as isize);
                 let size = sonicterm_block_glyph::glue::Size::new(cell_w_i, cell_h_i);
                 let sized_key = sonicterm_block_glyph::SizedBlockKey { block: block_key, size };
-                // BlockKey identity collapses to a u32 via the std
-                // `DefaultHasher`. Block glyphs are size-sensitive
-                // (the same key at a different cell pitch produces a
-                // different bitmap) so the hash inputs include the
-                // packed cell dims as well as the variant. We don't
-                // need cryptographic strength — only collision
-                // resistance among the ~hundred block glyphs the
-                // renderer touches per frame; `DefaultHasher` is
-                // overkill but free.
-                //
-                // Bug 4 fix: `underline_h_isize` participates in the
-                // hash too — the same SizedBlockKey at the same cell
-                // size renders with a different stroke width when the
-                // font's underline_thickness changes (e.g. live font
-                // family swap), so the cached tile would be stale
-                // without this bit of the key.
+                // Block tiles are size- and stroke-sensitive, so the atlas id hashes the sized key
+                // and the stroke width; only collision resistance among the few hundred block
+                // glyphs a frame touches is needed.
                 let glyph_id_u32: u32 = {
                     use std::hash::{Hash, Hasher};
                     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -9076,9 +8937,7 @@ impl GpuRenderer {
                     // contribute to the atlas key.
                     ((h64 >> 32) as u32) ^ (h64 as u32)
                 };
-                // Block glyphs ignore bold/italic — the geometry is the
-                // same regardless of cell style, so collapse those bits
-                // to keep the cache footprint minimal.
+                // Block geometry ignores bold and italic, so those bits are collapsed.
                 let key = sonicterm_types::glyph_key::GlyphKey {
                     ch: lead_cell.ch,
                     font_slot: 0xFF,
@@ -9087,11 +8946,8 @@ impl GpuRenderer {
                     glyph_id: glyph_id_u32,
                     raster_variant: GlyphRasterVariant::Normal,
                 };
-                // Wrap `block_sprite` in a thin `Rasterizer` so the
-                // atlas only computes the sprite on a cache miss.
-                // Identity is captured by `key` above; the rasterizer
-                // ignores its `GlyphKey` argument and returns the
-                // tile derived from `sized_key`.
+                // A thin `Rasterizer` around `block_sprite`, so the atlas computes the sprite only
+                // on a miss; identity is captured by `key`.
                 struct BlockSpriteRasterizer {
                     sized_key: sonicterm_block_glyph::SizedBlockKey,
                     underline_h: isize,
@@ -9101,20 +8957,8 @@ impl GpuRenderer {
                         &mut self,
                         _key: sonicterm_types::glyph_key::GlyphKey,
                     ) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
-                        // Synthesize the BlockCellMetrics input that
-                        // `block_sprite` expects. Customglyph reads
-                        // `cell_size`, `underline_height`, and (only
-                        // under the `PolyWithCustomMetrics` arm)
-                        // descender / descender_row / descender_plus_two
-                        // / strike_row. Cell metrics are derived from
-                        // the SizedBlockKey's `size`. The underline
-                        // height arrives from the font (Bug 4 fix —
-                        // hardcoded 1 made Outline strokes invisible).
-                        // anti_alias=true — matches the wezterm-gui
-                        // default behavior (`config.anti_alias = true`).
-                        // We don't surface a config knob: per spec
-                        // "where wezterm and sonicterm disagree,
-                        // wezterm wins" + the upstream default is AA.
+                        // Cell metrics derive from the sized key; the underline height comes from
+                        // the font, and anti-aliasing matches WezTerm's default.
                         let block_tile = sonicterm_block_glyph::block_sprite_with_cell_metrics(
                             self.sized_key,
                             self.underline_h,
@@ -9131,10 +8975,8 @@ impl GpuRenderer {
                             offset_y: block_tile.offset_y,
                             advance: block_tile.advance,
                             coverage: alpha_mask,
-                            // WezTerm customglyph geometry is a mask for the
-                            // cell foreground, not a self-colored emoji. Treat
-                            // it as monochrome coverage so brand/icons like
-                            // claude's red block logo inherit SGR fg.
+                            // Block geometry is a mask for the cell foreground, not a self-coloured
+                            // emoji, so icons inherit the SGR foreground.
                             is_color: false,
                             is_subpixel: false,
                         })
@@ -9146,20 +8988,17 @@ impl GpuRenderer {
                     glyph_atlas.get_or_insert(key, &mut CountingRasterizer::new(&mut block_raster))
                 else {
                     // When: `glyph_atlas.get_or_insert` is None — the block
-                    // sprite could not be rasterized or packed.
+                    // sprite could not be packed; the row is not cached.
+                    complete = false;
                     continue;
                 };
                 if info.px_size[0] == 0 || info.px_size[1] == 0 {
-                    // When: either axis of `info.px_size` is 0 — a zero-area
-                    // sprite, which has no pixels to blit.
+                    // When: either axis of `info.px_size` is 0 — the sprite passed the atlas's
+                    // placement limit here, so the block drew nothing and its row is not cached.
+                    complete = false;
                     continue;
                 }
-                // `block_sprite` was generated from this exact target size.
-                // Keeping the destination identical avoids software resampling;
-                // the hardware branch retains its established fractional rect.
                 let color = cell_fg(&lead_cell, theme, fg_default);
-                // Block glyphs are converted to monochrome masks so they
-                // honour the cell foreground and Cmd-hover URL recolor like text.
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
@@ -9172,32 +9011,32 @@ impl GpuRenderer {
                     ch = ?lead_cell.ch,
                     codepoint = format!("U+{:04X}", lead_cell.ch as u32),
                     code_u32 = lead_cell.ch as u32,
-                    final_rect = ?(gx, gy, gw, gh),
+                    target_size = ?(target_w, target_h),
                     final_rgba = ?rgba,
                     is_color = info.is_color,
                     path = "block_sprite",
                     "glyph render emit (block-glyph)"
                 );
-                glyph_instances.push(GlyphInstance {
-                    rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
-                    uv: info.uv,
-                    color: rgba,
-                    flags: glyph_flags(info.is_color, info.is_subpixel),
-                });
+                let mut record = tile_record(RowGlyphKind::Block, g.lead_col, &info, rgba);
+                record.raster_offset = [0.0; 2];
+                record.raster_size = [target_w, target_h];
+                record.end_col = end_col as u16;
+                records.glyphs.push(record);
                 continue;
             }
 
-            // ── Normal wezterm-shape path (non-block cluster) ──
-            //
+            // ── Normal shape path (non-block cluster) ──
             let shape_x_offset = shaped_cluster_x_offset(
                 &mut positioned_cluster_col,
                 &mut positioned_cluster_pen_x,
                 g,
             );
-            // Post-glyphon the char-fallback path is wezterm-
-            // only. FontStack is the sole rasterizer; missing chars
-            // emit tofu via `Rasterizer::rasterize` returning
-            // None (when sonicterm-font's fallback chain has nothing).
+            let marker_fit = status_marker_fit_eligible(
+                lead_cell.ch,
+                cluster_cells,
+                is_wide,
+                lead_cell.extras().is_some(),
+            );
             if g.glyph_id == 0 {
                 // When: `g.glyph_id == 0` — the shaper found no glyph for this
                 // cluster, so the char-fallback path runs instead.
@@ -9207,15 +9046,10 @@ impl GpuRenderer {
                     // legitimately glyph-less and must not draw tofu.
                     continue;
                 }
-                // Drop the `resolve_slot` swash walk. wezterm
-                // handles fallback internally — pass `font_slot = 0`
-                // and let `FontStack::rasterize` find a face
-                // (it shapes the single char against the loaded font
-                // when glyph_id == 0).
-                let slot: u8 = 0;
+                // The rasterizer finds a face itself for slot 0 when glyph_id is 0.
                 let key = sonicterm_types::glyph_key::GlyphKey {
                     ch,
-                    font_slot: slot,
+                    font_slot: 0,
                     weight_bold: style.bold,
                     italic: style.italic,
                     glyph_id: 0,
@@ -9224,26 +9058,20 @@ impl GpuRenderer {
                 let Some(wt) = wt_raster.as_deref_mut() else {
                     // When: `wt_raster` is None — a test fixture with no
                     // FontStack, so the fallback char cannot be rasterized.
+                    complete = false;
                     continue;
                 };
-                let info_opt = drawable_or_tofu(
-                    glyph_atlas.get_or_insert(key, &mut CountingRasterizer::new(wt)),
-                );
-                let Some(info) = info_opt else {
-                    // When: `info_opt` is None — true tofu: the atlas refused the glyph or
+                let inserted = glyph_atlas.get_or_insert(key, &mut CountingRasterizer::new(wt));
+                complete &= inserted.is_some();
+                let Some(info) = drawable_or_tofu(inserted) else {
+                    // When: `drawable_or_tofu` is None — true tofu: the atlas refused the glyph or
                     // cached it as missing, so an outline box is drawn instead.
-
-                    let cx = snapped_cell_x[g.lead_col as usize];
-                    let cy = top_inset + f32::from(row) * cell_h;
-                    let inset = (cell_h * 0.12).max(1.0);
-                    missing_tofu.push((
-                        cx + inset,
-                        cy + inset,
-                        cell_pixel_width - inset * 2.0,
-                        cell_h - inset * 2.0,
+                    records.tofu.push(tofu_box(
+                        g.lead_col,
+                        cell_pixel_width,
                         cell_fg(&lead_cell, theme, fg_default),
                     ));
-                    missing_chars_this_frame.push(ch);
+                    records.missing_chars.push(ch);
                     continue;
                 };
                 if info.px_size[0] == 0 || info.px_size[1] == 0 {
@@ -9251,27 +9079,6 @@ impl GpuRenderer {
                     // face produced a zero-area tile, which has no pixels.
                     continue;
                 }
-                let cx = snapped_cell_x[g.lead_col as usize];
-                let cy = top_inset + f32::from(row) * cell_h;
-                let inv_s = 1.0_f32;
-                let gx = cx + info.px_offset[0] as f32 * inv_s;
-                let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
-                let gw = info.px_size[0] as f32 * inv_s;
-                let gh = info.px_size[1] as f32 * inv_s;
-                let (gx, gy, gw, gh) =
-                    positioned_shaped_glyph_rect((gx, gy, gw, gh), shape_x_offset, g.y_offset);
-                let cell_right =
-                    snapped_cell_x.get(g.lead_col as usize + 1).copied().unwrap_or(cx + cell_w);
-                let (gx, gy, gw, gh) = fit_single_cell_status_marker(
-                    ch,
-                    cluster_cells,
-                    is_wide,
-                    lead_cell.extras().is_some(),
-                    (gx, gy, gw, gh),
-                    (cx, cy, cell_right - cx, cell_h),
-                );
-                // All other glyphs keep their natural raster geometry. In
-                // particular, multi-cell ligature halves may exceed one cell.
                 let color = cell_fg(&lead_cell, theme, fg_default);
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
@@ -9280,8 +9087,6 @@ impl GpuRenderer {
                     // it takes the cell foreground like ordinary text.
                     resolve_fg(g.lead_col, color)
                 };
-                let (gx, gy, gw, gh) =
-                    sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
                 if glyph_draw_is_degenerate(&info) {
                     // When: `glyph_draw_is_degenerate` — the tile has area but
                     // its UVs or metrics cannot produce a visible draw.
@@ -9297,12 +9102,16 @@ impl GpuRenderer {
                     );
                     continue;
                 }
-                glyph_instances.push(GlyphInstance {
-                    rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
-                    uv: info.uv,
-                    color: rgba,
-                    flags: glyph_flags(info.is_color, info.is_subpixel),
-                });
+                let mut record = tile_record(RowGlyphKind::Fallback, g.lead_col, &info, rgba);
+                set_shaped_bits(
+                    &mut record,
+                    [shape_x_offset, g.y_offset],
+                    marker_fit,
+                    g,
+                    is_wide,
+                    &lead_cell,
+                );
+                records.glyphs.push(record);
                 continue;
             }
 
@@ -9313,21 +9122,17 @@ impl GpuRenderer {
                 style.bold,
                 style.italic,
             );
-            // Sonicterm-font is the sole rasterizer; the
-            // legacy `swash_rasterizer::classify_symbol` / SymbolFit
-            // family routes through the SwashRasterizer which is gone.
-            // sonicterm-font sizes glyphs natively, so the IconCellFit
-            // resample helper isn't needed either. Atlas keys remain
-            // identical (font_slot, glyph_id) so cached tiles survive.
             let Some(wt) = wt_raster.as_deref_mut() else {
                 // When: `wt_raster` is None — a test fixture with no FontStack,
-                // so the ligature glyph cannot be rasterized.
+                // so the shaped glyph cannot be rasterized.
+                complete = false;
                 continue;
             };
             let Some(info) = glyph_atlas.get_or_insert(key, &mut CountingRasterizer::new(wt))
             else {
-                // When: `glyph_atlas.get_or_insert` is None — the face produced
-                // no tile for this shaped glyph id.
+                // When: `glyph_atlas.get_or_insert` is None — the atlas refused
+                // this shaped glyph; the row is not cached.
+                complete = false;
                 continue;
             };
             if info.px_size[0] == 0 || info.px_size[1] == 0 {
@@ -9335,25 +9140,6 @@ impl GpuRenderer {
                 // which has no pixels to blit.
                 continue;
             }
-            let cx = snapped_cell_x[g.lead_col as usize];
-            let cy = top_inset + f32::from(row) * cell_h;
-            let inv_s = 1.0_f32;
-            let gx = cx + info.px_offset[0] as f32 * inv_s;
-            let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
-            let gw = info.px_size[0] as f32 * inv_s;
-            let gh = info.px_size[1] as f32 * inv_s;
-            let (gx, gy, gw, gh) =
-                positioned_shaped_glyph_rect((gx, gy, gw, gh), shape_x_offset, g.y_offset);
-            let cell_right =
-                snapped_cell_x.get(g.lead_col as usize + 1).copied().unwrap_or(cx + cell_w);
-            let (gx, gy, gw, gh) = fit_single_cell_status_marker(
-                lead_cell.ch,
-                cluster_cells,
-                is_wide,
-                lead_cell.extras().is_some(),
-                (gx, gy, gw, gh),
-                (cx, cy, cell_right - cx, cell_h),
-            );
             // Multi-cell ligature halves keep their natural overhang so paired
             // glyphs such as `=>` continue to fuse across adjacent cells.
             let color = cell_fg(&lead_cell, theme, fg_default);
@@ -9364,8 +9150,6 @@ impl GpuRenderer {
                 // takes the cell foreground like ordinary text.
                 resolve_fg(g.lead_col, color)
             };
-            let (gx, gy, gw, gh) =
-                sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
             if glyph_draw_is_degenerate(&info) {
                 // When: `glyph_draw_is_degenerate` — the tile has area but its
                 // UVs or metrics cannot produce a visible draw.
@@ -9381,13 +9165,18 @@ impl GpuRenderer {
                 );
                 continue;
             }
-            glyph_instances.push(GlyphInstance {
-                rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
-                uv: info.uv,
-                color: rgba,
-                flags: glyph_flags(info.is_color, info.is_subpixel),
-            });
+            let mut record = tile_record(RowGlyphKind::Shaped, g.lead_col, &info, rgba);
+            set_shaped_bits(
+                &mut record,
+                [shape_x_offset, g.y_offset],
+                marker_fit,
+                g,
+                is_wide,
+                &lead_cell,
+            );
+            records.glyphs.push(record);
         }
+        complete
     }
 }
 
@@ -9943,11 +9732,234 @@ pub fn pixel_to_local_col(px: f32, edges: &[f32], cols: u16) -> Option<u16> {
     None
 }
 
+/// A glyph record of `kind` at `lead_col` from an atlas tile: its region, raster offset and size,
+/// `rgba` and its colour and subpixel flags, with no shaping offset and no marker fit.
+fn tile_record(
+    kind: sonicterm_text::row_glyph_cache::RowGlyphKind,
+    lead_col: u16,
+    info: &sonicterm_text::glyph_atlas::GlyphInfo,
+    rgba: [f32; 4],
+) -> sonicterm_text::row_glyph_cache::RowGlyph {
+    sonicterm_text::row_glyph_cache::RowGlyph {
+        uv: info.uv,
+        color: rgba,
+        raster_offset: [info.px_offset[0] as f32, info.px_offset[1] as f32],
+        shape_offset: [0.0; 2],
+        raster_size: [info.px_size[0] as f32, info.px_size[1] as f32],
+        lead_col,
+        end_col: lead_col.saturating_add(1),
+        kind_and_bits: sonicterm_text::row_glyph_cache::RowGlyphBits {
+            kind,
+            is_color: info.is_color,
+            is_subpixel: info.is_subpixel,
+            marker_fit_eligible: false,
+            is_wide: false,
+            has_extras: false,
+            cluster_cells: 1,
+        }
+        .pack(),
+    }
+}
+
+/// Record a shaped or fallback glyph's resolved shaping offset and the inputs of its marker fit,
+/// decided now from the lead cell and applied only at projection.
+fn set_shaped_bits(
+    record: &mut sonicterm_text::row_glyph_cache::RowGlyph,
+    shape_offset: [f32; 2],
+    marker_fit_eligible: bool,
+    shaped: &sonicterm_text::shape::ShapedGlyph,
+    is_wide: bool,
+    lead_cell: &Cell,
+) {
+    let mut bits = record.bits();
+    bits.marker_fit_eligible = marker_fit_eligible;
+    bits.is_wide = is_wide;
+    bits.has_extras = lead_cell.extras().is_some();
+    bits.cluster_cells = shaped.cluster_cells.max(1);
+    record.kind_and_bits = bits.pack();
+    record.shape_offset = shape_offset;
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: the next frame-shaping call on this thread fails once.
+    static FAIL_NEXT_SHAPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: make the next `shape_text_for_frame` call on this thread return `Err` once.
+#[cfg(test)]
+pub(crate) fn fail_next_shape_for_test() {
+    FAIL_NEXT_SHAPE.with(|armed| armed.set(true));
+}
+
+/// `shaped`, or an error in its place when the test seam is armed, consuming the seam.
+#[cfg(test)]
+fn inject_shape_failure<T>(shaped: Result<T>) -> Result<T> {
+    if FAIL_NEXT_SHAPE.with(|armed| armed.replace(false)) {
+        // When: the test seam is armed, this shaping call fails as a real error would.
+        return Err(anyhow!("injected shaping failure"));
+    }
+    shaped
+}
+
+/// Production never injects a shaping failure: the shaping result passes through.
+#[cfg(not(test))]
+#[inline(always)]
+fn inject_shape_failure<T>(shaped: Result<T>) -> Result<T> {
+    shaped
+}
+
+/// Where one cached row is drawn this frame: its slot, origin, column edges, cell size, baseline,
+/// surface and presenter. Everything the content key omits lives here, so one row's records
+/// project correctly wherever it is drawn.
+#[derive(Clone, Copy)]
+pub(crate) struct RowPlacement<'edges> {
+    pub(crate) slot: u16,
+    pub(crate) origin: (f32, f32),
+    pub(crate) cols: u16,
+    pub(crate) snapped_cell_x: &'edges [f32],
+    pub(crate) cell_size: (f32, f32),
+    pub(crate) baseline_y_in_cell: f32,
+    pub(crate) surface: (f32, f32),
+}
+
+/// Project one glyph record onto the surface at `at`, per kind, in the order the shaping paths
+/// built rectangles before records existed: cell origin, raster offset (natural position),
+/// shaping offset, marker fit when eligible, device-pixel snap, then NDC. A block fills the
+/// columns it spans: on the GPU at the fractional cell height, on the software presenter at the
+/// integer target its tile was rasterized for.
+pub(crate) fn project_row_glyph(
+    glyph: &sonicterm_text::row_glyph_cache::RowGlyph,
+    at: &RowPlacement<'_>,
+    software_presenter: bool,
+) -> GlyphInstance {
+    use sonicterm_text::row_glyph_cache::RowGlyphKind;
+    let bits = glyph.bits();
+    let (cell_w, cell_h) = at.cell_size;
+    let (sw, sh) = at.surface;
+    let top_inset = at.origin.1;
+    let cx = at.snapped_cell_x[usize::from(glyph.lead_col)];
+    let cy = top_inset + f32::from(at.slot) * cell_h;
+    let rect = match bits.kind {
+        RowGlyphKind::Block => {
+            let cell_right = at.snapped_cell_x[usize::from(glyph.end_col)];
+            if software_presenter {
+                let cell_bottom = top_inset + (f32::from(at.slot) + 1.0) * cell_h;
+                software_block_glyph_target_rect(cx, cy, cell_right, cell_bottom)
+            } else {
+                // When: `software_presenter` is false, the block keeps the fractional cell box.
+                (cx, cy, cell_right - cx, cell_h)
+            }
+        }
+        RowGlyphKind::Natural => {
+            let natural = (
+                cx + glyph.raster_offset[0],
+                cy + at.baseline_y_in_cell + glyph.raster_offset[1],
+                glyph.raster_size[0],
+                glyph.raster_size[1],
+            );
+            sonicterm_render_model::geometry::snap_to_device_pixels(natural, 1.0)
+        }
+        RowGlyphKind::Fallback | RowGlyphKind::Shaped => {
+            let natural = (
+                cx + glyph.raster_offset[0],
+                cy + at.baseline_y_in_cell + glyph.raster_offset[1],
+                glyph.raster_size[0],
+                glyph.raster_size[1],
+            );
+            let positioned =
+                positioned_shaped_glyph_rect(natural, glyph.shape_offset[0], glyph.shape_offset[1]);
+            let fitted = if bits.marker_fit_eligible {
+                // A standalone status marker is fitted inside its own cell.
+                let cell_right = at
+                    .snapped_cell_x
+                    .get(usize::from(glyph.lead_col) + 1)
+                    .copied()
+                    .unwrap_or(cx + cell_w);
+                fit_status_marker_rect(positioned, (cx, cy, cell_right - cx, cell_h))
+            } else {
+                // When: `marker_fit_eligible` is false, the glyph keeps its natural overhang, as ligature halves must.
+                positioned
+            };
+            sonicterm_render_model::geometry::snap_to_device_pixels(fitted, 1.0)
+        }
+    };
+    GlyphInstance {
+        rect: px_to_ndc(rect.0, rect.1, rect.2, rect.3, sw, sh),
+        uv: glyph.uv,
+        color: glyph.color,
+        flags: glyph_flags(bits.is_color, bits.is_subpixel),
+    }
+}
+
+/// Append one cached row to the frame at `at`: underlines at its slot, projected glyphs as the
+/// row's own span, tofu boxes and missing characters. The hit path and the miss path both call
+/// this, so a replayed row draws exactly what shaping it again would.
+pub(crate) fn project_cached_row(
+    row: &sonicterm_text::row_glyph_cache::CachedRow,
+    at: &RowPlacement<'_>,
+    software_presenter: bool,
+    frame: GlyphFrame<'_>,
+) {
+    let (pad, top_inset) = at.origin;
+    for run in &row.underlines {
+        frame.underlines.push((pad, top_inset, at.cols, at.slot, *run));
+    }
+    let glyph_base = frame.glyph_instances.len();
+    frame
+        .glyph_instances
+        .extend(row.glyphs.iter().map(|glyph| project_row_glyph(glyph, at, software_presenter)));
+    let cell_h = at.cell_size.1;
+    for tofu in &row.tofu {
+        frame.missing_tofu.push((
+            at.snapped_cell_x[usize::from(tofu.lead_col)] + tofu.inset,
+            top_inset + f32::from(at.slot) * cell_h + tofu.inset,
+            tofu.width,
+            tofu.height,
+            ChromeColor::from(tofu.color),
+        ));
+    }
+    frame.missing_chars_this_frame.extend_from_slice(&row.missing_chars);
+    let (sw, sh) = at.surface;
+    frame.row_spans.push(RowGlyphSpan::new(
+        frame.glyph_instances,
+        glyph_base..frame.glyph_instances.len(),
+        sw,
+        sh,
+    ));
+}
+
+/// Whether every block record of a software-presenter row still rasterizes at its stored size
+/// when drawn at `at`. The software target rectangle is integer, so a fractional cell height or
+/// column edge can make the same block one pixel taller or wider at another position; such a
+/// row misses and is shaped again. The current top, the separately computed bottom and the
+/// current snapped column edges are used in that order, as shaping uses them.
+pub(crate) fn software_blocks_fit(
+    row: &sonicterm_text::row_glyph_cache::CachedRow,
+    at: &RowPlacement<'_>,
+) -> bool {
+    use sonicterm_text::row_glyph_cache::RowGlyphKind;
+    let (_, cell_h) = at.cell_size;
+    let top_inset = at.origin.1;
+    row.glyphs.iter().filter(|glyph| glyph.bits().kind == RowGlyphKind::Block).all(|glyph| {
+        let (Some(&left), Some(&right)) = (
+            at.snapped_cell_x.get(usize::from(glyph.lead_col)),
+            at.snapped_cell_x.get(usize::from(glyph.end_col)),
+        ) else {
+            // When: `lead_col` or `end_col` is outside `snapped_cell_x`, the record cannot be placed here.
+            return false;
+        };
+        let top = top_inset + f32::from(at.slot) * cell_h;
+        let bottom = top_inset + (f32::from(at.slot) + 1.0) * cell_h;
+        let (_, _, width, height) = software_block_glyph_target_rect(left, top, right, bottom);
+        [width, height] == glyph.raster_size
+    })
+}
+
 /// The renderer's glyph inputs for one row: atlas, row cache, fonts and shaping configuration.
 pub(crate) struct GlyphShaping<'frame> {
     pub(crate) atlas: &'frame mut GlyphAtlas,
     pub(crate) row_cache: &'frame mut sonicterm_text::row_glyph_cache::RowGlyphCache,
-    pub(crate) font_family: &'frame str,
     pub(crate) font_stack: Option<&'frame sonicterm_engine::FontStack>,
     pub(crate) wt_raster: Option<&'frame mut sonicterm_engine::FontStack>,
     pub(crate) style_rev: u64,
@@ -9961,7 +9973,29 @@ pub(crate) struct GlyphShaping<'frame> {
     pub(crate) software_presenter: bool,
 }
 
-/// Where one glyph row sits: its pane, grid, viewport slot and origin, plus selection and hover.
+impl GlyphShaping<'_> {
+    /// The same inputs for one row of a pane pass, reborrowed so the pass can use them again.
+    fn reborrow(&mut self) -> GlyphShaping<'_> {
+        GlyphShaping {
+            atlas: &mut *self.atlas,
+            row_cache: &mut *self.row_cache,
+            font_stack: self.font_stack,
+            wt_raster: self.wt_raster.as_deref_mut(),
+            style_rev: self.style_rev,
+            theme: self.theme,
+            fg_default: self.fg_default,
+            raster_px: self.raster_px,
+            cell_size: self.cell_size,
+            surface: self.surface,
+            baseline_y_in_cell: self.baseline_y_in_cell,
+            hovered_url_accent: self.hovered_url_accent,
+            software_presenter: self.software_presenter,
+        }
+    }
+}
+
+/// Where one glyph row sits: its pane, grid, viewport slot and origin, hover, and the content
+/// key its pane pass computed for it before any admission.
 pub(crate) struct GlyphRow<'grid> {
     pub(crate) pane_id: sonicterm_text::row_glyph_cache::PaneId,
     pub(crate) grid: &'grid Grid,
@@ -9969,8 +10003,9 @@ pub(crate) struct GlyphRow<'grid> {
     pub(crate) slot: u16,
     pub(crate) origin: (f32, f32),
     pub(crate) snapped_cell_x: &'grid [f32],
-    pub(crate) selection: Option<(u64, u16, u64, u16)>,
     pub(crate) pane_hovered_url: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+    /// The row's content key from [`emitted_row_key`]; 0 for a row the grid no longer holds.
+    pub(crate) key: u64,
 }
 
 /// The frame buffers one glyph row appends to.
@@ -9983,122 +10018,114 @@ pub(crate) struct GlyphFrame<'frame> {
     pub(crate) row_spans: &'frame mut Vec<RowGlyphSpan>,
 }
 
-/// Append one row's glyphs, underlines and tofu to the frame, replaying them from the row
-/// cache when the row's key matches, else shaping and caching them. Returns whether the row
-/// was replayed; a row the grid no longer holds draws nothing and is not a replay.
+impl GlyphFrame<'_> {
+    /// The same buffers for one row, reborrowed so the pass can append the next row too.
+    fn reborrow(&mut self) -> GlyphFrame<'_> {
+        GlyphFrame {
+            glyph_instances: &mut *self.glyph_instances,
+            underlines: &mut *self.underlines,
+            missing_tofu: &mut *self.missing_tofu,
+            missing_chars_this_frame: &mut *self.missing_chars_this_frame,
+            row_spans: &mut *self.row_spans,
+        }
+    }
+}
+
+/// The content key of the row at `slot` of a view whose top is `view_top_abs`: its cells and
+/// every non-positional shaping input, with the row's active hover fragment. Counts the row's
+/// cells as hashed. Returns 0 when the grid no longer holds that row.
+pub(crate) fn emitted_row_key(
+    shaping: &GlyphShaping<'_>,
+    grid: &Grid,
+    view_top_abs: u64,
+    slot: u16,
+    pane_hovered_url: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+) -> u64 {
+    let Some(row) = grid.row_at_abs(view_top_abs.saturating_add(u64::from(slot))) else {
+        // When: the absolute row is outside the scrollback still held, nothing is emitted for it.
+        return 0;
+    };
+    crate::frame_stats::note_row_cells_hashed(|| row.iter().len());
+    let inputs = sonicterm_text::row_glyph_cache::RowKeyInputs {
+        style_rev: shaping.style_rev,
+        cell_w: shaping.cell_size.0,
+        cell_h: shaping.cell_size.1,
+        baseline_y_in_cell: shaping.baseline_y_in_cell,
+        raster_px: shaping.raster_px,
+        software_presenter: shaping.software_presenter,
+        hover_span: hovered_url_row_key_span(pane_hovered_url, slot),
+    };
+    shaping.row_cache.content_key(row.iter(), grid.cols, &inputs)
+}
+
+/// Append one row's glyphs, underlines and tofu to the frame, replaying them from the row cache
+/// when its key and atlas identity match (and, for software blocks, their sizes still hold),
+/// else shaping them into records and admitting the row when it is complete. Both paths project
+/// through [`project_cached_row`]. Returns whether the row was replayed; a row the grid no longer
+/// holds draws nothing and is not a replay.
 pub(crate) fn emit_row_glyphs(
     shaping: GlyphShaping<'_>,
     placement: GlyphRow<'_>,
-    frame: GlyphFrame<'_>,
+    mut frame: GlyphFrame<'_>,
 ) -> bool {
     let GlyphShaping {
         atlas,
         row_cache,
-        font_family,
         font_stack,
         mut wt_raster,
-        style_rev,
         theme,
         fg_default,
-        raster_px,
         cell_size: (cell_w, cell_h),
-        surface: (sw, sh),
+        surface,
         baseline_y_in_cell,
         hovered_url_accent,
         software_presenter,
+        ..
     } = shaping;
     let GlyphRow {
         pane_id,
         grid,
         view_top_abs,
         slot: r,
-        origin: (pad, top_inset),
+        origin,
         snapped_cell_x,
-        selection: sel_bbox,
         pane_hovered_url,
+        key,
     } = placement;
-    let GlyphFrame {
-        glyph_instances,
-        underlines,
-        missing_tofu,
-        missing_chars_this_frame,
-        row_spans,
-    } = frame;
     let row_abs = view_top_abs.saturating_add(u64::from(r));
     let Some(row) = grid.row_at_abs(row_abs) else {
         // When: `grid.row_at_abs(row_abs)` is None — that
         // absolute row is outside the scrollback still held.
         return false;
     };
-    // ------ Cache lookup ------
-    // Rows containing Box-Drawing / Block-Element
-    // codepoints cache normally: those glyphs now route
-    // through the same WezTerm block_sprite atlas path as
-    // text glyphs, so no side-channel geometry replay is
-    // required.
-    crate::frame_stats::note_row_cells_hashed(|| row.iter().len());
-    // Cell dimensions already encode DPI in raster pixels; the separate scale key stays 1.0.
-    let key = sonicterm_text::row_glyph_cache::row_hash_cells(
-        view_top_abs,
-        r as usize,
-        row.iter(),
-        style_rev,
-        cell_w,
-        cell_h,
-        1.0,
-        pad,
-        top_inset,
-        sw,
-        sh,
-        sel_bbox,
-    );
-    // Fold only this row's active hover fragment into its cache
-    // key. Peer fragments and hint-only underlines remain outside
-    // the row cache, so unrelated rows keep replaying.
-    let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pane_id, r);
-    let key = hovered_url_row_cache_key(key, row_hovered_url, r);
+    let at = RowPlacement {
+        slot: r,
+        origin,
+        cols: grid.cols,
+        snapped_cell_x,
+        cell_size: (cell_w, cell_h),
+        baseline_y_in_cell,
+        surface,
+    };
     let atlas_identity = row_cache_atlas_identity(atlas);
-    let cached_row = row_cache.get(pane_id, row_abs, key, atlas_identity);
+    let cached_row = row_cache.get(pane_id, key, atlas_identity, |cached| {
+        !software_presenter || software_blocks_fit(cached, &at)
+    });
     crate::frame_stats::note_row_cache(cached_row.is_some());
     if let Some(cached) = cached_row {
-        // When: `cached_row` is Some — the row hash and
-        // atlas identity both match, so shaped glyphs are reusable.
-        let glyph_base = glyph_instances.len();
-        glyph_instances.extend_from_slice(&cached.glyphs);
-        for run in &cached.underlines {
-            underlines.push((pad, top_inset, grid.cols, r, *run));
-        }
-        for t in &cached.tofu {
-            // TofuColor is [u8;4] in the cache (no
-            // cross-crate ChromeColor dep). Convert
-            // back to ChromeColor for the frame's
-            // local emit vec.
-            let (x, y, w, h, c) = *t;
-            missing_tofu.push((x, y, w, h, ChromeColor::from(c)));
-        }
-        missing_chars_this_frame.extend_from_slice(&cached.missing_chars);
-        row_spans.push(RowGlyphSpan::new(
-            glyph_instances,
-            glyph_base..glyph_instances.len(),
-            sw,
-            sh,
-        ));
+        // When: `cached_row` is Some — the content key and atlas identity match and any software
+        // block still fits, so the shaped records are projected at this row's position.
+        project_cached_row(cached, &at, software_presenter, frame.reborrow());
         return true;
     }
-    // ------ Miss: shape into row-local buffers, then
-    // splice into the frame buffers AND insert into the
-    // cache. Keeping the per-row work in local Vecs is
-    // what lets us cache without scanning the frame
-    // buffers after the fact. ------
-    let glyph_base = glyph_instances.len();
-    let tofu_base = missing_tofu.len();
-    let miss_base = missing_chars_this_frame.len();
-    let mut row_underlines: Vec<sonicterm_text::row_glyph_cache::UnderlineRun> = Vec::new();
+    // Miss: build position-free records in a row-local buffer, project them, and admit them when
+    // complete. Keeping the row's work local is what lets it be cached without rescanning the
+    // frame buffers.
+    let mut records = sonicterm_text::row_glyph_cache::CachedRow::default();
     let mut ul_start: Option<(u16, UnderlineStyle, Color)> = None;
     let mut last_visible_col: u16 = 0;
-    // First pass: per-cell underline coalescing (unchanged
-    // — underlines are a cell-level decoration, independent
-    // of shaping).
+    // First pass: per-cell underline coalescing; underlines are a cell-level decoration,
+    // independent of shaping.
     for (col, cell) in row.iter().enumerate() {
         if cell.flags.contains(CellFlags::WIDE_CONT) {
             // When: `WIDE_CONT` — the trailing half of a wide
@@ -10115,15 +10142,12 @@ pub(crate) fn emit_row_glyphs(
                     // colour, so the open run simply continues.
                 }
                 Some((s, active_style, active_color)) => {
-                    let end = (col as u16).saturating_sub(1);
-                    let run = sonicterm_text::row_glyph_cache::UnderlineRun {
+                    records.underlines.push(sonicterm_text::row_glyph_cache::UnderlineRun {
                         start_col: s,
-                        end_col: end,
+                        end_col: (col as u16).saturating_sub(1),
                         style: active_style,
                         color: active_color,
-                    };
-                    row_underlines.push(run);
-                    underlines.push((pad, top_inset, grid.cols, r, run));
+                    });
                     ul_start = Some((col as u16, style, color));
                 }
                 None => {
@@ -10133,140 +10157,193 @@ pub(crate) fn emit_row_glyphs(
         } else if let Some((s, style, color)) = ul_start.take() {
             // When: `ul_start.take()` is Some — this cell has no
             // underline, so the open run ends and is emitted.
-            let end = (col as u16).saturating_sub(1);
-            let run = sonicterm_text::row_glyph_cache::UnderlineRun {
+            records.underlines.push(sonicterm_text::row_glyph_cache::UnderlineRun {
                 start_col: s,
-                end_col: end,
+                end_col: (col as u16).saturating_sub(1),
                 style,
                 color,
-            };
-            row_underlines.push(run);
-            underlines.push((pad, top_inset, grid.cols, r, run));
+            });
         }
     }
     if let Some((s, style, color)) = ul_start.take() {
-        let run = sonicterm_text::row_glyph_cache::UnderlineRun {
+        records.underlines.push(sonicterm_text::row_glyph_cache::UnderlineRun {
             start_col: s,
             end_col: last_visible_col,
             style,
             color,
-        };
-        row_underlines.push(run);
-        underlines.push((pad, top_inset, grid.cols, r, run));
+        });
     }
 
-    // Second pass: group cells into style runs and shape
-    // each run through the FontStack shaper. The shaper composes
-    // ZWJ sequences and ligatures into single glyphs when
-    // the font supports them; otherwise it produces 1:1
-    // output identical to the old char-based path.
+    // Second pass: group cells into style runs and shape each one. Every run is built, whatever
+    // an earlier run reported, and its completeness is then folded into the row's: a failed run
+    // keeps the row out of the cache but never stops a later valid run from drawing.
+    let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pane_id, r);
+    let mut complete = true;
     let mut run_cells: Vec<(u16, Cell)> = Vec::new();
     let mut run_style: Option<RunStyle> = None;
-    let mut run_first_col: u16 = 0;
-    for (col, cell) in row.iter().enumerate() {
-        if cell.flags.contains(CellFlags::WIDE_CONT) {
-            // When: `WIDE_CONT` — the trailing half of a wide
-            // glyph, already shaped from its lead cell.
+    let cells: Vec<(u16, &Cell)> = row
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| !cell.flags.contains(CellFlags::WIDE_CONT))
+        .map(|(col, cell)| (col as u16, cell))
+        .collect();
+    for (index, (col, cell)) in cells.iter().enumerate() {
+        let style = RunStyle::from_cell(cell);
+        if run_style.is_some_and(|open| open != style) {
+            // The style changed, so the open run is shaped before this cell starts a new one.
+            let run_complete = GpuRenderer::build_shape_run(
+                atlas,
+                &mut records,
+                r,
+                run_style.expect("an open run"),
+                &run_cells,
+                theme,
+                fg_default,
+                cell_w,
+                cell_h,
+                origin.1,
+                snapped_cell_x,
+                font_stack,
+                wt_raster.as_deref_mut(),
+                row_hovered_url,
+                hovered_url_accent,
+                software_presenter,
+            );
+            complete &= run_complete;
+            run_cells.clear();
+        }
+        run_style = Some(style);
+        run_cells.push((*col, (*cell).clone()));
+        if index + 1 == cells.len() {
+            // This is the row's last visible cell, so its open run is shaped now.
+            let run_complete = GpuRenderer::build_shape_run(
+                atlas,
+                &mut records,
+                r,
+                style,
+                &run_cells,
+                theme,
+                fg_default,
+                cell_w,
+                cell_h,
+                origin.1,
+                snapped_cell_x,
+                font_stack,
+                wt_raster.as_deref_mut(),
+                row_hovered_url,
+                hovered_url_accent,
+                software_presenter,
+            );
+            complete &= run_complete;
+        }
+    }
+    project_cached_row(&records, &at, software_presenter, frame.reborrow());
+    if complete {
+        // Every run shaped and every attempted glyph reached a stable atlas outcome, so the row
+        // is admitted; an incomplete row was drawn and is shaped again next time.
+        row_cache.insert(pane_id, key, row_cache_atlas_identity(atlas), records);
+    }
+    false
+}
+
+/// One pane's glyph rows for a pass: its grid, plan, origin, column edges and hover.
+pub(crate) struct PaneGlyphRows<'pane> {
+    pub(crate) pane_id: sonicterm_text::row_glyph_cache::PaneId,
+    pub(crate) grid: &'pane Grid,
+    pub(crate) planned: &'pane PlannedPane,
+    pub(crate) origin: (f32, f32),
+    pub(crate) snapped_cell_x: &'pane [f32],
+    pub(crate) pane_hovered_url: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+}
+
+/// Where a pane pass records each emitted row's ink and its underline owners.
+pub(crate) struct PaneGlyphSinks<'sink> {
+    pub(crate) row_ink: &'sink mut crate::row_ink::RowInkTable,
+    pub(crate) ink_surface: PixelRect,
+    pub(crate) underline_owners: &'sink mut Vec<usize>,
+    pub(crate) injected_row_glyph: Option<InjectedRowGlyph>,
+}
+
+/// Assemble one pane's emitted glyph rows in two phases. The pin phase computes the content key
+/// of every row the plan emits, once, and pins those keys with the pane's committed slot keys
+/// before any admission, so eviction can never drop a row this pass or the presented frame
+/// shows. The emit phase then, in slot order, replays or shapes each row, stages its key for the
+/// slot, appends the test row-glyph seam and stages the row's ink record. The cache's
+/// `begin_frame` for this pass must already have run.
+pub(crate) fn assemble_pane_glyph_rows(
+    mut shaping: GlyphShaping<'_>,
+    pane: PaneGlyphRows<'_>,
+    mut frame: GlyphFrame<'_>,
+    sinks: PaneGlyphSinks<'_>,
+) {
+    let PaneGlyphRows { pane_id, grid, planned, origin, snapped_cell_x, pane_hovered_url } = pane;
+    let view_top_abs = planned.view_top_abs;
+    // Pin phase.
+    let keys: Vec<u64> = planned
+        .rows()
+        .map(|(slot, _)| {
+            if planned.emit_rows[usize::from(slot)] {
+                emitted_row_key(&shaping, grid, view_top_abs, slot, pane_hovered_url)
+            } else {
+                // When: the plan does not emit `slot`, its key is never needed this pass.
+                0
+            }
+        })
+        .collect();
+    shaping.row_cache.pin(pane_id, &keys);
+    // Emit phase.
+    for (slot, _) in planned.rows() {
+        if !planned.emit_rows[usize::from(slot)] {
+            // When: the plan does not emit `slot`, its retained pixels and record stay.
             continue;
         }
-        let style = RunStyle::from_cell(cell);
-        match run_style {
-            None => {
-                run_style = Some(style);
-                run_first_col = col as u16;
-                run_cells.push((col as u16, cell.clone()));
-            }
-            Some(s) if s == style => {
-                run_cells.push((col as u16, cell.clone()));
-            }
-            Some(s) => {
-                GpuRenderer::flush_shape_run(
-                    atlas,
-                    font_family,
-                    raster_px,
-                    glyph_instances,
-                    missing_tofu,
-                    missing_chars_this_frame,
-                    r,
-                    run_first_col,
-                    s,
-                    &run_cells,
-                    theme,
-                    fg_default,
-                    cell_w,
-                    cell_h,
-                    top_inset,
-                    pad,
-                    sw,
-                    sh,
-                    baseline_y_in_cell,
-                    snapped_cell_x,
-                    font_stack,
-                    wt_raster.as_deref_mut(),
-                    row_hovered_url,
-                    hovered_url_accent,
-                    software_presenter,
-                );
-                run_cells.clear();
-                run_style = Some(style);
-                run_first_col = col as u16;
-                run_cells.push((col as u16, cell.clone()));
-            }
-        }
-    }
-    if let Some(s) = run_style {
-        GpuRenderer::flush_shape_run(
-            atlas,
-            font_family,
-            raster_px,
-            glyph_instances,
-            missing_tofu,
-            missing_chars_this_frame,
-            r,
-            run_first_col,
-            s,
-            &run_cells,
-            theme,
-            fg_default,
-            cell_w,
-            cell_h,
-            top_inset,
-            pad,
-            sw,
-            sh,
-            baseline_y_in_cell,
-            snapped_cell_x,
-            font_stack,
-            wt_raster,
-            pane_hovered_url,
-            hovered_url_accent,
-            software_presenter,
+        let key = keys[usize::from(slot)];
+        let (spans_before, tofu_before, underlines_before) =
+            (frame.row_spans.len(), frame.missing_tofu.len(), frame.underlines.len());
+        let _replayed = emit_row_glyphs(
+            shaping.reborrow(),
+            GlyphRow {
+                pane_id,
+                grid,
+                view_top_abs,
+                slot,
+                origin,
+                snapped_cell_x,
+                pane_hovered_url,
+                key,
+            },
+            frame.reborrow(),
         );
+        if key != 0 {
+            // The row exists, so its key is this slot's staged key until the frame settles.
+            shaping.row_cache.stage_slot(pane_id, slot, key);
+        }
+        // The row's ink: its glyphs' union and its tofu outlines. Its underlines join when they
+        // are drawn below.
+        push_injected_row_glyph(
+            shaping.atlas,
+            sinks.injected_row_glyph,
+            pane_id,
+            slot,
+            frame.glyph_instances,
+            frame.row_spans,
+            shaping.surface,
+        );
+        let ink = crate::row_ink::emitted_row_ink(
+            &frame.row_spans[spans_before..],
+            frame.missing_tofu[tofu_before..]
+                .iter()
+                .map(|(left, top, width, height, _)| (*left, *top, *width, *height)),
+        );
+        let staged = sinks.row_ink.stage_row(
+            pane_id,
+            slot,
+            grid,
+            view_top_abs,
+            ink.to_rect(sinks.ink_surface),
+        );
+        sinks.underline_owners.extend((underlines_before..frame.underlines.len()).map(|_| staged));
     }
-    // Capture this row's contributions and insert into
-    // the cache so subsequent unchanged frames replay
-    // without shaping.
-    let row_glyphs = glyph_instances[glyph_base..].to_vec();
-    // Convert ChromeColor → TofuColor for cache storage.
-    let row_tofu: Vec<(f32, f32, f32, f32, [u8; 4])> = missing_tofu[tofu_base..]
-        .iter()
-        .map(|(x, y, w, h, c)| (*x, *y, *w, *h, [c.r(), c.g(), c.b(), c.a()]))
-        .collect();
-    let row_missing = missing_chars_this_frame[miss_base..].to_vec();
-    row_cache.insert(
-        pane_id,
-        row_abs,
-        key,
-        row_cache_atlas_identity(atlas),
-        sonicterm_text::row_glyph_cache::CachedRow {
-            glyphs: row_glyphs,
-            underlines: row_underlines,
-            tofu: row_tofu,
-            missing_chars: row_missing,
-        },
-    );
-    row_spans.push(RowGlyphSpan::new(glyph_instances, glyph_base..glyph_instances.len(), sw, sh));
-    false
 }
 
 /// The pane-focus flash: the pane's chrome rectangle, lifted 0.07 above the background, at `alpha`.
@@ -10523,6 +10600,8 @@ fn indexed(i: u8, theme: &Theme) -> Option<ChromeColor> {
     }
 }
 
+#[cfg(test)]
+pub(crate) use core_tests::warm_and_cold_row_glyphs;
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod core_tests;
