@@ -217,3 +217,28 @@ fn snap_keeps_adjacent_cells_seamless_at_fractional_scale() {
     assert!(approx(a_right, b_left), "a_right={a_right} b_left={b_left}");
     assert!(is_device_aligned(a_right, scale));
 }
+
+/// The exact area several damage rectangles cover counts each pixel once: disjoint parts add,
+/// overlapping and nested parts do not double count, touching edges share no pixel, and empty
+/// parts cover nothing. This is the denominator-free figure the damage-waste counter subtracts.
+#[test]
+fn covered_area_counts_each_pixel_once() {
+    let rect = |left, top, width, height| PixelRect { x: left, y: top, w: width, h: height };
+    assert_eq!(covered_area(&[]), 0);
+    assert_eq!(covered_area(&[rect(0, 0, 0, 10)]), 0, "an empty part covers nothing");
+    // Disjoint: 10x10 and 20x5 never meet.
+    assert_eq!(covered_area(&[rect(0, 0, 10, 10), rect(50, 50, 20, 5)]), 100 + 100);
+    // Overlapping: two 10x10 squares sharing a 5x5 corner.
+    assert_eq!(covered_area(&[rect(0, 0, 10, 10), rect(5, 5, 10, 10)]), 100 + 100 - 25);
+    // Nested: the inner part adds nothing.
+    assert_eq!(covered_area(&[rect(0, 0, 20, 20), rect(5, 5, 4, 4)]), 400);
+    // Touching edges: adjacent parts add exactly.
+    assert_eq!(covered_area(&[rect(0, 0, 10, 10), rect(10, 0, 10, 10)]), 200);
+    // Negative origins are measured like any other coordinate.
+    assert_eq!(covered_area(&[rect(-10, -10, 10, 10)]), 100);
+    // Eight row strips with a gap between each: the union rect would be far larger.
+    let strips: Vec<PixelRect> = (0..8).map(|index| rect(0, index * 20, 100, 10)).collect();
+    assert_eq!(covered_area(&strips), 8 * 1000);
+    let union = strips.iter().copied().reduce(PixelRect::union).expect("eight strips");
+    assert_eq!(u64::from(union.w) * u64::from(union.h), 100 * 150);
+}
