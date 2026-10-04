@@ -38,7 +38,7 @@ impl PaneState {
 
 impl WindowState {
     /// The panes this window shows: the active tab's leaves, or its zoomed pane.
-    fn visible_pane_ids(&self) -> Vec<u64> {
+    pub(super) fn visible_pane_ids(&self) -> Vec<u64> {
         self.tab_states.get(self.tabs.active_index()).map_or_else(Vec::new, |tab| {
             tab.tree.zoomed_pane_id().map_or_else(|| tab.tree.leaves(), |id| vec![id])
         })
@@ -160,6 +160,7 @@ impl App {
                 states.iter().map(|(pane_id, state)| (*pane_id, state.resets)).collect();
             return false;
         }
+        window.redraw.finish_admitted_yield(super::parser_yield::YieldLoss::Sync);
         window.redraw.attempt_causes = None;
         window.redraw.deferred = true;
         window.redraw.deferred_rule = Some(DeferRule::Sync);

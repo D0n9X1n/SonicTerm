@@ -244,6 +244,9 @@ impl App {
         if turning_on {
             for window in self.windows.values_mut() {
                 window.redraw.invalidate_link_pacing();
+                // The software path takes no fast retry; every ask and token resolves now.
+                window.redraw.suppress_yield(super::parser_yield::YieldLoss::Software);
+                window.redraw.resolve_yield_ask();
             }
         }
     }

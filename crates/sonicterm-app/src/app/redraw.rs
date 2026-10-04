@@ -128,6 +128,12 @@ pub(crate) struct WindowRedrawState {
     pub(super) attempt_sync_resets: Vec<(u64, u64)>,
     /// This window's frame counters; `Some` only when its App's gate is on.
     pub(super) frame_counters: Option<Box<super::frame_counters::WindowFrameCounters>>,
+    /// The window's outstanding request to a pane's worker for its next gap.
+    pub(super) yield_ask: Option<super::parser_yield::YieldAsk>,
+    /// Whether this contention episode already accepted its one fast retry.
+    pub(super) yield_episode_spent: bool,
+    /// An accepted grant, until its terminal disposition.
+    pub(super) yield_token: Option<super::parser_yield::YieldToken>,
     #[cfg(target_os = "macos")]
     pub(super) surface_probe_at: Option<Instant>,
     /// Test-only monitor source: `Some(rate)` replaces the native refresh-rate read.
@@ -160,6 +166,9 @@ impl Default for WindowRedrawState {
             resize_pending: false,
             surface_recovery_pending: false,
             attempt_sync_resets: Vec::new(),
+            yield_ask: None,
+            yield_episode_spent: false,
+            yield_token: None,
             #[cfg(target_os = "macos")]
             surface_probe_at: None,
             #[cfg(test)]
@@ -270,6 +279,7 @@ impl WindowRedrawState {
                 }
             }
             FrameSettlement::Stopped(generation) => {
+                self.suppress_yield(super::parser_yield::YieldLoss::Suppressed);
                 self.stopped_generation = Some(generation);
                 self.invalidate_link_pacing();
                 self.cancel_surface_probe();
@@ -284,6 +294,7 @@ impl WindowRedrawState {
                         self.store_pacing(super::display_link::PacingMode::Timer);
                     }
                     SurfaceRetryReason::Occluded => {
+                        self.suppress_yield(super::parser_yield::YieldLoss::Suppressed);
                         self.backend_occluded = true;
                         self.invalidate_link_pacing();
                         #[cfg(target_os = "macos")]
@@ -351,6 +362,7 @@ impl WindowRedrawState {
         self.backend_occluded = false;
         self.cancel_surface_probe();
         if occluded {
+            self.suppress_yield(super::parser_yield::YieldLoss::Suppressed);
             self.deferred = false;
             self.timeout_pending = false;
             self.invalidate_link_pacing();
@@ -360,6 +372,7 @@ impl WindowRedrawState {
 
     /// Consume a structurally invalid attempt and exclude every frame-family deadline.
     pub(super) fn park(&mut self, snapshot: CauseSnapshot) {
+        self.suppress_yield(super::parser_yield::YieldLoss::Suppressed);
         self.observed = snapshot.0;
         self.attempt_causes = None;
         self.parked = true;
@@ -886,6 +899,16 @@ impl App {
             return false;
         };
         window.redraw.request_in_flight = false;
+        let leaked = window
+            .redraw
+            .yield_token
+            .as_ref()
+            .is_some_and(|token| token.stage == super::parser_yield::TokenStage::Admitted);
+        debug_assert!(!leaked, "an admitted yield token outlived its attempt");
+        if leaked {
+            // An adapter return skipped its resolution, so the token is lost here instead.
+            window.redraw.suppress_yield(super::parser_yield::YieldLoss::Invalid);
+        }
         if let Some(renderer) = window.renderer.as_mut() {
             // When: `renderer` exists, report a device stop before topology or pacing can suppress it.
             if !renderer.device_accepts_gpu_work() {
@@ -902,10 +925,12 @@ impl App {
                 }
                 window.redraw.deferred = false;
                 window.redraw.invalidate_link_pacing();
+                window.redraw.suppress_yield(super::parser_yield::YieldLoss::Suppressed);
                 return false;
             }
             if window.redraw.native_occluded || window.redraw.backend_occluded {
                 // When: `native_occluded` or `backend_occluded` suppresses this owner, even recovery dirt waits without pane locks.
+                window.redraw.suppress_yield(super::parser_yield::YieldLoss::Suppressed);
                 return false;
             }
             if window.redraw.stopped_generation.is_some() {
@@ -913,12 +938,14 @@ impl App {
                 let snapshot = renderer.device_error_snapshot();
                 if !window.accept_device_recovery(&snapshot) {
                     // When: `accept_device_recovery` refuses the live snapshot, no cause may bypass the stopped generation.
+                    window.redraw.suppress_yield(super::parser_yield::YieldLoss::Suppressed);
                     return false;
                 }
             }
         }
         if !window.frame_deadlines_allowed() {
             // When: `window` is hidden, occluded, parked, or stopped, it contributes no frame attempt or deadline.
+            window.redraw.suppress_yield(super::parser_yield::YieldLoss::Suppressed);
             return false;
         }
         if !window.redraw.has_pending() {
@@ -930,6 +957,8 @@ impl App {
             window.redraw.monitor_period,
         );
         let software = self.software_render_degrade;
+        // A live grant bypasses the contention floor and the streaming carry for this admission only.
+        let token_live = window.revalidate_yield_token(now, software);
         // A stored mode decides; otherwise a Streaming deferral would store `Link` when a link is installed.
         let mode =
             window.redraw.pacing.unwrap_or(if window.display_link.source.is_some() && !software {
@@ -942,13 +971,13 @@ impl App {
         let mut streaming_inputs = None;
         let rule = super::frame_counters::defer_rule(
             || window.redraw.timeout_pending && now < window.last_render + period,
-            || window.contention_blocks_redraw(now, period, software),
+            || window.contention_blocks_redraw(now, period, software) && !token_live,
             || window.sync_defers(now),
             || {
                 let input_pending = window.redraw.input_pending();
                 let output_advanced = window.visible_output_advanced();
                 streaming_inputs = Some((input_pending, output_advanced));
-                match mode {
+                let defers = match mode {
                     super::display_link::PacingMode::Link => {
                         super::frame_pacing::streaming_work(
                             input_pending,
@@ -964,10 +993,18 @@ impl App {
                         now.saturating_duration_since(window.pacing_clock(software)),
                         period,
                     ),
-                }
+                };
+                defers && !token_live
             },
         );
         let defer = rule.is_some();
+        if token_live {
+            // A live grant is admitted here, or lost to a Timeout or Sync deferral; it is used once.
+            match (rule, window.redraw.yield_token.as_mut()) {
+                (None, Some(token)) => token.stage = super::parser_yield::TokenStage::Admitted,
+                _ => window.redraw.suppress_yield(super::parser_yield::YieldLoss::Deferred),
+            }
+        }
         if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
             // the App's gate is on, count the winning deferral rule, or the attempt.
             match rule {

@@ -449,6 +449,7 @@ impl WindowState {
     pub(super) fn coherent_frame_collected(&mut self) {
         self.retry_not_before = None;
         self.visible_frame_invalid = false;
+        self.yield_collected();
     }
 
     /// Borrow the renderer. Panics if the renderer field is `None`

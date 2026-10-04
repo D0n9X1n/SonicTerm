@@ -173,6 +173,7 @@ impl App {
             // When: `windows.remove(&win_id)` is `None`, no child resources remain to release.
             return false;
         };
+        removed.resolve_window_yield();
         self.retire_window_counters(win_id, &mut removed);
         for pane in std::mem::take(&mut removed.panes).into_values() {
             self.retire_pane(pane);

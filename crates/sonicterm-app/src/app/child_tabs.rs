@@ -43,6 +43,7 @@ impl App {
         if let Some(child) = self.windows.get(&win_id) {
             if child.tabs.is_empty() {
                 if let Some(mut removed) = self.windows.remove(&win_id) {
+                    removed.resolve_window_yield();
                     self.retire_window_counters(win_id, &mut removed);
                     for pane in std::mem::take(&mut removed.panes).into_values() {
                         self.retire_pane(pane);
@@ -87,6 +88,7 @@ impl App {
             main_window.set_visible(false);
         }
         if let Some(window) = self.main_mut() {
+            window.redraw.suppress_yield(super::parser_yield::YieldLoss::Suppressed);
             window.hidden = true;
             window.redraw.invalidate_link_pacing();
             window.redraw.cancel_surface_probe();

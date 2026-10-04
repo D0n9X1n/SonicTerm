@@ -68,6 +68,7 @@ impl App {
         }
         let Some(renderer) = child.renderer.as_ref() else {
             // When: `renderer` is absent, no child geometry is available yet.
+            child.redraw.finish_admitted_yield(super::parser_yield::YieldLoss::Invalid);
             return;
         };
         let (surface_width, surface_height) = renderer.logical_size();

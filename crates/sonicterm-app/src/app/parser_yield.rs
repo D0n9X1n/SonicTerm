@@ -39,7 +39,6 @@ impl ParserYield {
     /// Publish a new request and return its generation.
     // Ordering: requested fetch_add Release; the worker's Acquire load sees it, and no other data
     // is published through it.
-    #[cfg_attr(not(test), allow(dead_code, reason = "the window side publishes requests"))]
     pub(in crate::app) fn request(&self) -> u64 {
         self.requested.fetch_add(1, Ordering::Release) + 1
     }
@@ -189,19 +188,359 @@ pub(in crate::app) fn yield_step<Target>(
     })
 }
 
-impl super::App {
-    /// Answer a worker's grant. No window publishes a request yet, so every grant is served at
-    /// once and the worker resumes; a pane no window holds is left to its own deadline.
-    pub(super) fn handle_parser_yielded(
+/// Why a token ended without a frame; logged at `debug`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::app) enum YieldLoss {
+    /// The window was suppressed: stopped, occluded, parked or hidden.
+    Suppressed,
+    /// The worker's deadline passed, or the floor changed, before admission.
+    Expired,
+    /// The pane left the window's visible set, or is another pane now.
+    Moved,
+    /// The software path took over.
+    Software,
+    /// Admission deferred by a surface timeout or a synchronized-output hold.
+    Deferred,
+    /// The retry found a visible parser busy.
+    Parser,
+    /// The retry found a visible image store busy.
+    Images,
+    /// The guarded synchronized-output recheck abandoned the retry.
+    Sync,
+    /// The retry could not collect a frame: no renderer, no layout or invalid topology.
+    Invalid,
+    /// The window was removed.
+    Removed,
+}
+
+/// How far an accepted grant has got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::app) enum TokenStage {
+    /// Accepted; the next admission may bypass the floor and the streaming carry once.
+    Granted,
+    /// Admitted; the attempt in flight must resolve it before it returns.
+    Admitted,
+}
+
+/// A window's outstanding request to one pane's worker.
+#[derive(Clone, Debug)]
+pub(in crate::app) struct YieldAsk {
+    /// The pane's handshake, compared by identity.
+    pub(in crate::app) handshake: std::sync::Arc<ParserYield>,
+    /// The pane the request names.
+    pub(in crate::app) pane_id: u64,
+    /// The request's generation.
+    pub(in crate::app) generation: u64,
+    /// The contention floor armed by the miss that published the request.
+    pub(in crate::app) floor: Instant,
+}
+
+/// An accepted grant: one admission may bypass the floor and the streaming carry before
+/// `park_deadline`.
+#[derive(Clone, Debug)]
+pub(in crate::app) struct YieldToken {
+    /// The pane's handshake, compared by identity.
+    pub(in crate::app) handshake: std::sync::Arc<ParserYield>,
+    /// The pane the grant names.
+    pub(in crate::app) pane_id: u64,
+    /// The granted generation.
+    pub(in crate::app) generation: u64,
+    /// The floor the grant was accepted under; it must still be armed.
+    pub(in crate::app) floor: Instant,
+    /// The deadline the worker fixed before it sent the grant.
+    pub(in crate::app) park_deadline: Instant,
+    /// Granted, or admitted by the attempt in flight.
+    pub(in crate::app) stage: TokenStage,
+}
+
+/// How a window answered a grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum YieldAnswer {
+    /// Accepted: request a redraw.
+    Accepted,
+    /// Rejected or declined; the worker has been served.
+    Rejected,
+    /// The window does not hold the pane; serve it wherever it lives.
+    NotHeld,
+}
+
+impl super::redraw::WindowRedrawState {
+    /// End the token: count it as a frame, or as lost for `loss`, serve its generation, and
+    /// clear it, which ends the carry and the bypass. A frame was already served at collection.
+    pub(in crate::app) fn resolve_yield_token(&mut self, loss: Option<YieldLoss>) {
+        let Some(token) = self.yield_token.take() else {
+            // When: no token is outstanding, there is nothing to resolve or count.
+            return;
+        };
+        token.handshake.serve_outstanding(token.generation);
+        if let Some(reason) = loss {
+            tracing::debug!(
+                target: "sonicterm_app::parser_yield",
+                pane_id = token.pane_id,
+                generation = token.generation,
+                ?reason,
+                "yield token lost"
+            );
+        }
+        if let Some(counters) = self.frame_counters.as_deref_mut() {
+            // the App's gate is on, the token's end counts as a frame or a loss.
+            if loss.is_some() {
+                counters.parser_yield_lost += 1;
+            } else {
+                // When: `loss` is None, the coherent collection presented the granted retry.
+                counters.parser_yield_frames += 1;
+            }
+        }
+    }
+
+    /// Resolve any token as lost for `loss`: an eager suppression or a removal.
+    pub(in crate::app) fn suppress_yield(&mut self, loss: YieldLoss) {
+        if self.yield_token.is_some() {
+            self.resolve_yield_token(Some(loss));
+        }
+    }
+
+    /// Resolve an admitted token as lost for `loss`, at an adapter exit before collection.
+    pub(in crate::app) fn finish_admitted_yield(&mut self, loss: YieldLoss) {
+        if self.yield_token.as_ref().is_some_and(|token| token.stage == TokenStage::Admitted) {
+            self.resolve_yield_token(Some(loss));
+        }
+    }
+
+    /// Clear any outstanding request, serving its generation.
+    pub(in crate::app) fn resolve_yield_ask(&mut self) {
+        if let Some(ask) = self.yield_ask.take() {
+            ask.handshake.serve_outstanding(ask.generation);
+        }
+    }
+
+    /// Count one grant that was not accepted.
+    fn count_rejected(&mut self) {
+        if let Some(counters) = self.frame_counters.as_deref_mut() {
+            // the App's gate is on, each grant not accepted is counted.
+            counters.parser_yield_rejected += 1;
+        }
+    }
+}
+
+impl super::WindowState {
+    /// The handshake of `pane_id` if this window shows it now.
+    fn visible_handshake(&self, pane_id: u64) -> Option<&std::sync::Arc<ParserYield>> {
+        self.visible_pane_ids()
+            .contains(&pane_id)
+            .then(|| self.panes.get(&pane_id).map(|pane| &pane.parser_yield))
+            .flatten()
+    }
+
+    /// Resolve an outstanding request that can no longer be granted: its floor passed, it was
+    /// served, or its pane left the visible set or is another pane now.
+    // Ordering: served loads Acquire, pairing with serve_outstanding's Release.
+    fn resolve_stale_ask(&mut self, now: Instant) {
+        let Some(ask) = self.redraw.yield_ask.as_ref() else {
+            // When: `yield_ask` is None, no request is outstanding, so nothing can be stale.
+            return;
+        };
+        let stale = now >= ask.floor
+            || ask.handshake.served.load(Ordering::Acquire) >= ask.generation
+            || !self
+                .visible_handshake(ask.pane_id)
+                .is_some_and(|handshake| std::sync::Arc::ptr_eq(handshake, &ask.handshake));
+        if stale {
+            self.redraw.resolve_yield_ask();
+        }
+    }
+
+    /// Revalidate a granted token at admission; a token no longer live resolves as lost, and
+    /// the ordinary rules then run against the still-armed floor. Returns whether it is live.
+    pub(in crate::app) fn revalidate_yield_token(&mut self, now: Instant, software: bool) -> bool {
+        let Some(token) = self.redraw.yield_token.as_ref() else {
+            // When: no token is outstanding, admission runs its ordinary rules.
+            return false;
+        };
+        if token.stage != TokenStage::Granted {
+            // When: an admitted token reaches admission, the backstop has already resolved it.
+            return false;
+        }
+        let loss = if software {
+            Some(YieldLoss::Software)
+        } else if now >= token.park_deadline || self.retry_not_before != Some(token.floor) {
+            // When: the worker's deadline passed or the floor changed, the grant is spent.
+            Some(YieldLoss::Expired)
+        } else if !self
+            .visible_handshake(token.pane_id)
+            .is_some_and(|handshake| std::sync::Arc::ptr_eq(handshake, &token.handshake))
+        {
+            // When: `visible_handshake` of `token.pane_id` is absent or not `ptr_eq`, the grant moved.
+            Some(YieldLoss::Moved)
+        } else {
+            // When: `software`, `park_deadline`, `retry_not_before` and `visible_handshake` all hold, it is live.
+            None
+        };
+        match loss {
+            Some(loss) => {
+                self.redraw.suppress_yield(loss);
+                false
+            }
+            None => true,
+        }
+    }
+
+    /// A coherent collection supersedes any request, resolves any token as a frame, and opens
+    /// a new episode. The collection already served every visible pane under its guards.
+    pub(in crate::app) fn yield_collected(&mut self) {
+        self.redraw.resolve_yield_ask();
+        self.redraw.resolve_yield_token(None);
+        self.redraw.yield_episode_spent = false;
+    }
+
+    /// The window is being removed: resolve its token `lost(removed)` and its request, before
+    /// its counters retire, so the closed totals carry the loss and no occupancy.
+    pub(in crate::app) fn resolve_window_yield(&mut self) {
+        self.redraw.suppress_yield(YieldLoss::Removed);
+        self.redraw.resolve_yield_ask();
+    }
+
+    /// Answer a worker's grant for `pane_id`'s `generation`, sent with `park_deadline`.
+    // Ordering: served loads Acquire, pairing with serve_outstanding's Release.
+    fn answer_parser_yield(
         &mut self,
-        _window_id: winit::window::WindowId,
         pane_id: u64,
         generation: u64,
-        _park_deadline: Instant,
+        park_deadline: Instant,
+        now: Instant,
+        software: bool,
+    ) -> YieldAnswer {
+        let Some(held) =
+            self.panes.get(&pane_id).map(|pane| std::sync::Arc::clone(&pane.parser_yield))
+        else {
+            // When: this window does not hold the pane, any request for it here is moved.
+            if self.redraw.yield_ask.as_ref().is_some_and(|ask| ask.pane_id == pane_id) {
+                self.redraw.resolve_yield_ask();
+            }
+            self.redraw.count_rejected();
+            return YieldAnswer::NotHeld;
+        };
+        let matched = self.redraw.yield_ask.as_ref().is_some_and(|ask| {
+            ask.pane_id == pane_id
+                && ask.generation == generation
+                && std::sync::Arc::ptr_eq(&ask.handshake, &held)
+        });
+        if !matched {
+            // When: `matched` is false, the grant is stale; the worker is served and
+            // the current request, if any, stays.
+            held.serve_outstanding(generation);
+            self.redraw.count_rejected();
+            return YieldAnswer::Rejected;
+        }
+        let floor = self.redraw.yield_ask.as_ref().map(|ask| ask.floor).expect("matched");
+        let valid = self.retry_not_before == Some(floor)
+            && now < floor
+            && now < park_deadline
+            && held.served.load(Ordering::Acquire) < generation;
+        let eligible = self.visible_handshake(pane_id).is_some()
+            && self.frame_deadlines_allowed()
+            && !self.redraw.timeout_pending
+            && !self.sync_defers(now)
+            && !software;
+        if !(valid && eligible) {
+            // When: `valid` and `eligible` do not both hold, the request resolves and
+            // the floor stays.
+            self.redraw.resolve_yield_ask();
+            self.redraw.count_rejected();
+            return YieldAnswer::Rejected;
+        }
+        let ask = self.redraw.yield_ask.take().expect("matched");
+        self.redraw.yield_episode_spent = true;
+        self.redraw.yield_token = Some(YieldToken {
+            handshake: ask.handshake,
+            pane_id,
+            generation,
+            floor,
+            park_deadline,
+            stage: TokenStage::Granted,
+        });
+        if let Some(counters) = self.redraw.frame_counters.as_deref_mut() {
+            // the App's gate is on, each accepted grant is counted.
+            counters.parser_yield_wakes += 1;
+        }
+        YieldAnswer::Accepted
+    }
+}
+
+impl super::App {
+    /// Answer a worker's grant. An accepted grant keeps the floor, serves nothing and asks for
+    /// one redraw; every other answer serves the worker so it resumes before its deadline.
+    pub(super) fn handle_parser_yielded(
+        &mut self,
+        window_id: winit::window::WindowId,
+        pane_id: u64,
+        generation: u64,
+        park_deadline: Instant,
     ) {
-        let pane = self.windows.values().find_map(|window| window.panes.get(&pane_id));
-        if let Some(pane) = pane {
-            pane.parser_yield.serve_outstanding(generation);
+        let now = self.dispatch_now();
+        let software = self.software_render_degrade;
+        let answer = self.windows.get_mut(&window_id).map_or(YieldAnswer::NotHeld, |window| {
+            window.answer_parser_yield(pane_id, generation, park_deadline, now, software)
+        });
+        match answer {
+            YieldAnswer::Accepted => {
+                if let Some(window) = self.windows.get(&window_id) {
+                    window.request_window_redraw();
+                }
+            }
+            YieldAnswer::Rejected => {
+                // When: `YieldAnswer::Rejected`, the window rejected or declined and already served the worker.
+            }
+            YieldAnswer::NotHeld => {
+                // The window is gone or never held the pane: serve the pane where it lives.
+                let pane = self.windows.values().find_map(|window| window.panes.get(&pane_id));
+                if let Some(pane) = pane {
+                    pane.parser_yield.serve_outstanding(generation);
+                }
+            }
+        }
+    }
+
+    /// Publish one request after a hardware parser miss on `pane_id`, when the episode is open
+    /// and no request is outstanding. The floor is already armed by the miss's deferral.
+    pub(super) fn publish_parser_yield(
+        &mut self,
+        id: winit::window::WindowId,
+        pane_id: u64,
+        images: bool,
+        now: Instant,
+    ) {
+        if images || self.software_render_degrade {
+            // When: `images` or `software_render_degrade` is set, no worker gap would help.
+            return;
+        }
+        let Some(window) = self.windows.get_mut(&id) else {
+            // When: `id` closed, there is no window to retry.
+            return;
+        };
+        window.resolve_stale_ask(now);
+        if window.redraw.yield_episode_spent || window.redraw.yield_ask.is_some() {
+            // When: `yield_episode_spent` or `yield_ask` is set, the episode used its retry or a request waits.
+            return;
+        }
+        let (Some(floor), Some(pane)) = (window.retry_not_before, window.panes.get(&pane_id))
+        else {
+            // When: no floor is armed or the pane is gone, there is nothing to request.
+            return;
+        };
+        let handshake = std::sync::Arc::clone(&pane.parser_yield);
+        let generation = handshake.request();
+        window.redraw.yield_ask = Some(YieldAsk { handshake, pane_id, generation, floor });
+        if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
+            // the App's gate is on, each published request is counted.
+            counters.parser_yield_requests += 1;
+        }
+    }
+
+    /// Resolve `id`'s admitted token as lost for `loss` at an adapter exit before collection.
+    pub(super) fn finish_yield_attempt(&mut self, id: winit::window::WindowId, loss: YieldLoss) {
+        if let Some(window) = self.windows.get_mut(&id) {
+            window.redraw.finish_admitted_yield(loss);
         }
     }
 }

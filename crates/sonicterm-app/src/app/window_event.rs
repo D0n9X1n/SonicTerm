@@ -670,6 +670,7 @@ impl App {
         }
         let Some(renderer) = self.main_renderer() else {
             // When: `renderer` is absent, no native geometry exists for this frame.
+            self.finish_yield_attempt(win_id, super::parser_yield::YieldLoss::Invalid);
             return;
         };
         let (width, height) = renderer.logical_size();

@@ -102,6 +102,7 @@ struct VisibleSource {
     rect: Rect,
     parser: Arc<Mutex<Parser>>,
     images: Arc<Mutex<Vec<InlineImage>>>,
+    parser_yield: Arc<super::parser_yield::ParserYield>,
     viewport_top_abs: Option<u64>,
     viewport_anchor: ViewportAnchor,
 }
@@ -159,6 +160,7 @@ impl VisibleFrameSources {
                 rect,
                 parser: Arc::clone(&pane.parser),
                 images: Arc::clone(&pane.inline_images),
+                parser_yield: Arc::clone(&pane.parser_yield),
                 viewport_top_abs: pane.viewport_top_abs,
                 viewport_anchor: pane.viewport_anchor,
             });
@@ -188,7 +190,10 @@ impl VisibleFrameSources {
     ///
     /// `before_first_lock` is the generation-capture seam for owner-addressed scheduling.
     /// Any miss drops all earlier guards and image clones before returning to the retry adapter.
+    /// Once every visible parser guard is held, before any image store, each pane's waiting
+    /// worker is served, so a worker that yielded resumes as soon as the frame has its grids.
     // Lock order: parser then images; test observations borrow image_visits then image_clones briefly.
+    // Ordering: requested loads Acquire, pairing with the event loop's Release fetch_add.
     pub(super) fn try_collect<S>(
         &self,
         before_first_lock: impl FnOnce() -> S,
@@ -201,6 +206,11 @@ impl VisibleFrameSources {
                 .try_lock()
                 .ok_or(FrameUnavailable::Contended { pane_id: entry.id, images: false })?;
             guards.push((entry.id, parser, entry.rect));
+        }
+        for entry in &self.entries {
+            entry.parser_yield.serve_outstanding(
+                entry.parser_yield.requested.load(std::sync::atomic::Ordering::Acquire),
+            );
         }
         let mut images = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
@@ -423,8 +433,20 @@ impl App {
         was_dirty: bool,
         now: Instant,
     ) {
+        let loss = match why {
+            FrameUnavailable::Contended { images: true, .. } => {
+                super::parser_yield::YieldLoss::Images
+            }
+            FrameUnavailable::Contended { images: false, .. } => {
+                super::parser_yield::YieldLoss::Parser
+            }
+            FrameUnavailable::NoLayout | FrameUnavailable::StructuralInvalid(_) => {
+                super::parser_yield::YieldLoss::Invalid
+            }
+        };
+        self.finish_yield_attempt(id, loss);
         match why {
-            FrameUnavailable::Contended { images, .. } => {
+            FrameUnavailable::Contended { pane_id, images } => {
                 let window = self.windows.get_mut(&id);
                 if let Some(counters) =
                     window.and_then(|window| window.redraw.frame_counters.as_deref_mut())
@@ -432,7 +454,9 @@ impl App {
                     // the App's gate is on, the busy lock is counted where it returns here.
                     counters.note_contention(images);
                 }
-                self.defer_window_lock_contention(id, was_dirty, now)
+                self.defer_window_lock_contention(id, was_dirty, now);
+                // A hardware parser miss may ask the pane's worker for its next gap.
+                self.publish_parser_yield(id, pane_id, images, now);
             }
             FrameUnavailable::NoLayout => {
                 if let Some(window) = self.windows.get_mut(&id) {

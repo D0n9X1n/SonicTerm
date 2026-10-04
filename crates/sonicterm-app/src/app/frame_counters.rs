@@ -1124,6 +1124,16 @@ pub(crate) struct WindowFrameCounters {
     /// Pending acknowledgement receipts dropped at a collection: the pane was not held, its parser
     /// differed, or an identity changed. Each costs a later re-assembly, never pixels.
     pub(crate) dirt_ack_dropped: u64,
+    /// Requests a parser miss published to a pane's worker.
+    pub(crate) parser_yield_requests: u64,
+    /// Grants accepted (W).
+    pub(crate) parser_yield_wakes: u64,
+    /// Grants declined, stale, expired, superseded or moved.
+    pub(crate) parser_yield_rejected: u64,
+    /// Tokens resolved by a coherent collection (F).
+    pub(crate) parser_yield_frames: u64,
+    /// Tokens resolved any other way (L).
+    pub(crate) parser_yield_lost: u64,
     /// Intervals between consecutive presented frames.
     pub(crate) present_interval: Histogram,
     /// Output events serviced for the window: `PaneOutput` and `RequestRedraw`.
@@ -1173,6 +1183,11 @@ impl Default for WindowFrameCounters {
             display_link_fallbacks: 0,
             contention_retry_armed: 0,
             dirt_ack_dropped: 0,
+            parser_yield_requests: 0,
+            parser_yield_wakes: 0,
+            parser_yield_rejected: 0,
+            parser_yield_frames: 0,
+            parser_yield_lost: 0,
             present_interval: Histogram::new(HistogramUnit::Millis),
             user_request_redraw: 0,
             redraw_requested: 0,
@@ -1605,6 +1620,11 @@ impl WindowFrameCounters {
             ("display_link_fallbacks", self.display_link_fallbacks),
             ("contention_retry_armed", self.contention_retry_armed),
             ("dirt_ack_dropped", self.dirt_ack_dropped),
+            ("parser_yield_requests", self.parser_yield_requests),
+            ("parser_yield_wakes", self.parser_yield_wakes),
+            ("parser_yield_rejected", self.parser_yield_rejected),
+            ("parser_yield_frames", self.parser_yield_frames),
+            ("parser_yield_lost", self.parser_yield_lost),
             ("native_request_redraw", native_requests + renderer_requests),
             ("user_request_redraw", self.user_request_redraw),
             ("redraw_requested", self.redraw_requested),
@@ -1694,7 +1714,13 @@ impl super::App {
                 let counters = window.redraw.frame_counters.as_deref()?;
                 let stats =
                     window.renderer.as_ref().map(sonicterm_gpu::core::GpuRenderer::frame_stats);
-                Some((*id, counters.record(stats, app.dispatch.native_requests(*id))))
+                let mut record = counters.record(stats, app.dispatch.native_requests(*id));
+                // A live window's yield-token occupancy is a level; closed records never carry it.
+                record.push_count(
+                    "parser_yield_tokens",
+                    u64::from(window.redraw.yield_token.is_some()),
+                );
+                Some((*id, record))
             })
             .collect();
         // A window its own dispatch is closing already counts as closed, so no total dips.

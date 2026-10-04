@@ -253,6 +253,7 @@ impl App {
             self.cancel_window_rename(previous_id);
             self.cancel_tab_edit(previous_id);
             if let Some(mut previous) = self.windows.remove(&previous_id) {
+                previous.resolve_window_yield();
                 self.retire_window_counters(previous_id, &mut previous);
                 for pane in std::mem::take(&mut previous.panes).into_values() {
                     self.retire_pane(pane);
