@@ -74,6 +74,9 @@ pub struct FrameStats {
     pub damage_permille_sum: u64,
     /// Frames whose damage was recorded.
     pub damaged_frames: u64,
+    /// Sum of each damaged frame's waste, in permille: the share of its single damage rectangle
+    /// minus the share its damage parts exactly cover. Its denominator is `damaged_frames`.
+    pub damage_waste_permille_sum: u64,
     /// Frames drawn while software rendering was degraded.
     pub software_frames: u64,
     /// Frames drawn on the GPU path.
@@ -148,6 +151,7 @@ impl FrameStats {
         index_bytes: 0,
         damage_permille_sum: 0,
         damaged_frames: 0,
+        damage_waste_permille_sum: 0,
         software_frames: 0,
         gpu_frames: 0,
         row_cache_hits: 0,
@@ -182,6 +186,7 @@ impl FrameStats {
         self.index_bytes += other.index_bytes;
         self.damage_permille_sum += other.damage_permille_sum;
         self.damaged_frames += other.damaged_frames;
+        self.damage_waste_permille_sum += other.damage_waste_permille_sum;
         self.software_frames += other.software_frames;
         self.gpu_frames += other.gpu_frames;
         self.row_cache_hits += other.row_cache_hits;
@@ -628,6 +633,12 @@ pub(crate) fn note_damage(permille: impl FnOnce() -> u64) {
     });
 }
 
+/// Record one damaged frame's waste in permille, beside [`note_damage`]. `waste` runs only inside
+/// a counting scope, so with the gate off the exact cover is never computed.
+pub(crate) fn note_damage_waste(waste: impl FnOnce() -> u64) {
+    record(|stats| stats.damage_waste_permille_sum += waste());
+}
+
 /// Count one drawn frame by the presenter that drew it; `software` is [`presents_software`].
 pub(crate) fn note_frame(software: bool) {
     record(|stats| {
@@ -819,6 +830,24 @@ pub(crate) fn damage_permille(damage: &PixelRect, width: u32, height: u32) -> u6
     }
     let damaged = u64::from(damage.w) * u64::from(damage.h);
     (damaged * 1_000 / surface).min(1_000)
+}
+
+/// The waste of drawing `damage` as one rectangle, in permille of a `width` by `height` surface:
+/// its share minus the share of the exact area `parts` cover. `parts` lie inside `damage`.
+pub(crate) fn damage_waste_permille(
+    damage: &PixelRect,
+    parts: &[PixelRect],
+    width: u32,
+    height: u32,
+) -> u64 {
+    let surface = u64::from(width) * u64::from(height);
+    if surface == 0 {
+        // When: the surface has no area, no share can be computed.
+        return 0;
+    }
+    let covered = sonicterm_render_model::geometry::covered_area(parts);
+    let covered_permille = (covered * 1_000 / surface).min(1_000);
+    damage_permille(damage, width, height).saturating_sub(covered_permille)
 }
 
 #[cfg(test)]

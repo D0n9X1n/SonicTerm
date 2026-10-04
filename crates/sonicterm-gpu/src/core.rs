@@ -8117,13 +8117,9 @@ impl GpuRenderer {
             self.finalize_growth_episodes_if_device_stopped();
             return Ok(FrameOutcome::without_receipts(outcome));
         }
-        self.finish_successful_frame(
-            plan,
-            recolor,
-            missing_chars,
-            missing_chrome_chars,
-            gpu_timing,
-        );
+        // Only a presented frame's recolors are on screen, so only it becomes the next baseline.
+        self.last_recolor = recolor;
+        self.finish_successful_frame(plan, missing_chars, missing_chrome_chars, gpu_timing);
         Ok(FrameOutcome { outcome: PresentOutcome::Presented, receipts })
     }
 
@@ -8167,7 +8163,6 @@ impl GpuRenderer {
     fn finish_successful_frame(
         &mut self,
         plan: FramePlan,
-        recolor: crate::cursor::RecolorRecord,
         missing_chars_this_frame: Vec<char>,
         missing_chrome_chars: Vec<char>,
         gpu_timing: Option<(Instant, Instant, Vec<(&'static str, f32)>)>,
@@ -8177,6 +8172,15 @@ impl GpuRenderer {
         let (surface_width, surface_height) = (self.config.width, self.config.height);
         crate::frame_stats::note_damage(|| {
             crate::frame_stats::damage_permille(&plan.damage, surface_width, surface_height)
+        });
+        // The single rectangle's waste over the parts it unions decides whether a rect list pays.
+        crate::frame_stats::note_damage_waste(|| {
+            crate::frame_stats::damage_waste_permille(
+                &plan.damage,
+                &plan.damage_parts,
+                surface_width,
+                surface_height,
+            )
         });
         // The frame counts by the presenter `present_frame` used, via the same predicate.
         let software_presenter =
@@ -8189,7 +8193,6 @@ impl GpuRenderer {
         self.last_missing_chars = missing_chars_this_frame;
         self.last_missing_chrome_chars = missing_chrome_chars;
         self.last_frame_key = Some(plan.key);
-        self.last_recolor = recolor;
         if self.pane_focus_flash.is_some() {
             self.request_window_redraw();
         }

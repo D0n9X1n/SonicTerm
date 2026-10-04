@@ -5687,10 +5687,30 @@ fn damage_classes_are_wired_through_the_renderer() {
     let widen = source.find("plan.widen_for_recolor(self.last_recolor, frame_recolor);").unwrap();
     let layers = source.find("Ok(Assembled::Layers(Box::new(AssembledLayers {").unwrap();
     assert!(widen < layers, "damage is widened before the layers carry it");
-    let finish = function_body(&source, "    fn finish_successful_frame(");
-    assert!(finish.contains("self.last_recolor = recolor;"));
+    // The record is stored after the presenter reports `Presented` and before the frame finishes.
+    let present = function_body(&source, "    fn present_layers(");
+    let guard = present.find("return Ok(FrameOutcome::without_receipts(outcome));").unwrap();
+    let store = present.find("self.last_recolor = recolor;").expect("the record is stored");
+    let finish = present.find("self.finish_successful_frame(plan,").unwrap();
+    assert!(guard < store && store < finish);
+    assert_eq!(source.matches("self.last_recolor = ").count(), 1, "one writer");
     assert!(compact
         .contains("letemit_full_rows=crate::frame_plan::emits_every_visible_row(render_mode);"));
     assert!(function_body(&source, "pub fn emit_pane_scrollbar(")
         .contains("crate::frame_plan::pane_scrollbar_geometry("));
+}
+
+/// Every presented frame that records its damage share also records its waste, from the same
+/// final damage and the parts it unions.
+#[test]
+fn presented_frames_record_damage_waste_beside_damage() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let finish: String =
+        function_body(&source, "    fn finish_successful_frame(").split_whitespace().collect();
+    let damage = finish.find("crate::frame_stats::note_damage(||").expect("damage recorded");
+    let waste = finish.find("crate::frame_stats::note_damage_waste(||").expect("waste recorded");
+    assert!(damage < waste);
+    assert!(finish.contains(
+        "crate::frame_stats::damage_waste_permille(&plan.damage,&plan.damage_parts,surface_width,surface_height,)"
+    ));
 }
