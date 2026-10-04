@@ -396,16 +396,45 @@ pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
     )
 }
 
-// Lock order: inline_images -> inline_media_charge; parser releases before either, and command_events locks after both.
-// Ordering: cursor_visible, keyboard_input and pointer_input use Relaxed; each word is self-contained, not a barrier for parser changes.
+/// Most PTY output bytes (4 KiB) one VT worker parser lock section parses before dropping the guard.
+///
+/// A frame only `try_lock`s a visible parser and a miss waits a full frame period, so one long
+/// hold over a large batch can cost frames. A bound gives the collector a gap at least every
+/// 4 KiB; the parser keeps UTF-8, CSI, OSC and DCS state across sections, so the cut is free.
+pub(super) const PARSER_SECTION_BYTES: usize = 4 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only observer run at each interior section boundary, with the bytes still unparsed.
+    static SECTION_BOUNDARY_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(usize)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: install or remove this thread's section-boundary observer.
+#[cfg(test)]
+pub(super) fn set_section_boundary_hook(hook: Option<Box<dyn FnMut(usize)>>) {
+    SECTION_BOUNDARY_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+
+/// Test-only: run this thread's section-boundary observer, if one is installed.
+#[cfg(test)]
+fn run_section_boundary_hook(remaining_bytes: usize) {
+    SECTION_BOUNDARY_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(remaining_bytes);
+        }
+    });
+}
+
+/// Parse one PTY output batch in sections of at most [`PARSER_SECTION_BYTES`].
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
     bytes: Bytes,
     command_started: &mut Option<Instant>,
-    mut decode_media: Decode,
-    mut emit_event: Emit,
-    mut now: Now,
-    mut send_reply: Send,
+    decode_media: Decode,
+    emit_event: Emit,
+    now: Now,
+    send_reply: Send,
 ) where
     Bytes: AsRef<[u8]>,
     Decode: FnMut(&MediaEvent) -> Option<InlineImage>,
@@ -413,7 +442,41 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     Now: FnMut() -> Instant,
     Send: FnMut(Vec<u8>),
 {
-    let mut remaining = bytes.as_ref();
+    process_pane_vt_batch_in_sections(
+        handles,
+        bytes.as_ref(),
+        PARSER_SECTION_BYTES,
+        command_started,
+        decode_media,
+        emit_event,
+        now,
+        send_reply,
+    );
+}
+
+/// Parse `bytes` in parser lock sections of at most `section_bytes`, which must be nonzero.
+///
+/// A section also ends early when the parser stages a reply. Host side effects of each
+/// section run after its guard drops; replies are batched and sent once the batch is parsed.
+// Lock order: inline_images -> inline_media_charge; parser releases before either, and command_events locks after both.
+// Ordering: cursor_visible, keyboard_input and pointer_input use Relaxed; each word is self-contained, not a barrier for parser changes.
+#[allow(clippy::too_many_arguments)]
+fn process_pane_vt_batch_in_sections<Decode, Emit, Now, Send>(
+    handles: &PaneVtHandles,
+    bytes: &[u8],
+    section_bytes: usize,
+    command_started: &mut Option<Instant>,
+    mut decode_media: Decode,
+    mut emit_event: Emit,
+    mut now: Now,
+    mut send_reply: Send,
+) where
+    Decode: FnMut(&MediaEvent) -> Option<InlineImage>,
+    Emit: FnMut(UserEvent),
+    Now: FnMut() -> Instant,
+    Send: FnMut(Vec<u8>),
+{
+    let mut remaining = bytes;
     let mut reply_batch = Vec::new();
     let counters = handles.frame_counters.as_ref();
     if let Some(counters) = counters {
@@ -426,10 +489,11 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         // With the gate on, one clock read precedes lock() and three are taken under the guard;
         // all arithmetic and every counter update wait until the guard has dropped.
         let before_lock = counters.map(|_| now());
+        let section_input = &remaining[..remaining.len().min(section_bytes)];
         let (result, section) = {
             let mut parser = handles.parser.lock();
             let locked_at = before_lock.map(|_| now());
-            let result = parser.advance_with_replies(remaining);
+            let result = parser.advance_with_replies(section_input);
             let parsed_at = before_lock.map(|_| now());
             handles.keyboard_input.store(parser.keyboard_input_snapshot(), Ordering::Relaxed);
             handles.pointer_input.store(parser.pointer_input_snapshot(), Ordering::Relaxed);
@@ -529,6 +593,9 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             }
             break;
         }
+        // Interior boundary: this section's guard has dropped and the next lock() has not run.
+        #[cfg(test)]
+        run_section_boundary_hook(remaining.len());
     }
 }
 

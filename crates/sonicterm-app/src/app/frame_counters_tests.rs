@@ -532,7 +532,7 @@ const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
 /// The only functions allowed a plain parser lock: the VT worker's own section, which runs off
 /// the event-loop thread, and the counting helper that lock_parser wraps.
 const WORKER_LOCK_SECTIONS: &[(&str, &str)] = &[
-    ("app/spawn_pane.rs", "process_pane_vt_batch_with"),
+    ("app/spawn_pane.rs", "process_pane_vt_batch_in_sections"),
     ("app/frame_counters.rs", "lock_counted"),
 ];
 

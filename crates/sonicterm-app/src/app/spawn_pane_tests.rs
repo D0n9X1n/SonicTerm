@@ -777,3 +777,411 @@ fn gate_off_output_events_still_coalesce_without_reading_the_flush_clock() {
     }
     assert_eq!(flush_clock_reads(), before + 3, "one read per targeted flush with the gate on");
 }
+
+/// One interior section boundary of a worker batch: the bytes still unparsed, and whether
+/// the parser's mutex was free when the boundary hook ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SectionBoundary {
+    remaining_bytes: usize,
+    parser_unlocked: bool,
+}
+
+/// Run `parse` with a boundary hook that `try_lock`s `parser` on this thread and records each
+/// interior boundary; the hook is removed again before returning.
+fn record_section_boundaries(
+    parser: &Arc<Mutex<Parser>>,
+    parse: impl FnOnce(),
+) -> Vec<SectionBoundary> {
+    let boundaries = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let recorded = std::rc::Rc::clone(&boundaries);
+    let observed_parser = Arc::clone(parser);
+    set_section_boundary_hook(Some(Box::new(move |remaining_bytes| {
+        let parser_unlocked = observed_parser.try_lock().is_some();
+        recorded.borrow_mut().push(SectionBoundary { remaining_bytes, parser_unlocked });
+    })));
+    parse();
+    set_section_boundary_hook(None);
+    let boundaries = boundaries.borrow().clone();
+    boundaries
+}
+
+/// Printable ASCII rows ending in CR LF, cut to exactly `batch_bytes` bytes.
+fn plain_text_batch(batch_bytes: usize) -> Vec<u8> {
+    let mut batch = Vec::with_capacity(batch_bytes + 80);
+    let mut row_index = 0_usize;
+    while batch.len() < batch_bytes {
+        batch.extend_from_slice(format!("row {row_index:05} {}\r\n", "x".repeat(60)).as_bytes());
+        row_index += 1;
+    }
+    batch.truncate(batch_bytes);
+    batch
+}
+
+/// A long reply-free batch is parsed in sections of at most `PARSER_SECTION_BYTES`, so no
+/// single parser lock hold covers the whole batch.
+#[test]
+fn long_batch_is_parsed_in_bounded_sections() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let (_pane, handles) = counting_worker_handles(&stats);
+    let batch_bytes = 20 * 1024;
+    let batch = plain_text_batch(batch_bytes);
+    let boundaries = record_section_boundaries(&handles.parser, || {
+        process_pane_vt_batch_with(
+            &handles,
+            &batch,
+            &mut None,
+            |_| None,
+            |_| {},
+            Instant::now,
+            |_| {},
+        );
+    });
+    // Section lengths are the drops in remaining bytes from the batch start to its end.
+    let mut section_starts = vec![batch_bytes];
+    section_starts.extend(boundaries.iter().map(|boundary| boundary.remaining_bytes));
+    section_starts.push(0);
+    let section_lengths: Vec<usize> =
+        section_starts.windows(2).map(|pair| pair[0] - pair[1]).collect();
+    assert!(section_lengths.len() >= 5, "sections: {section_lengths:?}");
+    assert!(
+        section_lengths.iter().all(|length| *length <= PARSER_SECTION_BYTES),
+        "every section is bounded: {section_lengths:?}"
+    );
+    let sections_counted = stats.parse.snapshot().count();
+    assert_eq!(sections_counted, section_lengths.len() as u64);
+    assert_eq!(stats.parse_bytes.load(Relaxed), batch_bytes as u64);
+    assert_eq!(stats.batches.load(Relaxed), 1, "one batch however many sections it takes");
+}
+
+/// At every interior section boundary of a long batch the worker has dropped the parser
+/// guard while input remains, so another thread's `try_lock` could take the parser there.
+#[test]
+fn parser_guard_is_released_between_sections_while_input_remains() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let batch_bytes = 20 * 1024;
+    let batch = plain_text_batch(batch_bytes);
+    let boundaries = record_section_boundaries(&handles.parser, || {
+        process_pane_vt_batch_with(
+            &handles,
+            &batch,
+            &mut None,
+            |_| None,
+            |_| {},
+            Instant::now,
+            |_| {},
+        );
+    });
+    // A reply-free batch is cut only by the bound, at each multiple of the section size.
+    let expected: Vec<SectionBoundary> = (1..batch_bytes.div_ceil(PARSER_SECTION_BYTES))
+        .map(|sections_done| SectionBoundary {
+            remaining_bytes: batch_bytes - sections_done * PARSER_SECTION_BYTES,
+            parser_unlocked: true,
+        })
+        .collect();
+    assert_eq!(boundaries, expected);
+    assert!(boundaries.iter().all(|boundary| boundary.remaining_bytes > 0));
+}
+
+/// Cursor-position queries spread across many sections, several cut mid-sequence by the
+/// bound, are each answered once, in query order, in one reply submission after the batch.
+#[test]
+fn replies_staged_across_bounded_sections_are_sent_once_in_order() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let mut batch = Vec::new();
+    let mut expected_replies = Vec::new();
+    let mut query_ranges = Vec::new();
+    // A reply ends a section, so the next section starts right after each query; filler of
+    // `PARSER_SECTION_BYTES - cut_offset` puts the next bound `cut_offset` bytes into the query.
+    for (query_index, cut_offset) in (1..=9_usize).enumerate() {
+        batch.extend(plain_text_batch(PARSER_SECTION_BYTES - cut_offset));
+        let (row, col) = (query_index + 1, query_index + 2);
+        let query = format!("\x1b[{row};{col}H\x1b[6n");
+        query_ranges.push(batch.len()..batch.len() + query.len());
+        batch.extend_from_slice(query.as_bytes());
+        expected_replies.extend_from_slice(format!("\x1b[{row};{col}R").as_bytes());
+    }
+    batch.extend_from_slice(b"done");
+    let mut submissions = Vec::new();
+    let boundaries = record_section_boundaries(&handles.parser, || {
+        process_pane_vt_batch_with(
+            &handles,
+            &batch,
+            &mut None,
+            |_| None,
+            |_| {},
+            Instant::now,
+            |reply| submissions.push(reply),
+        );
+    });
+    // Every query has an interior boundary strictly inside it, which only the bound makes.
+    for query_range in &query_ranges {
+        assert!(
+            boundaries.iter().any(|boundary| {
+                let cut_at = batch.len() - boundary.remaining_bytes;
+                query_range.start < cut_at && cut_at < query_range.end
+            }),
+            "no section bound inside the query at {query_range:?}"
+        );
+    }
+    assert_eq!(submissions, vec![expected_replies], "one submission, every reply once, in order");
+}
+
+/// How a test batch reaches the worker's parse loop.
+#[derive(Clone, Copy)]
+enum SectionBound {
+    /// The production worker path, `process_pane_vt_batch_with`.
+    Production,
+    /// One section per reply, the unbounded parse the bound must reproduce.
+    Unbounded,
+}
+
+/// The rendered form of a hyperlink: its client id and URI, independent of the interned id.
+type ResolvedLink = (Option<String>, String);
+
+/// A cell with its hyperlink id replaced by the link it resolves to.
+type ResolvedCell = (sonicterm_grid::grid::Cell, Option<ResolvedLink>);
+
+/// Everything a worker batch leaves behind or emits, comparable across two parsers whose
+/// hyperlink ids differ because ids are allocated process-wide.
+#[derive(Debug, PartialEq)]
+struct ParseOutcome {
+    visible_rows: Vec<(Vec<ResolvedCell>, bool)>,
+    scrollback_rows: Vec<(Vec<ResolvedCell>, bool)>,
+    cursor: sonicterm_grid::grid::Pos,
+    pending_wrap: bool,
+    autowrap: bool,
+    alternate_screen: bool,
+    prompts: Vec<sonicterm_grid::grid::PromptRegion>,
+    title: Option<String>,
+    cwd: Option<String>,
+    osc7_cwd: Option<sonicterm_vt::vt::Osc7Cwd>,
+    cwd_revision: u64,
+    hyperlink_count: usize,
+    current_hyperlink: Option<ResolvedLink>,
+    bracketed_paste: bool,
+    keyboard_input: u64,
+    pointer_input: u8,
+    published_cursor_visible: bool,
+    published_keyboard_input: u64,
+    published_pointer_input: u8,
+    emitted_events: Vec<UserEvent>,
+    command_events: Vec<(CommandEvent, Duration, Option<Duration>)>,
+    media_events: Vec<MediaEvent>,
+    reply_submissions: Vec<Vec<u8>>,
+}
+
+/// Resolve `link_id` through `parser`'s registry.
+fn resolve_link(parser: &Parser, link_id: sonicterm_types::HyperlinkId) -> Option<ResolvedLink> {
+    parser
+        .hyperlinks()
+        .lookup(link_id)
+        .map(|link| (link.id.as_deref().map(str::to_owned), link.uri.to_string()))
+}
+
+/// Copy one row's cells with each hyperlink resolved, and its soft-wrap provenance.
+fn resolve_row(parser: &Parser, row: &sonicterm_grid::grid::Row) -> (Vec<ResolvedCell>, bool) {
+    let cells = row
+        .iter()
+        .map(|cell| {
+            let link = cell.hyperlink().and_then(|link_id| resolve_link(parser, link_id));
+            let mut unlinked = cell.clone();
+            unlinked.set_hyperlink(None);
+            (unlinked, link)
+        })
+        .collect();
+    (cells, row.soft_wrapped_from_previous())
+}
+
+/// Parse `batch` on a fresh private-pool pane through `bound`, with a fake clock, and return
+/// its outcome and interior section boundaries.
+fn parse_through_worker(batch: &[u8], bound: SectionBound) -> (ParseOutcome, Vec<SectionBoundary>) {
+    let (_pane, handles) = pane_and_worker_handles();
+    let clock_base = Instant::now();
+    let mut clock_ticks = 0_u64;
+    let fake_clock = || {
+        clock_ticks += 1;
+        clock_base + Duration::from_millis(clock_ticks)
+    };
+    let mut emitted_events = Vec::new();
+    let mut media_events = Vec::new();
+    let mut reply_submissions = Vec::new();
+    let boundaries = record_section_boundaries(&handles.parser, || {
+        let decode_media = |media: &MediaEvent| {
+            media_events.push(media.clone());
+            None
+        };
+        let emit_event = |event| emitted_events.push(event);
+        let send_reply = |reply| reply_submissions.push(reply);
+        match bound {
+            SectionBound::Production => process_pane_vt_batch_with(
+                &handles,
+                batch,
+                &mut None,
+                decode_media,
+                emit_event,
+                fake_clock,
+                send_reply,
+            ),
+            SectionBound::Unbounded => process_pane_vt_batch_in_sections(
+                &handles,
+                batch,
+                usize::MAX,
+                &mut None,
+                decode_media,
+                emit_event,
+                fake_clock,
+                send_reply,
+            ),
+        }
+    });
+    let parser = handles.parser.lock();
+    let grid = parser.grid();
+    let outcome = ParseOutcome {
+        visible_rows: grid.rows_iter().map(|row| resolve_row(&parser, row)).collect(),
+        scrollback_rows: grid.scrollback_iter().map(|row| resolve_row(&parser, row)).collect(),
+        cursor: grid.cursor,
+        pending_wrap: grid.pending_wrap(),
+        autowrap: grid.autowrap(),
+        alternate_screen: grid.is_alt(),
+        prompts: grid.prompts().copied().collect(),
+        title: parser.title().map(str::to_owned),
+        cwd: parser.cwd().map(str::to_owned),
+        osc7_cwd: parser.osc7_cwd().cloned(),
+        cwd_revision: parser.cwd_revision(),
+        hyperlink_count: parser.hyperlinks().len(),
+        current_hyperlink: parser
+            .current_hyperlink()
+            .and_then(|link_id| resolve_link(&parser, link_id)),
+        bracketed_paste: parser.bracketed_paste_enabled(),
+        keyboard_input: parser.keyboard_input_snapshot(),
+        pointer_input: parser.pointer_input_snapshot(),
+        published_cursor_visible: handles.cursor_visible.load(Ordering::Relaxed),
+        published_keyboard_input: handles.keyboard_input.load(Ordering::Relaxed),
+        published_pointer_input: handles.pointer_input.load(Ordering::Relaxed),
+        emitted_events,
+        command_events: handles
+            .command_events
+            .lock()
+            .iter()
+            .map(|command| (command.event, command.at - clock_base, command.duration))
+            .collect(),
+        media_events,
+        reply_submissions,
+    };
+    (outcome, boundaries)
+}
+
+/// One sequence the bound must be able to cut anywhere, and a check that it took effect.
+struct BoundaryFixture {
+    name: &'static str,
+    sequence: Vec<u8>,
+    took_effect: fn(&ParseOutcome) -> bool,
+}
+
+/// UTF-8, CSI, OSC 8, OSC 7, DECRQSS, Kitty, iTerm2, OSC 52 and OSC 133 sequences.
+fn boundary_fixtures() -> Vec<BoundaryFixture> {
+    let image_payload = base64::engine::general_purpose::STANDARD.encode([7_u8; 24]);
+    let clipboard_payload = base64::engine::general_purpose::STANDARD.encode("copied");
+    vec![
+        BoundaryFixture {
+            name: "utf8",
+            sequence: "é€😀".as_bytes().to_vec(),
+            took_effect: |outcome| {
+                outcome.visible_rows.iter().flat_map(|row| &row.0).any(|cell| cell.0.ch == '😀')
+            },
+        },
+        BoundaryFixture {
+            name: "csi",
+            sequence: b"\x1b[38;2;10;20;30;1;4m\x1b[?2004h\x1b[5;7H".to_vec(),
+            // CUP lands on row 4; the trailing CR LF writes the 18-byte tail on row 5 in the SGR style.
+            took_effect: |outcome| {
+                let tail_cell = &outcome.visible_rows[5].0[0].0;
+                outcome.bracketed_paste
+                    && (outcome.cursor.row, outcome.cursor.col) == (5, 18)
+                    && tail_cell.ch == 'a'
+                    && tail_cell.fg != outcome.visible_rows[5].0[40].0.fg
+            },
+        },
+        BoundaryFixture {
+            name: "osc8",
+            sequence: b"\x1b]8;id=fixture;https://example.com/a\x1b\\linked\x1b]8;;\x1b\\".to_vec(),
+            took_effect: |outcome| {
+                outcome.visible_rows.iter().flat_map(|row| &row.0).any(|cell| {
+                    cell.1.as_ref().is_some_and(|link| link.1 == "https://example.com/a")
+                })
+            },
+        },
+        BoundaryFixture {
+            name: "osc7",
+            sequence: b"\x1b]7;file://builder.example/home/user/work%20dir\x07".to_vec(),
+            took_effect: |outcome| {
+                outcome.osc7_cwd.as_ref().is_some_and(|cwd| {
+                    cwd.authority == "builder.example" && cwd.path == "/home/user/work dir"
+                })
+            },
+        },
+        BoundaryFixture {
+            name: "decrqss",
+            sequence: b"\x1b[4:3m\x1bP$qm\x1b\\".to_vec(),
+            took_effect: |outcome| !outcome.reply_submissions.is_empty(),
+        },
+        BoundaryFixture {
+            name: "kitty",
+            sequence: format!("\x1b_Gf=100,a=T;{image_payload}\x1b\\").into_bytes(),
+            took_effect: |outcome| {
+                outcome.media_events.iter().any(|media| media.protocol == MediaProtocol::Kitty)
+            },
+        },
+        BoundaryFixture {
+            name: "iterm2",
+            sequence: format!("\x1b]1337;File=inline=1:{image_payload}\x07").into_bytes(),
+            took_effect: |outcome| {
+                outcome.media_events.iter().any(|media| media.protocol == MediaProtocol::Iterm2File)
+            },
+        },
+        BoundaryFixture {
+            name: "osc52-osc133",
+            sequence: format!("\x1b]52;c;{clipboard_payload}\x07\x1b]133;C\x07\x1b]133;D;0\x07")
+                .into_bytes(),
+            took_effect: |outcome| {
+                outcome.emitted_events.len() == 1 && outcome.command_events.len() == 2
+            },
+        },
+    ]
+}
+
+/// A bounded parse through the production worker path equals one unbounded parse of the
+/// same bytes, whichever byte of each sequence the section bound falls before.
+#[test]
+fn bounded_sections_parse_like_one_unbounded_section_at_every_cut() {
+    for fixture in boundary_fixtures() {
+        for cut_offset in 0..fixture.sequence.len() {
+            // The first bound falls `cut_offset` bytes into the sequence.
+            let mut batch = plain_text_batch(PARSER_SECTION_BYTES - cut_offset);
+            batch.extend_from_slice(&fixture.sequence);
+            batch.extend_from_slice(b"\r\nafter the sequence");
+            let (bounded, bounded_boundaries) =
+                parse_through_worker(&batch, SectionBound::Production);
+            let (unbounded, _) = parse_through_worker(&batch, SectionBound::Unbounded);
+            let first_cut_remaining = batch.len() - PARSER_SECTION_BYTES;
+            assert!(
+                bounded_boundaries
+                    .iter()
+                    .any(|boundary| boundary.remaining_bytes == first_cut_remaining),
+                "{} offset {cut_offset}: no section bound inside the sequence",
+                fixture.name
+            );
+            assert!(
+                (fixture.took_effect)(&unbounded),
+                "{} offset {cut_offset}: the fixture had no effect",
+                fixture.name
+            );
+            assert!(
+                bounded == unbounded,
+                "{} offset {cut_offset}: bounded {bounded:#?}\nunbounded {unbounded:#?}",
+                fixture.name
+            );
+        }
+    }
+}
