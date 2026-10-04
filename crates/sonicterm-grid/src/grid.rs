@@ -373,7 +373,7 @@ impl Grid {
     pub fn clear_dirty_through(&mut self, generation: u64) {
         for (dirty, stamp) in self.dirty_rows.iter_mut().zip(&self.dirty_stamps) {
             if *stamp <= generation {
-                // When: `stamp <= generation`, the row's last dirt is what the renderer drew.
+                // The row's last dirt is what the renderer drew.
                 *dirty = false;
             }
         }
@@ -387,7 +387,7 @@ impl Grid {
                 (self.dirty_rows.get_mut(row), self.dirty_stamps.get(row))
             {
                 if *stamp <= generation {
-                    // When: `stamp <= generation`, the row's last dirt is what the renderer drew.
+                    // The row's last dirt is what the renderer drew.
                     *dirty = false;
                 }
             }
