@@ -5134,9 +5134,14 @@ fn render_releasing_lends_once_and_presents_after_release() {
     assert!(source.contains("\nenum Assembled {\n"), "Assembled is private and has no lifetime");
     let call = source.split_once("    pub fn render_releasing(").unwrap().1;
     let call = call.split_once("\n    }\n").unwrap().0;
-    assert_eq!(call.matches("source.lend(").count(), 1);
-    let lend = call.find("source.lend(").unwrap();
+    // The call lends through `lend_and_assemble` once, and that function lends its source once.
+    assert_eq!(call.matches("lend_and_assemble(").count(), 1);
+    let seam = source.split_once("\nfn lend_and_assemble(").unwrap().1;
+    let seam = seam.split_once("\n}\n").unwrap().0;
+    assert_eq!(seam.matches("source.lend(").count(), 1);
+    let lend = call.find("lend_and_assemble(").unwrap();
     for after in [
+        "self.flush_image_upload_rebuild();",
         "self.present_layers(",
         "self.prepare_cached_present()",
         "self.reset_glyph_atlas_after_invalidation(",
@@ -5146,10 +5151,10 @@ fn render_releasing_lends_once_and_presents_after_release() {
     }
     let assemble = source.split_once("    fn assemble_frame(").unwrap().1;
     let assemble = assemble.split_once("    /// Hand assembled batches").unwrap().0;
-    let empty = assemble.find("return Ok(Assembled::NoPanes);").unwrap();
-    let stopped = assemble.find("return Ok(Assembled::Unavailable);").unwrap();
-    let plan = assemble.find("FramePlan::build(").unwrap();
-    assert!(empty < stopped && stopped < plan, "typed exits come first, in their order");
+    assert!(call.contains("lend_and_assemble(source, accepts_gpu_work,"), "exits decided first");
+    assert!(
+        !assemble.contains("Assembled::NoPanes") && !assemble.contains("Assembled::Unavailable")
+    );
     for presenting in [
         "present_frame(",
         "prepare_cached_present(",
@@ -5158,4 +5163,88 @@ fn render_releasing_lends_once_and_presents_after_release() {
     ] {
         assert!(!assemble.contains(presenting), "assembly calls {presenting}");
     }
+}
+
+/// A source that owns its grids and records when it is lent and when it is dropped.
+struct OwningSource {
+    grids: Vec<Grid>,
+    log: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+}
+
+impl sonicterm_render_model::FrameSource for OwningSource {
+    fn lend<R>(
+        mut self,
+        assemble: impl for<'slice, 'grid> FnOnce(
+            &'slice mut [sonicterm_render_model::PaneRender<'grid>],
+        ) -> R,
+    ) -> R {
+        self.log.borrow_mut().push("lend");
+        let mut panes: Vec<_> = self
+            .grids
+            .iter_mut()
+            .enumerate()
+            .map(|(index, grid)| sonicterm_render_model::PaneRender {
+                id: index as u64 + 1,
+                rect_px: PixelRect { x: 0, y: 0, w: 80, h: 40 },
+                grid,
+                viewport_top_abs: None,
+                is_active: index == 0,
+                cursor_style: sonicterm_render_model::CursorStyle::default(),
+                is_broadcast_participant: false,
+                scrollbar_alpha: 0.0,
+                inline_images: Vec::new(),
+            })
+            .collect();
+        assemble(&mut panes)
+    }
+}
+
+impl Drop for OwningSource {
+    // Lifecycle: dropping the source releases what it owns; the log records when.
+    fn drop(&mut self) {
+        self.log.borrow_mut().push("drop");
+    }
+}
+
+/// The renderer-free exits of the one releasing call, through the production seam: an empty source
+/// is skipped as `NoPanes` with no receipts whether or not the device accepts work, a stopped
+/// device with panes is `Unavailable` and never assembles, and in every case the source is lent
+/// once and dropped before the call returns.
+#[test]
+fn an_empty_source_is_no_panes_and_is_dropped_before_the_call_returns() {
+    let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let source = |grids: Vec<Grid>| OwningSource { grids, log: std::rc::Rc::clone(&log) };
+    for accepts_gpu_work in [true, false] {
+        log.borrow_mut().clear();
+        let assembled = lend_and_assemble(source(Vec::new()), accepts_gpu_work, |_| {
+            panic!("an empty source never assembles")
+        })
+        .unwrap();
+        assert_eq!(*log.borrow(), ["lend", "drop"], "dropped before the call returns");
+        let outcome = settle_without_renderer(assembled).ok().expect("an empty source is settled");
+        assert!(
+            matches!(outcome.outcome, PresentOutcome::Skipped(SkipReason::NoPanes)),
+            "accepts={accepts_gpu_work}: {:?}",
+            outcome.outcome
+        );
+        assert!(outcome.receipts.is_empty());
+    }
+    log.borrow_mut().clear();
+    let stopped = lend_and_assemble(source(vec![Grid::new(8, 2)]), false, |_| {
+        panic!("a stopped device never assembles")
+    })
+    .unwrap();
+    assert!(matches!(stopped, Assembled::Unavailable));
+    assert_eq!(*log.borrow(), ["lend", "drop"]);
+    assert!(
+        settle_without_renderer(stopped).is_err(),
+        "a stopped device needs the renderer's report"
+    );
+    let mut assembled_panes = 0;
+    let usable = lend_and_assemble(source(vec![Grid::new(8, 2), Grid::new(8, 2)]), true, |panes| {
+        assembled_panes = panes.len();
+        Ok(Assembled::Unavailable)
+    });
+    assert!(usable.is_ok());
+    assert_eq!(assembled_panes, 2, "a usable device assembles the lent panes once");
 }

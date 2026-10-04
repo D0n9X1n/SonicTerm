@@ -146,6 +146,40 @@ impl FrameOutcome {
     }
 }
 
+/// Lend `source` once and decide the exits that need no renderer, in their existing order: an empty
+/// source is `NoPanes`, then a device that no longer accepts work is `Unavailable`; only otherwise does
+/// `assemble` run. The source is dropped before this returns.
+fn lend_and_assemble(
+    source: impl sonicterm_render_model::FrameSource,
+    accepts_gpu_work: bool,
+    assemble: impl for<'slice, 'grid> FnOnce(
+        &'slice mut [sonicterm_render_model::PaneRender<'grid>],
+    ) -> Result<Assembled>,
+) -> Result<Assembled> {
+    source.lend(|panes| {
+        if panes.is_empty() {
+            // When: `panes` is empty, no grid is available to draw, so skip the frame.
+            return Ok(Assembled::NoPanes);
+        }
+        if !accepts_gpu_work {
+            // When: `accepts_gpu_work` is false, frames are skipped and their dirty state kept.
+            return Ok(Assembled::Unavailable);
+        }
+        assemble(panes)
+    })
+}
+
+/// The outcome of an exit that needs no renderer: an empty source is skipped with no receipts. Any
+/// other assembly is handed back for presentation.
+fn settle_without_renderer(assembled: Assembled) -> std::result::Result<FrameOutcome, Assembled> {
+    match assembled {
+        Assembled::NoPanes => {
+            Ok(FrameOutcome::without_receipts(PresentOutcome::Skipped(SkipReason::NoPanes)))
+        }
+        other => Err(other),
+    }
+}
+
 /// What assembling a frame decided, owning everything presentation needs and borrowing no grid, so
 /// the frame's source is released before any of it is presented. The typed exits come first, in the
 /// order assembly checks them.
@@ -4877,7 +4911,8 @@ impl GpuRenderer {
         self.debug_assert_prepared(fonts);
         // Read before lending, so assembly itself never reaches the device.
         let subpixel_aa = self.effective_subpixel_aa_mode();
-        let assembled = source.lend(|panes| {
+        let accepts_gpu_work = self.device_errors.accepts_gpu_work();
+        let assembled = lend_and_assemble(source, accepts_gpu_work, |panes| {
             self.assemble_frame(
                 subpixel_aa,
                 panes,
@@ -4905,7 +4940,12 @@ impl GpuRenderer {
                 return FrameOutcome::without_receipts(PresentOutcome::Failed(error));
             }
         };
+        let assembled = match settle_without_renderer(assembled) {
+            Ok(outcome) => return outcome,
+            Err(assembled) => assembled,
+        };
         let outcome = match assembled {
+            // Settled above; kept so the match names every exit.
             Assembled::NoPanes => PresentOutcome::Skipped(SkipReason::NoPanes),
             Assembled::Unavailable => self.rendering_unavailable(),
             Assembled::Unchanged { focus_flash } => {
@@ -4978,14 +5018,7 @@ impl GpuRenderer {
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> Result<Assembled> {
-        if panes.is_empty() {
-            // When: `panes.is_empty()`, no grid is available to draw, so skip the frame.
-            return Ok(Assembled::NoPanes);
-        }
-        if !self.device_errors.accepts_gpu_work() {
-            // When: `accepts_gpu_work` is false, frames are skipped and their dirty state kept.
-            return Ok(Assembled::Unavailable);
-        }
+        // `lend_and_assemble` has already taken the empty and stopped exits, so `panes` is not empty.
         let mut gpu_timing = tracing::enabled!(target: "render_timing", tracing::Level::DEBUG)
             .then(|| {
                 let now = Instant::now();
