@@ -173,9 +173,10 @@ On macOS 14 and later, window registration installs a per-window
 `NSView.displayLink`, created paused, whose preferred rate is the window's monitor
 period and follows every refresh that changes it. A hardware deferral that the
 streaming rule wins stores the pacing mode `Link` when the window has a link;
-every other deferral (a surface timeout, the contention floor, the degraded
-software path, or a window with no link) stores `Timer` and keeps the rules
-above. The stored mode holds until the frame is admitted; link invalidation
+a surface-timeout or contention deferral, and a streaming deferral on the
+degraded software path or in a window with no link, store `Timer` and keep the
+rules above. A `Sync` deferral stores no mode and keeps one already stored; it
+pauses the link until admission re-evaluates the hold. The stored mode holds until the frame is admitted; link invalidation
 clears a stored `Link` but never a stored `Timer`. The link runs only while a
 `Link` admission is pending: the wait fold starts it after collecting deadlines
 and pauses it when nothing link-paced is pending or the window cannot schedule

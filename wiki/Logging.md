@@ -410,7 +410,7 @@ previous snapshot and takes deltas.
 | `handler` | ms histogram | each `window_event` dispatch for the window |
 | `flush_to_redraw` | ms histogram | oldest pending flush to the first redraw of a window that shows the pane |
 
-The three `defer_*` counts record the rule that won. The rules are checked in
+The four `defer_*` counts record the rule that won. The rules are checked in
 that order, and a later one is never evaluated once an earlier one holds, so each
 deferred redraw counts once ([Rendering Modes](Rendering-Modes#lock-contention-retry)
 describes the retry floor).

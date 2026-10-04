@@ -214,7 +214,10 @@ Synchronized output: `CSI ? 2026 h` opens an update and `CSI ? 2026 l` ends it.
 RIS also ends it; leaving the alternate screen does not. A repeated `h` keeps the
 update it opened, so it cannot extend its own bound. While an update is open, the
 pane's worker keeps parsing but sends no output event, and a window that shows the
-pane presents no frame, until the update ends or 150 ms pass. The first frame, a
+pane presents no frame, until the update ends or 150 ms pass. Two limits apply. A
+reset that no successful frame has shown yet releases the pane even if a new update
+opens before that frame. And a window holds for at most 150 ms from the first frame
+it held in a stretch, whichever panes hold it. The first frame, a
 visibility change, device recovery, a changed surface size and surface recovery
 still present the live grid. DECRQM `CSI ? 2026 $ p` is answered with
 `CSI ? 2026 ; Ps $ y`, where `Ps` is 1 while an update is open and 2 otherwise; no

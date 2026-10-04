@@ -324,7 +324,7 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `handler` | 毫秒直方图 | 该窗口每次 `window_event` 分发 |
 | `flush_to_redraw` | 毫秒直方图 | 最早的待处理 flush 到显示该窗格的窗口第一次重绘 |
 
-三个 `defer_*` 计数记录胜出的规则。规则按上述顺序检查，前一条成立后不再求值后面的规则，因此每次
+四个 `defer_*` 计数记录胜出的规则。规则按上述顺序检查，前一条成立后不再求值后面的规则，因此每次
 推迟的重绘只计一次（重试下限见[渲染模式](Rendering-Modes-zh-CN#锁争用重试)）。
 
 三个 `display_link_*` 计数始终存在，在不运行链接的地方（Windows、Linux、macOS 14 之前、软件路径）
