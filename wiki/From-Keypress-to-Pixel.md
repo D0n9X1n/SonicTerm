@@ -315,6 +315,10 @@ monitor frame period. Resolved degradation also coalesces pure input redraws to
 the software frame period. A timed `ControlFlow::WaitUntil` wakes the event loop
 and requests the frame again.
 
+After that flush decision, a worker with a pending yield request sends
+`ParserYielded` with its fixed deadline and parks, holding no lock. Any
+synchronized-output hold that elapsed meanwhile is released before the next batch.
+
 ### 9. The event loop builds a complete frame
 
 On `RedrawRequested`, the app computes the active tab's pane rectangles. It
@@ -340,6 +344,11 @@ selection, copy mode, tabs, search, palette, IME, viewport, notification, and
 hovered-URL data to `GpuRenderer::render_releasing`, with the panes lent by the
 frame source. It does not construct one
 aggregate `RenderInputs` value.
+
+On hardware, a parser miss may publish one request to that pane's worker. An
+accepted grant lets one admission bypass the retry floor before the worker's
+deadline. A successful collection serves the worker under the held parser guards,
+before images. Collection never blocks.
 
 ### 10. Damage and row caches select work
 

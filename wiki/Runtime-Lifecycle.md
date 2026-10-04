@@ -387,6 +387,14 @@ runs that owner's command maintenance even when hidden or stopped, then marks
 Output only when its visible output advanced, or Chrome when only command chrome
 changed. Transfer changes the shared target without replacing the generation.
 
+After a batch's flush decision, a worker whose window asked for its next gap sends
+`ParserYielded` and parks between batches, holding no parser, image-store, media
+charge, command-queue or redraw-target lock, until a window serves the request or
+the deadline it fixed before sending passes. The park is capped at an open
+synchronized update's stored deadline and never extends it. Whatever the handshake
+step returned, an update hold that elapsed is released before the next batch is
+parsed.
+
 Each window owns cause generations, input immediacy, its raw monitor period,
 last actual present, and suppression state. The public `last_render: Instant`
 is the last-attempt clock. On hardware, streaming is paced from `stream_clock`,

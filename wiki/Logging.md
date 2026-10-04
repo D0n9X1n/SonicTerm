@@ -403,6 +403,11 @@ previous snapshot and takes deltas.
 | `display_link_fallbacks` | count | display-link-paced streaming frames admitted by the two-period fallback ceiling because no tick came |
 | `contention_retry_armed` | count | lock-contention retries armed |
 | `dirt_ack_dropped` | count | presented-frame receipts dropped at the next collection because the pane was not held, its parser changed, or its grid was resized or switched screens after assembly; output written after assembly does not drop a receipt, it only keeps the rows it dirtied. Each drop costs a later re-assembly, never pixels |
+| `parser_yield_requests` | count | requests a hardware parser miss published to the missed pane's worker |
+| `parser_yield_wakes` | count | grants the window accepted (W) |
+| `parser_yield_rejected` | count | grants the window did not accept: declined, stale, expired, superseded or moved |
+| `parser_yield_frames` | count | accepted grants resolved by a coherent collection (F) |
+| `parser_yield_lost` | count | accepted grants resolved any other way (L) |
 | `native_request_redraw` | count | native redraw requests for the window, on every request path; a dispatch's requests reach the totals when it ends, so a window line shows them one dispatch late (`final=1` lines are complete) |
 | `user_request_redraw` | count | output events serviced for the window: `PaneOutput` from a VT worker's flush (at most one outstanding per pane) and `RequestRedraw` from a harness or test, counted before the visible-output filter |
 | `redraw_requested` | count | `RedrawRequested` events for the window |
@@ -426,6 +431,15 @@ unused ticks: ticks refused by a timeout or contention rule, replaced before
 use, or spent by an admission that was not streaming. The counts show which
 path authorized each frame; they do not prove where frames land relative to
 vsync ([Rendering Modes](Rendering-Modes#owner-local-frame-scheduling)).
+
+For accepted grants, `parser_yield_wakes − parser_yield_frames − parser_yield_lost`
+equals the change in grants still open. The window line carries no open count; a
+`perf_scenarios` phase reports it as the levels `parser_yield_tokens_start` and
+`parser_yield_tokens_end`, read from the phase's start and end snapshots, summed over
+live windows only (a closed window holds none) and never subtracted. Each lost grant
+logs `yield token lost` at `debug` on `sonicterm_app::parser_yield` with its
+`pane_id`, `generation` and `reason`: `Suppressed`, `Expired`, `Moved`, `Software`,
+`Deferred`, `Parser`, `Images`, `Sync`, `Invalid` or `Removed`.
 
 At each `RedrawRequested`, `flush_to_redraw` takes the pending flush of every
 pane the window shows: the active tab's panes, or the zoomed pane. A hidden
@@ -475,6 +489,10 @@ or whose worker finishes after it, still adds to it.
 | `flushes_coalesced` | count | flushes that found an earlier flush still pending, which keeps its time |
 | `flushes_suppressed` | count | targeted flushes that sent no event because the pane's output event was still outstanding; a send the event loop refused is not counted |
 | `sync_timeouts` | count | synchronized updates (DEC 2026) a worker released at the 150 ms bound rather than at their reset |
+| `parser_yields` | count | `ParserYielded` events a worker sent; a refused send is not counted |
+| `parser_yield_timeouts` | count | sends whose wait ended with the request still unserved |
+| `parser_yield_wait` | µs histogram | one sample per send, from the clock reading before the send to the end of the wait; it may be nonzero with no park |
+| `parser_yield_overshoot` | µs histogram | how far past its deadline a wait ended, for each send that ended late |
 
 No identity holds between `flushes`, `flushes_untargeted`, `flushes_coalesced`,
 and the `flush_to_redraw` count. A pane that closes drops its pending timestamp,

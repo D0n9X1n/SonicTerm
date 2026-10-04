@@ -379,6 +379,11 @@ recovery cause. Worker Output does not unpark, but command maintenance still run
 The warning latch is independent of parking and resets only after a successful
 held-frame reconciliation. The collector itself adds no timer or redraw.
 
+Once every visible parser guard is held, and before any image store is locked, the
+collector serves each visible pane's waiting VT worker: a monotonic store of the
+pane's requested generation, then an unpark only when that store advanced it. No
+lock is taken for it, so frame collection still never blocks.
+
 Viewport anchors and their public projections are captured for visible panes,
 then reconciled through `reconcile_held_viewports` against the held parser grids.
 The per-pane viewports and active-frame viewport come from that same result. The

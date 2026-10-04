@@ -317,6 +317,11 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `display_link_fallbacks` | 次数 | 没有 tick 到来、由两个周期的回退上限准入的按显示链接计节奏的流式帧 |
 | `contention_retry_armed` | 次数 | 设置的锁争用重试 |
 | `dirt_ack_dropped` | 次数 | 下一次收集时因窗格未被持有、解析器已变化，或网格在组帧后改变尺寸或切换屏幕而丢弃的已呈现帧回执；组帧后写入的输出不会丢弃回执，只保留它标脏的行。每次丢弃只代价一次之后的重新组装，从不影响像素 |
+| `parser_yield_requests` | 次数 | 硬件解析器未命中时向被错过窗格的工作线程发出的请求 |
+| `parser_yield_wakes` | 次数 | 窗口接受的授权（W） |
+| `parser_yield_rejected` | 次数 | 窗口未接受的授权：被拒绝、过时、过期、被取代或已移走 |
+| `parser_yield_frames` | 次数 | 由完整收集结算的已接受授权（F） |
+| `parser_yield_lost` | 次数 | 以其它方式结算的已接受授权（L） |
 | `native_request_redraw` | 次数 | 该窗口的原生重绘请求，覆盖每条请求路径；一次 dispatch 的请求在其结束时计入汇总，因此窗口行晚一次 dispatch 显示它们（`final=1` 行是完整的） |
 | `user_request_redraw` | 次数 | 该窗口已服务的输出事件：VT 工作线程 flush 发出的 `PaneOutput`（每个窗格最多一个未处理）和测试框架或测试发出的 `RequestRedraw`，在可见输出过滤之前计数 |
 | `redraw_requested` | 次数 | 该窗口的 `RedrawRequested` 事件 |
@@ -333,6 +338,13 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 链接节奏不可用）；两者都非零为**混合**。`display_link_ticks` 减去 `display_link_admissions` 是未使用
 的 tick：被超时或争用规则拒绝、使用前被替换，或被非流式准入消耗的 tick。这些计数显示每一帧由哪条
 路径授权；它们不证明帧相对于垂直同步落在何处（[渲染模式](Rendering-Modes-zh-CN#按窗口归属的帧调度)）。
+
+对已接受的授权，`parser_yield_wakes − parser_yield_frames − parser_yield_lost` 等于仍未结算授权数的
+变化。窗口行不携带未结算数量；`perf_scenarios` 的阶段把它报告为 `parser_yield_tokens_start` 和
+`parser_yield_tokens_end` 两个水平值，分别读自阶段开始和结束时的快照，只对存活窗口求和（已关闭的窗口
+不持有授权），且从不相减。每个丢失的授权都会在 `sonicterm_app::parser_yield` 上以 `debug` 级别记录
+`yield token lost`，附带 `pane_id`、`generation` 和 `reason`：`Suppressed`、`Expired`、`Moved`、
+`Software`、`Deferred`、`Parser`、`Images`、`Sync`、`Invalid` 或 `Removed`。
 
 每次 `RedrawRequested` 时，`flush_to_redraw` 会取走该窗口所显示的每个窗格的待处理 flush：活动标签页的
 窗格，或被放大的窗格。隐藏窗格的 flush 会一直等到其标签页显示出来。一组合并的 flush 只产生一次观测。
@@ -377,6 +389,10 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `flushes_coalesced` | 次数 | 发现更早的 flush 仍待处理的 flush；更早的那次保留其时间 |
 | `flushes_suppressed` | 次数 | 有目标、但因窗格的输出事件仍未处理而未发送事件的 flush；事件循环拒收的发送不计入 |
 | `sync_timeouts` | 次数 | 工作线程在 150 ms 时限而非重置时释放的同步更新（DEC 2026） |
+| `parser_yields` | 次数 | 工作线程发送的 `ParserYielded` 事件；被拒绝的发送不计入 |
+| `parser_yield_timeouts` | 次数 | 等待结束时请求仍未被满足的发送 |
+| `parser_yield_wait` | 微秒直方图 | 每次发送一个样本，从发送前的时钟读数到等待结束；即使没有停放也可能非零 |
+| `parser_yield_overshoot` | 微秒直方图 | 每次晚于期限结束的发送超出期限的时长 |
 
 `flushes`、`flushes_untargeted`、`flushes_coalesced` 与 `flush_to_redraw` 的计数之间没有恒等关系。
 关闭的窗格会丢弃其待处理时间戳，而且各计数器并非作为一次快照读取，因此要分别解读。

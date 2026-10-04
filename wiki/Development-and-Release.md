@@ -800,8 +800,8 @@ same three cases, S1 `wgpu`, S1 `role-exit`, and an S10/sync delivery replay
 adapter, so this checks the tooling, the wgpu presenter and role-exit handling,
 never timing. Linux CI builds the harness without running a scenario, and
 every platform runs
-`scripts/perf-compare_tests.py` and `scripts/perf-critical-path_tests.py`
-through `check-workflow-supply-chain.sh`.
+`scripts/perf-compare_tests.py`, `scripts/perf-critical-path_tests.py` and
+`scripts/perf-1584-acceptance_tests.py` through `check-workflow-supply-chain.sh`.
 [Local Gate](Local-Gate#performance-scenario-smoke) has the smoke's failure
 rules.
 

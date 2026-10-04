@@ -107,6 +107,7 @@ cargo build -p sonicterm-app
   Structural parking excludes every frame deadline; Output maintains commands but cannot
   unpark. Device-stop reporting runs before this suppression. Native evidence is separate
   from the fake-clock and source-contract tests.
+- On hardware, a parser miss may earn one accepted fast retry per contention episode. The worker parks only between batches, holding no lock, until a deadline fixed before it signals (2 ms, never past an open synchronized update's deadline). Spurious wakes never extend that deadline, and an elapsed hold is released before the next batch. Scheduler overshoot is possible and measured. A grant bypasses the retry floor once and never clears or arms it. Window removal resolves any yield token before its counters retire. The render path never blocks.
 - A scrolled-back viewport is anchored to history identity. Writers repin through
   the pane's anchor setter with a baseline read under the lock that chose the row;
   readers resolve through the anchor, and both render collectors reconcile every

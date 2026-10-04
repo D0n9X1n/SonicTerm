@@ -555,8 +555,8 @@ report。没有它的旧运行按历史模式读取：每个 job 的证据是在
 因此通过只说明工具可用，从不说明某项改动更快。在 Windows 上，`windows-tests` job 构建 harness 并运行
 `python scripts/perf-compare.py --smoke`：同样的三个用例、S1 `wgpu`、S1 `role-exit`，以及一次 S10/sync
 交付回放（见[Windows](Local-Gate-zh-CN#windows)）。托管 runner 使用软件适配器渲染，因此这只检查工具、
-wgpu 呈现器与角色退出处理，从不检查计时。Linux CI 只构建 harness 而不运行场景，每个平台都通过 `check-workflow-supply-chain.sh` 运行 `scripts/perf-compare_tests.py` 与
-`scripts/perf-critical-path_tests.py`。
+wgpu 呈现器与角色退出处理，从不检查计时。Linux CI 只构建 harness 而不运行场景，每个平台都通过 `check-workflow-supply-chain.sh` 运行 `scripts/perf-compare_tests.py`、
+`scripts/perf-critical-path_tests.py` 与 `scripts/perf-1584-acceptance_tests.py`。
 smoke 的失败规则见[本地 gate](Local-Gate-zh-CN#性能场景-smoke)。
 
 ## Coverage 证据与重新建立基线
