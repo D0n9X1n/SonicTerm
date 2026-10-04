@@ -606,8 +606,8 @@ impl App {
 
     /// Test-only: give `id` an accepted parser-yield grant through the production request and
     /// answer path: a miss arms the floor 1 s ahead, a request is published for the active pane, and
-    /// its worker's grant, parked for 900 ms, is answered on the real clock well inside both bounds.
-    /// Returns whether it was accepted.
+    /// a synthetic grant carrying a deadline 900 ms ahead is answered on the real clock, well inside
+    /// both bounds; no worker parks. Returns whether it was accepted.
     #[doc(hidden)]
     pub fn __test_grant_yield_token(&mut self, id: WindowId) -> bool {
         let now = self.dispatch_now();

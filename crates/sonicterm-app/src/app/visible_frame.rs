@@ -46,8 +46,9 @@ pub(super) enum FrameUnavailable {
     Contended { pane_id: u64, images: bool },
 }
 
-/// A failure the collector can be made to report at one boundary, so tests reach the adapters'
-/// source and reconciliation exits without building a broken topology. Only tests arm one.
+/// Test-only: a failure the collector reports at one boundary, so tests reach the adapters' source
+/// and reconciliation exits without building a broken topology.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FrameFault {
     /// The source capture reports a structural topology failure.
@@ -68,23 +69,17 @@ pub(super) fn inject_frame_fault(fault: Option<FrameFault>) {
     FRAME_FAULT.with(|cell| cell.set(fault));
 }
 
-/// Take the armed failure when it is `wanted`; it fires once. Production builds never fail here.
-fn take_frame_fault(#[cfg_attr(not(test), allow(unused_variables))] wanted: FrameFault) -> bool {
-    #[cfg(test)]
-    {
-        FRAME_FAULT.with(|cell| {
-            let armed = cell.get() == Some(wanted);
-            if armed {
-                // An armed fault is consumed, so it fires once.
-                cell.set(None);
-            }
-            armed
-        })
-    }
-    #[cfg(not(test))]
-    {
-        false
-    }
+/// Test-only: take the armed failure when it is `wanted`; it fires once.
+#[cfg(test)]
+fn take_frame_fault(wanted: FrameFault) -> bool {
+    FRAME_FAULT.with(|cell| {
+        let armed = cell.get() == Some(wanted);
+        if armed {
+            // An armed fault is consumed, so it fires once.
+            cell.set(None);
+        }
+        armed
+    })
 }
 
 /// Validated layout order and the active pane's actual position within it.
@@ -348,6 +343,7 @@ impl VisibleFrameSources {
         window: &mut WindowState,
         guards: &mut ParserGuards<'_>,
     ) -> Result<FrameViewports, FrameUnavailable> {
+        #[cfg(test)]
         if take_frame_fault(FrameFault::Reconcile) {
             // When: `take_frame_fault` finds the armed reconciliation fault, no receipt applies.
             return Err(FrameUnavailable::StructuralInvalid(LayoutInvalid::VisibleDisagrees));
@@ -464,6 +460,7 @@ impl App {
         outer: Rect,
     ) -> Result<VisibleFrameSources, FrameUnavailable> {
         let window = self.windows.get(&id).ok_or(FrameUnavailable::NoLayout)?;
+        #[cfg(test)]
         if take_frame_fault(FrameFault::Sources) {
             // When: `take_frame_fault` finds the armed source fault, capture reports a topology failure.
             return Err(FrameUnavailable::StructuralInvalid(LayoutInvalid::MissingTabState));
