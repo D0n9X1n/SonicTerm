@@ -29,10 +29,9 @@ fn extracted_upload_policy_preserves_dimensions_and_cpu_payload() {
     assert_eq!(atlas_payload_bytes(16, 8), 512);
 }
 
-#[test]
-fn extracted_retry_and_success_keep_distinct_settlement_boundaries() {
-    // Rejection invalidates UVs before requesting redraw; only acknowledged presentation settles retry.
-    let lifecycle = include_str!("atlas_lifecycle.rs");
+/// The settlement scan over one checkout of `atlas_lifecycle.rs` and `core.rs`, read as LF.
+fn check_settlement_boundaries(lifecycle: &str, core: &str) {
+    let (lifecycle, core) = (lifecycle.replace("\r\n", "\n"), core.replace("\r\n", "\n"));
     let retry = lifecycle.split_once("fn reset_glyph_atlas_after_invalidation(").unwrap().1;
     let retry = retry.split_once("fn glyph_atlas_stamp(").unwrap().0;
     let mut previous = 0;
@@ -54,13 +53,21 @@ fn extracted_retry_and_success_keep_distinct_settlement_boundaries() {
     assert!(retry.contains("\"eviction_compaction\""));
     assert!(retry.contains("\"content_reset_or_replacement\""));
     assert!(retry.contains("?before,") && retry.contains("?after,"));
-    let core = include_str!("core.rs");
     assert_eq!(core.matches("self.finish_glyph_atlas_retry();").count(), 1);
     // A presented frame settles the retry; it clears no grid dirt, which its receipts carry out.
     let success = core.split_once("fn finish_successful_frame(").unwrap().1;
     let success = success.split_once("\n    }\n").unwrap().0;
     assert!(success.contains("self.finish_glyph_atlas_retry();"));
     assert!(!success.contains("clear_dirty") && !success.contains("panes"));
+}
+
+#[test]
+fn extracted_retry_and_success_keep_distinct_settlement_boundaries() {
+    // Rejection invalidates UVs before requesting redraw; only acknowledged presentation settles retry.
+    // Windows CI checks sources out with CRLF line ends, so the scan runs on a CRLF copy too.
+    let (lifecycle, core) = (include_str!("atlas_lifecycle.rs"), include_str!("core.rs"));
+    check_settlement_boundaries(lifecycle, core);
+    check_settlement_boundaries(&lifecycle.replace('\n', "\r\n"), &core.replace('\n', "\r\n"));
 }
 
 #[test]

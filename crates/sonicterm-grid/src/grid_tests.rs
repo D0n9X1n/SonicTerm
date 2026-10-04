@@ -2045,24 +2045,47 @@ fn dirty_writer_problems(source: &str) -> Vec<String> {
             }
         }
     }
+    // References a function can take into `dirty_rows`; a write through any binding of one counts.
+    const ALIASES: [&str; 6] = [
+        "dirty_rows.get_mut(",
+        "dirty_rows.iter_mut(",
+        "dirty_rows.split_at_mut(",
+        "dirty_rows.last_mut(",
+        "dirty_rows.first_mut(",
+        "&mutself.dirty_rows",
+    ];
     let mut problems = Vec::new();
     for (name, body) in &functions {
-        let sets = body.iter().any(|line| {
-            (line.contains("dirty_rows") || line.starts_with("*slot"))
-                && (line.contains("= true")
-                    || line.contains("fill(true)")
-                    || line.contains(".resize(")
-                    || line.contains("vec![true"))
-        });
-        let stores_false =
-            body.iter().any(|line| line.contains("dirty_rows") && line.contains("fill(false)"))
-                || body.iter().any(|line| line.starts_with("*slot = false"));
-        let bumps = body.iter().any(|line| line.contains("self.dirty_generation = "));
-        let literal = body.iter().any(|line| line.starts_with("dirty_rows: vec![true"));
+        // The body without whitespace, so a call or a write split across lines reads as one.
+        let code: String = body
+            .iter()
+            .flat_map(|line| line.chars())
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let aliased = ALIASES.iter().any(|alias| code.contains(alias));
+        let writes_through_alias = |value: &str| {
+            aliased
+                && code.match_indices('*').any(|(at, _)| {
+                    let rest = &code[at + 1..];
+                    let binding: String = rest
+                        .chars()
+                        .take_while(|character| character.is_alphanumeric() || *character == '_')
+                        .collect();
+                    !binding.is_empty() && rest[binding.len()..].starts_with(&format!("={value}"))
+                })
+        };
+        let sets = code.contains("dirty_rows.fill(true)")
+            || code.contains("dirty_rows.resize(")
+            || code.contains("dirty_rows:vec![true")
+            || code.contains("dirty_rows=vec![true")
+            || (code.contains("dirty_rows[") && code.contains("]=true"))
+            || writes_through_alias("true");
+        let stores_false = code.contains("dirty_rows.fill(false)") || writes_through_alias("false");
+        let bumps = code.contains("self.dirty_generation=");
+        let literal = code.contains("dirty_rows:vec![true");
         let name = name.as_str();
         if SETTERS.contains(&name) {
-            let advances = bumps
-                || (name == "resize" && body.iter().any(|line| line.contains("self.mark_all()")));
+            let advances = bumps || (name == "resize" && code.contains("self.mark_all()"));
             if sets && !advances {
                 problems.push(format!("{name} sets dirty bits without advancing the generation"));
             }
@@ -2075,7 +2098,7 @@ fn dirty_writer_problems(source: &str) -> Vec<String> {
                 problems.push(format!("{name} no longer clears"));
             }
         } else if LITERALS.contains(&name) && literal {
-            if !body.iter().any(|line| line.starts_with("dirty_generation: 0")) {
+            if !code.contains("dirty_generation:0") {
                 problems.push(format!("{name}'s grid literal does not start at generation 0"));
             }
         } else if sets || bumps || stores_false {
@@ -2085,38 +2108,80 @@ fn dirty_writer_problems(source: &str) -> Vec<String> {
     problems
 }
 
-/// The dirty-bit writers stay closed: the pin passes on this file and catches a writer that sets a
-/// bit without advancing the generation, a clearing helper that stores `true`, and a new writer.
+/// `source` with `fixture` added as a production `Grid` method, before the test module.
+fn with_writer(source: &str, fixture: &str) -> String {
+    let marker = "\n#[cfg(test)]\n#[path = \"grid_tests.rs\"]";
+    let at = source.find(marker).expect("grid.rs declares its test module");
+    format!("{}\nimpl Grid {{\n{fixture}\n}}\n{}", &source[..at], &source[at..])
+}
+
+/// The writer pin over one checkout of `grid.rs`: it passes on the file and rejects a setter that does
+/// not advance the generation, a clearing helper that stores `true`, a direct write in a new place,
+/// and aliased writes through a reference taken from `dirty_rows` under any binding name. Every
+/// fixture is built from the LF-normalized text, so the checks mean the same on a CRLF checkout.
+fn check_dirty_writer_pin(checkout: &str) {
+    let source = checkout.replace("\r\n", "\n");
+    assert_eq!(dirty_writer_problems(checkout), Vec::<String>::new());
+    let rejects = |mutated: &str, writer: &str| {
+        assert_ne!(mutated, source, "precondition: the {writer} fixture changed the source");
+        let problems = dirty_writer_problems(&mutated.replace('\n', "\r\n"));
+        assert!(
+            problems.iter().any(|problem| problem.starts_with(writer)),
+            "{writer}: {problems:?}"
+        );
+        let problems = dirty_writer_problems(mutated);
+        assert!(
+            problems.iter().any(|problem| problem.starts_with(writer)),
+            "{writer}: {problems:?}"
+        );
+    };
+    rejects(
+        &source.replacen(
+            "            *slot = true;\n        }\n        self.dirty_generation = self.dirty_generation.wrapping_add(1);",
+            "            *slot = true;\n        }",
+            1,
+        ),
+        "mark_range",
+    );
+    rejects(
+        &source.replacen("self.dirty_rows.fill(false);", "self.dirty_rows.fill(true);", 1),
+        "clear_dirty ",
+    );
+    rejects(
+        &source.replacen(
+            "                self.mark_row(index as u16);\n            }\n        }\n        self.bump();",
+            "                self.dirty_rows[index] = true;\n            }\n        }\n        self.bump();",
+            1,
+        ),
+        "clear_soft_wraps_in_visible_range",
+    );
+    rejects(
+        &with_writer(
+            &source,
+            "    fn aliased_get(&mut self) {\n        let dirty = self\n            .dirty_rows\n            .get_mut(0);\n        if let Some(dirty) = dirty {\n            *dirty = true;\n        }\n    }",
+        ),
+        "aliased_get",
+    );
+    rejects(
+        &with_writer(
+            &source,
+            "    fn aliased_for_each(&mut self) {\n        self.dirty_rows.iter_mut().for_each(|flag| *flag = true);\n    }",
+        ),
+        "aliased_for_each",
+    );
+    rejects(
+        &with_writer(
+            &source,
+            "    fn aliased_loop(&mut self) {\n        for bit in self.dirty_rows.iter_mut() {\n            *bit = true;\n        }\n    }",
+        ),
+        "aliased_loop",
+    );
+}
+
+/// The dirty-bit writers stay closed on an LF and on a CRLF checkout, as Windows CI checks it out.
 #[test]
 fn dirty_bits_are_set_only_by_writers_that_advance_the_generation() {
-    let source = include_str!("grid.rs");
-    assert_eq!(dirty_writer_problems(source), Vec::<String>::new());
-    let crlf = source.replace('\n', "\r\n");
-    assert_eq!(dirty_writer_problems(&crlf), Vec::<String>::new(), "CRLF reads as LF");
-
-    let unbumped = source.replacen(
-        "        for slot in &mut self.dirty_rows[low..=high] {\n            *slot = true;\n        }\n        self.dirty_generation = self.dirty_generation.wrapping_add(1);",
-        "        for slot in &mut self.dirty_rows[low..=high] {\n            *slot = true;\n        }",
-        1,
-    );
-    assert_ne!(unbumped, source, "precondition: mark_range's bump was removed");
-    assert!(dirty_writer_problems(&unbumped)
-        .iter()
-        .any(|problem| problem.starts_with("mark_range")));
-
-    let storing_true =
-        source.replacen("self.dirty_rows.fill(false);", "self.dirty_rows.fill(true);", 1);
-    assert!(dirty_writer_problems(&storing_true)
-        .iter()
-        .any(|problem| problem.starts_with("clear_dirty ")));
-
-    let direct = source.replacen(
-        "                self.mark_row(index as u16);\n            }\n        }\n        self.bump();",
-        "                self.dirty_rows[index] = true;\n            }\n        }\n        self.bump();",
-        1,
-    );
-    assert_ne!(direct, source, "precondition: a soft-wrap clear writes the bit directly");
-    assert!(dirty_writer_problems(&direct)
-        .iter()
-        .any(|problem| problem.starts_with("clear_soft_wraps_in_visible_range")));
+    let lf = include_str!("grid.rs").replace("\r\n", "\n");
+    check_dirty_writer_pin(&lf);
+    check_dirty_writer_pin(&lf.replace('\n', "\r\n"));
 }

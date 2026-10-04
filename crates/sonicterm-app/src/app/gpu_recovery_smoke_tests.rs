@@ -45,12 +45,9 @@ fn recovery_probe_starts_without_native_custody() {
     assert!(!probe.stale_event_observed);
 }
 
-/// The native oracle must consume the same marker-bearing plan before compatibility conversion discards the typed outcome.
-#[test]
-fn recovery_marker_proof_is_bound_to_each_present_callback() {
-    // The marker facts are copied from the held guards before the call that releases them, and the
-    // verdict is applied with the call's outcome before compatibility conversion.
-    for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
+/// The recovery-marker scan over one checkout of the two adapters and the probe, read as LF.
+fn check_recovery_marker_proof(main: &str, child: &str, probe: &str) {
+    for source in [main.replace("\r\n", "\n"), child.replace("\r\n", "\n")] {
         let sample = source.find("smoke.recovery_marker_sample(").unwrap();
         let render = source.find("r.render_releasing(").unwrap();
         let evidence = source.find("smoke.observe_recovery_frame(").unwrap();
@@ -60,7 +57,7 @@ fn recovery_marker_proof_is_bound_to_each_present_callback() {
         let compatibility = source.find("outcome.into_render_result()").unwrap();
         assert!(sample < render && render < evidence && evidence < compatibility);
     }
-    let source = include_str!("gpu_recovery_smoke.rs");
+    let source = probe.replace("\r\n", "\n");
     let observe = source.split_once("pub(super) fn observe_frame(").unwrap().1;
     let observe = observe.split_once("impl App").unwrap().0;
     assert!(observe.contains("PresentOutcome::Presented"));
@@ -79,6 +76,22 @@ fn recovery_marker_proof_is_bound_to_each_present_callback() {
     assert!(observe
         .contains("accepts_proof_generation(self.stage, self.original_generation, generation)"));
     assert!(observe.contains("proof.presented_generation = Some(generation)"));
+}
+
+/// The native oracle must consume the same marker-bearing plan before compatibility conversion discards the typed outcome.
+#[test]
+fn recovery_marker_proof_is_bound_to_each_present_callback() {
+    // The marker facts are copied from the held guards before the call that releases them, and the
+    // verdict is applied with the call's outcome before compatibility conversion. Windows CI checks
+    // sources out with CRLF line ends, so the scan runs on a CRLF copy too.
+    let sources = [
+        include_str!("window_event.rs"),
+        include_str!("child_window_redraw.rs"),
+        include_str!("gpu_recovery_smoke.rs"),
+    ];
+    check_recovery_marker_proof(sources[0], sources[1], sources[2]);
+    let crlf = sources.map(|text| text.replace('\n', "\r\n"));
+    check_recovery_marker_proof(&crlf[0], &crlf[1], &crlf[2]);
 }
 
 /// A pre-loss present never proves recovery, and post-loss observations are accepted only in the recovery stage.
