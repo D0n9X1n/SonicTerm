@@ -1310,7 +1310,8 @@ fn item_body<'source>(source: &'source str, signature: &str) -> &'source str {
 
 /// In the worker, the size/age and quiet flushes are reached only past the synchronized-output
 /// hold check, while the disconnect flush, and the loop's disconnect arm, consult no hold; the
-/// loop takes its flush decision only after the batch has been published.
+/// disconnect arm sends the final output before it reports the exit; and the loop takes its flush
+/// decision only after the batch has been published.
 #[test]
 fn threshold_and_quiet_flushes_sit_behind_the_hold_and_disconnect_does_not() {
     let source = include_str!("spawn_pane.rs").replace("\r\n", "\n");
@@ -1329,6 +1330,10 @@ fn threshold_and_quiet_flushes_sit_behind_the_hold_and_disconnect_does_not() {
         source.find("Err(crossbeam_channel::RecvTimeoutError::Disconnected) =>").unwrap();
     let arm = &source[arm_start..arm_start + source[arm_start..].find("break;").unwrap()];
     assert!(arm.contains("flush.on_disconnect(") && !arm.contains("held"), "{arm}");
+    // The shell's final output is sent before its exit is reported, so the last frame is not lost.
+    let final_output = arm.find("flush.on_disconnect(").unwrap();
+    let exit = arm.find("report_pane_exit(").expect("the disconnect arm reports the exit");
+    assert!(final_output < exit, "{arm}");
     // The worker loop decides only after the batch is published, so a release sees its generation.
     let ok_arm = &source[source.find("Ok(bytes) =>").unwrap()..arm_start];
     let publish = ok_arm.find("process_pane_vt_batch_and_publish(").expect("loop publishes");
