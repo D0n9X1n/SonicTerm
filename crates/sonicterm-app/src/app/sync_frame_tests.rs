@@ -735,3 +735,97 @@ fn a_contention_abort_keeps_the_resize_obligation() {
         );
     }
 }
+
+/// The state an abandoned frame must leave untouched: pending receipts, the pane's dirty rows,
+/// pending and unsettled causes, the last present, both pacing clocks and the retry floor.
+fn untouched_state(app: &App, id: WindowId, pane: u64) -> String {
+    let window = &app.windows[&id];
+    let receipts: Vec<_> =
+        window.pending_receipts.iter().map(|ticket| format!("{:?}", ticket.receipt)).collect();
+    let dirty: Vec<usize> = window.panes[&pane].parser.lock().grid().dirty_rows().collect();
+    format!(
+        "receipts={receipts:?} dirty={dirty:?} causes={:?} unsettled={} presented={:?} \
+         last_render={:?} stream={:?} retry={:?}",
+        window.redraw.snapshot(),
+        window.redraw.has_pending(),
+        window.redraw.last_present,
+        window.last_render,
+        window.stream_clock,
+        window.retry_not_before,
+    )
+}
+
+/// The recheck race on both roles with a real collected guard set: a DECSET lands after admission,
+/// the frame is collected under real guards, and the abandon leaves pending receipts, dirt, causes,
+/// clocks and an armed retry floor exactly as they were, counting one `defer_sync`. Each adapter's
+/// abort branch returns before applying receipts or completing the attempt.
+#[test]
+fn the_recheck_abandons_a_held_frame_on_both_roles_without_touching_state() {
+    use sonicterm_render_model::{AckReceipt, AckRows};
+    use sonicterm_ui::pane::Rect;
+    for child_owner in [false, true] {
+        let (mut app, main, child, base) = held_owners();
+        let owner = if child_owner { child } else { main };
+        let pane = pane_of(&app, owner, 0);
+        let outer = Rect::new(0.0, 0.0, 400.0, 120.0);
+        let collect_sources = |app: &mut App| {
+            if child_owner {
+                app.child_visible_frame_sources(owner, outer)
+            } else {
+                app.main_visible_frame_sources(outer)
+            }
+            .unwrap_or_else(|_| panic!("child={child_owner}: a valid layout"))
+        };
+        // A presented frame left pending receipts; new output dirtied rows after it.
+        app.windows[&owner].panes[&pane].parser.lock().advance(b"first\r\n");
+        let sources = collect_sources(&mut app);
+        let held = sources.try_collect(|| ()).ok().unwrap();
+        let receipts = held
+            .guards
+            .iter()
+            .enumerate()
+            .map(|(index, (id, parser, _))| AckReceipt::of(index, *id, parser.grid(), AckRows::All))
+            .collect();
+        drop(held);
+        let tickets = sources.bind(receipts);
+        drop(sources);
+        let window = app.windows.get_mut(&owner).unwrap();
+        window.pending_receipts = tickets;
+        window.retry_not_before = Some(at_ms(base, 40));
+        assert!(!window.pending_receipts.is_empty(), "child={child_owner}: receipts pending");
+
+        app.mark_window_redraw(owner, RedrawCause::Output);
+        app.windows.get_mut(&owner).unwrap().retry_not_before = None;
+        assert!(
+            app.begin_window_redraw(owner, base),
+            "child={child_owner}: admitted before the DECSET"
+        );
+        app.windows.get_mut(&owner).unwrap().retry_not_before = Some(at_ms(base, 40));
+        app.windows[&owner].panes[&pane].parser.lock().advance(b"\x1b[?2026hpainted row");
+        hold(&app, owner, pane, 1, at_ms(base, 100));
+        let before = untouched_state(&app, owner, pane);
+        assert!(before.contains("dirty=[0"), "child={child_owner}: rows are dirty: {before}");
+
+        let sources = collect_sources(&mut app);
+        let held = sources.try_collect(|| ()).ok().unwrap();
+        let states: Vec<_> =
+            held.guards.iter().map(|(id, parser, _)| (*id, parser.synchronized_output())).collect();
+        assert!(
+            app.abandon_synchronized_frame(owner, &states, at_ms(base, 1)),
+            "child={child_owner}"
+        );
+        drop(held);
+        drop(sources);
+        assert_eq!(untouched_state(&app, owner, pane), before, "child={child_owner}");
+        assert_eq!(defer_sync(&app, owner), 1, "child={child_owner}");
+        assert_eq!(app.windows[&owner].redraw.deferred_rule, Some(DeferRule::Sync));
+    }
+    for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
+        let source = source.replace("\r\n", "\n");
+        let recheck = source.find("abandon_synchronized_frame(").expect("the adapter rechecks");
+        let branch = &source[recheck..recheck + source[recheck..].find("return;").unwrap()];
+        assert!(!branch.contains("reconcile_and_apply_receipts"), "{branch}");
+        assert!(!branch.contains("complete_window_redraw"), "{branch}");
+        assert!(!branch.contains("coherent_frame_collected"), "{branch}");
+    }
+}
