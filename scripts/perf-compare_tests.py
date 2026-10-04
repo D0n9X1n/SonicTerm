@@ -685,6 +685,24 @@ class MemoryLineTests(unittest.TestCase):
                 self.assertIsNotNone(sample, "the required totals still parse")
                 self.assertIsNone(sample.grid_bytes_per_pane())
 
+    def test_each_renderers_glyph_atlas_facts_parse_in_order_with_every_fit_label(self):
+        # The renderer breakdown carries six glyph atlas facts per renderer; every fit label parses, an
+        # older line without them gives no facts, and an unknown fit label is not read as a fact.
+        def facts(dim, fit):
+            return (f"glyph_atlas_dim={dim} glyph_atlas_packed_pixels=4000 glyph_atlas_growths=1 "
+                    f"glyph_atlas_evictions=0 glyph_atlas_fit={fit} glyph_atlas_max_tile=25x16")
+        for fit in ("256", "512", "1024", "2048", "no_headroom", "does_not_fit", "evicted"):
+            with self.subTest(fit=fit):
+                line = memory_line().replace(
+                    "renderers=[main warm]",
+                    f'renderers="visible[1] total=9/1 {facts(512, fit)}, warm[0] total=1/1 {facts(256, "256")}"')
+                atlases = perf.parse_memory_line(line).glyph_atlases
+                self.assertEqual(atlases, (perf.GlyphAtlasFacts(512, 4000, 1, 0, fit, (25, 16)),
+                                           perf.GlyphAtlasFacts(256, 4000, 1, 0, "256", (25, 16))))
+        self.assertEqual(perf.parse_memory_line(memory_line()).glyph_atlases, ())
+        unknown = memory_line().replace("renderers=[main warm]", f"renderers={facts(512, 'tiny')}")
+        self.assertEqual(perf.parse_memory_line(unknown).glyph_atlases, ())
+
     def test_checkpoint_takes_the_latest_line_at_or_before_it(self):
         # A line written after the checkpoint never describes it.
         samples = [perf.MemorySample(unix_s, None, int(unix_s), 0) for unix_s in (10.0, 20.0, 30.0)]
@@ -5094,8 +5112,10 @@ COUNTER_CONTRACT = {
                   # row_cache_invalidate_us is summed microseconds as a plain count, not a histogram.
                   "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited",
                   # font_fallback_applies is supporting evidence; a base older than the counter shows n/a.
-                  "font_fallback_applies"),
-                 ("assembly_us",)),
+                  "font_fallback_applies",
+                  # Glyph atlas growths and growths no frame presented; a base older than them shows n/a.
+                  "glyph_atlas_growths", "atlas_growth_abandoned"),
+                 ("assembly_us", "atlas_growth_to_present_ms")),
 }
 CONTRACT_FIELD_COUNT = sum(len(counts) + len(histograms) for counts, histograms in COUNTER_CONTRACT.values())
 MILLISECOND_BOUNDS = [4, 7, 9, 12, 17, 25, 34, 50, 100]

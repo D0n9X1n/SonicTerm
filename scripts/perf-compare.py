@@ -1228,6 +1228,8 @@ class MemorySample:
     grid_visible_bytes: int | None = None
     grid_history_bytes: int | None = None
     grid_alternate_bytes: int | None = None
+    # Each renderer's glyph atlas facts, in breakdown order; empty on a line from an older build.
+    glyph_atlases: tuple = ()
 
     def totals(self) -> tuple:
         """The figures a checkpoint reading compares: two samples with equal totals are the same reading."""
@@ -1258,6 +1260,32 @@ def _optional_text(fields: str, name: str) -> str | None:
     return value[1:-1] if len(value) >= 2 and value[0] == value[-1] == '"' else value
 
 
+# One renderer's six glyph atlas facts inside the quoted renderer breakdown.
+_GLYPH_ATLAS_FACTS = re.compile(
+    r"glyph_atlas_dim=(\d+) glyph_atlas_packed_pixels=(\d+) glyph_atlas_growths=(\d+) "
+    r"glyph_atlas_evictions=(\d+) glyph_atlas_fit=(256|512|1024|2048|no_headroom|does_not_fit|evicted) "
+    r"glyph_atlas_max_tile=(\d+)x(\d+)")
+
+
+@dataclass(frozen=True)
+class GlyphAtlasFacts:
+    """One renderer's glyph atlas: dimension, packed area, growths, evictions, fit and largest tile."""
+
+    dim: int
+    packed_pixels: int
+    growths: int
+    evictions: int
+    fit: str
+    max_tile: tuple
+
+
+def parse_glyph_atlases(fields: str) -> tuple:
+    """Every renderer's glyph atlas facts on a memory line, in order; empty when none are reported."""
+    return tuple(
+        GlyphAtlasFacts(int(dim), int(packed), int(growths), int(evictions), fit, (int(width), int(height)))
+        for dim, packed, growths, evictions, fit, width, height in _GLYPH_ATLAS_FACTS.findall(fields))
+
+
 def parse_memory_line(line: str) -> MemorySample | None:
     """Parse one `memory snapshot` line; any other line, or one with a malformed total, is None."""
     position = line.find(MEMORY_MARKER)
@@ -1284,7 +1312,8 @@ def parse_memory_line(line: str) -> MemorySample | None:
         panes_contended=_optional_count(fields, "panes_contended"),
         grid_visible_bytes=_optional_count(fields, "grid_visible_bytes"),
         grid_history_bytes=_optional_count(fields, "grid_history_bytes"),
-        grid_alternate_bytes=_optional_count(fields, "grid_alternate_bytes"))
+        grid_alternate_bytes=_optional_count(fields, "grid_alternate_bytes"),
+        glyph_atlases=parse_glyph_atlases(fields))
 
 
 @dataclass(frozen=True)
@@ -1909,8 +1938,10 @@ FRAME_COUNTER_FIELDS = {
                   # row_cache_invalidate_us is summed microseconds kept as a plain count, not a histogram.
                   "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited",
                   # font_fallback_applies is supporting evidence; a base older than the counter shows n/a.
-                  "font_fallback_applies"),
-                 ("assembly_us",)),
+                  "font_fallback_applies",
+                  # Glyph atlas growths and growths no frame presented; a base older than them shows n/a.
+                  "glyph_atlas_growths", "atlas_growth_abandoned"),
+                 ("assembly_us", "atlas_growth_to_present_ms")),
 }
 HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000]}
 # A histogram's `sum_us` is an exact integer in microseconds whatever its unit; this converts it to the unit.

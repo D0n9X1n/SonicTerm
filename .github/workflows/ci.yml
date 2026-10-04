@@ -109,6 +109,9 @@ jobs:
       - name: Run scenario harness unit tests with frame counters
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory
 
+      - name: Measure the glyph atlas working set
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture
+
       - name: Run scenario harness unit tests with the frame texture reading
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
 
@@ -545,6 +548,9 @@ jobs:
 
       - name: Run scenario harness unit tests with frame counters
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory
+
+      - name: Measure the glyph atlas working set
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture
 
       - name: Run scenario harness unit tests with the frame texture reading
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
