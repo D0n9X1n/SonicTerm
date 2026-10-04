@@ -84,14 +84,33 @@ fn recovery_marker_proof_is_bound_to_each_present_callback() {
     // The marker facts are copied from the held guards before the call that releases them, and the
     // verdict is applied with the call's outcome before compatibility conversion. Windows CI checks
     // sources out with CRLF line ends, so the scan runs on a CRLF copy too.
-    let sources = [
+    scan_marker_proof_in_both_line_ends([
         include_str!("window_event.rs"),
         include_str!("child_window_redraw.rs"),
         include_str!("gpu_recovery_smoke.rs"),
-    ];
+    ]);
+}
+
+/// Run the marker-proof scan over the checkout as given and over its CRLF form, built from the
+/// LF-normalized text so an already-CRLF checkout never becomes `\r\r\n`.
+fn scan_marker_proof_in_both_line_ends(sources: [&str; 3]) {
     check_recovery_marker_proof(sources[0], sources[1], sources[2]);
-    let crlf = sources.map(|text| text.replace('\n', "\r\n"));
+    let crlf = sources.map(|text| text.replace("\r\n", "\n").replace('\n', "\r\n"));
     check_recovery_marker_proof(&crlf[0], &crlf[1], &crlf[2]);
+}
+
+/// A Windows checkout hands include_str! CRLF text; the scan must still read it as LF.
+#[test]
+fn marker_proof_scan_accepts_a_checkout_that_is_already_crlf() {
+    // Building the CRLF variant from CRLF text would yield `\r\r\n`, which one normalization
+    // leaves as `\r\n`, so every LF delimiter lookup in the scan would miss.
+    let crlf = [
+        include_str!("window_event.rs"),
+        include_str!("child_window_redraw.rs"),
+        include_str!("gpu_recovery_smoke.rs"),
+    ]
+    .map(|text| text.replace("\r\n", "\n").replace('\n', "\r\n"));
+    scan_marker_proof_in_both_line_ends([&crlf[0], &crlf[1], &crlf[2]]);
 }
 
 /// A pre-loss present never proves recovery, and post-loss observations are accepted only in the recovery stage.
