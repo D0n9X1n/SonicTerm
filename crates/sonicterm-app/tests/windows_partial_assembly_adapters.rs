@@ -209,7 +209,8 @@ fn retained_pixels(fixture: &mut Fixture) -> Result<Vec<u8>, String> {
 /// Test 10 (child) and its main-window control: dense rows and a hidden cursor are drawn and
 /// acknowledged; a one-row edit then presents exactly one `Partial` frame through the adapter,
 /// hashing fewer cells than a full frame did; its receipt clears the edited row at the next
-/// collection; and the retained frame equals a full repaint of the same state.
+/// collection; the retained frame equals a full repaint of the same state; and the partial frame
+/// uploads fewer vertex and index bytes than that full repaint does.
 fn partial_edit_through_the_adapter(active: &ActiveEventLoop, role: Role) -> Result<(), String> {
     let mut fixture = fixture(active, role)?;
     write(&mut fixture, b"\x1b[?25l")?;
@@ -229,6 +230,10 @@ fn partial_edit_through_the_adapter(active: &ActiveEventLoop, role: Role) -> Res
     present(&mut fixture, active)?;
     let after = renderer(&mut fixture)?.frame_stats();
     let hashed = after.row_cells_hashed - before.row_cells_hashed;
+    // The stats are cumulative, so one frame's upload is the difference across it.
+    let uploaded =
+        |stats: &sonicterm_gpu::frame_stats::FrameStats| stats.vertex_bytes + stats.index_bytes;
+    let partial_upload = uploaded(&after) - uploaded(&before);
     check(
         after.partial_frames - before.partial_frames == 1
             && after.full_frames == before.full_frames
@@ -249,7 +254,21 @@ fn partial_edit_through_the_adapter(active: &ActiveEventLoop, role: Role) -> Res
     check(rows.as_deref() == Some(&[][..]), &format!("the edited row is acknowledged: {rows:?}"))?;
 
     renderer(&mut fixture)?.invalidate_retained_frame();
+    let before = renderer(&mut fixture)?.frame_stats();
     present(&mut fixture, active)?;
+    let after = renderer(&mut fixture)?.frame_stats();
+    check(
+        after.full_frames - before.full_frames == 1,
+        &format!("the comparison frame is Full: {before:?} -> {after:?}"),
+    )?;
+    let full_upload = uploaded(&after) - uploaded(&before);
+    check(
+        partial_upload > 0 && partial_upload < full_upload,
+        &format!(
+            "the partial frame uploads {partial_upload} bytes, less than the full repaint's \
+             {full_upload}"
+        ),
+    )?;
     let full_pixels = retained_pixels(&mut fixture)?;
     check(narrow == full_pixels, "the partial frame equals a full repaint of the same state")
 }
