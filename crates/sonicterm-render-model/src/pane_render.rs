@@ -182,3 +182,7 @@ pub enum CursorStyle {
     /// Underline under the cell with blink (DECSCUSR 3).
     UnderlineBlink,
 }
+
+#[cfg(test)]
+#[path = "pane_render_tests.rs"]
+mod pane_render_tests;
