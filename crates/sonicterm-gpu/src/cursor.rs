@@ -97,7 +97,7 @@ fn glyph_hash(glyph: &GlyphInstance) -> u64 {
 }
 
 /// The smallest whole-pixel rectangle containing finite `(x, y, w, h)`.
-fn outward_rect((left, top, width, height): (f32, f32, f32, f32)) -> PixelRect {
+pub(crate) fn outward_rect((left, top, width, height): (f32, f32, f32, f32)) -> PixelRect {
     // Float-to-int `as` saturates, so huge finite ink clamps rather than wrapping.
     let x0 = left.floor() as i32;
     let y0 = top.floor() as i32;

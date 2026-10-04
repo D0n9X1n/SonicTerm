@@ -5618,6 +5618,7 @@ impl GpuRenderer {
                     style_rev: self.style_rev,
                     renderer_hash,
                     overlay_active,
+                    cursor_cell: None,
                 },
                 cell_w: self.cell_w,
                 cell_h: self.cell_h,
@@ -5633,6 +5634,9 @@ impl GpuRenderer {
                 ),
                 scrollbar_mode: self.scrollbar_mode,
                 degraded: self.software_render_degrade,
+                tab_bar_top: self.tab_bar_visible.then(|| self.tab_bar_y_offset()),
+                scale: self.scale_factor,
+                previous_recolor: crate::cursor::RecolorRecord::default(),
             },
             panes.iter().map(|pane| PaneMetadata {
                 id: pane.id,

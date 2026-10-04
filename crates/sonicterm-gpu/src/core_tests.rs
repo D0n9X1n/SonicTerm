@@ -73,6 +73,9 @@ fn revision_plan(id: u64, revision: u64) -> FramePlan {
             vertical_ink_pad: 0.0,
             scrollbar_mode: ScrollbarMode::Never,
             degraded: false,
+            tab_bar_top: None,
+            scale: 1.0,
+            previous_recolor: crate::cursor::RecolorRecord::default(),
         },
         [PaneMetadata {
             id,
@@ -4509,6 +4512,9 @@ fn scrolled_back_cache_plan(dirty_live_rows: Vec<usize>) -> FramePlan {
         vertical_ink_pad: 0.0,
         scrollbar_mode: ScrollbarMode::Never,
         degraded: false,
+        tab_bar_top: None,
+        scale: 1.0,
+        previous_recolor: crate::cursor::RecolorRecord::default(),
     };
     let metadata = |revision, dirty_rows| PaneMetadata {
         id: 7,

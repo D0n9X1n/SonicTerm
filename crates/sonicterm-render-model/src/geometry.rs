@@ -152,7 +152,12 @@ pub fn covered_area(parts: &[PixelRect]) -> u64 {
         .iter()
         .filter(|part| !part.is_empty())
         .map(|part| {
-            [i64::from(part.x), i64::from(part.y), i64::from(part.right()), i64::from(part.bottom())]
+            [
+                i64::from(part.x),
+                i64::from(part.y),
+                i64::from(part.right()),
+                i64::from(part.bottom()),
+            ]
         })
         .collect();
     let mut x_edges: Vec<i64> = spans.iter().flat_map(|span| [span[0], span[2]]).collect();
