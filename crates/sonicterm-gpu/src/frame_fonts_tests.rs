@@ -31,6 +31,24 @@ impl Targets {
     }
 
     fn prepare_notice(&mut self, notice_id: u64, generation: u64) -> (FrameFonts, bool) {
+        let (token, change) = prepare_frame_fonts(
+            &mut self.applied,
+            (notice_id, generation),
+            FontApplyTargets {
+                row_glyph_cache: &mut self.rows,
+                line_quad_cache: &mut self.quads,
+                style_rev: &mut self.style_rev,
+                last_frame_key: &mut self.frame_key,
+                glyph_atlas: &mut self.atlas,
+                preedit_glyph_cache: &mut self.preedit,
+                fallback_epoch: &mut self.epoch,
+            },
+        );
+        (token, change.invalidated())
+    }
+
+    /// What one preparation of `notice_id` at `generation` changed.
+    fn classify(&mut self, notice_id: u64, generation: u64) -> FontChange {
         prepare_frame_fonts(
             &mut self.applied,
             (notice_id, generation),
@@ -44,7 +62,61 @@ impl Targets {
                 fallback_epoch: &mut self.epoch,
             },
         )
+        .1
     }
+}
+
+/// Targets with nothing applied yet.
+fn fresh_targets() -> Targets {
+    Targets {
+        applied: None,
+        rows: RowGlyphCache::new(),
+        quads: LineQuadCache::new(),
+        style_rev: 0,
+        frame_key: None,
+        atlas: GlyphAtlas::new(16, 16),
+        preedit: None,
+        epoch: 0,
+    }
+}
+
+#[test]
+fn a_preparation_tells_a_first_or_replaced_stack_from_a_newer_generation() {
+    // The first preparation and a new notice are setups; only a newer generation of the notice
+    // already applied is a fallback apply. Every invalidation still counts as before.
+    let mut targets = fresh_targets();
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        assert_eq!(targets.classify(7, 0), FontChange::Initial);
+        assert_eq!(targets.classify(7, 0), FontChange::None);
+        assert_eq!(targets.classify(7, 1), FontChange::Generation);
+        assert_eq!(targets.classify(9, 1), FontChange::Initial);
+        assert_eq!(targets.classify(9, 2), FontChange::Generation);
+    }
+    let stats = sink.snapshot();
+    assert_eq!((stats.font_fallback_applies, stats.font_generation_applies), (4, 2));
+}
+
+#[test]
+fn an_owed_apply_reaches_exactly_one_attempt() {
+    // Repeated preparations owe one apply; the next attempt takes it, so a reused token or a retry
+    // carries none; an unused preparation's apply goes to the next attempt; a stack setup clears it.
+    let mut owed = false;
+    let take = |owed: &mut bool| std::mem::take(owed);
+    owe_apply(&mut owed, FontChange::Initial);
+    assert!(!take(&mut owed), "a first stack owes no fallback apply");
+    owe_apply(&mut owed, FontChange::Generation);
+    owe_apply(&mut owed, FontChange::Generation);
+    owe_apply(&mut owed, FontChange::None);
+    assert!(take(&mut owed), "two preparations, one apply attempt");
+    assert!(!take(&mut owed), "the same token rendered again carries nothing");
+    owe_apply(&mut owed, FontChange::Generation);
+    owe_apply(&mut owed, FontChange::None);
+    assert!(take(&mut owed), "an unused preparation's apply goes to the next attempt");
+    owe_apply(&mut owed, FontChange::Generation);
+    owe_apply(&mut owed, FontChange::Initial);
+    assert!(!take(&mut owed), "a replaced stack is not a fallback apply");
 }
 
 #[test]
@@ -353,7 +425,7 @@ fn a_mid_frame_merge_lags_until_the_frame_that_applies_its_generation_remeasures
                      applied: &mut Option<(u64, u64)>| {
         let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
         let current = (notice_id, stack.fallback_notice().generation());
-        let (_token, did_apply) = prepare_frame_fonts(
+        let (_token, change) = prepare_frame_fonts(
             applied,
             current,
             FontApplyTargets {
@@ -367,7 +439,7 @@ fn a_mid_frame_merge_lags_until_the_frame_that_applies_its_generation_remeasures
             },
         );
         let _ = title_font.measure(tabs, false, false, std::time::Instant::now());
-        (did_apply, tabs.tabs()[0].content_width_px().expect("the title was measured"))
+        (change.invalidated(), tabs.tabs()[0].content_width_px().expect("the title was measured"))
     };
     let real_glyph = |stack: &sonicterm_engine::FontStack| {
         stack.shape_text_for_frame("é", false, false).unwrap()[0].glyph_pos

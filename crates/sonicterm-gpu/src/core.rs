@@ -69,7 +69,8 @@ mod atlas_lifecycle;
 
 #[path = "frame_fonts.rs"]
 mod frame_fonts;
-pub use frame_fonts::FrameFonts;
+use crate::frame_stats::CountingRasterizer;
+pub use frame_fonts::{FontChange, FrameFonts};
 /// The App's wake for a fallback completion, called with the completed notice's id from the
 /// fallback worker thread. It must only post an event and never touch renderer state.
 pub type FontFallbackWaker = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
@@ -2097,6 +2098,8 @@ pub struct GpuRenderer {
     style_rev: u64,
     /// The `(notice id, generation)` the last frame preparation applied.
     applied_fonts: Option<(u64, u64)>,
+    /// A fallback generation apply no render attempt has carried yet; the next attempt takes it.
+    unattributed_apply: bool,
     /// The App's wake for fallback completions; attached to every body stack this renderer installs.
     fallback_waker: Option<FontFallbackWaker>,
     /// Active drag-chip overlay: translucent rect drawn at the cursor
@@ -2975,6 +2978,7 @@ impl GpuRenderer {
             last_pane_layout: Vec::new(),
             style_rev: 0,
             applied_fonts: None,
+            unattributed_apply: false,
             fallback_waker: None,
             drag_chip: None,
             async_loader: None,
@@ -4568,7 +4572,8 @@ impl GpuRenderer {
             let notice = stack.fallback_notice();
             (notice.id(), notice.generation())
         });
-        let (token, _applied) = frame_fonts::prepare_frame_fonts(
+        let prepare_started = crate::frame_stats::prepare_clock();
+        let (token, change) = frame_fonts::prepare_frame_fonts(
             &mut self.applied_fonts,
             current,
             frame_fonts::FontApplyTargets {
@@ -4581,6 +4586,8 @@ impl GpuRenderer {
                 fallback_epoch: self.tab_title_font.fallback_epoch_mut(),
             },
         );
+        crate::frame_stats::note_font_prepare(prepare_started, change == FontChange::Generation);
+        frame_fonts::owe_apply(&mut self.unattributed_apply, change);
         token
     }
 
@@ -4928,6 +4935,10 @@ impl GpuRenderer {
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> FrameOutcome {
         let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
+        // The attempt opens inside the collection scope and closes first, so it folds there; it
+        // takes the owed fallback apply, so exactly one attempt carries it.
+        let _attempt =
+            crate::frame_stats::AttemptScope::enter(std::mem::take(&mut self.unattributed_apply));
         self.debug_assert_prepared(fonts);
         // Read before lending, so assembly itself never reaches the device.
         let subpixel_aa = self.effective_subpixel_aa_mode();
@@ -7928,7 +7939,9 @@ impl GpuRenderer {
                     // FontStack; quads still paint, glyphs are skipped.
                     continue;
                 };
-                let info_opt = drawable_or_tofu(glyph_atlas.get_or_insert(key, wt));
+                let info_opt = drawable_or_tofu(
+                    glyph_atlas.get_or_insert(key, &mut CountingRasterizer::new(wt)),
+                );
                 let Some(info) = info_opt else {
                     // When: `info_opt` is None — the atlas refused the glyph or cached it as
                     // missing, so a printable cell draws the same outline box as the shaped path.
@@ -8236,7 +8249,9 @@ impl GpuRenderer {
                 }
                 let mut block_raster =
                     BlockSpriteRasterizer { sized_key, underline_h: underline_h_isize };
-                let Some(info) = glyph_atlas.get_or_insert(key, &mut block_raster) else {
+                let Some(info) =
+                    glyph_atlas.get_or_insert(key, &mut CountingRasterizer::new(&mut block_raster))
+                else {
                     // When: `glyph_atlas.get_or_insert` is None — the block
                     // sprite could not be rasterized or packed.
                     continue;
@@ -8318,7 +8333,9 @@ impl GpuRenderer {
                     // FontStack, so the fallback char cannot be rasterized.
                     continue;
                 };
-                let info_opt = drawable_or_tofu(glyph_atlas.get_or_insert(key, wt));
+                let info_opt = drawable_or_tofu(
+                    glyph_atlas.get_or_insert(key, &mut CountingRasterizer::new(wt)),
+                );
                 let Some(info) = info_opt else {
                     // When: `info_opt` is None — true tofu: the atlas refused the glyph or
                     // cached it as missing, so an outline box is drawn instead.
@@ -8414,7 +8431,8 @@ impl GpuRenderer {
                 // so the ligature glyph cannot be rasterized.
                 continue;
             };
-            let Some(info) = glyph_atlas.get_or_insert(key, wt) else {
+            let Some(info) = glyph_atlas.get_or_insert(key, &mut CountingRasterizer::new(wt))
+            else {
                 // When: `glyph_atlas.get_or_insert` is None — the face produced
                 // no tile for this shaped glyph id.
                 continue;

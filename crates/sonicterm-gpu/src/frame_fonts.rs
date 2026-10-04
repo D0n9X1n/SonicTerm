@@ -34,6 +34,40 @@ impl FrameFonts {
     }
 }
 
+/// What one frame preparation changed, so a fallback apply can be told from a font setup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontChange {
+    /// The notice and generation were already applied; nothing was invalidated.
+    None,
+    /// The first preparation, or a new notice from a replaced body stack.
+    Initial,
+    /// A newer generation of the notice already applied: a fallback apply.
+    Generation,
+}
+
+impl FontChange {
+    /// Whether the preparation invalidated the shaped rows and the atlas's missing entries.
+    #[must_use]
+    pub fn invalidated(self) -> bool {
+        self != Self::None
+    }
+}
+
+/// Record in `owed` whether the next render attempt carries a fallback apply after `change`. A
+/// newer generation is owed until an attempt takes it, however many preparations repeat it; a
+/// first or replaced stack owes none; an unchanged preparation leaves `owed` as it was.
+pub(super) fn owe_apply(owed: &mut bool, change: FontChange) {
+    match change {
+        // A newer generation was applied: the next render attempt carries it, once.
+        FontChange::Generation => *owed = true,
+        // A first or replaced stack was set up: no fallback apply is owed.
+        FontChange::Initial => *owed = false,
+        FontChange::None => {
+            // When: `change` is None, the preparation changed nothing, so an owed apply stays owed.
+        }
+    }
+}
+
 /// Everything a fallback apply invalidates. Generic over the frame key and preedit cache types
 /// so a test can supply stand-ins.
 pub(super) struct FontApplyTargets<'targets, Key = FrameKey, Preedit = super::PreeditGlyphCache> {
@@ -97,17 +131,22 @@ pub(super) fn acknowledge_fallback_wake(
 }
 
 /// Prepare one frame's fonts: apply `current` when it differs from `applied`, and return the
-/// token with whether anything was invalidated.
+/// token with what changed.
 pub(super) fn prepare_frame_fonts<Key, Preedit>(
     applied: &mut Option<(u64, u64)>,
     current: (u64, u64),
     targets: FontApplyTargets<'_, Key, Preedit>,
-) -> (FrameFonts, bool) {
+) -> (FrameFonts, FontChange) {
     let token = FrameFonts { notice_id: current.0, generation: current.1 };
     if *applied == Some(current) {
         // When: this notice and generation were already applied, no placeholder can be stale.
-        return (token, false);
+        return (token, FontChange::None);
     }
+    let change = match *applied {
+        // The same notice was applied before and only its generation moved: a fallback apply.
+        Some((notice_id, _)) if notice_id == current.0 => FontChange::Generation,
+        _ => FontChange::Initial,
+    };
     *applied = Some(current);
     targets.row_glyph_cache.invalidate_all();
     targets.line_quad_cache.invalidate_all();
@@ -119,7 +158,11 @@ pub(super) fn prepare_frame_fonts<Key, Preedit>(
     *targets.preedit_glyph_cache = None;
     *targets.fallback_epoch += 1;
     crate::frame_stats::note_font_fallback_apply();
-    (token, true)
+    if change == FontChange::Generation {
+        // A newer generation of the same notice, counted apart from initial setups.
+        crate::frame_stats::note_font_generation_apply();
+    }
+    (token, change)
 }
 
 #[cfg(test)]

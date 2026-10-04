@@ -747,3 +747,351 @@ fn frame(stack: &FontStack) {
     assert_eq!(blocking_shape_calls(&lf), vec!["fixture.rs:10 shape_text_with_style".to_owned()]);
     assert_eq!(blocking_shape_calls(&crlf), blocking_shape_calls(&lf));
 }
+
+/// A rasterizer that returns its scripted results in order, then nothing.
+struct Scripted {
+    results: std::collections::VecDeque<Option<RasterTile>>,
+}
+
+impl Scripted {
+    fn new(results: Vec<Option<RasterTile>>) -> Self {
+        Self { results: results.into() }
+    }
+}
+
+impl Rasterizer for Scripted {
+    fn rasterize(&mut self, _: GlyphKey) -> Option<RasterTile> {
+        self.results.pop_front().flatten()
+    }
+}
+
+/// A rasterizer that shapes glyph zero through a counted request, as a nested-timer probe.
+struct ShapingRasterizer;
+
+impl Rasterizer for ShapingRasterizer {
+    fn rasterize(&mut self, _: GlyphKey) -> Option<RasterTile> {
+        shape_request(|| ());
+        Some(coverage_tile(1, 1))
+    }
+}
+
+/// A monochrome tile of `width` by `height` pixels; zero in either is an empty tile.
+fn coverage_tile(width: u32, height: u32) -> RasterTile {
+    RasterTile {
+        width,
+        height,
+        offset_x: 0,
+        offset_y: 0,
+        advance: width as f32,
+        coverage: vec![255; (width * height) as usize],
+        is_color: false,
+        is_subpixel: false,
+    }
+}
+
+fn glyph(character: char) -> GlyphKey {
+    GlyphKey::new(character, false, false)
+}
+
+#[test]
+fn a_timed_request_adds_exactly_its_clock_pair_and_the_gate_off_reads_no_clock() {
+    // The test clock steps 7 ns per reading, so one request reads it twice and adds exactly 7 ns.
+    // With no counting scope each closure still runs once and returns its value, and no clock,
+    // counter, attempt or preparation timer reads the clock.
+    test_clock::install(100, 7);
+    let sink = FrameStatsSink::default();
+    {
+        let _collect = CollectGuard::enter(Some(&sink));
+        assert_eq!(shape_request(|| 42), 42);
+    }
+    assert_eq!(test_clock::reads(), 2);
+    assert_eq!((sink.snapshot().shape_ns, sink.snapshot().shape_requests), (7, 1));
+
+    let mut runs = 0;
+    assert_eq!(
+        shape_request(|| {
+            runs += 1;
+            5
+        }),
+        5
+    );
+    let mut scripted = Scripted::new(vec![Some(coverage_tile(2, 2))]);
+    assert!(CountingRasterizer::new(&mut scripted).rasterize(glyph('a')).is_some());
+    let _attempt = AttemptScope::enter(true);
+    assert_eq!(prepare_clock(), None);
+    assert_eq!(runs, 1);
+    assert_eq!(test_clock::reads(), 2, "the gate-off calls read no clock");
+    assert_eq!(sink.snapshot().shape_requests, 1, "and write no counter");
+    test_clock::remove();
+}
+
+#[test]
+fn nested_shaping_and_rasterizing_count_once_under_the_outer_timer() {
+    // Glyph-zero shaping inside a rasterizer call is raster time, and a rasterizer reached from a
+    // shaping request is shape time: only the outermost timer reads the clock.
+    test_clock::install(0, 10);
+    let sink = FrameStatsSink::default();
+    {
+        let _collect = CollectGuard::enter(Some(&sink));
+        CountingRasterizer::new(&mut ShapingRasterizer).rasterize(glyph('a'));
+        shape_request(|| {
+            let mut scripted = Scripted::new(vec![Some(coverage_tile(1, 1))]);
+            CountingRasterizer::new(&mut scripted).rasterize(glyph('b'))
+        });
+    }
+    let stats = sink.snapshot();
+    assert_eq!((stats.raster_ns, stats.shape_ns), (10, 10));
+    assert_eq!((stats.raster_calls, stats.shape_requests), (2, 2));
+    assert_eq!(test_clock::reads(), 4, "two outer timers, two readings each");
+    test_clock::remove();
+}
+
+#[test]
+fn a_rasterizer_call_counts_once_and_a_tile_only_when_it_has_pixels() {
+    // No tile and an empty tile are calls but not tiles; an atlas hit calls nothing.
+    let sink = FrameStatsSink::default();
+    {
+        let _collect = CollectGuard::enter(Some(&sink));
+        let mut scripted =
+            Scripted::new(vec![None, Some(coverage_tile(0, 0)), Some(coverage_tile(2, 2))]);
+        let mut counting = CountingRasterizer::new(&mut scripted);
+        for character in ['a', 'b', 'c'] {
+            counting.rasterize(glyph(character));
+        }
+        let mut atlas = sonicterm_text::glyph_atlas::GlyphAtlas::new(64, 64);
+        let mut scripted = Scripted::new(vec![Some(coverage_tile(2, 2))]);
+        for _ in 0..2 {
+            atlas.get_or_insert(glyph('d'), &mut CountingRasterizer::new(&mut scripted));
+        }
+    }
+    let stats = sink.snapshot();
+    assert_eq!((stats.raster_calls, stats.raster_tiles), (4, 2));
+}
+
+#[test]
+fn an_attempt_folds_its_own_work_once_and_an_apply_attempt_into_both_classes() {
+    // Clock step 10. Shaping before any attempt adds to the phase only; the apply attempt (enter,
+    // shape pair, raster pair, close) and the retry after it (enter, shape pair, close) each fold
+    // once, and only the apply attempt joins the apply class.
+    test_clock::install(0, 10);
+    let sink = FrameStatsSink::default();
+    {
+        let _collect = CollectGuard::enter(Some(&sink));
+        shape_request(|| ());
+        {
+            let _attempt = AttemptScope::enter(true);
+            shape_request(|| ());
+            let mut scripted = Scripted::new(vec![Some(coverage_tile(2, 2))]);
+            CountingRasterizer::new(&mut scripted).rasterize(glyph('a'));
+            note_attempt_presented();
+            note_attempt_presented();
+        }
+        {
+            let _retry = AttemptScope::enter(false);
+            shape_request(|| ());
+        }
+    }
+    let stats = sink.snapshot();
+    assert_eq!((stats.shape_ns, stats.raster_ns, stats.shape_requests), (30, 10, 3));
+    let apply = AttemptStats {
+        attempts: 1,
+        presented: 1,
+        attempt_ns: 50,
+        shape_ns: 10,
+        raster_ns: 10,
+        shape_requests: 1,
+        raster_calls: 1,
+        raster_tiles: 1,
+    };
+    assert_eq!(stats.apply_attempts, apply);
+    let retry = AttemptStats {
+        attempts: 1,
+        attempt_ns: 30,
+        shape_ns: 10,
+        shape_requests: 1,
+        ..AttemptStats::ZERO
+    };
+    let mut every = apply;
+    every.add(&retry);
+    assert_eq!(stats.attempts, every);
+    test_clock::remove();
+}
+
+#[test]
+fn a_helper_of_the_same_renderer_joins_its_attempt_and_any_other_renderer_is_isolated() {
+    // notification_layout opens its own scope on the drawing renderer's sink, so its shaping joins
+    // that renderer's attempt once. Another renderer, or a non-counting one, starts outside every
+    // attempt and with no open timer, and the outer attempt resumes when it closes.
+    test_clock::install(0, 1);
+    let sink = FrameStatsSink::default();
+    let other = FrameStatsSink::default();
+    {
+        let _collect = CollectGuard::enter(Some(&sink));
+        let _attempt = AttemptScope::enter(false);
+        {
+            let _helper = CollectGuard::enter(Some(&sink));
+            shape_request(|| ());
+        }
+        {
+            let _quiet = CollectGuard::enter(None);
+            shape_request(|| ());
+        }
+        {
+            let _outer_timer = WorkTimer::start(TimedWork::Raster);
+            let _other = CollectGuard::enter(Some(&other));
+            assert_eq!(ATTEMPT.with(Cell::get), None, "another renderer is outside any attempt");
+            assert_eq!(TIMING_DEPTH.with(Cell::get), 0, "and its timers start unnested");
+            shape_request(|| ());
+        }
+        assert!(ATTEMPT.with(Cell::get).is_some(), "the outer attempt resumes");
+    }
+    let stats = sink.snapshot();
+    assert_eq!((stats.shape_requests, stats.attempts.shape_requests), (1, 1));
+    assert_eq!((other.snapshot().shape_requests, other.snapshot().shape_ns), (1, 1));
+    assert_eq!(other.snapshot().attempts, AttemptStats::ZERO);
+    test_clock::remove();
+}
+
+#[test]
+fn a_panic_inside_a_request_or_another_renderer_restores_the_timers_and_the_attempt() {
+    // A failing request is still counted and timed once, and its timer is closed on unwind; a
+    // renderer that panics inside another's attempt restores that attempt and its timer depth.
+    test_clock::install(0, 5);
+    let sink = FrameStatsSink::default();
+    let other = FrameStatsSink::default();
+    {
+        let _collect = CollectGuard::enter(Some(&sink));
+        let _attempt = AttemptScope::enter(false);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            shape_request(|| -> u8 { panic!("shaping failed") })
+        }));
+        assert!(caught.is_err());
+        assert_eq!(TIMING_DEPTH.with(Cell::get), 0);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _other = CollectGuard::enter(Some(&other));
+            let _timer = WorkTimer::start(TimedWork::Raster);
+            panic!("another renderer failed");
+        }));
+        assert!(caught.is_err());
+        assert!(ATTEMPT.with(Cell::get).is_some());
+        assert_eq!(TIMING_DEPTH.with(Cell::get), 0);
+        shape_request(|| ());
+    }
+    let stats = sink.snapshot();
+    assert_eq!((stats.attempts.shape_requests, stats.shape_ns), (2, 10));
+    test_clock::remove();
+}
+
+#[test]
+fn font_preparation_time_is_exact_split_by_generation_and_outside_every_attempt() {
+    // A preparation reads the clock twice; a generation apply adds to both preparation fields.
+    test_clock::install(0, 3);
+    let sink = FrameStatsSink::default();
+    {
+        let _collect = CollectGuard::enter(Some(&sink));
+        note_font_prepare(prepare_clock(), true);
+        note_font_prepare(prepare_clock(), false);
+    }
+    let stats = sink.snapshot();
+    assert_eq!((stats.font_prepare_ns, stats.font_generation_prepare_ns), (6, 3));
+    assert_eq!(stats.attempts, AttemptStats::ZERO);
+    note_font_prepare(prepare_clock(), true);
+    assert_eq!(test_clock::reads(), 4, "the gate-off preparation reads no clock");
+    test_clock::remove();
+}
+
+/// Every glyph-atlas insertion in `sources` as `path:line`, with whether its arguments wrap the
+/// rasterizer in `CountingRasterizer`.
+fn atlas_insertions(sources: &[(String, String)]) -> Vec<(String, bool)> {
+    let mut found = Vec::new();
+    for (path, text) in sources {
+        let code = code_only(&to_lf(text));
+        for (offset, _) in code.match_indices(".get_or_insert(") {
+            let open = offset + ".get_or_insert".len();
+            let mut depth = 0_usize;
+            let mut close = code.len();
+            for (index, character) in code[open..].char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = open + index;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let line = code[..offset].matches('\n').count() + 1;
+            let name = Path::new(path)
+                .file_name()
+                .map_or(path.clone(), |name| name.to_string_lossy().into_owned());
+            found.push((
+                format!("{name}:{line}"),
+                code[open..close].contains("CountingRasterizer::new("),
+            ));
+        }
+    }
+    found
+}
+
+#[test]
+fn every_glyph_atlas_insertion_counts_its_rasterizer() {
+    // An insertion that passes the bare rasterizer goes uncounted. The five sites are the four
+    // terminal paths in core.rs and the shared chrome path (tabs, palette, search, preedit).
+    let mut sources = Vec::new();
+    crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
+    let insertions = atlas_insertions(&sources);
+    let bare: Vec<_> = insertions.iter().filter(|(_, wrapped)| !wrapped).collect();
+    assert!(bare.is_empty(), "uncounted glyph-atlas insertions: {bare:#?}");
+    assert_eq!(insertions.len(), 5, "the insertion sites changed; review them: {insertions:#?}");
+    assert!(insertions.iter().any(|(site, _)| site.starts_with("chrome_text.rs:")));
+}
+
+#[test]
+fn the_insertion_scan_finds_a_bare_rasterizer_across_lines_and_line_endings() {
+    // A wrapped call split over lines counts as wrapped; a bare one does not, on LF and CRLF.
+    let fixture = "fn draw(atlas: &mut Atlas, wt: &mut Raster) {\n    atlas.get_or_insert(key, wt);\n    \
+                   atlas.get_or_insert(\n        key,\n        &mut CountingRasterizer::new(wt),\n    );\n}\n";
+    for text in [fixture.to_owned(), to_crlf(fixture)] {
+        let found = atlas_insertions(&[("fixture.rs".to_owned(), text)]);
+        assert_eq!(
+            found,
+            vec![("fixture.rs:2".to_owned(), false), ("fixture.rs:3".to_owned(), true)]
+        );
+    }
+}
+
+#[test]
+fn the_attempt_and_the_owed_apply_are_wired_through_the_production_entry_points() {
+    // render_releasing opens the attempt inside its collection scope and takes the owed apply, so
+    // exactly one attempt carries it; both presenters mark the attempt where a frame passes the
+    // present boundary; begin_frame_fonts times the preparation and records the change.
+    let mut sources = Vec::new();
+    crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
+    let bodies = function_bodies(&sources);
+    let body = |name: &str| {
+        bodies
+            .iter()
+            .find(|function| function.name == name)
+            .map(|function| function.body.split_whitespace().collect::<String>())
+            .unwrap_or_else(|| panic!("{name} not found"))
+    };
+    let releasing = body("render_releasing");
+    assert!(releasing.contains("CollectGuard::enter(self.frame_sink.as_ref())"));
+    assert!(releasing.contains("AttemptScope::enter(std::mem::take(&mutself.unattributed_apply))"));
+    let present = to_lf(include_str!("present.rs")).split_whitespace().collect::<String>();
+    assert_eq!(
+        present.matches("note_attempt_presented();Ok(PresentOutcome::Presented)").count(),
+        2,
+        "each presenter marks the attempt where it returns Presented"
+    );
+    let prepare = body("begin_frame_fonts");
+    for call in
+        ["prepare_clock()", "note_font_prepare(", "owe_apply(&mutself.unattributed_apply,change)"]
+    {
+        assert!(prepare.contains(call), "begin_frame_fonts lacks {call}");
+    }
+    assert!(body("notification_layout").contains("CollectGuard::enter(self.frame_sink.as_ref())"));
+}
