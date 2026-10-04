@@ -200,3 +200,35 @@ fn valid_records_follow_the_grids_rows_and_content_stamps() {
     assert_eq!(table.valid_records(7, &grid, 0, 3)[0], Some(strips[0]), "history keeps its stamp");
     assert_eq!(table.valid_records(7, &grid, 1, 3), [None; 3], "the view top moved");
 }
+
+/// A test reads one slot's committed record as it stands, whatever content it describes; staged
+/// records are not visible until committed, and a dropped pane has none.
+#[test]
+fn committed_rect_reads_the_committed_record_only() {
+    let mut table = RowInkTable::default();
+    table.begin_frame();
+    table.stage(7, 2, ink(rect(0, 40, 100, 20), 2, 5));
+    assert_eq!(table.committed_rect(7, 2), None, "a staged record is not committed");
+    table.commit(&[(7, 4)]);
+    assert_eq!(table.committed_rect(7, 2), Some(rect(0, 40, 100, 20)));
+    assert_eq!(table.committed_rect(7, 1), None);
+    table.drop_pane(7);
+    assert_eq!(table.committed_rect(7, 2), None);
+}
+
+/// One emitted row can push more than one glyph span (a row glyph a test attaches after the
+/// row's own glyphs); its record is the union of every span's ink and its tofu, never only the
+/// first span's, so the record bounds every glyph the row drew. A span with no ink adds nothing.
+#[test]
+fn an_emitted_rows_ink_unions_every_span_and_its_tofu() {
+    use crate::cursor::RowGlyphSpan;
+    let surface = rect(0, 0, 240, 160);
+    let spans = [
+        RowGlyphSpan { glyphs: 0..2, ink_px: Some([10.0, 20.0, 30.0, 40.0]) },
+        RowGlyphSpan { glyphs: 2..2, ink_px: None },
+        RowGlyphSpan { glyphs: 2..3, ink_px: Some([50.0, 5.0, 60.0, 25.0]) },
+    ];
+    let ink = emitted_row_ink(&spans, [(0.0, 30.0, 4.0, 4.0)]);
+    assert_eq!(ink.to_rect(surface), rect(0, 5, 60, 35));
+    assert!(emitted_row_ink(&[], []).to_rect(surface).is_empty());
+}

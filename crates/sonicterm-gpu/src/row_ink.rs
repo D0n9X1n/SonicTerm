@@ -132,6 +132,11 @@ impl RowInkTable {
             .collect()
     }
 
+    /// The committed record of `slot` of `pane_id` as it stands, whatever content it describes.
+    pub(crate) fn committed_rect(&self, pane_id: u64, slot: u16) -> Option<PixelRect> {
+        self.committed.get(&(pane_id, slot)).map(|ink| ink.rect)
+    }
+
     /// Drop every record of a pane that was closed.
     pub(crate) fn drop_pane(&mut self, pane_id: u64) {
         self.committed.retain(|(owner, _), _| *owner != pane_id);
@@ -193,6 +198,22 @@ pub(crate) fn union_non_empty(left: PixelRect, right: PixelRect) -> PixelRect {
         // When: neither `left` nor `right` is_empty, the record grows to their bounding rectangle.
         left.union(right)
     }
+}
+
+/// The ink one emitted row's glyph loop drew: its glyph spans' ink and its tofu outlines, as
+/// `(left, top, width, height)` in surface pixels.
+pub(crate) fn emitted_row_ink(
+    spans: &[crate::cursor::RowGlyphSpan],
+    tofu: impl IntoIterator<Item = (f32, f32, f32, f32)>,
+) -> InkEdges {
+    let mut ink = InkEdges::default();
+    for [left, top, right, bottom] in spans.iter().filter_map(|span| span.ink_px) {
+        ink.add_px((left, top, right - left, bottom - top));
+    }
+    for rect in tofu {
+        ink.add_px(rect);
+    }
+    ink
 }
 
 /// The union of a row's primitive rectangles in surface pixels, kept as floats until committed.

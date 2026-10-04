@@ -6179,15 +6179,12 @@ impl GpuRenderer {
                     );
                     // The row's ink: its glyphs' union and its tofu outlines. Its underlines join
                     // when they are drawn below.
-                    let mut ink = crate::row_ink::InkEdges::default();
-                    if let Some([left, top, right, bottom]) =
-                        row_spans[spans_before..].iter().find_map(|span| span.ink_px)
-                    {
-                        ink.add_px((left, top, right - left, bottom - top));
-                    }
-                    for (left, top, width, height, _) in &missing_tofu[tofu_before..] {
-                        ink.add_px((*left, *top, *width, *height));
-                    }
+                    let ink = crate::row_ink::emitted_row_ink(
+                        &row_spans[spans_before..],
+                        missing_tofu[tofu_before..]
+                            .iter()
+                            .map(|(left, top, width, height, _)| (*left, *top, *width, *height)),
+                    );
                     underline_owners.extend(
                         (underlines_before..underlines.len())
                             .map(|_| (pane_id, r, view_top_abs, grid)),
