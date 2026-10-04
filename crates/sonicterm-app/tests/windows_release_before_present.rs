@@ -60,9 +60,28 @@ struct Fixture {
     pane: u64,
 }
 
+/// Whether this host enumerates no wgpu adapter at all, established apart from renderer
+/// construction. That is the only limitation that turns a failed wgpu renderer into a skip;
+/// surface configuration, device and resource errors on a host with an adapter fail the test.
+fn host_has_no_adapter() -> bool {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty()
+}
+
+/// Classify a wgpu renderer construction failure: `HOST_INCAPABLE` only when no adapter exists.
+fn wgpu_construction_failure(error: impl std::fmt::Display) -> String {
+    if host_has_no_adapter() {
+        format!("HOST_INCAPABLE: no wgpu adapter: {error}")
+    } else {
+        // When: host_has_no_adapter is false an adapter exists, so the construction error is a defect.
+        format!("wgpu renderer construction failed on a host with an adapter: {error}")
+    }
+}
+
 /// A window of `role` with a real renderer, presenting through GDI (`software`) or wgpu.
-/// A wgpu renderer the host cannot create is reported as `HOST_INCAPABLE: ...`, never passed
-/// silently; the presenter each fixture resolved is checked.
+/// A wgpu renderer is skipped as `HOST_INCAPABLE: ...` only when the host enumerates no adapter;
+/// any other construction error fails. The presenter each fixture resolved is checked.
 fn fixture(active: &ActiveEventLoop, role: Role, software: bool) -> Result<Fixture, String> {
     let window = Arc::new(
         active
@@ -109,7 +128,7 @@ fn fixture(active: &ActiveEventLoop, role: Role, software: bool) -> Result<Fixtu
     );
     let mut renderer = match created {
         Ok(renderer) => renderer,
-        Err(error) if !software => return Err(format!("HOST_INCAPABLE: wgpu renderer: {error}")),
+        Err(error) if !software => return Err(wgpu_construction_failure(error)),
         Err(error) => return Err(error.to_string()),
     };
     renderer.set_cursor_blink(false);
