@@ -501,6 +501,9 @@ renderer that collected it.
 | `row_cache_misses` | count | row glyph cache lookups that missed |
 | `shape_requests` | count | `FontStack` shaping and measuring requests the renderer made |
 | `full_frames` | count | frames whose render plan was `Full`; a frame whose plan was `Noop` is not counted |
+| `partial_frames` | count | presented frames whose render plan was `Partial` (only the rows that meet the damage were assembled); counted after presentation, so divide by presented frames, not by `full_frames` |
+| `partial_fallbacks` | count | `Partial` plans reassembled `Full` in the same frame because the final damage reached a row they did not assemble |
+| `row_cells_hashed` | count | cells hashed into row glyph cache keys, one row per assembled terminal row |
 | `row_cache_invalidate_visits` | count | row glyph cache entries examined while invalidating dirty rows: one per `invalidate_row_abs` call, a keyed removal of that `(pane, absolute row)` entry |
 | `row_cache_invalidate_us` | µs | total time spent invalidating dirty rows, as a plain sum; one clock pair per pane that invalidates at least one row, taken inside that pane's row loop so counting never changes which cached rows are kept |
 | `recolor_glyphs_visited` | count | glyphs examined when recoloring glyphs under the cursor, the copy-mode cursor or a search match on the frame's main glyph list: the rows whose ink meets the target plus every glyph outside the terminal rows, such as tab titles; overlay text is not counted |
@@ -797,12 +800,14 @@ renderer retention window="<window-id>" role="visible" total_bytes=<bytes>
                    row_glyph_cache_bytes=<bytes> row_glyph_cache_items=<count>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
                    vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
+                   row_ink_bytes=<bytes> row_ink_items=<count>
 renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    glyph_atlas_bytes=<bytes> glyph_atlas_items=<count>
                    image_atlas_bytes=<bytes> image_atlas_items=<count>
                    row_glyph_cache_bytes=<bytes> row_glyph_cache_items=<count>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
                    vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
+                   row_ink_bytes=<bytes> row_ink_items=<count>
 ```
 
 | Field | What it owns | First response |
@@ -818,6 +823,8 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `software_frame_bytes` | full-window Windows software-present buffer | reduce window size; zero outside that path |
 | `vertex_scratch_bytes` | the `UploadStaging` part: the presentation pipeline's reused CPU vertex-assembly buffer plus each atlas upload's dirty and coalesced rect lists and staging buffer | the vertex buffer follows the largest recent frame and shrinks to twice a frame's use once over four times that use and over 1 MiB; a sync releases the rect lists; a staging buffer keeps its largest write, at most one atlas |
 | `vertex_scratch_items` | 1 while the vertex buffer holds an allocation, else 0 | — |
+| `row_ink_bytes` | the `RowInk` part: the allocated buckets of the per-row ink table (where each presented row drew, per pane and slot) plus one frame's staging buffer | bounded by the visible rows; a pane that shrinks or closes releases its records at the next presented frame |
+| `row_ink_items` | committed per-row ink records, one per visible row | — |
 
 `role="warm"` means the renderer belongs to the standby pool, not a visible
 window; closing a window does not release it. Renderer figures are host memory,

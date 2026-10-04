@@ -1556,3 +1556,47 @@ fn scaled_glyph_sampling_does_not_bleed_from_adjacent_atlas_tile() {
         );
     }
 }
+
+/// The software presenter composes a degraded frame whole: it reads no damage, so every row a
+/// degraded plan emits is drawn, including rows outside what a narrow hardware damage would cover,
+/// and after a frame that painted every pixel nothing stale survives. That is why a partial plan,
+/// whose rows outside the damage are not in the batches, must never reach this presenter.
+#[test]
+fn a_degraded_frame_is_composed_whole_with_no_stale_pixel() {
+    let atlas = GlyphAtlas::new(1, 1);
+    let (width_px, height_px, row_h) = (12u32, 8u32, 2u32);
+    let background = [0.0, 0.0, 0.0, 1.0];
+    let mut frame = SoftwareFrame::new(width_px, height_px, background).unwrap();
+    let surface = (width_px as f32, height_px as f32);
+    let quad = |left: u32, top: u32, width: u32, height: u32, color: [f32; 4]| QuadInstance {
+        rect: px_to_ndc(left as f32, top as f32, width as f32, height as f32, surface.0, surface.1),
+        color,
+        ..Default::default()
+    };
+    let red = [1.0, 0.0, 0.0, 1.0];
+    frame.draw_layers(&atlas, &atlas, &[quad(0, 0, width_px, height_px, red)], &[], &[], &[], &[]);
+    assert_eq!(frame.pixel_bgra(0, 0), [0, 0, 255, 255], "the first frame paints every pixel");
+
+    // A degraded plan emits all four rows; row 1 is the edit a narrow hardware damage would
+    // cover. Each row is a quad 10 px wide, so columns 10 and 11 are never drawn.
+    let colors =
+        [[0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0], [1.0, 1.0, 0.0, 1.0], [0.0, 1.0, 1.0, 1.0]];
+    let rows: Vec<QuadInstance> =
+        (0..4u32).map(|row| quad(0, row * row_h, 10, row_h, colors[row as usize])).collect();
+    frame.prepare(width_px, height_px, background).unwrap();
+    frame.draw_layers(&atlas, &atlas, &rows, &[], &[], &[], &[]);
+    let bgra = |[red, green, blue, alpha]: [f32; 4]| {
+        [(blue * 255.0) as u8, (green * 255.0) as u8, (red * 255.0) as u8, (alpha * 255.0) as u8]
+    };
+    for pixel_y in 0..height_px {
+        for pixel_x in 0..width_px {
+            let expected = if pixel_x < 10 {
+                bgra(colors[(pixel_y / row_h) as usize])
+            } else {
+                // Columns no quad covers hold the background, not the first frame's red.
+                [0, 0, 0, 255]
+            };
+            assert_eq!(frame.pixel_bgra(pixel_x, pixel_y), expected, "({pixel_x}, {pixel_y})");
+        }
+    }
+}

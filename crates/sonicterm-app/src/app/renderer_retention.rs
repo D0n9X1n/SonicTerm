@@ -78,6 +78,8 @@ pub fn emit_renderer_retention(label: &str, role: &str, retention: &RendererRete
         software_frame_bytes = retention.software_frame.bytes,
         vertex_scratch_bytes = retention.vertex_scratch.bytes,
         vertex_scratch_items = retention.vertex_scratch.items,
+        row_ink_bytes = retention.row_ink.bytes,
+        row_ink_items = retention.row_ink.items,
         "renderer retention"
     );
 }

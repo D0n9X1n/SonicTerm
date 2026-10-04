@@ -5,7 +5,7 @@ use sonicterm_cfg::{
     keymap::{Direction, Keymap},
     theme::Theme,
 };
-use sonicterm_grid::grid::Grid;
+use sonicterm_grid::grid::{CellFlags, Color, Grid};
 use sonicterm_ui::pane::PaneTree;
 use std::{sync::Barrier, time::Duration};
 
@@ -1074,6 +1074,173 @@ fn a_suppressed_window_keeps_its_pending_set_until_its_next_collection() {
             let tickets_and_others = Arc::weak_count(&parser);
             drop(app.windows.remove(&window));
             assert!(Arc::weak_count(&parser) < tickets_and_others, "closing drops the tickets");
+        }
+    }
+}
+
+/// A partial frame's `Rows` receipt, applied at the next collection through the pending set in
+/// both adapters, clears only its rows and never advances the grid's dirty generation; once a
+/// resize renumbers the rows, the same receipt is dropped and every dirty bit is kept.
+#[test]
+fn a_rows_receipt_keeps_the_dirty_generation_and_a_mismatch_keeps_every_bit() {
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        let generation =
+            |app: &App| app.windows[&window].panes[&right].parser.lock().grid().dirty_generation();
+        counted_and_dirty(&mut app, window, &[left, right]);
+        let rows = sonicterm_render_model::AckRows::Rows([1].into_iter().collect());
+        present_receipts(&mut app, window, child, rows.clone());
+        let before = generation(&app);
+        collect_next(&mut app, window, child).unwrap();
+        assert_eq!(dirty(&app, window, right), [0, 2], "only the receipt's row is cleared");
+        assert_eq!(generation(&app), before, "acknowledging never advances the generation");
+
+        counted_and_dirty(&mut app, window, &[left, right]);
+        present_receipts(&mut app, window, child, rows);
+        {
+            let parser = Arc::clone(&app.windows[&window].panes[&right].parser);
+            let mut parser = parser.lock();
+            let grid = parser.grid_mut();
+            let (cols, rows) = (grid.cols, grid.rows);
+            grid.resize(cols, rows + 1);
+        }
+        let dropped_before = dropped(&app, window);
+        collect_next(&mut app, window, child).unwrap();
+        assert_eq!(dirty(&app, window, right), all_rows(&app, window, right), "child={child}");
+        assert_eq!(dropped(&app, window), dropped_before + 1, "the mismatched receipt is dropped");
+    }
+}
+
+/// Present a frame that issues, per held pane, the receipt `rows_for` gives its id (`None` issues
+/// none for that pane, as a `Noop` plan does), and store them as the pending set.
+fn present_pane_receipts(
+    app: &mut App,
+    window: WindowId,
+    child: bool,
+    rows_for: impl Fn(u64) -> Option<sonicterm_render_model::AckRows>,
+) {
+    let sources = sources(app, window, child).ok().unwrap();
+    let held = sources.try_collect(|| {}).ok().unwrap();
+    let receipts = held
+        .guards
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (id, parser, _))| {
+            Some(AckReceipt::of(index, *id, parser.grid(), rows_for(*id)?))
+        })
+        .collect();
+    drop(held);
+    let tickets = sources.bind(receipts);
+    app.windows.get_mut(&window).unwrap().pending_receipts = tickets;
+}
+
+/// The viewport slot that draws live row `live_row` of a `rows`-row view whose top is
+/// `view_top_abs`, over `scrollback_len` history rows; `None` below the view.
+fn slot_of_live_row(
+    scrollback_len: u64,
+    view_top_abs: u64,
+    rows: u16,
+    live_row: u64,
+) -> Option<u64> {
+    (scrollback_len + live_row).checked_sub(view_top_abs).filter(|slot| *slot < u64::from(rows))
+}
+
+/// Test 20 at the App seam, both adapters, through the pending set. The scrolled pane has 16 rows
+/// over 100 history rows. Viewed from absolute row 90 with only live row 15 dirty, that row is raw
+/// slot 25, below the view: an offscreen-only `Noop` issues no receipt and another pane's partial
+/// frame gives this pane `Rows(empty)`, so both keep it dirty while the peer keeps every row but
+/// the one its own receipt names. Viewed from row 97 with live rows 5 and 15 dirty (slots 8 and
+/// 18), `Rows({5})` clears live row 5 and keeps live row 15. No application advances the
+/// scrolled grid's dirty generation.
+#[test]
+fn scrolled_view_row_receipts_clear_only_drawn_live_rows_at_the_next_collection() {
+    type Receipts = fn(u64, u64) -> Option<sonicterm_render_model::AckRows>;
+    /// One case: its label, the view top, the dirty live rows, the receipts, the scrolled pane's
+    /// rows left dirty, and the one peer row its receipt clears.
+    type Case = (&'static str, u64, &'static [usize], Receipts, &'static [usize], Option<usize>);
+    let cases: [Case; 3] = [
+        ("offscreen-only Noop", 90, &[15], |_, _| None, &[15], None),
+        (
+            "another pane's partial frame",
+            90,
+            &[15],
+            |pane, scrolled| {
+                Some(if pane == scrolled {
+                    sonicterm_render_model::AckRows::Rows(Default::default())
+                } else {
+                    sonicterm_render_model::AckRows::Rows([0].into_iter().collect())
+                })
+            },
+            &[15],
+            Some(0),
+        ),
+        (
+            "live row 5 drawn",
+            97,
+            &[5, 15],
+            |pane, scrolled| {
+                (pane == scrolled)
+                    .then(|| sonicterm_render_model::AckRows::Rows([5].into_iter().collect()))
+            },
+            &[15],
+            None,
+        ),
+    ];
+    for child in [false, true] {
+        for (name, view_top, dirty_live_rows, receipts_for, kept, peer_cleared) in cases {
+            let (mut app, window, peer, scrolled, _) = fixture(child, false);
+            let parser = Arc::clone(&app.windows[&window].panes[&scrolled].parser);
+            {
+                let mut parser = parser.lock();
+                let grid = parser.grid_mut();
+                grid.resize(20, 16);
+                grid.goto(15, 0);
+                for _ in 0..100 {
+                    grid.linefeed();
+                }
+                grid.clear_dirty();
+                for row in dirty_live_rows {
+                    grid.goto(*row as u16, 0);
+                    grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+                }
+            }
+            app.windows[&window].panes[&peer].parser.lock().grid_mut().mark_all_dirty();
+            app.windows
+                .get_mut(&window)
+                .unwrap()
+                .panes
+                .get_mut(&scrolled)
+                .unwrap()
+                .viewport_top_abs = Some(view_top);
+            let (scrollback_len, view_rows, generation) = {
+                let parser = parser.lock();
+                let grid = parser.grid();
+                (grid.scrollback_len() as u64, grid.rows, grid.dirty_generation())
+            };
+            assert_eq!((view_rows, scrollback_len), (16, 100), "{name}: the fixture's dimensions");
+            // Live row 15's raw slot is past the 16-row view at either top; live row 5 is slot 8
+            // from row 97.
+            assert_eq!(scrollback_len + 15 - view_top, if view_top == 90 { 25 } else { 18 });
+            assert_eq!(slot_of_live_row(scrollback_len, view_top, view_rows, 15), None, "{name}");
+            if view_top == 97 {
+                assert_eq!(slot_of_live_row(scrollback_len, 97, view_rows, 5), Some(8), "{name}");
+            }
+            assert_eq!(dirty(&app, window, scrolled), dirty_live_rows, "{name}: dirt before");
+            let peer_rows = all_rows(&app, window, peer);
+            assert_eq!(dirty(&app, window, peer), peer_rows, "{name}: the peer starts all dirty");
+
+            present_pane_receipts(&mut app, window, child, |pane| receipts_for(pane, scrolled));
+            collect_next(&mut app, window, child).unwrap();
+            assert_eq!(dirty(&app, window, scrolled), kept, "child={child} {name}");
+            assert_eq!(
+                parser.lock().grid().dirty_generation(),
+                generation,
+                "child={child} {name}: acknowledging never advances the generation"
+            );
+            assert_eq!(dropped(&app, window), 0, "child={child} {name}: no receipt is dropped");
+            let peer_kept: Vec<usize> =
+                peer_rows.into_iter().filter(|row| Some(*row) != peer_cleared).collect();
+            assert_eq!(dirty(&app, window, peer), peer_kept, "child={child} {name}: the peer");
         }
     }
 }

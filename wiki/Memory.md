@@ -202,6 +202,12 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
 - `row_quad_cache_bytes` / `row_quad_cache_items`: hash-table backing, cached
   background/decoration quad vectors, and row count;
 - `software_frame_bytes`: Windows CPU/GDI frame, zero elsewhere;
+- `row_ink_bytes` / `row_ink_items`: the renderer's `RowInk` part, counted in
+  `renderer_total_bytes`: one ink record per visible row (where it last drew) plus
+  one frame's staging. Records of closed panes and vanished rows are pruned when a
+  frame presents, and the table is shrunk once under a quarter full. The class is
+  reported, never charged, with a 144 MiB envelope (twice the maximum visible
+  cells in bucket-rounded table entries, plus one frame's staging);
 - `vertex_scratch_bytes` / `vertex_scratch_items`: the renderer's `UploadStaging`
   part, counted in `renderer_total_bytes`. It is the presentation pipeline's
   reused CPU vertex-assembly buffer plus, for each of the glyph and image atlas

@@ -61,18 +61,21 @@ fn stationary_hover_modifier_changes_invalidate_presented_ink() {
         state.window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, false);
         let inactive = FramePlan::build(state.clone(), [pane(7, 1)], None);
         state.window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, true);
-        let active = FramePlan::build(state.clone(), [pane(7, 1)], Some(&inactive.key));
+        // Records seeded from the presented frame let the hardware plan narrow to the hover row.
+        let recorded = seeded(&state, &inactive, pane(7, 1));
+        let narrowed = if degraded { RenderMode::Full } else { RenderMode::Partial };
+        let active = FramePlan::build(state.clone(), [recorded.clone()], Some(&inactive.key));
         assert!(!active.unchanged);
-        assert_eq!(active.mode, RenderMode::Full);
+        assert_eq!(active.mode, narrowed);
         let expected =
             if degraded { inactive.damage } else { PixelRect { x: 0, y: 22, w: 100, h: 20 } };
         assert_eq!(active.damage, expected);
         let stable = FramePlan::build(state.clone(), [pane(7, 1)], Some(&active.key));
         assert_eq!(stable.mode, RenderMode::Noop);
         state.window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, false);
-        let released = FramePlan::build(state, [pane(7, 1)], Some(&active.key));
+        let released = FramePlan::build(state, [recorded], Some(&active.key));
         assert!(!released.unchanged);
-        assert_eq!(released.mode, RenderMode::Full);
+        assert_eq!(released.mode, narrowed);
         assert_eq!(released.damage, expected);
     }
 }
@@ -158,6 +161,48 @@ fn bottom_alignment_damage_and_resize_follow_grid_origin() {
     assert!(same.unchanged);
 }
 
+/// The ink-padded strip of `slot` in `planned`, or an empty rectangle when it has no pixels.
+fn padded_strip(frame_facts: &FrameFacts, planned: &PlannedPane, slot: u16) -> PixelRect {
+    dirty_rows_damage_rect_with_ink_pad(
+        [usize::from(slot)],
+        planned.full_rect,
+        planned.layout.x,
+        planned.layout.y,
+        planned.cols,
+        frame_facts.cell_w,
+        frame_facts.cell_h,
+        frame_facts.vertical_ink_pad,
+        frame_facts.window.width,
+        frame_facts.window.height,
+    )
+    .unwrap_or(PixelRect { x: 0, y: 0, w: 0, h: 0 })
+}
+
+/// `input` with a complete record per slot, as the renderer hands the planner after `prior`
+/// presented: each slot's record is its padded strip in `prior`'s projection of the same pane.
+fn seeded(frame_facts: &FrameFacts, prior: &FramePlan, input: PaneMetadata) -> PaneMetadata {
+    seeded_with(frame_facts, prior, input, |_, strip| Some(strip))
+}
+
+/// `input` seeded like [`seeded`], with `record` choosing each slot's record from its strip.
+fn seeded_with(
+    frame_facts: &FrameFacts,
+    prior: &FramePlan,
+    input: PaneMetadata,
+    record: impl Fn(u16, PixelRect) -> Option<PixelRect>,
+) -> PaneMetadata {
+    let planned = prior.panes.iter().find(|pane| pane.id == input.id).expect("planned pane");
+    let row_ink = (0..input.rows)
+        .map(|slot| record(slot, padded_strip(frame_facts, planned, slot)))
+        .collect();
+    PaneMetadata { row_ink, ..input }
+}
+
+/// A `Rows` acknowledgement of `rows`.
+fn rows_ack<const ROWS: usize>(rows: [usize; ROWS]) -> sonicterm_render_model::AckRows {
+    sonicterm_render_model::AckRows::Rows(rows.into_iter().collect())
+}
+
 /// A primary pane that is not scrolled back, so each live row is drawn at its own slot.
 fn live_pane(id: u64, revision: u64) -> PaneMetadata {
     PaneMetadata { viewport_top_abs: None, ..pane(id, revision) }
@@ -177,6 +222,7 @@ fn pane(id: u64, revision: u64) -> PaneMetadata {
         is_alt: false,
         scrollbar_alpha: 0.0,
         dirty_rows: Vec::new(),
+        row_ink: Vec::new(),
     }
 }
 
@@ -196,17 +242,18 @@ fn primary_plan_composes_complete_decisions() {
     assert!(unchanged.unchanged);
     assert_eq!(unchanged.mode, RenderMode::Noop);
     assert_eq!(unchanged.key, key);
-    let mut changed = live_pane(7, 2);
+    let mut changed = seeded(&facts(false), &first, live_pane(7, 2));
     changed.dirty_rows = vec![1];
     let edited = FramePlan::build(facts(false), [changed], Some(&key));
     assert!(!edited.unchanged);
-    assert_eq!(edited.mode, RenderMode::Full);
+    // Seeded with complete records, a one-row edit narrower than the surface is partial.
+    assert_eq!(edited.mode, RenderMode::Partial);
     assert_eq!(edited.damage, PixelRect { x: 0, y: 22, w: 100, h: 20 });
     assert_eq!(edited.damaged_rows, 1);
-    assert!(edited.acknowledges(0, 7, 2));
-    assert!(!edited.acknowledges(0, 7, 3));
-    assert!(!edited.acknowledges(0, 8, 2));
-    assert!(!edited.acknowledges(1, 7, 2));
+    assert_eq!(edited.acknowledged_rows(0, 7, 2), Some(rows_ack([1])));
+    assert_eq!(edited.acknowledged_rows(0, 7, 3), None);
+    assert_eq!(edited.acknowledged_rows(0, 8, 2), None);
+    assert_eq!(edited.acknowledged_rows(1, 7, 2), None);
 }
 
 /// Topology, inactive-pane scrolling, overlays, opacity, and degraded policy combine into one full-damage decision.
@@ -473,7 +520,7 @@ fn changed_revision_without_damage_is_noop_and_never_acknowledged() {
         assert_eq!(noop.mode, RenderMode::Noop, "degraded={degraded}");
         assert_ne!(noop.key, baseline.key);
         assert_eq!(noop.key.panes[0].revision, 2, "the key records the new revision");
-        assert!(!noop.acknowledges(0, 7, 2));
+        assert_eq!(noop.acknowledged_rows(0, 7, 2), None);
     }
 }
 
@@ -491,7 +538,7 @@ fn hardware_revision_change_without_dirty_rows_is_an_a7_noop() {
     assert_eq!(bumped.mode, RenderMode::Noop);
     assert_eq!(bumped.damage, PixelRect { x: 0, y: 0, w: 0, h: 0 });
     assert_eq!(bumped.key.panes[0].revision, 2);
-    assert!(!bumped.acknowledges(0, 7, 2));
+    assert_eq!(bumped.acknowledged_rows(0, 7, 2), None);
 }
 
 /// A renderer that clears its retained frame key, as a device rebuild does, draws
@@ -628,7 +675,7 @@ fn offscreen_only_edit_is_a_noop_on_the_hardware_path() {
     assert!(!plan.unchanged);
     assert_eq!(plan.mode, RenderMode::Noop);
     assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 0, h: 0 });
-    assert!(!plan.acknowledges(0, 7, 2));
+    assert_eq!(plan.acknowledged_rows(0, 7, 2), None);
     assert_eq!(full_frames, 0);
 }
 
@@ -640,7 +687,7 @@ fn offscreen_only_edit_is_a_noop_on_the_degraded_path() {
     assert!(!plan.unchanged);
     assert_eq!(plan.mode, RenderMode::Noop);
     assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 0, h: 0 });
-    assert!(!plan.acknowledges(0, 7, 2));
+    assert_eq!(plan.acknowledged_rows(0, 7, 2), None);
     assert_eq!(full_frames, 0);
 }
 
@@ -1042,7 +1089,7 @@ fn offscreen_dirt_with_and_without_a_tab_band_change() {
     let plan = FramePlan::build(with_band.clone(), [edited.clone()], Some(&first.key));
     assert_eq!(plan.mode, RenderMode::Noop);
     assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 0, h: 0 });
-    assert!(!plan.acknowledges(0, 7, 2));
+    assert_eq!(plan.acknowledged_rows(0, 7, 2), None);
 
     let mut retitled = with_band;
     retitled.window.tab_hash = 1;
@@ -1100,7 +1147,7 @@ fn conservative_rules_keep_whole_surface_or_whole_pane_damage() {
     hardware_retitled.window.tab_hash = 1;
     let plan = transition(hidden_bar(false), hardware_retitled, pane(7, 1));
     assert_eq!(plan.mode, RenderMode::Noop);
-    assert!(!plan.acknowledges(0, 7, 1));
+    assert_eq!(plan.acknowledged_rows(0, 7, 1), None);
 
     let alternate = PaneMetadata { is_alt: true, ..live_pane(7, 1) };
     let mut toggled = cursor_facts();
@@ -1370,26 +1417,32 @@ fn recolor_bounds_widen_cursor_and_changed_record_damage() {
     assert!(plan.damage.y <= 72);
 }
 
-/// Coverage contract while assembly stays whole-frame: every mode that presents emits every
-/// visible row, so an unchanged row whose tall ink the cursor recolors is always in the batches
-/// and the post-assembly widening covers it. The match has no wildcard arm, so a partial mode
-/// fails to compile here until it carries its own ink-coverage rule.
+/// Coverage contract per mode: a Full plan emits every visible row; a Partial plan emits every
+/// row whose valid record meets the previous recolor bounds, so the tall glyph a block cursor
+/// recolored last frame is in the batches and widening by it needs no fallback; an unchanged
+/// key is a Noop that emits nothing.
 #[test]
-fn every_presenting_mode_emits_every_visible_row() {
-    for mode in [RenderMode::Full, RenderMode::Noop] {
-        match mode {
-            RenderMode::Full => assert!(emits_every_visible_row(mode)),
-            RenderMode::Noop => assert!(!emits_every_visible_row(mode)),
-        }
-    }
-    // The tall glyph sits in an unchanged row whose padded strip misses the cursor row.
+fn every_presenting_mode_emits_the_rows_its_ink_can_reach() {
     let mut toggled = tall_cursor_facts();
     toggled.window.cursor_shape = 1;
-    let mut plan = transition(tall_cursor_facts(), toggled, tall_live_pane());
-    assert!(plan.damage.y > 72, "the row damage alone misses the tall glyph");
-    assert!(emits_every_visible_row(plan.mode));
-    plan.widen_for_recolor(RecolorRecord::default(), recolored(TALL_GLYPH, 1));
+    toggled.previous_recolor = recolored(CURSOR_TALL_RECORD, 1);
+    let full = transition(tall_cursor_facts(), toggled.clone(), tall_live_pane());
+    assert_eq!(full.mode, RenderMode::Full, "unseeded records cannot be narrowed");
+    assert!(full.panes[0].emit_rows.iter().all(|emit| *emit));
+
+    let first = FramePlan::build(tall_cursor_facts(), [tall_live_pane()], None);
+    let recorded = tall_glyph_records(&tall_cursor_facts(), &first);
+    let mut plan = FramePlan::build(toggled.clone(), [recorded.clone()], Some(&first.key));
+    assert_eq!(plan.mode, RenderMode::Partial);
+    // Slots 3 to 5 hold the recolored tall glyph's ink; slot 6 does not.
+    assert_eq!(plan.panes[0].emit_rows[3..7], [true, true, true, false]);
+    plan.widen_for_recolor(recolored(CURSOR_TALL_RECORD, 1), recolored(CURSOR_TALL_RECORD, 1));
     assert!(plan.damage.y <= 72);
+    assert!(!plan.partial_reaches_unemitted_ink(), "every row the widening reaches was emitted");
+
+    let noop = FramePlan::build(toggled, [recorded], Some(&plan.key));
+    assert!(noop.unchanged);
+    assert!(noop.panes[0].emit_rows.iter().all(|emit| !*emit));
 }
 
 /// While an overlay is active on either side, any change to the frame key repaints the whole
@@ -1498,4 +1551,459 @@ fn tab_title_ink_above_the_band_is_damaged_on_a_tab_band_or_focus_change() {
     let mut plan = transition(colored(1), colored(2), live_pane(7, 1));
     plan.widen_for_tab_ink(RecolorBounds::Unbounded, short);
     assert_eq!(plan.damage, surface);
+}
+
+/// The tall glyph of slot 3 of the 24-row cursor pane, reaching from y=72 into the slot-5 cursor
+/// cell at x=22..32; its padded strip (y=62..82) misses that row.
+const CURSOR_TALL_RECORD: PixelRect = PixelRect { x: 22, y: 72, w: 10, h: 40 };
+
+/// The 24-row cursor pane seeded from `prior`, with slot 3 holding `CURSOR_TALL_RECORD`.
+fn tall_glyph_records(frame_facts: &FrameFacts, prior: &FramePlan) -> PaneMetadata {
+    seeded_with(frame_facts, prior, tall_live_pane(), |slot, strip| {
+        Some(if slot == 3 { CURSOR_TALL_RECORD } else { strip })
+    })
+}
+
+/// Facts for a 10-row live pane with room on the surface for every slot and no tab bar.
+fn ten_row_facts(vertical_ink_pad: f32) -> FrameFacts {
+    FrameFacts {
+        window: WindowIdentity { width: 240, height: 240, ..Default::default() },
+        vertical_ink_pad,
+        tab_bar_top: None,
+        ..facts(false)
+    }
+}
+
+/// A live 10-row pane, 100 px wide, with every slot on the surface of `ten_row_facts`.
+fn ten_row_pane() -> PaneMetadata {
+    PaneMetadata { rect: PixelRect { x: 0, y: 0, w: 100, h: 204 }, rows: 10, ..live_pane(7, 1) }
+}
+
+/// Present `input` under `frame_facts`, then plan an edit of its live rows `dirty` against that
+/// frame with complete seeded records.
+fn seeded_edit(frame_facts: &FrameFacts, input: PaneMetadata, dirty: &[usize]) -> FramePlan {
+    let first = FramePlan::build(frame_facts.clone(), [input.clone()], None);
+    let mut edited = seeded(frame_facts, &first, input);
+    edited.revision += 1;
+    edited.dirty_rows = dirty.to_vec();
+    FramePlan::build(frame_facts.clone(), [edited], Some(&first.key))
+}
+
+/// The one-row edit on a 10-row pane with a one-cell ink pad.
+fn ten_row_edit(degraded: bool) -> FramePlan {
+    seeded_edit(&FrameFacts { degraded, ..ten_row_facts(20.0) }, ten_row_pane(), &[5])
+}
+
+/// Two side-by-side 4-row panes: pane 7's unchanged row 1 overhangs to x=108, and pane 9 edits
+/// its row 1, damaging x>=100 on that row.
+fn neighbour_edit(degraded: bool) -> FramePlan {
+    let frame_facts = FrameFacts { degraded, ..facts(false) };
+    let right = PaneMetadata {
+        rect: PixelRect { x: 100, y: 0, w: 100, h: 84 },
+        is_active: false,
+        ..live_pane(9, 1)
+    };
+    let first = FramePlan::build(frame_facts.clone(), [live_pane(7, 1), right.clone()], None);
+    let left = seeded_with(&frame_facts, &first, live_pane(7, 1), |slot, strip| {
+        Some(if slot == 1 { PixelRect { x: 96, y: 22, w: 12, h: 20 } } else { strip })
+    });
+    let mut right = seeded(&frame_facts, &first, right);
+    right.revision = 2;
+    right.dirty_rows = vec![1];
+    FramePlan::build(frame_facts, [left, right], Some(&first.key))
+}
+
+/// The 24-row cursor pane edits row 15 far from its unmoved slot-5 cursor; slot 3's record holds
+/// a tall glyph reaching into the cursor cell, and the last frame recolored a glyph in slot 12.
+fn cursor_reach_edit(degraded: bool) -> FramePlan {
+    let frame_facts = FrameFacts {
+        degraded,
+        previous_recolor: recolored(PixelRect { x: 22, y: 250, w: 5, h: 5 }, 1),
+        ..tall_cursor_facts()
+    };
+    let first = FramePlan::build(frame_facts.clone(), [tall_live_pane()], None);
+    let mut edited = tall_glyph_records(&frame_facts, &first);
+    edited.revision = 2;
+    edited.dirty_rows = vec![15];
+    FramePlan::build(frame_facts, [edited], Some(&first.key))
+}
+
+/// The indices of the emitted rows of `plan`'s pane `index`.
+fn emitted(plan: &FramePlan, index: usize) -> Vec<usize> {
+    plan.panes[index]
+        .emit_rows
+        .iter()
+        .enumerate()
+        .filter(|(_, emit)| **emit)
+        .map(|(row, _)| row)
+        .collect()
+}
+
+/// A one-row hardware edit narrower than the surface is `Partial` and emits only the rows whose
+/// padded strip (here also their record) meets its damage: dirty row 1 of a 4-row pane reaches
+/// every row, and dirty row 5 of a 10-row pane, padded one cell, reaches rows 3 to 7.
+#[test]
+fn a_one_row_edit_emits_only_rows_meeting_its_padded_damage() {
+    let four =
+        seeded_edit(&FrameFacts { vertical_ink_pad: 20.0, ..facts(false) }, live_pane(7, 1), &[1]);
+    assert_eq!(four.mode, RenderMode::Partial);
+    assert_eq!(emitted(&four, 0), [0, 1, 2, 3]);
+
+    let ten = ten_row_edit(false);
+    assert_eq!(ten.mode, RenderMode::Partial);
+    assert_eq!(ten.damage, PixelRect { x: 0, y: 82, w: 100, h: 60 });
+    assert_eq!(emitted(&ten, 0), [3, 4, 5, 6, 7]);
+}
+
+/// Every case the planner cannot narrow stays `Full` and emits every row: the first frame (a
+/// cleared key), the surface size, metrics, padding, the scrollbar mode, every full-class
+/// window field, an overlay before or after, a pane-count change and a pane projection change.
+#[test]
+fn every_case_the_planner_cannot_narrow_stays_full() {
+    let base = ten_row_facts(0.0);
+    let first = FramePlan::build(base.clone(), [ten_row_pane()], None);
+    let edited = || {
+        let mut edited = seeded(&base, &first, ten_row_pane());
+        edited.revision = 2;
+        edited.dirty_rows = vec![5];
+        edited
+    };
+    let assert_full = |plan: FramePlan, label: &str| {
+        assert_eq!(plan.mode, RenderMode::Full, "{label}");
+        assert!(plan.panes.iter().all(|pane| pane.emit_rows.iter().all(|emit| *emit)), "{label}");
+    };
+    assert_eq!(
+        FramePlan::build(base.clone(), [edited()], Some(&first.key)).mode,
+        RenderMode::Partial,
+        "the unchanged-facts edit narrows, so each case below is what forces Full"
+    );
+    assert_full(FramePlan::build(base.clone(), [edited()], None), "first frame or cleared key");
+
+    let changes: [(&str, fn(&mut FrameFacts)); 22] = [
+        ("width", |changed| changed.window.width += 1),
+        ("height", |changed| changed.window.height += 1),
+        ("cell width", |changed| changed.cell_w = 11.0),
+        ("cell height", |changed| changed.cell_h = 19.0),
+        ("ink pad", |changed| changed.vertical_ink_pad = 1.0),
+        ("padding", |changed| changed.padding = [3.0; 4]),
+        ("scrollbar mode", |changed| changed.scrollbar_mode = ScrollbarMode::Always),
+        ("quick-select hints", |changed| changed.window.quick_select_hint_count = 1),
+        ("active tab", |changed| changed.window.tab = 1),
+        ("search", |changed| changed.window.search_hash = 1),
+        ("palette", |changed| changed.window.palette_hash = 1),
+        ("ime", |changed| changed.window.ime_hash = 1),
+        ("notification", |changed| changed.window.notification_hash = 1),
+        ("window viewport", |changed| changed.window.viewport_top_abs = Some(0)),
+        ("focus flash", |changed| changed.window.pane_focus_flash_bucket = 1),
+        ("broadcast", |changed| changed.window.broadcast_participants_hash = 1),
+        ("inline media", |changed| changed.window.inline_media_hash = 1),
+        ("subpixel", |changed| changed.window.subpixel_aa = SubpixelAaMode::Rgb),
+        ("background", |changed| changed.window.background = [1, 0, 0, 0]),
+        ("style", |changed| changed.window.style_rev = 1),
+        ("renderer", |changed| changed.window.renderer_hash = 1),
+        ("overlay after", |changed| changed.window.overlay_active = true),
+    ];
+    for (label, change) in changes {
+        let mut changed = base.clone();
+        change(&mut changed);
+        assert_full(FramePlan::build(changed, [edited()], Some(&first.key)), label);
+    }
+
+    let overlay = FrameFacts {
+        window: WindowIdentity { overlay_active: true, ..base.window.clone() },
+        ..base.clone()
+    };
+    let shown = FramePlan::build(overlay, [ten_row_pane()], None);
+    assert_full(FramePlan::build(base.clone(), [edited()], Some(&shown.key)), "overlay before");
+
+    let other = PaneMetadata {
+        rect: PixelRect { x: 100, y: 0, w: 100, h: 204 },
+        is_active: false,
+        ..ten_row_pane()
+    };
+    let other = PaneMetadata { id: 9, ..other };
+    assert_full(FramePlan::build(base.clone(), [edited(), other], Some(&first.key)), "pane count");
+    let scrolled = PaneMetadata { viewport_top_abs: Some(10), ..edited() };
+    assert_full(FramePlan::build(base.clone(), [scrolled], Some(&first.key)), "projection");
+    let moved = PaneMetadata { rect: PixelRect { w: 90, ..ten_row_pane().rect }, ..edited() };
+    assert_full(FramePlan::build(base, [moved], Some(&first.key)), "pane rectangle");
+}
+
+/// The degraded path is never `Partial`: every input that narrows on the hardware path plans a
+/// `Full` frame with surface damage that emits every row.
+#[test]
+fn degraded_plans_are_never_partial() {
+    for (label, hardware, degraded) in [
+        ("one-row edit", ten_row_edit(false), ten_row_edit(true)),
+        ("neighbour overhang", neighbour_edit(false), neighbour_edit(true)),
+        ("cursor reach", cursor_reach_edit(false), cursor_reach_edit(true)),
+    ] {
+        assert_eq!(hardware.mode, RenderMode::Partial, "{label} narrows on hardware");
+        assert_eq!(degraded.mode, RenderMode::Full, "{label}");
+        assert_eq!(degraded.damage, degraded.surface, "{label}");
+        assert!(degraded.panes.iter().all(|pane| pane.emit_rows.iter().all(|emit| *emit)));
+    }
+}
+
+/// A presented plan acknowledges per pane: `Full` every row, `Noop` nothing, and `Partial` the
+/// dirty live rows whose slot it emitted. A dirty slot whose padded strip lies wholly below the
+/// surface is still emitted and acknowledged; a dirty live row below a scrolled view has no slot
+/// and keeps its bit.
+#[test]
+fn partial_plans_acknowledge_exactly_the_emitted_dirty_live_rows() {
+    let ten = ten_row_edit(false);
+    assert_eq!(ten.acknowledged_rows(0, 7, 2), Some(rows_ack([5])));
+    assert_eq!(ten.acknowledged_rows(0, 7, 1), None, "another revision");
+    assert_eq!(ten.acknowledged_rows(0, 9, 2), None, "another pane");
+    assert_eq!(ten.acknowledged_rows(1, 7, 2), None, "another index");
+    let first = FramePlan::build(ten_row_facts(0.0), [ten_row_pane()], None);
+    assert_eq!(first.acknowledged_rows(0, 7, 1), Some(sonicterm_render_model::AckRows::All));
+    let unchanged = FramePlan::build(ten_row_facts(0.0), [ten_row_pane()], Some(&first.key));
+    assert_eq!(unchanged.acknowledged_rows(0, 7, 1), None);
+
+    // A 10-row pane on a 160 px surface: slots 8 and 9 have no pixels.
+    let short = FrameFacts { tab_bar_top: None, ..facts(false) };
+    let clipped = seeded_edit(&short, ten_row_pane(), &[2, 8]);
+    assert_eq!(clipped.mode, RenderMode::Partial);
+    assert_eq!(clipped.damage, PixelRect { x: 0, y: 42, w: 100, h: 20 });
+    assert_eq!(emitted(&clipped, 0), [2, 8]);
+    assert_eq!(clipped.acknowledged_rows(0, 7, 2), Some(rows_ack([2, 8])));
+
+    // Scrolled back three rows: live rows 0, 5 and 9 are slots 3, 8 and 12, and slot 12 is below
+    // the 10-row view.
+    let scrolled =
+        PaneMetadata { scrollback_len: 100, viewport_top_abs: Some(97), ..ten_row_pane() };
+    let offscreen = seeded_edit(&short, scrolled, &[0, 5, 9]);
+    assert_eq!(offscreen.panes[0].dirty_slots, [3, 8]);
+    assert_eq!(offscreen.mode, RenderMode::Partial);
+    assert_eq!(offscreen.acknowledged_rows(0, 7, 2), Some(rows_ack([0, 5])));
+}
+
+/// Facts for the 16-row scrolled-view fixtures: room for two 324 px panes, no tab bar.
+fn sixteen_row_facts() -> FrameFacts {
+    FrameFacts {
+        window: WindowIdentity { width: 240, height: 400, ..Default::default() },
+        tab_bar_top: None,
+        ..facts(false)
+    }
+}
+
+/// A 16-row pane with 100 history rows, at `x`, viewing from `view_top`.
+fn sixteen_row_pane(id: u64, x: i32, view_top: Option<u64>) -> PaneMetadata {
+    PaneMetadata {
+        rect: PixelRect { x, y: 0, w: 100, h: 324 },
+        rows: 16,
+        scrollback_len: 100,
+        viewport_top_abs: view_top,
+        is_active: id == 7,
+        ..pane(id, 1)
+    }
+}
+
+/// Plan an edit of `dirty` on each `(pane, dirty)` input against a presented first frame.
+fn seeded_edits(inputs: Vec<(PaneMetadata, Vec<usize>)>) -> FramePlan {
+    let frame_facts = sixteen_row_facts();
+    let first =
+        FramePlan::build(frame_facts.clone(), inputs.iter().map(|(input, _)| input.clone()), None);
+    let edited: Vec<_> = inputs
+        .into_iter()
+        .map(|(input, dirty)| {
+            let mut edited = seeded(&frame_facts, &first, input);
+            edited.revision += 1;
+            edited.dirty_rows = dirty;
+            edited
+        })
+        .collect();
+    FramePlan::build(frame_facts, edited, Some(&first.key))
+}
+
+/// Scrolled views acknowledge live rows through their slots. With 16 rows and 100 history rows,
+/// view top 90 puts live row 15 at slot 25, offscreen: alone it is a `Noop` with no receipt; in a
+/// frame another pane's edit makes `Partial`, the scrolled pane emits only rows meeting the damage
+/// and acknowledges `Rows(empty)`. View top 97 puts live rows 5 and 15 at slots 8 and 18: only
+/// live row 5 is acknowledged, and a live pane in the same frame acknowledges its own slot.
+#[test]
+fn scrolled_views_acknowledge_live_rows_through_their_slots() {
+    assert_eq!(live_row_to_slot(100, 90, 16, 15), None, "slot 25 is past a 16-row view");
+    assert_eq!(live_row_to_slot(100, 97, 16, 5), Some(8));
+    assert_eq!(live_row_to_slot(100, 97, 16, 15), None, "slot 18 is past a 16-row view");
+
+    let alone = seeded_edits(vec![(sixteen_row_pane(7, 0, Some(90)), vec![15])]);
+    assert_eq!((alone.panes[0].row_count, alone.panes[0].scrollback_len), (16, 100));
+    assert_eq!(alone.mode, RenderMode::Noop);
+    assert_eq!(alone.acknowledged_rows(0, 7, 2), None);
+    assert!(alone.panes[0].emit_rows.iter().all(|emit| !*emit));
+
+    let beside = seeded_edits(vec![
+        (sixteen_row_pane(7, 0, Some(90)), vec![15]),
+        (sixteen_row_pane(9, 100, None), vec![2]),
+    ]);
+    assert_eq!(beside.mode, RenderMode::Partial);
+    assert!(emitted(&beside, 0).is_empty(), "the scrolled pane's rows only touch the damage");
+    assert_eq!(beside.acknowledged_rows(0, 7, 2), Some(rows_ack([])));
+    assert_eq!(beside.acknowledged_rows(1, 9, 2), Some(rows_ack([2])));
+
+    let near = seeded_edits(vec![
+        (sixteen_row_pane(7, 0, Some(97)), vec![5, 15]),
+        (sixteen_row_pane(9, 100, None), vec![2]),
+    ]);
+    assert_eq!(near.mode, RenderMode::Partial);
+    assert_eq!(near.panes[0].dirty_slots, [8]);
+    assert!(near.panes[0].emit_rows[8]);
+    assert_eq!(near.acknowledged_rows(0, 7, 2), Some(rows_ack([5])));
+    assert_eq!(near.acknowledged_rows(1, 9, 2), Some(rows_ack([2])));
+}
+
+/// The two dirt consumers stay split: emission and receipts use slots (live row 5 is slot 8) and
+/// live rows, while invalidation drops absolute row `scrollback_len + live_row` (105). Dirt only
+/// below the view is a `Noop` that issues no receipt.
+#[test]
+fn emission_receipts_and_invalidation_read_their_own_dirt() {
+    let plan = seeded_edits(vec![(sixteen_row_pane(7, 0, Some(97)), vec![5])]);
+    assert_eq!(plan.mode, RenderMode::Partial);
+    assert!(plan.panes[0].emit_rows[8]);
+    assert_eq!(plan.acknowledged_rows(0, 7, 2), Some(rows_ack([5])));
+    let pane = &plan.panes[0];
+    let invalidated: Vec<u64> =
+        pane.dirty_live_rows.iter().map(|row| pane.scrollback_len + *row as u64).collect();
+    assert_eq!(invalidated, [105]);
+
+    let offscreen = seeded_edits(vec![(sixteen_row_pane(7, 0, Some(97)), vec![15])]);
+    assert_eq!(offscreen.mode, RenderMode::Noop);
+    assert_eq!(offscreen.acknowledged_rows(0, 7, 2), None);
+}
+
+/// Neighbouring and vertical overhang: an unchanged row of another pane whose record reaches the
+/// damage is emitted though its strip only touches it, and an unchanged row whose tall record
+/// reaches an edit three rows below is emitted while the rows between are not.
+#[test]
+fn rows_whose_records_overhang_the_damage_are_emitted() {
+    let neighbour = neighbour_edit(false);
+    assert_eq!(neighbour.mode, RenderMode::Partial);
+    assert_eq!(neighbour.damage, PixelRect { x: 100, y: 22, w: 100, h: 20 });
+    assert_eq!(emitted(&neighbour, 0), [1], "pane 7 row 1 overhangs to x=108");
+    assert_eq!(emitted(&neighbour, 1), [1]);
+
+    let frame_facts = ten_row_facts(0.0);
+    let first = FramePlan::build(frame_facts.clone(), [ten_row_pane()], None);
+    let mut edited = seeded_with(&frame_facts, &first, ten_row_pane(), |slot, strip| {
+        Some(if slot == 3 { PixelRect { x: 22, y: 62, w: 10, h: 80 } } else { strip })
+    });
+    edited.revision = 2;
+    edited.dirty_rows = vec![6];
+    let plan = FramePlan::build(frame_facts, [edited], Some(&first.key));
+    assert_eq!(plan.mode, RenderMode::Partial);
+    assert_eq!(plan.damage, PixelRect { x: 0, y: 122, w: 100, h: 20 });
+    assert_eq!(emitted(&plan, 0), [3, 6]);
+}
+
+/// Stale records are never trusted. A dirty slot is emitted whatever its record says, even an
+/// empty or missing one, and even when its strip lies below a 100 px surface; a non-emitted slot
+/// whose record is missing (its content stamp or absolute row changed) forces `Full`.
+#[test]
+fn a_dirty_slot_is_emitted_whatever_its_record_and_a_stale_clean_slot_forces_full() {
+    let frame_facts = FrameFacts {
+        window: WindowIdentity { width: 240, height: 100, ..Default::default() },
+        vertical_ink_pad: 12.0,
+        tab_bar_top: None,
+        ..facts(false)
+    };
+    let first = FramePlan::build(frame_facts.clone(), [ten_row_pane()], None);
+    let edit = |record: fn(u16, PixelRect) -> Option<PixelRect>| {
+        let mut edited = seeded_with(&frame_facts, &first, ten_row_pane(), record);
+        edited.revision = 2;
+        edited.dirty_rows = vec![4, 6];
+        FramePlan::build(frame_facts.clone(), [edited], Some(&first.key))
+    };
+    let plan = edit(|_, strip| Some(strip));
+    assert_eq!(plan.damage, PixelRect { x: 0, y: 70, w: 100, h: 30 });
+    assert_eq!(plan.mode, RenderMode::Partial);
+    assert!(plan.panes[0].emit_rows[6], "slot 6 is below the surface with an empty record");
+    let missing_dirty = edit(|slot, strip| (slot != 4).then_some(strip));
+    assert_eq!(missing_dirty.mode, RenderMode::Partial, "a dirty slot is emitted anyway");
+    assert!(missing_dirty.panes[0].emit_rows[4]);
+    let stale_clean = edit(|slot, strip| (slot != 0).then_some(strip));
+    assert_eq!(stale_clean.mode, RenderMode::Full);
+}
+
+/// A presented frame keeps records only for panes with pixels on the surface, each up to its
+/// row count; a pane moved off the surface keeps none, since its return is a full-class change.
+#[test]
+fn drawn_row_counts_name_only_panes_on_the_surface() {
+    let off = PaneMetadata {
+        rect: PixelRect { x: 300, y: 0, w: 100, h: 84 },
+        is_active: false,
+        ..live_pane(9, 1)
+    };
+    let plan = FramePlan::build(facts(false), [live_pane(7, 1), off], None);
+    assert_eq!(plan.drawn_row_counts(), [(7, 4)]);
+}
+
+/// Unseeded inputs, as before any frame presented, carry no records and plan `Full`.
+#[test]
+fn a_pane_without_records_plans_full() {
+    let frame_facts = ten_row_facts(0.0);
+    let first = FramePlan::build(frame_facts.clone(), [ten_row_pane()], None);
+    let mut edited = ten_row_pane();
+    edited.revision = 2;
+    edited.dirty_rows = vec![5];
+    let plan = FramePlan::build(frame_facts, [edited], Some(&first.key));
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert!(plan.panes[0].emit_rows.iter().all(|emit| *emit));
+}
+
+/// The drawn cursor cell and the previous recolor bounds reach rows the damage does not: an
+/// unchanged row whose tall record meets the unmoved block cursor is emitted though its strip
+/// misses the damage, and so is the row whose record meets the last frame's recolor bounds.
+#[test]
+fn rows_whose_records_meet_the_cursor_cell_or_previous_recolor_are_emitted() {
+    let plan = cursor_reach_edit(false);
+    assert_eq!(plan.mode, RenderMode::Partial);
+    assert_eq!(plan.damage, PixelRect { x: 0, y: 302, w: 100, h: 20 });
+    assert_eq!(emitted(&plan, 0), [3, 5, 12, 15]);
+}
+
+/// After assembly the damage can still grow by the recolor and tab-title ink. A partial plan
+/// whose final damage reaches a non-emitted row's record must be reassembled `Full`, which emits
+/// every row and acknowledges every row; damage that stays on emitted rows needs no fallback.
+#[test]
+fn widened_damage_reaching_a_non_emitted_record_falls_back_to_full() {
+    let plan = || seeded_edit(&ten_row_facts(0.0), ten_row_pane(), &[5]);
+    assert_eq!(emitted(&plan(), 0), [5]);
+
+    let mut on_emitted = plan();
+    on_emitted.widen_for_recolor(
+        RecolorRecord::default(),
+        recolored(PixelRect { x: 22, y: 105, w: 10, h: 10 }, 1),
+    );
+    assert!(!on_emitted.partial_reaches_unemitted_ink());
+
+    let mut recolor = plan();
+    recolor.widen_for_recolor(
+        RecolorRecord::default(),
+        recolored(PixelRect { x: 22, y: 50, w: 10, h: 10 }, 1),
+    );
+    assert!(recolor.damage.y <= 50, "the recolor widens a partial plan's damage");
+    assert!(recolor.partial_reaches_unemitted_ink());
+    // Converting a partial plan counts the full frame it becomes; the fallback is counted by the
+    // assembly orchestration, and a second call converts nothing.
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        recolor.force_full();
+        recolor.force_full();
+    }
+    let stats = sink.snapshot();
+    assert_eq!((stats.partial_fallbacks, stats.full_frames, stats.partial_frames), (0, 1, 0));
+    assert_eq!(recolor.mode, RenderMode::Full);
+    assert!(recolor.panes[0].emit_rows.iter().all(|emit| *emit));
+    assert_eq!(recolor.acknowledged_rows(0, 7, 2), Some(sonicterm_render_model::AckRows::All));
+    assert!(!recolor.partial_reaches_unemitted_ink());
+
+    let mut tab_ink = plan();
+    tab_ink.widen_for_tab_ink(
+        RecolorBounds::Empty,
+        RecolorBounds::Rect(PixelRect { x: 0, y: 10, w: 10, h: 10 }),
+    );
+    assert!(tab_ink.partial_reaches_unemitted_ink());
 }

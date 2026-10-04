@@ -201,10 +201,19 @@ correctness, not only speed.
   any key change while an overlay is active in the old or new key, the degraded
   path and the first frame damage the whole surface; a class change on an
   alternate-screen pane damages that pane.
-- Narrow damage relies on `Full` assembly under the scissor: every batch is
-  assembled and drawn in order and the scissor limits writes, so all ink meeting
-  the damage is redrawn. Ink that can exceed a row's padded strip is damaged by
-  its recorded bounds instead: the glyphs a cursor recolors (previous and current
+- Narrow damage relies on assembling every primitive that meets it, drawn in
+  order under the scissor. `Noop` (an unchanged key, revision-only dirt all
+  scrolled out of view, or a changed key with empty damage and no dirty live row)
+  assembles nothing; any other frame is `Partial` or `Full`. `Full` assembles
+  every row; `Partial` assembles every dirty slot, every row whose padded strip
+  meets the damage, every row whose valid ink record meets the damage, the drawn
+  cursor cell or the last recolor bounds, and every non-row primitive whole. A
+  row it does not emit keeps its pixels and its record. Ink records are committed only by a presented frame and trusted only for
+  the absolute row and content stamp they were drawn from; a clean visible row
+  without one makes the frame `Full`, and a final damage that reaches a skipped
+  row's record reassembles the frame `Full` in the same call. This supersedes the
+  earlier rule that narrow damage needs `Full` assembly. Ink that can exceed a
+  row's padded strip is also damaged by its recorded bounds: the glyphs a cursor recolors (previous and current
   record) and the tab-title glyphs (last presented and current). Both are kept
   only by a presented frame, and bounds that are not finite fall back to the
   active pane or the surface.
@@ -662,7 +671,7 @@ happens at the window's next collection.
 and validate it by the stored row hash; glyph entries also by atlas content
 identity. Their capacities are about four times the sum of visible rows across
 all panes. A capacity or geometry-size change clears the affected cache. Every
-Full frame drops absolute row `scrollback_len + r` for each dirty live row `r`
+assembled frame, `Full` or `Partial`, drops absolute row `scrollback_len + r` for each dirty live row `r`
 of each pane on the surface, on screen or not, from both caches; each drop is one
 keyed removal of that entry. At capacity, a new glyph row first evicts rows
 outside the viewports the frame named through `begin_frame`, and clears the

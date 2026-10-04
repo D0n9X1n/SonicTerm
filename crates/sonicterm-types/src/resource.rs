@@ -86,6 +86,8 @@ pub enum ResourceClass {
     RowGlyphCache,
     /// Per-row cached background and decoration quads.
     RowQuadCache,
+    /// Per-row ink bounds a renderer presented, which decide the rows a partial frame emits.
+    RowInk,
     /// VT escape and media capture storage.
     ParserCapture,
     /// Transient inline-media decoding storage.
@@ -235,6 +237,11 @@ impl ResourceClass {
             }
             Self::RowQuadCache => {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 160 * 1024 * 1024 }
+            }
+            // One record per visible row: the committed table at twice the maximum visible-cell
+            // seam (bucket-rounded, with control bytes) plus one frame's staging at the seam.
+            Self::RowInk => {
+                ClassCoverage::UnchargedRetention { per_owner_bytes: 144 * 1024 * 1024 }
             }
             Self::SoftwareFrame => {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 160 * 1024 * 1024 }
@@ -389,9 +396,11 @@ impl ResourceClass {
             // for them for the same reason it carries none for the classes
             // below: not because the charge lands elsewhere, but because there
             // is no charge.
-            Self::GlyphAtlas | Self::RowGlyphCache | Self::RowQuadCache | Self::SoftwareFrame => {
-                PaneSeamTerm::NotChargedInProduction
-            }
+            Self::GlyphAtlas
+            | Self::RowGlyphCache
+            | Self::RowQuadCache
+            | Self::RowInk
+            | Self::SoftwareFrame => PaneSeamTerm::NotChargedInProduction,
 
             // Charged to the pane that owns the queue, so it appears in that
             // pane's total and the backstop above it must carry its cap.

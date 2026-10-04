@@ -463,6 +463,7 @@ fn each_work_counter_moves_as_defined_inside_a_counting_scope() {
         let _counting = CollectGuard::enter(Some(&sink));
         assert!(assembly_clock().is_some());
         note_assembly(assembly_clock());
+        finish_assembly();
     }
     let after = sink.snapshot();
     assert_eq!(after.assembly_buckets.iter().sum::<u64>(), 3, "one sample per assembled frame");
@@ -1161,16 +1162,17 @@ fn atlas_insertions(sources: &[(String, String)]) -> Vec<(String, bool)> {
 
 #[test]
 fn every_glyph_atlas_insertion_counts_its_rasterizer() {
-    // An insertion that passes the bare rasterizer goes uncounted. The six sites are the four
-    // terminal paths in core.rs, the shared chrome path (tabs, palette, search, preedit) and the
-    // working-set helper's ASCII pass.
+    // An insertion that passes the bare rasterizer goes uncounted. The seven sites are the four
+    // terminal paths in core.rs, the shared chrome path (tabs, palette, search, preedit), the
+    // working-set helper's ASCII pass and the test glyph seams' solid tile in cursor.rs.
     let mut sources = Vec::new();
     crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
     let insertions = atlas_insertions(&sources);
     let bare: Vec<_> = insertions.iter().filter(|(_, wrapped)| !wrapped).collect();
     assert!(bare.is_empty(), "uncounted glyph-atlas insertions: {bare:#?}");
-    assert_eq!(insertions.len(), 6, "the insertion sites changed; review them: {insertions:#?}");
+    assert_eq!(insertions.len(), 7, "the insertion sites changed; review them: {insertions:#?}");
     assert!(insertions.iter().any(|(site, _)| site.starts_with("chrome_text.rs:")));
+    assert!(insertions.iter().any(|(site, _)| site.starts_with("cursor.rs:")));
 }
 
 #[test]
@@ -1271,4 +1273,35 @@ fn damage_waste_is_summed_only_inside_a_counting_scope() {
     total.add(&stats);
     total.add(&stats);
     assert_eq!(total.damage_waste_permille_sum, 1370);
+}
+
+/// The partial-assembly counters record only inside a counting scope: a presented frame counts as
+/// partial only when its mode was `Partial`, each fallback counts once, and the hashed cells are
+/// summed lazily, so with the gate off the cell count is never computed. `add` folds all three.
+#[test]
+fn partial_counters_record_only_inside_a_counting_scope() {
+    note_partial_frame(true);
+    note_partial_fallback();
+    note_row_cells_hashed(|| panic!("cells counted with no counting scope"));
+    let sink = FrameStatsSink::default();
+    {
+        let _collect = CollectGuard::enter(Some(&sink));
+        note_partial_frame(true);
+        note_partial_frame(false);
+        note_partial_fallback();
+        note_row_cells_hashed(|| 80);
+        note_row_cells_hashed(|| 40);
+    }
+    let stats = sink.snapshot();
+    assert_eq!(
+        (stats.partial_frames, stats.partial_fallbacks, stats.row_cells_hashed),
+        (1, 1, 120)
+    );
+    let mut total = FrameStats::ZERO;
+    total.add(&stats);
+    total.add(&stats);
+    assert_eq!(
+        (total.partial_frames, total.partial_fallbacks, total.row_cells_hashed),
+        (2, 2, 240)
+    );
 }

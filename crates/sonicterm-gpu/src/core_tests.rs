@@ -90,6 +90,7 @@ fn revision_plan(id: u64, revision: u64) -> FramePlan {
             is_alt: false,
             scrollbar_alpha: 0.0,
             dirty_rows: vec![0, 1],
+            row_ink: Vec::new(),
         }],
         None,
     )
@@ -160,8 +161,8 @@ fn production_frame_decisions_use_one_plan_and_preserve_retry_boundaries() {
     // The frame finishes once, and only after its presenter reports `Presented`.
     let handoff = render.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
     let guard = render[handoff..].find("PresentOutcome::Presented)").unwrap() + handoff;
-    let finish = render.find("self.finish_successful_frame(plan,").unwrap();
-    assert_eq!(render.matches("self.finish_successful_frame(plan,").count(), 1);
+    let finish = render.find("self.finish_successful_frame(").unwrap();
+    assert_eq!(render.matches("self.finish_successful_frame(").count(), 1);
     assert!(handoff < guard && guard < finish);
     // Each presenter in `present.rs` reports `Presented` only after its success
     // boundary, never acknowledges a plan itself, and every surface exit precedes
@@ -1025,7 +1026,7 @@ fn atlas_frame_detector_production_capture_and_retry_precede_presentation() {
         .unwrap();
     let retry = source[guard..].find("return Ok(Assembled::AtlasRetry {").unwrap() + guard;
     let present = source.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
-    let acknowledge = source.find("self.finish_successful_frame(plan,").unwrap();
+    let acknowledge = source.find("self.finish_successful_frame(").unwrap();
     assert!(start < guard && guard < retry && retry < present && present < acknowledge);
     assert!(source.contains("let atlas_evictions_at_frame_start = self.glyph_atlas.evictions();"));
     let lifecycle = include_str!("atlas_lifecycle.rs");
@@ -3960,6 +3961,7 @@ fn every_reported_part_is_classified_exactly_once() {
         row_quad_cache: amount(1024 * 1024, 80),
         software_frame: amount(4 * 1024 * 1024, 1),
         vertex_scratch: amount(3 * 1024 * 1024, 1),
+        row_ink: amount(64 * 1024, 40),
     };
 
     let classes = retention.seam_classes();
@@ -3977,6 +3979,21 @@ fn every_reported_part_is_classified_exactly_once() {
         classes.len(),
         "no class may appear twice, or bytes are counted twice"
     );
+}
+
+/// The per-row ink records are one reported part, classified once under `RowInk` and inside
+/// `total()`, so the bytes a partial frame's records hold are visible and never double-counted.
+#[test]
+fn row_ink_is_reported_once_under_its_own_class() {
+    let retention = RendererRetention { row_ink: amount(4096, 40), ..RendererRetention::default() };
+    let classes = retention.seam_classes();
+    let row_ink: Vec<_> =
+        classes.iter().filter(|(class, _)| *class == ResourceClass::RowInk).collect();
+    assert_eq!(row_ink.len(), 1);
+    assert_eq!(row_ink[0].1, amount(4096, 40));
+    assert_eq!(retention.total(), amount(4096, 40));
+    assert!(matches!(ResourceClass::RowInk.coverage(), ClassCoverage::UnchargedRetention { .. }));
+    assert_eq!(ResourceClass::RowInk.pane_seam_term(), PaneSeamTerm::NotChargedInProduction);
 }
 
 /// Pane cache eviction is one glyph-then-quad renderer operation.
@@ -4328,7 +4345,10 @@ fn row_spans_viewports_and_title_order_follow_the_assembly() {
         .find("forpvinpane_views.iter().filter(|pane|pane.planned.full_clip.is_some()){")
         .expect("per-pane loop");
     assert!(resize < begin && begin < pane_loop, "viewports are named before any insert");
-    assert_eq!(core.matches("row_spans.push(RowGlyphSpan::new(").count(), 2);
+    // Two sites record a row's own glyphs; the third is the test row-glyph seam's own span.
+    assert_eq!(core.matches("row_spans.push(RowGlyphSpan::new(").count(), 3);
+    let seam = core.find("fnpush_injected_row_glyph(").expect("row glyph seam");
+    assert!(core[seam..].find("row_spans.push(RowGlyphSpan::new(").is_some());
     let hit = core.find("glyph_instances.extend_from_slice(&cached.glyphs);").expect("hit replay");
     let hit_span = hit + core[hit..].find("row_spans.push(").expect("hit span");
     let hit_return = hit + core[hit..].find("returntrue;").expect("hit return");
@@ -4529,6 +4549,7 @@ fn scrolled_back_cache_plan(dirty_live_rows: Vec<usize>) -> FramePlan {
         is_alt: false,
         scrollbar_alpha: 0.0,
         dirty_rows,
+        row_ink: Vec::new(),
     };
     let baseline = FramePlan::build(frame_facts(), [metadata(1, Vec::new())], None);
     FramePlan::build(frame_facts(), [metadata(2, dirty_live_rows)], Some(&baseline.key))
@@ -5691,11 +5712,9 @@ fn damage_classes_are_wired_through_the_renderer() {
     let present = function_body(&source, "    fn present_layers(");
     let guard = present.find("return Ok(FrameOutcome::without_receipts(outcome));").unwrap();
     let store = present.find("self.last_recolor = recolor;").expect("the record is stored");
-    let finish = present.find("self.finish_successful_frame(plan,").unwrap();
+    let finish = present.find("self.finish_successful_frame(").unwrap();
     assert!(guard < store && store < finish);
     assert_eq!(source.matches("self.last_recolor = ").count(), 1, "one writer");
-    assert!(compact
-        .contains("letemit_full_rows=crate::frame_plan::emits_every_visible_row(render_mode);"));
     assert!(function_body(&source, "pub fn emit_pane_scrollbar(")
         .contains("crate::frame_plan::pane_scrollbar_geometry("));
 }
@@ -5745,7 +5764,8 @@ fn the_injected_glyph_precedes_every_cursor_recolor_and_damage_is_read_beside_th
     assert!(scrollbar < inject && inject < selection && inject < first_recolor);
     let finish = source.split_once("    fn finish_successful_frame(").expect("finish exists").1;
     let readout = finish.find("self.presented_damage.record(").expect("damage readout");
-    let key = finish.find("self.last_frame_key = Some(plan.key);").expect("key recorded");
+    // The key is kept by the settlement seam, which finishing calls right after the readout.
+    let key = finish.find("settle_retained_frame(").expect("key settled");
     assert!(readout < key, "the readout is written beside the frame key");
 }
 
@@ -5835,4 +5855,349 @@ fn try_resize_outcome_returns_unchanged_before_any_reconfiguration() {
     let key = body.find("self.last_frame_key = None;").expect("the retained key is cleared");
     assert!(unchanged < configure && unchanged < key, "{body}");
     assert!(body.trim_end().ends_with("ResizeOutcome::Changed"), "{body}");
+}
+
+/// The body of the method whose signature starts at `signature`, through its closing brace at
+/// method indentation.
+fn method_body<'source>(source: &'source str, signature: &str) -> &'source str {
+    let start = source.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
+    let end = source[start..].find("\n    }\n").map_or(source.len(), |offset| start + offset);
+    &source[start..end]
+}
+
+/// Row emission reads the plan's per-slot bitset: no dirty-row scan and no whole-frame flag is
+/// left, and both the glyph and the background row loop test `emit_rows[` right after they
+/// start. Checked on an LF and a CRLF checkout, as Windows CI checks it out.
+#[test]
+fn both_row_loops_emit_by_the_planned_bitset() {
+    for source in
+        [include_str!("core.rs").to_owned(), include_str!("core.rs").replace('\n', "\r\n")]
+    {
+        let source = source.replace("\r\n", "\n");
+        assert!(!source.contains("dirty_rows.contains("), "no dirty-row scan decides emission");
+        assert!(!source.contains("dirty_slots.contains("), "no dirty-slot scan decides emission");
+        assert!(!source.contains("emit_full_rows"), "no whole-frame emission flag");
+        for marker in ["for (r, _) in pv.planned.rows() {", "for (r, row_abs) in pv.planned.rows()"]
+        {
+            let start = source.find(marker).unwrap_or_else(|| panic!("{marker}"));
+            let head: String = source[start..].lines().take(3).collect();
+            assert!(head.contains("pv.planned.emit_rows["), "{marker} tests emit_rows: {head}");
+        }
+    }
+}
+
+/// Ink records describe presented pixels only. Assembly opens a fresh stage before the row loops;
+/// the one commit, the one partial-frame count and the key are in the settlement seam's
+/// `Presented` arm; a presented frame reaches it through `finish_successful_frame`, after the
+/// `Presented` guard, and every other presenter outcome and the atlas retry settle through the
+/// same seam. What each outcome settles is asserted by behaviour in
+/// `every_frame_outcome_settles_records_receipts_counts_and_the_key`.
+#[test]
+fn ink_records_and_partial_frames_commit_only_on_a_presented_frame() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    assert_eq!(source.matches("row_ink.commit(").count(), 1, "one commit site");
+    assert_eq!(source.matches("note_partial_frame(").count(), 1, "one partial-frame count");
+    let settle = source.split_once("fn settle_retained_frame(").expect("settlement seam").1;
+    let presented = settle.find("(PresentOutcome::Presented, Some(plan)) => {").expect("arm");
+    let commit = settle.find("row_ink.commit(").expect("commit");
+    let key = settle.find("*last_frame_key = Some(plan.key);").expect("key");
+    assert!(presented < commit && commit < key);
+    assert_eq!(
+        source.matches("settle_retained_frame(\n").count(),
+        4,
+        "seam, finish, unpresented, retry"
+    );
+    let finish = method_body(&source, "    fn finish_successful_frame(");
+    assert!(finish.contains("&PresentOutcome::Presented,"), "finishing settles as presented");
+    let present = method_body(&source, "    fn present_layers(");
+    let guard = present.find("return Ok(FrameOutcome::without_receipts(outcome));").unwrap();
+    let unpresented = present.find("settle_retained_frame(").unwrap();
+    let finish_call = present.find("self.finish_successful_frame(").unwrap();
+    assert!(unpresented < guard && guard < finish_call, "only a presented frame finishes");
+    let assemble = method_body(&source, "    fn assemble_frame(");
+    let begin = assemble.find("self.row_ink.begin_frame();").expect("a fresh stage per assembly");
+    let glyph_loop = assemble.find("for (r, _) in pv.planned.rows() {").unwrap();
+    assert!(begin < glyph_loop);
+}
+
+/// The post-assembly check runs after both widenings and before the layers carry the damage; a
+/// partial plan whose final damage reaches a non-emitted row is reported back, and
+/// `render_releasing` reassembles that frame `Full` in the same call.
+#[test]
+fn a_partial_plan_reaching_unemitted_ink_is_reassembled_full() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let assemble = method_body(&source, "    fn assemble_frame(");
+    let widen = assemble.find("plan.widen_for_tab_ink(").unwrap();
+    let check = assemble.find("plan.partial_reaches_unemitted_ink()").expect("checked");
+    let layers = assemble.find("Ok(Assembled::Layers(Box::new(AssembledLayers {").unwrap();
+    assert!(widen < check && check < layers);
+    assert!(assemble.contains("return Ok(Assembled::PartialFallback);"));
+    assert!(assemble.contains("plan.force_full();"), "the second pass plans Full");
+    let releasing = method_body(&source, "    pub fn render_releasing(");
+    assert!(releasing.contains("assemble_with_fallback(|force_full|"), "one orchestration");
+    let orchestration = source.split_once("fn assemble_with_fallback(").unwrap().1;
+    assert!(orchestration.contains("Ok(Assembled::PartialFallback) =>"), "the fallback is caught");
+}
+
+/// The GDI presenter composes every batch into the whole frame and never reads damage, so it
+/// must never receive a partial frame; a debug assertion in `present_software_frame` pins it.
+#[test]
+fn the_software_presenter_asserts_it_never_receives_a_partial_frame() {
+    let source = include_str!("present.rs").replace("\r\n", "\n");
+    let body = method_body(&source, "    fn present_software_frame(");
+    assert!(body.contains("debug_assert!(!layers.partial"), "{body}");
+}
+
+/// The seams that fail a frame after its plan keep the frame key when armed, so the failing frame
+/// plans against the last presented key and can be partial; the failure paths clear it themselves.
+/// The submission seam arms the same probe as `GpuFaultKind::FrameValidation`, which clears the key.
+#[test]
+fn partial_failure_seams_keep_the_frame_key_when_armed() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    for signature in
+        ["    pub fn __fail_next_surface_acquire(", "    pub fn __fail_next_frame_submission("]
+    {
+        let body = method_body(&source, signature);
+        assert!(!body.contains("last_frame_key"), "{signature} touches the key");
+        assert!(!body.contains("invalidate_retained_frame"), "{signature} clears the key");
+    }
+    let submission = method_body(&source, "    pub fn __fail_next_frame_submission(");
+    assert!(submission.contains("create_frame_fault_probe(&self.device)"));
+}
+
+/// The row glyph seam joins its row: inside the glyph row loop it is pushed after that row's own
+/// glyphs and before the row's ink is computed, so it is in the row's span and committed record and
+/// is drawn only when that row is emitted.
+#[test]
+fn an_injected_row_glyph_joins_its_rows_span_and_record() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let assemble = method_body(&source, "    fn assemble_frame(");
+    let row_loop = assemble.find("for (r, _) in pv.planned.rows() {").unwrap();
+    let emit = row_loop + assemble[row_loop..].find("emit_row_glyphs(").unwrap();
+    let inject = assemble.find("push_injected_row_glyph(\n").expect("the seam is pushed");
+    let ink = assemble.find("crate::row_ink::emitted_row_ink(").unwrap();
+    assert!(row_loop < emit && emit < inject && inject < ink);
+}
+
+/// Facts for the fallback orchestration tests: a 4-row pane on a 240x160 surface, no tab bar.
+fn fallback_facts() -> FrameFacts {
+    FrameFacts {
+        window: WindowIdentity { width: 240, height: 160, ..Default::default() },
+        cell_w: 10.0,
+        cell_h: 20.0,
+        padding: [2.0; 4],
+        vertical_ink_pad: 0.0,
+        scrollbar_mode: ScrollbarMode::Never,
+        degraded: false,
+        tab_bar_top: None,
+        scale: 1.0,
+        previous_recolor: crate::cursor::RecolorRecord::default(),
+    }
+}
+
+/// The 4-row pane of `fallback_facts` at `revision`, with `dirty_rows` and per-slot `row_ink`.
+fn fallback_pane(
+    revision: u64,
+    dirty_rows: Vec<usize>,
+    row_ink: Vec<Option<PixelRect>>,
+) -> PaneMetadata {
+    PaneMetadata {
+        id: 7,
+        revision,
+        dirty_generation: 0,
+        rect: PixelRect { x: 0, y: 0, w: 100, h: 84 },
+        cols: 8,
+        rows: 4,
+        scrollback_len: 0,
+        viewport_top_abs: None,
+        is_active: true,
+        is_alt: false,
+        scrollbar_alpha: 0.0,
+        dirty_rows,
+        row_ink,
+    }
+}
+
+/// The production two-pass orchestration: a first pass that reports a partial fallback is
+/// assembled again as forced Full. As `assemble_frame` plans them, the first pass reads valid
+/// records and plans `Partial`; the forced pass reads none, so its build already plans `Full`.
+/// The frame counts one fallback and one full frame, and one assembly sample of both passes'
+/// summed time (40 + 30 = 70 us, in the 50-100 bucket).
+#[test]
+fn a_partial_fallback_is_counted_once_with_one_summed_assembly_sample() {
+    let first =
+        FramePlan::build(fallback_facts(), [fallback_pane(1, Vec::new(), Vec::new())], None);
+    let key = first.key.clone();
+    let empty = PixelRect { x: 0, y: 0, w: 0, h: 0 };
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let mut passes = Vec::new();
+    let result = {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        assemble_with_fallback(|force_full| {
+            passes.push(force_full);
+            let records = if force_full { Vec::new() } else { vec![Some(empty); 4] };
+            let mut plan = FramePlan::build(
+                fallback_facts(),
+                [fallback_pane(2, vec![1], records)],
+                Some(&key),
+            );
+            if force_full {
+                plan.force_full();
+            }
+            crate::frame_stats::note_assembly_us(if force_full { 30 } else { 40 });
+            if force_full {
+                assert_eq!(plan.mode, RenderMode::Full);
+                Ok(Assembled::Unchanged { focus_flash: false })
+            } else {
+                // When: the first pass is the partial plan, its final damage reached unemitted ink.
+                assert_eq!(plan.mode, RenderMode::Partial);
+                Ok(Assembled::PartialFallback)
+            }
+        })
+    };
+    assert_eq!(passes, [false, true]);
+    assert!(matches!(result, Ok(Assembled::Unchanged { focus_flash: false })));
+    let stats = sink.snapshot();
+    assert_eq!((stats.partial_fallbacks, stats.full_frames, stats.partial_frames), (1, 1, 0));
+    assert_eq!(stats.assembly_buckets, [0, 0, 1, 0, 0, 0, 0]);
+    assert_eq!(stats.assembly_sum_us, 70);
+}
+
+/// An ordinary frame is one pass: no fallback, and one assembly sample of its own time. A pass
+/// timed outside a counting scope leaves nothing pending for the next counted frame.
+#[test]
+fn an_ordinary_frame_records_one_assembly_sample_and_no_fallback() {
+    // Timed with the gate off and never closed: none of it may reach the next counted frame.
+    crate::frame_stats::note_assembly_us(500);
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let mut passes = Vec::new();
+    let result = {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        assemble_with_fallback(|force_full| {
+            passes.push(force_full);
+            crate::frame_stats::note_assembly_us(40);
+            Ok(Assembled::Unchanged { focus_flash: false })
+        })
+    };
+    assert_eq!(passes, [false]);
+    assert!(matches!(result, Ok(Assembled::Unchanged { .. })));
+    let stats = sink.snapshot();
+    assert_eq!(stats.partial_fallbacks, 0);
+    assert_eq!(stats.assembly_buckets, [0, 1, 0, 0, 0, 0, 0]);
+    assert_eq!(stats.assembly_sum_us, 40);
+}
+
+/// A frame's outcome settles what it leaves retained, through the one production seam. Starting
+/// from committed records and a staged replacement of a partial plan: `Presented` commits the
+/// replacement, counts one partial frame, keeps the plan's key and returns its receipts, and the
+/// next edit plans `Partial` against that key. Timeout, `AtlasRetry` and `RenderingUnavailable`
+/// keep the committed records, discard the staged one, count nothing, return no receipt and clear
+/// the key, so the retry plans a `Full` first frame.
+#[test]
+fn every_frame_outcome_settles_records_receipts_counts_and_the_key() {
+    use crate::device_errors::{DeviceGate, DeviceState};
+    use crate::row_ink::{RowInk, RowInkTable};
+    use sonicterm_render_model::{AckReceipt, AckRows};
+    let strip = |slot: i32| PixelRect { x: 0, y: 2 + 20 * slot, w: 100, h: 20 };
+    let records = || (0..4).map(|slot| Some(strip(slot))).collect::<Vec<_>>();
+    let first =
+        FramePlan::build(fallback_facts(), [fallback_pane(1, Vec::new(), Vec::new())], None);
+    let edit = |key: Option<&FrameKey>, revision| {
+        FramePlan::build(fallback_facts(), [fallback_pane(revision, vec![1], records())], key)
+    };
+    let replacement = PixelRect { x: 0, y: 12, w: 100, h: 40 };
+    let retained = || {
+        let mut table = RowInkTable::default();
+        table.begin_frame();
+        for slot in 0..4u16 {
+            let rect = strip(i32::from(slot));
+            table.stage(7, slot, RowInk { rect, abs_row: u64::from(slot), content_seq: Some(1) });
+        }
+        table.commit(&[(7, 4)]);
+        table.begin_frame();
+        table.stage(7, 1, RowInk { rect: replacement, abs_row: 1, content_seq: Some(2) });
+        table
+    };
+    let receipts =
+        || vec![AckReceipt::of(0, 7, &Grid::new(8, 4), AckRows::Rows([1].into_iter().collect()))];
+    let stopped = || {
+        PresentOutcome::RenderingUnavailable(SuspendedContext {
+            generation: 1,
+            gate: DeviceGate { state: DeviceState::Unusable, destroy_requested: false },
+            reports_stop: true,
+        })
+    };
+    let unpresented: [(&str, fn() -> PresentOutcome); 2] = [
+        ("timeout", || PresentOutcome::SurfaceRetry(SurfaceRetryReason::Timeout)),
+        ("atlas retry", || PresentOutcome::AtlasRetry),
+    ];
+    let mut cases: Vec<(&str, PresentOutcome)> =
+        unpresented.iter().map(|(name, outcome)| (*name, outcome())).collect();
+    cases.push(("rendering unavailable", stopped()));
+    for (name, outcome) in cases {
+        let plan = edit(Some(&first.key), 2);
+        assert_eq!(plan.mode, RenderMode::Partial, "{name}: the failing frame is partial");
+        let mut key = Some(first.key.clone());
+        let mut table = retained();
+        let sink = crate::frame_stats::FrameStatsSink::default();
+        let settled = {
+            let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+            settle_retained_frame(&mut key, &mut table, &outcome, None, receipts())
+        };
+        assert!(settled.is_empty(), "{name}: no receipt");
+        assert_eq!(key, None, "{name}: the key is cleared");
+        assert_eq!(sink.snapshot().partial_frames, 0, "{name}: nothing presented");
+        assert_eq!(table.committed_rect(7, 1), Some(strip(1)), "{name}: records unchanged");
+        table.commit(&[(7, 4)]);
+        assert_eq!(table.committed_rect(7, 1), Some(strip(1)), "{name}: the stage is discarded");
+        let retry = edit(key.as_ref(), 2);
+        assert!(retry.first_frame && retry.mode == RenderMode::Full, "{name}: the retry is Full");
+    }
+
+    let plan = edit(Some(&first.key), 2);
+    let plan_key = plan.key.clone();
+    let mut key = Some(first.key.clone());
+    let mut table = retained();
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let settled = {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        settle_retained_frame(
+            &mut key,
+            &mut table,
+            &PresentOutcome::Presented,
+            Some(plan),
+            receipts(),
+        )
+    };
+    assert_eq!(settled, receipts(), "a presented frame returns its receipts");
+    assert_eq!(key.as_ref(), Some(&plan_key), "the presented plan's key is kept");
+    assert_eq!(sink.snapshot().partial_frames, 1);
+    assert_eq!(table.committed_rect(7, 1), Some(replacement), "the replacement commits");
+    let next = edit(key.as_ref(), 3);
+    assert!(!next.first_frame && next.mode == RenderMode::Partial, "the next edit is partial");
+}
+
+/// The row glyph seam draws whatever was emitted before it: in a partial frame its owner row can
+/// be a blank row emitted first, with no glyph in the frame yet, and the seam must still append
+/// one glyph of its rectangle as the row's own span, with ink, so the row's record bounds it.
+#[test]
+fn an_injected_row_glyph_draws_in_a_blank_row_emitted_first() {
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let seam = InjectedRowGlyph {
+        pane_id: 7,
+        slot: 10,
+        rect_px: (96.0, 200.0, 12.0, 19.0),
+        color: [1.0, 0.0, 1.0, 1.0],
+    };
+    let surface = (640.0, 480.0);
+    let mut glyphs = Vec::new();
+    let mut row_spans = Vec::new();
+    push_injected_row_glyph(&mut atlas, Some(seam), 7, 10, &mut glyphs, &mut row_spans, surface);
+    assert_eq!(glyphs.len(), 1, "the seam draws with no glyph emitted before it");
+    assert_eq!(row_spans.len(), 1);
+    assert_eq!(row_spans[0].ink_px, Some([96.0, 200.0, 108.0, 219.0]));
+    let uv = glyphs[0].uv;
+    assert!(uv[2] > uv[0] && uv[3] > uv[1], "the glyph samples a resident tile: {uv:?}");
+    push_injected_row_glyph(&mut atlas, Some(seam), 7, 11, &mut glyphs, &mut row_spans, surface);
+    assert_eq!(glyphs.len(), 1, "another row draws nothing");
 }

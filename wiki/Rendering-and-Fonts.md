@@ -737,12 +737,34 @@ and a cursor change also repaint everything between them. The
 `damage_waste_permille_sum` counter ([Logging](Logging#renderer-fields))
 measures the area that rectangle covers beyond its parts. A changed key with no
 dirty live row and empty damage, such as a revision bump from `set_autowrap`,
-plans `Noop` and acknowledges nothing.
+plans `Noop` and acknowledges nothing. `Noop` also covers an unchanged key and a
+change whose only dirt is scrolled out of view; every other frame is `Partial`
+or `Full`.
 
-Narrow damage is correct because assembly stays `Full`: every batch is drawn in
-order, and the scissor limits writes to the damage. All ink that meets the damage
-is redrawn, including glyph overhang from neighbouring rows, the background reset
-and overlays.
+Narrow damage is correct because every primitive that meets the damage is
+assembled and drawn in order under the scissor. A `Full` frame assembles every
+row. A `Partial` frame assembles every dirty slot, every row whose ink-padded
+strip meets the damage, and every row whose valid ink record meets the damage,
+the drawn cursor cell or the last presented cursor-recolor bounds; a row it does
+not emit keeps its retained pixels and its record. Everything that is not a terminal row (pane
+chrome, cursor, selection, highlights, inline images, scrollbars, tab bar and
+overlays) is assembled whole and clipped by the scissor.
+
+A row's ink record is the outward-rounded union of what it presented: its
+glyphs, tofu, background and underline quads, unclipped to the pane, so a
+neighbouring pane's overhanging glyph or a tall glyph rows away is found. It is
+staged during assembly and committed only when the frame presents, and it is
+trusted only while the slot still shows the same absolute row with the same
+content stamp; a clean visible row with no valid record makes the frame `Full`.
+After assembly the recolor and tab-title widening can still grow the damage; if
+the final damage reaches the record of a row the frame did not assemble, the
+frame is assembled again as `Full` in the same render call and counted once in
+`partial_fallbacks`.
+
+A presented `Partial` frame acknowledges, per pane, only the dirty live rows
+whose slot it assembled; a `Full` frame acknowledges every row. A dirty live row
+below a scrolled-back view has no slot, so it keeps its dirt bit until a frame
+draws it.
 
 ### Presentation outcomes
 

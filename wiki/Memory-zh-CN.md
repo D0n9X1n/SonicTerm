@@ -166,6 +166,10 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 - `row_quad_cache_bytes` / `row_quad_cache_items`：哈希表后备存储、缓存背景/装饰
   quad 向量和缓存行数；
 - `software_frame_bytes`：Windows CPU/GDI 帧，其它平台为零；
+- `row_ink_bytes` / `row_ink_items`：渲染器的 `RowInk` 部分，计入 `renderer_total_bytes`：
+  每个可见行一条墨迹记录（该行上次绘制的范围），加上一帧的暂存缓冲。一帧呈现时剪除已关闭窗格与
+  已消失行的记录，表内条目不足四分之一时收缩。该分类只报告、不计费，覆盖数值为 144 MiB
+  （按桶取整的表条目为最大可见单元数的两倍，加上一帧暂存）；
 - `vertex_scratch_bytes` / `vertex_scratch_items`：渲染器的 `UploadStaging` 部分，计入
   `renderer_total_bytes`。它是呈现管线复用的 CPU 顶点组装缓冲，加上字形图集与图像图集两个上传
   各自的脏矩形列表、合并矩形列表和暂存缓冲。顶点缓冲每帧清空后重新填充。一帧之后，若容量超过

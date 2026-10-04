@@ -89,9 +89,17 @@ visible pane revisions, geometry, selection, tabs, overlays, hover, inline
 media, font/style state, and other image-affecting inputs. Effective scrollbar
 opacity is quantized in each keyed pane record: `Never`, panes without
 scrollback, and opacity at or below the shared emit floor all map to zero.
-Hardware rendering still performs the full renderer assembly when a changed
-frame is requested; unchanged frame keys return without rebuilding or
-submitting a new frame.
+Every frame plans one of three modes. `Noop` rebuilds and submits nothing: the
+frame key is unchanged, the only change is pane revisions whose dirt is all
+scrolled out of view, or the key changed with empty damage and no dirty live
+row. Any other frame is `Partial` or `Full`. A hardware frame is `Partial` when
+its damage is narrower than the surface and nothing forces a full repaint: it is
+not a first frame, has no full-class change, no overlay before or after, and a
+valid ink record for every clean visible row. A `Partial` frame assembles every
+dirty slot, every row whose ink-padded strip meets the damage, and every row
+whose valid ink record meets the damage, the drawn cursor cell or the last
+presented recolor bounds ([Rendering and Fonts](Rendering-and-Fonts)). Every
+other frame is `Full`. The degraded path is never `Partial`.
 
 The private production `FramePlan` owns that key together with final mode,
 damage, pane full/content clips, resolved viewport rows, and expected revisions.
@@ -401,9 +409,15 @@ viewport slot that draws it. Live row `r` is absolute row `scrollback_len + r`.
 A primary view scrolled back by `k` rows draws it at slot `r + k`, and draws it
 nowhere when `r + k` is past the last row. Primary-screen damage covers only
 those slots; the alternate screen keeps no scrollback and still damages its
-whole pane. On every Full frame, both row caches drop absolute row
-`scrollback_len + r` for every dirty live row of each pane on the surface,
-whether that row is on screen or not.
+whole pane. On every assembled frame, `Full` or `Partial`, both row caches drop
+absolute row `scrollback_len + r` for every dirty live row of each pane on the
+surface, whether that row is on screen or not.
+
+A `Partial` frame assembles only the rows listed above. A row it does not emit
+keeps its retained pixels and its ink record, and a dirty live row whose slot the
+frame did not draw keeps its dirt bit. Any frame that does not present (a surface
+retry, an atlas retry, or a stopped device) commits no record or receipt and
+clears the frame key, so the next frame is a whole-surface `Full`.
 
 A frame whose only change is pane revisions, with every changed pane's dirt
 scrolled out of view, presents nothing on either path: the plan is `Noop` with

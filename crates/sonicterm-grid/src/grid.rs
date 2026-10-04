@@ -480,6 +480,20 @@ impl Grid {
         self.content_seq
     }
 
+    /// The content stamp of scrollback-absolute row `abs`: a history line's own stamp, or a
+    /// visible row's change stamp. `None` past the visible bottom. A renderer compares it to the
+    /// stamp it presented to tell whether the row's content changed since.
+    #[must_use]
+    pub fn row_content_seq_at_abs(&self, abs: u64) -> Option<u64> {
+        let scrollback_rows = self.scrollback.len() as u64;
+        if abs < scrollback_rows {
+            self.scrollback.get(abs as usize).map(Line::content_seq)
+        } else {
+            // When: `abs >= scrollback_rows`, the row is visible and its stamp is in `row_content_seq`.
+            self.row_content_seq.get((abs - scrollback_rows) as usize).copied()
+        }
+    }
+
     /// Current primary/alternate screen incarnation identity.
     #[inline]
     pub fn screen_epoch(&self) -> u64 {

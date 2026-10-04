@@ -75,6 +75,8 @@ pub mod frame_stats;
 pub mod glyph_working_set;
 
 mod frame_plan;
+/// Per-row ink records that decide which rows a partial frame must emit.
+mod row_ink;
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

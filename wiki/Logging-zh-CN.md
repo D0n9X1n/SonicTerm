@@ -400,6 +400,9 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `row_cache_misses` | 次数 | 未命中的行字形缓存查询 |
 | `shape_requests` | 次数 | 渲染器发出的 `FontStack` 塑形与测量请求 |
 | `full_frames` | 次数 | 渲染计划为 `Full` 的帧；计划为 `Noop` 的帧不计入 |
+| `partial_frames` | 次数 | 渲染计划为 `Partial`（只组装与损伤区域相交的行）且已呈现的帧；呈现后才计数，应除以已呈现帧数，而非 `full_frames` |
+| `partial_fallbacks` | 次数 | 因最终损伤区域触及未组装的行，在同一帧内重新按 `Full` 组装的 `Partial` 计划 |
+| `row_cells_hashed` | 次数 | 写入行字形缓存键的单元格数，每个已组装的终端行一行 |
 | `row_cache_invalidate_visits` | 次数 | 使脏行失效时检查的行字形缓存条目：每次 `invalidate_row_abs` 调用检查一个，即按 `(窗格, 绝对行)` 键删除该条目 |
 | `row_cache_invalidate_us` | 微秒 | 使脏行失效所花的总时间，为普通累加和；至少使一行失效的窗格在其行循环内读取一对时钟，因此计数不会改变保留哪些缓存行 |
 | `recolor_glyphs_visited` | 次数 | 在帧的主字形列表上为光标、复制模式光标或搜索匹配下的字形重新着色时检查的字形：墨迹与目标相交的行，加上终端行之外的全部字形（如标签标题）；叠加层文字不计入 |
@@ -649,12 +652,14 @@ renderer retention window="<window-id>" role="visible" total_bytes=<bytes>
                    row_glyph_cache_bytes=<bytes> row_glyph_cache_items=<count>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
                    vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
+                   row_ink_bytes=<bytes> row_ink_items=<count>
 renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    glyph_atlas_bytes=<bytes> glyph_atlas_items=<count>
                    image_atlas_bytes=<bytes> image_atlas_items=<count>
                    row_glyph_cache_bytes=<bytes> row_glyph_cache_items=<count>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
                    vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
+                   row_ink_bytes=<bytes> row_ink_items=<count>
 ```
 
 | 字段 | 归属内容 | 首先处理 |
@@ -670,6 +675,8 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `software_frame_bytes` | Windows 软件呈现的整窗缓冲 | 缩小窗口；其它路径为零 |
 | `vertex_scratch_bytes` | `UploadStaging` 部分：呈现管线复用的 CPU 顶点组装缓冲，加上每个图集上传的脏矩形列表、合并矩形列表和暂存缓冲 | 顶点缓冲跟随最近最大的一帧，超过该帧用量四倍且超过 1 MiB 时收缩到用量的两倍；同步会释放矩形列表；暂存缓冲保留最大一次写入，至多一张图集 |
 | `vertex_scratch_items` | 顶点缓冲持有分配时为 1，否则为 0 | — |
+| `row_ink_bytes` | `RowInk` 部分：逐行墨迹表（每个已呈现行按窗格与槽位记录的绘制范围）已分配的桶，加上一帧的暂存缓冲 | 受可见行数限制；窗格缩小或关闭后，下一帧呈现时释放其记录 |
+| `row_ink_items` | 已提交的逐行墨迹记录数，每个可见行一条 | — |
 
 `role="warm"` 表示渲染器位于待命池，不属于可见窗口；关闭窗口不会释放它。
 这些数值是主机内存，不是 GPU 显存。

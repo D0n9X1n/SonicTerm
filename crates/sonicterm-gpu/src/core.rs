@@ -101,14 +101,9 @@ fn presented_receipts(
     panes
         .iter()
         .enumerate()
-        .filter(|(index, pane)| plan.acknowledges(*index, pane.id, pane.grid.revision()))
-        .map(|(index, pane)| {
-            sonicterm_render_model::AckReceipt::of(
-                index,
-                pane.id,
-                pane.grid,
-                sonicterm_render_model::AckRows::All,
-            )
+        .filter_map(|(index, pane)| {
+            let rows = plan.acknowledged_rows(index, pane.id, pane.grid.revision())?;
+            Some(sonicterm_render_model::AckReceipt::of(index, pane.id, pane.grid, rows))
         })
         .collect()
 }
@@ -128,6 +123,46 @@ pub fn acknowledge_receipts(
                 .is_some_and(|pane| receipt.try_apply(pane.grid))
         })
         .count()
+}
+
+/// A test glyph attached to one terminal row: the row's pane and viewport slot, and the glyph's
+/// `(x, y, w, h)` rectangle in surface pixels and color.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InjectedRowGlyph {
+    /// The pane whose row draws the glyph.
+    pub pane_id: u64,
+    /// The viewport slot of that row.
+    pub slot: u16,
+    /// The glyph's rectangle in surface pixels.
+    pub rect_px: (f32, f32, f32, f32),
+    /// The glyph's color.
+    pub color: [f32; 4],
+}
+
+/// Append the row glyph seam's instance after the row at `slot` of `pane_id`, as its own span,
+/// when `seam` names that row.
+fn push_injected_row_glyph(
+    atlas: &mut GlyphAtlas,
+    seam: Option<InjectedRowGlyph>,
+    pane_id: u64,
+    slot: u16,
+    glyphs: &mut Vec<GlyphInstance>,
+    row_spans: &mut Vec<RowGlyphSpan>,
+    surface: (f32, f32),
+) {
+    let Some(InjectedRowGlyph { pane_id: owner, slot: owner_slot, rect_px, color }) = seam else {
+        // When: `seam` is None, as in production, nothing is appended.
+        return;
+    };
+    if owner != pane_id || owner_slot != slot {
+        // When: `owner` or `owner_slot` names another row than `pane_id` and `slot`, nothing is drawn here.
+        return;
+    }
+    let (sw, sh) = surface;
+    let base = glyphs.len();
+    glyphs.extend(crate::cursor::seam_glyph(atlas, rect_px, color, sw, sh));
+    row_spans.push(RowGlyphSpan::new(glyphs, base..glyphs.len(), sw, sh));
 }
 
 /// The glyph atlas facts a memory snapshot reports per renderer.
@@ -204,6 +239,51 @@ pub(crate) fn upload_staging_amount(
     ResourceAmount { bytes: vertex.bytes + uploads, items: vertex.items }
 }
 
+/// Settle what a frame's outcome leaves retained: only `Presented` with its plan commits the
+/// staged ink records, counts a partial frame, keeps the plan's key and returns its receipts.
+/// Every other outcome discards the staged records, keeps the committed ones (their pixels are
+/// still on screen), returns no receipt and clears the key, so the retry plans a Full first frame.
+fn settle_retained_frame(
+    last_frame_key: &mut Option<FrameKey>,
+    row_ink: &mut crate::row_ink::RowInkTable,
+    outcome: &PresentOutcome,
+    presented_plan: Option<FramePlan>,
+    receipts: Vec<sonicterm_render_model::AckReceipt>,
+) -> Vec<sonicterm_render_model::AckReceipt> {
+    match (outcome, presented_plan) {
+        (PresentOutcome::Presented, Some(plan)) => {
+            row_ink.commit(&plan.drawn_row_counts());
+            crate::frame_stats::note_partial_frame(plan.mode == RenderMode::Partial);
+            *last_frame_key = Some(plan.key);
+            receipts
+        }
+        _ => {
+            // Nothing this frame assembled reached the screen, so nothing of it is kept.
+            row_ink.begin_frame();
+            *last_frame_key = None;
+            Vec::new()
+        }
+    }
+}
+
+/// Assemble one frame through `assemble`, called with whether the pass is forced Full. A first
+/// pass whose partial plan's final damage reached a row it did not emit is assembled again forced
+/// Full under the same guards, so the scissor never erases unemitted ink; that fallback is counted
+/// here, once, whatever mode the second pass plans. The passes' time is one assembly sample.
+fn assemble_with_fallback(
+    mut assemble: impl FnMut(bool) -> Result<Assembled>,
+) -> Result<Assembled> {
+    let assembled = match assemble(false) {
+        Ok(Assembled::PartialFallback) => {
+            crate::frame_stats::note_partial_fallback();
+            assemble(true)
+        }
+        other => other,
+    };
+    crate::frame_stats::finish_assembly();
+    assembled
+}
+
 /// Lend `source` once and decide the exits that need no renderer, in their existing order: an empty
 /// source is `NoPanes`, then a device that no longer accepts work is `Unavailable`; only otherwise does
 /// `assemble` run. The source is dropped before this returns.
@@ -252,6 +332,8 @@ enum Assembled {
     Noop(Box<FrameKey>),
     /// The glyph atlas changed during assembly, so its UVs are stale.
     AtlasRetry { stamp: GlyphContentStamp, evictions: u64 },
+    /// A partial plan's final damage reached a row it did not emit; assemble it again as Full.
+    PartialFallback,
     /// Drawable batches and their plan.
     Layers(Box<AssembledLayers>),
 }
@@ -2298,6 +2380,15 @@ pub struct GpuRenderer {
     /// Test seam: a glyph `(x, y, w, h)` surface-pixel rectangle and color appended before the
     /// cursor recolors; only `__inject_test_glyph` sets it, so production keeps `None`.
     injected_test_glyph: Option<((f32, f32, f32, f32), [f32; 4])>,
+    /// Test seam: a glyph `(x, y, w, h)` and color attached to the row at `(pane, slot)`, drawn
+    /// only when that row is emitted; only `__inject_row_glyph` sets it, so production keeps `None`.
+    injected_row_glyph: Option<InjectedRowGlyph>,
+    /// Test seam: the reason the next wgpu acquisition reports instead of asking the surface; only
+    /// `__fail_next_surface_acquire` sets it, so production keeps `None`.
+    fault_surface_acquire: Option<SurfaceRetryReason>,
+    /// Where each presented row drew, per `(pane, slot)`; staged during assembly and committed
+    /// beside `last_frame_key` only when a frame presents. A partial plan emits by these records.
+    row_ink: crate::row_ink::RowInkTable,
     /// The last presented frame's damage, kept beside `last_frame_key` only after
     /// `__enable_presented_damage`; production never enables it.
     presented_damage: PresentedDamageRecorder,
@@ -2693,6 +2784,8 @@ pub struct RendererRetention {
     /// uploads' dirty and coalesced rect lists. CPU memory, so the GPU-buffer exclusion does not
     /// cover it; one item while the vertex scratch holds an allocation.
     pub vertex_scratch: ResourceAmount,
+    /// Per-row ink records of the presented frame and one frame's staging; items are records.
+    pub row_ink: ResourceAmount,
 }
 
 impl RendererRetention {
@@ -2712,7 +2805,7 @@ impl RendererRetention {
     /// `Vec`s — so charging both under one class would make the class mean two
     /// things and leave a reader unable to tell which allocation to act on.
     #[must_use]
-    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 6] {
+    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 7] {
         [
             (ResourceClass::GlyphAtlas, self.glyph_atlas),
             (ResourceClass::InlineMediaRetained, self.image_atlas),
@@ -2721,6 +2814,7 @@ impl RendererRetention {
             (ResourceClass::SoftwareFrame, self.software_frame),
             // The vertex scratch is CPU storage staged for the vertex-buffer upload.
             (ResourceClass::UploadStaging, self.vertex_scratch),
+            (ResourceClass::RowInk, self.row_ink),
         ]
     }
 
@@ -2734,6 +2828,7 @@ impl RendererRetention {
             self.row_quad_cache,
             self.software_frame,
             self.vertex_scratch,
+            self.row_ink,
         ]
         .into_iter()
         .fold(ResourceAmount::default(), |acc, part| ResourceAmount {
@@ -3267,6 +3362,9 @@ impl GpuRenderer {
             last_recolor: crate::cursor::RecolorRecord::default(),
             last_tab_ink: crate::cursor::RecolorBounds::Empty,
             injected_test_glyph: None,
+            injected_row_glyph: None,
+            fault_surface_acquire: None,
+            row_ink: crate::row_ink::RowInkTable::default(),
             presented_damage: PresentedDamageRecorder::default(),
             presented_fields: PresentedFields::default(),
             preedit_glyph_cache: None,
@@ -3670,6 +3768,7 @@ impl GpuRenderer {
             row_quad_cache: self.line_quad_cache.retained_amount(),
             software_frame: self.software_frame_retained_amount(),
             vertex_scratch: self.upload_staging_retained(),
+            row_ink: self.row_ink.retained_amount(),
         }
     }
 
@@ -3697,6 +3796,7 @@ impl GpuRenderer {
     pub fn invalidate_pane_caches(&mut self, pane_id: u64) {
         self.row_glyph_cache.invalidate_pane(pane_id);
         self.line_quad_cache.invalidate_pane(pane_id);
+        self.row_ink.drop_pane(pane_id);
     }
 
     #[cfg(windows)]
@@ -4585,6 +4685,41 @@ impl GpuRenderer {
         self.injected_test_glyph = glyph;
     }
 
+    /// Test hook: attach a glyph `(x, y, w, h)` in surface pixels and its color to the row at viewport
+    /// slot `slot` of pane `pane_id`, drawn after that row's own glyphs whenever the row is emitted,
+    /// so its ink joins the row's record; `None` removes it. It is not part of the frame key: a test
+    /// changes it together with that row's dirt, as a real glyph change would.
+    #[doc(hidden)]
+    pub fn __inject_row_glyph(&mut self, glyph: Option<InjectedRowGlyph>) {
+        self.injected_row_glyph = glyph;
+    }
+
+    /// Test hook: the committed ink record of viewport slot `slot` of pane `pane_id`, as the last
+    /// presented frame left it; `None` when no record is kept.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_row_ink(&self, pane_id: u64, slot: u16) -> Option<PixelRect> {
+        self.row_ink.committed_rect(pane_id, slot)
+    }
+
+    /// Test hook: the next wgpu presentation reports `reason` at the acquire point instead of
+    /// asking the surface, after its plan was assembled, and takes the production retry branch.
+    /// Arming it keeps the frame key, so the failing frame plans against the last presented one.
+    #[doc(hidden)]
+    pub fn __fail_next_surface_acquire(&mut self, reason: SurfaceRetryReason) {
+        self.fault_surface_acquire = Some(reason);
+    }
+
+    /// Test hook: the next presented frame's submission fails validation after its retained draw,
+    /// as `GpuFaultKind::FrameValidation` makes it, but arming it keeps the frame key, so the failing
+    /// frame plans against the last presented one; the failure path clears the key itself.
+    #[doc(hidden)]
+    pub fn __fail_next_frame_submission(&mut self) {
+        self.fault_frame_probe = self
+            .device_errors
+            .gpu_work("fault.frame_probe", || create_frame_fault_probe(&self.device));
+    }
+
     /// Test hook: keep each later presented frame's damage for `__take_presented_damage`.
     /// Production never calls it, so a presented frame builds and keeps no snapshot.
     #[doc(hidden)]
@@ -4608,13 +4743,12 @@ impl GpuRenderer {
     }
 
     /// Append the test glyph seam's instance, if one is set, after the terminal rows.
-    fn push_injected_test_glyph(&self, glyphs: &mut Vec<GlyphInstance>, sw: f32, sh: f32) {
+    fn push_injected_test_glyph(&mut self, glyphs: &mut Vec<GlyphInstance>, sw: f32, sh: f32) {
         let Some((rect_px, color)) = self.injected_test_glyph else {
             // When: injected_test_glyph is None, as in production, nothing is appended.
             return;
         };
-        let template = glyphs.first().copied();
-        glyphs.extend(crate::cursor::injected_glyph(template.as_ref(), rect_px, color, sw, sh));
+        glyphs.extend(crate::cursor::seam_glyph(&mut self.glyph_atlas, rect_px, color, sw, sh));
     }
 
     /// Test hook: recreate the retained frame texture copyable (`COPY_SRC`), now and on every later
@@ -5487,23 +5621,27 @@ impl GpuRenderer {
         let subpixel_aa = self.effective_subpixel_aa_mode();
         let accepts_gpu_work = self.device_errors.accepts_gpu_work();
         let assembled = lend_and_assemble(source, accepts_gpu_work, |panes| {
-            self.assemble_frame(
-                subpixel_aa,
-                panes,
-                theme,
-                cursor_visible,
-                selection,
-                copy_mode,
-                tabs,
-                process_privileged,
-                search,
-                palette,
-                ime,
-                viewport_top_abs,
-                notification,
-                hovered_url_cells,
-                link_preview,
-            )
+            let mut palette = palette;
+            assemble_with_fallback(|force_full| {
+                self.assemble_frame(
+                    subpixel_aa,
+                    panes,
+                    theme,
+                    cursor_visible,
+                    selection,
+                    copy_mode,
+                    tabs,
+                    process_privileged,
+                    search,
+                    palette.as_deref_mut(),
+                    ime,
+                    viewport_top_abs,
+                    notification,
+                    hovered_url_cells,
+                    link_preview,
+                    force_full,
+                )
+            })
         });
         // The source is gone here: every arm below runs with no parser guard held.
         self.flush_image_upload_rebuild();
@@ -5531,6 +5669,13 @@ impl GpuRenderer {
             // Settled above; kept so the match names every exit.
             Assembled::NoPanes => PresentOutcome::Skipped(SkipReason::NoPanes),
             Assembled::Unavailable => self.rendering_unavailable(),
+            Assembled::PartialFallback => {
+                // Only a forced-Full pass reaches here, and force_full makes a fallback impossible;
+                // present nothing and plan the next frame from scratch rather than trust the key.
+                self.last_frame_key = None;
+                self.request_window_redraw();
+                PresentOutcome::Skipped(SkipReason::Noop)
+            }
             Assembled::Unchanged { focus_flash } => {
                 // When: `Unchanged`, retain the no-assembly fast path and the Windows cached-frame reblit.
                 self.skipped_frames = self.skipped_frames.wrapping_add(1);
@@ -5573,6 +5718,13 @@ impl GpuRenderer {
                     // so the frame takes the reset path with eviction disabled for one retry.
                     self.reset_glyph_atlas_after_invalidation(stamp, evictions);
                 }
+                let _discarded = settle_retained_frame(
+                    &mut self.last_frame_key,
+                    &mut self.row_ink,
+                    &PresentOutcome::AtlasRetry,
+                    None,
+                    Vec::new(),
+                );
                 PresentOutcome::AtlasRetry
             }
             Assembled::Layers(layers) => {
@@ -5607,6 +5759,7 @@ impl GpuRenderer {
         notification: Option<&NotificationBubble>,
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
+        force_full: bool,
     ) -> Result<Assembled> {
         // `lend_and_assemble` has already taken the empty and stopped exits, so `panes` is not empty.
         let mut gpu_timing = tracing::enabled!(target: "render_timing", tracing::Level::DEBUG)
@@ -5771,6 +5924,11 @@ impl GpuRenderer {
         let cursor_pane = panes.iter().find(|pane| pane.is_active).unwrap_or(&panes[0]);
         let cursor_live_top = cursor_pane.grid.scrollback_len() as u64;
         let cursor_view_top = viewport_top_abs.unwrap_or(cursor_live_top).min(cursor_live_top);
+        // Records are read only when a partial plan is possible: never on the degraded path, on a
+        // first frame, or on the forced-Full pass of a fallback.
+        let partial_possible =
+            !force_full && !self.software_render_degrade && self.last_frame_key.is_some();
+        let row_ink = &self.row_ink;
         let mut plan = FramePlan::build(
             FrameFacts {
                 window: WindowIdentity {
@@ -5847,6 +6005,20 @@ impl GpuRenderer {
                 is_alt: pane.grid.is_alt(),
                 scrollbar_alpha: pane.scrollbar_alpha,
                 dirty_rows: pane.grid.dirty_rows().collect(),
+                row_ink: if partial_possible {
+                    row_ink.valid_records(
+                        pane.id,
+                        pane.grid,
+                        crate::frame_plan::resolved_view_top(
+                            pane.viewport_top_abs,
+                            pane.grid.scrollback_len() as u64,
+                        ),
+                        pane.grid.rows,
+                    )
+                } else {
+                    // When: `partial_possible` is false, the plan cannot be partial and needs no record.
+                    Vec::new()
+                },
             }),
             self.last_frame_key.as_ref(),
         );
@@ -5875,11 +6047,12 @@ impl GpuRenderer {
             // When: `plan.mode` is Noop, remember its identity without acknowledging unpresented grid dirt.
             return Ok(Assembled::Noop(Box::new(plan.key)));
         }
+        if force_full {
+            plan.force_full();
+        }
         let inline_media_changed = self.last_frame_key.as_ref().is_none_or(|previous| {
             previous.window.inline_media_hash != plan.key.window.inline_media_hash
         });
-        let render_mode = plan.mode;
-        let emit_full_rows = crate::frame_plan::emits_every_visible_row(render_mode);
         // The cursor recolors this frame performs, accumulated across the copy-mode and block sites.
         let mut frame_recolor = crate::cursor::RecolorRecord::default();
         let pane_rects: Vec<_> = plan
@@ -5956,6 +6129,12 @@ impl GpuRenderer {
             u16,
             sonicterm_text::row_glyph_cache::UnderlineRun,
         )> = Vec::new();
+        // Per entry of `underlines`, the staging index of the row that pushed it, so each
+        // underline's quads merge into that row's one ink record.
+        let mut underline_owners: Vec<usize> = Vec::new();
+        // Per drawn pane, the staging indices its glyph rows took, in ascending slot order, so
+        // the background loop merges each row's quads into the record the glyph loop staged.
+        let mut staged_ranges: Vec<(u64, std::ops::Range<usize>)> = Vec::new();
         let mut glyph_instances: Vec<GlyphInstance> =
             Vec::with_capacity(grid.cols as usize * grid.rows as usize);
         // Overlay glyph instances — palette text + (future) other modals.
@@ -6040,6 +6219,8 @@ impl GpuRenderer {
                     })
                     .collect();
             self.row_glyph_cache.begin_frame(&visible_rows);
+            // A fresh stage: records an unpresented frame staged are discarded.
+            self.row_ink.begin_frame();
             for pv in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
                 let grid: &Grid = pv.grid;
                 let pane_id: sonicterm_text::row_glyph_cache::PaneId = pv.pane_id;
@@ -6051,6 +6232,7 @@ impl GpuRenderer {
                 // `scrollback_len()`. Otherwise it's the explicit absolute
                 // index requested by the scroll action (e.g. a prompt row).
                 let view_top_abs = pv.planned.view_top_abs;
+                let pane_staged_start = self.row_ink.staged_len();
                 // Drop cache entries for every row the VT thread mutated
                 // since the last frame. `grid.dirty_rows()` already covers
                 // theme/font/resize/scroll/focus/selection changes via the
@@ -6085,10 +6267,12 @@ impl GpuRenderer {
                 let pane_hovered_url =
                     hovered_url_cells.filter(|hovered| hovered.pane_id == pv.pane_id);
                 for (r, _) in pv.planned.rows() {
-                    if !emit_full_rows && !pv.planned.dirty_slots.contains(&r) {
-                        // When: `r` is outside planned dirt and full emission is disabled, retain its previous pixels.
+                    if !pv.planned.emit_rows[usize::from(r)] {
+                        // When: the plan does not emit slot `r`, its retained pixels and record stay.
                         continue;
                     }
+                    let (spans_before, tofu_before, underlines_before) =
+                        (row_spans.len(), missing_tofu.len(), underlines.len());
                     let _replayed = emit_row_glyphs(
                         GlyphShaping {
                             atlas: &mut self.glyph_atlas,
@@ -6124,7 +6308,33 @@ impl GpuRenderer {
                             row_spans: &mut row_spans,
                         },
                     );
+                    // The row's ink: its glyphs' union and its tofu outlines. Its underlines join
+                    // when they are drawn below.
+                    push_injected_row_glyph(
+                        &mut self.glyph_atlas,
+                        self.injected_row_glyph,
+                        pane_id,
+                        r,
+                        &mut glyph_instances,
+                        &mut row_spans,
+                        (sw, sh),
+                    );
+                    let ink = crate::row_ink::emitted_row_ink(
+                        &row_spans[spans_before..],
+                        missing_tofu[tofu_before..]
+                            .iter()
+                            .map(|(left, top, width, height, _)| (*left, *top, *width, *height)),
+                    );
+                    let staged = self.row_ink.stage_row(
+                        pane_id,
+                        r,
+                        grid,
+                        view_top_abs,
+                        ink.to_rect(plan.surface),
+                    );
+                    underline_owners.extend((underlines_before..underlines.len()).map(|_| staged));
                 }
+                staged_ranges.push((pane_id, pane_staged_start..self.row_ink.staged_len()));
             } // end per-pane loop
         }
 
@@ -6222,6 +6432,10 @@ impl GpuRenderer {
             let pane_id: crate::row_quad_cache::PaneId = pv.pane_id;
             let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
             let view_top_abs_bg = pv.planned.view_top_abs;
+            let pane_staged = staged_ranges
+                .iter()
+                .find(|(staged_pane, _)| *staged_pane == pane_id)
+                .map(|(_, range)| range.clone());
             // Mirror RowGlyphCache's dirty-row invalidation: drop the absolute
             // rows of every live row the VT thread mutated since the last frame.
             invalidate_planned_quad_rows(&mut self.line_quad_cache, pv.planned);
@@ -6240,8 +6454,8 @@ impl GpuRenderer {
             // pad and the snapped column edges differ.
             let snapped_cell_x_bg = build_snapped_cell_x(pad_bg, cell_w, pv_grid.cols);
             for (r, row_abs) in pv.planned.rows().take(max_rows as usize) {
-                if !emit_full_rows && !pv.planned.dirty_slots.contains(&r) {
-                    // When: `r` is outside planned dirt and full emission is disabled, retain its previous background.
+                if !pv.planned.emit_rows[usize::from(r)] {
+                    // When: the plan does not emit slot `r`, its retained background stays.
                     continue;
                 }
                 let Some(row_cells) = pv_grid.row_at_abs(row_abs) else {
@@ -6249,6 +6463,7 @@ impl GpuRenderer {
                     // outside the scrollback this pane still retains.
                     continue;
                 };
+                let quads_before = quads.len();
                 let geometry = RowBackgroundGeometry {
                     origin: (pad_bg, top_inset_bg),
                     pane_size: (pane_rect.w, pane_rect.h),
@@ -6270,6 +6485,19 @@ impl GpuRenderer {
                     &snapped_cell_x_bg,
                     &mut quads,
                 );
+                let mut ink = crate::row_ink::InkEdges::default();
+                for quad in &quads[quads_before..] {
+                    ink.add_px(crate::cursor::ndc_rect_px(quad.rect, sw, sh));
+                }
+                let rect = ink.to_rect(plan.surface);
+                match pane_staged.clone().and_then(|range| self.row_ink.staged_index(range, r)) {
+                    Some(staged) => self.row_ink.merge_staged(staged, rect),
+                    None => {
+                        // When: `staged_index` finds no glyph-loop record for `r`, stage one here
+                        // so the row's background ink is never dropped.
+                        let _ = self.row_ink.stage_row(pane_id, r, pv_grid, view_top_abs_bg, rect);
+                    }
+                }
             }
         }
 
@@ -6533,7 +6761,7 @@ impl GpuRenderer {
         // and truncated underlines on wider INACTIVE panes. Key the
         // cache by (pad_bits, pane_cols) and size it accordingly.
         let mut underline_caches: Vec<(u32, u16, Vec<f32>)> = Vec::new();
-        for (origin_x, origin_y, pane_cols, row, run) in &underlines {
+        for (entry, (origin_x, origin_y, pane_cols, row, run)) in underlines.iter().enumerate() {
             let pad_bits = origin_x.to_bits();
             let cache = if let Some((_, _, c)) =
                 underline_caches.iter().find(|(b, pc, _)| *b == pad_bits && *pc == *pane_cols)
@@ -6560,6 +6788,7 @@ impl GpuRenderer {
             let y = *origin_y + f32::from(*row) * self.cell_h;
             let underline_color =
                 chrome_color_to_linear_rgba(color_to_chrome(run.color, theme, self.fg_default));
+            let quads_before = quads.len();
             push_underline_quads(
                 &mut quads,
                 run.style,
@@ -6572,6 +6801,14 @@ impl GpuRenderer {
                 sh,
                 underline_color,
             );
+            // Dotted and curly underlines reach below the cell, so the drawn quads join the record.
+            if let Some(staged) = underline_owners.get(entry) {
+                let mut ink = crate::row_ink::InkEdges::default();
+                for quad in &quads[quads_before..] {
+                    ink.add_px(crate::cursor::ndc_rect_px(quad.rect, sw, sh));
+                }
+                self.row_ink.merge_staged(*staged, ink.to_rect(plan.surface));
+            }
         }
 
         // Hover target underline. The pane id travels with the hit so an
@@ -8214,6 +8451,10 @@ impl GpuRenderer {
         // Widen the damage by this frame's recolors before the layers carry it to the presenter.
         plan.widen_for_recolor(self.last_recolor, frame_recolor);
         plan.widen_for_tab_ink(self.last_tab_ink, tab_ink);
+        if plan.partial_reaches_unemitted_ink() {
+            // When: `partial_reaches_unemitted_ink` holds, the scissor would erase a skipped row's ink.
+            return Ok(Assembled::PartialFallback);
+        }
         // Receipts are read under the same guards the plan was built from; they carry no borrow.
         let receipts = presented_receipts(&plan, panes);
         Ok(Assembled::Layers(Box::new(AssembledLayers {
@@ -8262,6 +8503,7 @@ impl GpuRenderer {
             surface_height,
             first_frame: plan.first_frame,
             damage: plan.damage,
+            partial: plan.mode == RenderMode::Partial,
             subpixel_aa,
             batches: FrameBatches {
                 quads: &quads,
@@ -8278,12 +8520,25 @@ impl GpuRenderer {
         if !matches!(outcome, PresentOutcome::Presented) {
             // When: `matches!` finds any outcome but `Presented`, no receipt is issued, so its dirty rows stay.
             self.finalize_growth_episodes_if_device_stopped();
+            let _discarded = settle_retained_frame(
+                &mut self.last_frame_key,
+                &mut self.row_ink,
+                &outcome,
+                None,
+                receipts,
+            );
             return Ok(FrameOutcome::without_receipts(outcome));
         }
         // Only a presented frame's recolors are on screen, so only it becomes the next baseline.
         self.last_recolor = recolor;
         self.last_tab_ink = tab_ink;
-        self.finish_successful_frame(plan, missing_chars, missing_chrome_chars, gpu_timing);
+        let receipts = self.finish_successful_frame(
+            plan,
+            receipts,
+            missing_chars,
+            missing_chrome_chars,
+            gpu_timing,
+        );
         Ok(FrameOutcome { outcome: PresentOutcome::Presented, receipts })
     }
 
@@ -8324,13 +8579,16 @@ impl GpuRenderer {
         self.request_window_redraw();
     }
 
+    /// Finish a presented frame: record its statistics and settle its plan, returning the receipts
+    /// the settlement keeps.
     fn finish_successful_frame(
         &mut self,
         plan: FramePlan,
+        receipts: Vec<sonicterm_render_model::AckReceipt>,
         missing_chars_this_frame: Vec<char>,
         missing_chrome_chars: Vec<char>,
         gpu_timing: Option<(Instant, Instant, Vec<(&'static str, f32)>)>,
-    ) {
+    ) -> Vec<sonicterm_render_model::AckReceipt> {
         let render_mode = plan.mode;
         let damaged_rows = plan.damaged_rows;
         let (surface_width, surface_height) = (self.config.width, self.config.height);
@@ -8361,7 +8619,14 @@ impl GpuRenderer {
             damage: plan.damage,
             surface: PixelRect { x: 0, y: 0, w: surface_width.max(1), h: surface_height.max(1) },
         });
-        self.last_frame_key = Some(plan.key);
+        // The presented rows' records replace theirs; records of undrawn or vanished rows are pruned.
+        let receipts = settle_retained_frame(
+            &mut self.last_frame_key,
+            &mut self.row_ink,
+            &PresentOutcome::Presented,
+            Some(plan),
+            receipts,
+        );
         if self.pane_focus_flash.is_some() {
             self.request_window_redraw();
         }
@@ -8371,6 +8636,7 @@ impl GpuRenderer {
             let total_ms = now.saturating_duration_since(start).as_secs_f32() * 1000.0;
             let mode = match render_mode {
                 RenderMode::Full => "full",
+                RenderMode::Partial => "partial",
                 RenderMode::Noop => "noop",
             };
             let mut line = format!(
@@ -8382,6 +8648,7 @@ impl GpuRenderer {
             }
             tracing::debug!(target: "render_timing", %line);
         }
+        receipts
     }
 
     /// This function only emits the quick-select hint background
@@ -9769,6 +10036,7 @@ pub(crate) fn emit_row_glyphs(
     // through the same WezTerm block_sprite atlas path as
     // text glyphs, so no side-channel geometry replay is
     // required.
+    crate::frame_stats::note_row_cells_hashed(|| row.iter().len());
     // Cell dimensions already encode DPI in raster pixels; the separate scale key stays 1.0.
     let key = sonicterm_text::row_glyph_cache::row_hash_cells(
         view_top_abs,
