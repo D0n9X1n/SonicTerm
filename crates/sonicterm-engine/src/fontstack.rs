@@ -385,28 +385,86 @@ impl FontStack {
     }
 }
 
+/// A loaded face's stable identity: its file path (canonical when it resolves) or the name of
+/// built-in or in-memory data, and its index within a collection. Unlike a font slot, it does not
+/// depend on the order a configuration resolved its faces in.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FaceIdentity {
+    /// Canonical file path, or `builtin:<name>` / `memory:<name>` for data not on disk.
+    pub source: String,
+    /// Index of the face within its collection file.
+    pub face_index: u32,
+}
+
+/// Diagnostic only: what a glyph key rasterizes from, resolved exactly as the rasterizer does.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedGlyphFace {
+    /// The face the glyph is drawn from.
+    pub face: FaceIdentity,
+    /// The glyph id inside that face.
+    pub glyph_id: u32,
+    /// The raster pixel size requested for that face, in thousandths of a pixel. Strike
+    /// selection is a pure function of the face and this size, so equal sizes select one strike.
+    pub strike_px_milli: u64,
+}
+
+impl FaceIdentity {
+    fn of(handle: &sonicterm_font::locator::FontDataHandle) -> Self {
+        use sonicterm_font::locator::FontDataSource;
+        let source = match &handle.source {
+            FontDataSource::OnDisk(path) => {
+                // A face found through two directory spellings is still one file.
+                std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()).display().to_string()
+            }
+            FontDataSource::BuiltIn { name, .. } => format!("builtin:{name}"),
+            FontDataSource::Memory { name, .. } => format!("memory:{name}"),
+        };
+        Self { source, face_index: handle.index }
+    }
+}
+
+impl FontStack {
+    /// The loaded face for `key`'s style, its fallback slot and its glyph id, resolved as the
+    /// rasterizer resolves them; `None` when the character has no published face yet.
+    fn resolve_key(
+        &self,
+        key: GlyphKey,
+    ) -> Option<(std::rc::Rc<sonicterm_font::LoadedFont>, usize, u32)> {
+        let font = self.font_for_style(key.weight_bold, key.italic).ok()?;
+        if key.glyph_id != 0 {
+            // When: `glyph_id` is set the key already names its slot and glyph.
+            return Some((font, key.font_slot as usize, key.glyph_id));
+        }
+        // A zero glyph id shapes `ch` for this frame; an unresolved character returns `None` at
+        // once, which the atlas caches as missing until its face is published.
+        let text = key.ch.to_string();
+        let infos = font
+            .shape_for_frame(&text, Some(Presentation::Text), Direction::LeftToRight, None, None)
+            .ok()?;
+        let first = infos.into_iter().find(|glyph| glyph.glyph_pos != 0)?;
+        Some((font, first.font_idx, first.glyph_pos))
+    }
+
+    /// Diagnostic only: the face, glyph id and strike `key` rasterizes from in this stack, by the
+    /// rasterizer's own resolution. `None` when the key does not resolve to a face.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn resolved_glyph_face(&self, key: GlyphKey) -> Option<ResolvedGlyphFace> {
+        let (font, font_idx, glyph_id) = self.resolve_key(key)?;
+        let (handle, raster_px) = font.face_raster_request(font_idx)?;
+        Some(ResolvedGlyphFace {
+            face: FaceIdentity::of(&handle),
+            glyph_id,
+            strike_px_milli: (raster_px * 1000.0).round() as u64,
+        })
+    }
+}
+
 impl Rasterizer for FontStack {
     fn rasterize(&mut self, key: GlyphKey) -> Option<RasterTile> {
-        let font = self.font_for_style(key.weight_bold, key.italic).ok()?;
-        let (font_idx, glyph_pos) = if key.glyph_id != 0 {
-            (key.font_slot as usize, key.glyph_id)
-        } else {
-            // When: `glyph_id` is zero, shape `ch` for this frame; an unresolved character returns
-            // `None` at once, which the atlas caches as missing until its face is published.
-            let text = key.ch.to_string();
-            let infos = font
-                .shape_for_frame(
-                    &text,
-                    Some(Presentation::Text),
-                    Direction::LeftToRight,
-                    None,
-                    None,
-                )
-                .ok()?;
-            let first = infos.into_iter().find(|glyph| glyph.glyph_pos != 0)?;
-            (first.font_idx, first.glyph_pos)
-        };
-
+        let (font, font_idx, glyph_pos) = self.resolve_key(key)?;
         let rasterized = font.rasterize_glyph(glyph_pos, font_idx).ok()?;
         self.rasterized_glyph_to_tile(rasterized)
     }

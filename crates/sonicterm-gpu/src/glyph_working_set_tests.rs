@@ -180,3 +180,60 @@ fn a_cold_measurement_holds_real_cjk_and_emoji_tiles() {
         assert!(width_px > 0 && height_px > 0, "{key:?} has a real raster, not tofu");
     }
 }
+
+/// Shape `character` with `stack` (waiting for fallback), insert its shaped key into `atlas` with
+/// `stack` as the rasterizer, and return the key with its tile identity.
+fn shaped_tile(
+    stack: &sonicterm_engine::FontStack,
+    atlas: &mut GlyphAtlas,
+    character: char,
+    variant: GlyphRasterVariant,
+) -> (GlyphKey, Option<TileIdentity>) {
+    let shaped = stack.shape_text_with_style(&character.to_string(), false, false).unwrap();
+    let glyph = shaped.iter().find(|glyph| glyph.glyph_pos != 0).expect("a real glyph");
+    let key = GlyphKey::shaped(
+        character,
+        u8::try_from(glyph.font_idx).unwrap(),
+        glyph.glyph_pos,
+        false,
+        false,
+    )
+    .with_raster_variant(variant);
+    let mut raster = stack.clone();
+    let info = atlas.get_or_insert(key, &mut raster).expect("the tile is placed");
+    (key, tile_identity(stack, key, &info))
+}
+
+/// A tile's identity names its resolved face, glyph, strike and flags, never the configuration-local
+/// font slot: é drawn from Rec Mono as a fallback (slot 1 behind a face lacking it) and as the
+/// primary face (slot 0) is one identity, while another strike or raster variant is another.
+#[test]
+fn a_tile_identity_is_the_same_face_and_strike_whatever_slot_holds_it() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = crate::lib_tests::fallback_stack("tile-identity");
+    let primary = |size| {
+        sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
+            &[("Rec Mono St.Helens", false)],
+            packaged_fonts(),
+            size,
+            96,
+            1.0,
+        )
+        .unwrap()
+    };
+    let mut atlas = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);
+    let (fallback_key, fallback_identity) =
+        shaped_tile(&fixture.stack, &mut atlas, 'é', GlyphRasterVariant::Normal);
+    let (primary_key, primary_identity) =
+        shaped_tile(&primary(14.0), &mut atlas, 'é', GlyphRasterVariant::Normal);
+    assert_ne!(fallback_key.font_slot, primary_key.font_slot, "the slots differ");
+    let identity = fallback_identity.expect("the fallback key resolves");
+    assert_eq!(Some(&identity), primary_identity.as_ref(), "one face, glyph and strike");
+    assert!(identity.source.face.source.ends_with("RecMonoSt.Helens-Regular.ttf"), "{identity:?}");
+    let (_, larger) = shaped_tile(&primary(15.0), &mut atlas, 'é', GlyphRasterVariant::Normal);
+    assert_ne!(larger.as_ref(), Some(&identity), "another strike is another tile");
+    let (_, tab_title) = shaped_tile(&primary(14.0), &mut atlas, 'é', GlyphRasterVariant::TabTitle);
+    assert_ne!(tab_title.as_ref(), Some(&identity), "another raster variant is another tile");
+}

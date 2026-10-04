@@ -10,12 +10,74 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use sonicterm_text::glyph_atlas::{FitOutcome, GlyphAtlas, ATLAS_DIM};
+use sonicterm_text::glyph_atlas::{FitOutcome, GlyphAtlas, GlyphInfo, ATLAS_DIM};
 use sonicterm_types::{GlyphKey, GlyphRasterVariant};
 
 use crate::chrome_text::{self, ChromeAttrs};
 use crate::color::ChromeColor;
 use crate::core::{palette_footer_font_size, renderer_font_stacks, RendererFontStacks};
+
+/// A resident tile's identity across font configurations: its resolved face, glyph and strike,
+/// its raster variant and its presentation flags. Unlike a [`GlyphKey`], it carries no font slot,
+/// whose numbering is local to the configuration that resolved it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TileIdentity {
+    /// The face, glyph id and strike the tile was rasterized from.
+    pub source: sonicterm_engine::ResolvedGlyphFace,
+    /// The raster role whose strike drew the tile.
+    pub raster_variant: GlyphRasterVariant,
+    /// Whether the key asked for the bold face, which may be synthesized from the same file.
+    pub bold: bool,
+    /// Whether the key asked for the italic face, which may be synthesized from the same file.
+    pub italic: bool,
+    /// Whether the tile holds color artwork.
+    pub is_color: bool,
+    /// Whether the tile holds subpixel coverage.
+    pub is_subpixel: bool,
+}
+
+/// The identity of the tile `key` holds as `info`, resolved through `stack`, the stack that
+/// rasterized it. `None` when the key no longer resolves to a face.
+#[must_use]
+pub fn tile_identity(
+    stack: &sonicterm_engine::FontStack,
+    key: GlyphKey,
+    info: &GlyphInfo,
+) -> Option<TileIdentity> {
+    Some(TileIdentity {
+        source: stack.resolved_glyph_face(key)?,
+        raster_variant: key.raster_variant,
+        bold: key.weight_bold,
+        italic: key.italic,
+        is_color: info.is_color,
+        is_subpixel: info.is_subpixel,
+    })
+}
+
+/// Every resident tile of `atlas` by identity, with its raster width and height, resolving each
+/// key through the stack `stack_for` returns for its raster variant. The second value lists the
+/// resident keys that resolved to no identity.
+#[must_use]
+pub fn resident_tile_identities<'stack>(
+    atlas: &GlyphAtlas,
+    stack_for: impl Fn(GlyphRasterVariant) -> Option<&'stack sonicterm_engine::FontStack>,
+) -> (HashMap<TileIdentity, [u32; 2]>, Vec<GlyphKey>) {
+    let mut identities = HashMap::new();
+    let mut unresolved = Vec::new();
+    for key in atlas.resident_tile_keys() {
+        let resolved = atlas.get(key).and_then(|info| {
+            let identity = tile_identity(stack_for(key.raster_variant)?, key, &info)?;
+            Some((identity, info.px_size))
+        });
+        match resolved {
+            Some((identity, size)) => {
+                identities.insert(identity, size);
+            }
+            None => unresolved.push(key),
+        }
+    }
+    (identities, unresolved)
+}
 
 /// The working set the renderer could hold for a text at one DPI.
 #[derive(Debug, Clone)]
@@ -30,6 +92,8 @@ pub struct GlyphWorkingSet {
     pub tile_keys: HashSet<GlyphKey>,
     /// Every resident tile's raster width and height in pixels, by key.
     pub tile_sizes: HashMap<GlyphKey, [u32; 2]>,
+    /// Every resident tile's raster width and height in pixels, by identity across configurations.
+    pub tile_identities: HashMap<TileIdentity, [u32; 2]>,
     /// The point size each raster variant was drawn at.
     pub variant_sizes: Vec<(GlyphRasterVariant, f32)>,
 }
@@ -153,7 +217,14 @@ fn measure_with_stacks(
         }
     }
     let tile_keys = atlas.resident_tile_keys();
+    let (tile_identities, _unresolved) =
+        resident_tile_identities(&atlas, |variant| match variant {
+            GlyphRasterVariant::Normal => Some(&body),
+            GlyphRasterVariant::TabTitle => stacks.tab_title.as_ref(),
+            GlyphRasterVariant::PaletteFooter => stacks.palette_footer.as_ref(),
+        });
     Some(GlyphWorkingSet {
+        tile_identities,
         fit_outcome: atlas.fit_outcome(),
         max_tile_dims: atlas.max_tile_dims(),
         packed_pixels: atlas.packed_pixels(),

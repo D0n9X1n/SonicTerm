@@ -946,3 +946,35 @@ mod frame_fallback {
         assert!(fixture.stack.rasterized_glyph_to_tile(raster(vec![0; 4], 0, 0)).is_none());
     }
 }
+
+/// The diagnostic face resolution mirrors the rasterizer: a character key (glyph id 0) and the
+/// shaped key for the same glyph resolve to one face, one glyph id and one strike, and the strike
+/// is the loaded face's raster size in thousandths of a pixel (14 pt at 96 DPI is 18.667 px).
+#[test]
+fn a_character_key_and_its_shaped_key_resolve_to_one_face_and_strike() {
+    let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let stack = FontStack::try_new_with_font_dirs_for_test(
+        &[("Rec Mono St.Helens", false)],
+        vec![fonts],
+        14.0,
+        96,
+        1.0,
+    )
+    .unwrap();
+    let shaped = stack.shape_text_with_style("a", false, false).unwrap();
+    let glyph = shaped.first().expect("a shapes to one glyph");
+    let by_character = stack.resolved_glyph_face(GlyphKey::new('a', false, false));
+    let by_glyph = stack.resolved_glyph_face(GlyphKey::shaped(
+        'a',
+        u8::try_from(glyph.font_idx).unwrap(),
+        glyph.glyph_pos,
+        false,
+        false,
+    ));
+    let resolved = by_character.expect("the character resolves");
+    assert_eq!(Some(&resolved), by_glyph.as_ref(), "both keys name one tile source");
+    assert_eq!(resolved.glyph_id, glyph.glyph_pos);
+    assert_eq!(resolved.strike_px_milli, 18_667);
+    assert!(resolved.face.source.ends_with("RecMonoSt.Helens-Regular.ttf"), "{resolved:?}");
+    assert_eq!(resolved.face.face_index, 0);
+}

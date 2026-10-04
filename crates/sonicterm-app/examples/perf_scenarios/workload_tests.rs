@@ -1126,12 +1126,12 @@ fn glyph_atlas_working_set() {
     }
 }
 
-/// The working-set helper against the real renderer: the S9 and S12 fixtures drawn on a Windows
+/// The working-set helper against the real renderer, compared by tile identity rather than by
+/// configuration-local glyph keys: the S9 and S12 fixtures drawn on a Windows
 /// window with the tab bar and three titles, the cursor and the command palette open with its
 /// footer and detail rows, at scale 1 and 2. It lives beside the fixtures it draws.
 #[cfg(target_os = "windows")]
 mod real_renderer_coverage {
-    use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -1141,8 +1141,8 @@ mod real_renderer_coverage {
     use sonicterm_cfg::keymap::{Action, Keymap};
     use sonicterm_cfg::theme::Theme;
     use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
-    use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
-    use sonicterm_types::{GlyphKey, GlyphRasterVariant};
+    use sonicterm_gpu::glyph_working_set::{measure_glyph_working_set, TileIdentity};
+    use sonicterm_types::GlyphRasterVariant;
     use winit::application::ApplicationHandler;
     use winit::dpi::PhysicalSize;
     use winit::event::WindowEvent;
@@ -1250,35 +1250,56 @@ mod real_renderer_coverage {
         Ok(Some((window, renderer)))
     }
 
-    /// Dispatch the real main-window redraw with pacing open until the resident keys stop
-    /// changing for three frames, so late fallback faces have landed; at most 3 s.
-    fn settle(app: &mut App, active: &ActiveEventLoop, id: WindowId) -> HashSet<GlyphKey> {
+    /// How long a case may wait for a presented frame that draws no tofu.
+    const FALLBACK_DEADLINE: Duration = Duration::from_secs(15);
+
+    /// Dispatch the real main-window redraw with pacing open until a dispatch presents a frame
+    /// (the renderer's successful-frame count advances) and that frame drew no tofu
+    /// (`last_missing_tofu()` is empty), so every fallback face has landed. Fails at the deadline
+    /// with what was still missing.
+    fn settle(
+        app: &mut App,
+        active: &ActiveEventLoop,
+        id: WindowId,
+        case: &str,
+    ) -> Result<(), String> {
         let started = Instant::now();
-        let mut last = HashSet::new();
-        let mut unchanged = 0;
-        while unchanged < 3 && started.elapsed() < Duration::from_secs(3) {
+        let mut presented_any = false;
+        let mut last_missing = Vec::new();
+        while started.elapsed() < FALLBACK_DEADLINE {
+            let before = app
+                .__test_window_renderer_mut(id)
+                .map(|renderer| renderer.successful_frame_count())
+                .ok_or("the window has a renderer")?;
             app.__test_set_window_last_render(id, Instant::now() - Duration::from_secs(1));
             ApplicationHandler::window_event(app, active, id, WindowEvent::RedrawRequested);
-            let keys = app
-                .__test_window_renderer_mut(id)
-                .map(|renderer| renderer.__test_resident_tile_keys())
-                .unwrap_or_default();
-            unchanged = if keys == last { unchanged + 1 } else { 0 };
-            last = keys;
+            let renderer = app.__test_window_renderer_mut(id).ok_or("the window has a renderer")?;
+            let presented = renderer.successful_frame_count() > before;
+            presented_any |= presented;
+            last_missing = renderer.last_missing_tofu().to_vec();
+            if presented && last_missing.is_empty() {
+                // When: this dispatch presented and drew no tofu, fallback is complete.
+                return Ok(());
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
-        last
+        Err(format!(
+            "{case}: no presented frame without tofu within {FALLBACK_DEADLINE:?} \
+             (any frame presented: {presented_any}; still missing: {last_missing:?})"
+        ))
     }
 
     /// Test 17 for one fixture at one scale: the renderer draws the fixture, three titles, the
-    /// cursor and the open palette; it then holds a footer key and a tab-title key, and every key
-    /// it holds is in the helper's key set for the same text, titles and DPI.
+    /// cursor and the open palette until a presented frame draws no tofu. It then holds a footer
+    /// key and a tab-title key, every resident tile resolves to an identity (face, glyph, strike,
+    /// variant and flags), and each identity is in the helper's set with the same raster size.
     fn covered(
         active: &ActiveEventLoop,
         name: &str,
         fixture: Fixture,
         scale: f32,
     ) -> Result<(), String> {
+        let case = format!("{name}@{scale}");
         let size_pt: f32 = FONT_SIZE.parse().map_err(|_| "the scenario font size")?;
         let Some((window, renderer)) = renderer(active, scale, size_pt)? else {
             return Ok(());
@@ -1302,19 +1323,42 @@ mod real_renderer_coverage {
         app.__test_set_frontmost_window(Some(id));
         check(app.run_action(&Action::OpenCommandPalette), "the palette opens")?;
         check(app.__test_palette_open(), "the palette is open")?;
-        let resident = settle(&mut app, active, id);
+        settle(&mut app, active, id, &case)?;
+        let renderer = app.__test_window_renderer_mut(id).ok_or("the window has a renderer")?;
+        let resident = renderer.__test_resident_tile_keys();
         let has = |variant| resident.iter().any(|key| key.raster_variant == variant);
-        check(has(GlyphRasterVariant::PaletteFooter), &format!("{name}@{scale}: a footer key"))?;
-        check(has(GlyphRasterVariant::TabTitle), &format!("{name}@{scale}: a tab-title key"))?;
+        check(has(GlyphRasterVariant::PaletteFooter), &format!("{case}: a footer key"))?;
+        check(has(GlyphRasterVariant::TabTitle), &format!("{case}: a tab-title key"))?;
+        let (identities, unresolved) = renderer.__test_resident_tile_identities();
+        check(
+            unresolved.is_empty(),
+            &format!("{case}: resident keys with no face identity: {unresolved:?}"),
+        )?;
         let lines: Vec<&str> = text.lines().collect();
         let dpi = (72.0 * scale).round() as usize;
         let helper =
             measure_glyph_working_set(&lines, &TITLES, FONT_FAMILY, size_pt, dpi, &font_dirs())
                 .ok_or("the packaged scenario family loads")?;
-        let missing: Vec<&GlyphKey> = resident.difference(&helper.tile_keys).take(20).collect();
+        let missing: Vec<&TileIdentity> = identities
+            .keys()
+            .filter(|identity| !helper.tile_identities.contains_key(*identity))
+            .take(20)
+            .collect();
         check(
             missing.is_empty(),
-            &format!("{name}@{scale}: resident keys the helper missed: {missing:?}"),
+            &format!("{case}: resident tiles the helper missed: {missing:?}"),
+        )?;
+        let resized: Vec<(&TileIdentity, [u32; 2], [u32; 2])> = identities
+            .iter()
+            .filter_map(|(identity, size)| {
+                let measured = helper.tile_identities[identity];
+                (measured != *size).then_some((identity, *size, measured))
+            })
+            .take(20)
+            .collect();
+        check(
+            resized.is_empty(),
+            &format!("{case}: raster sizes differ (identity, renderer, helper): {resized:?}"),
         )
     }
 
@@ -1334,8 +1378,9 @@ mod real_renderer_coverage {
         }
     }
 
-    /// The helper's key set covers every key the real renderer holds for S9 and S12 with the tab
-    /// bar, titles, cursor and an open palette, at scale 1 and 2.
+    /// Once fallback completes on a presented frame, the helper's identity set covers every tile
+    /// the real renderer holds for S9 and S12 with the tab bar, titles, cursor and an open
+    /// palette, at scale 1 and 2, with the same raster sizes.
     #[test]
     fn the_helper_covers_the_real_renderer() {
         let event_loop =

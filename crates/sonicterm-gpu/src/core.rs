@@ -4531,6 +4531,26 @@ impl GpuRenderer {
         self.glyph_atlas.resident_tile_keys()
     }
 
+    /// Test seam: every resident glyph tile by identity across font configurations, with its
+    /// raster size, resolved through the stack that drew its raster variant; the second value
+    /// lists the resident keys that resolved to no identity.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_resident_tile_identities(
+        &self,
+    ) -> (
+        std::collections::HashMap<crate::glyph_working_set::TileIdentity, [u32; 2]>,
+        Vec<sonicterm_types::GlyphKey>,
+    ) {
+        crate::glyph_working_set::resident_tile_identities(&self.glyph_atlas, |variant| {
+            match variant {
+                GlyphRasterVariant::Normal => self.font_stack.as_ref(),
+                GlyphRasterVariant::TabTitle => self.tab_title_font.stack(),
+                GlyphRasterVariant::PaletteFooter => self.palette_footer_font_stack.as_ref(),
+            }
+        })
+    }
+
     /// Apply a new font family / size / line-height multiplier without
     /// reconstructing the renderer.
     ///
