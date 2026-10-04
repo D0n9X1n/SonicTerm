@@ -346,7 +346,9 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
     // until a frame draws the resolved glyph and the title has been measured with it. The title
     // stack shares the body configuration, so the frame that applies its generation remeasures.
     let deadline = Instant::now() + FALLBACK_DEADLINE;
+    // The fallback face must be applied by a frame whose first attempt retries, below.
     let mut wakes = 0_u32;
+    let mut retry_checked = false;
     while renderer.last_missing_tofu().contains(&UNRESOLVED)
         || scene.tabs.tabs()[0].content_width_px() == width_before
     {
@@ -359,7 +361,13 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
             return Err(String::from("the wake carried another renderer's notice"));
         }
         if renderer.acknowledge_font_fallback(notice_id) {
-            draw(&mut renderer, &mut scene, &theme, size)?;
+            if retry_checked {
+                draw(&mut renderer, &mut scene, &theme, size)?;
+            } else {
+                // When: this is the first frame to apply a generation, its first attempt is forced to retry.
+                retry_checked = true;
+                forced_retry_on_apply(&mut renderer, &mut scene, &theme, size)?;
+            }
         }
     }
 
@@ -379,8 +387,49 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
     if tabs_after == tabs_before {
         return Err(String::from("the tab bar still shows the tofu title"));
     }
+    if !retry_checked {
+        return Err(String::from(
+            "no frame applied the fallback generation, so the retry was not checked",
+        ));
+    }
     attempt_attribution(&mut renderer, &mut scene, &theme, size)?;
     Ok(Outcome::Exercised)
+}
+
+/// The first frame that applies a fallback generation, with its first attempt forced to an atlas
+/// retry: that attempt carries the apply and folds once, unpresented; the retry that follows is
+/// a new preparation, carries no apply, and presents.
+fn forced_retry_on_apply(
+    renderer: &mut GpuRenderer,
+    scene: &mut Scene,
+    theme: &Theme,
+    size: PhysicalSize<u32>,
+) -> Result<(), String> {
+    let before = renderer.frame_stats();
+    let fonts = renderer.begin_frame_fonts();
+    let _ = renderer.measure_tab_widths(&fonts, &mut scene.tabs, false, false, Instant::now());
+    renderer.__change_glyph_atlas_during_next_assembly();
+    let first = render_once(renderer, &fonts, scene, theme, size);
+    if !matches!(first, PresentOutcome::AtlasRetry) {
+        return Err(format!("the forced attempt did not retry: {first:?}"));
+    }
+    draw(renderer, scene, theme, size)?;
+    let after = renderer.frame_stats();
+    let applies = after.font_generation_applies - before.font_generation_applies;
+    let apply = (
+        after.apply_attempts.attempts - before.apply_attempts.attempts,
+        after.apply_attempts.presented - before.apply_attempts.presented,
+    );
+    let every = (
+        after.attempts.attempts - before.attempts.attempts,
+        after.attempts.presented - before.attempts.presented,
+    );
+    if applies != 1 || apply != (1, 0) || every != (2, 1) {
+        return Err(format!(
+            "a retried apply: {applies} applies, apply (attempts, presented) {apply:?}, every {every:?}"
+        ));
+    }
+    Ok(())
 }
 
 /// The counted attempts of the real renderer: every fallback generation the frames applied is

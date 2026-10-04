@@ -5583,14 +5583,18 @@ class CounterTableTests(unittest.TestCase):
         self.assertEqual(len(details), 2)
         self.assertTrue(details[0].startswith("- S9/default head run 1 workload: every attempt 1 attempts"), details)
         self.assertIn("shaping 50.0%, rasterizing 50.0%, other 0.0%", details[0])
-        # A run of an applying phase that applied nothing is still listed, so the pooled row's whole
-        # population can be read run by run.
+        # A run of a phase with attempts is listed even when it applied nothing, so both pooled rows' whole
+        # populations can be read run by run; a phase with only ordinary attempts is listed too.
         quiet = counters_result({"renderer.render_attempts": 2, "renderer.render_attempt_ns": 50})
         mixed = perf.SideRuns(outcomes=[*head.outcomes, make_outcome(result=quiet)])
         details = perf.attempt_split_details("S9/default", counters_side({}), mixed)
         self.assertEqual(len(details), 4, details)
         self.assertIn("head run 3 workload: every attempt 2 attempts (1/1 runs)", details[-1])
         self.assertIn("fallback apply attempts no apply attempts (1/1 runs)", details[-1])
+        ordinary = perf.attempt_split_details("S9/default", counters_side({}), perf.SideRuns(
+            outcomes=[make_outcome(result=quiet)]))
+        self.assertEqual(len(ordinary), 2, ordinary)
+        self.assertIn("head run 1 workload: every attempt 2 attempts", ordinary[-1])
 
     def test_fallback_applies_read_n_a_on_an_older_base_and_a_real_zero_on_a_supporting_one(self):
         # font_fallback_applies joined the renderer section: a base built before it reads n/a with no change, a

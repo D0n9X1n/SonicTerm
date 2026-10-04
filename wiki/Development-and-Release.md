@@ -459,7 +459,7 @@ head, one row per scenario, phase and non-zero counter;
   means per attempt, so the shares always add up to 100%. A phase in which no
   side drew an attempt reads as one row, `no render attempts`, and a side
   without the fields reads `n/a`. The details block lists each run's own split
-  for every phase in which a run drew a fallback apply attempt.
+  for every phase in which any run drew a render attempt.
 - The Change column compares a count's medians, or a histogram's means. The
   Baseline column, and the change, read `n/a` when the base does not declare
   `perf-counters` (the set then runs on the head only), and for a field the

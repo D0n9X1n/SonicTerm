@@ -4677,12 +4677,12 @@ def _attempt_split_rows(label: str, phase_name: str, sides: Sequence[SideRuns], 
 
 
 def attempt_split_details(label: str, base: SideRuns, head: SideRuns) -> list[str]:
-    """Each run's own split, for every phase in which any run on either side drew a fallback apply attempt, so
-    the pooled row's whole population can be read run by run: every run of that phase is listed, including
-    runs that applied nothing and runs that lack the fields (`n/a`). Lines for the details block."""
+    """Each run's own split, for every phase in which any run on either side drew a render attempt, so both
+    pooled rows' whole populations can be read run by run: every run of that phase is listed, including runs
+    that applied nothing and runs that lack the fields (`n/a`). Lines for the details block."""
     sides = (("base", base), ("head", head))
     applying = {name for _side_name, side in sides for name, phases in _counter_phases(side).items()
-                if any(attempt_split([counters], "apply_")[1] for counters in phases)}
+                if any(attempt_split([counters], "render_")[1] for counters in phases)}
     lines = []
     for side_name, side in sides:
         for index, outcome in enumerate(side.outcomes, 1):
@@ -5934,7 +5934,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         for side, evidence, kind, _reasons in result.attempts:
             details.append(f"- {result.label} {result.set_name} {side} {kind}: `{evidence}/01-harness.log`")
     if split_details:
-        details += ["", "Per-run render-attempt splits (phases with a fallback apply attempt):", ""] + split_details
+        details += ["", "Per-run render-attempt splits (phases with a render attempt):", ""] + split_details
     document = comparison_document(timed_rows, lap_rows, alloc_rows, host_lines, details,
                                    counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead,
                                    capped_note=capped_note)
