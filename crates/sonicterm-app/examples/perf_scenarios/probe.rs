@@ -32,11 +32,11 @@ use crate::cli::{RunArgs, REFUSED};
 use crate::counters::{CounterTotals, CountersMode};
 use crate::record::{
     attribute_dispatch, bulk_tail_mismatch, echo_target, line_row_near_cursor, missing_wide_tokens,
-    planned_rows, presenter_blocked, prompt_origin, protocol_rows, retained_text,
-    row_count_mismatch, snapshot_echo, wide_tokens, write_progress, Attribution, CheckpointRecord,
-    DispatchObservation, EchoSnapshot, EchoTarget, LatencySample, Measurements, MonitorInfo,
-    PhaseRecord, PresenterRecord, RunResult, SlowDispatch, SlowDispatches, Status, Throughput,
-    UnattributedReason, CHECKPOINT_MEMORY, CREDITED,
+    planned_rows, presenter_blocked, presenter_record_for, prompt_origin, protocol_rows,
+    retained_text, row_count_mismatch, snapshot_echo, wide_tokens, write_progress, Attribution,
+    CheckpointRecord, DispatchObservation, EchoSnapshot, EchoTarget, LatencySample, Measurements,
+    MonitorInfo, PhaseRecord, PresenterRecord, RunResult, SlowDispatch, SlowDispatches, Status,
+    Throughput, UnattributedReason, CHECKPOINT_MEMORY, CREDITED,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{
@@ -1714,10 +1714,8 @@ impl Probe {
         };
         self.grid = self.app.__test_pane_grid_size(pane);
         self.monitor = self.monitor_info();
-        // Only Windows records how it presented, so macOS results, and their tables, stay as they were.
-        if cfg!(windows) {
-            self.presenter = self.presenter_record();
-        }
+        // Every host records how it presented, so a macOS row can show it stayed on the hardware path.
+        self.presenter = self.presenter_record();
         let blocked = self.presenter.as_ref().and_then(|presenter| {
             presenter_blocked(self.plan.presentation, presenter, scenarios::BUILD_HOST)
         });
@@ -1756,14 +1754,12 @@ impl Probe {
     /// How the main window presents: the configured mode and the renderer's software flags.
     fn presenter_record(&self) -> Option<PresenterRecord> {
         let renderer = self.app.main_renderer()?;
-        let degraded = renderer.is_software_render_degraded();
-        Some(PresenterRecord {
-            software_render_mode: self.software_render_mode,
-            software_rendering: renderer.is_software_rendering(),
-            software_render_degraded: degraded,
-            // The degrade path presents through GDI on Windows; elsewhere it stays on wgpu.
-            windows_gdi: cfg!(windows) && degraded,
-        })
+        Some(presenter_record_for(
+            scenarios::BUILD_HOST,
+            self.software_render_mode,
+            renderer.is_software_rendering(),
+            renderer.is_software_render_degraded(),
+        ))
     }
 
     /// Whether `pane`, just recorded as a role pane, had already exited; if so the run is invalidated.

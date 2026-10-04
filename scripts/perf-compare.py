@@ -2070,14 +2070,16 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
     # The measurement window's display after startup; absent or null when the harness did not report one.
     if data.get("monitor") is not None and not _monitor_ok(data["monitor"]):
         problems.append("monitor needs name, refresh_rate_millihertz and scale_factor of the documented types")
-    # Off Windows the harness reports no presenter; when present each field has its type.
+    # Windows and macOS runs record their presenter; when present each field has its type.
     presenter = data.get("presenter")
     if presenter is not None and not _presenter_ok(presenter):
         problems.append("presenter needs software_render_mode (a string or null) and the booleans "
                         "software_rendering, software_render_degraded and windows_gdi")
-    if platform_name == "win32" and status == "valid" and presenter is None:
-        # When: every Windows run records how it presented, so a valid one without the record cannot be trusted.
-        problems.append("a valid Windows result has no presenter")
+    if platform_name in ("win32", "darwin") and status == "valid" and presenter is None:
+        # When: every Windows and macOS run records how it presented, so a valid one without the record cannot be
+        # trusted; a macOS row counts only when that record shows the hardware path.
+        host = "Windows" if platform_name == "win32" else "macOS"
+        problems.append(f"a valid {host} result has no presenter")
     if platform_name == "win32" and data.get("synthetic_occlusion") is True:
         # When: Windows reports no occlusion, so the harness must never deliver a synthetic one there.
         problems.append("synthetic_occlusion is true, but Windows reports no occlusion")
@@ -3962,7 +3964,7 @@ def latency_acceptance(base: tuple[int, int] | None, head: tuple[int, int] | Non
 
 
 def presenter_text(outcome: RunOutcome) -> str | None:
-    """Name a run's presenter and adapter, or None when it reported neither (macOS)."""
+    """Name a run's presenter and adapter, or None when it reported neither (a base older than the macOS record)."""
     presenter = (outcome.result or {}).get("presenter")
     if outcome.renderer is None and not isinstance(presenter, Mapping):
         return None
