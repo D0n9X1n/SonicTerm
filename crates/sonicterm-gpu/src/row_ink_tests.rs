@@ -1,0 +1,171 @@
+use super::*;
+
+use sonicterm_types::{retained_hash_table_bytes, ClassCoverage, ResourceClass};
+
+fn rect(x: i32, y: i32, w: u32, h: u32) -> PixelRect {
+    PixelRect { x, y, w, h }
+}
+
+fn ink(rect: PixelRect, abs_row: u64, content_seq: u64) -> RowInk {
+    RowInk { rect, abs_row, content_seq: Some(content_seq) }
+}
+
+/// Stage one record per slot `0..rows` of `pane_id` and commit with `pane_id` the only survivor.
+fn present_rows(table: &mut RowInkTable, pane_id: u64, rows: u16) {
+    table.begin_frame();
+    for slot in 0..rows {
+        let top = i32::from(slot) * 20;
+        table.stage(pane_id, slot, ink(rect(0, top, 100, 20), u64::from(slot), 1));
+    }
+    table.commit(&[(pane_id, rows)]);
+}
+
+/// Records describe presented pixels only: a frame that stages but never commits (a surface
+/// retry, an atlas retry or an unavailable device) leaves the committed records as they were.
+#[test]
+fn staged_records_count_only_once_committed() {
+    let mut table = RowInkTable::default();
+    table.begin_frame();
+    table.stage(7, 0, ink(rect(0, 0, 100, 20), 20, 3));
+    // The frame was not presented: the next frame begins without committing.
+    table.begin_frame();
+    assert_eq!(table.valid_rect(7, 0, 20, Some(3)), None, "an unpresented stage is discarded");
+    table.stage(7, 0, ink(rect(0, 0, 100, 20), 20, 3));
+    table.commit(&[(7, 4)]);
+    assert_eq!(table.valid_rect(7, 0, 20, Some(3)), Some(rect(0, 0, 100, 20)));
+    assert_eq!(table.len(), 1);
+}
+
+/// A row a partial frame did not emit keeps its pixels, so it keeps its record; an emitted
+/// row's record is replaced, not unioned with what it drew before.
+#[test]
+fn a_non_emitted_row_keeps_its_record_and_an_emitted_row_replaces_it() {
+    let mut table = RowInkTable::default();
+    present_rows(&mut table, 7, 4);
+    table.begin_frame();
+    table.stage(7, 1, ink(rect(4, 22, 10, 8), 1, 2));
+    table.commit(&[(7, 4)]);
+    assert_eq!(table.valid_rect(7, 0, 0, Some(1)), Some(rect(0, 0, 100, 20)), "kept");
+    assert_eq!(table.valid_rect(7, 1, 1, Some(2)), Some(rect(4, 22, 10, 8)), "replaced");
+    assert_eq!(table.len(), 4);
+}
+
+/// The glyph and background loops each stage a row they emit; one frame's stages for one slot
+/// are unioned into the single record that slot presented.
+#[test]
+fn one_frames_stages_for_a_slot_union_into_its_record() {
+    let mut table = RowInkTable::default();
+    table.begin_frame();
+    table.stage(7, 2, ink(rect(10, 40, 5, 30), 2, 9));
+    table.stage(7, 2, ink(rect(0, 44, 100, 20), 2, 9));
+    // An empty stage (a row that emitted nothing in one loop) adds no area.
+    table.stage(7, 2, ink(PixelRect { x: 500, y: 500, w: 0, h: 0 }, 2, 9));
+    table.commit(&[(7, 4)]);
+    assert_eq!(table.valid_rect(7, 2, 2, Some(9)), Some(rect(0, 40, 100, 30)));
+}
+
+/// A row that emitted nothing has a valid, empty record, which is not a missing record.
+#[test]
+fn an_empty_row_has_an_empty_record_rather_than_none() {
+    let mut table = RowInkTable::default();
+    table.begin_frame();
+    table.stage(7, 0, RowInk { rect: PixelRect { x: 0, y: 0, w: 0, h: 0 }, abs_row: 30, content_seq: None });
+    table.commit(&[(7, 1)]);
+    let record = table.valid_rect(7, 0, 30, None).expect("an empty row is recorded");
+    assert!(record.is_empty());
+}
+
+/// A record is trusted only for the content it describes: a slot that now shows another
+/// absolute row, or whose row's content stamp moved, has no valid record, and a slot never
+/// presented has none either.
+#[test]
+fn a_changed_content_stamp_or_absolute_row_invalidates_a_record() {
+    let mut table = RowInkTable::default();
+    table.begin_frame();
+    table.stage(7, 3, ink(rect(0, 60, 100, 20), 23, 5));
+    table.commit(&[(7, 4)]);
+    assert!(table.valid_rect(7, 3, 23, Some(5)).is_some());
+    assert_eq!(table.valid_rect(7, 3, 23, Some(6)), None, "content stamp changed");
+    assert_eq!(table.valid_rect(7, 3, 24, Some(5)), None, "slot shows another absolute row");
+    assert_eq!(table.valid_rect(7, 3, 23, None), None, "the row is no longer held");
+    assert_eq!(table.valid_rect(7, 2, 22, Some(5)), None, "never presented");
+    assert_eq!(table.valid_rect(9, 3, 23, Some(5)), None, "another pane");
+}
+
+/// Records of a pane that left the plan are pruned at commit, and closing a pane drops its
+/// records at once; slots at or past a surviving pane's row count are pruned too.
+#[test]
+fn records_of_closed_panes_and_vanished_slots_are_dropped() {
+    let mut table = RowInkTable::default();
+    table.begin_frame();
+    for (pane_id, slot) in [(7, 0), (7, 3), (9, 0)] {
+        table.stage(pane_id, slot, ink(rect(0, 0, 1, 1), u64::from(slot), 1));
+    }
+    table.commit(&[(7, 4), (9, 1)]);
+    assert_eq!(table.len(), 3);
+    // Pane 9 closed and pane 7 shrank to three rows.
+    table.begin_frame();
+    table.commit(&[(7, 3)]);
+    assert_eq!(table.len(), 1);
+    assert!(table.valid_rect(7, 0, 0, Some(1)).is_some());
+    table.drop_pane(7);
+    assert_eq!(table.len(), 0);
+}
+
+/// A pane grown to 2,000 rows and shrunk back to 40 releases the table: after the shrinking
+/// frame commits, 40 records remain, the capacity falls to at most 128 and the reported bytes
+/// fall with it.
+#[test]
+fn the_table_releases_capacity_after_a_pane_shrinks() {
+    let mut table = RowInkTable::default();
+    present_rows(&mut table, 7, 2_000);
+    let grown = table.retained_amount();
+    assert_eq!(grown.items, 2_000);
+    present_rows(&mut table, 7, 40);
+    assert_eq!(table.len(), 40);
+    assert!(table.capacity() <= 128, "capacity {} after shrinking", table.capacity());
+    let shrunk = table.retained_amount();
+    assert_eq!(shrunk.items, 40);
+    assert!(shrunk.bytes * 10 < grown.bytes, "{} -> {} bytes", grown.bytes, shrunk.bytes);
+}
+
+/// The reported bytes count allocated buckets, not usable capacity: a capacity of 112 is 128
+/// buckets of entries plus a control byte each and the 16-byte trailing group, plus the staging
+/// buffer's capacity in entries. A 2,000-row frame stays inside the class's coverage envelope,
+/// which is computed with the same helper.
+#[test]
+fn reported_bytes_count_allocated_buckets_and_staging() {
+    let mut table = RowInkTable::default();
+    present_rows(&mut table, 7, 2_000);
+    present_rows(&mut table, 7, 40);
+    assert_eq!(table.capacity(), 112);
+    let entry = std::mem::size_of::<(RowInkKey, RowInk)>();
+    let table_bytes = retained_hash_table_bytes::<RowInkKey, RowInk>(112);
+    assert_eq!(table_bytes, 128 * entry + 128 + 16);
+    assert_ne!(table_bytes, 112 * entry);
+    assert_eq!(table.retained_amount().bytes, table_bytes + table.staged_capacity() * entry);
+
+    let visible = sonicterm_render_model::boundary::grid::grid::MAX_VISIBLE_GRID_CELLS as usize;
+    let envelope = retained_hash_table_bytes::<RowInkKey, RowInk>(2 * visible) + visible * entry;
+    let ClassCoverage::UnchargedRetention { per_owner_bytes } = ResourceClass::RowInk.coverage()
+    else {
+        panic!("RowInk must record its uncharged envelope");
+    };
+    assert!(per_owner_bytes >= envelope, "tabled {per_owner_bytes} < envelope {envelope}");
+    present_rows(&mut table, 7, 2_000);
+    assert!(table.retained_amount().bytes <= envelope);
+}
+
+/// Ink edges union every finite rectangle and round outward; a non-finite rectangle makes the
+/// row's ink the whole surface, and a row with no rectangle has empty ink.
+#[test]
+fn ink_edges_round_outward_and_make_non_finite_ink_the_surface() {
+    let surface = rect(0, 0, 240, 160);
+    let mut edges = InkEdges::default();
+    assert!(edges.to_rect(surface).is_empty());
+    edges.add_px((10.5, 20.25, 4.0, 3.0));
+    edges.add_px((2.0, 30.0, 1.0, 1.5));
+    assert_eq!(edges.to_rect(surface), rect(2, 20, 13, 12));
+    edges.add_px((f32::NAN, 0.0, 1.0, 1.0));
+    assert_eq!(edges.to_rect(surface), surface);
+}

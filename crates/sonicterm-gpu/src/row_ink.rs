@@ -1,0 +1,211 @@
+//! Per-row ink records: where each presented terminal row's primitives actually drew.
+//!
+//! A partial frame redraws only the rows whose ink can reach its damage. A glyph is drawn at its
+//! natural size with no pane clip, so a row's padded strip does not bound it; this table keeps the
+//! outward-rounded union of what each row last presented, per `(pane, slot)`, and the content it
+//! drew it from, so a row whose content has since changed is never trusted.
+
+use sonicterm_render_model::PixelRect;
+use sonicterm_types::{retained_hash_table_bytes, ResourceAmount};
+
+/// A record's key: the pane id and the viewport slot the row was drawn at.
+pub(crate) type RowInkKey = (u64, u16);
+
+/// What one presented row drew, and the content it drew it from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowInk {
+    /// The union of the row's glyphs, background and decoration quads; empty when it drew nothing.
+    pub rect: PixelRect,
+    /// The absolute row the slot showed.
+    pub abs_row: u64,
+    /// That row's content stamp when presented; `None` when the grid no longer held the row.
+    pub content_seq: Option<u64>,
+}
+
+/// Below this capacity a table or staging buffer is never shrunk.
+const SHRINK_FLOOR: usize = 64;
+
+/// Committed records per `(pane, slot)` and one frame's staged records.
+///
+/// Records are staged during assembly and committed only when the frame presents, so they always
+/// describe the pixels on screen. A row a frame did not emit keeps its record, as it keeps its
+/// pixels.
+#[derive(Debug, Default)]
+pub(crate) struct RowInkTable {
+    committed: std::collections::HashMap<RowInkKey, RowInk>,
+    staged: Vec<(RowInkKey, RowInk)>,
+}
+
+impl RowInkTable {
+    /// Discard whatever an unpresented frame staged, before a new frame stages its rows.
+    pub(crate) fn begin_frame(&mut self) {
+        self.clear_staged();
+    }
+
+    /// Stage what the row at `slot` of `pane_id` emitted this frame. A slot staged more than once
+    /// (by the glyph and the background loop) commits the union of its stages.
+    pub(crate) fn stage(&mut self, pane_id: u64, slot: u16, ink: RowInk) {
+        self.staged.push(((pane_id, slot), ink));
+    }
+
+    /// The committed ink of `slot` of `pane_id`, if it still describes that slot's content: the
+    /// slot shows the same absolute row, and that row's content stamp is the one presented.
+    pub(crate) fn valid_rect(
+        &self,
+        pane_id: u64,
+        slot: u16,
+        abs_row: u64,
+        content_seq: Option<u64>,
+    ) -> Option<PixelRect> {
+        self.committed
+            .get(&(pane_id, slot))
+            .filter(|ink| ink.abs_row == abs_row && ink.content_seq == content_seq)
+            .map(|ink| ink.rect)
+    }
+
+    /// Commit a presented frame's stages, replacing each emitted slot's record, then prune every
+    /// record whose pane is not in `surviving` (`(pane_id, row_count)`) or whose slot is at or past
+    /// that pane's row count, and release capacity the table no longer needs.
+    pub(crate) fn commit(&mut self, surviving: &[(u64, u16)]) {
+        // Sorting groups one slot's stages together; their row and content are the same, so only
+        // the rectangles need merging.
+        self.staged.sort_unstable_by_key(|(key, _)| *key);
+        let mut pending: Option<(RowInkKey, RowInk)> = None;
+        for (key, ink) in self.staged.drain(..) {
+            pending = match pending {
+                Some((pending_key, mut merged)) if pending_key == key => {
+                    merged.rect = union_non_empty(merged.rect, ink.rect);
+                    Some((pending_key, merged))
+                }
+                other => {
+                    // When: `key` starts a new slot, the previous slot's merged record is complete.
+                    if let Some((done_key, done)) = other {
+                        self.committed.insert(done_key, done);
+                    }
+                    Some((key, ink))
+                }
+            };
+        }
+        if let Some((done_key, done)) = pending {
+            self.committed.insert(done_key, done);
+        }
+        self.committed.retain(|(pane_id, slot), _| {
+            surviving.iter().any(|(survivor, rows)| survivor == pane_id && slot < rows)
+        });
+        let len = self.committed.len();
+        if shrink_target(len, self.committed.capacity()).is_some() {
+            self.committed.shrink_to((2 * len).max(SHRINK_FLOOR));
+        }
+        self.clear_staged();
+    }
+
+    /// Drop every record of a pane that was closed.
+    pub(crate) fn drop_pane(&mut self, pane_id: u64) {
+        self.committed.retain(|(owner, _), _| *owner != pane_id);
+        self.staged.retain(|((owner, _), _)| *owner != pane_id);
+    }
+
+    /// Committed records.
+    pub(crate) fn len(&self) -> usize {
+        self.committed.len()
+    }
+
+    /// The committed table's usable capacity.
+    pub(crate) fn capacity(&self) -> usize {
+        self.committed.capacity()
+    }
+
+    /// The staging buffer's capacity, in entries.
+    pub(crate) fn staged_capacity(&self) -> usize {
+        self.staged.capacity()
+    }
+
+    /// The table's allocated buckets, control bytes and trailing group, plus the staging buffer;
+    /// items are committed records.
+    pub(crate) fn retained_amount(&self) -> ResourceAmount {
+        let entry = std::mem::size_of::<(RowInkKey, RowInk)>();
+        ResourceAmount {
+            bytes: retained_hash_table_bytes::<RowInkKey, RowInk>(self.committed.capacity())
+                .saturating_add(self.staged.capacity().saturating_mul(entry)),
+            items: self.committed.len(),
+        }
+    }
+
+    /// Empty the staging buffer, shrinking it by the table's rule from the length it reached.
+    fn clear_staged(&mut self) {
+        let peak = self.staged.len();
+        self.staged.clear();
+        if let Some(target) = shrink_target(peak, self.staged.capacity()) {
+            self.staged.shrink_to(target);
+        }
+    }
+}
+
+/// The capacity to shrink to when `len` fills under a quarter of a `capacity` above the floor.
+fn shrink_target(len: usize, capacity: usize) -> Option<usize> {
+    (capacity > SHRINK_FLOOR && len < capacity / 4).then(|| (2 * len).max(SHRINK_FLOOR))
+}
+
+/// The union of two rectangles, where an empty one adds no area.
+pub(crate) fn union_non_empty(left: PixelRect, right: PixelRect) -> PixelRect {
+    if right.is_empty() {
+        left
+    } else if left.is_empty() {
+        // When: `left` is empty, it contributes no area and its origin is meaningless.
+        right
+    } else {
+        // When: both have area, the record grows to their bounding rectangle.
+        left.union(right)
+    }
+}
+
+/// The union of a row's primitive rectangles in surface pixels, kept as floats until committed.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct InkEdges {
+    /// `[left, top, right, bottom]` over every finite rectangle with area.
+    edges: Option<[f32; 4]>,
+    /// A non-finite rectangle was added, so the row's ink cannot be bounded.
+    unbounded: bool,
+}
+
+impl InkEdges {
+    /// Add `(left, top, width, height)` in surface pixels.
+    pub(crate) fn add_px(&mut self, (left, top, width, height): (f32, f32, f32, f32)) {
+        if !(left.is_finite() && top.is_finite() && width.is_finite() && height.is_finite()) {
+            // When: any component is non-finite, `min`/`max` would drop it, so the row is unbounded.
+            self.unbounded = true;
+            return;
+        }
+        if width <= 0.0 || height <= 0.0 {
+            // When: the rectangle has no area, it draws nothing.
+            return;
+        }
+        let added = [left, top, left + width, top + height];
+        self.edges = Some(self.edges.map_or(added, |acc| {
+            [acc[0].min(added[0]), acc[1].min(added[1]), acc[2].max(added[2]), acc[3].max(added[3])]
+        }));
+    }
+
+    /// Add another row's accumulated ink.
+    pub(crate) fn merge(&mut self, other: InkEdges) {
+        self.unbounded |= other.unbounded;
+        if let Some([left, top, right, bottom]) = other.edges {
+            self.add_px((left, top, right - left, bottom - top));
+        }
+    }
+
+    /// The outward-rounded rectangle; the whole `surface` when unbounded, empty when nothing drew.
+    pub(crate) fn to_rect(self, surface: PixelRect) -> PixelRect {
+        if self.unbounded {
+            // When: a primitive's extent was non-finite, the surface bounds every pixel it can touch.
+            return surface;
+        }
+        self.edges.map_or(PixelRect { x: 0, y: 0, w: 0, h: 0 }, |[left, top, right, bottom]| {
+            crate::cursor::outward_rect((left, top, right - left, bottom - top))
+        })
+    }
+}
+
+#[cfg(test)]
+#[path = "row_ink_tests.rs"]
+mod row_ink_tests;
