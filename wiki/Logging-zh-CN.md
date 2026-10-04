@@ -649,12 +649,14 @@ renderer retention window="<window-id>" role="visible" total_bytes=<bytes>
                    row_glyph_cache_bytes=<bytes> row_glyph_cache_items=<count>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
                    vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
+                   row_ink_bytes=<bytes> row_ink_items=<count>
 renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    glyph_atlas_bytes=<bytes> glyph_atlas_items=<count>
                    image_atlas_bytes=<bytes> image_atlas_items=<count>
                    row_glyph_cache_bytes=<bytes> row_glyph_cache_items=<count>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
                    vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
+                   row_ink_bytes=<bytes> row_ink_items=<count>
 ```
 
 | 字段 | 归属内容 | 首先处理 |
@@ -670,6 +672,8 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `software_frame_bytes` | Windows 软件呈现的整窗缓冲 | 缩小窗口；其它路径为零 |
 | `vertex_scratch_bytes` | `UploadStaging` 部分：呈现管线复用的 CPU 顶点组装缓冲，加上每个图集上传的脏矩形列表、合并矩形列表和暂存缓冲 | 顶点缓冲跟随最近最大的一帧，超过该帧用量四倍且超过 1 MiB 时收缩到用量的两倍；同步会释放矩形列表；暂存缓冲保留最大一次写入，至多一张图集 |
 | `vertex_scratch_items` | 顶点缓冲持有分配时为 1，否则为 0 | — |
+| `row_ink_bytes` | `RowInk` 部分：逐行墨迹表（每个已呈现行按窗格与槽位记录的绘制范围）已分配的桶，加上一帧的暂存缓冲 | 受可见行数限制；窗格缩小或关闭后，下一帧呈现时释放其记录 |
+| `row_ink_items` | 已提交的逐行墨迹记录数，每个可见行一条 | — |
 
 `role="warm"` 表示渲染器位于待命池，不属于可见窗口；关闭窗口不会释放它。
 这些数值是主机内存，不是 GPU 显存。

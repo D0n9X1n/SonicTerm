@@ -83,6 +83,8 @@ pub struct RendererSummary {
     pub software_frame: sonicterm_types::ResourceAmount,
     /// Reused vertex assembly storage of the presentation pipeline.
     pub vertex_scratch: sonicterm_types::ResourceAmount,
+    /// Per-row ink records of the presented frame and one frame's staging.
+    pub row_ink: sonicterm_types::ResourceAmount,
     /// Glyph atlas size, packed area, growths, evictions, fit and largest tile.
     pub glyph_atlas_facts: sonicterm_gpu::core::GlyphAtlasFacts,
 }
@@ -192,6 +194,7 @@ impl RendererSummary {
             self.row_quad_cache,
             self.software_frame,
             self.vertex_scratch,
+            self.row_ink,
         ]
         .into_iter()
         .fold(sonicterm_types::ResourceAmount::default(), |acc, part| {
@@ -210,7 +213,7 @@ impl RendererSummary {
     fn render(&self) -> String {
         let total = self.total();
         format!(
-            "{}[{}] glyph={}/{} image={}/{} row_glyph={}/{} row_quad={}/{} software={}/{} vertex={}/{} total={}/{}",
+            "{}[{}] glyph={}/{} image={}/{} row_glyph={}/{} row_quad={}/{} software={}/{} vertex={}/{} row_ink={}/{} total={}/{}",
             self.role,
             self.label,
             self.glyph_atlas.bytes,
@@ -225,6 +228,8 @@ impl RendererSummary {
             self.software_frame.items,
             self.vertex_scratch.bytes,
             self.vertex_scratch.items,
+            self.row_ink.bytes,
+            self.row_ink.items,
             total.bytes,
             total.items,
         ) + &format!(
@@ -664,6 +669,7 @@ fn summarize(
         row_quad_cache: retention.row_quad_cache,
         software_frame: retention.software_frame,
         vertex_scratch: retention.vertex_scratch,
+        row_ink: retention.row_ink,
         glyph_atlas_facts,
     }
 }

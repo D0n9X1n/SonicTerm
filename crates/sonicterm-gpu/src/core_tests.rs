@@ -3960,6 +3960,7 @@ fn every_reported_part_is_classified_exactly_once() {
         row_quad_cache: amount(1024 * 1024, 80),
         software_frame: amount(4 * 1024 * 1024, 1),
         vertex_scratch: amount(3 * 1024 * 1024, 1),
+        row_ink: amount(64 * 1024, 40),
     };
 
     let classes = retention.seam_classes();
@@ -3977,6 +3978,21 @@ fn every_reported_part_is_classified_exactly_once() {
         classes.len(),
         "no class may appear twice, or bytes are counted twice"
     );
+}
+
+/// The per-row ink records are one reported part, classified once under `RowInk` and inside
+/// `total()`, so the bytes a partial frame's records hold are visible and never double-counted.
+#[test]
+fn row_ink_is_reported_once_under_its_own_class() {
+    let retention = RendererRetention { row_ink: amount(4096, 40), ..RendererRetention::default() };
+    let classes = retention.seam_classes();
+    let row_ink: Vec<_> =
+        classes.iter().filter(|(class, _)| *class == ResourceClass::RowInk).collect();
+    assert_eq!(row_ink.len(), 1);
+    assert_eq!(row_ink[0].1, amount(4096, 40));
+    assert_eq!(retention.total(), amount(4096, 40));
+    assert!(matches!(ResourceClass::RowInk.coverage(), ClassCoverage::UnchargedRetention { .. }));
+    assert_eq!(ResourceClass::RowInk.pane_seam_term(), PaneSeamTerm::NotChargedInProduction);
 }
 
 /// Pane cache eviction is one glyph-then-quad renderer operation.

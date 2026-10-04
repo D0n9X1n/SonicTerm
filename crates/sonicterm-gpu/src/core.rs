@@ -2298,6 +2298,9 @@ pub struct GpuRenderer {
     /// Test seam: a glyph `(x, y, w, h)` surface-pixel rectangle and color appended before the
     /// cursor recolors; only `__inject_test_glyph` sets it, so production keeps `None`.
     injected_test_glyph: Option<((f32, f32, f32, f32), [f32; 4])>,
+    /// Where each presented row drew, per `(pane, slot)`; staged during assembly and committed
+    /// beside `last_frame_key` only when a frame presents. A partial plan emits by these records.
+    row_ink: crate::row_ink::RowInkTable,
     /// The last presented frame's damage, kept beside `last_frame_key` only after
     /// `__enable_presented_damage`; production never enables it.
     presented_damage: PresentedDamageRecorder,
@@ -2693,6 +2696,8 @@ pub struct RendererRetention {
     /// uploads' dirty and coalesced rect lists. CPU memory, so the GPU-buffer exclusion does not
     /// cover it; one item while the vertex scratch holds an allocation.
     pub vertex_scratch: ResourceAmount,
+    /// Per-row ink records of the presented frame and one frame's staging; items are records.
+    pub row_ink: ResourceAmount,
 }
 
 impl RendererRetention {
@@ -2712,7 +2717,7 @@ impl RendererRetention {
     /// `Vec`s — so charging both under one class would make the class mean two
     /// things and leave a reader unable to tell which allocation to act on.
     #[must_use]
-    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 6] {
+    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 7] {
         [
             (ResourceClass::GlyphAtlas, self.glyph_atlas),
             (ResourceClass::InlineMediaRetained, self.image_atlas),
@@ -2721,6 +2726,7 @@ impl RendererRetention {
             (ResourceClass::SoftwareFrame, self.software_frame),
             // The vertex scratch is CPU storage staged for the vertex-buffer upload.
             (ResourceClass::UploadStaging, self.vertex_scratch),
+            (ResourceClass::RowInk, self.row_ink),
         ]
     }
 
@@ -2734,6 +2740,7 @@ impl RendererRetention {
             self.row_quad_cache,
             self.software_frame,
             self.vertex_scratch,
+            self.row_ink,
         ]
         .into_iter()
         .fold(ResourceAmount::default(), |acc, part| ResourceAmount {
@@ -3267,6 +3274,7 @@ impl GpuRenderer {
             last_recolor: crate::cursor::RecolorRecord::default(),
             last_tab_ink: crate::cursor::RecolorBounds::Empty,
             injected_test_glyph: None,
+            row_ink: crate::row_ink::RowInkTable::default(),
             presented_damage: PresentedDamageRecorder::default(),
             presented_fields: PresentedFields::default(),
             preedit_glyph_cache: None,
@@ -3670,6 +3678,7 @@ impl GpuRenderer {
             row_quad_cache: self.line_quad_cache.retained_amount(),
             software_frame: self.software_frame_retained_amount(),
             vertex_scratch: self.upload_staging_retained(),
+            row_ink: self.row_ink.retained_amount(),
         }
     }
 
@@ -3697,6 +3706,7 @@ impl GpuRenderer {
     pub fn invalidate_pane_caches(&mut self, pane_id: u64) {
         self.row_glyph_cache.invalidate_pane(pane_id);
         self.line_quad_cache.invalidate_pane(pane_id);
+        self.row_ink.drop_pane(pane_id);
     }
 
     #[cfg(windows)]
