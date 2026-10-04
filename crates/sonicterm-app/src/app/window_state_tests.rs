@@ -361,3 +361,47 @@ fn backdating_hook_moves_both_clocks() {
     assert_eq!(app.windows[&child].last_render, backdated);
     assert_eq!(app.windows[&child].stream_clock, backdated);
 }
+
+/// A local selection drag reads only its press pane: with the sibling pane's parser held by
+/// another thread, the press and each extension complete promptly, take no counted parser lock,
+/// and dirty no pane, so selection reaches the renderer as window identity alone.
+#[test]
+fn selection_drag_locks_only_the_selecting_pane() {
+    use crate::app::frame_counters::{DispatchScope, DispatchTotals};
+    use std::sync::{atomic::Ordering, mpsc, Arc};
+    use std::time::{Duration, Instant};
+    let (mut app, child, active, sibling) = split_child();
+    let window = app.windows.get_mut(&child).expect("seeded child window");
+    clear_window_dirt(window);
+    let before = window_dirt(window);
+
+    // The helper holds the sibling's parser until released, or for at most five seconds, so a
+    // drag that locks the sibling is detected by its delay instead of hanging the suite.
+    let sibling_parser = Arc::clone(&window.panes[&sibling].parser);
+    let (held_sender, held) = mpsc::channel();
+    let (release, release_receiver) = mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = sibling_parser.lock();
+        held_sender.send(()).expect("the test waits for the hold");
+        let _ = release_receiver.recv_timeout(Duration::from_secs(5));
+    });
+    held.recv().expect("the sibling parser is held");
+
+    let totals = Arc::new(DispatchTotals::default());
+    let started = Instant::now();
+    {
+        let _scope = DispatchScope::enter(Some(Arc::clone(&totals)));
+        assert!(window.begin_local_selection(active, (0, 0), 1), "the press binds a selection");
+        for col in 1..4 {
+            assert!(window.extend_local_selection_to_cell((1, col)), "the drag extends");
+        }
+    }
+    let elapsed = started.elapsed();
+    // A holder that timed out has dropped its receiver; the elapsed check below reports why.
+    let _ = release.send(());
+    holder.join().expect("the holder exits");
+    assert!(elapsed < Duration::from_secs(2), "the drag blocked on the sibling for {elapsed:?}");
+    assert_eq!(totals.locks.load(Ordering::Relaxed), 0, "the drag only try-locks its pane");
+    assert_eq!(window_dirt(window), before, "the drag dirtied a pane");
+    assert_eq!(window.selection.and_then(|selection| selection.pane_id), Some(active));
+}
