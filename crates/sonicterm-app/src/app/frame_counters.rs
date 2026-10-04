@@ -1572,6 +1572,8 @@ impl WindowFrameCounters {
                 ("index_bytes", stats.index_bytes),
                 ("damage_permille_sum", stats.damage_permille_sum),
                 ("damaged_frames", stats.damaged_frames),
+                // Union-rect waste in permille; damaged_frames is its denominator.
+                ("damage_waste_permille_sum", stats.damage_waste_permille_sum),
                 ("software_frames", stats.software_frames),
                 ("gpu_frames", stats.gpu_frames),
                 ("row_cache_hits", stats.row_cache_hits),

@@ -1961,7 +1961,10 @@ FRAME_COUNTER_FIELDS = {
              "fg_worker_probe_us")),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced", "flushes_suppressed"),
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
-    "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames", "software_frames",
+    "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
+                  # damage_waste_permille_sum is the union rect's share minus what its parts cover, over
+                  # damaged_frames; a base older than it shows n/a.
+                  "damage_waste_permille_sum", "software_frames",
                   "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",
                   # row_cache_invalidate_us is summed microseconds kept as a plain count, not a histogram.
                   "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited",
