@@ -598,19 +598,27 @@ reaches, so a native test can pin that gate.
 
 ### Atlas and font invariants
 
-The CPU glyph atlas is fixed at 2,048 × 2,048 BGRA8 pixels, about 16 MiB. Its
-metadata holds at most `MAX_ATLAS_ENTRIES = 16,384` entries, including blank and
-missing sentinels.
+The CPU glyph atlas grows by doubling up to 2,048 × 2,048 BGRA8 pixels, about
+16 MiB. Its metadata holds at most `MAX_ATLAS_ENTRIES = 16,384` entries,
+including blank and missing sentinels. Growth copies resident pixels in place,
+recomputes their UVs and advances the atlas identity without rasterizing
+anything again; only the glyph atlas grows, and a reset remains the only path
+that clears it.
 
 On a miss, the atlas uses reclaimed rectangles before its shelf packer. Under
-metadata or packing pressure, it deterministically evicts the coldest quarter.
+metadata or packing pressure, a growable atlas below 2,048 grows first; at
+2,048 or the entry cap it deterministically evicts the coldest quarter. A stamp
+change caused only by growth (same device, same allocation, no eviction, more
+growths) retries once after recreating the texture, without a reset or
+disabling eviction.
 Frame and preedit validity use the exact tuple of device generation, renderer-owned
 allocation generation, and atlas-local content identity, not the resettable eviction
 count. If this stamp changes during assembly, the renderer discards the frame before
 presentation, resets the atlas in place, invalidates UV-bearing caches, and requests
 one retry without acknowledging the grid. The retry disables eviction until one
 frame presents successfully. Diagnostic eviction fields remain actual counts, and
-reset/replacement has a distinct reason. The fixed pixel allocation does not grow.
+reset/replacement has a distinct reason. The image atlas's pixel allocation is
+fixed and does not grow.
 The private `atlas_lifecycle` child of `core` owns those transitions and the existing
 upload gates. `FrameBatches` groups only borrowed slices of the owned batches; grids and parser
 guards stay with assembly and are released before presentation, and acknowledgement

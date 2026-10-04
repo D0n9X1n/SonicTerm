@@ -400,8 +400,17 @@ overlays are assembled separately.
 
 ### Glyph atlas
 
-The CPU `GlyphAtlas` is a fixed 2048×2048 BGRA8 texture, 16 MiB at four bytes
-per pixel, with at most 16,384 indexed entries. A shelf packer reuses freed
+The CPU `GlyphAtlas` is a square BGRA8 texture that starts small and grows on
+demand up to 2048×2048 (16 MiB at four bytes per pixel), with at most 16,384
+indexed entries. A renderer starts at `START_ATLAS_DIM_1X` at scale factors up
+to 1.5 and `START_ATLAS_DIM_2X` above (both 2048 until CI working-set data sets
+them lower); a warm spare window starts at the 256 floor, since it may never
+draw. When a tile does not fit, the atlas doubles first: resident tiles keep
+their pixel positions, their pixels are copied, their UVs are recomputed, and
+one typed re-upload rectangle per tile is queued; nothing is rasterized again.
+Growth advances the atlas identity, so the frame that grew it is discarded and
+retried once without a reset. Eviction happens only at 2048 or at the entry
+cap. The image atlas stays fixed at 2048 and never grows. A shelf packer reuses freed
 rectangles before extending shelves. Keys include font slot, glyph id,
 character, style, and native raster role.
 
@@ -413,8 +422,9 @@ Insertion follows these rules:
 3. spaces use zero-area entries and need no upload;
 4. normal, subpixel, and color tiles are copied into BGRA storage;
 5. each write records a tight dirty rectangle;
-6. under pressure, the coldest quarter is evicted deterministically and
-   allocation retries.
+6. when a tile does not fit, a growable atlas below 2048 doubles first; at
+   2048 or at the entry cap, the coldest quarter is evicted deterministically
+   and allocation retries.
 
 Eviction is required for correctness as well as a memory bound: merely refusing
 new entries would keep memory flat while later glyphs disappeared. Atlas resets

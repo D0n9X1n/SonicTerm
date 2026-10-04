@@ -25,7 +25,7 @@ This page explains what those figures count; protocol and atlas details are in
 | PTY input | one fixed 64-byte pending pointer-motion slot per pane; four queued UI messages, 16 MiB each; reply FIFO uses 64 KiB RAM including framing, ≤32 KiB writer output, ≤32 KiB + 4 B read scratch, ≤32 KiB app reply-batch payload, and <32 KiB parser-dispatch payload (growable vectors may retain spare capacity) | UI refuses with bytes intact; replies spill to private temporary storage without waiting for native input capacity |
 | Reply spill disk | no fixed disk quota; consumed prefixes remain until the FIFO file drains | delete on drain, writer exit, or pane teardown; storage errors explicitly fail reply delivery while output/exit observation continues |
 | PTY output | 64 queued chunks plus one blocked sender chunk, each backed by a 64 KiB reader ring; structural worst case 4.0625 MiB | block the reader and apply OS backpressure |
-| Glyph atlas | one 2048×2048 BGRA8 CPU atlas per renderer, 16 MiB and 16,384 entries | evict the coldest quarter and retry |
+| Glyph atlas | one BGRA8 CPU atlas per renderer that grows by doubling up to 2048×2048, 16 MiB and 16,384 entries | grow first; at 2048 or the entry cap, evict the coldest quarter and retry |
 | Image atlas | 1×1 placeholder; 2048×2048 BGRA8 only while media is active | skip older images when full; release to placeholder after 240 media-free frames, or without a frame 30 s after renderable media was last visible |
 | Windows software frame | axis ≤ 16,384; total ≤ 160 MiB | reject construction or resize and preserve the old valid allocation |
 | Pane command events | 1,024 events | drop the oldest and shrink retained vector capacity |
@@ -194,7 +194,8 @@ or reset of the sampling cadence.
 
 Renderer memory is separate because it is window-owned rather than pane-owned:
 
-- `glyph_atlas_bytes`: CPU glyph atlas capacity;
+- `glyph_atlas_bytes`: CPU glyph atlas pixel capacity plus its dirty-rect list's capacity, so it rises as the atlas grows;
+- per renderer, after `total=`: `glyph_atlas_dim`, `glyph_atlas_packed_pixels`, `glyph_atlas_growths`, `glyph_atlas_evictions`, `glyph_atlas_fit` (the smallest power-of-two size its resident tiles would fit with a quarter of the height free) and `glyph_atlas_max_tile`;
 - `image_atlas_bytes`: CPU inline-image atlas capacity;
 - `row_glyph_cache_bytes` / `row_glyph_cache_items`: hash-table backing, cached
   glyph instances, underline runs, tofu geometry, missing characters, and row count;

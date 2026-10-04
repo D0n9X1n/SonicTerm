@@ -21,10 +21,13 @@ cargo build -p sonicterm-text
 - Avoid atlas allocation or eviction surprises on the hottest draw path.
 - UV-bearing caches use `GlyphAtlas::identity()`, not the resettable eviction
   counter, and still clear promptly when their owning seam changes.
-- The atlas is a fixed-size texture plus an index. `retained_amount().bytes`
-  is the texture capacity and is constant by construction; only `items`
-  moves. A test bounding `bytes` compares a constant to itself and would
-  pass against any defect.
+- A `GlyphAtlas::growable` atlas doubles up to its maximum before it evicts;
+  `new` and `default_size` stay fixed. Growth copies resident tiles, keeps
+  their positions, recomputes UVs, queues one typed re-upload rect per tile
+  and advances the identity; it never rasterizes again.
+  `retained_amount().bytes` is the pixel capacity plus the dirty list's
+  capacity, so it moves with growth; on a fixed atlas it is constant, and a
+  test bounding it there compares a constant to itself.
 - Eviction is what keeps the index bounded. With eviction disabled the index
   still stops growing, because a full atlas stops admitting — memory looks
   flat while every later glyph goes missing. Assert that eviction ran, not
