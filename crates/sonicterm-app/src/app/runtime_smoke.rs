@@ -368,16 +368,27 @@ impl RuntimeSmokeState {
         true
     }
 
-    /// Record a marker-bearing native present while the matching pane's parser guard remains held.
+    /// Copy the recovery marker facts of `window`'s held panes before the render call; `None` when
+    /// no recovery proof is running, so ordinary frames scan nothing.
+    pub(super) fn recovery_marker_sample<'grid>(
+        &self,
+        window: winit::window::WindowId,
+        panes: impl IntoIterator<Item = (u64, &'grid Grid, Option<u64>)>,
+    ) -> Option<gpu_recovery_smoke::RecoveryMarkerSample> {
+        let probe = self.recovery_probe.as_ref()?;
+        Some(probe.marker_sample(window, panes, &self.marker))
+    }
+
+    /// Record a marker-bearing native present from the sample copied before the render call.
     pub(super) fn observe_recovery_frame(
         &mut self,
         window: winit::window::WindowId,
         generation: u64,
-        panes: &[sonicterm_render_model::PaneRender<'_>],
+        sample: &gpu_recovery_smoke::RecoveryMarkerSample,
         outcome: &sonicterm_gpu::core::PresentOutcome,
     ) {
         if let Some(probe) = self.recovery_probe.as_mut() {
-            probe.observe_frame(window, generation, panes, outcome, &self.marker);
+            probe.observe_frame(window, generation, sample, outcome);
         }
     }
 

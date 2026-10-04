@@ -54,6 +54,9 @@ pub struct WindowState {
     pub tabs: TabBar,
     pub tab_states: Vec<TabState>,
     pub panes: HashMap<u64, PaneState>,
+    /// The receipts of this window's last presented frame, applied to the held grids at its next
+    /// successful collection and then emptied; kept unchanged by every other outcome.
+    pub(crate) pending_receipts: Vec<super::visible_frame::AckTicket>,
     /// This window's owner in the governor hierarchy.
     ///
     /// `None` for synthetic windows built by tests that never registered one.
@@ -422,6 +425,8 @@ impl WindowState {
     /// half of the removal.
     pub(crate) fn remove_pane(&mut self, pane_id: u64) -> Option<PaneState> {
         let pane = self.panes.remove(&pane_id)?;
+        // A removed pane's receipts would fail revalidation anyway; drop them now.
+        self.pending_receipts.retain(|ticket| ticket.receipt.pane_id != pane_id);
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.invalidate_pane_caches(pane_id);
         }

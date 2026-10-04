@@ -48,22 +48,31 @@ fn recovery_probe_starts_without_native_custody() {
 /// The native oracle must consume the same marker-bearing plan before compatibility conversion discards the typed outcome.
 #[test]
 fn recovery_marker_proof_is_bound_to_each_present_callback() {
+    // The marker facts are copied from the held guards before the call that releases them, and the
+    // verdict is applied with the call's outcome before compatibility conversion.
     for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
-        let render = source.find("let outcome = r.render_with_outcome(").unwrap();
+        let sample = source.find("smoke.recovery_marker_sample(").unwrap();
+        let render = source.find("r.render_releasing(").unwrap();
         let evidence = source.find("smoke.observe_recovery_frame(").unwrap();
         let call = source[evidence..].split_once(");").unwrap().0;
-        assert!(call.contains("r.device_generation()") && call.contains("&panes_slice"));
+        assert!(call.contains("r.device_generation()") && call.contains("sample"));
+        assert!(!source.contains("panes_slice"));
         let compatibility = source.find("outcome.into_render_result()").unwrap();
-        assert!(render < evidence && evidence < compatibility);
+        assert!(sample < render && render < evidence && evidence < compatibility);
     }
     let source = include_str!("gpu_recovery_smoke.rs");
     let observe = source.split_once("pub(super) fn observe_frame(").unwrap().1;
     let observe = observe.split_once("impl App").unwrap().0;
     assert!(observe.contains("PresentOutcome::Presented"));
     assert!(observe.contains("proof.window == window"));
-    assert!(observe.contains("pane.id == proof.pane"));
-    assert!(observe.contains("grid_marker_rows(pane.grid, marker) > proof.marker_rows"));
-    assert!(observe.contains("visible_marker(pane.grid, pane.viewport_top_abs, marker)"));
+    assert!(observe.contains("mark.pane == proof.pane"));
+    assert!(observe.contains("mark.marker_rows > proof.marker_rows && mark.visible"));
+    // The grid reads live in the sample, taken while the guards are held.
+    let sample = source.split_once("pub(super) fn marker_sample<").unwrap().1;
+    let sample = sample.split_once("pub(super) fn observe_frame(").unwrap().0;
+    assert!(sample.contains("grid_marker_rows(grid, marker)"));
+    assert!(sample.contains("visible_marker(grid, viewport_top_abs, marker)"));
+    assert!(!observe.split_once("pub(super) fn observe_device_event").unwrap().0.contains("grid"));
     assert!(observe
         .contains("accepts_proof_generation(self.stage, self.original_generation, generation)"));
     assert!(observe.contains("proof.presented_generation = Some(generation)"));

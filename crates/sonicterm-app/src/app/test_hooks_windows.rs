@@ -100,6 +100,7 @@ impl App {
         let child = WindowState {
             // Registered when the window is inserted.
             owner: None,
+            pending_receipts: Vec::new(),
             role: WindowRole::Terminal,
             custom_window_name: String::new(),
             window: None,
@@ -593,6 +594,7 @@ impl App {
         let main = WindowState {
             // Registered when the window is inserted.
             owner: None,
+            pending_receipts: Vec::new(),
             role: WindowRole::Terminal,
             custom_window_name: String::new(),
             window: None,

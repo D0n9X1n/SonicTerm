@@ -1058,6 +1058,9 @@ pub(crate) struct WindowFrameCounters {
     pub(crate) defer_streaming: u64,
     /// Contention retries armed.
     pub(crate) contention_retry_armed: u64,
+    /// Pending acknowledgement receipts dropped at a collection: the pane was not held, its parser
+    /// differed, or an identity changed. Each costs a later re-assembly, never pixels.
+    pub(crate) dirt_ack_dropped: u64,
     /// Intervals between consecutive presented frames.
     pub(crate) present_interval: Histogram,
     /// Output events serviced for the window: `PaneOutput` and `RequestRedraw`.
@@ -1101,6 +1104,7 @@ impl Default for WindowFrameCounters {
             defer_contention: 0,
             defer_streaming: 0,
             contention_retry_armed: 0,
+            dirt_ack_dropped: 0,
             present_interval: Histogram::new(HistogramUnit::Millis),
             user_request_redraw: 0,
             redraw_requested: 0,
@@ -1521,6 +1525,7 @@ impl WindowFrameCounters {
             ("defer_contention", self.defer_contention),
             ("defer_streaming", self.defer_streaming),
             ("contention_retry_armed", self.contention_retry_armed),
+            ("dirt_ack_dropped", self.dirt_ack_dropped),
             ("native_request_redraw", native_requests + renderer_requests),
             ("user_request_redraw", self.user_request_redraw),
             ("redraw_requested", self.redraw_requested),

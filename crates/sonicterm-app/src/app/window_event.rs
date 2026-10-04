@@ -769,9 +769,10 @@ impl App {
             }
         };
         // One anchored viewport projection feeds both the per-pane and active-frame viewports.
+        // Reconcile, then apply the previous frame's receipts under these guards, before planning.
         let frame_viewports = match self
             .main_mut()
-            .map(|window| sources.reconcile_viewports(&mut window.panes, &guards))
+            .map(|window| sources.reconcile_and_apply_receipts(window, &mut guards))
         {
             Some(Ok(viewports)) => viewports,
             result => {
@@ -815,6 +816,8 @@ impl App {
             self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.is_waiting_for_present());
         let mut smoke_presented_count = None;
         let mut frame_completion = None;
+        // A presented frame's receipts; bound and stored as the window's pending set after the call.
+        let mut presented_receipts = Vec::new();
 
         // lift the main window Arc clone before the
         // mut borrow on `self.renderer` below, so the IME
@@ -969,15 +972,20 @@ impl App {
                 }
                 let search =
                     tab_states_mref.get(tab_idx).and_then(|tab_state| tab_state.search.as_ref());
-                // The shared builder borrows all visible grids and moves each image snapshot once.
-                let mut panes_slice = super::visible_frame::pane_renders(
-                    &mut guards,
-                    &mut images,
-                    &frame_viewports,
-                    active_id,
-                    &broadcast_participants,
-                    &scrollbar_alpha_map,
-                );
+                // Every reader after the render call takes its copy here: the call releases the guards.
+                let cursor_copy = {
+                    let grid = guards[active_pos].1.grid();
+                    (grid.cursor.row, grid.cursor.col)
+                };
+                let cursor_rect_copy = guards[active_pos].2;
+                let recovery_sample = self.runtime_smoke.as_ref().and_then(|smoke| {
+                    smoke.recovery_marker_sample(
+                        win_id,
+                        guards
+                            .iter()
+                            .map(|(id, parser, _)| (*id, parser.grid(), frame_viewports.of(*id))),
+                    )
+                });
                 // Keep the widths on screen, then measure changed titles with the tab font right
                 // before drawing; hit-testing reads the stored widths of the frame on screen.
                 let drawn_tab_widths = tabs_mref.laid_out_widths();
@@ -992,9 +1000,17 @@ impl App {
                     Instant::now(),
                 );
                 r.set_render_timing_label("main");
-                let outcome = r.render_with_outcome(
+                // The source owns the guards and media; they are released before presentation.
+                let sonicterm_gpu::core::FrameOutcome { outcome, receipts } = r.render_releasing(
                     &fonts,
-                    &mut panes_slice,
+                    super::visible_frame::HeldFrameSource {
+                        guards,
+                        images: std::mem::take(&mut images),
+                        viewports: &frame_viewports,
+                        active: active_id,
+                        broadcast: &broadcast_participants,
+                        scrollbar_alpha: &scrollbar_alpha_map,
+                    },
                     &self.theme,
                     cursor_visible_now
                         && !(self.command_palette.is_open()
@@ -1020,13 +1036,11 @@ impl App {
                 if let Some(recovery) = self.gpu_recovery.as_mut() {
                     recovery.observe_frame(r.device_generation(), &outcome, Instant::now());
                 }
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
-                    smoke.observe_recovery_frame(
-                        win_id,
-                        r.device_generation(),
-                        &panes_slice,
-                        &outcome,
-                    );
+                presented_receipts = receipts;
+                if let (Some(smoke), Some(sample)) =
+                    (self.runtime_smoke.as_mut(), recovery_sample.as_ref())
+                {
+                    smoke.observe_recovery_frame(win_id, r.device_generation(), sample, &outcome);
                 }
                 frame_completion =
                     Some((super::redraw::FrameSettlement::of(&outcome), Instant::now()));
@@ -1056,8 +1070,7 @@ impl App {
                     search,
                     preedit,
                 );
-                let grid = guards[active_pos].1.grid_mut();
-                ((grid.cursor.row, grid.cursor.col), guards[active_pos].2, field_ime)
+                (cursor_copy, cursor_rect_copy, field_ime)
             };
             // refresh the OS-drag tab bar
             // snapshot so cross-window drop hit-tests see the
@@ -1105,6 +1118,13 @@ impl App {
                         );
                     }
                 }
+            }
+        }
+        if !presented_receipts.is_empty() {
+            // When: the frame presented, its receipts replace the pending set emptied at collection.
+            let tickets = sources.bind(presented_receipts);
+            if let Some(window) = self.main_mut() {
+                window.pending_receipts = tickets;
             }
         }
         if let (Some(snapshot), Some((outcome, at))) = (frame_snapshot.as_ref(), frame_completion) {

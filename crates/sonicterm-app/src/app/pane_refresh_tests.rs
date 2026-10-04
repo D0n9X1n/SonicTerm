@@ -530,7 +530,7 @@ fn both_redraw_paths_invalidate_before_rendering() {
             .find("invalidate_selection_for_content(")
             .unwrap_or_else(|| panic!("{name} redraw must call the shared invalidation helper"));
         let render = source[call..]
-            .find(".render_with_outcome(")
+            .find(".render_releasing(")
             .map(|offset| call + offset)
             .unwrap_or_else(|| panic!("{name} redraw must render after invalidation"));
         assert!(source[call..render].contains(selection_arg));

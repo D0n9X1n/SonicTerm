@@ -118,7 +118,8 @@ impl App {
             // When: windows no longer contains win_id, discard its collected frame instead of presenting retained hover.
             return;
         };
-        let frame_viewports = match sources.reconcile_viewports(&mut child.panes, &guards) {
+        // Reconcile, then apply the previous frame's receipts under these guards, before planning.
+        let frame_viewports = match sources.reconcile_and_apply_receipts(child, &mut guards) {
             Ok(viewports) => viewports,
             Err(why) => {
                 // When: `why` rejects an owner, drop the entire collection before returning to the adapter.
@@ -208,14 +209,21 @@ impl App {
             if let Some(timing) = timing.as_mut() {
                 timing.lap("scrollbar");
             }
-            let mut panes_slice = super::visible_frame::pane_renders(
-                &mut guards,
-                &mut images,
-                &frame_viewports,
-                active_id,
-                broadcast_participants,
-                &scrollbar_alpha_map,
-            );
+            // Every reader after the render call takes its copy here: the call releases the guards.
+            let cursor_copy = {
+                let grid = guards[active_pos].1.grid();
+                (grid.cursor.row, grid.cursor.col)
+            };
+            let cursor_rect_copy = guards[active_pos].2;
+            let recovery_sample = self.runtime_smoke.as_ref().and_then(|smoke| {
+                smoke.recovery_marker_sample(
+                    win_id,
+                    guards
+                        .iter()
+                        .map(|(id, parser, _)| (*id, parser.grid(), frame_viewports.of(*id))),
+                )
+            });
+
             if let Some(timing) = timing.as_mut() {
                 timing.lap("pane_slice");
             }
@@ -247,9 +255,17 @@ impl App {
                     Instant::now(),
                 );
                 r.set_render_timing_label("child");
-                let outcome = r.render_with_outcome(
+                // The source owns the guards and media; they are released before presentation.
+                let sonicterm_gpu::core::FrameOutcome { outcome, receipts } = r.render_releasing(
                     &fonts,
-                    &mut panes_slice,
+                    super::visible_frame::HeldFrameSource {
+                        guards,
+                        images: std::mem::take(&mut images),
+                        viewports: &frame_viewports,
+                        active: active_id,
+                        broadcast: broadcast_participants,
+                        scrollbar_alpha: &scrollbar_alpha_map,
+                    },
                     theme,
                     cursor_visible_now && !palette_here,
                     child.selection.as_ref(),
@@ -282,13 +298,14 @@ impl App {
                 if let Some(recovery) = self.gpu_recovery.as_mut() {
                     recovery.observe_frame(r.device_generation(), &outcome, Instant::now());
                 }
-                if let Some(smoke) = self.runtime_smoke.as_mut() {
-                    smoke.observe_recovery_frame(
-                        win_id,
-                        r.device_generation(),
-                        &panes_slice,
-                        &outcome,
-                    );
+                if !receipts.is_empty() {
+                    // When: the frame presented, its receipts replace the pending set emptied at collection.
+                    child.pending_receipts = sources.bind(receipts);
+                }
+                if let (Some(smoke), Some(sample)) =
+                    (self.runtime_smoke.as_mut(), recovery_sample.as_ref())
+                {
+                    smoke.observe_recovery_frame(win_id, r.device_generation(), sample, &outcome);
                 }
                 if let Some(snapshot) = frame_snapshot.as_ref() {
                     let at = Instant::now();
@@ -331,6 +348,9 @@ impl App {
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     smoke.note_render_attempt();
                 }
+            } else {
+                // When: the child has no renderer, nothing is drawn; release the frame's guards here too.
+                drop(guards);
             }
             let request_consumed = matches!(
                 frame_settlement,
@@ -369,10 +389,7 @@ impl App {
                     .is_some_and(|smoke| smoke.observe_adopted_present(win_id, count));
                 if presented {
                     // When: `presented` is true, release the adopted child after dropping every frame borrow.
-                    // Teardown workers may need the parser lock held by this frame.
-
-                    drop(panes_slice);
-                    drop(guards);
+                    // The frame's parser guards were released by the render call.
                     drop(sources);
                     let _ = child;
                     let released = self.close_child_window(win_id);
@@ -421,13 +438,9 @@ impl App {
             // the IME candidate window (pinyin/romaji/Hangul) appears
             // under the edited cell instead of pinned to the screen's
             // top-left. Throttled via the child's own ImeCursorThrottle.
-            // The active pane guard is still held here, so read the
-            // cursor cell from it.
+            // The cursor cell is the copy taken before the render call, the cursor the frame drew.
             {
-                let (cur_row, cur_col) = {
-                    let grid = guards[active_pos].1.grid_mut();
-                    (grid.cursor.row, grid.cursor.col)
-                };
+                let (cur_row, cur_col) = cursor_copy;
                 if let (Some(win), Some(renderer)) =
                     (child.window.as_ref(), child.renderer.as_ref())
                 {
@@ -449,7 +462,7 @@ impl App {
                         // When: neither `palette_here` nor `search` owns input, publish the active terminal pane's IME anchor.
                         if let Some([origin_x, origin_y]) = renderer.pane_grid_origin(active_id) {
                             // Child IME follows the planned text origin rather than raw pane padding.
-                            let pane = guards[active_pos].2;
+                            let pane = cursor_rect_copy;
                             let rect =
                                 sonicterm_ui::pane::Rect::new(origin_x, origin_y, pane.w, pane.h);
                             super::update_terminal_ime_cursor_area(

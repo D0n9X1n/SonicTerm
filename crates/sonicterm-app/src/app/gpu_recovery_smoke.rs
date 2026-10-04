@@ -72,15 +72,52 @@ fn one_rebuild(snapshot: RecoverySnapshot, old: u64) -> bool {
         && snapshot.counts.failed_attempts == 0
 }
 
+/// One held pane's marker facts, read from its grid before the frame's source is released.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::app) struct RecoveryMark {
+    pub(in crate::app) pane: u64,
+    /// Rows, visible and in history, that carry the marker.
+    pub(in crate::app) marker_rows: usize,
+    /// Whether the marker is inside the pane's viewport.
+    pub(in crate::app) visible: bool,
+}
+
+/// The marker facts of every proof pane the frame held, copied before the render call, so the
+/// verdict describes the frame that was drawn even when the grid changes during presentation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(in crate::app) struct RecoveryMarkerSample {
+    pub(in crate::app) marks: Vec<RecoveryMark>,
+}
+
 impl RecoveryProbe {
+    /// Read the marker facts of this window's proof panes from the held grids.
+    pub(super) fn marker_sample<'grid>(
+        &self,
+        window: WindowId,
+        panes: impl IntoIterator<Item = (u64, &'grid sonicterm_grid::grid::Grid, Option<u64>)>,
+        marker: &str,
+    ) -> RecoveryMarkerSample {
+        let marks = panes
+            .into_iter()
+            .filter(|(pane, _, _)| {
+                self.panes.iter().any(|proof| proof.window == window && proof.pane == *pane)
+            })
+            .map(|(pane, grid, viewport_top_abs)| RecoveryMark {
+                pane,
+                marker_rows: grid_marker_rows(grid, marker),
+                visible: visible_marker(grid, viewport_top_abs, marker),
+            })
+            .collect();
+        RecoveryMarkerSample { marks }
+    }
+
     /// Accept only a visible fresh marker presented by a generation valid for the current proof stage.
     pub(super) fn observe_frame(
         &mut self,
         window: WindowId,
         generation: u64,
-        panes: &[sonicterm_render_model::PaneRender<'_>],
+        sample: &RecoveryMarkerSample,
         outcome: &PresentOutcome,
-        marker: &str,
     ) {
         if !accepts_proof_generation(self.stage, self.original_generation, generation)
             || !matches!(outcome, PresentOutcome::Presented)
@@ -89,10 +126,8 @@ impl RecoveryProbe {
             return;
         }
         for proof in self.panes.iter_mut().filter(|proof| proof.window == window) {
-            if let Some(pane) = panes.iter().find(|pane| pane.id == proof.pane) {
-                if grid_marker_rows(pane.grid, marker) > proof.marker_rows
-                    && visible_marker(pane.grid, pane.viewport_top_abs, marker)
-                {
+            if let Some(mark) = sample.marks.iter().find(|mark| mark.pane == proof.pane) {
+                if mark.marker_rows > proof.marker_rows && mark.visible {
                     proof.presented_generation = Some(generation);
                 }
             }

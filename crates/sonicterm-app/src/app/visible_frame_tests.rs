@@ -518,12 +518,28 @@ fn production_roles_share_the_visible_collector_and_guarded_pane_builder() {
     assert!(child.contains("self.child_visible_frame_sources(win_id, outer)"));
     for source in [main, child] {
         assert!(source.contains("sources.try_collect(|| self.snapshot_window_redraw(win_id))"));
-        assert!(source.contains("sources.reconcile_viewports("));
-        assert!(source.contains("super::visible_frame::pane_renders("));
+        // Each adapter reconciles and applies receipts through the one helper, and lends its guards
+        // through `HeldFrameSource`, whose `lend` alone builds the pane renders.
+        assert!(source.contains("sources.reconcile_and_apply_receipts("));
+        assert!(!source.contains("reconcile_viewports("));
+        assert!(source.contains("HeldFrameSource {"));
+        assert!(!source.contains("pane_renders("));
         assert!(!source.contains("std::mem::transmute"));
         assert!(!source.contains("inline_images_by_pane"));
         assert!(!source.contains("active pane guard collected above"));
     }
+    let collector = include_str!("visible_frame.rs").replace("\r\n", "\n");
+    let production = collector.split("#[path = \"visible_frame_tests.rs\"]").next().unwrap();
+    assert_eq!(
+        production.matches("self.reconcile_viewports(").count(),
+        1,
+        "only the helper reconciles"
+    );
+    let lend =
+        production.split_once("    fn lend<R>(").unwrap().1.split_once("\n    }\n").unwrap().0;
+    assert!(lend.contains("pane_renders("));
+    assert_eq!(production.matches("fn pane_renders<").count(), 1, "defined once");
+    assert_eq!(production.matches("pane_renders(").count(), 1, "called only by lend");
 }
 
 /// Main's geometry-only scrollbar update, fade tick, and redraw request survive visible lock contention.
@@ -629,7 +645,7 @@ fn warning_reset_is_after_reconciliation_in_both_production_roles() {
         ),
     ] {
         let source = compact(source);
-        let reconcile = source.find("sources.reconcile_viewports(").unwrap();
+        let reconcile = source.find("sources.reconcile_and_apply_receipts(").unwrap();
         let complete =
             source[reconcile..].find(".coherent_frame_collected();").unwrap() + reconcile;
         let error = source[reconcile..complete].find("self.visible_frame_unavailable(").unwrap()
