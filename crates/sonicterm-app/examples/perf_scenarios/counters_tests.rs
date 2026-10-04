@@ -78,6 +78,7 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "contention_images",
             "defer_timeout",
             "defer_contention",
+            "defer_sync",
             "defer_streaming",
             "stream_clock_exempt",
             "display_link_ticks",
@@ -376,6 +377,7 @@ fn every_counter_api_call_in_the_harness_is_behind_the_feature() {
 /// The window, vt and renderer fields a base without the newest counters cannot read, by API name.
 const NEWER_SOURCES: &[&str] = &[
     "sync_timeouts",
+    "defer_sync",
     "stream_clock_exempt",
     "display_link_ticks",
     "display_link_admissions",

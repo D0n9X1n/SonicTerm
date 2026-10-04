@@ -578,19 +578,43 @@ fn the_parser_lock_audit_reports_each_unconverted_site() {
     assert_eq!(parser_lock_audit(&converted, &[], &[], &[]).len(), 1);
 }
 
+/// The rules are ordered Timeout > Contention > Sync > Streaming, and no predicate after the
+/// winner runs: the sync and streaming checks do Acquire loads, and streaming allocates.
 #[test]
 fn the_winning_deferral_rule_is_counted_and_later_predicates_never_run() {
-    // The streaming check allocates and does Acquire loads, so it must not run after a winner.
     let later = std::cell::Cell::new(0_u32);
     let bump = || {
         later.set(later.get() + 1);
         true
     };
-    assert_eq!(defer_rule(|| true, bump, bump), Some(DeferRule::Timeout));
-    assert_eq!(defer_rule(|| false, || true, bump), Some(DeferRule::Contention));
+    assert_eq!(defer_rule(|| true, bump, bump, bump), Some(DeferRule::Timeout));
+    assert_eq!(defer_rule(|| false, || true, bump, bump), Some(DeferRule::Contention));
+    assert_eq!(defer_rule(|| false, || false, || true, bump), Some(DeferRule::Sync));
     assert_eq!(later.get(), 0, "no predicate ran after the winner");
-    assert_eq!(defer_rule(|| false, || false, || true), Some(DeferRule::Streaming));
-    assert_eq!(defer_rule(|| false, || false, || false), None);
+    assert_eq!(defer_rule(|| false, || false, || false, || true), Some(DeferRule::Streaming));
+    assert_eq!(defer_rule(|| false, || false, || false, || false), None);
+}
+
+/// `defer_sync` counts the Sync rule and joins the window record by name between
+/// `defer_contention` and `defer_streaming`; a window that never held reports it as zero.
+#[test]
+fn defer_sync_joins_the_window_record_between_contention_and_streaming() {
+    assert_eq!(WindowFrameCounters::default().record(None, 0).count("defer_sync"), Some(0));
+    let mut counters = WindowFrameCounters {
+        defer_contention: 1,
+        defer_streaming: 2,
+        ..WindowFrameCounters::default()
+    };
+    counters.note_defer(DeferRule::Sync);
+    counters.note_defer(DeferRule::Sync);
+    let record = counters.record(None, 0);
+    assert_eq!(record.count("defer_sync"), Some(2));
+    let fields = record.line_fields();
+    let order: Vec<usize> = ["defer_contention=1", "defer_sync=2", "defer_streaming=2"]
+        .iter()
+        .map(|name| fields.find(name).unwrap_or_else(|| panic!("{name} in {fields}")))
+        .collect();
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{fields}");
 }
 
 #[test]

@@ -901,6 +901,7 @@ impl App {
         let rule = super::frame_counters::defer_rule(
             || window.redraw.timeout_pending && now < window.last_render + period,
             || window.contention_blocks_redraw(now, period, software),
+            || false,
             || {
                 let input_pending = window.redraw.input_pending();
                 let output_advanced = window.visible_output_advanced();

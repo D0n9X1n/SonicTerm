@@ -1942,7 +1942,9 @@ FRAME_COUNTER_STATES = ("unsupported", "off", "on")
 # unit is its name's suffix, and the unit fixes its bucket bounds; the last bucket is the overflow.
 FRAME_COUNTER_FIELDS = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
-                "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_streaming",
+                "contention_parser", "contention_images", "defer_timeout", "defer_contention",
+                # defer_sync counts frames held by a visible open synchronized update; a base older than it shows n/a.
+                "defer_sync", "defer_streaming",
                 # stream_clock_exempt counts settled hardware keypress attempts that kept the streaming clock; a
                 # base older than it shows n/a.
                 "stream_clock_exempt",

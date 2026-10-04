@@ -2279,6 +2279,7 @@ fn defer_count(app: &App, id: WindowId, rule: super::super::frame_counters::Defe
     match rule {
         DeferRule::Timeout => counters.defer_timeout,
         DeferRule::Contention => counters.defer_contention,
+        DeferRule::Sync => counters.defer_sync,
         DeferRule::Streaming => counters.defer_streaming,
     }
 }

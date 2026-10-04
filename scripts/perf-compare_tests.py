@@ -5111,8 +5111,8 @@ class WindowsComparisonLegTests(unittest.TestCase):
 # each section's integer counts, then its histograms (the suffix names the unit).
 COUNTER_CONTRACT = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
-                "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_streaming",
-                "stream_clock_exempt", "display_link_ticks", "display_link_admissions", "display_link_fallbacks",
+                "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_sync",
+                "defer_streaming", "stream_clock_exempt", "display_link_ticks", "display_link_admissions", "display_link_fallbacks",
                 "contention_retry_armed", "dirt_ack_dropped", "native_request_redraw",
                 "user_request_redraw", "redraw_requested"),
                ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
@@ -5768,6 +5768,28 @@ class CounterTableTests(unittest.TestCase):
         self.assertEqual(suppressed_row(typing_side({})),
                          [["S5/default", "typing", "vt.flushes_suppressed (count)", "0 (0–0)", "4 (4–4)",
                            perf.percent_change(0, 4)]])
+        gate_off = valid_result(frame_counters="off")
+        self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
+
+    def test_sync_deferrals_are_required_on_the_head_and_n_a_on_an_older_base(self):
+        # defer_sync joined the window section: a head must report it, a base built before it reads n/a with no
+        # change shown, a supporting base that never held a frame prints a real 0, and a gate-off run carries no
+        # phase counters, so it is never checked for the field.
+        lacking = counters_result()
+        del lacking["phases"][0]["frame_counters"]["window"]["defer_sync"]
+        problems = perf.validate_result(lacking, HARNESS_HASH, 0, counters=True)
+        self.assertTrue(any("window.defer_sync" in problem for problem in problems), problems)
+        self.assertEqual(perf.validate_result(lacking, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        head = counters_side({"window.defer_sync": 6})
+
+        def held_cells(base):
+            rows, _omitted = perf.counter_rows("S10/sync", base, head)
+            return {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}["window.defer_sync (count)"]
+
+        self.assertEqual(held_cells(perf.SideRuns(outcomes=[make_outcome(result=lacking)])),
+                         ("n/a", "6 (6–6)", "n/a"))
+        self.assertEqual(held_cells(perf.SideRuns(outcomes=[make_outcome(result=counters_result())])),
+                         ("0 (0–0)", "6 (6–6)", perf.percent_change(0, 6)))
         gate_off = valid_result(frame_counters="off")
         self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
 

@@ -145,6 +145,7 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::Window, "contention_images"),
     count(Section::Window, "defer_timeout"),
     count(Section::Window, "defer_contention"),
+    count(Section::Window, "defer_sync"),
     count(Section::Window, "defer_streaming"),
     count(Section::Window, "stream_clock_exempt"),
     count(Section::Window, "display_link_ticks"),
