@@ -737,13 +737,16 @@ and a cursor change also repaint everything between them. The
 `damage_waste_permille_sum` counter ([Logging](Logging#renderer-fields))
 measures the area that rectangle covers beyond its parts. A changed key with no
 dirty live row and empty damage, such as a revision bump from `set_autowrap`,
-plans `Noop` and acknowledges nothing.
+plans `Noop` and acknowledges nothing. `Noop` also covers an unchanged key and a
+change whose only dirt is scrolled out of view; every other frame is `Partial`
+or `Full`.
 
 Narrow damage is correct because every primitive that meets the damage is
 assembled and drawn in order under the scissor. A `Full` frame assembles every
-row. A `Partial` frame assembles every dirty slot and every row whose ink-padded
-strip, or whose ink record, meets the damage, the drawn cursor cell, or the last
-presented cursor-recolor bounds. Everything that is not a terminal row (pane
+row. A `Partial` frame assembles every dirty slot, every row whose ink-padded
+strip meets the damage, and every row whose valid ink record meets the damage,
+the drawn cursor cell or the last presented cursor-recolor bounds; a row it does
+not emit keeps its retained pixels and its record. Everything that is not a terminal row (pane
 chrome, cursor, selection, highlights, inline images, scrollbars, tab bar and
 overlays) is assembled whole and clipped by the scissor.
 
