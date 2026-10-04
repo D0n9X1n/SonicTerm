@@ -129,6 +129,38 @@ pub fn acknowledge_receipts(
         .count()
 }
 
+/// The glyph atlas facts a memory snapshot reports per renderer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GlyphAtlasFacts {
+    /// Current square dimension in pixels.
+    pub dim: u32,
+    /// Area of every resident tile at its tile size.
+    pub packed_pixels: u64,
+    /// Size doublings since construction.
+    pub growths: u64,
+    /// LRU evictions since the last reset.
+    pub evictions: u64,
+    /// Fit label: `256`, `512`, `1024`, `2048`, `no_headroom`, `does_not_fit` or `evicted`.
+    pub fit: String,
+    /// Largest resident tile width and height.
+    pub max_tile: [u32; 2],
+}
+
+impl GlyphAtlasFacts {
+    /// Read the facts from `atlas`.
+    #[must_use]
+    pub fn of(atlas: &GlyphAtlas) -> Self {
+        Self {
+            dim: atlas.width(),
+            packed_pixels: atlas.packed_pixels(),
+            growths: atlas.growths(),
+            evictions: atlas.evictions(),
+            fit: atlas.fit_outcome().label(),
+            max_tile: atlas.max_tile_dims(),
+        }
+    }
+}
+
 /// Settle one releasing frame for a caller that still borrows its grids: apply the receipts only
 /// when the frame was presented, and return its outcome. Every other outcome keeps the dirty rows.
 pub fn settle_borrowed_frame(
@@ -3410,6 +3442,12 @@ impl GpuRenderer {
             software_frame: self.software_frame_retained_amount(),
             vertex_scratch: self.upload_staging_retained(),
         }
+    }
+
+    /// The glyph atlas's size, packing, growth, eviction and fit facts.
+    #[must_use]
+    pub fn glyph_atlas_facts(&self) -> GlyphAtlasFacts {
+        GlyphAtlasFacts::of(&self.glyph_atlas)
     }
 
     /// The `UploadStaging` part: the vertex scratch plus both atlas uploads' rect lists.

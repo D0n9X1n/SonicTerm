@@ -265,6 +265,14 @@ fn populated_snapshot() -> MemorySnapshot {
                 row_quad_cache: ResourceAmount { bytes: 32, items: 3 },
                 software_frame: ResourceAmount { bytes: 1_024, items: 1 },
                 vertex_scratch: ResourceAmount { bytes: 272, items: 1 },
+                glyph_atlas_facts: sonicterm_gpu::core::GlyphAtlasFacts {
+                    dim: 512,
+                    packed_pixels: 4_000,
+                    growths: 1,
+                    evictions: 0,
+                    fit: "512".to_string(),
+                    max_tile: [25, 16],
+                },
             },
             RendererSummary {
                 label: "0".to_string(),
@@ -275,6 +283,7 @@ fn populated_snapshot() -> MemorySnapshot {
                 row_quad_cache: ResourceAmount { bytes: 8, items: 1 },
                 software_frame: ResourceAmount::default(),
                 vertex_scratch: ResourceAmount::default(),
+                glyph_atlas_facts: Default::default(),
             },
         ],
         allocator: Some(AllocatorReading {
@@ -446,6 +455,17 @@ fn visible_and_warm_renderers_are_both_reported_with_their_roles() {
     assert!(rendered.contains("row_quad=32/3"), "visible quad-cache bytes/items: {rendered}");
     assert!(rendered.contains("software=1024/1"), "software frame bytes/items: {rendered}");
     assert!(rendered.contains("vertex=272/1"), "visible vertex scratch bytes/items: {rendered}");
+    // The six glyph atlas facts each renderer reports, in the order perf-compare reads them.
+    for field in [
+        "glyph_atlas_dim=512",
+        "glyph_atlas_packed_pixels=4000",
+        "glyph_atlas_growths=1",
+        "glyph_atlas_evictions=0",
+        "glyph_atlas_fit=512",
+        "glyph_atlas_max_tile=25x16",
+    ] {
+        assert!(rendered.contains(field), "{field}: {rendered}");
+    }
     assert!(rendered.contains("glyph=128/3"), "warm glyph atlas bytes/items: {rendered}");
     assert!(rendered.contains("row_glyph=16/2"), "warm glyph-cache bytes/items: {rendered}");
     assert!(rendered.contains("row_quad=8/1"), "warm quad-cache bytes/items: {rendered}");
@@ -466,6 +486,7 @@ fn renderer_breakdown_order_is_stable_across_input_order() {
         row_quad_cache: ResourceAmount::default(),
         software_frame: ResourceAmount::default(),
         vertex_scratch: ResourceAmount::default(),
+        glyph_atlas_facts: Default::default(),
     };
     let mut first = empty_snapshot();
     first.renderers = vec![

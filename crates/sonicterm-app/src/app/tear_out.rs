@@ -308,6 +308,15 @@ fn live_renderer_settings<'a>(
 }
 
 impl App {
+    /// Settings for a warm-pool renderer: a hidden window that may never draw, so its glyph
+    /// atlas starts at the 256 floor and grows after adoption like any other.
+    fn warm_renderer_settings(&self) -> sonicterm_gpu::core::RendererSettings<'_> {
+        sonicterm_gpu::core::RendererSettings {
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Minimum,
+            ..self.tear_out_renderer_settings("warm")
+        }
+    }
+
     fn tear_out_renderer_settings(
         &self,
         role: &'static str,
@@ -445,7 +454,7 @@ impl App {
             }
         };
         window.set_ime_allowed(true);
-        let settings = self.tear_out_renderer_settings("warm");
+        let settings = self.warm_renderer_settings();
         let shared_gpu = self.shared_gpu_context();
         let mut renderer = match shared_gpu.map_or_else(
             || GpuRenderer::new(window.clone(), event_loop, &self.theme, settings),

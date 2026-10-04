@@ -5400,3 +5400,35 @@ fn the_promoted_image_atlas_is_fixed_at_the_maximum() {
     assert_eq!(promoted.growth_policy(), sonicterm_text::glyph_atlas::GrowthPolicy::Fixed);
     assert_eq!(promoted.growths(), 0);
 }
+
+/// The snapshot facts read the glyph atlas as it is: a grown atlas reports its new dimension,
+/// its growth, the packed area and largest tile of its resident tiles, and its fit label.
+#[test]
+fn glyph_atlas_facts_read_a_grown_atlas() {
+    use sonicterm_text::glyph_atlas::{RasterTile, ATLAS_DIM, MIN_ATLAS_DIM};
+    let mut atlas = GlyphAtlas::growable(MIN_ATLAS_DIM, ATLAS_DIM);
+    assert_eq!(GlyphAtlasFacts::of(&atlas).dim, MIN_ATLAS_DIM, "a fresh atlas is at its start");
+    // A 30×40 coverage tile, so the packed area and largest tile are known.
+    struct FactsTile;
+    impl sonicterm_text::glyph_atlas::Rasterizer for FactsTile {
+        fn rasterize(&mut self, _: sonicterm_types::GlyphKey) -> Option<RasterTile> {
+            Some(RasterTile {
+                width: 30,
+                height: 40,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 30.0,
+                coverage: vec![200; 30 * 40],
+                is_color: false,
+                is_subpixel: false,
+            })
+        }
+    }
+    let key = sonicterm_types::GlyphKey::new('x', false, false);
+    let _info = atlas.get_or_insert(key, &mut FactsTile);
+    atlas.grow_to(512);
+    let facts = GlyphAtlasFacts::of(&atlas);
+    assert_eq!((facts.dim, facts.growths, facts.evictions), (512, 1, 0));
+    assert_eq!((facts.packed_pixels, facts.max_tile), (30 * 40, [30, 40]));
+    assert_eq!(facts.fit, atlas.fit_outcome().label());
+}
