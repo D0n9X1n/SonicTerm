@@ -1940,8 +1940,10 @@ _PHASE_FIELDS = {
 
 # result.json's `frame_counters`: whether the binary has the perf-counters feature and the run forced the gate on.
 FRAME_COUNTER_STATES = ("unsupported", "off", "on")
-# With the gate on, each phase's deltas: per section, its integer counts, then its histograms. A histogram's
-# unit is its name's suffix, and the unit fixes its bucket bounds; the last bucket is the overflow.
+# With the gate on, each phase's deltas: per section, its integer counts, then its histograms, then its levels. A
+# histogram's unit is its name's suffix, and the unit fixes its bucket bounds; the last bucket is the overflow. A
+# level is an occupancy read at one snapshot, never a delta: `_start` from the phase-start snapshot and `_end` from
+# the phase-end snapshot, each summed over live windows only.
 FRAME_COUNTER_FIELDS = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
                 "contention_parser", "contention_images", "defer_timeout", "defer_contention",
@@ -1955,18 +1957,28 @@ FRAME_COUNTER_FIELDS = {
                 "display_link_ticks", "display_link_admissions", "display_link_fallbacks",
                 "contention_retry_armed",
                 # dirt_ack_dropped counts receipts dropped at a collection; a base older than it shows n/a.
-                "dirt_ack_dropped", "native_request_redraw", "user_request_redraw", "redraw_requested"),
-               ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
+                "dirt_ack_dropped",
+                # The renderer-waiting handshake: requests published, grants accepted (W) and not accepted, and
+                # tokens resolved by a frame (F) or otherwise (L); a base older than them shows n/a.
+                "parser_yield_requests", "parser_yield_wakes", "parser_yield_rejected", "parser_yield_frames",
+                "parser_yield_lost", "native_request_redraw", "user_request_redraw", "redraw_requested"),
+               ("present_interval_ms", "handler_ms", "flush_to_redraw_ms"),
+               # Token occupancy at each phase endpoint; W - F - L equals end - start.
+               ("parser_yield_tokens_start", "parser_yield_tokens_end")),
     "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
              "fg_probe_calls", "fg_probe_panes", "fg_worker_probes", "fg_worker_panes", "fg_results_stale",
              "native_request_redraw_unregistered"),
             # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker.
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
-             "fg_worker_probe_us")),
+             "fg_worker_probe_us"), ()),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced", "flushes_suppressed",
             # sync_timeouts counts synchronized updates released at the 150 ms bound; a base older than it shows n/a.
-            "sync_timeouts"),
-           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
+            "sync_timeouts",
+            # parser_yields counts ParserYielded sends; a timeout is a send whose wait ended unserved.
+            "parser_yields", "parser_yield_timeouts"),
+           # One wait sample per send (it may be nonzero with no park), and the overshoot of each late one.
+           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us", "parser_yield_wait_us",
+            "parser_yield_overshoot_us"), ()),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   # damage_waste_permille_sum is the union rect's share minus what its parts cover, over
                   # damaged_frames; a base older than it shows n/a.
@@ -1989,7 +2001,7 @@ FRAME_COUNTER_FIELDS = {
                   "apply_attempt_raster_tiles",
                   # Glyph atlas growths and growths no frame presented; a base older than them shows n/a.
                   "glyph_atlas_growths", "atlas_growth_abandoned"),
-                 ("assembly_us", "atlas_growth_to_present_ms")),
+                 ("assembly_us", "atlas_growth_to_present_ms"), ()),
 }
 HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000]}
 # A histogram's `sum_us` is an exact integer in microseconds whatever its unit; this converts it to the unit.
@@ -2033,7 +2045,7 @@ def frame_counter_problems(counters: object, partial: bool = False) -> list[str]
     if not isinstance(counters, dict):
         return ["is not an object"]
     problems = []
-    for section, (counts, histograms) in FRAME_COUNTER_FIELDS.items():
+    for section, (counts, histograms, levels) in FRAME_COUNTER_FIELDS.items():
         # When: the key is absent, an older base never had the section; a present null is malformed.
         if section not in counters:
             if not partial:
@@ -2043,11 +2055,11 @@ def frame_counter_problems(counters: object, partial: bool = False) -> list[str]
         if not isinstance(body, dict):
             problems.append(f"the {section} section is {type(body).__name__}, not an object")
             continue
-        for field_name in counts + histograms:
+        for field_name in counts + histograms + levels:
             if field_name not in body:
                 if not partial:
                     problems.append(f"lacks {section}.{field_name}")
-            elif field_name in counts and not _count_ok(body[field_name]):
+            elif field_name in counts + levels and not _count_ok(body[field_name]):
                 problems.append(f"{section}.{field_name} is not a non-negative integer")
             elif field_name in histograms:
                 problem = _histogram_problem(body[field_name], field_name.rsplit("_", 1)[1])
@@ -4964,9 +4976,9 @@ def counter_rows(label: str, base: SideRuns, head: SideRuns) -> tuple[list[list[
     phase_names = list(per_side[1]) + [name for name in per_side[0] if name not in per_side[1]]
     omitted = 0
     for phase_name in phase_names:
-        for section, (counts, histograms) in FRAME_COUNTER_FIELDS.items():
-            for field_name in counts + histograms:
-                unit = None if field_name in counts else field_name.rsplit("_", 1)[1]
+        for section, (counts, histograms, levels) in FRAME_COUNTER_FIELDS.items():
+            for field_name in counts + histograms + levels:
+                unit = None if field_name in counts + levels else field_name.rsplit("_", 1)[1]
                 cells = [_counter_cell(phases.get(phase_name, []), len(side.outcomes), section, field_name, unit)
                          for side, phases in zip(sides, per_side)]
                 if not any(active for _text, _figure, active in cells):
@@ -4974,9 +4986,12 @@ def counter_rows(label: str, base: SideRuns, head: SideRuns) -> tuple[list[list[
                     continue
                 texts = [text if text is not None else ("n/a" if head_only else _missing_cell(side))
                          for (text, _figure, _active), side in zip(cells, sides)]
-                rows.append([label, phase_name, f"{section}.{field_name} ({_counter_label(field_name, unit)})",
+                # A level is an occupancy, not a delta: its row is labelled (level) and shows no change.
+                level = field_name in levels
+                kind = "level" if level else _counter_label(field_name, unit)
+                rows.append([label, phase_name, f"{section}.{field_name} ({kind})",
                              texts[0], texts[1],
-                             percent_change(cells[0][1], cells[1][1])])
+                             "" if level else percent_change(cells[0][1], cells[1][1])])
         rows.extend(_attempt_split_rows(label, phase_name, sides, per_side, head_only))
     return rows, omitted
 

@@ -106,6 +106,17 @@ impl Unit {
 pub(crate) enum FieldKind {
     Count,
     Histogram(Unit),
+    /// An occupancy summed over live windows at one phase endpoint; never a delta.
+    Level(Endpoint),
+}
+
+/// Which snapshot a level field reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Endpoint {
+    /// The phase-start snapshot.
+    Start,
+    /// The phase-end snapshot.
+    End,
 }
 
 /// One contract field: its section, contract name, kind and the counter API's name for it.
@@ -119,6 +130,15 @@ pub(crate) struct FieldSpec {
 
 const fn count(section: Section, name: &'static str) -> FieldSpec {
     FieldSpec { section, name, kind: FieldKind::Count, source: name }
+}
+
+const fn level(
+    section: Section,
+    name: &'static str,
+    endpoint: Endpoint,
+    source: &'static str,
+) -> FieldSpec {
+    FieldSpec { section, name, kind: FieldKind::Level(endpoint), source }
 }
 
 const fn histogram(
@@ -153,12 +173,19 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::Window, "display_link_fallbacks"),
     count(Section::Window, "contention_retry_armed"),
     count(Section::Window, "dirt_ack_dropped"),
+    count(Section::Window, "parser_yield_requests"),
+    count(Section::Window, "parser_yield_wakes"),
+    count(Section::Window, "parser_yield_rejected"),
+    count(Section::Window, "parser_yield_frames"),
+    count(Section::Window, "parser_yield_lost"),
     count(Section::Window, "native_request_redraw"),
     count(Section::Window, "user_request_redraw"),
     count(Section::Window, "redraw_requested"),
     histogram(Section::Window, "present_interval_ms", Unit::Millis, "present_interval"),
     histogram(Section::Window, "handler_ms", Unit::Millis, "handler"),
     histogram(Section::Window, "flush_to_redraw_ms", Unit::Millis, "flush_to_redraw"),
+    level(Section::Window, "parser_yield_tokens_start", Endpoint::Start, "parser_yield_tokens"),
+    level(Section::Window, "parser_yield_tokens_end", Endpoint::End, "parser_yield_tokens"),
     count(Section::App, "wake_init"),
     count(Section::App, "wake_poll"),
     count(Section::App, "wake_wait_cancelled"),
@@ -184,9 +211,18 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::VtParser, "flushes_coalesced"),
     count(Section::VtParser, "flushes_suppressed"),
     count(Section::VtParser, "sync_timeouts"),
+    count(Section::VtParser, "parser_yields"),
+    count(Section::VtParser, "parser_yield_timeouts"),
     histogram(Section::VtParser, "parser_lock_wait_us", Unit::Micros, "parser_lock_wait"),
     histogram(Section::VtParser, "parser_lock_hold_us", Unit::Micros, "parser_lock_hold"),
     histogram(Section::VtParser, "parse_us", Unit::Micros, "parse"),
+    histogram(Section::VtParser, "parser_yield_wait_us", Unit::Micros, "parser_yield_wait"),
+    histogram(
+        Section::VtParser,
+        "parser_yield_overshoot_us",
+        Unit::Micros,
+        "parser_yield_overshoot",
+    ),
     count(Section::Renderer, "vertex_bytes"),
     count(Section::Renderer, "index_bytes"),
     count(Section::Renderer, "damage_permille_sum"),
@@ -248,6 +284,8 @@ pub(crate) enum FieldValue {
         counts: Vec<u64>,
         sum_us: u64,
     },
+    /// An occupancy at one snapshot, passed through a delta unchanged.
+    Level(u64),
 }
 
 impl FieldValue {
@@ -258,6 +296,7 @@ impl FieldValue {
             FieldKind::Histogram(unit) => {
                 Self::Histogram { counts: vec![0; unit.bounds().len() + 1], sum_us: 0 }
             }
+            FieldKind::Level(_) => Self::Level(0),
         }
     }
 }
@@ -304,8 +343,30 @@ impl CounterTotals {
         sections: &[Section],
         read: impl Fn(&str) -> SourceValue,
     ) -> Result<(), String> {
+        self.add_fields(sections, true, read)
+    }
+
+    /// Add a closed-window record: its counts and histograms, never a level, since a closed
+    /// window holds no token.
+    pub(crate) fn add_closed_record(
+        &mut self,
+        sections: &[Section],
+        read: impl Fn(&str) -> SourceValue,
+    ) -> Result<(), String> {
+        self.add_fields(sections, false, read)
+    }
+
+    /// Add one record's fields in `sections`, its levels only when `levels`.
+    fn add_fields(
+        &mut self,
+        sections: &[Section],
+        levels: bool,
+        read: impl Fn(&str) -> SourceValue,
+    ) -> Result<(), String> {
         for (field, total) in FIELDS.iter().zip(&mut self.values) {
-            if !sections.contains(&field.section) {
+            if !sections.contains(&field.section)
+                || (!levels && matches!(field.kind, FieldKind::Level(_)))
+            {
                 continue;
             }
             let source = read(field.source);
@@ -316,7 +377,8 @@ impl CounterTotals {
             // A record that supplies the field makes it supported, starting from zero.
             let total = total.get_or_insert_with(|| FieldValue::zero(field.kind));
             match (field.kind, source, total) {
-                (FieldKind::Count, SourceValue::Count(value), FieldValue::Count(sum)) => {
+                (FieldKind::Count, SourceValue::Count(value), FieldValue::Count(sum))
+                | (FieldKind::Level(_), SourceValue::Count(value), FieldValue::Level(sum)) => {
                     *sum += value;
                 }
                 (
@@ -346,30 +408,36 @@ impl CounterTotals {
 
     /// What grew since `start`. Totals sum live and closed windows, so they never fall; a
     /// field that did would read zero rather than wrap. A field `start` lacked counts from zero,
-    /// as when no window existed yet; a field the end lacks stays unsupported.
+    /// as when no window existed yet; a field the end lacks stays unsupported. A level is never
+    /// subtracted: its start key is the start snapshot's value (0 when that snapshot lacked it,
+    /// as at startup) and its end key the end snapshot's.
     pub(crate) fn delta_since(&self, start: &Self) -> Self {
-        let values = self
-            .values
+        let values = FIELDS
             .iter()
-            .zip(&start.values)
-            .map(|(end, begin)| match (end.as_ref()?, begin.as_ref()) {
-                (end, None) => Some(end.clone()),
-                (FieldValue::Count(end), Some(FieldValue::Count(begin))) => {
-                    Some(FieldValue::Count(end.saturating_sub(*begin)))
-                }
-                (
-                    FieldValue::Histogram { counts, sum_us },
-                    Some(FieldValue::Histogram { counts: begin_counts, sum_us: begin_sum }),
-                ) => Some(FieldValue::Histogram {
-                    counts: counts
-                        .iter()
-                        .zip(begin_counts)
-                        .map(|(end, begin)| end.saturating_sub(*begin))
-                        .collect(),
-                    sum_us: sum_us.saturating_sub(*begin_sum),
-                }),
-                // Both totals are built from FIELDS, so kinds always match.
-                (end, Some(_)) => Some(end.clone()),
+            .zip(self.values.iter().zip(&start.values))
+            .map(|(field, (end, begin))| match (field.kind, end.as_ref()?, begin.as_ref()) {
+                (FieldKind::Level(Endpoint::Start), _, Some(begin)) => Some(begin.clone()),
+                (FieldKind::Level(Endpoint::Start), _, None) => Some(FieldValue::Level(0)),
+                (FieldKind::Level(Endpoint::End), end, _) => Some(end.clone()),
+                (_, end, begin) => match (end, begin) {
+                    (end, None) => Some(end.clone()),
+                    (FieldValue::Count(end), Some(FieldValue::Count(begin))) => {
+                        Some(FieldValue::Count(end.saturating_sub(*begin)))
+                    }
+                    (
+                        FieldValue::Histogram { counts, sum_us },
+                        Some(FieldValue::Histogram { counts: begin_counts, sum_us: begin_sum }),
+                    ) => Some(FieldValue::Histogram {
+                        counts: counts
+                            .iter()
+                            .zip(begin_counts)
+                            .map(|(end, begin)| end.saturating_sub(*begin))
+                            .collect(),
+                        sum_us: sum_us.saturating_sub(*begin_sum),
+                    }),
+                    // Both totals are built from FIELDS, so kinds always match.
+                    (end, Some(_)) => Some(end.clone()),
+                },
             })
             .collect();
         Self { values }
@@ -395,7 +463,7 @@ impl CounterTotals {
                             "sum_us": sum_us,
                         })
                     }
-                    (_, FieldValue::Count(value)) => json!(value),
+                    (_, FieldValue::Count(value) | FieldValue::Level(value)) => json!(value),
                     (_, FieldValue::Histogram { sum_us, .. }) => json!(sum_us),
                 };
                 fields.insert(field.name.to_owned(), entry);
@@ -448,12 +516,17 @@ pub(crate) fn snapshot_totals(
 ) -> Option<Result<CounterTotals, String>> {
     let snapshot = app.frame_counters_snapshot()?;
     let mut totals = CounterTotals::unsupported();
-    let windows = snapshot.windows.iter().map(|(_, record)| record);
+    let mut windows = snapshot.windows.iter().map(|(_, record)| record);
+    // Levels sum over live windows only; the closed record adds its counts and histograms.
     let result = windows
-        .chain(std::iter::once(&snapshot.closed_windows))
         .try_for_each(|record| {
             totals
                 .add_record(&[Section::Window, Section::Renderer], |name| read_field(record, name))
+        })
+        .and_then(|()| {
+            totals.add_closed_record(&[Section::Window, Section::Renderer], |name| {
+                read_field(&snapshot.closed_windows, name)
+            })
         })
         .and_then(|()| {
             totals.add_record(&[Section::App, Section::VtParser], |name| {

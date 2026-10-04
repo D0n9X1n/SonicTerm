@@ -86,12 +86,19 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "display_link_fallbacks",
             "contention_retry_armed",
             "dirt_ack_dropped",
+            "parser_yield_requests",
+            "parser_yield_wakes",
+            "parser_yield_rejected",
+            "parser_yield_frames",
+            "parser_yield_lost",
             "native_request_redraw",
             "user_request_redraw",
             "redraw_requested",
             "present_interval_ms",
             "handler_ms",
             "flush_to_redraw_ms",
+            "parser_yield_tokens_start",
+            "parser_yield_tokens_end",
         ],
     ),
     (
@@ -127,9 +134,13 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "flushes_coalesced",
             "flushes_suppressed",
             "sync_timeouts",
+            "parser_yields",
+            "parser_yield_timeouts",
             "parser_lock_wait_us",
             "parser_lock_hold_us",
             "parse_us",
+            "parser_yield_wait_us",
+            "parser_yield_overshoot_us",
         ],
     ),
     (
@@ -222,11 +233,11 @@ fn every_contract_field_serializes_present_and_zero_with_the_right_histogram_sha
         }
     }
     // Every field ending in _ms or _us is a histogram; the names above with those suffixes
-    // are exactly the fourteen contract histograms (the retired event-loop fg_probe_us beside the
-    // worker's fg_worker_probe_us, and the renderer's atlas_growth_to_present_ms);
-    // row_cache_invalidate_us is a plain sum.
+    // are exactly the sixteen contract histograms (the retired event-loop fg_probe_us beside the
+    // worker's fg_worker_probe_us, the renderer's atlas_growth_to_present_ms, and the handshake's
+    // wait and overshoot); row_cache_invalidate_us is a plain sum. The two token levels read 0.
     let histograms = FIELDS.iter().filter(|field| matches!(field.kind, FieldKind::Histogram(_)));
-    assert_eq!(histograms.count(), 14);
+    assert_eq!(histograms.count(), 16);
 }
 
 #[test]
@@ -379,6 +390,16 @@ fn every_counter_api_call_in_the_harness_is_behind_the_feature() {
 
 /// The window, vt and renderer fields a base without the newest counters cannot read, by API name.
 const NEWER_SOURCES: &[&str] = &[
+    "parser_yields",
+    "parser_yield_timeouts",
+    "parser_yield_wait",
+    "parser_yield_overshoot",
+    "parser_yield_requests",
+    "parser_yield_wakes",
+    "parser_yield_rejected",
+    "parser_yield_frames",
+    "parser_yield_lost",
+    "parser_yield_tokens",
     "sync_timeouts",
     "defer_sync",
     "stream_clock_exempt",
@@ -435,7 +456,7 @@ fn a_field_the_base_cannot_read_is_omitted_not_reported_as_zero() {
             continue;
         }
         let value = match field.kind {
-            FieldKind::Count => SourceValue::Count(1),
+            FieldKind::Count | FieldKind::Level(_) => SourceValue::Count(1),
             FieldKind::Histogram(unit) => SourceValue::Histogram {
                 unit: unit.name(),
                 bounds: unit.bounds().to_vec(),
@@ -630,4 +651,65 @@ fn an_atlas_reading_without_the_counter_feature_has_no_counts() {
         (reading.counted_glyph_atlas_growths, reading.closed_glyph_atlas_growths),
         (None, None)
     );
+}
+
+/// Totals over live records reading `tokens` each, plus a closed record, as `snapshot_totals`
+/// builds them; `None` leaves the token source out of every record.
+fn token_totals(live: &[u64], closed: Option<u64>) -> CounterTotals {
+    let mut totals = CounterTotals::unsupported();
+    for tokens in live {
+        let record = HashMap::from([("parser_yield_tokens", SourceValue::Count(*tokens))]);
+        totals.add_record(&[Section::Window], reader(&record)).unwrap();
+    }
+    let closed = closed.map_or_else(HashMap::new, |tokens| {
+        HashMap::from([("parser_yield_tokens", SourceValue::Count(tokens))])
+    });
+    totals.add_closed_record(&[Section::Window], reader(&closed)).unwrap();
+    totals
+}
+
+#[test]
+fn a_token_level_is_summed_over_live_windows_and_never_subtracted() {
+    // Token occupancy is a level read at each phase endpoint: the start key comes from the start
+    // snapshot and the end key from the end snapshot, summed over live windows; an end below the
+    // start stays as written, and a closed record never adds to it.
+    let start = token_totals(&[1, 2], Some(5));
+    let end = token_totals(&[1, 0], Some(7));
+    let delta = end.delta_since(&start);
+    assert_eq!(delta.get("parser_yield_tokens_start"), Some(&FieldValue::Level(3)));
+    assert_eq!(delta.get("parser_yield_tokens_end"), Some(&FieldValue::Level(1)));
+    let document = delta.to_json();
+    assert_eq!(document["window"]["parser_yield_tokens_start"], json!(3));
+    assert_eq!(document["window"]["parser_yield_tokens_end"], json!(1));
+}
+
+#[test]
+fn a_startup_phase_with_no_start_snapshot_reads_zero_tokens_at_its_start() {
+    // Startup's baseline is read before any window exists, so it supplies no token source; a
+    // supporting end snapshot then writes start 0, since no token existed before the App did.
+    let baseline = CounterTotals::unsupported();
+    let end = token_totals(&[1], None);
+    let delta = end.delta_since(&baseline);
+    assert_eq!(delta.get("parser_yield_tokens_start"), Some(&FieldValue::Level(0)));
+    assert_eq!(delta.get("parser_yield_tokens_end"), Some(&FieldValue::Level(1)));
+}
+
+#[test]
+fn an_older_app_without_the_token_source_omits_both_endpoint_keys() {
+    // An App build without parser_yield_tokens supplies no value at either snapshot, so neither
+    // endpoint key is written and the comparison reads n/a, never a measured 0.
+    let start = token_totals(&[], None);
+    let end = token_totals(&[], None);
+    let document = end.delta_since(&start).to_json();
+    assert!(document["window"].get("parser_yield_tokens_start").is_none(), "{document}");
+    assert!(document["window"].get("parser_yield_tokens_end").is_none(), "{document}");
+}
+
+#[cfg(feature = "perf-counters")]
+#[test]
+fn a_gate_off_app_emits_no_counter_fields() {
+    // With the gate off the App keeps no counters, so a run reports none of the eleven fields.
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let app = sonicterm_app::app::App::new(Theme::default(), Config::default(), Keymap::default());
+    assert!(snapshot_totals(&app).is_none());
 }

@@ -5138,22 +5138,25 @@ class WindowsComparisonLegTests(unittest.TestCase):
 
 
 # The result.json frame-counter contract, written out here so a test fails when the script drifts from it:
-# each section's integer counts, then its histograms (the suffix names the unit).
+# each section's integer counts, then its histograms (the suffix names the unit), then its levels.
 COUNTER_CONTRACT = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
                 "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_sync",
                 "defer_streaming", "stream_clock_exempt", "display_link_ticks", "display_link_admissions", "display_link_fallbacks",
-                "contention_retry_armed", "dirt_ack_dropped", "native_request_redraw",
+                "contention_retry_armed", "dirt_ack_dropped", "parser_yield_requests", "parser_yield_wakes",
+                "parser_yield_rejected", "parser_yield_frames", "parser_yield_lost", "native_request_redraw",
                 "user_request_redraw", "redraw_requested"),
-               ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
+               ("present_interval_ms", "handler_ms", "flush_to_redraw_ms"),
+               ("parser_yield_tokens_start", "parser_yield_tokens_end")),
     "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
              "fg_probe_calls", "fg_probe_panes", "fg_worker_probes", "fg_worker_panes", "fg_results_stale",
              "native_request_redraw_unregistered"),
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
-             "fg_worker_probe_us")),
+             "fg_worker_probe_us"), ()),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced",
-            "flushes_suppressed", "sync_timeouts"),
-           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
+            "flushes_suppressed", "sync_timeouts", "parser_yields", "parser_yield_timeouts"),
+           ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us", "parser_yield_wait_us",
+            "parser_yield_overshoot_us"), ()),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   "damage_waste_permille_sum", "software_frames",
                   "gpu_frames", "row_cache_hits", "row_cache_misses", "shape_requests", "full_frames",
@@ -5171,9 +5174,10 @@ COUNTER_CONTRACT = {
                   "apply_attempt_raster_tiles",
                   # Glyph atlas growths and growths no frame presented; a base older than them shows n/a.
                   "glyph_atlas_growths", "atlas_growth_abandoned"),
-                 ("assembly_us", "atlas_growth_to_present_ms")),
+                 ("assembly_us", "atlas_growth_to_present_ms"), ()),
 }
-CONTRACT_FIELD_COUNT = sum(len(counts) + len(histograms) for counts, histograms in COUNTER_CONTRACT.values())
+CONTRACT_FIELD_COUNT = sum(len(counts) + len(histograms) + len(levels)
+                           for counts, histograms, levels in COUNTER_CONTRACT.values())
 MILLISECOND_BOUNDS = [4, 7, 9, 12, 17, 25, 34, 50, 100]
 MICROSECOND_BOUNDS = [10, 50, 100, 500, 1000, 5000]
 
@@ -5185,8 +5189,8 @@ def frame_counters(values=None):
     """
     values = values or {}
     sections = {}
-    for section, (counts, histograms) in COUNTER_CONTRACT.items():
-        body = {name: values.get(f"{section}.{name}", 0) for name in counts}
+    for section, (counts, histograms, levels) in COUNTER_CONTRACT.items():
+        body = {name: values.get(f"{section}.{name}", 0) for name in counts + levels}
         for name in histograms:
             unit = name.rsplit("_", 1)[1]
             bounds = MILLISECOND_BOUNDS if unit == "ms" else MICROSECOND_BOUNDS
@@ -5870,6 +5874,51 @@ class CounterTableTests(unittest.TestCase):
                          ("0 (0–0)", "2 (2–2)", perf.percent_change(0, 2)))
         gate_off = valid_result(frame_counters="off")
         self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
+
+    def test_parser_yield_fields_are_required_on_the_head_and_n_a_on_an_older_base(self):
+        # The handshake's nine counts and histograms and its two window levels are required on a head. A base
+        # built before them omits every key, validates as a partial contract, and reads n/a with no change,
+        # never a measured 0.
+        fields = [("vt", "parser_yields"), ("vt", "parser_yield_timeouts"), ("vt", "parser_yield_wait_us"),
+                  ("vt", "parser_yield_overshoot_us"), ("window", "parser_yield_requests"),
+                  ("window", "parser_yield_wakes"), ("window", "parser_yield_rejected"),
+                  ("window", "parser_yield_frames"), ("window", "parser_yield_lost"),
+                  ("window", "parser_yield_tokens_start"), ("window", "parser_yield_tokens_end")]
+        for section, name in fields:
+            lacking = counters_result()
+            del lacking["phases"][0]["frame_counters"][section][name]
+            problems = perf.validate_result(lacking, HARNESS_HASH, 0, counters=True)
+            self.assertTrue(any(f"{section}.{name}" in problem for problem in problems), (name, problems))
+        older = counters_result()
+        for phase in older["phases"]:
+            for section, name in fields:
+                del phase["frame_counters"][section][name]
+        self.assertEqual(perf.validate_result(older, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        head = counters_side({"vt.parser_yields": 3, "window.parser_yield_tokens_end": 1})
+        rows, _omitted = perf.counter_rows("S3/default", perf.SideRuns(outcomes=[make_outcome(result=older)]), head)
+        cells = {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}
+        self.assertEqual(cells["vt.parser_yields (count)"], ("n/a", "3 (3–3)", "n/a"))
+        self.assertEqual(cells["window.parser_yield_tokens_end (level)"], ("n/a", "1 (1–1)", ""))
+
+    def test_a_level_must_be_a_non_negative_integer(self):
+        # A level is an occupancy read at one snapshot: a negative, fractional, textual, boolean or null value is
+        # malformed evidence, named by its field.
+        for bad in (-1, 1.5, "1", True, None):
+            result = counters_result({"window.parser_yield_tokens_start": bad})
+            problems = perf.validate_result(result, HARNESS_HASH, 0, counters=True)
+            self.assertTrue(any("window.parser_yield_tokens_start" in problem for problem in problems),
+                            (bad, problems))
+
+    def test_levels_print_as_written_with_no_change_column(self):
+        # A level is never a delta: its start and end rows print each side's values as written (an end below the
+        # start stays as written) and show no change, since a percent change between two occupancies means
+        # nothing.
+        base = counters_side({"window.parser_yield_tokens_end": 1})
+        head = counters_side({"window.parser_yield_tokens_start": 1})
+        rows, _omitted = perf.counter_rows("S3/default", base, head)
+        cells = {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}
+        self.assertEqual(cells["window.parser_yield_tokens_start (level)"], ("0 (0–0)", "1 (1–1)", ""))
+        self.assertEqual(cells["window.parser_yield_tokens_end (level)"], ("1 (1–1)", "0 (0–0)", ""))
 
     def test_event_loop_probe_work_falling_to_zero_shows_against_a_base_that_probed(self):
         # The event-loop probe fields stay in the contract with real zeros on a head that moved probing to the
