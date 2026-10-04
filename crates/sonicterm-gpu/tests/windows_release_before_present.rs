@@ -56,7 +56,9 @@ fn check(condition: bool, message: &str) -> Result<(), String> {
     }
 }
 
-/// A renderer on its own window, presenting through GDI (`software`) or through wgpu.
+/// A renderer on its own window, presenting through GDI (`software`, `Force`) or through wgpu (`Off`,
+/// which never degrades, even on a software adapter). The presenter it resolved is checked. A wgpu
+/// renderer the host cannot create is reported as `HOST_INCAPABLE: ...`, never passed silently.
 fn fresh_renderer(
     active: &ActiveEventLoop,
     role: &'static str,
@@ -72,7 +74,7 @@ fn fresh_renderer(
             )
             .map_err(|error| error.to_string())?,
     );
-    let mode = if software { SoftwareRenderMode::Force } else { SoftwareRenderMode::Auto };
+    let mode = if software { SoftwareRenderMode::Force } else { SoftwareRenderMode::Off };
     let settings = RendererSettings {
         font_family: "monospace",
         font_dirs: &[],
@@ -90,8 +92,15 @@ fn fresh_renderer(
         },
         role,
     };
-    let mut renderer = GpuRenderer::new(window, active, &Theme::default(), settings)
-        .map_err(|error| error.to_string())?;
+    let mut renderer = match GpuRenderer::new(window, active, &Theme::default(), settings) {
+        Ok(renderer) => renderer,
+        Err(error) if !software => return Err(format!("HOST_INCAPABLE: wgpu renderer: {error}")),
+        Err(error) => return Err(error.to_string()),
+    };
+    check(
+        renderer.is_software_render_degraded() == software,
+        &format!("{role}: the renderer presents through GDI={software}"),
+    )?;
     renderer.set_tab_bar_visible(false);
     renderer.set_cursor_blink(false);
     Ok(renderer)
@@ -107,13 +116,18 @@ fn text_grid(text: &str) -> Grid {
     grid
 }
 
-/// The one pane of every frame here, filling the window.
+/// The one pane of every frame here, filling the window, following the live tail.
 fn pane(grid: &mut Grid) -> PaneRender<'_> {
+    pane_at(grid, None)
+}
+
+/// The one pane, its view at `viewport_top_abs`.
+fn pane_at(grid: &mut Grid, viewport_top_abs: Option<u64>) -> PaneRender<'_> {
     PaneRender {
         id: 1,
         rect_px: PixelRect { x: 0, y: 0, w: WIDTH, h: HEIGHT },
         grid,
-        viewport_top_abs: None,
+        viewport_top_abs,
         is_active: true,
         cursor_style: CursorStyle::BlockSteady,
         is_broadcast_participant: false,
@@ -135,10 +149,19 @@ fn release(renderer: &mut GpuRenderer, source: impl FrameSource) -> FrameOutcome
 
 /// One frame through the compatibility wrapper.
 fn wrapped(renderer: &mut GpuRenderer, grid: &mut Grid) -> PresentOutcome {
+    wrapped_at(renderer, grid, None)
+}
+
+/// One frame through the compatibility wrapper, the pane's view at `viewport_top_abs`.
+fn wrapped_at(
+    renderer: &mut GpuRenderer,
+    grid: &mut Grid,
+    viewport_top_abs: Option<u64>,
+) -> PresentOutcome {
     let theme = Theme::default();
     let tabs = TabBar::new();
     let fonts = renderer.begin_frame_fonts();
-    let mut panes = [pane(grid)];
+    let mut panes = [pane_at(grid, viewport_top_abs)];
     renderer.render_with_outcome(
         &fonts, &mut panes, &theme, false, None, None, &tabs, false, None, None, None, None, None,
         None, None,
@@ -183,7 +206,14 @@ fn software_pixels(renderer: &GpuRenderer) -> Vec<[u8; 4]> {
 /// finds the grid's lock free, on the GDI and the wgpu presenter.
 fn lend_drop_present(active: &ActiveEventLoop) -> Result<(), String> {
     for software in [true, false] {
-        let mut renderer = fresh_renderer(active, "release-order", software)?;
+        let mut renderer = match fresh_renderer(active, "release-order", software) {
+            Err(reason) if reason.starts_with("HOST_INCAPABLE") => {
+                // When: the host cannot create a wgpu renderer, report the capability, not a pass.
+                println!("capability=HOST_INCAPABLE case=release-order-wgpu reason={reason}");
+                continue;
+            }
+            other => other?,
+        };
         let grid = Arc::new(Mutex::new(text_grid("order")));
         let log = Arc::new(Mutex::new(Vec::new()));
         let (hook_grid, hook_log) = (Arc::clone(&grid), Arc::clone(&log));
@@ -252,7 +282,8 @@ fn stopped_device_returns_its_typed_exits(active: &ActiveEventLoop) -> Result<()
 }
 
 /// Test 9: the wrapper on a dirty standalone grid gives the releasing call's outcome and pixels,
-/// clears the dirt after `Presented`, and keeps it after a skip and after a stopped frame.
+/// clears the dirt after `Presented`, and keeps it after a planned `Noop` skip, an atlas retry and a
+/// stopped frame. A surface retry has no injection seam on Windows and is not exercised here.
 fn wrapper_matches_the_releasing_call(active: &ActiveEventLoop) -> Result<(), String> {
     let mut wrapper = fresh_renderer(active, "release-wrapper", true)?;
     let mut releasing = fresh_renderer(active, "release-wrapper", true)?;
@@ -286,6 +317,37 @@ fn wrapper_matches_the_releasing_call(active: &ActiveEventLoop) -> Result<(), St
         !matches!(unchanged, PresentOutcome::Presented),
         &format!("an unchanged frame presents nothing: {unchanged:?}"),
     )?;
+
+    // A planned skip: the view sits at the top of history and the only dirt is a live row below it,
+    // outside the drawable damage, so the plan is Noop and that dirt must survive.
+    let mut scrolled = fresh_renderer(active, "release-wrapper-noop", true)?;
+    let mut history = text_grid("history");
+    for _ in 0..8 {
+        history.scroll_up(1);
+    }
+    check(history.scrollback_len() > usize::from(history.rows), "the live rows are off the view")?;
+    let first = wrapped_at(&mut scrolled, &mut history, Some(0));
+    check(matches!(first, PresentOutcome::Presented), &format!("the scrolled view: {first:?}"))?;
+    history.goto(3, 0);
+    history.put_char('z', Color::Default, Color::Default, CellFlags::empty());
+    let noop = wrapped_at(&mut scrolled, &mut history, Some(0));
+    check(
+        matches!(noop, PresentOutcome::Skipped(SkipReason::Noop)),
+        &format!("offscreen-only dirt plans Noop: {noop:?}"),
+    )?;
+    check(history.dirty_rows().any(|row| row == 3), "a Noop skip keeps the dirt")?;
+
+    // An atlas retry: the atlas changes during assembly, so nothing is presented and dirt survives.
+    scrolled.__change_glyph_atlas_during_next_assembly();
+    let retry = wrapped_at(&mut scrolled, &mut history, None);
+    check(
+        matches!(retry, PresentOutcome::AtlasRetry),
+        &format!("a changed atlas retries: {retry:?}"),
+    )?;
+    check(history.dirty_count() > 0, "an atlas retry keeps the dirt")?;
+    let after = wrapped_at(&mut scrolled, &mut history, None);
+    check(matches!(after, PresentOutcome::Presented), &format!("the retried frame: {after:?}"))?;
+    check(history.dirty_count() == 0, "the presented retry clears the dirt")?;
     wrapper.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
     wrapper_grid.mark_all_dirty();
     let stopped = wrapped(&mut wrapper, &mut wrapper_grid);

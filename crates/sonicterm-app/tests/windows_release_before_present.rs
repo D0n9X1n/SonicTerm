@@ -61,6 +61,8 @@ struct Fixture {
 }
 
 /// A window of `role` with a real renderer, presenting through GDI (`software`) or wgpu.
+/// A wgpu renderer the host cannot create is reported as `HOST_INCAPABLE: ...`, never passed
+/// silently; the presenter each fixture resolved is checked.
 fn fixture(active: &ActiveEventLoop, role: Role, software: bool) -> Result<Fixture, String> {
     let window = Arc::new(
         active
@@ -74,11 +76,16 @@ fn fixture(active: &ActiveEventLoop, role: Role, software: bool) -> Result<Fixtu
     );
     let theme = Theme::default();
     let mut config = Config::default();
-    let mode = if software { SoftwareRenderMode::Force } else { SoftwareRenderMode::Auto };
+    // `Off` never degrades, so the wgpu cases present through wgpu even on a software adapter.
+    let mode = if software { SoftwareRenderMode::Force } else { SoftwareRenderMode::Off };
     config.appearance.software_render_mode = mode;
     config.appearance.scrollbar = ScrollbarMode::Never;
     config.terminal.cursor_blink = false;
-    let mut renderer = GpuRenderer::new(
+    config.window.padding_left = 0.0;
+    config.window.padding_right = 0.0;
+    config.window.padding_top = 0.0;
+    config.window.padding_bottom = 0.0;
+    let created = GpuRenderer::new(
         window.clone(),
         active,
         &theme,
@@ -99,8 +106,12 @@ fn fixture(active: &ActiveEventLoop, role: Role, software: bool) -> Result<Fixtu
             },
             role: "release-before-present-test",
         },
-    )
-    .map_err(|error| error.to_string())?;
+    );
+    let mut renderer = match created {
+        Ok(renderer) => renderer,
+        Err(error) if !software => return Err(format!("HOST_INCAPABLE: wgpu renderer: {error}")),
+        Err(error) => return Err(error.to_string()),
+    };
     renderer.set_cursor_blink(false);
     let mut app = App::new(theme, config, Keymap::default());
     app.__test_set_software_render_degrade(software);
@@ -115,16 +126,20 @@ fn fixture(active: &ActiveEventLoop, role: Role, software: bool) -> Result<Fixtu
     };
     check(app.__test_attach_window_renderer(id, window, renderer), "renderer attached")?;
     app.__test_set_frontmost_window(Some(id));
+    let degraded =
+        app.__test_window_renderer_mut(id).map(|renderer| renderer.is_software_render_degraded());
+    check(degraded == Some(software), &format!("the renderer presents through GDI={software}"))?;
     Ok(Fixture { app, id, pane })
 }
 
-/// Dispatch the real `RedrawRequested` until a frame is presented, as the existing fixtures do.
+/// Dispatch the real `RedrawRequested` until the renderer counts one more presented frame.
 fn present(fixture: &mut Fixture, active: &ActiveEventLoop) -> Result<(), String> {
     let started = Instant::now();
+    let presented = fixture.app.__test_window_successful_frames(fixture.id).unwrap_or(0);
     loop {
-        dispatch(fixture, active, started);
-        if fixture.app.__test_window_last_render(fixture.id).is_some_and(|time| time >= started) {
-            // When: the window's last render moved past `started`, a frame was presented.
+        dispatch(fixture, active, Instant::now());
+        if fixture.app.__test_window_successful_frames(fixture.id).unwrap_or(0) > presented {
+            // When: the successful-presentation count moved, a frame was presented.
             return Ok(());
         }
         check(started.elapsed() < Duration::from_secs(3), "the frame was presented")?;
@@ -186,26 +201,52 @@ fn dirty(fixture: &Fixture) -> Result<Vec<usize>, String> {
         .ok_or_else(|| "no pane".into())
 }
 
-/// Every pixel of the window's software frame, as BGRA.
-fn pixels(fixture: &Fixture) -> Vec<[u8; 4]> {
-    (0..240u32)
-        .flat_map(|pixel_y| (0..480u32).map(move |pixel_x| (pixel_x, pixel_y)))
-        .filter_map(|(pixel_x, pixel_y)| {
-            fixture.app.__test_window_software_frame_pixel_bgra(fixture.id, pixel_x, pixel_y)
+/// The software frame's pixels of terminal row `row`, over its first 16 columns: the band the
+/// hook's text lands in, clear of the tab bar above and of any chrome at the right edge.
+fn row_band(fixture: &Fixture, row: u16) -> Result<Vec<[u8; 4]>, String> {
+    let (cell_width, cell_height, top) =
+        fixture.app.__test_window_cell_geometry(fixture.id).ok_or("no cell geometry")?;
+    let first_y = (top + f32::from(row) * cell_height).ceil() as u32;
+    let last_y = (top + f32::from(row + 1) * cell_height).floor() as u32;
+    let last_x = (16.0 * cell_width) as u32;
+    (first_y..last_y)
+        .flat_map(|pixel_y| (0..last_x).map(move |pixel_x| (pixel_x, pixel_y)))
+        .map(|(pixel_x, pixel_y)| {
+            fixture
+                .app
+                .__test_window_software_frame_pixel_bgra(fixture.id, pixel_x, pixel_y)
+                .ok_or_else(|| String::from("software frame pixel unavailable"))
         })
         .collect()
 }
 
+/// The hook's row as a frame draws it when the same bytes are written directly, with no hook.
+fn reference_row(active: &ActiveEventLoop, role: Role) -> Result<Vec<[u8; 4]>, String> {
+    let mut reference = fixture(active, role, true)?;
+    for bytes in [b"\x1b[?25l".as_slice(), b"base", b"\x1b[2;1Hhooked"] {
+        let written =
+            reference.app.__test_advance_child_pane_parser(reference.id, reference.pane, bytes);
+        check(written, "reference written")?;
+        present(&mut reference, active)?;
+    }
+    row_band(&reference, 1)
+}
+
 /// Tests 1, 2, 8a and 8b: during presentation the hook locks the visible pane's parser and writes
-/// a row, and the frame presents. The next frame draws that row (its pixels change on GDI) and its
-/// receipt waits; with nothing changed after it, the following collection clears the dirt and no
-/// frame is presented on the unchanged key.
+/// a row, and the frame presents. The next frame draws that row: on GDI its pixels equal a frame
+/// that wrote the same bytes directly, and differ before that frame. Its receipt waits; with nothing
+/// changed after it, the following collection clears the dirt and no frame is presented.
 fn parse_during_present_is_drawn_then_acknowledged(
     active: &ActiveEventLoop,
     role: Role,
     software: bool,
 ) -> Result<(), String> {
     let mut fixture = fixture(active, role, software)?;
+    // A hidden cursor keeps the hook's row comparable with the reference's.
+    check(
+        fixture.app.__test_advance_child_pane_parser(fixture.id, fixture.pane, b"\x1b[?25l"),
+        "hide",
+    )?;
     present(&mut fixture, active)?;
     let locked = lock_and_write(&mut fixture, b"\x1b[2;1Hhooked", false)?;
     check(fixture.app.__test_advance_child_pane_parser(fixture.id, fixture.pane, b"base"), "base")?;
@@ -218,10 +259,12 @@ fn parse_during_present_is_drawn_then_acknowledged(
     )?;
     unhook(&mut fixture)?;
     check(dirty(&fixture)?.contains(&1), "the hook's row is dirty after the frame")?;
-    let before = pixels(&fixture);
+    let before = if software { Some(row_band(&fixture, 1)?) } else { None };
     present(&mut fixture, active)?;
-    if software {
-        check(pixels(&fixture) != before, "the next frame draws the hook's row")?;
+    if let Some(before) = before {
+        let reference = reference_row(active, role)?;
+        check(before != reference, "before that frame the hook's row is not drawn")?;
+        check(row_band(&fixture, 1)? == reference, "the next frame draws the hook's row")?;
     }
     check(
         fixture.app.__test_window_pending_receipts(fixture.id) == Some(1),
@@ -311,8 +354,13 @@ fn run(active: &ActiveEventLoop) -> Result<(), String> {
     for role in [Role::Main, Role::Child] {
         let named = |error: String| format!("{role:?}: {error}");
         for software in [true, false] {
-            parse_during_present_is_drawn_then_acknowledged(active, role, software)
-                .map_err(|error| named(format!("software={software}: {error}")))?;
+            match parse_during_present_is_drawn_then_acknowledged(active, role, software) {
+                Err(reason) if !software && reason.starts_with("HOST_INCAPABLE") => {
+                    // When: the host cannot create a wgpu renderer, report the capability, not a pass.
+                    println!("capability=HOST_INCAPABLE case={role:?}-wgpu reason={reason}");
+                }
+                result => result.map_err(|error| named(format!("software={software}: {error}")))?,
+            }
         }
         stop_during_present_clears_nothing(active, role).map_err(named)?;
         stop_before_collection_keeps_the_set(active, role).map_err(named)?;

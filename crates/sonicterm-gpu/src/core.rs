@@ -1855,6 +1855,9 @@ pub struct GpuRenderer {
     /// Test seam: return one backend occlusion after the normal frame device gate.
     #[cfg(target_os = "macos")]
     fault_surface_occluded: bool,
+    /// Test seam: replace the glyph atlas identity during the next assembly, as an atlas reset
+    /// mid-frame would, so that frame takes the atlas retry.
+    fault_atlas_change_during_assembly: bool,
     /// Test seam: stop the device just before the next cached Windows CPU reblit.
     #[cfg(target_os = "windows")]
     fault_stop_before_cached_present: bool,
@@ -2879,6 +2882,7 @@ impl GpuRenderer {
             glyph_atlas,
             glyph_upload,
             glyph_atlas_generation: 0,
+            fault_atlas_change_during_assembly: false,
             image_atlas,
             image_upload,
             retained_inline_media_bytes: 0,
@@ -3765,6 +3769,13 @@ impl GpuRenderer {
     /// Cell width and height in raster pixels, matching rendered pane content rectangles.
     pub fn cell_size(&self) -> (f32, f32) {
         (self.cell_w, self.cell_h)
+    }
+
+    /// Test hook: change the glyph atlas identity during the next assembly, so that frame returns
+    /// `AtlasRetry` and presents nothing.
+    #[doc(hidden)]
+    pub fn __change_glyph_atlas_during_next_assembly(&mut self) {
+        self.fault_atlas_change_during_assembly = true;
     }
 
     /// Test hook: run `hook` at the start of every presentation, after the frame's source was
@@ -7564,6 +7575,10 @@ impl GpuRenderer {
         gpu_lap!("overlays");
         crate::frame_stats::note_assembly(assembly_started);
 
+        if std::mem::take(&mut self.fault_atlas_change_during_assembly) {
+            // The test seam stands in for an atlas reset during assembly: only its identity moves.
+            self.glyph_atlas_generation = self.glyph_atlas_generation.wrapping_add(1);
+        }
         if atlas_changed_during_frame(atlas_stamp_at_frame_start, self.glyph_atlas_stamp()) {
             // When: atlas_changed_during_frame detects stale UVs, discard them after the source is released.
             return Ok(Assembled::AtlasRetry {
