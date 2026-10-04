@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import calendar
 from dataclasses import asdict, dataclass, field
+from fractions import Fraction
 import errno
 import hashlib
 import importlib.util
@@ -1338,6 +1339,170 @@ def read_memory_samples(log_dir: Path) -> list[MemorySample]:
     """Return a run's memory samples in time order; a short run may have none."""
     samples = [sample for sample in map(parse_memory_line, _log_lines(log_dir)) if sample]
     return sorted(samples, key=lambda sample: sample.unix_s)
+
+
+# The cell-layout decision: whether storing grid cells in 16 bytes instead of 24 is worth its cost. It reads S12's
+# `end` checkpoint on the head side of a CI comparison, and goes only when grid cells are a large enough share of
+# resident memory on one platform. Missing or partial evidence is inconclusive, never a no-go.
+CELL_LAYOUT_PLATFORMS = ("macOS", "Windows")
+CELL_LAYOUT_RUNS = 5
+CELL_LAYOUT_PANES = 3
+CELL_LAYOUT_CHECKPOINT = "end"
+CELL_LAYOUT_MIN_SHARE = Fraction(3, 10)
+CELL_LAYOUT_MIN_SAVING_BYTES = 8 * 1024 * 1024
+CELL_LAYOUT_GRID_FIELDS = ("grid_visible_bytes", "grid_history_bytes", "grid_alternate_bytes")
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+@dataclass(frozen=True)
+class CellLayoutRun:
+    """One head S12 run's inputs to the cell-layout decision."""
+
+    name: str
+    # The CI workflow run the evidence came from; runs from two workflow runs are never pooled.
+    workflow_run: str
+    result: dict | None
+    memory: list[MemorySample]
+    # perf-compare's own classification of the run; anything but `valid` was rejected and replaced.
+    classification: str = "valid"
+
+
+@dataclass(frozen=True)
+class CellLayoutReading:
+    """A run's grid and resident bytes at `end`, or why the run cannot be used."""
+
+    name: str
+    grid_bytes: int | None = None
+    resident_bytes: int | None = None
+    problem: str | None = None
+
+
+@dataclass(frozen=True)
+class CellLayoutPlatform:
+    """One platform's readings, its median share and saving, and whether it passes; `passes` is None when it
+    has no decidable statistic."""
+
+    platform: str
+    readings: tuple[CellLayoutReading, ...]
+    share: Fraction | None = None
+    saving_bytes: Fraction | None = None
+    passes: bool | None = None
+    failed_clauses: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CellLayoutDecision:
+    """`Go`, `NoGo` or `Inconclusive`, with every platform's statistics and, when inconclusive, why."""
+
+    outcome: str
+    platforms: dict[str, CellLayoutPlatform]
+    reasons: tuple[str, ...] = ()
+
+
+def cell_layout_reading(run: CellLayoutRun) -> CellLayoutReading:
+    """Read `end`'s authoritative tagged sample of one run, or name the reason the run is invalid."""
+    def invalid(problem: str) -> CellLayoutReading:
+        return CellLayoutReading(run.name, problem=problem)
+
+    if run.classification != "valid":
+        return invalid(f"run classified {run.classification}")
+    if run.result is None:
+        return invalid("no result.json")
+    if run.result.get("checkpoint_memory") != "supported":
+        return invalid("checkpoint sampling unsupported")
+    point = next((point for point in run.result.get("checkpoints") or []
+                  if isinstance(point, dict) and point.get("label") == CELL_LAYOUT_CHECKPOINT), None)
+    if point is None or not isinstance(point.get("index"), int):
+        return invalid("no end checkpoint")
+    if point.get("sampling") == "exhausted":
+        return invalid("partial (sampling exhausted)")
+    reading = checkpoint_memory(run.memory, point["index"])
+    if reading is None:
+        return invalid("no tagged end sample")
+    if reading.problem is not None:
+        return invalid(reading.problem)
+    if reading.partial:
+        return invalid("partial")
+    sample = reading.sample
+    for name in ("panes_total", "panes_sampled"):
+        value = getattr(sample, name)
+        if value != CELL_LAYOUT_PANES:
+            return invalid(f"{name}={value}")
+    if sample.panes_contended != 0:
+        return invalid(f"panes_contended={sample.panes_contended}")
+    if sample.process_resident_bytes is None:
+        return invalid("process_resident_bytes unsupported")
+    if sample.process_resident_bytes <= 0:
+        return invalid(f"process_resident_bytes={sample.process_resident_bytes}")
+    missing = [name for name in CELL_LAYOUT_GRID_FIELDS if getattr(sample, name) is None]
+    if missing:
+        return invalid(f"missing {', '.join(missing)}")
+    grid_bytes = sum(getattr(sample, name) for name in CELL_LAYOUT_GRID_FIELDS)
+    return CellLayoutReading(run.name, grid_bytes, sample.process_resident_bytes)
+
+
+def cell_layout_platform(platform: str, runs: Sequence[CellLayoutRun]) -> CellLayoutPlatform:
+    """Judge one platform: its median per-run share and saving, from exactly five valid runs of one workflow run."""
+    readings = tuple(cell_layout_reading(run) for run in runs)
+    reasons = [f"{platform} {reading.name}: {reading.problem}" for reading in readings if reading.problem]
+    valid = [reading for reading in readings if reading.problem is None]
+    workflow_runs = sorted({run.workflow_run for run in runs})
+    if len(workflow_runs) > 1:
+        reasons.append(f"{platform}: runs from {len(workflow_runs)} workflow runs ({', '.join(workflow_runs)})")
+    if len(valid) != CELL_LAYOUT_RUNS:
+        reasons.append(f"{platform}: {len(valid)} valid runs, need exactly {CELL_LAYOUT_RUNS}")
+    if len(valid) != CELL_LAYOUT_RUNS or len(workflow_runs) > 1:
+        return CellLayoutPlatform(platform, readings, reasons=tuple(reasons))
+    # The median of the per-run values, in exact fractions: never a ratio of medians.
+    shares = sorted(Fraction(reading.grid_bytes, reading.resident_bytes) for reading in valid)
+    savings = sorted(Fraction(reading.grid_bytes * 8, 24) for reading in valid)
+    share, saving = shares[CELL_LAYOUT_RUNS // 2], savings[CELL_LAYOUT_RUNS // 2]
+    failed = tuple(clause for clause, holds in (("share", share >= CELL_LAYOUT_MIN_SHARE),
+                                                ("size", saving >= CELL_LAYOUT_MIN_SAVING_BYTES)) if not holds)
+    return CellLayoutPlatform(platform, readings, share, saving, not failed, failed, tuple(reasons))
+
+
+def cell_layout_decision(runs_by_platform: Mapping[str, Sequence[CellLayoutRun]]) -> CellLayoutDecision:
+    """Go when one platform passes both clauses; NoGo only when both platforms are decidable and neither passes;
+    otherwise Inconclusive, naming every missing or rejected run."""
+    platforms = {platform: cell_layout_platform(platform, runs_by_platform.get(platform, ()))
+                 for platform in CELL_LAYOUT_PLATFORMS}
+    if any(judged.passes for judged in platforms.values()):
+        return CellLayoutDecision("Go", platforms)
+    if all(judged.passes is False for judged in platforms.values()):
+        return CellLayoutDecision("NoGo", platforms)
+    reasons = tuple(reason for judged in platforms.values() for reason in judged.reasons)
+    return CellLayoutDecision("Inconclusive", platforms, reasons)
+
+
+def read_cell_layout_runs(artifact_root: Path, workflow_run: str) -> dict[str, list[CellLayoutRun]]:
+    """Read every head S12 timed run from downloaded `perf-comparison-*` artifacts of one workflow run.
+
+    An artifact keeps each run's `result.json` under `scratch/` and the harness's console output, which carries
+    the App's log lines with ANSI colour, as `01-harness.log`; the App's own log files are read when present.
+    """
+    runs: dict[str, list[CellLayoutRun]] = {platform: [] for platform in CELL_LAYOUT_PLATFORMS}
+    for artifact in sorted(artifact_root.iterdir()):
+        platform = next((name for name in CELL_LAYOUT_PLATFORMS if f"-{name}-" in artifact.name), None)
+        if platform is None or not artifact.is_dir():
+            continue
+        for run_dir in sorted(artifact.glob("runs/S12-default/timed/*-head")):
+            outcome_path, result_path = run_dir / "outcome.json", run_dir / "scratch" / "result.json"
+            classification = json.loads(outcome_path.read_text(encoding="utf-8")).get("kind", "missing") \
+                if outcome_path.is_file() else "missing"
+            result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.is_file() else None
+            memory = read_memory_samples(run_dir / "scratch" / "logs")
+            harness_log = run_dir / "01-harness.log"
+            if not memory and harness_log.is_file():
+                # When: the App's log files were not kept, its lines are read from the colored console output.
+                lines = (ANSI_ESCAPE.sub("", line)
+                         for line in harness_log.read_text(encoding="utf-8", errors="replace").splitlines())
+                memory = sorted((sample for sample in map(parse_memory_line, lines) if sample),
+                                key=lambda sample: sample.unix_s)
+            runs[platform].append(CellLayoutRun(f"{artifact.name}/{run_dir.name}", workflow_run, result, memory,
+                                                classification))
+    return runs
 
 
 def memory_at(samples: Sequence[MemorySample], unix_s: float,
