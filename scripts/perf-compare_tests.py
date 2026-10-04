@@ -5094,7 +5094,14 @@ COUNTER_CONTRACT = {
                   # row_cache_invalidate_us is summed microseconds as a plain count, not a histogram.
                   "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited",
                   # font_fallback_applies is supporting evidence; a base older than the counter shows n/a.
-                  "font_fallback_applies"),
+                  "font_fallback_applies",
+                  "shape_ns", "raster_ns", "raster_calls", "raster_tiles", "font_generation_applies",
+                  "font_prepare_ns", "font_generation_prepare_ns", "render_attempts", "render_attempts_presented",
+                  "render_attempt_ns", "render_attempt_shape_ns", "render_attempt_raster_ns",
+                  "render_attempt_shape_requests", "render_attempt_raster_calls", "render_attempt_raster_tiles",
+                  "apply_attempts", "apply_attempts_presented", "apply_attempt_ns", "apply_attempt_shape_ns",
+                  "apply_attempt_raster_ns", "apply_attempt_shape_requests", "apply_attempt_raster_calls",
+                  "apply_attempt_raster_tiles"),
                  ("assembly_us",)),
 }
 CONTRACT_FIELD_COUNT = sum(len(counts) + len(histograms) for counts, histograms in COUNTER_CONTRACT.values())
@@ -5491,6 +5498,61 @@ class CounterTableTests(unittest.TestCase):
         rows, _omitted = perf.counter_rows("S2/flood", supported_zero, head)
         cells = {row[2]: (row[3], row[4]) for row in rows[1:]}
         self.assertEqual(cells["app.fg_worker_probes (count)"], ("0 (0–0)", "2 (2–2)"))
+
+    def test_nanosecond_fields_are_labelled_and_shown_in_microseconds_without_rounding_the_figure(self):
+        # A _ns field is summed nanoseconds: its cell shows microseconds with two decimals, while the change
+        # compares the exact nanosecond medians, so 1,999 ns and 2,999 ns read 2.00 and 3.00 us and +50.0%.
+        base = counters_side({"renderer.shape_ns": 1999})
+        head = counters_side({"renderer.shape_ns": 2999})
+        rows, _omitted = perf.counter_rows("S9/default", base, head)
+        cells = {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}
+        self.assertEqual(cells["renderer.shape_ns (us, summed from ns)"], ("2.00 (2.00–2.00)", "3.00 (3.00–3.00)",
+                                                                          "+50.0%"))
+
+    def test_the_attempt_split_pools_raw_totals_so_its_shares_add_up(self):
+        # Three runs (attempt, shape, raster ns) = (100, 90, 0), (100, 0, 90), (1000, 500, 500): field-by-field
+        # medians would give (100, 90, 90), a negative remainder. Pooling gives (1200, 590, 590): 49.2%, 49.2%
+        # and 1.7% for the other 20 ns, with per-attempt means over the 3 pooled attempts.
+        def run(attempt_ns, shape_ns, raster_ns):
+            return {"renderer.apply_attempts": 1, "renderer.apply_attempt_ns": attempt_ns,
+                    "renderer.apply_attempt_shape_ns": shape_ns, "renderer.apply_attempt_raster_ns": raster_ns,
+                    "renderer.apply_attempt_shape_requests": 4, "renderer.apply_attempt_raster_calls": 2,
+                    "renderer.render_attempts": 1, "renderer.render_attempt_ns": attempt_ns}
+        head = counters_side(run(100, 90, 0), run(100, 0, 90), run(1000, 500, 500))
+        text, attempts = perf.attempt_split(perf._counter_phases(head)["workload"], "apply_")
+        self.assertEqual(attempts, 3)
+        self.assertEqual(text, "3 attempts (3/3 runs): shaping 49.2%, rasterizing 49.2%, other 1.7%; per attempt "
+                               "0.40 us, 4.0 shape requests, 2.0 raster calls, 0.0 tiles")
+        # The two splits join the counters table after the phase's fields, once each.
+        rows, _omitted = perf.counter_rows("S9/default", counters_side(), head)
+        names = [row[2] for row in rows if row[2].startswith("renderer attempt split")]
+        self.assertEqual(names, ["renderer attempt split: every attempt (pooled)",
+                                 "renderer attempt split: fallback apply attempts (pooled)"])
+
+    def test_the_attempt_split_reports_no_attempts_excludes_incomplete_runs_and_reads_n_a_on_an_older_base(self):
+        # Zero apply attempts reads "no apply attempts", never 0%. A run missing any field of the class is left
+        # out of every field of it, and the scope names how many runs counted. A base built before the counters
+        # reads n/a for the split, and a phase where no side drew an attempt adds no split rows.
+        quiet = counters_side({"renderer.render_attempts": 2, "renderer.render_attempt_ns": 50})
+        phases = perf._counter_phases(quiet)["workload"]
+        self.assertEqual(perf.attempt_split(phases, "apply_"), ("no apply attempts (1/1 runs)", 0))
+        complete = counters_result({"renderer.apply_attempts": 1, "renderer.apply_attempt_ns": 10})
+        lacking = counters_result({"renderer.apply_attempts": 5, "renderer.apply_attempt_ns": 999})
+        del lacking["phases"][0]["frame_counters"]["renderer"]["apply_attempt_raster_tiles"]
+        side = perf.SideRuns(outcomes=[make_outcome(result=complete), make_outcome(result=lacking)])
+        text, attempts = perf.attempt_split(perf._counter_phases(side)["workload"], "apply_")
+        self.assertEqual(attempts, 1)
+        self.assertTrue(text.startswith("1 attempts (1/2 runs): "), text)
+        older = counters_result()
+        for name in list(older["phases"][0]["frame_counters"]["renderer"]):
+            if "attempt" in name:
+                del older["phases"][0]["frame_counters"]["renderer"][name]
+        rows, _omitted = perf.counter_rows("S9/default", perf.SideRuns(outcomes=[make_outcome(result=older)]), quiet)
+        split = {row[2]: (row[3], row[4]) for row in rows if row[2].startswith("renderer attempt split")}
+        self.assertEqual(split["renderer attempt split: fallback apply attempts (pooled)"],
+                         ("n/a", "no apply attempts (1/1 runs)"))
+        rows, _omitted = perf.counter_rows("S9/default", counters_side(), counters_side())
+        self.assertFalse([row for row in rows if row[2].startswith("renderer attempt split")])
 
     def test_fallback_applies_read_n_a_on_an_older_base_and_a_real_zero_on_a_supporting_one(self):
         # font_fallback_applies joined the renderer section: a base built before it reads n/a with no change, a

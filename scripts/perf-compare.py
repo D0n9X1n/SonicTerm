@@ -1909,7 +1909,15 @@ FRAME_COUNTER_FIELDS = {
                   # row_cache_invalidate_us is summed microseconds kept as a plain count, not a histogram.
                   "row_cache_invalidate_visits", "row_cache_invalidate_us", "recolor_glyphs_visited",
                   # font_fallback_applies is supporting evidence; a base older than the counter shows n/a.
-                  "font_fallback_applies"),
+                  "font_fallback_applies",
+                  # Render-attempt and font-preparation counters; every _ns field is summed nanoseconds.
+                  "shape_ns", "raster_ns", "raster_calls", "raster_tiles", "font_generation_applies",
+                  "font_prepare_ns", "font_generation_prepare_ns", "render_attempts", "render_attempts_presented",
+                  "render_attempt_ns", "render_attempt_shape_ns", "render_attempt_raster_ns",
+                  "render_attempt_shape_requests", "render_attempt_raster_calls", "render_attempt_raster_tiles",
+                  "apply_attempts", "apply_attempts_presented", "apply_attempt_ns", "apply_attempt_shape_ns",
+                  "apply_attempt_raster_ns", "apply_attempt_shape_requests", "apply_attempt_raster_calls",
+                  "apply_attempt_raster_tiles"),
                  ("assembly_us",)),
 }
 HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000]}
@@ -4526,7 +4534,12 @@ def _counter_cell(per_run: Sequence[dict], run_count: int, section: str, field_n
                if isinstance(sections.get(section), dict) and field_name in sections[section]]
     if not present:
         return None, None, False
-    if histogram_unit is None:
+    if histogram_unit is None and field_name.endswith("_ns"):
+        # Nanoseconds stay exact through every delta; only the display converts to microseconds.
+        figure = median(present)
+        text = f"{figure / 1000:.2f} ({min(present) / 1000:.2f}–{max(present) / 1000:.2f})"
+        active = any(present)
+    elif histogram_unit is None:
         figure = median(present)
         text, active = f"{_figure(figure)} ({min(present)}–{max(present)})", any(present)
     else:
@@ -4539,10 +4552,47 @@ def _counter_cell(per_run: Sequence[dict], run_count: int, section: str, field_n
 
 def _counter_label(field_name: str, histogram_unit: str | None) -> str:
     """A field's unit label: a histogram's unit; for an integer, `us, summed` when its name ends in _us
-    (a summed duration in microseconds), otherwise `count`."""
+    (a summed duration in microseconds), `us, summed from ns` when it ends in _ns, otherwise `count`."""
     if histogram_unit is not None:
         return histogram_unit
+    if field_name.endswith("_ns"):
+        return "us, summed from ns"
     return "us, summed" if field_name.endswith("_us") else "count"
+
+
+# The matched fields of one render-attempt class, by role; a class's prefix is `render_` or `apply_`.
+ATTEMPT_SPLIT_ROLES = ("attempts", "attempt_ns", "attempt_shape_ns", "attempt_raster_ns", "attempt_shape_requests",
+                       "attempt_raster_calls", "attempt_raster_tiles")
+
+
+def attempt_split(per_run: Sequence[dict], prefix: str) -> tuple[str | None, int]:
+    """One side's pooled split of a render-attempt class in one phase, and its pooled attempt count.
+
+    Only runs that carry every field of the class count, and their raw totals are summed before any division,
+    so the shares come from one population and the shaping, rasterizing and remaining shares add up to 100%.
+    The text is None when no run carries the class.
+    """
+    fields = [prefix + role for role in ATTEMPT_SPLIT_ROLES]
+    runs = [sections["renderer"] for sections in per_run
+            if isinstance(sections.get("renderer"), dict)
+            and all(_is_int(sections["renderer"].get(field)) for field in fields)]
+    if not runs:
+        return None, 0
+    pooled = {role: sum(run[prefix + role] for run in runs) for role in ATTEMPT_SPLIT_ROLES}
+    attempts, attempt_ns = pooled["attempts"], pooled["attempt_ns"]
+    scope = f"{len(runs)}/{len(per_run)} runs"
+    if attempts == 0:
+        return f"no {prefix.rstrip('_')} attempts ({scope})", 0
+    if attempt_ns == 0:
+        return f"{attempts} attempts with no measured time ({scope})", attempts
+    shape, raster = pooled["attempt_shape_ns"], pooled["attempt_raster_ns"]
+    other = attempt_ns - shape - raster
+    text = (f"{attempts} attempts ({scope}): shaping {100 * shape / attempt_ns:.1f}%, rasterizing "
+            f"{100 * raster / attempt_ns:.1f}%, other {100 * other / attempt_ns:.1f}%; per attempt "
+            f"{attempt_ns / attempts / 1000:.2f} us, {pooled['attempt_shape_requests'] / attempts:.1f} shape "
+            f"requests, {pooled['attempt_raster_calls'] / attempts:.1f} raster calls, "
+            f"{pooled['attempt_raster_tiles'] / attempts:.1f} tiles")
+    return text, attempts
 
 
 def presenter_counter_notes(label: str, side_name: str, side: SideRuns) -> list[str]:
@@ -4600,7 +4650,24 @@ def counter_rows(label: str, base: SideRuns, head: SideRuns) -> tuple[list[list[
                 rows.append([label, phase_name, f"{section}.{field_name} ({_counter_label(field_name, unit)})",
                              texts[0], texts[1],
                              percent_change(cells[0][1], cells[1][1])])
+        rows.extend(_attempt_split_rows(label, phase_name, sides, per_side, head_only))
     return rows, omitted
+
+
+def _attempt_split_rows(label: str, phase_name: str, sides: Sequence[SideRuns], per_side: Sequence[dict],
+                        head_only: bool) -> list[list[str]]:
+    """The pooled render-attempt split rows of one phase, all attempts then apply attempts; none when neither
+    side drew an attempt. A side whose runs lack the fields reads `n/a`."""
+    splits = {prefix: [attempt_split(phases.get(phase_name, []), prefix) for phases in per_side]
+              for prefix in ("render_", "apply_")}
+    if not any(attempts for _text, attempts in splits["render_"]):
+        return []
+    rows = []
+    for prefix, name in (("render_", "every attempt"), ("apply_", "fallback apply attempts")):
+        texts = [text if text is not None else ("n/a" if head_only else _missing_cell(side))
+                 for (text, _attempts), side in zip(splits[prefix], sides)]
+        rows.append([label, phase_name, f"renderer attempt split: {name} (pooled)", texts[0], texts[1], ""])
+    return rows
 
 
 def render_table(rows: Iterable[Sequence[str]], header: str = TABLE_HEADER) -> str:
