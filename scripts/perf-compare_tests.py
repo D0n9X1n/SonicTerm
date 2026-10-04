@@ -5421,7 +5421,8 @@ class CounterTableTests(unittest.TestCase):
              "p95 ≤17 ms, max >100 ms, mean 15.00 ms (20 events)", "n/a"],
             ["S1/default", "workload", "app.wake_user (count)", "n/a", "1.5 (0–3)", "n/a"],
             ["S1/default", "workload", "vt.parse_us (us)", "n/a",
-             "p95 >5000 us, max >5000 us, mean 3025.00 us (2 events)", "n/a"]])
+             "p95 >5000 us, max >5000 us, mean 3025.00 us (2 events)", "n/a"],
+            ["S1/default", "workload", "renderer attempt split (pooled)", "n/a", "no render attempts (2/2 runs)", ""]])
         self.assertEqual(omitted, CONTRACT_FIELD_COUNT - 4)
 
     def test_the_s11_release_reshow_phase_prints_full_frames_max_assembly_and_presented(self):
@@ -5473,7 +5474,10 @@ class CounterTableTests(unittest.TestCase):
             ["S1/default", "workload", "window.attempts (count)", "4 (4–4)", "6 (6–6)", "+50.0%"],
             ["S1/default", "workload", "window.handler_ms (ms)", "p95 ≤12 ms, max ≤12 ms, mean 10.00 ms (2 events)",
              "p95 ≤12 ms, max ≤12 ms, mean 12.00 ms (2 events)", "+20.0%"],
-            ["S1/default", "workload", "renderer.full_frames (count)", "n/a", "3 (3–3)", "n/a"]])
+            ["S1/default", "workload", "renderer.full_frames (count)", "n/a", "3 (3–3)", "n/a"],
+            # Both sides carry the attempt fields and drew none, which reads as one explicit row.
+            ["S1/default", "workload", "renderer attempt split (pooled)", "no render attempts (1/1 runs)",
+             "no render attempts (1/1 runs)", ""]])
         self.assertEqual(omitted, CONTRACT_FIELD_COUNT - 3)
 
     def test_foreground_worker_fields_are_required_on_the_head_and_n_a_on_an_older_base(self):
@@ -5551,8 +5555,34 @@ class CounterTableTests(unittest.TestCase):
         split = {row[2]: (row[3], row[4]) for row in rows if row[2].startswith("renderer attempt split")}
         self.assertEqual(split["renderer attempt split: fallback apply attempts (pooled)"],
                          ("n/a", "no apply attempts (1/1 runs)"))
-        rows, _omitted = perf.counter_rows("S9/default", counters_side(), counters_side())
-        self.assertFalse([row for row in rows if row[2].startswith("renderer attempt split")])
+        # A phase where neither side drew an attempt reads as one explicit row, never omitted.
+        rows, _omitted = perf.counter_rows("S9/default", counters_side({}), counters_side({}))
+        split = [row for row in rows if row[2].startswith("renderer attempt split")]
+        self.assertEqual([row[2:5] for row in split], [["renderer attempt split (pooled)",
+                                                        "no render attempts (1/1 runs)",
+                                                        "no render attempts (1/1 runs)"]])
+
+    def test_the_harness_attempt_fixture_pools_to_exact_shares_and_lists_each_run(self):
+        # The fixture is written by the harness from cumulative totals through its own delta and serializer
+        # (counters_tests.rs). Run 1's (1999, 999, 999) -> (2999, 1499, 1499) ns arrives as (1000, 500, 500),
+        # so pooling with run 2 gives (4000, 1500, 2000): 37.5%, 50.0% and 12.5%, never a negative remainder.
+        fixture = json.loads(ATTEMPT_FIXTURE.read_text(encoding="utf-8"))
+        def run(renderer):
+            result = counters_result()
+            result["phases"][0]["frame_counters"]["renderer"].update(renderer)
+            return make_outcome(result=result)
+        head = perf.SideRuns(outcomes=[run(entry["renderer"]) for entry in fixture["runs"]])
+        text, attempts = perf.attempt_split(perf._counter_phases(head)["workload"], "apply_")
+        self.assertEqual(attempts, 4)
+        self.assertEqual(text, "4 attempts (2/2 runs): shaping 37.5%, rasterizing 50.0%, other 12.5%; per attempt "
+                               "1.00 us, 2.0 shape requests, 1.5 raster calls, 1.0 tiles")
+        rows, _omitted = perf.counter_rows("S9/default", counters_side(), head)
+        cells = {row[2]: row[4] for row in rows[1:]}
+        self.assertEqual(cells["renderer.apply_attempt_ns (us, summed from ns)"], "2.00 (1.00–3.00)")
+        details = perf.attempt_split_details("S9/default", counters_side(), head)
+        self.assertEqual(len(details), 2)
+        self.assertTrue(details[0].startswith("- S9/default head run 1 workload: every attempt 1 attempts"), details)
+        self.assertIn("shaping 50.0%, rasterizing 50.0%, other 0.0%", details[0])
 
     def test_fallback_applies_read_n_a_on_an_older_base_and_a_real_zero_on_a_supporting_one(self):
         # font_fallback_applies joined the renderer section: a base built before it reads n/a with no change, a
@@ -7135,6 +7165,8 @@ COUNTERS_HOOK_MANIFEST = HEAD_MANIFEST + "\n[features]\nperf-counters = []\nperf
 # Golden runs the harness's own test writes: `result.json` from the production serializer and the
 # `memory` lines the App's hook logged, keyed by build ("supported" or "unsupported") and case.
 CHECKPOINT_FIXTURE = Path(__file__).with_name("perf-compare_checkpoint_fixture.json")
+# Two runs' renderer attempt deltas, written by the harness test that computes them.
+ATTEMPT_FIXTURE = Path(__file__).with_name("perf-compare_attempt_fixture.json")
 
 
 def fixture_run(build, case):

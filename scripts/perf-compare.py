@@ -4656,18 +4656,43 @@ def counter_rows(label: str, base: SideRuns, head: SideRuns) -> tuple[list[list[
 
 def _attempt_split_rows(label: str, phase_name: str, sides: Sequence[SideRuns], per_side: Sequence[dict],
                         head_only: bool) -> list[list[str]]:
-    """The pooled render-attempt split rows of one phase, all attempts then apply attempts; none when neither
-    side drew an attempt. A side whose runs lack the fields reads `n/a`."""
+    """The pooled render-attempt split rows of one phase, all attempts then apply attempts. A phase where no
+    side drew an attempt reads as one row saying so; none when no side carries the fields. A side whose runs
+    lack the fields reads `n/a`."""
     splits = {prefix: [attempt_split(phases.get(phase_name, []), prefix) for phases in per_side]
               for prefix in ("render_", "apply_")}
-    if not any(attempts for _text, attempts in splits["render_"]):
+    if all(text is None for text, _attempts in splits["render_"]):
         return []
+    if not any(attempts for _text, attempts in splits["render_"]):
+        # No side drew an attempt: one explicit row, rather than an omitted phase or two empty rows.
+        texts = [text if text is not None else ("n/a" if head_only else _missing_cell(side))
+                 for (text, _attempts), side in zip(splits["render_"], sides)]
+        return [[label, phase_name, "renderer attempt split (pooled)", texts[0], texts[1], ""]]
     rows = []
     for prefix, name in (("render_", "every attempt"), ("apply_", "fallback apply attempts")):
         texts = [text if text is not None else ("n/a" if head_only else _missing_cell(side))
                  for (text, _attempts), side in zip(splits[prefix], sides)]
         rows.append([label, phase_name, f"renderer attempt split: {name} (pooled)", texts[0], texts[1], ""])
     return rows
+
+
+def attempt_split_details(label: str, base: SideRuns, head: SideRuns) -> list[str]:
+    """Each run's own split, for every phase in which some run drew a fallback apply attempt, so the pooled
+    row's runs can be compared one by one. Lines for the details block; none when no run applied."""
+    lines = []
+    for side_name, side in (("base", base), ("head", head)):
+        for index, outcome in enumerate(side.outcomes, 1):
+            for phase in (outcome.result or {}).get("phases") or []:
+                counters = phase.get("frame_counters")
+                if not isinstance(counters, dict):
+                    continue
+                apply_text, apply_attempts = attempt_split([counters], "apply_")
+                if not apply_attempts:
+                    continue
+                every_text, _attempts = attempt_split([counters], "render_")
+                lines.append(f"- {label} {side_name} run {index} {phase.get('name')}: every attempt {every_text}; "
+                             f"fallback apply attempts {apply_text}")
+    return lines
 
 
 def render_table(rows: Iterable[Sequence[str]], header: str = TABLE_HEADER) -> str:
@@ -5843,6 +5868,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             results.append(result)
     marks["measure_end"] = time.time()
     timed_rows, lap_rows, alloc_rows, counters_table, overhead = [], [], [], [], []
+    split_details: list[str] = []
     timed_heads: dict[str, SideRuns] = {}
     omitted = 0
     presenter_notes: list[str] = []
@@ -5860,6 +5886,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         elif result.set_name == "counters":
             rows, left_out = counter_rows(shown, result.base, result.head)
             counters_table.extend(rows)
+            split_details.extend(attempt_split_details(shown, result.base, result.head))
             omitted += left_out
             for side_name, side in (("base", result.base), ("head", result.head)):
                 presenter_notes.extend(presenter_counter_notes(result.label, side_name, side))
@@ -5903,6 +5930,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     for result in results:
         for side, evidence, kind, _reasons in result.attempts:
             details.append(f"- {result.label} {result.set_name} {side} {kind}: `{evidence}/01-harness.log`")
+    if split_details:
+        details += ["", "Per-run render-attempt splits (phases with a fallback apply attempt):", ""] + split_details
     document = comparison_document(timed_rows, lap_rows, alloc_rows, host_lines, details,
                                    counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead,
                                    capped_note=capped_note)

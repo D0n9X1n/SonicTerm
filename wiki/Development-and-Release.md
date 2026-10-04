@@ -449,6 +449,17 @@ head, one row per scenario, phase and non-zero counter;
 - A histogram's p95 and max are bucket bounds over every run's events (`≤17 ms`,
   or `>100 ms` for the overflow bucket), never exact values; its mean is the
   summed time over the event count.
+- A field ending in `_ns` is summed nanoseconds. It is subtracted, compared and
+  pooled as an exact integer, and shown in microseconds with two decimals only
+  for display.
+- Each phase also gets the renderer's pooled render-attempt split: one row for
+  every attempt and one for the attempts that carried a fallback apply. Over
+  the runs that report every field of a class, the matched totals are summed
+  first and then divided into shaping, rasterizing and remaining shares, with
+  means per attempt, so the shares always add up to 100%. A phase in which no
+  side drew an attempt reads as one row, `no render attempts`, and a side
+  without the fields reads `n/a`. The details block lists each run's own split
+  for every phase in which a run drew a fallback apply attempt.
 - The Change column compares a count's medians, or a histogram's means. The
   Baseline column, and the change, read `n/a` when the base does not declare
   `perf-counters` (the set then runs on the head only), and for a field the
