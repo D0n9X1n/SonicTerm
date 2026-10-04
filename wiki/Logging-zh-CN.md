@@ -308,6 +308,9 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `defer_contention` | 次数 | 因锁争用重试下限而推迟的重绘 |
 | `defer_streaming` | 次数 | 因流式输出节奏而推迟的重绘 |
 | `stream_clock_exempt` | 次数 | 硬件路径上针对新输入、未呈现而结算并保留流式时钟的尝试；它们等待的回显不从这些尝试开始计节奏 |
+| `display_link_ticks` | 次数 | 窗口接受的显示链接 tick：tick 的代际是运行中链接的代际，且有待准入的 `Link`；过期 tick 不计入 |
+| `display_link_admissions` | 次数 | 由 tick 准入的按显示链接计节奏的流式帧 |
+| `display_link_fallbacks` | 次数 | 没有 tick 到来、由两个周期的回退上限准入的按显示链接计节奏的流式帧 |
 | `contention_retry_armed` | 次数 | 设置的锁争用重试 |
 | `dirt_ack_dropped` | 次数 | 下一次收集时因窗格未被持有、解析器已变化，或网格在组帧后改变尺寸或切换屏幕而丢弃的已呈现帧回执；组帧后写入的输出不会丢弃回执，只保留它标脏的行。每次丢弃只代价一次之后的重新组装，从不影响像素 |
 | `native_request_redraw` | 次数 | 该窗口的原生重绘请求，覆盖每条请求路径；一次 dispatch 的请求在其结束时计入汇总，因此窗口行晚一次 dispatch 显示它们（`final=1` 行是完整的） |
@@ -319,6 +322,13 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 
 三个 `defer_*` 计数记录胜出的规则。规则按上述顺序检查，前一条成立后不再求值后面的规则，因此每次
 推迟的重绘只计一次（重试下限见[渲染模式](Rendering-Modes-zh-CN#锁争用重试)）。
+
+三个 `display_link_*` 计数始终存在，在不运行链接的地方（Windows、Linux、macOS 14 之前、软件路径）
+为 0。每次按显示链接计节奏的流式准入只计一次，计为 tick 准入或回退，因此 `attempts` 不小于二者之和。
+两者都为 0 的阶段为**未覆盖**；只有准入非零为**链接节奏**；只有回退非零为**仅回退**（该次运行中显示
+链接节奏不可用）；两者都非零为**混合**。`display_link_ticks` 减去 `display_link_admissions` 是未使用
+的 tick：被超时或争用规则拒绝、使用前被替换，或被非流式准入消耗的 tick。这些计数显示每一帧由哪条
+路径授权；它们不证明帧相对于垂直同步落在何处（[渲染模式](Rendering-Modes-zh-CN#按窗口归属的帧调度)）。
 
 每次 `RedrawRequested` 时，`flush_to_redraw` 会取走该窗口所显示的每个窗格的待处理 flush：活动标签页的
 窗格，或被放大的窗格。隐藏窗格的 flush 会一直等到其标签页显示出来。一组合并的 flush 只产生一次观测。

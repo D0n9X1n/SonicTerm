@@ -389,6 +389,9 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 `sonicterm-render-model`、`sonicterm-resource`、`sonicterm-text`、
 `sonicterm-types`、`sonicterm-ui`、`sonicterm-vt`。
 
+**macOS 依赖：** `objc2`、`objc2-foundation`、`objc2-app-kit` 和 `objc2-quartz-core`，已经通过其他
+crate 存在于 lockfile 中，用于每窗口的 `NSView.displayLink` 及其 tick target（`src/app/display_link.rs`）。
+
 **阅读：** `src/app/{mod,window_state,window_registry,session,input_dispatch,effects}.rs`、
 `src/app/{event_loop,window_event,window_keyboard,window_pointer,spawn_pane,reaper_driver,keymap_dispatch,path_target,tear_out}.rs`、
 `src/shell.rs`。

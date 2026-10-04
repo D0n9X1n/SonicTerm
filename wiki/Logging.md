@@ -393,6 +393,9 @@ previous snapshot and takes deltas.
 | `defer_contention` | count | redraws deferred by the lock-contention retry floor |
 | `defer_streaming` | count | redraws deferred by streaming-output pacing |
 | `stream_clock_exempt` | count | hardware attempts for new input that settled without presenting and kept the streaming clock, so the echo they waited for is not paced from them |
+| `display_link_ticks` | count | display-link ticks the window accepted: the tick's generation was the running link's and a `Link` admission was pending; stale ticks are not counted |
+| `display_link_admissions` | count | display-link-paced streaming frames admitted by a tick |
+| `display_link_fallbacks` | count | display-link-paced streaming frames admitted by the two-period fallback ceiling because no tick came |
 | `contention_retry_armed` | count | lock-contention retries armed |
 | `dirt_ack_dropped` | count | presented-frame receipts dropped at the next collection because the pane was not held, its parser changed, or its grid was resized or switched screens after assembly; output written after assembly does not drop a receipt, it only keeps the rows it dirtied. Each drop costs a later re-assembly, never pixels |
 | `native_request_redraw` | count | native redraw requests for the window, on every request path; a dispatch's requests reach the totals when it ends, so a window line shows them one dispatch late (`final=1` lines are complete) |
@@ -406,6 +409,18 @@ The three `defer_*` counts record the rule that won. The rules are checked in
 that order, and a later one is never evaluated once an earlier one holds, so each
 deferred redraw counts once ([Rendering Modes](Rendering-Modes#lock-contention-retry)
 describes the retry floor).
+
+The three `display_link_*` counts are always present and read 0 where no link
+runs (Windows, Linux, macOS before 14, the software path). Each display-link-paced
+streaming admission is counted once, as a tick admission or a fallback, so
+`attempts` is at least their sum. A phase is **unexercised** when both are 0,
+**link-paced** when only admissions are non-zero, **fallback-only** when only
+fallbacks are (display-link pacing was unavailable in that run), and **mixed**
+when both are. `display_link_ticks` minus `display_link_admissions` counts
+unused ticks: ticks refused by a timeout or contention rule, replaced before
+use, or spent by an admission that was not streaming. The counts show which
+path authorized each frame; they do not prove where frames land relative to
+vsync ([Rendering Modes](Rendering-Modes#owner-local-frame-scheduling)).
 
 At each `RedrawRequested`, `flush_to_redraw` takes the pending flush of every
 pane the window shows: the active tab's panes, or the zoomed pane. A hidden

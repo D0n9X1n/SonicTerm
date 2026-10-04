@@ -69,6 +69,9 @@ flowchart TD
 优先选择后端支持的 `Mailbox`，否则使用 `Fifo`。不透明 backdrop 使用
 `CompositeAlphaMode::Opaque`，透明 backdrop 使用
 `CompositeAlphaMode::PreMultiplied`。期望最大帧延迟为 2。
+在 macOS 上，wgpu 的 Metal 后端只提供 `Fifo` 和 `Immediate`，因此 macOS 始终以 `Fifo` 呈现。
+在那里，流式输出被推迟的窗口在显示链接（display link）的 tick 上准入，而不是在上次渲染一个
+周期之后（见按窗口归属的帧调度）。
 
 SonicTerm 绘制到保留式离屏帧纹理。帧键覆盖可见窗格修订号、几何、选区、标签页、
 浮层、悬停、内联媒体、字体/样式状态以及其它影响画面的输入。滚动条有效透明度在每个带身份的
@@ -131,6 +134,24 @@ LCD 生效条件与混合公式见[渲染与字体](Rendering-and-Fonts-zh-CN)�
 原生帧请求在途时，只排除重复的 Frame 期限：通知和滚动条空闲到期期限仍保持启用，到期
 只清理一次，并把重绘合并到已有请求。滚动条到期只在确实改变了滚动条时才请求帧；在期限被收集
 之后出现的活动、悬停或拖动会使它不产生任何效果。
+
+在 macOS 14 及更高版本上，窗口注册时会安装每窗口的 `NSView.displayLink`，创建时处于暂停状态，
+首选速率为窗口的显示器周期，并随每次改变周期的刷新而更新。流式规则胜出的硬件推迟在窗口有链接时
+存储节奏模式 `Link`；其他所有推迟（表面超时、争用下限、降级的软件路径，或没有链接的窗口）存储
+`Timer`，沿用上述规则。存储的模式保持到该帧准入；链接失效会清除存储的 `Link`，但从不清除存储的
+`Timer`。链接只在有待准入的 `Link` 时运行：等待合并在收集期限之后启动它，在没有需要链接节奏的工作
+或窗口不能调度帧时暂停它。每次启动都会递增窗口的链接代际，只有属于运行中代际且有待准入 `Link`
+时才接受 tick；被接受的 tick 授权一帧。原生遮挡和后端遮挡、设备停止、停放、隐藏以及软件降级开启
+都会在写入处使链接节奏失效，递增代际并丢弃未使用的 tick。没有 tick 到来时，Frame 期限是节奏时钟
+之后两个周期的回退上限。输入快速路径、表面超时重试、争用下限、25,000 µs 和 83,333 µs 周期，以及
+更早的 macOS、Windows 和 Linux 都不变：它们不安装链接，按计时器计节奏。
+
+按显示链接计节奏的帧仍可能等待 drawable。准入和同步的 present 调用在同一次 `RedrawRequested`
+处理中执行，因此上一次 present 调用返回之前不会准入新帧；但 present 调用返回并不释放其 drawable。
+wgpu-hal 的 Metal 表面把 `maximumDrawableCount` 设为帧延迟加一（硬件路径上为 3），关闭
+`allowsNextDrawableTimeout`，并忽略获取超时；因此三帧都未完成时，下一次获取会在 `nextDrawable`
+中等待。显示链接节奏不能消除这种等待，计时器路径也有同样的暴露。没有计数器测量它；Instruments 的
+Metal System Trace 可以显示它。
 
 输出事件按窗格服务。VT 工作线程为每个窗格最多保留一个未处理的 `PaneOutput`。事件循环在当前
 持有该窗格的窗口中确认它，运行该窗口的命令维护，只有该窗口活动标签页（或其放大窗格）有未显示的
@@ -296,7 +317,7 @@ CPU/GDI 软件呈现与 wgpu 区分开。
 | --- | --- |
 | 适配器分类与表面策略 | `crates/sonicterm-gpu/src/core.rs` |
 | 配置到降级决策 | `crates/sonicterm-app/src/app/{frame_pacing,event_loop,config_apply}.rs` |
-| 帧节奏 | `crates/sonicterm-app/src/app/{mod,frame_pacing}.rs` |
+| 帧节奏 | `crates/sonicterm-app/src/app/{mod,frame_pacing,redraw,display_link}.rs` |
 | 保留帧与损伤 | `crates/sonicterm-gpu/src/core.rs` |
 | 设备错误隔离 | `crates/sonicterm-gpu/src/{device_errors,core,present}.rs` |
 | 共享设备恢复 | `crates/sonicterm-app/src/app/{gpu_recovery,gpu_recovery_worker}.rs`、`crates/sonicterm-gpu/src/{recovery,recovery_context,rebind}.rs` |

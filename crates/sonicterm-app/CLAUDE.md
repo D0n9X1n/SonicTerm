@@ -91,7 +91,10 @@ cargo build -p sonicterm-app
   identities before locking. Frame completion settles only captured owner generations.
   `last_render` is the attempt clock. On hardware, streaming is paced from `stream_clock`,
   which a settled input attempt that presented nothing does not advance. Timeout, contention,
-  software and every other outcome stay paced by attempts. `request_redraw(&self)` stays native-only.
+  software and every other outcome stay paced by attempts. On macOS hardware, streaming admission
+  is per display-link tick, with a two-period fallback; the pacing mode is fixed per deferral; the
+  link runs only while a `Link` admission is pending; ticks carry a generation, and a frame may
+  still wait in `nextDrawable`. `request_redraw(&self)` stays native-only.
   Structural parking excludes every frame deadline; Output maintains commands but cannot
   unpark. Device-stop reporting runs before this suppression. Native evidence is separate
   from the fake-clock and source-contract tests.
