@@ -831,7 +831,7 @@ fn growth_keeps_positions_and_pixels_and_queues_a_typed_reupload() {
     let identity_before = atlas.identity();
     let mut counting = SyntheticRasterizer::default();
 
-    atlas.grow_to(512);
+    assert!(atlas.grow_to(512), "the next doubling is allowed");
 
     assert_eq!((atlas.width(), atlas.height(), atlas.growths()), (512, 512, 1));
     assert!(atlas.identity() > identity_before, "every UV-bearing cache must rebuild");
@@ -989,7 +989,7 @@ fn growth_after_slot_reuse_covers_only_the_new_tile() {
     assert_eq!(reused.uv[0..2], [0.0, 0.0], "the 10×12 tile reuses the freed 40×40 slot");
     assert_eq!(atlas.sample(20, 20), 200, "precondition: the evicted tile's pixel is still there");
 
-    atlas.grow_to(512);
+    assert!(atlas.grow_to(512), "the next doubling is allowed");
 
     let grown = atlas.get(numbered_key(1)).unwrap();
     assert_eq!(grown.uv, [0.0, 0.0, 10.0 / 512.0, 12.0 / 512.0]);
@@ -1043,4 +1043,47 @@ fn a_large_reupload_is_counted_and_released_by_the_drain() {
     assert_eq!(drained.len(), 5000);
     assert!(atlas.dirty_capacity() <= DIRTY_LIST_RETAINED);
     assert!(atlas.retained_amount().bytes < before, "the reported figure falls after the drain");
+}
+
+/// Everything a growth would change, so a rejected call can be shown to change none of it.
+/// The pixels enter as a length and a byte sum, so a failure prints a short tuple.
+fn growth_snapshot(atlas: &GlyphAtlas) -> (u32, u32, u64, u64, usize, u64, usize) {
+    let pixel_sum = atlas.pixels().iter().map(|byte| u64::from(*byte)).sum();
+    (
+        atlas.width(),
+        atlas.height(),
+        atlas.identity(),
+        atlas.growths(),
+        atlas.pixels().len(),
+        pixel_sum,
+        atlas.dirty_capacity(),
+    )
+}
+
+/// `grow_to` honors the growth policy: a fixed atlas never grows, and a growable one moves only
+/// by one doubling at or below its maximum. Every rejected size leaves the atlas untouched.
+#[test]
+fn grow_to_rejects_sizes_the_growth_policy_forbids_without_mutating() {
+    let mut fixed = GlyphAtlas::new(MIN_ATLAS_DIM, MIN_ATLAS_DIM);
+    let before = growth_snapshot(&fixed);
+    assert!(!fixed.grow_to(MIN_ATLAS_DIM * 2), "a fixed atlas refuses growth");
+    assert_eq!(growth_snapshot(&fixed), before, "a fixed atlas never grows");
+
+    let mut growable = GlyphAtlas::growable(MIN_ATLAS_DIM, 512);
+    growable.get_or_insert(
+        numbered_key(0),
+        &mut ShapedRasterizer { width: 10, height: 12, is_color: false },
+    );
+    // Skipping a doubling, a size that is not a power of two, the current size and a smaller one.
+    for rejected in [MIN_ATLAS_DIM * 4, MIN_ATLAS_DIM + 44, MIN_ATLAS_DIM, MIN_ATLAS_DIM / 2] {
+        let before = growth_snapshot(&growable);
+        assert!(!growable.grow_to(rejected), "{rejected} is refused");
+        assert_eq!(growth_snapshot(&growable), before, "{rejected} is not one doubling");
+    }
+    // The one allowed size is the next doubling; at the maximum nothing further is allowed.
+    assert!(growable.grow_to(MIN_ATLAS_DIM * 2), "the next doubling is allowed");
+    assert_eq!((growable.width(), growable.growths()), (512, 1));
+    let at_max = growth_snapshot(&growable);
+    assert!(!growable.grow_to(1024), "the maximum is never exceeded");
+    assert_eq!(growth_snapshot(&growable), at_max, "a refusal at the maximum changes nothing");
 }

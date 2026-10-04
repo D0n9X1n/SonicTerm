@@ -771,7 +771,7 @@ fn a_growth_reupload_is_typed_and_equals_a_fresh_first_upload() {
     let mut grown = GlyphAtlas::growable(sonicterm_text::glyph_atlas::MIN_ATLAS_DIM, ATLAS_DIM);
     fill(&mut grown);
     let _earlier_sync = staged_writes(&mut grown);
-    grown.grow_to(512);
+    assert!(grown.grow_to(512), "the next doubling is allowed");
     let reupload = staged_writes(&mut grown);
     let mut fresh = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);
     fill(&mut fresh);

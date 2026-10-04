@@ -486,19 +486,31 @@ impl GlyphAtlas {
         (self.width < max).then(|| self.width.saturating_mul(2).min(max))
     }
 
-    /// Enlarge the atlas to `dim × dim` without re-rasterizing anything.
+    /// Enlarge the atlas to `dim × dim` without re-rasterizing anything, when its growth
+    /// policy allows that size; returns whether it grew.
     ///
-    /// Every resident tile keeps its pixel position, so its pixels are copied row by row and
-    /// its normalized UVs are recomputed from its own tile size. The identity advances so
-    /// every UV-bearing cache rebuilds, and the dirty list is replaced by one rect per
-    /// resident tile, typed by that tile's pixel kind, so the recreated GPU texture receives
-    /// each tile exactly once.
+    /// Only the next doubling of a `Growable` atlas is allowed: `dim` must equal twice the
+    /// current size, clamped to the maximum. A `Fixed` atlas, an atlas at its maximum, and
+    /// every other `dim` are refused, and a refused call changes nothing.
     ///
-    /// # Panics
-    ///
-    /// When the atlas is not square or `dim` does not exceed its current size.
-    pub fn grow_to(&mut self, dim: u32) {
-        assert!(self.width == self.height && dim > self.width, "growth enlarges a square atlas");
+    /// On growth, every resident tile keeps its pixel position, so its pixels are copied row
+    /// by row and its normalized UVs are recomputed from its own tile size. The identity
+    /// advances so every UV-bearing cache rebuilds, and the dirty list is replaced by one rect
+    /// per resident tile, typed by that tile's pixel kind, so the recreated GPU texture
+    /// receives each tile exactly once.
+    #[must_use = "a refused growth leaves the atlas at its current size"]
+    pub fn grow_to(&mut self, dim: u32) -> bool {
+        if self.next_growth_dim() != Some(dim) {
+            // When: the policy's next doubling is not `dim`, refuse before touching any state.
+            return false;
+        }
+        self.grow_unchecked(dim);
+        true
+    }
+
+    /// The copy behind [`Self::grow_to`]; `dim` is the policy's next doubling.
+    fn grow_unchecked(&mut self, dim: u32) {
+        debug_assert!(self.width == self.height && dim > self.width, "growth enlarges a square");
         let bpp = BYTES_PER_PIXEL as usize;
         let old_row_bytes = self.width as usize * bpp;
         let new_row_bytes = dim as usize * bpp;
@@ -557,7 +569,7 @@ impl GlyphAtlas {
             // Each pass doubles toward the maximum, so the loop ends after at most three
             // growths from the 256 floor.
             let next_dim = self.next_growth_dim()?;
-            self.grow_to(next_dim);
+            self.grow_unchecked(next_dim);
         }
     }
 

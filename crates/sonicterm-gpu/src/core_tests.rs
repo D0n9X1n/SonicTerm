@@ -5426,7 +5426,7 @@ fn glyph_atlas_facts_read_a_grown_atlas() {
     }
     let key = sonicterm_types::GlyphKey::new('x', false, false);
     let _info = atlas.get_or_insert(key, &mut FactsTile);
-    atlas.grow_to(512);
+    assert!(atlas.grow_to(512), "the next doubling is allowed");
     let facts = GlyphAtlasFacts::of(&atlas);
     assert_eq!((facts.dim, facts.growths, facts.evictions), (512, 1, 0));
     assert_eq!((facts.packed_pixels, facts.max_tile), (30 * 40, [30, 40]));
