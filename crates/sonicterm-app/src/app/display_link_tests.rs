@@ -958,3 +958,39 @@ fn the_assignment_scan_tells_a_write_from_a_comparison() {
     assert!(!assigns("if self.redraw.pacing == Some(mode) {", "pacing"));
     assert!(!assigns("self.link_pacing = None;", "pacing"));
 }
+
+/// An early wake does not end a synchronized-output hold: after a held admission, a cursor repaint
+/// clears `deferred` before admission re-evaluates, yet the stored `Link` stays paused, and a tick
+/// delivered before the next redraw is rejected and not counted.
+#[test]
+fn an_early_wake_keeps_a_held_window_off_the_link() {
+    use crate::app::spawn_pane::{pack_sync_deadline, sync_word_of};
+    for child_owner in [false, true] {
+        let (mut app, owner, log, base) = linked_owner(child_owner);
+        assert!(!admit_output(&mut app, owner, at_ms(base, 1)));
+        about_to_wait(&mut app, owner, at_ms(base, 1));
+        let held = redraw_of(&app, owner).link_live.expect("the link runs");
+        // A window that has presented once is not forced as a first frame.
+        app.windows.get_mut(&owner).unwrap().redraw.last_present = Some(base);
+        {
+            let window = &app.windows[&owner];
+            let pane = &window.panes[&window.tab_states[window.tabs.active_index()].active_pane];
+            let state = sonicterm_vt::vt::SyncState { set: true, epoch: 1, resets: 0 };
+            let deadline = base + Duration::from_secs(10);
+            pane.sync_deadline_word.store(pack_sync_deadline(1, deadline), Ordering::Relaxed);
+            pane.sync_word.store(sync_word_of(state), Ordering::Release);
+        }
+        assert!(!admit_at(&mut app, owner, at_ms(base, 2)), "child={child_owner}: held");
+        app.sync_display_links();
+        assert_eq!(log.borrow().calls, vec![true, false], "child={child_owner}: paused");
+        app.repaint_owner(owner, &[RedrawCause::Cursor]);
+        set_fake_now(at_ms(base, 3));
+        app.sync_display_links();
+        assert_eq!(log.borrow().calls, vec![true, false], "child={child_owner}: still paused");
+        deliver(&mut app, owner, held);
+        let generation = current_generation(&app, owner);
+        deliver(&mut app, owner, generation);
+        assert_eq!(redraw_of(&app, owner).link_permit, None, "child={child_owner}");
+        assert_eq!(link_counts(&app, owner).0, 0, "child={child_owner}: no tick counted");
+    }
+}

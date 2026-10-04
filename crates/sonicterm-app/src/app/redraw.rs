@@ -197,8 +197,12 @@ impl WindowRedrawState {
     }
 
     /// Whether a synchronized-output hold keeps this window's frame back; the link does not run.
+    ///
+    /// The winning `Sync` rule alone decides, not `deferred`: an early wake that clears `deferred`
+    /// before admission re-evaluates must not restart a stored `Link`. Only admission, which
+    /// rewrites `deferred_rule`, or settlement, which clears it, ends the hold.
     pub(super) fn sync_hold(&self) -> bool {
-        self.deferred && self.deferred_rule == Some(super::frame_counters::DeferRule::Sync)
+        self.deferred_rule == Some(super::frame_counters::DeferRule::Sync)
     }
 
     /// Whether an input generation has not yet spent its immediate-attempt privilege.
