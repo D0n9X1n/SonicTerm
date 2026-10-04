@@ -518,12 +518,28 @@ fn production_roles_share_the_visible_collector_and_guarded_pane_builder() {
     assert!(child.contains("self.child_visible_frame_sources(win_id, outer)"));
     for source in [main, child] {
         assert!(source.contains("sources.try_collect(|| self.snapshot_window_redraw(win_id))"));
-        assert!(source.contains("sources.reconcile_viewports("));
-        assert!(source.contains("super::visible_frame::pane_renders("));
+        // Each adapter reconciles and applies receipts through the one helper, and lends its guards
+        // through `HeldFrameSource`, whose `lend` alone builds the pane renders.
+        assert!(source.contains("sources.reconcile_and_apply_receipts("));
+        assert!(!source.contains("reconcile_viewports("));
+        assert!(source.contains("HeldFrameSource {"));
+        assert!(!source.contains("pane_renders("));
         assert!(!source.contains("std::mem::transmute"));
         assert!(!source.contains("inline_images_by_pane"));
         assert!(!source.contains("active pane guard collected above"));
     }
+    let collector = include_str!("visible_frame.rs").replace("\r\n", "\n");
+    let production = collector.split("#[path = \"visible_frame_tests.rs\"]").next().unwrap();
+    assert_eq!(
+        production.matches("self.reconcile_viewports(").count(),
+        1,
+        "only the helper reconciles"
+    );
+    let lend =
+        production.split_once("    fn lend<R>(").unwrap().1.split_once("\n    }\n").unwrap().0;
+    assert!(lend.contains("pane_renders("));
+    assert_eq!(production.matches("fn pane_renders<").count(), 1, "defined once");
+    assert_eq!(production.matches("pane_renders(").count(), 1, "called only by lend");
 }
 
 /// Main's geometry-only scrollbar update, fade tick, and redraw request survive visible lock contention.
@@ -629,7 +645,7 @@ fn warning_reset_is_after_reconciliation_in_both_production_roles() {
         ),
     ] {
         let source = compact(source);
-        let reconcile = source.find("sources.reconcile_viewports(").unwrap();
+        let reconcile = source.find("sources.reconcile_and_apply_receipts(").unwrap();
         let complete =
             source[reconcile..].find(".coherent_frame_collected();").unwrap() + reconcile;
         let error = source[reconcile..complete].find("self.visible_frame_unavailable(").unwrap()
@@ -644,4 +660,412 @@ fn warning_reset_is_after_reconciliation_in_both_production_roles() {
     let collector = include_str!("visible_frame.rs");
     assert!(collector.contains("Closing or reaped window/tab: silent skip."));
     assert!(!collector.contains("or no renderer geometry yet"));
+}
+
+/// Present a frame of `window`'s visible panes as the adapters do: collect, read one receipt per held
+/// pane with `rows`, release the guards, and store the bound receipts as the pending set.
+fn present_receipts(
+    app: &mut App,
+    window: WindowId,
+    child: bool,
+    rows: sonicterm_render_model::AckRows,
+) {
+    let sources = sources(app, window, child).ok().unwrap();
+    let held = sources.try_collect(|| {}).ok().unwrap();
+    let receipts = held
+        .guards
+        .iter()
+        .enumerate()
+        .map(|(index, (id, parser, _))| AckReceipt::of(index, *id, parser.grid(), rows.clone()))
+        .collect();
+    drop(held);
+    let tickets = sources.bind(receipts);
+    app.windows.get_mut(&window).unwrap().pending_receipts = tickets;
+}
+
+/// The window's next collection through the production helper: reconcile, then apply its receipts.
+fn collect_next(app: &mut App, window: WindowId, child: bool) -> Result<(), FrameUnavailable> {
+    let sources = sources(app, window, child)?;
+    let mut held = sources.try_collect(|| {})?;
+    let state = app.windows.get_mut(&window).unwrap();
+    sources.reconcile_and_apply_receipts(state, &mut held.guards).map(|_| ())
+}
+
+/// The dirty rows of `pane` in `window`.
+fn dirty(app: &App, window: WindowId, pane: u64) -> Vec<usize> {
+    app.windows[&window].panes[&pane].parser.lock().grid().dirty_rows().collect()
+}
+
+/// Every row of `pane`'s grid, as `dirty` reports a fully dirty pane.
+fn all_rows(app: &App, window: WindowId, pane: u64) -> Vec<usize> {
+    (0..usize::from(app.windows[&window].panes[&pane].parser.lock().grid().rows)).collect()
+}
+
+/// The window's `dirt_ack_dropped` count.
+fn dropped(app: &App, window: WindowId) -> u64 {
+    app.windows[&window]
+        .redraw
+        .frame_counters
+        .as_ref()
+        .map_or(0, |counters| counters.dirt_ack_dropped)
+}
+
+/// Turn on the window's frame counters and mark every visible pane dirty.
+fn counted_and_dirty(app: &mut App, window: WindowId, panes: &[u64]) {
+    let state = app.windows.get_mut(&window).unwrap();
+    state.redraw.frame_counters = Some(Box::default());
+    for pane in panes {
+        state.panes[pane].parser.lock().grid_mut().mark_all_dirty();
+    }
+}
+
+/// A ticket for the pane held under `id` by `parser`, read from its grid as it is now.
+fn ticket_for(id: u64, parser: &Arc<Mutex<Parser>>) -> AckTicket {
+    let receipt = AckReceipt::of(0, id, parser.lock().grid(), sonicterm_render_model::AckRows::All);
+    AckTicket { receipt, parser: Arc::downgrade(parser) }
+}
+
+/// One ticket case: its label, the change made after the receipt, whether the ticket then applies,
+/// and the dirty rows left (`None` keeps them all).
+type TicketChange = (&'static str, fn(&mut Parser), bool, Option<usize>);
+
+/// The ticket rule on bare grids: a ticket applies only through the guard of its own pane and parser,
+/// and only while size generation and screen epoch match. It clears the rows the frame drew and keeps
+/// every row dirtied after assembly: a parse keeps the row it wrote, `mark_all_dirty` keeps every row.
+/// A resize or a screen switch renumbers the rows, so it does not apply; nor does a pane that is not
+/// held (switched away or removed while the VT worker still holds the parser) or an id now naming a
+/// new parser.
+#[test]
+fn a_ticket_clears_only_its_own_unchanged_held_grid() {
+    let parser = || Arc::new(Mutex::new(Parser::new(Grid::new(8, 3))));
+    let rect = Rect::new(0.0, 0.0, 80.0, 60.0);
+    // Each change, whether the ticket then applies, and the dirty rows left: `None` keeps them all.
+    let changes: [TicketChange; 5] = [
+        ("a parse", |parser| drop(parser.advance(b"x")), true, Some(1)),
+        ("mark_all_dirty", |parser| parser.grid_mut().mark_all_dirty(), true, Some(3)),
+        ("a resize", |parser| parser.grid_mut().resize(10, 3), false, None),
+        ("a screen switch", |parser| parser.grid_mut().enter_alt_screen(), false, None),
+        ("nothing", |_| {}, true, Some(0)),
+    ];
+    for (label, change, applies, left) in changes {
+        let shared = parser();
+        let ticket = ticket_for(7, &shared);
+        change(&mut shared.lock());
+        let before = shared.lock().grid().dirty_count();
+        let mut guards = vec![(7, shared.lock(), rect)];
+        let applied = apply_ticket(&ticket, &mut guards);
+        drop(guards);
+        assert_eq!(applied, applies, "{label}");
+        let after = shared.lock().grid().dirty_count();
+        assert_eq!(after, left.unwrap_or(before), "{label} keeps the dirt written after the frame");
+    }
+
+    let held_elsewhere = parser();
+    let worker = Arc::clone(&held_elsewhere);
+    let ticket = ticket_for(7, &held_elsewhere);
+    let other = parser();
+    let mut not_held = vec![(8, other.lock(), rect)];
+    assert!(!apply_ticket(&ticket, &mut not_held), "a pane the collection does not hold");
+    drop(not_held);
+    let reused = parser();
+    let mut new_parser = vec![(7, reused.lock(), rect)];
+    assert!(!apply_ticket(&ticket, &mut new_parser), "an id now naming a new parser");
+    drop(new_parser);
+    assert!(worker.lock().grid().dirty_count() > 0, "the removed pane keeps its dirt");
+}
+
+/// Frame N's receipts are applied at N+1's collection, under its guards, after reconciliation: an
+/// unchanged grid is cleared and the set emptied; a print after present keeps the row it wrote and
+/// clears the rest, with no drop; a contended collection keeps the set for the next successful one; and a
+/// structural failure returns before any receipt is touched. Both roles.
+#[test]
+fn receipts_from_one_frame_are_applied_at_the_next_collection() {
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        counted_and_dirty(&mut app, window, &[left, right]);
+        present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+        collect_next(&mut app, window, child).unwrap();
+        assert!(dirty(&app, window, left).is_empty() && dirty(&app, window, right).is_empty());
+        assert!(app.windows[&window].pending_receipts.is_empty());
+        assert_eq!(dropped(&app, window), 0);
+
+        counted_and_dirty(&mut app, window, &[left, right]);
+        present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+        app.windows[&window].panes[&right].parser.lock().advance(b"new");
+        collect_next(&mut app, window, child).unwrap();
+        assert!(dirty(&app, window, left).is_empty());
+        assert!(!dirty(&app, window, right).is_empty(), "dirt written after present is kept");
+        assert!(
+            dirty(&app, window, right).len() < all_rows(&app, window, right).len(),
+            "rows the frame drew and the print left alone are cleared"
+        );
+        assert_eq!(dropped(&app, window), 0, "the receipt still applies");
+
+        counted_and_dirty(&mut app, window, &[left, right]);
+        present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+        let busy = Arc::clone(&app.windows[&window].panes[&left].parser);
+        let guard = busy.lock();
+        assert!(matches!(
+            collect_next(&mut app, window, child),
+            Err(FrameUnavailable::Contended { .. })
+        ));
+        assert_eq!(
+            app.windows[&window].pending_receipts.len(),
+            2,
+            "a contended collection keeps the set"
+        );
+        drop(guard);
+        collect_next(&mut app, window, child).unwrap();
+        assert!(app.windows[&window].pending_receipts.is_empty());
+        assert!(dirty(&app, window, left).is_empty() && dirty(&app, window, right).is_empty());
+
+        counted_and_dirty(&mut app, window, &[left, right]);
+        present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+        let swapped = sources(&mut app, window, child).ok().unwrap();
+        let mut held = swapped.try_collect(|| {}).ok().unwrap();
+        held.guards.swap(0, 1);
+        let state = app.windows.get_mut(&window).unwrap();
+        let why = swapped.reconcile_and_apply_receipts(state, &mut held.guards).err().unwrap();
+        assert_eq!(why, FrameUnavailable::StructuralInvalid(LayoutInvalid::VisibleDisagrees));
+        assert_eq!(state.pending_receipts.len(), 2, "a structural failure touches no receipt");
+        drop(held);
+        drop(swapped);
+        assert_eq!(dirty(&app, window, left), all_rows(&app, window, left));
+        collect_next(&mut app, window, child).unwrap();
+        assert!(dirty(&app, window, left).is_empty() && dirty(&app, window, right).is_empty());
+    }
+}
+
+/// A pane switched away before the next collection is not held, so its receipt is dropped and its
+/// dirt kept; once it is visible again the next presented frame's receipt clears it. Removing a pane
+/// drops its tickets from the pending set.
+#[test]
+fn a_switched_away_pane_keeps_its_dirt_until_it_is_drawn_again() {
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        counted_and_dirty(&mut app, window, &[left, right]);
+        present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+        app.windows.get_mut(&window).unwrap().tabs.activate(1);
+        collect_next(&mut app, window, child).unwrap();
+        assert_eq!(dirty(&app, window, left), all_rows(&app, window, left));
+        assert_eq!(dirty(&app, window, right), all_rows(&app, window, right));
+        assert_eq!(dropped(&app, window), 2);
+        app.windows.get_mut(&window).unwrap().tabs.activate(0);
+        present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+        collect_next(&mut app, window, child).unwrap();
+        assert!(dirty(&app, window, left).is_empty() && dirty(&app, window, right).is_empty());
+
+        present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+        let state = app.windows.get_mut(&window).unwrap();
+        let removed = state.remove_pane(right);
+        assert!(removed.is_some());
+        assert!(state.pending_receipts.iter().all(|ticket| ticket.receipt.pane_id != right));
+        assert_eq!(state.pending_receipts.len(), 1);
+    }
+}
+
+/// A subset receipt applied at the next collection clears only its rows; after a later mark the same
+/// receipt still applies but keeps every row that mark dirtied, so nothing is dropped.
+#[test]
+fn a_subset_receipt_clears_only_its_rows_at_the_next_collection() {
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        counted_and_dirty(&mut app, window, &[left, right]);
+        let rows = sonicterm_render_model::AckRows::Rows([1].into_iter().collect());
+        present_receipts(&mut app, window, child, rows.clone());
+        collect_next(&mut app, window, child).unwrap();
+        assert_eq!(dirty(&app, window, right), [0, 2]);
+
+        counted_and_dirty(&mut app, window, &[left, right]);
+        present_receipts(&mut app, window, child, rows);
+        app.windows[&window].panes[&right].parser.lock().grid_mut().mark_all_dirty();
+        collect_next(&mut app, window, child).unwrap();
+        assert_eq!(dirty(&app, window, right), [0, 1, 2], "a later mark keeps every row");
+        assert_eq!(dropped(&app, window), 0);
+    }
+}
+
+/// The App's source releases every parser guard when `lend` returns: inside the closure no visible
+/// parser can be locked, and after it each one can.
+#[test]
+fn the_held_source_releases_its_guards_when_lend_returns() {
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        let sources = sources(&mut app, window, child).ok().unwrap();
+        let held = sources.try_collect(|| {}).ok().unwrap();
+        let state = app.windows.get_mut(&window).unwrap();
+        let viewports = sources.reconcile_viewports(&mut state.panes, &held.guards).unwrap();
+        let parsers: Vec<_> =
+            [left, right].iter().map(|id| Arc::clone(&state.panes[id].parser)).collect();
+        let (broadcast, alpha) = (BTreeSet::new(), HashMap::new());
+        let source = HeldFrameSource {
+            guards: held.guards,
+            images: held.images,
+            viewports: &viewports,
+            active: sources.active_id(),
+            broadcast: &broadcast,
+            scrollbar_alpha: &alpha,
+        };
+        let lent = source.lend(|panes| {
+            assert!(parsers.iter().all(|parser| parser.try_lock().is_none()), "held while lent");
+            panes.len()
+        });
+        assert_eq!(lent, 2);
+        assert!(parsers.iter().all(|parser| parser.try_lock().is_some()), "released after lend");
+    }
+}
+
+/// Both adapters collect, reconcile and apply receipts through the one helper, then move their guards
+/// into the frame source; nothing reads a guard or re-locks a parser after the call, receipts are
+/// stored only after it, and the reconciliation-error cleanup still releases everything.
+#[test]
+fn both_adapters_release_their_guards_through_the_one_call() {
+    for (name, source, ok_arm) in [
+        ("main", include_str!("window_event.rs"), "Some(Ok(viewports)) =>"),
+        ("child", include_str!("child_window_redraw.rs"), "Ok(viewports) =>"),
+    ] {
+        let source = source.replace("\r\n", "\n");
+        assert!(!source.contains("panes_slice"), "{name} keeps a borrowed pane slice");
+        let collect = source.find("sources.try_collect(").unwrap();
+        let reconcile = source.find("sources.reconcile_and_apply_receipts(").unwrap();
+        let call = source.find("r.render_releasing(").unwrap();
+        let store = source.find("sources.store_presented(").unwrap();
+        assert!(collect < reconcile && reconcile < call && call < store, "{name} order");
+        // The match's error arm ends at its first `return;`; past it only the successful path remains.
+        let unavailable =
+            source[reconcile..].find("self.visible_frame_unavailable(").unwrap() + reconcile;
+        let error_end = source[unavailable..].find("return;").unwrap() + unavailable;
+        let arms = &source[reconcile..error_end];
+        assert!(arms.contains(ok_arm), "{name} binds the reconciled viewports");
+        let cleanup = arms.find("drop(guards);").expect("error arm drops guards");
+        assert!(
+            arms[cleanup..].contains("drop(images);") && arms[cleanup..].contains("drop(sources);")
+        );
+        assert!(
+            !source[error_end..call].contains("drop(guards)"),
+            "{name} drops guards before the call"
+        );
+        let source_literal = &source[call..];
+        assert!(source_literal.contains("HeldFrameSource {") && source_literal.contains("guards,"));
+        let after = &source[call..];
+        assert!(!after.contains("guards["), "{name} reads a guard after the call");
+        assert!(!after.contains("try_lock"), "{name} re-locks a parser after the call");
+    }
+    let collector = include_str!("visible_frame.rs").replace("\r\n", "\n");
+    let helper = collector.split_once("pub(super) fn reconcile_and_apply_receipts(").unwrap().1;
+    let helper = helper.split_once("\n    }\n").unwrap().0;
+    let reconciled = helper.find("self.reconcile_viewports(").unwrap();
+    assert!(reconciled < helper.find("apply_ticket(").unwrap());
+    assert!(helper[..helper.find("apply_ticket(").unwrap()].contains("?;"));
+    // No production file renders through the compatibility wrapper.
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut pending = vec![src];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs")
+                && !path.to_string_lossy().ends_with("_tests.rs")
+            {
+                let text = std::fs::read_to_string(&path).unwrap();
+                assert!(
+                    !text.contains("render_with_outcome("),
+                    "{} uses the wrapper",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// A frame that did not present returns no receipts, and storing them leaves the window's pending
+/// set exactly as it was; a presented frame's receipts replace the set.
+#[test]
+fn a_frame_that_did_not_present_leaves_the_pending_set_unchanged() {
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        counted_and_dirty(&mut app, window, &[left, right]);
+        present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+        let sources = sources(&mut app, window, child).ok().unwrap();
+        let state = app.windows.get_mut(&window).unwrap();
+        let receipts = |state: &WindowState| -> Vec<AckReceipt> {
+            state.pending_receipts.iter().map(|ticket| ticket.receipt.clone()).collect()
+        };
+        let before = receipts(state);
+        assert_eq!(before.len(), 2);
+        sources.store_presented(&mut state.pending_receipts, Vec::new());
+        assert_eq!(receipts(state), before, "no receipts leave the set unchanged");
+        sources.store_presented(&mut state.pending_receipts, vec![before[0].clone()]);
+        assert_eq!(receipts(state), [before[0].clone()], "a presented frame replaces the set");
+    }
+}
+
+/// Suppress or restore `window` the way production does: hide or show it, park or unpark its
+/// redraw, or record or clear a stopped device generation.
+fn suppress(app: &mut App, window: WindowId, child: bool, mode: &str, suppressed: bool) {
+    match (mode, child) {
+        ("hide", false) if suppressed => app.hide_main_window(),
+        ("hide", false) => app.show_main_window(),
+        ("hide", true) => app.windows.get_mut(&window).unwrap().hidden = suppressed,
+        ("park", _) => app.windows.get_mut(&window).unwrap().redraw.parked = suppressed,
+        _ => {
+            app.windows.get_mut(&window).unwrap().redraw.stopped_generation =
+                suppressed.then_some(1)
+        }
+    }
+}
+
+/// Hidden, parked and stopped windows make no frame attempt, so a presented frame's receipts and
+/// every pane's dirt wait. On show, unpark or recovery the next successful collection applies the
+/// set: matching receipts clear their dirt, and after recovery marks every pane dirty they are
+/// dropped with the dirt kept. Closing the window drops the set with its state.
+#[test]
+fn a_suppressed_window_keeps_its_pending_set_until_its_next_collection() {
+    for child in [false, true] {
+        for mode in ["hide", "park", "stop"] {
+            let (mut app, window, left, right, _) = fixture(child, false);
+            counted_and_dirty(&mut app, window, &[left, right]);
+            present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+            // Pacing would allow a frame now, so only the suppression can refuse it.
+            let paced = |app: &mut App| {
+                app.windows.get_mut(&window).unwrap().last_render =
+                    Instant::now() - Duration::from_secs(1);
+            };
+            suppress(&mut app, window, child, mode, true);
+            paced(&mut app);
+            assert!(!app.begin_window_redraw(window, Instant::now()), "{mode}: no frame attempt");
+            assert_eq!(app.windows[&window].pending_receipts.len(), 2, "{mode} keeps the set");
+            assert_eq!(
+                dirty(&app, window, left),
+                all_rows(&app, window, left),
+                "{mode} keeps dirt"
+            );
+            suppress(&mut app, window, child, mode, false);
+            paced(&mut app);
+            assert!(
+                app.begin_window_redraw(window, Instant::now()),
+                "{mode}: restored, it attempts"
+            );
+            if mode == "stop" {
+                // Recovery marks every pane dirty, as production does after a device rebuild.
+                crate::app::pane_refresh::mark_all_panes_dirty(&app.windows[&window].panes);
+            }
+            collect_next(&mut app, window, child).unwrap();
+            assert!(app.windows[&window].pending_receipts.is_empty(), "{mode}: the set is applied");
+            if mode == "stop" {
+                assert_eq!(dirty(&app, window, left), all_rows(&app, window, left));
+                assert_eq!(dropped(&app, window), 0, "receipts apply and keep the recovery's dirt");
+            } else {
+                assert!(
+                    dirty(&app, window, left).is_empty() && dirty(&app, window, right).is_empty()
+                );
+            }
+            present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+            let parser = Arc::clone(&app.windows[&window].panes[&left].parser);
+            let tickets_and_others = Arc::weak_count(&parser);
+            drop(app.windows.remove(&window));
+            assert!(Arc::weak_count(&parser) < tickets_and_others, "closing drops the tickets");
+        }
+    }
 }

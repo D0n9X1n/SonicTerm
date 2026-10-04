@@ -91,16 +91,142 @@ pub use present::{PresentOutcome, SkipReason, SurfaceRetryReason, SuspendedConte
 pub use rebind::PreparedRebind;
 pub use recovery_context::{CandidateSurface, ContextRequest, RecoveredContext, RequestFailure};
 
-// Presentation completes while parser guards still hold; exact identity also rejects separately replayed stale metadata.
-fn acknowledge_presented_plan(
+/// The metadata receipts a presented `plan` issues: one per pane the plan acknowledges, read from the
+/// grids it was assembled from. They carry no grid borrow, so they outlive the frame's source.
+fn presented_receipts(
     plan: &FramePlan,
+    panes: &[sonicterm_render_model::PaneRender<'_>],
+) -> Vec<sonicterm_render_model::AckReceipt> {
+    panes
+        .iter()
+        .enumerate()
+        .filter(|(index, pane)| plan.acknowledges(*index, pane.id, pane.grid.revision()))
+        .map(|(index, pane)| {
+            sonicterm_render_model::AckReceipt::of(
+                index,
+                pane.id,
+                pane.grid,
+                sonicterm_render_model::AckRows::All,
+            )
+        })
+        .collect()
+}
+
+/// Apply `receipts` to the panes a caller still borrows: each clears its rows only when the pane at
+/// its index has its id and every grid identity still matches. Returns how many receipts cleared.
+pub fn acknowledge_receipts(
+    receipts: &[sonicterm_render_model::AckReceipt],
     panes: &mut [sonicterm_render_model::PaneRender<'_>],
-) {
-    for (index, pane) in panes.iter_mut().enumerate() {
-        if plan.acknowledges(index, pane.id, pane.grid.revision()) {
-            pane.grid.clear_dirty();
-        }
+) -> usize {
+    receipts
+        .iter()
+        .filter(|receipt| {
+            panes
+                .get_mut(receipt.index)
+                .filter(|pane| pane.id == receipt.pane_id)
+                .is_some_and(|pane| receipt.try_apply(pane.grid))
+        })
+        .count()
+}
+
+/// Settle one releasing frame for a caller that still borrows its grids: apply the receipts only
+/// when the frame was presented, and return its outcome. Every other outcome keeps the dirty rows.
+pub fn settle_borrowed_frame(
+    frame: FrameOutcome,
+    panes: &mut [sonicterm_render_model::PaneRender<'_>],
+) -> PresentOutcome {
+    let FrameOutcome { outcome, receipts } = frame;
+    if matches!(outcome, PresentOutcome::Presented) {
+        // Presented: nothing could change the borrowed grids since assembly, so apply the receipts.
+        acknowledge_receipts(&receipts, panes);
     }
+    outcome
+}
+
+/// What `render_releasing` reports: how the frame ended, and when it presented, one metadata receipt
+/// per pane its plan acknowledges. Receipts are non-empty only for `Presented`.
+#[derive(Debug)]
+#[must_use = "a presented frame's receipts must be applied, or its dirt is drawn again"]
+pub struct FrameOutcome {
+    /// How the frame ended.
+    pub outcome: PresentOutcome,
+    /// What a presented frame drew of each acknowledged pane.
+    pub receipts: Vec<sonicterm_render_model::AckReceipt>,
+}
+
+impl FrameOutcome {
+    fn without_receipts(outcome: PresentOutcome) -> Self {
+        FrameOutcome { outcome, receipts: Vec::new() }
+    }
+}
+
+/// Lend `source` once and decide the exits that need no renderer, in their existing order: an empty
+/// source is `NoPanes`, then a device that no longer accepts work is `Unavailable`; only otherwise does
+/// `assemble` run. The source is dropped before this returns.
+fn lend_and_assemble(
+    source: impl sonicterm_render_model::FrameSource,
+    accepts_gpu_work: bool,
+    assemble: impl for<'slice, 'grid> FnOnce(
+        &'slice mut [sonicterm_render_model::PaneRender<'grid>],
+    ) -> Result<Assembled>,
+) -> Result<Assembled> {
+    source.lend(|panes| {
+        if panes.is_empty() {
+            // When: `panes` is empty, no grid is available to draw, so skip the frame.
+            return Ok(Assembled::NoPanes);
+        }
+        if !accepts_gpu_work {
+            // When: `accepts_gpu_work` is false, frames are skipped and their dirty state kept.
+            return Ok(Assembled::Unavailable);
+        }
+        assemble(panes)
+    })
+}
+
+/// The outcome of an exit that needs no renderer: an empty source is skipped with no receipts. Any
+/// other assembly is handed back for presentation.
+fn settle_without_renderer(assembled: Assembled) -> std::result::Result<FrameOutcome, Assembled> {
+    match assembled {
+        Assembled::NoPanes => {
+            Ok(FrameOutcome::without_receipts(PresentOutcome::Skipped(SkipReason::NoPanes)))
+        }
+        other => Err(other),
+    }
+}
+
+/// What assembling a frame decided, owning everything presentation needs and borrowing no grid, so
+/// the frame's source is released before any of it is presented. The typed exits come first, in the
+/// order assembly checks them.
+enum Assembled {
+    /// The source lent no pane.
+    NoPanes,
+    /// The device stopped accepting work.
+    Unavailable,
+    /// The frame key is unchanged; `focus_flash` asks for the next flash frame.
+    Unchanged { focus_flash: bool },
+    /// Nothing drawable changed; remember the key.
+    Noop(Box<FrameKey>),
+    /// The glyph atlas changed during assembly, so its UVs are stale.
+    AtlasRetry { stamp: GlyphContentStamp, evictions: u64 },
+    /// Drawable batches and their plan.
+    Layers(Box<AssembledLayers>),
+}
+
+/// An assembled frame's owned batches, geometry, plan and receipts.
+struct AssembledLayers {
+    surface_width: f32,
+    surface_height: f32,
+    subpixel_aa: SubpixelAaMode,
+    quads: Vec<QuadInstance>,
+    images: Vec<ImageInstance>,
+    glyphs: Vec<GlyphInstance>,
+    overlay_quads: Vec<QuadInstance>,
+    overlay_glyphs: Vec<GlyphInstance>,
+    field_candidates: PresentedFields,
+    missing_chars: Vec<char>,
+    gpu_timing: present::FrameTiming,
+    plan: FramePlan,
+    receipts: Vec<sonicterm_render_model::AckReceipt>,
 }
 
 fn pane_focus_flash_sample(elapsed: Duration) -> Option<(u8, f32)> {
@@ -1741,8 +1867,10 @@ pub struct GpuRenderer {
     /// Test fault: every later frame records an invalid clear of this buffer.
     fault_frame_probe: Option<wgpu::Buffer>,
     /// Test seam: return one backend occlusion after the normal frame device gate.
-    #[cfg(target_os = "macos")]
     fault_surface_occluded: bool,
+    /// Test seam: replace the glyph atlas identity during the next assembly, as an atlas reset
+    /// mid-frame would, so that frame takes the atlas retry.
+    fault_atlas_change_during_assembly: bool,
     /// Test seam: stop the device just before the next cached Windows CPU reblit.
     #[cfg(target_os = "windows")]
     fault_stop_before_cached_present: bool,
@@ -1781,6 +1909,9 @@ pub struct GpuRenderer {
     /// scrolled off and back, and re-decode it each time, so the count gates
     /// demotion behind a sustained absence.
     frames_without_inline_media: u32,
+    /// Set when assembly resized the CPU image atlas: the GPU mirror is rebuilt after the frame's
+    /// source is released, so no device resource is created while parser guards are held.
+    image_upload_rebuild_pending: bool,
     /// When the window last assembled a frame without renderable inline media after one with it, or
     /// `None` while media is visible. The interval release counts [`IMAGE_ATLAS_IDLE_INTERVAL`] from it.
     inline_media_absent_since: Option<Instant>,
@@ -1910,6 +2041,8 @@ pub struct GpuRenderer {
     successful_frame_count: u64,
     /// This renderer's statistics when it counts; set once by its App, before any frame.
     frame_sink: Option<crate::frame_stats::FrameStatsSink>,
+    /// Test hook run at the start of each presentation; returning true stops the device there.
+    present_hook: Option<Box<dyn FnMut() -> bool + Send>>,
     #[cfg(target_os = "windows")]
     software_frame: Option<crate::software_frame::SoftwareFrame>,
     /// Window label used in renderer-internal timing logs.
@@ -2745,7 +2878,6 @@ impl GpuRenderer {
             device_stop_reported: false,
             fault_invalid_glyph_upload: false,
             fault_frame_probe: None,
-            #[cfg(target_os = "macos")]
             fault_surface_occluded: false,
             #[cfg(target_os = "windows")]
             fault_stop_before_cached_present: false,
@@ -2762,10 +2894,12 @@ impl GpuRenderer {
             glyph_atlas,
             glyph_upload,
             glyph_atlas_generation: 0,
+            fault_atlas_change_during_assembly: false,
             image_atlas,
             image_upload,
             retained_inline_media_bytes: 0,
             frames_without_inline_media: 0,
+            image_upload_rebuild_pending: false,
             inline_media_absent_since: None,
             glyph_atlas_retry_without_eviction: false,
             font_family: font_family.to_string(),
@@ -2818,6 +2952,7 @@ impl GpuRenderer {
             skipped_frames: 0,
             successful_frame_count: 0,
             frame_sink: None,
+            present_hook: None,
             #[cfg(target_os = "windows")]
             software_frame: None,
             render_timing_label: role,
@@ -3648,6 +3783,20 @@ impl GpuRenderer {
         (self.cell_w, self.cell_h)
     }
 
+    /// Test hook: change the glyph atlas identity during the next assembly, so that frame returns
+    /// `AtlasRetry` and presents nothing.
+    #[doc(hidden)]
+    pub fn __change_glyph_atlas_during_next_assembly(&mut self) {
+        self.fault_atlas_change_during_assembly = true;
+    }
+
+    /// Test hook: run `hook` at the start of every presentation, after the frame's source was
+    /// released; when it returns true the device is stopped there, as a loss during present would.
+    #[doc(hidden)]
+    pub fn __set_present_hook(&mut self, hook: Option<Box<dyn FnMut() -> bool + Send>>) {
+        self.present_hook = hook;
+    }
+
     /// Collect frame statistics from now on. The App calls this once, before the renderer draws.
     pub fn set_frame_counting(&mut self, counting: bool) {
         self.frame_sink = counting.then(crate::frame_stats::FrameStatsSink::default);
@@ -3708,8 +3857,9 @@ impl GpuRenderer {
         self.last_frame_key = None;
     }
 
-    /// Force one typed backend-occlusion result on the next real frame without switching macOS Spaces.
-    #[cfg(target_os = "macos")]
+    /// Force one typed backend-occlusion result on the next real wgpu frame, at the acquire step,
+    /// without switching macOS Spaces or covering a window. The Windows software presenter has no
+    /// surface acquire, so on that presenter the armed fault waits for a wgpu frame.
     #[doc(hidden)]
     pub fn __occlude_next_surface_acquire(&mut self) {
         self.fault_surface_occluded = true;
@@ -4704,9 +4854,12 @@ impl GpuRenderer {
     /// Render one frame, taking the same arguments as [`Self::render`],
     /// and report what happened to it as a [`PresentOutcome`].
     ///
-    /// Only [`PresentOutcome::Presented`] means a presenter showed the frame and
-    /// acknowledged its plan. A skip, a cached reblit, an atlas or surface
-    /// retry, a stopped device, and a failure all keep the plan's dirty rows.
+    /// A compatibility wrapper over [`Self::render_releasing`] with a [`BorrowedSource`]: the caller
+    /// keeps its grids, so on [`PresentOutcome::Presented`] the frame's receipts are applied to them
+    /// here. A skip, a cached reblit, an atlas or surface retry, a stopped device, and a failure all
+    /// keep the dirty rows. It opens no counter scope of its own; `render_releasing` opens one.
+    ///
+    /// [`BorrowedSource`]: sonicterm_render_model::BorrowedSource
     #[allow(clippy::too_many_arguments)]
     pub fn render_with_outcome(
         &mut self,
@@ -4726,10 +4879,9 @@ impl GpuRenderer {
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> PresentOutcome {
-        let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
-        self.debug_assert_prepared(fonts);
-        self.render_frame(
-            panes,
+        let frame = self.render_releasing(
+            fonts,
+            sonicterm_render_model::BorrowedSource(&mut *panes),
             theme,
             cursor_visible,
             selection,
@@ -4743,16 +4895,137 @@ impl GpuRenderer {
             notification,
             hovered_url_cells,
             link_preview,
-        )
-        .unwrap_or_else(PresentOutcome::Failed)
+        );
+        settle_borrowed_frame(frame, panes)
     }
 
     // Same borrow shape as `render`, whose rationale covers this suppression too.
-    /// Assemble one frame and hand it to its presenter. Fallible steps use `?`;
-    /// `render_with_outcome` turns an error into `PresentOutcome::Failed`.
+    /// Render one frame from `source` and report how it ended, with a metadata receipt per pane a
+    /// presented frame acknowledges.
+    ///
+    /// Assembly runs inside `source.lend`; when it returns the source is dropped, so an owning source
+    /// releases every parser guard before the surface is acquired, the retained frame is blitted, or
+    /// the frame is submitted and presented. Nothing is acknowledged here: the caller applies the
+    /// receipts. Assembly and presentation share one `&mut self` borrow, so no resize, font change,
+    /// atlas reset or rebind can come between them.
     #[allow(clippy::too_many_arguments)]
-    fn render_frame(
+    pub fn render_releasing(
         &mut self,
+        fonts: &FrameFonts,
+        source: impl sonicterm_render_model::FrameSource,
+        theme: &Theme,
+        cursor_visible: bool,
+        selection: Option<&Selection>,
+        copy_mode: Option<&CopyModeState>,
+        tabs: &TabBar,
+        process_privileged: bool,
+        search: Option<&SearchState>,
+        palette: Option<&mut CommandPalette>,
+        ime: Option<&ImeState>,
+        viewport_top_abs: Option<u64>,
+        notification: Option<&NotificationBubble>,
+        hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+        link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
+    ) -> FrameOutcome {
+        let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
+        self.debug_assert_prepared(fonts);
+        // Read before lending, so assembly itself never reaches the device.
+        let subpixel_aa = self.effective_subpixel_aa_mode();
+        let accepts_gpu_work = self.device_errors.accepts_gpu_work();
+        let assembled = lend_and_assemble(source, accepts_gpu_work, |panes| {
+            self.assemble_frame(
+                subpixel_aa,
+                panes,
+                theme,
+                cursor_visible,
+                selection,
+                copy_mode,
+                tabs,
+                process_privileged,
+                search,
+                palette,
+                ime,
+                viewport_top_abs,
+                notification,
+                hovered_url_cells,
+                link_preview,
+            )
+        });
+        // The source is gone here: every arm below runs with no parser guard held.
+        self.flush_image_upload_rebuild();
+        let assembled = match assembled {
+            Ok(assembled) => assembled,
+            Err(error) => {
+                // When: assembly returned `error`, nothing was drawn; report it as failed, with no receipts.
+                return FrameOutcome::without_receipts(PresentOutcome::Failed(error));
+            }
+        };
+        let assembled = match settle_without_renderer(assembled) {
+            Ok(outcome) => {
+                // When: `settle_without_renderer` settled an empty source, return it with no receipts.
+                return outcome;
+            }
+            Err(assembled) => assembled,
+        };
+        let outcome = match assembled {
+            // Settled above; kept so the match names every exit.
+            Assembled::NoPanes => PresentOutcome::Skipped(SkipReason::NoPanes),
+            Assembled::Unavailable => self.rendering_unavailable(),
+            Assembled::Unchanged { focus_flash } => {
+                // When: `Unchanged`, retain the no-assembly fast path and the Windows cached-frame reblit.
+                self.skipped_frames = self.skipped_frames.wrapping_add(1);
+                tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
+                let outcome = if let Some(before) = self.prepare_cached_present() {
+                    // When: `before` describes a retained CPU frame, admit its reblit at this render boundary.
+                    let Some(reblit_scope) = self.device_errors.enter_gpu_work("render.reblit")
+                    else {
+                        // When: `enter_gpu_work` refuses, keep the stopped exit before the focus-flash redraw.
+                        return FrameOutcome::without_receipts(self.rendering_unavailable());
+                    };
+                    self.present_unchanged_frame(before, reblit_scope)
+                        .unwrap_or_else(PresentOutcome::Failed)
+                } else {
+                    // When: `before` is absent, no cached presenter is available for this unchanged plan.
+                    PresentOutcome::Skipped(SkipReason::Unchanged)
+                };
+                if focus_flash
+                    && !matches!(
+                        outcome,
+                        PresentOutcome::RenderingUnavailable(_) | PresentOutcome::Failed(_)
+                    )
+                {
+                    self.request_window_redraw();
+                }
+                outcome
+            }
+            Assembled::Noop(key) => {
+                // Nothing drawable changed: remember the key without acknowledging any dirt.
+                self.last_frame_key = Some(*key);
+                PresentOutcome::Skipped(SkipReason::Noop)
+            }
+            Assembled::AtlasRetry { stamp, evictions } => {
+                // The atlas changed during assembly: discard its stale UVs; the reset requests its own redraw.
+                self.reset_glyph_atlas_after_invalidation(stamp, evictions);
+                PresentOutcome::AtlasRetry
+            }
+            Assembled::Layers(layers) => {
+                // When: `Layers` carries owned batches, present them; only a presented frame returns receipts.
+                return self.present_layers(*layers).unwrap_or_else(|error| {
+                    FrameOutcome::without_receipts(PresentOutcome::Failed(error))
+                });
+            }
+        };
+        FrameOutcome::without_receipts(outcome)
+    }
+
+    // Same borrow shape as `render`, whose rationale covers this suppression too.
+    /// Plan and assemble one frame from the lent panes, deciding the typed exits first in their
+    /// existing order. The result borrows no grid. Fallible steps use `?`; `render_releasing` turns
+    /// an error into `PresentOutcome::Failed`.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_frame(
+        &mut self,
+        subpixel_aa: SubpixelAaMode,
         panes: &mut [sonicterm_render_model::PaneRender<'_>],
         theme: &Theme,
         cursor_visible: bool,
@@ -4767,15 +5040,8 @@ impl GpuRenderer {
         notification: Option<&NotificationBubble>,
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
-    ) -> Result<PresentOutcome> {
-        if panes.is_empty() {
-            // When: `panes.is_empty()`, no grid is available to draw, so skip the frame.
-            return Ok(PresentOutcome::Skipped(SkipReason::NoPanes));
-        }
-        if !self.device_errors.accepts_gpu_work() {
-            // When: `accepts_gpu_work` is false, frames are skipped and their dirty state kept.
-            return Ok(self.rendering_unavailable());
-        }
+    ) -> Result<Assembled> {
+        // `lend_and_assemble` has already taken the empty and stopped exits, so `panes` is not empty.
         let mut gpu_timing = tracing::enabled!(target: "render_timing", tracing::Level::DEBUG)
             .then(|| {
                 let now = Instant::now();
@@ -4902,7 +5168,6 @@ impl GpuRenderer {
             || ime.is_some_and(|i| i.is_composing() || !i.preedit().is_empty())
             || self.drag_chip.is_some()
             || self.pane_focus_flash.is_some();
-        let subpixel_aa = self.effective_subpixel_aa_mode();
         let renderer_hash = {
             use std::hash::{Hash, Hasher};
             let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -4990,6 +5255,7 @@ impl GpuRenderer {
             panes.iter().map(|pane| PaneMetadata {
                 id: pane.id,
                 revision: pane.grid.revision(),
+                dirty_generation: pane.grid.dirty_generation(),
                 rect: pane.rect_px,
                 cols: pane.grid.cols,
                 rows: pane.grid.rows,
@@ -5020,33 +5286,12 @@ impl GpuRenderer {
             })
             .collect();
         if plan.unchanged {
-            // When: `plan.unchanged` holds, retain the no-assembly fast path and the Windows cached-frame reblit.
-            self.skipped_frames = self.skipped_frames.wrapping_add(1);
-            tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
-            let outcome = if let Some(before) = self.prepare_cached_present() {
-                // When: `before` describes a retained CPU frame, admit its reblit at this render boundary.
-                let Some(reblit_scope) = self.device_errors.enter_gpu_work("render.reblit") else {
-                    // When: `enter_gpu_work` refuses, keep the stopped exit before the focus-flash redraw.
-                    return Ok(self.rendering_unavailable());
-                };
-                self.present_unchanged_frame(before, reblit_scope)?
-            } else {
-                // When: `before` is absent, no cached presenter is available for this unchanged plan.
-                PresentOutcome::Skipped(SkipReason::Unchanged)
-            };
-            if matches!(outcome, PresentOutcome::RenderingUnavailable(_)) {
-                // When: `matches!` finds a stopped reblit, keep its early exit before the focus-flash redraw.
-                return Ok(outcome);
-            }
-            if pane_focus_flash_bucket != 0 {
-                self.request_window_redraw();
-            }
-            return Ok(outcome);
+            // When: `plan.unchanged` holds, retain the no-assembly fast path; the reblit runs after release.
+            return Ok(Assembled::Unchanged { focus_flash: pane_focus_flash_bucket != 0 });
         }
         if plan.mode == RenderMode::Noop {
             // When: `plan.mode` is Noop, remember its identity without acknowledging unpresented grid dirt.
-            self.last_frame_key = Some(plan.key);
-            return Ok(PresentOutcome::Skipped(SkipReason::Noop));
+            return Ok(Assembled::Noop(Box::new(plan.key)));
         }
         let inline_media_changed = self.last_frame_key.as_ref().is_none_or(|previous| {
             previous.window.inline_media_hash != plan.key.window.inline_media_hash
@@ -7342,13 +7587,16 @@ impl GpuRenderer {
         gpu_lap!("overlays");
         crate::frame_stats::note_assembly(assembly_started);
 
+        if std::mem::take(&mut self.fault_atlas_change_during_assembly) {
+            // The test seam stands in for an atlas reset during assembly: only its identity moves.
+            self.glyph_atlas_generation = self.glyph_atlas_generation.wrapping_add(1);
+        }
         if atlas_changed_during_frame(atlas_stamp_at_frame_start, self.glyph_atlas_stamp()) {
-            // When: atlas_changed_during_frame detects stale UVs, discard them before presentation.
-            self.reset_glyph_atlas_after_invalidation(
-                atlas_stamp_at_frame_start,
-                atlas_evictions_at_frame_start,
-            );
-            return Ok(PresentOutcome::AtlasRetry);
+            // When: atlas_changed_during_frame detects stale UVs, discard them after the source is released.
+            return Ok(Assembled::AtlasRetry {
+                stamp: atlas_stamp_at_frame_start,
+                evictions: atlas_evictions_at_frame_start,
+            });
         }
 
         #[cfg(debug_assertions)]
@@ -7357,20 +7605,55 @@ impl GpuRenderer {
             crate::quad::debug_assert_premultiplied_quads("overlay", &quads_overlay);
         }
 
-        // The presenter borrows only the drawable layers; `plan` and the
-        // parser guards behind `panes` stay here until acknowledgement.
-        let layers = FrameLayers {
+        // Receipts are read under the same guards the plan was built from; they carry no borrow.
+        let receipts = presented_receipts(&plan, panes);
+        Ok(Assembled::Layers(Box::new(AssembledLayers {
             surface_width: sw,
             surface_height: sh,
+            subpixel_aa,
+            quads,
+            images: image_glyph_instances,
+            glyphs: glyph_instances,
+            overlay_quads: quads_overlay,
+            overlay_glyphs: overlay_glyph_instances,
+            field_candidates,
+            missing_chars: missing_chars_this_frame,
+            gpu_timing,
+            plan,
+            receipts,
+        })))
+    }
+
+    /// Hand assembled batches to the presenter; on `Presented`, finish the frame and return its receipts.
+    fn present_layers(&mut self, assembled: AssembledLayers) -> Result<FrameOutcome> {
+        let AssembledLayers {
+            surface_width,
+            surface_height,
+            subpixel_aa,
+            quads,
+            images,
+            glyphs,
+            overlay_quads,
+            overlay_glyphs,
+            field_candidates,
+            missing_chars,
+            mut gpu_timing,
+            plan,
+            receipts,
+        } = assembled;
+        // The presenter borrows only the owned drawable layers; no grid or parser guard is held.
+        let layers = FrameLayers {
+            surface_width,
+            surface_height,
             first_frame: plan.first_frame,
             damage: plan.damage,
             subpixel_aa,
             batches: FrameBatches {
                 quads: &quads,
-                images: &image_glyph_instances,
-                glyphs: &glyph_instances,
-                overlay_quads: &quads_overlay,
-                overlay_glyphs: &overlay_glyph_instances,
+                images: &images,
+                glyphs: &glyphs,
+                overlay_quads: &overlay_quads,
+                overlay_glyphs: &overlay_glyphs,
             },
         };
         let outcome = self.present_frame(&layers, &mut gpu_timing)?;
@@ -7378,11 +7661,11 @@ impl GpuRenderer {
         self.presented_fields
             .settle(field_candidates, matches!(outcome, PresentOutcome::Presented));
         if !matches!(outcome, PresentOutcome::Presented) {
-            // When: `matches!` finds any outcome but `Presented`, nothing acknowledges the plan, so its dirty rows stay.
-            return Ok(outcome);
+            // When: `matches!` finds any outcome but `Presented`, no receipt is issued, so its dirty rows stay.
+            return Ok(FrameOutcome::without_receipts(outcome));
         }
-        self.finish_successful_frame(plan, missing_chars_this_frame, panes, gpu_timing);
-        Ok(PresentOutcome::Presented)
+        self.finish_successful_frame(plan, missing_chars, gpu_timing);
+        Ok(FrameOutcome { outcome: PresentOutcome::Presented, receipts })
     }
 
     /// Raise one test fault on this renderer's device.
@@ -7426,7 +7709,6 @@ impl GpuRenderer {
         &mut self,
         plan: FramePlan,
         missing_chars_this_frame: Vec<char>,
-        panes: &mut [sonicterm_render_model::PaneRender<'_>],
         gpu_timing: Option<(Instant, Instant, Vec<(&'static str, f32)>)>,
     ) {
         let render_mode = plan.mode;
@@ -7439,7 +7721,6 @@ impl GpuRenderer {
         let software_presenter =
             crate::frame_stats::presents_software(self.software_render_degrade);
         crate::frame_stats::note_frame(software_presenter);
-        acknowledge_presented_plan(&plan, panes);
         self.successful_frame_count = self.successful_frame_count.saturating_add(1);
         self.finish_glyph_atlas_retry();
         self.last_missing_chars = missing_chars_this_frame;

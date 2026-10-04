@@ -288,7 +288,7 @@ const GATED_METHODS: &[&str] = &[
     "rebuild_glyph_upload_if_needed",
     "rebuild_image_upload_if_needed",
     "allocator_snapshot",
-    "render_frame",
+    "render_releasing",
     "present_software_frame",
     "present_wgpu_frame",
     "probe_surface_availability",
@@ -1201,7 +1201,9 @@ fn presentation_delegates_and_presenters_remain_in_the_gate_graph() {
     for name in [
         "render",
         "render_with_outcome",
-        "render_frame",
+        "render_releasing",
+        "assemble_frame",
+        "present_layers",
         "present_frame",
         "prepare_cached_present",
         "present_unchanged_frame",
@@ -1471,4 +1473,64 @@ fn retired_context_destroy_closes_the_gate_first() {
     let destroy = at("self.device.destroy()");
     assert!(check < close && close < destroy);
     assert!(!body.contains(".poll("));
+}
+
+/// The renderer methods reachable from `assemble_frame` through renderer-method calls that create,
+/// write or gate device work: a GPU handle used beyond a fixed device read, or a device-gate entry.
+fn assembly_device_work(sources: &[String]) -> Vec<String> {
+    let blanked: Vec<String> =
+        sources.iter().map(|text| code_only(&text.replace("\r\n", "\n"))).collect();
+    let (_, methods) = renderer_methods(&blanked);
+    let mut reached: BTreeSet<String> = BTreeSet::from(["assemble_frame".to_owned()]);
+    let mut frontier = vec!["assemble_frame".to_owned()];
+    while let Some(name) = frontier.pop() {
+        for caller in methods.iter().filter(|method| method.name == name) {
+            for callee in &methods {
+                if !method_calls(&caller.code, &callee.name).is_empty()
+                    && reached.insert(callee.name.clone())
+                {
+                    frontier.push(callee.name.clone());
+                }
+            }
+        }
+    }
+    methods
+        .iter()
+        .filter(|method| reached.contains(&method.name))
+        .filter(|method| {
+            let reads = device_reads(&method.code);
+            handle_uses(&method.code).iter().any(|at| !reads.contains(at))
+                || method.code.contains(".enter_gpu_work(")
+                || method.code.contains(".gpu_work(")
+        })
+        .map(|method| method.name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Assembly runs while the frame's parser guards are held, so nothing reachable from
+/// `assemble_frame` creates or writes a device resource or enters the device gate; that work waits
+/// until `lend` returns. A device call reintroduced into a helper assembly reaches is caught.
+#[test]
+fn nothing_reachable_from_assembly_touches_the_device() {
+    let sources: Vec<String> =
+        production_sources().into_iter().map(|(_, text)| text.replace("\r\n", "\n")).collect();
+    assert_eq!(assembly_device_work(&sources), Vec::<String>::new());
+    let crlf: Vec<String> = sources.iter().map(|text| text.replace('\n', "\r\n")).collect();
+    assert_eq!(assembly_device_work(&crlf), Vec::<String>::new(), "CRLF reads as LF");
+    let seeded: Vec<String> = sources
+        .iter()
+        .map(|text| {
+            text.replacen(
+                "        self.image_upload_rebuild_pending = true;\n",
+                "        self.rebuild_image_upload_if_needed();\n",
+                1,
+            )
+        })
+        .collect();
+    assert_ne!(seeded, sources, "precondition: a deferred rebuild was put back into assembly");
+    assert!(assembly_device_work(&seeded)
+        .iter()
+        .any(|name| name == "rebuild_image_upload_if_needed"));
 }

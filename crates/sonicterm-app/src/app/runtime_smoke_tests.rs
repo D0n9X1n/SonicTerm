@@ -460,7 +460,7 @@ fn frame_scenario_skips_warm_phases_and_uses_real_render_attempts() {
     assert_eq!(smoke.next_fault(), Some(GpuFaultKind::FrameValidation));
     assert!(!smoke.should_maintain_warm_pool());
     let main = include_str!("window_event.rs");
-    let begin = main.find("let outcome = r.render_with_outcome(").unwrap();
+    let begin = main.find("r.render_releasing(").unwrap();
     // The render lap is found by its label, so the timer binding's name is free to change.
     assert!(
         main[begin..].find("smoke.note_render_attempt()").unwrap()
@@ -517,7 +517,7 @@ fn fault_polling_is_default_disabled_and_uses_a_fixed_deadline() {
 #[test]
 fn typed_redraws_preserve_both_smoke_attempt_observations() {
     for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
-        let call = source.find("let outcome = r.render_with_outcome(").unwrap();
+        let call = source.find("r.render_releasing(").unwrap();
         let result = source[call..].find("outcome.into_render_result()").unwrap() + call;
         let observed = source[call..].find("smoke.note_render_attempt()").unwrap() + call;
         // Each file names its timer binding its own way, so the render lap is found by label.

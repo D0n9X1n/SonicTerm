@@ -146,8 +146,8 @@ impl App {
         self.windows.get(&id).map(|child| child.panes.keys().copied().collect())
     }
 
-    /// Test-only: a child pane's parser handle, so a test can hold its lock and make a memory
-    /// sample find that pane contended.
+    /// Test-only: a pane's parser handle in any window, so a test can hold its lock: to make a memory
+    /// sample find that pane contended, or to lock it from a present hook.
     #[doc(hidden)]
     pub fn __test_child_pane_parser(
         &self,

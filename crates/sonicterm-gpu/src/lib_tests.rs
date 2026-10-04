@@ -114,7 +114,9 @@ fn render_cleanup_child_setup_omits_loader_attachment_and_keeps_device_waker() {
 fn render_cleanup_main_frame_omits_inactive_cursor_sink() {
     // Main frames do not allocate an empty vector for a compatibility-only cursor setter.
     let source = include_str!("../../sonicterm-app/src/app/window_event.rs");
-    assert_eq!(source.matches("let outcome = r.render_with_outcome(").count(), 1);
+    // Main renders through exactly one releasing call and never through the compatibility wrapper.
+    assert_eq!(source.matches("r.render_releasing(").count(), 1);
+    assert!(!source.contains("render_with_outcome("));
     assert!(!source.contains(".set_inactive_pane_cursors("));
 }
 

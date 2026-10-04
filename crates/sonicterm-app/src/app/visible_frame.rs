@@ -14,7 +14,7 @@ use std::{
 };
 
 use parking_lot::{Mutex, MutexGuard};
-use sonicterm_render_model::{InlineImage, PaneRender};
+use sonicterm_render_model::{AckReceipt, FrameSource, InlineImage, PaneRender};
 use sonicterm_ui::pane::Rect;
 use sonicterm_vt::vt::Parser;
 use winit::window::WindowId;
@@ -253,6 +253,103 @@ impl VisibleFrameSources {
             guards.iter().map(|(id, parser, _)| (*id, &**parser)),
             self.active_id(),
         ))
+    }
+}
+
+/// A presented frame's receipt bound to the pane's ownership when it was presented. The `Weak` is
+/// identity only: it is never upgraded, and it keeps the parser's address from being reused while
+/// the ticket lives. Liveness is decided at application: the pane must be held by the window's
+/// collection with the same parser.
+pub(crate) struct AckTicket {
+    pub(crate) receipt: AckReceipt,
+    parser: std::sync::Weak<Mutex<Parser>>,
+}
+
+impl VisibleFrameSources {
+    /// Bind a presented frame's receipts to the panes this collection held, by index; a receipt whose
+    /// index or pane id disagrees with the layout is dropped.
+    pub(super) fn bind(&self, receipts: Vec<AckReceipt>) -> Vec<AckTicket> {
+        receipts
+            .into_iter()
+            .filter_map(|receipt| {
+                let entry =
+                    self.entries.get(receipt.index).filter(|entry| entry.id == receipt.pane_id)?;
+                Some(AckTicket { receipt, parser: Arc::downgrade(&entry.parser) })
+            })
+            .collect()
+    }
+
+    /// Store a frame's receipts as the window's pending set. Receipts are non-empty only for a
+    /// presented frame, which replaces the set; any other outcome leaves the set unchanged.
+    pub(super) fn store_presented(&self, pending: &mut Vec<AckTicket>, receipts: Vec<AckReceipt>) {
+        if receipts.is_empty() {
+            // When: `receipts` is empty the frame did not present, so the pending set stays as it was.
+            return;
+        }
+        *pending = self.bind(receipts);
+    }
+
+    /// Reconcile the viewports, then, only when that succeeds, apply `window`'s pending receipts to
+    /// the held grids and empty the set. A failed reconciliation returns before any receipt is
+    /// touched, so the set and every grid's dirt stay for the next successful collection.
+    pub(super) fn reconcile_and_apply_receipts(
+        &self,
+        window: &mut WindowState,
+        guards: &mut ParserGuards<'_>,
+    ) -> Result<FrameViewports, FrameUnavailable> {
+        let viewports = self.reconcile_viewports(&mut window.panes, guards)?;
+        let pending = std::mem::take(&mut window.pending_receipts);
+        let dropped = pending.iter().filter(|ticket| !apply_ticket(ticket, guards)).count();
+        if dropped > 0 {
+            if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
+                counters.dirt_ack_dropped += dropped as u64;
+            }
+        }
+        Ok(viewports)
+    }
+}
+
+/// Apply one pending ticket through the guard the collection already holds; returns whether it
+/// cleared. It is live only when a guard holds its pane and that guard's parser is the ticket's.
+pub(super) fn apply_ticket(ticket: &AckTicket, guards: &mut ParserGuards<'_>) -> bool {
+    let Some((_, parser, _)) = guards.iter_mut().find(|(id, _, _)| *id == ticket.receipt.pane_id)
+    else {
+        // When: no held guard has the receipt's `pane_id` (switched away, removed or moved), its dirt stays.
+        return false;
+    };
+    if !std::ptr::eq(MutexGuard::mutex(parser), ticket.parser.as_ptr()) {
+        // When: the id now names another parser, the receipt describes a pane that no longer exists.
+        return false;
+    }
+    ticket.receipt.try_apply(parser.grid_mut())
+}
+
+/// The frame source the App lends to the renderer: it owns the visible parser guards and media
+/// snapshots, so they are released when `lend` returns, before the frame is presented.
+pub(super) struct HeldFrameSource<'guard, 'window> {
+    pub(super) guards: ParserGuards<'guard>,
+    pub(super) images: Vec<Vec<InlineImage>>,
+    pub(super) viewports: &'window FrameViewports,
+    pub(super) active: u64,
+    pub(super) broadcast: &'window BTreeSet<u64>,
+    pub(super) scrollbar_alpha: &'window HashMap<u64, f32>,
+}
+
+impl FrameSource for HeldFrameSource<'_, '_> {
+    fn lend<R>(
+        mut self,
+        assemble: impl for<'slice, 'grid> FnOnce(&'slice mut [PaneRender<'grid>]) -> R,
+    ) -> R {
+        let mut panes = pane_renders(
+            &mut self.guards,
+            &mut self.images,
+            self.viewports,
+            self.active,
+            self.broadcast,
+            self.scrollbar_alpha,
+        );
+        // `panes`, then `self.guards`, drop when this returns, before the caller presents.
+        assemble(&mut panes)
     }
 }
 

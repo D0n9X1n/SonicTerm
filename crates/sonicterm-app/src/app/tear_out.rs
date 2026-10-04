@@ -955,6 +955,7 @@ impl App {
 
         let child = WindowState {
             owner,
+            pending_receipts: Vec::new(),
             role: crate::app::WindowRole::Terminal,
             custom_window_name: String::new(),
             window: Some(destination.window.clone()),

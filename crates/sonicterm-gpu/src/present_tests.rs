@@ -150,22 +150,42 @@ fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 #[test]
 fn noop_and_atlas_retry_are_wired_to_unacknowledged_exits() {
     let core = compact(include_str!("core.rs"));
+    // Assembly decides Noop and hands the key out; after release the key is stored and nothing finishes.
     let noop = source_between(&core, "ifplan.mode==RenderMode::Noop{", "letinline_media_changed=");
-    assert!(noop.contains(
-        "self.last_frame_key=Some(plan.key);returnOk(PresentOutcome::Skipped(SkipReason::Noop));"
-    ));
-    assert!(
-        !noop.contains("finish_successful_frame") && !noop.contains("acknowledge_presented_plan")
+    assert!(noop.contains("returnOk(Assembled::Noop(Box::new(plan.key)));"));
+    let noop_arm = source_between(
+        &core,
+        "Assembled::Noop(key)=>{",
+        "Assembled::AtlasRetry{stamp,evictions}=>",
     );
+    assert!(noop_arm
+        .contains("self.last_frame_key=Some(*key);PresentOutcome::Skipped(SkipReason::Noop)"));
+    for forbidden in ["finish_successful_frame", "presented_receipts", "clear_dirty"] {
+        assert!(
+            !noop.contains(forbidden) && !noop_arm.contains(forbidden),
+            "Noop reaches {forbidden}"
+        );
+    }
+    // A changed atlas leaves assembly before any batch is presented, and its reset runs after release.
     let guard = "ifatlas_changed_during_frame(atlas_stamp_at_frame_start,";
     let atlas = source_between(&core, guard, "#[cfg(debug_assertions)]");
-    assert!(atlas.contains("self.reset_glyph_atlas_after_invalidation(atlas_stamp_at_frame_start,atlas_evictions_at_frame_start,);returnOk(PresentOutcome::AtlasRetry);"));
-    for forbidden in ["present_frame(", "finish_successful_frame", "acknowledge_presented_plan"] {
-        assert!(!atlas.contains(forbidden));
+    assert!(atlas.contains("returnOk(Assembled::AtlasRetry{stamp:atlas_stamp_at_frame_start,evictions:atlas_evictions_at_frame_start,});"));
+    let atlas_arm = source_between(
+        &core,
+        "Assembled::AtlasRetry{stamp,evictions}=>{",
+        "Assembled::Layers(layers)=>",
+    );
+    assert!(atlas_arm.contains(
+        "self.reset_glyph_atlas_after_invalidation(stamp,evictions);PresentOutcome::AtlasRetry"
+    ));
+    for forbidden in ["present_frame(", "finish_successful_frame", "presented_receipts"] {
+        assert!(
+            !atlas.contains(forbidden) && !atlas_arm.contains(forbidden),
+            "atlas retry reaches {forbidden}"
+        );
     }
     let guard_position = core.find(guard).unwrap();
-    let retry_position =
-        guard_position + atlas.find("returnOk(PresentOutcome::AtlasRetry);").unwrap();
+    let retry_position = guard_position + atlas.find("returnOk(Assembled::AtlasRetry{").unwrap();
     assert!(retry_position < core.find("self.present_frame(&layers,").unwrap());
     assert!(retry_position < core.find("self.finish_successful_frame(plan,").unwrap());
     let lifecycle = compact(include_str!("atlas_lifecycle.rs"));
@@ -287,19 +307,26 @@ fn cached_reblit_checkpoint_order_and_stopped_early_exit_are_preserved() {
         .contains("fnreblit_software_frame(&mutself,before:DeviceGate,reblit_scope:GpuWorkScope,"));
     assert!(source.contains("self.reblit_software_frame(before,reblit_scope)"));
     let core = compact(include_str!("core.rs"));
-    let unchanged = source_between(&core, "ifplan.unchanged{", "ifplan.mode==RenderMode::Noop{");
+    // Assembly only decides the unchanged key; the reblit runs after the source is released.
+    let decided = source_between(&core, "ifplan.unchanged{", "ifplan.mode==RenderMode::Noop{");
+    assert!(
+        decided.contains("returnOk(Assembled::Unchanged{focus_flash:pane_focus_flash_bucket!=0});")
+    );
+    assert!(!decided.contains("prepare_cached_present") && !decided.contains("enter_gpu_work"));
+    let unchanged =
+        source_between(&core, "Assembled::Unchanged{focus_flash}=>{", "Assembled::Noop(key)=>{");
     let prepare = unchanged.find("self.prepare_cached_present()").unwrap();
     let gate = unchanged.find("self.device_errors.enter_gpu_work(\"render.reblit\")").unwrap();
-    let handoff = unchanged.find("self.present_unchanged_frame(before,reblit_scope)?").unwrap();
+    let handoff = unchanged.find("self.present_unchanged_frame(before,reblit_scope)").unwrap();
     assert!(prepare < gate && gate < handoff);
-    assert!(unchanged.contains("returnOk(self.rendering_unavailable());"));
-    assert!(unchanged.contains(
-        "ifmatches!(outcome,PresentOutcome::RenderingUnavailable(_)){returnOk(outcome);}"
-    ));
     assert!(
-        unchanged.find("returnOk(outcome);").unwrap()
-            < unchanged.find("self.request_window_redraw();").unwrap()
+        unchanged.contains("returnFrameOutcome::without_receipts(self.rendering_unavailable());")
     );
+    // A stopped or failed reblit never requests the focus-flash redraw.
+    let stopped = unchanged
+        .find("PresentOutcome::RenderingUnavailable(_)|PresentOutcome::Failed(_)")
+        .unwrap();
+    assert!(stopped < unchanged.find("self.request_window_redraw();").unwrap());
 }
 
 /// Only the two app-owned retry reasons require the Result adapter's native request; atlas and recovered surfaces must not double-request.
@@ -389,7 +416,7 @@ fn surface_probe_native_calls_and_retained_key_invalidation_stay_inside_the_gate
         "queue.present",
         ".sync(",
         "finish_successful_frame",
-        "acknowledge_presented_plan",
+        "clear_dirty",
         "request_redraw(",
         ".poll(",
     ] {
@@ -426,6 +453,21 @@ fn backend_occlusion_fault_seam_cannot_bypass_device_gate_or_touch_native_surfac
     let upload = render.find("self.image_upload.sync(").unwrap();
     let acquire = render.find("self.surface.get_current_texture()").unwrap();
     assert!(gate < fault && fault < retry && retry < upload && upload < acquire);
-    assert!(render
-        .contains("#[cfg(target_os=\"macos\")]ifstd::mem::take(&mutself.fault_surface_occluded)"));
+    assert!(render.contains(";ifstd::mem::take(&mutself.fault_surface_occluded)"));
+}
+
+/// Neither presenter reads a grid: both compose only the owned batches, so the frame's source can be
+/// released before either runs.
+#[test]
+fn presenters_read_no_grid() {
+    let source = include_str!("present.rs").replace("\r\n", "\n");
+    for name in ["fn present_software_frame(", "fn present_wgpu_frame("] {
+        let body = source.split_once(name).unwrap_or_else(|| panic!("missing {name}")).1;
+        let end = ["\n    pub(super) fn ", "\n    fn ", "\n}\n"]
+            .iter()
+            .filter_map(|next| body.find(next))
+            .min()
+            .unwrap_or(body.len());
+        assert!(!body[..end].contains("grid"), "{name} reads a grid");
+    }
 }

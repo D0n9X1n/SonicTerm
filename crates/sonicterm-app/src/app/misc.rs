@@ -714,6 +714,7 @@ impl App {
             // Registered when the window is inserted; construction has no
             // governor in scope.
             owner: None,
+            pending_receipts: Vec::new(),
             role: crate::app::WindowRole::Terminal,
             custom_window_name: String::new(),
             window: Some(window.clone()),

@@ -209,8 +209,12 @@ and the owner remains backend-occluded, visible, and unparked. They do not assem
 a frame or consume dirt. Native acquire/configure may block; this is a slow
 exceptional check, not a nonblocking guarantee or normal heartbeat.
 
-`__occlude_next_surface_acquire` is a macOS-only fault seam for the real typed
-retry exit without a Space switch. Fake-clock owner tests and source contracts
+`__occlude_next_surface_acquire` is a test fault seam for the real typed retry
+exit at the wgpu presenter's acquire step, without a Space switch or a covered
+window. It applies on every platform's wgpu presenter; the Windows software
+presenter has no surface acquire, so an armed fault waits for a wgpu frame. The
+Windows release-order test drives the compatibility wrapper through it and checks
+that a surface retry keeps the grid's dirt. Fake-clock owner tests and source contracts
 cover the policy, but do not replace same-window full-app CPU measurements or
 native proof of the first full presented frame.
 
@@ -228,7 +232,10 @@ the effective frame period. The retry is a floor over normal pacing, including
 degraded IME pacing. Earlier input or redraw events cannot bypass or postpone
 it. A due failure rearms it; coherent collection clears it before atlas/surface
 retry policy runs. Closing the window discards it. No unconditional redraw
-heartbeat or blocking parser/image lock is introduced.
+heartbeat or blocking parser/image lock is introduced. A frame holds the visible
+parser guards only while it assembles; they are released before the surface is
+acquired and the frame presented, on the GPU and GDI paths alike. The retry floor
+stays one full frame period.
 
 ### Windows CPU presentation
 

@@ -29,10 +29,9 @@ fn extracted_upload_policy_preserves_dimensions_and_cpu_payload() {
     assert_eq!(atlas_payload_bytes(16, 8), 512);
 }
 
-#[test]
-fn extracted_retry_and_success_keep_distinct_settlement_boundaries() {
-    // Rejection invalidates UVs before requesting redraw; only acknowledged presentation settles retry.
-    let lifecycle = include_str!("atlas_lifecycle.rs");
+/// The settlement scan over one checkout of `atlas_lifecycle.rs` and `core.rs`, read as LF.
+fn check_settlement_boundaries(lifecycle: &str, core: &str) {
+    let (lifecycle, core) = (lifecycle.replace("\r\n", "\n"), core.replace("\r\n", "\n"));
     let retry = lifecycle.split_once("fn reset_glyph_atlas_after_invalidation(").unwrap().1;
     let retry = retry.split_once("fn glyph_atlas_stamp(").unwrap().0;
     let mut previous = 0;
@@ -48,19 +47,42 @@ fn extracted_retry_and_success_keep_distinct_settlement_boundaries() {
         assert!(position > previous, "misordered {call}");
         previous = position;
     }
-    assert!(!retry.contains("acknowledge_presented_plan"));
+    assert!(!retry.contains("clear_dirty") && !retry.contains("acknowledge_receipts"));
     assert!(retry.contains("let current_epoch = self.glyph_atlas.evictions();"));
     assert!(retry.contains("current_epoch > frame_epoch"));
     assert!(retry.contains("\"eviction_compaction\""));
     assert!(retry.contains("\"content_reset_or_replacement\""));
     assert!(retry.contains("?before,") && retry.contains("?after,"));
-    let core = include_str!("core.rs");
     assert_eq!(core.matches("self.finish_glyph_atlas_retry();").count(), 1);
+    // A presented frame settles the retry; it clears no grid dirt, which its receipts carry out.
     let success = core.split_once("fn finish_successful_frame(").unwrap().1;
-    assert!(
-        success.find("acknowledge_presented_plan").unwrap()
-            < success.find("self.finish_glyph_atlas_retry();").unwrap()
-    );
+    let success = success.split_once("\n    }\n").unwrap().0;
+    assert!(success.contains("self.finish_glyph_atlas_retry();"));
+    assert!(!success.contains("clear_dirty") && !success.contains("panes"));
+}
+
+#[test]
+fn extracted_retry_and_success_keep_distinct_settlement_boundaries() {
+    // Rejection invalidates UVs before requesting redraw; only acknowledged presentation settles retry.
+    // Windows CI checks sources out with CRLF line ends, so the scan runs on a CRLF copy too.
+    scan_settlement_in_both_line_ends(include_str!("atlas_lifecycle.rs"), include_str!("core.rs"));
+}
+
+/// Run the settlement scan over the checkout as given and over its CRLF form, built from the
+/// LF-normalized text so an already-CRLF checkout never becomes `\r\r\n`.
+fn scan_settlement_in_both_line_ends(lifecycle: &str, core: &str) {
+    check_settlement_boundaries(lifecycle, core);
+    let (lifecycle, core) = (lifecycle.replace("\r\n", "\n"), core.replace("\r\n", "\n"));
+    check_settlement_boundaries(&lifecycle.replace('\n', "\r\n"), &core.replace('\n', "\r\n"));
+}
+
+#[test]
+fn settlement_scan_accepts_a_checkout_that_is_already_crlf() {
+    // A Windows checkout hands include_str! CRLF text; building the CRLF variant from it must not
+    // produce `\r\r\n`, which one normalization leaves as `\r\n` and LF delimiters then miss.
+    let lifecycle = include_str!("atlas_lifecycle.rs").replace("\r\n", "\n").replace('\n', "\r\n");
+    let core = include_str!("core.rs").replace("\r\n", "\n").replace('\n', "\r\n");
+    scan_settlement_in_both_line_ends(&lifecycle, &core);
 }
 
 #[test]

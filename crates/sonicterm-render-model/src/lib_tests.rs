@@ -7,7 +7,6 @@ const TEST_OWNERSHIP_EXEMPTIONS: &[(&str, &str)] = &[
         "painter",
         "source-compatibility trait with no production implementation; implementability is covered below",
     ),
-    ("pane_render", "passive frame-input structs exercised by renderer and app integration tests"),
 ];
 
 fn validate_test_ownership(

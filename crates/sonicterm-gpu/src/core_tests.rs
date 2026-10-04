@@ -77,6 +77,7 @@ fn revision_plan(id: u64, revision: u64) -> FramePlan {
         [PaneMetadata {
             id,
             revision,
+            dirty_generation: 0,
             rect: PixelRect { x: 0, y: 0, w: 80, h: 40 },
             cols: 8,
             rows: 2,
@@ -89,6 +90,15 @@ fn revision_plan(id: u64, revision: u64) -> FramePlan {
         }],
         None,
     )
+}
+
+/// A plan's receipts, applied to the same panes, as a presented frame's would be.
+fn acknowledge_plan(
+    plan: &FramePlan,
+    panes: &mut [sonicterm_render_model::PaneRender<'_>],
+) -> usize {
+    let receipts = presented_receipts(plan, panes);
+    acknowledge_receipts(&receipts, panes)
 }
 
 /// Only a presented plan's exact revision can clear dirt; a subsequent mutation or replacement stays dirty.
@@ -109,19 +119,19 @@ fn planned_acknowledgement_rejects_newer_grid_and_replacement() {
         scrollbar_alpha: 0.0,
         inline_images: Vec::new(),
     }];
-    acknowledge_presented_plan(&plan, &mut panes);
+    acknowledge_plan(&plan, &mut panes);
     assert!(panes[0].grid.dirty_count() > 0);
     let current = revision_plan(7, panes[0].grid.revision());
     panes[0].id = 8;
-    acknowledge_presented_plan(&current, &mut panes);
+    acknowledge_plan(&current, &mut panes);
     assert!(panes[0].grid.dirty_count() > 0);
     panes[0].id = 7;
-    acknowledge_presented_plan(&current, &mut panes);
+    acknowledge_plan(&current, &mut panes);
     assert_eq!(panes[0].grid.dirty_count(), 0);
     panes[0].grid.mark_all_dirty();
     let mut noop = revision_plan(7, panes[0].grid.revision());
     noop.mode = RenderMode::Noop;
-    acknowledge_presented_plan(&noop, &mut panes);
+    acknowledge_plan(&noop, &mut panes);
     assert!(panes[0].grid.dirty_count() > 0, "unpresented plans cannot acknowledge dirt");
 }
 
@@ -144,7 +154,7 @@ fn production_frame_decisions_use_one_plan_and_preserve_retry_boundaries() {
     assert!(render.contains("plan.damage"));
     assert!(render.contains("pv.planned.content_clip"));
     assert!(render.contains("pv.planned.rows()"));
-    // The render body acknowledges once, and only after its presenter reports `Presented`.
+    // The frame finishes once, and only after its presenter reports `Presented`.
     let handoff = render.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
     let guard = render[handoff..].find("PresentOutcome::Presented)").unwrap() + handoff;
     let finish = render.find("self.finish_successful_frame(plan,").unwrap();
@@ -155,7 +165,10 @@ fn production_frame_decisions_use_one_plan_and_preserve_retry_boundaries() {
     // submission.
     let presenters = include_str!("present.rs").replace("\r\n", "\n");
     assert!(!presenters.contains("finish_successful_frame"));
-    assert!(!presenters.contains("acknowledge_presented_plan"));
+    // Atlases clear their own dirty rects; a presenter never clears grid dirt.
+    for grid_clear in ["acknowledge_receipts", "grid.clear_dirty()", "clear_dirty_rows("] {
+        assert!(!presenters.contains(grid_clear), "a presenter calls {grid_clear}");
+    }
     assert_eq!(presenters.matches("Ok(PresentOutcome::Presented)").count(), 2);
     let software = presenters
         .find("crate::software_windows::present_frame(frame, &self.window)?;\n        lap(timing, \"software_present\");")
@@ -986,7 +999,7 @@ fn atlas_frame_detector_production_capture_and_retry_precede_presentation() {
     let guard = source
         .find("if atlas_changed_during_frame(atlas_stamp_at_frame_start, self.glyph_atlas_stamp())")
         .unwrap();
-    let retry = source[guard..].find("return Ok(PresentOutcome::AtlasRetry);").unwrap() + guard;
+    let retry = source[guard..].find("return Ok(Assembled::AtlasRetry {").unwrap() + guard;
     let present = source.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
     let acknowledge = source.find("self.finish_successful_frame(plan,").unwrap();
     assert!(start < guard && guard < retry && retry < present && present < acknowledge);
@@ -4445,6 +4458,7 @@ fn scrolled_back_cache_plan(dirty_live_rows: Vec<usize>) -> FramePlan {
     let metadata = |revision, dirty_rows| PaneMetadata {
         id: 7,
         revision,
+        dirty_generation: 0,
         rect: PixelRect { x: 0, y: 0, w: 100, h: 484 },
         cols: 8,
         rows: 24,
@@ -5073,4 +5087,220 @@ fn a_real_space_passes_through_the_atlas_and_emission_without_tofu() {
     assert_eq!(glyphs.len(), 1, "only A draws a glyph");
     assert!(tofu.is_empty(), "the space draws no tofu box");
     assert!(missing.is_empty(), "nothing is reported missing");
+}
+
+/// The compatibility wrapper's acknowledgement applies receipts through the borrowed grids: a subset
+/// receipt clears only its rows, a receipt naming another pane clears nothing, a receipt taken before a
+/// later mark applies but keeps every row that mark dirtied, and an `All` receipt clears every row.
+#[test]
+fn borrowed_acknowledgement_clears_only_matching_receipts_and_their_rows() {
+    use sonicterm_render_model::{AckReceipt, AckRows, CursorStyle, PaneRender};
+    let mut grid = Grid::new(8, 3);
+    grid.mark_all_dirty();
+    let subset = AckReceipt::of(0, 7, &grid, AckRows::Rows([1].into_iter().collect()));
+    let other = AckReceipt { pane_id: 8, ..AckReceipt::of(0, 7, &grid, AckRows::All) };
+    let mut panes = [PaneRender {
+        id: 7,
+        rect_px: PixelRect { x: 0, y: 0, w: 80, h: 60 },
+        grid: &mut grid,
+        viewport_top_abs: None,
+        is_active: true,
+        cursor_style: CursorStyle::default(),
+        is_broadcast_participant: false,
+        scrollbar_alpha: 0.0,
+        inline_images: Vec::new(),
+    }];
+    assert_eq!(acknowledge_receipts(&[other], &mut panes), 0, "another pane's receipt");
+    assert_eq!(panes[0].grid.dirty_count(), 3);
+    assert_eq!(acknowledge_receipts(std::slice::from_ref(&subset), &mut panes), 1);
+    assert_eq!(panes[0].grid.dirty_rows().collect::<Vec<_>>(), [0, 2]);
+    panes[0].grid.mark_all_dirty();
+    assert_eq!(acknowledge_receipts(&[subset], &mut panes), 1, "the receipt still applies");
+    assert_eq!(panes[0].grid.dirty_count(), 3, "a later mark keeps all dirt");
+    let all = AckReceipt::of(0, 7, &*panes[0].grid, AckRows::All);
+    assert_eq!(acknowledge_receipts(&[all], &mut panes), 1);
+    assert_eq!(panes[0].grid.dirty_count(), 0);
+}
+
+/// The compatibility wrapper's settlement keeps the borrowed grid's dirt for every outcome but
+/// `Presented`, even when the frame carries a matching receipt; a surface retry is the case a
+/// renderer-free host cannot otherwise reach, so it is checked for each retry reason.
+#[test]
+fn settling_a_borrowed_frame_clears_dirt_only_when_presented() {
+    use sonicterm_render_model::{AckReceipt, AckRows, CursorStyle, PaneRender};
+    let not_presented = || {
+        vec![
+            PresentOutcome::SurfaceRetry(SurfaceRetryReason::Occluded),
+            PresentOutcome::SurfaceRetry(SurfaceRetryReason::Timeout),
+            PresentOutcome::SurfaceRetry(SurfaceRetryReason::Outdated),
+            PresentOutcome::AtlasRetry,
+            PresentOutcome::CachedReblit,
+            PresentOutcome::Skipped(SkipReason::Noop),
+            PresentOutcome::Failed(anyhow::anyhow!("presenter failed")),
+        ]
+    };
+    let mut cases: Vec<(PresentOutcome, bool)> =
+        not_presented().into_iter().map(|outcome| (outcome, false)).collect();
+    cases.push((PresentOutcome::Presented, true));
+    for (outcome, clears) in cases {
+        let label = format!("{outcome:?}");
+        let mut grid = Grid::new(8, 3);
+        grid.mark_all_dirty();
+        // A receipt that matches every identity, so only the outcome decides whether it applies.
+        let receipt = AckReceipt::of(0, 7, &grid, AckRows::All);
+        let mut panes = [PaneRender {
+            id: 7,
+            rect_px: PixelRect { x: 0, y: 0, w: 80, h: 60 },
+            grid: &mut grid,
+            viewport_top_abs: None,
+            is_active: true,
+            cursor_style: CursorStyle::default(),
+            is_broadcast_participant: false,
+            scrollbar_alpha: 0.0,
+            inline_images: Vec::new(),
+        }];
+        let frame = FrameOutcome { outcome, receipts: vec![receipt] };
+        let settled = settle_borrowed_frame(frame, &mut panes);
+        assert_eq!(format!("{settled:?}"), label, "settlement returns the frame's outcome");
+        let expected_dirty = if clears { 0 } else { 3 };
+        assert_eq!(panes[0].grid.dirty_count(), expected_dirty, "{label}");
+    }
+}
+
+/// The compatibility wrapper settles through `settle_borrowed_frame` and applies no receipt of its
+/// own, so the settlement rule above is the rule the real `render_with_outcome` path follows.
+#[test]
+fn the_compatibility_wrapper_settles_only_through_settle_borrowed_frame() {
+    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let wrapper = core.split_once("    pub fn render_with_outcome(").expect("wrapper").1;
+    let wrapper = wrapper.split_once("\n    }\n").expect("wrapper body").0;
+    assert!(wrapper.trim_end().ends_with("settle_borrowed_frame(frame, panes)"), "{wrapper}");
+    assert!(!wrapper.contains("acknowledge_receipts"), "the wrapper acknowledges on its own");
+}
+
+/// One call assembles inside `lend` and presents only after it returns: no public split API exists,
+/// `Assembled` is private and borrows nothing, and assembly decides the empty and stopped exits
+/// first, in their existing order, without reaching the device or a presenter.
+#[test]
+fn render_releasing_lends_once_and_presents_after_release() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    for split in ["pub fn assemble", "present_assembled", "AssembledFrame", "pub enum Assembled"] {
+        assert!(!source.contains(split), "a split API remains: {split}");
+    }
+    assert!(source.contains("\nenum Assembled {\n"), "Assembled is private and has no lifetime");
+    let call = source.split_once("    pub fn render_releasing(").unwrap().1;
+    let call = call.split_once("\n    }\n").unwrap().0;
+    // The call lends through `lend_and_assemble` once, and that function lends its source once.
+    assert_eq!(call.matches("lend_and_assemble(").count(), 1);
+    let seam = source.split_once("\nfn lend_and_assemble(").unwrap().1;
+    let seam = seam.split_once("\n}\n").unwrap().0;
+    assert_eq!(seam.matches("source.lend(").count(), 1);
+    let lend = call.find("lend_and_assemble(").unwrap();
+    for after in [
+        "self.flush_image_upload_rebuild();",
+        "self.present_layers(",
+        "self.prepare_cached_present()",
+        "self.reset_glyph_atlas_after_invalidation(",
+        "self.rendering_unavailable()",
+    ] {
+        assert!(call.find(after).is_some_and(|at| at > lend), "{after} runs after release");
+    }
+    let assemble = source.split_once("    fn assemble_frame(").unwrap().1;
+    let assemble = assemble.split_once("    /// Hand assembled batches").unwrap().0;
+    assert!(call.contains("lend_and_assemble(source, accepts_gpu_work,"), "exits decided first");
+    assert!(
+        !assemble.contains("Assembled::NoPanes") && !assemble.contains("Assembled::Unavailable")
+    );
+    for presenting in [
+        "present_frame(",
+        "prepare_cached_present(",
+        "enter_gpu_work(",
+        "effective_subpixel_aa_mode(",
+    ] {
+        assert!(!assemble.contains(presenting), "assembly calls {presenting}");
+    }
+}
+
+/// A source that owns its grids and records when it is lent and when it is dropped.
+struct OwningSource {
+    grids: Vec<Grid>,
+    log: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+}
+
+impl sonicterm_render_model::FrameSource for OwningSource {
+    fn lend<R>(
+        mut self,
+        assemble: impl for<'slice, 'grid> FnOnce(
+            &'slice mut [sonicterm_render_model::PaneRender<'grid>],
+        ) -> R,
+    ) -> R {
+        self.log.borrow_mut().push("lend");
+        let mut panes: Vec<_> = self
+            .grids
+            .iter_mut()
+            .enumerate()
+            .map(|(index, grid)| sonicterm_render_model::PaneRender {
+                id: index as u64 + 1,
+                rect_px: PixelRect { x: 0, y: 0, w: 80, h: 40 },
+                grid,
+                viewport_top_abs: None,
+                is_active: index == 0,
+                cursor_style: sonicterm_render_model::CursorStyle::default(),
+                is_broadcast_participant: false,
+                scrollbar_alpha: 0.0,
+                inline_images: Vec::new(),
+            })
+            .collect();
+        assemble(&mut panes)
+    }
+}
+
+impl Drop for OwningSource {
+    // Lifecycle: dropping the source releases what it owns; the log records when.
+    fn drop(&mut self) {
+        self.log.borrow_mut().push("drop");
+    }
+}
+
+/// The renderer-free exits of the one releasing call, through the production seam: an empty source
+/// is skipped as `NoPanes` with no receipts whether or not the device accepts work, a stopped
+/// device with panes is `Unavailable` and never assembles, and in every case the source is lent
+/// once and dropped before the call returns.
+#[test]
+fn an_empty_source_is_no_panes_and_is_dropped_before_the_call_returns() {
+    let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let source = |grids: Vec<Grid>| OwningSource { grids, log: std::rc::Rc::clone(&log) };
+    for accepts_gpu_work in [true, false] {
+        log.borrow_mut().clear();
+        let assembled = lend_and_assemble(source(Vec::new()), accepts_gpu_work, |_| {
+            panic!("an empty source never assembles")
+        })
+        .unwrap();
+        assert_eq!(*log.borrow(), ["lend", "drop"], "dropped before the call returns");
+        let outcome = settle_without_renderer(assembled).ok().expect("an empty source is settled");
+        assert!(
+            matches!(outcome.outcome, PresentOutcome::Skipped(SkipReason::NoPanes)),
+            "accepts={accepts_gpu_work}: {:?}",
+            outcome.outcome
+        );
+        assert!(outcome.receipts.is_empty());
+    }
+    log.borrow_mut().clear();
+    let stopped = lend_and_assemble(source(vec![Grid::new(8, 2)]), false, |_| {
+        panic!("a stopped device never assembles")
+    })
+    .unwrap();
+    assert!(matches!(stopped, Assembled::Unavailable));
+    assert_eq!(*log.borrow(), ["lend", "drop"]);
+    assert!(
+        settle_without_renderer(stopped).is_err(),
+        "a stopped device needs the renderer's report"
+    );
+    let mut assembled_panes = 0;
+    let usable = lend_and_assemble(source(vec![Grid::new(8, 2), Grid::new(8, 2)]), true, |panes| {
+        assembled_panes = panes.len();
+        Ok(Assembled::Unavailable)
+    });
+    assert!(usable.is_ok());
+    assert_eq!(assembled_panes, 2, "a usable device assembles the lent panes once");
 }

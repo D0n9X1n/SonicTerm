@@ -530,7 +530,7 @@ fn both_redraw_paths_invalidate_before_rendering() {
             .find("invalidate_selection_for_content(")
             .unwrap_or_else(|| panic!("{name} redraw must call the shared invalidation helper"));
         let render = source[call..]
-            .find(".render_with_outcome(")
+            .find(".render_releasing(")
             .map(|offset| call + offset)
             .unwrap_or_else(|| panic!("{name} redraw must render after invalidation"));
         assert!(source[call..render].contains(selection_arg));
@@ -645,4 +645,33 @@ fn unchanged_interior_wrap_marks_keep_a_wrapped_selection_copyable() {
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some(&wrapped[80..]));
         assert!(app.windows.get(&window).unwrap().selection.is_some());
     }
+}
+
+/// The IME area published from a cursor copied before the render call is today's: the pane origin
+/// plus the copied row and column in cells, one cell in size. Reading the held grid gives the same.
+#[test]
+fn a_copied_cursor_publishes_todays_ime_area() {
+    let mut grid = sonicterm_grid::grid::Grid::new(20, 6);
+    grid.goto(3, 7);
+    let copied = (grid.cursor.row, grid.cursor.col);
+    let rect = sonicterm_ui::pane::Rect::new(10.0, 20.0, 200.0, 120.0);
+    let publish = |cursor: (u16, u16)| {
+        let mut throttle = sonicterm_ui::ime::ImeCursorThrottle::new();
+        let mut published = None;
+        update_terminal_ime_cursor_area(
+            &mut throttle,
+            (7, rect),
+            cursor,
+            (8.0, 16.0),
+            (0.0, 0.0),
+            |position, size| published = Some((position, size)),
+        );
+        published
+    };
+    let expected = Some((
+        winit::dpi::PhysicalPosition::new(10 + 7 * 8, 20 + 3 * 16),
+        winit::dpi::PhysicalSize::new(8, 16),
+    ));
+    assert_eq!(publish(copied), expected);
+    assert_eq!(publish((grid.cursor.row, grid.cursor.col)), expected);
 }

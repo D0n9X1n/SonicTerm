@@ -1892,7 +1892,9 @@ FRAME_COUNTER_STATES = ("unsupported", "off", "on")
 FRAME_COUNTER_FIELDS = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
                 "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_streaming",
-                "contention_retry_armed", "native_request_redraw", "user_request_redraw", "redraw_requested"),
+                "contention_retry_armed",
+                # dirt_ack_dropped counts receipts dropped at a collection; a base older than it shows n/a.
+                "dirt_ack_dropped", "native_request_redraw", "user_request_redraw", "redraw_requested"),
                ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
     "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
              "fg_probe_calls", "fg_probe_panes", "fg_worker_probes", "fg_worker_panes", "fg_results_stale",

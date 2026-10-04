@@ -454,7 +454,7 @@ fn only_the_redraw_paths_measure_tab_widths() {
             .unwrap_or_else(|| panic!("{name} keeps the drawn widths"));
         let prepare = source.find(".begin_frame_fonts()").expect("fonts are prepared");
         let measure = source.find(".measure_tab_widths(").expect("measure");
-        let render = source.find(".render_with_outcome(").expect("render call");
+        let render = source.find(".render_releasing(").expect("render call");
         let settle = source
             .find("settle_tab_widths(")
             .unwrap_or_else(|| panic!("{name} settles the widths on the outcome"));

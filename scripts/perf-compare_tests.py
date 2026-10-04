@@ -5078,7 +5078,8 @@ class WindowsComparisonLegTests(unittest.TestCase):
 COUNTER_CONTRACT = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
                 "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_streaming",
-                "contention_retry_armed", "native_request_redraw", "user_request_redraw", "redraw_requested"),
+                "contention_retry_armed", "dirt_ack_dropped", "native_request_redraw", "user_request_redraw",
+                "redraw_requested"),
                ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
     "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
              "fg_probe_calls", "fg_probe_panes", "fg_worker_probes", "fg_worker_panes", "fg_results_stale",
@@ -5505,6 +5506,28 @@ class CounterTableTests(unittest.TestCase):
         rows, _omitted = perf.counter_rows("S9/default", supported_zero, head)
         cells = {row[2]: (row[3], row[4]) for row in rows[1:]}
         self.assertEqual(cells["renderer.font_fallback_applies (count)"], ("0 (0–0)", "2 (2–2)"))
+
+    def test_dropped_acknowledgements_are_required_on_the_head_and_n_a_on_an_older_base(self):
+        # dirt_ack_dropped joined the window section: a head must report it, a base built before it reads n/a
+        # with no change shown, a supporting base that dropped nothing prints a real 0, and a gate-off run
+        # carries no phase counters, so it is never checked for the field.
+        lacking = counters_result()
+        del lacking["phases"][0]["frame_counters"]["window"]["dirt_ack_dropped"]
+        problems = perf.validate_result(lacking, HARNESS_HASH, 0, counters=True)
+        self.assertTrue(any("window.dirt_ack_dropped" in problem for problem in problems), problems)
+        self.assertEqual(perf.validate_result(lacking, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        head = counters_side({"window.dirt_ack_dropped": 3})
+
+        def dropped_cells(base):
+            rows, _omitted = perf.counter_rows("S3/default", base, head)
+            return {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}["window.dirt_ack_dropped (count)"]
+
+        self.assertEqual(dropped_cells(perf.SideRuns(outcomes=[make_outcome(result=lacking)])),
+                         ("n/a", "3 (3–3)", "n/a"))
+        self.assertEqual(dropped_cells(perf.SideRuns(outcomes=[make_outcome(result=counters_result())])),
+                         ("0 (0–0)", "3 (3–3)", perf.percent_change(0, 3)))
+        gate_off = valid_result(frame_counters="off")
+        self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
 
     def test_suppressed_flushes_are_required_on_the_head_and_n_a_on_an_older_base(self):
         # flushes_suppressed joined the vt section: a head's typing phase must report it, a base built before it

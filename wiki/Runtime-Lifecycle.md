@@ -455,9 +455,12 @@ attempt time plus its effective frame period. This floor is separate from the
 last-frame timestamp and is combined with normal pacing. Input or redraw events
 before it cannot bypass or extend it. A due failed attempt rearms from that
 attempt; coherent collection clears it before renderer-specific retries, and
-window removal discards it. Successful guards remain alive through
-`GpuRenderer::render_with_outcome`; no blocking lock or unconditional heartbeat is
-added.
+window removal discards it. Successful guards are lent to
+`GpuRenderer::render_releasing` and released when assembly ends, before
+presentation. A presented frame's receipts become the window's single pending set,
+applied at its next successful collection after viewport reconciliation. Every
+other outcome, a hidden, parked or stopped window, and a contended or invalid
+collection keep the set. No blocking lock or unconditional heartbeat is added.
 
 ### Config reload and save
 

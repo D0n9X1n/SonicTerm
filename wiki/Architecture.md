@@ -120,12 +120,17 @@ It acquires all visible parser guards with `try_lock`, then briefly locks and co
 only those panes' image lists. Inactive-tab and zoom-hidden image stores cannot defer
 the visible frame and are not cloned. The owned handles outlive the guards through
 ordinary borrows, without a lifetime cast. The shared builder creates real
-`PaneRender` grid borrows and moves each image snapshot once; parser guards remain
-held through `GpuRenderer::render_with_outcome` and revision acknowledgement. Any visible lock
-miss discards the whole collection before entering the existing contention retry.
+`PaneRender` grid borrows and moves each image snapshot once, inside the frame source
+(`HeldFrameSource`) that owns the parser guards. `GpuRenderer::render_releasing` borrows the
+panes from that source exactly once, to assemble the frame. The guards drop as soon as
+assembly ends, before the surface is acquired, the retained frame blitted, or the frame
+submitted and presented, so the VT worker can parse during presentation. A presented frame
+returns metadata receipts. The window applies them at its next successful collection, under
+the guards that collection holds. Any visible lock miss discards the whole collection before
+entering the existing contention retry.
 
-`GpuRenderer::render_with_outcome` receives visible `PaneRender` records plus explicit UI
-arguments. A metadata-only `FramePlan` selects identity, mode, damage, clips,
+`GpuRenderer::render_releasing` receives a frame source that lends visible `PaneRender` records,
+plus explicit UI arguments. A metadata-only `FramePlan` selects identity, mode, damage, clips,
 viewport slots, and expected revisions; it is not a copied-grid or threaded
 renderer boundary. Production uses `PaneRender` and `WeztermPipeline`, not the
 public compatibility `RenderInputs`/`Painter` seams. See

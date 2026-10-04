@@ -319,7 +319,8 @@ and requests the frame again.
 
 On `RedrawRequested`, the app computes the active tab's pane rectangles. It
 uses `try_lock` for every required inline-image store and every active-tab
-parser, and keeps all parser guards for the render call. If one lock is
+parser, and moves all parser guards into the frame source the renderer assembles
+from; they are released as soon as assembly ends, before presentation. If one lock is
 unavailable, it drops every collected guard, records a pending redraw, and
 returns without calling the renderer. The frame is complete or absent;
 SonicTerm does not present a mix of old and new pane state.
@@ -336,7 +337,8 @@ For each visible pane, the app builds `PaneRender` with:
 
 The production call passes the pane slice plus explicit theme, cursor,
 selection, copy mode, tabs, search, palette, IME, viewport, notification, and
-hovered-URL data to `GpuRenderer::render_with_outcome`. It does not construct one
+hovered-URL data to `GpuRenderer::render_releasing`, with the panes lent by the
+frame source. It does not construct one
 aggregate `RenderInputs` value.
 
 ### 10. Damage and row caches select work
@@ -395,8 +397,10 @@ Windows CPU presentation calls `finish_successful_frame` only after
 `queue.present(frame)`. The wgpu present call itself has no success result for a
 later compositor failure.
 
-`finish_successful_frame` stores the new `FrameKey`, increments the successful
-frame count, and clears dirty rows only when pane identity and grid revision still match the frame plan.
+`finish_successful_frame` stores the new `FrameKey` and increments the successful
+frame count; it clears no dirt. The presented frame's receipts are applied at the
+window's next collection: when the same parser is held and the pane's size generation and
+screen epoch still match, it clears the pane's dirty rows except those dirtied after assembly.
 
 Before a wgpu draw:
 

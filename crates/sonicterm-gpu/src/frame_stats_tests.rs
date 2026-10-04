@@ -375,13 +375,19 @@ fn every_renderer_entry_point_that_can_shape_opens_a_collection_scope() {
         .map(|body| body.name)
         .collect::<BTreeSet<_>>();
     for entry_point in [
-        "render_with_outcome",
+        "render_releasing",
         "measure_overlay_text_width",
         "notification_layout",
         "measure_tab_widths",
     ] {
         assert!(scoped.contains(entry_point), "{entry_point} opens no scope: {scoped:?}");
     }
+    // The compatibility wrapper opens no scope of its own: it reaches the one `render_releasing` opens.
+    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let wrapper = core.split_once("    pub fn render_with_outcome(").expect("wrapper").1;
+    let wrapper = wrapper.split_once("\n    }\n").expect("wrapper body").0;
+    assert!(!wrapper.contains("CollectGuard::enter("), "the wrapper opens its own scope");
+    assert!(wrapper.contains("self.render_releasing("), "the wrapper bypasses render_releasing");
 }
 
 #[test]

@@ -156,6 +156,7 @@ impl GpuRenderer {
             return false;
         }
         self.release_image_atlas("idle_interval");
+        self.flush_image_upload_rebuild();
         true
     }
 
@@ -176,10 +177,9 @@ impl GpuRenderer {
         let released_width = self.image_atlas.width();
         let released_height = self.image_atlas.height();
         self.image_atlas = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
-        if !self.uses_windows_software_presenter() {
-            // The GPU mirror must shrink with the CPU atlas when software presentation is inactive.
-            self.rebuild_image_upload_if_needed();
-        }
+        // The GPU mirror shrinks with the CPU atlas once no parser guard is held: after `lend`
+        // returns for a frame, or at once for the interval trigger, which runs outside any frame.
+        self.image_upload_rebuild_pending = true;
         self.frames_without_inline_media = 0;
         tracing::debug!(
             target: "memory",
@@ -210,10 +210,8 @@ impl GpuRenderer {
             return false;
         }
         self.image_atlas = GlyphAtlas::default_size();
-        if !self.uses_windows_software_presenter() {
-            // The GPU mirror must grow before sampling media when software presentation is inactive.
-            self.rebuild_image_upload_if_needed();
-        }
+        // The GPU mirror grows after `lend` returns, before any presenter samples the media.
+        self.image_upload_rebuild_pending = true;
         tracing::debug!(
             target: "memory",
             renderer_role = self.render_timing_label,
@@ -232,6 +230,16 @@ impl GpuRenderer {
             "inline image atlas promoted"
         );
         true
+    }
+
+    /// Rebuild the image mirror an assembly or a release asked for, once no parser guard is held.
+    /// The software presenter samples the CPU atlas directly and needs no mirror.
+    pub(super) fn flush_image_upload_rebuild(&mut self) {
+        if std::mem::take(&mut self.image_upload_rebuild_pending)
+            && !self.uses_windows_software_presenter()
+        {
+            self.rebuild_image_upload_if_needed();
+        }
     }
 
     /// Rebuild a mismatched glyph mirror only inside the live device gate.

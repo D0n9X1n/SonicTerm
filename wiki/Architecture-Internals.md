@@ -362,19 +362,33 @@ validated active index is retained; layout order never implies active index zero
 One `FramePlan` composes the key, mode, damage, clips, and viewport slots from
 captured metadata. Copy-mode identity covers every field and quick-select hint
 without cloning its owned text. The plan retains visible-pane and dirty-row
-metadata, never hidden history or cell rows. Existing parser guards remain held
-through stateful assembly and presentation; no PTY write can interleave on those
-grids during that borrow.
+metadata, never hidden history or cell rows. Parser guards are held through stateful
+assembly only: `render_releasing` assembles inside the source's single `lend` and presents
+after the source, with its guards, is dropped, so a PTY write can land between assembly and
+presentation. The renderer clears no grid dirt. A presented frame returns one metadata
+`AckReceipt` per acknowledged pane: its index, pane id, revision, dirty generation, size
+generation, screen epoch, and rows. The window keeps them as its pending set. At its next
+successful collection, after viewport reconciliation and before planning, a receipt applies
+only when the same parser is held and the grid's size generation and screen epoch still match.
+It then clears the receipt's rows that were last dirtied at or before the receipt's dirty
+generation, and keeps every row dirtied after assembly: each dirty row records the generation
+that set it. A resize or a screen switch renumbers the rows, so such a receipt is dropped, its
+dirt is kept, and the drop is counted in `dirt_ack_dropped`, as is a receipt whose pane is not
+held or whose parser changed. Every write that sets a dirty bit advances `dirty_generation`,
+which is part of the frame key, so presented but unacknowledged dirt never takes the
+unchanged-key shortcut.
 
-Dirty rows clear only in `finish_successful_frame`, and only when the pane id and
-current grid revision exactly match that plan's captured expectation:
+The renderer clears no grid dirt. A frame issues its metadata receipts only when it is
+`Presented`, which `finish_successful_frame` follows:
 
 - on Windows CPU presentation, after `SetDIBitsToDevice` returns success;
 - on wgpu presentation, after command submission and `queue.present(frame)` are
   invoked.
 
 On both paths the frame's device must also still accept GPU work, as described
-under GPU error containment below.
+under GPU error containment below. The receipts clear dirt only at the window's next
+successful collection, only when the same parser is held and the pane's size generation and
+screen epoch still match, and only for rows not dirtied again after assembly.
 
 `SetDIBitsToDevice` can report failure. wgpu's present call has no result that
 reports a later presentation failure. Surface timeout, occlusion, outdated,
@@ -463,12 +477,12 @@ Every renderer method that issues GPU work runs only while its device is
   configuration and the GPU atlas-upload rebuilds;
 - `set_scale_factor` and `force_rebuild_for_scale` recompute the CPU-side font
   metrics and skip the GPU upload rebuild;
-- `allocator_snapshot` returns `None`, and `render_with_outcome` and `render` do
-  no work.
+- `allocator_snapshot` returns `None`, and `render_releasing`, `render_with_outcome` and
+  `render` do no work.
 
 Reading device features for the LCD policy is not GPU work.
 
-`render_with_outcome` checks the gate after its empty-pane guard and reports a
+`render_releasing` checks the gate during assembly, right after its empty-pane exit, and reports a
 stopped device as `PresentOutcome::RenderingUnavailable`, with the device
 generation and gate reading. Only the first such outcome on each renderer
 carries the stop report: `render` maps it to `Err`, which the app logs once, and
@@ -598,8 +612,9 @@ one retry without acknowledging the grid. The retry disables eviction until one
 frame presents successfully. Diagnostic eviction fields remain actual counts, and
 reset/replacement has a distinct reason. The fixed pixel allocation does not grow.
 The private `atlas_lifecycle` child of `core` owns those transitions and the existing
-upload gates. `FrameBatches` groups only borrowed drawable slices; grids, parser
-guards, frame plans, and acknowledgement remain with frame assembly.
+upload gates. `FrameBatches` groups only borrowed slices of the owned batches; grids and parser
+guards stay with assembly and are released before presentation, and acknowledgement
+happens at the window's next collection.
 
 `RowGlyphCache` and `LineQuadCache` hold one entry per `(pane id, absolute row)`
 and validate it by the stored row hash; glyph entries also by atlas content

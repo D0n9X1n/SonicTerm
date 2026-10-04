@@ -463,7 +463,7 @@ fn command_badge_role_capture_and_wait_fold_preserve_due_order() {
         let capture = source
             .find("sources.try_collect(|| self.snapshot_window_redraw(win_id))")
             .expect("each production role uses the scheduler snapshot before its parser locks");
-        let render = source.find("let outcome = r.render_with_outcome(").unwrap();
+        let render = source.find("r.render_releasing(").unwrap();
         assert!(poll < capture && capture < render);
     }
     let source = include_str!("event_loop.rs");
@@ -932,7 +932,11 @@ fn production_roles_preserve_prelock_snapshot_and_exact_attempt_accounting() {
         ),
     ] {
         assert!(source.contains("sources.try_collect(|| self.snapshot_window_redraw(win_id))"));
-        let render = source.find("let outcome = r.render_with_outcome(").unwrap();
+        // The call binds its outcome and the presented frame's receipts by destructuring.
+        let render = source.find("r.render_releasing(").unwrap();
+        let binding =
+            source[..render].rfind("let sonicterm_gpu::core::FrameOutcome { outcome, receipts } =");
+        assert!(binding.is_some_and(|binding| render - binding < 80));
         let classify = source[render..].find("FrameSettlement::of(&outcome)").unwrap();
         let consume = source[render..].find("outcome.into_render_result()").unwrap();
         assert!(classify < consume);

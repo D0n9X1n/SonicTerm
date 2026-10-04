@@ -45,28 +45,72 @@ fn recovery_probe_starts_without_native_custody() {
     assert!(!probe.stale_event_observed);
 }
 
-/// The native oracle must consume the same marker-bearing plan before compatibility conversion discards the typed outcome.
-#[test]
-fn recovery_marker_proof_is_bound_to_each_present_callback() {
-    for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
-        let render = source.find("let outcome = r.render_with_outcome(").unwrap();
+/// The recovery-marker scan over one checkout of the two adapters and the probe, read as LF.
+fn check_recovery_marker_proof(main: &str, child: &str, probe: &str) {
+    for source in [main.replace("\r\n", "\n"), child.replace("\r\n", "\n")] {
+        let sample = source.find("smoke.recovery_marker_sample(").unwrap();
+        let render = source.find("r.render_releasing(").unwrap();
         let evidence = source.find("smoke.observe_recovery_frame(").unwrap();
         let call = source[evidence..].split_once(");").unwrap().0;
-        assert!(call.contains("r.device_generation()") && call.contains("&panes_slice"));
+        assert!(call.contains("r.device_generation()") && call.contains("sample"));
+        assert!(!source.contains("panes_slice"));
         let compatibility = source.find("outcome.into_render_result()").unwrap();
-        assert!(render < evidence && evidence < compatibility);
+        assert!(sample < render && render < evidence && evidence < compatibility);
     }
-    let source = include_str!("gpu_recovery_smoke.rs");
+    let source = probe.replace("\r\n", "\n");
     let observe = source.split_once("pub(super) fn observe_frame(").unwrap().1;
     let observe = observe.split_once("impl App").unwrap().0;
     assert!(observe.contains("PresentOutcome::Presented"));
     assert!(observe.contains("proof.window == window"));
-    assert!(observe.contains("pane.id == proof.pane"));
-    assert!(observe.contains("grid_marker_rows(pane.grid, marker) > proof.marker_rows"));
-    assert!(observe.contains("visible_marker(pane.grid, pane.viewport_top_abs, marker)"));
+    assert!(observe.contains("mark.pane == proof.pane"));
+    assert!(observe.contains("mark_proves(mark, proof.marker_rows)"));
+    // The grid reads live in the sample, taken while the guards are held.
+    let sample = source.split_once("pub(super) fn marker_sample<").unwrap().1;
+    let sample = sample.split_once("pub(super) fn observe_frame(").unwrap().0;
+    assert!(sample.contains("mark_of(pane, grid, viewport_top_abs, marker)"));
+    let mark = source.split_once("pub(in crate::app) fn mark_of(").unwrap().1;
+    let mark = mark.split_once("\n}\n").unwrap().0;
+    assert!(mark.contains("grid_marker_rows(grid, marker)"));
+    assert!(mark.contains("visible_marker(grid, viewport_top_abs, marker)"));
+    assert!(!observe.split_once("pub(super) fn observe_device_event").unwrap().0.contains("grid"));
     assert!(observe
         .contains("accepts_proof_generation(self.stage, self.original_generation, generation)"));
     assert!(observe.contains("proof.presented_generation = Some(generation)"));
+}
+
+/// The native oracle must consume the same marker-bearing plan before compatibility conversion discards the typed outcome.
+#[test]
+fn recovery_marker_proof_is_bound_to_each_present_callback() {
+    // The marker facts are copied from the held guards before the call that releases them, and the
+    // verdict is applied with the call's outcome before compatibility conversion. Windows CI checks
+    // sources out with CRLF line ends, so the scan runs on a CRLF copy too.
+    scan_marker_proof_in_both_line_ends([
+        include_str!("window_event.rs"),
+        include_str!("child_window_redraw.rs"),
+        include_str!("gpu_recovery_smoke.rs"),
+    ]);
+}
+
+/// Run the marker-proof scan over the checkout as given and over its CRLF form, built from the
+/// LF-normalized text so an already-CRLF checkout never becomes `\r\r\n`.
+fn scan_marker_proof_in_both_line_ends(sources: [&str; 3]) {
+    check_recovery_marker_proof(sources[0], sources[1], sources[2]);
+    let crlf = sources.map(|text| text.replace("\r\n", "\n").replace('\n', "\r\n"));
+    check_recovery_marker_proof(&crlf[0], &crlf[1], &crlf[2]);
+}
+
+/// A Windows checkout hands include_str! CRLF text; the scan must still read it as LF.
+#[test]
+fn marker_proof_scan_accepts_a_checkout_that_is_already_crlf() {
+    // Building the CRLF variant from CRLF text would yield `\r\r\n`, which one normalization
+    // leaves as `\r\n`, so every LF delimiter lookup in the scan would miss.
+    let crlf = [
+        include_str!("window_event.rs"),
+        include_str!("child_window_redraw.rs"),
+        include_str!("gpu_recovery_smoke.rs"),
+    ]
+    .map(|text| text.replace("\r\n", "\n").replace('\n', "\r\n"));
+    scan_marker_proof_in_both_line_ends([&crlf[0], &crlf[1], &crlf[2]]);
 }
 
 /// A pre-loss present never proves recovery, and post-loss observations are accepted only in the recovery stage.
@@ -163,4 +207,24 @@ fn native_recovery_smoke_runs_after_the_production_recovery_service() {
     let smoke = wait.find("self.drive_gpu_recovery_smoke(event_loop, Instant::now())").unwrap();
     assert!(production < warm && warm < smoke);
     assert!(wait.contains("self.gpu_recovery_smoke_deadline()"));
+}
+
+/// Marker facts copied from an unchanged grid agree with reading the grid directly, and the verdict
+/// is the drawn frame's: after the grid is rewritten its own facts no longer prove the marker, while
+/// the facts copied for the drawn frame still do.
+#[test]
+fn a_marker_sample_agrees_with_the_grid_and_keeps_the_drawn_frames_verdict() {
+    let mut parser = sonicterm_vt::vt::Parser::new(sonicterm_grid::grid::Grid::new(20, 3));
+    drop(parser.advance(b"marker one"));
+    let drawn = mark_of(7, parser.grid(), None, "marker");
+    let read = RecoveryMark {
+        pane: 7,
+        marker_rows: grid_marker_rows(parser.grid(), "marker"),
+        visible: visible_marker(parser.grid(), None, "marker"),
+    };
+    assert_eq!(drawn, read);
+    assert!(mark_proves(&drawn, 0));
+    drop(parser.advance(b"\x1b[2J\x1b[3J\x1b[H"));
+    assert!(!mark_proves(&mark_of(7, parser.grid(), None, "marker"), 0), "the rewrite hides it");
+    assert!(mark_proves(&drawn, 0), "the drawn frame's verdict stands");
 }
