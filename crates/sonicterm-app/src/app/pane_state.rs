@@ -134,6 +134,14 @@ pub struct PaneState {
     /// Pointer-routing modes (`Parser::pointer_input_snapshot`) published after each parser batch,
     /// so pointer handlers route without taking the parser lock.
     pub pointer_input: Arc<std::sync::atomic::AtomicU8>,
+    /// Synchronized output (DEC 2026) as `epoch << 1 | set`, published by the VT worker under the
+    /// parser lock after each parser section; travels with this pane across window transfers.
+    pub(crate) sync_word: Arc<AtomicU64>,
+    /// When the current synchronized update stops holding, in `sync_clock` nanoseconds; meaningful
+    /// only while `sync_word` has its set bit.
+    pub(crate) sync_deadline_ns: Arc<AtomicU64>,
+    /// The parser's monotonic count of synchronized-output resets, published with `sync_word`.
+    pub(crate) sync_resets: Arc<AtomicU64>,
     /// Decoded inline media images captured from terminal protocols.
     pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
     /// This pane's share of the process-wide inline-media total.
@@ -177,9 +185,13 @@ impl PaneState {
         pty: Option<PtyHandle>,
         media_pool: &Arc<media::InlineMediaPool>,
     ) -> Self {
-        let (keyboard_input, pointer_input) = {
+        let (keyboard_input, pointer_input, sync_state) = {
             let parser = crate::app::frame_counters::lock_parser(&parser);
-            (parser.keyboard_input_snapshot(), parser.pointer_input_snapshot())
+            (
+                parser.keyboard_input_snapshot(),
+                parser.pointer_input_snapshot(),
+                parser.synchronized_output(),
+            )
         };
         Self {
             // Assigned when the pane is inserted into a window.
@@ -207,6 +219,10 @@ impl PaneState {
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             keyboard_input: Arc::new(AtomicU64::new(keyboard_input)),
             pointer_input: Arc::new(std::sync::atomic::AtomicU8::new(pointer_input)),
+            sync_word: Arc::new(AtomicU64::new(super::spawn_pane::sync_word_of(sync_state))),
+            // A deadline of 0 has already passed, so an inherited open update never holds.
+            sync_deadline_ns: Arc::new(AtomicU64::new(0)),
+            sync_resets: Arc::new(AtomicU64::new(sync_state.resets)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
             inline_media_charge: media_pool.new_charge(),
             frame_counters: None,

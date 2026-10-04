@@ -31,7 +31,7 @@ use sonicterm_ui::{
     tabbar_view::{TabBarLayout, TabHit},
     tabs::{Tab, TabBar},
 };
-use sonicterm_vt::vt::{CommandEvent, MediaEvent, Parser, VtEvent};
+use sonicterm_vt::vt::{CommandEvent, MediaEvent, Parser, SyncState, VtEvent};
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},
@@ -153,6 +153,48 @@ pub(super) fn report_pane_exit(
     let _ = proxy.send_event(UserEvent::PaneProcessExited { pane_id, was_clean });
 }
 
+/// How long one synchronized update (DEC 2026) may hold a pane's output before it is released.
+pub(in crate::app) const SYNC_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// Pack synchronized output as the pane publishes it: `epoch << 1 | set`.
+pub(in crate::app) fn sync_word_of(state: SyncState) -> u64 {
+    (state.epoch << 1) | u64::from(state.set)
+}
+
+/// Unpack a published synchronized-output word into `(set, epoch)`.
+pub(in crate::app) fn sync_word_parts(word: u64) -> (bool, u64) {
+    (word & 1 == 1, word >> 1)
+}
+
+/// The worker's record of synchronized-output resets across the parser sections of a batch.
+///
+/// Each section only sets `reset_pending`, so a reset in any section of a batch survives later
+/// sections that see none; the flush decision clears it after it has sent for the whole batch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::app) struct SyncLatch {
+    /// The parser reset count the worker has already seen.
+    pub(in crate::app) seen_resets: u64,
+    /// A reset arrived since the last flush decision sent.
+    pub(in crate::app) reset_pending: bool,
+}
+
+impl SyncLatch {
+    /// A latch that has seen every reset the pane has already published.
+    // Ordering: sync_resets loads Relaxed; the worker that owns the latch is the only writer.
+    pub(in crate::app) fn for_pane(handles: &PaneVtHandles) -> Self {
+        Self { seen_resets: handles.sync_resets.load(Ordering::Relaxed), reset_pending: false }
+    }
+
+    /// Note the parser's reset count after one section; a new reset sets `reset_pending`.
+    fn note_resets(&mut self, resets: u64) {
+        if resets > self.seen_resets {
+            // A reset happened in this section; it stays pending until the batch is flushed.
+            self.reset_pending = true;
+            self.seen_resets = resets;
+        }
+    }
+}
+
 /// Pane-owned state shared with its VT worker.
 #[derive(Clone)]
 pub(in crate::app) struct PaneVtHandles {
@@ -162,6 +204,9 @@ pub(in crate::app) struct PaneVtHandles {
     cursor_visible: Arc<AtomicBool>,
     keyboard_input: Arc<AtomicU64>,
     pointer_input: Arc<std::sync::atomic::AtomicU8>,
+    sync_word: Arc<AtomicU64>,
+    sync_deadline_ns: Arc<AtomicU64>,
+    sync_resets: Arc<AtomicU64>,
     output_generation: Arc<AtomicU64>,
     output_outstanding: Arc<AtomicBool>,
     inline_images: Arc<Mutex<Vec<InlineImage>>>,
@@ -179,6 +224,9 @@ impl PaneVtHandles {
             cursor_visible: pane.cursor_visible.clone(),
             keyboard_input: pane.keyboard_input.clone(),
             pointer_input: pane.pointer_input.clone(),
+            sync_word: pane.sync_word.clone(),
+            sync_deadline_ns: pane.sync_deadline_ns.clone(),
+            sync_resets: pane.sync_resets.clone(),
             output_generation: pane.output_generation.clone(),
             output_outstanding: pane.output_outstanding.clone(),
             inline_images: pane.inline_images.clone(),
@@ -211,6 +259,7 @@ pub(super) fn spawn_pane_workers(
             let mut pending_bytes: usize = 0;
             let mut command_started: Option<Instant> = None;
             let mut replies_failed = false;
+            let mut sync_latch = SyncLatch::for_pane(&worker_handles);
             let mut redraw_probe = crate::app::invariants::RedrawCoalescerProbe::new();
             loop {
                 match out_rx.recv_timeout(if pending {
@@ -228,6 +277,7 @@ pub(super) fn spawn_pane_workers(
                             &worker_handles,
                             bytes,
                             &mut command_started,
+                            &mut sync_latch,
                             redraw_proxy.as_ref(),
                             |reply| {
                                 if replies_failed {
@@ -356,17 +406,34 @@ pub(in crate::app) fn send_output_redraw<Target: Clone>(
     }
 }
 
+/// Publish the parser's synchronized output to the pane; the caller holds the parser lock.
+///
+/// A new epoch that is set gets a deadline `SYNC_OUTPUT_TIMEOUT` from `now`; a repeated set keeps it.
+// Ordering: sync_resets and sync_deadline_ns store Relaxed before sync_word's Release store;
+// an Acquire load of sync_word sees the matching resets and deadline.
+fn publish_sync_output(handles: &PaneVtHandles, state: SyncState, now: impl FnOnce() -> Instant) {
+    handles.sync_resets.store(state.resets, Ordering::Relaxed);
+    let (_, published_epoch) = sync_word_parts(handles.sync_word.load(Ordering::Relaxed));
+    if state.set && state.epoch != published_epoch {
+        // A newly opened epoch starts its own deadline; a repeated set keeps the old one.
+        let deadline = super::sync_clock::nanos_at(now() + SYNC_OUTPUT_TIMEOUT);
+        handles.sync_deadline_ns.store(deadline, Ordering::Relaxed);
+    }
+    handles.sync_word.store(sync_word_of(state), Ordering::Release);
+}
+
 /// Publish one completed nonempty batch only after parser, media, and host side effects return.
 // Ordering: output_generation Release pairs with the window's pre-lock Acquire snapshot.
 pub(in crate::app) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
     handles: &PaneVtHandles,
     bytes: Bytes,
     command_started: &mut Option<Instant>,
+    sync_latch: &mut SyncLatch,
     proxy: Option<&EventLoopProxy<UserEvent>>,
     send_reply: impl FnMut(Vec<u8>),
 ) {
     let nonempty = !bytes.as_ref().is_empty();
-    process_pane_vt_batch(handles, bytes, command_started, proxy, send_reply);
+    process_pane_vt_batch(handles, bytes, command_started, sync_latch, proxy, send_reply);
     if nonempty {
         handles.output_generation.fetch_add(1, Ordering::Release);
     }
@@ -377,6 +444,7 @@ pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
     handles: &PaneVtHandles,
     bytes: Bytes,
     command_started: &mut Option<Instant>,
+    sync_latch: &mut SyncLatch,
     proxy: Option<&EventLoopProxy<UserEvent>>,
     send_reply: impl FnMut(Vec<u8>),
 ) {
@@ -384,6 +452,7 @@ pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
         handles,
         bytes,
         command_started,
+        sync_latch,
         super::media::decode_inline_image,
         |event| {
             if let Some(proxy) = proxy {
@@ -398,10 +467,12 @@ pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
 
 // Lock order: inline_images -> inline_media_charge; parser releases before either, and command_events locks after both.
 // Ordering: cursor_visible, keyboard_input and pointer_input use Relaxed; each word is self-contained, not a barrier for parser changes.
+#[allow(clippy::too_many_arguments)]
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
     bytes: Bytes,
     command_started: &mut Option<Instant>,
+    sync_latch: &mut SyncLatch,
     mut decode_media: Decode,
     mut emit_event: Emit,
     mut now: Now,
@@ -433,6 +504,9 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             let parsed_at = before_lock.map(|_| now());
             handles.keyboard_input.store(parser.keyboard_input_snapshot(), Ordering::Relaxed);
             handles.pointer_input.store(parser.pointer_input_snapshot(), Ordering::Relaxed);
+            let sync_state = parser.synchronized_output();
+            publish_sync_output(handles, sync_state, &mut now);
+            sync_latch.note_resets(sync_state.resets);
             let released_at = before_lock.map(|_| now());
             (result, (locked_at, parsed_at, released_at))
         };

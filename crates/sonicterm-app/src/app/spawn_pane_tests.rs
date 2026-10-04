@@ -28,15 +28,22 @@ fn real_pty_readonly_parser_reply_uses_production_spool() {
         let before = pty.input_diagnostics().completed_messages;
         let mut submitted = Vec::new();
         phase(pane_id, "parser-query");
-        process_pane_vt_batch(&handles, b"\x1b[6n", &mut None, None, |bytes| {
-            assert!(
-                handles.parser.try_lock().is_some(),
-                "reply writes must release the parser first"
-            );
-            let actual = bytes.clone();
-            replies.send(bytes).expect("production reply spool must accept cursor reply");
-            submitted.push(actual);
-        });
+        process_pane_vt_batch(
+            &handles,
+            b"\x1b[6n",
+            &mut None,
+            &mut SyncLatch::default(),
+            None,
+            |bytes| {
+                assert!(
+                    handles.parser.try_lock().is_some(),
+                    "reply writes must release the parser first"
+                );
+                let actual = bytes.clone();
+                replies.send(bytes).expect("production reply spool must accept cursor reply");
+                submitted.push(actual);
+            },
+        );
         assert_eq!(submitted, vec![b"\x1b[1;1R".to_vec()]);
         phase(pane_id, "reply-writer-completion");
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -72,6 +79,7 @@ fn reply_bursts_preserve_every_byte_and_release_parser_before_delivery() {
         &handles,
         &input,
         &mut None,
+        &mut SyncLatch::default(),
         |_| None,
         |_| {},
         Instant::now,
@@ -100,6 +108,7 @@ fn reply_spool_admission_leaves_parser_available_with_visible_output_applied() {
             &handles,
             b"\x1b[6nX",
             &mut None,
+            &mut SyncLatch::default(),
             |_| None,
             |_| {},
             Instant::now,
@@ -127,6 +136,7 @@ fn reply_delivery_failure_does_not_abandon_visible_output() {
         &handles,
         b"\x1b[6nX",
         &mut None,
+        &mut SyncLatch::default(),
         |_| None,
         |_| {},
         Instant::now,
@@ -296,6 +306,7 @@ fn prompt_end_does_not_start_command_timer() {
         &handles,
         b"\x1b]133;B\x07",
         &mut started,
+        &mut SyncLatch::default(),
         |_| None,
         |_| {},
         Instant::now,
@@ -316,6 +327,7 @@ fn command_duration_excludes_prompt_editing_time() {
         &handles,
         b"\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;B\x07\x1b]133;D;0\x07",
         &mut started,
+        &mut SyncLatch::default(),
         |_| None,
         |_| {},
         || times.next().unwrap(),
@@ -361,6 +373,7 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
         &handles,
         bytes.as_bytes(),
         &mut command_started,
+        &mut SyncLatch::default(),
         |media| {
             decoder_unlocked = Some(parser.try_lock().is_some());
             assert_eq!(media.protocol, MediaProtocol::Kitty);
@@ -439,6 +452,7 @@ fn pane_vt_batch_publishes_pointer_modes_after_each_parse() {
         &handles,
         b"\x1b[?1002h\x1b[?1006h\x1b[?1049h\x1b[?1h",
         &mut command_started,
+        &mut SyncLatch::default(),
         |_| None,
         |_| {},
         Instant::now,
@@ -455,6 +469,7 @@ fn pane_vt_batch_publishes_pointer_modes_after_each_parse() {
         &handles,
         b"\x1b[?1002l\x1b[?1049l",
         &mut command_started,
+        &mut SyncLatch::default(),
         |_| None,
         |_| {},
         Instant::now,
@@ -509,6 +524,9 @@ fn pane_derived_worker_handles_share_every_store_with_the_pane() {
     assert!(Arc::ptr_eq(&worker.keyboard_input, &pane.keyboard_input));
     assert!(Arc::ptr_eq(&worker.pointer_input, &pane.pointer_input));
     assert!(Arc::ptr_eq(&worker.inline_media_charge, &pane.inline_media_charge));
+    assert!(Arc::ptr_eq(&worker.sync_word, &pane.sync_word));
+    assert!(Arc::ptr_eq(&worker.sync_deadline_ns, &pane.sync_deadline_ns));
+    assert!(Arc::ptr_eq(&worker.sync_resets, &pane.sync_resets));
 }
 
 /// The media pool outlives the app while a VT worker still holds a pane's
@@ -541,19 +559,44 @@ fn worker_output_generation_is_published_after_complete_nonempty_batches() {
     assert!(Arc::ptr_eq(&pane.output_generation, &handles.output_generation));
     let generation = Arc::clone(&handles.output_generation);
     let mut replies = 0;
-    process_pane_vt_batch_and_publish(&handles, b"x\x1b[6n", &mut None, None, |_| {
-        replies += 1;
-        assert_eq!(generation.load(Ordering::Acquire), 0, "publication must follow reply dispatch");
-        assert!(handles.parser.try_lock().is_some());
-        assert!(handles.inline_images.try_lock().is_some());
-    });
+    process_pane_vt_batch_and_publish(
+        &handles,
+        b"x\x1b[6n",
+        &mut None,
+        &mut SyncLatch::default(),
+        None,
+        |_| {
+            replies += 1;
+            assert_eq!(
+                generation.load(Ordering::Acquire),
+                0,
+                "publication must follow reply dispatch"
+            );
+            assert!(handles.parser.try_lock().is_some());
+            assert!(handles.inline_images.try_lock().is_some());
+        },
+    );
     assert_eq!(replies, 1);
     assert_eq!(generation.load(Ordering::Acquire), 1);
     assert!(handles.parser.try_lock().is_some());
     assert!(handles.inline_images.try_lock().is_some());
-    process_pane_vt_batch_and_publish(&handles, b"", &mut None, None, |_| {});
+    process_pane_vt_batch_and_publish(
+        &handles,
+        b"",
+        &mut None,
+        &mut SyncLatch::default(),
+        None,
+        |_| {},
+    );
     assert_eq!(generation.load(Ordering::Acquire), 1, "empty input is not output publication");
-    process_pane_vt_batch_and_publish(&handles, b"y", &mut None, None, |_| {});
+    process_pane_vt_batch_and_publish(
+        &handles,
+        b"y",
+        &mut None,
+        &mut SyncLatch::default(),
+        None,
+        |_| {},
+    );
     assert_eq!(generation.load(Ordering::Acquire), 2);
 }
 
@@ -608,7 +651,16 @@ fn counting_worker_times_each_parser_section_from_four_clock_reads() {
         clock_reads += 1;
         start + Duration::from_micros(clock_reads * 10)
     };
-    process_pane_vt_batch_with(&handles, b"hello", &mut None, |_| None, |_| {}, clock, |_| {});
+    process_pane_vt_batch_with(
+        &handles,
+        b"hello",
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| {},
+        clock,
+        |_| {},
+    );
     assert_eq!(clock_reads, 4, "one read before lock() and three under the guard");
     let (wait, parse, hold) = (
         stats.parser_lock_wait.snapshot(),
@@ -629,7 +681,16 @@ fn worker_without_counters_reads_no_clock() {
         clock_reads += 1;
         Instant::now()
     };
-    process_pane_vt_batch_with(&handles, b"hello", &mut None, |_| None, |_| {}, clock, |_| {});
+    process_pane_vt_batch_with(
+        &handles,
+        b"hello",
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| {},
+        clock,
+        |_| {},
+    );
     assert_eq!(clock_reads, 0);
 }
 
@@ -776,4 +837,100 @@ fn gate_off_output_events_still_coalesce_without_reading_the_flush_clock() {
         send_output_redraw(&target, &gate_on, Some(&counters), |_| true);
     }
     assert_eq!(flush_clock_reads(), before + 3, "one read per targeted flush with the gate on");
+}
+
+/// The pane's published synchronized-output word, deadline and reset count, read under `parser`.
+fn published_sync(handles: &PaneVtHandles) -> (u64, u64, u64) {
+    (
+        handles.sync_word.load(Ordering::Acquire),
+        handles.sync_deadline_ns.load(Ordering::Relaxed),
+        handles.sync_resets.load(Ordering::Relaxed),
+    )
+}
+
+/// Under a held parser guard the published word equals the parser's `synchronized_output()`, the
+/// reset count is the parser's, and a set word carries the deadline stored with its epoch: the
+/// injected clock at the batch that opened the epoch plus the 150 ms bound. A repeated set keeps
+/// that deadline, and a new epoch gets a new one.
+#[test]
+fn sync_word_matches_the_parser_under_its_guard() {
+    use crate::app::sync_clock;
+    let (_pane, handles) = pane_and_worker_handles();
+    let origin = sync_clock::origin();
+    let mut clock_ms = 10_u64;
+    let mut latch = SyncLatch::default();
+    let feed = |bytes: &[u8], at_ms: u64, latch: &mut SyncLatch| {
+        let at = origin + Duration::from_millis(at_ms);
+        process_pane_vt_batch_with(
+            &handles,
+            bytes,
+            &mut None,
+            latch,
+            |_| None,
+            |_| {},
+            || at,
+            |_| {},
+        );
+    };
+    let check = |expected_deadline_ms: Option<u64>| {
+        let parser = handles.parser.lock();
+        let state = parser.synchronized_output();
+        let (word, deadline_ns, resets) = published_sync(&handles);
+        assert_eq!(word, sync_word_of(state), "{state:?}");
+        assert_eq!(resets, state.resets);
+        if let Some(deadline_ms) = expected_deadline_ms {
+            let expected = Duration::from_millis(deadline_ms) + SYNC_OUTPUT_TIMEOUT;
+            assert_eq!(deadline_ns, sync_clock::nanos_at(origin + expected));
+        }
+    };
+    check(None);
+    assert_eq!(published_sync(&handles), (0, 0, 0), "a fresh pane holds nothing");
+
+    feed(b"\x1b[?2026hrow", clock_ms, &mut latch);
+    check(Some(10));
+    clock_ms += 40;
+    feed(b"\x1b[?2026hmore", clock_ms, &mut latch);
+    check(Some(10));
+    clock_ms += 40;
+    feed(b"\x1b[?2026l", clock_ms, &mut latch);
+    check(None);
+    assert!(latch.reset_pending, "the reset is latched for the flush decision");
+    clock_ms += 40;
+    feed(b"\x1b[?2026h", clock_ms, &mut latch);
+    check(Some(130));
+    feed(b"\x1bc", clock_ms, &mut latch);
+    check(None);
+    assert_eq!(published_sync(&handles).2, 2, "RIS is published as a reset");
+}
+
+/// A reader that takes the parser guard while a worker thread opens and closes updates always sees
+/// the word that matches the parser it holds: both are written under that guard.
+#[test]
+fn sync_word_never_disagrees_with_a_held_parser_across_threads() {
+    let (_pane, handles) = pane_and_worker_handles();
+    let worker_handles = handles.clone();
+    let worker = std::thread::spawn(move || {
+        let mut latch = SyncLatch::default();
+        for _ in 0..500 {
+            for bytes in [&b"\x1b[?2026hx"[..], b"\x1b[?2026l", b"\x1b[?2026h\x1b[?2026ly"] {
+                process_pane_vt_batch_and_publish(
+                    &worker_handles,
+                    bytes,
+                    &mut None,
+                    &mut latch,
+                    None,
+                    |_| {},
+                );
+            }
+        }
+    });
+    let mut checks = 0_u32;
+    while !worker.is_finished() || checks == 0 {
+        let parser = handles.parser.lock();
+        let state = parser.synchronized_output();
+        assert_eq!(handles.sync_word.load(Ordering::Acquire), sync_word_of(state));
+        assert_eq!(handles.sync_resets.load(Ordering::Relaxed), state.resets);
+        checks += 1;
+    }
+    worker.join().unwrap();
 }

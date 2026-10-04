@@ -398,6 +398,7 @@ impl App {
             &handles,
             bytes,
             &mut None,
+            &mut super::spawn_pane::SyncLatch::default(),
             None,
             |_| {},
         );
