@@ -161,8 +161,10 @@ macOS 和 X11 的原生 `Occluded` 事件按窗口处理，先于主窗口和子
 才重新安排一秒后的探测。这不会组装帧或消耗脏状态。原生 acquire/configure 可能阻塞；
 这是低频异常检查，不是非阻塞保证，也不是普通心跳。
 
-`__occlude_next_surface_acquire` 是仅 macOS 的故障入口，无需切换 Space 即可到达真实的带类型
-重试出口。假时钟窗口测试和源代码契约覆盖策略，但不能代替同一窗口的完整应用 CPU 测量，
+`__occlude_next_surface_acquire` 是测试故障入口，在 wgpu 呈现器的 acquire 步骤到达真实的带类型
+重试出口，无需切换 Space 或遮挡窗口。它适用于各平台的 wgpu 呈现器；Windows 软件呈现器没有
+surface acquire，因此已设置的故障会等到 wgpu 帧。Windows 释放顺序测试经由它驱动兼容包装器，
+并检查 surface 重试保留网格脏状态。假时钟窗口测试和源代码契约覆盖策略，但不能代替同一窗口的完整应用 CPU 测量，
 也不能代替恢复后首帧完整呈现的原生证据。
 
 ### 锁争用重试

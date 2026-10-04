@@ -129,6 +129,20 @@ pub fn acknowledge_receipts(
         .count()
 }
 
+/// Settle one releasing frame for a caller that still borrows its grids: apply the receipts only
+/// when the frame was presented, and return its outcome. Every other outcome keeps the dirty rows.
+pub fn settle_borrowed_frame(
+    frame: FrameOutcome,
+    panes: &mut [sonicterm_render_model::PaneRender<'_>],
+) -> PresentOutcome {
+    let FrameOutcome { outcome, receipts } = frame;
+    if matches!(outcome, PresentOutcome::Presented) {
+        // Presented: nothing could change the borrowed grids since assembly, so apply the receipts.
+        acknowledge_receipts(&receipts, panes);
+    }
+    outcome
+}
+
 /// What `render_releasing` reports: how the frame ended, and when it presented, one metadata receipt
 /// per pane its plan acknowledges. Receipts are non-empty only for `Presented`.
 #[derive(Debug)]
@@ -1853,7 +1867,6 @@ pub struct GpuRenderer {
     /// Test fault: every later frame records an invalid clear of this buffer.
     fault_frame_probe: Option<wgpu::Buffer>,
     /// Test seam: return one backend occlusion after the normal frame device gate.
-    #[cfg(target_os = "macos")]
     fault_surface_occluded: bool,
     /// Test seam: replace the glyph atlas identity during the next assembly, as an atlas reset
     /// mid-frame would, so that frame takes the atlas retry.
@@ -2865,7 +2878,6 @@ impl GpuRenderer {
             device_stop_reported: false,
             fault_invalid_glyph_upload: false,
             fault_frame_probe: None,
-            #[cfg(target_os = "macos")]
             fault_surface_occluded: false,
             #[cfg(target_os = "windows")]
             fault_stop_before_cached_present: false,
@@ -3845,8 +3857,9 @@ impl GpuRenderer {
         self.last_frame_key = None;
     }
 
-    /// Force one typed backend-occlusion result on the next real frame without switching macOS Spaces.
-    #[cfg(target_os = "macos")]
+    /// Force one typed backend-occlusion result on the next real wgpu frame, at the acquire step,
+    /// without switching macOS Spaces or covering a window. The Windows software presenter has no
+    /// surface acquire, so on that presenter the armed fault waits for a wgpu frame.
     #[doc(hidden)]
     pub fn __occlude_next_surface_acquire(&mut self) {
         self.fault_surface_occluded = true;
@@ -4866,7 +4879,7 @@ impl GpuRenderer {
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> PresentOutcome {
-        let FrameOutcome { outcome, receipts } = self.render_releasing(
+        let frame = self.render_releasing(
             fonts,
             sonicterm_render_model::BorrowedSource(&mut *panes),
             theme,
@@ -4883,11 +4896,7 @@ impl GpuRenderer {
             hovered_url_cells,
             link_preview,
         );
-        if matches!(outcome, PresentOutcome::Presented) {
-            // Presented: nothing could change the borrowed grids since assembly, so apply the receipts.
-            acknowledge_receipts(&receipts, panes);
-        }
-        outcome
+        settle_borrowed_frame(frame, panes)
     }
 
     // Same borrow shape as `render`, whose rationale covers this suppression too.

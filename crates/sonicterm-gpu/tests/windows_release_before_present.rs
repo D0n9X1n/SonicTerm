@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use sonicterm_gpu::core::{
     acknowledge_receipts, FrameOutcome, GpuRenderer, PresentOutcome, RendererSettings, SkipReason,
-    SurfaceAppearance,
+    SurfaceAppearance, SurfaceRetryReason,
 };
 use sonicterm_gpu::device_errors::GpuFaultKind;
 use sonicterm_gpu::frame_stats::FrameStats;
@@ -56,9 +56,28 @@ fn check(condition: bool, message: &str) -> Result<(), String> {
     }
 }
 
+/// Whether this host enumerates no wgpu adapter at all, established apart from renderer
+/// construction. That is the only limitation that turns a failed wgpu renderer into a skip;
+/// surface configuration, device and resource errors on a host with an adapter fail the test.
+fn host_has_no_adapter() -> bool {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty()
+}
+
+/// Classify a wgpu renderer construction failure: `HOST_INCAPABLE` only when no adapter exists.
+fn wgpu_construction_failure(error: impl std::fmt::Display) -> String {
+    if host_has_no_adapter() {
+        format!("HOST_INCAPABLE: no wgpu adapter: {error}")
+    } else {
+        // When: host_has_no_adapter is false an adapter exists, so the construction error is a defect.
+        format!("wgpu renderer construction failed on a host with an adapter: {error}")
+    }
+}
+
 /// A renderer on its own window, presenting through GDI (`software`, `Force`) or through wgpu (`Off`,
 /// which never degrades, even on a software adapter). The presenter it resolved is checked. A wgpu
-/// renderer the host cannot create is reported as `HOST_INCAPABLE: ...`, never passed silently.
+/// renderer is skipped as `HOST_INCAPABLE: ...` only when the host enumerates no adapter.
 fn fresh_renderer(
     active: &ActiveEventLoop,
     role: &'static str,
@@ -94,7 +113,7 @@ fn fresh_renderer(
     };
     let mut renderer = match GpuRenderer::new(window, active, &Theme::default(), settings) {
         Ok(renderer) => renderer,
-        Err(error) if !software => return Err(format!("HOST_INCAPABLE: wgpu renderer: {error}")),
+        Err(error) if !software => return Err(wgpu_construction_failure(error)),
         Err(error) => return Err(error.to_string()),
     };
     check(
@@ -283,7 +302,8 @@ fn stopped_device_returns_its_typed_exits(active: &ActiveEventLoop) -> Result<()
 
 /// Test 9: the wrapper on a dirty standalone grid gives the releasing call's outcome and pixels,
 /// clears the dirt after `Presented`, and keeps it after a planned `Noop` skip, an atlas retry and a
-/// stopped frame. A surface retry has no injection seam on Windows and is not exercised here.
+/// stopped frame. The wgpu presenter's surface retry is covered by
+/// `wrapper_keeps_dirt_after_a_surface_retry`.
 fn wrapper_matches_the_releasing_call(active: &ActiveEventLoop) -> Result<(), String> {
     let mut wrapper = fresh_renderer(active, "release-wrapper", true)?;
     let mut releasing = fresh_renderer(active, "release-wrapper", true)?;
@@ -356,6 +376,34 @@ fn wrapper_matches_the_releasing_call(active: &ActiveEventLoop) -> Result<(), St
         &format!("the stopped wrapper frame: {stopped:?}"),
     )?;
     check(wrapper_grid.dirty_count() > 0, "a stopped wrapper frame keeps its dirt")
+}
+
+/// The wrapper on a wgpu renderer whose next acquire is forced to report occlusion: the real
+/// `render_with_outcome` path returns `SurfaceRetry`, keeps every dirty row, and the next frame
+/// presents and clears them.
+fn wrapper_keeps_dirt_after_a_surface_retry(active: &ActiveEventLoop) -> Result<(), String> {
+    let mut renderer = match fresh_renderer(active, "release-wrapper-surface", false) {
+        Err(reason) if reason.starts_with("HOST_INCAPABLE") => {
+            // When: fresh_renderer found no adapter at all, report the capability, not a pass.
+            println!("capability=HOST_INCAPABLE case=release-wrapper-surface reason={reason}");
+            return Ok(());
+        }
+        other => other?,
+    };
+    let mut grid = text_grid("surface");
+    let first = wrapped(&mut renderer, &mut grid);
+    check(matches!(first, PresentOutcome::Presented), &format!("the first frame: {first:?}"))?;
+    grid.mark_all_dirty();
+    renderer.__occlude_next_surface_acquire();
+    let retry = wrapped(&mut renderer, &mut grid);
+    check(
+        matches!(retry, PresentOutcome::SurfaceRetry(SurfaceRetryReason::Occluded)),
+        &format!("the occluded acquire retries: {retry:?}"),
+    )?;
+    check(grid.dirty_count() == usize::from(grid.rows), "a surface retry keeps every dirty row")?;
+    let after = wrapped(&mut renderer, &mut grid);
+    check(matches!(after, PresentOutcome::Presented), &format!("the retried frame: {after:?}"))?;
+    check(grid.dirty_count() == 0, "the presented retry clears the dirt")
 }
 
 /// The deterministic counters test 10 compares; durations are left out.
@@ -486,6 +534,7 @@ fn run(active: &ActiveEventLoop) -> Result<(), String> {
     lend_drop_present(active)?;
     stopped_device_returns_its_typed_exits(active)?;
     wrapper_matches_the_releasing_call(active)?;
+    wrapper_keeps_dirt_after_a_surface_retry(active)?;
     counters_match_on_fresh_renderers(active)
 }
 

@@ -411,7 +411,6 @@ impl GpuRenderer {
             ),
             "the frame texture must match the configured surface"
         );
-        #[cfg(target_os = "macos")]
         if std::mem::take(&mut self.fault_surface_occluded) {
             // When: `fault_surface_occluded` is armed, use the real typed retry exit without touching the native surface.
             self.last_frame_key = None;

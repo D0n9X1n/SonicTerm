@@ -453,8 +453,7 @@ fn backend_occlusion_fault_seam_cannot_bypass_device_gate_or_touch_native_surfac
     let upload = render.find("self.image_upload.sync(").unwrap();
     let acquire = render.find("self.surface.get_current_texture()").unwrap();
     assert!(gate < fault && fault < retry && retry < upload && upload < acquire);
-    assert!(render
-        .contains("#[cfg(target_os=\"macos\")]ifstd::mem::take(&mutself.fault_surface_occluded)"));
+    assert!(render.contains(";ifstd::mem::take(&mutself.fault_surface_occluded)"));
 }
 
 /// Neither presenter reads a grid: both compose only the owned batches, so the frame's source can be

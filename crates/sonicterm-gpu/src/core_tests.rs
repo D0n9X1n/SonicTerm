@@ -5122,6 +5122,62 @@ fn borrowed_acknowledgement_clears_only_matching_receipts_and_their_rows() {
     assert_eq!(panes[0].grid.dirty_count(), 0);
 }
 
+/// The compatibility wrapper's settlement keeps the borrowed grid's dirt for every outcome but
+/// `Presented`, even when the frame carries a matching receipt; a surface retry is the case a
+/// renderer-free host cannot otherwise reach, so it is checked for each retry reason.
+#[test]
+fn settling_a_borrowed_frame_clears_dirt_only_when_presented() {
+    use sonicterm_render_model::{AckReceipt, AckRows, CursorStyle, PaneRender};
+    let not_presented = || {
+        vec![
+            PresentOutcome::SurfaceRetry(SurfaceRetryReason::Occluded),
+            PresentOutcome::SurfaceRetry(SurfaceRetryReason::Timeout),
+            PresentOutcome::SurfaceRetry(SurfaceRetryReason::Outdated),
+            PresentOutcome::AtlasRetry,
+            PresentOutcome::CachedReblit,
+            PresentOutcome::Skipped(SkipReason::Noop),
+            PresentOutcome::Failed(anyhow::anyhow!("presenter failed")),
+        ]
+    };
+    let mut cases: Vec<(PresentOutcome, bool)> =
+        not_presented().into_iter().map(|outcome| (outcome, false)).collect();
+    cases.push((PresentOutcome::Presented, true));
+    for (outcome, clears) in cases {
+        let label = format!("{outcome:?}");
+        let mut grid = Grid::new(8, 3);
+        grid.mark_all_dirty();
+        // A receipt that matches every identity, so only the outcome decides whether it applies.
+        let receipt = AckReceipt::of(0, 7, &grid, AckRows::All);
+        let mut panes = [PaneRender {
+            id: 7,
+            rect_px: PixelRect { x: 0, y: 0, w: 80, h: 60 },
+            grid: &mut grid,
+            viewport_top_abs: None,
+            is_active: true,
+            cursor_style: CursorStyle::default(),
+            is_broadcast_participant: false,
+            scrollbar_alpha: 0.0,
+            inline_images: Vec::new(),
+        }];
+        let frame = FrameOutcome { outcome, receipts: vec![receipt] };
+        let settled = settle_borrowed_frame(frame, &mut panes);
+        assert_eq!(format!("{settled:?}"), label, "settlement returns the frame's outcome");
+        let expected_dirty = if clears { 0 } else { 3 };
+        assert_eq!(panes[0].grid.dirty_count(), expected_dirty, "{label}");
+    }
+}
+
+/// The compatibility wrapper settles through `settle_borrowed_frame` and applies no receipt of its
+/// own, so the settlement rule above is the rule the real `render_with_outcome` path follows.
+#[test]
+fn the_compatibility_wrapper_settles_only_through_settle_borrowed_frame() {
+    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let wrapper = core.split_once("    pub fn render_with_outcome(").expect("wrapper").1;
+    let wrapper = wrapper.split_once("\n    }\n").expect("wrapper body").0;
+    assert!(wrapper.trim_end().ends_with("settle_borrowed_frame(frame, panes)"), "{wrapper}");
+    assert!(!wrapper.contains("acknowledge_receipts"), "the wrapper acknowledges on its own");
+}
+
 /// One call assembles inside `lend` and presents only after it returns: no public split API exists,
 /// `Assembled` is private and borrows nothing, and assembly decides the empty and stopped exits
 /// first, in their existing order, without reaching the device or a presenter.
