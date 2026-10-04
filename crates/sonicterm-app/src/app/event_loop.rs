@@ -413,11 +413,14 @@ impl App {
                     window.ime.is_composing(),
                     window.redraw.monitor_period,
                 );
-                due.push(DueWork {
-                    owner: Some(*id),
-                    cause: DueCause::Frame,
-                    deadline: window.frame_deadline(period, self.software_render_degrade),
-                });
+                // A Sync-held window wakes at its earliest held deadline or its cap, not its pacing floor.
+                let deadline = if window.redraw.sync_hold() {
+                    window.sync_wake_at(now)
+                } else {
+                    // When: `sync_hold()` is false, the pacing floor or link ceiling decides the wake.
+                    window.frame_deadline(period, self.software_render_degrade)
+                };
+                due.push(DueWork { owner: Some(*id), cause: DueCause::Frame, deadline });
             }
             if let Some(deadline) =
                 window.notification.as_ref().and_then(|bubble| bubble.expires_at)

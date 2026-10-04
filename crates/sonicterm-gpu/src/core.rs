@@ -1627,6 +1627,30 @@ pub(crate) struct ValidatedSurfaceSize {
     pub bytes: usize,
 }
 
+/// What a requested surface resize did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeOutcome {
+    /// The surface took a new size.
+    Changed,
+    /// The validated size equals the configured one; nothing was reconfigured.
+    Unchanged,
+    /// The size is unrepresentable; the previous surface stays configured.
+    Rejected,
+}
+
+/// Classify a resize from the configured `(width, height)` to a validated candidate.
+#[must_use]
+pub(crate) fn classify_resize(
+    configured: (u32, u32),
+    candidate: Option<&ValidatedSurfaceSize>,
+) -> ResizeOutcome {
+    match candidate {
+        None => ResizeOutcome::Rejected,
+        Some(size) if (size.width, size.height) == configured => ResizeOutcome::Unchanged,
+        Some(_) => ResizeOutcome::Changed,
+    }
+}
+
 #[must_use]
 pub(crate) fn validated_surface_size(
     width: u32,
@@ -3288,6 +3312,14 @@ impl GpuRenderer {
     /// returned without reconfiguring the surface.
     #[must_use]
     pub fn try_resize(&mut self, width: u32, height: u32) -> bool {
+        self.try_resize_outcome(width, height) != ResizeOutcome::Rejected
+    }
+
+    /// Checked resize that reports whether the surface actually changed size.
+    ///
+    /// `Unchanged` reconfigures nothing and keeps the retained frame; only `Changed` resizes.
+    #[must_use]
+    pub fn try_resize_outcome(&mut self, width: u32, height: u32) -> ResizeOutcome {
         let max_dimension =
             self.device.limits().max_texture_dimension_2d.min(MAX_SURFACE_DIMENSION);
         let Some(size) = validated_surface_size(width, height, max_dimension) else {
@@ -3303,12 +3335,14 @@ impl GpuRenderer {
                 max_bgra_bytes = MAX_SURFACE_BYTES,
                 "renderer rejected unsafe surface resize"
             );
-            return false;
+            return ResizeOutcome::Rejected;
         };
-        if self.config.width == size.width && self.config.height == size.height {
+        if classify_resize((self.config.width, self.config.height), Some(&size))
+            == ResizeOutcome::Unchanged
+        {
             // When: the validated size equals the configured one — common on
             // scale events. Reconfiguring would drop both caches for nothing.
-            return true;
+            return ResizeOutcome::Unchanged;
         }
         let planned_frame_texture =
             frame_texture_extent(self.uses_windows_software_presenter(), size.width, size.height);
@@ -3352,7 +3386,7 @@ impl GpuRenderer {
         // surface dims via the per-call `(sw, sh)` parameter. The
         // legacy `*_buffer.set_size(...)` block that lived here is
         // gone with the glyphon plumbing.
-        true
+        ResizeOutcome::Changed
     }
 
     /// Top inset reserved above the grid: OS titlebar band (when active)
@@ -3816,6 +3850,14 @@ impl GpuRenderer {
             .iter()
             .find(|pane| pane.id == pane_id)
             .map(|pane| [pane.origin_x_logical, pane.origin_y_logical])
+    }
+
+    /// Test-only: the configured surface size `(width, height)` in physical pixels, which a
+    /// `Resized` at the same size leaves `Unchanged`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
     }
 
     /// Rendered layout of a pane from the most recent frame, absent before layout.

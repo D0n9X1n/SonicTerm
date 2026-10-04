@@ -35,6 +35,9 @@ cargo test -p sonicterm-vt
   a path that stages unconditionally or renders a partial payload. A cut
   Sixel is byte-identical to a complete short one, so a partial render is
   indistinguishable from correct output.
+- DEC 2026 is stored, not acted on: `Parser::synchronized_output()` reports the mode,
+  an epoch that moves only on reset-to-set, and a monotonic reset count (RIS counts
+  too; `?1049l` clears no mode). DECRQM is answered for mode 2026 only.
 - `cancel_capture` is called by the host on a stalled transfer, and the
   sender is never told. It must leave the parser swallowing the remaining
   payload rather than returning to ground — a payload is printable ASCII

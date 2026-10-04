@@ -87,6 +87,15 @@ cargo build -p sonicterm-app
 - Recovery prepares and commits all live/warm renderers in one callback, retires
   failed candidates before dispatch resumes, and never joins its request worker.
 - Do not add unconditional heartbeat redraws at the tail of event handling.
+- Synchronized output (DEC 2026): a pane runs exactly one VT worker, which publishes
+  `sync_word` (resets, epoch, set bit) and the epoch-tagged `sync_deadline_word` under
+  the parser lock; lock-free readers use `read_published_sync` and treat an untagged
+  deadline as not yet published. The worker holds output events while an update is open,
+  flushes once after the batch that resets it is published, and releases at 150 ms
+  (`sync_timeouts`). Windows hold by `DeferRule::Sync` for at most 150 ms per stretch;
+  only first frame, Visibility, DeviceRecovered, `resize_pending` and
+  `surface_recovery_pending` force a frame. Both adapters recheck under the guards
+  before receipts and abandon a held frame unsettled; the display link never runs for it.
 - Pane output generations publish after complete batches; the collector Acquire-loads
   identities before locking. Frame completion settles only captured owner generations.
   `last_render` is the attempt clock. On hardware, streaming is paced from `stream_clock`,

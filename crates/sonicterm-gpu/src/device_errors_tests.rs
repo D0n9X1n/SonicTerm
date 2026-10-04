@@ -283,7 +283,8 @@ fn generations_are_unique() {
 /// Renderer methods that must issue their GPU work through the device gate.
 const GATED_METHODS: &[&str] = &[
     "new_async",
-    "try_resize",
+    // `try_resize` delegates here; this body configures the surface through the gate.
+    "try_resize_outcome",
     "set_software_render_degrade",
     "rebuild_glyph_upload_if_needed",
     "rebuild_image_upload_if_needed",

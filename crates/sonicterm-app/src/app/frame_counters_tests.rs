@@ -524,7 +524,8 @@ const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/pane_state.rs", 1),
     ("app/scroll.rs", 1),
     ("app/search_handle.rs", 2),
-    ("app/spawn_pane.rs", 1),
+    // The pane spawn, and the worker latch reading the parser once before its first batch.
+    ("app/spawn_pane.rs", 2),
     ("app/viewport_anchor.rs", 1),
     ("app/window_keyboard.rs", 2),
 ];
@@ -578,19 +579,43 @@ fn the_parser_lock_audit_reports_each_unconverted_site() {
     assert_eq!(parser_lock_audit(&converted, &[], &[], &[]).len(), 1);
 }
 
+/// The rules are ordered Timeout > Contention > Sync > Streaming, and no predicate after the
+/// winner runs: the sync and streaming checks do Acquire loads, and streaming allocates.
 #[test]
 fn the_winning_deferral_rule_is_counted_and_later_predicates_never_run() {
-    // The streaming check allocates and does Acquire loads, so it must not run after a winner.
     let later = std::cell::Cell::new(0_u32);
     let bump = || {
         later.set(later.get() + 1);
         true
     };
-    assert_eq!(defer_rule(|| true, bump, bump), Some(DeferRule::Timeout));
-    assert_eq!(defer_rule(|| false, || true, bump), Some(DeferRule::Contention));
+    assert_eq!(defer_rule(|| true, bump, bump, bump), Some(DeferRule::Timeout));
+    assert_eq!(defer_rule(|| false, || true, bump, bump), Some(DeferRule::Contention));
+    assert_eq!(defer_rule(|| false, || false, || true, bump), Some(DeferRule::Sync));
     assert_eq!(later.get(), 0, "no predicate ran after the winner");
-    assert_eq!(defer_rule(|| false, || false, || true), Some(DeferRule::Streaming));
-    assert_eq!(defer_rule(|| false, || false, || false), None);
+    assert_eq!(defer_rule(|| false, || false, || false, || true), Some(DeferRule::Streaming));
+    assert_eq!(defer_rule(|| false, || false, || false, || false), None);
+}
+
+/// `defer_sync` counts the Sync rule and joins the window record by name between
+/// `defer_contention` and `defer_streaming`; a window that never held reports it as zero.
+#[test]
+fn defer_sync_joins_the_window_record_between_contention_and_streaming() {
+    assert_eq!(WindowFrameCounters::default().record(None, 0).count("defer_sync"), Some(0));
+    let mut counters = WindowFrameCounters {
+        defer_contention: 1,
+        defer_streaming: 2,
+        ..WindowFrameCounters::default()
+    };
+    counters.note_defer(DeferRule::Sync);
+    counters.note_defer(DeferRule::Sync);
+    let record = counters.record(None, 0);
+    assert_eq!(record.count("defer_sync"), Some(2));
+    let fields = record.line_fields();
+    let order: Vec<usize> = ["defer_contention=1", "defer_sync=2", "defer_streaming=2"]
+        .iter()
+        .map(|name| fields.find(name).unwrap_or_else(|| panic!("{name} in {fields}")))
+        .collect();
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{fields}");
 }
 
 #[test]
@@ -1660,4 +1685,24 @@ fn damage_waste_joins_the_renderer_record_after_damaged_frames() {
         fields.find("damage_waste_permille_sum=37").expect("damage_waste_permille_sum field");
     let software = fields.find("software_frames=1").expect("software_frames field");
     assert!(damaged < waste && waste < software, "{fields}");
+}
+
+/// `sync_timeouts` joins the App record by name, after `flushes_suppressed` and before
+/// `ui_parser_locks`, so the harness and perf-compare read it in contract order; an App whose
+/// workers never timed out a synchronized update still reports it, as zero.
+#[test]
+fn sync_timeouts_joins_the_app_record_after_flushes_suppressed() {
+    let counters = AppFrameCounters::new();
+    assert_eq!(counters.record().count("sync_timeouts"), Some(0), "supported zero");
+    counters.vt.flushes_suppressed.fetch_add(2, Ordering::Relaxed);
+    counters.vt.sync_timeouts.fetch_add(3, Ordering::Relaxed);
+    counters.dispatch.locks.fetch_add(1, Ordering::Relaxed);
+    let record = counters.record();
+    assert_eq!(record.count("sync_timeouts"), Some(3));
+    let fields = record.line_fields();
+    let order: Vec<usize> = ["flushes_suppressed=2", "sync_timeouts=3", "ui_parser_locks=1"]
+        .iter()
+        .map(|name| fields.find(name).unwrap_or_else(|| panic!("{name} in {fields}")))
+        .collect();
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{fields}");
 }

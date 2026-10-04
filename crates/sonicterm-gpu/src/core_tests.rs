@@ -5805,3 +5805,34 @@ fn presented_damage_recording_and_glyph_injection_are_opt_in() {
     let call = assembly.find("self.push_injected_test_glyph(").expect("seam call");
     assert!(guard < call, "the seam is reached only when a glyph is injected");
 }
+
+/// A resize to the configured size is `Unchanged`, a new valid size `Changed`, and an
+/// unrepresentable one `Rejected`; a zero size clamps to one pixel before it is compared.
+#[test]
+fn resize_outcome_distinguishes_changed_unchanged_and_rejected() {
+    let max = MAX_SURFACE_DIMENSION;
+    let same = validated_surface_size(800, 600, max);
+    assert_eq!(classify_resize((800, 600), same.as_ref()), ResizeOutcome::Unchanged);
+    let wider = validated_surface_size(801, 600, max);
+    assert_eq!(classify_resize((800, 600), wider.as_ref()), ResizeOutcome::Changed);
+    let unsafe_size = validated_surface_size(u32::MAX, u32::MAX, max);
+    assert_eq!(classify_resize((800, 600), unsafe_size.as_ref()), ResizeOutcome::Rejected);
+    let zero = validated_surface_size(0, 0, max);
+    assert_eq!(classify_resize((1, 1), zero.as_ref()), ResizeOutcome::Unchanged);
+}
+
+/// `try_resize_outcome` returns `Unchanged` through `classify_resize` before it reconfigures the
+/// surface or clears the retained key, and reports `Changed` only after the new size is applied.
+#[test]
+fn try_resize_outcome_returns_unchanged_before_any_reconfiguration() {
+    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let body = core.split("pub fn try_resize_outcome(").nth(1).expect("the resize body");
+    let body = &body[..body.find("\n    }\n").expect("the body ends")];
+    let unchanged =
+        body.find("return ResizeOutcome::Unchanged;").expect("an unchanged early return");
+    assert!(body[..unchanged].contains("classify_resize("), "{body}");
+    let configure = body.find("self.surface.configure(").expect("the surface is configured");
+    let key = body.find("self.last_frame_key = None;").expect("the retained key is cleared");
+    assert!(unchanged < configure && unchanged < key, "{body}");
+    assert!(body.trim_end().ends_with("ResizeOutcome::Changed"), "{body}");
+}

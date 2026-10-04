@@ -722,7 +722,7 @@ fn a_contention_retry_stays_timer_owned_with_a_link_installed() {
 /// A synchronized-output hold stops the link, and no tick can authorize the held frame; the stored
 /// `Link` survives as data. Released before the 20 ms ceiling, the admission defers and the link
 /// restarts at a newer generation; released after it, the admission is a fallback with no restart.
-/// `sync_hold` is set the way the synchronized-output writer sets it.
+/// The hold is the window's winning `Sync` deferral, set the way admission sets it.
 #[test]
 fn a_sync_hold_stops_the_link_and_keeps_the_mode() {
     for child_owner in [false, true] {
@@ -732,7 +732,9 @@ fn a_sync_hold_stops_the_link_and_keeps_the_mode() {
             assert!(!admit_output(&mut app, owner, at_ms(base, 1)));
             about_to_wait(&mut app, owner, at_ms(base, 1));
             let held = redraw_of(&app, owner).link_live.expect("the link runs");
-            app.windows.get_mut(&owner).unwrap().redraw.sync_hold = true;
+            let redraw = &mut app.windows.get_mut(&owner).unwrap().redraw;
+            redraw.deferred_rule = Some(crate::app::frame_counters::DeferRule::Sync);
+            assert!(redraw.sync_hold(), "{label}: a deferred window under Sync is held");
             set_fake_now(at_ms(base, 2));
             app.sync_display_links();
             assert_eq!(log.borrow().calls, vec![true, false], "{label}: the hold stops the link");
@@ -748,14 +750,14 @@ fn a_sync_hold_stops_the_link_and_keeps_the_mode() {
             assert_eq!(redraw_of(&app, owner).pacing, Some(PacingMode::Link), "{label}");
             if late {
                 assert!(admit_at(&mut app, owner, at_ms(base, 50)), "{label}: past the ceiling");
-                assert!(!redraw_of(&app, owner).sync_hold, "{label}");
+                assert!(!redraw_of(&app, owner).sync_hold(), "{label}");
                 assert_eq!(link_counts(&app, owner), (0, 0, 1), "{label}");
                 assert_eq!(redraw_of(&app, owner).pacing, None, "{label}");
                 about_to_wait(&mut app, owner, at_ms(base, 50));
                 assert_eq!(log.borrow().calls, vec![true, false], "{label}: no restart");
             } else {
                 assert!(!admit_at(&mut app, owner, at_ms(base, 17)), "{label}: before the ceiling");
-                assert!(!redraw_of(&app, owner).sync_hold, "{label}");
+                assert!(!redraw_of(&app, owner).sync_hold(), "{label}");
                 about_to_wait(&mut app, owner, at_ms(base, 17));
                 let restarted = redraw_of(&app, owner).link_live.expect("restarted");
                 assert!(restarted > held, "{label}");
@@ -955,4 +957,40 @@ fn the_assignment_scan_tells_a_write_from_a_comparison() {
     assert!(assigns("self.redraw.pacing = None;", "pacing"));
     assert!(!assigns("if self.redraw.pacing == Some(mode) {", "pacing"));
     assert!(!assigns("self.link_pacing = None;", "pacing"));
+}
+
+/// An early wake does not end a synchronized-output hold: after a held admission, a cursor repaint
+/// clears `deferred` before admission re-evaluates, yet the stored `Link` stays paused, and a tick
+/// delivered before the next redraw is rejected and not counted.
+#[test]
+fn an_early_wake_keeps_a_held_window_off_the_link() {
+    use crate::app::spawn_pane::{pack_sync_deadline, sync_word_of};
+    for child_owner in [false, true] {
+        let (mut app, owner, log, base) = linked_owner(child_owner);
+        assert!(!admit_output(&mut app, owner, at_ms(base, 1)));
+        about_to_wait(&mut app, owner, at_ms(base, 1));
+        let held = redraw_of(&app, owner).link_live.expect("the link runs");
+        // A window that has presented once is not forced as a first frame.
+        app.windows.get_mut(&owner).unwrap().redraw.last_present = Some(base);
+        {
+            let window = &app.windows[&owner];
+            let pane = &window.panes[&window.tab_states[window.tabs.active_index()].active_pane];
+            let state = sonicterm_vt::vt::SyncState { set: true, epoch: 1, resets: 0 };
+            let deadline = base + Duration::from_secs(10);
+            pane.sync_deadline_word.store(pack_sync_deadline(1, deadline), Ordering::Relaxed);
+            pane.sync_word.store(sync_word_of(state), Ordering::Release);
+        }
+        assert!(!admit_at(&mut app, owner, at_ms(base, 2)), "child={child_owner}: held");
+        app.sync_display_links();
+        assert_eq!(log.borrow().calls, vec![true, false], "child={child_owner}: paused");
+        app.repaint_owner(owner, &[RedrawCause::Cursor]);
+        set_fake_now(at_ms(base, 3));
+        app.sync_display_links();
+        assert_eq!(log.borrow().calls, vec![true, false], "child={child_owner}: still paused");
+        deliver(&mut app, owner, held);
+        let generation = current_generation(&app, owner);
+        deliver(&mut app, owner, generation);
+        assert_eq!(redraw_of(&app, owner).link_permit, None, "child={child_owner}");
+        assert_eq!(link_counts(&app, owner).0, 0, "child={child_owner}: no tick counted");
+    }
 }

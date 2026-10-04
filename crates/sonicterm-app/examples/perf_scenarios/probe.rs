@@ -138,6 +138,8 @@ struct PhaseMeter {
     slow_dispatches: SlowDispatches,
     present_interval_ms: Vec<f64>,
     allocations: Option<Vec<u64>>,
+    /// The phase's counted updates, from its spec.
+    updates: Option<u32>,
     last_present: Option<Instant>,
     /// Counter totals when the phase started; `None` when the run does not count.
     counters_start: Option<CounterTotals>,
@@ -979,7 +981,7 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     let roles = plan.roles.len();
     let sentinels = (0..roles).map(|role| workload::sentinel_line(role, &prepared.nonce)).collect();
     // Startup is measured from just before the App is built.
-    let meter = PhaseMeter::start("startup", allocation_counter.is_some(), None);
+    let meter = PhaseMeter::start("startup", allocation_counter.is_some(), None, None);
     // Read before the App takes the config, so the presenter record can name the configured mode.
     let software_render_mode = render_mode_text(prepared.config.appearance.software_render_mode);
     let app =
@@ -1170,7 +1172,12 @@ fn write_role_program(
 }
 
 impl PhaseMeter {
-    fn start(name: &'static str, counting: bool, counters_start: Option<CounterTotals>) -> Self {
+    fn start(
+        name: &'static str,
+        counting: bool,
+        counters_start: Option<CounterTotals>,
+        updates: Option<u32>,
+    ) -> Self {
         Self {
             name,
             started: Instant::now(),
@@ -1182,6 +1189,7 @@ impl PhaseMeter {
             slow_dispatches: SlowDispatches::default(),
             present_interval_ms: Vec::new(),
             allocations: counting.then(Vec::new),
+            updates,
             last_present: None,
             counters_start,
         }
@@ -1210,6 +1218,7 @@ impl PhaseMeter {
             present_interval_ms: self.present_interval_ms,
             allocations_per_frame: self.allocations,
             frame_counters,
+            updates: self.updates,
         }
     }
 }
@@ -2205,7 +2214,7 @@ impl Probe {
         tracing::info!(target: LOG_TARGET, phase = phase.name, "perf_scenarios phase started");
         let counters_start = self.counter_totals();
         let counting = self.allocation_counter.is_some();
-        self.meter = Some(PhaseMeter::start(phase.name, counting, counters_start));
+        self.meter = Some(PhaseMeter::start(phase.name, counting, counters_start, phase.updates));
         self.sentinel_roles = match &phase.end {
             PhaseEnd::Sentinels(roles) => roles.clone(),
             _ => Vec::new(),

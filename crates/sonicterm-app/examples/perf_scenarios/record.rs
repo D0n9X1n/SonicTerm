@@ -450,6 +450,10 @@ pub(crate) struct PhaseRecord {
     /// The phase's frame and lock counter delta; present only when the run counts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) frame_counters: Option<CounterTotals>,
+    /// The logical updates the selected workload played in this phase; present only for a phase
+    /// that plays counted updates (S10's `stream`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) updates: Option<u32>,
 }
 
 /// One memory checkpoint at the end of a timed phase.

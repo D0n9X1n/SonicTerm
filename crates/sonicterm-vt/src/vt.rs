@@ -512,6 +512,17 @@ pub struct Osc7Cwd {
     pub path: String,
 }
 
+/// Synchronized output (DEC private mode 2026) as the parser holds it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SyncState {
+    /// Whether the application has an update open (`CSI ? 2026 h`).
+    pub set: bool,
+    /// Count of reset-to-set transitions; a repeated set keeps the current epoch.
+    pub epoch: u64,
+    /// Count of set-to-reset transitions, by `CSI ? 2026 l` or RIS; it never decreases.
+    pub resets: u64,
+}
+
 /// Streaming parser wrapping `vte::Parser` and an internal performer that owns
 /// the grid plus the current SGR attributes.
 pub struct Parser {
@@ -1431,6 +1442,21 @@ impl Parser {
             | (self.keyboard_protocol_epoch() << 16)
     }
 
+    /// Report synchronized output (DEC 2026): whether an update is open, its epoch, and the resets so far.
+    pub fn synchronized_output(&self) -> SyncState {
+        SyncState {
+            set: self.performer.synchronized_output,
+            epoch: self.performer.sync_epoch,
+            resets: self.performer.sync_resets,
+        }
+    }
+
+    /// Test-only: start synchronized output's epoch at `epoch`, so a test can reach an epoch boundary.
+    #[doc(hidden)]
+    pub fn __test_set_sync_epoch(&mut self, epoch: u64) {
+        self.performer.sync_epoch = epoch;
+    }
+
     /// Pack the pointer-routing modes into one byte; decode it with [`PointerModes::from_bits`].
     pub fn pointer_input_snapshot(&self) -> u8 {
         PointerModes::new(
@@ -1536,6 +1562,12 @@ struct Performer {
     /// DECSET ?1000/?1002/?1003 mouse tracking selected by the application.
     mouse_tracking: MouseTracking,
     focus_reporting: bool,
+    /// DEC 2026: an application update is open and should be presented only once it ends.
+    synchronized_output: bool,
+    /// Reset-to-set transitions of `synchronized_output`; see [`SyncState::epoch`].
+    sync_epoch: u64,
+    /// Set-to-reset transitions of `synchronized_output`; see [`SyncState::resets`].
+    sync_resets: u64,
     /// Latest OSC 0/2 title (sticky — survives consumed events).
     title: Option<String>,
     /// Latest permissively-decoded OSC 7 path used only for tab titles.
@@ -1631,6 +1663,9 @@ impl Performer {
             keyboard_protocol_epoch: 0,
             mouse_tracking: MouseTracking::default(),
             focus_reporting: false,
+            synchronized_output: false,
+            sync_epoch: 0,
+            sync_resets: 0,
             title: None,
             cwd: None,
             osc7_cwd: None,
@@ -2006,6 +2041,7 @@ impl Performer {
         self.modify_other_keys = 0;
         self.mouse_tracking = MouseTracking::Off;
         self.focus_reporting = false;
+        self.set_synchronized_output(false);
         self.current_hyperlink = None;
         self.scroll_top = None;
         self.scroll_bottom = None;
@@ -2136,6 +2172,20 @@ impl Performer {
         }
     }
 
+    /// Apply DEC 2026: a reset-to-set transition opens a new epoch, a set-to-reset one is counted.
+    ///
+    /// A repeated set keeps its epoch, so an application cannot renew its own hold by re-setting.
+    fn set_synchronized_output(&mut self, set: bool) {
+        if set && !self.synchronized_output {
+            // The mode opens from reset, so the update gets a fresh epoch.
+            self.sync_epoch = self.sync_epoch.wrapping_add(1);
+        } else if !set && self.synchronized_output {
+            // When: `!set` while `synchronized_output` is set, an update ends; count it so no reset is missed.
+            self.sync_resets = self.sync_resets.wrapping_add(1);
+        }
+        self.synchronized_output = set;
+    }
+
     /// Handle a CSI sequence with `?` intermediate (DEC private modes).
     fn handle_dec_private_mode(&mut self, params: &Params, set: bool) {
         self.reset_last_printed_char();
@@ -2242,9 +2292,7 @@ impl Performer {
                     }
                 }
                 1004 => self.focus_reporting = set,
-                2026 => {
-                    // When: code 2026 is synchronized output; accept the mode while retaining immediate painting semantics.
-                }
+                2026 => self.set_synchronized_output(set),
                 _ => {
                     // When: code is not implemented, preserve current terminal state so unknown private modes remain compatible.
                 }
@@ -2476,6 +2524,15 @@ impl Perform for Performer {
                     // Kitty keyboard protocol query: report the active flags.
                     let flags = self.kitty_keyboard_flags();
                     self.reply(format!("\x1b[?{flags}u").as_bytes());
+                    return;
+                }
+                'p' if inter == b"?$" => {
+                    // When: action is DECRQM; only mode 2026 is answered, every other mode stays silent as before.
+                    let mut modes = params.iter();
+                    if let (Some([2026]), None) = (modes.next(), modes.next()) {
+                        let state = if self.synchronized_output { 1 } else { 2 };
+                        self.reply(format!("\x1b[?2026;{state}$y").as_bytes());
+                    }
                     return;
                 }
                 _ => {

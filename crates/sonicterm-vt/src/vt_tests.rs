@@ -4,7 +4,7 @@ use sonicterm_grid::grid::{CellFlags, Color, Grid, UnderlineStyle};
 
 use super::{
     parse_osc7_cwd_snapshot, CaptureStagingPool, EscapeFamily, MediaCapture, MediaEvent,
-    MediaProtocol, MouseTracking, Osc7Cwd, Parser, PointerModes, VtEvent,
+    MediaProtocol, MouseTracking, Osc7Cwd, Parser, PointerModes, SyncState, VtEvent,
     GUARANTEED_CONCURRENT_CAPTURES, MAX_ESCAPE_SEQUENCE_BYTES, MAX_ITERM2_METADATA_BYTES,
     MAX_MEDIA_PAYLOAD_BYTES, MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
 };
@@ -3453,4 +3453,112 @@ fn live_capture_count_is_per_parser_while_the_pool_counts_all_sharers() {
     sixel.advance(b"\x1b\\");
     assert_eq!(sixel.live_capture_count(), 0);
     assert_eq!(pool.live_captures(), 1, "only the kitty capture is still live");
+}
+
+/// DEC 2026 is stored: `h` sets it, `l` clears it, the epoch moves only on a reset-to-set
+/// transition (a repeated `h` cannot renew a hold), and every set-to-reset transition is
+/// counted, including an `l` followed by an `h` within one `advance`.
+#[test]
+fn synchronized_output_tracks_mode_epoch_and_resets() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    assert_eq!(parser.synchronized_output(), SyncState { set: false, epoch: 0, resets: 0 });
+
+    parser.advance(b"\x1b[?2026h");
+    assert_eq!(parser.synchronized_output(), SyncState { set: true, epoch: 1, resets: 0 });
+    parser.advance(b"\x1b[?2026h");
+    assert_eq!(
+        parser.synchronized_output(),
+        SyncState { set: true, epoch: 1, resets: 0 },
+        "a repeated set keeps its epoch"
+    );
+
+    parser.advance(b"\x1b[?2026l");
+    assert_eq!(parser.synchronized_output(), SyncState { set: false, epoch: 1, resets: 1 });
+    parser.advance(b"\x1b[?2026l");
+    assert_eq!(
+        parser.synchronized_output(),
+        SyncState { set: false, epoch: 1, resets: 1 },
+        "a reset while already reset is not a transition"
+    );
+
+    parser.advance(b"\x1b[?2026hpaint\x1b[?2026l\x1b[?2026h");
+    assert_eq!(
+        parser.synchronized_output(),
+        SyncState { set: true, epoch: 3, resets: 2 },
+        "a reset inside one advance is counted even when the mode is set again"
+    );
+}
+
+/// RIS clears a set mode and counts the reset; leaving the alternate screen clears no mode,
+/// as it clears no other mode; a fresh parser starts reset with no resets counted.
+#[test]
+fn synchronized_output_resets_only_on_ris() {
+    let fresh = Parser::new(Grid::new(8, 2));
+    assert_eq!(fresh.synchronized_output(), SyncState { set: false, epoch: 0, resets: 0 });
+
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[?1049h\x1b[?2026h\x1b[?1049l");
+    assert_eq!(
+        parser.synchronized_output(),
+        SyncState { set: true, epoch: 1, resets: 0 },
+        "?1049l leaves the mode set"
+    );
+
+    parser.advance(b"\x1bc");
+    assert_eq!(parser.synchronized_output(), SyncState { set: false, epoch: 1, resets: 1 });
+    parser.advance(b"\x1bc");
+    assert_eq!(
+        parser.synchronized_output(),
+        SyncState { set: false, epoch: 1, resets: 1 },
+        "RIS while reset counts nothing"
+    );
+}
+
+/// DECRQM for mode 2026 answers `CSI ? 2026 ; Ps $ y`, with Ps 2 while reset and 1 while set,
+/// through the captured reply path, and prints nothing.
+#[test]
+fn decrqm_reports_synchronized_output_state() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b[?2026$p");
+    assert_eq!(reply, b"\x1b[?2026;2$y");
+
+    parser.advance(b"\x1b[?2026h");
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b[?2026$p");
+    assert_eq!(reply, b"\x1b[?2026;1$y");
+
+    parser.advance(b"\x1b[?2026l");
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b[?2026$p");
+    assert_eq!(reply, b"\x1b[?2026;2$y");
+    assert_eq!(parser.grid().cursor.col, 0, "a query prints nothing");
+}
+
+/// Only mode 2026 is answered: DECRQM for any other private mode, and an unhandled `?` final,
+/// stay silent and change no mode, keyboard, pointer or cursor state, as before 2026 was answered.
+#[test]
+fn other_private_mode_queries_stay_unanswered() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[?1h\x1b[?2026h");
+    let before = (
+        parser.synchronized_output(),
+        parser.keyboard_input_snapshot(),
+        parser.pointer_input_snapshot(),
+        parser.grid().cursor.row,
+        parser.grid().cursor.col,
+    );
+    for query in
+        [&b"\x1b[?1$p"[..], b"\x1b[?25$p", b"\x1b[?2026;1$p", b"\x1b[?2026z", b"\x1b[?2026$q"]
+    {
+        let (consumed, events, reply) = parser.advance_with_replies(query);
+        assert_eq!(consumed, query.len(), "{query:?}");
+        assert!(events.is_empty(), "{query:?}");
+        assert!(reply.is_empty(), "{query:?} must not be answered");
+        let after = (
+            parser.synchronized_output(),
+            parser.keyboard_input_snapshot(),
+            parser.pointer_input_snapshot(),
+            parser.grid().cursor.row,
+            parser.grid().cursor.col,
+        );
+        assert_eq!(after, before, "{query:?} changed state");
+    }
 }

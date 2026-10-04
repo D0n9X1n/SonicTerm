@@ -431,3 +431,31 @@ fn run_caps_list_only_where_a_scenario_declares_them() {
         }
     }
 }
+
+/// S10's `stream` phase records the update count its selected workload plays, 1,200 at full
+/// length and 300 with `--short`, read from the workload rather than a constant; every other phase
+/// of every scenario, variant and host records none.
+#[test]
+fn only_s10_stream_carries_its_workload_update_count() {
+    for spec in SCENARIOS {
+        for variant in spec.variants {
+            for (short, host) in [(false, Host::Posix), (true, Host::Posix), (true, Host::Windows)]
+            {
+                let Some(plan) = plan_for(spec.id, variant, short, host) else { continue };
+                let frames = plan.roles.iter().find_map(|role| match role {
+                    Workload::Frames { count, .. } => Some(*count),
+                    _ => None,
+                });
+                for step in &plan.steps {
+                    let Step::Phase(phase) = step else { continue };
+                    let expected = (spec.id == "S10" && phase.name == "stream")
+                        .then(|| frames.expect("S10 plays frames"));
+                    assert_eq!(phase.updates, expected, "{}/{variant} {}", spec.id, phase.name);
+                }
+                if spec.id == "S10" {
+                    assert_eq!(frames, Some(if short { 300 } else { 1_200 }), "{variant}");
+                }
+            }
+        }
+    }
+}

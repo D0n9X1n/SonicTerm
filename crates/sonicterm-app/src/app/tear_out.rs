@@ -389,7 +389,9 @@ impl App {
         let real_sf = window_dpi(window);
         renderer.force_rebuild_for_scale(real_sf);
         let target = super::apply_terminal_window_minimum(window, renderer);
-        renderer.try_resize(target.width.max(1), target.height.max(1))
+        // A configured child presents its first frame, which no synchronized hold can keep back.
+        renderer.try_resize_outcome(target.width.max(1), target.height.max(1))
+            != sonicterm_gpu::core::ResizeOutcome::Rejected
     }
 
     pub(super) fn warm_window_pool_maintain(&mut self, event_loop: &ActiveEventLoop) {

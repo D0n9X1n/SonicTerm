@@ -1934,6 +1934,8 @@ _PHASE_FIELDS = {
         isinstance(item, dict) and all(_finite_non_negative(item.get(key)) for key in SLOW_DISPATCH_KEYS)
         for item in value),
     "dispatch_count": lambda value: _is_int(value) and value >= 0,
+    # The logical updates S10's stream phase played; a harness older than the field leaves it out.
+    "updates": lambda value: _is_int(value) and value > 0,
 }
 
 # result.json's `frame_counters`: whether the binary has the perf-counters feature and the run forced the gate on.
@@ -1942,7 +1944,9 @@ FRAME_COUNTER_STATES = ("unsupported", "off", "on")
 # unit is its name's suffix, and the unit fixes its bucket bounds; the last bucket is the overflow.
 FRAME_COUNTER_FIELDS = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
-                "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_streaming",
+                "contention_parser", "contention_images", "defer_timeout", "defer_contention",
+                # defer_sync counts frames held by a visible open synchronized update; a base older than it shows n/a.
+                "defer_sync", "defer_streaming",
                 # stream_clock_exempt counts settled hardware keypress attempts that kept the streaming clock; a
                 # base older than it shows n/a.
                 "stream_clock_exempt",
@@ -1959,7 +1963,9 @@ FRAME_COUNTER_FIELDS = {
             # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker.
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),
-    "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced", "flushes_suppressed"),
+    "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced", "flushes_suppressed",
+            # sync_timeouts counts synchronized updates released at the 150 ms bound; a base older than it shows n/a.
+            "sync_timeouts"),
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   # damage_waste_permille_sum is the union rect's share minus what its parts cover, over
@@ -3863,6 +3869,11 @@ def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
             metrics[(f"{name} wall", "s", "run")] = wall_s
         if wall_s and _is_int(phase.get("presented_frames")):
             metrics[(f"{name} presented frames", "fps", "run")] = phase["presented_frames"] / wall_s
+        # Presented frames per logical update, divided by this run's own recorded count, never a constant;
+        # a phase without `updates` (every phase but S10's stream, or an older harness) has no figure.
+        if _is_int(phase.get("presented_frames")) and _is_int(phase.get("updates")) and phase["updates"] > 0:
+            metrics[(f"{name} presented frames per update", "ratio", "run")] = \
+                phase["presented_frames"] / phase["updates"]
         if wall_s and _is_int(phase.get("redraw_requested")):
             metrics[(f"{name} redraws requested", "per s", "run")] = phase["redraw_requested"] / wall_s
         if _is_number(phase.get("cpu_user_s")) and _is_number(phase.get("cpu_system_s")):

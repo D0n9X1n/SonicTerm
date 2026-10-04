@@ -85,7 +85,9 @@ pub fn resize_renderer_and_panes_if_present(
         // has no surface to size, and no pane geometry can be derived.
         return false;
     };
-    if !renderer.try_resize(width, height) {
+    // Only the doc-hidden no-renderer helper reaches this; the child `Resized` handler notes its
+    // outcome through `resize_renderer_and_split_panes`.
+    if renderer.try_resize_outcome(width, height) == sonicterm_gpu::core::ResizeOutcome::Rejected {
         // When: `try_resize` rejected `width`/`height` as unrepresentable, so
         // the old surface stands and resizing panes would desync them from it.
         return false;
@@ -117,11 +119,12 @@ pub(super) fn resize_renderer_and_split_panes(
         // resize and no cell metrics to lay the panes out against.
         return false;
     };
-    if !renderer.try_resize(width, height) {
-        // When: `try_resize` refused `width`/`height`, so the panes must keep
-        // matching the surface that is still live.
+    let outcome = renderer.try_resize_outcome(width, height);
+    if outcome == sonicterm_gpu::core::ResizeOutcome::Rejected {
+        // When: `outcome` is `Rejected` for `width`/`height`, the panes keep matching the live surface.
         return false;
     }
+    child.redraw.note_resize(outcome);
     resize_visible_panes_in_child(child);
     true
 }

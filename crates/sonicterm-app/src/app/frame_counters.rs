@@ -611,6 +611,8 @@ pub(crate) struct VtFrameStats {
     pub(crate) flushes_coalesced: AtomicU64,
     /// Targeted flushes that sent no event because the pane's output event was outstanding.
     pub(crate) flushes_suppressed: AtomicU64,
+    /// Synchronized updates (DEC 2026) a worker released at the 150 ms bound, not at their reset.
+    pub(crate) sync_timeouts: AtomicU64,
 }
 
 impl Default for VtFrameStats {
@@ -625,6 +627,7 @@ impl Default for VtFrameStats {
             flushes_untargeted: AtomicU64::new(0),
             flushes_coalesced: AtomicU64::new(0),
             flushes_suppressed: AtomicU64::new(0),
+            sync_timeouts: AtomicU64::new(0),
         }
     }
 }
@@ -1015,15 +1018,18 @@ pub(crate) enum DeferRule {
     Timeout,
     /// The window's lock-contention retry floor.
     Contention,
+    /// A visible pane's synchronized update (DEC 2026) is still open.
+    Sync,
     /// Streaming output paced to the frame period.
     Streaming,
 }
 
 /// The first deferral predicate that holds. A later predicate is never evaluated after an earlier
-/// one was true, because the streaming check allocates and does Acquire loads.
+/// one was true, because the sync and streaming checks do Acquire loads and streaming allocates.
 pub(crate) fn defer_rule(
     timeout: impl FnOnce() -> bool,
     contention: impl FnOnce() -> bool,
+    sync: impl FnOnce() -> bool,
     streaming: impl FnOnce() -> bool,
 ) -> Option<DeferRule> {
     if timeout() {
@@ -1031,6 +1037,9 @@ pub(crate) fn defer_rule(
     } else if contention() {
         // When: `contention` holds after no surface timeout, the retry floor wins.
         Some(DeferRule::Contention)
+    } else if sync() {
+        // When: `sync` holds after timeout and contention did not, a visible open update holds the frame.
+        Some(DeferRule::Sync)
     } else {
         // When: neither `timeout` nor `contention` held, so the streaming check runs, and only now.
         streaming().then_some(DeferRule::Streaming)
@@ -1065,6 +1074,8 @@ pub(crate) struct WindowFrameCounters {
     /// Redraws deferred by the contention retry floor.
     pub(crate) defer_contention: u64,
     /// Redraws deferred by streaming pacing.
+    /// Frames held because a visible pane's synchronized update was open.
+    pub(crate) defer_sync: u64,
     pub(crate) defer_streaming: u64,
     /// Attempts whose completion kept the streaming clock: hardware input attempts that settled.
     pub(crate) stream_clock_exempt: u64,
@@ -1120,6 +1131,7 @@ impl Default for WindowFrameCounters {
             contention_images: 0,
             defer_timeout: 0,
             defer_contention: 0,
+            defer_sync: 0,
             defer_streaming: 0,
             stream_clock_exempt: 0,
             display_link_ticks: 0,
@@ -1205,6 +1217,7 @@ impl WindowFrameCounters {
         match rule {
             DeferRule::Timeout => self.defer_timeout += 1,
             DeferRule::Contention => self.defer_contention += 1,
+            DeferRule::Sync => self.defer_sync += 1,
             DeferRule::Streaming => self.defer_streaming += 1,
         }
     }
@@ -1473,6 +1486,7 @@ impl AppFrameCounters {
             ("flushes_untargeted", &vt.flushes_untargeted),
             ("flushes_coalesced", &vt.flushes_coalesced),
             ("flushes_suppressed", &vt.flushes_suppressed),
+            ("sync_timeouts", &vt.sync_timeouts),
             ("ui_parser_locks", &dispatch.locks),
             ("fg_worker_probes", &self.fg_worker.probes),
             ("fg_worker_panes", &self.fg_worker.panes),
@@ -1545,6 +1559,7 @@ impl WindowFrameCounters {
             ("contention_images", self.contention_images),
             ("defer_timeout", self.defer_timeout),
             ("defer_contention", self.defer_contention),
+            ("defer_sync", self.defer_sync),
             ("defer_streaming", self.defer_streaming),
             ("stream_clock_exempt", self.stream_clock_exempt),
             ("display_link_ticks", self.display_link_ticks),

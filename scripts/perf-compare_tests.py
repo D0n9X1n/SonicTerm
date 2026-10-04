@@ -2254,6 +2254,36 @@ def row_for(rows, metric):
 
 
 class ComparisonTableTests(unittest.TestCase):
+    def test_presented_frames_per_update_divides_by_each_runs_recorded_updates(self):
+        # S10's stream phase records the updates its workload played. The row divides each run's presented
+        # frames by that run's own count, never a constant: runs of 300 and 1,200 updates give 0.5 and 1.0.
+        # A base whose harness predates the field reads n/a with no change; a phase without the field (any
+        # non-S10 phase) gets no row; a malformed count is a result problem.
+        def stream_outcome(presented, updates):
+            phase = dict(valid_result()["phases"][0], name="stream", presented_frames=presented)
+            if updates is not None:
+                phase["updates"] = updates
+            return make_outcome(result=valid_result(phases=[phase]))
+
+        metric = "stream presented frames per update (ratio)"
+        head = perf.SideRuns([stream_outcome(150, 300), stream_outcome(1200, 1200)])
+        for label in ("S10/default", "S10/sync"):
+            with self.subTest(label=label):
+                older = perf.SideRuns([stream_outcome(300, None)])
+                self.assertEqual(row_for(perf.comparison_rows(label, older, head), metric)[2:],
+                                 ["n/a", "0.75 (0.50–1.00)", "n/a"])
+                recorded = perf.SideRuns([stream_outcome(600, 300)])
+                self.assertEqual(row_for(perf.comparison_rows(label, recorded, head), metric)[2:],
+                                 ["2.00 (2.00–2.00)", "0.75 (0.50–1.00)", perf.percent_change(2.0, 0.75)])
+        rows = perf.comparison_rows("S1/default", perf.SideRuns([timed_outcome([1.0])]),
+                                    perf.SideRuns([timed_outcome([1.0])]))
+        self.assertFalse([row for row in rows if "per update" in row[1]], rows)
+        for bad in (0, -3, 1.5, "300"):
+            with self.subTest(updates=bad):
+                phase = dict(valid_result()["phases"][0], name="stream", updates=bad)
+                problems = perf.validate_result(valid_result(phases=[phase]), HARNESS_HASH, 0)
+                self.assertTrue(any("updates" in problem for problem in problems), problems)
+
     def test_frame_rows_show_pooled_statistics_with_the_per_run_spread(self):
         # Each cell is the pooled figure followed by the min-max of per-run figures.
         base = perf.SideRuns([timed_outcome([1.0, 2.0]), timed_outcome([3.0, 4.0])])
@@ -5111,8 +5141,8 @@ class WindowsComparisonLegTests(unittest.TestCase):
 # each section's integer counts, then its histograms (the suffix names the unit).
 COUNTER_CONTRACT = {
     "window": (("attempts", "presented", "cached", "settled", "retry", "surface_retry", "stopped", "failed",
-                "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_streaming",
-                "stream_clock_exempt", "display_link_ticks", "display_link_admissions", "display_link_fallbacks",
+                "contention_parser", "contention_images", "defer_timeout", "defer_contention", "defer_sync",
+                "defer_streaming", "stream_clock_exempt", "display_link_ticks", "display_link_admissions", "display_link_fallbacks",
                 "contention_retry_armed", "dirt_ack_dropped", "native_request_redraw",
                 "user_request_redraw", "redraw_requested"),
                ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
@@ -5122,7 +5152,7 @@ COUNTER_CONTRACT = {
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced",
-            "flushes_suppressed"),
+            "flushes_suppressed", "sync_timeouts"),
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   "damage_waste_permille_sum", "software_frames",
@@ -5768,6 +5798,50 @@ class CounterTableTests(unittest.TestCase):
         self.assertEqual(suppressed_row(typing_side({})),
                          [["S5/default", "typing", "vt.flushes_suppressed (count)", "0 (0–0)", "4 (4–4)",
                            perf.percent_change(0, 4)]])
+        gate_off = valid_result(frame_counters="off")
+        self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
+
+    def test_sync_deferrals_are_required_on_the_head_and_n_a_on_an_older_base(self):
+        # defer_sync joined the window section: a head must report it, a base built before it reads n/a with no
+        # change shown, a supporting base that never held a frame prints a real 0, and a gate-off run carries no
+        # phase counters, so it is never checked for the field.
+        lacking = counters_result()
+        del lacking["phases"][0]["frame_counters"]["window"]["defer_sync"]
+        problems = perf.validate_result(lacking, HARNESS_HASH, 0, counters=True)
+        self.assertTrue(any("window.defer_sync" in problem for problem in problems), problems)
+        self.assertEqual(perf.validate_result(lacking, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        head = counters_side({"window.defer_sync": 6})
+
+        def held_cells(base):
+            rows, _omitted = perf.counter_rows("S10/sync", base, head)
+            return {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}["window.defer_sync (count)"]
+
+        self.assertEqual(held_cells(perf.SideRuns(outcomes=[make_outcome(result=lacking)])),
+                         ("n/a", "6 (6–6)", "n/a"))
+        self.assertEqual(held_cells(perf.SideRuns(outcomes=[make_outcome(result=counters_result())])),
+                         ("0 (0–0)", "6 (6–6)", perf.percent_change(0, 6)))
+        gate_off = valid_result(frame_counters="off")
+        self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
+
+    def test_sync_timeouts_are_required_on_the_head_and_n_a_on_an_older_base(self):
+        # sync_timeouts joined the vt section: a head must report it, a base built before it reads n/a with no
+        # change shown, a supporting base whose updates all ended in time prints a real 0, and a gate-off run
+        # carries no phase counters, so it is never checked for the field.
+        lacking = counters_result()
+        del lacking["phases"][0]["frame_counters"]["vt"]["sync_timeouts"]
+        problems = perf.validate_result(lacking, HARNESS_HASH, 0, counters=True)
+        self.assertTrue(any("vt.sync_timeouts" in problem for problem in problems), problems)
+        self.assertEqual(perf.validate_result(lacking, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        head = counters_side({"vt.sync_timeouts": 2})
+
+        def timeout_cells(base):
+            rows, _omitted = perf.counter_rows("S10/sync", base, head)
+            return {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}["vt.sync_timeouts (count)"]
+
+        self.assertEqual(timeout_cells(perf.SideRuns(outcomes=[make_outcome(result=lacking)])),
+                         ("n/a", "2 (2–2)", "n/a"))
+        self.assertEqual(timeout_cells(perf.SideRuns(outcomes=[make_outcome(result=counters_result())])),
+                         ("0 (0–0)", "2 (2–2)", perf.percent_change(0, 2)))
         gate_off = valid_result(frame_counters="off")
         self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
 

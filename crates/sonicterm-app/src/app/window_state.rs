@@ -437,6 +437,12 @@ impl WindowState {
             retry_armed: self.retry_not_before.is_some(),
         };
         self.redraw.complete_attempt(clocks, snapshot, outcome, at, software);
+        self.credit_sync_resets(matches!(
+            outcome,
+            redraw::FrameSettlement::Presented
+                | redraw::FrameSettlement::Cached
+                | redraw::FrameSettlement::Settled
+        ));
     }
 
     /// Clear collection backoff and its invalidity warning only after held-frame reconciliation succeeds.
