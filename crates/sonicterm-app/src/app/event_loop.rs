@@ -291,9 +291,11 @@ impl App {
         // sample that changes nothing cannot become a heartbeat redraw. An idle
         // session has neither a frame nor foreground-probe contributor; only the
         // retention cadence wakes it, and that wake remains draw-free.
-        let now = Instant::now();
+        let now = self.dispatch_now();
         let motion_wake = self.flush_pointer_motion(now);
         let mut due = self.refresh_frame_due_work_at(now);
+        // Links follow the modes the frame deadlines above already read; the deadlines do not depend on it.
+        self.sync_display_links();
         if let Some(deadline) = self.memory_sample_deadline() {
             due.push(super::redraw::DueWork {
                 owner: None,
@@ -414,7 +416,7 @@ impl App {
                 due.push(DueWork {
                     owner: Some(*id),
                     cause: DueCause::Frame,
-                    deadline: window.redraw_not_before(period, self.software_render_degrade),
+                    deadline: window.frame_deadline(period, self.software_render_degrade),
                 });
             }
             if let Some(deadline) =
@@ -463,9 +465,16 @@ impl App {
     }
 
     pub(super) fn do_new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
+        self.service_resume_time(&cause);
+    }
+
+    /// On a timer wake, service every elapsed due identity at the dispatch clock's instant, the
+    /// clock admission and the wait fold read, so all three agree on which deadlines have passed.
+    pub(super) fn service_resume_time(&mut self, cause: &winit::event::StartCause) {
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
             // Service every elapsed identity without turning maintenance into a repaint.
-            self.service_redraw_due(Instant::now());
+            let now = self.dispatch_now();
+            self.service_redraw_due(now);
         }
     }
 
@@ -488,6 +497,9 @@ impl App {
             }
             UserEvent::RequestRedraw(window_id) => {
                 self.service_output_event(OutputEvent::Explicit(window_id), Instant::now());
+            }
+            UserEvent::DisplayLinkTick { window_id, generation, target } => {
+                self.handle_display_link_tick(window_id, generation, target);
             }
             UserEvent::PaneOutput { window_id, pane_id } => {
                 self.service_output_event(OutputEvent::Pane { window_id, pane_id }, Instant::now());
@@ -853,10 +865,11 @@ impl App {
         // renderer (and its adapter) exists. Combine the config mode with
         // runtime software-rasterizer detection, then clamp the frame period
         // so the CPU isn't asked to rasterize at the monitor's full refresh.
-        self.software_render_degrade = crate::app::should_degrade_for_software_render(
+        let degrade = crate::app::should_degrade_for_software_render(
             self.config.appearance.software_render_mode,
             renderer.is_software_rendering(),
         );
+        self.set_software_render_degrade(degrade);
         renderer.set_software_render_degrade(self.software_render_degrade);
         if let Some(recorder) = &self.breadcrumb_recorder {
             // When: a breadcrumb_recorder is installed; the adapter class is only
@@ -967,6 +980,7 @@ impl App {
             retry_not_before: None,
             visible_frame_invalid: false,
             redraw: Default::default(),
+            display_link: Default::default(),
             hover_link: false,
             pressed_tab: None,
             drag_session: None,

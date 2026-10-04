@@ -121,6 +121,24 @@ Objective-C target receives menu selectors, translates menu tags to shared
 `Action` values, and wakes the event loop through its proxy. Per-window AppKit
 work runs from the one-shot window-ready callback after a valid NSWindow exists.
 
+### Display link
+
+On macOS 14 and later, each registered window (the main window, a new terminal
+window and a torn-out window) takes an `NSView.displayLink` from its AppKit view.
+The link is added to the main run loop in common modes, created paused, and runs
+only while that window has a display-link-paced streaming frame pending
+([Rendering Modes](Rendering-Modes#owner-local-frame-scheduling)). Its
+Objective-C target holds only the window id, a clone of the event-loop proxy and
+the window's link generation; when the link fires, the target posts
+`UserEvent::DisplayLinkTick` through the proxy and never touches the App.
+Dropping the window's handle invalidates the link and releases its target.
+
+Below macOS 14, `available!(macos = 14.0)` is false, so no link is installed and
+the window keeps the timer path; SonicTerm does not use `CVDisplayLink`. Windows
+and Linux install no link. The native check runs on a real `NSView` on the
+process main thread in `crates/sonicterm-app/tests/display_link_native.rs`,
+which has no libtest harness; it does not assert that the display fires a tick.
+
 ### Shell-script open events
 
 The app bundle advertises `public.shell-script` and
@@ -374,6 +392,7 @@ teardown exits `20`; an earlier fault, loss or recovery failure keeps its origin
 | Path and URL detection, shared by every OS | `crates/sonicterm-cfg/src/url_scan.rs`, `crates/sonicterm-app/src/app/path_target.rs` |
 | Safe native target open | `crates/sonicterm-app/src/app/path_target.rs`, `crates/sonicterm-app/src/app/path_target/{unix,macos,linux,windows}.rs`, `crates/sonicterm-cfg/src/url_open/{macos,linux,windows}.rs` |
 | macOS entry/menu/open documents/tab handoff | `crates/sonicterm-mac/src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs` |
+| macOS display link | `crates/sonicterm-app/src/app/display_link.rs` |
 | Windows entry/CLI/menu/backdrop/tab drag | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
 | Windows software present | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`, `crates/sonicterm-windows/src/software_presenter.rs` |
 | Linux entry and identity | `crates/sonicterm-linux/src/main.rs`, `crates/sonicterm-linux/resources/` |

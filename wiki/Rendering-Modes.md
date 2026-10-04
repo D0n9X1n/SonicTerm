@@ -79,6 +79,10 @@ rate keeps the 60 Hz default. Surface presentation prefers `Mailbox` when the
 backend offers it and otherwise uses `Fifo`. Opaque backdrops use
 `CompositeAlphaMode::Opaque`; transparent backdrops use
 `CompositeAlphaMode::PreMultiplied`. The desired maximum frame latency is 2.
+On macOS, wgpu's Metal backend offers only `Fifo` and `Immediate`, so macOS
+always presents `Fifo`. There, a window whose streaming output is deferred is
+admitted on a display-link tick rather than one period after its last render
+(see Owner-local frame scheduling).
 
 SonicTerm renders into a retained offscreen frame texture. A frame key covers
 visible pane revisions, geometry, selection, tabs, overlays, hover, inline
@@ -164,6 +168,36 @@ idle expiration remain armed, clear once when due, and coalesce their repaint
 with that existing request. A scrollbar expiry requests a frame only when it
 changed the bar; activity or a hold after the deadline was collected makes it a
 no-op.
+
+On macOS 14 and later, window registration installs a per-window
+`NSView.displayLink`, created paused, whose preferred rate is the window's monitor
+period and follows every refresh that changes it. A hardware deferral that the
+streaming rule wins stores the pacing mode `Link` when the window has a link;
+every other deferral (a surface timeout, the contention floor, the degraded
+software path, or a window with no link) stores `Timer` and keeps the rules
+above. The stored mode holds until the frame is admitted; link invalidation
+clears a stored `Link` but never a stored `Timer`. The link runs only while a
+`Link` admission is pending: the wait fold starts it after collecting deadlines
+and pauses it when nothing link-paced is pending or the window cannot schedule
+frames. Each start bumps the window's link generation, and a tick is accepted
+only for the running generation and a pending `Link` admission; an accepted tick
+authorizes one frame. Native and backend occlusion, device stop, park, hide and
+software degradation turning on invalidate link pacing at the writer, which bumps
+the generation and drops an unused tick. If no tick comes, the Frame deadline is
+a fallback ceiling two periods after the pacing clock. Input fast paths, the
+surface-timeout retry, the contention floor, the 25,000 µs and 83,333 µs periods,
+earlier macOS, Windows and Linux are unchanged: they install no link and pace
+from the timer.
+
+A display-link-paced frame can still wait for a drawable. Admission and the
+synchronous present call run in the same `RedrawRequested` handler, so a frame
+is never admitted before the previous present call returned, but a returned
+present does not release its drawable. wgpu-hal's Metal surface sets
+`maximumDrawableCount` to the frame latency plus one (3 on the hardware path),
+disables `allowsNextDrawableTimeout` and ignores the acquire timeout, so when
+three frames are still outstanding the next acquisition waits in `nextDrawable`.
+Display-link pacing does not remove that wait, and the timer path has the same
+exposure. No counter measures it; Metal System Trace in Instruments shows it.
 
 Output events are serviced per pane. A VT worker keeps at most one `PaneOutput`
 outstanding for each pane. The event loop acknowledges it in the window that holds
@@ -393,7 +427,7 @@ owned by [Logging](Logging) and [Memory](Memory).
 | --- | --- |
 | Adapter classification and surface policy | `crates/sonicterm-gpu/src/core.rs` |
 | Config-to-degradation decision | `crates/sonicterm-app/src/app/{frame_pacing,event_loop,config_apply}.rs` |
-| Frame pacing | `crates/sonicterm-app/src/app/{mod,frame_pacing}.rs` |
+| Frame pacing | `crates/sonicterm-app/src/app/{mod,frame_pacing,redraw,display_link}.rs` |
 | Retained frame and damage | `crates/sonicterm-gpu/src/core.rs` |
 | Device error containment | `crates/sonicterm-gpu/src/{device_errors,core,present}.rs` |
 | Shared-device recovery | `crates/sonicterm-app/src/app/{gpu_recovery,gpu_recovery_worker}.rs`, `crates/sonicterm-gpu/src/{recovery,recovery_context,rebind}.rs` |

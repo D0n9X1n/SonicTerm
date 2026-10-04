@@ -108,6 +108,16 @@ pub(crate) struct WindowRedrawState {
     pub(super) native_occluded: bool,
     pub(super) backend_occluded: bool,
     pub(super) timeout_pending: bool,
+    /// The pending admission's pacing mode, stored at the deferral that won; `None` when none is stored.
+    pub(super) pacing: Option<super::display_link::PacingMode>,
+    /// The link generation, bumped on every start and invalidation; the native tick target reads it.
+    pub(super) link_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The generation of the running link interval, or `None` while it is paused or invalidated.
+    pub(super) link_live: Option<u64>,
+    /// The generation of an accepted tick not yet spent by an admission.
+    pub(super) link_permit: Option<u64>,
+    /// Set while a synchronized-output hold keeps this window's frame back; the link does not run.
+    pub(super) sync_hold: bool,
     /// This window's frame counters; `Some` only when its App's gate is on.
     pub(super) frame_counters: Option<Box<super::frame_counters::WindowFrameCounters>>,
     #[cfg(target_os = "macos")]
@@ -133,6 +143,11 @@ impl Default for WindowRedrawState {
             native_occluded: false,
             backend_occluded: false,
             timeout_pending: false,
+            pacing: None,
+            link_generation: super::display_link::new_link_generation(),
+            link_live: None,
+            link_permit: None,
+            sync_hold: false,
             #[cfg(target_os = "macos")]
             surface_probe_at: None,
             #[cfg(test)]
@@ -214,6 +229,7 @@ impl WindowRedrawState {
             }
             FrameSettlement::Stopped(generation) => {
                 self.stopped_generation = Some(generation);
+                self.invalidate_link_pacing();
                 self.cancel_surface_probe();
             }
             FrameSettlement::SurfaceRetry(reason) => {
@@ -222,9 +238,11 @@ impl WindowRedrawState {
                     SurfaceRetryReason::Timeout => {
                         self.timeout_pending = true;
                         self.deferred = true;
+                        self.store_pacing(super::display_link::PacingMode::Timer);
                     }
                     SurfaceRetryReason::Occluded => {
                         self.backend_occluded = true;
+                        self.invalidate_link_pacing();
                         #[cfg(target_os = "macos")]
                         if !self.native_occluded {
                             self.surface_probe_at = Some(now + SURFACE_PROBE_PERIOD);
@@ -291,6 +309,7 @@ impl WindowRedrawState {
         if occluded {
             self.deferred = false;
             self.timeout_pending = false;
+            self.invalidate_link_pacing();
         }
         was_occluded && !occluded
     }
@@ -300,6 +319,7 @@ impl WindowRedrawState {
         self.observed = snapshot.0;
         self.attempt_causes = None;
         self.parked = true;
+        self.invalidate_link_pacing();
         self.cancel_surface_probe();
         self.deferred = false;
         self.request_in_flight = false;
@@ -623,19 +643,27 @@ impl WindowState {
     }
 
     /// Refresh the raw native-monitor period, preserving the last known rate when unavailable.
+    /// A changed period is passed on to the window's display link, so its ticks follow the display.
     pub(super) fn refresh_monitor_period(&mut self) {
+        let before = self.redraw.monitor_period;
+        let rate = self.read_monitor_rate();
+        self.redraw.apply_monitor_rate(rate);
+        if self.redraw.monitor_period != before {
+            self.push_preferred_period();
+        }
+    }
+
+    /// The native monitor's refresh rate in millihertz, or a test's override of it.
+    fn read_monitor_rate(&self) -> Option<u32> {
         #[cfg(test)]
         if let Some(rate) = self.redraw.monitor_rate_override {
             // When: a test supplies `monitor_rate_override`, it stands in for the native monitor.
-            self.redraw.apply_monitor_rate(rate);
-            return;
+            return rate;
         }
-        let rate = self
-            .window
+        self.window
             .as_ref()
             .and_then(|window| window.current_monitor())
-            .and_then(|monitor| monitor.refresh_rate_millihertz());
-        self.redraw.apply_monitor_rate(rate);
+            .and_then(|monitor| monitor.refresh_rate_millihertz())
     }
 }
 
@@ -829,6 +857,7 @@ impl App {
                     }
                 }
                 window.redraw.deferred = false;
+                window.redraw.invalidate_link_pacing();
                 return false;
             }
             if window.redraw.native_occluded || window.redraw.backend_occluded {
@@ -857,17 +886,42 @@ impl App {
             window.redraw.monitor_period,
         );
         let software = self.software_render_degrade;
+        // Only a synchronized-output rule holds a window; no such rule wins here, so this begin ends a hold.
+        window.redraw.sync_hold = false;
+        // A stored mode decides; otherwise a Streaming deferral would store `Link` when a link is installed.
+        let mode =
+            window.redraw.pacing.unwrap_or(if window.display_link.source.is_some() && !software {
+                super::display_link::PacingMode::Link
+            } else {
+                // No link is installed or the software path runs, so streaming stays on the timer.
+                super::display_link::PacingMode::Timer
+            });
+        // The streaming check's inputs, kept so a link-paced admission is classified from the same values.
+        let mut streaming_inputs = None;
         let rule = super::frame_counters::defer_rule(
             || window.redraw.timeout_pending && now < window.last_render + period,
             || window.contention_blocks_redraw(now, period, software),
             || {
-                super::should_defer_streaming_redraw(
-                    window.redraw.input_pending(),
-                    window.visible_output_advanced(),
-                    software,
-                    now.saturating_duration_since(window.pacing_clock(software)),
-                    period,
-                )
+                let input_pending = window.redraw.input_pending();
+                let output_advanced = window.visible_output_advanced();
+                streaming_inputs = Some((input_pending, output_advanced));
+                match mode {
+                    super::display_link::PacingMode::Link => {
+                        super::frame_pacing::streaming_work(
+                            input_pending,
+                            output_advanced,
+                            software,
+                        ) && !window.redraw.link_permit_valid()
+                            && now < window.link_ceiling(period, software)
+                    }
+                    super::display_link::PacingMode::Timer => super::should_defer_streaming_redraw(
+                        input_pending,
+                        output_advanced,
+                        software,
+                        now.saturating_duration_since(window.pacing_clock(software)),
+                        period,
+                    ),
+                }
             },
         );
         let defer = rule.is_some();
@@ -876,6 +930,37 @@ impl App {
             match rule {
                 Some(rule) => counters.note_defer(rule),
                 None => counters.attempts += 1,
+            }
+        }
+        match rule {
+            Some(super::frame_counters::DeferRule::Streaming) => window.redraw.store_pacing(mode),
+            Some(_) => window.redraw.store_pacing(super::display_link::PacingMode::Timer),
+            None => {
+                if window.redraw.pacing == Some(super::display_link::PacingMode::Link) {
+                    // A link-paced admission is classified once, from the inputs the streaming check read.
+                    let streaming =
+                        streaming_inputs.is_some_and(|(input_pending, output_advanced)| {
+                            super::frame_pacing::streaming_work(
+                                input_pending,
+                                output_advanced,
+                                software,
+                            )
+                        });
+                    let ticked = window.redraw.link_permit_valid();
+                    if let (true, Some(counters)) =
+                        (streaming, window.redraw.frame_counters.as_deref_mut())
+                    {
+                        // the App's gate is on, a streaming admission counts as a tick or a fallback.
+                        if ticked {
+                            counters.display_link_admissions += 1;
+                        } else {
+                            // When: `ticked` is false, the fallback ceiling admitted the frame, not a tick.
+                            counters.display_link_fallbacks += 1;
+                        }
+                    }
+                }
+                window.redraw.pacing = None;
+                window.redraw.link_permit = None;
             }
         }
         window.redraw.deferred = defer;
@@ -947,6 +1032,28 @@ impl App {
             self.pending_redraw = false;
         }
         self.pending_redraw_windows.remove(&id);
+    }
+
+    /// The instant every pacing read uses, from the App's dispatch clock.
+    pub(super) fn dispatch_now(&self) -> Instant {
+        (self.dispatch_clock)()
+    }
+
+    /// Admit or defer one `RedrawRequested` for either window role at the dispatch clock's instant.
+    pub(super) fn admit_window_redraw(&mut self, id: WindowId) -> bool {
+        let now = self.dispatch_now();
+        self.begin_window_redraw(id, now)
+    }
+
+    /// Complete one renderer call for either window role at the dispatch clock's instant.
+    pub(super) fn complete_window_redraw(
+        &mut self,
+        id: WindowId,
+        snapshot: &FrameSnapshot,
+        outcome: FrameSettlement,
+    ) {
+        let at = self.dispatch_now();
+        self.finish_window_redraw(id, snapshot, outcome, at);
     }
 
     /// Consume a still-current badge transition without borrowing parser state or waking another owner.
@@ -1100,6 +1207,12 @@ impl App {
 #[cfg(test)]
 #[path = "redraw_tests.rs"]
 mod redraw_tests;
+
+// The fake dispatch clock and paced owners are shared with the display-link tests; `redraw` is
+// private to `app`, so this public declaration reaches no further than `app`.
+#[cfg(test)]
+#[path = "redraw_dispatch_tests.rs"]
+pub mod redraw_dispatch_tests;
 
 /// Each tab's drawn command badge and its frame-key `command_status_hash` at `now`.
 fn command_chrome(

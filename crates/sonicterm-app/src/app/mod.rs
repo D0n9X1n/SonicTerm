@@ -178,6 +178,16 @@ pub enum UserEvent {
     /// Request a frame of this window unconditionally, after command maintenance. The
     /// application itself no longer sends it; harnesses and tests do.
     RequestRedraw(WindowId),
+    /// A window's display link fired. Accepted only while `generation` is the window's running link
+    /// interval and a link-paced admission is pending.
+    DisplayLinkTick {
+        /// The window whose link fired.
+        window_id: WindowId,
+        /// The link generation the native target read when it fired.
+        generation: u64,
+        /// The display's target time for the frame, for diagnostics only.
+        target: Instant,
+    },
     /// A VT worker flushed output for this pane, which `window_id` held when it was sent. At
     /// most one is outstanding per pane; the event loop acknowledges it and requests a frame
     /// only when the pane's window shows new output or changed chrome.
@@ -307,6 +317,10 @@ pub use frame_pacing::{
     effective_frame_period, should_defer_streaming_redraw, should_degrade_for_software_render,
     should_flush_pending_pty_redraw, software_render_frame_period,
 };
+mod display_link;
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use display_link::{probe_native_display_link, NativeDisplayLinkReport};
 mod gpu_recovery;
 mod gpu_recovery_worker;
 pub mod hovered_url;
@@ -709,6 +723,10 @@ pub struct App {
     /// refresh. Resolved after the renderer is created and re-resolved on an
     /// explicit config reload.
     pub(super) software_render_degrade: bool,
+    /// The one clock every pacing read goes through: redraw admission and completion for both window
+    /// roles, collection contention, the display-link tick and the wait fold. `Instant::now` in
+    /// production; a test installs a fake through [`Self::__test_set_dispatch_clock`].
+    pub(super) dispatch_clock: fn() -> Instant,
     /// Legacy observation of main pacing deferral; owner redraw state, not this flag, arms deadlines.
     pub(super) pending_redraw: bool,
     /// Legacy child-deferral observation, never the runtime wake-fold authority.
@@ -846,6 +864,8 @@ impl App {
             native.set_title(&compose_window_title(key, &window.custom_window_name));
         }
         self.windows.insert(id, window);
+        // The link takes the period the refresh above just read; only macOS installs one.
+        self.install_native_display_link(id);
         if !owner_prepared {
             self.register_window_owner(id);
         }

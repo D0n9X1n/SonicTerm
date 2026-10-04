@@ -120,6 +120,8 @@ pub struct WindowState {
     pub(crate) visible_frame_invalid: bool,
     /// Owner-local redraw causes and native-monitor cadence; the pacing clocks live beside it.
     pub(crate) redraw: redraw::WindowRedrawState,
+    /// The display-link source paced streaming admissions use, and its native running generation.
+    pub(crate) display_link: display_link::WindowDisplayLink,
     /// pointer-cursor-is-link latch. Mirrors
     /// `App.hover_link` (now deleted). Per-window so a torn-out child can
     /// flip its own cursor independently of the main window.

@@ -511,10 +511,11 @@ impl App {
                     .or_else(|| self.windows.values().find_map(|window| window.renderer.as_ref()))
                     .or_else(|| self.warm_window_pool.first().map(|warm| &warm.renderer))
                 {
-                    self.software_render_degrade = super::should_degrade_for_software_render(
+                    let degrade = super::should_degrade_for_software_render(
                         self.config.appearance.software_render_mode,
                         renderer.is_software_rendering(),
                     );
+                    self.set_software_render_degrade(degrade);
                     self.frame_period = super::software_render_frame_period(
                         self.software_render_degrade,
                         self.monitor_frame_period,

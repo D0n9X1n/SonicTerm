@@ -1777,7 +1777,7 @@ fn production_occlusion_order_retained_invalidation_and_device_precedence_are_pi
         ),
     ] {
         assert!(
-            source.find("self.begin_window_redraw(win_id,").unwrap()
+            source.find("self.admit_window_redraw(win_id)").unwrap()
                 < source.find(collect).unwrap()
         );
     }
@@ -2410,27 +2410,26 @@ fn method_body<'source>(source: &'source str, signature: &str) -> &'source str {
     &source[start..end]
 }
 
-/// The child adapter completes through `finish_window_redraw`, the seam the behavioural tests drive
-/// for both roles, passing the renderer's own settlement and instant; it writes no clock, settles no
-/// cause and picks no software policy itself, so a wrong argument cannot hide in a second writer.
+/// Both roles complete through `complete_window_redraw`, the seam the behavioural tests drive, passing
+/// the renderer's own settlement; the adapter stamps the dispatch clock, and neither handler writes a
+/// clock, settles a cause or picks a software policy itself, so a wrong argument cannot hide in a
+/// second writer.
 #[test]
 fn main_and_child_completions_share_one_clock_writer() {
     let child_source = include_str!("child_window_redraw.rs").replace("\r\n", "\n");
     let main_source = include_str!("window_event.rs").replace("\r\n", "\n");
     let redraw_source = include_str!("redraw.rs").replace("\r\n", "\n");
-    let child_call = "self.finish_window_redraw(win_id, snapshot, settlement, at);";
-    assert_eq!(child_source.matches("finish_window_redraw(").count(), 1, "one child completion");
-    assert!(
-        child_source.contains(child_call),
-        "the child passes its own snapshot, outcome and instant"
-    );
+    let child_call = "self.complete_window_redraw(win_id, snapshot, settlement);";
+    assert_eq!(child_source.matches("complete_window_redraw(").count(), 1, "one child completion");
+    assert!(child_source.contains(child_call), "the child passes its own snapshot and outcome");
+    assert!(!child_source.contains("finish_window_redraw("), "the child uses the adapter");
     assert!(
         child_source.contains("let settlement = super::redraw::FrameSettlement::of(&outcome);"),
         "the child's outcome is the renderer's"
     );
     assert!(
-        child_source.contains("frame_completion = Some((settlement, Instant::now()));"),
-        "the instant is taken after the renderer call"
+        child_source.contains("frame_completion = Some(settlement);"),
+        "the child records only the settlement; the adapter takes the instant"
     );
     for inline in [
         ".complete_attempt(",
@@ -2442,8 +2441,14 @@ fn main_and_child_completions_share_one_clock_writer() {
         assert!(!child_source.contains(inline), "the child adapter must not use {inline} itself");
     }
     assert_eq!(
-        main_source.matches("self.finish_window_redraw(win_id, snapshot, outcome, at);").count(),
+        main_source.matches("self.complete_window_redraw(win_id, snapshot, outcome);").count(),
         1
+    );
+    assert!(!main_source.contains("finish_window_redraw("), "the main handler uses the adapter");
+    assert!(
+        method_body(&redraw_source, "pub(super) fn complete_window_redraw(")
+            .contains("let at = self.dispatch_now();"),
+        "the adapter stamps the dispatch clock"
     );
     assert!(
         method_body(&redraw_source, "pub(super) fn finish_window_redraw(").contains(

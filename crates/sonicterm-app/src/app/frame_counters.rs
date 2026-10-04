@@ -1068,6 +1068,12 @@ pub(crate) struct WindowFrameCounters {
     pub(crate) defer_streaming: u64,
     /// Attempts whose completion kept the streaming clock: hardware input attempts that settled.
     pub(crate) stream_clock_exempt: u64,
+    /// Display-link ticks the tick handler accepted; stale ticks are not counted.
+    pub(crate) display_link_ticks: u64,
+    /// `Link`-mode streaming frames admitted by a tick.
+    pub(crate) display_link_admissions: u64,
+    /// `Link`-mode streaming frames admitted by the fallback ceiling.
+    pub(crate) display_link_fallbacks: u64,
     /// Contention retries armed.
     pub(crate) contention_retry_armed: u64,
     /// Pending acknowledgement receipts dropped at a collection: the pane was not held, its parser
@@ -1116,6 +1122,9 @@ impl Default for WindowFrameCounters {
             defer_contention: 0,
             defer_streaming: 0,
             stream_clock_exempt: 0,
+            display_link_ticks: 0,
+            display_link_admissions: 0,
+            display_link_fallbacks: 0,
             contention_retry_armed: 0,
             dirt_ack_dropped: 0,
             present_interval: Histogram::new(HistogramUnit::Millis),
@@ -1538,6 +1547,9 @@ impl WindowFrameCounters {
             ("defer_contention", self.defer_contention),
             ("defer_streaming", self.defer_streaming),
             ("stream_clock_exempt", self.stream_clock_exempt),
+            ("display_link_ticks", self.display_link_ticks),
+            ("display_link_admissions", self.display_link_admissions),
+            ("display_link_fallbacks", self.display_link_fallbacks),
             ("contention_retry_armed", self.contention_retry_armed),
             ("dirt_ack_dropped", self.dirt_ack_dropped),
             ("native_request_redraw", native_requests + renderer_requests),

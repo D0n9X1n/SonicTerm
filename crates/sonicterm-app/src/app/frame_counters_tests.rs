@@ -1606,3 +1606,39 @@ fn stream_clock_exempt_joins_the_window_record_after_defer_streaming() {
     let armed = fields.find("contention_retry_armed=").expect("contention_retry_armed field");
     assert!(defer < exempt && exempt < armed, "{fields}");
 }
+
+/// The three display-link counts join the window record by name, after `stream_clock_exempt` and
+/// before `contention_retry_armed`, so the harness and perf-compare read them in contract order. A
+/// line omits zero counts, so every neighbour is non-zero to show the order.
+#[test]
+fn display_link_counts_join_the_window_record_after_stream_clock_exempt() {
+    let counters = WindowFrameCounters {
+        stream_clock_exempt: 1,
+        display_link_ticks: 5,
+        display_link_admissions: 3,
+        display_link_fallbacks: 2,
+        contention_retry_armed: 1,
+        ..WindowFrameCounters::default()
+    };
+    let record = counters.record(None, 0);
+    assert_eq!(record.count("display_link_ticks"), Some(5));
+    assert_eq!(record.count("display_link_admissions"), Some(3));
+    assert_eq!(record.count("display_link_fallbacks"), Some(2));
+    let fields = record.line_fields();
+    let order: Vec<usize> = [
+        "stream_clock_exempt=",
+        "display_link_ticks=5",
+        "display_link_admissions=3",
+        "display_link_fallbacks=2",
+        "contention_retry_armed=",
+    ]
+    .iter()
+    .map(|name| fields.find(name).unwrap_or_else(|| panic!("{name} in {fields}")))
+    .collect();
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{fields}");
+    // A window that never ran a link still reports all three, as zero.
+    let idle = WindowFrameCounters::default().record(None, 0);
+    for name in ["display_link_ticks", "display_link_admissions", "display_link_fallbacks"] {
+        assert_eq!(idle.count(name), Some(0), "{name}");
+    }
+}

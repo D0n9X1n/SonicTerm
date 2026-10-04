@@ -42,8 +42,15 @@ pub fn should_defer_streaming_redraw(
     // CPU. Costs at most one frame (25 ms) of extra input latency, which is
     // an acceptable trade only because rendering is already slow here. The
     // hardware-GPU path passes `false` and keeps input redraws immediate.
-    let streaming = software_render || pty_burst || !was_dirty;
-    streaming && since_last_render < frame_period
+    streaming_work(was_dirty, pty_burst, software_render) && since_last_render < frame_period
+}
+
+/// Whether a redraw is streaming work: on the CPU rasterizer every frame, otherwise new visible output
+/// or no pending input. Pure typing is not streaming. The timer rule, the display-link rule and the
+/// classification of a link-paced admission all read this one predicate.
+#[must_use]
+pub(super) fn streaming_work(input_pending: bool, output_advanced: bool, software: bool) -> bool {
+    software || output_advanced || !input_pending
 }
 
 /// Whether coalesced PTY output is due for a redraw.
@@ -127,7 +134,8 @@ impl App {
     #[doc(hidden)]
     pub fn defer_redraw_on_lock_contention(&mut self, was_dirty: bool) {
         if let Some(id) = self.main_window_id {
-            self.defer_window_lock_contention(id, was_dirty, Instant::now());
+            let now = self.dispatch_now();
+            self.defer_window_lock_contention(id, was_dirty, now);
         }
     }
 
@@ -147,6 +155,7 @@ impl App {
             window.redraw.monitor_period,
         );
         window.arm_contention_retry(now, period);
+        window.redraw.store_pacing(display_link::PacingMode::Timer);
         if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
             // the App's gate is on, each armed contention retry is counted.
             counters.contention_retry_armed += 1;

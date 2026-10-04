@@ -99,6 +99,19 @@ NSMenu 只能在 winit 创建 AppKit 事件循环后安装。Objective-C target 
 把菜单 tag 转换为共享 `Action`，再通过 event-loop proxy 唤醒循环。需要 NSWindow 的工作
 在一次性 window-ready callback 中执行，此时 handle 已有效。
 
+### 显示链接
+
+在 macOS 14 及更高版本上，每个注册的窗口（主窗口、新终端窗口和拖出的窗口）从其 AppKit 视图取得
+`NSView.displayLink`。链接以 common modes 加入主 run loop，创建时处于暂停状态，只在该窗口有按显示
+链接计节奏的流式帧待准入时运行（[渲染模式](Rendering-Modes-zh-CN#按窗口归属的帧调度)）。它的
+Objective-C target 只持有窗口 id、event-loop proxy 的副本和窗口的链接代际；链接触发时，target 通过
+proxy 发送 `UserEvent::DisplayLinkTick`，从不访问 App。丢弃窗口的句柄会使链接失效并释放其 target。
+
+低于 macOS 14 时，`available!(macos = 14.0)` 为 false，因此不安装链接，窗口保持计时器路径；
+SonicTerm 不使用 `CVDisplayLink`。Windows 和 Linux 不安装链接。原生检查在
+`crates/sonicterm-app/tests/display_link_native.rs` 中于进程主线程上的真实 `NSView` 运行，该测试没有
+libtest 框架；它不断言显示器会触发 tick。
+
 ### Shell 脚本打开事件
 
 App bundle 以 `LSHandlerRank=Alternate` 声明 `public.shell-script` 和
@@ -294,6 +307,7 @@ Wayland 上的两种 Linux 包布局中运行三个场景。[打包](Packaging-z
 | 路径与 URL 检测（各操作系统共用） | `crates/sonicterm-cfg/src/url_scan.rs`、`crates/sonicterm-app/src/app/path_target.rs` |
 | 安全原生目标打开 | `crates/sonicterm-app/src/app/path_target.rs`、`crates/sonicterm-app/src/app/path_target/{unix,macos,linux,windows}.rs`、`crates/sonicterm-cfg/src/url_open/{macos,linux,windows}.rs` |
 | macOS 入口/菜单/打开文档/标签页交接 | `crates/sonicterm-mac/src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs` |
+| macOS 显示链接 | `crates/sonicterm-app/src/app/display_link.rs` |
 | Windows 入口/CLI/菜单/backdrop/标签页拖放 | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
 | Windows 软件呈现 | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`、`crates/sonicterm-windows/src/software_presenter.rs` |
 | Linux 入口与 identity | `crates/sonicterm-linux/src/main.rs`、`crates/sonicterm-linux/resources/` |
