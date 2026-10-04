@@ -7373,11 +7373,12 @@ class CellLayoutBoundaryTests(unittest.TestCase):
         return perf.cell_layout_platform("macOS", runs)
 
     def test_the_share_clause_is_inclusive_and_exact(self):
+        # 10G = 3R exactly passes; with 3R % 10 == 1, G = (3R - 1) / 10 is the nearest integer pair that fails.
         resident = 100 * CELL_MIB
-        at_bound = self.platform(3 * resident // 10, resident)
-        self.assertNotIn("share", at_bound.failed_clauses)
-        below = self.platform(3 * resident // 10 - 1, resident)
-        self.assertIn("share", below.failed_clauses)
+        self.assertNotIn("share", self.platform(3 * resident // 10, resident).failed_clauses)
+        odd_resident = 100 * CELL_MIB + 7
+        self.assertEqual(3 * odd_resident % 10, 1)
+        self.assertIn("share", self.platform((3 * odd_resident - 1) // 10, odd_resident).failed_clauses)
 
     def test_the_size_clause_is_inclusive_and_exact(self):
         self.assertNotIn("size", self.platform(24 * CELL_MIB, 50 * CELL_MIB).failed_clauses)
@@ -7437,6 +7438,46 @@ class CellLayoutOutcomeTests(unittest.TestCase):
         self.assertEqual(perf.cell_layout_reading(cell_layout_run("zero", 6 * CELL_MIB, 0)).problem,
                          "process_resident_bytes=0")
 
+    def test_unsupported_resident_and_a_missing_grid_field_are_inconclusive_not_nogo(self):
+        unsupported = cell_layout_run("unsupported", 6 * CELL_MIB, None)
+        self.assertEqual(perf.cell_layout_reading(unsupported).problem, "process_resident_bytes unsupported")
+        base = cell_layout_run("no-history", 6 * CELL_MIB, 100 * CELL_MIB)
+        sample = base.memory[0]
+        no_history = perf.CellLayoutRun("no-history", "1", base.result, [perf.MemorySample(
+            sample.unix_s, sample.process_resident_bytes, sample.renderer_total_bytes, 0, checkpoint_index=2,
+            checkpoint_label="end", checkpoint_attempt=1, checkpoint_complete=True, panes_total=3, panes_sampled=3,
+            panes_contended=0, grid_visible_bytes=6 * CELL_MIB, grid_history_bytes=None, grid_alternate_bytes=0)])
+        self.assertEqual(perf.cell_layout_reading(no_history).problem, "missing grid_history_bytes")
+        for bad in (unsupported, no_history):
+            decision = perf.cell_layout_decision({"macOS": cell_layout_runs(FAILING[:4]) + [bad],
+                                                  "Windows": cell_layout_runs(FAILING)})
+            self.assertEqual(decision.outcome, "Inconclusive")
+            self.assertTrue(any(bad.name in reason for reason in decision.reasons))
+
+    def test_a_rejected_replacement_is_named_and_not_counted(self):
+        focus = perf.CellLayoutRun("focus", "1", cell_layout_run("focus", 6 * CELL_MIB, 100 * CELL_MIB).result, [],
+                                   classification="focus")
+        judged = perf.cell_layout_platform("macOS", cell_layout_runs(FAILING) + [focus])
+        self.assertFalse(judged.passes)
+        self.assertEqual(sum(reading.problem is None for reading in judged.readings), 5)
+        self.assertIn("macOS focus: run classified focus", judged.reasons)
+
+    def test_the_same_run_counted_five_times_is_not_five_runs(self):
+        same = cell_layout_run("only", 30 * CELL_MIB, 100 * CELL_MIB)
+        decision = perf.cell_layout_decision({"macOS": [same] * 5, "Windows": cell_layout_runs(FAILING)})
+        self.assertEqual(decision.outcome, "Inconclusive")
+        self.assertTrue(any("runs repeated" in reason for reason in decision.reasons))
+
+    def test_platforms_from_two_workflow_runs_never_make_a_nogo(self):
+        windows = [cell_layout_run(f"win{index}", 6 * CELL_MIB, 100 * CELL_MIB, workflow_run="2")
+                   for index in range(5)]
+        decision = perf.cell_layout_decision({"macOS": cell_layout_runs(FAILING), "Windows": windows})
+        self.assertEqual(decision.outcome, "Inconclusive")
+        self.assertTrue(any("different workflow runs" in reason for reason in decision.reasons))
+        # A platform whose own five runs pass still decides a go.
+        passing = perf.cell_layout_decision({"macOS": cell_layout_runs(PASSING), "Windows": windows})
+        self.assertEqual(passing.outcome, "Go")
+
 
 class CellLayoutHeadOnlyTests(unittest.TestCase):
     """The decision reads the head alone: a head without checkpoint sampling is Inconclusive, never NoGo."""
@@ -7458,31 +7499,115 @@ def cell_line(index, label, attempt, complete, grid_history_bytes, resident_byte
 
 class CellLayoutParsedLineTests(unittest.TestCase):
     """Retried, exhausted, repeated, conflicting and earlier-checkpoint samples reach the decision correctly, from
-    parsed log lines."""
+    parsed log lines, each beside four other valid runs."""
 
     def run_from(self, name, lines, sampling="complete"):
         memory = [sample for sample in map(perf.parse_memory_line, lines) if sample]
         result = {"checkpoint_memory": "supported",
                   "checkpoints": [{"index": 0, "label": "settled", "sampling": "complete"},
+                                  {"index": 1, "label": "covered", "sampling": "complete"},
                                   {"index": 2, "label": "end", "sampling": sampling}]}
         return perf.CellLayoutRun(name, "1", result, memory)
 
-    def test_retried_exhausted_repeated_conflicting_and_earlier_samples(self):
-        retried = self.run_from("retried", [cell_line(2, "end", 1, False, 1), cell_line(2, "end", 2, True, 7)])
-        self.assertEqual(perf.cell_layout_reading(retried).grid_bytes, 7)
-        exhausted = self.run_from("exhausted", [cell_line(2, "end", attempt, False, 7) for attempt in range(1, 9)],
-                                  sampling="exhausted")
-        self.assertIn("partial", perf.cell_layout_reading(exhausted).problem)
-        repeated = self.run_from("repeated", [cell_line(2, "end", 1, True, 7)] * 2)
-        self.assertIsNone(perf.cell_layout_reading(repeated).problem)
-        conflicting = self.run_from("conflict", [cell_line(2, "end", 1, True, 7), cell_line(2, "end", 1, True, 8)])
-        self.assertEqual(perf.cell_layout_reading(conflicting).problem, "conflicting samples")
-        earlier = self.run_from("earlier", [cell_line(0, "settled", 1, True, 99), cell_line(2, "end", 1, True, 7)])
-        self.assertEqual(perf.cell_layout_reading(earlier).grid_bytes, 7)
-        platform_runs = [self.run_from(f"ok{index}", [cell_line(2, "end", 1, True, 7)]) for index in range(4)]
-        decision = perf.cell_layout_decision({"macOS": platform_runs + [exhausted],
-                                              "Windows": cell_layout_runs(FAILING)})
-        self.assertEqual(decision.outcome, "Inconclusive")
+    def decide(self, candidate):
+        """The decision with `candidate` as macOS's fifth run and five failing Windows runs."""
+        others = [self.run_from(f"ok{index}", [cell_line(2, "end", 1, True, 7)]) for index in range(4)]
+        decision = perf.cell_layout_decision({"macOS": others + [candidate], "Windows": cell_layout_runs(FAILING)})
+        valid = sum(reading.problem is None for reading in decision.platforms["macOS"].readings)
+        return decision, valid
+
+    def test_a_retried_end_uses_its_complete_attempt(self):
+        decision, valid = self.decide(self.run_from(
+            "retried", [cell_line(2, "end", 1, False, 1), cell_line(2, "end", 2, True, 7)]))
+        self.assertEqual((decision.outcome, valid), ("NoGo", 5))
+
+    def test_exhausted_sampling_is_inconclusive_not_nogo(self):
+        decision, valid = self.decide(self.run_from(
+            "exhausted", [cell_line(2, "end", attempt, False, 7) for attempt in range(1, 9)], sampling="exhausted"))
+        self.assertEqual((decision.outcome, valid), ("Inconclusive", 4))
+        self.assertTrue(any("exhausted: partial" in reason for reason in decision.reasons))
+
+    def test_a_repeated_end_line_counts_once(self):
+        decision, valid = self.decide(self.run_from("repeated", [cell_line(2, "end", 1, True, 7)] * 2))
+        self.assertEqual((decision.outcome, valid), ("NoGo", 5))
+
+    def test_conflicting_end_samples_make_the_run_invalid(self):
+        decision, valid = self.decide(self.run_from(
+            "conflict", [cell_line(2, "end", 1, True, 7), cell_line(2, "end", 1, True, 8)]))
+        self.assertEqual((decision.outcome, valid), ("Inconclusive", 4))
+        self.assertTrue(any("conflict: conflicting samples" in reason for reason in decision.reasons))
+
+    def test_only_the_end_checkpoint_is_read(self):
+        # Huge settled and covered samples would pass both clauses; only end's small one may count.
+        lines = [cell_line(0, "settled", 1, True, 90 * CELL_MIB), cell_line(1, "covered", 1, True, 90 * CELL_MIB),
+                 cell_line(2, "end", 1, True, 7)]
+        decision, valid = self.decide(self.run_from("earlier", lines))
+        self.assertEqual((decision.outcome, valid), ("NoGo", 5))
+        self.assertEqual(decision.platforms["macOS"].readings[-1].grid_bytes, 7)
+
+
+CELL_HEAD = "a" * 40
+
+
+def write_cell_artifact(root, platform, runs, shard="S1-S3-S6-S8-S12", head=CELL_HEAD, run_id="1"):
+    """A `perf-comparison-*` artifact holding head S12 runs; each run is (name, outcome dict or raw text)."""
+    artifact = root / f"perf-comparison-1586-{head}-{platform}-{shard}-1"
+    (artifact / "runs" / "S12-default" / "timed").mkdir(parents=True)
+    (artifact / "timing.json").write_text(json.dumps({"run_id": run_id, "shard": shard}), encoding="utf-8")
+    for name, outcome in runs:
+        run_dir = artifact / "runs" / "S12-default" / "timed" / name
+        (run_dir / "scratch").mkdir(parents=True)
+        text = outcome if isinstance(outcome, str) else json.dumps(outcome)
+        (run_dir / "outcome.json").write_text(text, encoding="utf-8")
+        (run_dir / "scratch" / "result.json").write_text(json.dumps(
+            {"checkpoint_memory": "supported", "checkpoints": [{"index": 2, "label": "end", "sampling": "complete"}]}),
+            encoding="utf-8")
+        (run_dir / "01-harness.log").write_text(
+            "\x1b[2m" + cell_line(2, "end", 1, True, 7) + "\x1b[0m\n", encoding="utf-8")
+    return artifact
+
+
+HEAD_OUTCOME = {"kind": "valid", "side": "head", "scenario": "S12", "variant": "default"}
+
+
+class CellLayoutArtifactTests(unittest.TestCase):
+    """The reader takes only the requested workflow run's S1-S3-S6-S8-S12 head runs, names evidence from anything
+    else, and turns unreadable files into named invalid runs instead of failing."""
+
+    def test_the_reader_keeps_provenance_and_names_foreign_evidence(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            write_cell_artifact(root, "macOS", [(f"0{index}-head", HEAD_OUTCOME) for index in range(1, 6)])
+            write_cell_artifact(root, "Windows", [("01-head", HEAD_OUTCOME)], shard="S7")
+            write_cell_artifact(root, "Windows", [("01-head", HEAD_OUTCOME), ("02-head", HEAD_OUTCOME)], run_id="2")
+            runs = perf.read_cell_layout_runs(root, "1", CELL_HEAD)
+            self.assertEqual(len(runs["macOS"]), 5)
+            self.assertTrue(all(run.problem is None for run in runs["macOS"]))
+            self.assertEqual(perf.cell_layout_reading(runs["macOS"][0]).grid_bytes, 7)
+            # The S7 artifact is not read; the other workflow run's is read but named.
+            self.assertEqual(len(runs["Windows"]), 2)
+            self.assertTrue(all("workflow run 2" in run.problem for run in runs["Windows"]))
+
+    def test_another_head_side_scenario_or_unreadable_file_is_a_named_invalid_run(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            write_cell_artifact(root, "macOS", [("01-head", dict(HEAD_OUTCOME, side="base")),
+                                                ("02-head", dict(HEAD_OUTCOME, scenario="S7")),
+                                                ("03-head", "{not json"),
+                                                ("04-head", "[1, 2]")])
+            write_cell_artifact(root, "Windows", [("01-head", HEAD_OUTCOME)], head="b" * 40)
+            runs = perf.read_cell_layout_runs(root, "1", CELL_HEAD)
+            problems = [run.problem for run in runs["macOS"]]
+            self.assertIn("side=base", problems[0])
+            self.assertIn("scenario=S7", problems[1])
+            self.assertIn("outcome.json unreadable", problems[2])
+            self.assertEqual(problems[3], "outcome.json is not an object")
+            self.assertIn("measured head " + "b" * 40, runs["Windows"][0].problem)
+            decision = perf.cell_layout_decision(runs)
+            self.assertEqual(decision.outcome, "Inconclusive")
+            # Every rejected run is named: the four macOS runs and the Windows run of the other head.
+            for run in runs["macOS"] + runs["Windows"]:
+                self.assertTrue(any(run.name in reason for reason in decision.reasons), run.name)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
