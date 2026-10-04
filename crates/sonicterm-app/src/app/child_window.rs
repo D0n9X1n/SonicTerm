@@ -117,11 +117,12 @@ pub(super) fn resize_renderer_and_split_panes(
         // resize and no cell metrics to lay the panes out against.
         return false;
     };
-    if !renderer.try_resize(width, height) {
-        // When: `try_resize` refused `width`/`height`, so the panes must keep
-        // matching the surface that is still live.
+    let outcome = renderer.try_resize_outcome(width, height);
+    if outcome == sonicterm_gpu::core::ResizeOutcome::Rejected {
+        // When: `outcome` is `Rejected` for `width`/`height`, the panes keep matching the live surface.
         return false;
     }
+    child.redraw.note_resize(outcome);
     resize_visible_panes_in_child(child);
     true
 }

@@ -510,3 +510,30 @@ fn the_recheck_under_the_guards_abandons_a_newly_held_frame() {
     scan(include_str!("window_event.rs"));
     scan(include_str!("child_window_redraw.rs"));
 }
+
+/// Only a changed surface size arms `resize_pending`: a `Resized` at the configured size
+/// (`Unchanged`) or a rejected one leaves a held window held, and a changed one forces its frame.
+/// The main and child `Resized` handlers both classify the resize, then note it.
+#[test]
+fn only_a_changed_resize_forces_a_frame_through_a_hold() {
+    use sonicterm_gpu::core::ResizeOutcome;
+    let cases = [
+        (ResizeOutcome::Unchanged, false),
+        (ResizeOutcome::Rejected, false),
+        (ResizeOutcome::Changed, true),
+    ];
+    for (outcome, forced) in cases {
+        let (mut app, main, _, base) = held_owners();
+        hold(&app, main, pane_of(&app, main, 0), 1, at_ms(base, 100));
+        app.windows.get_mut(&main).unwrap().redraw.note_resize(outcome);
+        let admitted =
+            attempt(&mut app, main, RedrawCause::Expose, base, FrameSettlement::Presented);
+        assert_eq!(admitted, forced, "{outcome:?}");
+    }
+    for source in [include_str!("window_event.rs"), include_str!("child_window.rs")] {
+        let source = source.replace("\r\n", "\n");
+        let classify = source.find("try_resize_outcome(").expect("the handler classifies");
+        let note = source.find("redraw.note_resize(").expect("the handler notes the outcome");
+        assert!(classify < note);
+    }
+}

@@ -516,17 +516,21 @@ impl App {
                 // When: WindowEvent::Resized supplies size, update geometry before scheduling.
 
                 // Resized updates renderer and pane geometry before scheduling the replacement frame.
-                if self
+                let outcome = self
                     .main_renderer_mut()
-                    .is_some_and(|renderer| !renderer.try_resize(size.width, size.height))
-                {
-                    // When: try_resize returns false for size, retain the previous surface.
+                    .map(|renderer| renderer.try_resize_outcome(size.width, size.height));
+                if outcome == Some(sonicterm_gpu::core::ResizeOutcome::Rejected) {
+                    // When: `outcome` is `Rejected` for `size`, retain the previous surface.
                     tracing::warn!(
                         width = size.width,
                         height = size.height,
                         "main window resize ignored after renderer safety rejection"
                     );
                     return;
+                }
+                if let (Some(outcome), Some(window)) = (outcome, self.main_mut()) {
+                    // A changed surface size owes a frame that a synchronized hold cannot keep back.
+                    window.redraw.note_resize(outcome);
                 }
                 // Notify the reducer of the new logical grid dimensions.
                 // Derive cols/rows from

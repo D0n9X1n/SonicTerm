@@ -183,6 +183,14 @@ impl WindowRedrawState {
         }
     }
 
+    /// Note a `Resized` outcome: only a changed surface size owes a frame that forces any hold.
+    pub(super) fn note_resize(&mut self, outcome: sonicterm_gpu::core::ResizeOutcome) {
+        if outcome == sonicterm_gpu::core::ResizeOutcome::Changed {
+            // A new surface size must reach the screen even mid-update.
+            self.resize_pending = true;
+        }
+    }
+
     /// Whether `cause` has a generation no attempt has settled yet.
     pub(super) fn cause_pending(&self, cause: RedrawCause) -> bool {
         self.pending[cause as usize] != self.observed[cause as usize]
