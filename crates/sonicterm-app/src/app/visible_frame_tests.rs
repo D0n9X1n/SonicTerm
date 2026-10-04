@@ -1146,17 +1146,24 @@ fn slot_of_live_row(
 }
 
 /// Test 20 at the App seam, both adapters, through the pending set. The scrolled pane has 16 rows
-/// and 100 history rows viewed from absolute row 97, so live rows 5 and 15 are slots 8 and 18, and
-/// slot 18 is below the view. An offscreen-only `Noop` issues no receipt; another pane's partial
-/// frame gives this pane `Rows(empty)`; `Rows({5})` clears live row 5 and keeps live row 15. No
-/// application advances the grid's dirty generation.
+/// over 100 history rows. Viewed from absolute row 90 with only live row 15 dirty, that row is raw
+/// slot 25, below the view: an offscreen-only `Noop` issues no receipt and another pane's partial
+/// frame gives this pane `Rows(empty)`, so both keep it dirty while the peer keeps every row but
+/// the one its own receipt names. Viewed from row 97 with live rows 5 and 15 dirty (slots 8 and
+/// 18), `Rows({5})` clears live row 5 and keeps live row 15. No application advances the
+/// scrolled grid's dirty generation.
 #[test]
 fn scrolled_view_row_receipts_clear_only_drawn_live_rows_at_the_next_collection() {
     type Receipts = fn(u64, u64) -> Option<sonicterm_render_model::AckRows>;
-    let cases: [(&str, Receipts, &[usize]); 3] = [
-        ("offscreen-only Noop", |_, _| None, &[5, 15]),
+    /// One case: its label, the view top, the dirty live rows, the receipts, the scrolled pane's
+    /// rows left dirty, and the one peer row its receipt clears.
+    type Case = (&'static str, u64, &'static [usize], Receipts, &'static [usize], Option<usize>);
+    let cases: [Case; 3] = [
+        ("offscreen-only Noop", 90, &[15], |_, _| None, &[15], None),
         (
             "another pane's partial frame",
+            90,
+            &[15],
             |pane, scrolled| {
                 Some(if pane == scrolled {
                     sonicterm_render_model::AckRows::Rows(Default::default())
@@ -1164,20 +1171,24 @@ fn scrolled_view_row_receipts_clear_only_drawn_live_rows_at_the_next_collection(
                     sonicterm_render_model::AckRows::Rows([0].into_iter().collect())
                 })
             },
-            &[5, 15],
+            &[15],
+            Some(0),
         ),
         (
             "live row 5 drawn",
+            97,
+            &[5, 15],
             |pane, scrolled| {
                 (pane == scrolled)
                     .then(|| sonicterm_render_model::AckRows::Rows([5].into_iter().collect()))
             },
             &[15],
+            None,
         ),
     ];
     for child in [false, true] {
-        for (name, receipts_for, kept) in cases {
-            let (mut app, window, _left, scrolled, _) = fixture(child, false);
+        for (name, view_top, dirty_live_rows, receipts_for, kept, peer_cleared) in cases {
+            let (mut app, window, peer, scrolled, _) = fixture(child, false);
             let parser = Arc::clone(&app.windows[&window].panes[&scrolled].parser);
             {
                 let mut parser = parser.lock();
@@ -1188,28 +1199,35 @@ fn scrolled_view_row_receipts_clear_only_drawn_live_rows_at_the_next_collection(
                     grid.linefeed();
                 }
                 grid.clear_dirty();
-                for (row, character) in [(5, 'x'), (15, 'y')] {
-                    grid.goto(row, 0);
-                    grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+                for row in dirty_live_rows {
+                    grid.goto(*row as u16, 0);
+                    grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
                 }
             }
+            app.windows[&window].panes[&peer].parser.lock().grid_mut().mark_all_dirty();
             app.windows
                 .get_mut(&window)
                 .unwrap()
                 .panes
                 .get_mut(&scrolled)
                 .unwrap()
-                .viewport_top_abs = Some(97);
+                .viewport_top_abs = Some(view_top);
             let (scrollback_len, view_rows, generation) = {
                 let parser = parser.lock();
                 let grid = parser.grid();
                 (grid.scrollback_len() as u64, grid.rows, grid.dirty_generation())
             };
             assert_eq!((view_rows, scrollback_len), (16, 100), "{name}: the fixture's dimensions");
-            assert_eq!(slot_of_live_row(scrollback_len, 97, view_rows, 5), Some(8), "{name}");
-            assert_eq!(scrollback_len + 15 - 97, 18, "{name}: live row 15 is slot 18");
-            assert_eq!(slot_of_live_row(scrollback_len, 97, view_rows, 15), None, "{name}: below");
-            assert_eq!(dirty(&app, window, scrolled), [5, 15], "{name}: the dirt before the frame");
+            // Live row 15's raw slot is past the 16-row view at either top; live row 5 is slot 8
+            // from row 97.
+            assert_eq!(scrollback_len + 15 - view_top, if view_top == 90 { 25 } else { 18 });
+            assert_eq!(slot_of_live_row(scrollback_len, view_top, view_rows, 15), None, "{name}");
+            if view_top == 97 {
+                assert_eq!(slot_of_live_row(scrollback_len, 97, view_rows, 5), Some(8), "{name}");
+            }
+            assert_eq!(dirty(&app, window, scrolled), dirty_live_rows, "{name}: dirt before");
+            let peer_rows = all_rows(&app, window, peer);
+            assert_eq!(dirty(&app, window, peer), peer_rows, "{name}: the peer starts all dirty");
 
             present_pane_receipts(&mut app, window, child, |pane| receipts_for(pane, scrolled));
             collect_next(&mut app, window, child).unwrap();
@@ -1220,6 +1238,9 @@ fn scrolled_view_row_receipts_clear_only_drawn_live_rows_at_the_next_collection(
                 "child={child} {name}: acknowledging never advances the generation"
             );
             assert_eq!(dropped(&app, window), 0, "child={child} {name}: no receipt is dropped");
+            let peer_kept: Vec<usize> =
+                peer_rows.into_iter().filter(|row| Some(*row) != peer_cleared).collect();
+            assert_eq!(dirty(&app, window, peer), peer_kept, "child={child} {name}: the peer");
         }
     }
 }
