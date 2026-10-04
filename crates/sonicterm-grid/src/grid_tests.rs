@@ -2293,3 +2293,29 @@ fn dirty_bits_are_set_only_by_writers_that_advance_the_generation() {
     check_dirty_writer_pin(&lf_source);
     check_dirty_writer_pin(&lf_source.replace('\n', "\r\n"));
 }
+
+/// A renderer's per-row ink record stays valid only while its row's content stamp is unchanged:
+/// `row_content_seq_at_abs` reads a visible row's stamp and, once the row scrolls into history,
+/// the same stamp from the history line; a write moves only the written row's stamp, and an
+/// absolute row past the visible bottom has none.
+#[test]
+fn row_content_seq_at_abs_follows_a_row_from_the_screen_into_history() {
+    let mut grid = Grid::new(4, 3);
+    grid.goto(1, 0);
+    grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+    let written = grid.row_content_seq_at_abs(1).expect("visible row 1");
+    assert!(written > grid.row_content_seq_at_abs(0).expect("visible row 0"));
+    assert_eq!(grid.row_content_seq_at_abs(2), grid.row_content_seq_at_abs(0));
+    assert_eq!(grid.row_content_seq_at_abs(3), None, "past the visible bottom");
+
+    grid.scroll_up(2);
+    assert_eq!(grid.scrollback_len(), 2);
+    // Absolute row 1 is now history; it keeps the stamp it had on screen.
+    assert_eq!(grid.row_content_seq_at_abs(1), Some(written));
+    let before = grid.row_content_seq_at_abs(2);
+    grid.goto(1, 0);
+    grid.put_char('y', Color::Default, Color::Default, CellFlags::empty());
+    assert_eq!(grid.row_content_seq_at_abs(2), before, "an unwritten row keeps its stamp");
+    assert!(grid.row_content_seq_at_abs(3) > before, "the written row's stamp advances");
+    assert_eq!(grid.row_content_seq_at_abs(1), Some(written), "history is untouched");
+}
