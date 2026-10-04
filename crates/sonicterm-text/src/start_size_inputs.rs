@@ -101,7 +101,7 @@ pub fn required_inputs(scale: u32) -> Vec<RequiredInput> {
     for (fixture, perf_source) in fixtures {
         for platform in ["macos", "windows"] {
             if scale == 1 {
-                // When: scale is 1 the perf scenarios measured this fixture's end-of-run atlas.
+                // The perf scenarios run at scale 1 only, so only that scale needs their rows.
                 required.push(RequiredInput { platform, fixture, source: perf_source });
             }
             required.push(RequiredInput { platform, fixture, source: InputSource::Helper });
@@ -216,7 +216,7 @@ pub fn validate_start_dim(
         .map(|required| format!("{} {} {:?}", required.platform, required.fixture, required.source))
         .collect();
     if !missing.is_empty() {
-        // When: a required input is unrecorded the rows cannot justify a start below the maximum.
+        // When: missing names an unrecorded input, the rows cannot justify a smaller start.
         return Err(format!(
             "{scale}x start {start} lacks required inputs: {}",
             missing.join(", ")
