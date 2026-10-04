@@ -15,8 +15,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use sonicterm_gpu::{
     core::{
-        unpad_readback_rows, GlyphAtlasStart, GpuRenderer, InjectedRowGlyph, PresentOutcome,
-        PresentedDamage, RendererSettings, SurfaceAppearance, SurfaceRetryReason,
+        settle_borrowed_frame, unpad_readback_rows, GlyphAtlasStart, GpuRenderer, InjectedRowGlyph,
+        PresentOutcome, PresentedDamage, RendererSettings, SurfaceAppearance, SurfaceRetryReason,
     },
     device_errors::DeviceStateWaker,
 };
@@ -32,7 +32,7 @@ use sonicterm_render_model::{
             tabs::{Tab, TabBar},
         },
     },
-    CursorStyle, InlineImage, PaneRender, PixelRect,
+    AckReceipt, AckRows, BorrowedSource, CursorStyle, InlineImage, PaneRender, PixelRect,
 };
 use sonicterm_types::{ClassCoverage, ResourceClass};
 use winit::{
@@ -143,6 +143,8 @@ struct ScenePane {
 struct Scene {
     /// The terminal background opacity the renderer draws this scene at.
     opacity: f32,
+    /// The receipts of the last frame of this scene that presented.
+    receipts: Vec<AckReceipt>,
     panes: Vec<ScenePane>,
     cursor_visible: bool,
     selection: Option<Selection>,
@@ -315,6 +317,7 @@ fn single(layout: &Layout) -> Scene {
     tabs.push(Tab::new("shell"));
     Scene {
         opacity: OPACITY,
+        receipts: Vec::new(),
         panes: vec![ScenePane {
             id: PANE_ID,
             rect: layout.pane,
@@ -328,7 +331,8 @@ fn single(layout: &Layout) -> Scene {
     }
 }
 
-/// Draw `scene` once through the compatibility path, which applies its receipts to the grids.
+/// Draw `scene` once through the releasing call over borrowed grids, as the App's adapters do.
+/// A presented frame's receipts are applied to the grids and kept on the scene.
 fn frame(renderer: &mut GpuRenderer, scene: &mut Scene) -> PresentOutcome {
     let theme = Theme::default();
     let fonts = renderer.begin_frame_fonts();
@@ -347,9 +351,9 @@ fn frame(renderer: &mut GpuRenderer, scene: &mut Scene) -> PresentOutcome {
             inline_images: pane.images.clone(),
         })
         .collect();
-    renderer.render_with_outcome(
+    let released = renderer.render_releasing(
         &fonts,
-        &mut panes,
+        BorrowedSource(&mut panes[..]),
         &theme,
         scene.cursor_visible,
         scene.selection.as_ref(),
@@ -363,7 +367,15 @@ fn frame(renderer: &mut GpuRenderer, scene: &mut Scene) -> PresentOutcome {
         None,
         None,
         None,
-    )
+    );
+    let receipts = released.receipts.clone();
+    let outcome = settle_borrowed_frame(released, &mut panes);
+    drop(panes);
+    if matches!(outcome, PresentOutcome::Presented) {
+        // Only a presented frame issues receipts; a retry keeps the last presented frame's.
+        scene.receipts = receipts;
+    }
+    outcome
 }
 
 /// Draw `scene` until a frame presents, at most four tries, and return that frame's damage.
@@ -432,16 +444,18 @@ enum Expect {
 /// Present `scene` with narrow damage, check how it was assembled, then repaint the same state in
 /// full and require the two retained frames equal byte for byte, with the ground's alpha following
 /// the scene's background opacity.
-/// Returns the narrow frame's damage and its counter deltas.
+/// Returns the narrow frame's damage, its counter deltas and its receipts.
 fn narrow_matches_full(
     renderer: &mut GpuRenderer,
     scene: &mut Scene,
     case: &str,
     expect: Expect,
-) -> Result<(PresentedDamage, Counts), String> {
+) -> Result<(PresentedDamage, Counts, Vec<AckReceipt>), String> {
     let before = counts(renderer);
     let narrow = present(renderer, scene)?;
     let moved = delta(before, counts(renderer));
+    // The full comparison frame below replaces the scene's receipts, so keep the narrow frame's.
+    let narrow_receipts = std::mem::take(&mut scene.receipts);
     check(
         !narrow.first_frame && narrow.is_narrow(),
         &format!("{case}: the frame damages less than the surface: {narrow:?}"),
@@ -484,7 +498,7 @@ fn narrow_matches_full(
         (corner[3] == u8::MAX) == (scene.opacity >= 1.0),
         &format!("{case}: the ground's alpha {corner:?} follows opacity {}", scene.opacity),
     )?;
-    Ok((narrow, moved))
+    Ok((narrow, moved, narrow_receipts))
 }
 
 /// Test 6: every acceptance case presents `Partial`, emitting fewer rows than the pane has, and
@@ -655,7 +669,7 @@ fn parity_cases(
     )?;
     baseline(renderer, &mut image)?;
     write(image.grid(), EDIT_ROW, 0, "edit");
-    let (damage, _) = narrow_matches_full(
+    let (damage, _, _) = narrow_matches_full(
         renderer,
         &mut image,
         &label("inline image crossing the damage"),
@@ -775,6 +789,7 @@ fn overhanging_records(
     tabs.push(Tab::new("shell"));
     let mut split = Scene {
         opacity: OPACITY,
+        receipts: Vec::new(),
         panes: vec![
             ScenePane {
                 id: PANE_ID,
@@ -824,7 +839,7 @@ fn overhanging_records(
     let mut vertical = single(layout);
     baseline(renderer, &mut vertical)?;
     write(vertical.grid(), EDIT_ROW, 0, "edit");
-    let (damage, _) =
+    let (damage, _, _) =
         narrow_matches_full(renderer, &mut vertical, "tall glyph five rows up", Expect::Partial)?;
     let record = renderer.__test_row_ink(PANE_ID, tall_slot).ok_or("the tall row's record")?;
     check(
@@ -839,7 +854,8 @@ fn overhanging_records(
 /// cursor recolors it; widening the damage by its bounds reaches a row the partial plan did not
 /// emit, so the frame is reassembled `Full` in the same frame, counted as one fallback and one
 /// full frame, and equals a full repaint. Hiding it again emits the rows the previous recolor
-/// reached, so no fallback is needed.
+/// reached, so no fallback is needed. Both frames go through the releasing call: the fallback's
+/// receipt acknowledges every row (`AckRows::All`), the partial frame's only the rows it drew.
 ///
 /// Before presenting, the geometry is checked: the cursor cell covers at least the recolorer's
 /// 20% of the glyph, and the glyph reaches a dense row whose padded strip misses the cursor rows'
@@ -889,9 +905,29 @@ fn post_assembly_fallback(
         ),
     )?;
     scene.cursor_visible = true;
-    narrow_matches_full(renderer, &mut scene, "recolor reaching a skipped row", Expect::Fallback)?;
+    let (_, _, fallback_receipts) = narrow_matches_full(
+        renderer,
+        &mut scene,
+        "recolor reaching a skipped row",
+        Expect::Fallback,
+    )?;
+    check(
+        !fallback_receipts.is_empty()
+            && fallback_receipts.iter().all(|receipt| receipt.rows == AckRows::All),
+        &format!("the reassembled Full frame acknowledges every row: {fallback_receipts:?}"),
+    )?;
     scene.cursor_visible = false;
-    narrow_matches_full(renderer, &mut scene, "previous recolor rows emitted", Expect::Partial)?;
+    let (_, _, partial_receipts) = narrow_matches_full(
+        renderer,
+        &mut scene,
+        "previous recolor rows emitted",
+        Expect::Partial,
+    )?;
+    check(
+        !partial_receipts.is_empty()
+            && partial_receipts.iter().all(|receipt| matches!(receipt.rows, AckRows::Rows(_))),
+        &format!("the partial frame acknowledges only its drawn rows: {partial_receipts:?}"),
+    )?;
     renderer.__inject_test_glyph(None);
     Ok(())
 }
