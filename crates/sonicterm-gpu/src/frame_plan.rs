@@ -91,6 +91,9 @@ impl WindowIdentity {
 pub(crate) struct PaneIdentity {
     pub id: u64,
     pub revision: u64,
+    /// The grid's dirty generation: dirt marked after a presented frame changes the key, so a pane
+    /// with unacknowledged dirt never takes the unchanged-key shortcut.
+    pub dirty_generation: u64,
     pub rect: PixelRect,
     pub cols: u16,
     pub rows: u16,
@@ -104,8 +107,10 @@ pub(crate) struct PaneIdentity {
 
 impl PaneIdentity {
     fn same_projection(&self, other: &Self) -> bool {
-        // Grid revisions alone use dirty-row damage; every other pane identity change invalidates its projection.
-        Self { revision: other.revision, ..*self } == *other
+        // Grid revisions and dirty generations alone use dirty-row damage; every other pane identity
+        // change invalidates its projection.
+        Self { revision: other.revision, dirty_generation: other.dirty_generation, ..*self }
+            == *other
     }
 }
 
@@ -137,6 +142,8 @@ pub(crate) struct FrameFacts {
 pub(crate) struct PaneMetadata {
     pub id: u64,
     pub revision: u64,
+    /// The grid's dirty generation when the plan was built.
+    pub dirty_generation: u64,
     pub rect: PixelRect,
     pub cols: u16,
     pub rows: u16,
@@ -266,6 +273,7 @@ impl FramePlan {
             identities.push(PaneIdentity {
                 id: input.id,
                 revision: input.revision,
+                dirty_generation: input.dirty_generation,
                 rect: input.rect,
                 cols: input.cols,
                 rows: input.rows,

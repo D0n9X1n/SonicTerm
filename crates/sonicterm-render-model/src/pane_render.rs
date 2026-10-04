@@ -67,6 +67,103 @@ pub struct PaneRender<'a> {
     pub inline_images: Vec<InlineImage>,
 }
 
+/// A frame's panes, lent to the renderer once. The renderer assembles the frame inside `lend`'s
+/// closure; when `lend` returns, the source is gone, so an owning source releases every parser
+/// guard before the frame is presented.
+pub trait FrameSource {
+    /// Lend the frame's panes to `assemble` exactly once, then drop every guard.
+    ///
+    /// The closure is higher-ranked over both lifetimes, so its result cannot hold a pane or a grid.
+    fn lend<R>(
+        self,
+        assemble: impl for<'slice, 'grid> FnOnce(&'slice mut [PaneRender<'grid>]) -> R,
+    ) -> R;
+}
+
+/// A source over panes the caller keeps borrowing; lending releases nothing.
+pub struct BorrowedSource<'slice, 'grid>(pub &'slice mut [PaneRender<'grid>]);
+
+impl FrameSource for BorrowedSource<'_, '_> {
+    fn lend<R>(
+        self,
+        assemble: impl for<'slice, 'grid> FnOnce(&'slice mut [PaneRender<'grid>]) -> R,
+    ) -> R {
+        assemble(self.0)
+    }
+}
+
+/// Which of a pane's dirty rows a presented frame drew and may acknowledge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AckRows {
+    /// Every row: the frame drew the whole pane.
+    All,
+    /// Only these visible row slots.
+    Rows(sonicterm_grid::grid::RowSet),
+}
+
+/// What a presented frame drew of one pane, as metadata only: the pane's position in the frame, its
+/// id, the grid identities it was assembled from, and the rows it may acknowledge. Applying it clears
+/// those rows only when every identity still matches the grid, so dirt written after assembly stays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AckReceipt {
+    /// The pane's index in the frame's pane slice.
+    pub index: usize,
+    /// The pane's id.
+    pub pane_id: PaneId,
+    /// The grid's cell-content revision when the frame was assembled.
+    pub revision: u64,
+    /// The grid's dirty generation when the frame was assembled.
+    pub dirty_generation: u64,
+    /// The grid's size generation when the frame was assembled.
+    pub size_generation: u64,
+    /// The grid's screen epoch when the frame was assembled.
+    pub screen_epoch: u64,
+    /// The rows the frame drew.
+    pub rows: AckRows,
+}
+
+impl AckReceipt {
+    /// The receipt for what a frame drew of `grid`, read from the grid as it is now.
+    pub fn of(
+        index: usize,
+        pane_id: PaneId,
+        grid: &sonicterm_grid::grid::Grid,
+        rows: AckRows,
+    ) -> Self {
+        AckReceipt {
+            index,
+            pane_id,
+            revision: grid.revision(),
+            dirty_generation: grid.dirty_generation(),
+            size_generation: grid.size_generation(),
+            screen_epoch: grid.screen_epoch(),
+            rows,
+        }
+    }
+
+    /// Whether `grid` is still exactly the grid this receipt was assembled from.
+    pub fn matches(&self, grid: &sonicterm_grid::grid::Grid) -> bool {
+        self.revision == grid.revision()
+            && self.dirty_generation == grid.dirty_generation()
+            && self.size_generation == grid.size_generation()
+            && self.screen_epoch == grid.screen_epoch()
+    }
+
+    /// Clear the receipt's rows from `grid` when every identity still matches; returns whether it did.
+    /// A mismatch clears nothing, so dirt written after the frame was assembled is kept.
+    pub fn try_apply(&self, grid: &mut sonicterm_grid::grid::Grid) -> bool {
+        if !self.matches(grid) {
+            // When: any identity moved since assembly, the dirt may not be what the frame drew; keep it.
+            return false;
+        }
+        match &self.rows {
+            AckRows::All => grid.clear_dirty(),
+            AckRows::Rows(rows) => grid.clear_dirty_rows(rows),
+        }
+        true
+    }
+}
+
 /// Cursor presentation style carried directly in the render boundary so the
 /// GPU does not depend on a concrete UI cursor-state representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

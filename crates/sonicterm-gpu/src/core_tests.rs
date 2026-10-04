@@ -77,6 +77,7 @@ fn revision_plan(id: u64, revision: u64) -> FramePlan {
         [PaneMetadata {
             id,
             revision,
+            dirty_generation: 0,
             rect: PixelRect { x: 0, y: 0, w: 80, h: 40 },
             cols: 8,
             rows: 2,
@@ -89,6 +90,15 @@ fn revision_plan(id: u64, revision: u64) -> FramePlan {
         }],
         None,
     )
+}
+
+/// A plan's receipts, applied to the same panes, as a presented frame's would be.
+fn acknowledge_plan(
+    plan: &FramePlan,
+    panes: &mut [sonicterm_render_model::PaneRender<'_>],
+) -> usize {
+    let receipts = presented_receipts(plan, panes);
+    acknowledge_receipts(&receipts, panes)
 }
 
 /// Only a presented plan's exact revision can clear dirt; a subsequent mutation or replacement stays dirty.
@@ -109,19 +119,19 @@ fn planned_acknowledgement_rejects_newer_grid_and_replacement() {
         scrollbar_alpha: 0.0,
         inline_images: Vec::new(),
     }];
-    acknowledge_presented_plan(&plan, &mut panes);
+    acknowledge_plan(&plan, &mut panes);
     assert!(panes[0].grid.dirty_count() > 0);
     let current = revision_plan(7, panes[0].grid.revision());
     panes[0].id = 8;
-    acknowledge_presented_plan(&current, &mut panes);
+    acknowledge_plan(&current, &mut panes);
     assert!(panes[0].grid.dirty_count() > 0);
     panes[0].id = 7;
-    acknowledge_presented_plan(&current, &mut panes);
+    acknowledge_plan(&current, &mut panes);
     assert_eq!(panes[0].grid.dirty_count(), 0);
     panes[0].grid.mark_all_dirty();
     let mut noop = revision_plan(7, panes[0].grid.revision());
     noop.mode = RenderMode::Noop;
-    acknowledge_presented_plan(&noop, &mut panes);
+    acknowledge_plan(&noop, &mut panes);
     assert!(panes[0].grid.dirty_count() > 0, "unpresented plans cannot acknowledge dirt");
 }
 
@@ -144,7 +154,7 @@ fn production_frame_decisions_use_one_plan_and_preserve_retry_boundaries() {
     assert!(render.contains("plan.damage"));
     assert!(render.contains("pv.planned.content_clip"));
     assert!(render.contains("pv.planned.rows()"));
-    // The render body acknowledges once, and only after its presenter reports `Presented`.
+    // The frame finishes once, and only after its presenter reports `Presented`.
     let handoff = render.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
     let guard = render[handoff..].find("PresentOutcome::Presented)").unwrap() + handoff;
     let finish = render.find("self.finish_successful_frame(plan,").unwrap();
@@ -155,7 +165,10 @@ fn production_frame_decisions_use_one_plan_and_preserve_retry_boundaries() {
     // submission.
     let presenters = include_str!("present.rs").replace("\r\n", "\n");
     assert!(!presenters.contains("finish_successful_frame"));
-    assert!(!presenters.contains("acknowledge_presented_plan"));
+    // Atlases clear their own dirty rects; a presenter never clears grid dirt.
+    for grid_clear in ["acknowledge_receipts", "grid.clear_dirty()", "clear_dirty_rows("] {
+        assert!(!presenters.contains(grid_clear), "a presenter calls {grid_clear}");
+    }
     assert_eq!(presenters.matches("Ok(PresentOutcome::Presented)").count(), 2);
     let software = presenters
         .find("crate::software_windows::present_frame(frame, &self.window)?;\n        lap(timing, \"software_present\");")
@@ -986,7 +999,7 @@ fn atlas_frame_detector_production_capture_and_retry_precede_presentation() {
     let guard = source
         .find("if atlas_changed_during_frame(atlas_stamp_at_frame_start, self.glyph_atlas_stamp())")
         .unwrap();
-    let retry = source[guard..].find("return Ok(PresentOutcome::AtlasRetry);").unwrap() + guard;
+    let retry = source[guard..].find("return Ok(Assembled::AtlasRetry {").unwrap() + guard;
     let present = source.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
     let acknowledge = source.find("self.finish_successful_frame(plan,").unwrap();
     assert!(start < guard && guard < retry && retry < present && present < acknowledge);
@@ -4445,6 +4458,7 @@ fn scrolled_back_cache_plan(dirty_live_rows: Vec<usize>) -> FramePlan {
     let metadata = |revision, dirty_rows| PaneMetadata {
         id: 7,
         revision,
+        dirty_generation: 0,
         rect: PixelRect { x: 0, y: 0, w: 100, h: 484 },
         cols: 8,
         rows: 24,

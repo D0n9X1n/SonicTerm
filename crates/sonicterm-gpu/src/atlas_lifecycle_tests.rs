@@ -48,7 +48,7 @@ fn extracted_retry_and_success_keep_distinct_settlement_boundaries() {
         assert!(position > previous, "misordered {call}");
         previous = position;
     }
-    assert!(!retry.contains("acknowledge_presented_plan"));
+    assert!(!retry.contains("clear_dirty") && !retry.contains("acknowledge_receipts"));
     assert!(retry.contains("let current_epoch = self.glyph_atlas.evictions();"));
     assert!(retry.contains("current_epoch > frame_epoch"));
     assert!(retry.contains("\"eviction_compaction\""));
@@ -56,11 +56,11 @@ fn extracted_retry_and_success_keep_distinct_settlement_boundaries() {
     assert!(retry.contains("?before,") && retry.contains("?after,"));
     let core = include_str!("core.rs");
     assert_eq!(core.matches("self.finish_glyph_atlas_retry();").count(), 1);
+    // A presented frame settles the retry; it clears no grid dirt, which its receipts carry out.
     let success = core.split_once("fn finish_successful_frame(").unwrap().1;
-    assert!(
-        success.find("acknowledge_presented_plan").unwrap()
-            < success.find("self.finish_glyph_atlas_retry();").unwrap()
-    );
+    let success = success.split_once("\n    }\n").unwrap().0;
+    assert!(success.contains("self.finish_glyph_atlas_retry();"));
+    assert!(!success.contains("clear_dirty") && !success.contains("panes"));
 }
 
 #[test]

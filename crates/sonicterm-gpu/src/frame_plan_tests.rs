@@ -164,6 +164,7 @@ fn pane(id: u64, revision: u64) -> PaneMetadata {
     PaneMetadata {
         id,
         revision,
+        dirty_generation: 0,
         rect: PixelRect { x: 0, y: 0, w: 100, h: 84 },
         cols: 8,
         rows: 4,
@@ -689,6 +690,7 @@ fn offscreen_write_that_moves_the_cursor_under_a_preedit_is_not_a_noop() {
     let view_top_abs = scrollback_len - 4;
     let metadata = |grid: &Grid| PaneMetadata {
         revision: grid.revision(),
+        dirty_generation: grid.dirty_generation(),
         scrollback_len: grid.scrollback_len() as u64,
         viewport_top_abs: Some(view_top_abs),
         dirty_rows: grid.dirty_rows().collect(),
