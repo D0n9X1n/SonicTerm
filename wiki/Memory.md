@@ -195,23 +195,28 @@ or reset of the sampling cadence.
 Renderer memory is separate because it is window-owned rather than pane-owned:
 
 - `glyph_atlas_bytes`: CPU glyph atlas pixel capacity plus its dirty-rect list's capacity, so it rises as the atlas grows;
-- per renderer, after `total=`: `glyph_atlas_dim`, `glyph_atlas_packed_pixels`, `glyph_atlas_growths`, `glyph_atlas_evictions`, `glyph_atlas_fit` (the smallest power-of-two size its resident tiles would fit with a quarter of the height free) and `glyph_atlas_max_tile`;
+- per renderer, after `total=`: `glyph_atlas_dim`, `glyph_atlas_packed_pixels`, `glyph_atlas_growths`, `glyph_atlas_evictions`, `glyph_atlas_fit` and `glyph_atlas_max_tile`. The fit is the smallest of 256, 512, 1024 and 2048 that holds the resident tiles with a quarter of its height free. Otherwise it is `no_headroom` (every tile packs at 2048 but no size leaves that quarter free), `does_not_fit` (some tile cannot be placed even at 2048) or `evicted` (the atlas has evicted, so its resident set is no longer its working set). `glyph_atlas_growths` counts the renderer's doublings since it was built; a reset does not clear it;
 - `image_atlas_bytes`: CPU inline-image atlas capacity;
 - `row_glyph_cache_bytes` / `row_glyph_cache_items`: hash-table backing, cached
   glyph instances, underline runs, tofu geometry, missing characters, and row count;
 - `row_quad_cache_bytes` / `row_quad_cache_items`: hash-table backing, cached
   background/decoration quad vectors, and row count;
 - `software_frame_bytes`: Windows CPU/GDI frame, zero elsewhere;
-- `vertex_scratch_bytes` / `vertex_scratch_items`: the presentation pipeline's
-  reused CPU vertex-assembly buffer, cleared and refilled every frame. After a
-  frame, a capacity over four times that frame's vertices and over 1 MiB is
-  shrunk to twice its use. The policy also runs after a frame that emits no
-  vertices, which releases a scratch over 1 MiB entirely. Dropping the
-  renderer frees it. It is tagged
-  `UploadStaging` and counted in `renderer_total_bytes`. That class's recorded
-  coverage figure, 32 MiB, is the atlas staging ceiling only (two 16 MiB
-  atlases); the scratch is reported live beside it and has no fixed ceiling,
-  because it follows the frame's vertex count under the release policy above.
+- `vertex_scratch_bytes` / `vertex_scratch_items`: the renderer's `UploadStaging`
+  part, counted in `renderer_total_bytes`. It is the presentation pipeline's
+  reused CPU vertex-assembly buffer plus, for each of the glyph and image atlas
+  uploads, its dirty and coalesced rect lists and its staging buffer. The vertex
+  buffer is cleared and refilled every frame. After a frame, a capacity over four
+  times that frame's vertices and over 1 MiB is shrunk to twice its use; a frame
+  that emits no vertices releases a buffer over 1 MiB entirely. Each upload
+  clears both rect lists after a sync and shrinks a list over 1,024 rects to 64.
+  The staging buffer keeps its largest write's capacity, at most one whole
+  atlas. The items count only the vertex buffer: 1 while it holds an
+  allocation. Dropping the renderer frees all of them. The class's recorded
+  coverage figure, 34.5 MiB, is the upload envelope: two 16 MiB staging
+  buffers, plus 2 uploads × 2 lists × 2 × 16,384 rects × 20 bytes for the rect
+  lists during one sync. The vertex buffer is reported live beside it and has
+  no fixed ceiling, because it follows the frame's vertex count.
 
 These are host-memory copies. GPU textures and buffers are not included because
 the driver owns them and wgpu does not expose their sizes. Row-cache reports use

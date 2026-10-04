@@ -22,12 +22,15 @@ cargo build -p sonicterm-text
 - UV-bearing caches use `GlyphAtlas::identity()`, not the resettable eviction
   counter, and still clear promptly when their owning seam changes.
 - A `GlyphAtlas::growable` atlas doubles up to its maximum before it evicts;
-  `new` and `default_size` stay fixed. Growth copies resident tiles, keeps
-  their positions, recomputes UVs, queues one typed re-upload rect per tile
-  and advances the identity; it never rasterizes again.
+  `new` and `default_size` stay fixed. `grow_to` accepts only the policy's
+  next doubling and refuses anything else without changing the atlas. Growth
+  copies resident tiles, keeps their positions, recomputes UVs, queues one
+  typed re-upload rect per tile, advances the identity and counts one growth
+  that a reset does not clear; it never rasterizes again.
   `retained_amount().bytes` is the pixel capacity plus the dirty list's
-  capacity, so it moves with growth; on a fixed atlas it is constant, and a
-  test bounding it there compares a constant to itself.
+  capacity. Pixels move only with growth; the dirty list grows with inserts
+  and a drain shrinks it to 64 rects once it exceeds 1,024, so even a fixed
+  atlas's figure varies. A test bounding memory must assert the term it means.
 - Eviction is what keeps the index bounded. With eviction disabled the index
   still stops growing, because a full atlas stops admitting — memory looks
   flat while every later glyph goes missing. Assert that eviction ran, not

@@ -482,7 +482,10 @@ renderer that collected it.
 | `row_cache_invalidate_us` | µs | total time spent invalidating dirty rows, as a plain sum; one clock pair per pane that invalidates at least one row, taken inside that pane's row loop so counting never changes which cached rows are kept |
 | `recolor_glyphs_visited` | count | glyphs examined when recoloring glyphs under the cursor, the copy-mode cursor or a search match on the frame's main glyph list: the rows whose ink meets the target plus every glyph outside the terminal rows, such as tab titles; overlay text is not counted |
 | `font_fallback_applies` | count | frames whose font preparation applied a newer fallback notice or generation, clearing shaped rows, missing-glyph atlas entries and the tab-title width epoch once; supporting evidence that a resolved fallback face reached the screen, which tests prove by pixels |
+| `glyph_atlas_growths` | count | glyph atlas doublings, counted at every end-of-frame check and when the renderer settles its statistics; a frame that grows the atlas starts a growth episode |
+| `atlas_growth_abandoned` | count | growth episodes no frame presented: settled when the device stops, before a rebind replaces the device, and when the App settles a retiring or exiting window's statistics; a reset in place abandons nothing |
 | `assembly` | µs histogram | CPU frame assembly in the renderer: from the frame-key check to the end of overlay assembly, before the atlas-retry check, upload, surface acquire, submit and present; one sample per assembled frame, including frames that later retry or fail to present; a `Noop` or skipped frame adds none. It is not the app's `render` lap |
+| `atlas_growth_to_present` | ms histogram | from the start of the first frame that grew the glyph atlas to the next successful present; one sample per presented growth episode |
 
 On Windows a frame the GDI presenter draws counts as `software_frames`; the
 hosted Windows CI runner has no GPU, so its runs report `software_frames` and no
@@ -769,8 +772,8 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `row_quad_cache_bytes` | hash-table backing plus cached background/decoration quad vector capacities | compare with cached rows and pane/window churn |
 | `row_quad_cache_items` | cached quad rows | a falling count confirms row eviction even when table capacity is sticky |
 | `software_frame_bytes` | full-window Windows software-present buffer | reduce window size; zero outside that path |
-| `vertex_scratch_bytes` | the presentation pipeline's reused CPU vertex-assembly buffer | follows the largest recent frame; shrinks to twice a frame's use once over four times that use and over 1 MiB |
-| `vertex_scratch_items` | 1 while that buffer holds an allocation, else 0 | — |
+| `vertex_scratch_bytes` | the `UploadStaging` part: the presentation pipeline's reused CPU vertex-assembly buffer plus each atlas upload's dirty and coalesced rect lists and staging buffer | the vertex buffer follows the largest recent frame and shrinks to twice a frame's use once over four times that use and over 1 MiB; a sync releases the rect lists; a staging buffer keeps its largest write, at most one atlas |
+| `vertex_scratch_items` | 1 while the vertex buffer holds an allocation, else 0 | — |
 
 `role="warm"` means the renderer belongs to the standby pool, not a visible
 window; closing a window does not release it. Renderer figures are host memory,

@@ -159,19 +159,22 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 渲染器内存单独报告，因为它属于窗口而不是窗格：
 
 - `glyph_atlas_bytes`：CPU 字形图集像素容量加上脏矩形列表容量，因此会随图集增长而上升；
-- 每个渲染器在 `total=` 之后附加：`glyph_atlas_dim`、`glyph_atlas_packed_pixels`、`glyph_atlas_growths`、`glyph_atlas_evictions`、`glyph_atlas_fit`（其常驻图块在保留四分之一高度空余时能放下的最小 2 的幂尺寸）和 `glyph_atlas_max_tile`；
+- 每个渲染器在 `total=` 之后附加：`glyph_atlas_dim`、`glyph_atlas_packed_pixels`、`glyph_atlas_growths`、`glyph_atlas_evictions`、`glyph_atlas_fit` 和 `glyph_atlas_max_tile`。fit 是 256、512、1024 与 2048 中能放下常驻图块并保留四分之一高度空余的最小值。否则为 `no_headroom`（每个图块都能在 2048 放下，但没有尺寸能留出这四分之一）、`does_not_fit`（某个图块即使在 2048 也放不下）或 `evicted`（图集发生过淘汰，常驻集合已不再是工作集）。`glyph_atlas_growths` 统计渲染器自构建以来的翻倍次数，重置不会清零；
 - `image_atlas_bytes`：CPU 内联图像图集容量；
 - `row_glyph_cache_bytes` / `row_glyph_cache_items`：哈希表后备存储、缓存字形实例、
   下划线段、tofu 几何、缺失字符和缓存行数；
 - `row_quad_cache_bytes` / `row_quad_cache_items`：哈希表后备存储、缓存背景/装饰
   quad 向量和缓存行数；
 - `software_frame_bytes`：Windows CPU/GDI 帧，其它平台为零；
-- `vertex_scratch_bytes` / `vertex_scratch_items`：呈现管线复用的 CPU 顶点组装缓冲，每帧
-  清空后重新填充。一帧之后，若容量超过该帧顶点数的四倍且超过 1 MiB，就收缩到用量的两倍。
-  未产生任何顶点的帧也会执行该策略，此时超过 1 MiB 的暂存会被完全释放。渲染器释放时
-  一并释放。它标记为 `UploadStaging`，计入 `renderer_total_bytes`。该分类
-  记录的覆盖数值 32 MiB 只是图集暂存上限（两个 16 MiB 图集）；顶点暂存在其旁实时报告，
-  没有固定上限，因为它按上述释放策略跟随每帧的顶点数。
+- `vertex_scratch_bytes` / `vertex_scratch_items`：渲染器的 `UploadStaging` 部分，计入
+  `renderer_total_bytes`。它是呈现管线复用的 CPU 顶点组装缓冲，加上字形图集与图像图集两个上传
+  各自的脏矩形列表、合并矩形列表和暂存缓冲。顶点缓冲每帧清空后重新填充。一帧之后，若容量超过
+  该帧顶点数的四倍且超过 1 MiB，就收缩到用量的两倍；未产生任何顶点的帧会完全释放超过 1 MiB 的
+  缓冲。每个上传在一次同步后清空两个矩形列表，并把超过 1,024 个矩形的列表收缩到 64。暂存缓冲
+  保留其最大一次写入的容量，至多一整张图集。条目数只统计顶点缓冲：它持有分配时为 1。渲染器
+  释放时一并释放全部。该分类记录的覆盖数值 34.5 MiB 是上传包络：两个 16 MiB 暂存缓冲，加上一次
+  同步期间矩形列表的 2 个上传 × 2 个列表 × 2 × 16,384 个矩形 × 20 字节。顶点缓冲在其旁实时报告，
+  没有固定上限，因为它跟随每帧的顶点数。
 
 这些都是主机内存副本。GPU 纹理与缓冲不在其中，因为显卡驱动拥有它们，wgpu 也不提供
 大小。行缓存报告按已分配的哈希表与嵌套向量容量计算，而不是按当前长度。普通 clear/retain
