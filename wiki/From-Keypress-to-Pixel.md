@@ -397,8 +397,10 @@ Windows CPU presentation calls `finish_successful_frame` only after
 `queue.present(frame)`. The wgpu present call itself has no success result for a
 later compositor failure.
 
-`finish_successful_frame` stores the new `FrameKey`, increments the successful
-frame count, and clears dirty rows only when pane identity and grid revision still match the frame plan.
+`finish_successful_frame` stores the new `FrameKey` and increments the successful
+frame count; it clears no dirt. The presented frame's receipts are applied at the
+window's next collection, clearing a pane's dirty rows only when the same parser is held
+and its revision, dirty generation, size generation and screen epoch still match.
 
 Before a wgpu draw:
 

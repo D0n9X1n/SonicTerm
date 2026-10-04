@@ -42,8 +42,8 @@ the device-state wakers remain unchanged.
 The app uses non-blocking `try_lock` for every visible pane parser. If any pane
 is busy, it defers the frame instead of presenting a mixture of old and new pane
 state. The renderer's metadata-only `FramePlan` fixes clips and viewport row
-slots before shaping; execution keeps the borrowed grids and parser guards,
-and CPU atlas/cache mutation remains stateful.
+slots before shaping; assembly keeps the borrowed grids and parser guards and
+releases them before presentation, and CPU atlas/cache mutation remains stateful.
 
 ### Complete-row alignment
 

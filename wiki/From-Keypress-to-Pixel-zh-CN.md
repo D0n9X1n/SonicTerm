@@ -320,7 +320,7 @@ Windows CPU 呈现只有在 `SetDIBitsToDevice` 成功后才调用 `finish_succe
 wgpu 在提交命令并调用 `queue.present(frame)` 后调用它。wgpu present 本身没有可表示后续
 合成器失败的返回值。
 
-`finish_successful_frame` 保存新的 `FrameKey`，增加成功帧计数，并且只在窗格身份与网格修订号仍匹配帧计划时清除脏行。
+`finish_successful_frame` 保存新的 `FrameKey` 并增加成功帧计数，不清除脏行。已呈现帧的回执在窗口下一次收集时应用：只有持有同一解析器，且窗格的修订号、脏代次、尺寸代次和屏幕纪元仍然一致时，才清除该窗格的脏行。
 
 wgpu 绘制前：
 

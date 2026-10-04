@@ -374,15 +374,17 @@ dropped, its dirt is kept, and the drop is counted in `dirt_ack_dropped`. Every 
 a dirty bit advances `dirty_generation`, which is part of the frame key, so presented but
 unacknowledged dirt never takes the unchanged-key shortcut.
 
-Dirty rows clear only in `finish_successful_frame`, and only when the pane id and
-current grid revision exactly match that plan's captured expectation:
+The renderer clears no grid dirt. A frame issues its metadata receipts only when it is
+`Presented`, which `finish_successful_frame` follows:
 
 - on Windows CPU presentation, after `SetDIBitsToDevice` returns success;
 - on wgpu presentation, after command submission and `queue.present(frame)` are
   invoked.
 
 On both paths the frame's device must also still accept GPU work, as described
-under GPU error containment below.
+under GPU error containment below. The receipts clear dirt only at the window's next
+successful collection, and only when the same parser is held and the pane's revision,
+dirty generation, size generation and screen epoch still match.
 
 `SetDIBitsToDevice` can report failure. wgpu's present call has no result that
 reports a later presentation failure. Surface timeout, occlusion, outdated,
@@ -606,8 +608,9 @@ one retry without acknowledging the grid. The retry disables eviction until one
 frame presents successfully. Diagnostic eviction fields remain actual counts, and
 reset/replacement has a distinct reason. The fixed pixel allocation does not grow.
 The private `atlas_lifecycle` child of `core` owns those transitions and the existing
-upload gates. `FrameBatches` groups only borrowed drawable slices; grids, parser
-guards, frame plans, and acknowledgement remain with frame assembly.
+upload gates. `FrameBatches` groups only borrowed slices of the owned batches; grids and parser
+guards stay with assembly and are released before presentation, and acknowledgement
+happens at the window's next collection.
 
 `RowGlyphCache` and `LineQuadCache` hold one entry per `(pane id, absolute row)`
 and validate it by the stored row hash; glyph entries also by atlas content
