@@ -287,6 +287,8 @@ thread_local! {
     static ATTEMPT: Cell<Option<AttemptStats>> = const { Cell::new(None) };
     /// The innermost counting scope's sink identity, 0 for none.
     static SCOPE_SINK: Cell<usize> = const { Cell::new(0) };
+    /// Assembly time of the open frame's passes, recorded as one sample when the frame closes.
+    static PENDING_ASSEMBLY_US: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 /// The attempt and timer state an isolated scope replaced, restored when it closes.
@@ -738,7 +740,26 @@ pub(crate) fn assembly_clock() -> Option<Instant> {
 pub(crate) fn note_assembly(started: Option<Instant>) {
     if let Some(started) = started {
         // the frame reached the end of assembly under a counting scope: one sample.
-        record_assembly_us(micros_since(started));
+        note_assembly_us(micros_since(started));
+    }
+}
+
+/// Add one assembly pass of `elapsed_us` to the open frame; with the gate off nothing is kept.
+pub(crate) fn note_assembly_us(elapsed_us: u64) {
+    if !COLLECTING.with(Cell::get) {
+        // When: `COLLECTING` is false, no counting renderer is drawing, so the pass is not kept.
+        return;
+    }
+    PENDING_ASSEMBLY_US.with(|pending| {
+        pending.set(Some(pending.get().unwrap_or(0).saturating_add(elapsed_us)));
+    });
+}
+
+/// Close the frame's assembly: its passes' summed time is one sample, so a frame assembled twice
+/// by a partial fallback counts once at its real cost. A frame with no timed pass records nothing.
+pub(crate) fn finish_assembly() {
+    if let Some(elapsed_us) = PENDING_ASSEMBLY_US.with(Cell::take) {
+        record_assembly_us(elapsed_us);
     }
 }
 

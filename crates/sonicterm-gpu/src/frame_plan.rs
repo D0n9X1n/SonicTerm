@@ -849,7 +849,8 @@ impl FramePlan {
 
     /// Turn a partial plan into the `Full` plan assembly falls back to: every row emitted and
     /// every pane acknowledged whole. Its damage stays the composed rectangle, as a hardware
-    /// `Full` keeps it, and the reassembled frame counts as one full frame.
+    /// `Full` keeps it, and the reassembled frame counts as one full frame. The fallback itself is
+    /// counted where assembly consumes it, since the forced pass usually plans `Full` already.
     pub(crate) fn force_full(&mut self) {
         if self.mode != RenderMode::Partial {
             // When: `mode` is not Partial, every row is already emitted or none is presented.
@@ -860,7 +861,6 @@ impl FramePlan {
             pane.emit_rows.fill(true);
         }
         crate::frame_stats::note_full_frame(true);
-        crate::frame_stats::note_partial_fallback();
     }
 
     /// Whether a partial plan's final damage, after the recolor and tab-ink widening, reaches the

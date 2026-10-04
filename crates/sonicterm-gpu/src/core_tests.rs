@@ -5923,7 +5923,9 @@ fn a_partial_plan_reaching_unemitted_ink_is_reassembled_full() {
     assert!(assemble.contains("return Ok(Assembled::PartialFallback);"));
     assert!(assemble.contains("plan.force_full();"), "the second pass plans Full");
     let releasing = method_body(&source, "    pub fn render_releasing(");
-    assert!(releasing.contains("Ok(Assembled::PartialFallback)"), "the fallback is caught");
+    assert!(releasing.contains("assemble_with_fallback(|force_full|"), "one orchestration");
+    let orchestration = source.split_once("fn assemble_with_fallback(").unwrap().1;
+    assert!(orchestration.contains("Ok(Assembled::PartialFallback) =>"), "the fallback is caught");
 }
 
 /// The GDI presenter composes every batch into the whole frame and never reads damage, so it
@@ -5964,4 +5966,112 @@ fn an_injected_row_glyph_joins_its_rows_span_and_record() {
     let inject = assemble.find("self.push_injected_row_glyph(").expect("the seam is pushed");
     let ink = assemble.find("crate::row_ink::emitted_row_ink(").unwrap();
     assert!(row_loop < emit && emit < inject && inject < ink);
+}
+
+/// Facts for the fallback orchestration tests: a 4-row pane on a 240x160 surface, no tab bar.
+fn fallback_facts() -> FrameFacts {
+    FrameFacts {
+        window: WindowIdentity { width: 240, height: 160, ..Default::default() },
+        cell_w: 10.0,
+        cell_h: 20.0,
+        padding: [2.0; 4],
+        vertical_ink_pad: 0.0,
+        scrollbar_mode: ScrollbarMode::Never,
+        degraded: false,
+        tab_bar_top: None,
+        scale: 1.0,
+        previous_recolor: crate::cursor::RecolorRecord::default(),
+    }
+}
+
+/// The 4-row pane of `fallback_facts` at `revision`, with `dirty_rows` and per-slot `row_ink`.
+fn fallback_pane(
+    revision: u64,
+    dirty_rows: Vec<usize>,
+    row_ink: Vec<Option<PixelRect>>,
+) -> PaneMetadata {
+    PaneMetadata {
+        id: 7,
+        revision,
+        dirty_generation: 0,
+        rect: PixelRect { x: 0, y: 0, w: 100, h: 84 },
+        cols: 8,
+        rows: 4,
+        scrollback_len: 0,
+        viewport_top_abs: None,
+        is_active: true,
+        is_alt: false,
+        scrollbar_alpha: 0.0,
+        dirty_rows,
+        row_ink,
+    }
+}
+
+/// The production two-pass orchestration: a first pass that reports a partial fallback is
+/// assembled again as forced Full. As `assemble_frame` plans them, the first pass reads valid
+/// records and plans `Partial`; the forced pass reads none, so its build already plans `Full`.
+/// The frame counts one fallback and one full frame, and one assembly sample of both passes'
+/// summed time (40 + 30 = 70 us, in the 50-100 bucket).
+#[test]
+fn a_partial_fallback_is_counted_once_with_one_summed_assembly_sample() {
+    let first =
+        FramePlan::build(fallback_facts(), [fallback_pane(1, Vec::new(), Vec::new())], None);
+    let key = first.key.clone();
+    let empty = PixelRect { x: 0, y: 0, w: 0, h: 0 };
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let mut passes = Vec::new();
+    let result = {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        assemble_with_fallback(|force_full| {
+            passes.push(force_full);
+            let records = if force_full { Vec::new() } else { vec![Some(empty); 4] };
+            let mut plan = FramePlan::build(
+                fallback_facts(),
+                [fallback_pane(2, vec![1], records)],
+                Some(&key),
+            );
+            if force_full {
+                plan.force_full();
+            }
+            crate::frame_stats::note_assembly_us(if force_full { 30 } else { 40 });
+            if force_full {
+                assert_eq!(plan.mode, RenderMode::Full);
+                Ok(Assembled::Unchanged { focus_flash: false })
+            } else {
+                // When: the first pass is the partial plan, its final damage reached unemitted ink.
+                assert_eq!(plan.mode, RenderMode::Partial);
+                Ok(Assembled::PartialFallback)
+            }
+        })
+    };
+    assert_eq!(passes, [false, true]);
+    assert!(matches!(result, Ok(Assembled::Unchanged { focus_flash: false })));
+    let stats = sink.snapshot();
+    assert_eq!((stats.partial_fallbacks, stats.full_frames, stats.partial_frames), (1, 1, 0));
+    assert_eq!(stats.assembly_buckets, [0, 0, 1, 0, 0, 0, 0]);
+    assert_eq!(stats.assembly_sum_us, 70);
+}
+
+/// An ordinary frame is one pass: no fallback, and one assembly sample of its own time. A pass
+/// timed outside a counting scope leaves nothing pending for the next counted frame.
+#[test]
+fn an_ordinary_frame_records_one_assembly_sample_and_no_fallback() {
+    // Timed with the gate off and never closed: none of it may reach the next counted frame.
+    crate::frame_stats::note_assembly_us(500);
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let mut passes = Vec::new();
+    let result = {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        assemble_with_fallback(|force_full| {
+            passes.push(force_full);
+            crate::frame_stats::note_assembly_us(40);
+            Ok(Assembled::Unchanged { focus_flash: false })
+        })
+    };
+    assert_eq!(passes, [false]);
+    assert!(matches!(result, Ok(Assembled::Unchanged { .. })));
+    let stats = sink.snapshot();
+    assert_eq!(stats.partial_fallbacks, 0);
+    assert_eq!(stats.assembly_buckets, [0, 1, 0, 0, 0, 0, 0]);
+    assert_eq!(stats.assembly_sum_us, 40);
 }

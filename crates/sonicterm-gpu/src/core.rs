@@ -214,6 +214,24 @@ pub(crate) fn upload_staging_amount(
     ResourceAmount { bytes: vertex.bytes + uploads, items: vertex.items }
 }
 
+/// Assemble one frame through `assemble`, called with whether the pass is forced Full. A first
+/// pass whose partial plan's final damage reached a row it did not emit is assembled again forced
+/// Full under the same guards, so the scissor never erases unemitted ink; that fallback is counted
+/// here, once, whatever mode the second pass plans. The passes' time is one assembly sample.
+fn assemble_with_fallback(
+    mut assemble: impl FnMut(bool) -> Result<Assembled>,
+) -> Result<Assembled> {
+    let assembled = match assemble(false) {
+        Ok(Assembled::PartialFallback) => {
+            crate::frame_stats::note_partial_fallback();
+            assemble(true)
+        }
+        other => other,
+    };
+    crate::frame_stats::finish_assembly();
+    assembled
+}
+
 /// Lend `source` once and decide the exits that need no renderer, in their existing order: an empty
 /// source is `NoPanes`, then a device that no longer accepts work is `Unavailable`; only otherwise does
 /// `assemble` run. The source is dropped before this returns.
@@ -5580,8 +5598,7 @@ impl GpuRenderer {
         let accepts_gpu_work = self.device_errors.accepts_gpu_work();
         let assembled = lend_and_assemble(source, accepts_gpu_work, |panes| {
             let mut palette = palette;
-            let mut assemble = |panes: &mut [sonicterm_render_model::PaneRender<'_>],
-                                force_full| {
+            assemble_with_fallback(|force_full| {
                 self.assemble_frame(
                     subpixel_aa,
                     panes,
@@ -5600,13 +5617,7 @@ impl GpuRenderer {
                     link_preview,
                     force_full,
                 )
-            };
-            match assemble(panes, false) {
-                // A partial frame whose final damage reached a row it did not emit is assembled
-                // again as Full under the same guards, so the scissor never erases unemitted ink.
-                Ok(Assembled::PartialFallback) => assemble(panes, true),
-                other => other,
-            }
+            })
         });
         // The source is gone here: every arm below runs with no parser guard held.
         self.flush_image_upload_rebuild();

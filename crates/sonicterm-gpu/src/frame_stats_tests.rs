@@ -463,6 +463,7 @@ fn each_work_counter_moves_as_defined_inside_a_counting_scope() {
         let _counting = CollectGuard::enter(Some(&sink));
         assert!(assembly_clock().is_some());
         note_assembly(assembly_clock());
+        finish_assembly();
     }
     let after = sink.snapshot();
     assert_eq!(after.assembly_buckets.iter().sum::<u64>(), 3, "one sample per assembled frame");
