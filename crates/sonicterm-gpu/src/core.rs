@@ -5092,9 +5092,6 @@ impl GpuRenderer {
         let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
         self.debug_assert_prepared(fonts);
         let frame_start = Instant::now();
-        // A growth outside assembly, or one a reset retry left behind, resizes the texture here,
-        // before lending, so presentation never syncs a grown atlas into a smaller texture.
-        self.rebuild_glyph_upload_if_needed();
         // Read before lending, so assembly itself never reaches the device.
         let subpixel_aa = self.effective_subpixel_aa_mode();
         let accepts_gpu_work = self.device_errors.accepts_gpu_work();
@@ -5119,6 +5116,10 @@ impl GpuRenderer {
         });
         // The source is gone here: every arm below runs with no parser guard held.
         self.flush_image_upload_rebuild();
+        // Any growth, from this assembly, outside it, or left by a reset retry, resizes the texture
+        // here, after release and before any present, so a grown atlas never syncs into a smaller
+        // texture and recreating one never holds the parser guards. Assembly reads no texture.
+        self.rebuild_glyph_upload_if_needed();
         self.count_glyph_atlas_growths(frame_start);
         self.abandon_growth_timing_if_device_stopped();
         let assembled = match assembled {

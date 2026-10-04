@@ -5241,6 +5241,29 @@ fn render_releasing_lends_once_and_presents_after_release() {
     }
 }
 
+/// The glyph texture is resized only once the frame source has released its parser guards: in
+/// `render_releasing` the rebuild comes after `lend_and_assemble` returns and before any present,
+/// never ahead of the lend, so recreating a texture never blocks PTY parsing.
+#[test]
+fn render_releasing_resizes_the_glyph_texture_after_release_and_before_present() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let call = source.split_once("    pub fn render_releasing(").unwrap().1;
+    let call = call.split_once("\n    }\n").unwrap().0;
+    let code: String = call
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lend = code.find("lend_and_assemble(").expect("the lend");
+    let rebuilds: Vec<usize> =
+        code.match_indices("self.rebuild_glyph_upload_if_needed();").map(|(at, _)| at).collect();
+    assert_eq!(rebuilds.len(), 1, "one rebuild seam in render_releasing");
+    assert!(rebuilds[0] > lend, "the rebuild runs after the parser guards are released");
+    for present in ["self.present_layers(", "self.prepare_cached_present()"] {
+        assert!(rebuilds[0] < code.find(present).unwrap(), "the rebuild precedes {present}");
+    }
+}
+
 /// A source that owns its grids and records when it is lent and when it is dropped.
 struct OwningSource {
     grids: Vec<Grid>,
