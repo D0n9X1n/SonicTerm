@@ -9,20 +9,35 @@
 #![warn(clippy::min_ident_chars)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell as CountCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid, MAX_GRID_CELLS};
 use sonicterm_grid::hyperlink::HyperlinkId;
 
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Allocation events on this thread: every `alloc` and every `realloc`.
+    ///
+    /// Per thread, because the harness's own threads (result reporting, a finished test's
+    /// teardown) allocate while a test measures, and the `MEASURE` lock cannot serialize them.
+    /// A const-initialized `Cell` has no destructor, so reaching it never allocates or re-enters.
+    static ALLOC_EVENTS: CountCell<usize> = const { CountCell::new(0) };
+}
+
+/// Count one allocation event on the calling thread; a thread already tearing down its locals is skipped.
+fn note_alloc_event() {
+    let _ = ALLOC_EVENTS.try_with(|events| events.set(events.get() + 1));
+}
 
 struct Counting;
 
-// SAFETY: Operations forward exact pointers, layouts, and sizes to `System`; atomic bookkeeping allocates nothing and cannot re-enter.
+// SAFETY: Operations forward exact pointers, layouts, and sizes to `System`; atomic and const thread-local counts allocate nothing and cannot re-enter.
 unsafe impl GlobalAlloc for Counting {
-    // SAFETY: `layout` must be valid; the atomic byte update is allocation-free before forwarding it unchanged.
+    // SAFETY: `layout` must be valid; the byte and event counts are allocation-free before forwarding it unchanged.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        note_alloc_event();
         // SAFETY: `layout` is the exact valid layout received under `GlobalAlloc::alloc`.
         unsafe { System.alloc(layout) }
     }
@@ -32,10 +47,11 @@ unsafe impl GlobalAlloc for Counting {
         // SAFETY: `ptr` and original `layout` are forwarded unchanged from the valid deallocation call.
         unsafe { System.dealloc(ptr, layout) }
     }
-    // SAFETY: `ptr`, original `layout`, and `new_size` must be valid; atomic bookkeeping allocates nothing and cannot re-enter.
+    // SAFETY: `ptr`, original `layout`, and `new_size` must be valid; the byte and event counts allocate nothing and cannot re-enter.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         LIVE_BYTES.fetch_add(new_size.saturating_sub(layout.size()), Ordering::Relaxed);
         LIVE_BYTES.fetch_sub(layout.size().saturating_sub(new_size), Ordering::Relaxed);
+        note_alloc_event();
         // SAFETY: `ptr`, original `layout`, and `new_size` are forwarded unchanged under `GlobalAlloc::realloc`.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -53,6 +69,11 @@ static MEASURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn held() -> usize {
     LIVE_BYTES.load(Ordering::Relaxed)
+}
+
+/// Allocation events the calling thread has made so far.
+fn alloc_events() -> usize {
+    ALLOC_EVENTS.with(CountCell::get)
 }
 
 fn budget() -> usize {
@@ -459,4 +480,217 @@ fn shrinking_the_scrollback_limit_returns_real_memory() {
         "after trimming, reported {reported_after} understates real heap {truth_after}"
     );
     drop(grid);
+}
+
+/// A plain cell holding `character`.
+fn plain(character: char) -> Cell {
+    Cell::plain(character, Color::Default, Color::Default, CellFlags::empty())
+}
+
+/// Rewrite the bottom visible row in place as one of three eject shapes: 0 uniform (compresses),
+/// 1 thirty letters then blanks (trims), 2 a letter in every column (stays flat). Writing plain
+/// cells over plain cells allocates nothing.
+fn write_bottom_row_kind(grid: &mut Grid, kind: usize) {
+    let cols = usize::from(grid.cols);
+    let bottom = grid.rows - 1;
+    let row = grid.row_mut(bottom);
+    match kind {
+        0 => row.fill_range(0, cols, plain('=')),
+        1 => {
+            for column in 0..30 {
+                row.set(column, plain(char::from(b'a' + (column % 26) as u8)));
+            }
+            row.fill_range(30, cols, Cell::default());
+        }
+        _ => {
+            for column in 0..cols {
+                row.set(column, plain(char::from(b'a' + (column % 26) as u8)));
+            }
+        }
+    }
+}
+
+/// A 200x50 grid whose history is at its limit, filled with rows of the given kinds.
+fn grid_at_history_capacity(pattern: [usize; 3]) -> Grid {
+    let mut grid = Grid::new(200, 50);
+    let mut step = 0;
+    loop {
+        write_bottom_row_kind(&mut grid, pattern[step % 3]);
+        let before = grid.scrollback_len();
+        grid.scroll_up(1);
+        step += 1;
+        if grid.scrollback_len() == before && before > 0 {
+            // When: one more scroll did not grow history, it is at its limit.
+            break;
+        }
+    }
+    grid
+}
+
+/// Scroll `rows` rows of the given kinds, writing each outside the measured window, and return the
+/// allocation events counted inside `scroll_up_with` alone.
+fn measured_scrolls(
+    grid: &mut Grid,
+    pattern: [usize; 3],
+    rows: usize,
+    fills: &mut Vec<Cell>,
+) -> usize {
+    let mut events = 0;
+    for step in 0..rows {
+        write_bottom_row_kind(grid, pattern[step % 3]);
+        let fill = fills.pop().unwrap_or_default();
+        let before = alloc_events();
+        grid.scroll_up_with(1, fill);
+        events += alloc_events() - before;
+    }
+    events
+}
+
+/// An all-uniform stream at history capacity takes at most one allocation per scrolled row: the
+/// ejected row's released buffer becomes the blank row, and the oldest row is dropped rather than
+/// rebuilt from its cells. Before, each scroll allocated the one-cluster vector and rebuilt the
+/// recycled oldest row, about two per row.
+#[test]
+fn a_uniform_stream_at_capacity_allocates_at_most_once_per_row() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut grid = grid_at_history_capacity([0, 0, 0]);
+    let rows = 3_000;
+    let mut fills = Vec::new();
+    let events = measured_scrolls(&mut grid, [0, 0, 0], rows, &mut fills);
+    assert!(events <= rows, "{events} allocation events for {rows} scrolled uniform rows");
+}
+
+/// Pin: a stream cycling trimmed, compressed and flat ejects at capacity, with a plain fill, also
+/// stays within one allocation per scrolled row.
+#[test]
+fn a_mixed_stream_at_capacity_allocates_at_most_once_per_row() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut grid = grid_at_history_capacity([1, 0, 2]);
+    let rows = 3_000;
+    let mut fills = Vec::new();
+    let events = measured_scrolls(&mut grid, [1, 0, 2], rows, &mut fills);
+    assert!(events <= rows, "{events} allocation events for {rows} scrolled mixed rows");
+}
+
+/// With a fill carrying a hyperlink and a combining mark, row-storage events stay at most one per
+/// row, and every other event is a fill clone: at most `cols` clones of the fill per row (the
+/// written rows' first cells are plain, so compression clones nothing that allocates).
+#[test]
+fn an_attribute_bearing_fill_adds_only_its_own_clones() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut fill = Cell::default();
+    fill.set_hyperlink(Some(HyperlinkId(9)));
+    fill.set_extras(Some("\u{0301}".into()));
+    for pattern in [[0usize, 0, 0], [1, 0, 2]] {
+        let mut grid = grid_at_history_capacity(pattern);
+        let cols = usize::from(grid.cols);
+        let rows = 600;
+        // One clone of the fill per scroll is handed in; clone them before measuring.
+        let mut fills: Vec<Cell> = (0..rows).map(|_| fill.clone()).collect();
+        let before = alloc_events();
+        let probe = fill.clone();
+        let per_fill_clone = alloc_events() - before;
+        drop(probe);
+        assert!(per_fill_clone >= 1, "precondition: cloning the fill must allocate");
+
+        let storage_before = grid.row_storage_allocs();
+        let events = measured_scrolls(&mut grid, pattern, rows, &mut fills);
+        let storage_events = (grid.row_storage_allocs() - storage_before) as usize;
+        assert!(
+            storage_events <= rows,
+            "pattern {pattern:?}: {storage_events} row buffers for {rows} rows"
+        );
+        let clone_events = events.saturating_sub(storage_events);
+        assert!(
+            clone_events <= rows * cols * per_fill_clone,
+            "pattern {pattern:?}: {clone_events} attribute events exceed {rows} x {cols} fill clones"
+        );
+    }
+}
+
+/// Trimming moves cells: a row whose prefix holds 40 hyperlinked cells is trimmed with exactly one
+/// allocation (its new buffer) and no attribute clone, and reads back unchanged.
+#[test]
+fn trimming_moves_hyperlinked_cells_without_cloning_them() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut cells: Vec<Cell> = (0..40)
+        .map(|column| {
+            let mut cell = plain(char::from(b'a' + (column % 26) as u8));
+            cell.set_hyperlink(Some(HyperlinkId(7)));
+            cell
+        })
+        .collect();
+    cells.resize(200, Cell::default());
+    let original = sonicterm_grid::line::Line::from_flat(cells.clone());
+    let mut line = sonicterm_grid::line::Line::from_flat(cells);
+
+    let before = alloc_events();
+    let released = line.try_trim();
+    let events = alloc_events() - before;
+
+    assert!(released.is_some() && line.is_trimmed());
+    assert_eq!(events, 1, "trimming must allocate only its new buffer");
+    assert_eq!(line, original);
+    drop(released);
+}
+
+/// Trimmed history is charged what it holds: after short rows fill history, its reported figure
+/// tracks the real heap, and history retains at most half its flat figure.
+#[test]
+fn trimmed_history_is_charged_what_it_holds() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let before = held();
+    let mut grid = Grid::new(200, 24);
+    grid.set_scrollback_limit(usize::MAX);
+    for line_index in 0..3_000usize {
+        for column in 0..20 {
+            let letter = char::from(b'a' + ((line_index + column) % 26) as u8);
+            grid.put_char(letter, Color::Default, Color::Default, CellFlags::empty());
+        }
+        grid.carriage_return();
+        grid.linefeed();
+    }
+    let truth = held().saturating_sub(before);
+    let reported = grid.retained_amount().bytes;
+
+    let history = grid.retained_amount_by_region().history;
+    assert!(grid.scrollback_trimmed_rows() >= 2_900, "precondition: history must be trimmed");
+    let flat_history = history.items * 200 * std::mem::size_of::<Cell>();
+    assert!(
+        history.bytes * 2 <= flat_history,
+        "history retained {} bytes against a flat figure of {flat_history}",
+        history.bytes
+    );
+    let ratio = truth as f64 / reported.max(1) as f64;
+    assert!(
+        (0.85..=1.15).contains(&ratio),
+        "reported {reported} against real heap {truth} ({ratio:.2}x)"
+    );
+    drop(grid);
+}
+
+/// Allocation counts are per thread: another thread allocating while a test measures adds nothing
+/// to the measuring thread's count, so exact counts cannot pick up the harness's own allocations.
+#[test]
+fn allocation_events_ignore_other_threads() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let before = alloc_events();
+    let other_thread_allocs = std::thread::spawn(|| {
+        let boxes: Vec<Box<[u8; 64]>> = (0..100).map(|_| Box::new([0u8; 64])).collect();
+        boxes.len()
+    })
+    .join()
+    .expect("the allocating thread completes");
+    let events = alloc_events() - before;
+
+    assert_eq!(other_thread_allocs, 100);
+    // Spawning and joining allocate a few events of their own on this thread (the handle and its
+    // shared packet); the other thread's hundred boxes must not appear.
+    assert!(events < 20, "{events} events counted on the measuring thread");
 }

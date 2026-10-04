@@ -1,34 +1,32 @@
-//! Line cluster compression for same-attribute runs (P5).
+//! Row storage in three forms, read through one transparent API.
 //!
-//! A terminal line frequently consists of long runs of consecutive cells that
-//! share the exact same attributes (theme background, default fg, no
-//! bold/italic, no hyperlink) — e.g. trailing blanks after a short prompt, or
-//! an empty alt-screen page. Storing those as `Vec<Cell>` wastes memory and
-//! cache: each `Cell` is dozens of bytes.
+//! A terminal row frequently ends in a long run of identical cells (the
+//! blanks after a short prompt), and is sometimes uniform throughout (an empty
+//! alt-screen page). Storing every column as a 24-byte `Cell` wastes memory
+//! once the row has left the screen.
 //!
-//! `LineStorage` is a two-form representation:
+//! `LineStorage` has three forms:
 //!
-//! * `Cluster(Vec<Cluster>)` — RLE-style runs of identical cells. Built when
-//!   we know a line was written as a stream of same-attr cells (most pty
-//!   output of the form "echo something").
-//! * `Flat(Vec<Cell>)` — the classic dense form. Any in-place edit (write a
-//!   single cell, change a single attr) **degrades** the storage to `Flat`
-//!   immediately. Flat is also the form used while the parser is actively
-//!   mutating a line; clustering is a post-hoc compaction.
+//! * `Flat(Vec<Cell>)` — the dense form. Every row is Flat while the parser
+//!   writes it, and any in-place edit of another form expands it to Flat first.
+//! * `Cluster(Vec<Cluster>)` — RLE runs of identical cells. `Grid` stores a
+//!   uniform row ejected into scrollback as one cluster.
+//! * `Trimmed { cells, len }` — the cells up to the last one that differs from
+//!   the row's fill (its last cell), then the fill once, plus the logical
+//!   width. `Grid` stores other ejected rows this way when that saves at least
+//!   a quarter of the row and 256 bytes.
 //!
-//! `Line` exposes a transparent `iter`/`get`/`len`/`set` API so callers don't
-//! have to know which form a given line is in. The compaction policy
-//! (`compact_if_beneficial`) only switches Flat → Cluster when the saving is
-//! ≥ 2× — otherwise the bookkeeping costs more than it saves.
-//!
-//! NOTE: this module is an additive primitive, not yet wired into
-//! `Grid::scrollback`, because every Row consumer indexes through
-//! `Vec<Cell>` directly. The data structure, its invariants, and its tests
-//! stand on their own so the call-site refactor can be done separately.
+//! `Line` exposes a transparent `iter`/`get`/`len`/`set` API, and equality,
+//! hashing and debug output that ignore the form, so callers never see which
+//! form a row is in.
 
 use sonicterm_types::cell::{Cell, CellFlags, FatAttributes};
 
 const MIN_EXACT_HALF_COMPACTION_ITEMS: usize = 1024;
+/// Fill columns a trimmed row must leave; one would save nothing over storing it.
+const MIN_TRIMMED_FILL_COLUMNS: usize = 2;
+/// Bytes a trim must save; smaller rows keep their plain form.
+const MIN_TRIM_SAVING_BYTES: usize = 256;
 
 fn shrink_vec_if_excessive<T>(items: &mut Vec<T>) {
     let len = items.len();
@@ -57,6 +55,17 @@ pub enum LineStorage {
     Cluster(Vec<Cluster>),
     /// Dense form. Length equals the logical line length.
     Flat(Vec<Cell>),
+    /// History form. `cells` holds the stored prefix, then the row's fill cell
+    /// as its last element; every column from `cells.len() - 1` to `len` reads
+    /// as that fill. Invariant: at least two fill columns, a fill that is
+    /// neither `WIDE` nor `WIDE_CONT`, and a prefix whose last cell differs
+    /// from the fill. Zero length is always `Flat`.
+    Trimmed {
+        /// The stored prefix, then the fill once.
+        cells: Vec<Cell>,
+        /// The logical width.
+        len: usize,
+    },
 }
 
 impl LineStorage {
@@ -80,6 +89,7 @@ impl LineStorage {
         match self {
             LineStorage::Flat(cells) => cells.len(),
             LineStorage::Cluster(clusters) => clusters.iter().map(|cluster| cluster.count).sum(),
+            LineStorage::Trimmed { len, .. } => *len,
         }
     }
 
@@ -89,11 +99,12 @@ impl LineStorage {
     }
 
     /// Approximate byte footprint of the storage payload (excluding the
-    /// enum discriminant). Used by [`Line::compact_if_beneficial`] to decide
-    /// whether collapsing pays for itself.
+    /// enum discriminant): the stored items, whatever the form.
     pub fn approx_byte_size(&self) -> usize {
         match self {
-            LineStorage::Flat(cells) => cells.len() * std::mem::size_of::<Cell>(),
+            LineStorage::Flat(cells) | LineStorage::Trimmed { cells, .. } => {
+                cells.len() * std::mem::size_of::<Cell>()
+            }
             LineStorage::Cluster(clusters) => clusters.len() * std::mem::size_of::<Cluster>(),
         }
     }
@@ -103,7 +114,9 @@ impl LineStorage {
     /// reporting code counts bytes actually reserved from the allocator.
     pub fn approx_capacity_byte_size(&self) -> usize {
         match self {
-            LineStorage::Flat(cells) => cells.capacity() * std::mem::size_of::<Cell>(),
+            LineStorage::Flat(cells) | LineStorage::Trimmed { cells, .. } => {
+                cells.capacity() * std::mem::size_of::<Cell>()
+            }
             LineStorage::Cluster(clusters) => clusters.capacity() * std::mem::size_of::<Cluster>(),
         }
     }
@@ -149,7 +162,10 @@ impl LineStorage {
             std::mem::size_of::<FatAttributes>() + cell.extras().map_or(0, str::len)
         };
         match self {
-            LineStorage::Flat(cells) => cells.iter().map(cell_bytes).sum(),
+            // A trimmed row stores its fill once, so a rare-attribute fill counts once.
+            LineStorage::Flat(cells) | LineStorage::Trimmed { cells, .. } => {
+                cells.iter().map(cell_bytes).sum()
+            }
             LineStorage::Cluster(clusters) => {
                 clusters.iter().map(|cluster| cell_bytes(&cluster.cell)).sum()
             }
@@ -170,9 +186,74 @@ impl LineStorage {
         matches!(self, LineStorage::Flat(_))
     }
 
+    /// `true` if storage is currently in trimmed (prefix plus fill) form.
+    pub fn is_trimmed(&self) -> bool {
+        matches!(self, LineStorage::Trimmed { .. })
+    }
+
+    /// Expand a trimmed row to `Flat` in its own buffer: one exact reserve, then the fill to the
+    /// logical width. No-op for any other form.
+    fn expand_trimmed(&mut self) {
+        let LineStorage::Trimmed { cells, len } = self else {
+            // When: the storage is not `Trimmed`, there is nothing to expand.
+            return;
+        };
+        let len = *len;
+        let mut cells = std::mem::take(cells);
+        if let Some(fill) = cells.last().cloned() {
+            cells.reserve_exact(len - cells.len());
+            cells.resize(len, fill);
+        }
+        *self = LineStorage::Flat(cells);
+    }
+
+    /// Shorten a trimmed row to `new_len`, below its length and above zero. It stays trimmed
+    /// while two fill columns remain; otherwise its buffer becomes the `Flat` row, with no
+    /// allocation.
+    fn truncate_trimmed(&mut self, new_len: usize) {
+        let LineStorage::Trimmed { cells, len } = self else {
+            // When: the storage is not `Trimmed`, the caller's own path truncates it.
+            return;
+        };
+        let stored = cells.len() - 1;
+        if new_len >= stored + MIN_TRIMMED_FILL_COLUMNS {
+            // When: `new_len >= stored + MIN_TRIMMED_FILL_COLUMNS`, two fill columns remain; only `len` shrinks.
+            *len = new_len;
+            return;
+        }
+        let mut cells = std::mem::take(cells);
+        // At `stored + 1` the buffer already holds exactly `new_len` cells, the fill last.
+        cells.truncate(new_len);
+        shrink_vec_if_excessive(&mut cells);
+        *self = LineStorage::Flat(cells);
+    }
+
+    /// Lengthen a trimmed row to `new_len`, padding with `fill`. A pad equal to the stored fill
+    /// only widens the row; any other pad expands it to `Flat` with one exact reserve.
+    fn grow_trimmed(&mut self, new_len: usize, fill: Cell) {
+        let LineStorage::Trimmed { cells, len } = self else {
+            // When: the storage is not `Trimmed`, the caller's own path grows it.
+            return;
+        };
+        if cells.last() == Some(&fill) {
+            // When: the pad is the stored fill, the row reads correctly with a wider width.
+            *len = new_len;
+            return;
+        }
+        let old_len = *len;
+        let mut cells = std::mem::take(cells);
+        if let Some(stored_fill) = cells.last().cloned() {
+            cells.reserve_exact(new_len - cells.len());
+            cells.resize(old_len, stored_fill);
+        }
+        cells.resize(new_len, fill);
+        *self = LineStorage::Flat(cells);
+    }
+
     /// Force the storage to `Flat`. No-op if already flat.
     #[allow(clippy::wrong_self_convention)]
     pub fn to_flat(&mut self) {
+        self.expand_trimmed();
         if let LineStorage::Cluster(clusters) = self {
             let total: usize = clusters.iter().map(|cluster| cluster.count).sum();
             let mut flat = Vec::with_capacity(total);
@@ -190,6 +271,10 @@ impl LineStorage {
     pub fn get(&self, idx: usize) -> Option<Cell> {
         match self {
             LineStorage::Flat(cells) => cells.get(idx).cloned(),
+            LineStorage::Trimmed { cells, len } => {
+                // storage is `Trimmed`, columns past the prefix read as its fill.
+                (idx < *len).then(|| cells[idx.min(cells.len() - 1)].clone())
+            }
             LineStorage::Cluster(clusters) => {
                 // When: storage is `Cluster`, locate `idx` by accumulating run lengths.
                 let mut off = 0;
@@ -219,6 +304,10 @@ impl LineStorage {
         match self {
             LineStorage::Flat(cells) => StorageRangeIter::Flat(cells[start..end].iter()),
             LineStorage::Cluster(clusters) => StorageRangeIter::cluster(clusters, start, end),
+            LineStorage::Trimmed { cells, .. } => {
+                let (prefix, fill, fill_remaining) = trimmed_window(cells, start, end);
+                StorageRangeIter::Trimmed { prefix: prefix.iter(), fill, fill_remaining }
+            }
         }
     }
 
@@ -236,7 +325,7 @@ impl LineStorage {
                     false
                 }
             }
-            LineStorage::Cluster(_) => unreachable!("just flattened"),
+            _ => unreachable!("just flattened"),
         }
     }
 
@@ -245,18 +334,25 @@ impl LineStorage {
         self.to_flat();
         match self {
             LineStorage::Flat(cells) => cells.push(cell),
-            LineStorage::Cluster(_) => unreachable!("just flattened"),
+            _ => unreachable!("just flattened"),
         }
     }
 
     /// Truncate to `new_len`. No-op if already shorter or equal. Preserves
-    /// the current storage form.
+    /// the current storage form, except that a trimmed row left with fewer
+    /// than two fill columns becomes `Flat`.
     pub fn truncate(&mut self, new_len: usize) {
         if new_len >= self.len() {
             // When: `new_len >= self.len()`, truncation would not shorten the storage.
             return;
         }
+        if new_len == 0 {
+            // When: `new_len == 0`, every form becomes an empty flat row.
+            *self = LineStorage::Flat(Vec::new());
+            return;
+        }
         match self {
+            LineStorage::Trimmed { .. } => self.truncate_trimmed(new_len),
             LineStorage::Flat(cells) => {
                 cells.truncate(new_len);
                 shrink_vec_if_excessive(cells);
@@ -306,6 +402,7 @@ impl LineStorage {
                 Some(last) if last.cell == fill => last.count += extra,
                 _ => clusters.push(Cluster { cell: fill, count: extra }),
             },
+            LineStorage::Trimmed { .. } => self.grow_trimmed(new_len, fill),
         }
     }
 
@@ -321,6 +418,10 @@ impl LineStorage {
             LineStorage::Cluster(clusters) => {
                 StorageIter::Cluster { clusters: clusters.iter(), current: None, remaining: 0 }
             }
+            LineStorage::Trimmed { cells, len } => {
+                let (prefix, fill, fill_remaining) = trimmed_window(cells, 0, *len);
+                StorageIter::Trimmed { prefix: prefix.iter(), fill, fill_remaining }
+            }
         }
     }
 
@@ -329,7 +430,7 @@ impl LineStorage {
         self.to_flat();
         match self {
             LineStorage::Flat(cells) => cells.iter_mut(),
-            LineStorage::Cluster(_) => unreachable!("just flattened"),
+            _ => unreachable!("just flattened"),
         }
     }
 
@@ -349,7 +450,7 @@ impl LineStorage {
                     *slot = cell.clone();
                 }
             }
-            LineStorage::Cluster(_) => unreachable!("just flattened"),
+            _ => unreachable!("just flattened"),
         }
     }
 
@@ -368,21 +469,19 @@ impl LineStorage {
                 }
                 let _ = len; // silence unused warning if optimizer drops it
             }
-            LineStorage::Cluster(_) => unreachable!("just flattened"),
+            _ => unreachable!("just flattened"),
         }
     }
 
     /// Try to re-compress into Cluster form.
     ///
     /// Switches only when Cluster storage is smaller than the current Flat
-    /// storage. [`Line::compact_if_beneficial`] applies the stricter requirement
-    /// that Cluster storage use at most half as many bytes. Returns `true` if
-    /// storage changed.
+    /// storage. Returns `true` if storage changed.
     pub fn try_compress(&mut self) -> bool {
         let flat = match self {
             LineStorage::Flat(cells) => cells,
-            LineStorage::Cluster(_) => {
-                // When: storage is already `Cluster`, compression cannot change it.
+            LineStorage::Cluster(_) | LineStorage::Trimmed { .. } => {
+                // When: storage is already `Cluster` or `Trimmed`, compression does not apply.
                 return false;
             }
         };
@@ -405,7 +504,41 @@ impl LineStorage {
 /// uniform return type).
 pub enum StorageIter<'a> {
     Flat(std::slice::Iter<'a, Cell>),
-    Cluster { clusters: std::slice::Iter<'a, Cluster>, current: Option<&'a Cell>, remaining: usize },
+    Cluster {
+        clusters: std::slice::Iter<'a, Cluster>,
+        current: Option<&'a Cell>,
+        remaining: usize,
+    },
+    /// A trimmed row's prefix, then its fill `fill_remaining` times.
+    Trimmed {
+        prefix: std::slice::Iter<'a, Cell>,
+        fill: &'a Cell,
+        fill_remaining: usize,
+    },
+}
+
+/// The part of a trimmed row's stored `cells` that `[start, end)` covers, its fill, and how many
+/// fill columns of the window lie past the prefix. `end` must not exceed the logical width.
+/// Whether `cell` equals `fill`, deciding on the plain fields when neither carries a rare-attribute box.
+///
+/// Equal to `cell == fill`, but the eject scans call it on every trailing blank of a history row, and
+/// the derived comparison is not inlined across crates because it may compare the boxed attributes.
+#[inline]
+pub(crate) fn same_as_fill(cell: &Cell, fill: &Cell) -> bool {
+    if !cell.has_fat() && !fill.has_fat() {
+        // When: neither cell has rare attributes, the plain fields decide equality.
+        return cell.ch == fill.ch
+            && cell.fg == fill.fg
+            && cell.bg == fill.bg
+            && cell.flags == fill.flags;
+    }
+    cell == fill
+}
+
+fn trimmed_window(cells: &[Cell], start: usize, end: usize) -> (&[Cell], &Cell, usize) {
+    let stored = cells.len() - 1;
+    let prefix = &cells[start.min(stored)..end.min(stored)];
+    (prefix, &cells[stored], end.saturating_sub(start.max(stored)))
 }
 
 impl<'a> Iterator for StorageIter<'a> {
@@ -414,6 +547,15 @@ impl<'a> Iterator for StorageIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             StorageIter::Flat(it) => it.next().cloned(),
+            StorageIter::Trimmed { prefix, fill, fill_remaining } => {
+                // iterating `Trimmed` storage, the prefix comes first, then the fill.
+                prefix.next().cloned().or_else(|| {
+                    (*fill_remaining > 0).then(|| {
+                        *fill_remaining -= 1;
+                        (*fill).clone()
+                    })
+                })
+            }
             StorageIter::Cluster { clusters, current, remaining } => {
                 if *remaining == 0 {
                     let cluster = clusters.next()?;
@@ -432,6 +574,12 @@ impl<'a> Iterator for StorageIter<'a> {
 pub enum StorageRangeIter<'a> {
     Empty,
     Flat(std::slice::Iter<'a, Cell>),
+    /// A window of a trimmed row: part of its prefix, then its fill `fill_remaining` times.
+    Trimmed {
+        prefix: std::slice::Iter<'a, Cell>,
+        fill: &'a Cell,
+        fill_remaining: usize,
+    },
     Cluster {
         clusters: std::slice::Iter<'a, Cluster>,
         current: Option<&'a Cell>,
@@ -471,6 +619,15 @@ impl<'a> Iterator for StorageRangeIter<'a> {
         match self {
             StorageRangeIter::Empty => None,
             StorageRangeIter::Flat(it) => it.next().cloned(),
+            StorageRangeIter::Trimmed { prefix, fill, fill_remaining } => {
+                // iterating a `Trimmed` window, the prefix comes first, then the fill.
+                prefix.next().cloned().or_else(|| {
+                    (*fill_remaining > 0).then(|| {
+                        *fill_remaining -= 1;
+                        (*fill).clone()
+                    })
+                })
+            }
             StorageRangeIter::Cluster {
                 clusters,
                 current,
@@ -495,8 +652,8 @@ impl<'a> Iterator for StorageRangeIter<'a> {
     }
 }
 
-/// A line of cells with transparent cluster-or-flat storage.
-#[derive(Debug, Clone)]
+/// A line of cells with transparent flat, cluster or trimmed storage.
+#[derive(Clone)]
 pub struct Line {
     storage: LineStorage,
     /// Last content sequence plus the automatic-wrap provenance bit.
@@ -509,10 +666,25 @@ pub struct Line {
 const SOFT_WRAPPED_FROM_PREVIOUS: u64 = 1 << 63;
 pub(crate) const MAX_LINE_CONTENT_SEQ: u64 = SOFT_WRAPPED_FROM_PREVIOUS - 1;
 
+/// Equality reads cells through the transparent iterator, so a compressed or trimmed row equals
+/// its flat original, as its `Hash` already does.
 impl PartialEq for Line {
     fn eq(&self, other: &Self) -> bool {
-        self.storage == other.storage
+        self.len() == other.len()
             && self.soft_wrapped_from_previous() == other.soft_wrapped_from_previous()
+            && self.iter().eq(other.iter())
+    }
+}
+
+/// Debug output lists the logical cells, whatever form stores them.
+impl std::fmt::Debug for Line {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Line")
+            .field("cells", &self.iter().collect::<Vec<_>>())
+            .field("content_seq", &self.content_seq())
+            .field("soft_wrapped_from_previous", &self.soft_wrapped_from_previous())
+            .finish()
     }
 }
 
@@ -601,7 +773,7 @@ impl Line {
     /// Release all unused inner storage capacity.
     pub(crate) fn shrink_capacity_to_fit(&mut self) {
         match &mut self.storage {
-            LineStorage::Flat(cells) => cells.shrink_to_fit(),
+            LineStorage::Flat(cells) | LineStorage::Trimmed { cells, .. } => cells.shrink_to_fit(),
             LineStorage::Cluster(clusters) => clusters.shrink_to_fit(),
         }
     }
@@ -611,10 +783,59 @@ impl Line {
         matches!(self.storage, LineStorage::Cluster(_))
     }
 
+    /// Returns `true` if the line is currently in trimmed (prefix plus fill) form.
+    pub fn is_trimmed(&self) -> bool {
+        self.storage.is_trimmed()
+    }
+
+    /// Store this flat row as its cells up to the last one that differs from its fill (its last
+    /// cell), then the fill once.
+    ///
+    /// Trims only when that leaves at least two fill columns, saves at least a quarter of the row
+    /// and 256 bytes, and the fill is not half of a wide pair. The prefix and the fill move into a
+    /// new buffer of exact capacity, so no rare-attribute box is cloned. Returns the released
+    /// buffer, which now holds only fill copies, for the caller to reuse; `None` leaves the row
+    /// unchanged.
+    pub fn try_trim(&mut self) -> Option<Vec<Cell>> {
+        let LineStorage::Flat(cells) = &mut self.storage else {
+            // When: the row is not `Flat`, it is already in a compact form.
+            return None;
+        };
+        let row_len = cells.len();
+        let stored = {
+            let fill = cells.last()?;
+            if fill.flags.intersects(CellFlags::WIDE | CellFlags::WIDE_CONT) {
+                // When: the fill is half of a wide pair, repeating it would split the pair.
+                return None;
+            }
+            cells.iter().rposition(|cell| !same_as_fill(cell, fill)).map_or(0, |index| index + 1)
+        };
+        let fill_columns = row_len - stored;
+        let cell_bytes = std::mem::size_of::<Cell>();
+        let saving = fill_columns.saturating_sub(1) * cell_bytes;
+        if fill_columns < MIN_TRIMMED_FILL_COLUMNS
+            || saving * 4 < row_len * cell_bytes
+            || saving < MIN_TRIM_SAVING_BYTES
+        {
+            // When: `fill_columns` is under two or `saving` is under a quarter of the row or 256 bytes, keep `Flat`.
+            return None;
+        }
+        let mut trimmed = Vec::with_capacity(stored + 1);
+        trimmed.extend(cells.drain(..stored));
+        trimmed.push(cells.pop()?);
+        let released = std::mem::take(cells);
+        self.storage = LineStorage::Trimmed { cells: trimmed, len: row_len };
+        Some(released)
+    }
+
     /// Get the cell at logical column `idx`, if in range.
     pub fn get(&self, idx: usize) -> Option<&Cell> {
         match &self.storage {
             LineStorage::Flat(cells) => cells.get(idx),
+            LineStorage::Trimmed { cells, len } => {
+                // storage is `Trimmed`, columns past the prefix read as its fill.
+                (idx < *len).then(|| &cells[idx.min(cells.len() - 1)])
+            }
             LineStorage::Cluster(clusters) => {
                 // When: storage is `Cluster`, locate `idx` by accumulating run lengths.
                 let mut off = 0;
@@ -664,7 +885,7 @@ impl Line {
                 cells[idx] = cell;
                 true
             }
-            LineStorage::Cluster(_) => unreachable!("just degraded"),
+            _ => unreachable!("just degraded"),
         }
     }
 
@@ -706,12 +927,19 @@ impl Line {
                     *slot = cell.clone();
                 }
             }
-            LineStorage::Cluster(_) => unreachable!("just degraded"),
+            _ => unreachable!("just degraded"),
         }
     }
 
-    /// Force the storage to `Flat`. No-op if already flat.
+    /// Force the storage to `Flat`. No-op if already flat. A trimmed row expands in its own
+    /// buffer; a clustered row is rebuilt.
+    #[inline]
     pub fn degrade_to_flat(&mut self) {
+        if matches!(self.storage, LineStorage::Flat(_)) {
+            // When: `matches!(self.storage, LineStorage::Flat(_))`, the write path needs no conversion.
+            return;
+        }
+        self.storage.expand_trimmed();
         if let LineStorage::Cluster(clusters) = &self.storage {
             let total: usize = clusters.iter().map(|cluster| cluster.count).sum();
             let mut flat = Vec::with_capacity(total);
@@ -721,34 +949,6 @@ impl Line {
                 }
             }
             self.storage = LineStorage::Flat(flat);
-        }
-    }
-
-    /// Try to collapse a Flat storage into Cluster form. Only switches when
-    /// the cluster form uses **at most half** the bytes of the flat
-    /// form — otherwise the win is too small to justify the indirection on
-    /// later accesses. No-op if already clustered.
-    ///
-    /// Returns `true` if storage changed.
-    pub fn compact_if_beneficial(&mut self) -> bool {
-        let flat = match &self.storage {
-            LineStorage::Flat(cells) => cells,
-            LineStorage::Cluster(_) => {
-                // When: storage is already `Cluster`, compaction cannot change it.
-                return false;
-            }
-        };
-        if flat.is_empty() {
-            // When: `flat.is_empty()`, there are no cells to compact.
-            return false;
-        }
-        let candidate = LineStorage::cluster_from_flat(flat);
-        if candidate.approx_byte_size() * 2 <= self.storage.approx_byte_size() {
-            self.storage = candidate;
-            true
-        } else {
-            // When: `candidate` does not halve storage bytes, retain flat storage.
-            false
         }
     }
 
@@ -777,6 +977,10 @@ impl Line {
                 let total: usize = clusters.iter().map(|cluster| cluster.count).sum();
                 LineIter::new_cluster(clusters, total)
             }
+            LineStorage::Trimmed { cells, len } => {
+                let (prefix, fill, fill_remaining) = trimmed_window(cells, 0, *len);
+                LineIter::Trimmed { prefix: prefix.iter(), fill, fill_remaining }
+            }
         }
     }
 
@@ -799,6 +1003,10 @@ impl Line {
         match &self.storage {
             LineStorage::Flat(cells) => LineIter::Flat(cells[start..end].iter()),
             LineStorage::Cluster(clusters) => LineIter::cluster_range(clusters, start, take),
+            LineStorage::Trimmed { cells, .. } => {
+                let (prefix, fill, fill_remaining) = trimmed_window(cells, start, end);
+                LineIter::Trimmed { prefix: prefix.iter(), fill, fill_remaining }
+            }
         }
     }
 
@@ -845,10 +1053,10 @@ impl Line {
     pub fn as_vec(&self) -> &Vec<Cell> {
         match &self.storage {
             LineStorage::Flat(cells) => cells,
-            LineStorage::Cluster(_) => {
+            LineStorage::Cluster(_) | LineStorage::Trimmed { .. } => {
                 unreachable!(
-                    "Line::as_vec()/as_flat_slice() requires Flat storage; \
-                     call iter()/get()/get_range() for cluster-transparent access"
+                    "Line::as_vec()/as_flat_slice() requires Flat storage, not Cluster or Trimmed; \
+                     call iter()/get()/get_range() for transparent access"
                 )
             }
         }
@@ -860,7 +1068,7 @@ impl Line {
         self.degrade_to_flat();
         match &mut self.storage {
             LineStorage::Flat(cells) => cells,
-            LineStorage::Cluster(_) => unreachable!("just degraded"),
+            _ => unreachable!("just degraded"),
         }
     }
 
@@ -885,6 +1093,9 @@ impl Line {
             // When: `new_len < cur`, truncation may remove the continuation of the new trailing cell.
             self.truncate(new_len);
             match &mut self.storage {
+                LineStorage::Trimmed { .. } => {
+                    // When: storage is `Trimmed`, its last logical cell is the fill, never a `WIDE` lead to repair.
+                }
                 LineStorage::Flat(cells) => {
                     if let Some(edge) =
                         cells.last_mut().filter(|cell| cell.flags.contains(CellFlags::WIDE))
@@ -921,6 +1132,7 @@ impl Line {
                     _ => clusters.push(Cluster { cell: fill, count: extra }),
                 }
             }
+            LineStorage::Trimmed { .. } => self.storage.grow_trimmed(new_len, fill),
         }
     }
 
@@ -943,6 +1155,7 @@ impl Line {
                 cells.truncate(new_len);
                 shrink_vec_if_excessive(cells);
             }
+            LineStorage::Trimmed { .. } => self.storage.truncate_trimmed(new_len),
             LineStorage::Cluster(clusters) => {
                 // When: storage is `Cluster`, trim whole runs and then the boundary run.
                 let mut remaining = new_len;
@@ -986,26 +1199,53 @@ impl Line {
     /// * No-op if any two cells differ — keeps Flat to avoid degrading
     ///   on the first edit.
     pub fn try_compress(&mut self) -> bool {
-        let flat = match &self.storage {
-            LineStorage::Flat(cells) => cells,
-            LineStorage::Cluster(_) => {
-                // When: storage is already `Cluster`, compression cannot change it.
-                return false;
-            }
+        self.compress_releasing().is_some()
+    }
+
+    /// Compress a uniform flat row to one `Cluster`, as [`Line::try_compress`] does, and return
+    /// its old cell buffer for the caller to reuse. `None` leaves the row unchanged.
+    pub fn compress_releasing(&mut self) -> Option<Vec<Cell>> {
+        let LineStorage::Flat(flat) = &mut self.storage else {
+            // When: storage is already `Cluster` or `Trimmed`, compression does not apply.
+            return None;
         };
-        if flat.is_empty() {
-            // When: `flat.is_empty()`, there are no cells to compress.
-            return false;
-        }
-        let first = &flat[0];
-        if !flat.iter().all(|cell| cell == first) {
+        let first = flat.first()?;
+        if !flat.iter().all(|cell| same_as_fill(cell, first)) {
             // When: not every flat cell equals `first`, single-cluster compression is invalid.
-            return false;
+            return None;
         }
         let count = flat.len();
         let cell = first.clone();
+        let released = std::mem::take(flat);
         self.storage = LineStorage::Cluster(vec![Cluster { cell, count }]);
-        true
+        Some(released)
+    }
+
+    /// Empty this row into a flat buffer that can hold `cols` cells, without reading its old
+    /// cells, and reset its stamp and soft wrap. Returns `true` when that took an allocation.
+    ///
+    /// A flat buffer already large enough is cleared in place; a trimmed row's buffer is cleared
+    /// and grown once by exactly `cols`; a clustered row gets a new buffer of `cols`.
+    pub fn clear_for_reuse(&mut self, cols: usize) -> bool {
+        self.content_seq_and_flags = 0;
+        match &mut self.storage {
+            LineStorage::Flat(cells) if cells.capacity() >= cols => {
+                // the flat buffer already holds `cols` cells, clearing it needs no allocation.
+                cells.clear();
+                false
+            }
+            LineStorage::Flat(cells) | LineStorage::Trimmed { cells, .. } => {
+                let mut cells = std::mem::take(cells);
+                cells.clear();
+                cells.reserve_exact(cols);
+                self.storage = LineStorage::Flat(cells);
+                true
+            }
+            LineStorage::Cluster(_) => {
+                self.storage = LineStorage::Flat(Vec::with_capacity(cols));
+                true
+            }
+        }
     }
 
     /// force the storage to Flat. Use at any mutation site
@@ -1076,6 +1316,13 @@ impl std::hash::Hash for Line {
 pub enum LineIter<'a> {
     Empty,
     Flat(std::slice::Iter<'a, Cell>),
+    /// A trimmed row (or a window of one): part of its prefix, then its fill
+    /// `fill_remaining` times.
+    Trimmed {
+        prefix: std::slice::Iter<'a, Cell>,
+        fill: &'a Cell,
+        fill_remaining: usize,
+    },
     /// Bi-directional walk over a slice of clusters covering exactly
     /// `total` cells, with `head_*` tracking the next-from-front cluster
     /// position and `tail_*` tracking the next-from-back cluster
@@ -1184,6 +1431,15 @@ impl<'a> Iterator for LineIter<'a> {
         match self {
             LineIter::Empty => None,
             LineIter::Flat(it) => it.next(),
+            LineIter::Trimmed { prefix, fill, fill_remaining } => {
+                // walking `Trimmed` storage forward, the prefix comes before the fill.
+                prefix.next().or_else(|| {
+                    (*fill_remaining > 0).then(|| {
+                        *fill_remaining -= 1;
+                        *fill
+                    })
+                })
+            }
             LineIter::Cluster {
                 clusters,
                 head_idx,
@@ -1235,6 +1491,16 @@ impl<'a> DoubleEndedIterator for LineIter<'a> {
         match self {
             LineIter::Empty => None,
             LineIter::Flat(it) => it.next_back(),
+            LineIter::Trimmed { prefix, fill, fill_remaining } => {
+                // Walking `Trimmed` storage backward, the fill comes before the prefix.
+                if *fill_remaining > 0 {
+                    *fill_remaining -= 1;
+                    Some(*fill)
+                } else {
+                    // When: `*fill_remaining == 0`, the prefix supplies the rest from its end.
+                    prefix.next_back()
+                }
+            }
             LineIter::Cluster {
                 clusters,
                 head_idx,
@@ -1278,6 +1544,7 @@ impl<'a> ExactSizeIterator for LineIter<'a> {
         match self {
             LineIter::Empty => 0,
             LineIter::Flat(it) => it.len(),
+            LineIter::Trimmed { prefix, fill_remaining, .. } => prefix.len() + fill_remaining,
             LineIter::Cluster { total, .. } => *total,
         }
     }

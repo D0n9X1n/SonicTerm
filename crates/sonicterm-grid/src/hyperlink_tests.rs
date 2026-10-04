@@ -1,8 +1,9 @@
 //! Behavior tests for the OSC 8 [`HyperlinkRegistry`].
 //!
 //! Covers tuple interning (`(id, uri)` as the dedup key), stable-id reuse for
-//! repeat interns, distinct ids for differing id-or-uri, and id → `Hyperlink`
-//! lookup round-trips including the unknown-id miss.
+//! repeat interns, distinct ids for differing id-or-uri, id → `Hyperlink`
+//! lookup round-trips including the unknown-id miss, and the shared-string
+//! structure and its per-allocation accounting.
 
 use super::*;
 
@@ -49,7 +50,7 @@ fn lookup_roundtrip_preserves_id_and_uri() {
     let hid = registry.intern(Some("k"), "https://example.com/path");
     let link = registry.lookup(hid).expect("interned link resolves");
     assert_eq!(link.id.as_deref(), Some("k"));
-    assert_eq!(link.uri, "https://example.com/path");
+    assert_eq!(&*link.uri, "https://example.com/path");
 }
 
 #[test]
@@ -58,7 +59,7 @@ fn lookup_roundtrip_for_anonymous_link() {
     let hid = registry.intern(None, "https://anon.example");
     let link = registry.lookup(hid).expect("interned link resolves");
     assert_eq!(link.id, None);
-    assert_eq!(link.uri, "https://anon.example");
+    assert_eq!(&*link.uri, "https://anon.example");
 }
 
 #[test]
@@ -175,7 +176,7 @@ fn a_freed_uri_re_interns_to_a_working_id() {
     assert_ne!(reborn, stale, "a re-interned URI must get a fresh id");
     assert_ne!(reborn, HyperlinkId(0), "re-interning must not return the invalid sentinel");
     assert_eq!(
-        registry.lookup(reborn).map(|link| link.uri.as_str()),
+        registry.lookup(reborn).map(|link| &*link.uri),
         Some("https://example.com/stale"),
         "the re-interned id must resolve to its URI"
     );
@@ -331,9 +332,8 @@ fn reported_bytes_include_the_tables_that_hold_the_strings() {
     }
 
     let strings: usize = (0..2_000u32)
-        .map(|index| format!("https://example.com/a-path/{index}").len())
-        .sum::<usize>()
-        * 2;
+        .map(|index| arc_bytes(&format!("https://example.com/a-path/{index}")))
+        .sum::<usize>();
 
     let reported = registry.retained_bytes();
     assert!(
@@ -430,4 +430,493 @@ fn retaining_a_subset_returns_the_freed_entries_table_bytes() {
         "keeping a tenth of the entries must return most of the bytes: {after} against {full}"
     );
     assert_eq!(registry.len(), live.len(), "the surviving entries must be exactly the live set");
+}
+
+// ---------------------------------------------------------------------------
+// Shared strings
+//
+// Each distinct URI is one `Arc<str>` shared by the lookup table and every
+// link that uses it, and each client id under it is one more. The figure is
+// charged per allocation, so many client ids on one long URI cost the URI once.
+// ---------------------------------------------------------------------------
+
+/// The lookup table and the id table share each string: the URI `Arc` behind `by_uri` is the
+/// one in the link, and so is the client id behind `by_client`.
+#[test]
+fn both_maps_share_each_uri_and_client_id_allocation() {
+    let mut registry = HyperlinkRegistry::new();
+    let hid = registry.intern(Some("client"), "https://example.com/shared");
+    let link = registry.lookup(hid).expect("interned link resolves");
+    let (uri_key, entry) =
+        registry.by_uri.get_key_value("https://example.com/shared").expect("URI entry");
+    assert!(Arc::ptr_eq(uri_key, &link.uri));
+    let (client_key, client_hid) = entry.by_client.get_key_value("client").expect("client id");
+    assert_eq!(*client_hid, hid);
+    assert!(Arc::ptr_eq(client_key, link.id.as_ref().expect("client id on the link")));
+}
+
+/// `(None, u)`, `(a, u)`, `(b, u)` and `(a, v)` are four links: each gets its own id, re-interning
+/// returns that id, and each id resolves to its own client id and URI.
+#[test]
+fn four_keys_on_two_uris_get_distinct_ids_that_resolve_both_ways() {
+    let mut registry = HyperlinkRegistry::new();
+    let keys = [
+        (None, "https://u.example"),
+        (Some("a"), "https://u.example"),
+        (Some("b"), "https://u.example"),
+        (Some("a"), "https://v.example"),
+    ];
+    let ids: Vec<HyperlinkId> = keys.iter().map(|(id, uri)| registry.intern(*id, uri)).collect();
+    let distinct: HashSet<HyperlinkId> = ids.iter().copied().collect();
+    assert_eq!(distinct.len(), 4);
+    assert_eq!(registry.by_uri.len(), 2, "two URIs, two shared allocations");
+    for ((id, uri), hid) in keys.iter().zip(&ids) {
+        assert_eq!(registry.intern(*id, uri), *hid, "re-interning returns the same id");
+        let link = registry.lookup(*hid).expect("each id resolves");
+        assert_eq!(link.id.as_deref(), *id);
+        assert_eq!(&*link.uri, *uri);
+    }
+}
+
+/// One URI holds every client id up to the count cap, each resolving to its own id, and the next
+/// distinct id is refused by the count cap, not the byte budget.
+#[test]
+fn one_uri_holds_every_client_id_up_to_the_count_cap() {
+    let mut registry = HyperlinkRegistry::new();
+    let uri = "https://example.com/one";
+    let ids: Vec<HyperlinkId> = (0..MAX_HYPERLINKS)
+        .map(|index| {
+            registry.intern_or_reject(Some(&format!("id-{index}")), uri).expect("admitted")
+        })
+        .collect();
+    for (index, hid) in ids.iter().enumerate() {
+        let client_id = format!("id-{index}");
+        assert_eq!(registry.intern(Some(&client_id), uri), *hid);
+        assert_eq!(registry.lookup(*hid).and_then(|link| link.id.as_deref()), Some(&*client_id));
+    }
+    assert_eq!(
+        registry.intern_or_reject(Some("one-more"), uri),
+        Err(AdmissionRejection::ItemCountLimit)
+    );
+}
+
+/// The string figure is one allocation per distinct URI plus one per `(uri, id)` client id: a
+/// thousand client ids on one 8 KiB URI charge the URI once and are all admitted.
+#[test]
+fn many_client_ids_on_one_long_uri_charge_the_uri_once() {
+    let mut registry = HyperlinkRegistry::new();
+    let uri = format!("https://example.com/{}", "x".repeat(MAX_HYPERLINK_URI_BYTES - 32));
+    let client_ids: Vec<String> = (0..1_000).map(|index| format!("client-{index}")).collect();
+    for client_id in &client_ids {
+        assert!(registry.try_intern(Some(client_id), &uri).is_some(), "{client_id} admitted");
+    }
+    let expected =
+        arc_bytes(&uri) + client_ids.iter().map(|client_id| arc_bytes(client_id)).sum::<usize>();
+    assert_eq!(registry.retained_bytes, expected);
+    assert!(registry.retained_bytes() < MAX_HYPERLINK_METADATA_BYTES / 8);
+}
+
+/// The same client-id text under two URIs is two allocations, so it is charged twice.
+#[test]
+fn the_same_client_id_under_two_uris_is_charged_twice() {
+    let mut registry = HyperlinkRegistry::new();
+    let client_id = "shared-id";
+    registry.intern(Some(client_id), "https://u.example");
+    let after_first = registry.retained_bytes;
+    registry.intern(Some(client_id), "https://v.example");
+    assert_eq!(
+        registry.retained_bytes - after_first,
+        arc_bytes(client_id) + arc_bytes("https://v.example")
+    );
+    assert_eq!(after_first, arc_bytes(client_id) + arc_bytes("https://u.example"));
+}
+
+/// Reclaiming keeps a URI charged while any link uses it and refunds it with the last one; the
+/// inner-table figure is read from the surviving table's capacity after the sweep has shrunk it.
+#[test]
+fn reclaiming_refunds_a_uri_only_with_its_last_reference() {
+    let mut registry = HyperlinkRegistry::new();
+    let uri = "https://example.com/reclaimed";
+    let ids: Vec<HyperlinkId> =
+        (0..1_000).map(|index| registry.intern(Some(&format!("id-{index}")), uri)).collect();
+    let keep: HashSet<HyperlinkId> = [ids[7]].into_iter().collect();
+
+    assert_eq!(registry.retain_live(&keep), 999);
+    let entry = registry.by_uri.get(uri).expect("the URI survives with one link");
+    assert!(entry.by_client.capacity() < 16, "the sweep shrank the inner table");
+    assert_eq!(registry.inner_table_bytes, client_table_bytes(entry.by_client.capacity()));
+    assert_eq!(registry.retained_bytes, arc_bytes(uri) + arc_bytes("id-7"));
+
+    assert_eq!(registry.retain_live(&HashSet::new()), 1);
+    assert!(registry.by_uri.is_empty());
+    assert_eq!(registry.retained_bytes(), HyperlinkRegistry::new().retained_bytes());
+}
+
+/// After a sweep shrinks a large inner table, the headroom it held is admitted again: the registry
+/// fills to within one entry of the cap, past where a figure still charging the old capacity
+/// would have stopped.
+#[test]
+fn a_shrunk_inner_table_returns_its_admission_headroom() {
+    let mut registry = HyperlinkRegistry::new();
+    let uri = "https://example.com/wide";
+    let ids: Vec<HyperlinkId> = (0..MAX_HYPERLINKS)
+        .map(|index| registry.intern(Some(&format!("id-{index}")), uri))
+        .collect();
+    let stale_inner = registry.inner_table_bytes;
+    let keep: HashSet<HyperlinkId> = [ids[0]].into_iter().collect();
+    registry.retain_live(&keep);
+    let shrunk_inner = registry.inner_table_bytes;
+    assert!(stale_inner > shrunk_inner + 256 * 1024, "precondition: the sweep released table");
+
+    let long = "y".repeat(MAX_HYPERLINK_URI_BYTES - 32);
+    let mut index = 0u32;
+    while registry.try_intern(None, &format!("https://example.com/{index:08}/{long}")).is_some() {
+        index += 1;
+    }
+    let admitted = registry.retained_bytes();
+    assert!(admitted <= MAX_HYPERLINK_METADATA_BYTES);
+    assert!(
+        admitted + stale_inner - shrunk_inner > MAX_HYPERLINK_METADATA_BYTES,
+        "admitted {admitted}: a stale inner-table figure would have refused part of it"
+    );
+}
+
+/// `source` with every comment and every string or character literal's contents replaced by spaces,
+/// so a scan sees only code. Line breaks are kept; a lifetime is code.
+fn code_only(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let blank = |character: char| if character == '\n' { '\n' } else { ' ' };
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let current = chars[index];
+        let next = chars.get(index + 1).copied();
+        let previous_is_ident =
+            index > 0 && (chars[index - 1].is_alphanumeric() || chars[index - 1] == '_');
+        if current == '/' && next == Some('/') {
+            while index < chars.len() && chars[index] != '\n' {
+                out.push(' ');
+                index += 1;
+            }
+        } else if current == '/' && next == Some('*') {
+            let mut depth = 0usize;
+            while index < chars.len() {
+                if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+                    depth += 1;
+                    out.push_str("  ");
+                    index += 2;
+                } else if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                    depth -= 1;
+                    out.push_str("  ");
+                    index += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    out.push(blank(chars[index]));
+                    index += 1;
+                }
+            }
+        } else if current == 'r' && !previous_is_ident && matches!(next, Some('"') | Some('#')) {
+            // A raw string: `r`, its hashes and quote, then everything up to the quote and hashes.
+            let mut hashes = 0;
+            let mut cursor = index + 1;
+            while chars.get(cursor) == Some(&'#') {
+                hashes += 1;
+                cursor += 1;
+            }
+            if chars.get(cursor) != Some(&'"') {
+                out.push(current);
+                index += 1;
+                continue;
+            }
+            out.extend(&chars[index..=cursor]);
+            index = cursor + 1;
+            let closing: String =
+                std::iter::once('"').chain(std::iter::repeat_n('#', hashes)).collect();
+            while index < chars.len()
+                && !chars[index..].iter().collect::<String>().starts_with(&closing)
+            {
+                out.push(blank(chars[index]));
+                index += 1;
+            }
+            out.push_str(&closing);
+            index += closing.chars().count();
+        } else if current == '"' {
+            out.push('"');
+            index += 1;
+            while index < chars.len() && chars[index] != '"' {
+                if chars[index] == '\\' {
+                    out.push(' ');
+                    index += 1;
+                }
+                if index < chars.len() {
+                    out.push(blank(chars[index]));
+                    index += 1;
+                }
+            }
+            out.push('"');
+            index += 1;
+        } else if current == '\'' && (next == Some('\\') || chars.get(index + 2) == Some(&'\'')) {
+            // A character literal (a lifetime has no closing quote two places on).
+            out.push('\'');
+            index += 1;
+            while index < chars.len() && chars[index] != '\'' {
+                if chars[index] == '\\' {
+                    out.push(' ');
+                    index += 1;
+                }
+                out.push(' ');
+                index += 1;
+            }
+            out.push('\'');
+            index += 1;
+        } else {
+            out.push(current);
+            index += 1;
+        }
+    }
+    out
+}
+
+/// The identifiers and keywords in `code`, in order.
+fn identifiers(code: &str) -> Vec<&str> {
+    code.split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+/// The body, braces included, of every function named `name` in `code`.
+fn function_bodies<'code>(code: &'code str, name: &str) -> Vec<&'code str> {
+    let pattern = format!("fn {name}");
+    let is_ident = |character: char| character.is_alphanumeric() || character == '_';
+    let mut bodies = Vec::new();
+    let mut from = 0;
+    while let Some(found) = code[from..].find(&pattern) {
+        let start = from + found;
+        from = start + pattern.len();
+        if code[from..].chars().next().is_some_and(is_ident)
+            || code[..start].chars().next_back().is_some_and(is_ident)
+        {
+            continue;
+        }
+        let Some(open) = code[from..].find('{') else { break };
+        let open = from + open;
+        let mut depth = 0usize;
+        for (offset, character) in code[open..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        bodies.push(&code[open..=open + offset]);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    bodies
+}
+
+/// The scanner sees code only: a call or keyword inside a comment, a string or a character literal
+/// is blanked, while the same text as code, and a lifetime, survive.
+#[test]
+fn the_source_scanner_blanks_comments_and_literals() {
+    let source = "let text = \".iter() for\"; // .find(x) while\nlet lead = '{'; /* .any( */ fn \
+                  keep<'a>(items: &'a [u8]) { items.iter(); }";
+    let code = code_only(source);
+    assert_eq!(code.chars().count(), source.chars().count(), "positions are kept");
+    for hidden in [".find(", "while", ".any(", "for\""] {
+        assert!(!code.contains(hidden), "{hidden} is blanked in {code:?}");
+    }
+    assert!(code.contains("items.iter()") && code.contains("<'a>"), "{code:?}");
+    assert_eq!(code.matches(".iter(").count(), 1);
+    assert_eq!(function_bodies(&code, "keep"), ["{ items.iter(); }"]);
+}
+
+/// Interning and lookup never search entries: `intern_or_reject`, `interned_id`, `lookup` and every
+/// function in this file they reach, with comments and literals blanked, hold no iterator search
+/// and no loop. Also, `retain_live` shrinks every table before it recomputes the inner-table figure.
+#[test]
+fn the_lookup_path_has_no_linear_search() {
+    let code = code_only(&include_str!("hyperlink.rs").replace("\r\n", "\n"));
+    let tokens = identifiers(&code);
+    let defined: HashSet<&str> =
+        tokens.windows(2).filter(|pair| pair[0] == "fn").map(|pair| pair[1]).collect();
+    let searches = [
+        ".iter(",
+        ".iter_mut(",
+        ".into_iter(",
+        ".find(",
+        ".position(",
+        ".any(",
+        ".all(",
+        ".keys(",
+        ".values(",
+        ".values_mut(",
+        ".filter(",
+        ".drain(",
+    ];
+    let mut pending = vec!["intern_or_reject", "interned_id", "lookup"];
+    let mut visited = HashSet::new();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name) {
+            continue;
+        }
+        let bodies = function_bodies(&code, name);
+        assert!(!bodies.is_empty(), "{name} is defined in hyperlink.rs");
+        for body in bodies {
+            let compact: String =
+                body.chars().filter(|character| !character.is_whitespace()).collect();
+            for search in searches {
+                assert!(!compact.contains(search), "{name} searches entries with {search}");
+            }
+            let words = identifiers(body);
+            for keyword in ["for", "while", "loop"] {
+                assert!(!words.contains(&keyword), "{name} loops with {keyword}");
+            }
+            pending.extend(words.into_iter().filter(|word| defined.contains(word)));
+        }
+    }
+    for reached in
+        ["interned_id", "insert_growth", "growth_bytes", "capacity_after_insert", "table_bytes"]
+    {
+        assert!(visited.contains(reached), "the scan reaches {reached}: {visited:?}");
+    }
+
+    let retain = function_bodies(&code, "retain_live").concat();
+    let last_shrink = retain.rfind("shrink_to_fit").expect("retain_live shrinks");
+    let recompute = retain.find("self.inner_table_bytes =").expect("retain_live recomputes");
+    assert!(last_shrink < recompute, "the figure must be read after the tables shrink");
+}
+
+// ---------------------------------------------------------------------------
+// Table growth at admission
+//
+// A new link can grow up to three tables. Admission must charge that growth
+// before it changes anything, or a registry near the cap admits a link whose
+// table growth carries it past the cap.
+// ---------------------------------------------------------------------------
+
+/// Client ids that exactly fill a client table's capacity: 14,336 is 7/8 of 16,384 buckets.
+const FULL_CLIENT_TABLE: usize = 14_336;
+
+/// A registry whose `"shared"` URI has a full client table and whose remaining budget is filled
+/// with distinct 8 KiB anonymous URIs until the next one is refused.
+fn registry_at_the_cap_with_a_full_client_table() -> HyperlinkRegistry {
+    let mut registry = HyperlinkRegistry::new();
+    for index in 0..FULL_CLIENT_TABLE {
+        let client_id = format!("id-{index:05}");
+        assert!(registry.try_intern(Some(&client_id), "shared").is_some(), "{client_id}");
+    }
+    let long = "u".repeat(MAX_HYPERLINK_URI_BYTES - 16);
+    let mut index = 0u32;
+    while registry.try_intern(None, &format!("{index:08}{long}")).is_some() {
+        index += 1;
+    }
+    registry
+}
+
+/// The reviewer's boundary: one more client id under a URI whose client table is full needs only
+/// 24 bytes of string but grows the table by about 400 KB. With the registry filled to the cap it
+/// must be refused, leaving the figure within the cap and the registry unchanged; admitting it put
+/// retention about 400 KB over the cap.
+#[test]
+fn a_client_id_whose_table_growth_would_pass_the_cap_is_refused() {
+    let mut registry = registry_at_the_cap_with_a_full_client_table();
+    let entry = registry.by_uri.get("shared").expect("the shared URI");
+    assert_eq!(
+        (entry.by_client.len(), entry.by_client.capacity()),
+        (FULL_CLIENT_TABLE, FULL_CLIENT_TABLE),
+        "precondition: the client table is exactly full"
+    );
+    let headroom = MAX_HYPERLINK_METADATA_BYTES - registry.retained_bytes();
+    let next_id = format!("id-{FULL_CLIENT_TABLE:05}");
+    assert!(
+        headroom >= next_id.len() + 16 + 8,
+        "precondition: the string alone fits ({headroom} B of headroom)"
+    );
+    let (len, retained, ids) =
+        (registry.len(), registry.retained_bytes(), registry.by_id.capacity());
+
+    assert_eq!(
+        registry.intern_or_reject(Some(&next_id), "shared"),
+        Err(AdmissionRejection::PerOwnerBudget),
+        "the table growth must be charged"
+    );
+    assert!(registry.retained_bytes() <= MAX_HYPERLINK_METADATA_BYTES);
+    assert_eq!((registry.len(), registry.retained_bytes()), (len, retained), "nothing changed");
+    assert_eq!(registry.by_id.capacity(), ids);
+    let entry = registry.by_uri.get("shared").expect("the shared URI");
+    assert_eq!(entry.by_client.capacity(), FULL_CLIENT_TABLE, "the client table did not grow");
+}
+
+/// The growth formula is the standard `HashMap`'s: for each of the registry's three key/value
+/// types, inserting new keys one at a time from empty to 40,000 entries moves `capacity()` exactly
+/// as `capacity_after_insert` predicts, and so does inserting into a table rebuilt by `collect`.
+#[test]
+fn capacity_after_insert_matches_the_standard_hash_map() {
+    fn check<Key: std::hash::Hash + Eq, Value>(make: impl Fn(usize) -> (Key, Value), name: &str) {
+        let mut table: HashMap<Key, Value> = HashMap::new();
+        for index in 0..40_000 {
+            let predicted = capacity_after_insert(table.len(), table.capacity());
+            let (key, value) = make(index);
+            table.insert(key, value);
+            assert_eq!(table.capacity(), predicted, "{name} after {} inserts", index + 1);
+        }
+        for kept in [1usize, 3, 7, 13, 100, 1_000, 14_336] {
+            let mut rebuilt: HashMap<Key, Value> =
+                table.drain().take(kept).collect::<Vec<_>>().into_iter().collect();
+            rebuilt.shrink_to_fit();
+            let predicted = capacity_after_insert(rebuilt.len(), rebuilt.capacity());
+            let (key, value) = make(1_000_000 + kept);
+            rebuilt.insert(key, value);
+            assert_eq!(rebuilt.capacity(), predicted, "{name} rebuilt with {kept}");
+            table = rebuilt;
+            for index in 0..40_000 {
+                let (key, value) = make(2_000_000 + kept * 100_000 + index);
+                table.insert(key, value);
+            }
+        }
+    }
+    check(
+        |index| (HyperlinkId(index as u64), Hyperlink { id: None, uri: Arc::from("u") }),
+        "by_id",
+    );
+    check(|index| (Arc::<str>::from(index.to_string()), UriEntry::default()), "by_uri");
+    check(|index| (Arc::<str>::from(index.to_string()), HyperlinkId(index as u64)), "by_client");
+}
+
+/// No admission takes the figure past the cap: a mixed stream of client ids under a few URIs and
+/// anonymous URIs of varied length, with a reclaim halfway, keeps `retained_bytes()` within the cap
+/// after every call, and every refusal leaves the figure unchanged.
+#[test]
+fn no_admission_takes_the_figure_past_the_cap() {
+    let mut registry = HyperlinkRegistry::new();
+    let mut kept = HashSet::new();
+    for index in 0..30_000usize {
+        if index == 15_000 {
+            registry.retain_live(&kept);
+        }
+        let before = registry.retained_bytes();
+        let outcome = if index % 3 == 0 {
+            let uri = format!("{index}{}", "v".repeat(2_000 + (index * 37) % 6_000));
+            registry.intern_or_reject(None, &uri)
+        } else {
+            registry.intern_or_reject(
+                Some(&format!("client-{index}")),
+                &format!("shared-{}", index % 4),
+            )
+        };
+        assert!(registry.retained_bytes() <= MAX_HYPERLINK_METADATA_BYTES, "after link {index}");
+        match outcome {
+            Ok(hid) if index % 5 == 0 => {
+                kept.insert(hid);
+            }
+            Ok(_) => {}
+            Err(_) => assert_eq!(registry.retained_bytes(), before, "a refusal changes nothing"),
+        }
+    }
 }

@@ -1621,7 +1621,7 @@ fn structural_paths_native_interaction() {
                             "padding_left": self.app.config.window.padding_left,
                             "preview": window.link_preview.as_ref().map(|preview| &preview.uri),
                             "notification": window.notification.as_ref().map(|notification| &notification.message),
-                            "links": parser.grid().rows_iter().enumerate().flat_map(|(row, cells)| cells.iter().enumerate().filter_map(move |(col, cell)| cell.hyperlink().map(|id| (row,col,id)))).filter_map(|(row,col,id)| parser.hyperlinks().lookup(id).map(|link| serde_json::json!({"row":row,"col":col,"uri":link.uri}))).collect::<Vec<_>>()});
+                            "links": parser.grid().rows_iter().enumerate().flat_map(|(row, cells)| cells.iter().enumerate().filter_map(move |(col, cell)| cell.hyperlink().map(|id| (row,col,id)))).filter_map(|(row,col,id)| parser.hyperlinks().lookup(id).map(|link| serde_json::json!({"row":row,"col":col,"uri":&*link.uri}))).collect::<Vec<_>>()});
                         std::fs::write(
                             self.root.join("window.json"),
                             serde_json::to_vec(&report).unwrap(),

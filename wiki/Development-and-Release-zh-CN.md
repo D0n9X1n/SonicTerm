@@ -301,7 +301,9 @@ PR 与 Change。
 - 噪声下限就是这一逐次运行的离散范围，而不是合并后帧样本的极值；落在其中的变化视为噪声。
 - `n/a` 表示 base 不报告该字段，`blocked` 表示 base 无法构建或运行该场景，并附带错误。
 - 检查点的内存取自该时刻或之前最新的 `memory snapshot` 行，再加上 macOS `footprint` 读数；
-  该日志行见[日志](Logging-zh-CN#info-级别的聚合快照)。
+  该日志行见[日志](Logging-zh-CN#info-级别的聚合快照)。该行带有网格字段时，检查点还会多一行
+  `grid bytes per pane`：`grid_visible_bytes + grid_history_bytes + grid_alternate_bytes`
+  除以 `panes_sampled`。
 - S2 只在能把样本无歧义地归属到某一帧时才计入按键到呈现的延迟，并报告归属覆盖率；阅读延迟时
   要同时看覆盖率。
 

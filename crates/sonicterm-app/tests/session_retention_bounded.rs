@@ -213,7 +213,7 @@ fn links_still_resolve_after_far_more_than_the_registry_cap() {
         .find_map(|cell| cell.hyperlink())
         .expect("the final link must reach a cell");
     assert_eq!(
-        parser.hyperlinks().lookup(hid).map(|link| link.uri.as_str()),
+        parser.hyperlinks().lookup(hid).map(|link| &*link.uri),
         Some("https://example.com/last"),
         "after {emitted} links the newest must still resolve"
     );
