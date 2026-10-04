@@ -359,25 +359,70 @@ pub(crate) fn glyph_ink_bounds(glyphs: &[GlyphInstance], sw: f32, sh: f32) -> Re
     })
 }
 
-/// A glyph drawing `rect_px` (`x, y, w, h` in surface pixels) in `color` with `template`'s atlas
-/// coordinates and flags; `None` without a template or on an empty surface.
+/// The atlas key of the test seams' solid tile: a noncharacter in a font slot and glyph id no font
+/// occupies, so no real glyph ever shares its entry.
+const SEAM_TILE_KEY: sonicterm_types::GlyphKey = sonicterm_types::GlyphKey {
+    ch: '\u{FFFF}',
+    font_slot: u8::MAX,
+    weight_bold: false,
+    italic: false,
+    glyph_id: u32::MAX,
+    raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
+};
+
+/// Rasterizes the test seams' tile: 4 x 4 pixels of full coverage.
+struct SeamTile;
+
+impl sonicterm_text::glyph_atlas::Rasterizer for SeamTile {
+    fn rasterize(
+        &mut self,
+        _key: sonicterm_types::GlyphKey,
+    ) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+        Some(sonicterm_text::glyph_atlas::RasterTile {
+            width: 4,
+            height: 4,
+            offset_x: 0,
+            offset_y: 0,
+            advance: 4.0,
+            coverage: vec![u8::MAX; 16],
+            is_color: false,
+            is_subpixel: false,
+        })
+    }
+}
+
+/// A solid glyph drawing `rect_px` (`x, y, w, h` in surface pixels) in `color` from the test
+/// seams' own atlas tile, inserted on first use; `None` on an empty surface or when the atlas
+/// cannot hold the tile.
 ///
-/// Only the renderer's test glyph seam calls it, to place an instance whose ink a cursor recolor
-/// reaches but whose row strip does not.
-pub(crate) fn injected_glyph(
-    template: Option<&GlyphInstance>,
+/// Only the renderer's test glyph seams call it. The tile is its own, so the glyph draws the same
+/// whichever rows the frame emitted before it, including none.
+pub(crate) fn seam_glyph(
+    atlas: &mut sonicterm_text::glyph_atlas::GlyphAtlas,
     rect_px: (f32, f32, f32, f32),
     color: [f32; 4],
     sw: f32,
     sh: f32,
 ) -> Option<GlyphInstance> {
-    let template = template?;
     if sw <= 0.0 || sh <= 0.0 {
         // When: `sw` or `sh` is nonpositive, no NDC rectangle can place the glyph.
         return None;
     }
+    // The tile is a real insertion, so it counts like every other one.
+    let info = atlas.get_or_insert(
+        SEAM_TILE_KEY,
+        &mut crate::frame_stats::CountingRasterizer::new(&mut SeamTile),
+    )?;
+    // Sample the tile's middle half, so bilinear filtering never reaches a neighbouring tile.
+    let [u_min, v_min, u_max, v_max] = info.uv;
+    let (inset_u, inset_v) = ((u_max - u_min) / 4.0, (v_max - v_min) / 4.0);
     let (left, top, width, height) = rect_px;
-    Some(GlyphInstance { rect: px_to_ndc(left, top, width, height, sw, sh), color, ..*template })
+    Some(GlyphInstance {
+        rect: px_to_ndc(left, top, width, height, sw, sh),
+        uv: [u_min + inset_u, v_min + inset_v, u_max - inset_u, v_max - inset_v],
+        color,
+        flags: crate::core::glyph_flags(false, false),
+    })
 }
 
 /// Recolor every quad in `quads` that overlaps `target` (`x, y, w, h` in surface px) to `rgba`.

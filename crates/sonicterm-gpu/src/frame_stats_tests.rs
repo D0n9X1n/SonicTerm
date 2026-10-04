@@ -1162,16 +1162,17 @@ fn atlas_insertions(sources: &[(String, String)]) -> Vec<(String, bool)> {
 
 #[test]
 fn every_glyph_atlas_insertion_counts_its_rasterizer() {
-    // An insertion that passes the bare rasterizer goes uncounted. The six sites are the four
-    // terminal paths in core.rs, the shared chrome path (tabs, palette, search, preedit) and the
-    // working-set helper's ASCII pass.
+    // An insertion that passes the bare rasterizer goes uncounted. The seven sites are the four
+    // terminal paths in core.rs, the shared chrome path (tabs, palette, search, preedit), the
+    // working-set helper's ASCII pass and the test glyph seams' solid tile in cursor.rs.
     let mut sources = Vec::new();
     crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
     let insertions = atlas_insertions(&sources);
     let bare: Vec<_> = insertions.iter().filter(|(_, wrapped)| !wrapped).collect();
     assert!(bare.is_empty(), "uncounted glyph-atlas insertions: {bare:#?}");
-    assert_eq!(insertions.len(), 6, "the insertion sites changed; review them: {insertions:#?}");
+    assert_eq!(insertions.len(), 7, "the insertion sites changed; review them: {insertions:#?}");
     assert!(insertions.iter().any(|(site, _)| site.starts_with("chrome_text.rs:")));
+    assert!(insertions.iter().any(|(site, _)| site.starts_with("cursor.rs:")));
 }
 
 #[test]

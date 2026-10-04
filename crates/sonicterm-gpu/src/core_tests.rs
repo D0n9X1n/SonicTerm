@@ -5974,7 +5974,7 @@ fn an_injected_row_glyph_joins_its_rows_span_and_record() {
     let assemble = method_body(&source, "    fn assemble_frame(");
     let row_loop = assemble.find("for (r, _) in pv.planned.rows() {").unwrap();
     let emit = row_loop + assemble[row_loop..].find("emit_row_glyphs(").unwrap();
-    let inject = assemble.find("self.push_injected_row_glyph(").expect("the seam is pushed");
+    let inject = assemble.find("push_injected_row_glyph(\n").expect("the seam is pushed");
     let ink = assemble.find("crate::row_ink::emitted_row_ink(").unwrap();
     assert!(row_loop < emit && emit < inject && inject < ink);
 }
@@ -6175,4 +6175,29 @@ fn every_frame_outcome_settles_records_receipts_counts_and_the_key() {
     assert_eq!(table.committed_rect(7, 1), Some(replacement), "the replacement commits");
     let next = edit(key.as_ref(), 3);
     assert!(!next.first_frame && next.mode == RenderMode::Partial, "the next edit is partial");
+}
+
+/// The row glyph seam draws whatever was emitted before it: in a partial frame its owner row can
+/// be a blank row emitted first, with no glyph in the frame yet, and the seam must still append
+/// one glyph of its rectangle as the row's own span, with ink, so the row's record bounds it.
+#[test]
+fn an_injected_row_glyph_draws_in_a_blank_row_emitted_first() {
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let seam = InjectedRowGlyph {
+        pane_id: 7,
+        slot: 10,
+        rect_px: (96.0, 200.0, 12.0, 19.0),
+        color: [1.0, 0.0, 1.0, 1.0],
+    };
+    let surface = (640.0, 480.0);
+    let mut glyphs = Vec::new();
+    let mut row_spans = Vec::new();
+    push_injected_row_glyph(&mut atlas, Some(seam), 7, 10, &mut glyphs, &mut row_spans, surface);
+    assert_eq!(glyphs.len(), 1, "the seam draws with no glyph emitted before it");
+    assert_eq!(row_spans.len(), 1);
+    assert_eq!(row_spans[0].ink_px, Some([96.0, 200.0, 108.0, 219.0]));
+    let uv = glyphs[0].uv;
+    assert!(uv[2] > uv[0] && uv[3] > uv[1], "the glyph samples a resident tile: {uv:?}");
+    push_injected_row_glyph(&mut atlas, Some(seam), 7, 11, &mut glyphs, &mut row_spans, surface);
+    assert_eq!(glyphs.len(), 1, "another row draws nothing");
 }

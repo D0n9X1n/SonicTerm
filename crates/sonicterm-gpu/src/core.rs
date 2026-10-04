@@ -140,6 +140,31 @@ pub struct InjectedRowGlyph {
     pub color: [f32; 4],
 }
 
+/// Append the row glyph seam's instance after the row at `slot` of `pane_id`, as its own span,
+/// when `seam` names that row.
+fn push_injected_row_glyph(
+    atlas: &mut GlyphAtlas,
+    seam: Option<InjectedRowGlyph>,
+    pane_id: u64,
+    slot: u16,
+    glyphs: &mut Vec<GlyphInstance>,
+    row_spans: &mut Vec<RowGlyphSpan>,
+    surface: (f32, f32),
+) {
+    let Some(InjectedRowGlyph { pane_id: owner, slot: owner_slot, rect_px, color }) = seam else {
+        // When: `seam` is None, as in production, nothing is appended.
+        return;
+    };
+    if owner != pane_id || owner_slot != slot {
+        // When: `owner` or `owner_slot` names another row than `pane_id` and `slot`, nothing is drawn here.
+        return;
+    }
+    let (sw, sh) = surface;
+    let base = glyphs.len();
+    glyphs.extend(crate::cursor::seam_glyph(atlas, rect_px, color, sw, sh));
+    row_spans.push(RowGlyphSpan::new(glyphs, base..glyphs.len(), sw, sh));
+}
+
 /// The glyph atlas facts a memory snapshot reports per renderer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GlyphAtlasFacts {
@@ -4695,33 +4720,6 @@ impl GpuRenderer {
             .gpu_work("fault.frame_probe", || create_frame_fault_probe(&self.device));
     }
 
-    /// Append the row glyph seam's instance after the row at `slot` of `pane_id`, as its own span,
-    /// when the seam names that row.
-    fn push_injected_row_glyph(
-        &self,
-        pane_id: u64,
-        slot: u16,
-        glyphs: &mut Vec<GlyphInstance>,
-        row_spans: &mut Vec<RowGlyphSpan>,
-        surface: (f32, f32),
-    ) {
-        let Some(InjectedRowGlyph { pane_id: owner, slot: owner_slot, rect_px, color }) =
-            self.injected_row_glyph
-        else {
-            // When: injected_row_glyph is None, as in production, nothing is appended.
-            return;
-        };
-        if owner != pane_id || owner_slot != slot {
-            // When: `owner` or `owner_slot` names another row than `pane_id` and `slot`, nothing is drawn here.
-            return;
-        }
-        let (sw, sh) = surface;
-        let base = glyphs.len();
-        let template = glyphs.first().copied();
-        glyphs.extend(crate::cursor::injected_glyph(template.as_ref(), rect_px, color, sw, sh));
-        row_spans.push(RowGlyphSpan::new(glyphs, base..glyphs.len(), sw, sh));
-    }
-
     /// Test hook: keep each later presented frame's damage for `__take_presented_damage`.
     /// Production never calls it, so a presented frame builds and keeps no snapshot.
     #[doc(hidden)]
@@ -4745,13 +4743,12 @@ impl GpuRenderer {
     }
 
     /// Append the test glyph seam's instance, if one is set, after the terminal rows.
-    fn push_injected_test_glyph(&self, glyphs: &mut Vec<GlyphInstance>, sw: f32, sh: f32) {
+    fn push_injected_test_glyph(&mut self, glyphs: &mut Vec<GlyphInstance>, sw: f32, sh: f32) {
         let Some((rect_px, color)) = self.injected_test_glyph else {
             // When: injected_test_glyph is None, as in production, nothing is appended.
             return;
         };
-        let template = glyphs.first().copied();
-        glyphs.extend(crate::cursor::injected_glyph(template.as_ref(), rect_px, color, sw, sh));
+        glyphs.extend(crate::cursor::seam_glyph(&mut self.glyph_atlas, rect_px, color, sw, sh));
     }
 
     /// Test hook: recreate the retained frame texture copyable (`COPY_SRC`), now and on every later
@@ -6313,7 +6310,9 @@ impl GpuRenderer {
                     );
                     // The row's ink: its glyphs' union and its tofu outlines. Its underlines join
                     // when they are drawn below.
-                    self.push_injected_row_glyph(
+                    push_injected_row_glyph(
+                        &mut self.glyph_atlas,
+                        self.injected_row_glyph,
                         pane_id,
                         r,
                         &mut glyph_instances,
