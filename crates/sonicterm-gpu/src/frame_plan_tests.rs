@@ -1423,3 +1423,15 @@ fn any_key_change_under_an_active_overlay_damages_the_whole_surface() {
         assert_eq!(plan.mode, RenderMode::Noop, "unchanged, {degraded}");
     }
 }
+
+/// Building dirty-row damage allocates nothing per dirty slot: each primary slot is damaged
+/// from a one-element iterator, not a collected `Vec`, so a plan with counters off pays no
+/// per-row allocation for the waste parts. Line endings are normalized before scanning.
+#[test]
+fn dirty_slot_damage_allocates_no_vector_per_slot() {
+    let source = include_str!("frame_plan.rs").replace("\r\n", "\n");
+    let build = source.split_once("    pub(crate) fn build(").expect("FramePlan::build exists").1;
+    let build = &build[..build.find("\n    }\n").expect("build ends")];
+    assert!(!build.contains("vec![slot]"), "a Vec is built per dirty slot");
+    assert!(!build.contains("Vec<Vec<u16>>"), "dirty slots are regrouped into vectors");
+}

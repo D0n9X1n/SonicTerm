@@ -500,17 +500,12 @@ impl FramePlan {
                     .collect()
             };
             // One part per dirty slot (one for an alternate pane, which damages whole), so the
-            // waste counter sees the gaps between dirty rows.
-            let slot_groups: Vec<Vec<u16>> = if input.is_alt {
-                vec![dirty_slots.clone()]
-            } else {
-                // When: `is_alt` is false, each dirty row is its own ink-padded strip.
-                dirty_slots.iter().map(|&slot| vec![slot]).collect()
-            };
-            for slots in slot_groups {
+            // waste counter sees the gaps between dirty rows. Each group is a borrowed slice, so
+            // the loop allocates nothing per dirty row.
+            let mut add_slot_group = |slots: &[u16]| {
                 if let Some(rect) = pane_damage_rect_with_ink_pad(
                     input.is_alt,
-                    slots.into_iter().map(usize::from),
+                    slots.iter().map(|&slot| usize::from(slot)),
                     input.rect,
                     origin_x,
                     origin_y,
@@ -522,6 +517,14 @@ impl FramePlan {
                     surface.h,
                 ) {
                     dirt.add_clipped(rect, surface);
+                }
+            };
+            if input.is_alt {
+                add_slot_group(&dirty_slots);
+            } else {
+                // When: `is_alt` is false, each dirty row is its own ink-padded strip.
+                for slot in &dirty_slots {
+                    add_slot_group(std::slice::from_ref(slot));
                 }
             }
             damaged_rows += dirty_slots.len();
