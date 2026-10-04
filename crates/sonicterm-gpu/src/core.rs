@@ -1855,7 +1855,7 @@ impl PresentedDamageRecorder {
     #[inline]
     pub fn record(&mut self, build: impl FnOnce() -> PresentedDamage) {
         if self.enabled {
-            // When: `enabled` is set, a test hook asked for each presented frame's damage.
+            // Only a test hook sets `enabled`; production skips the snapshot entirely.
             self.last = Some(build());
         }
     }
@@ -6267,7 +6267,7 @@ impl GpuRenderer {
         }
 
         if self.injected_test_glyph.is_some() {
-            // When: a test injected a glyph, it joins the terminal glyphs before any recolor.
+            // An injected test glyph joins the terminal glyphs before any recolor reads them.
             self.push_injected_test_glyph(&mut glyph_instances, sw, sh);
         }
 
