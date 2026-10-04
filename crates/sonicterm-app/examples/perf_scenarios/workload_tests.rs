@@ -1057,7 +1057,10 @@ fn platform_name() -> &'static str {
 /// One working-set measurement as the parseable row CI output is recorded from: `key=value`
 /// fields after a fixed prefix, in the order `START_SIZE_INPUTS` rows are keyed, with `source`
 /// naming what measured it (`helper` or `real_renderer`). `fit` is `FitOutcome::label`, which
-/// the helper and the renderer's `GlyphAtlasFacts::fit` both produce.
+/// the helper and the renderer's `GlyphAtlasFacts::fit` both produce. `incomplete_glyphs`
+/// counts required glyphs the measurement drew as tofu; a nonzero count makes the row ineligible
+/// to select a start below the maximum.
+#[allow(clippy::too_many_arguments)]
 fn working_set_row(
     platform: &str,
     scale: u32,
@@ -1066,10 +1069,12 @@ fn working_set_row(
     fit: &str,
     max_tile: [u32; 2],
     packed_pixels: u64,
+    incomplete_glyphs: usize,
 ) -> String {
     format!(
         "glyph_atlas_working_set platform={platform} scale={scale} fixture={fixture} \
-         source={source} fit={fit} max_tile={}x{} packed_pixels={packed_pixels}",
+         source={source} fit={fit} max_tile={}x{} packed_pixels={packed_pixels} \
+         incomplete_glyphs={incomplete_glyphs}",
         max_tile[0], max_tile[1]
     )
 }
@@ -1102,17 +1107,19 @@ fn missing_required_chrome(
         .collect()
 }
 
-/// 12c, run by CI on each platform: for S9's and S12's working sets at scale 1 and 2, the start
-/// constant is at least this platform's need, and the live helper outcome equals this platform's
-/// recorded `helper` row. With no recorded row the constant must be the maximum: no savings are
-/// claimed without a measurement. Prints each figure so CI's output can become the table's rows.
+/// 12c, run by CI on each platform: each start constant passes `validate_table_start`, the same
+/// validation the unit tests use, which admits only the maximum until the sizing oracle is complete
+/// and every required input is recorded. For S9's and S12's working sets at scale 1 and 2 the
+/// constant is at least this platform's need, where a measurement that drew any glyph as tofu
+/// needs the maximum, and the live helper measurement equals this platform's recorded `helper`
+/// row when one exists. Prints each figure so CI's output can become the table's rows.
 #[test]
 #[ignore = "measures with the real font stack; CI runs it in its own step"]
 fn glyph_atlas_working_set() {
     use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
-    use sonicterm_text::glyph_atlas::{ATLAS_DIM, START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
+    use sonicterm_text::glyph_atlas::{START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
     use sonicterm_text::start_size_inputs::{
-        start_rule, InputSource, RuleInput, START_SIZE_INPUTS,
+        start_rule, validate_table_start, InputSource, RuleInput, START_SIZE_INPUTS,
     };
     let font_dirs =
         vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
@@ -1121,6 +1128,9 @@ fn glyph_atlas_working_set() {
     let titles = ["zsh", "perf_scenarios", "S12 covered window"];
     let platform = platform_name();
     for (scale, dpi, constant) in [(1, 72, START_ATLAS_DIM_1X), (2, 144, START_ATLAS_DIM_2X)] {
+        let table = validate_table_start(scale, constant)
+            .unwrap_or_else(|error| panic!("{scale}x start {constant} fails validation: {error}"));
+        println!("glyph_atlas_start scale={scale} constant={constant} verdict={}", table.verdict);
         let mut local = Vec::new();
         for (name, fixture) in fixtures {
             let bytes = fixture_bytes(fixture);
@@ -1129,6 +1139,7 @@ fn glyph_atlas_working_set() {
             let set =
                 measure_glyph_working_set(&lines, &titles, FONT_FAMILY, size, dpi, &font_dirs)
                     .expect("the packaged scenario family loads");
+            let incomplete_glyphs = set.unresolved_chars.len() + set.raster_failed.len();
             println!(
                 "{}",
                 working_set_row(
@@ -1138,10 +1149,11 @@ fn glyph_atlas_working_set() {
                     "helper",
                     &set.fit_outcome.label(),
                     set.max_tile_dims,
-                    set.packed_pixels
+                    set.packed_pixels,
+                    incomplete_glyphs
                 )
             );
-            if !set.unresolved_chars.is_empty() || !set.raster_failed.is_empty() {
+            if incomplete_glyphs > 0 {
                 // When: a required tile is tofu on this host, say which, apart from the row.
                 println!(
                     "glyph_atlas_working_set_tofu platform={platform} scale={scale} fixture={name} \
@@ -1155,25 +1167,20 @@ fn glyph_atlas_working_set() {
                     && row.fixture == name
                     && row.source == InputSource::Helper
             });
-            match recorded {
-                Some(row) => {
-                    assert_eq!(
-                        (row.outcome, row.max_tile),
-                        (set.fit_outcome, set.max_tile_dims),
-                        "{name} at {scale}x drifted from its recorded helper row ({})",
-                        row.run_url
-                    );
-                }
-                None => {
-                    // When: no helper row is recorded for this input, savings need a measurement.
-                    assert_eq!(constant, ATLAS_DIM, "{name} at {scale}x has no recorded row");
-                    println!("  no recorded helper row: maximum selected, no savings");
-                }
+            if let Some(row) = recorded {
+                // When: a helper row is recorded, the live measurement must not drift from it.
+                assert_eq!(
+                    (row.outcome, row.max_tile, row.incomplete_glyphs),
+                    (set.fit_outcome, set.max_tile_dims, incomplete_glyphs),
+                    "{name} at {scale}x drifted from its recorded helper row ({})",
+                    row.run_url
+                );
             }
             local.push(RuleInput {
                 label: format!("{platform} {scale}x {name} helper"),
                 outcome: set.fit_outcome,
                 max_tile: set.max_tile_dims,
+                incomplete_glyphs,
             });
         }
         let need = start_rule(&local).expect("two measured inputs");
@@ -1188,7 +1195,8 @@ fn glyph_atlas_working_set() {
 
 /// The working-set step and the real-renderer coverage test print their measurements through one
 /// formatter, so a single `key=value` parser reads both and the rows can become `START_SIZE_INPUTS`
-/// entries: the same keys in the same order, told apart only by `source`.
+/// entries: the same keys in the same order, told apart only by `source`. Both kinds carry
+/// `incomplete_glyphs`, the count that makes a row ineligible to select a smaller start.
 #[test]
 fn working_set_rows_share_one_parseable_format() {
     use sonicterm_text::glyph_atlas::FitOutcome;
@@ -1210,6 +1218,7 @@ fn working_set_rows_share_one_parseable_format() {
         &FitOutcome::Fits(512).label(),
         [18, 24],
         9000,
+        3,
     ));
     let real = parse(&working_set_row(
         "windows",
@@ -1219,17 +1228,28 @@ fn working_set_rows_share_one_parseable_format() {
         &FitOutcome::FitsWithoutHeadroom.label(),
         [40, 48],
         123_456,
+        0,
     ));
     let keys =
         |row: &[(String, String)]| row.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
     assert_eq!(
         keys(&helper),
-        ["platform", "scale", "fixture", "source", "fit", "max_tile", "packed_pixels"]
+        [
+            "platform",
+            "scale",
+            "fixture",
+            "source",
+            "fit",
+            "max_tile",
+            "packed_pixels",
+            "incomplete_glyphs"
+        ]
     );
     assert_eq!(keys(&helper), keys(&real));
     assert_eq!(helper[3].1, "helper");
     assert_eq!(real[3].1, "real_renderer");
     assert_eq!((real[4].1.as_str(), real[5].1.as_str()), ("no_headroom", "40x48"));
+    assert_eq!((helper[7].1.as_str(), real[7].1.as_str()), ("3", "0"));
 }
 
 /// Fallback is complete only on a presented frame whose terminal rows and chrome both drew no
@@ -1317,6 +1337,13 @@ fn the_coverage_setup_opens_the_palette_on_the_main_frame() {
 /// configuration-local glyph keys: the S9 and S12 fixtures drawn on a Windows
 /// window with the tab bar and three titles, the cursor and the command palette open with its
 /// footer and detail rows, at scale 1 and 2. It lives beside the fixtures it draws.
+///
+/// Limitation: it checks the subset of tiles that became resident, and does not yet prove that the
+/// renderer drew the complete working set. Two failures leave no tile and no missing-glyph record:
+/// a shaped glyph with a nonzero id whose rasterization or atlas admission fails is skipped
+/// silently by the terminal row path, and a tab title whose fitting fails is drawn as an empty
+/// title before the chrome diagnostic sees it. Until both are reported as missing glyphs,
+/// `SIZING_ORACLE_COMPLETE` stays false and neither normal start constant may drop below 2048.
 #[cfg(target_os = "windows")]
 mod real_renderer_coverage {
     use std::path::PathBuf;
@@ -1484,7 +1511,8 @@ mod real_renderer_coverage {
     /// It then holds every required footer symbol and title character as a real tile, prints its
     /// atlas as a `source=real_renderer` row, every resident tile resolves to an identity (face,
     /// glyph, strike, variant and flags), and each identity is in the helper's set with the same
-    /// raster size.
+    /// raster size. Tiles lost to the two unreported failures the module comment names are not
+    /// checked.
     fn covered(
         active: &ActiveEventLoop,
         name: &str,
@@ -1519,6 +1547,9 @@ mod real_renderer_coverage {
         let absent = super::missing_required_chrome(&resident);
         check(absent.is_empty(), &format!("{case}: required chrome not resident: {absent:?}"))?;
         let facts = renderer.glyph_atlas_facts();
+        // The renderer's own tofu report; it misses the oracle gaps the module comment names.
+        let incomplete_glyphs =
+            renderer.last_missing_tofu().len() + renderer.last_missing_chrome().len();
         print_row(&super::working_set_row(
             super::platform_name(),
             scale as u32,
@@ -1527,6 +1558,7 @@ mod real_renderer_coverage {
             &facts.fit,
             facts.max_tile,
             facts.packed_pixels,
+            incomplete_glyphs,
         ));
         let (identities, unresolved) = renderer.__test_resident_tile_identities();
         check(
@@ -1590,7 +1622,8 @@ mod real_renderer_coverage {
 
     /// Once fallback completes on a presented frame, the helper's identity set covers every tile
     /// the real renderer holds for S9 and S12 with the tab bar, titles, cursor and an open
-    /// palette, at scale 1 and 2, with the same raster sizes.
+    /// palette, at scale 1 and 2, with the same raster sizes. It checks resident tiles only and
+    /// does not prove complete rendering; see the module comment for the two unreported failures.
     #[test]
     fn the_helper_covers_the_real_renderer() {
         let event_loop =
