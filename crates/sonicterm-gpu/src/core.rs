@@ -43,7 +43,7 @@ use crate::color::{
     chrome_color_to_linear_rgba, dim_toward, hex_to_chrome_color, hex_to_premultiplied_rgba,
     hex_to_wgpu_with_alpha, ChromeColor,
 };
-use crate::cursor::{recolor_cursor_glyphs_in, InactivePaneCursor, RowGlyphSpan};
+use crate::cursor::{recolor_cursor_glyphs_in, InactivePaneCursor, RecolorOutcome, RowGlyphSpan};
 use crate::device_errors::{
     create_frame_fault_probe, destroy_and_await_loss, install_device_error_handlers,
     run_isolated_validation, DeviceErrorSnapshot, DeviceErrorState, DeviceStateWaker, GpuFaultKind,
@@ -6173,7 +6173,7 @@ impl GpuRenderer {
                 &mut quads,
                 &active_snapped_cell_x,
             ) {
-                let visited = recolor_cursor_glyphs_in(
+                let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
                     &mut glyph_instances,
                     &row_spans,
                     cx,
@@ -6264,7 +6264,7 @@ impl GpuRenderer {
                                 ..Default::default()
                             });
                         }
-                        let visited = recolor_cursor_glyphs_in(
+                        let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
                             &mut glyph_instances,
                             &row_spans,
                             cx,
@@ -6720,7 +6720,7 @@ impl GpuRenderer {
                     });
                     // The tab titles were appended after the rows; they lie outside every
                     // recorded row span, so this scan still examines each of them.
-                    let visited = recolor_cursor_glyphs_in(
+                    let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
                         &mut glyph_instances,
                         &row_spans,
                         qx,
