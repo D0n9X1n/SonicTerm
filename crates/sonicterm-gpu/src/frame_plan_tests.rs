@@ -1088,6 +1088,20 @@ fn conservative_rules_keep_whole_surface_or_whole_pane_damage() {
     assert_eq!(plan.mode, RenderMode::Full);
     assert_eq!(plan.damage, surface);
 
+    // A class change whose area is not drawn (the tab bar is hidden) still repaints the whole
+    // surface on the degraded path; the hardware path draws nothing new and plans the A7 Noop.
+    let hidden_bar = |degraded| FrameFacts { tab_bar_top: None, ..facts(degraded) };
+    let mut degraded_retitled = hidden_bar(true);
+    degraded_retitled.window.tab_hash = 1;
+    let plan = transition(hidden_bar(true), degraded_retitled, pane(7, 1));
+    assert_eq!(plan.mode, RenderMode::Full);
+    assert_eq!(plan.damage, surface);
+    let mut hardware_retitled = hidden_bar(false);
+    hardware_retitled.window.tab_hash = 1;
+    let plan = transition(hidden_bar(false), hardware_retitled, pane(7, 1));
+    assert_eq!(plan.mode, RenderMode::Noop);
+    assert!(!plan.acknowledges(0, 7, 1));
+
     let alternate = PaneMetadata { is_alt: true, ..live_pane(7, 1) };
     let mut toggled = cursor_facts();
     toggled.window.cursor_visible = false;
@@ -1097,6 +1111,11 @@ fn conservative_rules_keep_whole_surface_or_whole_pane_damage() {
     assert_eq!(plan.damage, PixelRect { x: 0, y: 0, w: 100, h: 84 });
 
     let first = FramePlan::build(cursor_facts(), [live_pane(7, 1)], None);
+    assert_eq!(first.damage, surface);
+    // A first frame that also carries dirty rows repaints the whole surface, not only those rows.
+    let dirty_first = PaneMetadata { dirty_rows: vec![1], ..live_pane(7, 1) };
+    let first = FramePlan::build(cursor_facts(), [dirty_first], None);
+    assert_eq!(first.mode, RenderMode::Full);
     assert_eq!(first.damage, surface);
 }
 
