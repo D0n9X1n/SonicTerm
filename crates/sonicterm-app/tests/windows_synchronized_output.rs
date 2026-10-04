@@ -96,19 +96,31 @@ fn present(app: &mut App, active: &ActiveEventLoop, id: WindowId) -> Result<(), 
     Err("the frame was presented".to_owned())
 }
 
-/// The software frame's pixels over the whole drawable terminal region, below the tab bar.
-fn pane_pixels(app: &App, window: &Window, id: WindowId) -> Result<Vec<[u8; 4]>, String> {
-    let (_, _, top) = app.__test_window_cell_geometry(id).ok_or("no pane geometry")?;
+/// The software frame's pixels over `pane`'s content rectangle from the renderer's last pane
+/// layout: terminal cells only, with no tab bar or other chrome, which differ between tabs.
+fn pane_pixels(
+    app: &mut App,
+    window: &Window,
+    id: WindowId,
+    pane: u64,
+) -> Result<(Vec<[u8; 4]>, (u32, u32)), String> {
+    let layout = app
+        .__test_window_renderer_mut(id)
+        .and_then(|renderer| renderer.pane_layout(pane))
+        .ok_or("no pane layout")?;
     let size = window.inner_size();
-    let first_row = top.ceil() as u32;
-    let last_row = size.height;
-    (first_row..last_row)
-        .flat_map(|pixel_y| (0..size.width).map(move |pixel_x| (pixel_x, pixel_y)))
+    let left = layout.origin_x_logical.max(0.0).ceil() as u32;
+    let top = layout.origin_y_logical.max(0.0).ceil() as u32;
+    let right = ((layout.origin_x_logical + layout.w_logical) as u32).min(size.width);
+    let bottom = ((layout.origin_y_logical + layout.h_logical) as u32).min(size.height);
+    let pixels = (top..bottom)
+        .flat_map(|pixel_y| (left..right).map(move |pixel_x| (pixel_x, pixel_y)))
         .map(|(pixel_x, pixel_y)| {
             app.__test_window_software_frame_pixel_bgra(id, pixel_x, pixel_y)
                 .ok_or_else(|| String::from("software frame pixel unavailable"))
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((pixels, (right.saturating_sub(left), bottom.saturating_sub(top))))
 }
 
 /// The issue's update: `?2026h`, 60 row writes, `?2026l`. Write `row` lands on a grid row of the
@@ -176,19 +188,19 @@ fn run(active: &ActiveEventLoop) -> Result<(), String> {
         check(app.__test_advance_child_pane_parser(id, pane, b"\x1b[?25l"), "cursor hidden")?;
     }
 
-    let (_, rows) = app.__test_child_pane_grid_size(id, subject).ok_or("subject grid")?;
-    check(rows >= 20, &format!("the grid holds the written rows: {rows}"))?;
-
-    // The reference frame: the same bytes, unbracketed, in tab 1.
+    // The reference frame: the same bytes, unbracketed, in tab 1, shown and sized first.
     check(app.__test_invoke_activate_tab_in_child(id, 1), "reference tab shown")?;
     settle(&mut app, active, id)?;
-    let blank = pane_pixels(&app, &window, id)?;
+    let reference_grid = app.__test_child_pane_grid_size(id, reference).ok_or("reference grid")?;
+    let rows = reference_grid.1;
+    check(rows >= 20, &format!("the shown grid holds the written rows: {reference_grid:?}"))?;
+    let (blank, _) = pane_pixels(&mut app, &window, id, reference)?;
     let mut reference_worker = app.__test_pane_worker(id, reference).ok_or("reference worker")?;
     for row in 0..ROW_WRITES {
         let _ = reference_worker.batch(&row_write(row, rows), Instant::now());
     }
     present(&mut app, active, id)?;
-    let expected = pane_pixels(&app, &window, id)?;
+    let (expected, expected_rect) = pane_pixels(&mut app, &window, id, reference)?;
     check(!expected.is_empty() && expected != blank, "the reference draws the update")?;
 
     // The subject starts from one fresh presentation, then settles: GDI re-blits an unchanged
@@ -239,7 +251,14 @@ fn run(active: &ActiveEventLoop) -> Result<(), String> {
         window_count(&app, id, "presented")? == presented_before + 1,
         "exactly one frame presents after ?2026l",
     )?;
-    check(pane_pixels(&app, &window, id)? == expected, "that frame shows the final screen")
+    let subject_grid = app.__test_child_pane_grid_size(id, subject).ok_or("subject grid")?;
+    check(
+        subject_grid == reference_grid,
+        &format!("same grid: {subject_grid:?} {reference_grid:?}"),
+    )?;
+    let (pixels, rect) = pane_pixels(&mut app, &window, id, subject)?;
+    check(rect == expected_rect, &format!("same content rectangle: {rect:?} {expected_rect:?}"))?;
+    check(pixels == expected, "that frame shows the final screen")
 }
 
 /// No torn frame through the production publisher: the update presents once, complete.
