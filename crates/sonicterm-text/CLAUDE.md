@@ -31,6 +31,13 @@ cargo build -p sonicterm-text
   capacity. Pixels move only with growth; the dirty list grows with inserts
   and a drain shrinks it to 64 rects once it exceeds 1,024, so even a fixed
   atlas's figure varies. A test bounding memory must assert the term it means.
+- `START_ATLAS_DIM_1X` and `START_ATLAS_DIM_2X` stay 2048: normal renderers
+  keep the full allocation, and only warm spares start at `MIN_ATLAS_DIM`.
+  `start_size_inputs::validate_table_start` rejects any smaller start while
+  `SIZING_ORACLE_COMPLETE` is false, whatever rows `START_SIZE_INPUTS` holds,
+  and a row with nonzero `incomplete_glyphs` always selects 2048. The guard
+  stays false until the real renderer reports silently skipped shaped-glyph
+  raster or admission failures and failed tab-title fitting as missing glyphs.
 - Eviction is what keeps the index bounded. With eviction disabled the index
   still stops growing, because a full atlas stops admitting — memory looks
   flat while every later glyph goes missing. Assert that eviction ran, not

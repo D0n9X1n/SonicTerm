@@ -400,12 +400,13 @@ overlays are assembled separately.
 
 ### Glyph atlas
 
-The CPU `GlyphAtlas` is a square BGRA8 texture that starts small and grows on
-demand up to 2048×2048 (16 MiB at four bytes per pixel), with at most 16,384
-indexed entries. A renderer starts at `START_ATLAS_DIM_1X` at scale factors up
-to 1.5 and `START_ATLAS_DIM_2X` above (both 2048 until CI working-set data sets
-them lower); a warm spare window starts at the 256 floor, since it may never
-draw. When a tile does not fit, the atlas doubles first: resident tiles keep
+The CPU `GlyphAtlas` is a square BGRA8 texture that grows on demand up to
+2048×2048 (16 MiB at four bytes per pixel), with at most 16,384 indexed
+entries. A normal renderer starts at `START_ATLAS_DIM_1X` at scale factors up
+to 1.5 and `START_ATLAS_DIM_2X` above; both are 2048, so a normal renderer
+keeps the full allocation it has always had. A warm spare window starts at the
+256 floor, since it may never draw, and grows after adoption; the memory saving
+applies to warm spares only. When a tile does not fit, the atlas doubles first: resident tiles keep
 their pixel positions, their pixels are copied, their UVs are recomputed, and
 one typed re-upload rectangle per tile is queued; nothing is rasterized again.
 Growth advances the atlas identity, so the frame that grew it is discarded and
@@ -415,6 +416,29 @@ it starts as a 1×1 placeholder, is replaced with fixed 2048×2048 storage when
 renderable media is promoted, and is demoted back to the placeholder when idle.
 A shelf packer reuses freed rectangles before extending shelves. Keys include font slot, glyph id,
 character, style, and native raster role.
+
+Measurement-based sizing of the normal start is not complete.
+`sonicterm_text::start_size_inputs::validate_table_start` checks both start
+constants, in its unit test and in the `glyph-atlas-working-set` step. It
+always accepts 2048, which saves nothing, so an empty or incomplete
+`START_SIZE_INPUTS` table is valid at that size. It rejects any smaller start
+unless all three hold: `SIZING_ORACLE_COMPLETE` is true; the table records
+every required input at that scale (the perf S9 and S12 end-of-run atlas on
+macOS and Windows at scale 1, the working-set helper on both platforms and the
+Windows real renderer for S9 and S12 at each scale); and the start rule over
+those rows selects exactly that size. A measurement that drew any required
+glyph as tofu, unresolved or resolved but not rasterized, selects 2048, so it
+can never justify a smaller start. Each `glyph_atlas_working_set` row reports
+that count as `incomplete_glyphs`; the helper's S9 measurement currently
+reports emoji that fail to rasterize, so it selects 2048.
+
+`SIZING_ORACLE_COMPLETE` is false, and recorded rows alone cannot lower a start.
+The Windows real-renderer coverage test checks the subset of tiles that became
+resident against the helper; it does not yet prove complete rendering. Two
+failures leave no tile and no missing-glyph record: a shaped glyph with a
+nonzero id whose rasterization or atlas admission fails is skipped silently by
+the terminal row path, and a tab title whose fitting fails is drawn as an empty
+title before the chrome diagnostic sees it.
 
 Insertion follows these rules:
 
