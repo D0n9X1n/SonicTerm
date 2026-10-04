@@ -178,6 +178,7 @@ fn wgpu_renderer(active: &ActiveEventLoop) -> Result<(Arc<Window>, GpuRenderer),
     renderer.set_cursor_shape(CursorShape::Block);
     renderer.set_window_focused(true);
     renderer.__enable_retained_frame_readback();
+    renderer.__enable_presented_damage();
     Ok((window, renderer))
 }
 

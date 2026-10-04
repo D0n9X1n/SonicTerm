@@ -1835,6 +1835,37 @@ impl PresentedDamage {
     }
 }
 
+/// Keeps the last presented frame's damage for a real-renderer test, only once enabled.
+///
+/// Disabled by default, as in production: `record` then tests one bool and builds nothing.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct PresentedDamageRecorder {
+    enabled: bool,
+    last: Option<PresentedDamage>,
+}
+
+impl PresentedDamageRecorder {
+    /// Start keeping each presented frame's damage.
+    pub fn enable(&mut self) {
+        self.enabled = true;
+    }
+
+    /// Keep the snapshot `build` makes, only when enabled; a disabled recorder never calls it.
+    #[inline]
+    pub fn record(&mut self, build: impl FnOnce() -> PresentedDamage) {
+        if self.enabled {
+            // When: `enabled` is set, a test hook asked for each presented frame's damage.
+            self.last = Some(build());
+        }
+    }
+
+    /// The last kept snapshot, cleared by this read.
+    pub fn take(&mut self) -> Option<PresentedDamage> {
+        self.last.take()
+    }
+}
+
 /// A copy of the retained frame in a buffer the test maps itself; production code under `src/`
 /// never maps or polls.
 #[doc(hidden)]
@@ -2243,9 +2274,9 @@ pub struct GpuRenderer {
     /// Test seam: a glyph `(x, y, w, h)` surface-pixel rectangle and color appended before the
     /// cursor recolors; only `__inject_test_glyph` sets it, so production keeps `None`.
     injected_test_glyph: Option<((f32, f32, f32, f32), [f32; 4])>,
-    /// The last presented frame's damage, written beside `last_frame_key` and taken by
-    /// `__take_presented_damage`.
-    last_presented_damage: Option<PresentedDamage>,
+    /// The last presented frame's damage, kept beside `last_frame_key` only after
+    /// `__enable_presented_damage`; production never enables it.
+    presented_damage: PresentedDamageRecorder,
     /// Constant-size geometry of the palette and search query fields as last presented.
     presented_fields: PresentedFields,
     /// Preedit glyphs keyed by text, placement, color, and qualified atlas identity to reject stale UVs.
@@ -3212,7 +3243,7 @@ impl GpuRenderer {
             last_recolor: crate::cursor::RecolorRecord::default(),
             last_tab_ink: crate::cursor::RecolorBounds::Empty,
             injected_test_glyph: None,
-            last_presented_damage: None,
+            presented_damage: PresentedDamageRecorder::default(),
             presented_fields: PresentedFields::default(),
             preedit_glyph_cache: None,
             skipped_frames: 0,
@@ -4512,11 +4543,18 @@ impl GpuRenderer {
         self.injected_test_glyph = glyph;
     }
 
+    /// Test hook: keep each later presented frame's damage for `__take_presented_damage`.
+    /// Production never calls it, so a presented frame builds and keeps no snapshot.
+    #[doc(hidden)]
+    pub fn __enable_presented_damage(&mut self) {
+        self.presented_damage.enable();
+    }
+
     /// Test hook: the damage of the last presented frame, cleared by this read, so a frame that
-    /// presents nothing reads `None` instead of an older frame's damage.
+    /// presents nothing reads `None` instead of an older frame's damage. `None` until enabled.
     #[doc(hidden)]
     pub fn __take_presented_damage(&mut self) -> Option<PresentedDamage> {
-        self.last_presented_damage.take()
+        self.presented_damage.take()
     }
 
     /// Test hook: whether a retained frame key is kept, so the next changed frame is not a
@@ -6228,8 +6266,10 @@ impl GpuRenderer {
             );
         }
 
-        // The test glyph seam joins the terminal glyphs before any recolor reads them.
-        self.push_injected_test_glyph(&mut glyph_instances, sw, sh);
+        if self.injected_test_glyph.is_some() {
+            // When: a test injected a glyph, it joins the terminal glyphs before any recolor.
+            self.push_injected_test_glyph(&mut glyph_instances, sw, sh);
+        }
 
         if let Some(sel) = selection {
             if !sel.is_empty() {
@@ -8274,7 +8314,7 @@ impl GpuRenderer {
         self.finish_glyph_atlas_retry();
         self.last_missing_chars = missing_chars_this_frame;
         self.last_missing_chrome_chars = missing_chrome_chars;
-        self.last_presented_damage = Some(PresentedDamage {
+        self.presented_damage.record(|| PresentedDamage {
             first_frame: plan.first_frame,
             damage: plan.damage,
             surface: PixelRect { x: 0, y: 0, w: surface_width.max(1), h: surface_height.max(1) },

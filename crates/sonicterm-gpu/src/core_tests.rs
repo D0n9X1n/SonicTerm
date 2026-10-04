@@ -5744,7 +5744,7 @@ fn the_injected_glyph_precedes_every_cursor_recolor_and_damage_is_read_beside_th
     let first_recolor = assembly.find("recolor_cursor_glyphs_in(").expect("a cursor recolor");
     assert!(scrollbar < inject && inject < selection && inject < first_recolor);
     let finish = source.split_once("    fn finish_successful_frame(").expect("finish exists").1;
-    let readout = finish.find("self.last_presented_damage = Some(").expect("damage readout");
+    let readout = finish.find("self.presented_damage.record(").expect("damage readout");
     let key = finish.find("self.last_frame_key = Some(plan.key);").expect("key recorded");
     assert!(readout < key, "the readout is written beside the frame key");
 }
@@ -5771,4 +5771,37 @@ fn tab_title_ink_is_measured_widened_and_kept_only_by_a_presented_frame() {
     let guard = present.find("if !matches!(outcome, PresentOutcome::Presented)").expect("guard");
     let kept = present.find("self.last_tab_ink = tab_ink;").expect("ink kept");
     assert!(guard < kept, "only a presented frame keeps its title ink");
+}
+
+/// A presented-damage recorder that was never enabled, as in production, keeps no snapshot and
+/// never builds one: its builder is not called, so a presented frame pays only the branch. Once
+/// enabled it keeps the last snapshot until a read takes it.
+#[test]
+fn a_recorder_never_enabled_keeps_no_presented_damage_snapshot() {
+    let mut recorder = PresentedDamageRecorder::default();
+    recorder.record(|| panic!("a disabled recorder builds no snapshot"));
+    assert_eq!(recorder.take(), None);
+    let surface = PixelRect { x: 0, y: 0, w: 200, h: 100 };
+    let snapshot = PresentedDamage { first_frame: false, damage: surface, surface };
+    recorder.enable();
+    recorder.record(|| snapshot);
+    assert_eq!(recorder.take(), Some(snapshot));
+    assert_eq!(recorder.take(), None, "a read takes the snapshot");
+}
+
+/// The test hooks are opt-in: the renderer starts with a disabled recorder, only
+/// `__enable_presented_damage` enables it, and assembly tests the injected glyph's `Option`
+/// before calling the seam. Line endings are normalized before scanning.
+#[test]
+fn presented_damage_recording_and_glyph_injection_are_opt_in() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    assert!(source.contains("            presented_damage: PresentedDamageRecorder::default(),\n"));
+    assert_eq!(source.matches("self.presented_damage.enable();").count(), 1);
+    let enable = source.split_once("    pub fn __enable_presented_damage(").expect("hook").1;
+    let enable = enable.split_once("\n    }\n").expect("hook body").0;
+    assert!(enable.contains("self.presented_damage.enable();"));
+    let assembly = source.split_once("    fn assemble_frame(").expect("assemble_frame exists").1;
+    let guard = assembly.find("if self.injected_test_glyph.is_some() {").expect("Option guard");
+    let call = assembly.find("self.push_injected_test_glyph(").expect("seam call");
+    assert!(guard < call, "the seam is reached only when a glyph is injected");
 }
