@@ -1069,22 +1069,10 @@ pub(crate) struct WindowFrameCounters {
     /// Attempts whose completion kept the streaming clock: hardware input attempts that settled.
     pub(crate) stream_clock_exempt: u64,
     /// Display-link ticks the tick handler accepted; stale ticks are not counted.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "the window record reads it with the counter contract")
-    )]
     pub(crate) display_link_ticks: u64,
     /// `Link`-mode streaming frames admitted by a tick.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "the window record reads it with the counter contract")
-    )]
     pub(crate) display_link_admissions: u64,
     /// `Link`-mode streaming frames admitted by the fallback ceiling.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "the window record reads it with the counter contract")
-    )]
     pub(crate) display_link_fallbacks: u64,
     /// Contention retries armed.
     pub(crate) contention_retry_armed: u64,
@@ -1559,6 +1547,9 @@ impl WindowFrameCounters {
             ("defer_contention", self.defer_contention),
             ("defer_streaming", self.defer_streaming),
             ("stream_clock_exempt", self.stream_clock_exempt),
+            ("display_link_ticks", self.display_link_ticks),
+            ("display_link_admissions", self.display_link_admissions),
+            ("display_link_fallbacks", self.display_link_fallbacks),
             ("contention_retry_armed", self.contention_retry_armed),
             ("dirt_ack_dropped", self.dirt_ack_dropped),
             ("native_request_redraw", native_requests + renderer_requests),
