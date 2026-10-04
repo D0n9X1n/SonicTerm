@@ -1961,7 +1961,15 @@ fn widened_damage_reaching_a_non_emitted_record_falls_back_to_full() {
     recolor.widen_for_recolor(RecolorRecord::default(), recolored(PixelRect { x: 22, y: 50, w: 10, h: 10 }, 1));
     assert!(recolor.damage.y <= 50, "the recolor widens a partial plan's damage");
     assert!(recolor.partial_reaches_unemitted_ink());
-    recolor.force_full();
+    // The fallback counts once as a fallback and once as the full frame it reassembles.
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        recolor.force_full();
+        recolor.force_full();
+    }
+    let stats = sink.snapshot();
+    assert_eq!((stats.partial_fallbacks, stats.full_frames, stats.partial_frames), (1, 1, 0));
     assert_eq!(recolor.mode, RenderMode::Full);
     assert!(recolor.panes[0].emit_rows.iter().all(|emit| *emit));
     assert_eq!(recolor.acknowledged_rows(0, 7, 2), Some(sonicterm_render_model::AckRows::All));

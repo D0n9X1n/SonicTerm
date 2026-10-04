@@ -1272,3 +1272,28 @@ fn damage_waste_is_summed_only_inside_a_counting_scope() {
     total.add(&stats);
     assert_eq!(total.damage_waste_permille_sum, 1370);
 }
+
+/// The partial-assembly counters record only inside a counting scope: a presented frame counts as
+/// partial only when its mode was `Partial`, each fallback counts once, and the hashed cells are
+/// summed lazily, so with the gate off the cell count is never computed. `add` folds all three.
+#[test]
+fn partial_counters_record_only_inside_a_counting_scope() {
+    note_partial_frame(true);
+    note_partial_fallback();
+    note_row_cells_hashed(|| panic!("cells counted with no counting scope"));
+    let sink = FrameStatsSink::default();
+    {
+        let _collect = CollectGuard::enter(Some(&sink));
+        note_partial_frame(true);
+        note_partial_frame(false);
+        note_partial_fallback();
+        note_row_cells_hashed(|| 80);
+        note_row_cells_hashed(|| 40);
+    }
+    let stats = sink.snapshot();
+    assert_eq!((stats.partial_frames, stats.partial_fallbacks, stats.row_cells_hashed), (1, 1, 120));
+    let mut total = FrameStats::ZERO;
+    total.add(&stats);
+    total.add(&stats);
+    assert_eq!((total.partial_frames, total.partial_fallbacks, total.row_cells_hashed), (2, 2, 240));
+}

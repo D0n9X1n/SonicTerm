@@ -91,6 +91,12 @@ pub struct FrameStats {
     pub native_request_redraw: u64,
     /// Frames whose render plan was `RenderMode::Full`.
     pub full_frames: u64,
+    /// Presented frames whose render plan was `RenderMode::Partial`; counted after presentation.
+    pub partial_frames: u64,
+    /// Partial plans reassembled `Full` because the final damage reached a row they did not emit.
+    pub partial_fallbacks: u64,
+    /// Cells hashed into row glyph cache keys, one row per emitted terminal row.
+    pub row_cells_hashed: u64,
     /// Row glyph cache entries `invalidate_row_abs` examined: one per call, a keyed removal.
     pub row_cache_invalidate_visits: u64,
     /// Microseconds spent invalidating dirty rows; one clock pair per pane with a dirty row.
@@ -159,6 +165,9 @@ impl FrameStats {
         shape_requests: 0,
         native_request_redraw: 0,
         full_frames: 0,
+        partial_frames: 0,
+        partial_fallbacks: 0,
+        row_cells_hashed: 0,
         row_cache_invalidate_visits: 0,
         row_cache_invalidate_us: 0,
         recolor_glyphs_visited: 0,
@@ -194,6 +203,9 @@ impl FrameStats {
         self.shape_requests += other.shape_requests;
         self.native_request_redraw += other.native_request_redraw;
         self.full_frames += other.full_frames;
+        self.partial_frames += other.partial_frames;
+        self.partial_fallbacks += other.partial_fallbacks;
+        self.row_cells_hashed += other.row_cells_hashed;
         self.row_cache_invalidate_visits += other.row_cache_invalidate_visits;
         self.row_cache_invalidate_us += other.row_cache_invalidate_us;
         self.recolor_glyphs_visited += other.recolor_glyphs_visited;
@@ -667,6 +679,22 @@ pub(crate) fn note_row_cache(hit: bool) {
 /// one check.
 pub(crate) fn note_full_frame(full: bool) {
     record(|stats| stats.full_frames += u64::from(full));
+}
+
+/// Count one presented frame as partial when `partial`; called only once a frame presented.
+pub(crate) fn note_partial_frame(partial: bool) {
+    record(|stats| stats.partial_frames += u64::from(partial));
+}
+
+/// Count one partial plan reassembled as `Full` by the post-assembly check.
+pub(crate) fn note_partial_fallback() {
+    record(|stats| stats.partial_fallbacks += 1);
+}
+
+/// Count the cells one row hashed into its row-cache key. `cells` runs only inside a counting
+/// scope, so with the gate off the row is never measured.
+pub(crate) fn note_row_cells_hashed(cells: impl FnOnce() -> usize) {
+    record(|stats| stats.row_cells_hashed += cells() as u64);
 }
 
 /// Count one frame whose font preparation applied a newer fallback notice or generation.

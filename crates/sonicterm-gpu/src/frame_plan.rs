@@ -852,6 +852,7 @@ impl FramePlan {
             pane.emit_rows.fill(true);
         }
         crate::frame_stats::note_full_frame(true);
+        crate::frame_stats::note_partial_fallback();
     }
 
     /// Whether a partial plan's final damage, after the recolor and tab-ink widening, reaches the
