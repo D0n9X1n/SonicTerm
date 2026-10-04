@@ -1387,3 +1387,145 @@ fn retirement_and_exit_finalize_renderer_statistics_before_reading_them() {
         assert!(finalize < read, "{name} finalizes before it reads");
     }
 }
+
+/// On Windows, a real GDI renderer whose glyph atlas grows and whose device then stops between
+/// frames reports, in the closed-window totals, every growth once, one abandoned episode and no
+/// growth-to-present sample. The growth comes from the App's own redraw; the stop goes through
+/// `begin_window_redraw`'s stopped path, which assembles nothing; the totals come from the
+/// window's retirement, so they are read before the renderer drops.
+#[cfg(windows)]
+#[test]
+fn a_device_stopped_between_frames_abandons_its_growth_in_the_closed_totals() {
+    use crate::app::pty_test_support::isolated;
+    use winit::{
+        application::ApplicationHandler,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+    };
+    if isolated() {
+        return;
+    }
+    struct Probe {
+        outcome: Option<Result<(), String>>,
+    }
+    impl ApplicationHandler<crate::app::UserEvent> for Probe {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            self.outcome = Some(run_stopped_growth(event_loop));
+            event_loop.exit();
+        }
+        fn window_event(
+            &mut self,
+            _: &ActiveEventLoop,
+            _: winit::window::WindowId,
+            _: winit::event::WindowEvent,
+        ) {
+        }
+    }
+    let event_loop = EventLoop::<crate::app::UserEvent>::with_user_event()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let mut probe = Probe { outcome: None };
+    event_loop.run_app(&mut probe).unwrap();
+    probe.outcome.expect("resumed runs").unwrap_or_else(|error| panic!("{error}"));
+}
+
+/// The body of the stopped-growth case, inside the one event loop its isolated process runs.
+#[cfg(windows)]
+fn run_stopped_growth(event_loop: &winit::event_loop::ActiveEventLoop) -> Result<(), String> {
+    use sonicterm_cfg::config::{ScrollbarMode, SoftwareRenderMode};
+    use sonicterm_cfg::theme::Theme;
+    use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
+    use sonicterm_gpu::device_errors::GpuFaultKind;
+    use winit::application::ApplicationHandler;
+    use winit::event::WindowEvent;
+    use winit::{dpi::PhysicalSize, window::Window};
+
+    let mut app = app_under_filter("warn");
+    app.force_frame_counters_on().map_err(|_| "the counter gate turns on")?;
+    let pane = app.__test_seed_tab("growth");
+    // Distinct printable characters on several rows: at 160 px they outgrow the 256 floor at once.
+    let text: String =
+        ('!'..='~').collect::<Vec<_>>().chunks(12).fold(String::new(), |mut rows, chunk| {
+            rows.extend(chunk);
+            rows.push_str("\r\n");
+            rows
+        });
+    if !app.__test_advance_pane_parser(pane, text.as_bytes()) {
+        return Err("the pane parser takes the text".into());
+    }
+    let id = app.__test_main_window_id().ok_or("no main window")?;
+    let window = std::sync::Arc::new(
+        event_loop
+            .create_window(
+                Window::default_attributes()
+                    .with_visible(true)
+                    .with_inner_size(PhysicalSize::new(1000, 700)),
+            )
+            .map_err(|error| error.to_string())?,
+    );
+    let font_dirs =
+        [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    let settings = RendererSettings {
+        font_family: "Rec Mono St.Helens",
+        font_dirs: &font_dirs,
+        font_size: 160.0,
+        line_height_mult: 1.0,
+        font_weight_scale: 1.0,
+        subpixel_aa: Default::default(),
+        padding: [0.0; 4],
+        appearance: SurfaceAppearance {
+            backdrop: Default::default(),
+            opacity: 1.0,
+            scrollbar: ScrollbarMode::Never,
+            panel_padding: 0.0,
+            software_render_mode: SoftwareRenderMode::Force,
+        },
+        role: "stopped-growth-test",
+        glyph_atlas_start: GlyphAtlasStart::Minimum,
+    };
+    let mut renderer = GpuRenderer::new(window.clone(), event_loop, &Theme::default(), settings)
+        .map_err(|error| error.to_string())?;
+    // Registration turns counting on; the test attach does not register, so it is set here.
+    renderer.set_frame_counting(true);
+    if !app.__test_attach_window_renderer(id, window, renderer) {
+        return Err("the renderer attaches".into());
+    }
+    let growths = |app: &mut App| {
+        app.__test_window_renderer_mut(id)
+            .map_or(0, |renderer| renderer.glyph_atlas_facts().growths)
+    };
+    // One real redraw at a time, until one grows the atlas; that frame retries and presents nothing.
+    for _ in 0..4 {
+        app.__test_set_window_last_render(id, Instant::now() - Duration::from_secs(1));
+        ApplicationHandler::window_event(&mut app, event_loop, id, WindowEvent::RedrawRequested);
+        if growths(&mut app) > 0 {
+            break;
+        }
+    }
+    let grown = growths(&mut app);
+    let renderer = app.__test_window_renderer_mut(id).ok_or("the renderer")?;
+    let pending = renderer.frame_stats();
+    if grown == 0 || pending.atlas_growth_to_present_buckets.iter().sum::<u64>() != 0 {
+        return Err(format!("precondition: a growth with no present yet, got {grown} growths"));
+    }
+    renderer.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
+    if renderer.device_accepts_gpu_work() {
+        return Err("the device stopped".into());
+    }
+    if app.begin_window_redraw(id, Instant::now()) {
+        return Err("a stopped window starts no frame".into());
+    }
+    let mut removed = app.windows.remove(&id).ok_or("the window is tracked")?;
+    app.retire_window_counters(id, &mut removed);
+    let closed = app.frame_counters_snapshot().ok_or("counting app")?.closed_windows;
+    let reported = (
+        closed.count("glyph_atlas_growths"),
+        closed.count("atlas_growth_abandoned"),
+        closed.histogram_count("atlas_growth_to_present").unwrap_or(0),
+    );
+    if reported != (Some(grown), Some(1), 0) {
+        return Err(format!("closed totals {reported:?}, want ({grown} growths, 1 abandoned, 0)"));
+    }
+    Ok(())
+}
