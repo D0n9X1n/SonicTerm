@@ -172,7 +172,9 @@ pub(super) fn apply_window_request(
     );
     // An asynchronous request leaves the current extent authoritative until Resized supplies the accepted dimensions.
     let actual = window.request_inner_size(desired).unwrap_or_else(|| window.inner_size());
-    renderer.try_resize(actual.width, actual.height)
+    // A requested window presents its first frame, which no synchronized hold can keep back.
+    renderer.try_resize_outcome(actual.width, actual.height)
+        != sonicterm_gpu::core::ResizeOutcome::Rejected
 }
 
 /// Compute the physical inner-window floor that preserves a 30×10 terminal grid.
@@ -263,13 +265,17 @@ pub(super) fn apply_window_dpi_transition(
     }
     let available = destination_available_inner_size(&native, old_scale, dpi_scale, minimum);
     let target = dpi_transition_inner_size(old_inner, size_scale, dpi_scale, minimum, available);
-    if !renderer.try_resize(target.width, target.height) {
-        // When: try_resize rejects target, leave the native writer untouched and await Resized.
+    let outcome = renderer.try_resize_outcome(target.width, target.height);
+    if outcome == sonicterm_gpu::core::ResizeOutcome::Rejected {
+        // When: `outcome` is `Rejected` for target, leave the native writer untouched and await Resized.
         return None;
     }
+    // The committed size owes a presented frame; the `Resized` that follows reads `Unchanged`.
+    window.redraw.note_resize(outcome);
     if let Err(error) = inner_size_writer.request_inner_size(target) {
         // When: request_inner_size returns error, restore the renderer extent before returning.
-        let _ = renderer.try_resize(old_inner.width, old_inner.height);
+        let restored = renderer.try_resize_outcome(old_inner.width, old_inner.height);
+        window.redraw.note_resize(restored);
         tracing::warn!(
             target: "sonicterm_app::app",
             ?error,
@@ -314,6 +320,14 @@ pub fn apply_terminal_window_minimum(
     window: &Window,
     renderer: &mut GpuRenderer,
 ) -> winit::dpi::PhysicalSize<u32> {
+    terminal_window_minimum_outcome(window, renderer).0
+}
+
+/// Refresh the minimum and report the renderer resize it committed, when it grew the window.
+fn terminal_window_minimum_outcome(
+    window: &Window,
+    renderer: &mut GpuRenderer,
+) -> (winit::dpi::PhysicalSize<u32>, Option<sonicterm_gpu::core::ResizeOutcome>) {
     let (cell_w, cell_h) = renderer.cell_size();
     let minimum = minimum_terminal_inner_size(
         cell_w,
@@ -330,17 +344,22 @@ pub fn apply_terminal_window_minimum(
         current.width.max(minimum.width),
         current.height.max(minimum.height),
     );
+    let mut outcome = None;
     if target != current {
         // When: `target != current`, grow the undersized axes without shrinking the others.
         let _ = window.request_inner_size(target);
-        let _ = renderer.try_resize(target.width, target.height);
+        outcome = Some(renderer.try_resize_outcome(target.width, target.height));
     }
-    target
+    (target, outcome)
 }
 
 pub(super) fn apply_window_state_minimum(window: &mut WindowState) {
     if let (Some(native), Some(renderer)) = (window.window.as_ref(), window.renderer.as_mut()) {
-        // When: both native window and renderer exist, refresh their shared minimum geometry.
-        let _ = apply_terminal_window_minimum(native, renderer);
+        // Both native window and renderer exist, so refresh their shared minimum geometry.
+        let (_, outcome) = terminal_window_minimum_outcome(native, renderer);
+        if let Some(outcome) = outcome {
+            // An enforced minimum committed a size, which owes a presented frame.
+            window.redraw.note_resize(outcome);
+        }
     }
 }

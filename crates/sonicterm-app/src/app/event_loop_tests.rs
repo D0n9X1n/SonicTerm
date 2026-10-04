@@ -207,7 +207,8 @@ fn main_and_child_scale_handlers_use_inner_size_writer() {
         assert!(source.contains("apply_window_dpi_transition("));
     }
     assert!(shared.contains("native.is_maximized() || native.fullscreen().is_some()"));
-    let renderer_resize = shared.find("renderer.try_resize(target.width, target.height)").unwrap();
+    let renderer_resize =
+        shared.find("renderer.try_resize_outcome(target.width, target.height)").unwrap();
     let native_resize = shared.find("inner_size_writer.request_inner_size(target)").unwrap();
     assert!(renderer_resize < native_resize, "renderer rejection must precede native commit");
 }

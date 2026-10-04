@@ -585,3 +585,68 @@ fn an_aliased_deadline_extends_a_hold_only_up_to_the_cap() {
         FrameSettlement::Presented
     ));
 }
+
+/// Every production source file under `src/`, CRLF-normalized, with its path relative to `src/`.
+fn production_sources() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && !path.to_string_lossy().ends_with("_tests.rs")
+            {
+                let name = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                out.push((name, std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n")));
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut out = Vec::new();
+    walk(&root, &root, &mut out);
+    out
+}
+
+/// No production path commits a renderer size through the bool `try_resize`, which cannot say
+/// whether the surface changed: every one goes through `try_resize_outcome`. The DPI transition
+/// records its outcome as an obligation, which a later same-size `Resized` cannot clear.
+#[test]
+fn every_renderer_resize_reports_whether_the_surface_changed() {
+    let sources = production_sources();
+    assert!(sources.len() > 50, "the production sources were found");
+    for (name, source) in &sources {
+        // `retention.rs` resizes a resource reservation, not a renderer surface.
+        if name.ends_with("app/retention.rs") {
+            continue;
+        }
+        let bypasses = source.replace("try_resize_outcome(", "").matches("try_resize(").count();
+        assert_eq!(bypasses, 0, "{name} commits a renderer size without its outcome");
+    }
+    let setup = &sources.iter().find(|(name, _)| name.ends_with("app/window_setup.rs")).unwrap().1;
+    let dpi = setup.split("fn apply_window_dpi_transition(").nth(1).unwrap();
+    let dpi = &dpi[..dpi.find("\n}\n").unwrap()];
+    let resize = dpi.find("try_resize_outcome(").expect("the DPI transition classifies its resize");
+    let note = dpi.find("redraw.note_resize(").expect("and records the obligation");
+    assert!(resize < note, "{dpi}");
+    let minimum = setup.split("fn apply_window_state_minimum(").nth(1).unwrap();
+    assert!(minimum[..minimum.find("\n}\n").unwrap()].contains("redraw.note_resize("));
+}
+
+/// A size committed by a DPI change keeps its obligation through the `Resized` that follows at the
+/// committed size (`Unchanged`), so the next frame is forced while a pane holds, on both roles.
+#[test]
+fn a_dpi_resize_keeps_its_obligation_through_a_same_size_resized() {
+    use sonicterm_gpu::core::ResizeOutcome;
+    for child_owner in [false, true] {
+        let (mut app, main, child, base) = held_owners();
+        let owner = if child_owner { child } else { main };
+        hold(&app, owner, pane_of(&app, owner, 0), 1, at_ms(base, 100));
+        let redraw = &mut app.windows.get_mut(&owner).unwrap().redraw;
+        redraw.note_resize(ResizeOutcome::Changed);
+        redraw.note_resize(ResizeOutcome::Unchanged);
+        assert!(redraw.resize_pending, "child={child_owner}");
+        let forced =
+            attempt(&mut app, owner, RedrawCause::Expose, base, FrameSettlement::Presented);
+        assert!(forced, "child={child_owner}: the committed size is presented through the hold");
+    }
+}
