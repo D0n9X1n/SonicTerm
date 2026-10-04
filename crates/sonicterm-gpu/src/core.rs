@@ -3907,6 +3907,14 @@ impl GpuRenderer {
         (self.cell_w, self.cell_h)
     }
 
+    /// Test hook: evict the glyph atlas's coldest quarter at `cap` entries instead of the
+    /// production maximum, so a native test can drive a real eviction in the same assembly as a
+    /// growth. Passing `sonicterm_text::glyph_atlas::MAX_ATLAS_ENTRIES` restores production.
+    #[doc(hidden)]
+    pub fn __set_glyph_atlas_entry_cap(&mut self, cap: usize) {
+        self.glyph_atlas.__set_entry_cap_for_test(cap);
+    }
+
     /// Test hook: change the glyph atlas identity during the next assembly, so that frame returns
     /// `AtlasRetry` and presents nothing.
     #[doc(hidden)]

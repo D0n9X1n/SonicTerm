@@ -3,6 +3,9 @@
 //! without a reset or a second rasterization, the GPU upload follows the new size (the software
 //! presenter keeps its 1x1 placeholder), the next presented frame draws a fresh renderer's pixels,
 //! and every growth episode is counted once, with one growth-to-present sample per presented frame.
+//!
+//! The incremental cases rewrite one persistent grid, so its revision and dirty generation advance
+//! every frame and no frame takes the unchanged-key shortcut; each asserts that its frame assembled.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -157,16 +160,28 @@ fn key_count() -> usize {
     ('!'..='~').count() * 4
 }
 
-/// A one-row grid holding keys `newest - 7 ..= newest`, every row dirty.
-fn sliding_grid(newest: usize) -> Grid {
-    let mut grid = Grid::new(SLIDING_COLS, 1);
+/// The one-row grid the incremental cases rewrite for every frame.
+fn sliding_grid() -> Grid {
+    Grid::new(SLIDING_COLS, 1)
+}
+
+/// Rewrite `grid` to hold keys `newest - 7 ..= newest` and mark it dirty. Writing the cells
+/// advances the grid's revision and dirty generation, so the frame key changes even when the
+/// visible keys repeat, and the next frame assembles.
+fn slide_to(grid: &mut Grid, newest: usize) {
+    grid.goto(0, 0);
     let first = newest.saturating_sub(usize::from(SLIDING_COLS) - 1);
     for index in first..=newest {
         let (character, flags) = key_cell(index);
         grid.put_char(character, Color::Default, Color::Default, flags);
     }
     grid.mark_all_dirty();
-    grid
+}
+
+/// Frames assembled so far: every assembly lands in exactly one `assembly_us` bucket, and the
+/// unchanged-key shortcut and the cached reblit assemble nothing.
+fn assembled(stats: &FrameStats) -> u64 {
+    stats.assembly_buckets.iter().sum()
 }
 
 /// A grid filling `window` at the renderer's cell size, every cell a distinct key.
@@ -246,12 +261,14 @@ struct BeforeGrowth {
     stats: FrameStats,
 }
 
-/// Draw the sliding window one new key per frame until the frame that inserts a key would grow the
-/// atlas; present everything before it and return the state just before that frame. One new key
-/// per frame can grow the atlas only once, so the growing frame grows it exactly once.
+/// Draw the sliding window on `grid` one new key per frame until the frame that inserts a key would
+/// grow the atlas; present everything before it and return the state just before that frame. One
+/// new key per frame can grow the atlas only once, so the growing frame grows it exactly once.
+/// Every frame must assemble, so none can pass by reusing the previous frame.
 fn slide_until_growth(
     renderer: &mut GpuRenderer,
     window: &Window,
+    grid: &mut Grid,
 ) -> Result<(BeforeGrowth, PresentOutcome), String> {
     for newest in 0..key_count() {
         let before = BeforeGrowth {
@@ -262,7 +279,13 @@ fn slide_until_growth(
             dim: renderer.glyph_atlas_facts().dim,
             stats: renderer.frame_stats(),
         };
-        let outcome = frame(renderer, window, &mut sliding_grid(newest));
+        slide_to(grid, newest);
+        let outcome = frame(renderer, window, grid);
+        let assembled_now = assembled(&renderer.frame_stats()) - assembled(&before.stats);
+        check(
+            assembled_now == 1,
+            &format!("key {newest}: the frame assembled once, not {assembled_now}: {outcome:?}"),
+        )?;
         if renderer.glyph_atlas_facts().dim != before.dim {
             // When: the dimension moved, this frame grew the atlas; the caller checks its retry.
             return Ok((before, outcome));
@@ -291,7 +314,8 @@ fn growth_retry(active: &ActiveEventLoop, software: bool) -> Result<(), String> 
             }
             other => other?,
         };
-    let (before, outcome) = slide_until_growth(&mut renderer, &window)?;
+    let mut grid = sliding_grid();
+    let (before, outcome) = slide_until_growth(&mut renderer, &window, &mut grid)?;
     check(
         matches!(outcome, PresentOutcome::AtlasRetry),
         &format!("{role}: the growing frame retries: {outcome:?}"),
@@ -307,10 +331,16 @@ fn growth_retry(active: &ActiveEventLoop, software: bool) -> Result<(), String> 
     )?;
     let expected_gpu = if software { (1, 1) } else { (cpu_w, cpu_h) };
     check(gpu == expected_gpu, &format!("{role}: the upload is {gpu:?}, want {expected_gpu:?}"))?;
-    let retried = frame(&mut renderer, &window, &mut sliding_grid(before.newest));
+    let assembled_before_retry = assembled(&renderer.frame_stats());
+    grid.mark_all_dirty();
+    let retried = frame(&mut renderer, &window, &mut grid);
     check(
         matches!(retried, PresentOutcome::Presented),
         &format!("{role}: the retried frame presents: {retried:?}"),
+    )?;
+    check(
+        assembled(&renderer.frame_stats()) == assembled_before_retry + 1,
+        &format!("{role}: the retried frame assembled"),
     )?;
     check(
         renderer.__test_glyph_atlas_dimensions().1 == expected_gpu,
@@ -334,7 +364,9 @@ fn growth_retry(active: &ActiveEventLoop, software: bool) -> Result<(), String> 
         let (fresh_window, mut fresh) =
             counting_renderer(active, "atlas-growth-fresh", true, SLIDING_FONT_PX, size)?;
         check(fresh_window.inner_size() == window.inner_size(), "both windows are one size")?;
-        present(&mut fresh, &fresh_window, &mut sliding_grid(before.newest))?;
+        let mut fresh_grid = sliding_grid();
+        slide_to(&mut fresh_grid, before.newest);
+        present(&mut fresh, &fresh_window, &mut fresh_grid)?;
         check(fresh.glyph_atlas_facts().growths == 0, "the fresh atlas never grew")?;
         let (grown, expected) =
             (software_pixels(&renderer, &window), software_pixels(&fresh, &window));
@@ -357,31 +389,46 @@ fn software_pixels(renderer: &GpuRenderer, window: &Window) -> Vec<[u8; 4]> {
         .collect()
 }
 
-/// Test 15b: growth and a non-growth atlas change in one frame take the reset path. The assembly
-/// hook advances the allocation identity as an eviction's reset would, so the growth is not
-/// growth-only. The growth is still counted once, the reset frame keeps its timing, and the next
-/// presented frame records the one sample; nothing is abandoned.
-fn growth_with_reset(active: &ActiveEventLoop) -> Result<(), String> {
+/// Test 15b: a real growth and a real eviction in one assembly take the reset path. A probe
+/// renderer finds the growing key and the resident count just before it; this renderer replays the
+/// same keys, so it packs the same tiles, then lowers its entry cap to two above that count and
+/// draws a window whose three newest keys are new: the first grows the atlas, the second fills it to
+/// the cap, and the third evicts. The growth is still counted once, the reset frame keeps its
+/// timing, and the next presented frame records the one sample; nothing is abandoned.
+fn growth_with_eviction(active: &ActiveEventLoop) -> Result<(), String> {
     let size = PhysicalSize::new(480, 120);
+    let growing = {
+        let (probe_window, mut probe) =
+            counting_renderer(active, "atlas-growth-probe", true, SLIDING_FONT_PX, size)?;
+        slide_until_growth(&mut probe, &probe_window, &mut sliding_grid())?.0
+    };
     let (window, mut renderer) =
-        counting_renderer(active, "atlas-growth-reset", true, SLIDING_FONT_PX, size)?;
-    // Find the growing key on a probe renderer, then arm the hook for that frame on this one.
-    let (probe_window, mut probe) =
-        counting_renderer(active, "atlas-growth-probe", true, SLIDING_FONT_PX, size)?;
-    let (growing, _) = slide_until_growth(&mut probe, &probe_window)?;
+        counting_renderer(active, "atlas-growth-eviction", true, SLIDING_FONT_PX, size)?;
+    let mut grid = sliding_grid();
     for newest in 0..growing.newest {
-        present(&mut renderer, &window, &mut sliding_grid(newest))?;
+        slide_to(&mut grid, newest);
+        present(&mut renderer, &window, &mut grid)?;
     }
+    check(
+        renderer.glyph_atlas_len() == growing.resident && renderer.glyph_atlas_facts().growths == 0,
+        "precondition: the replay packed the probe's tiles without growing",
+    )?;
+    check(renderer.glyph_atlas_facts().fit != "evicted", "precondition: nothing evicted yet")?;
     let (resets, stats) = (renderer.__test_glyph_atlas_resets(), renderer.frame_stats());
-    renderer.__change_glyph_atlas_during_next_assembly();
-    let outcome = frame(&mut renderer, &window, &mut sliding_grid(growing.newest));
+    renderer.__set_glyph_atlas_entry_cap(growing.resident + 2);
+    slide_to(&mut grid, growing.newest + 2);
+    let outcome = frame(&mut renderer, &window, &mut grid);
+    renderer.__set_glyph_atlas_entry_cap(sonicterm_text::glyph_atlas::MAX_ATLAS_ENTRIES);
     check(matches!(outcome, PresentOutcome::AtlasRetry), &format!("reset frame: {outcome:?}"))?;
-    check(renderer.glyph_atlas_facts().growths == 1, "the reset frame grew the atlas once")?;
+    check(assembled(&renderer.frame_stats()) == assembled(&stats) + 1, "the frame assembled")?;
+    check(renderer.glyph_atlas_facts().growths == 1, "the frame grew the atlas once")?;
+    // The reset zeroes the eviction counter; the fit label keeps that an eviction happened.
+    check(renderer.glyph_atlas_facts().fit == "evicted", "the same frame evicted")?;
     check(renderer.__test_glyph_atlas_resets() == resets + 1, "the frame took the reset path")?;
     let counted = renderer.frame_stats();
     check(counted.glyph_atlas_growths == stats.glyph_atlas_growths + 1, "growth counted")?;
     check(samples(&counted) == samples(&stats), "no sample before a present")?;
-    present(&mut renderer, &window, &mut sliding_grid(growing.newest))?;
+    present(&mut renderer, &window, &mut grid)?;
     let after = renderer.frame_stats();
     check(samples(&after) == samples(&stats) + 1, "the next present records one sample")?;
     check(after.atlas_growth_abandoned == 0, "a reset abandons nothing")?;
@@ -394,10 +441,12 @@ fn growth_then_device_loss(active: &ActiveEventLoop) -> Result<(), String> {
     let size = PhysicalSize::new(480, 120);
     let (window, mut renderer) =
         counting_renderer(active, "atlas-growth-loss", true, SLIDING_FONT_PX, size)?;
-    let (before, outcome) = slide_until_growth(&mut renderer, &window)?;
+    let mut grid = sliding_grid();
+    let (before, outcome) = slide_until_growth(&mut renderer, &window, &mut grid)?;
     check(matches!(outcome, PresentOutcome::AtlasRetry), &format!("growth: {outcome:?}"))?;
     renderer.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
-    let stopped = frame(&mut renderer, &window, &mut sliding_grid(before.newest));
+    grid.mark_all_dirty();
+    let stopped = frame(&mut renderer, &window, &mut grid);
     check(
         matches!(stopped, PresentOutcome::RenderingUnavailable(_)),
         &format!("the stopped frame: {stopped:?}"),
@@ -440,7 +489,7 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
     for (name, case) in [
         ("growth retry wgpu", (|active| growth_retry(active, false)) as fn(&ActiveEventLoop) -> _),
         ("growth retry gdi", |active| growth_retry(active, true)),
-        ("growth with reset", growth_with_reset),
+        ("growth with eviction", growth_with_eviction),
         ("growth then device loss", growth_then_device_loss),
         ("two growths in one frame", two_growths_in_one_frame),
     ] {

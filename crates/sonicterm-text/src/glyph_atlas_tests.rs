@@ -1087,3 +1087,29 @@ fn grow_to_rejects_sizes_the_growth_policy_forbids_without_mutating() {
     assert!(!growable.grow_to(1024), "the maximum is never exceeded");
     assert_eq!(growth_snapshot(&growable), at_max, "a refusal at the maximum changes nothing");
 }
+
+/// The test-only entry cap moves the eviction threshold and nothing else: a growable atlas with a
+/// cap of 4 evicts its coldest quarter at the fifth key while it still has room to pack, and the
+/// cap survives a reset in place so a retry runs under the same threshold.
+#[test]
+fn a_lowered_entry_cap_evicts_before_packing_runs_out() {
+    let mut atlas = GlyphAtlas::growable(MIN_ATLAS_DIM, ATLAS_DIM);
+    atlas.__set_entry_cap_for_test(4);
+    let mut rasterizer = ShapedRasterizer { width: 8, height: 8, is_color: false };
+    for index in 0..4 {
+        atlas.tick_frame();
+        atlas.get_or_insert(numbered_key(index), &mut rasterizer);
+    }
+    assert_eq!((atlas.len(), atlas.evictions()), (4, 0), "four keys fit under the cap");
+    atlas.tick_frame();
+    atlas.get_or_insert(numbered_key(4), &mut rasterizer);
+    assert!(atlas.evictions() > 0, "the fifth key evicts at the cap");
+    assert!(atlas.len() <= 4, "the index stays at or below the cap");
+    assert_eq!(atlas.growths(), 0, "the eviction is not a packing failure");
+    atlas.reset_in_place();
+    for index in 0..5 {
+        atlas.tick_frame();
+        atlas.get_or_insert(numbered_key(index), &mut rasterizer);
+    }
+    assert!(atlas.evictions() > 0, "the cap survives a reset in place");
+}

@@ -369,6 +369,9 @@ pub struct GlyphAtlas {
     growths: u64,
     /// Whether any eviction has happened since construction; survives `reset_in_place`.
     ever_evicted: bool,
+    /// Entry count at which insertion evicts; `MAX_ATLAS_ENTRIES` except under a test that
+    /// lowers it. Survives `reset_in_place`.
+    entry_cap: usize,
 }
 
 /// Pixel interpretation required when uploading one atlas write.
@@ -428,6 +431,7 @@ impl GlyphAtlas {
             growth: GrowthPolicy::Fixed,
             growths: 0,
             ever_evicted: false,
+            entry_cap: MAX_ATLAS_ENTRIES,
         }
     }
 
@@ -969,9 +973,16 @@ impl GlyphAtlas {
         Some(self.insert_tile(key, tile, allocation))
     }
 
+    /// Test hook: evict at `cap` entries instead of `MAX_ATLAS_ENTRIES`, so a native test can
+    /// drive a real eviction in the same assembly as a growth. Production never calls it.
+    #[doc(hidden)]
+    pub fn __set_entry_cap_for_test(&mut self, cap: usize) {
+        self.entry_cap = cap.clamp(1, MAX_ATLAS_ENTRIES);
+    }
+
     fn make_entry_room(&mut self, allow_eviction: bool) -> bool {
-        if self.map.len() < MAX_ATLAS_ENTRIES {
-            // When: map is below MAX_ATLAS_ENTRIES a slot is already free, so admission
+        if self.map.len() < self.entry_cap {
+            // When: map is below entry_cap a slot is already free, so admission
             // proceeds without disturbing any resident entry.
             return true;
         }
@@ -981,7 +992,7 @@ impl GlyphAtlas {
             return false;
         }
         self.evict_lru_quartile();
-        self.map.len() < MAX_ATLAS_ENTRIES
+        self.map.len() < self.entry_cap
     }
 
     fn insert_tile(
