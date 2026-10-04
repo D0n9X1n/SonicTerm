@@ -941,6 +941,7 @@ fn windows_answer_only_their_own_asks() {
     assert_eq!(fixture.counts(main), (1, 0, 1, 0, 0));
     assert!(fixture.app.windows[&main].redraw.yield_ask.is_some(), "main's own ask stays");
     assert_eq!(fixture.token_stage(main), None);
+    assert_eq!(fixture.counts(child), (1, 1, 0, 0, 0), "main's grant never reaches the child");
     publish_output(&fixture.app, main);
     assert_eq!(
         fixture.attempt(main, 3_200, 3_200, Busy::Free),
