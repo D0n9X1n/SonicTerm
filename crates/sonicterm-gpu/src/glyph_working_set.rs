@@ -412,3 +412,47 @@ fn account_tile(
 #[cfg(test)]
 #[path = "glyph_working_set_tests.rs"]
 mod glyph_working_set_tests;
+
+/// The alpha census of one resident colour tile, read from the atlas's own pixels: how many of its
+/// pixels are transparent (alpha 0), translucent (strictly between 0 and 255, an antialiased
+/// edge) and opaque (255).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColourTileAlpha {
+    /// The tile's atlas key.
+    pub key: GlyphKey,
+    /// Pixels with alpha 0.
+    pub transparent: u64,
+    /// Pixels with alpha strictly between 0 and 255.
+    pub translucent: u64,
+    /// Pixels with alpha 255.
+    pub opaque: u64,
+}
+
+/// The alpha census of `character`'s largest resident colour tile in `atlas`, or `None` when the
+/// atlas holds no colour tile for it. A coverage tile of the same character is not counted.
+#[must_use]
+pub fn colour_tile_alpha(atlas: &GlyphAtlas, character: char) -> Option<ColourTileAlpha> {
+    let (width_px, height_px) = (atlas.width() as f32, atlas.height() as f32);
+    atlas
+        .resident_tile_keys()
+        .into_iter()
+        .filter(|key| key.ch == character)
+        .filter_map(|key| atlas.get(key).filter(|info| info.is_color).map(|info| (key, info)))
+        .max_by_key(|(_, info)| u64::from(info.px_size[0]) * u64::from(info.px_size[1]))
+        .map(|(key, info)| {
+            // UVs are exact divisions of the atlas size, so rounding recovers the tile's origin.
+            let left = (info.uv[0] * width_px).round() as u32;
+            let top = (info.uv[1] * height_px).round() as u32;
+            let mut census = ColourTileAlpha { key, transparent: 0, translucent: 0, opaque: 0 };
+            for pixel_y in top..top + info.px_size[1] {
+                for pixel_x in left..left + info.px_size[0] {
+                    match atlas.sample(pixel_x, pixel_y) {
+                        0 => census.transparent += 1,
+                        u8::MAX => census.opaque += 1,
+                        _ => census.translucent += 1,
+                    }
+                }
+            }
+            census
+        })
+}

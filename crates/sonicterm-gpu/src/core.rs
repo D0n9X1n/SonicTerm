@@ -4499,6 +4499,17 @@ impl GpuRenderer {
             .count()
     }
 
+    /// Test hook: the alpha census of `character`'s resident colour tile, read from the CPU atlas,
+    /// so a native test can assert the colour glyph it selected holds translucent edge pixels.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_colour_tile_alpha(
+        &self,
+        character: char,
+    ) -> Option<crate::glyph_working_set::ColourTileAlpha> {
+        crate::glyph_working_set::colour_tile_alpha(&self.glyph_atlas, character)
+    }
+
     /// The retained frame texture's actual extent: 1x1 under the Windows software presenter, else
     /// the configured surface size. GPU memory, so it is not part of [`Self::retained_amounts`].
     #[must_use]

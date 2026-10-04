@@ -42,7 +42,7 @@ const SLIDING_FONT_PX: f32 = 40.0;
 /// The colour glyph the wgpu case draws beside the sliding keys, two cells wide after them.
 const COLOUR_GLYPH: char = '\u{1F600}';
 /// How long the wgpu case waits for the colour glyph's fallback face to resolve.
-const COLOUR_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+const COLOUR_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
 /// Body size of the two-growth case, so one screen of distinct glyphs outgrows 512 at once.
 const LARGE_FONT_PX: f32 = 160.0;
 
@@ -175,45 +175,130 @@ fn colour_grid() -> Grid {
     Grid::new(SLIDING_COLS + 2, 1)
 }
 
+/// The host's system colour-emoji face, pinned by path so a user-installed emoji font cannot stand
+/// in for it: Segoe UI Emoji on Windows, Apple Color Emoji on macOS.
+fn pinned_colour_face_path() -> PathBuf {
+    if cfg!(target_os = "windows") {
+        PathBuf::from("C:\\Windows\\Fonts\\seguiemj.ttf")
+    } else {
+        // When: the host is not Windows, the probe pins macOS's system colour-emoji face.
+        PathBuf::from("/System/Library/Fonts/Apple Color Emoji.ttc")
+    }
+}
+
+/// Answers every fallback request with the pinned system colour-emoji face only.
+struct PinnedColourLocator;
+
+impl sonicterm_font::locator::FontLocator for PinnedColourLocator {
+    fn load_fonts(
+        &self,
+        _: &[config::FontAttributes],
+        _: &mut std::collections::HashSet<config::FontAttributes>,
+        _: u16,
+    ) -> anyhow::Result<Vec<sonicterm_font::parser::ParsedFont>> {
+        Ok(Vec::new())
+    }
+
+    fn locate_fallback_for_codepoints(
+        &self,
+        _: &[char],
+    ) -> anyhow::Result<Vec<sonicterm_font::parser::ParsedFont>> {
+        use sonicterm_font::locator::{FontDataHandle, FontDataSource, FontOrigin};
+        let handle = FontDataHandle {
+            source: FontDataSource::OnDisk(pinned_colour_face_path()),
+            index: 0,
+            variation: 0,
+            origin: FontOrigin::BuiltIn,
+            coverage: None,
+        };
+        Ok(vec![sonicterm_font::parser::ParsedFont::from_locator(&handle)?])
+    }
+}
+
+/// Whether this host has a colour face for the colour glyph, established apart from the renderer
+/// under test: the packaged family with the pinned system emoji face as its only fallback shapes
+/// the glyph to a fallback slot, which rasterizes to a colour tile with painted pixels. `Err`
+/// names the step that found no colour face; only then may the colour sub-case be skipped.
+fn probe_colour_face() -> Result<(), String> {
+    use sonicterm_text::glyph_atlas::Rasterizer;
+    let path = pinned_colour_face_path();
+    if !path.exists() {
+        // When: the pinned face file is absent, the host has no system colour-emoji face.
+        return Err(format!("{} is absent", path.display()));
+    }
+    let stack = sonicterm_engine::FontStack::try_new_with_locator_for_test(
+        "Rec Mono St.Helens",
+        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+        Arc::new(PinnedColourLocator),
+        14.0,
+        96,
+    )
+    .map_err(|error| format!("the probe stack: {error}"))?;
+    // Shaping with style waits for fallback discovery, so the pinned face has been asked.
+    let shaped = stack
+        .shape_text_with_style(&COLOUR_GLYPH.to_string(), false, false)
+        .map_err(|error| format!("shaping {COLOUR_GLYPH:?}: {error}"))?;
+    let glyph = shaped
+        .iter()
+        .find(|glyph| glyph.glyph_pos != 0 && glyph.font_idx != 0)
+        .ok_or_else(|| format!("{} does not cover {COLOUR_GLYPH:?}", path.display()))?;
+    let slot = u8::try_from(glyph.font_idx).map_err(|_| "a fallback slot past 255")?;
+    let key = sonicterm_types::GlyphKey::shaped(COLOUR_GLYPH, slot, glyph.glyph_pos, false, false);
+    let tile = stack.clone().rasterize(key).ok_or("the colour glyph rasterized nothing")?;
+    let painted = tile.coverage.chunks(4).any(|pixel| pixel.len() == 4 && pixel[3] > 0);
+    if tile.is_color && painted {
+        Ok(())
+    } else {
+        // When: the face answered but drew no colour pixels, it is no usable colour face.
+        Err(format!("the pinned face drew is_color={} painted={painted}", tile.is_color))
+    }
+}
+
 /// Draw the colour glyph after the sliding keys and present until a frame presents with no missing
-/// character, so its fallback face has resolved and its tile is resident. `Ok(false)` when no
-/// colour face resolves by the deadline or the tile holds no colour: that sub-case is reported as
-/// `HOST_INCAPABLE`, the glyph is blanked, and the coverage comparison still runs.
+/// character, so its fallback face has resolved and its tile is resident. When `colour_face` (the
+/// independent probe) found no colour face, the sub-case is reported as `HOST_INCAPABLE`, the
+/// glyph is not drawn, and `Ok(false)` lets the coverage comparison run. When it found one, a glyph
+/// that does not resolve, does not rasterize to a colour tile, or whose tile has no translucent
+/// (antialiased) pixel fails the case.
 fn settle_colour(
     renderer: &mut GpuRenderer,
     window: &Window,
     grid: &mut Grid,
     role: &str,
+    colour_face: &Result<(), String>,
 ) -> Result<bool, String> {
+    if let Err(reason) = colour_face {
+        // When: the probe found no colour face, the host cannot exercise the colour path.
+        println!("capability=HOST_INCAPABLE case={role}-colour reason={reason}");
+        return Ok(false);
+    }
     grid.goto(0, SLIDING_COLS);
     grid.put_char(COLOUR_GLYPH, Color::Default, Color::Default, CellFlags::empty());
     let started = std::time::Instant::now();
-    let mut resolved = false;
+    let mut presented_any = false;
     while started.elapsed() < COLOUR_DEADLINE {
         grid.mark_all_dirty();
         let outcome = frame(renderer, window, grid);
-        if matches!(outcome, PresentOutcome::Presented) && renderer.last_missing_tofu().is_empty() {
+        let presented = matches!(outcome, PresentOutcome::Presented);
+        presented_any |= presented;
+        if presented && renderer.last_missing_tofu().is_empty() {
             // When: a presented frame drew every character, the fallback face has resolved.
-            resolved = true;
-            break;
+            let census = renderer.__test_colour_tile_alpha(COLOUR_GLYPH).ok_or_else(|| {
+                format!("{role}: {COLOUR_GLYPH:?} resolved, but no colour tile is resident")
+            })?;
+            check(
+                census.translucent > 0,
+                &format!("{role}: the selected colour tile has translucent pixels: {census:?}"),
+            )?;
+            return Ok(true);
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    if resolved && renderer.__test_resident_color_tiles() > 0 {
-        // When: the glyph resolved to a colour tile, the colour sub-case runs.
-        return Ok(true);
-    }
-    println!(
-        "capability=HOST_INCAPABLE case={role}-colour reason=no colour face resolved \
-         (resolved={resolved}, missing={:?})",
+    Err(format!(
+        "{role}: a colour face exists, but {COLOUR_GLYPH:?} did not present without tofu within \
+         {COLOUR_DEADLINE:?} (any frame presented: {presented_any}; missing: {:?})",
         renderer.last_missing_tofu()
-    );
-    grid.goto(0, SLIDING_COLS);
-    for _ in 0..2 {
-        grid.put_char(' ', Color::Default, Color::Default, CellFlags::empty());
-    }
-    present(renderer, window, grid)?;
-    Ok(false)
+    ))
 }
 
 /// The retained GPU frame's tightly packed pixels, read back through the renderer's test copy.
@@ -260,7 +345,7 @@ fn compare_with_fresh_wgpu(
     if colour {
         // When: the grown renderer drew a colour tile, the fresh one must resolve the same face.
         check(
-            settle_colour(&mut fresh, &fresh_window, &mut grid, role)?,
+            settle_colour(&mut fresh, &fresh_window, &mut grid, role, &Ok(()))?,
             "the fresh renderer resolves the colour face the grown one did",
         )?;
     }
@@ -442,6 +527,13 @@ fn slide_until_growth(
 fn growth_retry(active: &ActiveEventLoop, software: bool) -> Result<(), String> {
     let size = PhysicalSize::new(480, 120);
     let role = if software { "atlas-growth-gdi" } else { "atlas-growth-wgpu" };
+    // Colour availability is established before, and apart from, the renderer under test.
+    let colour_face = if software {
+        Err("the GDI case draws no colour glyph".into())
+    } else {
+        // When: the case runs on wgpu, it draws the colour glyph if the host has a colour face.
+        probe_colour_face()
+    };
     let (window, mut renderer) =
         match counting_renderer(active, role, software, SLIDING_FONT_PX, size) {
             Err(reason) if reason.starts_with("HOST_INCAPABLE") => {
@@ -458,7 +550,7 @@ fn growth_retry(active: &ActiveEventLoop, software: bool) -> Result<(), String> 
         // When: the wgpu case compares retained GPU frames, so its frame texture must be copyable,
         // and a resident colour tile must be re-uploaded by the growth too.
         renderer.__enable_retained_frame_readback();
-        settle_colour(&mut renderer, &window, &mut grid, role)?
+        settle_colour(&mut renderer, &window, &mut grid, role, &colour_face)?
     };
     let (before, outcome) = slide_until_growth(&mut renderer, &window, &mut grid)?;
     check(
@@ -649,6 +741,21 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
         Ok(())
     } else {
         Err(failures.join("; "))
+    }
+}
+
+/// The colour sub-case's skip is decided by the independent probe alone, so the probe itself must
+/// find the pinned system face whenever that file is installed: then the colour path cannot be
+/// skipped, and a renderer that fails to draw the glyph fails the growth test.
+#[test]
+fn the_colour_face_probe_finds_the_pinned_system_face() {
+    let probe = probe_colour_face();
+    if pinned_colour_face_path().exists() {
+        // When: the face file is installed, the probe must find a usable colour face.
+        assert_eq!(probe, Ok(()), "{} is installed", pinned_colour_face_path().display());
+    } else {
+        // When: the face file is absent, the probe reports the host incapable and why.
+        assert!(probe.is_err());
     }
 }
 

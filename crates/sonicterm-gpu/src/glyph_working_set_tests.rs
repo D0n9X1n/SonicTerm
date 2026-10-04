@@ -346,3 +346,46 @@ fn raster_failures_are_listed_and_unplaced_tiles_are_rejected() {
         Err(WorkingSetError::NotPlaced { key: never_inserted })
     );
 }
+
+/// Answers every key with a 3x1 colour tile whose alphas are 0, 128 and 255, premultiplied.
+struct RampColour;
+
+impl sonicterm_text::glyph_atlas::Rasterizer for RampColour {
+    fn rasterize(&mut self, _key: GlyphKey) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+        Some(sonicterm_text::glyph_atlas::RasterTile {
+            width: 3,
+            height: 1,
+            offset_x: 0,
+            offset_y: 0,
+            advance: 3.0,
+            coverage: vec![0, 0, 0, 0, 64, 32, 16, 128, 255, 128, 0, 255],
+            is_color: true,
+            is_subpixel: false,
+        })
+    }
+}
+
+/// The colour-path check reads the selected colour tile's own pixels from the atlas: a resident
+/// colour tile of the character is found and its alpha census counts the transparent, translucent
+/// (antialiased edge) and opaque pixels inside its rectangle only. A coverage tile of the same
+/// character, or a character with no tile, is not a colour tile.
+#[test]
+fn a_resident_colour_tile_reports_its_alpha_census() {
+    let mut atlas = GlyphAtlas::new(64, 64);
+    // A coverage neighbour placed first, so the colour tile does not sit at the atlas origin.
+    let _coverage = atlas.get_or_insert(
+        GlyphKey::with_slot('a', 0, false, false),
+        &mut sonicterm_text::glyph_atlas::SyntheticRasterizer::default(),
+    );
+    let colour_key = GlyphKey::shaped('\u{1F600}', 1, 42, false, false);
+    let _colour = atlas.get_or_insert(colour_key, &mut RampColour);
+    let census = colour_tile_alpha(&atlas, '\u{1F600}').expect("a resident colour tile");
+    assert_eq!(census.key, colour_key);
+    assert_eq!(
+        (census.transparent, census.translucent, census.opaque),
+        (1, 1, 1),
+        "only the tile's own three pixels are counted"
+    );
+    assert!(colour_tile_alpha(&atlas, 'a').is_none(), "a coverage tile is not a colour tile");
+    assert!(colour_tile_alpha(&atlas, 'z').is_none(), "no tile at all");
+}
