@@ -287,7 +287,7 @@ impl super::redraw::WindowRedrawState {
             if loss.is_some() {
                 counters.parser_yield_lost += 1;
             } else {
-                // When: `loss` is None, the coherent collection presented the granted retry.
+                // When: `loss` is None, the coherent collection completed the granted retry.
                 counters.parser_yield_frames += 1;
             }
         }
@@ -534,6 +534,15 @@ impl super::App {
         if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
             // the App's gate is on, each published request is counted.
             counters.parser_yield_requests += 1;
+        }
+    }
+
+    /// Resolve every window's token `lost(removed)` and its request before shutdown reports the
+    /// final counters or retires panes, gate on or off. A resolved window holds neither, so a
+    /// repeat serves and counts nothing.
+    pub(super) fn resolve_all_window_yields(&mut self) {
+        for window in self.windows.values_mut() {
+            window.resolve_window_yield();
         }
     }
 

@@ -206,7 +206,7 @@ pub enum UserEvent {
         pane_id: u64,
         /// The request generation the worker granted.
         generation: u64,
-        /// The deadline the worker fixed before sending; it never parks past it.
+        /// The deadline the worker fixed before sending; it never requests a wait beyond it.
         park_deadline: Instant,
     },
     /// A previously-deferred font fallback family finished loading in the
@@ -1000,6 +1000,8 @@ impl ApplicationHandler<UserEvent> for App {
         // Forward to sonicterm-logging so every Cmd+Q / WM_CLOSE /
         // last-window exit lands in sonicterm.log. See
         // `crates/sonicterm-logging/src/exit_trace.rs`.
+        // Outstanding parser-yield grants resolve first, so the final counters carry their loss.
+        self.resolve_all_window_yields();
         self.finish_frame_lines();
         sonicterm_logging::record_loop_exiting();
     }

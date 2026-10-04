@@ -231,6 +231,8 @@ impl App {
 
     /// Retire every pane, including hidden windows, and return the cached bounded native settlement result.
     pub fn finish_session(&mut self) -> bool {
+        // Every parked worker is served before its pane retires; a repeat resolves nothing.
+        self.resolve_all_window_yields();
         if let Some(settled) = self.session_finished {
             // When: session_finished is cached, no pane or driver may be shut down a second time.
             return settled;

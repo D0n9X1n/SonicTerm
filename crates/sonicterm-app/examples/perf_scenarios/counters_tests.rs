@@ -713,3 +713,58 @@ fn a_gate_off_app_emits_no_counter_fields() {
     let app = sonicterm_app::app::App::new(Theme::default(), Config::default(), Keymap::default());
     assert!(snapshot_totals(&app).is_none());
 }
+
+#[test]
+fn a_supporting_build_reports_token_levels_with_no_live_window() {
+    // Level support comes from the App's always-present handshake count, not from a live window:
+    // removing the sole granted window gives start 1 and end 0, zero windows at both ends give 0
+    // and 0, and a build without the count still omits both keys.
+    let totals = |live: &[u64], supports: bool| {
+        let app_record = if supports {
+            HashMap::from([("parser_yields", SourceValue::Count(0))])
+        } else {
+            HashMap::new()
+        };
+        let mut totals = token_totals(live, None);
+        totals.add_record(&[Section::App, Section::VtParser], reader(&app_record)).unwrap();
+        totals.seed_levels();
+        totals
+    };
+    let removed = totals(&[], true).delta_since(&totals(&[1], true));
+    assert_eq!(removed.get("parser_yield_tokens_start"), Some(&FieldValue::Level(1)));
+    assert_eq!(removed.get("parser_yield_tokens_end"), Some(&FieldValue::Level(0)));
+    let empty = totals(&[], true).delta_since(&totals(&[], true));
+    assert_eq!(empty.get("parser_yield_tokens_start"), Some(&FieldValue::Level(0)));
+    assert_eq!(empty.get("parser_yield_tokens_end"), Some(&FieldValue::Level(0)));
+    let older = totals(&[], false).delta_since(&totals(&[], false)).to_json();
+    assert!(older["window"].get("parser_yield_tokens_start").is_none(), "{older}");
+    assert!(older["window"].get("parser_yield_tokens_end").is_none(), "{older}");
+}
+
+#[cfg(feature = "perf-counters")]
+#[test]
+fn removing_the_sole_granted_window_keeps_its_token_levels() {
+    // A real App whose only window holds a grant at a phase's start and is closed before its end
+    // still reports start 1 and end 0, and W - F - L equals end - start.
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let mut app =
+        sonicterm_app::app::App::new(Theme::default(), Config::default(), Keymap::default());
+    enable(&mut app).expect("no window yet");
+    let child = app.__test_seed_child_window(&["granted"]);
+    let main = app.__test_main_window_id().expect("a synthetic main");
+    assert!(app.__test_remove_window(main));
+    assert!(app.__test_grant_yield_token(child), "the grant is accepted");
+    let start = snapshot_totals(&app).expect("counting").expect("contract shape");
+    assert!(app.__test_close_child_window(child));
+    let end = snapshot_totals(&app).expect("counting").expect("contract shape");
+    let delta = end.delta_since(&start);
+    assert_eq!(delta.get("parser_yield_tokens_start"), Some(&FieldValue::Level(1)));
+    assert_eq!(delta.get("parser_yield_tokens_end"), Some(&FieldValue::Level(0)));
+    let count = |name| match delta.get(name) {
+        Some(FieldValue::Count(value)) => *value as i64,
+        other => panic!("{name} reads {other:?}"),
+    };
+    let identity =
+        count("parser_yield_wakes") - count("parser_yield_frames") - count("parser_yield_lost");
+    assert_eq!(identity, -1, "W - F - L = end - start");
+}

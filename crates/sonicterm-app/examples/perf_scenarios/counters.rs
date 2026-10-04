@@ -356,6 +356,26 @@ impl CounterTotals {
         self.add_fields(sections, false, read)
     }
 
+    /// Seed every unset level at zero when the App's handshake count shows the build supports
+    /// them, so a snapshot with no live window reads 0 rather than omitting the key. Support comes
+    /// from the always-present `parser_yields` count, never from a live window or closed record,
+    /// and an older App that lacks it keeps its levels unsupported.
+    pub(crate) fn seed_levels(&mut self) {
+        let supports = FIELDS
+            .iter()
+            .zip(&self.values)
+            .any(|(field, total)| field.source == "parser_yields" && total.is_some());
+        if !supports {
+            // When: no record supplied `parser_yields`, the build predates the levels.
+            return;
+        }
+        for (field, total) in FIELDS.iter().zip(&mut self.values) {
+            if matches!(field.kind, FieldKind::Level(_)) && total.is_none() {
+                *total = Some(FieldValue::zero(field.kind));
+            }
+        }
+    }
+
     /// Add one record's fields in `sections`, its levels only when `levels`.
     fn add_fields(
         &mut self,
@@ -533,7 +553,10 @@ pub(crate) fn snapshot_totals(
                 read_field(&snapshot.app, name)
             })
         });
-    Some(result.map(|()| totals))
+    Some(result.map(|()| {
+        totals.seed_levels();
+        totals
+    }))
 }
 
 /// Each counted window's `glyph_atlas_growths` keyed by its native label, and the closed windows'

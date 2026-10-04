@@ -96,8 +96,8 @@ impl FakePark {
     }
 }
 
+// Lifecycle: the unpark hook captures this park's token; it is removed with the park.
 impl Drop for FakePark {
-    // Lifecycle: the unpark hook captures this park's token; it is removed with the park.
     fn drop(&mut self) {
         set_unpark_hook(None);
     }
@@ -1320,12 +1320,58 @@ fn every_removal_path_resolves_before_retirement() {
     assert!(failed.is_empty(), "failed paths: {failed:?}");
 }
 
-/// S17 (b): an Admitted token at each post-admission exit the adapters reach headlessly
-/// (parser and image misses, no layout, structural invalidity, guarded Sync abandonment, no
-/// renderer) is resolved `lost` on the still-live window's record; `closed_windows` is unchanged.
+/// Check one resolved grant on `id`: no token, one effective serve and, on a counting App, one
+/// wake and one loss on the live record with occupancy 0 and the closed loss still `closed_lost`.
+fn resolved_once(
+    fixture: &Fixture,
+    id: WindowId,
+    counting: bool,
+    closed_lost: Option<u64>,
+) -> Result<(), String> {
+    if fixture.token_stage(id).is_some() {
+        return Err("a token is left".into());
+    }
+    let serves = take_serve_log().len();
+    if serves != 1 {
+        return Err(format!("{serves} effective serves"));
+    }
+    match (fixture.app.frame_counters_snapshot(), counting) {
+        (None, false) => Ok(()),
+        (None, true) => Err("a counting App has no snapshot".into()),
+        (Some(_), false) => Err("the gate is off but counters exist".into()),
+        (Some(snapshot), true) => {
+            let record = snapshot
+                .windows
+                .iter()
+                .find(|(window, _)| *window == id)
+                .map(|(_, record)| record)
+                .ok_or("the window is not live")?;
+            let live = (
+                record.count("parser_yield_wakes"),
+                record.count("parser_yield_lost"),
+                record.count("parser_yield_tokens"),
+            );
+            if live != (Some(1), Some(1), Some(0)) {
+                return Err(format!("live W L tokens {live:?}"));
+            }
+            if snapshot.closed_windows.count("parser_yield_lost") != closed_lost {
+                return Err("the closed totals changed".into());
+            }
+            Ok(())
+        }
+    }
+}
+
+/// S17 (b) through shared code: an Admitted token at each post-admission exit (parser and image
+/// misses, a source or topology failure, a reconciliation failure, no layout, structural
+/// invalidity, guarded Sync abandonment, no renderer) resolves `lost` once on the still-live
+/// window, gate on and off, and `closed_windows` is unchanged. The source and reconciliation
+/// failures come from the test-only `FrameFault` seam on the production collector.
 #[test]
-fn every_adapter_exit_resolves_an_admitted_token() {
-    use crate::app::visible_frame::{FrameUnavailable, LayoutInvalid};
+fn every_shared_exit_resolves_an_admitted_token() {
+    use crate::app::visible_frame::{
+        inject_frame_fault, FrameFault, FrameUnavailable, LayoutInvalid,
+    };
     let exits: Vec<(&str, fn(&mut Fixture, u64))> = vec![
         ("contended parser", |fixture, pane| {
             let why = FrameUnavailable::Contended { pane_id: pane, images: false };
@@ -1346,6 +1392,16 @@ fn every_adapter_exit_resolves_an_admitted_token() {
             let (main, now) = (fixture.main, fake_now());
             fixture.app.visible_frame_unavailable(main, why, false, now);
         }),
+        ("source or topology failure", |fixture, _| {
+            inject_frame_fault(Some(FrameFault::Sources));
+            let main = fixture.main;
+            assert_eq!(fixture.collect(main, Busy::Free), Attempt::Missed);
+        }),
+        ("reconciliation failure", |fixture, _| {
+            inject_frame_fault(Some(FrameFault::Reconcile));
+            let main = fixture.main;
+            assert_eq!(fixture.collect(main, Busy::Free), Attempt::Missed);
+        }),
         ("guarded sync abandonment", |fixture, pane| {
             let main = fixture.main;
             let parser = Arc::clone(&fixture.app.windows[&main].panes[&pane].parser);
@@ -1357,37 +1413,44 @@ fn every_adapter_exit_resolves_an_admitted_token() {
             fixture.app.finish_yield_attempt(main, YieldLoss::Invalid);
         }),
     ];
-    let failed: Vec<String> = exits
-        .iter()
-        .filter_map(|(name, exit)| {
-            let outcome = std::panic::catch_unwind(|| {
-                let mut fixture = Fixture::new(true);
+    let mut failed = Vec::new();
+    for counting in [true, false] {
+        for (name, exit) in &exits {
+            let outcome = std::panic::catch_unwind(|| -> Result<(), String> {
+                inject_frame_fault(None);
+                let mut fixture = Fixture::new(counting);
                 let main = fixture.main;
                 let pane = fixture.granted(main);
                 set_fake_now(fixture.at(4_000));
-                assert!(fixture.app.admit_window_redraw(main));
-                assert_eq!(fixture.token_stage(main), Some(TokenStage::Admitted));
-                let closed_before = fixture.app.frame_counters_snapshot().unwrap().closed_windows;
+                if !fixture.app.admit_window_redraw(main) {
+                    return Err("not admitted".into());
+                }
+                if fixture.token_stage(main) != Some(TokenStage::Admitted) {
+                    return Err("the token is not Admitted".into());
+                }
+                let closed_lost = fixture
+                    .app
+                    .frame_counters_snapshot()
+                    .and_then(|snapshot| snapshot.closed_windows.count("parser_yield_lost"));
                 exit(&mut fixture, pane);
-                let record = fixture.live_record(main);
-                assert_eq!(record.count("parser_yield_wakes"), Some(1));
-                assert_eq!(record.count("parser_yield_lost"), Some(1));
-                assert_eq!(record.count("parser_yield_tokens"), Some(0));
-                let closed = fixture.app.frame_counters_snapshot().unwrap().closed_windows;
-                assert_eq!(
-                    closed.count("parser_yield_lost"),
-                    closed_before.count("parser_yield_lost")
-                );
-                assert_eq!(take_serve_log().len(), 1);
+                inject_frame_fault(None);
+                resolved_once(&fixture, main, counting, closed_lost)
             });
-            outcome.is_err().then(|| (*name).to_owned())
-        })
-        .collect();
-    assert!(failed.is_empty(), "failed exits: {failed:?}");
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(why)) => failed.push(format!("{name} (counting {counting}): {why}")),
+                Err(_) => failed.push(format!("{name} (counting {counting}): panicked")),
+            }
+        }
+    }
+    inject_frame_fault(None);
+    assert!(failed.is_empty(), "{failed:#?}");
 }
 
-/// S17 (b), source: in both redraw adapters every return between admission and the coherent
-/// collection resolves the token, or is a missing-owner exit whose removal already resolved it.
+/// S17 (b), source: in both redraw adapters every `return` between admission and the coherent
+/// collection resolves the token inside its own block, or is a missing-owner exit whose removal
+/// already resolved it. The scan is block-scoped, so deleting one resolver fails it even when a
+/// neighbouring return still resolves.
 #[test]
 fn every_adapter_return_after_admission_resolves_the_token() {
     let resolvers = [
@@ -1414,17 +1477,23 @@ fn every_adapter_return_after_admission_resolves_the_token() {
         let from = source.find(start).expect(start);
         let to = from + source[from..].find(end).expect(end);
         let lines: Vec<&str> = source[from..to].lines().collect();
+        let indent = |line: &str| line.len() - line.trim_start().len();
         let mut returns = 0;
         for (index, line) in lines.iter().enumerate() {
             if line.trim() != "return;" {
                 continue;
             }
             returns += 1;
-            let context = lines[index.saturating_sub(10)..index].join("\n");
-            let resolved = resolvers.iter().any(|call| context.contains(call));
+            // The block opens at the nearest earlier line indented less than the return.
+            let opening = (0..index)
+                .rev()
+                .find(|earlier| indent(lines[*earlier]) < indent(line))
+                .unwrap_or(0);
+            let block = lines[opening..index].join("\n");
+            let resolved = resolvers.iter().any(|call| block.contains(call));
             let missing_owner =
-                context.contains("no longer") || context.contains("admit_window_redraw` refuses");
-            assert!(resolved || missing_owner, "{name}: unresolved return after\n{context}");
+                block.contains("no longer") || block.contains("admit_window_redraw` refuses");
+            assert!(resolved || missing_owner, "{name}: unresolved return in\n{block}");
         }
         assert!(returns >= 5, "{name}: found {returns} returns");
     }
@@ -1563,11 +1632,22 @@ fn a_collection_serves_under_the_parser_guards_before_images() {
     assert!(handshake.served.load(Ordering::Acquire) >= generation, "served before images");
 }
 
-/// §5.1 9: a batch parsed by a worker that then yields leaves the same grid, OSC 7 directory,
-/// title, modes, replies, events and media as one parsed by a worker with no request.
+/// §5.1 9: a batch parsed by a worker that then yields leaves exactly what the same batch leaves
+/// with no request: the grid, each hyperlink compared by its target (ids come from a process-wide
+/// allocator), the OSC 7 directory with its provenance, the title, modes, ordered replies, ordered
+/// host events, command records, retained media and its accounting. The baseline must produce
+/// each kind of effect, so an empty comparison cannot pass.
 #[test]
 fn a_yield_changes_nothing_the_batch_produced() {
-    let bytes: &[u8] = b"\x1b]7;file://host/tmp/dir\x1b\\\x1b]2;title\x07\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\\x1b[?1000h\x1b[c\x1b]133;A\x07\x1b_Gf=100,a=T;image\x1b\\tail";
+    use base64::Engine;
+    let clipboard = base64::engine::general_purpose::STANDARD.encode("copied");
+    let bytes = format!(
+        "\x1b]7;file://host/tmp/dir\x1b\\\x1b]2;title\x07\x1b]8;;https://example.com\x1b\\link\
+         \x1b]8;;\x1b\\\x1b[?1000h\x1b[c\x1b]52;c;{clipboard}\x07\x1b]133;A\x07\
+         \x1b_Gf=100,a=T;image\x1b\\tail"
+    )
+    .into_bytes();
+    let base = test_base();
     let run = |yielding: bool| {
         let media_pool = crate::app::media::InlineMediaPool::new();
         let parser = sonicterm_vt::vt::Parser::new_with_staging_pool(
@@ -1582,14 +1662,14 @@ fn a_yield_changes_nothing_the_batch_produced() {
         );
         let handles = crate::app::spawn_pane::PaneVtHandles::from_pane_state(&pane);
         *pane.redraw_target.lock() = Some(WindowId::from(9));
-        set_fake_now(test_base());
+        set_fake_now(base);
         if yielding {
             pane.parser_yield.request();
         }
         let script = if yielding { vec![Step::Timeout(Duration::ZERO)] } else { Vec::new() };
         let mut park = FakePark::new(&pane.parser_yield, script, u32::from(yielding));
         let mut flush = crate::app::spawn_pane::OutputFlush::new(1, &handles);
-        let (mut replies, mut events) = (Vec::new(), 0);
+        let (mut replies, mut events) = (Vec::new(), Vec::new());
         let outcome = crate::app::spawn_pane::worker_batch(
             &handles,
             &mut flush,
@@ -1597,7 +1677,7 @@ fn a_yield_changes_nothing_the_batch_produced() {
             |latch, now| {
                 crate::app::spawn_pane::publish_pane_vt_batch_with(
                     &handles,
-                    bytes,
+                    &bytes,
                     &mut None,
                     latch,
                     |media| {
@@ -1610,7 +1690,7 @@ fn a_yield_changes_nothing_the_batch_produced() {
                             bgra: Arc::from([1, 2, 3, 255]),
                         })
                     },
-                    |_| events += 1,
+                    |event| events.push(event),
                     || now,
                     |reply| replies.extend(reply),
                 );
@@ -1621,36 +1701,56 @@ fn a_yield_changes_nothing_the_batch_produced() {
             &mut park,
         );
         assert_eq!(matches!(outcome, YieldOutcome::Sent(_)), yielding);
-        let image_count = pane.inline_images.lock().len();
-        let command_count = pane.command_events.lock().len();
+        let images = format!("{:?}", *pane.inline_images.lock());
+        let commands = format!("{:?}", *pane.command_events.lock());
         let parser = pane.parser.lock();
-        // Hyperlink ids come from a process-wide allocator, so the dump compares them by
-        // position; the registry's size compares what they name.
+        // Each allocator id in the grid dump is replaced by the target it names.
         let grid = format!("{:?}", parser.grid());
-        let mut normalized = String::with_capacity(grid.len());
+        let mut resolved = String::with_capacity(grid.len());
         let mut rest = grid.as_str();
         while let Some(start) = rest.find("HyperlinkId(") {
-            normalized.push_str(&rest[..start + "HyperlinkId(".len()]);
-            rest = &rest[start + "HyperlinkId(".len()..];
-            rest = rest.trim_start_matches(|digit: char| digit.is_ascii_digit());
+            resolved.push_str(&rest[..start]);
+            let after = &rest[start + "HyperlinkId(".len()..];
+            let digits =
+                after.find(|character: char| !character.is_ascii_digit()).unwrap_or(after.len());
+            let target = after[..digits]
+                .parse::<u64>()
+                .ok()
+                .and_then(|raw| parser.hyperlinks().lookup(sonicterm_types::HyperlinkId(raw)))
+                .map(|link| link.uri.to_string());
+            resolved.push_str(&format!("Link({target:?}"));
+            rest = &after[digits..];
         }
-        normalized.push_str(rest);
-        let produced = (
-            normalized,
-            parser.hyperlinks().len(),
-            parser.cwd().map(str::to_owned),
+        resolved.push_str(rest);
+        (
+            resolved,
+            format!("{:?}", parser.osc7_cwd()),
             parser.title().map(str::to_owned),
             parser.keyboard_input_snapshot(),
             parser.pointer_input_snapshot(),
             replies,
             events,
-            image_count,
-            command_count,
+            commands,
+            images,
+            media_pool.bytes(),
             pane.output_generation.load(Ordering::Acquire),
-        );
-        produced
+        )
     };
-    assert_eq!(run(true), run(false));
+    let baseline = run(false);
+    assert!(baseline.0.contains("Link(Some(\"https://example.com\")"), "the hyperlink is held");
+    assert!(baseline.1.contains("/tmp/dir"), "{}", baseline.1);
+    assert_eq!(baseline.2.as_deref(), Some("title"));
+    assert!(!baseline.5.is_empty(), "the device-attributes query replied");
+    assert!(
+        baseline
+            .6
+            .iter()
+            .any(|event| matches!(event, crate::app::UserEvent::ClipboardWrite { .. })),
+        "the clipboard write was emitted"
+    );
+    assert!(baseline.7.contains("PromptStart"), "{}", baseline.7);
+    assert!(baseline.8.contains("bgra") && baseline.9 > 0, "the media is retained and charged");
+    assert_eq!(run(true), baseline);
 }
 
 /// Attach a real software-forced renderer and native window to `id`, as a launched window has.
@@ -1727,16 +1827,27 @@ fn redraw_through_adapter(
 type AdapterCase =
     fn(&mut Fixture, &winit::event_loop::ActiveEventLoop) -> Result<WindowId, String>;
 
-/// S17 (b) and S14 through production code with a real event loop: each redraw adapter's exits,
-/// reached by `RedrawRequested`, and the three renderer-gated returns of `begin_window_redraw`
-/// each resolve the grant `lost` once, with one effective serve and no token left. Returns the
-/// names of the cases that failed.
+/// S17 (b) and S14 through production code with a real event loop, gate on and off: each redraw
+/// adapter's reachable post-admission exit, reached by `RedrawRequested`, and the three
+/// renderer-gated returns of `begin_window_redraw` each resolve the grant `lost` once. Source and
+/// reconciliation failures come from the test-only `FrameFault` seam. The adapters' missing-owner
+/// returns are not reachable: each adapter runs synchronously right after admission found the
+/// window, and nothing between them can remove it. Returns the failed cases.
 #[cfg_attr(not(windows), allow(dead_code, reason = "the real adapters run only on Windows CI"))]
 fn real_adapter_failures(event_loop: &winit::event_loop::ActiveEventLoop) -> Vec<String> {
+    use crate::app::visible_frame::{inject_frame_fault, FrameFault};
     let cases: Vec<(&str, AdapterCase)> = vec![
         ("main: no renderer", |fixture, event_loop| {
             let main = fixture.main;
             fixture.granted(main);
+            redraw_through_adapter(fixture, event_loop, main, 4_000);
+            Ok(main)
+        }),
+        ("main: source failure", |fixture, event_loop| {
+            let main = fixture.main;
+            attach_renderer(fixture, event_loop, main)?;
+            fixture.granted(main);
+            inject_frame_fault(Some(FrameFault::Sources));
             redraw_through_adapter(fixture, event_loop, main, 4_000);
             Ok(main)
         }),
@@ -1757,9 +1868,25 @@ fn real_adapter_failures(event_loop: &winit::event_loop::ActiveEventLoop) -> Vec
             redraw_through_adapter(fixture, event_loop, main, 4_000);
             Ok(main)
         }),
+        ("main: reconciliation failure", |fixture, event_loop| {
+            let main = fixture.main;
+            attach_renderer(fixture, event_loop, main)?;
+            fixture.granted(main);
+            inject_frame_fault(Some(FrameFault::Reconcile));
+            redraw_through_adapter(fixture, event_loop, main, 4_000);
+            Ok(main)
+        }),
         ("child: no renderer", |fixture, event_loop| {
             let (child, _) = fixture.child();
             fixture.granted(child);
+            redraw_through_adapter(fixture, event_loop, child, 4_000);
+            Ok(child)
+        }),
+        ("child: source failure", |fixture, event_loop| {
+            let (child, _) = fixture.child();
+            attach_renderer(fixture, event_loop, child)?;
+            fixture.granted(child);
+            inject_frame_fault(Some(FrameFault::Sources));
             redraw_through_adapter(fixture, event_loop, child, 4_000);
             Ok(child)
         }),
@@ -1777,6 +1904,14 @@ fn real_adapter_failures(event_loop: &winit::event_loop::ActiveEventLoop) -> Vec
             attach_renderer(fixture, event_loop, child)?;
             let pane = fixture.granted(child);
             fixture.app.windows[&child].panes[&pane].parser.lock().advance(b"\x1b[?2026h");
+            redraw_through_adapter(fixture, event_loop, child, 4_000);
+            Ok(child)
+        }),
+        ("child: reconciliation failure", |fixture, event_loop| {
+            let (child, _) = fixture.child();
+            attach_renderer(fixture, event_loop, child)?;
+            fixture.granted(child);
+            inject_frame_fault(Some(FrameFault::Reconcile));
             redraw_through_adapter(fixture, event_loop, child, 4_000);
             Ok(child)
         }),
@@ -1818,40 +1953,38 @@ fn real_adapter_failures(event_loop: &winit::event_loop::ActiveEventLoop) -> Vec
             Ok(main)
         }),
     ];
-    cases
-        .iter()
-        .filter_map(|(name, case)| {
+    let mut failed = Vec::new();
+    for counting in [true, false] {
+        for (name, case) in &cases {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut fixture = Fixture::new(true);
+                inject_frame_fault(None);
+                let mut fixture = Fixture::new(counting);
+                let closed_lost = fixture
+                    .app
+                    .frame_counters_snapshot()
+                    .and_then(|snapshot| snapshot.closed_windows.count("parser_yield_lost"));
                 let id = case(&mut fixture, event_loop)?;
-                let (_, wakes, _, frames, lost) = fixture.counts(id);
-                if (wakes, frames, lost) != (1, 0, 1) {
-                    return Err(format!("W F L {wakes} {frames} {lost}"));
-                }
-                if fixture.token_stage(id).is_some() {
-                    return Err("a token is left".into());
-                }
-                let serves = take_serve_log().len();
-                if serves != 1 {
-                    return Err(format!("{serves} effective serves"));
-                }
-                Ok(())
+                inject_frame_fault(None);
+                resolved_once(&fixture, id, counting, closed_lost)
             }));
             match outcome {
-                Ok(Ok(())) => None,
-                Ok(Err(why)) => Some(format!("{name}: {why}")),
-                Err(_) => Some(format!("{name}: panicked")),
+                Ok(Ok(())) => {}
+                Ok(Err(why)) => failed.push(format!("{name} (counting {counting}): {why}")),
+                Err(_) => failed.push(format!("{name} (counting {counting}): panicked")),
             }
-        })
-        .collect()
+        }
+    }
+    inject_frame_fault(None);
+    failed
 }
 
 /// S17 (b), S14 on Windows: the real main and child redraw adapters, driven by `RedrawRequested`
 /// through a real event loop, and `begin_window_redraw`'s device-refusal, occlusion and
-/// refused-recovery returns with a real renderer, each resolve an accepted grant `lost` once.
+/// refused-recovery returns with a real renderer, each resolve an accepted grant `lost` once at
+/// every exit they can reach, gate on and off.
 #[cfg(windows)]
 #[test]
-fn real_adapters_resolve_a_grant_at_every_exit() {
+fn real_adapters_resolve_a_grant_at_each_reachable_exit() {
     use crate::app::pty_test_support::isolated;
     use winit::{
         application::ApplicationHandler,
@@ -1885,4 +2018,88 @@ fn real_adapters_resolve_a_grant_at_every_exit() {
     event_loop.run_app(&mut probe).unwrap();
     let failures = probe.failures.expect("resumed runs");
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// The `frame_counters` lines a test prints.
+#[derive(Clone, Default)]
+struct CounterLines(Arc<parking_lot::Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CounterLines {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        /// The event's message field.
+        struct Message<'line>(&'line mut String);
+        impl tracing::field::Visit for Message<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    *self.0 = format!("{value:?}");
+                }
+            }
+        }
+        if event.metadata().target() == "frame_counters" {
+            let mut line = String::new();
+            event.record(&mut Message(&mut line));
+            self.0.lock().push(line);
+        }
+    }
+}
+
+/// Whole-App shutdown resolves every window's outstanding grant and request before the final
+/// counters, gate on and off, through `exiting`'s cleanup and through `finish_session`: one
+/// effective serve per generation, no ask or token left, the loss counted before the final line,
+/// and a repeat that changes nothing.
+#[test]
+fn shutdown_resolves_every_window_yield_once() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let app_source = include_str!("mod.rs").replace("\r\n", "\n");
+    let exiting = &app_source[app_source.find("fn exiting(").expect("exiting")..];
+    let resolve = exiting.find("self.resolve_all_window_yields();").expect("exiting resolves");
+    assert!(resolve < exiting.find("self.finish_frame_lines();").expect("final lines"));
+    let session_source = include_str!("session.rs").replace("\r\n", "\n");
+    let session =
+        &session_source[session_source.find("pub fn finish_session(").expect("session")..];
+    let resolve = session.find("self.resolve_all_window_yields();").expect("session resolves");
+    assert!(resolve < session.find("let panes").expect("the panes drain"));
+    for counting in [true, false] {
+        for through_session in [false, true] {
+            let mut fixture = Fixture::new(counting);
+            let main = fixture.main;
+            fixture.granted(main);
+            let (child, _) = fixture.child();
+            fixture.missed_at_t0(child);
+            assert!(take_serve_log().is_empty());
+            let lines = CounterLines::default();
+            let subscriber = tracing_subscriber::Registry::default().with(lines.clone());
+            sonicterm_logging::test_capture::with_default(subscriber, || {
+                if through_session {
+                    fixture.app.finish_session();
+                } else {
+                    // When: the event loop exits, `exiting` runs this cleanup, then the final lines.
+                    fixture.app.resolve_all_window_yields();
+                    fixture.app.finish_frame_lines();
+                }
+            });
+            let case = format!("counting {counting}, through_session {through_session}");
+            assert_eq!(take_serve_log().len(), 2, "{case}: one serve per generation");
+            assert!(
+                fixture.app.windows.values().all(|window| {
+                    window.redraw.yield_ask.is_none() && window.redraw.yield_token.is_none()
+                }),
+                "{case}"
+            );
+            if counting {
+                assert_eq!(fixture.counts(main).4, 1, "{case}");
+                assert_eq!(fixture.counts(child).4, 0, "{case}: a request is not a loss");
+                if !through_session {
+                    let printed = lines.0.lock().join("\n");
+                    assert!(printed.contains("parser_yield_lost=1"), "{case}: {printed}");
+                }
+            }
+            fixture.app.resolve_all_window_yields();
+            fixture.app.finish_session();
+            assert!(take_serve_log().is_empty(), "{case}: a repeat serves nothing");
+            if counting {
+                assert_eq!(fixture.counts(main).4, 1, "{case}: a repeat counts nothing");
+            }
+        }
+    }
 }
