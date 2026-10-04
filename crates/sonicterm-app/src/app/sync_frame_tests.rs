@@ -650,3 +650,88 @@ fn a_dpi_resize_keeps_its_obligation_through_a_same_size_resized() {
         assert!(forced, "child={child_owner}: the committed size is presented through the hold");
     }
 }
+
+/// A reset credit survives a released frame that ends in a surface timeout: the retry waits out
+/// the timeout floor on the real clocks and is still released, and only a successful frame spends
+/// the credit, after which the reopened update holds.
+#[test]
+fn a_surface_timeout_keeps_an_unspent_reset_credit() {
+    let (mut app, main, _, base) = held_owners();
+    let pane = pane_of(&app, main, 0);
+    hold(&app, main, pane, 1, at_ms(base, 5_000));
+    release(&app, main, pane);
+    hold(&app, main, pane, 2, at_ms(base, 5_000));
+    app.mark_window_redraw(main, RedrawCause::Output);
+    assert!(app.begin_window_redraw(main, base), "the unpresented reset releases the pane");
+    let snapshot = app.snapshot_window_redraw_at(main, base).unwrap();
+    let timeout = FrameSettlement::SurfaceRetry(SurfaceRetryReason::Timeout);
+    app.finish_window_redraw(main, &snapshot, timeout, base);
+    assert_eq!(app.windows[&main].panes[&pane].presented_sync_resets, 0, "the credit is unspent");
+    assert!(!app.begin_window_redraw(main, at_ms(base, 1)));
+    assert_eq!(app.windows[&main].redraw.deferred_rule, Some(DeferRule::Timeout));
+    let retry_at = at_ms(base, 20);
+    assert!(app.begin_window_redraw(main, retry_at), "past the floor the retry is still released");
+    let snapshot = app.snapshot_window_redraw_at(main, retry_at).unwrap();
+    app.finish_window_redraw(main, &snapshot, FrameSettlement::Presented, retry_at);
+    assert_eq!(app.windows[&main].panes[&pane].presented_sync_resets, 1);
+    app.mark_window_redraw(main, RedrawCause::Expose);
+    assert!(!app.begin_window_redraw(main, at_ms(base, 60)), "the spent credit no longer releases");
+    assert_eq!(app.windows[&main].redraw.deferred_rule, Some(DeferRule::Sync));
+}
+
+/// A contention abort keeps the resize obligation, on both roles: with `resize_pending` armed and
+/// a visible parser lock held, the production collector reports contention through the retry
+/// adapter; once the lock is free, the retry is forced through the hold and its presented frame
+/// clears the obligation, after which the hold applies again.
+#[test]
+fn a_contention_abort_keeps_the_resize_obligation() {
+    use sonicterm_ui::pane::Rect;
+    for child_owner in [false, true] {
+        let (mut app, main, child, base) = held_owners();
+        let owner = if child_owner { child } else { main };
+        let pane = pane_of(&app, owner, 0);
+        hold(&app, owner, pane, 1, at_ms(base, 5_000));
+        app.windows.get_mut(&owner).unwrap().redraw.resize_pending = true;
+        app.mark_window_redraw(owner, RedrawCause::Expose);
+        assert!(app.begin_window_redraw(owner, base), "child={child_owner}: forced");
+        let parser = app.windows[&owner].panes[&pane].parser.clone();
+        let busy = parser.lock();
+        let outer = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let sources = if child_owner {
+            app.child_visible_frame_sources(owner, outer)
+        } else {
+            app.main_visible_frame_sources(outer)
+        }
+        .unwrap_or_else(|_| panic!("child={child_owner}: a valid layout"));
+        let why = match sources.try_collect(|| ()) {
+            Ok(_) => panic!("child={child_owner}: the held parser lock makes collection contend"),
+            Err(why) => why,
+        };
+        drop(sources);
+        drop(busy);
+        app.visible_frame_unavailable(owner, why, false, base);
+        assert!(app.windows[&owner].redraw.resize_pending, "child={child_owner}: kept");
+        assert!(app.windows[&owner].retry_not_before.is_some(), "child={child_owner}: retry armed");
+        assert!(
+            attempt(
+                &mut app,
+                owner,
+                RedrawCause::Expose,
+                at_ms(base, 500),
+                FrameSettlement::Presented
+            ),
+            "child={child_owner}: the retry is forced through the hold"
+        );
+        assert!(!app.windows[&owner].redraw.resize_pending, "child={child_owner}: presented");
+        assert!(
+            !attempt(
+                &mut app,
+                owner,
+                RedrawCause::Expose,
+                at_ms(base, 600),
+                FrameSettlement::Presented
+            ),
+            "child={child_owner}: the hold applies again"
+        );
+    }
+}
