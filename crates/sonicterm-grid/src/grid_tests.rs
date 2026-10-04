@@ -2064,6 +2064,43 @@ fn a_bounded_clear_keeps_rows_dirtied_after_its_generation() {
     assert_eq!(dirty_rows_vec(&grown), vec![0, 1, 2, 3]);
 }
 
+/// Range marks stamp their rows too: after a region scroll or an erase below, a receipt taken
+/// before them keeps exactly the rows they touched, as a whole-grid and as a subset clear, and
+/// clears the rows dirtied before assembly that they left alone.
+#[test]
+fn a_bounded_clear_keeps_rows_a_range_mark_touched_after_its_generation() {
+    // Each case starts fully dirty before assembly, then applies its range mark after it.
+    let scrolled = || {
+        let mut grid = Grid::new(6, 6);
+        grid.goto(0, 0);
+        grid.mark_all_dirty();
+        let assembled = grid.dirty_generation();
+        grid.scroll_region_up_with(1, 3, 1, Cell::default());
+        (grid, assembled)
+    };
+    let (mut whole, assembled) = scrolled();
+    whole.clear_dirty_through(assembled);
+    assert_eq!(dirty_rows_vec(&whole), vec![1, 2, 3], "the scrolled region stays dirty");
+    let (mut subset, assembled) = scrolled();
+    subset.clear_dirty_rows_through(&[2, 3, 4].into_iter().collect(), assembled);
+    assert_eq!(dirty_rows_vec(&subset), vec![0, 1, 2, 3, 5], "row 4 clears; 2 and 3 scrolled");
+
+    let erased = || {
+        let mut grid = Grid::new(6, 6);
+        grid.goto(3, 0);
+        grid.mark_all_dirty();
+        let assembled = grid.dirty_generation();
+        grid.erase_below_with(Cell::default());
+        (grid, assembled)
+    };
+    let (mut whole, assembled) = erased();
+    whole.clear_dirty_through(assembled);
+    assert_eq!(dirty_rows_vec(&whole), vec![3, 4, 5], "the erased rows stay dirty");
+    let (mut subset, assembled) = erased();
+    subset.clear_dirty_rows_through(&[1, 4].into_iter().collect(), assembled);
+    assert_eq!(dirty_rows_vec(&subset), vec![0, 2, 3, 4, 5], "row 1 clears; 4 was erased");
+}
+
 /// The problems with `source`'s writers of `dirty_rows`: every write that sets a bit sits in
 /// `mark_row`, `mark_all`, `mark_range` or `resize`, each of which advances the generation, or in
 /// the two struct literals that start a grid at generation 0; `clear_dirty` and `clear_dirty_rows`
@@ -2130,12 +2167,26 @@ fn dirty_writer_problems(source: &str) -> Vec<String> {
             || writes_through_alias("true");
         let stores_false = code.contains("dirty_rows.fill(false)") || writes_through_alias("false");
         let bumps = code.contains("self.dirty_generation=");
+        // Writes to the per-row stamps: only the setters keep them, so a receipt reads true stamps.
+        let stamps = [
+            "dirty_stamps.fill(",
+            "dirty_stamps.get_mut(",
+            "dirty_stamps.resize(",
+            "dirty_stamps.iter_mut(",
+            "&mutself.dirty_stamps",
+        ]
+        .iter()
+        .any(|write| code.contains(write));
         let literal = code.contains("dirty_rows:vec![true");
         let name = name.as_str();
         if SETTERS.contains(&name) {
             let advances = bumps || (name == "resize" && code.contains("self.mark_all()"));
             if sets && !advances {
                 problems.push(format!("{name} sets dirty bits without advancing the generation"));
+            }
+            let stamped = stamps || (name == "resize" && code.contains("self.mark_all()"));
+            if sets && !stamped {
+                problems.push(format!("{name} sets dirty bits without stamping their rows"));
             }
         } else if CLEARERS.contains(&name) {
             if sets || bumps {
@@ -2149,7 +2200,7 @@ fn dirty_writer_problems(source: &str) -> Vec<String> {
             if !code.contains("dirty_generation:0") {
                 problems.push(format!("{name}'s grid literal does not start at generation 0"));
             }
-        } else if sets || bumps || stores_false {
+        } else if sets || bumps || stores_false || stamps {
             problems.push(format!("{name} writes dirty bits outside the admitted writers"));
         }
     }
@@ -2187,6 +2238,15 @@ fn check_dirty_writer_pin(checkout: &str) {
         &source.replacen(
             "            *slot = true;\n        }\n        self.dirty_generation = self.dirty_generation.wrapping_add(1);",
             "            *slot = true;\n        }",
+            1,
+        ),
+        "mark_range",
+    );
+    // A range mark that advances the generation but leaves its rows' stamps behind.
+    rejects(
+        &source.replacen(
+            "        for stamp in &mut self.dirty_stamps[low..=high] {\n            *stamp = self.dirty_generation;\n        }\n",
+            "",
             1,
         ),
         "mark_range",
