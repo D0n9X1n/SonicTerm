@@ -5828,7 +5828,8 @@ fn try_resize_outcome_returns_unchanged_before_any_reconfiguration() {
     let core = include_str!("core.rs").replace("\r\n", "\n");
     let body = core.split("pub fn try_resize_outcome(").nth(1).expect("the resize body");
     let body = &body[..body.find("\n    }\n").expect("the body ends")];
-    let unchanged = body.find("return ResizeOutcome::Unchanged;").expect("an unchanged early return");
+    let unchanged =
+        body.find("return ResizeOutcome::Unchanged;").expect("an unchanged early return");
     assert!(body[..unchanged].contains("classify_resize("), "{body}");
     let configure = body.find("self.surface.configure(").expect("the surface is configured");
     let key = body.find("self.last_frame_key = None;").expect("the retained key is cleared");
