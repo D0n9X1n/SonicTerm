@@ -899,6 +899,7 @@ fn preedit_cache_matches_only_on_identical_inputs_and_atlas_stamp() {
         },
         glyphs: Vec::new(),
         missing_boxes: Vec::new(),
+        missing_chrome_chars: Vec::new(),
     };
     // Exact match.
     let epoch = GlyphContentStamp {
@@ -941,6 +942,7 @@ fn preedit_cache_rejects_same_content_identity_after_atlas_replacement() {
         atlas_stamp: old_epoch,
         glyphs: Vec::new(),
         missing_boxes: Vec::new(),
+        missing_chrome_chars: Vec::new(),
     };
     let replacement_epoch = GlyphContentStamp {
         device_generation: 7,
@@ -969,6 +971,7 @@ fn preedit_cache_rejects_reset_with_unchanged_evictions() {
         atlas_stamp: capture(&atlas),
         glyphs: Vec::new(),
         missing_boxes: Vec::new(),
+        missing_chrome_chars: Vec::new(),
     };
     assert!(cache.matches("preedit", 14.0, 100.0, 50.0, 0xAABBCCFF, capture(&atlas)));
     let evictions = atlas.evictions();
@@ -1003,6 +1006,7 @@ fn atlas_frame_detector_qualifies_equal_content_by_allocation_and_device() {
             atlas_stamp: before,
             glyphs: Vec::new(),
             missing_boxes: Vec::new(),
+            missing_chrome_chars: Vec::new(),
         };
         assert!(!cache.matches("preedit", 14.0, 0.0, 0.0, 0xFFFFFFFF, after));
     }
@@ -4161,6 +4165,37 @@ fn successful_frame_counter_advances_only_after_native_presentation() {
     assert!(finish.contains("self.successful_frame_count ="));
     assert!(finish.contains("saturating_add(1)"));
     assert_eq!(finish.matches("saturating_add(1);").count(), 1);
+}
+
+/// The chrome readout follows the terminal rows' missing list frame for frame: `assemble_frame`
+/// opens one missing-chrome scope for the whole frame and hands its list to the presented frame,
+/// which publishes it beside the rows' list. A frame that does not present publishes neither, and
+/// the preedit cache replays its tofu with its glyphs.
+#[test]
+fn chrome_tofu_is_published_only_by_a_presented_frame() {
+    const CORE_SRC: &str = include_str!("core.rs");
+    assert!(CORE_SRC.contains("pub fn last_missing_chrome(&self) -> &[char]"));
+    let assemble_start = CORE_SRC.find("    fn assemble_frame(").expect("assembly");
+    let assemble_end = CORE_SRC[assemble_start..]
+        .find("\n    /// Hand assembled batches to the presenter")
+        .map(|offset| assemble_start + offset)
+        .expect("bounded assembly");
+    let assemble = &CORE_SRC[assemble_start..assemble_end];
+    // One frame scope; the preedit cache opens a nested one to capture its own run.
+    assert_eq!(
+        assemble
+            .matches("let missing_chrome_scope = chrome_text::MissingChromeScope::enter();")
+            .count(),
+        1
+    );
+    assert!(assemble.contains("missing_chrome_chars: missing_chrome_scope.finish()"));
+    assert!(
+        assemble.contains("cached.missing_chrome_chars"),
+        "a preedit cache hit replays its tofu"
+    );
+    let finish_start = CORE_SRC.find("    fn finish_successful_frame(").expect("present cleanup");
+    let finish = &CORE_SRC[finish_start..finish_start + 2000];
+    assert!(finish.contains("self.last_missing_chrome_chars = missing_chrome_chars"));
 }
 
 fn selection_for_rows(start: u64, end: u64) -> Selection {

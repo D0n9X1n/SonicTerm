@@ -268,6 +268,8 @@ struct AssembledLayers {
     overlay_glyphs: Vec<GlyphInstance>,
     field_candidates: PresentedFields,
     missing_chars: Vec<char>,
+    /// Chrome characters this frame drew as tofu or dropped; published only if it presents.
+    missing_chrome_chars: Vec<char>,
     gpu_timing: present::FrameTiming,
     plan: FramePlan,
     receipts: Vec<sonicterm_render_model::AckReceipt>,
@@ -2195,6 +2197,10 @@ pub struct GpuRenderer {
     /// surfaced through [`Self::last_missing_tofu`]; production code
     /// must not depend on it.
     last_missing_chars: Vec<char>,
+    /// Chrome characters (tab titles, palette, search, preedit, footer) the most recent presented
+    /// frame drew as tofu or dropped, whitespace excluded. Test-only diagnostic surfaced through
+    /// [`Self::last_missing_chrome`]; production code must not depend on it.
+    last_missing_chrome_chars: Vec<char>,
     // Row-cache hits skip style-run shaping; misses shape through the font stack before atlas insertion.
     /// Sonicterm-font driven shaper. Owns
     /// the cell metrics (`cell_metrics_raster_px()`), the resolved
@@ -2288,6 +2294,8 @@ struct PreeditGlyphCache {
     glyphs: Vec<GlyphInstance>,
     /// Outline quads of unresolved characters, replayed with the glyphs.
     missing_boxes: Vec<QuadInstance>,
+    /// The characters those outlines stand for, replayed into the frame's chrome readout.
+    missing_chrome_chars: Vec<char>,
 }
 
 impl PreeditGlyphCache {
@@ -3133,6 +3141,7 @@ impl GpuRenderer {
             tab_bar_visible: true,
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
+            last_missing_chrome_chars: Vec::new(),
             // `shape_cache` field deleted with the cosmic-text path.
             font_stack: font_stacks.body,
             tab_title_font: TabTitleFont::new(
@@ -3953,6 +3962,17 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn last_missing_tofu(&self) -> &[char] {
         &self.last_missing_chars
+    }
+
+    /// Every chrome character (tab titles, palette rows, query, footer, search, preedit) the
+    /// previous presented frame drew as tofu or dropped because its run could not be shaped or
+    /// its tile was not placed; whitespace is excluded. The chrome counterpart of
+    /// [`Self::last_missing_tofu`], so fallback is complete only when both are empty.
+    ///
+    /// Test-only diagnostic, doc-hidden like `last_missing_tofu`.
+    #[doc(hidden)]
+    pub fn last_missing_chrome(&self) -> &[char] {
+        &self.last_missing_chrome_chars
     }
 
     /// Grid `(cols, rows)` from raster surface and cell dimensions; logical padding is scaled before subtraction.
@@ -5742,6 +5762,9 @@ impl GpuRenderer {
         // layout. Cleared every frame; published into `self.last_missing_chars`
         // before render() returns.
         let mut missing_chars_this_frame: Vec<char> = Vec::new();
+        // The chrome counterpart: every chrome layout below notes its tofu into this scope, which
+        // closes with the assembled frame; a frame that fails to assemble discards it on drop.
+        let missing_chrome_scope = chrome_text::MissingChromeScope::enter();
         // Geometry is in raster pixels, so px_to_ndc uses the unscaled physical surface dimensions.
         let sw = self.config.width as f32;
         let sh = self.config.height as f32;
@@ -6812,6 +6835,10 @@ impl GpuRenderer {
                     search_font_size,
                     search_font_size,
                 );
+                if search_run.is_none() {
+                    // An unshaped label paints nothing, so every visible character is missing.
+                    chrome_text::note_unshaped_chrome(&search_text.label);
+                }
                 let search_field = search_run.as_ref().map(|run| {
                     plan_field(
                         search_placement,
@@ -7310,6 +7337,10 @@ impl GpuRenderer {
                     palette_font_size,
                     palette_native_em,
                 );
+                if palette_run.is_none() {
+                    // An unshaped query paints nothing, so every visible character is missing.
+                    chrome_text::note_unshaped_chrome(&paint_text);
+                }
                 let palette_field = palette_run.as_ref().map(|run| {
                     plan_field(
                         palette_placement,
@@ -7718,10 +7749,17 @@ impl GpuRenderer {
                     let cached = self.preedit_glyph_cache.as_ref().unwrap();
                     overlay_glyph_instances.extend(cached.glyphs.iter().copied());
                     quads_overlay.extend(cached.missing_boxes.iter().copied());
+                    for &missing in &cached.missing_chrome_chars {
+                        // A hit draws the cached tofu without a layout, so it is noted here.
+                        chrome_text::note_missing_chrome(missing);
+                    }
                 } else {
                     // When: `!cache_hit` — text, placement, colour, or atlas
                     // epoch changed, so the run is re-shaped and re-cached.
                     let before = overlay_glyph_instances.len();
+                    // A nested scope captures the run's tofu for the cache; it is noted again
+                    // into the frame's scope below.
+                    let preedit_scope = chrome_text::MissingChromeScope::enter();
                     let preedit_boxes = emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
@@ -7740,6 +7778,10 @@ impl GpuRenderer {
                         None,
                     );
                     quads_overlay.extend(preedit_boxes.iter().copied());
+                    let preedit_missing = preedit_scope.finish();
+                    for &missing in &preedit_missing {
+                        chrome_text::note_missing_chrome(missing);
+                    }
                     // The frame-end stamp check rejects and clears this cache if emission recycled any UVs.
                     self.preedit_glyph_cache = Some(PreeditGlyphCache {
                         text: text.to_string(),
@@ -7750,6 +7792,7 @@ impl GpuRenderer {
                         atlas_stamp: self.glyph_atlas_stamp(),
                         glyphs: overlay_glyph_instances[before..].to_vec(),
                         missing_boxes: preedit_boxes,
+                        missing_chrome_chars: preedit_missing,
                     });
                 }
 
@@ -7968,6 +8011,7 @@ impl GpuRenderer {
             overlay_glyphs: overlay_glyph_instances,
             field_candidates,
             missing_chars: missing_chars_this_frame,
+            missing_chrome_chars: missing_chrome_scope.finish(),
             gpu_timing,
             plan,
             receipts,
@@ -7987,6 +8031,7 @@ impl GpuRenderer {
             overlay_glyphs,
             field_candidates,
             missing_chars,
+            missing_chrome_chars,
             mut gpu_timing,
             plan,
             receipts,
@@ -8015,7 +8060,7 @@ impl GpuRenderer {
             self.finalize_growth_episodes_if_device_stopped();
             return Ok(FrameOutcome::without_receipts(outcome));
         }
-        self.finish_successful_frame(plan, missing_chars, gpu_timing);
+        self.finish_successful_frame(plan, missing_chars, missing_chrome_chars, gpu_timing);
         Ok(FrameOutcome { outcome: PresentOutcome::Presented, receipts })
     }
 
@@ -8060,6 +8105,7 @@ impl GpuRenderer {
         &mut self,
         plan: FramePlan,
         missing_chars_this_frame: Vec<char>,
+        missing_chrome_chars: Vec<char>,
         gpu_timing: Option<(Instant, Instant, Vec<(&'static str, f32)>)>,
     ) {
         let render_mode = plan.mode;
@@ -8077,6 +8123,7 @@ impl GpuRenderer {
         self.growth_episodes.present();
         self.finish_glyph_atlas_retry();
         self.last_missing_chars = missing_chars_this_frame;
+        self.last_missing_chrome_chars = missing_chrome_chars;
         self.last_frame_key = Some(plan.key);
         if self.pane_focus_flash.is_some() {
             self.request_window_redraw();

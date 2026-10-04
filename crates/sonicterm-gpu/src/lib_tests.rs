@@ -65,6 +65,15 @@ impl sonicterm_font::locator::FontLocator for RecMonoLocator {
 }
 
 pub(crate) fn fallback_stack(name: &str) -> FallbackStack {
+    fallback_stack_with_locator(name, std::sync::Arc::new(RecMonoLocator))
+}
+
+/// [`fallback_stack`] with `locator` answering fallback requests, so a test can delay or
+/// replace the face discovery publishes.
+pub(crate) fn fallback_stack_with_locator(
+    name: &str,
+    locator: std::sync::Arc<dyn sonicterm_font::locator::FontLocator + Send + Sync>,
+) -> FallbackStack {
     let directory =
         std::env::temp_dir().join(format!("sonicterm-gpu-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -78,7 +87,7 @@ pub(crate) fn fallback_stack(name: &str) -> FallbackStack {
     let stack = sonicterm_engine::FontStack::try_new_with_locator_for_test(
         "Roboto",
         vec![directory.clone()],
-        std::sync::Arc::new(RecMonoLocator),
+        locator,
         14.0,
         96,
     )

@@ -64,6 +64,71 @@ pub struct ChromeTextLayout {
     pub missing_boxes: Vec<QuadInstance>,
 }
 
+thread_local! {
+    /// Characters chrome layouts drew as tofu in the innermost open [`MissingChromeScope`];
+    /// `None` when no scope is open on this thread.
+    static MISSING_CHROME: std::cell::RefCell<Option<Vec<char>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// One frame's collection of chrome characters drawn without a glyph, the chrome counterpart of
+/// the terminal rows' missing list. While it is open, every chrome layout on this thread notes the
+/// characters it draws as tofu or drops, so call sites need no plumbing. Scopes nest: an inner
+/// scope keeps its own list and restores the enclosing one when it closes.
+#[must_use = "a scope collects only while it is held"]
+pub(crate) struct MissingChromeScope {
+    /// The enclosing scope's list, restored when this scope closes.
+    enclosing: Option<Option<Vec<char>>>,
+}
+
+impl MissingChromeScope {
+    /// Open an empty collection on this thread.
+    pub(crate) fn enter() -> Self {
+        let enclosing = MISSING_CHROME.with(|cell| cell.replace(Some(Vec::new())));
+        Self { enclosing: Some(enclosing) }
+    }
+
+    /// Close the scope and return what it collected, in drawing order.
+    pub(crate) fn finish(mut self) -> Vec<char> {
+        self.close()
+    }
+
+    /// Restore the enclosing list and take this scope's; empty after the first call.
+    fn close(&mut self) -> Vec<char> {
+        let Some(enclosing) = self.enclosing.take() else {
+            // When: `enclosing` was already taken, the scope is closed and holds nothing.
+            return Vec::new();
+        };
+        MISSING_CHROME.with(|cell| cell.replace(enclosing)).unwrap_or_default()
+    }
+}
+
+// Lifecycle: an unfinished MissingChromeScope calls close on drop: its list is discarded and
+// the enclosing one restored.
+impl Drop for MissingChromeScope {
+    fn drop(&mut self) {
+        let _discarded = self.close();
+    }
+}
+
+/// Note `missing` as drawn without a glyph when a scope is open; nothing happens otherwise.
+pub(crate) fn note_missing_chrome(missing: char) {
+    MISSING_CHROME.with(|cell| {
+        if let Some(list) = cell.borrow_mut().as_mut() {
+            // An open scope collects the character into this frame's chrome readout.
+            list.push(missing);
+        }
+    });
+}
+
+/// Note every visible character of a chrome run that could not be shaped and so drew nothing.
+/// Blanks are intentionally empty and are not missing, as on the terminal rows.
+pub(crate) fn note_unshaped_chrome(text: &str) {
+    for character in text.chars().filter(|character| !character.is_whitespace()) {
+        note_missing_chrome(character);
+    }
+}
+
 /// Opacity of a chrome tofu outline, matching the terminal grid's missing-glyph box.
 const MISSING_BOX_ALPHA: f32 = 0.55;
 /// Share of the run's font size a tofu outline stands above the baseline, as an ascent.
@@ -476,8 +541,11 @@ fn layout_with_raster_variant_impl(
             layout_prepared(&run, wt_raster, atlas, color, origin, screen, clip, raster_variant)
         }
         // A failed shaping leaves no glyph identities to key the atlas by, so the
-        // run is dropped rather than painted from guessed ids.
-        None => empty,
+        // run is dropped rather than painted from guessed ids, and reported as missing.
+        None => {
+            note_unshaped_chrome(text);
+            empty
+        }
     }
 }
 
@@ -535,12 +603,14 @@ pub fn layout_prepared(
         let Some(info) = atlas.get_or_insert(key, &mut CountingRasterizer::new(wt_raster)) else {
             // When: get_or_insert returns None the tile was not placed; the glyph is dropped
             // this frame but the pen still advances, matching the shaped advances.
+            note_missing_chrome(glyph.lead_ch);
             pen_x += advance;
             continue;
         };
         if info.missing {
             // When: info.missing marks a character no face resolved, an outline box one
             // advance wide and one ascent tall shows the gap, and the pen still advances.
+            note_missing_chrome(glyph.lead_ch);
             let width = advance.max(1.0);
             let height = (run.font_size_px * MISSING_BOX_ASCENT_RATIO).max(1.0);
             let (left, top) = (pen_x, baseline_y - height);

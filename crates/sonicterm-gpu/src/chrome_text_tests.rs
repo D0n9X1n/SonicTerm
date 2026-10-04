@@ -477,3 +477,155 @@ fn a_tofu_box_straddling_the_clip_edge_is_cut_to_it() {
         assert!(width > 0.0);
     }
 }
+
+/// Chrome tofu is reported per frame on the same terms as the terminal rows' missing list: a
+/// layout inside an open [`MissingChromeScope`] lists each character it drew as tofu, a resolved
+/// glyph or a space lists nothing, a layout with no scope open records nowhere, and a nested scope
+/// keeps its own list and restores the enclosing one when it closes.
+#[test]
+fn a_missing_chrome_scope_lists_the_tofu_its_layouts_drew() {
+    let _lock = font_fixture_lock();
+    // No scope is open: the layout still draws its box, and nothing is recorded.
+    let (outside, _) = lay_out_with_tracked_font("a\u{F0000}", None);
+    assert_eq!(outside.missing_boxes.len(), 4);
+
+    // U+F0000 is the one character no face maps on any host (U+F0001 is covered on some), so
+    // the scopes are told apart by how many times each lists it.
+    let outer = MissingChromeScope::enter();
+    let _resolved = lay_out_with_tracked_font("a b", None);
+    let _tofu = lay_out_with_tracked_font("x\u{F0000}", None);
+    let inner = MissingChromeScope::enter();
+    let _inner_tofu = lay_out_with_tracked_font("\u{F0000}", None);
+    assert_eq!(inner.finish(), vec!['\u{F0000}'], "the nested scope holds only its own tofu");
+    let _after_inner = lay_out_with_tracked_font("y\u{F0000}", None);
+    assert_eq!(
+        outer.finish(),
+        vec!['\u{F0000}', '\u{F0000}'],
+        "the enclosing list is restored without the nested scope's entry"
+    );
+}
+
+/// A chrome run that cannot be shaped draws nothing, so every visible character of it is missing,
+/// and blanks are not: the same rule the terminal rows apply to cells drawn without a tile.
+#[test]
+fn an_unshaped_chrome_run_lists_its_visible_characters() {
+    let scope = MissingChromeScope::enter();
+    note_unshaped_chrome("a b\t·");
+    assert_eq!(scope.finish(), vec!['a', 'b', '·']);
+}
+
+/// Opens once and lets every waiter through; a waiter is bounded so a failed test cannot hang.
+#[derive(Default)]
+struct Gate {
+    open: std::sync::Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+
+impl Gate {
+    fn open(&self) {
+        *self.open.lock().unwrap() = true;
+        self.changed.notify_all();
+    }
+
+    fn wait(&self) {
+        let guard = self.open.lock().unwrap();
+        let _ = self
+            .changed
+            .wait_timeout_while(guard, std::time::Duration::from_secs(30), |open| !*open)
+            .unwrap();
+    }
+}
+
+/// Answers fallback requests as the fixture's Rec Mono locator does, only once its gate opens, so
+/// the fallback face arrives after the first frame drew without it.
+struct LateLocator(std::sync::Arc<Gate>);
+
+impl sonicterm_font::locator::FontLocator for LateLocator {
+    fn load_fonts(
+        &self,
+        requested: &[config::FontAttributes],
+        loaded: &mut std::collections::HashSet<config::FontAttributes>,
+        pixel_size: u16,
+    ) -> anyhow::Result<Vec<sonicterm_font::parser::ParsedFont>> {
+        crate::lib_tests::RecMonoLocator.load_fonts(requested, loaded, pixel_size)
+    }
+
+    fn locate_fallback_for_codepoints(
+        &self,
+        codepoints: &[char],
+    ) -> anyhow::Result<Vec<sonicterm_font::parser::ParsedFont>> {
+        self.0.wait();
+        crate::lib_tests::RecMonoLocator.locate_fallback_for_codepoints(codepoints)
+    }
+}
+
+/// The footer's fallback face arrives late. The first frame draws the footer's é as tofu while no
+/// terminal row draws any, so a completion check on the terminal rows alone passes there; the
+/// chrome readout lists é and keeps the check waiting. Once the face is published and its
+/// generation applied (missing sentinels forgotten), the footer draws é and the readout is empty.
+#[test]
+fn a_late_footer_fallback_face_keeps_the_chrome_readout_waiting() {
+    let _lock = font_fixture_lock();
+    let gate = std::sync::Arc::new(Gate::default());
+    let fixture = crate::lib_tests::fallback_stack_with_locator(
+        "late-footer",
+        std::sync::Arc::new(LateLocator(std::sync::Arc::clone(&gate))),
+    );
+    // Opens the gate however the test ends, so the fallback worker never waits out its bound.
+    struct OpenOnDrop(std::sync::Arc<Gate>);
+    impl Drop for OpenOnDrop {
+        // Lifecycle: dropping `OpenOnDrop` opens the gate the fallback worker may be waiting on.
+        fn drop(&mut self) {
+            self.0.open();
+        }
+    }
+    let _open_on_drop = OpenOnDrop(std::sync::Arc::clone(&gate));
+    let body_size = 14.0;
+    let stacks = crate::core::renderer_font_views(Some(fixture.stack.clone()), body_size);
+    let footer_stack = stacks.palette_footer.expect("a footer stack");
+    let footer_size = crate::core::palette_footer_font_size(body_size);
+    let mut atlas = GlyphAtlas::new(256, 256);
+    let draw_footer = |atlas: &mut GlyphAtlas| {
+        let scope = MissingChromeScope::enter();
+        let mut rasterizer = footer_stack.clone();
+        let footer = layout_with_raster_variant(
+            &footer_stack,
+            &mut rasterizer,
+            atlas,
+            "é run",
+            ChromeColor::WHITE,
+            ChromeAttrs::default(),
+            footer_size,
+            footer_size,
+            (10.0, 30.0),
+            (400.0, 100.0),
+            None,
+            GlyphRasterVariant::PaletteFooter,
+        );
+        (footer, scope.finish())
+    };
+    let notice = footer_stack.fallback_notice();
+    let generation_before = notice.generation();
+
+    // The frame drew no terminal row, so the terminal readout of the old check is empty.
+    let terminal_missing: Vec<char> = Vec::new();
+    let (first, first_chrome) = draw_footer(&mut atlas);
+    assert!(terminal_missing.is_empty(), "the terminal-only check passes on this frame");
+    assert!(!first.missing_boxes.is_empty(), "the footer drew é as tofu");
+    assert_eq!(first_chrome, vec!['é'], "the chrome readout keeps the check waiting");
+
+    gate.open();
+    let started = std::time::Instant::now();
+    while notice.generation() == generation_before {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the late fallback face was never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Applying the generation forgets the missing sentinels, as `prepare_frame_fonts` does.
+    atlas.forget_missing();
+    let (second, second_chrome) = draw_footer(&mut atlas);
+    assert!(second.missing_boxes.is_empty(), "the footer draws é from the late face");
+    assert!(second_chrome.is_empty(), "{second_chrome:?}");
+}
