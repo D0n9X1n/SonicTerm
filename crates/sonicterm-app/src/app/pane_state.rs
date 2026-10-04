@@ -142,6 +142,9 @@ pub struct PaneState {
     pub(crate) sync_deadline_word: Arc<AtomicU64>,
     /// The parser's monotonic count of synchronized-output resets, published with `sync_word`.
     pub(crate) sync_resets: Arc<AtomicU64>,
+    /// The reset count a successful frame of this pane's window last showed; main thread only.
+    /// A published reset count above it releases the pane for one frame.
+    pub(crate) presented_sync_resets: u64,
     /// Decoded inline media images captured from terminal protocols.
     pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
     /// This pane's share of the process-wide inline-media total.
@@ -224,6 +227,7 @@ impl PaneState {
                 sync_state,
             ))),
             sync_resets: Arc::new(AtomicU64::new(sync_state.resets)),
+            presented_sync_resets: sync_state.resets,
             inline_images: Arc::new(Mutex::new(Vec::new())),
             inline_media_charge: media_pool.new_charge(),
             frame_counters: None,

@@ -116,8 +116,16 @@ pub(crate) struct WindowRedrawState {
     pub(super) link_live: Option<u64>,
     /// The generation of an accepted tick not yet spent by an admission.
     pub(super) link_permit: Option<u64>,
-    /// Set while a synchronized-output hold keeps this window's frame back; the link does not run.
-    pub(super) sync_hold: bool,
+    /// The rule that won the pending deferral; read only while `deferred` is set.
+    pub(super) deferred_rule: Option<super::frame_counters::DeferRule>,
+    /// The first `Sync` deferral of the current held stretch; the window holds at most 150 ms from it.
+    pub(super) sync_stretch_start: Option<Instant>,
+    /// A changed surface size not yet presented; it forces frames through a synchronized hold.
+    pub(super) resize_pending: bool,
+    /// A reconfigured or recreated surface not yet presented; it forces frames through a hold.
+    pub(super) surface_recovery_pending: bool,
+    /// Each visible pane's reset count read for the attempt in flight, credited on success.
+    pub(super) attempt_sync_resets: Vec<(u64, u64)>,
     /// This window's frame counters; `Some` only when its App's gate is on.
     pub(super) frame_counters: Option<Box<super::frame_counters::WindowFrameCounters>>,
     #[cfg(target_os = "macos")]
@@ -147,7 +155,11 @@ impl Default for WindowRedrawState {
             link_generation: super::display_link::new_link_generation(),
             link_live: None,
             link_permit: None,
-            sync_hold: false,
+            deferred_rule: None,
+            sync_stretch_start: None,
+            resize_pending: false,
+            surface_recovery_pending: false,
+            attempt_sync_resets: Vec::new(),
             #[cfg(target_os = "macos")]
             surface_probe_at: None,
             #[cfg(test)]
@@ -169,6 +181,16 @@ impl WindowRedrawState {
         ) {
             self.parked = false;
         }
+    }
+
+    /// Whether `cause` has a generation no attempt has settled yet.
+    pub(super) fn cause_pending(&self, cause: RedrawCause) -> bool {
+        self.pending[cause as usize] != self.observed[cause as usize]
+    }
+
+    /// Whether a synchronized-output hold keeps this window's frame back; the link does not run.
+    pub(super) fn sync_hold(&self) -> bool {
+        self.deferred && self.deferred_rule == Some(super::frame_counters::DeferRule::Sync)
     }
 
     /// Whether an input generation has not yet spent its immediate-attempt privilege.
@@ -218,11 +240,19 @@ impl WindowRedrawState {
         self.attempt_causes = None;
         self.observed[RedrawCause::Input as usize] = snapshot.0[RedrawCause::Input as usize];
         self.deferred = false;
+        self.deferred_rule = None;
         self.request_in_flight = false;
         self.timeout_pending = false;
         match outcome {
             FrameSettlement::Presented | FrameSettlement::Cached | FrameSettlement::Settled => {
                 self.observed = snapshot.0;
+                // A successful outcome ends the held stretch; a failure keeps it, so the cap holds.
+                self.sync_stretch_start = None;
+                if outcome == FrameSettlement::Presented {
+                    // Only a presented frame meets a resize or a recovered surface.
+                    self.resize_pending = false;
+                    self.surface_recovery_pending = false;
+                }
                 if matches!(outcome, FrameSettlement::Presented | FrameSettlement::Cached) {
                     self.last_present = Some(now);
                 }
@@ -238,6 +268,7 @@ impl WindowRedrawState {
                     SurfaceRetryReason::Timeout => {
                         self.timeout_pending = true;
                         self.deferred = true;
+                        self.deferred_rule = Some(super::frame_counters::DeferRule::Timeout);
                         self.store_pacing(super::display_link::PacingMode::Timer);
                     }
                     SurfaceRetryReason::Occluded => {
@@ -251,7 +282,8 @@ impl WindowRedrawState {
                     SurfaceRetryReason::Outdated
                     | SurfaceRetryReason::Suboptimal
                     | SurfaceRetryReason::SurfaceLost => {
-                        // When: `Outdated`, `Suboptimal`, or `SurfaceLost` recovered the surface, the presenter's native request owns retry.
+                        // The presenter recovered the surface and owns the retry; the next frame is forced.
+                        self.surface_recovery_pending = true;
                     }
                 }
             }
@@ -886,8 +918,6 @@ impl App {
             window.redraw.monitor_period,
         );
         let software = self.software_render_degrade;
-        // Only a synchronized-output rule holds a window; no such rule wins here, so this begin ends a hold.
-        window.redraw.sync_hold = false;
         // A stored mode decides; otherwise a Streaming deferral would store `Link` when a link is installed.
         let mode =
             window.redraw.pacing.unwrap_or(if window.display_link.source.is_some() && !software {
@@ -901,7 +931,7 @@ impl App {
         let rule = super::frame_counters::defer_rule(
             || window.redraw.timeout_pending && now < window.last_render + period,
             || window.contention_blocks_redraw(now, period, software),
-            || false,
+            || window.sync_defers(now),
             || {
                 let input_pending = window.redraw.input_pending();
                 let output_advanced = window.visible_output_advanced();
@@ -933,10 +963,16 @@ impl App {
                 None => counters.attempts += 1,
             }
         }
+        window.redraw.deferred_rule = rule;
         match rule {
             Some(super::frame_counters::DeferRule::Streaming) => window.redraw.store_pacing(mode),
+            Some(super::frame_counters::DeferRule::Sync) => {
+                // No pacing mode is stored; a stored `Link` waits for the release.
+                window.note_sync_deferral(now);
+            }
             Some(_) => window.redraw.store_pacing(super::display_link::PacingMode::Timer),
             None => {
+                window.record_attempt_sync_resets();
                 if window.redraw.pacing == Some(super::display_link::PacingMode::Link) {
                     // A link-paced admission is classified once, from the inputs the streaming check read.
                     let streaming =

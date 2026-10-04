@@ -83,7 +83,7 @@ impl WindowState {
 
     /// Whether this window may run its link and accept ticks now, apart from its pending mode.
     pub(super) fn link_eligible(&self, software: bool) -> bool {
-        !self.redraw.sync_hold && !software && self.frame_deadlines_allowed()
+        !self.redraw.sync_hold() && !software && self.frame_deadlines_allowed()
     }
 
     /// The Frame deadline of a deferred window: the timer rule's first admissible instant, raised to
@@ -91,7 +91,7 @@ impl WindowState {
     pub(super) fn frame_deadline(&self, period: Duration, software: bool) -> Instant {
         let floor = self.redraw_not_before(period, software);
         if self.redraw.pacing == Some(PacingMode::Link)
-            && !self.redraw.sync_hold
+            && !self.redraw.sync_hold()
             && !self.redraw.link_permit_valid()
         {
             floor.max(self.link_ceiling(period, software))

@@ -769,6 +769,17 @@ impl App {
                 }
             }
         };
+        // Recheck the synchronized-output hold under the guards; a held frame is abandoned unsettled.
+        let sync_states: Vec<_> =
+            guards.iter().map(|(id, parser, _)| (*id, parser.synchronized_output())).collect();
+        let now = self.dispatch_now();
+        if self.abandon_synchronized_frame(win_id, &sync_states, now) {
+            // When: `abandon_synchronized_frame` holds the frame, release the collection unsettled and unreceipted.
+            drop(guards);
+            drop(images);
+            drop(sources);
+            return;
+        }
         // One anchored viewport projection feeds both the per-pane and active-frame viewports.
         // Reconcile, then apply the previous frame's receipts under these guards, before planning.
         let frame_viewports = match self

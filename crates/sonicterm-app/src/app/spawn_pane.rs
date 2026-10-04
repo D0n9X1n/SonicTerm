@@ -157,18 +157,25 @@ pub(super) fn report_pane_exit(
 pub(in crate::app) const SYNC_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
 
 /// The epoch bits a published word carries; epochs compare within this range.
-const SYNC_EPOCH_MASK: u64 = (1 << 31) - 1;
+pub(in crate::app) const SYNC_EPOCH_MASK: u64 = (1 << 31) - 1;
 /// The deadline word keeps the epoch's low 16 bits above 48 bits of microseconds.
 const SYNC_DEADLINE_TAG_SHIFT: u32 = 48;
 
 /// Pack synchronized output as the pane publishes it: the reset count's low 32 bits, the epoch's
 /// low 31 bits, then the set bit. One word, so a reader sees a set bit, epoch and resets together.
 pub(in crate::app) fn sync_word_of(state: SyncState) -> u64 {
-    (state.resets << 32) | ((state.epoch & SYNC_EPOCH_MASK) << 1) | u64::from(state.set)
+    (published_resets(state.resets) << 32)
+        | ((state.epoch & SYNC_EPOCH_MASK) << 1)
+        | u64::from(state.set)
+}
+
+/// The part of a reset count a published word carries; compare reset counts only through it.
+pub(in crate::app) fn published_resets(resets: u64) -> u64 {
+    resets & 0xffff_ffff
 }
 
 /// Pack the deadline of `epoch` with that epoch's tag, so a reader can tell whose deadline it is.
-fn pack_sync_deadline(epoch: u64, deadline: Instant) -> u64 {
+pub(in crate::app) fn pack_sync_deadline(epoch: u64, deadline: Instant) -> u64 {
     let micros = super::sync_clock::micros_at(deadline) & ((1 << SYNC_DEADLINE_TAG_SHIFT) - 1);
     ((epoch & 0xffff) << SYNC_DEADLINE_TAG_SHIFT) | micros
 }

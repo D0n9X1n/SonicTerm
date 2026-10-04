@@ -112,6 +112,17 @@ impl App {
                 }
             }
         };
+        // Recheck the synchronized-output hold under the guards; a held frame is abandoned unsettled.
+        let sync_states: Vec<_> =
+            guards.iter().map(|(id, parser, _)| (*id, parser.synchronized_output())).collect();
+        let now = self.dispatch_now();
+        if self.abandon_synchronized_frame(win_id, &sync_states, now) {
+            // When: `abandon_synchronized_frame` holds the frame, release the collection unsettled and unreceipted.
+            drop(guards);
+            drop(images);
+            drop(sources);
+            return;
+        }
         self.refresh_target_hover_from_parsers(
             win_id,
             guards.iter().map(|(id, parser, _)| (*id, &**parser)),

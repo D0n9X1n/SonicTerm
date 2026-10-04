@@ -722,7 +722,7 @@ fn a_contention_retry_stays_timer_owned_with_a_link_installed() {
 /// A synchronized-output hold stops the link, and no tick can authorize the held frame; the stored
 /// `Link` survives as data. Released before the 20 ms ceiling, the admission defers and the link
 /// restarts at a newer generation; released after it, the admission is a fallback with no restart.
-/// `sync_hold` is set the way the synchronized-output writer sets it.
+/// The hold is the window's winning `Sync` deferral, set the way admission sets it.
 #[test]
 fn a_sync_hold_stops_the_link_and_keeps_the_mode() {
     for child_owner in [false, true] {
@@ -732,7 +732,9 @@ fn a_sync_hold_stops_the_link_and_keeps_the_mode() {
             assert!(!admit_output(&mut app, owner, at_ms(base, 1)));
             about_to_wait(&mut app, owner, at_ms(base, 1));
             let held = redraw_of(&app, owner).link_live.expect("the link runs");
-            app.windows.get_mut(&owner).unwrap().redraw.sync_hold = true;
+            let redraw = &mut app.windows.get_mut(&owner).unwrap().redraw;
+            redraw.deferred_rule = Some(crate::app::frame_counters::DeferRule::Sync);
+            assert!(redraw.sync_hold(), "{label}: a deferred window under Sync is held");
             set_fake_now(at_ms(base, 2));
             app.sync_display_links();
             assert_eq!(log.borrow().calls, vec![true, false], "{label}: the hold stops the link");
@@ -748,14 +750,14 @@ fn a_sync_hold_stops_the_link_and_keeps_the_mode() {
             assert_eq!(redraw_of(&app, owner).pacing, Some(PacingMode::Link), "{label}");
             if late {
                 assert!(admit_at(&mut app, owner, at_ms(base, 50)), "{label}: past the ceiling");
-                assert!(!redraw_of(&app, owner).sync_hold, "{label}");
+                assert!(!redraw_of(&app, owner).sync_hold(), "{label}");
                 assert_eq!(link_counts(&app, owner), (0, 0, 1), "{label}");
                 assert_eq!(redraw_of(&app, owner).pacing, None, "{label}");
                 about_to_wait(&mut app, owner, at_ms(base, 50));
                 assert_eq!(log.borrow().calls, vec![true, false], "{label}: no restart");
             } else {
                 assert!(!admit_at(&mut app, owner, at_ms(base, 17)), "{label}: before the ceiling");
-                assert!(!redraw_of(&app, owner).sync_hold, "{label}");
+                assert!(!redraw_of(&app, owner).sync_hold(), "{label}");
                 about_to_wait(&mut app, owner, at_ms(base, 17));
                 let restarted = redraw_of(&app, owner).link_live.expect("restarted");
                 assert!(restarted > held, "{label}");
