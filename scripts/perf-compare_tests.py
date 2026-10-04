@@ -6664,18 +6664,28 @@ class MemoryFreshnessTests(unittest.TestCase):
 
 
 class GridBytesPerPaneRowTests(unittest.TestCase):
-    """Each checkpoint with grid fields gets a grid-bytes-per-pane row; one without them gets none."""
+    """A checkpoint whose own tagged sample carries grid fields gets a grid-bytes-per-pane row, read through the
+    authoritative-sample rule; one without the fields gets none, and a harness without the hook reads n/a."""
 
     def test_the_row_is_the_per_pane_grid_figure_in_mebibytes(self):
         point = {"index": 0, "label": "end", "unix_s": 70.0, "footprint_file": None}
-        with_grid = perf.MemorySample(60.0, None, 1, 0, grid_visible_bytes=1048576,
-                                      grid_history_bytes=2 * 1048576, grid_alternate_bytes=1048576,
-                                      panes_sampled=2)
-        metrics = perf.run_metrics(make_outcome(result=valid_result(checkpoints=[point]), memory=[with_grid]))
+        supported = valid_result(checkpoints=[point], checkpoint_memory="supported")
+        with_grid = perf.MemorySample(60.0, None, 1, 0, checkpoint_index=0, checkpoint_label="end",
+                                      checkpoint_attempt=1, checkpoint_complete=True,
+                                      grid_visible_bytes=1048576, grid_history_bytes=2 * 1048576,
+                                      grid_alternate_bytes=1048576, panes_sampled=2)
+        metrics = perf.run_metrics(make_outcome(result=supported, memory=[with_grid]))
         self.assertEqual(metrics[("end grid bytes per pane", "MiB", "run")], 2.0)
-        without = perf.run_metrics(make_outcome(result=valid_result(checkpoints=[point]),
-                                                memory=[memory_sample(60.0)]))
+        without = perf.run_metrics(make_outcome(result=supported, memory=[tagged_sample(0, 1, True)]))
         self.assertNotIn(("end grid bytes per pane", "MiB", "run"), without)
+        # An untagged periodic sample with grid fields is never substituted for a checkpoint's own reading.
+        periodic = perf.run_metrics(make_outcome(result=valid_result(checkpoints=[point]),
+                                                 memory=[perf.MemorySample(60.0, None, 1, 0,
+                                                                           grid_visible_bytes=1048576,
+                                                                           grid_history_bytes=0,
+                                                                           grid_alternate_bytes=0,
+                                                                           panes_sampled=1)]))
+        self.assertIsInstance(periodic[("end grid bytes per pane", "MiB", "run")], perf.NotAvailable)
 
 
 class FrameTextureRowTests(unittest.TestCase):
