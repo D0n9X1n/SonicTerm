@@ -1089,6 +1089,14 @@ fn glyph_atlas_working_set() {
                 set.max_tile_dims[1],
                 set.packed_pixels
             );
+            if !set.unresolved_chars.is_empty() || !set.raster_failed.is_empty() {
+                // When: a required tile is tofu on this host, say which, apart from the row.
+                println!(
+                    "glyph_atlas_working_set_tofu platform={platform} scale={scale} fixture={name} \
+                     unresolved={:?} raster_failed={:?}",
+                    set.unresolved_chars, set.raster_failed
+                );
+            }
             let recorded = START_SIZE_INPUTS.iter().find(|row| {
                 row.platform == platform
                     && row.scale == scale

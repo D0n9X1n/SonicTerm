@@ -314,3 +314,35 @@ fn a_fallback_the_warm_up_did_not_wait_for_rejects_the_measurement() {
         "{outcome:?}"
     );
 }
+
+/// Answers every key with no raster, as a face whose glyph cannot be drawn does.
+struct NoRaster;
+
+impl sonicterm_text::glyph_atlas::Rasterizer for NoRaster {
+    fn rasterize(&mut self, _key: GlyphKey) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+        None
+    }
+}
+
+/// A resolved glyph that rasterizes to nothing is drawn by the renderer as the same tofu box, so
+/// the helper lists it as a raster failure (and a character with no face as unresolved) instead
+/// of rejecting the measurement; a required tile the atlas never placed, with no eviction to
+/// explain it, is still a rejection.
+#[test]
+fn raster_failures_are_listed_and_unplaced_tiles_are_rejected() {
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let shaped = GlyphKey::shaped('\u{1F1EF}', 2, 2687, false, false);
+    let notdef = GlyphKey::with_slot('\u{E000}', 0, false, false);
+    let _shaped_info = atlas.get_or_insert(shaped, &mut NoRaster);
+    let _notdef_info = atlas.get_or_insert(notdef, &mut NoRaster);
+    let mut accounted = Accounted::default();
+    account_tile(&atlas, shaped, &mut accounted).expect("a raster failure is listed");
+    account_tile(&atlas, notdef, &mut accounted).expect("an uncovered character is listed");
+    assert_eq!(accounted.raster_failed, HashSet::from([shaped]));
+    assert_eq!(accounted.unresolved_chars, BTreeSet::from(['\u{E000}']));
+    let never_inserted = GlyphKey::new('q', false, false);
+    assert_eq!(
+        account_tile(&atlas, never_inserted, &mut accounted),
+        Err(WorkingSetError::NotPlaced { key: never_inserted })
+    );
+}

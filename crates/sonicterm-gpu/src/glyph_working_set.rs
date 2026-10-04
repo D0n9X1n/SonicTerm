@@ -8,10 +8,11 @@
 //! a conservative superset: over-inclusion can only raise the start size.
 //!
 //! A measurement is complete or rejected. A failed warm-up, a glyph the warm-up resolved that the
-//! frame path still draws as notdef, a resolved glyph that fails to rasterize or is not placed, and
-//! a resident key without a face identity each reject it with a [`WorkingSetError`]; characters no
-//! face covers are drawn as tofu by the renderer too, so they are measured and listed in
-//! [`GlyphWorkingSet::unresolved_chars`].
+//! frame path still draws as notdef, a required tile the atlas did not place, and a resident key
+//! without a face identity each reject it with a [`WorkingSetError`]. A character no face covers,
+//! and a resolved glyph whose face rasterizes nothing, are drawn by the renderer as the same tofu
+//! box, so they are measured as it draws them and listed in [`GlyphWorkingSet::unresolved_chars`]
+//! and [`GlyphWorkingSet::raster_failed`].
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -105,6 +106,17 @@ pub struct GlyphWorkingSet {
     pub variant_sizes: Vec<(GlyphRasterVariant, f32)>,
     /// Characters no face covers: measured as the renderer draws them, as tofu, and listed here.
     pub unresolved_chars: Vec<char>,
+    /// Resolved glyphs whose face rasterized nothing: the renderer draws them as tofu too.
+    pub raster_failed: Vec<GlyphKey>,
+}
+
+/// The required tiles a measurement drew as tofu, listed rather than rejected.
+#[derive(Debug, Default)]
+struct Accounted {
+    /// Characters no face covers.
+    unresolved_chars: BTreeSet<char>,
+    /// Resolved glyphs that rasterized to nothing.
+    raster_failed: HashSet<GlyphKey>,
 }
 
 /// Why a working-set measurement is incomplete, so it is rejected rather than classified.
@@ -144,11 +156,6 @@ pub enum WorkingSetError {
         /// The cluster's lead character.
         character: char,
     },
-    /// A resolved glyph rasterized to nothing: the atlas cached it as missing.
-    RasterFailed {
-        /// The glyph's key.
-        key: GlyphKey,
-    },
     /// The atlas did not place a required tile and evicted nothing to explain it.
     NotPlaced {
         /// The tile's key.
@@ -178,7 +185,6 @@ impl std::fmt::Display for WorkingSetError {
                 "{character:?} in {variant:?} (bold {bold}, italic {italic}) resolved in the \
                  warm-up but the frame path drew notdef"
             ),
-            Self::RasterFailed { key } => write!(formatter, "{key:?} rasterized to nothing"),
             Self::NotPlaced { key } => write!(formatter, "{key:?} was not placed"),
             Self::UnresolvedIdentity { keys } => {
                 write!(formatter, "resident keys without a face identity: {keys:?}")
@@ -292,7 +298,7 @@ fn measure_with_stacks(
         ));
     }
     let mut variant_sizes = Vec::new();
-    let mut unresolved_chars = BTreeSet::new();
+    let mut accounted = Accounted::default();
     for (stack, point_size, variant, text) in surfaces {
         variant_sizes.push((variant, point_size));
         let raster_px = point_size * px_per_pt;
@@ -332,7 +338,7 @@ fn measure_with_stacks(
                         character,
                     });
                 }
-                account_tile(&atlas, key, &mut unresolved_chars)?;
+                account_tile(&atlas, key, &mut accounted)?;
             }
         }
     }
@@ -343,7 +349,7 @@ fn measure_with_stacks(
             let key = GlyphKey::new(character, bold, italic);
             // Counted like every insertion; outside a frame's counting scope this records nothing.
             let _info = atlas.get_or_insert(key, &mut CountingRasterizer::new(&mut body_raster));
-            account_tile(&atlas, key, &mut unresolved_chars)?;
+            account_tile(&atlas, key, &mut accounted)?;
         }
     }
     let tile_keys = atlas.resident_tile_keys();
@@ -362,7 +368,8 @@ fn measure_with_stacks(
         return Err(WorkingSetError::UnresolvedIdentity { keys: unidentified });
     }
     Ok(GlyphWorkingSet {
-        unresolved_chars: unresolved_chars.into_iter().collect(),
+        unresolved_chars: accounted.unresolved_chars.into_iter().collect(),
+        raster_failed: accounted.raster_failed.into_iter().collect(),
         tile_identities,
         fit_outcome: atlas.fit_outcome(),
         max_tile_dims: atlas.max_tile_dims(),
@@ -376,20 +383,21 @@ fn measure_with_stacks(
     })
 }
 
-/// Check that `key`, which a layout or the fast path required, is resident: a missing tile is
-/// tofu for a character no face covers (listed in `unresolved_chars`) unless the key named a real
-/// glyph, which then failed to rasterize; an absent tile is only allowed once the atlas evicted.
+/// Check that `key`, which a layout or the fast path required, is resident. A missing tile is the
+/// renderer's tofu: a real glyph id that rasterized nothing is listed in `raster_failed`, a notdef
+/// key in `unresolved_chars`. An absent tile is only allowed once the atlas evicted.
 fn account_tile(
     atlas: &GlyphAtlas,
     key: GlyphKey,
-    unresolved_chars: &mut BTreeSet<char>,
+    accounted: &mut Accounted,
 ) -> Result<(), WorkingSetError> {
     match atlas.get(key) {
         Some(info) if info.missing && key.glyph_id != 0 => {
-            Err(WorkingSetError::RasterFailed { key })
+            accounted.raster_failed.insert(key);
+            Ok(())
         }
         Some(info) if info.missing => {
-            unresolved_chars.insert(key.ch);
+            accounted.unresolved_chars.insert(key.ch);
             Ok(())
         }
         Some(_) => Ok(()),
