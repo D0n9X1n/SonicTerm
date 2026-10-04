@@ -1719,7 +1719,9 @@ fn partial_counters_join_the_renderer_record_after_full_frames() {
     stats.row_cells_hashed = 400;
     stats.row_cache_invalidate_visits = 3;
     let record = WindowFrameCounters::default().record(Some(stats), 0);
-    for (name, value) in [("partial_frames", 5), ("partial_fallbacks", 1), ("row_cells_hashed", 400)] {
+    for (name, value) in
+        [("partial_frames", 5), ("partial_fallbacks", 1), ("row_cells_hashed", 400)]
+    {
         assert_eq!(record.count(name), Some(value), "{name}");
     }
     let fields = record.line_fields();

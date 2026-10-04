@@ -1085,9 +1085,8 @@ fn a_suppressed_window_keeps_its_pending_set_until_its_next_collection() {
 fn a_rows_receipt_keeps_the_dirty_generation_and_a_mismatch_keeps_every_bit() {
     for child in [false, true] {
         let (mut app, window, left, right, _) = fixture(child, false);
-        let generation = |app: &App| {
-            app.windows[&window].panes[&right].parser.lock().grid().dirty_generation()
-        };
+        let generation =
+            |app: &App| app.windows[&window].panes[&right].parser.lock().grid().dirty_generation();
         counted_and_dirty(&mut app, window, &[left, right]);
         let rows = sonicterm_render_model::AckRows::Rows([1].into_iter().collect());
         present_receipts(&mut app, window, child, rows.clone());

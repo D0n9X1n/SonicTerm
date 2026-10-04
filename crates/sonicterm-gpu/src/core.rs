@@ -5550,7 +5550,7 @@ impl GpuRenderer {
             Assembled::NoPanes => PresentOutcome::Skipped(SkipReason::NoPanes),
             Assembled::Unavailable => self.rendering_unavailable(),
             Assembled::PartialFallback => {
-                // When: a forced-Full pass reported a fallback, which force_full makes impossible;
+                // Only a forced-Full pass reaches here, and force_full makes a fallback impossible;
                 // present nothing and plan the next frame from scratch rather than trust the key.
                 self.last_frame_key = None;
                 self.request_window_redraw();
@@ -5889,7 +5889,7 @@ impl GpuRenderer {
                         pane.grid.rows,
                     )
                 } else {
-                    // When: no partial plan is possible, the planner needs no record.
+                    // When: `partial_possible` is false, the plan cannot be partial and needs no record.
                     Vec::new()
                 },
             }),
@@ -8317,7 +8317,7 @@ impl GpuRenderer {
         plan.widen_for_recolor(self.last_recolor, frame_recolor);
         plan.widen_for_tab_ink(self.last_tab_ink, tab_ink);
         if plan.partial_reaches_unemitted_ink() {
-            // When: the final damage reaches ink of a row this partial frame skipped; reassemble Full.
+            // When: `partial_reaches_unemitted_ink` holds, the scissor would erase a skipped row's ink.
             return Ok(Assembled::PartialFallback);
         }
         // Receipts are read under the same guards the plan was built from; they carry no borrow.

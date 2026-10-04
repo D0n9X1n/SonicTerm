@@ -79,7 +79,7 @@ impl RowInkTable {
                     Some((pending_key, merged))
                 }
                 other => {
-                    // When: `key` starts a new slot, the previous slot's merged record is complete.
+                    // A new key starts a new slot, so the previous slot's merged record is complete.
                     if let Some((done_key, done)) = other {
                         self.committed.insert(done_key, done);
                     }
@@ -190,7 +190,7 @@ pub(crate) fn union_non_empty(left: PixelRect, right: PixelRect) -> PixelRect {
         // When: `left` is empty, it contributes no area and its origin is meaningless.
         right
     } else {
-        // When: both have area, the record grows to their bounding rectangle.
+        // When: neither `left` nor `right` is_empty, the record grows to their bounding rectangle.
         left.union(right)
     }
 }
@@ -208,12 +208,12 @@ impl InkEdges {
     /// Add `(left, top, width, height)` in surface pixels.
     pub(crate) fn add_px(&mut self, (left, top, width, height): (f32, f32, f32, f32)) {
         if !(left.is_finite() && top.is_finite() && width.is_finite() && height.is_finite()) {
-            // When: any component is non-finite, `min`/`max` would drop it, so the row is unbounded.
+            // When: `is_finite` fails for `left`, `top`, `width` or `height`, the row is unbounded.
             self.unbounded = true;
             return;
         }
         if width <= 0.0 || height <= 0.0 {
-            // When: the rectangle has no area, it draws nothing.
+            // When: `width` or `height` is not positive, the rectangle draws nothing.
             return;
         }
         let added = [left, top, left + width, top + height];
@@ -225,7 +225,7 @@ impl InkEdges {
     /// The outward-rounded rectangle; the whole `surface` when unbounded, empty when nothing drew.
     pub(crate) fn to_rect(self, surface: PixelRect) -> PixelRect {
         if self.unbounded {
-            // When: a primitive's extent was non-finite, the surface bounds every pixel it can touch.
+            // When: `unbounded` is set, the surface bounds every pixel a non-finite primitive touches.
             return surface;
         }
         self.edges.map_or(PixelRect { x: 0, y: 0, w: 0, h: 0 }, |[left, top, right, bottom]| {

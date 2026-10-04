@@ -11,7 +11,8 @@ the production glyph path.
 - `atlas_lifecycle.rs` - private atlas reset, promotion/demotion, gated upload rebuild and retry settlement.
 - `device_errors.rs` - per-device wgpu error and loss state, the GPU-work gate,
   the frame-outcome decision, and the test fault kinds.
-- `frame_plan.rs` - owned metadata-only key, mode, damage, clips, viewport slots, and revision expectations; damage is classified per changed identity field.
+- `frame_plan.rs` - owned metadata-only key, mode, damage, clips, viewport slots, and revision expectations; damage is classified per changed identity field; `Partial` mode and per-pane emitted rows.
+- `row_ink.rs` - per-row ink records of the presented frame, valid only for the absolute row and content stamp they were drawn from; a partial plan emits by them.
 - `present.rs` - the presentation seam: the wgpu and Windows GDI presenters and the typed `PresentOutcome`.
 - `software_frame.rs` - platform-neutral CPU composition and flat sibling pixel tests.
 - `software_windows.rs` - Windows-only HWND/HDC presentation of a validated borrowed frame.
