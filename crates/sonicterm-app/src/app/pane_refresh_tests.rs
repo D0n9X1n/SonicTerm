@@ -646,3 +646,32 @@ fn unchanged_interior_wrap_marks_keep_a_wrapped_selection_copyable() {
         assert!(app.windows.get(&window).unwrap().selection.is_some());
     }
 }
+
+/// The IME area published from a cursor copied before the render call is today's: the pane origin
+/// plus the copied row and column in cells, one cell in size. Reading the held grid gives the same.
+#[test]
+fn a_copied_cursor_publishes_todays_ime_area() {
+    let mut grid = sonicterm_grid::grid::Grid::new(20, 6);
+    grid.goto(3, 7);
+    let copied = (grid.cursor.row, grid.cursor.col);
+    let rect = sonicterm_ui::pane::Rect::new(10.0, 20.0, 200.0, 120.0);
+    let publish = |cursor: (u16, u16)| {
+        let mut throttle = sonicterm_ui::ime::ImeCursorThrottle::new();
+        let mut published = None;
+        update_terminal_ime_cursor_area(
+            &mut throttle,
+            (7, rect),
+            cursor,
+            (8.0, 16.0),
+            (0.0, 0.0),
+            |position, size| published = Some((position, size)),
+        );
+        published
+    };
+    let expected = Some((
+        winit::dpi::PhysicalPosition::new(10 + 7 * 8, 20 + 3 * 16),
+        winit::dpi::PhysicalSize::new(8, 16),
+    ));
+    assert_eq!(publish(copied), expected);
+    assert_eq!(publish((grid.cursor.row, grid.cursor.col)), expected);
+}

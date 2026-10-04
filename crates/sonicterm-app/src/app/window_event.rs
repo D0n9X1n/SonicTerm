@@ -1120,12 +1120,9 @@ impl App {
                 }
             }
         }
-        if !presented_receipts.is_empty() {
+        if let Some(window) = self.main_mut() {
             // A presented frame's receipts replace the pending set emptied at collection.
-            let tickets = sources.bind(presented_receipts);
-            if let Some(window) = self.main_mut() {
-                window.pending_receipts = tickets;
-            }
+            sources.store_presented(&mut window.pending_receipts, presented_receipts);
         }
         if let (Some(snapshot), Some((outcome, at))) = (frame_snapshot.as_ref(), frame_completion) {
             self.finish_window_redraw(win_id, snapshot, outcome, at);

@@ -66,12 +66,15 @@ fn recovery_marker_proof_is_bound_to_each_present_callback() {
     assert!(observe.contains("PresentOutcome::Presented"));
     assert!(observe.contains("proof.window == window"));
     assert!(observe.contains("mark.pane == proof.pane"));
-    assert!(observe.contains("mark.marker_rows > proof.marker_rows && mark.visible"));
+    assert!(observe.contains("mark_proves(mark, proof.marker_rows)"));
     // The grid reads live in the sample, taken while the guards are held.
     let sample = source.split_once("pub(super) fn marker_sample<").unwrap().1;
     let sample = sample.split_once("pub(super) fn observe_frame(").unwrap().0;
-    assert!(sample.contains("grid_marker_rows(grid, marker)"));
-    assert!(sample.contains("visible_marker(grid, viewport_top_abs, marker)"));
+    assert!(sample.contains("mark_of(pane, grid, viewport_top_abs, marker)"));
+    let mark = source.split_once("pub(in crate::app) fn mark_of(").unwrap().1;
+    let mark = mark.split_once("\n}\n").unwrap().0;
+    assert!(mark.contains("grid_marker_rows(grid, marker)"));
+    assert!(mark.contains("visible_marker(grid, viewport_top_abs, marker)"));
     assert!(!observe.split_once("pub(super) fn observe_device_event").unwrap().0.contains("grid"));
     assert!(observe
         .contains("accepts_proof_generation(self.stage, self.original_generation, generation)"));
@@ -172,4 +175,24 @@ fn native_recovery_smoke_runs_after_the_production_recovery_service() {
     let smoke = wait.find("self.drive_gpu_recovery_smoke(event_loop, Instant::now())").unwrap();
     assert!(production < warm && warm < smoke);
     assert!(wait.contains("self.gpu_recovery_smoke_deadline()"));
+}
+
+/// Marker facts copied from an unchanged grid agree with reading the grid directly, and the verdict
+/// is the drawn frame's: after the grid is rewritten its own facts no longer prove the marker, while
+/// the facts copied for the drawn frame still do.
+#[test]
+fn a_marker_sample_agrees_with_the_grid_and_keeps_the_drawn_frames_verdict() {
+    let mut parser = sonicterm_vt::vt::Parser::new(sonicterm_grid::grid::Grid::new(20, 3));
+    drop(parser.advance(b"marker one"));
+    let drawn = mark_of(7, parser.grid(), None, "marker");
+    let read = RecoveryMark {
+        pane: 7,
+        marker_rows: grid_marker_rows(parser.grid(), "marker"),
+        visible: visible_marker(parser.grid(), None, "marker"),
+    };
+    assert_eq!(drawn, read);
+    assert!(mark_proves(&drawn, 0));
+    drop(parser.advance(b"\x1b[2J\x1b[3J\x1b[H"));
+    assert!(!mark_proves(&mark_of(7, parser.grid(), None, "marker"), 0), "the rewrite hides it");
+    assert!(mark_proves(&drawn, 0), "the drawn frame's verdict stands");
 }

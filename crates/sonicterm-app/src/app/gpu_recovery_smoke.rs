@@ -102,11 +102,7 @@ impl RecoveryProbe {
             .filter(|(pane, _, _)| {
                 self.panes.iter().any(|proof| proof.window == window && proof.pane == *pane)
             })
-            .map(|(pane, grid, viewport_top_abs)| RecoveryMark {
-                pane,
-                marker_rows: grid_marker_rows(grid, marker),
-                visible: visible_marker(grid, viewport_top_abs, marker),
-            })
+            .map(|(pane, grid, viewport_top_abs)| mark_of(pane, grid, viewport_top_abs, marker))
             .collect();
         RecoveryMarkerSample { marks }
     }
@@ -127,7 +123,7 @@ impl RecoveryProbe {
         }
         for proof in self.panes.iter_mut().filter(|proof| proof.window == window) {
             if let Some(mark) = sample.marks.iter().find(|mark| mark.pane == proof.pane) {
-                if mark.marker_rows > proof.marker_rows && mark.visible {
+                if mark_proves(mark, proof.marker_rows) {
                     proof.presented_generation = Some(generation);
                 }
             }
@@ -166,6 +162,25 @@ fn visible_marker(
     (top..top + u64::from(grid.rows))
         .filter_map(|row| grid.row_at_abs(row))
         .any(|row| row.iter().map(|cell| cell.ch).collect::<String>().contains(marker))
+}
+
+/// One pane's marker facts, read from its grid while the frame's guard is held.
+pub(in crate::app) fn mark_of(
+    pane: u64,
+    grid: &sonicterm_grid::grid::Grid,
+    viewport_top_abs: Option<u64>,
+    marker: &str,
+) -> RecoveryMark {
+    RecoveryMark {
+        pane,
+        marker_rows: grid_marker_rows(grid, marker),
+        visible: visible_marker(grid, viewport_top_abs, marker),
+    }
+}
+
+/// Whether a frame whose marker facts are `mark` shows a marker newer than `baseline_rows`.
+fn mark_proves(mark: &RecoveryMark, baseline_rows: usize) -> bool {
+    mark.marker_rows > baseline_rows && mark.visible
 }
 
 impl App {

@@ -271,6 +271,11 @@ impl GpuRenderer {
         layers: &FrameLayers<'_>,
         timing: &mut FrameTiming,
     ) -> anyhow::Result<PresentOutcome> {
+        // A test hook runs first; when it asks, the device stops here, as a loss during present would.
+        let stop = self.present_hook.as_mut().is_some_and(|hook| hook());
+        if stop {
+            self.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
+        }
         #[cfg(target_os = "windows")]
         if crate::frame_stats::presents_software(self.software_render_degrade) {
             // When: `software_render_degrade` on Windows — frames reach the

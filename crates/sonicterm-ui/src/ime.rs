@@ -46,6 +46,12 @@ impl ImeCursorThrottle {
         true
     }
 
+    /// The last area reported to the native IME, if any.
+    #[must_use]
+    pub fn last(&self) -> Option<ImeCursorArea> {
+        self.last
+    }
+
     /// Forget the last terminal anchor after native focus or an overlay changes the text-input owner.
     pub fn reset(&mut self) {
         self.last = None;

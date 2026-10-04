@@ -279,6 +279,16 @@ impl VisibleFrameSources {
             .collect()
     }
 
+    /// Store a frame's receipts as the window's pending set. Receipts are non-empty only for a
+    /// presented frame, which replaces the set; any other outcome leaves the set unchanged.
+    pub(super) fn store_presented(&self, pending: &mut Vec<AckTicket>, receipts: Vec<AckReceipt>) {
+        if receipts.is_empty() {
+            // When: `receipts` is empty the frame did not present, so the pending set stays as it was.
+            return;
+        }
+        *pending = self.bind(receipts);
+    }
+
     /// Reconcile the viewports, then, only when that succeeds, apply `window`'s pending receipts to
     /// the held grids and empty the set. A failed reconciliation returns before any receipt is
     /// touched, so the set and every grid's dirt stay for the next successful collection.

@@ -298,10 +298,8 @@ impl App {
                 if let Some(recovery) = self.gpu_recovery.as_mut() {
                     recovery.observe_frame(r.device_generation(), &outcome, Instant::now());
                 }
-                if !receipts.is_empty() {
-                    // A presented frame's receipts replace the pending set emptied at collection.
-                    child.pending_receipts = sources.bind(receipts);
-                }
+                // A presented frame's receipts replace the pending set emptied at collection.
+                sources.store_presented(&mut child.pending_receipts, receipts);
                 if let (Some(smoke), Some(sample)) =
                     (self.runtime_smoke.as_mut(), recovery_sample.as_ref())
                 {

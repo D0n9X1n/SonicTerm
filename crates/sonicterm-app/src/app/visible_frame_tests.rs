@@ -919,7 +919,7 @@ fn both_adapters_release_their_guards_through_the_one_call() {
         let collect = source.find("sources.try_collect(").unwrap();
         let reconcile = source.find("sources.reconcile_and_apply_receipts(").unwrap();
         let call = source.find("r.render_releasing(").unwrap();
-        let store = source.find("pending_receipts = ").unwrap();
+        let store = source.find("sources.store_presented(").unwrap();
         assert!(collect < reconcile && reconcile < call && call < store, "{name} order");
         // The match's error arm ends at its first `return;`; past it only the successful path remains.
         let unavailable =
@@ -965,6 +965,97 @@ fn both_adapters_release_their_guards_through_the_one_call() {
                     path.display()
                 );
             }
+        }
+    }
+}
+
+/// A frame that did not present returns no receipts, and storing them leaves the window's pending
+/// set exactly as it was; a presented frame's receipts replace the set.
+#[test]
+fn a_frame_that_did_not_present_leaves_the_pending_set_unchanged() {
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        counted_and_dirty(&mut app, window, &[left, right]);
+        present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+        let sources = sources(&mut app, window, child).ok().unwrap();
+        let state = app.windows.get_mut(&window).unwrap();
+        let receipts = |state: &WindowState| -> Vec<AckReceipt> {
+            state.pending_receipts.iter().map(|ticket| ticket.receipt.clone()).collect()
+        };
+        let before = receipts(state);
+        assert_eq!(before.len(), 2);
+        sources.store_presented(&mut state.pending_receipts, Vec::new());
+        assert_eq!(receipts(state), before, "no receipts leave the set unchanged");
+        sources.store_presented(&mut state.pending_receipts, vec![before[0].clone()]);
+        assert_eq!(receipts(state), [before[0].clone()], "a presented frame replaces the set");
+    }
+}
+
+/// Suppress or restore `window` the way production does: hide or show it, park or unpark its
+/// redraw, or record or clear a stopped device generation.
+fn suppress(app: &mut App, window: WindowId, child: bool, mode: &str, suppressed: bool) {
+    match (mode, child) {
+        ("hide", false) if suppressed => app.hide_main_window(),
+        ("hide", false) => app.show_main_window(),
+        ("hide", true) => app.windows.get_mut(&window).unwrap().hidden = suppressed,
+        ("park", _) => app.windows.get_mut(&window).unwrap().redraw.parked = suppressed,
+        _ => {
+            app.windows.get_mut(&window).unwrap().redraw.stopped_generation =
+                suppressed.then_some(1)
+        }
+    }
+}
+
+/// Hidden, parked and stopped windows make no frame attempt, so a presented frame's receipts and
+/// every pane's dirt wait. On show, unpark or recovery the next successful collection applies the
+/// set: matching receipts clear their dirt, and after recovery marks every pane dirty they are
+/// dropped with the dirt kept. Closing the window drops the set with its state.
+#[test]
+fn a_suppressed_window_keeps_its_pending_set_until_its_next_collection() {
+    for child in [false, true] {
+        for mode in ["hide", "park", "stop"] {
+            let (mut app, window, left, right, _) = fixture(child, false);
+            counted_and_dirty(&mut app, window, &[left, right]);
+            present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+            // Pacing would allow a frame now, so only the suppression can refuse it.
+            let paced = |app: &mut App| {
+                app.windows.get_mut(&window).unwrap().last_render =
+                    Instant::now() - Duration::from_secs(1);
+            };
+            suppress(&mut app, window, child, mode, true);
+            paced(&mut app);
+            assert!(!app.begin_window_redraw(window, Instant::now()), "{mode}: no frame attempt");
+            assert_eq!(app.windows[&window].pending_receipts.len(), 2, "{mode} keeps the set");
+            assert_eq!(
+                dirty(&app, window, left),
+                all_rows(&app, window, left),
+                "{mode} keeps dirt"
+            );
+            suppress(&mut app, window, child, mode, false);
+            paced(&mut app);
+            assert!(
+                app.begin_window_redraw(window, Instant::now()),
+                "{mode}: restored, it attempts"
+            );
+            if mode == "stop" {
+                // Recovery marks every pane dirty, as production does after a device rebuild.
+                crate::app::pane_refresh::mark_all_panes_dirty(&app.windows[&window].panes);
+            }
+            collect_next(&mut app, window, child).unwrap();
+            assert!(app.windows[&window].pending_receipts.is_empty(), "{mode}: the set is applied");
+            if mode == "stop" {
+                assert_eq!(dirty(&app, window, left), all_rows(&app, window, left));
+                assert_eq!(dropped(&app, window), 2, "changed receipts are dropped");
+            } else {
+                assert!(
+                    dirty(&app, window, left).is_empty() && dirty(&app, window, right).is_empty()
+                );
+            }
+            present_receipts(&mut app, window, child, sonicterm_render_model::AckRows::All);
+            let parser = Arc::clone(&app.windows[&window].panes[&left].parser);
+            let tickets_and_others = Arc::weak_count(&parser);
+            drop(app.windows.remove(&window));
+            assert!(Arc::weak_count(&parser) < tickets_and_others, "closing drops the tickets");
         }
     }
 }

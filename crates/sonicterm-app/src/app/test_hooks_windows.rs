@@ -315,6 +315,61 @@ impl App {
         true
     }
 
+    /// Test seam: run `hook` at the start of each of a window's presentations; returning true
+    /// stops its device there. `false` when the window has no renderer.
+    #[doc(hidden)]
+    pub fn __test_set_window_present_hook(
+        &mut self,
+        id: WindowId,
+        hook: Option<Box<dyn FnMut() -> bool + Send>>,
+    ) -> bool {
+        let Some(renderer) = self.windows.get_mut(&id).and_then(|state| state.renderer.as_mut())
+        else {
+            // When: no `renderer` is attached to `id`, there is no presentation to hook.
+            return false;
+        };
+        renderer.__set_present_hook(hook);
+        true
+    }
+
+    /// Test seam: how many receipts wait in a window's pending set.
+    #[doc(hidden)]
+    pub fn __test_window_pending_receipts(&self, id: WindowId) -> Option<usize> {
+        Some(self.windows.get(&id)?.pending_receipts.len())
+    }
+
+    /// Test seam: the frames a window's renderer has presented successfully.
+    #[doc(hidden)]
+    pub fn __test_window_successful_frames(&self, id: WindowId) -> Option<u64> {
+        Some(self.windows.get(&id)?.renderer.as_ref()?.successful_frame_count())
+    }
+
+    /// Test seam: the terminal IME area a window last published, as position and size.
+    #[doc(hidden)]
+    pub fn __test_window_ime_area(&self, id: WindowId) -> Option<((i32, i32), (u32, u32))> {
+        let area = self.windows.get(&id)?.ime_cursor_throttle.last()?;
+        Some((area.position, area.size))
+    }
+
+    /// Test seam: the dirty rows of a pane's grid in a window.
+    #[doc(hidden)]
+    pub fn __test_window_pane_dirty_rows(&self, id: WindowId, pane_id: u64) -> Option<Vec<usize>> {
+        let pane = self.windows.get(&id)?.panes.get(&pane_id)?;
+        Some(pane.parser.lock().grid().dirty_rows().collect())
+    }
+
+    /// Test seam: stop a window's device outside any frame, as a loss between frames would.
+    #[doc(hidden)]
+    pub fn __test_stop_window_device(&mut self, id: WindowId) -> bool {
+        let Some(renderer) = self.windows.get_mut(&id).and_then(|state| state.renderer.as_mut())
+        else {
+            // When: no `renderer` is attached to `id`, there is no device to stop.
+            return false;
+        };
+        renderer.__inject_gpu_fault(sonicterm_gpu::device_errors::GpuFaultKind::DestroyDevice);
+        true
+    }
+
     /// Test seam: the characters a window's last drawn frame showed as tofu, so a test can
     /// redraw until non-blocking font fallback has resolved the ones it inspects.
     #[doc(hidden)]

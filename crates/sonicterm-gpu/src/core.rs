@@ -1988,6 +1988,8 @@ pub struct GpuRenderer {
     successful_frame_count: u64,
     /// This renderer's statistics when it counts; set once by its App, before any frame.
     frame_sink: Option<crate::frame_stats::FrameStatsSink>,
+    /// Test hook run at the start of each presentation; returning true stops the device there.
+    present_hook: Option<Box<dyn FnMut() -> bool + Send>>,
     #[cfg(target_os = "windows")]
     software_frame: Option<crate::software_frame::SoftwareFrame>,
     /// Window label used in renderer-internal timing logs.
@@ -2896,6 +2898,7 @@ impl GpuRenderer {
             skipped_frames: 0,
             successful_frame_count: 0,
             frame_sink: None,
+            present_hook: None,
             #[cfg(target_os = "windows")]
             software_frame: None,
             render_timing_label: role,
@@ -3724,6 +3727,13 @@ impl GpuRenderer {
     /// Cell width and height in raster pixels, matching rendered pane content rectangles.
     pub fn cell_size(&self) -> (f32, f32) {
         (self.cell_w, self.cell_h)
+    }
+
+    /// Test hook: run `hook` at the start of every presentation, after the frame's source was
+    /// released; when it returns true the device is stopped there, as a loss during present would.
+    #[doc(hidden)]
+    pub fn __set_present_hook(&mut self, hook: Option<Box<dyn FnMut() -> bool + Send>>) {
+        self.present_hook = hook;
     }
 
     /// Collect frame statistics from now on. The App calls this once, before the renderer draws.
