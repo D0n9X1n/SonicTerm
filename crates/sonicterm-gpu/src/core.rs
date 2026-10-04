@@ -1859,6 +1859,9 @@ pub struct GpuRenderer {
     /// scrolled off and back, and re-decode it each time, so the count gates
     /// demotion behind a sustained absence.
     frames_without_inline_media: u32,
+    /// Set when assembly resized the CPU image atlas: the GPU mirror is rebuilt after the frame's
+    /// source is released, so no device resource is created while parser guards are held.
+    image_upload_rebuild_pending: bool,
     /// When the window last assembled a frame without renderable inline media after one with it, or
     /// `None` while media is visible. The interval release counts [`IMAGE_ATLAS_IDLE_INTERVAL`] from it.
     inline_media_absent_since: Option<Instant>,
@@ -2846,6 +2849,7 @@ impl GpuRenderer {
             image_upload,
             retained_inline_media_bytes: 0,
             frames_without_inline_media: 0,
+            image_upload_rebuild_pending: false,
             inline_media_absent_since: None,
             glyph_atlas_retry_without_eviction: false,
             font_family: font_family.to_string(),
@@ -4893,6 +4897,7 @@ impl GpuRenderer {
             )
         });
         // The source is gone here: every arm below runs with no parser guard held.
+        self.flush_image_upload_rebuild();
         let assembled = match assembled {
             Ok(assembled) => assembled,
             Err(error) => {
