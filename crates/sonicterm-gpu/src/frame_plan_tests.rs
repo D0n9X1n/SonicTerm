@@ -1437,39 +1437,65 @@ fn dirty_slot_damage_allocates_no_vector_per_slot() {
 }
 
 /// Tab-title ink can reach above the padded tab band: a title glyph drawn at y=100..180 over a
-/// band starting at y=140. A retitle or focus change widens the damage by the previous and the
-/// current title ink, so y=100 is repainted; changed ink with no class change adds both sides;
-/// unchanged ink with no class adds nothing; unknown ink damages the whole surface.
+/// band starting at y=140. Each case passes only through the widening it names: a focus change
+/// with no drawn cursor and identical tall ink, a tab color change (it reaches the key through
+/// `tab_hash`) with identical tall ink, and changed ink under a dirty-row frame with no class,
+/// whose damage is exactly the row strip and both sides' ink. Unchanged ink with no class adds
+/// nothing, and unknown ink damages the whole surface.
 #[test]
 fn tab_title_ink_above_the_band_is_damaged_on_a_tab_band_or_focus_change() {
     let surface = PixelRect { x: 0, y: 0, w: 240, h: 160 };
     let tall = RecolorBounds::Rect(PixelRect { x: 20, y: 100, w: 10, h: 80 });
-    let short = RecolorBounds::Rect(PixelRect { x: 20, y: 142, w: 10, h: 12 });
-    let mut retitled = facts(false);
-    retitled.window.tab_hash = 1;
-    let mut plan = transition(facts(false), retitled, live_pane(7, 1));
+    let short_rect = PixelRect { x: 20, y: 142, w: 10, h: 12 };
+    let short = RecolorBounds::Rect(short_rect);
+    // The tall ink clipped to the 160 px surface, unioned with the full-width band.
+    let band_with_tall = PixelRect { x: 0, y: 100, w: 240, h: 60 };
+
+    // Focus with no drawn cursor: the band alone is planned, and only the focus widening adds
+    // the unchanged tall ink above it.
+    let focused = FrameFacts {
+        window: WindowIdentity { window_focused: true, ..facts(false).window },
+        ..facts(false)
+    };
+    let unfocused = FrameFacts {
+        window: WindowIdentity { window_focused: false, ..focused.window.clone() },
+        ..focused.clone()
+    };
+    let mut plan = transition(focused, unfocused, live_pane(7, 1));
+    assert!(plan.change.focus && !plan.change.cursor);
     assert_eq!(plan.damage, TAB_BAND);
+    plan.widen_for_tab_ink(tall, tall);
+    assert_eq!(plan.damage, band_with_tall, "focus repaints the unchanged title ink");
+
+    // A tab color change keeps the title's ink where it was; the tab-band widening repaints it.
+    let colored = |tab_hash| FrameFacts {
+        window: WindowIdentity { tab_hash, ..facts(false).window },
+        ..facts(false)
+    };
+    let mut plan = transition(colored(1), colored(2), live_pane(7, 1));
+    assert!(plan.change.tab_band);
+    assert_eq!(plan.damage, TAB_BAND);
+    plan.widen_for_tab_ink(tall, tall);
+    assert_eq!(plan.damage, band_with_tall, "a recolored title repaints its unchanged ink");
+
+    // Changed ink with no class: a revision with a dirty row whose strip misses the overhang.
+    let first = FramePlan::build(facts(false), [live_pane(7, 1)], None);
+    let dirty_frame = || {
+        let dirty = PaneMetadata { dirty_rows: vec![3], ..live_pane(7, 2) };
+        FramePlan::build(facts(false), [dirty], Some(&first.key))
+    };
+    let mut unchanged_ink = dirty_frame();
+    assert_eq!(unchanged_ink.mode, RenderMode::Full);
+    assert_eq!(unchanged_ink.change, ChangeClass::default(), "no narrow or full class is set");
+    assert_eq!(unchanged_ink.damage, row_rect(3));
+    unchanged_ink.widen_for_tab_ink(short, short);
+    assert_eq!(unchanged_ink.damage, row_rect(3), "unchanged ink with no class adds nothing");
+    let mut plan = dirty_frame();
     plan.widen_for_tab_ink(tall, short);
-    assert_eq!(plan.damage, PixelRect { x: 0, y: 100, w: 240, h: 60 });
+    let tall_clipped = PixelRect { x: 20, y: 100, w: 10, h: 60 };
+    assert_eq!(plan.damage, row_rect(3).union(tall_clipped).union(short_rect));
 
-    let mut unfocused = cursor_facts();
-    unfocused.window.window_focused = false;
-    unfocused.window.cursor_cell = None;
-    let mut plan = transition(cursor_facts(), unfocused, live_pane(7, 1));
-    plan.widen_for_tab_ink(short, tall);
-    assert!(plan.damage.y <= 100, "focus repaints the current title ink: {:?}", plan.damage);
-
-    let dirty = PaneMetadata { dirty_rows: vec![1], ..live_pane(7, 2) };
-    let mut plan = transition(facts(false), facts(false), dirty.clone());
-    let before = plan.damage;
-    plan.widen_for_tab_ink(short, short);
-    assert_eq!(plan.damage, before, "unchanged ink with no tab class adds nothing");
-    plan.widen_for_tab_ink(tall, short);
-    assert!(plan.damage.y <= 100, "changed ink adds the previous bounds");
-
-    let mut retitled = facts(false);
-    retitled.window.tab_hash = 1;
-    let mut plan = transition(facts(false), retitled, live_pane(7, 1));
+    let mut plan = transition(colored(1), colored(2), live_pane(7, 1));
     plan.widen_for_tab_ink(RecolorBounds::Unbounded, short);
     assert_eq!(plan.damage, surface);
 }
