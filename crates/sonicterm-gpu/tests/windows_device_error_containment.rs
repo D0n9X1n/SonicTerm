@@ -58,6 +58,7 @@ fn settings(role: &'static str) -> RendererSettings<'static> {
             software_render_mode: SoftwareRenderMode::Force,
         },
         role,
+        glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
     }
 }
 

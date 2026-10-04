@@ -833,6 +833,7 @@ fn attach_native_main_renderer(app: &mut App, event_loop: &ActiveEventLoop) {
                 software_render_mode: app.config.appearance.software_render_mode,
             },
             role: "main",
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         },
     )
     .unwrap();

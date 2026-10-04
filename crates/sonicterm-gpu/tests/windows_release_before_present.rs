@@ -110,6 +110,7 @@ fn fresh_renderer(
             software_render_mode: mode,
         },
         role,
+        glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
     };
     let mut renderer = match GpuRenderer::new(window, active, &Theme::default(), settings) {
         Ok(renderer) => renderer,

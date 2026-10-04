@@ -199,6 +199,7 @@ fn make_renderer(
                 software_render_mode: SoftwareRenderMode::Force,
             },
             role,
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         },
     )
     .map_err(|error| format!("{role}: renderer creation failed: {error}"))?;

@@ -926,3 +926,52 @@ fn slow_dispatches_below_the_limit_keep_everything() {
     );
     assert_eq!(SlowDispatches::default().finish(), (Vec::new(), 0));
 }
+
+#[test]
+fn atlas_readings_are_written_per_attempt_and_left_out_when_none_were_taken() {
+    // perf-compare reconciles a checkpoint's snapshot growths only with the reading taken in the same
+    // sampling attempt, so each reading carries its attempt, the main window's native label, each live
+    // window's counted growths and the closed windows' total, or nulls when the run does not count. A
+    // checkpoint that took no reading leaves the key out, in result.json and progress.json alike.
+    let mut result = partial_result(Status::Valid);
+    result.checkpoints = vec![
+        CheckpointRecord { index: 0, label: "settled", unix_s: 1.0, ..CheckpointRecord::default() },
+        CheckpointRecord {
+            index: 1,
+            label: "end",
+            unix_s: 2.0,
+            atlas_readings: vec![
+                AtlasReading {
+                    attempt: 1,
+                    main_window: Some("WindowId(7)".to_owned()),
+                    counted_glyph_atlas_growths: Some(std::collections::BTreeMap::from([(
+                        "WindowId(7)".to_owned(),
+                        3,
+                    )])),
+                    closed_glyph_atlas_growths: Some(2),
+                },
+                AtlasReading {
+                    attempt: 2,
+                    main_window: None,
+                    counted_glyph_atlas_growths: None,
+                    closed_glyph_atlas_growths: None,
+                },
+            ],
+            ..CheckpointRecord::default()
+        },
+    ];
+    let written = result_json_as_written(&result);
+    let progress = progress_of(Some("ab"), result.measurements());
+    for document in [&written["checkpoints"], &progress["checkpoints"]] {
+        assert!(document[0].get("atlas_readings").is_none());
+        assert_eq!(
+            document[1]["atlas_readings"],
+            json!([
+                {"attempt": 1, "main_window": "WindowId(7)",
+                 "counted_glyph_atlas_growths": {"WindowId(7)": 3}, "closed_glyph_atlas_growths": 2},
+                {"attempt": 2, "main_window": null, "counted_glyph_atlas_growths": null,
+                 "closed_glyph_atlas_growths": null}
+            ])
+        );
+    }
+}

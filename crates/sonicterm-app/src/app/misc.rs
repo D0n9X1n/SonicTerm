@@ -647,6 +647,7 @@ impl App {
                 software_render_mode: self.config.appearance.software_render_mode,
             },
             role: "child",
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         };
         // Share the live device, as warm-pool and tear-out windows do; only a
         // process with no renderer yet opens one here.

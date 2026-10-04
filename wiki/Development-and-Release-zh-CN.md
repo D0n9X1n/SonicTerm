@@ -43,6 +43,7 @@ python3 scripts/local-gate.py
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
 | `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
 | `perf-scenarios-counters-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
+| `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS、Windows | `local` | `rust`、`native` | `macos-core`、`windows-tests` |
 | `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
@@ -315,6 +316,15 @@ PR 与 Change。
   总量不同时显示 `n/a: conflicting samples`，harness 没有该钩子的一侧显示 `n/a: unsupported`。
   该样本带有网格字段时，检查点还会多一行 `grid bytes per pane`：
   `grid_visible_bytes + grid_history_bytes + grid_alternate_bytes` 除以 `panes_sampled`。
+  该样本带有字形图集事实时，其中列出的每个渲染器以逻辑身份各多出六行，例如
+  `end main glyph_atlas_dim (px)`：`glyph_atlas_dim`、`glyph_atlas_packed_pixels`、`glyph_atlas_fit`、
+  `glyph_atlas_growths`、`glyph_atlas_evictions` 与 `glyph_atlas_max_tile`。可见渲染器在分解中的标签是原生
+  窗口 id，每次运行都不同，所以检查点 `atlas_readings` 条目指名为主窗口的那个记作 `main`；预热渲染器保留其池
+  槽位 `warm[slot]`；其他可见渲染器，以及没有该读数的运行中的所有可见渲染器，按标签顺序记作 `visible#k`。
+  `renderer_native_id` 行列出每次运行的原生 id。所有运行一致时单元格给出该值，
+  否则给出每个不同的值及其运行次数，例如 `evicted ×1; no_headroom ×1`。fit 取值为 `256`、`512`、`1024`、
+  `2048`、`no_headroom`、`does_not_fit` 或 `evicted`。四个数值事实的变化比较中位数；fit 与最大字形块没有变化。
+  早于这些事实构建的 base 显示 `n/a`。
 - S2 只在能把样本无歧义地归属到某一帧时才计入按键到呈现的延迟，并报告归属覆盖率；阅读延迟时
   要同时看覆盖率。
 
@@ -333,6 +343,13 @@ PR 与 Change。
   以及 base 较旧的契约缺少某个字段时，Baseline 列与变化为 `n/a`；缺少字段在 base 上不算 schema 失败，
   在 head 上算。
 - 两侧每次运行都为 0 的计数器不列出，表上方的说明给出不列出的个数。
+- 内存样本带有字形图集事实的每个检查点多出一行 `glyph_atlas_growths, snapshot/counted`。每次内存采样尝试时，
+  harness 在检查点的 `atlas_readings` 中记录主窗口的原生标签、每个存活窗口自创建起计数的 `glyph_atlas_growths`，
+  以及已关闭窗口的总数。每次运行中每个存活窗口，snapshot 中的增长数（从渲染器构建起计数）必须等于同一次尝试中
+  该窗口计数的增长数，显示为 `main 2/2`；任何差异都是不一致。预热渲染器不绘制，不参与比较；已关闭窗口的增长
+  列为 `closed N`。没有计数数字的可见窗口，或没有该读数的运行，结论不定，并显示 snapshot 之和与各阶段计数之和，
+  因为启动增长和已关闭窗口使两者之间的不等式什么也证明不了。单元格给出最差的结论：`mismatch in N of M runs`，
+  其次 `inconclusive in N of M runs`，否则 `consistent`。只在 head 上运行的计数器组在 base 一侧显示 `n/a`。
 
 Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 head 的计数器运行与它的计时运行。这两组
 先后运行而不是交错运行，因此其中的小变化可能来自两组之间的漂移，而不是来自计数器。

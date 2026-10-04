@@ -100,6 +100,15 @@ pub struct FrameStats {
     pub assembly_buckets: [u64; ASSEMBLY_BUCKETS],
     /// The exact sum of assembly times, in microseconds.
     pub assembly_sum_us: u64,
+    /// Glyph atlas size doublings, counted once each at the end-of-frame check or at teardown.
+    pub glyph_atlas_growths: u64,
+    /// Growths whose next presented frame never came: device loss or teardown cleared them.
+    pub atlas_growth_abandoned: u64,
+    /// Growths by the time from the growing frame's start to the next presented frame, per
+    /// [`GROWTH_TO_PRESENT_BOUNDS_MS`] bucket, overflow last.
+    pub atlas_growth_to_present_buckets: [u64; GROWTH_TO_PRESENT_BUCKETS],
+    /// The exact sum of growth-to-present times, in microseconds.
+    pub atlas_growth_to_present_sum_us: u64,
     /// Nanoseconds inside every shaping and measuring request, rendering or not.
     pub shape_ns: u64,
     /// Nanoseconds inside every glyph-atlas rasterizer call.
@@ -119,6 +128,12 @@ pub struct FrameStats {
     /// Render attempts that carried a fallback generation apply.
     pub apply_attempts: AttemptStats,
 }
+
+/// Upper bounds of the `atlas_growth_to_present_ms` buckets in milliseconds, the App's frame bounds.
+pub const GROWTH_TO_PRESENT_BOUNDS_MS: [u64; 9] = [4, 7, 9, 12, 17, 25, 34, 50, 100];
+
+/// Buckets of `atlas_growth_to_present_ms`: one per bound and one for the overflow.
+pub const GROWTH_TO_PRESENT_BUCKETS: usize = GROWTH_TO_PRESENT_BOUNDS_MS.len() + 1;
 
 /// Upper bounds of the `assembly_us` buckets in microseconds, the App's microsecond bounds.
 pub const ASSEMBLY_BOUNDS_US: [u64; 6] = [10, 50, 100, 500, 1_000, 5_000];
@@ -146,6 +161,10 @@ impl FrameStats {
         font_fallback_applies: 0,
         assembly_buckets: [0; ASSEMBLY_BUCKETS],
         assembly_sum_us: 0,
+        glyph_atlas_growths: 0,
+        atlas_growth_abandoned: 0,
+        atlas_growth_to_present_buckets: [0; GROWTH_TO_PRESENT_BUCKETS],
+        atlas_growth_to_present_sum_us: 0,
         shape_ns: 0,
         raster_ns: 0,
         raster_calls: 0,
@@ -178,6 +197,16 @@ impl FrameStats {
             *slot += count;
         }
         self.assembly_sum_us += other.assembly_sum_us;
+        self.glyph_atlas_growths += other.glyph_atlas_growths;
+        self.atlas_growth_abandoned += other.atlas_growth_abandoned;
+        for (slot, count) in self
+            .atlas_growth_to_present_buckets
+            .iter_mut()
+            .zip(other.atlas_growth_to_present_buckets)
+        {
+            *slot += count;
+        }
+        self.atlas_growth_to_present_sum_us += other.atlas_growth_to_present_sum_us;
         self.shape_ns += other.shape_ns;
         self.raster_ns += other.raster_ns;
         self.raster_calls += other.raster_calls;
@@ -206,6 +235,14 @@ impl FrameStatsSink {
     /// Add one closed scope's notes.
     fn absorb(&self, other: &FrameStats) {
         self.stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner).add(other);
+    }
+
+    /// Count growths and abandoned growth timings found when an episode is finalized, outside
+    /// any frame scope.
+    pub(crate) fn note_teardown_growths(&self, growths: u64, abandoned: u64) {
+        let mut stats = self.stats.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        stats.glyph_atlas_growths += growths;
+        stats.atlas_growth_abandoned += abandoned;
     }
 
     /// This sink's identity: the address of its shared statistics, never 0.
@@ -675,6 +712,77 @@ fn record_assembly_us(elapsed_us: u64) {
     record(|stats| {
         stats.assembly_buckets[bucket] += 1;
         stats.assembly_sum_us += elapsed_us;
+    });
+}
+
+/// One renderer's glyph atlas growth episodes: the growths already counted, and the start of
+/// the first growing frame no successful present has completed yet.
+#[derive(Debug, Default)]
+pub(crate) struct GrowthEpisodes {
+    /// Glyph atlas growths already added to the frame counters.
+    counted_growths: u64,
+    /// Start of the first frame that grew the atlas since the last successful present.
+    pending_since: Option<Instant>,
+}
+
+impl GrowthEpisodes {
+    /// At an end-of-frame check, count the growths `atlas_growths` gained since the last reading
+    /// and start their timing at `frame_start`, unless an earlier growth's timing is pending.
+    pub(crate) fn count(&mut self, atlas_growths: u64, frame_start: Instant) {
+        let growths = atlas_growths.saturating_sub(self.counted_growths);
+        if growths == 0 {
+            // When: growths is zero the atlas kept its size since the last check; nothing to count.
+            return;
+        }
+        self.counted_growths = atlas_growths;
+        note_glyph_atlas_growths(growths);
+        self.pending_since.get_or_insert(frame_start);
+    }
+
+    /// At a successful present, record the pending episode's growth-to-present time.
+    pub(crate) fn present(&mut self) {
+        if let Some(pending_since) = self.pending_since.take() {
+            note_atlas_growth_presented(pending_since);
+        }
+    }
+
+    /// End the open episode where no later frame can present it (device stop, rebind, a final
+    /// read, teardown): add the growths `atlas_growths` gained since the last reading, and one
+    /// abandoned episode if one was pending or uncounted, straight into `sink`, so it works
+    /// outside any collection scope. Idempotent: a second call finds nothing left to add.
+    pub(crate) fn finalize(&mut self, atlas_growths: u64, sink: Option<&FrameStatsSink>) {
+        let growths = atlas_growths.saturating_sub(self.counted_growths);
+        self.counted_growths = atlas_growths;
+        let abandoned = u64::from(self.pending_since.take().is_some() || growths > 0);
+        if growths == 0 && abandoned == 0 {
+            // When: `growths` and `abandoned` are both zero, finalization already ran; add nothing.
+            return;
+        }
+        if let Some(sink) = sink {
+            sink.note_teardown_growths(growths, abandoned);
+        }
+    }
+}
+
+/// Count `growths` glyph atlas doublings found at an end-of-frame check.
+pub(crate) fn note_glyph_atlas_growths(growths: u64) {
+    record(|stats| stats.glyph_atlas_growths += growths);
+}
+
+/// Record the time from a growing frame's start, `pending_since`, to this successful present.
+pub(crate) fn note_atlas_growth_presented(pending_since: Instant) {
+    record_growth_to_present_us(micros_since(pending_since));
+}
+
+/// Record one growth-to-present time of `elapsed_us`; a value at a bound is in that bucket.
+fn record_growth_to_present_us(elapsed_us: u64) {
+    let bucket = GROWTH_TO_PRESENT_BOUNDS_MS
+        .iter()
+        .position(|bound_ms| elapsed_us <= bound_ms * 1_000)
+        .unwrap_or(GROWTH_TO_PRESENT_BOUNDS_MS.len());
+    record(|stats| {
+        stats.atlas_growth_to_present_buckets[bucket] += 1;
+        stats.atlas_growth_to_present_sum_us += elapsed_us;
     });
 }
 

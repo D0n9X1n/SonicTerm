@@ -46,6 +46,7 @@ fn probe_settings() -> RendererSettings<'static> {
             software_render_mode: SoftwareRenderMode::Force,
         },
         role: "shared-device-identity-test",
+        glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
     }
 }
 

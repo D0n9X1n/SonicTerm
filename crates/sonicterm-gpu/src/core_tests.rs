@@ -895,13 +895,19 @@ fn preedit_cache_matches_only_on_identical_inputs_and_atlas_stamp() {
             device_generation: 7,
             allocation_generation: 1,
             content_identity: 7,
+            growths: 0,
         },
         glyphs: Vec::new(),
         missing_boxes: Vec::new(),
+        missing_chrome_chars: Vec::new(),
     };
     // Exact match.
-    let epoch =
-        GlyphContentStamp { device_generation: 7, allocation_generation: 1, content_identity: 7 };
+    let epoch = GlyphContentStamp {
+        device_generation: 7,
+        allocation_generation: 1,
+        content_identity: 7,
+        growths: 0,
+    };
     assert!(c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, epoch));
     // Any single field differing must miss.
     assert!(!c.matches("ni'ha", 14.0, 100.0, 50.0, 0xAABBCCFF, epoch)); // text grew
@@ -909,16 +915,24 @@ fn preedit_cache_matches_only_on_identical_inputs_and_atlas_stamp() {
     assert!(!c.matches("ni'hao", 14.0, 101.0, 50.0, 0xAABBCCFF, epoch)); // x (scroll)
     assert!(!c.matches("ni'hao", 14.0, 100.0, 51.0, 0xAABBCCFF, epoch)); // y
     assert!(!c.matches("ni'hao", 14.0, 100.0, 50.0, 0x11223344, epoch)); // color
-    let evicted_epoch =
-        GlyphContentStamp { device_generation: 7, allocation_generation: 1, content_identity: 8 };
+    let evicted_epoch = GlyphContentStamp {
+        device_generation: 7,
+        allocation_generation: 1,
+        content_identity: 8,
+        growths: 0,
+    };
     assert!(!c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, evicted_epoch));
 }
 
 #[test]
 fn preedit_cache_rejects_same_content_identity_after_atlas_replacement() {
     // Equal local content identities cannot validate UVs from another allocation.
-    let old_epoch =
-        GlyphContentStamp { device_generation: 7, allocation_generation: 3, content_identity: 0 };
+    let old_epoch = GlyphContentStamp {
+        device_generation: 7,
+        allocation_generation: 3,
+        content_identity: 0,
+        growths: 0,
+    };
     let c = PreeditGlyphCache {
         text: "ni'hao".to_string(),
         font_size: 14.0,
@@ -928,9 +942,14 @@ fn preedit_cache_rejects_same_content_identity_after_atlas_replacement() {
         atlas_stamp: old_epoch,
         glyphs: Vec::new(),
         missing_boxes: Vec::new(),
+        missing_chrome_chars: Vec::new(),
     };
-    let replacement_epoch =
-        GlyphContentStamp { device_generation: 7, allocation_generation: 4, content_identity: 0 };
+    let replacement_epoch = GlyphContentStamp {
+        device_generation: 7,
+        allocation_generation: 4,
+        content_identity: 0,
+        growths: 0,
+    };
 
     assert!(
         !c.matches("ni'hao", 14.0, 100.0, 50.0, 0xAABBCCFF, replacement_epoch),
@@ -952,6 +971,7 @@ fn preedit_cache_rejects_reset_with_unchanged_evictions() {
         atlas_stamp: capture(&atlas),
         glyphs: Vec::new(),
         missing_boxes: Vec::new(),
+        missing_chrome_chars: Vec::new(),
     };
     assert!(cache.matches("preedit", 14.0, 100.0, 50.0, 0xAABBCCFF, capture(&atlas)));
     let evictions = atlas.evictions();
@@ -986,6 +1006,7 @@ fn atlas_frame_detector_qualifies_equal_content_by_allocation_and_device() {
             atlas_stamp: before,
             glyphs: Vec::new(),
             missing_boxes: Vec::new(),
+            missing_chrome_chars: Vec::new(),
         };
         assert!(!cache.matches("preedit", 14.0, 0.0, 0.0, 0xFFFFFFFF, after));
     }
@@ -4146,6 +4167,37 @@ fn successful_frame_counter_advances_only_after_native_presentation() {
     assert_eq!(finish.matches("saturating_add(1);").count(), 1);
 }
 
+/// The chrome readout follows the terminal rows' missing list frame for frame: `assemble_frame`
+/// opens one missing-chrome scope for the whole frame and hands its list to the presented frame,
+/// which publishes it beside the rows' list. A frame that does not present publishes neither, and
+/// the preedit cache replays its tofu with its glyphs.
+#[test]
+fn chrome_tofu_is_published_only_by_a_presented_frame() {
+    const CORE_SRC: &str = include_str!("core.rs");
+    assert!(CORE_SRC.contains("pub fn last_missing_chrome(&self) -> &[char]"));
+    let assemble_start = CORE_SRC.find("    fn assemble_frame(").expect("assembly");
+    let assemble_end = CORE_SRC[assemble_start..]
+        .find("\n    /// Hand assembled batches to the presenter")
+        .map(|offset| assemble_start + offset)
+        .expect("bounded assembly");
+    let assemble = &CORE_SRC[assemble_start..assemble_end];
+    // One frame scope; the preedit cache opens a nested one to capture its own run.
+    assert_eq!(
+        assemble
+            .matches("let missing_chrome_scope = chrome_text::MissingChromeScope::enter();")
+            .count(),
+        1
+    );
+    assert!(assemble.contains("missing_chrome_chars: missing_chrome_scope.finish()"));
+    assert!(
+        assemble.contains("cached.missing_chrome_chars"),
+        "a preedit cache hit replays its tofu"
+    );
+    let finish_start = CORE_SRC.find("    fn finish_successful_frame(").expect("present cleanup");
+    let finish = &CORE_SRC[finish_start..finish_start + 2000];
+    assert!(finish.contains("self.last_missing_chrome_chars = missing_chrome_chars"));
+}
+
 fn selection_for_rows(start: u64, end: u64) -> Selection {
     Selection {
         start: (start, 1),
@@ -4241,7 +4293,8 @@ fn row_invalidation_keeps_the_original_per_pane_order_with_the_gate_on_or_off() 
 }
 
 /// The vertex scratch is renderer-held CPU storage: `retained_amounts` reports the
-/// presentation pipeline's figure, `total()` counts it, and it is tagged as upload staging.
+/// presentation pipeline's figure together with both atlas uploads' rect lists, `total()` counts
+/// it, and it is tagged as upload staging.
 #[test]
 fn vertex_scratch_is_part_of_the_retained_report() {
     let retention =
@@ -4254,7 +4307,9 @@ fn vertex_scratch_is_part_of_the_retained_report() {
     let core: String = include_str!("core.rs").split_whitespace().collect();
     let report = core.find("pubfnretained_amounts(&self)").expect("retained_amounts");
     let body = &core[report..report + 600];
-    assert!(body.contains("vertex_scratch:self.present_pipeline.vertex_scratch_retained(),"));
+    assert!(body.contains("vertex_scratch:self.upload_staging_retained(),"));
+    let staging = core.split_once("fnupload_staging_retained(&self)").expect("helper").1;
+    assert!(staging[..300].contains("self.present_pipeline.vertex_scratch_retained()"));
 }
 
 /// Frame assembly records each emitted row's glyph span on both the cache-hit and miss paths of
@@ -5221,6 +5276,81 @@ fn render_releasing_lends_once_and_presents_after_release() {
     }
 }
 
+/// The glyph texture is resized only once the frame source has released its parser guards: in
+/// `render_releasing` the rebuild comes after `lend_and_assemble` returns and before any present,
+/// never ahead of the lend, so recreating a texture never blocks PTY parsing.
+#[test]
+fn render_releasing_resizes_the_glyph_texture_after_release_and_before_present() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let call = source.split_once("    pub fn render_releasing(").unwrap().1;
+    let call = call.split_once("\n    }\n").unwrap().0;
+    let code: String = call
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lend = code.find("lend_and_assemble(").expect("the lend");
+    let rebuilds: Vec<usize> =
+        code.match_indices("self.rebuild_glyph_upload_if_needed();").map(|(at, _)| at).collect();
+    assert_eq!(rebuilds.len(), 1, "one rebuild seam in render_releasing");
+    assert!(rebuilds[0] > lend, "the rebuild runs after the parser guards are released");
+    for present in ["self.present_layers(", "self.prepare_cached_present()"] {
+        assert!(rebuilds[0] < code.find(present).unwrap(), "the rebuild precedes {present}");
+    }
+}
+
+/// A stopped device finalizes its growth episodes before the stopped report can return early, so
+/// the App's non-rendering stopped path abandons a pending episode even when it never assembles.
+#[test]
+fn the_stopped_report_finalizes_growth_episodes_before_any_early_return() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let body = source.split_once("    pub fn take_stopped_render_outcome(").unwrap().1;
+    let body = body.split_once("\n    }\n").unwrap().0;
+    let finalize = body
+        .find("self.finalize_growth_episodes_if_device_stopped();")
+        .expect("the stop finalizes");
+    let first_return = body.find("return None;").expect("the early return");
+    assert!(finalize < first_return, "finalization precedes the early return");
+}
+
+/// A readback row is padded to wgpu's copy alignment, and unpadding keeps each row's pixels and
+/// drops the padding, so two renderers' frames compare byte for byte whatever their padding.
+#[test]
+fn readback_rows_pad_to_the_copy_alignment_and_unpad_to_tight_rows() {
+    assert_eq!(padded_readback_row_bytes(1), 256, "one pixel pads to one alignment unit");
+    assert_eq!(padded_readback_row_bytes(64), 256, "exactly one unit needs no padding");
+    assert_eq!(padded_readback_row_bytes(65), 512);
+    // Two rows of one pixel each, padded to 256 bytes; the padding holds a marker byte.
+    let mut mapped = vec![0xEE; 2 * 256];
+    mapped[..4].copy_from_slice(&[1, 2, 3, 4]);
+    mapped[256..260].copy_from_slice(&[5, 6, 7, 8]);
+    assert_eq!(unpad_readback_rows(&mapped, 1, 2, 256), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+/// Production never asks for a copyable retained frame: the constructor and every rebuild pass the
+/// test-only readback flag, which only `__enable_retained_frame_readback` sets, and only that flag
+/// adds `COPY_SRC`.
+#[test]
+fn only_the_test_readback_flag_makes_the_retained_frame_copyable() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let create = source.split_once("\nfn create_frame_texture(").unwrap().1;
+    let create = create.split_once("\n}\n").unwrap().0;
+    assert!(create.contains("if copy_source"), "COPY_SRC is conditional");
+    let compact: String = source.split_whitespace().collect();
+    let constructor = compact.split_once("asyncfnnew_async(").unwrap().1;
+    let build =
+        "build_frame_texture(&device,software_presenter,config.width,config.height,format,false,)";
+    assert!(constructor.contains(build), "the constructor builds without COPY_SRC");
+    assert!(source.contains("            retained_frame_readback: false,\n"));
+    let enable = source.split_once("    pub fn __enable_retained_frame_readback(").unwrap().1;
+    assert!(enable
+        .split_once("\n    }\n")
+        .unwrap()
+        .0
+        .contains("self.retained_frame_readback = true;"));
+    assert_eq!(source.matches("self.retained_frame_readback = true;").count(), 1);
+}
+
 /// A source that owns its grids and records when it is lent and when it is dropped.
 struct OwningSource {
     grids: Vec<Grid>,
@@ -5303,4 +5433,112 @@ fn an_empty_source_is_no_panes_and_is_dropped_before_the_call_returns() {
     });
     assert!(usable.is_ok());
     assert_eq!(assembled_panes, 2, "a usable device assembles the lent panes once");
+}
+
+/// A stamp at `allocation`, `identity` and `growths` on device generation 7.
+fn growth_stamp(allocation: u64, identity: u64, growths: u64) -> GlyphContentStamp {
+    GlyphContentStamp {
+        device_generation: 7,
+        allocation_generation: allocation,
+        content_identity: identity,
+        growths,
+    }
+}
+
+/// Only a change that grew the atlas, on the same device and allocation and with no eviction,
+/// takes the growth retry; an eviction, a reset or a device change takes the reset path.
+#[test]
+fn only_a_pure_growth_takes_the_growth_retry() {
+    let before = growth_stamp(1, 4, 0);
+    assert!(growth_only_change(before, growth_stamp(1, 5, 1), 3, 3), "growth alone");
+    assert!(growth_only_change(before, growth_stamp(1, 7, 2), 3, 3), "two growths in one frame");
+    assert!(!growth_only_change(before, growth_stamp(1, 6, 1), 3, 4), "growth with eviction");
+    assert!(!growth_only_change(before, growth_stamp(2, 6, 1), 3, 3), "a reset in place");
+    assert!(!growth_only_change(before, growth_stamp(1, 5, 0), 3, 4), "eviction alone");
+    let other_device = GlyphContentStamp { device_generation: 8, ..growth_stamp(1, 5, 1) };
+    assert!(!growth_only_change(before, other_device, 3, 3), "a new device");
+}
+
+/// `Normal` takes the scale-1 start up to 1.5 and the scale-2 start above it; `Minimum` is the floor.
+#[test]
+fn start_dim_follows_scale_and_start_kind() {
+    use sonicterm_text::glyph_atlas::{MIN_ATLAS_DIM, START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
+    for scale in [1.0, 1.25, 1.5] {
+        assert_eq!(start_dim(scale, GlyphAtlasStart::Normal), START_ATLAS_DIM_1X, "{scale}");
+    }
+    for scale in [1.75, 2.0, 3.0] {
+        assert_eq!(start_dim(scale, GlyphAtlasStart::Normal), START_ATLAS_DIM_2X, "{scale}");
+    }
+    for scale in [1.0, 2.0] {
+        assert_eq!(start_dim(scale, GlyphAtlasStart::Minimum), MIN_ATLAS_DIM);
+    }
+    assert_eq!(GlyphAtlasStart::default(), GlyphAtlasStart::Normal);
+}
+
+/// Only the renderer's glyph atlas is growable: `GlyphAtlas::growable(` appears once in production
+/// gpu sources, at the glyph atlas construction, and the image atlas keeps fixed constructors.
+#[test]
+fn only_the_glyph_atlas_is_built_growable() {
+    let sources = [
+        ("core.rs", include_str!("core.rs")),
+        ("atlas_lifecycle.rs", include_str!("atlas_lifecycle.rs")),
+        ("present.rs", include_str!("present.rs")),
+        ("atlas_upload.rs", include_str!("atlas_upload.rs")),
+        ("chrome_text.rs", include_str!("chrome_text.rs")),
+    ]
+    .map(|(name, text)| (name, text.replace("\r\n", "\n")));
+    let calls: Vec<&str> = sources
+        .iter()
+        .flat_map(|(name, text)| text.matches("GlyphAtlas::growable(").map(move |_| *name))
+        .collect();
+    assert_eq!(calls, ["core.rs"]);
+    let core = &sources[0].1;
+    let at = core.find("GlyphAtlas::growable(").unwrap();
+    assert!(
+        core[..at].trim_end().ends_with("let glyph_atlas ="),
+        "the call builds the glyph atlas"
+    );
+    let lifecycle = &sources[1].1;
+    assert!(lifecycle.contains("self.image_atlas = GlyphAtlas::default_size();"));
+}
+
+/// The promoted image atlas is the fixed 2048 atlas and never grows.
+#[test]
+fn the_promoted_image_atlas_is_fixed_at_the_maximum() {
+    let promoted = GlyphAtlas::default_size();
+    assert_eq!((promoted.width(), promoted.height()), (2048, 2048));
+    assert_eq!(promoted.growth_policy(), sonicterm_text::glyph_atlas::GrowthPolicy::Fixed);
+    assert_eq!(promoted.growths(), 0);
+}
+
+/// The snapshot facts read the glyph atlas as it is: a grown atlas reports its new dimension,
+/// its growth, the packed area and largest tile of its resident tiles, and its fit label.
+#[test]
+fn glyph_atlas_facts_read_a_grown_atlas() {
+    use sonicterm_text::glyph_atlas::{RasterTile, ATLAS_DIM, MIN_ATLAS_DIM};
+    let mut atlas = GlyphAtlas::growable(MIN_ATLAS_DIM, ATLAS_DIM);
+    assert_eq!(GlyphAtlasFacts::of(&atlas).dim, MIN_ATLAS_DIM, "a fresh atlas is at its start");
+    // A 30×40 coverage tile, so the packed area and largest tile are known.
+    struct FactsTile;
+    impl sonicterm_text::glyph_atlas::Rasterizer for FactsTile {
+        fn rasterize(&mut self, _: sonicterm_types::GlyphKey) -> Option<RasterTile> {
+            Some(RasterTile {
+                width: 30,
+                height: 40,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 30.0,
+                coverage: vec![200; 30 * 40],
+                is_color: false,
+                is_subpixel: false,
+            })
+        }
+    }
+    let key = sonicterm_types::GlyphKey::new('x', false, false);
+    let _info = atlas.get_or_insert(key, &mut FactsTile);
+    assert!(atlas.grow_to(512), "the next doubling is allowed");
+    let facts = GlyphAtlasFacts::of(&atlas);
+    assert_eq!((facts.dim, facts.growths, facts.evictions), (512, 1, 0));
+    assert_eq!((facts.packed_pixels, facts.max_tile), (30 * 40, [30, 40]));
+    assert_eq!(facts.fit, atlas.fit_outcome().label());
 }

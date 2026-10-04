@@ -472,6 +472,20 @@ impl LoadedFont {
         self.handles.borrow().clone()
     }
 
+    /// Diagnostic only: the data handle of the face at `fallback` and the raster pixel size
+    /// [`Self::rasterize_glyph`] requests for it, `font_size × face scale × dpi / 72`, as the
+    /// FreeType rasterizer computes it. `None` when no face holds that slot.
+    #[doc(hidden)]
+    pub fn face_raster_request(
+        &self,
+        fallback: FallbackIdx,
+    ) -> Option<(locator::FontDataHandle, f64)> {
+        let handles = self.handles.borrow();
+        let parsed = handles.get(fallback)?;
+        let raster_px = self.font_size * parsed.scale.unwrap_or(1.0) * f64::from(self.dpi) / 72.0;
+        Some((parsed.handle.clone(), raster_px))
+    }
+
     /// Whether the handle at `font_idx` is a font the user configured, as
     /// opposed to one resolved to cover a glyph the configured font lacked.
     ///

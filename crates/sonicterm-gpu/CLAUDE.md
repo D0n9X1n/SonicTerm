@@ -46,6 +46,10 @@ cargo build -p sonicterm-gpu
   semantics when moving data through the renderer.
 - Row glyph cache reads and writes use the atlas content identity; eviction
   counts remain diagnostic and must not become UV-bearing cache keys.
+- Only the glyph atlas is built growable (`start_dim`, then doubling to 2048);
+  the promoted image atlas stays fixed. A growth-only stamp change retries
+  through `retry_after_glyph_atlas_growth`, reached only from the retry arm
+  after `lend`, and never resets the atlas or disables eviction.
 - Multi-row hover fragments share one frame-key identity and one underline pass.
   Active recolor salts only the intersecting row cache key; hint-only fragments
   reuse ordinary glyph rows, and offscreen or out-of-column spans emit nothing.

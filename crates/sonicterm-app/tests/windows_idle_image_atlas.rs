@@ -107,6 +107,7 @@ fn fixture(
                 software_render_mode: mode,
             },
             role,
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -192,6 +193,10 @@ impl Fixture {
         self.app.__test_window_image_atlas_bytes(self.id).ok_or_else(|| String::from("no renderer"))
     }
 
+    fn parts(&self) -> Result<sonicterm_gpu::core::RendererRetention, String> {
+        self.app.__test_window_retained_amounts(self.id).ok_or_else(|| String::from("no renderer"))
+    }
+
     fn deadline(&self) -> Result<Instant, String> {
         self.app
             .__test_window_image_atlas_release_deadline(self.id)
@@ -259,8 +264,10 @@ fn timer_release(active: &ActiveEventLoop) -> Result<(), String> {
 }
 
 /// The aggregate `renderer_total_bytes` keeps its old figure after a release and moves only at the next
-/// retention sample, by exactly the released atlas bytes; the pane's `InlineMediaRetained` charge is the
-/// same before the release, after it, and after the next sample.
+/// retention sample, by exactly the bytes the renderer's own parts released: the image atlas, and the
+/// image upload's staging and rect lists in `UploadStaging`, which the 1x1 mirror rebuilt at release
+/// no longer keeps. No other part moves. The pane's `InlineMediaRetained` charge is the same before
+/// the release, after it, and after the next sample.
 fn aggregate_and_pane_charge(active: &ActiveEventLoop) -> Result<(), String> {
     let mut fixture = fixture(active, SoftwareRenderMode::Off, "idle-atlas-app-aggregate")?;
     fixture.activate(active, 1)?;
@@ -276,10 +283,13 @@ fn aggregate_and_pane_charge(active: &ActiveEventLoop) -> Result<(), String> {
         let charge = fixture.media_charge()?;
         check(charge.bytes >= IMAGE_BYTES, "precondition: the decoded image is charged")?;
         let promoted_bytes = fixture.atlas_bytes()?;
+        // Read with the aggregate's sample: no frame runs between the two readings.
+        let parts_before = fixture.parts()?;
         check(
             fixture.app.__test_collect_and_service_redraw_due(deadline) == 1,
             "the release runs",
         )?;
+        let parts_after = fixture.parts()?;
         check(
             !fixture.app.__test_sample_pane_retention_at(deadline + Duration::from_millis(1)),
             "a pass inside the interval does nothing",
@@ -296,8 +306,35 @@ fn aggregate_and_pane_charge(active: &ActiveEventLoop) -> Result<(), String> {
         let after =
             fixture.app.__test_last_sampled_renderer_bytes().ok_or("no aggregate emitted")?;
         check(
-            before.checked_sub(after) == promoted_bytes.checked_sub(4),
-            &format!("the aggregate drops by the released bytes: {before} -> {after}, atlas {promoted_bytes} -> 4"),
+            parts_after.image_atlas.bytes == 4 && promoted_bytes > 4,
+            &format!(
+                "the image atlas part drops to the placeholder: {promoted_bytes} -> {}",
+                parts_after.image_atlas.bytes
+            ),
+        )?;
+        let staging_released =
+            parts_before.vertex_scratch.bytes.checked_sub(parts_after.vertex_scratch.bytes);
+        check(
+            staging_released.is_some_and(|bytes| bytes >= IMAGE_BYTES),
+            &format!("the image upload's staged write leaves UploadStaging: {staging_released:?}"),
+        )?;
+        let unchanged = |part: fn(&sonicterm_gpu::core::RendererRetention) -> usize| {
+            part(&parts_before) == part(&parts_after)
+        };
+        check(
+            unchanged(|parts| parts.glyph_atlas.bytes)
+                && unchanged(|parts| parts.row_glyph_cache.bytes)
+                && unchanged(|parts| parts.row_quad_cache.bytes)
+                && unchanged(|parts| parts.software_frame.bytes),
+            &format!("no other part moves: {parts_before:?} -> {parts_after:?}"),
+        )?;
+        let released = parts_before.total().bytes.checked_sub(parts_after.total().bytes);
+        check(
+            before.checked_sub(after) == released,
+            &format!(
+                "the aggregate drops by the released parts: {before} -> {after}, released {released:?} \
+                 (atlas {promoted_bytes} -> 4, staging {staging_released:?})"
+            ),
         )?;
         check(fixture.media_charge()? == charge, "the next sample leaves the pane charge alone")
     })

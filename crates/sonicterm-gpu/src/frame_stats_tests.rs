@@ -731,8 +731,13 @@ fn blocking_shape_calls(sources: &[(String, String)]) -> Vec<String> {
 fn no_frame_code_calls_a_shaping_entry_point_that_may_wait() {
     // The renderer shapes and measures only through the frame entry points, which never wait for
     // fallback discovery; the blocking ones stay for explicit callers and tests.
+    // The working-set helper is the one explicit caller: it measures outside any frame and must
+    // wait for fallback faces. It must exist, so a rename cannot silently widen the exemption.
     let mut sources = Vec::new();
     crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
+    let is_measurement = |file: &str| Path::new(file).ends_with("glyph_working_set.rs");
+    assert!(sources.iter().any(|(file, _)| is_measurement(file)), "the helper's file exists");
+    sources.retain(|(file, _)| !is_measurement(file));
     assert_eq!(blocking_shape_calls(&sources), Vec::<String>::new());
 }
 
@@ -756,6 +761,54 @@ fn frame(stack: &FontStack) {
     let crlf = vec![("fixture.rs".to_owned(), fixture.replace('\n', "\r\n"))];
     assert_eq!(blocking_shape_calls(&lf), vec!["fixture.rs:10 shape_text_with_style".to_owned()]);
     assert_eq!(blocking_shape_calls(&crlf), blocking_shape_calls(&lf));
+}
+
+/// Growth counts and growth-to-present times are recorded only inside a counting scope; a time at a
+/// millisecond bound lands in that bucket, a time past the last bound in the overflow, and the sum
+/// is exact in microseconds. An abandoned episode reaches the sink only through a finalization
+/// note, which lands outside any scope.
+#[test]
+fn growth_counters_and_growth_to_present_buckets() {
+    let sink = FrameStatsSink::default();
+    note_glyph_atlas_growths(5);
+    record_growth_to_present_us(1_000);
+    assert_eq!(sink.snapshot(), FrameStats::ZERO, "no scope, nothing recorded");
+    {
+        let _counting = CollectGuard::enter(Some(&sink));
+        note_glyph_atlas_growths(2);
+        for elapsed_us in [4_000, 4_001, 100_000, 100_001] {
+            record_growth_to_present_us(elapsed_us);
+        }
+    }
+    sink.note_teardown_growths(1, 1);
+    let stats = sink.snapshot();
+    assert_eq!((stats.glyph_atlas_growths, stats.atlas_growth_abandoned), (3, 1));
+    let mut expected = [0; GROWTH_TO_PRESENT_BUCKETS];
+    expected[0] = 1; // 4 ms is at the first bound
+    expected[1] = 1; // just past 4 ms
+    expected[8] = 1; // 100 ms is at the last bound
+    expected[9] = 1; // overflow
+    assert_eq!(stats.atlas_growth_to_present_buckets, expected);
+    assert_eq!(stats.atlas_growth_to_present_sum_us, 4_000 + 4_001 + 100_000 + 100_001);
+}
+
+/// Finalizing growth episodes is idempotent: the first call adds the uncounted growths and one
+/// abandoned episode to the sink outside any scope, and a second call, as `Drop` makes after the
+/// App's own finalization, adds nothing.
+#[test]
+fn finalizing_growth_episodes_twice_counts_them_once() {
+    let sink = FrameStatsSink::default();
+    let mut episodes = GrowthEpisodes::default();
+    {
+        let _counting = CollectGuard::enter(Some(&sink));
+        episodes.count(1, Instant::now());
+    }
+    // One growth counted at a frame check, then one more outside any frame before teardown.
+    episodes.finalize(2, Some(&sink));
+    let first = sink.snapshot();
+    assert_eq!((first.glyph_atlas_growths, first.atlas_growth_abandoned), (2, 1));
+    episodes.finalize(2, Some(&sink));
+    assert_eq!(sink.snapshot(), first, "a second finalization adds nothing");
 }
 
 /// A rasterizer that returns its scripted results in order, then nothing.
@@ -1053,7 +1106,8 @@ fn an_attempt_nested_in_another_renderers_attempt_folds_into_its_own_renderer_ev
 }
 
 /// Every glyph-atlas insertion in `sources` as `path:line`, with whether its arguments wrap the
-/// rasterizer in `CountingRasterizer`.
+/// rasterizer in `CountingRasterizer`. A one-argument `get_or_insert` is `Option`'s, not an atlas
+/// insertion (which takes a key and a rasterizer), so it is skipped.
 fn atlas_insertions(sources: &[(String, String)]) -> Vec<(String, bool)> {
     let mut found = Vec::new();
     for (path, text) in sources {
@@ -1075,6 +1129,23 @@ fn atlas_insertions(sources: &[(String, String)]) -> Vec<(String, bool)> {
                     _ => {}
                 }
             }
+            let arguments = &code[open + 1..close];
+            let mut nesting = 0_usize;
+            let top_level_commas = arguments
+                .chars()
+                .filter(|character| {
+                    match character {
+                        '(' | '[' | '{' => nesting += 1,
+                        ')' | ']' | '}' => nesting = nesting.saturating_sub(1),
+                        _ => {}
+                    }
+                    *character == ',' && nesting == 0
+                })
+                .count();
+            if top_level_commas == 0 {
+                // A one-argument call is `Option::get_or_insert`, not an atlas insertion.
+                continue;
+            }
             let line = code[..offset].matches('\n').count() + 1;
             let name = Path::new(path)
                 .file_name()
@@ -1090,15 +1161,26 @@ fn atlas_insertions(sources: &[(String, String)]) -> Vec<(String, bool)> {
 
 #[test]
 fn every_glyph_atlas_insertion_counts_its_rasterizer() {
-    // An insertion that passes the bare rasterizer goes uncounted. The five sites are the four
-    // terminal paths in core.rs and the shared chrome path (tabs, palette, search, preedit).
+    // An insertion that passes the bare rasterizer goes uncounted. The six sites are the four
+    // terminal paths in core.rs, the shared chrome path (tabs, palette, search, preedit) and the
+    // working-set helper's ASCII pass.
     let mut sources = Vec::new();
     crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
     let insertions = atlas_insertions(&sources);
     let bare: Vec<_> = insertions.iter().filter(|(_, wrapped)| !wrapped).collect();
     assert!(bare.is_empty(), "uncounted glyph-atlas insertions: {bare:#?}");
-    assert_eq!(insertions.len(), 5, "the insertion sites changed; review them: {insertions:#?}");
+    assert_eq!(insertions.len(), 6, "the insertion sites changed; review them: {insertions:#?}");
     assert!(insertions.iter().any(|(site, _)| site.starts_with("chrome_text.rs:")));
+}
+
+#[test]
+fn the_insertion_scan_skips_option_get_or_insert() {
+    // `Option::get_or_insert` takes one argument and is never an atlas insertion; a two-argument
+    // call with a nested comma inside its key is still found.
+    let fixture = "fn track(pending: &mut Option<u64>, atlas: &mut Atlas, wt: &mut Raster) {\n    \
+                   pending.get_or_insert(f(1, 2));\n    atlas.get_or_insert(key(1, 2), wt);\n}\n";
+    let found = atlas_insertions(&[("fixture.rs".to_owned(), fixture.to_owned())]);
+    assert_eq!(found, vec![("fixture.rs:3".to_owned(), false)]);
 }
 
 #[test]

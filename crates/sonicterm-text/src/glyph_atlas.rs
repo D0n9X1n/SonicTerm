@@ -36,6 +36,92 @@ use sonicterm_types::{GlyphKey, ResourceAmount};
 pub const ATLAS_DIM: u32 = 2048;
 /// Maximum resident glyph metadata entries, including blank/missing sentinels.
 pub const MAX_ATLAS_ENTRIES: usize = 16 * 1024;
+/// Smallest square glyph atlas a renderer starts with. Warm-pool renderers start here
+/// and grow after adoption, so an idle pooled window holds 256 KiB rather than 16 MiB.
+pub const MIN_ATLAS_DIM: u32 = 256;
+/// Start dimension of a normal scale-1 renderer's glyph atlas. It must pass
+/// [`crate::start_size_inputs::validate_table_start`], which admits only the maximum until the
+/// sizing oracle is complete and every required scale-1 input is recorded; warm spares start at
+/// [`MIN_ATLAS_DIM`] instead.
+pub const START_ATLAS_DIM_1X: u32 = 2048;
+/// Start dimension of a normal scale-2 renderer's glyph atlas, validated the same way at scale 2.
+pub const START_ATLAS_DIM_2X: u32 = 2048;
+/// Dirty-list capacity above which a drained list is shrunk, so one growth re-upload of
+/// thousands of tiles does not pin its capacity for the atlas's lifetime.
+pub const DIRTY_LIST_SHRINK_ABOVE: usize = 1024;
+/// Capacity a drained dirty list is shrunk to; ordinary frames dirty fewer tiles than this.
+pub const DIRTY_LIST_RETAINED: usize = 64;
+/// Candidate start dimensions, smallest first, that [`GlyphAtlas::fit_outcome`] tries.
+pub const FIT_DIMS: [u32; 4] = [256, 512, 1024, 2048];
+
+/// Whether an atlas may enlarge itself when packing fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrowthPolicy {
+    /// The atlas keeps its constructed size and evicts when full.
+    Fixed,
+    /// The atlas doubles, square, up to `max` before it evicts.
+    Growable {
+        /// Largest square dimension the atlas may reach.
+        max: u32,
+    },
+}
+
+/// Smallest candidate start size the resident tiles would have fitted, replayed from empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FitOutcome {
+    /// Every tile packs at this dimension with the used height at most 75% of it.
+    Fits(u32),
+    /// Every tile packs at the maximum, but no candidate leaves 25% of its height free.
+    FitsWithoutHeadroom,
+    /// Some tile cannot be placed even at the maximum.
+    DoesNotFit,
+    /// The atlas has evicted since creation, so its resident set is not the working set.
+    Evicted,
+}
+
+impl FitOutcome {
+    /// Snapshot label: the dimension for a fit, else `no_headroom`, `does_not_fit` or `evicted`.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::Fits(dim) => dim.to_string(),
+            Self::FitsWithoutHeadroom => "no_headroom".to_owned(),
+            Self::DoesNotFit => "does_not_fit".to_owned(),
+            Self::Evicted => "evicted".to_owned(),
+        }
+    }
+}
+
+/// Replay `tiles` (each a `[width, height]`, in placement order) through a fresh shelf
+/// packer at each of [`FIT_DIMS`] and classify the smallest dimension that holds them.
+///
+/// A dimension qualifies only when every tile is placed and the used height
+/// (`shelf_y + shelf_h`) is at most three quarters of it, leaving room for the session to
+/// keep drawing new glyphs before the first growth.
+#[must_use]
+pub fn fit_outcome_of_tiles(tiles: &[[u32; 2]]) -> FitOutcome {
+    let mut placed_at_max = false;
+    for dim in FIT_DIMS {
+        let mut packer = ShelfPacker::new(dim, dim);
+        let all_placed =
+            tiles.iter().all(|[width, height]| packer.alloc(*width, *height).is_some());
+        if !all_placed {
+            // When: all_placed is false at this dim a larger candidate may still hold the set.
+            continue;
+        }
+        if packer.used_height().saturating_mul(4) <= dim.saturating_mul(3) {
+            // When: used_height leaves a quarter of dim free this is the smallest qualifying fit.
+            return FitOutcome::Fits(dim);
+        }
+        placed_at_max = dim == ATLAS_DIM;
+    }
+    if placed_at_max {
+        FitOutcome::FitsWithoutHeadroom
+    } else {
+        // When: placed_at_max is false some tile could not be placed even at ATLAS_DIM.
+        FitOutcome::DoesNotFit
+    }
+}
 
 /// Information about a glyph the renderer needs each frame: where its
 /// tile lives in the atlas (in normalized 0..1 UVs) and how far the
@@ -195,6 +281,24 @@ impl ShelfPacker {
         self.shelf_h = cand_shelf_h;
         Some((x, y))
     }
+
+    /// Height consumed so far: the open shelf's top plus its height.
+    #[doc(hidden)]
+    pub fn used_height(&self) -> u32 {
+        self.shelf_y.saturating_add(self.shelf_h)
+    }
+
+    /// Enlarge the packing area to `width × height` without moving any placement.
+    ///
+    /// The open shelf keeps its cursor and height and gains the new width; everything below
+    /// the old height becomes free for new shelves. Closed shelves do not reclaim their new
+    /// right-hand space, which is what keeps every placed tile at its pixel position.
+    #[doc(hidden)]
+    pub fn grow(&mut self, width: u32, height: u32) {
+        debug_assert!(width >= self.width && height >= self.height, "a packer never shrinks");
+        self.width = width;
+        self.height = height;
+    }
 }
 
 /// CPU-side glyph atlas. Holds the alpha texture in a `Vec<u8>` and
@@ -260,6 +364,15 @@ pub struct GlyphAtlas {
     /// When false, a full atlas rejects new tiles instead of recycling
     /// rectangles referenced earlier in the frame.
     eviction_enabled: bool,
+    /// Whether packing failure enlarges the atlas before it evicts.
+    growth: GrowthPolicy,
+    /// Monotonic count of size doublings; survives `reset_in_place`.
+    growths: u64,
+    /// Whether any eviction has happened since construction; survives `reset_in_place`.
+    ever_evicted: bool,
+    /// Entry count at which insertion evicts; `MAX_ATLAS_ENTRIES` except under a test that
+    /// lowers it. Survives `reset_in_place`.
+    entry_cap: usize,
 }
 
 /// Pixel interpretation required when uploading one atlas write.
@@ -316,12 +429,220 @@ impl GlyphAtlas {
             current_frame: 0,
             evictions: 0,
             eviction_enabled: true,
+            growth: GrowthPolicy::Fixed,
+            growths: 0,
+            ever_evicted: false,
+            entry_cap: MAX_ATLAS_ENTRIES,
         }
     }
 
-    /// Convenience: default-sized atlas (2048×2048).
+    /// Convenience: default-sized atlas (2048×2048). Fixed: it never grows.
     pub fn default_size() -> Self {
         Self::new(ATLAS_DIM, ATLAS_DIM)
+    }
+
+    /// New square atlas of `start` pixels that doubles up to `max` before it evicts.
+    ///
+    /// This is the only growing constructor; the renderer's glyph atlas is its only caller.
+    ///
+    /// # Panics
+    ///
+    /// When `start` or `max` is not a power of two, or `start > max`.
+    #[must_use]
+    pub fn growable(start: u32, max: u32) -> Self {
+        assert!(
+            start.is_power_of_two() && max.is_power_of_two(),
+            "growable sizes are powers of two"
+        );
+        assert!(start <= max, "a growable atlas starts at or below its maximum");
+        let mut atlas = Self::new(start, start);
+        atlas.growth = GrowthPolicy::Growable { max };
+        atlas
+    }
+
+    /// Whether this atlas grows on packing failure, and to what maximum.
+    #[must_use]
+    pub fn growth_policy(&self) -> GrowthPolicy {
+        self.growth
+    }
+
+    /// Monotonic count of size doublings since construction, including across resets.
+    #[must_use]
+    pub fn growths(&self) -> u64 {
+        self.growths
+    }
+
+    /// Largest tile width and height a lookup may place: the growth maximum when growable,
+    /// else the current size. A larger tile is cached as a sentinel instead.
+    fn placement_limit(&self) -> (u32, u32) {
+        match self.growth {
+            GrowthPolicy::Growable { max } => (max, max),
+            GrowthPolicy::Fixed => (self.width, self.height),
+        }
+    }
+
+    /// The next doubled dimension when this atlas may still grow, else `None`.
+    fn next_growth_dim(&self) -> Option<u32> {
+        let GrowthPolicy::Growable { max } = self.growth else {
+            // When: growth is Fixed the atlas keeps its constructed size, so packing failure evicts.
+            return None;
+        };
+        // At the maximum there is nothing left to double into, so packing failure evicts there too.
+        (self.width < max).then(|| self.width.saturating_mul(2).min(max))
+    }
+
+    /// Enlarge the atlas to `dim × dim` without re-rasterizing anything, when its growth
+    /// policy allows that size; returns whether it grew.
+    ///
+    /// Only the next doubling of a `Growable` atlas is allowed: `dim` must equal twice the
+    /// current size, clamped to the maximum. A `Fixed` atlas, an atlas at its maximum, and
+    /// every other `dim` are refused, and a refused call changes nothing.
+    ///
+    /// On growth, every resident tile keeps its pixel position, so its pixels are copied row
+    /// by row and its normalized UVs are recomputed from its own tile size. The identity
+    /// advances so every UV-bearing cache rebuilds, and the dirty list is replaced by one rect
+    /// per resident tile, typed by that tile's pixel kind, so the recreated GPU texture
+    /// receives each tile exactly once.
+    #[must_use = "a refused growth leaves the atlas at its current size"]
+    pub fn grow_to(&mut self, dim: u32) -> bool {
+        if self.next_growth_dim() != Some(dim) {
+            // When: the policy's next doubling is not `dim`, refuse before touching any state.
+            return false;
+        }
+        self.grow_unchecked(dim);
+        true
+    }
+
+    /// The copy behind [`Self::grow_to`]; `dim` is the policy's next doubling.
+    fn grow_unchecked(&mut self, dim: u32) {
+        debug_assert!(self.width == self.height && dim > self.width, "growth enlarges a square");
+        let bpp = BYTES_PER_PIXEL as usize;
+        let old_row_bytes = self.width as usize * bpp;
+        let new_row_bytes = dim as usize * bpp;
+        let mut grown = vec![0u8; new_row_bytes * dim as usize];
+        for (row_index, old_row) in self.pixels.chunks_exact(old_row_bytes).enumerate() {
+            let start = row_index * new_row_bytes;
+            grown[start..start + old_row_bytes].copy_from_slice(old_row);
+        }
+        // The old buffer drops here, so peak memory is both buffers for this call only.
+        self.pixels = grown;
+        self.packer.grow(dim, dim);
+        self.width = dim;
+        self.height = dim;
+        let dim_f = dim as f32;
+        let mut uploads: Vec<DirtyRect> = Vec::new();
+        for entry in self.map.values_mut() {
+            let Some((x, y, _, _)) = entry.rect else {
+                // When: rect is None the entry owns no pixels, so its zero UV stays as is.
+                continue;
+            };
+            let [tile_w, tile_h] = entry.info.px_size;
+            // UVs use the tile size, never the slot size: a reused slot may be larger than
+            // its tile, and the slot margin can hold an evicted tile's stale pixels.
+            entry.info.uv = [
+                x as f32 / dim_f,
+                y as f32 / dim_f,
+                (x + tile_w) as f32 / dim_f,
+                (y + tile_h) as f32 / dim_f,
+            ];
+            let kind =
+                if entry.info.is_color { AtlasPixelKind::Color } else { AtlasPixelKind::Coverage };
+            uploads.push(DirtyRect { x, y, w: tile_w, h: tile_h, kind });
+        }
+        // HashMap order is arbitrary; sorting keeps the re-upload order deterministic.
+        uploads.sort_by_key(|rect| (rect.y, rect.x));
+        self.dirty.clear();
+        self.dirty.extend(uploads);
+        self.identity = self.identity.wrapping_add(1);
+        self.growths += 1;
+        tracing::debug!(
+            target: "sonic::glyph_atlas",
+            dim,
+            growths = self.growths,
+            resident = self.map.len(),
+            "glyph atlas grew"
+        );
+    }
+
+    /// Allocate a `width × height` slot, growing the atlas before giving up. Never evicts.
+    fn alloc_rect_growing(&mut self, width: u32, height: u32) -> Option<AtlasAllocation> {
+        loop {
+            if let Some(allocation) = self.alloc_rect(width, height) {
+                // When: alloc_rect placed the tile at the current size, no growth is needed.
+                return Some(allocation);
+            }
+            // Each pass doubles toward the maximum, so the loop ends after at most three
+            // growths from the 256 floor.
+            let next_dim = self.next_growth_dim()?;
+            self.grow_unchecked(next_dim);
+        }
+    }
+
+    /// Area in pixels of every resident tile at its tile size.
+    #[must_use]
+    pub fn packed_pixels(&self) -> u64 {
+        self.map
+            .values()
+            .filter(|entry| entry.rect.is_some())
+            .map(|entry| u64::from(entry.info.px_size[0]) * u64::from(entry.info.px_size[1]))
+            .sum()
+    }
+
+    /// Largest resident tile width and largest resident tile height, independently.
+    #[must_use]
+    pub fn max_tile_dims(&self) -> [u32; 2] {
+        self.map.values().filter(|entry| entry.rect.is_some()).fold(
+            [0, 0],
+            |[max_w, max_h], entry| {
+                [max_w.max(entry.info.px_size[0]), max_h.max(entry.info.px_size[1])]
+            },
+        )
+    }
+
+    /// Keys of every resident tile that owns atlas pixels; sentinels are excluded.
+    #[must_use]
+    pub fn resident_tile_keys(&self) -> std::collections::HashSet<GlyphKey> {
+        self.map.iter().filter(|(_, entry)| entry.rect.is_some()).map(|(key, _)| *key).collect()
+    }
+
+    /// Reserved capacity of the CPU pixel buffer alone.
+    #[must_use]
+    pub fn retained_pixel_bytes(&self) -> usize {
+        self.pixels.capacity()
+    }
+
+    /// Reserved capacity of the pending dirty list, in rects.
+    #[must_use]
+    pub fn dirty_capacity(&self) -> usize {
+        self.dirty.capacity()
+    }
+
+    /// Smallest candidate start size the resident tiles would have fitted.
+    ///
+    /// Replays the resident tiles in `(y, x)` order at their tile size through a fresh
+    /// packer, per [`fit_outcome_of_tiles`]. An atlas that has ever evicted reports
+    /// [`FitOutcome::Evicted`], since its resident set is no longer its working set.
+    #[must_use]
+    pub fn fit_outcome(&self) -> FitOutcome {
+        if self.ever_evicted {
+            // When: ever_evicted is set the resident set understates the working set.
+            return FitOutcome::Evicted;
+        }
+        let mut placed: Vec<(u32, u32, [u32; 2])> = self
+            .map
+            .values()
+            .filter_map(|entry| entry.rect.map(|(x, y, _, _)| (y, x, entry.info.px_size)))
+            .collect();
+        placed.sort_unstable();
+        let tiles: Vec<[u32; 2]> = placed.into_iter().map(|(_, _, size)| size).collect();
+        fit_outcome_of_tiles(&tiles)
+    }
+
+    /// Shrink the dirty list after a drain when one large batch left it oversized.
+    fn shrink_dirty_list(&mut self) {
+        if self.dirty.capacity() > DIRTY_LIST_SHRINK_ABOVE {
+            self.dirty.shrink_to(DIRTY_LIST_RETAINED);
+        }
     }
 
     /// Atlas width in pixels.
@@ -407,6 +728,7 @@ impl GlyphAtlas {
         self.packer = ShelfPacker::new(self.width, self.height);
         self.free_rects.clear();
         self.dirty.clear();
+        self.shrink_dirty_list();
         self.hits = 0;
         self.misses = 0;
         self.current_frame = 0;
@@ -425,7 +747,8 @@ impl GlyphAtlas {
 
     /// Storage this atlas is holding, for governor accounting and telemetry.
     ///
-    /// Bytes are the pixel buffer's reserved capacity. Items count resident
+    /// Bytes are the pixel buffer's reserved capacity plus the pending dirty
+    /// list's reserved capacity. Items count resident
     /// glyph entries rather than pages: a page is a fixed 16 MiB allocation
     /// that says nothing about occupancy, while the entry count is what
     /// eviction actually acts on.
@@ -435,7 +758,8 @@ impl GlyphAtlas {
     /// buffer can hold bytes no entry references.
     #[must_use]
     pub fn retained_amount(&self) -> ResourceAmount {
-        ResourceAmount { bytes: self.pixels.capacity(), items: self.map.len() }
+        let dirty_bytes = self.dirty.capacity() * std::mem::size_of::<DirtyRect>();
+        ResourceAmount { bytes: self.pixels.capacity() + dirty_bytes, items: self.map.len() }
     }
 
     /// Borrow the CPU-side atlas pixels without draining dirty rects.
@@ -452,14 +776,18 @@ impl GlyphAtlas {
     }
 
     /// Move pending dirty rectangles into reusable caller-owned storage.
+    ///
+    /// A list left over 1,024 rects of capacity, as after a growth re-upload, shrinks to 64.
     pub fn drain_dirty_rects_into(&mut self, out: &mut Vec<DirtyRect>) {
         out.clear();
         out.append(&mut self.dirty);
+        self.shrink_dirty_list();
     }
 
-    /// Discard pending dirty rectangles while retaining their allocation.
+    /// Discard pending dirty rectangles, shrinking an oversized list like a drain does.
     pub fn clear_dirty_rects(&mut self) {
         self.dirty.clear();
+        self.shrink_dirty_list();
     }
 
     /// Look up the glyph for `key`, rasterizing + packing on miss.
@@ -528,12 +856,13 @@ impl GlyphAtlas {
             // and eviction is barred here, so admission is refused before any pixel work.
             return None;
         }
-        if width == 0 || height == 0 || width > self.width || height > self.height {
-            // When: width or height is zero or larger than the atlas the request can never
+        let (limit_w, limit_h) = self.placement_limit();
+        if width == 0 || height == 0 || width > limit_w || height > limit_h {
+            // When: width or height is zero or beyond placement_limit the request can never
             // be placed, so it is refused before build_tile materializes any pixels.
             return None;
         }
-        let allocation = self.alloc_rect(width, height)?;
+        let allocation = self.alloc_rect_growing(width, height)?;
         let tile = build_tile();
         if tile.is_empty() || tile.width != width || tile.height != height {
             // When: tile does not match the reserved width and height the slot would be
@@ -610,9 +939,10 @@ impl GlyphAtlas {
         // entries before discovering that the retry is equally impossible;
         // callers can skip or resize the oversized asset without invalidating
         // every cached UV in the process.
-        if tile.width > self.width || tile.height > self.height {
-            // When: tile exceeds the atlas width or height it can never be placed, so a
-            // sentinel is cached instead of evicting live tiles for an impossible retry.
+        let (limit_w, limit_h) = self.placement_limit();
+        if tile.width > limit_w || tile.height > limit_h {
+            // When: tile exceeds placement_limit it can never be placed, so a sentinel is
+            // cached instead of growing or evicting live tiles for an impossible retry.
             let info = GlyphInfo {
                 uv: [0.0, 0.0, 0.0, 0.0],
                 px_size: [0, 0],
@@ -626,9 +956,10 @@ impl GlyphAtlas {
                 .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
             return Some(info);
         }
-        // Allocate: try free-list first (slots reclaimed by prior
-        // eviction), then the shelf packer, then evict-and-retry.
-        let allocation = match self.alloc_rect(tile.width, tile.height) {
+        // Allocate: try free-list first (slots reclaimed by prior eviction), then the shelf
+        // packer, then growth toward the maximum, and only then evict-and-retry. Growth moves
+        // no tile, so it is allowed even while eviction is disabled.
+        let allocation = match self.alloc_rect_growing(tile.width, tile.height) {
             Some(allocation) => allocation,
             None if allow_eviction && self.eviction_enabled => {
                 self.evict_lru_quartile();
@@ -643,9 +974,16 @@ impl GlyphAtlas {
         Some(self.insert_tile(key, tile, allocation))
     }
 
+    /// Test hook: evict at `cap` entries instead of `MAX_ATLAS_ENTRIES`, so a native test can
+    /// drive a real eviction in the same assembly as a growth. Production never calls it.
+    #[doc(hidden)]
+    pub fn __set_entry_cap_for_test(&mut self, cap: usize) {
+        self.entry_cap = cap.clamp(1, MAX_ATLAS_ENTRIES);
+    }
+
     fn make_entry_room(&mut self, allow_eviction: bool) -> bool {
-        if self.map.len() < MAX_ATLAS_ENTRIES {
-            // When: map is below MAX_ATLAS_ENTRIES a slot is already free, so admission
+        if self.map.len() < self.entry_cap {
+            // When: map is below entry_cap a slot is already free, so admission
             // proceeds without disturbing any resident entry.
             return true;
         }
@@ -655,7 +993,7 @@ impl GlyphAtlas {
             return false;
         }
         self.evict_lru_quartile();
-        self.map.len() < MAX_ATLAS_ENTRIES
+        self.map.len() < self.entry_cap
     }
 
     fn insert_tile(
@@ -791,6 +1129,7 @@ impl GlyphAtlas {
                     self.free_rects.push(rect);
                 }
                 self.evictions += 1;
+                self.ever_evicted = true;
                 self.identity = self.identity.wrapping_add(1);
             }
         }

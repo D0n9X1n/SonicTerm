@@ -388,6 +388,8 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `row_cache_invalidate_us` | 微秒 | 使脏行失效所花的总时间，为普通累加和；至少使一行失效的窗格在其行循环内读取一对时钟，因此计数不会改变保留哪些缓存行 |
 | `recolor_glyphs_visited` | 次数 | 在帧的主字形列表上为光标、复制模式光标或搜索匹配下的字形重新着色时检查的字形：墨迹与目标相交的行，加上终端行之外的全部字形（如标签标题）；叠加层文字不计入 |
 | `font_fallback_applies` | 次数 | 字体准备应用了更新的回退通知或代次的帧，每次清除一次已塑形的行、图集中缺失字形的条目与标签标题宽度纪元；它只是已解析的回退字体到达屏幕的佐证，像素由测试证明 |
+| `glyph_atlas_growths` | 次数 | 字形图集翻倍次数，在每次帧末检查以及渲染器结算统计时计入；让图集增长的帧开始一个增长片段 |
+| `atlas_growth_abandoned` | 次数 | 没有帧呈现的增长片段：在设备停止时、重新绑定替换设备之前，以及 App 为退役或退出的窗口结算统计时结算；就地重置不放弃任何片段 |
 | `shape_ns` | 纳秒 | 所有塑形与测量请求内的时间，包括字体合并；在计时的光栅化调用内发出的请求计为光栅化 |
 | `raster_ns` | 纳秒 | 所有字形图集光栅化调用内的时间，包括字形零的解析、光栅化器创建与图块转换；其中的塑形不重复计入 |
 | `raster_calls` | 次数 | 字形图集光栅化调用，终端文字与界面文字都计入；图集命中不调用 |
@@ -399,6 +401,7 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `render_attempt_shape_requests`、`render_attempt_raster_calls`、`render_attempt_raster_tiles` | 次数 | 这些调用内的塑形请求、光栅化调用与图块 |
 | `apply_attempts`、`apply_attempts_presented`、`apply_attempt_*` | 同 `render_*` | 携带回退代次应用的渲染尝试的相同字段 |
 | `assembly` | 微秒直方图 | 渲染器中的 CPU 帧组装：从帧键检查到叠加层组装结束，在图集重试检查、上传、获取表面、提交与呈现之前；每个组装完成的帧记录一个样本，包括之后重试或呈现失败的帧；`Noop` 帧与被跳过的帧不记录。它不是应用的 `render` 计时段 |
+| `atlas_growth_to_present` | 毫秒直方图 | 从第一个让字形图集增长的帧开始，到下一次成功呈现；每个已呈现的增长片段一个样本 |
 
 在 Windows 上，GDI 呈现器绘制的帧计入 `software_frames`；托管的 Windows CI runner 没有 GPU，因此其运行
 报告 `software_frames` 而没有 `gpu_frames`。通过 wgpu 呈现的帧（包括其软件适配器）计入 `gpu_frames`。
@@ -649,8 +652,8 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `row_quad_cache_bytes` | 哈希表后备存储，以及缓存背景/装饰 quad 向量的容量 | 与缓存行数及窗格/窗口变化对照 |
 | `row_quad_cache_items` | 已缓存的 quad 行数 | 即使表容量有粘性，行数下降也能确认条目已淘汰 |
 | `software_frame_bytes` | Windows 软件呈现的整窗缓冲 | 缩小窗口；其它路径为零 |
-| `vertex_scratch_bytes` | 呈现管线复用的 CPU 顶点组装缓冲 | 跟随最近最大的一帧；超过该帧用量四倍且超过 1 MiB 时收缩到用量的两倍 |
-| `vertex_scratch_items` | 该缓冲持有分配时为 1，否则为 0 | — |
+| `vertex_scratch_bytes` | `UploadStaging` 部分：呈现管线复用的 CPU 顶点组装缓冲，加上每个图集上传的脏矩形列表、合并矩形列表和暂存缓冲 | 顶点缓冲跟随最近最大的一帧，超过该帧用量四倍且超过 1 MiB 时收缩到用量的两倍；同步会释放矩形列表；暂存缓冲保留最大一次写入，至多一张图集 |
+| `vertex_scratch_items` | 顶点缓冲持有分配时为 1，否则为 0 | — |
 
 `role="warm"` 表示渲染器位于待命池，不属于可见窗口；关闭窗口不会释放它。
 这些数值是主机内存，不是 GPU 显存。

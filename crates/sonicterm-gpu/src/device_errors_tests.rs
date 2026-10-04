@@ -295,6 +295,8 @@ const GATED_METHODS: &[&str] = &[
     "__inject_gpu_fault",
     "prepare_rebind",
     "commit_rebind",
+    // Test-only readback: copies the retained frame through the gate; the test maps it.
+    "__copy_retained_frame",
 ];
 
 /// Renderer methods that reach the device without issuing GPU work: they

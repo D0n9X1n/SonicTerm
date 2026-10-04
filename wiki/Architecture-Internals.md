@@ -598,19 +598,45 @@ reaches, so a native test can pin that gate.
 
 ### Atlas and font invariants
 
-The CPU glyph atlas is fixed at 2,048 × 2,048 BGRA8 pixels, about 16 MiB. Its
-metadata holds at most `MAX_ATLAS_ENTRIES = 16,384` entries, including blank and
-missing sentinels.
+The CPU glyph atlas grows by doubling up to 2,048 × 2,048 BGRA8 pixels, about
+16 MiB. Its metadata holds at most `MAX_ATLAS_ENTRIES = 16,384` entries,
+including blank and missing sentinels. Growth copies resident pixels in place,
+recomputes their UVs and advances the atlas identity without rasterizing
+anything again. `GlyphAtlas::grow_to` accepts only the growth policy's next
+doubling: a fixed atlas, an atlas at its maximum, and any other size are
+refused without changing the atlas. Only the glyph atlas grows, and a reset
+remains the only path that clears it.
 
 On a miss, the atlas uses reclaimed rectangles before its shelf packer. Under
-metadata or packing pressure, it deterministically evicts the coldest quarter.
+metadata or packing pressure, a growable atlas below 2,048 grows first; at
+2,048 or the entry cap it deterministically evicts the coldest quarter.
 Frame and preedit validity use the exact tuple of device generation, renderer-owned
-allocation generation, and atlas-local content identity, not the resettable eviction
-count. If this stamp changes during assembly, the renderer discards the frame before
-presentation, resets the atlas in place, invalidates UV-bearing caches, and requests
-one retry without acknowledging the grid. The retry disables eviction until one
-frame presents successfully. Diagnostic eviction fields remain actual counts, and
-reset/replacement has a distinct reason. The fixed pixel allocation does not grow.
+allocation generation, atlas-local content identity and growth count, not the
+resettable eviction count. When this stamp changes during assembly, the renderer
+discards the frame before presentation and requests one retry without
+acknowledging the grid. A change caused only by growth (same device, same
+allocation, no eviction, more growths) keeps the atlas: the retry drops the
+UV-bearing caches and recreates the texture at the new size, and eviction stays
+enabled. Any other change, including a growth and an eviction in one assembly, a
+reset or a replacement, resets the atlas in place, invalidates UV-bearing caches
+and disables eviction until one frame presents successfully. Diagnostic eviction
+fields remain actual counts, and reset/replacement has a distinct reason.
+The glyph texture is resized after the frame source releases its parser guards
+and before any present, so a grown atlas never syncs into a smaller texture and
+recreating it never blocks PTY parsing.
+
+Each frame that grew the atlas starts a growth episode. The frame counters count
+`glyph_atlas_growths` at every end-of-frame check, and the next successful
+present records the episode's `atlas_growth_to_present` time. An episode that no
+frame can present any more is counted in `atlas_growth_abandoned`: when the
+device stops (including the App's stopped-device path, which renders nothing),
+before a rebind replaces the device, and when the App settles a window's
+statistics for retirement or exit. That settlement is idempotent, and `Drop`
+repeats it as a fallback that then adds nothing. A reset in place keeps the
+device, so it abandons nothing.
+
+The image atlas starts as a 1 × 1 placeholder and is promoted to a fixed
+2,048 × 2,048 allocation; after promotion it never grows.
 The private `atlas_lifecycle` child of `core` owns those transitions and the existing
 upload gates. `FrameBatches` groups only borrowed slices of the owned batches; grids and parser
 guards stay with assembly and are released before presentation, and acknowledgement

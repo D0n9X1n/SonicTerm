@@ -83,6 +83,8 @@ pub struct RendererSummary {
     pub software_frame: sonicterm_types::ResourceAmount,
     /// Reused vertex assembly storage of the presentation pipeline.
     pub vertex_scratch: sonicterm_types::ResourceAmount,
+    /// Glyph atlas size, packed area, growths, evictions, fit and largest tile.
+    pub glyph_atlas_facts: sonicterm_gpu::core::GlyphAtlasFacts,
 }
 
 /// Renderer class selected as the authoritative shared-device reader.
@@ -225,6 +227,16 @@ impl RendererSummary {
             self.vertex_scratch.items,
             total.bytes,
             total.items,
+        ) + &format!(
+            " glyph_atlas_dim={} glyph_atlas_packed_pixels={} glyph_atlas_growths={} \
+             glyph_atlas_evictions={} glyph_atlas_fit={} glyph_atlas_max_tile={}x{}",
+            self.glyph_atlas_facts.dim,
+            self.glyph_atlas_facts.packed_pixels,
+            self.glyph_atlas_facts.growths,
+            self.glyph_atlas_facts.evictions,
+            self.glyph_atlas_facts.fit,
+            self.glyph_atlas_facts.max_tile[0],
+            self.glyph_atlas_facts.max_tile[1],
         )
     }
 }
@@ -559,13 +571,23 @@ impl super::App {
                 continue;
             };
             let label = format!("{window_id:?}");
-            renderers.push(summarize(label.clone(), "visible", &renderer.retained_amounts()));
+            renderers.push(summarize(
+                label.clone(),
+                "visible",
+                &renderer.retained_amounts(),
+                renderer.glyph_atlas_facts(),
+            ));
             visible_allocator_candidates.push((label, renderer));
         }
         let mut warm_allocator_candidates = Vec::new();
         for (index, warm) in self.warm_window_pool.iter().enumerate() {
             let label = format!("{index}");
-            renderers.push(summarize(label.clone(), "warm", &warm.renderer.retained_amounts()));
+            renderers.push(summarize(
+                label.clone(),
+                "warm",
+                &warm.renderer.retained_amounts(),
+                warm.renderer.glyph_atlas_facts(),
+            ));
             warm_allocator_candidates.push((label, &warm.renderer));
         }
 
@@ -631,6 +653,7 @@ fn summarize(
     label: String,
     role: &'static str,
     retention: &sonicterm_gpu::core::RendererRetention,
+    glyph_atlas_facts: sonicterm_gpu::core::GlyphAtlasFacts,
 ) -> RendererSummary {
     RendererSummary {
         label,
@@ -641,6 +664,7 @@ fn summarize(
         row_quad_cache: retention.row_quad_cache,
         software_frame: retention.software_frame,
         vertex_scratch: retention.vertex_scratch,
+        glyph_atlas_facts,
     }
 }
 

@@ -266,6 +266,11 @@ STEPS = (
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-counters,perf-hook-checkpoint-memory"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
+    # The ignored working-set check: each start constant covers this host's measured glyph atlas need.
+    Step("glyph-atlas-working-set",
+         ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "glyph_atlas_working_set", "--", "--ignored", "--nocapture"),
+         ("macos", "windows"), 900, "local", ("rust", "native"), ("macos-core", "windows-tests")),
     # The same unit tests with the frame-texture reading compiled in, wherever the plain ones run.
     Step("perf-scenarios-frame-texture-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",

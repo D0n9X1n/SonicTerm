@@ -18,6 +18,83 @@ pub(crate) fn tracked_font_stack(font_size: f64) -> FontStack {
     .expect("bundled test font must load")
 }
 
+/// A primary face lacking é, a locator that answers every fallback request with Rec Mono, and the
+/// temporary directory holding the primary face, removed on drop.
+pub(crate) struct FallbackStack {
+    pub(crate) stack: sonicterm_engine::FontStack,
+    directory: std::path::PathBuf,
+}
+
+impl Drop for FallbackStack {
+    // Lifecycle: dropping `FallbackStack` removes its temporary font `directory`.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+/// Answers every fallback request with Rec Mono, which has é.
+pub(crate) struct RecMonoLocator;
+
+impl sonicterm_font::locator::FontLocator for RecMonoLocator {
+    fn load_fonts(
+        &self,
+        _: &[config::FontAttributes],
+        _: &mut std::collections::HashSet<config::FontAttributes>,
+        _: u16,
+    ) -> anyhow::Result<Vec<sonicterm_font::parser::ParsedFont>> {
+        Ok(Vec::new())
+    }
+
+    fn locate_fallback_for_codepoints(
+        &self,
+        _: &[char],
+    ) -> anyhow::Result<Vec<sonicterm_font::parser::ParsedFont>> {
+        use sonicterm_font::locator::{FontDataHandle, FontDataSource, FontOrigin};
+        let handle = FontDataHandle {
+            source: FontDataSource::OnDisk(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+            ),
+            index: 0,
+            variation: 0,
+            origin: FontOrigin::BuiltIn,
+            coverage: None,
+        };
+        Ok(vec![sonicterm_font::parser::ParsedFont::from_locator(&handle)?])
+    }
+}
+
+pub(crate) fn fallback_stack(name: &str) -> FallbackStack {
+    fallback_stack_with_locator(name, std::sync::Arc::new(RecMonoLocator))
+}
+
+/// [`fallback_stack`] with `locator` answering fallback requests, so a test can delay or
+/// replace the face discovery publishes.
+pub(crate) fn fallback_stack_with_locator(
+    name: &str,
+    locator: std::sync::Arc<dyn sonicterm_font::locator::FontLocator + Send + Sync>,
+) -> FallbackStack {
+    let directory =
+        std::env::temp_dir().join(format!("sonicterm-gpu-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sonicterm-harfbuzz/harfbuzz/src/wasm/sample/c/test.ttf"),
+        directory.join("primary.ttf"),
+    )
+    .unwrap();
+    let stack = sonicterm_engine::FontStack::try_new_with_locator_for_test(
+        "Roboto",
+        vec![directory.clone()],
+        locator,
+        14.0,
+        96,
+    )
+    .unwrap();
+    FallbackStack { stack, directory }
+}
+
 #[test]
 fn exports_color_conversion_helpers() {
     let rgba = chrome_color_to_linear_rgba(ChromeColor::rgb(255, 0, 0));

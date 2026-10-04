@@ -621,6 +621,7 @@ fn setup_scale_case(
                     software_render_mode: SoftwareRenderMode::Force,
                 },
                 role: "font-weight-test",
+                glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
             },
         )
     })

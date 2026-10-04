@@ -308,6 +308,15 @@ fn live_renderer_settings<'a>(
 }
 
 impl App {
+    /// Settings for a warm-pool renderer: a hidden window that may never draw, so its glyph
+    /// atlas starts at the 256 floor and grows after adoption like any other.
+    fn warm_renderer_settings(&self) -> sonicterm_gpu::core::RendererSettings<'_> {
+        sonicterm_gpu::core::RendererSettings {
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Minimum,
+            ..self.tear_out_renderer_settings("warm")
+        }
+    }
+
     fn tear_out_renderer_settings(
         &self,
         role: &'static str,
@@ -333,6 +342,7 @@ impl App {
                 software_render_mode: self.config.appearance.software_render_mode,
             },
             role,
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         }
     }
 
@@ -444,7 +454,7 @@ impl App {
             }
         };
         window.set_ime_allowed(true);
-        let settings = self.tear_out_renderer_settings("warm");
+        let settings = self.warm_renderer_settings();
         let shared_gpu = self.shared_gpu_context();
         let mut renderer = match shared_gpu.map_or_else(
             || GpuRenderer::new(window.clone(), event_loop, &self.theme, settings),
@@ -477,6 +487,33 @@ impl App {
 
     fn take_warm_window(&mut self) -> Option<super::WarmWindow> {
         self.warm_window_pool.pop()
+    }
+
+    /// Test hook: build one warm-pool window exactly as pool maintenance does, pool it, and return
+    /// its id; `None` when its window or renderer could not be built.
+    #[doc(hidden)]
+    pub fn __test_prewarm_window(&mut self, event_loop: &ActiveEventLoop) -> Option<WindowId> {
+        let warm = self.create_warm_window(event_loop)?;
+        let id = warm.window.id();
+        self.warm_window_pool.push(warm);
+        Some(id)
+    }
+
+    /// Test hook: the glyph atlas dimension of pooled warm window `id`, `None` once it left the pool.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_warm_glyph_atlas_dim(&self, id: WindowId) -> Option<u32> {
+        self.warm_window_pool
+            .iter()
+            .find(|warm| warm.window.id() == id)
+            .map(|warm| warm.renderer.glyph_atlas_facts().dim)
+    }
+
+    /// Test hook: tear the main window's tab at `index` out through the production route, which
+    /// adopts a pooled warm window when one is ready.
+    #[doc(hidden)]
+    pub fn __test_tear_out_tab(&mut self, event_loop: &ActiveEventLoop, index: usize) -> bool {
+        self.tear_out_tab(event_loop, index)
     }
 
     pub(super) fn is_warm_window_id(&self, win_id: WindowId) -> bool {

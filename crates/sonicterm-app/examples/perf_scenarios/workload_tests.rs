@@ -1041,3 +1041,595 @@ fn role_exit_program_exits_1_after_go() {
     assert_eq!(program_steps(Workload::ExitAfterGo), [ProgramStep::ExitAfterGo]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The running platform's name as `START_SIZE_INPUTS` rows record it.
+fn platform_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        // When: neither macos nor windows matches, the platform has no recorded rows.
+        "linux"
+    }
+}
+
+/// One working-set measurement as the parseable row CI output is recorded from: `key=value`
+/// fields after a fixed prefix, in the order `START_SIZE_INPUTS` rows are keyed, with `source`
+/// naming what measured it (`helper` or `real_renderer`). `fit` is `FitOutcome::label`, which
+/// the helper and the renderer's `GlyphAtlasFacts::fit` both produce. `incomplete_glyphs`
+/// counts required glyphs the measurement drew as tofu; a nonzero count makes the row ineligible
+/// to select a start below the maximum.
+#[allow(clippy::too_many_arguments)]
+fn working_set_row(
+    platform: &str,
+    scale: u32,
+    fixture: &str,
+    source: &str,
+    fit: &str,
+    max_tile: [u32; 2],
+    packed_pixels: u64,
+    incomplete_glyphs: usize,
+) -> String {
+    format!(
+        "glyph_atlas_working_set platform={platform} scale={scale} fixture={fixture} \
+         source={source} fit={fit} max_tile={}x{} packed_pixels={packed_pixels} \
+         incomplete_glyphs={incomplete_glyphs}",
+        max_tile[0], max_tile[1]
+    )
+}
+
+/// Whether fallback is complete: the frame presented, and neither its terminal rows nor its
+/// chrome (tab titles, palette, footer) drew a character as tofu.
+fn fallback_settled(presented: bool, terminal_missing: &[char], chrome_missing: &[char]) -> bool {
+    presented && terminal_missing.is_empty() && chrome_missing.is_empty()
+}
+
+/// The palette footer's key-hint symbols the coverage test requires as `PaletteFooter` tiles.
+const REQUIRED_FOOTER_SYMBOLS: &str = "·↑↓↵";
+/// The tab title the coverage test requires as `TabTitle` tiles; short enough never to truncate.
+const REQUIRED_TITLE_TEXT: &str = "zsh";
+
+/// Each required chrome character with no real resident tile at its raster variant, as
+/// `(variant, character)`. Missing sentinels are not resident, so a symbol drawn as tofu is listed.
+fn missing_required_chrome(
+    resident: &std::collections::HashSet<sonicterm_types::GlyphKey>,
+) -> Vec<(sonicterm_types::GlyphRasterVariant, char)> {
+    use sonicterm_types::GlyphRasterVariant;
+    let required = REQUIRED_FOOTER_SYMBOLS
+        .chars()
+        .map(|symbol| (GlyphRasterVariant::PaletteFooter, symbol))
+        .chain(REQUIRED_TITLE_TEXT.chars().map(|symbol| (GlyphRasterVariant::TabTitle, symbol)));
+    required
+        .filter(|&(variant, symbol)| {
+            !resident.iter().any(|key| key.raster_variant == variant && key.ch == symbol)
+        })
+        .collect()
+}
+
+/// 12c, run by CI on each platform: each start constant passes `validate_table_start`, the same
+/// validation the unit tests use, which admits only the maximum until the sizing oracle is complete
+/// and every required input is recorded. For S9's and S12's working sets at scale 1 and 2 the
+/// constant is at least this platform's need, where a measurement that drew any glyph as tofu
+/// needs the maximum, and the live helper measurement equals this platform's recorded `helper`
+/// row when one exists. Prints each figure so CI's output can become the table's rows.
+#[test]
+#[ignore = "measures with the real font stack; CI runs it in its own step"]
+fn glyph_atlas_working_set() {
+    use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
+    use sonicterm_text::glyph_atlas::{START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
+    use sonicterm_text::start_size_inputs::{
+        start_rule, validate_table_start, InputSource, RuleInput, START_SIZE_INPUTS,
+    };
+    let font_dirs =
+        vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    let size: f32 = FONT_SIZE.parse().expect("the scenario font size");
+    let fixtures = [("S9", Fixture::EmojiCjk), ("S12", Fixture::HistoryScreen)];
+    let titles = ["zsh", "perf_scenarios", "S12 covered window"];
+    let platform = platform_name();
+    for (scale, dpi, constant) in [(1, 72, START_ATLAS_DIM_1X), (2, 144, START_ATLAS_DIM_2X)] {
+        let table = validate_table_start(scale, constant)
+            .unwrap_or_else(|error| panic!("{scale}x start {constant} fails validation: {error}"));
+        println!("glyph_atlas_start scale={scale} constant={constant} verdict={}", table.verdict);
+        let mut local = Vec::new();
+        for (name, fixture) in fixtures {
+            let bytes = fixture_bytes(fixture);
+            let text = String::from_utf8_lossy(&bytes);
+            let lines: Vec<&str> = text.lines().collect();
+            let set =
+                measure_glyph_working_set(&lines, &titles, FONT_FAMILY, size, dpi, &font_dirs)
+                    .expect("the packaged scenario family loads");
+            let incomplete_glyphs = set.unresolved_chars.len() + set.raster_failed.len();
+            println!(
+                "{}",
+                working_set_row(
+                    platform,
+                    scale,
+                    name,
+                    "helper",
+                    &set.fit_outcome.label(),
+                    set.max_tile_dims,
+                    set.packed_pixels,
+                    incomplete_glyphs
+                )
+            );
+            if incomplete_glyphs > 0 {
+                // When: a required tile is tofu on this host, say which, apart from the row.
+                println!(
+                    "glyph_atlas_working_set_tofu platform={platform} scale={scale} fixture={name} \
+                     unresolved={:?} raster_failed={:?}",
+                    set.unresolved_chars, set.raster_failed
+                );
+            }
+            let recorded = START_SIZE_INPUTS.iter().find(|row| {
+                row.platform == platform
+                    && row.scale == scale
+                    && row.fixture == name
+                    && row.source == InputSource::Helper
+            });
+            if let Some(row) = recorded {
+                // When: a helper row is recorded, the live measurement must not drift from it.
+                assert_eq!(
+                    (row.outcome, row.max_tile, row.incomplete_glyphs),
+                    (set.fit_outcome, set.max_tile_dims, incomplete_glyphs),
+                    "{name} at {scale}x drifted from its recorded helper row ({})",
+                    row.run_url
+                );
+            }
+            local.push(RuleInput {
+                label: format!("{platform} {scale}x {name} helper"),
+                outcome: set.fit_outcome,
+                max_tile: set.max_tile_dims,
+                incomplete_glyphs,
+            });
+        }
+        let need = start_rule(&local).expect("two measured inputs");
+        println!(
+            "glyph_atlas_working_set platform={platform} scale={scale} need={} constant={constant} \
+             verdict={}",
+            need.dim, need.verdict
+        );
+        assert!(constant >= need.dim, "{scale}x needs {} but starts at {constant}", need.dim);
+    }
+}
+
+/// The working-set step and the real-renderer coverage test print their measurements through one
+/// formatter, so a single `key=value` parser reads both and the rows can become `START_SIZE_INPUTS`
+/// entries: the same keys in the same order, told apart only by `source`. Both kinds carry
+/// `incomplete_glyphs`, the count that makes a row ineligible to select a smaller start.
+#[test]
+fn working_set_rows_share_one_parseable_format() {
+    use sonicterm_text::glyph_atlas::FitOutcome;
+    let parse = |line: &str| -> Vec<(String, String)> {
+        let fields = line.strip_prefix("glyph_atlas_working_set ").expect("the row prefix");
+        fields
+            .split(' ')
+            .map(|field| {
+                let (key, value) = field.split_once('=').expect("a key=value field");
+                (key.to_owned(), value.to_owned())
+            })
+            .collect()
+    };
+    let helper = parse(&working_set_row(
+        "windows",
+        1,
+        "S9",
+        "helper",
+        &FitOutcome::Fits(512).label(),
+        [18, 24],
+        9000,
+        3,
+    ));
+    let real = parse(&working_set_row(
+        "windows",
+        2,
+        "S12",
+        "real_renderer",
+        &FitOutcome::FitsWithoutHeadroom.label(),
+        [40, 48],
+        123_456,
+        0,
+    ));
+    let keys =
+        |row: &[(String, String)]| row.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
+    assert_eq!(
+        keys(&helper),
+        [
+            "platform",
+            "scale",
+            "fixture",
+            "source",
+            "fit",
+            "max_tile",
+            "packed_pixels",
+            "incomplete_glyphs"
+        ]
+    );
+    assert_eq!(keys(&helper), keys(&real));
+    assert_eq!(helper[3].1, "helper");
+    assert_eq!(real[3].1, "real_renderer");
+    assert_eq!((real[4].1.as_str(), real[5].1.as_str()), ("no_headroom", "40x48"));
+    assert_eq!((helper[7].1.as_str(), real[7].1.as_str()), ("3", "0"));
+}
+
+/// Fallback is complete only on a presented frame whose terminal rows and chrome both drew no
+/// tofu: a footer still waiting on its fallback face keeps the check waiting even though the
+/// terminal rows are complete, which a terminal-only check would have accepted.
+#[test]
+fn fallback_settles_only_when_rows_and_chrome_drew_no_tofu() {
+    assert!(fallback_settled(true, &[], &[]));
+    assert!(!fallback_settled(true, &[], &['↵']), "a footer awaiting its face is not settled");
+    assert!(!fallback_settled(true, &['界'], &[]));
+    assert!(!fallback_settled(false, &[], &[]), "a frame that did not present proves nothing");
+}
+
+/// The coverage test compares tiles only after the chrome it exercises is resident: every footer
+/// key-hint symbol under `PaletteFooter` and the short tab title under `TabTitle`, each as a real
+/// tile (missing sentinels are not resident). A symbol drawn only at another variant still counts
+/// as missing.
+#[test]
+fn required_chrome_symbols_are_checked_per_raster_variant() {
+    use sonicterm_types::{GlyphKey, GlyphRasterVariant};
+    // Any real shaped key stands in for a resident tile; only the character and variant matter.
+    let key = |symbol: char, variant| {
+        GlyphKey::shaped(symbol, 1, 7, false, false).with_raster_variant(variant)
+    };
+    let mut resident: std::collections::HashSet<GlyphKey> = REQUIRED_FOOTER_SYMBOLS
+        .chars()
+        .map(|symbol| key(symbol, GlyphRasterVariant::PaletteFooter))
+        .chain(REQUIRED_TITLE_TEXT.chars().map(|symbol| key(symbol, GlyphRasterVariant::TabTitle)))
+        .collect();
+    assert!(missing_required_chrome(&resident).is_empty());
+    resident.remove(&key('↵', GlyphRasterVariant::PaletteFooter));
+    resident.insert(key('↵', GlyphRasterVariant::Normal));
+    assert_eq!(missing_required_chrome(&resident), vec![(GlyphRasterVariant::PaletteFooter, '↵')]);
+}
+
+/// Open the command palette so the main frame draws it: no window is named frontmost, which routes
+/// the palette to main (no attached window). Naming the seeded main key would misroute it, since the
+/// attached native window carries another id. Fails when the palette is not open on main.
+fn open_palette_on_main_frame(app: &mut sonicterm_app::app::App) -> Result<(), String> {
+    app.__test_set_frontmost_window(None);
+    if !app.run_action(&sonicterm_cfg::keymap::Action::OpenCommandPalette) {
+        // When: run_action refuses the action, the palette cannot be measured.
+        return Err("the palette open action was refused".to_owned());
+    }
+    if !app.__test_palette_open() {
+        // When: the action ran but the palette is closed, nothing draws a footer.
+        return Err("the palette is not open".to_owned());
+    }
+    match app.__test_palette_attached_window() {
+        None => Ok(()),
+        // When: an attached window is named, the main frame does not draw the palette.
+        Some(window_id) => {
+            Err(format!("the palette attached to {window_id:?}, not the main frame"))
+        }
+    }
+}
+
+/// The real-renderer coverage test seeds its main window under a synthetic key and then attaches a
+/// native window with another id, so naming that key frontmost reads as a torn-out child and the
+/// palette attaches there: the main frame never draws it, and no footer key becomes resident. The
+/// shared setup must open the palette on the main frame (no attached window), on every host.
+#[test]
+fn the_coverage_setup_opens_the_palette_on_the_main_frame() {
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let fresh = || {
+        let mut app =
+            sonicterm_app::app::App::new(Theme::default(), Config::default(), Keymap::default());
+        app.__test_seed_tab("zsh");
+        app
+    };
+    // The mechanism: the seeded main key named frontmost routes the palette away from main.
+    let mut misrouted = fresh();
+    let main = misrouted.__test_main_window_id().expect("a seeded main window");
+    misrouted.__test_set_frontmost_window(Some(main));
+    assert!(misrouted.run_action(&sonicterm_cfg::keymap::Action::OpenCommandPalette));
+    assert_eq!(misrouted.__test_palette_attached_window(), Some(main));
+    // The setup the coverage test uses draws it on the main frame.
+    let mut app = fresh();
+    open_palette_on_main_frame(&mut app).expect("the palette opens on the main frame");
+    assert!(app.__test_palette_open());
+    assert_eq!(app.__test_palette_attached_window(), None);
+}
+
+/// The working-set helper against the real renderer, compared by tile identity rather than by
+/// configuration-local glyph keys: the S9 and S12 fixtures drawn on a Windows
+/// window with the tab bar and three titles, the cursor and the command palette open with its
+/// footer and detail rows, at scale 1 and 2. It lives beside the fixtures it draws.
+///
+/// Limitation: it checks the subset of tiles that became resident, and does not yet prove that the
+/// renderer drew the complete working set. Two failures leave no tile and no missing-glyph record:
+/// a shaped glyph with a nonzero id whose rasterization or atlas admission fails is skipped
+/// silently by the terminal row path, and a tab title whose fitting fails is drawn as an empty
+/// title before the chrome diagnostic sees it. Until both are reported as missing glyphs,
+/// `SIZING_ORACLE_COMPLETE` stays false and neither normal start constant may drop below 2048.
+#[cfg(target_os = "windows")]
+mod real_renderer_coverage {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use sonicterm_app::app::App;
+    use sonicterm_cfg::config::{Config, ScrollbarMode, SoftwareRenderMode};
+    use sonicterm_cfg::keymap::Keymap;
+    use sonicterm_cfg::theme::Theme;
+    use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
+    use sonicterm_gpu::glyph_working_set::{measure_glyph_working_set, TileIdentity};
+    use winit::application::ApplicationHandler;
+    use winit::dpi::PhysicalSize;
+    use winit::event::WindowEvent;
+    use winit::event_loop::{ActiveEventLoop, EventLoop};
+    use winit::platform::windows::EventLoopBuilderExtWindows;
+    use winit::window::{Window, WindowId};
+
+    use super::super::{fixture_bytes, FONT_FAMILY, FONT_SIZE};
+    use crate::scenarios::Fixture;
+
+    /// The tab titles the harness measures with.
+    const TITLES: [&str; 3] = ["zsh", "perf_scenarios", "S12 covered window"];
+
+    struct Probe {
+        outcome: Option<Result<(), String>>,
+    }
+
+    impl ApplicationHandler for Probe {
+        fn resumed(&mut self, active: &ActiveEventLoop) {
+            // winit allows one event loop per process, so every case runs inside this one.
+            self.outcome = Some(run_cases(active));
+            active.exit();
+        }
+
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+
+    fn check(condition: bool, message: &str) -> Result<(), String> {
+        if condition {
+            Ok(())
+        } else {
+            Err(message.to_owned())
+        }
+    }
+
+    /// Whether this host enumerates no wgpu adapter at all, established apart from renderer
+    /// construction. That is the only limitation that turns a failed wgpu renderer into a skip.
+    fn host_has_no_adapter() -> bool {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty()
+    }
+
+    /// The packaged scenario fonts, so the renderer and the helper load the same faces.
+    fn font_dirs() -> Vec<PathBuf> {
+        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")]
+    }
+
+    /// A wgpu renderer (WARP on the hosted runner) at `scale` on its own window, with the tab bar
+    /// on. `Ok(None)` only when the host enumerates no adapter; any other error fails.
+    fn renderer(
+        active: &ActiveEventLoop,
+        scale: f32,
+        size_pt: f32,
+    ) -> Result<Option<(Arc<Window>, GpuRenderer)>, String> {
+        let window = Arc::new(
+            active
+                .create_window(
+                    Window::default_attributes()
+                        .with_visible(true)
+                        .with_inner_size(PhysicalSize::new(1000, 640))
+                        .with_title("SonicTerm working-set coverage"),
+                )
+                .map_err(|error| error.to_string())?,
+        );
+        let dirs = font_dirs();
+        let created = GpuRenderer::new(
+            window.clone(),
+            active,
+            &Theme::default(),
+            RendererSettings {
+                font_family: FONT_FAMILY,
+                font_dirs: &dirs,
+                font_size: size_pt,
+                line_height_mult: 1.2,
+                font_weight_scale: 1.0,
+                subpixel_aa: Default::default(),
+                padding: [0.0; 4],
+                appearance: SurfaceAppearance {
+                    backdrop: Default::default(),
+                    opacity: 1.0,
+                    scrollbar: ScrollbarMode::Never,
+                    panel_padding: 0.0,
+                    software_render_mode: SoftwareRenderMode::Off,
+                },
+                role: "working-set-coverage",
+                glyph_atlas_start: GlyphAtlasStart::Normal,
+            },
+        );
+        let mut renderer = match created {
+            Ok(renderer) => renderer,
+            Err(error) if host_has_no_adapter() => {
+                // When: the host enumerates no adapter, report the capability, not a pass.
+                println!("capability=HOST_INCAPABLE case=working-set-coverage reason={error}");
+                return Ok(None);
+            }
+            Err(error) => {
+                // When: an adapter exists, so the construction error is a defect.
+                return Err(format!("wgpu renderer construction failed with an adapter: {error}"));
+            }
+        };
+        renderer.set_scale_factor(scale);
+        renderer.set_tab_bar_visible(true);
+        renderer.set_cursor_blink(false);
+        Ok(Some((window, renderer)))
+    }
+
+    /// How long a case may wait for a presented frame whose rows and chrome draw no tofu.
+    const FALLBACK_DEADLINE: Duration = Duration::from_secs(15);
+
+    /// Dispatch the real main-window redraw with pacing open until a dispatch presents a frame
+    /// (the renderer's successful-frame count advances) and that frame drew no tofu in its terminal
+    /// rows (`last_missing_tofu()`) or its chrome (`last_missing_chrome()`: titles, palette rows,
+    /// query and footer), so every fallback face has landed. Fails at the deadline with what was
+    /// still missing.
+    fn settle(
+        app: &mut App,
+        active: &ActiveEventLoop,
+        id: WindowId,
+        case: &str,
+    ) -> Result<(), String> {
+        let started = Instant::now();
+        let mut presented_any = false;
+        let mut last_missing = Vec::new();
+        let mut last_chrome_missing = Vec::new();
+        while started.elapsed() < FALLBACK_DEADLINE {
+            let before = app
+                .__test_window_renderer_mut(id)
+                .map(|renderer| renderer.successful_frame_count())
+                .ok_or("the window has a renderer")?;
+            app.__test_set_window_last_render(id, Instant::now() - Duration::from_secs(1));
+            ApplicationHandler::window_event(app, active, id, WindowEvent::RedrawRequested);
+            let renderer = app.__test_window_renderer_mut(id).ok_or("the window has a renderer")?;
+            let presented = renderer.successful_frame_count() > before;
+            presented_any |= presented;
+            last_missing = renderer.last_missing_tofu().to_vec();
+            last_chrome_missing = renderer.last_missing_chrome().to_vec();
+            if super::fallback_settled(presented, &last_missing, &last_chrome_missing) {
+                // When: the frame presented with no row or chrome tofu, fallback is complete.
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err(format!(
+            "{case}: no presented frame without tofu within {FALLBACK_DEADLINE:?} \
+             (any frame presented: {presented_any}; terminal rows still missing: \
+             {last_missing:?}; chrome still missing: {last_chrome_missing:?})"
+        ))
+    }
+
+    /// Test 17 for one fixture at one scale: the renderer draws the fixture, three titles, the
+    /// cursor and the open palette until a presented frame draws no tofu in its rows or chrome.
+    /// It then holds every required footer symbol and title character as a real tile, prints its
+    /// atlas as a `source=real_renderer` row, every resident tile resolves to an identity (face,
+    /// glyph, strike, variant and flags), and each identity is in the helper's set with the same
+    /// raster size. Tiles lost to the two unreported failures the module comment names are not
+    /// checked.
+    fn covered(
+        active: &ActiveEventLoop,
+        name: &str,
+        fixture: Fixture,
+        scale: f32,
+    ) -> Result<(), String> {
+        let case = format!("{name}@{scale}");
+        let size_pt: f32 = FONT_SIZE.parse().map_err(|_| "the scenario font size")?;
+        let Some((window, renderer)) = renderer(active, scale, size_pt)? else {
+            return Ok(());
+        };
+        let mut config = Config::default();
+        config.font.family = FONT_FAMILY.into();
+        config.font.size = size_pt;
+        config.appearance.software_render_mode = SoftwareRenderMode::Off;
+        config.locale = "en".into();
+        let mut app = App::new(Theme::default(), config, Keymap::default());
+        let bytes = fixture_bytes(fixture);
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        // A pty's ONLCR turns each LF into CR LF before the parser sees it.
+        let terminal_bytes = text.replace('\n', "\r\n").into_bytes();
+        for title in TITLES {
+            let pane = app.__test_seed_tab(title);
+            check(app.__test_advance_pane_parser(pane, &terminal_bytes), "fixture written")?;
+        }
+        let id = app.__test_main_window_id().ok_or("no main window")?;
+        check(app.__test_attach_window_renderer(id, window, renderer), "renderer attached")?;
+        super::open_palette_on_main_frame(&mut app).map_err(|error| format!("{case}: {error}"))?;
+        settle(&mut app, active, id, &case)?;
+        let renderer = app.__test_window_renderer_mut(id).ok_or("the window has a renderer")?;
+        let resident = renderer.__test_resident_tile_keys();
+        let absent = super::missing_required_chrome(&resident);
+        check(absent.is_empty(), &format!("{case}: required chrome not resident: {absent:?}"))?;
+        let facts = renderer.glyph_atlas_facts();
+        // The renderer's own tofu report; it misses the oracle gaps the module comment names.
+        let incomplete_glyphs =
+            renderer.last_missing_tofu().len() + renderer.last_missing_chrome().len();
+        print_row(&super::working_set_row(
+            super::platform_name(),
+            scale as u32,
+            name,
+            "real_renderer",
+            &facts.fit,
+            facts.max_tile,
+            facts.packed_pixels,
+            incomplete_glyphs,
+        ));
+        let (identities, unresolved) = renderer.__test_resident_tile_identities();
+        check(
+            unresolved.is_empty(),
+            &format!("{case}: resident keys with no face identity: {unresolved:?}"),
+        )?;
+        let lines: Vec<&str> = text.lines().collect();
+        let dpi = (72.0 * scale).round() as usize;
+        let helper =
+            measure_glyph_working_set(&lines, &TITLES, FONT_FAMILY, size_pt, dpi, &font_dirs())
+                .map_err(|error| {
+                    format!("{case}: the helper measurement is incomplete: {error}")
+                })?;
+        let missing: Vec<&TileIdentity> = identities
+            .keys()
+            .filter(|identity| !helper.tile_identities.contains_key(*identity))
+            .take(20)
+            .collect();
+        check(
+            missing.is_empty(),
+            &format!("{case}: resident tiles the helper missed: {missing:?}"),
+        )?;
+        let resized: Vec<(&TileIdentity, [u32; 2], [u32; 2])> = identities
+            .iter()
+            .filter_map(|(identity, size)| {
+                let measured = helper.tile_identities[identity];
+                (measured != *size).then_some((identity, *size, measured))
+            })
+            .take(20)
+            .collect();
+        check(
+            resized.is_empty(),
+            &format!("{case}: raster sizes differ (identity, renderer, helper): {resized:?}"),
+        )
+    }
+
+    /// Write one measurement row straight to stdout. CI runs this test without `--nocapture`, and
+    /// libtest captures only the print macros, so a direct write keeps the row in the job's log.
+    fn print_row(row: &str) {
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        // A row that cannot be written loses only evidence; the coverage assertions still run.
+        let _ = writeln!(stdout, "{row}").and_then(|()| stdout.flush());
+    }
+
+    fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
+        let mut failures = Vec::new();
+        for (name, fixture) in [("S9", Fixture::EmojiCjk), ("S12", Fixture::HistoryScreen)] {
+            for scale in [1.0, 2.0] {
+                if let Err(error) = covered(active, name, fixture, scale) {
+                    failures.push(error);
+                }
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+
+    /// Once fallback completes on a presented frame, the helper's identity set covers every tile
+    /// the real renderer holds for S9 and S12 with the tab bar, titles, cursor and an open
+    /// palette, at scale 1 and 2, with the same raster sizes. It checks resident tiles only and
+    /// does not prove complete rendering; see the module comment for the two unreported failures.
+    #[test]
+    fn the_helper_covers_the_real_renderer() {
+        let event_loop =
+            EventLoop::builder().with_any_thread(true).build().expect("Windows event loop");
+        let mut probe = Probe { outcome: None };
+        event_loop.run_app(&mut probe).expect("working-set coverage event loop");
+        probe.outcome.expect("resumed runs").unwrap_or_else(|error| panic!("{error}"));
+    }
+}

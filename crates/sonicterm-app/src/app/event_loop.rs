@@ -818,6 +818,7 @@ impl App {
                     software_render_mode: self.config.appearance.software_render_mode,
                 },
                 role: "main",
+                glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
             },
         );
         let mut renderer = match renderer_result {

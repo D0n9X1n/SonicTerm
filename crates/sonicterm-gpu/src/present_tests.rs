@@ -175,9 +175,29 @@ fn noop_and_atlas_retry_are_wired_to_unacknowledged_exits() {
         "Assembled::AtlasRetry{stamp,evictions}=>{",
         "Assembled::Layers(layers)=>",
     );
-    assert!(atlas_arm.contains(
-        "self.reset_glyph_atlas_after_invalidation(stamp,evictions);PresentOutcome::AtlasRetry"
-    ));
+    // A growth-only change retries without a reset; anything else takes the reset path. Both
+    // leave the arm as `AtlasRetry`, after release.
+    let classify = atlas_arm
+        .find("ifgrowth_only_change(stamp,after,evictions,self.glyph_atlas.evictions()){")
+        .expect("the arm classifies growth first");
+    let growth = atlas_arm.find("self.retry_after_glyph_atlas_growth();").expect("growth retry");
+    let reset = atlas_arm
+        .find("self.reset_glyph_atlas_after_invalidation(stamp,evictions);")
+        .expect("reset");
+    assert!(classify < growth && growth < reset);
+    assert!(atlas_arm.trim_end_matches(['}', ',']).ends_with("PresentOutcome::AtlasRetry"));
+    // The growth retry keeps the atlas: it never resets it in place or disables eviction.
+    let lifecycle = compact(include_str!("atlas_lifecycle.rs"));
+    let retry = source_between(
+        &lifecycle,
+        "pub(super)fnretry_after_glyph_atlas_growth(&mutself){",
+        "pub(super)fncount_glyph_atlas_growths(",
+    );
+    for forbidden in ["reset_glyph_atlas_in_place", "set_eviction_enabled", "reset_in_place"] {
+        assert!(!retry.contains(forbidden), "the growth retry calls {forbidden}");
+    }
+    assert!(retry.contains("self.rebuild_glyph_upload_if_needed();"));
+    assert!(retry.contains("self.request_window_redraw();"));
     for forbidden in ["present_frame(", "finish_successful_frame", "presented_receipts"] {
         assert!(
             !atlas.contains(forbidden) && !atlas_arm.contains(forbidden),

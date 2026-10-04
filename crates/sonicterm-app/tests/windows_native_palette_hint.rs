@@ -289,6 +289,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<NativeKeys, String> {
                 software_render_mode: SoftwareRenderMode::Force,
             },
             role: "native-palette-hint-test",
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -753,6 +754,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<NativeKeys, String> {
                 software_render_mode: SoftwareRenderMode::Force,
             },
             role: "native-palette-child-test",
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         },
         app.main_renderer().unwrap().shared_context(),
     )

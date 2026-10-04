@@ -641,6 +641,7 @@ impl HoverRetryProbe {
                     software_render_mode: SoftwareRenderMode::Force,
                 },
                 role: "quiet-hover-test",
+                glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
             },
         )
         .unwrap();

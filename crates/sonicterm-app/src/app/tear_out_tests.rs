@@ -1160,6 +1160,7 @@ fn run_stopped_spare_tear_out(event_loop: &winit::event_loop::ActiveEventLoop) {
             software_render_mode: SoftwareRenderMode::Force,
         },
         role: "stopped-spare-tear-out-test",
+        glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
     };
     let mut renderer =
         GpuRenderer::new(window.clone(), event_loop, &app.theme, settings).expect("spare renderer");
@@ -1425,4 +1426,25 @@ fn every_renderer_the_app_builds_gets_the_font_fallback_waker() {
         adoption_reconfigures,
         "warm adoption reconfigures the adopted renderer for its window"
     );
+}
+
+/// A warm-pool renderer may never draw, so its glyph atlas starts at the 256 floor; a tear-out
+/// child renderer takes the normal start. Both otherwise share the tear-out settings.
+#[test]
+fn warm_renderers_start_their_glyph_atlas_at_the_floor() {
+    let app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let warm = app.warm_renderer_settings();
+    let child = app.tear_out_renderer_settings("child");
+    assert_eq!(warm.glyph_atlas_start, sonicterm_gpu::core::GlyphAtlasStart::Minimum);
+    assert_eq!(child.glyph_atlas_start, sonicterm_gpu::core::GlyphAtlasStart::Normal);
+    assert_eq!(warm.role, "warm");
+    assert_eq!(
+        sonicterm_gpu::core::start_dim(1.0, warm.glyph_atlas_start),
+        sonicterm_text::glyph_atlas::MIN_ATLAS_DIM
+    );
+    // The warm window's construction uses these settings, not the child's.
+    let source = include_str!("tear_out.rs").replace("\r\n", "\n");
+    let create = source.split_once("fn create_warm_window(").unwrap().1;
+    let create = create.split_once("\n    }\n").unwrap().0;
+    assert!(create.contains("let settings = self.warm_renderer_settings();"));
 }

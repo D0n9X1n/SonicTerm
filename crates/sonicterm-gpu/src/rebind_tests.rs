@@ -9,6 +9,17 @@ fn method(name: &str) -> String {
     source[start..start + end].to_owned()
 }
 
+/// A rebind finalizes the old device's growth episodes after the candidate is accepted and before
+/// the device is replaced, so the first recovered present never times an episode across recovery.
+#[test]
+fn commit_rebind_finalizes_growth_episodes_before_replacing_the_device() {
+    let commit = method("commit_rebind");
+    let identity = commit.find("candidate_identity(").expect("the identity check");
+    let finalize = commit.find("self.finalize_growth_episodes();").expect("the rebind finalizes");
+    let replace = commit.find("self.device = context.device;").expect("the device replacement");
+    assert!(identity < finalize && finalize < replace, "accepted, finalized, then replaced");
+}
+
 /// A candidate needing the window's sRGB format and premultiplied native alpha.
 fn needs(degrade: bool) -> SurfaceNeeds {
     SurfaceNeeds {

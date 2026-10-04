@@ -56,6 +56,49 @@ impl GpuRenderer {
         )
     }
 
+    /// Retry a frame whose assembly only grew the glyph atlas.
+    ///
+    /// Growth moved no tile, so the atlas is kept as it is: no reset, eviction stays enabled. The
+    /// UV caches are dropped because their UVs were normalized to the old size, the GPU texture
+    /// is recreated at the new size (the grown atlas already queued every resident tile for one
+    /// re-upload), and one redraw presents the frame again.
+    pub(super) fn retry_after_glyph_atlas_growth(&mut self) {
+        self.row_glyph_cache.invalidate_all();
+        self.preedit_glyph_cache = None;
+        self.rebuild_glyph_upload_if_needed();
+        self.last_frame_key = None;
+        tracing::debug!(
+            target: "sonic::glyph_atlas",
+            width = self.glyph_atlas.width(),
+            growths = self.glyph_atlas.growths(),
+            "glyph atlas grew during frame assembly; retrying without a reset"
+        );
+        self.request_window_redraw();
+    }
+
+    /// Add growths since the last check to the frame counters and start their timing at
+    /// `frame_start`, unless an earlier growth's timing is still pending.
+    pub(super) fn count_glyph_atlas_growths(&mut self, frame_start: std::time::Instant) {
+        self.growth_episodes.count(self.glyph_atlas.growths(), frame_start);
+    }
+
+    /// Finalize the growth episodes once the device stops: no frame on this device will present
+    /// a pending growth, so it is counted abandoned. A reset in place keeps the device, so it
+    /// abandons nothing.
+    pub(super) fn finalize_growth_episodes_if_device_stopped(&mut self) {
+        if self.device_errors.accepts_gpu_work() {
+            // When: accepts_gpu_work is true a later frame can still present the grown atlas.
+            return;
+        }
+        self.finalize_growth_episodes();
+    }
+
+    /// Count uncounted growths and abandon a pending growth episode straight into this
+    /// renderer's sink; idempotent, and safe outside any collection scope.
+    pub(super) fn finalize_growth_episodes(&mut self) {
+        self.growth_episodes.finalize(self.glyph_atlas.growths(), self.frame_sink.as_ref());
+    }
+
     fn mark_glyph_atlas_replaced(&mut self) {
         self.glyph_atlas_generation = self.glyph_atlas_generation.wrapping_add(1);
         self.preedit_glyph_cache = None;
@@ -67,6 +110,7 @@ impl GpuRenderer {
         let height = self.glyph_atlas.height();
         self.glyph_atlas.reset_in_place();
         self.mark_glyph_atlas_replaced();
+        self.glyph_atlas_resets = self.glyph_atlas_resets.saturating_add(1);
         tracing::debug!(
             target: "memory",
             renderer_role = self.render_timing_label,

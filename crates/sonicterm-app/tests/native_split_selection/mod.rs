@@ -611,6 +611,7 @@ fn start_case(
                 software_render_mode: config.appearance.software_render_mode,
             },
             role: "native-split-selection",
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         },
     )?;
     renderer.set_cursor_blink(false);

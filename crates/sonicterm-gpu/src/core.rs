@@ -130,6 +130,38 @@ pub fn acknowledge_receipts(
         .count()
 }
 
+/// The glyph atlas facts a memory snapshot reports per renderer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GlyphAtlasFacts {
+    /// Current square dimension in pixels.
+    pub dim: u32,
+    /// Area of every resident tile at its tile size.
+    pub packed_pixels: u64,
+    /// Size doublings since construction.
+    pub growths: u64,
+    /// LRU evictions since the last reset.
+    pub evictions: u64,
+    /// Fit label: `256`, `512`, `1024`, `2048`, `no_headroom`, `does_not_fit` or `evicted`.
+    pub fit: String,
+    /// Largest resident tile width and height.
+    pub max_tile: [u32; 2],
+}
+
+impl GlyphAtlasFacts {
+    /// Read the facts from `atlas`.
+    #[must_use]
+    pub fn of(atlas: &GlyphAtlas) -> Self {
+        Self {
+            dim: atlas.width(),
+            packed_pixels: atlas.packed_pixels(),
+            growths: atlas.growths(),
+            evictions: atlas.evictions(),
+            fit: atlas.fit_outcome().label(),
+            max_tile: atlas.max_tile_dims(),
+        }
+    }
+}
+
 /// Settle one releasing frame for a caller that still borrows its grids: apply the receipts only
 /// when the frame was presented, and return its outcome. Every other outcome keeps the dirty rows.
 pub fn settle_borrowed_frame(
@@ -159,6 +191,17 @@ impl FrameOutcome {
     fn without_receipts(outcome: PresentOutcome) -> Self {
         FrameOutcome { outcome, receipts: Vec::new() }
     }
+}
+
+/// The renderer's `UploadStaging` part from its `vertex` scratch and its two atlas uploads; a
+/// free function so a headless test sums exactly what the renderer reports.
+pub(crate) fn upload_staging_amount(
+    vertex: ResourceAmount,
+    glyph_upload: &AtlasUpload,
+    image_upload: &AtlasUpload,
+) -> ResourceAmount {
+    let uploads = glyph_upload.retained_bytes() + image_upload.retained_bytes();
+    ResourceAmount { bytes: vertex.bytes + uploads, items: vertex.items }
 }
 
 /// Lend `source` once and decide the exits that need no renderer, in their existing order: an empty
@@ -225,6 +268,8 @@ struct AssembledLayers {
     overlay_glyphs: Vec<GlyphInstance>,
     field_candidates: PresentedFields,
     missing_chars: Vec<char>,
+    /// Chrome characters this frame drew as tofu or dropped; published only if it presents.
+    missing_chrome_chars: Vec<char>,
     gpu_timing: present::FrameTiming,
     plan: FramePlan,
     receipts: Vec<sonicterm_render_model::AckReceipt>,
@@ -307,7 +352,7 @@ fn hovered_url_span_rect(
     (width > 0.0).then_some((x, origin_y + f32::from(span.row) * cell_h, width, cell_h))
 }
 
-fn palette_footer_font_size(body_font_size: f32) -> f32 {
+pub(crate) fn palette_footer_font_size(body_font_size: f32) -> f32 {
     (body_font_size - 1.0).max(1.0)
 }
 
@@ -469,6 +514,36 @@ pub struct RendererSettings<'a> {
     pub appearance: SurfaceAppearance,
     /// Stable renderer role used by memory and timing diagnostics.
     pub role: &'static str,
+    /// Size the renderer's glyph atlas starts at before it grows on demand.
+    pub glyph_atlas_start: GlyphAtlasStart,
+}
+
+/// Which start size a renderer's glyph atlas takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlyphAtlasStart {
+    /// The measured start size for the window's scale factor.
+    #[default]
+    Normal,
+    /// The 256-pixel floor, for warm-pool renderers that may never draw.
+    Minimum,
+}
+
+/// Square start dimension of a glyph atlas for `scale_factor` and `start`.
+///
+/// `Normal` takes the scale-1 start up to 1.5 and the scale-2 start above it; `Minimum` is the
+/// floor. A later scale change resets the atlas in place at its current size and never shrinks it.
+#[must_use]
+pub fn start_dim(scale_factor: f32, start: GlyphAtlasStart) -> u32 {
+    let GlyphAtlasStart::Normal = start else {
+        // When: start is Minimum the renderer may never draw, so its atlas takes the 256 floor.
+        return sonicterm_text::glyph_atlas::MIN_ATLAS_DIM;
+    };
+    if scale_factor <= 1.5 {
+        sonicterm_text::glyph_atlas::START_ATLAS_DIM_1X
+    } else {
+        // When: scale_factor is above 1.5 the window rasterizes at scale 2, so it takes that start.
+        sonicterm_text::glyph_atlas::START_ATLAS_DIM_2X
+    }
 }
 
 fn cursor_color_from_theme(theme: &Theme) -> [f32; 4] {
@@ -501,13 +576,13 @@ fn effective_font_weight_scale(scale: f32) -> f32 {
 mod tab_title_font;
 use tab_title_font::TabTitleFont;
 
-struct RendererFontStacks {
-    body: Option<sonicterm_engine::FontStack>,
-    tab_title: Option<sonicterm_engine::FontStack>,
-    palette_footer: Option<sonicterm_engine::FontStack>,
+pub(crate) struct RendererFontStacks {
+    pub(crate) body: Option<sonicterm_engine::FontStack>,
+    pub(crate) tab_title: Option<sonicterm_engine::FontStack>,
+    pub(crate) palette_footer: Option<sonicterm_engine::FontStack>,
 }
 
-fn renderer_font_stacks(
+pub(crate) fn renderer_font_stacks(
     family: &str,
     body_size: f32,
     dpi: usize,
@@ -527,7 +602,7 @@ fn renderer_font_stacks(
 
 /// The renderer's three stacks from `body`: the tab-title and palette-footer views share its
 /// configuration at their own sizes for a `body_size` grid font.
-fn renderer_font_views(
+pub(crate) fn renderer_font_views(
     body: Option<sonicterm_engine::FontStack>,
     body_size: f32,
 ) -> RendererFontStacks {
@@ -1607,7 +1682,13 @@ fn create_frame_texture(
     width: u32,
     height: u32,
     format: TextureFormat,
+    copy_source: bool,
 ) -> (Texture, TextureView) {
+    let mut usage = TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
+    if copy_source {
+        // Only a test that enabled retained-frame readback copies the frame out.
+        usage |= TextureUsages::COPY_SRC;
+    }
     let texture = device.create_texture(&TextureDescriptor {
         label: Some("sonic-retained-frame"),
         size: wgpu::Extent3d {
@@ -1619,7 +1700,7 @@ fn create_frame_texture(
         sample_count: 1,
         dimension: TextureDimension::D2,
         format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+        usage,
         view_formats: &[],
     });
     let view = texture.create_view(&TextureViewDescriptor::default());
@@ -1645,15 +1726,61 @@ fn frame_texture_payload_bytes(extent: (u32, u32)) -> u64 {
 }
 
 /// Build the retained frame texture sized for the presenter; the only caller of `create_frame_texture`.
+/// `copy_source` is the test-only readback flag; production passes false.
 fn build_frame_texture(
     device: &wgpu::Device,
     software_presenter: bool,
     width: u32,
     height: u32,
     format: TextureFormat,
+    copy_source: bool,
 ) -> (Texture, TextureView) {
     let (texture_width, texture_height) = frame_texture_extent(software_presenter, width, height);
-    create_frame_texture(device, texture_width, texture_height, format)
+    create_frame_texture(device, texture_width, texture_height, format, copy_source)
+}
+
+/// Bytes per row of a readback buffer for a `width_px`-wide 4-byte frame, padded to wgpu's copy
+/// alignment.
+#[doc(hidden)]
+#[must_use]
+pub fn padded_readback_row_bytes(width_px: u32) -> u32 {
+    let tight_bytes = width_px.max(1) * 4;
+    tight_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
+}
+
+/// The tightly packed 4-byte pixels of a mapped readback whose `height_px` rows are each
+/// `padded_row_bytes` long, the padding dropped.
+#[doc(hidden)]
+#[must_use]
+pub fn unpad_readback_rows(
+    mapped: &[u8],
+    width_px: u32,
+    height_px: u32,
+    padded_row_bytes: u32,
+) -> Vec<u8> {
+    let tight_bytes = width_px as usize * 4;
+    mapped
+        .chunks(padded_row_bytes as usize)
+        .take(height_px as usize)
+        .flat_map(|row| &row[..tight_bytes])
+        .copied()
+        .collect()
+}
+
+/// A copy of the retained frame in a buffer the test maps itself; production code under `src/`
+/// never maps or polls.
+#[doc(hidden)]
+pub struct RetainedFrameReadback {
+    /// The device that owns `buffer`, which the test polls until the map completes.
+    pub device: wgpu::Device,
+    /// The `MAP_READ` buffer the frame was copied into.
+    pub buffer: wgpu::Buffer,
+    /// Frame width in pixels.
+    pub width_px: u32,
+    /// Frame height in pixels.
+    pub height_px: u32,
+    /// Bytes per buffer row, padded to wgpu's copy alignment.
+    pub padded_row_bytes: u32,
 }
 
 /// Create a wgpu instance for `event_loop`'s display, honoring `WGPU_BACKEND`.
@@ -1920,6 +2047,14 @@ pub struct GpuRenderer {
     /// eviction disabled until one frame presents successfully, bounding
     /// retries when the visible glyph working set exceeds atlas capacity.
     glyph_atlas_retry_without_eviction: bool,
+    /// Growths already counted and the growth episode awaiting its present.
+    growth_episodes: crate::frame_stats::GrowthEpisodes,
+    /// Test-only: the retained frame texture is built with `COPY_SRC` so a test can read it back.
+    /// Only `__enable_retained_frame_readback` sets it; production keeps it false.
+    retained_frame_readback: bool,
+    /// In-place glyph atlas resets since construction, read only by tests through
+    /// [`Self::__test_glyph_atlas_resets`] to prove a growth retry never resets.
+    glyph_atlas_resets: u64,
 
     font_family: String,
     font_dirs: Vec<PathBuf>,
@@ -2062,6 +2197,10 @@ pub struct GpuRenderer {
     /// surfaced through [`Self::last_missing_tofu`]; production code
     /// must not depend on it.
     last_missing_chars: Vec<char>,
+    /// Chrome characters (tab titles, palette, search, preedit, footer) the most recent presented
+    /// frame drew as tofu or dropped, whitespace excluded. Test-only diagnostic surfaced through
+    /// [`Self::last_missing_chrome`]; production code must not depend on it.
+    last_missing_chrome_chars: Vec<char>,
     // Row-cache hits skip style-run shaping; misses shape through the font stack before atlas insertion.
     /// Sonicterm-font driven shaper. Owns
     /// the cell metrics (`cell_metrics_raster_px()`), the resolved
@@ -2115,12 +2254,34 @@ struct GlyphContentStamp {
     device_generation: u64,
     allocation_generation: u64,
     content_identity: u64,
+    /// The atlas's monotonic growth count, so a growth is told apart from a reset or eviction.
+    growths: u64,
 }
 
 impl GlyphContentStamp {
     fn capture(device_generation: u64, allocation_generation: u64, atlas: &GlyphAtlas) -> Self {
-        Self { device_generation, allocation_generation, content_identity: atlas.identity() }
+        Self {
+            device_generation,
+            allocation_generation,
+            content_identity: atlas.identity(),
+            growths: atlas.growths(),
+        }
     }
+}
+
+/// Whether the atlas changed during a frame only by growing: same device, same allocation, no
+/// eviction since `frame_evictions`, and a higher growth count. Growth moves no tile, so the
+/// frame retries without resetting the atlas or disabling eviction.
+fn growth_only_change(
+    before: GlyphContentStamp,
+    after: GlyphContentStamp,
+    frame_evictions: u64,
+    current_evictions: u64,
+) -> bool {
+    before.device_generation == after.device_generation
+        && before.allocation_generation == after.allocation_generation
+        && frame_evictions == current_evictions
+        && after.growths > before.growths
 }
 
 struct PreeditGlyphCache {
@@ -2133,6 +2294,8 @@ struct PreeditGlyphCache {
     glyphs: Vec<GlyphInstance>,
     /// Outline quads of unresolved characters, replayed with the glyphs.
     missing_boxes: Vec<QuadInstance>,
+    /// The characters those outlines stand for, replayed into the frame's chrome readout.
+    missing_chrome_chars: Vec<char>,
 }
 
 impl PreeditGlyphCache {
@@ -2391,8 +2554,9 @@ pub struct RendererRetention {
     pub row_quad_cache: ResourceAmount,
     /// Windows software presentation buffer. Zero elsewhere.
     pub software_frame: ResourceAmount,
-    /// Reused per-frame vertex assembly storage of the presentation pipeline. CPU memory,
-    /// so the GPU-buffer exclusion does not cover it; one item while it holds an allocation.
+    /// Reused per-frame vertex assembly storage of the presentation pipeline, plus both atlas
+    /// uploads' dirty and coalesced rect lists. CPU memory, so the GPU-buffer exclusion does not
+    /// cover it; one item while the vertex scratch holds an allocation.
     pub vertex_scratch: ResourceAmount,
 }
 
@@ -2579,6 +2743,7 @@ impl GpuRenderer {
             padding,
             appearance,
             role,
+            glyph_atlas_start,
         } = settings;
         let font_weight_scale = effective_font_weight_scale(font_weight_scale);
         let [padding_left, padding_right, padding_top, padding_bottom] = padding;
@@ -2747,14 +2912,25 @@ impl GpuRenderer {
         InitTiming::finish(timing, InitOutcome::Returned);
         let software_presenter = cfg!(target_os = "windows") && software_render_degrade;
         let timing = InitTiming::begin("frame_texture");
-        let (frame_texture, frame_view) =
-            build_frame_texture(&device, software_presenter, config.width, config.height, format);
+        let (frame_texture, frame_view) = build_frame_texture(
+            &device,
+            software_presenter,
+            config.width,
+            config.height,
+            format,
+            false,
+        );
         InitTiming::finish(timing, InitOutcome::Returned);
         let timing = InitTiming::begin("frame_blitter");
         let frame_blitter = wgpu::util::TextureBlitter::new(&device, format);
         InitTiming::finish(timing, InitOutcome::Returned);
         let timing = InitTiming::begin("glyph_atlas");
-        let glyph_atlas = GlyphAtlas::default_size();
+        // The glyph atlas is the only growable atlas: it starts at its measured size and doubles
+        // up to ATLAS_DIM before it evicts.
+        let glyph_atlas = GlyphAtlas::growable(
+            start_dim(sf, glyph_atlas_start),
+            sonicterm_text::glyph_atlas::ATLAS_DIM,
+        );
         InitTiming::finish(timing, InitOutcome::Returned);
         let timing = InitTiming::begin("image_atlas");
         let image_atlas = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
@@ -2905,6 +3081,9 @@ impl GpuRenderer {
             image_upload_rebuild_pending: false,
             inline_media_absent_since: None,
             glyph_atlas_retry_without_eviction: false,
+            growth_episodes: crate::frame_stats::GrowthEpisodes::default(),
+            retained_frame_readback: false,
+            glyph_atlas_resets: 0,
             font_family: font_family.to_string(),
             font_dirs: font_dirs.to_vec(),
             font_size,
@@ -2962,6 +3141,7 @@ impl GpuRenderer {
             tab_bar_visible: true,
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
+            last_missing_chrome_chars: Vec::new(),
             // `shape_cache` field deleted with the cosmic-text path.
             font_stack: font_stacks.body,
             tab_title_font: TabTitleFont::new(
@@ -3347,8 +3527,23 @@ impl GpuRenderer {
             row_glyph_cache: self.row_glyph_cache.retained_amount(),
             row_quad_cache: self.line_quad_cache.retained_amount(),
             software_frame: self.software_frame_retained_amount(),
-            vertex_scratch: self.present_pipeline.vertex_scratch_retained(),
+            vertex_scratch: self.upload_staging_retained(),
         }
+    }
+
+    /// The glyph atlas's size, packing, growth, eviction and fit facts.
+    #[must_use]
+    pub fn glyph_atlas_facts(&self) -> GlyphAtlasFacts {
+        GlyphAtlasFacts::of(&self.glyph_atlas)
+    }
+
+    /// The `UploadStaging` part: the vertex scratch plus both atlas uploads' CPU storage.
+    fn upload_staging_retained(&self) -> ResourceAmount {
+        upload_staging_amount(
+            self.present_pipeline.vertex_scratch_retained(),
+            &self.glyph_upload,
+            &self.image_upload,
+        )
     }
 
     /// Release one permanently removed pane's cached rows without evicting peers.
@@ -3769,6 +3964,17 @@ impl GpuRenderer {
         &self.last_missing_chars
     }
 
+    /// Every chrome character (tab titles, palette rows, query, footer, search, preedit) the
+    /// previous presented frame drew as tofu or dropped because its run could not be shaped or
+    /// its tile was not placed; whitespace is excluded. The chrome counterpart of
+    /// [`Self::last_missing_tofu`], so fallback is complete only when both are empty.
+    ///
+    /// Test-only diagnostic, doc-hidden like `last_missing_tofu`.
+    #[doc(hidden)]
+    pub fn last_missing_chrome(&self) -> &[char] {
+        &self.last_missing_chrome_chars
+    }
+
     /// Grid `(cols, rows)` from raster surface and cell dimensions; logical padding is scaled before subtraction.
     pub fn cells(&self) -> (u16, u16) {
         let surf_w = self.config.width as f32;
@@ -3785,6 +3991,14 @@ impl GpuRenderer {
     /// Cell width and height in raster pixels, matching rendered pane content rectangles.
     pub fn cell_size(&self) -> (f32, f32) {
         (self.cell_w, self.cell_h)
+    }
+
+    /// Test hook: evict the glyph atlas's coldest quarter at `cap` entries instead of the
+    /// production maximum, so a native test can drive a real eviction in the same assembly as a
+    /// growth. Passing `sonicterm_text::glyph_atlas::MAX_ATLAS_ENTRIES` restores production.
+    #[doc(hidden)]
+    pub fn __set_glyph_atlas_entry_cap(&mut self, cap: usize) {
+        self.glyph_atlas.__set_entry_cap_for_test(cap);
     }
 
     /// Test hook: change the glyph atlas identity during the next assembly, so that frame returns
@@ -3804,6 +4018,14 @@ impl GpuRenderer {
     /// Collect frame statistics from now on. The App calls this once, before the renderer draws.
     pub fn set_frame_counting(&mut self, counting: bool) {
         self.frame_sink = counting.then(crate::frame_stats::FrameStatsSink::default);
+    }
+
+    /// Settle this renderer's statistics for a final read: count glyph atlas growths not yet
+    /// counted and abandon a pending growth episode. The App calls it before it copies a retiring
+    /// or exiting window's statistics; it is idempotent, and `Drop` repeats it as a fallback that
+    /// then adds nothing.
+    pub fn finalize_frame_stats(&mut self) {
+        self.finalize_growth_episodes();
     }
 
     /// The cumulative frame statistics; zero while the renderer does not count.
@@ -3891,6 +4113,9 @@ impl GpuRenderer {
 
     /// Take the device's one-time stopped-frame report without assembling or presenting a frame.
     pub fn take_stopped_render_outcome(&mut self) -> Option<PresentOutcome> {
+        // The App's stopped path refuses rendering before any assembly, so a pending growth
+        // episode ends here, even when the stop was already reported.
+        self.finalize_growth_episodes_if_device_stopped();
         if self.device_errors.accepts_gpu_work() || self.device_stop_reported {
             // When: `device_errors` accepts work or `device_stop_reported` is set, no stop report remains.
             return None;
@@ -4200,9 +4425,89 @@ impl GpuRenderer {
             self.config.width,
             self.config.height,
             self.config.format,
+            self.retained_frame_readback,
         );
         self.frame_texture = frame_texture;
         self.frame_view = frame_view;
+    }
+
+    /// Test hook: recreate the retained frame texture copyable (`COPY_SRC`), now and on every later
+    /// recreation, so [`Self::__copy_retained_frame`] can read it back. Production never calls it,
+    /// so production frame textures keep their usage. The next frame draws in full.
+    #[doc(hidden)]
+    pub fn __enable_retained_frame_readback(&mut self) {
+        self.retained_frame_readback = true;
+        self.rebuild_frame_texture();
+        self.last_frame_key = None;
+    }
+
+    /// Test hook: copy the retained frame into a new readback buffer, through the device gate, and
+    /// return what the test needs to map it. `None` until readback is enabled, or once the device
+    /// stopped. The test maps and polls; this never does.
+    #[doc(hidden)]
+    pub fn __copy_retained_frame(&mut self) -> Option<RetainedFrameReadback> {
+        if !self.retained_frame_readback {
+            // When: retained_frame_readback is false the texture has no COPY_SRC to copy from.
+            return None;
+        }
+        let Some(_scope) = self.device_errors.enter_gpu_work("frame_texture.readback") else {
+            // When: enter_gpu_work refuses, a stopped device copies nothing.
+            return None;
+        };
+        let (width_px, height_px) = (self.frame_texture.width(), self.frame_texture.height());
+        let padded_row_bytes = padded_readback_row_bytes(width_px);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sonic-retained-frame-readback"),
+            size: u64::from(padded_row_bytes) * u64::from(height_px),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("sonic-retained-frame-readback"),
+        });
+        encoder.copy_texture_to_buffer(
+            self.frame_texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row_bytes),
+                    rows_per_image: Some(height_px),
+                },
+            },
+            wgpu::Extent3d { width: width_px, height: height_px, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+        Some(RetainedFrameReadback {
+            device: self.device.clone(),
+            buffer,
+            width_px,
+            height_px,
+            padded_row_bytes,
+        })
+    }
+
+    /// Test hook: resident glyph tiles that hold colour pixels, so a native test can tell a colour
+    /// face resolved before it compares colour tiles.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_resident_color_tiles(&self) -> usize {
+        self.glyph_atlas
+            .resident_tile_keys()
+            .into_iter()
+            .filter(|key| self.glyph_atlas.get(*key).is_some_and(|info| info.is_color))
+            .count()
+    }
+
+    /// Test hook: the alpha census of `character`'s resident colour tile, read from the CPU atlas,
+    /// so a native test can assert the colour glyph it selected holds translucent edge pixels.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_colour_tile_alpha(
+        &self,
+        character: char,
+    ) -> Option<crate::glyph_working_set::ColourTileAlpha> {
+        crate::glyph_working_set::colour_tile_alpha(&self.glyph_atlas, character)
     }
 
     /// The retained frame texture's actual extent: 1x1 under the Windows software presenter, else
@@ -4224,6 +4529,61 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn glyph_atlas_len(&self) -> usize {
         self.glyph_atlas.len()
+    }
+
+    /// Test hook: in-place glyph atlas resets since construction.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_glyph_atlas_resets(&self) -> u64 {
+        self.glyph_atlas_resets
+    }
+
+    /// Test hook: glyph atlas lookups that missed, each one a rasterization; a reset zeroes it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_glyph_atlas_misses(&self) -> u64 {
+        self.glyph_atlas.misses()
+    }
+
+    /// Test hook: the glyph atlas's CPU size and its GPU upload's size, so a native test can check
+    /// that the upload follows a growth (or stays the 1x1 placeholder under the software presenter).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_glyph_atlas_dimensions(&self) -> ((u32, u32), (u32, u32)) {
+        (
+            (self.glyph_atlas.width(), self.glyph_atlas.height()),
+            (self.glyph_upload.width(), self.glyph_upload.height()),
+        )
+    }
+
+    /// Test hook: the keys of every glyph tile resident in the atlas, sentinels excluded, so a
+    /// native test can compare them with the working-set helper's key set.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_resident_tile_keys(
+        &self,
+    ) -> std::collections::HashSet<sonicterm_types::GlyphKey> {
+        self.glyph_atlas.resident_tile_keys()
+    }
+
+    /// Test seam: every resident glyph tile by identity across font configurations, with its
+    /// raster size, resolved through the stack that drew its raster variant; the second value
+    /// lists the resident keys that resolved to no identity.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_resident_tile_identities(
+        &self,
+    ) -> (
+        std::collections::HashMap<crate::glyph_working_set::TileIdentity, [u32; 2]>,
+        Vec<sonicterm_types::GlyphKey>,
+    ) {
+        crate::glyph_working_set::resident_tile_identities(&self.glyph_atlas, |variant| {
+            match variant {
+                GlyphRasterVariant::Normal => self.font_stack.as_ref(),
+                GlyphRasterVariant::TabTitle => self.tab_title_font.stack(),
+                GlyphRasterVariant::PaletteFooter => self.palette_footer_font_stack.as_ref(),
+            }
+        })
     }
 
     /// Apply a new font family / size / line-height multiplier without
@@ -4936,6 +5296,7 @@ impl GpuRenderer {
             &mut self.unattributed_apply,
         );
         self.debug_assert_prepared(fonts);
+        let frame_start = Instant::now();
         // Read before lending, so assembly itself never reaches the device.
         let subpixel_aa = self.effective_subpixel_aa_mode();
         let accepts_gpu_work = self.device_errors.accepts_gpu_work();
@@ -4960,6 +5321,12 @@ impl GpuRenderer {
         });
         // The source is gone here: every arm below runs with no parser guard held.
         self.flush_image_upload_rebuild();
+        // Any growth, from this assembly, outside it, or left by a reset retry, resizes the texture
+        // here, after release and before any present, so a grown atlas never syncs into a smaller
+        // texture and recreating one never holds the parser guards. Assembly reads no texture.
+        self.rebuild_glyph_upload_if_needed();
+        self.count_glyph_atlas_growths(frame_start);
+        self.finalize_growth_episodes_if_device_stopped();
         let assembled = match assembled {
             Ok(assembled) => assembled,
             Err(error) => {
@@ -5011,8 +5378,15 @@ impl GpuRenderer {
                 PresentOutcome::Skipped(SkipReason::Noop)
             }
             Assembled::AtlasRetry { stamp, evictions } => {
-                // The atlas changed during assembly: discard its stale UVs; the reset requests its own redraw.
-                self.reset_glyph_atlas_after_invalidation(stamp, evictions);
+                // The atlas changed during assembly, so its UVs are stale; each path requests a redraw.
+                let after = self.glyph_atlas_stamp();
+                if growth_only_change(stamp, after, evictions, self.glyph_atlas.evictions()) {
+                    self.retry_after_glyph_atlas_growth();
+                } else {
+                    // When: growth_only_change is false the atlas was evicted, reset or replaced,
+                    // so the frame takes the reset path with eviction disabled for one retry.
+                    self.reset_glyph_atlas_after_invalidation(stamp, evictions);
+                }
                 PresentOutcome::AtlasRetry
             }
             Assembled::Layers(layers) => {
@@ -5399,6 +5773,9 @@ impl GpuRenderer {
         // layout. Cleared every frame; published into `self.last_missing_chars`
         // before render() returns.
         let mut missing_chars_this_frame: Vec<char> = Vec::new();
+        // The chrome counterpart: every chrome layout below notes its tofu into this scope, which
+        // closes with the assembled frame; a frame that fails to assemble discards it on drop.
+        let missing_chrome_scope = chrome_text::MissingChromeScope::enter();
         // Geometry is in raster pixels, so px_to_ndc uses the unscaled physical surface dimensions.
         let sw = self.config.width as f32;
         let sh = self.config.height as f32;
@@ -6469,6 +6846,10 @@ impl GpuRenderer {
                     search_font_size,
                     search_font_size,
                 );
+                if search_run.is_none() {
+                    // An unshaped label paints nothing, so every visible character is missing.
+                    chrome_text::note_unshaped_chrome(&search_text.label);
+                }
                 let search_field = search_run.as_ref().map(|run| {
                     plan_field(
                         search_placement,
@@ -6967,6 +7348,10 @@ impl GpuRenderer {
                     palette_font_size,
                     palette_native_em,
                 );
+                if palette_run.is_none() {
+                    // An unshaped query paints nothing, so every visible character is missing.
+                    chrome_text::note_unshaped_chrome(&paint_text);
+                }
                 let palette_field = palette_run.as_ref().map(|run| {
                     plan_field(
                         palette_placement,
@@ -7375,10 +7760,17 @@ impl GpuRenderer {
                     let cached = self.preedit_glyph_cache.as_ref().unwrap();
                     overlay_glyph_instances.extend(cached.glyphs.iter().copied());
                     quads_overlay.extend(cached.missing_boxes.iter().copied());
+                    for &missing in &cached.missing_chrome_chars {
+                        // A hit draws the cached tofu without a layout, so it is noted here.
+                        chrome_text::note_missing_chrome(missing);
+                    }
                 } else {
                     // When: `!cache_hit` — text, placement, colour, or atlas
                     // epoch changed, so the run is re-shaped and re-cached.
                     let before = overlay_glyph_instances.len();
+                    // A nested scope captures the run's tofu for the cache; it is noted again
+                    // into the frame's scope below.
+                    let preedit_scope = chrome_text::MissingChromeScope::enter();
                     let preedit_boxes = emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
                         stack,
@@ -7397,6 +7789,10 @@ impl GpuRenderer {
                         None,
                     );
                     quads_overlay.extend(preedit_boxes.iter().copied());
+                    let preedit_missing = preedit_scope.finish();
+                    for &missing in &preedit_missing {
+                        chrome_text::note_missing_chrome(missing);
+                    }
                     // The frame-end stamp check rejects and clears this cache if emission recycled any UVs.
                     self.preedit_glyph_cache = Some(PreeditGlyphCache {
                         text: text.to_string(),
@@ -7407,6 +7803,7 @@ impl GpuRenderer {
                         atlas_stamp: self.glyph_atlas_stamp(),
                         glyphs: overlay_glyph_instances[before..].to_vec(),
                         missing_boxes: preedit_boxes,
+                        missing_chrome_chars: preedit_missing,
                     });
                 }
 
@@ -7625,6 +8022,7 @@ impl GpuRenderer {
             overlay_glyphs: overlay_glyph_instances,
             field_candidates,
             missing_chars: missing_chars_this_frame,
+            missing_chrome_chars: missing_chrome_scope.finish(),
             gpu_timing,
             plan,
             receipts,
@@ -7644,6 +8042,7 @@ impl GpuRenderer {
             overlay_glyphs,
             field_candidates,
             missing_chars,
+            missing_chrome_chars,
             mut gpu_timing,
             plan,
             receipts,
@@ -7669,9 +8068,10 @@ impl GpuRenderer {
             .settle(field_candidates, matches!(outcome, PresentOutcome::Presented));
         if !matches!(outcome, PresentOutcome::Presented) {
             // When: `matches!` finds any outcome but `Presented`, no receipt is issued, so its dirty rows stay.
+            self.finalize_growth_episodes_if_device_stopped();
             return Ok(FrameOutcome::without_receipts(outcome));
         }
-        self.finish_successful_frame(plan, missing_chars, gpu_timing);
+        self.finish_successful_frame(plan, missing_chars, missing_chrome_chars, gpu_timing);
         Ok(FrameOutcome { outcome: PresentOutcome::Presented, receipts })
     }
 
@@ -7716,6 +8116,7 @@ impl GpuRenderer {
         &mut self,
         plan: FramePlan,
         missing_chars_this_frame: Vec<char>,
+        missing_chrome_chars: Vec<char>,
         gpu_timing: Option<(Instant, Instant, Vec<(&'static str, f32)>)>,
     ) {
         let render_mode = plan.mode;
@@ -7729,8 +8130,11 @@ impl GpuRenderer {
             crate::frame_stats::presents_software(self.software_render_degrade);
         crate::frame_stats::note_frame(software_presenter);
         self.successful_frame_count = self.successful_frame_count.saturating_add(1);
+        // The successful-present seam both presenters share closes any pending growth timing.
+        self.growth_episodes.present();
         self.finish_glyph_atlas_retry();
         self.last_missing_chars = missing_chars_this_frame;
+        self.last_missing_chrome_chars = missing_chrome_chars;
         self.last_frame_key = Some(plan.key);
         if self.pane_focus_flash.is_some() {
             self.request_window_redraw();
@@ -8496,10 +8900,13 @@ impl GpuRenderer {
 
 // Lifecycle: `GpuRenderer` releases its `LIVE_RENDERERS` slot here — the sole
 // decrement, paired with the increment in `new_async`.
+// Lifecycle: teardown counts any glyph atlas growth not yet counted and abandons a pending
+// growth timing, since no later frame can present it.
 impl Drop for GpuRenderer {
     // Ordering: `LIVE_RENDERERS.fetch_sub(1, Ordering::AcqRel)`, pairing with
     // the `Ordering::AcqRel` increment in `new_async`. Publishes no payload.
     fn drop(&mut self) {
+        self.finalize_frame_stats();
         // Paired with the increment in `new`. Together they make the live
         // count return to its starting value across balanced open/close
         // churn, and stay above it when a renderer survives.

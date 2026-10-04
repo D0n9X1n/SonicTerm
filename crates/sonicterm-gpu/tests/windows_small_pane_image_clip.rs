@@ -132,6 +132,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<(), String> {
                 software_render_mode: SoftwareRenderMode::Force,
             },
             role: "small-pane-image-test",
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         },
     )
     .map_err(|error| error.to_string())?;

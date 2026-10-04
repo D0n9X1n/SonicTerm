@@ -127,6 +127,16 @@ impl Histogram {
         histogram
     }
 
+    /// A millisecond histogram from a renderer's bucket `counts` (overflow last) and exact sum.
+    pub(crate) fn from_millis(counts: &[u64], sum_us: u64) -> Self {
+        let mut histogram = Self::new(HistogramUnit::Millis);
+        for (slot, count) in histogram.buckets.iter_mut().zip(counts) {
+            *slot = *count;
+        }
+        histogram.sum_us = sum_us;
+        histogram
+    }
+
     /// The unit, bounds, used bucket counts (overflow last) and exact sum, borrowed.
     fn buckets(&self) -> HistogramBuckets<'_> {
         let bounds = self.unit.bounds();
@@ -1560,6 +1570,8 @@ impl WindowFrameCounters {
                 ("row_cache_invalidate_us", stats.row_cache_invalidate_us),
                 ("recolor_glyphs_visited", stats.recolor_glyphs_visited),
                 ("font_fallback_applies", stats.font_fallback_applies),
+                ("glyph_atlas_growths", stats.glyph_atlas_growths),
+                ("atlas_growth_abandoned", stats.atlas_growth_abandoned),
                 // Attempt and preparation timings are nanoseconds, kept as plain counts.
                 ("shape_ns", stats.shape_ns),
                 ("raster_ns", stats.raster_ns),
@@ -1589,6 +1601,11 @@ impl WindowFrameCounters {
             }
             let assembly = Histogram::from_micros(&stats.assembly_buckets, stats.assembly_sum_us);
             record.push_histogram("assembly", assembly);
+            let growth = Histogram::from_millis(
+                &stats.atlas_growth_to_present_buckets,
+                stats.atlas_growth_to_present_sum_us,
+            );
+            record.push_histogram("atlas_growth_to_present", growth);
         }
         record
     }
@@ -1629,6 +1646,10 @@ impl super::App {
             // When: `frame_counters` is None, the gate is off and there is nothing to retire.
             return;
         };
+        if let Some(renderer) = window.renderer.as_mut() {
+            // the window is leaving, so its renderer settles its growth episodes before the read.
+            renderer.finalize_frame_stats();
+        }
         let stats = window.renderer.as_ref().map(sonicterm_gpu::core::GpuRenderer::frame_stats);
         let Some(counters) = window.redraw.frame_counters.as_deref_mut() else {
             // When: the window never counted, there is nothing to retire.
@@ -1709,6 +1730,10 @@ impl super::App {
         app.finish_closing();
         let now = Instant::now();
         for (id, window) in &mut self.windows {
+            if let Some(renderer) = window.renderer.as_mut() {
+                // the App is exiting, so each renderer settles its growth episodes before the read.
+                renderer.finalize_frame_stats();
+            }
             let stats = window.renderer.as_ref().map(sonicterm_gpu::core::GpuRenderer::frame_stats);
             if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
                 // the window counts, its pending counts get a final line.

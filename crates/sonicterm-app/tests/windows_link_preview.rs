@@ -91,6 +91,7 @@ fn exercise(active: &ActiveEventLoop, main: bool) {
                 software_render_mode: SoftwareRenderMode::Force,
             },
             role: "link-preview-test",
+            glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         },
     )
     .unwrap();

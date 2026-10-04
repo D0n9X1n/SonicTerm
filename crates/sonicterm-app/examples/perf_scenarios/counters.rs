@@ -5,8 +5,12 @@
 //! against a tree whose App has no counters; such a run reports `"unsupported"`.
 #![cfg_attr(not(feature = "perf-counters"), allow(dead_code))]
 
+use std::collections::BTreeMap;
+
 use serde::{Serialize, Serializer};
 use serde_json::{json, Map, Value};
+
+use crate::record::AtlasReading;
 
 /// Whether a run's phases carry `frame_counters`: the top-level `"frame_counters"` value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,6 +220,14 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::Renderer, "apply_attempt_raster_calls"),
     count(Section::Renderer, "apply_attempt_raster_tiles"),
     histogram(Section::Renderer, "assembly_us", Unit::Micros, "assembly"),
+    count(Section::Renderer, "glyph_atlas_growths"),
+    count(Section::Renderer, "atlas_growth_abandoned"),
+    histogram(
+        Section::Renderer,
+        "atlas_growth_to_present_ms",
+        Unit::Millis,
+        "atlas_growth_to_present",
+    ),
 ];
 
 /// One field's value.
@@ -441,6 +453,57 @@ pub(crate) fn snapshot_totals(
         });
     Some(result.map(|()| totals))
 }
+
+/// Each counted window's `glyph_atlas_growths` keyed by its native label, and the closed windows'
+/// total (0 when none was counted). A window whose count is `None` has no renderer and is left out,
+/// never reported as 0. The label is `{window_id:?}`, the form the memory line gives its renderer.
+pub(crate) fn growth_counts(
+    windows: impl IntoIterator<Item = (winit::window::WindowId, Option<u64>)>,
+    closed: Option<u64>,
+) -> (BTreeMap<String, u64>, u64) {
+    let live = windows
+        .into_iter()
+        .filter_map(|(window_id, growths)| Some((format!("{window_id:?}"), growths?)))
+        .collect();
+    (live, closed.unwrap_or(0))
+}
+
+/// The glyph atlas reading for sampling attempt `attempt`: the main window's label and, while the
+/// App counts, each live window's counted growths and the closed windows' total.
+pub(crate) fn atlas_reading(app: &sonicterm_app::app::App, attempt: u32) -> AtlasReading {
+    let main_window = app.main_window().map(|window| format!("{:?}", window.id()));
+    let (counted, closed) = match counted_atlas_growths(app) {
+        Some((live, closed)) => (Some(live), Some(closed)),
+        None => (None, None),
+    };
+    AtlasReading {
+        attempt,
+        main_window,
+        counted_glyph_atlas_growths: counted,
+        closed_glyph_atlas_growths: closed,
+    }
+}
+
+/// Every live window's counted `glyph_atlas_growths` and the closed windows' total; `None` when
+/// `app`'s counters are off.
+#[cfg(feature = "perf-counters")]
+fn counted_atlas_growths(app: &sonicterm_app::app::App) -> Option<(BTreeMap<String, u64>, u64)> {
+    let snapshot = app.frame_counters_snapshot()?;
+    let windows = snapshot
+        .windows
+        .iter()
+        .map(|(window_id, record)| (*window_id, record.count(GLYPH_ATLAS_GROWTHS)));
+    Some(growth_counts(windows, snapshot.closed_windows.count(GLYPH_ATLAS_GROWTHS)))
+}
+
+/// This build has no counter API, so it counts no growths.
+#[cfg(not(feature = "perf-counters"))]
+fn counted_atlas_growths(_app: &sonicterm_app::app::App) -> Option<(BTreeMap<String, u64>, u64)> {
+    None
+}
+
+/// The renderer counter that counts glyph atlas size doublings.
+const GLYPH_ATLAS_GROWTHS: &str = "glyph_atlas_growths";
 
 /// Field `name` of `record`.
 #[cfg(feature = "perf-counters")]
