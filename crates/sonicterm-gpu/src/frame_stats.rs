@@ -482,6 +482,24 @@ fn note_raster_call(drawn: bool) {
     });
 }
 
+/// A render entry's scopes in their only valid order: the renderer's collection scope, then the
+/// attempt inside it. Fields drop in declaration order, so the attempt folds into the collector
+/// before the collector closes into the renderer's sink.
+pub(crate) struct RenderScope {
+    _attempt: AttemptScope,
+    _collect: CollectGuard,
+}
+
+impl RenderScope {
+    /// Open the scopes for a renderer whose sink is `sink`, taking its owed fallback apply, so
+    /// exactly one attempt carries each apply however often the frame's token is reused.
+    pub(crate) fn enter(sink: Option<&FrameStatsSink>, owed_apply: &mut bool) -> Self {
+        let collect = CollectGuard::enter(sink);
+        let attempt = AttemptScope::enter(std::mem::take(owed_apply));
+        Self { _attempt: attempt, _collect: collect }
+    }
+}
+
 /// One render attempt's scope: it collects the attempt's notes and, when it closes, adds them to
 /// every attempt and, for an attempt carrying a fallback apply, to the apply attempts.
 pub(crate) struct AttemptScope {

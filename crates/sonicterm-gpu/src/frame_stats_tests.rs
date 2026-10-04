@@ -334,7 +334,10 @@ fn calls(body: &str, name: &str) -> bool {
 /// opens a scope covers everything it calls, so the walk stops there.
 fn unscoped_entry_points(sources: &[(String, String)]) -> Vec<String> {
     let bodies = function_bodies(sources);
-    let opens_scope = |body: &FunctionBody| body.body.contains("CollectGuard::enter(");
+    // A render entry opens its collection scope through RenderScope, which enters a CollectGuard.
+    let opens_scope = |body: &FunctionBody| {
+        body.body.contains("CollectGuard::enter(") || body.body.contains("RenderScope::enter(")
+    };
     let mut reaching: BTreeSet<String> = bodies
         .iter()
         .filter(|body| body.name != "shape_request" && calls(&body.body, "shape_request"))
@@ -371,7 +374,11 @@ fn every_renderer_entry_point_that_can_shape_opens_a_collection_scope() {
     assert_eq!(unscoped_entry_points(&sources), Vec::<String>::new());
     let scoped = function_bodies(&sources)
         .into_iter()
-        .filter(|body| body.renderer_entry_point && body.body.contains("CollectGuard::enter("))
+        .filter(|body| {
+            body.renderer_entry_point
+                && (body.body.contains("CollectGuard::enter(")
+                    || body.body.contains("RenderScope::enter("))
+        })
         .map(|body| body.name)
         .collect::<BTreeSet<_>>();
     for entry_point in [
@@ -386,7 +393,10 @@ fn every_renderer_entry_point_that_can_shape_opens_a_collection_scope() {
     let core = include_str!("core.rs").replace("\r\n", "\n");
     let wrapper = core.split_once("    pub fn render_with_outcome(").expect("wrapper").1;
     let wrapper = wrapper.split_once("\n    }\n").expect("wrapper body").0;
-    assert!(!wrapper.contains("CollectGuard::enter("), "the wrapper opens its own scope");
+    assert!(
+        !wrapper.contains("CollectGuard::enter(") && !wrapper.contains("RenderScope::enter("),
+        "the wrapper opens its own scope"
+    );
     assert!(wrapper.contains("self.render_releasing("), "the wrapper bypasses render_releasing");
 }
 
@@ -1000,6 +1010,42 @@ fn font_preparation_time_is_exact_split_by_generation_and_outside_every_attempt(
     test_clock::remove();
 }
 
+#[test]
+fn an_attempt_nested_in_another_renderers_attempt_folds_into_its_own_renderer_even_on_unwind() {
+    // A counting renderer that draws inside another's attempt keeps its own attempt and apply
+    // class, and the outer attempt resumes with its own work; an inner attempt that panics still
+    // folds once, unpresented, and restores the outer attempt and timer depth.
+    let outer = FrameStatsSink::default();
+    let inner = FrameStatsSink::default();
+    {
+        let mut outer_owed = false;
+        let _outer = RenderScope::enter(Some(&outer), &mut outer_owed);
+        shape_request(|| ());
+        {
+            let mut inner_owed = true;
+            let _inner = RenderScope::enter(Some(&inner), &mut inner_owed);
+            shape_request(|| ());
+            note_attempt_presented();
+        }
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut inner_owed = true;
+            let _inner = RenderScope::enter(Some(&inner), &mut inner_owed);
+            shape_request(|| ());
+            panic!("the inner renderer failed mid-attempt");
+        }));
+        assert!(caught.is_err());
+        assert!(ATTEMPT.with(Cell::get).is_some(), "the outer attempt resumes");
+        assert_eq!(TIMING_DEPTH.with(Cell::get), 0);
+        shape_request(|| ());
+    }
+    let inner = inner.snapshot();
+    assert_eq!((inner.apply_attempts.attempts, inner.apply_attempts.presented), (2, 1));
+    assert_eq!((inner.attempts.attempts, inner.attempts.shape_requests), (2, 2));
+    let outer = outer.snapshot();
+    assert_eq!((outer.attempts.attempts, outer.attempts.shape_requests), (1, 2));
+    assert_eq!(outer.apply_attempts, AttemptStats::ZERO);
+}
+
 /// Every glyph-atlas insertion in `sources` as `path:line`, with whether its arguments wrap the
 /// rasterizer in `CountingRasterizer`.
 fn atlas_insertions(sources: &[(String, String)]) -> Vec<(String, bool)> {
@@ -1078,9 +1124,14 @@ fn the_attempt_and_the_owed_apply_are_wired_through_the_production_entry_points(
             .map(|function| function.body.split_whitespace().collect::<String>())
             .unwrap_or_else(|| panic!("{name} not found"))
     };
+    // The order of the scopes and the preparation's arguments live in the seams, which the
+    // attribution test drives; here only their use by the real entry points is pinned.
     let releasing = body("render_releasing");
-    assert!(releasing.contains("CollectGuard::enter(self.frame_sink.as_ref())"));
-    assert!(releasing.contains("AttemptScope::enter(std::mem::take(&mutself.unattributed_apply))"));
+    assert!(releasing
+        .starts_with("{let_scope=crate::frame_stats::RenderScope::enter(self.frame_sink.as_ref(),&mutself.unattributed_apply,);"));
+    assert!(
+        !releasing.contains("AttemptScope::enter") && !releasing.contains("CollectGuard::enter")
+    );
     let present = to_lf(include_str!("present.rs")).split_whitespace().collect::<String>();
     assert_eq!(
         present.matches("note_attempt_presented();Ok(PresentOutcome::Presented)").count(),
@@ -1088,10 +1139,9 @@ fn the_attempt_and_the_owed_apply_are_wired_through_the_production_entry_points(
         "each presenter marks the attempt where it returns Presented"
     );
     let prepare = body("begin_frame_fonts");
-    for call in
-        ["prepare_clock()", "note_font_prepare(", "owe_apply(&mutself.unattributed_apply,change)"]
-    {
-        assert!(prepare.contains(call), "begin_frame_fonts lacks {call}");
-    }
+    assert!(prepare.contains(
+        "frame_fonts::prepare_and_owe(&mutself.applied_fonts,&mutself.unattributed_apply,"
+    ));
+    assert!(!prepare.contains("prepare_frame_fonts("), "preparation goes through the seam only");
     assert!(body("notification_layout").contains("CollectGuard::enter(self.frame_sink.as_ref())"));
 }

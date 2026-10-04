@@ -4572,9 +4572,9 @@ impl GpuRenderer {
             let notice = stack.fallback_notice();
             (notice.id(), notice.generation())
         });
-        let prepare_started = crate::frame_stats::prepare_clock();
-        let (token, change) = frame_fonts::prepare_frame_fonts(
+        frame_fonts::prepare_and_owe(
             &mut self.applied_fonts,
+            &mut self.unattributed_apply,
             current,
             frame_fonts::FontApplyTargets {
                 row_glyph_cache: &mut self.row_glyph_cache,
@@ -4585,10 +4585,7 @@ impl GpuRenderer {
                 preedit_glyph_cache: &mut self.preedit_glyph_cache,
                 fallback_epoch: self.tab_title_font.fallback_epoch_mut(),
             },
-        );
-        crate::frame_stats::note_font_prepare(prepare_started, change == FontChange::Generation);
-        frame_fonts::owe_apply(&mut self.unattributed_apply, change);
-        token
+        )
     }
 
     /// Install the App's wake for fallback completions and attach it to the current body stack's
@@ -4934,11 +4931,10 @@ impl GpuRenderer {
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
     ) -> FrameOutcome {
-        let _collect = crate::frame_stats::CollectGuard::enter(self.frame_sink.as_ref());
-        // The attempt opens inside the collection scope and closes first, so it folds there; it
-        // takes the owed fallback apply, so exactly one attempt carries it.
-        let _attempt =
-            crate::frame_stats::AttemptScope::enter(std::mem::take(&mut self.unattributed_apply));
+        let _scope = crate::frame_stats::RenderScope::enter(
+            self.frame_sink.as_ref(),
+            &mut self.unattributed_apply,
+        );
         self.debug_assert_prepared(fonts);
         // Read before lending, so assembly itself never reaches the device.
         let subpixel_aa = self.effective_subpixel_aa_mode();

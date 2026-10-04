@@ -2,6 +2,62 @@ use sonicterm_text::glyph_atlas::GlyphAtlas;
 
 use super::*;
 
+/// Chrome text drawn inside a render attempt is counted there: the first layout shapes and
+/// rasterizes its glyphs, the same layout again shapes but finds every tile in the atlas. Tab
+/// titles, the palette, search, preedit and notifications all lay out through this function.
+#[test]
+fn chrome_layout_counts_its_shaping_and_rasterizing_in_the_open_attempt_once() {
+    use crate::frame_stats::{test_clock, FrameStatsSink, RenderScope};
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK.lock().unwrap();
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let stack = FontStack::try_new_with_font_dirs_for_test(
+        &[("Rec Mono St.Helens", false)],
+        vec![assets],
+        14.0,
+        96,
+        1.0,
+    )
+    .unwrap();
+    let mut raster = stack.clone();
+    let mut atlas = GlyphAtlas::new(512, 512);
+    let sink = FrameStatsSink::default();
+    // Every timer reads the clock twice, one step apart, so each timed call adds exactly 1 ns.
+    test_clock::install(0, 1);
+    let mut lay_out = |owed: bool| {
+        let mut owed = owed;
+        let scope = RenderScope::enter(Some(&sink), &mut owed);
+        layout(
+            &stack,
+            &mut raster,
+            &mut atlas,
+            "tab",
+            ChromeColor::WHITE,
+            ChromeAttrs::default(),
+            14.0,
+            14.0,
+            (20.0, 30.0),
+            (800.0, 100.0),
+            None,
+        );
+        // The attempt's notes reach the sink only when its scope closes.
+        drop(scope);
+        sink.snapshot()
+    };
+    let first = lay_out(true);
+    let second = lay_out(false);
+    test_clock::remove();
+    assert!(first.raster_calls >= 3 && first.raster_tiles >= 3, "{first:?}");
+    assert!(first.shape_requests >= 1);
+    assert_eq!((first.shape_ns, first.raster_ns), (first.shape_requests, first.raster_calls));
+    let applied = first.apply_attempts;
+    assert_eq!((applied.attempts, applied.raster_calls), (1, first.raster_calls));
+    assert_eq!(applied.shape_requests, first.shape_requests);
+    assert_eq!(second.raster_calls, first.raster_calls, "every tile is an atlas hit");
+    assert!(second.shape_requests > first.shape_requests, "the text is shaped again");
+    assert_eq!(second.attempts.shape_requests, second.shape_requests);
+    assert_eq!(second.apply_attempts, applied, "only the first attempt carried the apply");
+}
+
 /// Notification chrome reuses regular weighted raster tiles and preserves their LCD coverage flags.
 #[test]
 fn notification_reuses_regular_weighted_glyphs() {

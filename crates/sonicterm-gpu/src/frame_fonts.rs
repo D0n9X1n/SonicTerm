@@ -68,6 +68,21 @@ pub(super) fn owe_apply(owed: &mut bool, change: FontChange) {
     }
 }
 
+/// Prepare one frame's fonts as the renderer does: time the preparation, apply `current`, count a
+/// newer generation apart from a setup, and owe the next render attempt any fallback apply.
+pub(super) fn prepare_and_owe<Key, Preedit>(
+    applied: &mut Option<(u64, u64)>,
+    owed: &mut bool,
+    current: (u64, u64),
+    targets: FontApplyTargets<'_, Key, Preedit>,
+) -> FrameFonts {
+    let started = crate::frame_stats::prepare_clock();
+    let (token, change) = prepare_frame_fonts(applied, current, targets);
+    crate::frame_stats::note_font_prepare(started, change == FontChange::Generation);
+    owe_apply(owed, change);
+    token
+}
+
 /// Everything a fallback apply invalidates. Generic over the frame key and preedit cache types
 /// so a test can supply stand-ins.
 pub(super) struct FontApplyTargets<'targets, Key = FrameKey, Preedit = super::PreeditGlyphCache> {

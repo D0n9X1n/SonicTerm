@@ -47,6 +47,24 @@ impl Targets {
         (token, change.invalidated())
     }
 
+    /// Prepare `notice_id` at `generation` through the renderer's own seam, owing into `owed`.
+    fn prepare_owing(&mut self, owed: &mut bool, notice_id: u64, generation: u64) {
+        prepare_and_owe(
+            &mut self.applied,
+            owed,
+            (notice_id, generation),
+            FontApplyTargets {
+                row_glyph_cache: &mut self.rows,
+                line_quad_cache: &mut self.quads,
+                style_rev: &mut self.style_rev,
+                last_frame_key: &mut self.frame_key,
+                glyph_atlas: &mut self.atlas,
+                preedit_glyph_cache: &mut self.preedit,
+                fallback_epoch: &mut self.epoch,
+            },
+        );
+    }
+
     /// What one preparation of `notice_id` at `generation` changed.
     fn classify(&mut self, notice_id: u64, generation: u64) -> FontChange {
         prepare_frame_fonts(
@@ -96,6 +114,51 @@ fn a_preparation_tells_a_first_or_replaced_stack_from_a_newer_generation() {
     }
     let stats = sink.snapshot();
     assert_eq!((stats.font_fallback_applies, stats.font_generation_applies), (4, 2));
+}
+
+#[test]
+fn each_fallback_apply_is_attributed_to_exactly_one_render_attempt_through_the_production_seams() {
+    // Preparation and rendering run through prepare_and_owe and RenderScope, as the renderer runs
+    // them. Steps: setup and render (presented); a newer generation prepared twice, then rendered
+    // (presented) and rendered again on the same token (presented, not an apply); an unused
+    // preparation, then a render that does not present (the apply); a newer generation, then a
+    // replaced stack before any render (no apply owed). A stepping clock makes every time exact:
+    // each preparation and each attempt reads the clock twice, one step apart.
+    use crate::frame_stats::{test_clock, AttemptStats, CollectGuard, FrameStatsSink, RenderScope};
+    test_clock::install(0, 1);
+    let sink = FrameStatsSink::default();
+    let mut targets = fresh_targets();
+    let mut owed = false;
+    let prepare = |targets: &mut Targets, owed: &mut bool, notice_id: u64, generation: u64| {
+        let _collect = CollectGuard::enter(Some(&sink));
+        targets.prepare_owing(owed, notice_id, generation);
+    };
+    let render = |owed: &mut bool, presents: bool| {
+        let _scope = RenderScope::enter(Some(&sink), owed);
+        if presents {
+            // When: the step's frame passed the present boundary, as a presenter marks it.
+            crate::frame_stats::note_attempt_presented();
+        }
+    };
+    prepare(&mut targets, &mut owed, 7, 0);
+    render(&mut owed, true);
+    prepare(&mut targets, &mut owed, 7, 1);
+    prepare(&mut targets, &mut owed, 7, 1);
+    render(&mut owed, true);
+    render(&mut owed, true);
+    prepare(&mut targets, &mut owed, 7, 2);
+    render(&mut owed, false);
+    prepare(&mut targets, &mut owed, 7, 3);
+    prepare(&mut targets, &mut owed, 9, 3);
+    render(&mut owed, true);
+    test_clock::remove();
+    let stats = sink.snapshot();
+    assert_eq!((stats.font_fallback_applies, stats.font_generation_applies), (5, 3));
+    assert_eq!((stats.font_prepare_ns, stats.font_generation_prepare_ns), (6, 3), "6 preparations");
+    let apply = AttemptStats { attempts: 2, presented: 1, attempt_ns: 2, ..AttemptStats::ZERO };
+    assert_eq!(stats.apply_attempts, apply, "generations 1 and 2, once each; 3 was replaced");
+    let every = AttemptStats { attempts: 5, presented: 4, attempt_ns: 5, ..AttemptStats::ZERO };
+    assert_eq!(stats.attempts, every);
 }
 
 #[test]
