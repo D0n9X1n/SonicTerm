@@ -468,8 +468,11 @@ pub(crate) fn split_for(
     if delivery.decided_at > ended {
         return Err("delivered-after-present");
     }
-    // Checked intervals only: an out-of-order or unrepresentable endpoint is never saturated.
-    let part = |from: Instant, to: Instant| to.checked_duration_since(from).and_then(duration_ns);
+    // Checked intervals only: an out-of-order or unrepresentable endpoint is never saturated. Order is
+    // compared first: Windows' `checked_duration_since` reads a reversal inside its clock epsilon as zero.
+    let part = |from: Instant, to: Instant| {
+        (to >= from).then(|| to.duration_since(from)).and_then(duration_ns)
+    };
     let parts = (
         part(injected, appearance.parsed_at),
         part(appearance.parsed_at, publication.published_at),
