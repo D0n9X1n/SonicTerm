@@ -115,6 +115,123 @@ fn parser_dims(
     Some((guard.grid().cols, guard.grid().rows))
 }
 
+/// Whether a forwarded dispatch can change a pane's grid. Every grid change runs on this thread inside
+/// a dispatch: a native resize or scale change, an App action (tab, pane, split, zoom, font size, tab bar,
+/// reload), a pointer gesture (splitter, tab press, drag), a pane's exit or an OS drag. Redraws, pane
+/// output, display-link ticks, cache and probe notices, and the loop's turns never resize a grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GridEffect {
+    /// The dispatch never changes a pane's grid; the parser is not read after it.
+    Unchanged,
+    /// The dispatch may change a pane's grid; a frozen grid is read after it.
+    MayChange,
+}
+
+/// A native or synthetic window event's grid effect: only a redraw is known never to resize.
+fn window_event_effect(event: &WindowEvent) -> GridEffect {
+    match event {
+        WindowEvent::RedrawRequested => GridEffect::Unchanged,
+        _ => GridEffect::MayChange,
+    }
+}
+
+/// A user event's grid effect: output, redraw, tick and notice events never resize; every other event,
+/// including any the App adds later, is treated as one that may.
+fn user_event_effect(event: &UserEvent) -> GridEffect {
+    match event {
+        UserEvent::PaneOutput { .. }
+        | UserEvent::RequestRedraw(_)
+        | UserEvent::DisplayLinkTick { .. }
+        | UserEvent::ClearShapeCache
+        | UserEvent::FontFallbackReady { .. }
+        | UserEvent::ForegroundProbeReady
+        | UserEvent::UpdateCheckFinished { .. } => GridEffect::Unchanged,
+        _ => GridEffect::MayChange,
+    }
+}
+
+/// Where the row-run grid is frozen and its first change latched, and how it is read.
+trait GridWatch {
+    /// The frozen row-run grid, once prepared.
+    fn frozen_grid(&self) -> Option<workload::RowRunGeometry>;
+    /// Whether a change is already latched.
+    fn grid_violated(&self) -> bool;
+    /// The row-run pane's grid dimensions now, waiting for a busy parser.
+    fn read_grid(&mut self) -> Option<(u16, u16)>;
+    /// Latch the first change of the frozen grid.
+    fn latch_violation(&mut self, reason: String);
+}
+
+/// Latch the first change of the frozen grid; once latched it stays, so a change that reverts still counts.
+fn latch_grid<Watch: GridWatch>(watch: &mut Watch) {
+    let (Some(frozen), false) = (watch.frozen_grid(), watch.grid_violated()) else {
+        // When: no grid is frozen, or a change is already latched, there is nothing to record.
+        return;
+    };
+    if let Some(reason) =
+        watch.read_grid().and_then(|(cols, rows)| geometry_change(frozen, cols, rows))
+    {
+        watch.latch_violation(reason);
+    }
+}
+
+/// Run `dispatch`, then, only when it may change a pane's grid, read the frozen grid and latch a change.
+/// The grid is read after the dispatch, so the change it made is seen before any later dispatch reverts it.
+fn dispatch_then_observe<Watch: GridWatch, Output>(
+    watch: &mut Watch,
+    effect: GridEffect,
+    dispatch: impl FnOnce(&mut Watch) -> Output,
+) -> Output {
+    let output = dispatch(watch);
+    if effect == GridEffect::MayChange {
+        // When: the dispatch may have resized the grid, it is read now, before the next dispatch.
+        latch_grid(watch);
+    }
+    output
+}
+
+/// Run one plan step behind the grid gate: a latched or seen change invalidates and an unreadable grid
+/// before GO waits, both before the step's `effect` runs; only a proceeding gate runs it.
+fn gated_step<Context, Output>(
+    context: &mut Context,
+    gate: impl FnOnce(&mut Context) -> GeometryGate,
+    invalidate: impl FnOnce(&mut Context, String),
+    wait: impl FnOnce(&mut Context),
+    effect: impl FnOnce(&mut Context) -> Output,
+) -> Option<Output> {
+    match gate(context) {
+        GeometryGate::Invalidate(reason) => {
+            // When: the grid changed, the run ends before the step's effect.
+            invalidate(context, reason);
+            None
+        }
+        GeometryGate::Wait => {
+            // When: the grid cannot be rechecked before GO, the step waits without its effect.
+            wait(context);
+            None
+        }
+        GeometryGate::Proceed => Some(effect(context)),
+    }
+}
+
+impl GridWatch for Probe {
+    fn frozen_grid(&self) -> Option<workload::RowRunGeometry> {
+        self.row_run_geometry
+    }
+
+    fn grid_violated(&self) -> bool {
+        self.geometry_violation.is_some()
+    }
+
+    fn read_grid(&mut self) -> Option<(u16, u16)> {
+        self.row_run_dims(true)
+    }
+
+    fn latch_violation(&mut self, reason: String) {
+        self.geometry_violation = Some(reason);
+    }
+}
+
 /// What a plan step does with the row-run grid recheck.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum GeometryGate {
@@ -701,7 +818,9 @@ impl ApplicationHandler<UserEvent> for Probe {
             // When: the main window already exists, a later resume must not build a second one.
             return;
         }
-        self.forward(event_loop, Dispatch::Native, |app, active| app.resumed(active));
+        self.forward(event_loop, Dispatch::Native, GridEffect::MayChange, |app, active| {
+            app.resumed(active)
+        });
         let Some(window) = self.app.main_window().cloned() else {
             self.invalidate(event_loop, "the App opened no main window".to_owned());
             return;
@@ -747,7 +866,7 @@ impl ApplicationHandler<UserEvent> for Probe {
         match arrival {
             Arrival::Redraw => {
                 let kind = if is_main { Dispatch::Redraw } else { Dispatch::Native };
-                self.forward(event_loop, kind, |app, active| {
+                self.forward(event_loop, kind, GridEffect::Unchanged, |app, active| {
                     app.window_event(active, window_id, event)
                 });
             }
@@ -761,7 +880,8 @@ impl ApplicationHandler<UserEvent> for Probe {
             }
             Arrival::Occlusion(occluded) => self.native_occlusion(event_loop, occluded),
             Arrival::Routed(Route::Forward) => {
-                self.forward(event_loop, Dispatch::Native, |app, active| {
+                let effect = window_event_effect(&event);
+                self.forward(event_loop, Dispatch::Native, effect, |app, active| {
                     app.window_event(active, window_id, event)
                 });
             }
@@ -812,14 +932,19 @@ impl ApplicationHandler<UserEvent> for Probe {
                 }
             }
         }
-        self.forward(event_loop, Dispatch::Native, |app, active| app.user_event(active, event));
+        let effect = user_event_effect(&event);
+        self.forward(event_loop, Dispatch::Native, effect, |app, active| {
+            app.user_event(active, event)
+        });
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         if self.stage == Stage::Done {
             return;
         }
-        self.forward(event_loop, Dispatch::Harness, |app, active| app.new_events(active, cause));
+        self.forward(event_loop, Dispatch::Harness, GridEffect::Unchanged, |app, active| {
+            app.new_events(active, cause)
+        });
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -858,7 +983,9 @@ impl ApplicationHandler<UserEvent> for Probe {
         if self.stage == Stage::Done {
             return;
         }
-        self.forward(event_loop, Dispatch::Harness, |app, active| app.about_to_wait(active));
+        self.forward(event_loop, Dispatch::Harness, GridEffect::Unchanged, |app, active| {
+            app.about_to_wait(active)
+        });
         if self.stage != Stage::Done && event_loop.exiting() {
             // When: the App asked to exit, for example after a last-window close, the run cannot complete.
             self.invalidate(event_loop, "the App requested exit".to_owned());
@@ -1519,6 +1646,7 @@ impl Probe {
         &mut self,
         event_loop: &ActiveEventLoop,
         kind: Dispatch,
+        effect: GridEffect,
         dispatch: impl FnOnce(&mut App, &ActiveEventLoop),
     ) {
         let frames_before = self.frame_count();
@@ -1531,15 +1659,18 @@ impl Probe {
             Dispatch::Redraw => self.allocation_counter.map(|counter| counter()),
             Dispatch::Native | Dispatch::Harness => None,
         };
-        let started = Instant::now();
-        dispatch(&mut self.app, event_loop);
-        let allocations = allocations_before
-            .zip(self.allocation_counter)
-            .map(|(before_count, counter)| counter().saturating_sub(before_count));
-        let ended = Instant::now();
-        let frames_after = self.frame_count();
-        // Read after `ended`, so the measured dispatch time excludes it.
-        self.latch_row_run_geometry();
+        // Only a dispatch that may change a pane's grid reads the parser afterwards; ordinary
+        // measurement dispatches (redraws, pane output, loop turns) never take the parser lock here.
+        let (started, ended, allocations, frames_after) =
+            dispatch_then_observe(self, effect, |probe: &mut Self| {
+                let started = Instant::now();
+                dispatch(&mut probe.app, event_loop);
+                let allocations = allocations_before
+                    .zip(probe.allocation_counter)
+                    .map(|(before_count, counter)| counter().saturating_sub(before_count));
+                let ended = Instant::now();
+                (started, ended, allocations, probe.frame_count())
+            });
         if let Some((counts, scene)) = retry_before {
             // When: the atlas-retry driver runs, this dispatch's delta and scene feed its episode machine.
             self.observe_atlas_retry(counts, scene, ended);
@@ -1658,7 +1789,7 @@ impl Probe {
         if let Some(renderer) = self.app.main_renderer_mut() {
             renderer.invalidate_retained_frame();
         }
-        self.forward(event_loop, Dispatch::Harness, |app, active| {
+        self.forward(event_loop, Dispatch::Harness, GridEffect::Unchanged, |app, active| {
             app.user_event(active, UserEvent::RequestRedraw(window_id))
         });
     }
@@ -1863,19 +1994,6 @@ impl Probe {
             return dims;
         }
         parser_dims(&self.role_pane(self.row_run?.role)?.parser, blocking)
-    }
-
-    /// After a forwarded dispatch, latch the first change of the frozen grid. Every native resize, scale
-    /// change or App action reaches the grid through a forwarded dispatch on this thread, so a change that
-    /// reverts before the next plan step is still recorded. The parser is read without blocking first.
-    fn latch_row_run_geometry(&mut self) {
-        let (Some(frozen), None) = (self.row_run_geometry, &self.geometry_violation) else {
-            // When: no grid is frozen, or a change is already latched, there is nothing to record.
-            return;
-        };
-        if let Some((cols, rows)) = self.row_run_dims(true) {
-            self.geometry_violation = geometry_change(frozen, cols, rows);
-        }
     }
 
     /// Read `role`'s grid without blocking; `None` when the pane is gone or its parser is busy.
@@ -2343,7 +2461,7 @@ impl Probe {
     /// Run an App action as a forwarded dispatch; whether the App accepted it.
     fn run_action(&mut self, event_loop: &ActiveEventLoop, action: &Action) -> bool {
         let mut accepted = false;
-        self.forward(event_loop, Dispatch::Harness, |app, _active| {
+        self.forward(event_loop, Dispatch::Harness, GridEffect::MayChange, |app, _active| {
             accepted = app.run_action(action)
         });
         accepted
@@ -2410,107 +2528,111 @@ impl Probe {
                 self.finish(event_loop, Status::Valid, None);
                 return;
             };
-            match self.step_geometry_gate() {
-                GeometryGate::Invalidate(reason) => {
-                    // When: the frozen grid changed, before or after GO, the workload no longer fits it.
-                    self.invalidate(event_loop, reason);
-                    return;
-                }
-                GeometryGate::Wait => {
-                    // When: the grid cannot be rechecked yet, GO waits for a recheck.
-                    self.stage = Stage::Steps(index);
-                    return;
-                }
-                GeometryGate::Proceed => {}
-            }
-            match step {
-                Step::Phase(phase) => {
-                    if self.meter.is_none() {
-                        self.begin_phase(event_loop, phase);
-                    }
-                    if self.stage == Stage::Done {
-                        return;
-                    }
-                    self.drive(event_loop, Instant::now());
-                    if self.stage == Stage::Done {
-                        return;
-                    }
-                    if let Some(reason) = self.presented_failure.clone() {
-                        // When: a warm acknowledgement could not be written, the role never got its
-                        // release, so the run is not accepted evidence whatever the handshake marked.
-                        self.invalidate(event_loop, reason);
-                        return;
-                    }
-                    if self.image.present.take_redraw_request() {
-                        self.force_presentation(event_loop);
-                    }
-                    let warm_redraw = self
-                        .presented
-                        .as_mut()
-                        .is_some_and(|(_, handshake)| handshake.take_redraw_request());
-                    if warm_redraw {
-                        // The frame that drew the warm update may have presented before the scan saw
-                        // it complete; nothing else need present, so one presentation is forced.
-                        self.force_presentation(event_loop);
-                    }
-                    if self.image.role.is_some() {
-                        let now = Instant::now();
-                        let verdict = waits::image_verdict(
-                            scenarios::BUILD_HOST,
-                            self.image.present.seen(),
-                            self.image_register_deadline(),
-                            self.image_atlas_grew(),
-                            self.image.present.progress(now),
-                            now,
-                        );
-                        match verdict {
-                            ImageVerdict::Blocked(reason) => {
-                                // When: on Windows the image never registered, or the atlas never took it.
-                                self.finish(event_loop, Status::Blocked, Some(reason));
-                                return;
-                            }
-                            ImageVerdict::Invalid(reason) => {
-                                self.invalidate(event_loop, reason);
-                                return;
-                            }
-                            ImageVerdict::Valid | ImageVerdict::Waiting => {}
-                        }
-                    }
-                    if let Some(reason) = self.expired_barrier_reason(phase, Instant::now()) {
-                        // When: no qualifying frame presented within the barrier's own bound.
-                        self.invalidate(event_loop, reason);
-                        return;
-                    }
-                    if !self.phase_done(phase, Instant::now()) {
-                        self.stage = Stage::Steps(index);
-                        return;
-                    }
-                    self.end_phase(event_loop, phase);
-                    if self.stage == Stage::Done {
-                        // When: the phase's delivery check ended the run, no later step runs.
-                        return;
-                    }
-                }
-                Step::Act(act) => {
-                    self.perform(event_loop, *act);
-                    if self.stage == Stage::Done {
-                        return;
-                    }
-                }
-                Step::Checkpoint(label) => {
-                    if !self.advance_checkpoint(event_loop, index, label) {
-                        if self.stage != Stage::Done {
-                            self.stage = Stage::Steps(index);
-                        }
-                        return;
-                    }
-                    // The record is complete and its footprint taken: progress.json gets it now,
-                    // not when the next phase ends, so a run killed in that phase keeps it.
-                    self.record_progress();
-                }
+            // A latched grid change is acted on before the step's effect (a phase's start writes GO).
+            let advanced = gated_step(
+                self,
+                |probe: &mut Self| probe.step_geometry_gate(),
+                |probe: &mut Self, reason| probe.invalidate(event_loop, reason),
+                |probe: &mut Self| probe.stage = Stage::Steps(index),
+                |probe: &mut Self| probe.run_step(event_loop, index, step),
+            );
+            if advanced != Some(true) {
+                // When: the gate stopped the plan, or the step must wait or ended the run.
+                return;
             }
             index += 1;
         }
+    }
+
+    /// Run plan step `step` (at `index`) once; whether the plan moves on to the next step.
+    fn run_step(&mut self, event_loop: &ActiveEventLoop, index: usize, step: &Step) -> bool {
+        match step {
+            Step::Phase(phase) => {
+                if self.meter.is_none() {
+                    self.begin_phase(event_loop, phase);
+                }
+                if self.stage == Stage::Done {
+                    return false;
+                }
+                self.drive(event_loop, Instant::now());
+                if self.stage == Stage::Done {
+                    return false;
+                }
+                if let Some(reason) = self.presented_failure.clone() {
+                    // When: a warm acknowledgement could not be written, the role never got its
+                    // release, so the run is not accepted evidence whatever the handshake marked.
+                    self.invalidate(event_loop, reason);
+                    return false;
+                }
+                if self.image.present.take_redraw_request() {
+                    self.force_presentation(event_loop);
+                }
+                let warm_redraw = self
+                    .presented
+                    .as_mut()
+                    .is_some_and(|(_, handshake)| handshake.take_redraw_request());
+                if warm_redraw {
+                    // The frame that drew the warm update may have presented before the scan saw
+                    // it complete; nothing else need present, so one presentation is forced.
+                    self.force_presentation(event_loop);
+                }
+                if self.image.role.is_some() {
+                    let now = Instant::now();
+                    let verdict = waits::image_verdict(
+                        scenarios::BUILD_HOST,
+                        self.image.present.seen(),
+                        self.image_register_deadline(),
+                        self.image_atlas_grew(),
+                        self.image.present.progress(now),
+                        now,
+                    );
+                    match verdict {
+                        ImageVerdict::Blocked(reason) => {
+                            // When: on Windows the image never registered, or the atlas never took it.
+                            self.finish(event_loop, Status::Blocked, Some(reason));
+                            return false;
+                        }
+                        ImageVerdict::Invalid(reason) => {
+                            self.invalidate(event_loop, reason);
+                            return false;
+                        }
+                        ImageVerdict::Valid | ImageVerdict::Waiting => {}
+                    }
+                }
+                if let Some(reason) = self.expired_barrier_reason(phase, Instant::now()) {
+                    // When: no qualifying frame presented within the barrier's own bound.
+                    self.invalidate(event_loop, reason);
+                    return false;
+                }
+                if !self.phase_done(phase, Instant::now()) {
+                    self.stage = Stage::Steps(index);
+                    return false;
+                }
+                self.end_phase(event_loop, phase);
+                if self.stage == Stage::Done {
+                    // When: the phase's delivery check ended the run, no later step runs.
+                    return false;
+                }
+            }
+            Step::Act(act) => {
+                self.perform(event_loop, *act);
+                if self.stage == Stage::Done {
+                    return false;
+                }
+            }
+            Step::Checkpoint(label) => {
+                if !self.advance_checkpoint(event_loop, index, label) {
+                    if self.stage != Stage::Done {
+                        self.stage = Stage::Steps(index);
+                    }
+                    return false;
+                }
+                // The record is complete and its footprint taken: progress.json gets it now,
+                // not when the next phase ends, so a run killed in that phase keeps it.
+                self.record_progress();
+            }
+        }
+        true
     }
 
     /// Take one turn at the checkpoint step `step_index` (`label`): the first turn writes the request
@@ -3079,7 +3201,7 @@ impl Probe {
         let Some(window_id) = self.main_id else {
             return;
         };
-        self.forward(event_loop, Dispatch::Harness, |app, active| {
+        self.forward(event_loop, Dispatch::Harness, GridEffect::Unchanged, |app, active| {
             app.user_event(active, UserEvent::RequestRedraw(window_id))
         });
     }
@@ -3311,7 +3433,8 @@ impl Probe {
         let Some(window_id) = self.main_id else {
             return;
         };
-        self.forward(event_loop, Dispatch::Harness, |app, active| {
+        let effect = window_event_effect(&event);
+        self.forward(event_loop, Dispatch::Harness, effect, |app, active| {
             app.window_event(active, window_id, event)
         });
     }

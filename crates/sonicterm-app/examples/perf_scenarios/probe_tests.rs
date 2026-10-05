@@ -96,7 +96,8 @@ fn checkpoint_and_progress_work_falls_between_phase_snapshots() {
     let opened = begin.find("PhaseMeter::start(phase.name").expect("meter opens");
     assert!(go_write < snapshot && snapshot < opened);
     assert!(!begin[snapshot..opened].contains("record_progress"));
-    let advance = method("advance_steps");
+    // The step body runs in `run_step`, which `advance_steps` calls behind the grid gate.
+    let advance = method("run_step");
     let checkpoint = advance.find("Step::Checkpoint(label) => {").expect("checkpoint step");
     let progress =
         checkpoint + advance[checkpoint..].find("self.record_progress();").expect("progress");
@@ -232,7 +233,8 @@ fn an_expired_barrier_invalidates_the_run_even_with_a_late_frame() {
         assert!(reason.contains(&format!("{} s", bound.as_secs())), "{name}: {reason}");
     }
     // The step loop checks expiry, and invalidates with its reason, before asking whether the phase ended.
-    let advance = method("advance_steps");
+    // The step body runs in `run_step`, which `advance_steps` calls behind the grid gate.
+    let advance = method("run_step");
     let expiry = advance.find("self.expired_barrier_reason(phase,").expect("expiry check");
     let invalid =
         expiry + advance[expiry..].find("self.invalidate(event_loop, reason)").expect("invalid");
@@ -1536,7 +1538,7 @@ fn a_grid_change_after_a_dispatch_is_latched_even_when_it_reverts() {
     std::fs::create_dir_all(&scratch).expect("scratch");
     let (mut probe, _) = warm_probe(scratch.clone(), 10);
     probe.test_row_run_dims = Some(Some((238, 43)));
-    probe.latch_row_run_geometry();
+    latch_grid(&mut probe);
     assert_eq!(probe.geometry_violation, None, "nothing is latched before the grid is frozen");
     probe.prepare_measured(237, 43).expect("prepared");
     probe.test_row_run_dims = Some(None);
@@ -1548,12 +1550,12 @@ fn a_grid_change_after_a_dispatch_is_latched_even_when_it_reverts() {
         "a busy parser never stops a phase"
     );
     probe.test_row_run_dims = Some(Some((237, 43)));
-    probe.latch_row_run_geometry();
+    latch_grid(&mut probe);
     assert_eq!(probe.step_geometry_gate(), GeometryGate::Proceed);
     probe.test_row_run_dims = Some(Some((238, 43)));
-    probe.latch_row_run_geometry();
+    latch_grid(&mut probe);
     probe.test_row_run_dims = Some(Some((237, 43)));
-    probe.latch_row_run_geometry();
+    latch_grid(&mut probe);
     let GeometryGate::Invalidate(reason) = probe.step_geometry_gate() else {
         panic!("a reverted change still invalidates");
     };
@@ -1561,48 +1563,183 @@ fn a_grid_change_after_a_dispatch_is_latched_even_when_it_reverts() {
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
-/// The callers the geometry tests cannot drive without an event loop: every forwarded dispatch latches the
-/// row-run grid, and every plan step decides through `step_geometry_gate`.
+/// A fake row-run pane for the ordering adapters: its grid, the frozen grid, the latched change, how many
+/// times the grid was read, and the effects a plan step ran.
+#[derive(Default)]
+struct FakeGrid {
+    frozen: Option<workload::RowRunGeometry>,
+    violation: Option<String>,
+    dims: (u16, u16),
+    reads: u32,
+    log: Vec<&'static str>,
+}
+
+impl GridWatch for FakeGrid {
+    fn frozen_grid(&self) -> Option<workload::RowRunGeometry> {
+        self.frozen
+    }
+
+    fn grid_violated(&self) -> bool {
+        self.violation.is_some()
+    }
+
+    fn read_grid(&mut self) -> Option<(u16, u16)> {
+        self.reads += 1;
+        Some(self.dims)
+    }
+
+    fn latch_violation(&mut self, reason: String) {
+        self.violation = Some(reason);
+    }
+}
+
+/// The production dispatch adapter: an ordinary dispatch never reads the grid; a dispatch that may change
+/// it is read after it runs, so a resize is latched by that dispatch itself, and a later dispatch that
+/// reverts it does not clear the latch.
 #[test]
-fn every_dispatch_latches_and_every_step_gates_the_row_run_grid() {
-    let source = include_str!("probe.rs");
-    let body = |name: &str| -> &str {
-        let start = source.find(&format!("    fn {name}(")).expect("the function exists");
-        let rest = &source[start + 1..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+fn a_resizing_dispatch_is_latched_after_it_runs_and_survives_its_revert() {
+    let mut fake = FakeGrid {
+        frozen: workload::RowRunGeometry::measured(237, 43).ok(),
+        dims: (237, 43),
+        ..FakeGrid::default()
     };
-    assert!(body("forward").contains("self.latch_row_run_geometry();"), "forward latches the grid");
+    dispatch_then_observe(&mut fake, GridEffect::Unchanged, |fake: &mut FakeGrid| {
+        fake.dims = (238, 43)
+    });
+    assert_eq!(
+        (fake.reads, fake.violation.is_none()),
+        (0, true),
+        "an ordinary dispatch never reads"
+    );
+    fake.dims = (237, 43);
+    dispatch_then_observe(&mut fake, GridEffect::MayChange, |fake: &mut FakeGrid| {
+        fake.dims = (238, 43)
+    });
+    let reason = fake.violation.clone().expect("the resizing dispatch is latched by itself");
+    assert!(reason.contains("238x43"), "{reason}");
+    dispatch_then_observe(&mut fake, GridEffect::MayChange, |fake: &mut FakeGrid| {
+        fake.dims = (239, 43)
+    });
+    assert_eq!(fake.violation.as_ref(), Some(&reason), "a second change keeps the first reason");
+    dispatch_then_observe(&mut fake, GridEffect::MayChange, |fake: &mut FakeGrid| {
+        fake.dims = (237, 43)
+    });
+    assert_eq!(fake.violation, Some(reason), "a revert does not clear the latch");
+    let mut unfrozen = FakeGrid { dims: (80, 24), ..FakeGrid::default() };
+    dispatch_then_observe(&mut unfrozen, GridEffect::MayChange, |_: &mut FakeGrid| ());
+    assert_eq!(unfrozen.violation, None, "nothing is latched before the grid is frozen");
+}
+
+/// The production step adapter: a latched change invalidates and an unreadable grid before GO waits, both
+/// without running the step's effect (which writes GO or runs a phase); only a proceeding gate runs it.
+/// Driven through the probe's own gate, a resize-then-revert latched by a dispatch stops the next step.
+#[test]
+fn the_gate_stops_the_step_before_its_effect() {
+    let run = |gate: GeometryGate| {
+        let mut fake = FakeGrid::default();
+        let ran = gated_step(
+            &mut fake,
+            |_: &mut FakeGrid| gate,
+            |fake: &mut FakeGrid, _reason| fake.log.push("invalidate"),
+            |fake: &mut FakeGrid| fake.log.push("wait"),
+            |fake: &mut FakeGrid| {
+                fake.log.push("effect");
+                true
+            },
+        );
+        (ran, fake.log)
+    };
+    assert_eq!(run(GeometryGate::Invalidate("changed".to_owned())), (None, vec!["invalidate"]));
+    assert_eq!(run(GeometryGate::Wait), (None, vec!["wait"]));
+    assert_eq!(run(GeometryGate::Proceed), (Some(true), vec!["effect"]));
+    let scratch = warm_scratch("gate-adapter");
+    std::fs::create_dir_all(&scratch).expect("scratch");
+    let (mut probe, _) = warm_probe(scratch.clone(), 10);
+    probe.prepare_measured(237, 43).expect("prepared");
+    probe.go_at = Some(Instant::now());
+    probe.test_row_run_dims = Some(Some((238, 43)));
+    dispatch_then_observe(&mut probe, GridEffect::MayChange, |_: &mut Probe| ());
+    probe.test_row_run_dims = Some(Some((237, 43)));
+    dispatch_then_observe(&mut probe, GridEffect::MayChange, |_: &mut Probe| ());
+    let mut effects = 0;
+    let ran = gated_step(
+        &mut probe,
+        |probe: &mut Probe| probe.step_geometry_gate(),
+        |probe: &mut Probe, reason| probe.presented_failure = Some(reason),
+        |_: &mut Probe| (),
+        |_: &mut Probe| effects += 1,
+    );
+    assert_eq!((ran, effects), (None, 0), "the reverted change stops the step before its effect");
+    assert!(probe.presented_failure.as_deref().is_some_and(|reason| reason.contains("238x43")));
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// Only a dispatch that can resize a grid is classified as one: a redraw, pane output, a redraw request,
+/// a display-link tick and notices are not; a resize, a pane's exit and any other event are.
+#[test]
+fn only_grid_changing_dispatches_are_classified_as_such() {
+    let window = WindowId::dummy();
+    assert_eq!(window_event_effect(&WindowEvent::RedrawRequested), GridEffect::Unchanged);
+    let resized = WindowEvent::Resized(winit::dpi::PhysicalSize::new(800, 600));
+    assert_eq!(window_event_effect(&resized), GridEffect::MayChange);
+    assert_eq!(window_event_effect(&WindowEvent::Focused(true)), GridEffect::MayChange);
+    for event in [
+        UserEvent::PaneOutput { window_id: window, pane_id: 1 },
+        UserEvent::RequestRedraw(window),
+        UserEvent::ClearShapeCache,
+        UserEvent::ForegroundProbeReady,
+    ] {
+        assert_eq!(user_event_effect(&event), GridEffect::Unchanged, "{event:?}");
+    }
+    let exited = UserEvent::PaneProcessExited { pane_id: 1, was_clean: Some(true) };
+    assert_eq!(user_event_effect(&exited), GridEffect::MayChange);
+}
+
+/// The callers, as a secondary check: `forward` runs every dispatch through the dispatch adapter with its
+/// classification, the loop's turns are classified as never resizing, and every step runs behind the gate.
+#[test]
+fn every_dispatch_and_step_goes_through_the_adapters() {
+    assert!(method("forward").contains("dispatch_then_observe(self, effect,"), "forward");
+    for (name, needle) in [
+        ("new_events", "GridEffect::Unchanged"),
+        ("about_to_wait", "GridEffect::Unchanged"),
+        ("user_event", "user_event_effect(&event)"),
+        ("window_event", "window_event_effect(&event)"),
+        ("advance_steps", "gated_step("),
+        ("advance_steps", "probe.step_geometry_gate()"),
+    ] {
+        assert!(method(name).contains(needle), "{name} uses {needle}");
+    }
     assert!(
-        body("advance_steps").contains("self.step_geometry_gate()"),
-        "every step gates the grid"
+        !include_str!("probe.rs").contains("fn latch_row_run_geometry"),
+        "no per-dispatch blocking latch"
     );
 }
 
-/// A busy parser reads as no dimensions for the step's non-blocking recheck, but the post-dispatch latch
-/// waits for it, so a resize cannot slip past while another thread holds the parser.
+/// The latch's read waits for a parser another thread holds, and the step's recheck does not: the blocking
+/// read is still waiting while the lock is held and returns once it is released.
 #[test]
-fn the_latch_waits_for_a_busy_parser_and_the_recheck_does_not() {
+fn the_latch_read_waits_for_a_held_parser_and_the_recheck_does_not() {
     use sonicterm_vt::vt::{CaptureStagingPool, Parser};
     let parser = Arc::new(parking_lot::Mutex::new(Parser::new_with_staging_pool(
         Grid::new(237, 43),
         None,
         CaptureStagingPool::new(),
     )));
-    assert_eq!(parser_dims(&parser, false), Some((237, 43)));
-    let (held, release) = (mpsc::channel::<()>(), mpsc::channel::<()>());
-    let holder = {
-        let parser = Arc::clone(&parser);
-        let (held_tx, release_rx) = (held.0, release.1);
-        std::thread::spawn(move || {
-            let _guard = parser.lock();
-            held_tx.send(()).expect("held");
-            // The guard is held until the test has seen the busy read.
-            release_rx.recv().expect("release");
-        })
-    };
-    held.1.recv().expect("the other thread holds the parser");
+    let guard = parser.lock();
     assert_eq!(parser_dims(&parser, false), None, "the recheck does not wait");
-    release.0.send(()).expect("release");
-    assert_eq!(parser_dims(&parser, true), Some((237, 43)), "the latch waits for the parser");
-    holder.join().expect("holder thread");
+    let (sent, received) = mpsc::channel();
+    let reader = {
+        let parser = Arc::clone(&parser);
+        std::thread::spawn(move || sent.send(parser_dims(&parser, true)).expect("sent"))
+    };
+    assert!(
+        received.recv_timeout(Duration::from_millis(200)).is_err(),
+        "the blocking read is still waiting while the parser is held"
+    );
+    drop(guard);
+    let read =
+        received.recv_timeout(Duration::from_secs(10)).expect("the read finishes once released");
+    assert_eq!(read, Some((237, 43)));
+    reader.join().expect("reader thread");
 }
