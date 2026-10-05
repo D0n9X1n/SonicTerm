@@ -210,6 +210,7 @@ fn partial_result(status: Status) -> RunResult {
         }),
         window_path: "production",
         synthetic_occlusion: false,
+        trim_hook: TrimHookOutcome::NotReached,
         native_focus_events_dropped: 1,
         native_cursor_rest_events_dropped: 0,
         finish_session_settled: true,
@@ -264,6 +265,7 @@ fn result_json_carries_every_contract_field_even_for_a_partial_run() {
             "grid",
             "harness_hash",
             "harness_pid",
+            "hooks",
             "invalid_reason",
             "laps",
             "latency",
@@ -1364,4 +1366,24 @@ fn split_reason_rows_reached_through_the_real_app() {
     let (mut app, pane) = counting_app();
     let before = |now: Instant| now - Duration::from_secs(1);
     assert_eq!(app_reason(&mut app, pane, publish(b"a"), before), "presented-before-publication");
+}
+
+/// `hooks.trim` names the trim hook's outcome; a run whose plan never covered the window reads
+/// `not-reached`, and each outcome has its own name.
+#[test]
+fn result_json_records_the_trim_hooks_outcome() {
+    let mut result = partial_result(Status::Valid);
+    assert_eq!(result.to_json()["hooks"], json!({"trim": "not-reached"}));
+    result.trim_hook = TrimHookOutcome::Unsupported;
+    assert_eq!(result.to_json()["hooks"], json!({"trim": "unsupported"}));
+    let names: Vec<_> = [
+        TrimHookOutcome::NotReached,
+        TrimHookOutcome::Unsupported,
+        TrimHookOutcome::Skipped,
+        TrimHookOutcome::Trimmed,
+    ]
+    .iter()
+    .map(|outcome| outcome.as_str())
+    .collect();
+    assert_eq!(names, ["not-reached", "unsupported", "skipped", "trimmed"]);
 }

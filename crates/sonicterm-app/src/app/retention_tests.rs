@@ -1375,3 +1375,22 @@ fn the_media_pool_follows_a_pane_across_window_moves() {
         assert_eq!(pool.live_charges(), 1, "a move neither adds nor releases a charge");
     }
 }
+
+/// The trim hook is an explicit stub: for a real window and for an unknown one it reports
+/// `Unsupported`, and it runs no retention pass, so the sample clock and every window's panes are
+/// exactly as they were.
+#[test]
+fn the_trim_hook_reports_unsupported_and_changes_nothing() {
+    let mut app = app_with_private_pools();
+    app.__test_seed_tab("covered");
+    let main = app.main_window_id.expect("the seeded main window");
+    let sampled_at = Instant::now() - Duration::from_secs(5);
+    app.last_retention_sample = Some(sampled_at);
+    let panes_before: Vec<u64> = app.windows[&main].panes.keys().copied().collect();
+    assert_eq!(app.__trim_covered_now(main), TrimDecision::Unsupported);
+    assert_eq!(app.__trim_covered_now(WindowId::from(7)), TrimDecision::Unsupported);
+    assert_eq!(app.last_retention_sample, Some(sampled_at), "no retention pass ran");
+    let panes_after: Vec<u64> = app.windows[&main].panes.keys().copied().collect();
+    assert_eq!(panes_after, panes_before);
+    assert_eq!(app.windows.len(), 1, "no window was created or removed");
+}

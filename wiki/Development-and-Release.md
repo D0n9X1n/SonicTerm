@@ -31,7 +31,7 @@ python3 scripts/local-gate.py
 | `pty-close-baseline` | `cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `fmt` | `cargo fmt --all --check` | macOS, Windows, Linux | `local` | `rust` | `macos-core`, `windows-checks`, `linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
-| `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
@@ -45,7 +45,7 @@ python3 scripts/local-gate.py
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS, Windows, Linux | `local` | `rust`, `native`, `bash` | `macos-core`, `windows-tests`, `linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
-| `perf-scenarios-counters-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
+| `perf-scenarios-counters-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS, Windows | `local` | `rust`, `native` | `macos-core`, `windows-tests` |
 | `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
@@ -171,8 +171,11 @@ with exactly the perf features it supports, in building, `--build-only` and
 step for that feature set: `perf-counters` when the tree declares it and has the
 filtered logging API, `perf-frame-texture` when declared, and
 `perf-hook-checkpoint-memory` when declared and the app source defines
-`App::__perf_checkpoint_memory`. The manifest records each side's features, and
-a mismatch is refused.
+`App::__perf_checkpoint_memory`, and `perf-hook-trim` when declared and the app
+source defines `App::__trim_covered_now`. The local gate reviews one build step
+for every ordered subset of the five perf features: 32 subsets, 128 steps. A
+comparison compiles only the one subset each side supports. The manifest records
+each side's features, and a mismatch is refused.
 
 A full comparison runs for hours with measurement windows on screen. To run one
 locally, keep the host idle, on AC power, with the display awake and the screen unlocked, for
@@ -326,6 +329,16 @@ not, moves on only when its footprint (managed runs) is answered and its
 sampling is complete or out of attempts. `result.json` records
 `checkpoint_memory` (`supported` or `unsupported`) and, per checkpoint,
 `sampling`, `attempts` and `last_attempt_complete`.
+
+When the plan covers the measurement window, the harness asks the App's
+covered-window trim hook about it right after the cover opens; the hook step
+neither waits nor changes the plan, so both sides run the same protocol.
+`result.json` records the outcome as `hooks.trim`: `not-reached` (the plan never
+covered the window), `unsupported`, `skipped` or `trimmed`. A build without
+`perf-hook-trim`, and an App whose hook cannot trim yet, both read `unsupported`:
+the run is an untrimmed baseline, and its checkpoint memory stays a measured
+figure, never `n/a` or 0. Today's App hook always returns `unsupported`. An older
+harness writes no `hooks`; a result that names any other outcome is refused.
 
 Three kinds of run stop the comparison at once with exit 1 and are never
 retried: an unresolved cleanup, a schema failure, and a refusal.

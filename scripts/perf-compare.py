@@ -2241,6 +2241,10 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
         problems.append("scrollback_rows_retained is not an integer")
     if "checkpoint_memory" in data and data["checkpoint_memory"] not in CHECKPOINT_MEMORY_STATES:
         problems.append("checkpoint_memory is not supported or unsupported")
+    if "hooks" in data and not (isinstance(data["hooks"], dict)
+                                and data["hooks"].get("trim") in TRIM_HOOK_OUTCOMES):
+        # When: a harness that records its hooks names an outcome this script does not know, it cannot be read.
+        problems.append(f"hooks is {data['hooks']!r}, not {{'trim': one of {', '.join(TRIM_HOOK_OUTCOMES)}}}")
     checkpoints = data.get("checkpoints")
     if not isinstance(checkpoints, list) or not all(_checkpoint_ok(point) for point in checkpoints):
         problems.append("checkpoints is not a list of {index, label, unix_s, footprint_file}")
@@ -2563,11 +2567,15 @@ FRAME_TEXTURE_FEATURE = "perf-frame-texture"
 CHECKPOINT_MEMORY_FEATURE = "perf-hook-checkpoint-memory"
 # Marks a tree whose App has the S2 echo watch; the harness then splits S2/default latency at the flush.
 ECHO_TRACE_FEATURE = "perf-echo-trace"
+# Marks a tree whose App has the covered-window trim hook; the harness then asks it to trim at the cover.
+TRIM_HOOK_FEATURE = "perf-hook-trim"
 # Every perf feature a tree may declare, in the order a build passes them; later hooks append.
-PERF_FEATURES = (COUNTERS_FEATURE, FRAME_TEXTURE_FEATURE, CHECKPOINT_MEMORY_FEATURE, ECHO_TRACE_FEATURE)
+PERF_FEATURES = (COUNTERS_FEATURE, FRAME_TEXTURE_FEATURE, CHECKPOINT_MEMORY_FEATURE, ECHO_TRACE_FEATURE,
+                 TRIM_HOOK_FEATURE)
 # The app source a hook's method lives in, and the definition each hook feature needs there.
 APP_SOURCE_DIRECTORY = "crates/sonicterm-app/src"
-HOOK_METHODS = {CHECKPOINT_MEMORY_FEATURE: re.compile(r"^\s*pub fn __perf_checkpoint_memory\b", re.M)}
+HOOK_METHODS = {CHECKPOINT_MEMORY_FEATURE: re.compile(r"^\s*pub fn __perf_checkpoint_memory\b", re.M),
+                TRIM_HOOK_FEATURE: re.compile(r"^\s*pub fn __trim_covered_now\b", re.M)}
 _TABLE_HEADER = re.compile(r"\s*\[\s*([^\[\]]+?)\s*\]\s*(?:#.*)?")
 
 
@@ -3997,6 +4005,9 @@ class PartialValue(float):
 # A side whose harness has no checkpoint-memory hook: result.json says so, or an older harness leaves it out.
 UNSUPPORTED_CHECKPOINT_MEMORY = "unsupported"
 CHECKPOINT_MEMORY_STATES = ("supported", "unsupported")
+# result.json's `hooks.trim`. `unsupported` is an untrimmed baseline whose memory readings stay figures; an
+# older harness writes no `hooks` at all.
+TRIM_HOOK_OUTCOMES = ("not-reached", "unsupported", "skipped", "trimmed")
 CHECKPOINT_SAMPLING_STATES = ("complete", "exhausted", "active")
 
 
@@ -6598,6 +6609,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                f"{', '.join(side for side in SIDES if CHECKPOINT_MEMORY_FEATURE in features[side]) or 'neither ref'}",
                f"- Built with `--features {ECHO_TRACE_FEATURE}`: "
                f"{', '.join(side for side in SIDES if ECHO_TRACE_FEATURE in features[side]) or 'neither ref'}",
+               f"- Built with `--features {TRIM_HOOK_FEATURE}`: "
+               f"{', '.join(side for side in SIDES if TRIM_HOOK_FEATURE in features[side]) or 'neither ref'}",
                f"- Evidence: `{out}`", "", "Raw logs:", ""]
     for result in results:
         for side, evidence, kind, _reasons in result.attempts:

@@ -830,6 +830,7 @@ fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
         }),
         window_path: "production",
         synthetic_occlusion: false,
+        trim_hook: TrimHookOutcome::NotReached,
         native_focus_events_dropped: 0,
         native_cursor_rest_events_dropped: 0,
         finish_session_settled: true,
@@ -1229,4 +1230,31 @@ fn a_harness_snapshot_identity_change_reads_row_identity_changed() {
     let sample = probe.samples.last().expect("a credited sample");
     assert_eq!(sample.reason, crate::record::CREDITED, "the attribution itself is unchanged");
     assert_eq!(sample.split_reason, "row-identity-changed");
+}
+
+/// Today every build's trim hook reports `Unsupported`: without the feature the adapter says so
+/// itself, and with it the App's stub does. Either way the run measures an untrimmed baseline.
+#[test]
+fn the_trim_hook_reports_unsupported_in_every_build() {
+    let (mut probe, _pane) = typing_probe("S12", "default");
+    let main = sonicterm_app::app::synthetic_main_window_id();
+    assert_eq!(trim_covered(&mut probe.app, main), TrimHookOutcome::Unsupported);
+    // Without a cover over a known window the hook is not asked, so the outcome stays unreached.
+    probe.run_trim_hook();
+    assert_eq!(probe.trim_hook, TrimHookOutcome::NotReached);
+}
+
+/// The cover act opens the cover, then asks the hook; the hook step neither waits nor touches the
+/// occlusion state, so both sides of a comparison keep one protocol whatever the hook reports.
+#[test]
+fn covering_asks_the_trim_hook_after_the_cover_opens() {
+    let perform = method("perform");
+    let arm = perform.find("Act::Cover => {").expect("the cover act");
+    let cover = arm + perform[arm..].find("self.cover(event_loop);").expect("cover call");
+    let hook = arm + perform[arm..].find("self.run_trim_hook();").expect("hook call");
+    assert!(cover < hook, "the hook runs after the cover opens");
+    let body = method("run_trim_hook");
+    for untouched in ["occlusion", "arm_occlusion_wait", "stage", "deliver_occlusion"] {
+        assert!(!body.contains(untouched), "run_trim_hook touches {untouched}");
+    }
 }

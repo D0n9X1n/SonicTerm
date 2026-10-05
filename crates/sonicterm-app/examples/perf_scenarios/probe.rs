@@ -38,7 +38,7 @@ use crate::record::{
     write_progress, ArmState, AtlasReading, Attribution, CheckpointRecord, DispatchObservation,
     EchoSnapshot, EchoTarget, LatencySample, Measurements, MonitorInfo, PhaseRecord,
     PresenterRecord, RowIdentity, RunResult, SlowDispatch, SlowDispatches, Status, Throughput,
-    UnattributedReason, CHECKPOINT_MEMORY,
+    TrimHookOutcome, UnattributedReason, CHECKPOINT_MEMORY,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{
@@ -261,6 +261,23 @@ fn sample_checkpoint_memory(app: &mut App, index: usize, label: &str, attempt: u
 #[cfg(not(feature = "perf-hook-checkpoint-memory"))]
 fn sample_checkpoint_memory(_app: &mut App, _index: usize, _label: &str, _attempt: u32) -> bool {
     false
+}
+
+/// Call the App's covered-window trim hook for `window_id`; only a tree that declares the hook builds this.
+#[cfg(feature = "perf-hook-trim")]
+fn trim_covered(app: &mut App, window_id: WindowId) -> TrimHookOutcome {
+    use sonicterm_app::app::TrimDecision;
+    match app.__trim_covered_now(window_id) {
+        TrimDecision::Trimmed { .. } => TrimHookOutcome::Trimmed,
+        TrimDecision::Skipped(_) => TrimHookOutcome::Skipped,
+        TrimDecision::Unsupported => TrimHookOutcome::Unsupported,
+    }
+}
+
+/// This build has no trim hook, so the covered window is never trimmed and the run is a baseline.
+#[cfg(not(feature = "perf-hook-trim"))]
+fn trim_covered(_app: &mut App, _window_id: WindowId) -> TrimHookOutcome {
+    TrimHookOutcome::Unsupported
 }
 
 /// A checkpoint the plan reached and has not yet moved past: its footprint wait (managed runs) and
@@ -520,6 +537,8 @@ struct Probe {
     /// The last native pointer position and the at-rest moves dropped; Windows only drops any.
     native_pointer: waits::NativePointer,
     synthetic_occlusion: bool,
+    /// What the trim hook reported when the window was covered.
+    trim_hook: TrimHookOutcome,
     first_present_bound: FirstPresentBound,
     /// How the main window presents, recorded at the end of startup on Windows.
     presenter: Option<PresenterRecord>,
@@ -1323,6 +1342,7 @@ impl Probe {
             native_focus_dropped: 0,
             native_pointer: waits::NativePointer::default(),
             synthetic_occlusion: false,
+            trim_hook: TrimHookOutcome::NotReached,
             first_present_bound: FirstPresentBound::default(),
             presenter: None,
             software_render_mode: "",
@@ -1687,6 +1707,7 @@ impl Probe {
             monitor: self.monitor.clone(),
             window_path: "production",
             synthetic_occlusion: self.synthetic_occlusion,
+            trim_hook: self.trim_hook,
             native_focus_events_dropped: self.native_focus_dropped,
             native_cursor_rest_events_dropped: self.native_pointer.rest_dropped(),
             finish_session_settled: settled,
@@ -2474,7 +2495,10 @@ impl Probe {
                     self.invalidate(event_loop, format!("the App refused ActivateTab({index})"));
                 }
             }
-            Act::Cover => self.cover(event_loop),
+            Act::Cover => {
+                self.cover(event_loop);
+                self.run_trim_hook();
+            }
             Act::Uncover => self.uncover(),
         }
     }
@@ -2831,6 +2855,15 @@ impl Probe {
             Err(error) => {
                 self.invalidate(event_loop, format!("cannot open the occlusion cover: {error}"))
             }
+        }
+    }
+
+    /// Call the trim hook once the cover is up. It neither waits nor changes the plan's steps, so
+    /// both sides of a comparison run the same protocol whatever their hook reports.
+    fn run_trim_hook(&mut self) {
+        if let (Some(window_id), true) = (self.main_id, self.cover.is_some()) {
+            // When: the cover opened over a known measurement window, the hook is asked about it.
+            self.trim_hook = trim_covered(&mut self.app, window_id);
         }
     }
 

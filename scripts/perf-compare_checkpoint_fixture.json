@@ -32,6 +32,9 @@
         },
         "harness_hash": "abababababababababababababababababababababababababababababababab",
         "harness_pid": 4242,
+        "hooks": {
+          "trim": "not-reached"
+        },
         "invalid_reason": null,
         "laps": false,
         "latency": null,
@@ -110,6 +113,9 @@
         },
         "harness_hash": "abababababababababababababababababababababababababababababababab",
         "harness_pid": 4242,
+        "hooks": {
+          "trim": "not-reached"
+        },
         "invalid_reason": null,
         "laps": false,
         "latency": null,
@@ -191,6 +197,9 @@
         },
         "harness_hash": "abababababababababababababababababababababababababababababababab",
         "harness_pid": 4242,
+        "hooks": {
+          "trim": "not-reached"
+        },
         "invalid_reason": null,
         "laps": false,
         "latency": null,
@@ -265,6 +274,9 @@
         },
         "harness_hash": "abababababababababababababababababababababababababababababababab",
         "harness_pid": 4242,
+        "hooks": {
+          "trim": "not-reached"
+        },
         "invalid_reason": null,
         "laps": false,
         "latency": null,
@@ -339,6 +351,9 @@
         },
         "harness_hash": "abababababababababababababababababababababababababababababababab",
         "harness_pid": 4242,
+        "hooks": {
+          "trim": "not-reached"
+        },
         "invalid_reason": null,
         "laps": false,
         "latency": null,
@@ -411,6 +426,9 @@
         },
         "harness_hash": "abababababababababababababababababababababababababababababababab",
         "harness_pid": 4242,
+        "hooks": {
+          "trim": "not-reached"
+        },
         "invalid_reason": null,
         "laps": false,
         "latency": null,
