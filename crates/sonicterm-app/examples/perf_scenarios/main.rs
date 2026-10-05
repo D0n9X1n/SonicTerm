@@ -8,6 +8,8 @@
 //! root declares no global allocator, like every shipping binary;
 //! `alloc_main.rs` runs the same modules under a counting allocator.
 
+#[cfg(any(target_os = "macos", windows, test))]
+mod atlas_retry;
 mod cli;
 #[cfg(any(target_os = "macos", windows, test))]
 mod counters;

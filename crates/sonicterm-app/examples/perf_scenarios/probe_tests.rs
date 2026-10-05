@@ -833,6 +833,7 @@ fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
         trim_hook: TrimHookOutcome::NotReached,
         trim_experiment: None,
         trim_seq_after_hook: None,
+        atlas_recovery: None,
         native_focus_events_dropped: 0,
         native_cursor_rest_events_dropped: 0,
         finish_session_settled: true,

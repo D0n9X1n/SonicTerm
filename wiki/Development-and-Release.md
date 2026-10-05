@@ -627,9 +627,10 @@ display with its refresh rate and scale.
 | `S1/wgpu`, `S5/wgpu`, `S11/wgpu` | Windows only: the scenario with `software_render_mode = "off"`, presenting through wgpu without degrading. |
 | `S11/release` | The image, then a switch to a media-free tab until the first frame after the switch presents (5 s bound), a 65 s hold from that frame (never shortened), the `released` checkpoint, whose memory reading counts only from a sample at least 30 s after that frame (`fresh_after_unix_s`), then a switch back until a frame with an image atlas item presents (10 s bound). |
 | `S1/role-exit` | Windows only: the role's program exits 1 right after GO, which must end the run invalid; the smoke uses it. |
+| `S1/atlas-retry` | Counters set only, and refused when no counters set runs. After 70 static rows settle, 8 recovery episodes of four forced frames each: A retries an injected glyph-atlas change, B is the first presented recovery, C and D redraw the unchanged scene. `result.json` records each frame's counter deltas as `atlas_recovery`, and the comparison adds an "Atlas retry recovery" table that sums each frame's row-cache misses and hits, shaping requests and attempts over the accepted counters runs. |
 
-The pull-request perf pipeline runs `S2/flood`, `S6/flood` and `S6/selection-drag`
-by name on macOS and Windows; [What CI measures](#what-ci-measures) lists their shards.
+The pull-request perf pipeline runs `S2/flood`, `S6/flood`, `S6/selection-drag`
+and `S1/atlas-retry` by name on macOS and Windows; [What CI measures](#what-ci-measures) lists their shards.
 
 Every scenario's final memory checkpoint comes at least 60 s after GO, when the
 harness releases the workloads (5 s with `--short`, which the smoke uses). Most
@@ -805,17 +806,17 @@ a base that cannot build, list or fill a set's valid runs fails the shard, and
 its `comparison.md` opens with `**Incomplete comparison:**`. The one allowed gap
 is a counters set on a base that does not declare `perf-counters`, which still
 reads `n/a`. The macOS shards run S7; S9, S10, S6/flood and S6/selection-drag;
-S2 and S10/sync; S4, S5, S11 and S11/release; and S1, S3, S6, S8, S12 and
-S2/flood. The Windows shards of the same names run S7; S9, S10, S6/flood,
+S2 and S10/sync; S4, S5, S11 and S11/release; and S1, S3, S6, S8, S12,
+S2/flood and S1/atlas-retry. The Windows shards of the same names run S7; S9, S10, S6/flood,
 S6/selection-drag and S2/flood; S2 and S10/sync; S4, S5, S11, S11/release,
-S11/gdi and S11/wgpu; and S1, S3, S6, S8 and S12, which balances each
+S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12 and S1/atlas-retry, which balances each
 platform's measured shard times. On both platforms the S9-S10 shard also runs
 S9's laps set (`--laps-scenario S9 --laps-runs 2`, set by that matrix entry's
 `laps` field; the other entries pass no laps flags), and each platform's table
 gives its own `fallback_receive` verdict. A bare scenario ID selects only its default
 variant, so every variant is named explicitly. Under `--short`, `S2/flood` is
-capped at 2 runs per side, `S11/release` at 1, and `S11/gdi` and `S11/wgpu` at
-2. The `S2/flood` cap only keeps the pull-request comparison within 30 minutes:
+capped at 2 runs per side, `S11/release` at 1, and `S11/gdi`, `S11/wgpu` and
+`S1/atlas-retry` at 2. The `S2/flood` cap only keeps the pull-request comparison within 30 minutes:
 a release comparison runs it in full. With `perf-frame-texture`, S11's
 `end` checkpoint records `frame_texture_bytes`: 4 B under GDI on the head, `n/a`
 on a base without the feature. Each shard runs its sets' base and head runs

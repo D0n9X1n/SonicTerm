@@ -22,7 +22,12 @@ pub(crate) struct ScenarioSpec {
 
 /// Every scenario the harness can run, in id order.
 pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
-    spec("S1", "idle shell", &["default", "gdi", "wgpu", "role-exit"], 300, 80),
+    // S1/atlas-retry runs only in the counters set (perf-compare enforces it); its 2-run cap keeps the
+    // PR comparison inside 30 minutes.
+    capped(
+        spec("S1", "idle shell", &["default", "gdi", "wgpu", "role-exit", "atlas-retry"], 300, 80),
+        &[("atlas-retry", 2)],
+    ),
     // S2/flood is capped at 2 short runs to keep the PR comparison within 30 minutes; a release
     // comparison is never capped, so its full-length runs remain the variant's complete evidence.
     capped(spec("S2", "typing latency", &["default", "flood"], 300, 240), &[("flood", 2)]),
@@ -162,6 +167,8 @@ pub(crate) enum Fixture {
     Sixel,
     /// One OSC 1337 inline PNG of the same bands, for Windows, where Sixel never arrives through ConPTY.
     InlinePng,
+    /// 70 distinct numbered lines, one per visible row, for S1/atlas-retry.
+    AtlasRetryRows,
 }
 
 /// A production action that opens the next role's pane or arranges tabs before GO.
@@ -225,6 +232,8 @@ pub(crate) enum Driver {
     Drag { hertz: u32 },
     /// `MouseWheel` line ticks over `role`'s pane, up through the retained history and back down.
     Wheel { hertz: u32, role: usize },
+    /// Settle the scene, then inject eight atlas recovery episodes into the main renderer.
+    AtlasRetry,
 }
 
 /// When a phase ends.
@@ -366,6 +375,17 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
     let sweep =
         Step::Phase(driven("sweep", Driver::Sweep { hertz: 120 }, PhaseEnd::Hold(hold(10_000))));
     let (roles, setup, steps) = match (spec.id, variant) {
+        // atlas-retry prints its rows, then drives the recovery episodes until they end.
+        ("S1", "atlas-retry") => (
+            vec![Workload::PrintThenSleep(Fixture::AtlasRetryRows)],
+            vec![],
+            vec![
+                print(vec![0]),
+                Step::Phase(driven("recovery", Driver::AtlasRetry, PhaseEnd::DriverDone)),
+                idle,
+                end,
+            ],
+        ),
         // role-exit plans exactly like the idle default; only its role's program exits after GO.
         ("S1", _) => (
             vec![if variant == "role-exit" { Workload::ExitAfterGo } else { Workload::IdleShell }],

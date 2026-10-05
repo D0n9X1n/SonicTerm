@@ -1121,6 +1121,8 @@ pub(crate) struct RunResult {
     /// The App's trim number the hook's own trim reported; `None` unless the hook trimmed. A
     /// checkpoint sample whose `trim_seq` is at least this one was taken after that trim.
     pub(crate) trim_seq_after_hook: Option<u64>,
+    /// S1/atlas-retry's recovery episodes, as `result.json`'s `atlas_recovery`; absent elsewhere.
+    pub(crate) atlas_recovery: Option<Value>,
     /// Native `Focused` events the probe recorded and dropped.
     pub(crate) native_focus_events_dropped: u64,
     /// Windows: native `CursorMoved` events dropped because the pointer rested where the window
@@ -1192,6 +1194,10 @@ impl RunResult {
         put("hooks", json!({ "trim": self.trim_hook.as_str() }));
         put("trim_experiment", json!(self.trim_experiment));
         put("trim_seq_after_hook", json!(self.trim_seq_after_hook));
+        if let Some(recovery) = &self.atlas_recovery {
+            // When: the run recorded recovery episodes; every other result omits the key.
+            put("atlas_recovery", recovery.clone());
+        }
         // The measurement fields come from the serializer progress.json streams, so both
         // documents record them identically. Every field converts; a non-finite float is null.
         let measured =

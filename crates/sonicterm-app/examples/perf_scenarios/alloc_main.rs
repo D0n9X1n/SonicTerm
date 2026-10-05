@@ -9,6 +9,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(any(target_os = "macos", windows, test))]
+mod atlas_retry;
 mod cli;
 #[cfg(any(target_os = "macos", windows, test))]
 mod counters;

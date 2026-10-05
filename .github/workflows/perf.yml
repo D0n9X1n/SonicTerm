@@ -238,8 +238,9 @@ jobs:
           - platform: macOS
             runner: macos-14
             shard: S1-S3-S6-S8-S12
-            # S2/flood runs twice per side under --short (--list run_caps).
-            scenarios: S1 S3 S6 S8 S12 S2/flood
+            # S2/flood runs twice per side under --short (--list run_caps). S1/atlas-retry runs only in the
+            # counters set, twice per side under --short; its cost is an estimate until a PR run measures it.
+            scenarios: S1 S3 S6 S8 S12 S2/flood S1/atlas-retry
             laps: ""
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit
@@ -443,7 +444,9 @@ jobs:
           - platform: Windows
             runner: windows-latest
             shard: S1-S3-S6-S8-S12
-            scenarios: S1 S3 S6 S8 S12
+            # S1/atlas-retry runs only in the counters set, twice per side under --short; its cost is an
+            # estimate until a PR run measures it.
+            scenarios: S1 S3 S6 S8 S12 S1/atlas-retry
             laps: ""
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit
