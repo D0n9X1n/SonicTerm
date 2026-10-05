@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import dataclasses
+from fractions import Fraction
 import hashlib
 import importlib.util
 import io
@@ -9138,6 +9139,329 @@ class AtlasRetryVariantTests(CompareHarness, unittest.TestCase):
         head_only = perf.atlas_recovery_rows("S1/atlas-retry", perf.SideRuns(blocked="exit 5"), runs)
         self.assertEqual(head_only[1][1], "n/a")
         self.assertNotIn("Atlas retry recovery", perf.comparison_document([], [], [], [], []))
+
+
+# A healthy head run of one decision phase: 1,000 classified calls (400 first, 600 repeats), 50 assembly events
+# summing 50,000 us and 50 attempts summing 60,000,000 ns. Two such runs give R = 60% and T = 6%.
+ROW_RUN_HEAD_RUN = {"row_run_shape_calls": 1000, "row_run_shape_ok": 1000, "row_run_shape_failed": 0,
+                    "row_run_shape_ns": 5_000_000, "row_run_shape_first": 400, "row_run_shape_repeats": 600,
+                    "row_run_shape_same_pass_repeats": 100, "row_run_shape_repeat_ns": 3_000_000,
+                    "row_run_shape_unstable": 0, "row_run_shape_retry_repeats": 0, "row_run_unpresented_calls": 0,
+                    "row_run_unpresented_ns": 0, "row_run_identity_resets": 0, "row_run_shape_overflows": 0,
+                    "row_run_pass_overflows": 0, "row_run_diag_ns": 10_000, "render_attempts": 50,
+                    "render_attempt_ns": 60_000_000}
+# The negative control's head run: nothing repeats.
+ROW_RUN_UNIQUE_RUN = dict(ROW_RUN_HEAD_RUN, row_run_shape_first=1000, row_run_shape_repeats=0,
+                          row_run_shape_same_pass_repeats=0, row_run_shape_repeat_ns=0)
+
+
+def row_run_assembly(sum_us=50_000, events=50):
+    """An assembly_us histogram whose events all fall in one bucket."""
+    return {"unit": "us", "bounds": MICROSECOND_BOUNDS, "counts": [0, 0, 0, 0, events, 0, 0], "sum_us": sum_us}
+
+
+def row_run_head(label="S4/default", **fields):
+    """One head run's renderer section for `label`, with `fields` replaced."""
+    run = dict(ROW_RUN_UNIQUE_RUN if label == perf.ROW_RUN_NEGATIVE_LABEL else ROW_RUN_HEAD_RUN)
+    run["assembly_us"] = row_run_assembly()
+    run.update(fields)
+    return run
+
+
+def row_run_base(**fields):
+    """One base run's renderer section: the attempt fields and the assembly histogram, no row-run counters."""
+    run = {"render_attempts": 50, "render_attempt_ns": 60_000_000, "assembly_us": row_run_assembly()}
+    run.update(fields)
+    return run
+
+
+def healthy_row_run_evidence():
+    """Every decision phase on both platforms with two healthy runs per side; it decides BUILD."""
+    return {(platform_key, label, phase_name): perf.RowRunPhase((row_run_base(), row_run_base()),
+                                                                (row_run_head(label), row_run_head(label)))
+            for platform_key in perf.ROW_RUN_PLATFORMS for label, phase_name in perf.ROW_RUN_DECISION_PHASES}
+
+
+def with_head(evidence, key, *head_runs):
+    """`evidence` with the head runs of `key` replaced."""
+    changed = dict(evidence)
+    changed[key] = perf.RowRunPhase(evidence[key].base, tuple(head_runs))
+    return changed
+
+
+MAC_S4 = ("macos", "S4/default", "stream")
+WIN_S4 = ("windows", "S4/default", "stream")
+
+
+class RowRunDecisionTests(unittest.TestCase):
+    def test_metrics_sum_numerators_and_denominators_before_dividing(self):
+        # Two head runs with different denominators: R, T and both means pool their sums, so the result differs
+        # from the mean of the per-run ratios (R would be 50%, T 12.5%, O_asm 1 and O_att 7/3).
+        head = (row_run_head(row_run_shape_first=90, row_run_shape_repeats=10, row_run_shape_repeat_ns=20_000_000,
+                             assembly_us=row_run_assembly(100_000, 100), render_attempts=10,
+                             render_attempt_ns=10_000_000),
+                row_run_head(row_run_shape_first=100, row_run_shape_repeats=900, row_run_shape_repeat_ns=45_000_000,
+                             assembly_us=row_run_assembly(900_000, 300), render_attempts=30,
+                             render_attempt_ns=90_000_000))
+        base = (row_run_base(assembly_us=row_run_assembly(50_000, 100), render_attempts=10,
+                             render_attempt_ns=6_000_000),
+                row_run_base(assembly_us=row_run_assembly(150_000, 100), render_attempts=30,
+                             render_attempt_ns=18_000_000))
+        metrics = perf.row_run_metrics(perf.RowRunPhase(base, head))
+        self.assertEqual(metrics, {"R": Fraction(910, 1100), "T": Fraction(65_000_000, 1_000_000_000),
+                                   "O_asm": Fraction(2500, 1000) - 1, "O_att": Fraction(2_500_000, 600_000) - 1})
+
+    def test_only_accepted_runs_reach_the_evidence(self):
+        # A run the comparison rejected (occluded, retried) carries huge counters; only the valid runs that
+        # replaced it are summed. A blocked or failed side contributes no run.
+        plans = {side: perf.RunPlan(IDLE_SCENARIO, "default", side, Path(f"/{side}"), HARNESS_HASH)
+                 for side in perf.SIDES}
+
+        def counted(plan, first, rejected=False):
+            overrides = {"status": "invalid", "exit_code": 3, "notes": ["native occlusion change"]} if rejected else {}
+            result = counters_result({"renderer.row_run_shape_first": first}, **overrides)
+            return make_outcome(plan=plan, exit_code=3 if rejected else 0, result=result)
+        queues = {side: [lambda plan: counted(plan, 1_000_000, rejected=True), lambda plan: counted(plan, 7)]
+                  for side in perf.SIDES}
+
+        def run_case(plan, _evidence):
+            queue = queues[plan.side]
+            return (queue.pop(0) if len(queue) > 1 else queue[0])(plan)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = perf.run_set("S1/default", plans, None, 2, run_case, Path("/e"), "counters")
+        self.assertIn("occluded", [kind for _side, _evidence, kind, _why in result.attempts])
+        phase = perf.row_run_phase(result.base, result.head, "workload")
+        self.assertEqual([len(phase.base), len(phase.head)], [2, 2])
+        self.assertEqual(perf._row_run_total(phase.head, "row_run_shape_first"), 14)
+        self.assertEqual(perf._row_run_total(phase.base, "row_run_shape_first"), 14)
+        for unaccepted in (perf.SideRuns(outcomes=result.head.outcomes, blocked="exit 5"),
+                           perf.SideRuns(outcomes=result.head.outcomes, failed="focus: theft")):
+            self.assertEqual(perf.row_run_phase(unaccepted, unaccepted, "workload"), perf.RowRunPhase((), ()))
+
+    def test_a_missing_field_or_phase_reads_pending_evidence(self):
+        # Every head counter, both attempt fields and the assembly histogram are required; a run lacking one, a
+        # phase measured once, or a phase not measured at all is PENDING (evidence), naming what is missing.
+        for field_name in perf.ROW_RUN_HEAD_FIELDS + perf.ROW_RUN_ATTEMPT_FIELDS + ("assembly_us",):
+            with self.subTest(field=field_name):
+                lacking = row_run_head()
+                del lacking[field_name]
+                decision = perf.row_run_decision(with_head(healthy_row_run_evidence(), MAC_S4, lacking,
+                                                           row_run_head()))
+                self.assertEqual((decision.step, decision.outcome), (1, perf.PENDING_EVIDENCE))
+                self.assertIn(f"macos S4/default stream head: missing {field_name}", decision.reason)
+        for field_name in perf.ROW_RUN_ATTEMPT_FIELDS + ("assembly_us",):
+            with self.subTest(base_field=field_name):
+                evidence = healthy_row_run_evidence()
+                lacking = row_run_base()
+                del lacking[field_name]
+                evidence[WIN_S4] = perf.RowRunPhase((lacking, row_run_base()), evidence[WIN_S4].head)
+                decision = perf.row_run_decision(evidence)
+                self.assertIn(f"windows S4/default stream base: missing {field_name}", decision.reason)
+        evidence = healthy_row_run_evidence()
+        del evidence[("windows", "S10/unique", "stream")]
+        self.assertIn("windows S10/unique stream: not measured", perf.row_run_decision(evidence).reason)
+        once = perf.row_run_decision(with_head(healthy_row_run_evidence(), MAC_S4, row_run_head()))
+        self.assertIn("macos S4/default stream head: 1 accepted counters runs, needs 2", once.reason)
+        self.assertEqual(once.step, 1)
+
+    def test_zero_denominators_are_pending_evidence_and_never_divide(self):
+        # A zero assembly event count, assembly sum, attempt count or attempt time on either side, or fewer than
+        # 1,000 classified head calls, is PENDING (evidence); a metric over a zero denominator is None (n/a).
+        zero_cases = {"assembly events": {"assembly_us": row_run_assembly(50_000, 0)},
+                      "assembly sum_us": {"assembly_us": row_run_assembly(0, 50)},
+                      "render_attempts": {"render_attempts": 0}, "render_attempt_ns": {"render_attempt_ns": 0}}
+        for name, fields in zero_cases.items():
+            for side_name in ("base", "head"):
+                with self.subTest(field=name, side=side_name):
+                    evidence = healthy_row_run_evidence()
+                    phase = evidence[MAC_S4]
+                    zeroed = (row_run_base(**fields) if side_name == "base" else row_run_head(**fields),) * 2
+                    evidence[MAC_S4] = (perf.RowRunPhase(zeroed, phase.head) if side_name == "base"
+                                        else perf.RowRunPhase(phase.base, zeroed))
+                    decision = perf.row_run_decision(evidence)
+                    self.assertEqual((decision.step, decision.outcome), (1, perf.PENDING_EVIDENCE))
+                    self.assertIn(f"macos S4/default stream {side_name}: {name} is 0", decision.reason)
+        empty = perf.RowRunPhase((row_run_base(render_attempts=0),) * 2,
+                                 (row_run_head(row_run_shape_first=0, row_run_shape_repeats=0,
+                                               assembly_us=row_run_assembly(0, 0)),) * 2)
+        self.assertEqual(perf.row_run_metrics(empty), {"R": None, "T": None, "O_asm": None, "O_att": None})
+        self.assertIn(["macos", "S4/default", "stream", "R", "n/a", "n/a"], perf.row_run_rows({MAC_S4: empty}))
+        boundary = with_head(healthy_row_run_evidence(), MAC_S4,
+                             *(row_run_head(row_run_shape_first=200, row_run_shape_repeats=300),) * 2)
+        self.assertEqual(perf.row_run_decision(boundary).outcome, "BUILD", "first + repeats = 1,000 is enough")
+        short = with_head(healthy_row_run_evidence(), MAC_S4, row_run_head(row_run_shape_first=200,
+                                                                           row_run_shape_repeats=300),
+                          row_run_head(row_run_shape_first=199, row_run_shape_repeats=300))
+        self.assertIn("macos S4/default stream head: first + repeats = 999, needs 1000",
+                      perf.row_run_decision(short).reason)
+
+    def test_step_two_classification_bounds(self):
+        # Overflows must be 0; failed and unstable shares at most 1%; the negative control's R at most 0.5%; each
+        # positive workload's R at least 30%. A value on its bound passes; one call past it is PENDING (diagnostic).
+        unique = ("windows", "S10/unique", "stream")
+        powerline = ("macos", "S10/powerline", "stream")
+        cases = [
+            (MAC_S4, None, ({"row_run_shape_overflows": 1}, {}), "row_run_shape_overflows = 1, must be 0"),
+            (MAC_S4, None, ({}, {"row_run_pass_overflows": 2}), "row_run_pass_overflows = 2, must be 0"),
+            (MAC_S4, {"row_run_shape_failed": 10}, ({"row_run_shape_failed": 10}, {"row_run_shape_failed": 11}),
+             "row_run_shape_failed / calls = 1.05%, must be <= 1.00%"),
+            (MAC_S4, {"row_run_shape_unstable": 10},
+             ({"row_run_shape_unstable": 10}, {"row_run_shape_unstable": 11}),
+             "row_run_shape_unstable / calls = 1.05%, must be <= 1.00%"),
+            (unique, {"row_run_shape_first": 995, "row_run_shape_repeats": 5},
+             ({"row_run_shape_first": 995, "row_run_shape_repeats": 5},
+              {"row_run_shape_first": 994, "row_run_shape_repeats": 6}),
+             "R = 0.55%, the negative control must be <= 0.50%"),
+            (powerline, {"row_run_shape_first": 700, "row_run_shape_repeats": 300},
+             ({"row_run_shape_first": 700, "row_run_shape_repeats": 300},
+              {"row_run_shape_first": 701, "row_run_shape_repeats": 299}),
+             "R = 29.95%, a positive workload must be >= 30.00%"),
+        ]
+        for key, on_bound, failing_runs, reason in cases:
+            label = key[1]
+            with self.subTest(reason=reason):
+                if on_bound is not None:
+                    passing = with_head(healthy_row_run_evidence(), key, *(row_run_head(label, **on_bound),) * 2)
+                    self.assertEqual(perf.row_run_decision(passing).outcome, "BUILD", "a value on its bound")
+                failing = with_head(healthy_row_run_evidence(), key,
+                                    *(row_run_head(label, **fields) for fields in failing_runs))
+                decision = perf.row_run_decision(failing)
+                self.assertEqual((decision.step, decision.outcome), (2, perf.PENDING_DIAGNOSTIC))
+                self.assertIn(f"{key[0]} {label} stream: {reason}", decision.reason)
+
+    def test_step_three_overhead_bounds_and_scope(self):
+        # O_asm and O_att may reach +3% exactly in S4, S10/default and S10/unique on either platform; one unit past
+        # either is PENDING (overhead). S10/sync and the positive workloads carry no overhead bound, and a phase
+        # failing step 2 as well is decided at step 2.
+        on_bound = with_head(healthy_row_run_evidence(), MAC_S4,
+                             *(row_run_head(assembly_us=row_run_assembly(51_500), render_attempt_ns=61_800_000),) * 2)
+        self.assertEqual(perf.row_run_decision(on_bound).outcome, "BUILD")
+        for name, bound, past in (("O_asm", {"assembly_us": row_run_assembly(51_500)},
+                                   {"assembly_us": row_run_assembly(51_501)}),
+                                  ("O_att", {"render_attempt_ns": 61_800_000}, {"render_attempt_ns": 61_800_001})):
+            with self.subTest(metric=name):
+                evidence = with_head(healthy_row_run_evidence(), WIN_S4, row_run_head(**bound),
+                                     row_run_head(**past))
+                decision = perf.row_run_decision(evidence)
+                self.assertEqual((decision.step, decision.outcome), (3, perf.PENDING_OVERHEAD))
+                self.assertIn(f"windows S4/default stream: {name} = ", decision.reason)
+                self.assertTrue(decision.reason.startswith("reduce the diagnostic's cost before merge"))
+        unbounded = healthy_row_run_evidence()
+        for label in ("S10/sync", "S10/powerline"):
+            for platform_key in perf.ROW_RUN_PLATFORMS:
+                unbounded = with_head(unbounded, (platform_key, label, "stream"),
+                                      *(row_run_head(label, assembly_us=row_run_assembly(55_000)),) * 2)
+        self.assertEqual(perf.row_run_decision(unbounded).outcome, "BUILD")
+        both = with_head(healthy_row_run_evidence(), MAC_S4,
+                         *(row_run_head(row_run_shape_overflows=1, assembly_us=row_run_assembly(60_000)),) * 2)
+        self.assertEqual(perf.row_run_decision(both).step, 2)
+
+    def test_step_four_needs_one_same_reference_workload_on_both_platforms(self):
+        # BUILD when one reference workload's T is at least 5% on macOS and Windows; CLOSE when none is, including
+        # when each platform clears it only in a different workload.
+        healthy = perf.row_run_decision(healthy_row_run_evidence())
+        self.assertEqual((healthy.step, healthy.outcome), (4, "BUILD"))
+        self.assertIn("S4/default, S10/default, S10/sync spends >= 5.00%", healthy.reason)
+
+        def with_shares(shares):
+            evidence = healthy_row_run_evidence()
+            for (platform_key, label), repeat_ns in shares.items():
+                evidence = with_head(evidence, (platform_key, label, "stream"),
+                                     *(row_run_head(label, row_run_shape_repeat_ns=repeat_ns),) * 2)
+            return perf.row_run_decision(evidence)
+        low = {(platform_key, label): 2_000_000 for platform_key in perf.ROW_RUN_PLATFORMS
+               for label in perf.ROW_RUN_REFERENCE_LABELS}
+        exact = with_shares({**low, ("macos", "S10/sync"): 2_500_000, ("windows", "S10/sync"): 2_500_000})
+        self.assertEqual((exact.outcome, exact.reason.split(" spends")[0]), ("BUILD", "S10/sync"))
+        closed = with_shares(low)
+        self.assertEqual((closed.step, closed.outcome), (4, "CLOSE"))
+        self.assertIn("no one reference workload reaches 5.00% on both platforms", closed.reason)
+        self.assertIn("S4/default T = macos 4.00%, windows 4.00%", closed.reason)
+        split = with_shares({**low, ("macos", "S4/default"): 3_000_000, ("windows", "S10/default"): 3_000_000})
+        self.assertEqual(split.outcome, "CLOSE")
+
+    def test_a_rerun_replaces_the_first_run_and_is_never_pooled(self):
+        # Each run alone has one accepted run per phase; pooled they would have two and BUILD. The rerun replaces
+        # the first, so the decision is PENDING (evidence) naming both runs.
+        single = {key: perf.RowRunPhase(phase.base[:1], phase.head[:1])
+                  for key, phase in healthy_row_run_evidence().items()}
+        replaced = perf.row_run_final(single, "111", single, "222")
+        self.assertEqual((replaced.step, replaced.outcome), (1, perf.PENDING_EVIDENCE))
+        self.assertTrue(replaced.reason.startswith("runs 111 and 222: "), replaced.reason)
+        failing = with_head(healthy_row_run_evidence(), MAC_S4, *(row_run_head(row_run_shape_overflows=1),) * 2)
+        self.assertEqual(perf.row_run_final(failing, "111", healthy_row_run_evidence(), "222").outcome, "BUILD")
+        self.assertEqual(perf.row_run_final(healthy_row_run_evidence(), "111", failing, "222").outcome, "BUILD")
+        due = perf.row_run_final(failing, "111")
+        self.assertEqual((due.step, due.outcome), (2, perf.PENDING_RERUN))
+        self.assertIn("run 111 failed step 2; one same-head rerun is due", due.reason)
+        restart = perf.row_run_final(failing, "111", failing, "222")
+        self.assertEqual((restart.step, restart.outcome), (2, perf.PENDING_DIAGNOSTIC))
+        self.assertIn("change the diagnostic, not the thresholds", restart.reason)
+        self.assertEqual(perf.row_run_final(failing, "111", failing, "222", restarts=1).outcome,
+                         perf.PENDING_DIAGNOSTIC)
+        exhausted = perf.row_run_final(failing, "111", failing, "222", restarts=2)
+        self.assertEqual(exhausted.outcome, perf.PENDING_RESTARTS)
+        self.assertIn("after 2 restarts", exhausted.reason)
+        costly = with_head(healthy_row_run_evidence(), MAC_S4, *(row_run_head(render_attempt_ns=70_000_000),) * 2)
+        self.assertEqual(perf.row_run_final(costly, "111", costly, "222").outcome, perf.PENDING_OVERHEAD)
+        self.assertEqual(perf.row_run_final(costly, "111", single, "222").step, 1)
+
+    def test_a_base_without_the_row_run_counters_reads_n_a_and_still_decides(self):
+        # The base before the diagnostic reports no row-run counter: its cells read n/a, never 0, and the decision
+        # needs only its assembly and attempt fields. A head-only counters set has no base run at all.
+        evidence = healthy_row_run_evidence()
+        rows = perf.row_run_rows(evidence)
+        self.assertIn(["macos", "S4/default", "stream", "row_run_shape_calls", "n/a", "2000 (2 runs)"], rows)
+        self.assertIn(["macos", "S4/default", "stream", "render_attempts", "100 (2 runs)", "100 (2 runs)"], rows)
+        self.assertEqual(perf.row_run_decision(evidence).outcome, "BUILD")
+        older = counters_result({"renderer.render_attempts": 5})
+        for phase_record in older["phases"]:
+            for field_name in perf.ROW_RUN_HEAD_FIELDS:
+                del phase_record["frame_counters"]["renderer"][field_name]
+        plain = perf.SideRuns(outcomes=[make_outcome(result=older)] * 2)
+        phase = perf.row_run_phase(plain, plain, "workload")
+        self.assertIsNone(perf._row_run_total(phase.base, "row_run_shape_calls"))
+        head_only = perf.row_run_phase(perf.SideRuns(blocked=perf.COUNTERS_HEAD_ONLY), plain, "workload")
+        self.assertEqual(len(head_only.base), 0)
+        self.assertIn(["macos", "S4/default", "workload", "render_attempts", "n/a", "10 (2 runs)"],
+                      perf.row_run_rows({("macos", "S4/default", "workload"): head_only}))
+
+    def test_the_table_lists_sums_metrics_and_the_decision(self):
+        # Per phase: each field's pooled sum, assembly sum and events, R and T (head only), O_asm and O_att; then
+        # one decision row with its step, outcome and reason. The document carries the section only with rows.
+        rows = perf.row_run_rows(healthy_row_run_evidence())
+        self.assertIn(["macos", "S4/default", "stream", "assembly sum_us / events", "100000 / 100", "100000 / 100"],
+                      rows)
+        self.assertIn(["macos", "S4/default", "stream", "R", "n/a", "60.00%"], rows)
+        self.assertIn(["windows", "S10/sync", "stream", "T", "n/a", "6.00%"], rows)
+        self.assertIn(["macos", "S10/unique", "stream", "O_asm", "", "0.00%"], rows)
+        self.assertEqual(rows[-1][:5], ["", "", "", "decision", "step 4"])
+        self.assertTrue(rows[-1][5].startswith("BUILD: "))
+        document = perf.comparison_document([], [], [], [], [], row_run_rows=rows)
+        self.assertIn("### Row-run shaping (S4 and S10 counters runs)", document)
+        self.assertIn("| macos | S4/default | stream | R | n/a | 60.00% |", document)
+        self.assertNotIn("Row-run shaping", perf.comparison_document([], [], [], [], []))
+        self.assertEqual([perf.row_run_platform(name) for name in ("darwin", "win32", "linux")],
+                         ["macos", "windows", "linux"])
+
+
+class RowRunComparisonTests(CompareHarness, unittest.TestCase):
+    def test_a_counters_comparison_reports_each_measured_decision_phase(self):
+        # The comparison collects every counters set whose label is a decision phase on this host's platform:
+        # S10/default and S10/sync here. Their fake runs report no stream phase, so the phases have no accepted
+        # run and the decision is PENDING (evidence); S4, never selected, is not measured.
+        _code, _gate, _calls, _plans, _work, out = self.compare(
+            options=("--counters", "--counters-runs", "2"), head_manifest=COUNTERS_MANIFEST,
+            base_manifest=BASE_COUNTERS_MANIFEST, scenarios=("S10", "S10/sync"))
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertIn("### Row-run shaping", document)
+        section = document.split("### Row-run shaping", 1)[1].split("\n### ", 1)[0]
+        platform_key = perf.row_run_platform()
+        for label in ("S10/default", "S10/sync"):
+            self.assertIn(f"| {platform_key} | {label} | stream | row_run_shape_calls | n/a | n/a |", section)
+        self.assertNotIn("| S4/default |", section)
+        self.assertIn("| decision | step 1 | PENDING (evidence): ", section)
+        self.assertIn(f"{platform_key} S4/default stream: not measured", section)
 
 
 if __name__ == "__main__":

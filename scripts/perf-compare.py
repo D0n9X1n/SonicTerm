@@ -5557,6 +5557,290 @@ def attempt_split_details(label: str, base: SideRuns, head: SideRuns) -> list[st
     return lines
 
 
+# Row-run shaping diagnostic: the frozen measurement protocol's metrics and decision. Each decision phase is a
+# (scenario/variant, phase) pair; the positive workloads must repeat, the negative control must not.
+ROW_RUN_DECISION_PHASES = (("S4/default", "stream"), ("S10/default", "stream"), ("S10/sync", "stream"),
+                           ("S10/powerline", "stream"), ("S10/cjk-tui", "stream"), ("S10/unique", "stream"))
+ROW_RUN_POSITIVE_LABELS = ("S10/powerline", "S10/cjk-tui")
+ROW_RUN_NEGATIVE_LABEL = "S10/unique"
+# The phases whose overhead is bounded, and the reference workloads one of which must show the opportunity.
+ROW_RUN_OVERHEAD_LABELS = ("S4/default", "S10/default", "S10/unique")
+ROW_RUN_REFERENCE_LABELS = ("S4/default", "S10/default", "S10/sync")
+ROW_RUN_PLATFORMS = ("macos", "windows")
+ROW_RUN_MIN_RUNS = 2
+ROW_RUN_MIN_CLASSIFIED = 1000
+# Thresholds as exact fractions, so a boundary value is compared without float rounding.
+ROW_RUN_MAX_FAILED_SHARE = Fraction(1, 100)
+ROW_RUN_MAX_UNSTABLE_SHARE = Fraction(1, 100)
+ROW_RUN_MAX_NEGATIVE_REPEAT = Fraction(5, 1000)
+ROW_RUN_MIN_POSITIVE_REPEAT = Fraction(30, 100)
+ROW_RUN_MAX_OVERHEAD = Fraction(3, 100)
+ROW_RUN_MIN_OPPORTUNITY = Fraction(5, 100)
+# After this many restarts on a changed diagnostic the decision is posted as PENDING.
+ROW_RUN_MAX_RESTARTS = 2
+# The head's sixteen diagnostic counters, and the attempt fields both sides need.
+ROW_RUN_HEAD_FIELDS = ("row_run_shape_calls", "row_run_shape_ok", "row_run_shape_failed", "row_run_shape_ns",
+                       "row_run_shape_first", "row_run_shape_repeats", "row_run_shape_same_pass_repeats",
+                       "row_run_shape_repeat_ns", "row_run_shape_unstable", "row_run_shape_retry_repeats",
+                       "row_run_unpresented_calls", "row_run_unpresented_ns", "row_run_identity_resets",
+                       "row_run_shape_overflows", "row_run_pass_overflows", "row_run_diag_ns")
+ROW_RUN_ATTEMPT_FIELDS = ("render_attempts", "render_attempt_ns")
+PENDING_EVIDENCE = "PENDING (evidence)"
+PENDING_DIAGNOSTIC = "PENDING (diagnostic)"
+PENDING_OVERHEAD = "PENDING (overhead)"
+PENDING_RERUN = "PENDING (rerun due)"
+PENDING_RESTARTS = "PENDING"
+ROW_RUN_HEADER = ("| Platform | Scenario | Phase | Metric | Baseline | PR |\n"
+                  "| --- | --- | --- | --- | --- | --- |\n")
+ROW_RUN_NOTE = ("Each figure sums the accepted counters runs of the phase before any division. R = repeats / "
+                "(first + repeats) and T = repeat_ns / (assembly sum_us x 1,000) are head only; O_asm and O_att "
+                "compare the head's pooled assembly and per-attempt means with the base's. The baseline reads n/a "
+                "for a counter the base does not report. The decision applies the frozen steps to this invocation's "
+                "evidence only; a phase or platform this invocation did not measure leaves it PENDING (evidence).")
+
+
+@dataclass(frozen=True)
+class RowRunPhase:
+    """One decision phase's accepted counters runs: each run's renderer section, base and head."""
+
+    base: tuple
+    head: tuple
+
+
+@dataclass(frozen=True)
+class RowRunDecision:
+    """The step that decided (1-4), the outcome, and the reason printed beside it."""
+
+    step: int
+    outcome: str
+    reason: str
+
+
+def row_run_platform(platform_name: str = sys.platform) -> str:
+    """The decision's platform key for a host's sys.platform."""
+    return {"darwin": "macos", "win32": "windows"}.get(platform_name, platform_name)
+
+
+def _accepted_renderers(side: SideRuns, phase_name: str) -> tuple:
+    """The renderer counters of `side`'s accepted runs in `phase_name`; a blocked or failed side has none.
+    SideRuns holds only valid runs, so every run here passed the schema and focus checks."""
+    if side.blocked or side.failed:
+        return ()
+    renderers = []
+    for counters in _counter_phases(side).get(phase_name, []):
+        renderer = counters.get("renderer")
+        renderers.append(dict(renderer) if isinstance(renderer, Mapping) else {})
+    return tuple(renderers)
+
+
+def row_run_phase(base: SideRuns, head: SideRuns, phase_name: str) -> RowRunPhase:
+    """One decision phase's accepted runs on each side."""
+    return RowRunPhase(_accepted_renderers(base, phase_name), _accepted_renderers(head, phase_name))
+
+
+def _row_run_total(runs: Sequence[Mapping], field_name: str) -> int | None:
+    """`field_name` summed over every run, or None when there is no run or one lacks it."""
+    if not runs or not all(_is_int(run.get(field_name)) for run in runs):
+        return None
+    return sum(run[field_name] for run in runs)
+
+
+def _assembly_totals(runs: Sequence[Mapping]) -> tuple[int, int] | None:
+    """The assembly histogram's pooled sum_us and event count, or None when a run lacks the histogram."""
+    histograms = [run.get("assembly_us") for run in runs]
+    if not runs or not all(isinstance(histogram, Mapping) and _is_int(histogram.get("sum_us"))
+                           and isinstance(histogram.get("counts"), list) for histogram in histograms):
+        return None
+    return (sum(histogram["sum_us"] for histogram in histograms),
+            sum(sum(histogram["counts"]) for histogram in histograms))
+
+
+def _pooled_fraction(numerator: int | None, denominator: int | None) -> Fraction | None:
+    """numerator / denominator of pooled sums, or None when either is missing or the denominator is 0."""
+    if numerator is None or denominator is None or denominator == 0:
+        return None
+    return Fraction(numerator, denominator)
+
+
+def _relative_change(head_mean: Fraction | None, base_mean: Fraction | None) -> Fraction | None:
+    """head / base - 1, or None when either mean is missing or the base mean is 0."""
+    if head_mean is None or base_mean is None or base_mean == 0:
+        return None
+    return head_mean / base_mean - 1
+
+
+def row_run_metrics(phase: RowRunPhase) -> dict[str, Fraction | None]:
+    """R, T, O_asm and O_att of one phase; each sums its numerator and denominator over the accepted runs
+    before dividing, and is None when a run lacks a field or a pooled denominator is 0."""
+    first, repeats = (_row_run_total(phase.head, name) for name in ("row_run_shape_first", "row_run_shape_repeats"))
+    classified = None if first is None or repeats is None else first + repeats
+    head_assembly, base_assembly = _assembly_totals(phase.head), _assembly_totals(phase.base)
+    assembly_ns = None if head_assembly is None else head_assembly[0] * 1000
+    means = []
+    for runs, assembly in ((phase.head, head_assembly), (phase.base, base_assembly)):
+        assembly_mean = None if assembly is None else _pooled_fraction(*assembly)
+        attempt_mean = _pooled_fraction(_row_run_total(runs, "render_attempt_ns"),
+                                        _row_run_total(runs, "render_attempts"))
+        means.append((assembly_mean, attempt_mean))
+    return {"R": _pooled_fraction(repeats, classified),
+            "T": _pooled_fraction(_row_run_total(phase.head, "row_run_shape_repeat_ns"), assembly_ns),
+            "O_asm": _relative_change(means[0][0], means[1][0]),
+            "O_att": _relative_change(means[0][1], means[1][1])}
+
+
+def row_run_evidence_problems(where: str, phase: RowRunPhase) -> list[str]:
+    """Why one phase is not evidence enough: too few accepted runs, a missing field, too few classified
+    calls on the head, or a zero assembly or attempt figure on either side."""
+    problems = []
+    for side_name, runs, needed in (("base", phase.base, ()), ("head", phase.head, ROW_RUN_HEAD_FIELDS)):
+        if len(runs) < ROW_RUN_MIN_RUNS:
+            problems.append(f"{where} {side_name}: {len(runs)} accepted counters runs, needs {ROW_RUN_MIN_RUNS}")
+            continue
+        missing = sorted({name for run in runs for name in needed + ROW_RUN_ATTEMPT_FIELDS
+                          if not _is_int(run.get(name))})
+        if _assembly_totals(runs) is None:
+            missing.append("assembly_us")
+        if missing:
+            problems.append(f"{where} {side_name}: missing {', '.join(missing)}")
+            continue
+        sum_us, events = _assembly_totals(runs)
+        totals = {"assembly events": events, "assembly sum_us": sum_us,
+                  "render_attempts": _row_run_total(runs, "render_attempts"),
+                  "render_attempt_ns": _row_run_total(runs, "render_attempt_ns")}
+        problems.extend(f"{where} {side_name}: {name} is 0" for name, total in totals.items() if total == 0)
+        if side_name == "head":
+            classified = _row_run_total(runs, "row_run_shape_first") + _row_run_total(runs, "row_run_shape_repeats")
+            if classified < ROW_RUN_MIN_CLASSIFIED:
+                problems.append(f"{where} head: first + repeats = {classified}, needs {ROW_RUN_MIN_CLASSIFIED}")
+    return problems
+
+
+def _percent(value: Fraction | None) -> str:
+    """A fraction as a percentage with two decimals, or n/a."""
+    return "n/a" if value is None else f"{float(value) * 100:.2f}%"
+
+
+def row_run_decision(evidence: Mapping[tuple[str, str, str], RowRunPhase]) -> RowRunDecision:
+    """Apply the frozen decision steps to one run's evidence, keyed (platform, label, phase); the first step
+    that fails decides, with its reason."""
+    problems = []
+    for platform_key in ROW_RUN_PLATFORMS:
+        for label, phase_name in ROW_RUN_DECISION_PHASES:
+            where = f"{platform_key} {label} {phase_name}"
+            phase = evidence.get((platform_key, label, phase_name))
+            if phase is None:
+                problems.append(f"{where}: not measured")
+            else:
+                problems.extend(row_run_evidence_problems(where, phase))
+    if problems:
+        return RowRunDecision(1, PENDING_EVIDENCE, "; ".join(problems))
+    metrics = {key: row_run_metrics(phase) for key, phase in evidence.items()}
+    for platform_key in ROW_RUN_PLATFORMS:
+        for label, phase_name in ROW_RUN_DECISION_PHASES:
+            where = f"{platform_key} {label} {phase_name}"
+            head = evidence[(platform_key, label, phase_name)].head
+            calls = _row_run_total(head, "row_run_shape_calls")
+            for name in ("row_run_shape_overflows", "row_run_pass_overflows"):
+                if _row_run_total(head, name):
+                    problems.append(f"{where}: {name} = {_row_run_total(head, name)}, must be 0")
+            for name, bound in (("row_run_shape_failed", ROW_RUN_MAX_FAILED_SHARE),
+                                ("row_run_shape_unstable", ROW_RUN_MAX_UNSTABLE_SHARE)):
+                share = _pooled_fraction(_row_run_total(head, name), calls)
+                if share is None or share > bound:
+                    problems.append(f"{where}: {name} / calls = {_percent(share)}, must be <= {_percent(bound)}")
+            repeat = metrics[(platform_key, label, phase_name)]["R"]
+            if label == ROW_RUN_NEGATIVE_LABEL and (repeat is None or repeat > ROW_RUN_MAX_NEGATIVE_REPEAT):
+                problems.append(f"{where}: R = {_percent(repeat)}, the negative control must be "
+                                f"<= {_percent(ROW_RUN_MAX_NEGATIVE_REPEAT)}")
+            if label in ROW_RUN_POSITIVE_LABELS and (repeat is None or repeat < ROW_RUN_MIN_POSITIVE_REPEAT):
+                problems.append(f"{where}: R = {_percent(repeat)}, a positive workload must be "
+                                f">= {_percent(ROW_RUN_MIN_POSITIVE_REPEAT)}")
+    if problems:
+        return RowRunDecision(2, PENDING_DIAGNOSTIC, "; ".join(problems))
+    for platform_key in ROW_RUN_PLATFORMS:
+        for label in ROW_RUN_OVERHEAD_LABELS:
+            for name in ("O_asm", "O_att"):
+                overhead = metrics[(platform_key, label, "stream")][name]
+                if overhead is None or overhead > ROW_RUN_MAX_OVERHEAD:
+                    problems.append(f"{platform_key} {label} stream: {name} = {_percent(overhead)}, must be "
+                                    f"<= +{_percent(ROW_RUN_MAX_OVERHEAD)}")
+    if problems:
+        return RowRunDecision(3, PENDING_OVERHEAD, "reduce the diagnostic's cost before merge; "
+                              + "; ".join(problems))
+    shares = {label: [metrics[(platform_key, label, "stream")]["T"] for platform_key in ROW_RUN_PLATFORMS]
+              for label in ROW_RUN_REFERENCE_LABELS}
+    summary = "; ".join(f"{label} T = " + ", ".join(f"{platform_key} {_percent(share)}" for platform_key, share
+                                                   in zip(ROW_RUN_PLATFORMS, values))
+                        for label, values in shares.items())
+    winners = [label for label, values in shares.items()
+               if all(share is not None and share >= ROW_RUN_MIN_OPPORTUNITY for share in values)]
+    if winners:
+        return RowRunDecision(4, "BUILD", f"{', '.join(winners)} spends >= {_percent(ROW_RUN_MIN_OPPORTUNITY)} of "
+                              f"assembly on repeated row-run shaping on both platforms; {summary}")
+    return RowRunDecision(4, "CLOSE", f"no one reference workload reaches {_percent(ROW_RUN_MIN_OPPORTUNITY)} on "
+                          f"both platforms; {summary}")
+
+
+def row_run_final(first: Mapping[tuple[str, str, str], RowRunPhase], first_run_id: str,
+                  rerun: Mapping[tuple[str, str, str], RowRunPhase] | None = None, rerun_id: str = "",
+                  restarts: int = 0) -> RowRunDecision:
+    """The decision for one head under the rerun rule. A first run that fails step 1, 2 or 3 gets one same-head
+    rerun, which replaces it (never pooled); the rerun's BUILD or CLOSE stands. A rerun that fails step 1 is
+    PENDING (evidence) with both run ids; one that fails step 2 or 3 restarts on a changed diagnostic, and after
+    `restarts` reaches the limit the decision is PENDING."""
+    decision = row_run_decision(first)
+    if decision.step == 4:
+        return decision
+    if rerun is None:
+        return RowRunDecision(decision.step, PENDING_RERUN,
+                              f"run {first_run_id} failed step {decision.step}; one same-head rerun is due: "
+                              f"{decision.reason}")
+    replaced = row_run_decision(rerun)
+    if replaced.step == 4:
+        return replaced
+    runs = f"runs {first_run_id} and {rerun_id}"
+    if replaced.step == 1:
+        return RowRunDecision(1, PENDING_EVIDENCE, f"{runs}: {replaced.reason}")
+    if restarts >= ROW_RUN_MAX_RESTARTS:
+        return RowRunDecision(replaced.step, PENDING_RESTARTS,
+                              f"{runs} failed step {replaced.step} after {restarts} restarts: {replaced.reason}")
+    return RowRunDecision(replaced.step, replaced.outcome,
+                          f"{runs} failed step {replaced.step}; change the diagnostic, not the thresholds, and "
+                          f"take a fresh eligible run on the new head: {replaced.reason}")
+
+
+# The table's per-phase sums, in order; the base reports only what its tree counts.
+ROW_RUN_TABLE_FIELDS = ROW_RUN_HEAD_FIELDS + ROW_RUN_ATTEMPT_FIELDS
+
+
+def _row_run_sum_cell(runs: Sequence[Mapping], field_name: str) -> str:
+    """A pooled sum with its run count, or n/a when there is no run or one lacks the field."""
+    total = _row_run_total(runs, field_name)
+    return "n/a" if total is None else f"{total} ({len(runs)} runs)"
+
+
+def row_run_rows(evidence: Mapping[tuple[str, str, str], RowRunPhase]) -> list[list[str]]:
+    """The Row-run shaping table: each measured decision phase's pooled sums and R, T, O_asm and O_att, then
+    the decision with its step and reason."""
+    rows = []
+    for (platform_key, label, phase_name), phase in evidence.items():
+        prefix = [platform_key, label, phase_name]
+        for field_name in ROW_RUN_TABLE_FIELDS:
+            rows.append(prefix + [field_name, _row_run_sum_cell(phase.base, field_name),
+                                  _row_run_sum_cell(phase.head, field_name)])
+        assemblies = [_assembly_totals(runs) for runs in (phase.base, phase.head)]
+        rows.append(prefix + ["assembly sum_us / events"]
+                    + ["n/a" if totals is None else f"{totals[0]} / {totals[1]}" for totals in assemblies])
+        metrics = row_run_metrics(phase)
+        for name in ("R", "T"):
+            rows.append(prefix + [name, "n/a", _percent(metrics[name])])
+        for name in ("O_asm", "O_att"):
+            rows.append(prefix + [name, "", _percent(metrics[name])])
+    decision = row_run_decision(evidence)
+    rows.append(["", "", "", "decision", f"step {decision.step}", f"{decision.outcome}: {decision.reason}"])
+    return rows
+
+
 def render_table(rows: Iterable[Sequence[str]], header: str = TABLE_HEADER) -> str:
     """Render rows as a Markdown table under `header`; a `|` or newline in a cell cannot break it."""
     def cell(text: str) -> str:
@@ -6279,11 +6563,13 @@ def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequen
                         alloc_rows: Sequence[Sequence[str]], host_lines: Sequence[str],
                         detail_lines: Sequence[str], *, counter_rows: Sequence[Sequence[str]] = (),
                         counters_note: str = "", overhead_rows: Sequence[Sequence[str]] = (),
-                        capped_note: str = "", recovery_rows: Sequence[Sequence[str]] = ()) -> str:
+                        capped_note: str = "", recovery_rows: Sequence[Sequence[str]] = (),
+                        row_run_rows: Sequence[Sequence[str]] = ()) -> str:
     """Assemble comparison.md: the PR table, the laps, counters, overhead and allocation tables when run,
     the host block and details.
 
-    The counters section appears when the counters set ran or was skipped; `counters_note` says which.
+    The counters section appears when the counters set ran or was skipped; `counters_note` says which. The
+    Row-run shaping section appears when a counters set measured a row-run decision phase.
     `capped_note` names the variants whose short-mode runs were capped, under the PR table.
     """
     parts = ["## Performance comparison\n\n" + render_table(rows)
@@ -6295,6 +6581,9 @@ def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequen
         if counters_note:
             section += counters_note + "\n\n"
         parts.append(section + (render_table(counter_rows, COUNTERS_HEADER) if counter_rows else ""))
+    if row_run_rows:
+        parts.append(f"### Row-run shaping (S4 and S10 counters runs)\n\n{ROW_RUN_NOTE}\n\n"
+                     + render_table(row_run_rows, ROW_RUN_HEADER))
     if recovery_rows:
         parts.append(f"### Atlas retry recovery (S1/atlas-retry counters runs)\n\n{RECOVERY_NOTE}\n\n"
                      + render_table(recovery_rows, RECOVERY_HEADER))
@@ -6784,6 +7073,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     marks["measure_end"] = time.time()
     timed_rows, lap_rows, alloc_rows, counters_table, overhead = [], [], [], [], []
     recovery_rows: list[list[str]] = []
+    row_run_evidence: dict[tuple[str, str, str], RowRunPhase] = {}
     split_details: list[str] = []
     timed_heads: dict[str, SideRuns] = {}
     omitted = 0
@@ -6803,6 +7093,10 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             rows, left_out = counter_rows(shown, result.base, result.head)
             counters_table.extend(rows)
             recovery_rows.extend(atlas_recovery_rows(result.label, result.base, result.head))
+            for label, phase_name in ROW_RUN_DECISION_PHASES:
+                if label == result.label:
+                    row_run_evidence[(row_run_platform(), label, phase_name)] = row_run_phase(
+                        result.base, result.head, phase_name)
             counters_table.extend(glyph_atlas_reconciliation_rows(shown, result.base, result.head))
             split_details.extend(attempt_split_details(shown, result.base, result.head))
             counters_table.extend(split_rows(result.label, result.base, result.head,
@@ -6862,7 +7156,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         details += ["", "Per-run render-attempt splits (phases with a render attempt):", ""] + split_details
     document = comparison_document(timed_rows, lap_rows, alloc_rows, host_lines, details,
                                    counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead,
-                                   capped_note=capped_note, recovery_rows=recovery_rows)
+                                   capped_note=capped_note, recovery_rows=recovery_rows,
+                                   row_run_rows=row_run_rows(row_run_evidence) if row_run_evidence else ())
     problems = strict_problems(results) if args.require_base else []
     if problems:
         # The first line says the table is partial, so nobody reads a head-only table as a comparison.
