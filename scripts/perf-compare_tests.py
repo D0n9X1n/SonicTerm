@@ -4002,10 +4002,11 @@ COMPARE_STEP = "Compare the base and the head"
 SUMMARY_STEP = "Publish the table in the job summary"
 EVIDENCE_STEP = "Upload the comparison evidence"
 RESULT_STEP = "Require every comparison job to succeed"
-# Every scenario set a comparison measures: each runs in exactly one shard per platform. The three named
-# variants run beside their scenario's default, since a bare ID selects only the default.
-ALL_SCENARIOS = ["S1", "S2", "S2/flood", "S3", "S4", "S5", "S6", "S6/flood", "S6/selection-drag", "S7", "S8", "S9",
-                 "S10", "S10/sync", "S11", "S12"]
+# Every scenario set a comparison measures: each runs in exactly one shard per platform. The named variants
+# run beside their scenario's default, since a bare ID selects only the default; S1/atlas-retry runs only
+# its counters set.
+ALL_SCENARIOS = ["S1", "S1/atlas-retry", "S2", "S2/flood", "S3", "S4", "S5", "S6", "S6/flood", "S6/selection-drag",
+                 "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12"]
 # The variants only one platform's shards add: S11/release on both (capped at 1), the presenter controls on Windows.
 PLATFORM_SCENARIOS = {"macOS": ["S11/release"], "Windows": ["S11/release", "S11/gdi", "S11/wgpu"]}
 JOB_RESULTS = ("success", "failure", "cancelled", "skipped", "")
