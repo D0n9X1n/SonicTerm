@@ -101,6 +101,10 @@ perf-frame-texture = []
 # Marks that this tree's App can take a memory sample tagged with a perf checkpoint; only the
 # perf_scenarios example calls it, so the same harness source also builds against a tree without it.
 perf-hook-checkpoint-memory = []
+# Marks that this tree's App has the S2 echo watch (arm_echo_watch, take_echo_watch); only the
+# perf_scenarios example calls it, so the same harness source also builds against a tree without it.
+# The watch exists only while the frame-counter gate is on, so the feature implies perf-counters.
+perf-echo-trace = ["perf-counters"]
 
 # AppKit objects exist only on the main thread, so the native display-link test owns its main.
 [[test]]
