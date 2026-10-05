@@ -87,13 +87,18 @@ fn an_extra_attempt_is_invalid() {
     assert_eq!(machine.observe(Some(fitting(Frame::Retried)), now), Progress::Waiting, "an ended run ignores later frames");
 }
 
-/// A that presents, or C that resets, does not fit its frame.
+/// A that presents, A whose injected change reset nothing, or C that resets, does not fit its frame.
 #[test]
 fn a_frame_whose_counts_do_not_fit_is_invalid() {
     let now = Instant::now();
     let mut machine = settled(now);
     let presented_a = Counts { presented: 1, ..fitting(Frame::Retried) };
     assert!(matches!(machine.observe(Some(presented_a), now), Progress::Invalid(reason) if reason.contains("episode 0 A")));
+    // An A that neither presents nor resets is a deferral-like attempt the change never reached,
+    // so it is no retry and must not be recorded as one.
+    let mut machine = settled(now);
+    let unreset_a = Counts { resets: 0, ..fitting(Frame::Retried) };
+    assert!(matches!(machine.observe(Some(unreset_a), now), Progress::Invalid(reason) if reason.contains("episode 0 A")));
     let mut machine = settled(now);
     machine.observe(Some(fitting(Frame::Retried)), now);
     machine.observe(Some(fitting(Frame::Recovered)), now);
@@ -134,7 +139,8 @@ fn a_missing_counter_field_is_invalid() {
     assert_eq!(machine.observe(None, now), Progress::Invalid("counters unavailable".to_owned()));
 }
 
-/// Validation refuses a short run, a misordered frame, an extra attempt and a mismatched dimension.
+/// Validation refuses a short run, a misordered frame, an extra attempt, an A without a reset and a
+/// mismatched dimension.
 #[test]
 fn records_validation_refuses_every_malformed_run() {
     let now = Instant::now();
@@ -152,6 +158,9 @@ fn records_validation_refuses_every_malformed_run() {
     let mut doubled = good.clone();
     doubled[5].counts.attempts = 2;
     assert!(records_problem(&doubled).is_some());
+    let mut unreset = good.clone();
+    unreset[8].counts.resets = 0;
+    assert!(records_problem(&unreset).is_some(), "an A without a reset is refused");
     let mut grown = good;
     grown[30].counts.atlas_dim = 4096;
     assert!(records_problem(&grown).is_some());
