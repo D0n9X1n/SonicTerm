@@ -500,8 +500,11 @@ head, one row per scenario, phase and non-zero counter;
   pooled mean (the histogram has no exact quantiles, so its p95 bound is shown
   but never thresholded); and, for context only, shape+measure requests per
   drawn frame `shape_requests / (gpu_frames + software_frames)` and the partial
-  fallback ratio `partial_fallbacks / (partial_frames + partial_fallbacks)`. A
-  side without the fields, or with a 0 denominator, reads `n/a`, with no change.
+  fallback ratio `partial_fallbacks / (partial_frames + partial_fallbacks)`; and
+  the tab-title reuses per assembly `tab_title_reuses / Σ assembly_buckets` and
+  chrome-run reuses per assembly `chrome_run_reuses / Σ assembly_buckets`,
+  counters runs pooled. A side without the fields, or with a 0 denominator, reads
+  `n/a`, with no change.
 - The Change column compares a count's medians, or a histogram's means. The
   Baseline column, and the change, read `n/a` when the base does not declare
   `perf-counters` (the set then runs on the head only), and for a field the

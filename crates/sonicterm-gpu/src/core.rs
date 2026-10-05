@@ -360,11 +360,10 @@ struct AssembledLayers {
     surface_width: f32,
     surface_height: f32,
     subpixel_aa: SubpixelAaMode,
-    quads: Vec<QuadInstance>,
-    images: Vec<ImageInstance>,
-    glyphs: Vec<GlyphInstance>,
-    overlay_quads: Vec<QuadInstance>,
-    overlay_glyphs: Vec<GlyphInstance>,
+    /// The pass's lease on the renderer's frame scratch, holding this frame's quads, images and
+    /// glyphs. It travels with the frame and restores the scratch when it drops, on every
+    /// presentation outcome and on unwinding.
+    scratch: frame_scratch::ScratchLease,
     field_candidates: PresentedFields,
     missing_chars: Vec<char>,
     /// Chrome characters this frame drew as tofu or dropped; published only if it presents.
@@ -496,21 +495,22 @@ fn conservative_badge_text_width(fallback: f32, shaped: Option<f32>) -> f32 {
     shaped.filter(|width| width.is_finite() && *width >= 0.0).unwrap_or(fallback).max(fallback)
 }
 
+/// Content width of the search badge: icon, gap and label. `measure` returns a text's shaped
+/// width, or `None` when it cannot be shaped; with no measure, or when either text fails, the
+/// conservative estimate stands, and a shaped width below the estimate never shrinks the badge.
 fn search_badge_content_width(
     icon: &str,
     label: &str,
     font_size: f32,
     gap: f32,
-    font_stack: Option<&sonicterm_engine::FontStack>,
+    measure: Option<&mut dyn FnMut(&str) -> Option<f32>>,
 ) -> f32 {
     let fallback = estimate_badge_text_width(icon, font_size)
         + gap
         + estimate_badge_text_width(label, font_size);
-    let shaped = font_stack.and_then(|stack| {
-        let icon_w =
-            crate::frame_stats::shape_request(|| stack.measure_text_width_for_frame(icon)).ok()?;
-        let label_w =
-            crate::frame_stats::shape_request(|| stack.measure_text_width_for_frame(label)).ok()?;
+    let shaped = measure.and_then(|measure| {
+        let icon_w = measure(icon)?;
+        let label_w = measure(label)?;
         Some(icon_w + gap + label_w)
     });
     conservative_badge_text_width(fallback, shaped)
@@ -663,6 +663,9 @@ fn effective_font_weight_scale(scale: f32) -> f32 {
         1.0
     }
 }
+
+#[path = "frame_scratch.rs"]
+mod frame_scratch;
 
 #[path = "tab_title_font.rs"]
 mod tab_title_font;
@@ -996,51 +999,6 @@ fn tab_content_width_px(
         font_size_px,
     )?;
     Some(reserve_px + advances.iter().map(|(_, advance)| advance).sum::<f32>())
-}
-
-/// Fit a tab's display text into `available_px` of the tab font.
-///
-/// Text that fits is drawn whole. Otherwise the longest grapheme prefix that
-/// fits beside `…` is kept and the cut text is shaped again; when kerning or a
-/// ligature makes it wider than its advances promised, the cut steps back a
-/// grapheme, so a drawn title never passes its tab. Returns `None` when the
-/// text cannot be shaped.
-fn fit_tab_title(
-    stack: &sonicterm_engine::FontStack,
-    text: &str,
-    font_size_px: f32,
-    available_px: f32,
-) -> Option<FittedTitle> {
-    let measure = |candidate: &str| {
-        chrome_text::shaped_advances(
-            stack,
-            candidate,
-            ChromeAttrs::default(),
-            font_size_px,
-            font_size_px,
-        )
-    };
-    let advances = measure(text)?;
-    let whole_px: f32 = advances.iter().map(|(_, advance)| advance).sum();
-    if whole_px <= available_px + TITLE_FIT_TOLERANCE_PX {
-        // When: `whole_px` fits `available_px`, draw the whole title without shaping `…`.
-        return Some(FittedTitle { text: text.to_string(), width_px: whole_px, cut: false });
-    }
-    let ellipsis_px: f32 =
-        measure("…").map_or(0.0, |ellipsis| ellipsis.iter().map(|(_, advance)| advance).sum());
-    let mut budget_px = available_px;
-    // Each pass keeps a strictly shorter prefix, so the text length bounds the passes.
-    for _ in 0..=text.len() {
-        let fitted = fit_title_to_width(text, &advances, ellipsis_px, budget_px);
-        let drawn_px: f32 = measure(fitted.text.as_str())
-            .map_or(fitted.width_px, |cut| cut.iter().map(|(_, advance)| advance).sum());
-        if fitted.text.is_empty() || drawn_px <= available_px + TITLE_FIT_TOLERANCE_PX {
-            // When: `fitted` is empty or its shaped `drawn_px` fits `available_px`, draw it.
-            return Some(FittedTitle { width_px: drawn_px, ..fitted });
-        }
-        budget_px = fitted.width_px - TITLE_FIT_TOLERANCE_PX - 0.01;
-    }
-    Some(FittedTitle { text: String::new(), width_px: 0.0, cut: true })
 }
 
 /// Identity of the font and scale that tab titles are measured with. A change
@@ -1476,10 +1434,7 @@ use sonicterm_render_model::boundary::ui::{
         tab_bar_height, Rect as TabTitleRect, TabBarLayout, ACTIVE_TOP_ACCENT_H,
         ACTIVE_TOP_ACCENT_INSET, TAB_BAR_HEIGHT, TAB_GAP, TAB_VERT_INSET,
     },
-    tabs::{
-        fit_title_to_width, ContentWidthRefresh, FittedTitle, TabBar, TabContent,
-        TITLE_FIT_TOLERANCE_PX,
-    },
+    tabs::{ContentWidthRefresh, TabBar, TabContent},
 };
 use sonicterm_render_model::geometry::PixelRect;
 use sonicterm_text::GlyphInstance;
@@ -2445,6 +2400,13 @@ pub struct GpuRenderer {
     tab_title_font: TabTitleFont,
     /// Native-size stack for the command-palette footer (`body - 1`).
     palette_footer_font_stack: Option<sonicterm_engine::FontStack>,
+    /// Kept tab titles, search-overlay runs and the UI palette; reported as `chrome_cache`.
+    chrome_caches: crate::chrome_cache::ChromeCaches,
+    /// Whether the title and chrome-run caches keep what they shape; a test turns it off to
+    /// compare against cold drawing.
+    chrome_reuse: bool,
+    /// The per-frame draw vectors, kept between assembled frames; reported as `frame_scratch`.
+    frame_scratch: frame_scratch::ScratchHome,
     /// Per-row glyph cache. Stores the shaped
     /// `GlyphInstance`s, underline coalescing, and missing-tofu list
     /// for each visible row, keyed by absolute row index + a content
@@ -2769,7 +2731,7 @@ pub fn live_renderer_count() -> usize {
 
 /// CPU-side storage a renderer holds, split by owning class.
 ///
-/// Deliberately not a single total. The six parts have different lifetimes
+/// Deliberately not a single total. The parts have different lifetimes
 /// and remedies: atlases grow with content, row caches follow viewport churn,
 /// a software frame is sized by the window, and the vertex scratch follows the
 /// largest recent frame.
@@ -2791,6 +2753,10 @@ pub struct RendererRetention {
     pub vertex_scratch: ResourceAmount,
     /// Per-row ink records of the presented frame and one frame's staging; items are records.
     pub row_ink: ResourceAmount,
+    /// The reused per-frame draw vectors held between frames; items are allocated vectors.
+    pub frame_scratch: ResourceAmount,
+    /// Kept tab titles and chrome runs plus the UI palette's colors; items are kept runs.
+    pub chrome_cache: ResourceAmount,
 }
 
 impl RendererRetention {
@@ -2810,7 +2776,7 @@ impl RendererRetention {
     /// `Vec`s — so charging both under one class would make the class mean two
     /// things and leave a reader unable to tell which allocation to act on.
     #[must_use]
-    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 7] {
+    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 9] {
         [
             (ResourceClass::GlyphAtlas, self.glyph_atlas),
             (ResourceClass::InlineMediaRetained, self.image_atlas),
@@ -2820,6 +2786,8 @@ impl RendererRetention {
             // The vertex scratch is CPU storage staged for the vertex-buffer upload.
             (ResourceClass::UploadStaging, self.vertex_scratch),
             (ResourceClass::RowInk, self.row_ink),
+            (ResourceClass::FrameScratch, self.frame_scratch),
+            (ResourceClass::ChromeCache, self.chrome_cache),
         ]
     }
 
@@ -2834,6 +2802,8 @@ impl RendererRetention {
             self.software_frame,
             self.vertex_scratch,
             self.row_ink,
+            self.frame_scratch,
+            self.chrome_cache,
         ]
         .into_iter()
         .fold(ResourceAmount::default(), |acc, part| ResourceAmount {
@@ -3397,6 +3367,10 @@ impl GpuRenderer {
                 font_stacks.tab_title,
             ),
             palette_footer_font_stack: font_stacks.palette_footer,
+            // Seeded from the constructor theme, so the first frame derives no palette.
+            chrome_caches: crate::chrome_cache::ChromeCaches::new(theme),
+            chrome_reuse: true,
+            frame_scratch: frame_scratch::ScratchHome::new(),
             row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
             line_quad_cache: crate::row_quad_cache::LineQuadCache::new(),
             last_emit_origins: Vec::new(),
@@ -3777,6 +3751,11 @@ impl GpuRenderer {
             software_frame: self.software_frame_retained_amount(),
             vertex_scratch: self.upload_staging_retained(),
             row_ink: self.row_ink.retained_amount(),
+            frame_scratch: self.frame_scratch.retained_amount(),
+            chrome_cache: ResourceAmount {
+                bytes: self.chrome_caches.retained_bytes(),
+                items: self.chrome_caches.items(),
+            },
         }
     }
 
@@ -5135,6 +5114,8 @@ impl GpuRenderer {
         // SwashRasterizer prebake gone. Atlas is now lazily
         // filled by the wezterm rasterizer on the next render.
         self.row_glyph_cache.invalidate_all();
+        // Kept titles and chrome runs hold the old faces' glyph ids, whatever their keys say.
+        self.chrome_caches.clear_runs();
         self.line_quad_cache.invalidate_all();
         self.last_frame_key = None;
         self.last_pane_layout.clear();
@@ -5219,6 +5200,8 @@ impl GpuRenderer {
         }
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
+        // Every stack rescaled in place, so kept titles and runs hold old-size glyphs.
+        self.chrome_caches.clear_runs();
         // The GPU-side AtlasUpload owns a texture sized to the old atlas
         // dimensions and a bind group pointing at it. After replacing the
         // CPU `GlyphAtlas` with one of a different size, the next
@@ -5282,6 +5265,8 @@ impl GpuRenderer {
             hex_to_premultiplied_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
         self.search_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         self.search_bg = hex_to_premultiplied_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
+        // Refresh the kept UI palette now, so the next frame with this theme derives nothing.
+        let _palette = self.chrome_caches.palette.palette_for(theme);
         self.last_frame_key = None;
         self.style_rev = self.style_rev.wrapping_add(1);
         self.row_glyph_cache.invalidate_all();
@@ -5310,6 +5295,7 @@ impl GpuRenderer {
                 glyph_atlas: &mut self.glyph_atlas,
                 preedit_glyph_cache: &mut self.preedit_glyph_cache,
                 fallback_epoch: self.tab_title_font.fallback_epoch_mut(),
+                chrome_runs: &mut self.chrome_caches.runs,
             },
         )
     }
@@ -5364,10 +5350,31 @@ impl GpuRenderer {
         );
     }
 
-    /// Invalidate row glyphs, line quads, and the frame key, bumping `style_rev` so the next frame reshapes text.
+    /// Test seam: keep (`true`, the default) or drop the frame scratch and the kept chrome titles
+    /// and runs between frames, so a test can compare reuse against cold assembly.
+    #[doc(hidden)]
+    pub fn __set_frame_reuse(&mut self, reuse: bool) {
+        self.frame_scratch.set_reuse(reuse);
+        self.chrome_reuse = reuse;
+        if !reuse {
+            // Reuse is turned off, so kept titles and runs are dropped at once.
+            self.chrome_caches.clear_runs();
+        }
+    }
+
+    /// Test seam: how many times the UI palette was derived after construction.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __palette_computes(&self) -> u64 {
+        self.chrome_caches.palette.computes()
+    }
+
+    /// Invalidate row glyphs, line quads, kept chrome titles and runs, and the frame key, bumping
+    /// `style_rev` so the next frame reshapes text.
     pub fn clear_shape_cache(&mut self) {
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
+        self.chrome_caches.clear_runs();
         self.style_rev = self.style_rev.wrapping_add(1);
         self.last_frame_key = None;
         tracing::info!(
@@ -6102,20 +6109,36 @@ impl GpuRenderer {
         if force_full {
             plan.force_full();
         }
+        // Every exit after the unchanged and no-op ones uses the renderer's frame scratch: the
+        // lease restores it on any return, and a drawable frame hands it to presentation.
+        let mut scratch_lease = self.frame_scratch.lease();
+        let scratch = scratch_lease.get();
+        let frame_scratch::FrameScratch {
+            glyphs: glyph_instances,
+            overlay_glyphs: overlay_glyph_instances,
+            quads,
+            overlay_quads: quads_overlay,
+            images: image_glyph_instances,
+            row_spans,
+            underlines,
+            underline_owners,
+            staged_ranges,
+            missing_tofu,
+            pane_rects: pane_rect_scratch,
+            snapped,
+            snapped_peak,
+            row_keys,
+        } = scratch;
         let inline_media_changed = self.last_frame_key.as_ref().is_none_or(|previous| {
             previous.window.inline_media_hash != plan.key.window.inline_media_hash
         });
         // The cursor recolors this frame performs, accumulated across the copy-mode and block sites.
         let mut frame_recolor = crate::cursor::RecolorRecord::default();
-        let pane_rects: Vec<_> = plan
-            .panes
-            .iter()
-            .map(|pane| {
-                let rect = pane.full_rect;
-                (pane.id, PaneRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32))
-            })
-            .collect();
-        let pane_rects = pane_rects.as_slice();
+        pane_rect_scratch.extend(plan.panes.iter().map(|pane| {
+            let rect = pane.full_rect;
+            (pane.id, PaneRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32))
+        }));
+        let pane_rects = pane_rect_scratch.as_slice();
         struct PaneView<'a> {
             grid: &'a Grid,
             planned: &'a PlannedPane,
@@ -6174,34 +6197,20 @@ impl GpuRenderer {
         // the active pane's coordinates, and without `pane_cols` the
         // per-origin snapped-edge cache is sized from the active pane, so a
         // wider inactive pane has its underlines clamped and truncated.
-        let mut underlines: Vec<(
-            f32,
-            f32,
-            u16,
-            u16,
-            sonicterm_text::row_glyph_cache::UnderlineRun,
-        )> = Vec::new();
         // Per entry of `underlines`, the staging index of the row that pushed it, so each
         // underline's quads merge into that row's one ink record.
-        let mut underline_owners: Vec<usize> = Vec::new();
         // Per drawn pane, the staging indices its glyph rows took, in ascending slot order, so
         // the background loop merges each row's quads into the record the glyph loop staged.
-        let mut staged_ranges: Vec<(u64, std::ops::Range<usize>)> = Vec::new();
-        let mut glyph_instances: Vec<GlyphInstance> =
-            Vec::with_capacity(grid.cols as usize * grid.rows as usize);
         // Overlay glyph instances — palette text + (future) other modals.
         // Kept separate so they can be drawn AFTER `quad_overlay` paints
         // the modal backdrop, otherwise they'd be hidden by their own
         // background. (— palette text was previously routed through
         // glyphon's TextRenderer which bypassed the device-scale atlas
         // path used by `emit_tab_title_glyphs`, hence the HiDPI blur.)
-        let mut overlay_glyph_instances: Vec<GlyphInstance> = Vec::new();
         // Each emitted terminal row's glyph range in `glyph_instances` and its ink bounds, so
         // highlight recolors on the main list scan only rows whose ink meets the target.
-        let mut row_spans: Vec<RowGlyphSpan> = Vec::new();
         // Missing-glyph "tofu" outlines collected during the cell walk.
         // Drawn via the quad pipeline after the text instances.
-        let mut missing_tofu: Vec<(f32, f32, f32, f32, ChromeColor)> = Vec::new();
         // Mirror of missing_tofu, recording just the codepoint so tests
         // can assert "no class regressed" without depending on pixel
         // layout. Cleared every frame; published into `self.last_missing_chars`
@@ -6243,7 +6252,7 @@ impl GpuRenderer {
             // plain hover draws only a yellow underline, so compute lazily —
             // `[0.0;4]` otherwise. #perf
             let hovered_url_accent: [f32; 4] = if hovered_url_needs_accent(hovered_url_cells) {
-                sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme).accent
+                self.chrome_caches.palette.palette_for(theme).accent
             } else {
                 // When: `!hovered_url_needs_accent` — plain hover draws only
                 // the underline, so the accent is never sampled.
@@ -6260,15 +6269,26 @@ impl GpuRenderer {
                 // A test enabled the inspector: this pass records only what it emits itself.
                 probe.clear();
             }
-            for pv in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
+            for (pane_index, pv) in
+                pane_views.iter().enumerate().filter(|(_, pane)| pane.planned.full_clip.is_some())
+            {
                 let pane_staged_start = self.row_ink.staged_len();
                 // The inspector's record of this pane's emitted slots; `None` in production.
                 let mut pane_emitted = self.emitted_rows_probe.as_ref().map(|_| Vec::new());
                 // Per-cell device-pixel snapping rounds each cell's left edge independently, which
                 // at fractional DPI alternates the cell pitch; every glyph path derives its cell
                 // edges from these shared snapped edges, so adjacent cells share an edge.
-                let snapped_cell_x: Vec<f32> =
-                    build_snapped_cell_x(pv.origin_x, cell_w, pv.grid.cols);
+                // Each pane's glyph edges reuse slot `2 * pane_index` of the frame scratch.
+                let edge_slot = 2 * pane_index;
+                frame_scratch::fill_snapped_slot(
+                    snapped,
+                    snapped_peak,
+                    edge_slot,
+                    pv.origin_x,
+                    cell_w,
+                    pv.grid.cols,
+                );
+                let snapped_cell_x: &[f32] = &snapped[edge_slot];
                 // Hover recolor applies only to the pane named by the hit-test, so a split at the
                 // same row and columns never inherits another pane's accent.
                 let pane_hovered_url =
@@ -6294,22 +6314,23 @@ impl GpuRenderer {
                         grid: pv.grid,
                         planned: pv.planned,
                         origin: (pv.origin_x, pv.origin_y),
-                        snapped_cell_x: &snapped_cell_x,
+                        snapped_cell_x,
                         pane_hovered_url,
                     },
                     GlyphFrame {
-                        glyph_instances: &mut glyph_instances,
-                        underlines: &mut underlines,
-                        missing_tofu: &mut missing_tofu,
+                        glyph_instances: &mut *glyph_instances,
+                        underlines: &mut *underlines,
+                        missing_tofu: &mut *missing_tofu,
                         missing_chars_this_frame: &mut missing_chars_this_frame,
-                        row_spans: &mut row_spans,
+                        row_spans: &mut *row_spans,
                     },
                     PaneGlyphSinks {
                         row_ink: &mut self.row_ink,
                         ink_surface: plan.surface,
-                        underline_owners: &mut underline_owners,
+                        underline_owners: &mut *underline_owners,
                         injected_row_glyph: self.injected_row_glyph,
                         emitted_slots: pane_emitted.as_mut(),
+                        row_keys: &mut *row_keys,
                     },
                 );
                 staged_ranges.push((pv.pane_id, pane_staged_start..self.row_ink.staged_len()));
@@ -6326,12 +6347,10 @@ impl GpuRenderer {
             return Err(anyhow!("injected assembly failure"));
         }
 
-        let mut quads: Vec<QuadInstance> = Vec::new();
         // Overlay quads — drawn AFTER terminal text + main quads so that
         // palette / search-input / IME backgrounds visually cover the
         // terminal content underneath. Emitted into the same vector as the
         // main quads, terminal glyphs bleed through overlay dialogs.
-        let mut quads_overlay: Vec<QuadInstance> = Vec::new();
 
         let inline_image_placements: Vec<InlineImagePlacement<'_>> = pane_views
             .iter()
@@ -6364,10 +6383,9 @@ impl GpuRenderer {
         {
             self.reset_image_atlas();
         }
-        let mut image_glyph_instances = Vec::new();
         let skipped_inline_images = emit_inline_image_instances(
             &mut self.image_atlas,
-            &mut image_glyph_instances,
+            &mut *image_glyph_instances,
             &inline_image_placements,
             cell_w,
             cell_h,
@@ -6415,7 +6433,9 @@ impl GpuRenderer {
         });
         let total_visible_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
         self.line_quad_cache.resize(total_visible_rows.max(1));
-        for pv in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
+        for (pane_index, pv) in
+            pane_views.iter().enumerate().filter(|(_, pane)| pane.planned.full_clip.is_some())
+        {
             let pv_grid: &Grid = pv.grid;
             let pane_id: crate::row_quad_cache::PaneId = pv.pane_id;
             let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
@@ -6440,7 +6460,17 @@ impl GpuRenderer {
             // diagnosis Recommendation, per-pane bg must NOT reuse the
             // active pane's cache because each split-pane has its own
             // pad and the snapped column edges differ.
-            let snapped_cell_x_bg = build_snapped_cell_x(pad_bg, cell_w, pv_grid.cols);
+            // Each pane's background edges reuse slot `2 * pane_index + 1` of the frame scratch.
+            let bg_edge_slot = 2 * pane_index + 1;
+            frame_scratch::fill_snapped_slot(
+                snapped,
+                snapped_peak,
+                bg_edge_slot,
+                pad_bg,
+                cell_w,
+                pv_grid.cols,
+            );
+            let snapped_cell_x_bg: &[f32] = &snapped[bg_edge_slot];
             for (r, row_abs) in pv.planned.rows().take(max_rows as usize) {
                 if !pv.planned.emit_rows[usize::from(r)] {
                     // When: the plan does not emit slot `r`, its retained background stays.
@@ -6470,8 +6500,8 @@ impl GpuRenderer {
                     row_cells.iter(),
                     (self.style_rev, theme, sel_bbox_for_quads),
                     &geometry,
-                    &snapped_cell_x_bg,
-                    &mut quads,
+                    snapped_cell_x_bg,
+                    &mut *quads,
                 );
                 let mut ink = crate::row_ink::InkEdges::default();
                 for quad in &quads[quads_before..] {
@@ -6510,7 +6540,7 @@ impl GpuRenderer {
             let total_rows = pv.planned.scrollback_len + u64::from(viewport_rows);
             let view_top = pv.planned.view_top_abs;
             emit_pane_scrollbar(
-                &mut quads_overlay,
+                &mut *quads_overlay,
                 pane_rect,
                 viewport_rows,
                 total_rows,
@@ -6526,7 +6556,7 @@ impl GpuRenderer {
 
         if self.injected_test_glyph.is_some() {
             // An injected test glyph joins the terminal glyphs before any recolor reads them.
-            self.push_injected_test_glyph(&mut glyph_instances, sw, sh);
+            self.push_injected_test_glyph(&mut *glyph_instances, sw, sh);
         }
 
         if let Some(sel) = selection {
@@ -6550,7 +6580,7 @@ impl GpuRenderer {
                 // scrolled).
                 let sel_view_top_abs = plan.active_view_top_abs;
                 push_selection_quads(
-                    &mut quads,
+                    &mut *quads,
                     sel,
                     &SelectionGeometry {
                         view_top_abs: sel_view_top_abs,
@@ -6577,7 +6607,7 @@ impl GpuRenderer {
                     theme,
                     sw,
                     sh,
-                    &mut quads_overlay,
+                    &mut *quads_overlay,
                     &active_snapped_cell_x,
                 );
             }
@@ -6594,12 +6624,12 @@ impl GpuRenderer {
                 sh,
                 self.selection_color,
                 self.cursor_color,
-                &mut quads,
+                &mut *quads,
                 &active_snapped_cell_x,
             ) {
                 let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
-                    &mut glyph_instances,
-                    &row_spans,
+                    &mut *glyph_instances,
+                    row_spans,
                     cx,
                     cy,
                     self.cell_w,
@@ -6679,8 +6709,8 @@ impl GpuRenderer {
                             });
                         }
                         let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
-                            &mut glyph_instances,
-                            &row_spans,
+                            &mut *glyph_instances,
+                            row_spans,
                             cx,
                             cy,
                             cw,
@@ -6778,7 +6808,7 @@ impl GpuRenderer {
                 chrome_color_to_linear_rgba(color_to_chrome(run.color, theme, self.fg_default));
             let quads_before = quads.len();
             push_underline_quads(
-                &mut quads,
+                &mut *quads,
                 run.style,
                 x,
                 y,
@@ -6807,8 +6837,7 @@ impl GpuRenderer {
             if let Some(hovered_view) = pane_views.iter().find(|view| view.pane_id == h.pane_id) {
                 // When: `pane_views` finds `h.pane_id`, project all fragments through that pane's geometry.
                 let hov_accent = if h.active {
-                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme)
-                        .accent
+                    self.chrome_caches.palette.palette_for(theme).accent
                 } else {
                     // When: `h.active` is false, render the non-clickable hover hint in the theme's yellow rather than the action accent.
                     hex_to_premultiplied_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
@@ -6831,7 +6860,7 @@ impl GpuRenderer {
                         continue;
                     };
                     push_underline_quads(
-                        &mut quads,
+                        &mut *quads,
                         UnderlineStyle::Single,
                         x,
                         y,
@@ -6850,7 +6879,7 @@ impl GpuRenderer {
         // For cells whose rasterizer returned no tile (and char isn't
         // whitespace), draw a thin outlined rectangle so the gap is
         // visible. Helps catch font-fallback misses (emoji etc.).
-        for (x, y, w, h, col) in &missing_tofu {
+        for (x, y, w, h, col) in missing_tofu.iter() {
             let rgba = with_premultiplied_alpha(chrome_color_to_linear_rgba(*col), 0.55);
             let t = 1.0_f32; // border thickness
                              // Top
@@ -6903,7 +6932,7 @@ impl GpuRenderer {
 
         // Safety edges sit above terminal ink, images, and the scrollbar, but below modal chrome.
         emit_broadcast_borders(
-            &mut quads_overlay,
+            &mut *quads_overlay,
             pane_rects,
             &broadcast_participant_ids,
             hex_to_premultiplied_rgba(theme.colors.bright.red.0.as_str(), 1.0),
@@ -6934,8 +6963,7 @@ impl GpuRenderer {
             // tab bar. The theme.tab.* colors remain authoritative for
             // the title text (active vs inactive fg) so per-theme accents
             // still read through.
-            let ui_palette =
-                sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
+            let ui_palette = self.chrome_caches.palette.palette_for(theme);
             // `tok::BG_BASE` is a hardcoded near-black
             // (`#0B0E14`) that is indistinguishable from most dark
             // themes' `theme.background` — the tab bar drew correctly
@@ -6950,7 +6978,7 @@ impl GpuRenderer {
             let accent_blue = ui_palette.accent;
             let separator = ui_palette.border_subtle;
             emit_tab_bar_quads(
-                &mut quads,
+                &mut *quads,
                 &layout,
                 &TabBarQuadParams {
                     accent: accent_blue,
@@ -6993,7 +7021,11 @@ impl GpuRenderer {
             let tab_baseline_y = title_top + tab_raster_px * 0.95;
             let native_em = tab_raster_px;
             let mut tab_rasterizer = self.tab_title_font.stack().cloned();
-            for t in &layout.tabs {
+            // Kept titles are keyed by tab position; a closed tab's slot is dropped.
+            let title_font_key = self.tab_title_font.key();
+            let title_fallback_epoch = self.tab_title_font.fallback_epoch();
+            self.chrome_caches.titles.retain_tabs(layout.tabs.len());
+            for (position, t) in layout.tabs.iter().enumerate() {
                 let Some(tab) = tabs.tabs().get(t.idx) else {
                     // When: `tabs.tabs().get(t.idx)` is None — the layout
                     // outlived a closed tab, so there is no title to draw.
@@ -7022,9 +7054,22 @@ impl GpuRenderer {
                     if source_tab_idx == Some(t.idx) {
                         color = scale_chrome_text_alpha(color, source_alpha);
                     }
-                    let title =
-                        fit_tab_title(stack, &content.display_text(), tab_raster_px, text_px)
-                            .unwrap_or_default();
+                    let display = content.display_text();
+                    let probe = crate::chrome_cache::TitleProbe {
+                        text: &display,
+                        font_key: title_font_key,
+                        fallback_epoch: title_fallback_epoch,
+                        raster_px: tab_raster_px,
+                        text_px,
+                    };
+                    // A warm, unchanged title draws from its kept run with no shaping.
+                    let draw = self.chrome_caches.titles.prepare(
+                        position,
+                        &probe,
+                        stack,
+                        self.chrome_reuse,
+                    );
+                    let title = self.chrome_caches.titles.drawn(&draw);
                     let placement = tab_title_block_placement(
                         t.title_rect,
                         title.width_px,
@@ -7033,32 +7078,48 @@ impl GpuRenderer {
                     );
                     if let Some(badge) = placement.badge_rect {
                         emit_privilege_badge_quads(
-                            &mut quads,
+                            &mut *quads,
                             badge,
                             ui_palette.danger,
                             badge_alpha,
                             (sw, sh),
                         );
                     }
-                    let final_layout = chrome_text::layout_with_raster_variant(
-                        stack,
-                        rasterizer,
-                        &mut self.glyph_atlas,
-                        &title.text,
-                        color,
-                        ChromeAttrs::default(),
-                        tab_raster_px,
-                        native_em,
-                        (placement.text_x, tab_baseline_y),
-                        (sw, sh),
-                        Some(ChromeClip {
-                            x: placement.text_clip.x,
-                            y: placement.text_clip.y,
-                            w: placement.text_clip.w,
-                            h: placement.text_clip.h,
-                        }),
-                        GlyphRasterVariant::TabTitle,
-                    );
+                    let title_clip = Some(ChromeClip {
+                        x: placement.text_clip.x,
+                        y: placement.text_clip.y,
+                        w: placement.text_clip.w,
+                        h: placement.text_clip.h,
+                    });
+                    let title_origin = (placement.text_x, tab_baseline_y);
+                    let final_layout = match title.view {
+                        // The fit kept or made its run, so it draws without shaping again.
+                        Some(view) => chrome_text::layout_view(
+                            view,
+                            rasterizer,
+                            &mut self.glyph_atlas,
+                            color,
+                            title_origin,
+                            (sw, sh),
+                            title_clip,
+                            GlyphRasterVariant::TabTitle,
+                        ),
+                        // The final cut did not shape, so the text shapes at draw time as before.
+                        None => chrome_text::layout_with_raster_variant(
+                            stack,
+                            rasterizer,
+                            &mut self.glyph_atlas,
+                            title.text,
+                            color,
+                            ChromeAttrs::default(),
+                            tab_raster_px,
+                            native_em,
+                            title_origin,
+                            (sw, sh),
+                            title_clip,
+                            GlyphRasterVariant::TabTitle,
+                        ),
+                    };
                     glyph_instances.extend(final_layout.glyphs);
                     quads.extend(final_layout.missing_boxes);
                 } else if show_privilege_badge {
@@ -7067,7 +7128,7 @@ impl GpuRenderer {
                         tab_title_block_placement(t.title_rect, 0.0, true, self.scale_factor);
                     if let Some(badge) = placement.badge_rect {
                         emit_privilege_badge_quads(
-                            &mut quads,
+                            &mut *quads,
                             badge,
                             ui_palette.danger,
                             badge_alpha,
@@ -7148,8 +7209,8 @@ impl GpuRenderer {
                     // The tab titles were appended after the rows; they lie outside every
                     // recorded row span, so this scan still examines each of them.
                     let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
-                        &mut glyph_instances,
-                        &row_spans,
+                        &mut *glyph_instances,
+                        row_spans,
                         qx,
                         qy,
                         qw,
@@ -7190,13 +7251,30 @@ impl GpuRenderer {
         let search_preedit: &str =
             search.and(ime).map(|i| i.preedit()).filter(|s| !s.is_empty()).unwrap_or("");
         let search_label = search.map(|s| search_bar_label(s, search_preedit));
+        // The overlay's icon and label are looked up in the chrome-run cache: a warm overlay with
+        // an unchanged label measures and draws them without shaping.
+        let search_run_key = crate::chrome_cache::ChromeRunKey::new(
+            crate::chrome_cache::ChromeStack::Body,
+            ChromeAttrs::default(),
+            search_font_size,
+            search_font_size,
+        );
+        let chrome_reuse = self.chrome_reuse;
+        let search_gap_px = self.chrome_px(SEARCH_BAR_ICON_GAP);
         let search_content_width = search_label.as_ref().map(|label| {
+            let runs = &mut self.chrome_caches.runs;
+            let mut measure = self.font_stack.as_ref().map(|stack| {
+                move |text: &str| {
+                    let handle = runs.prepare(stack, text, search_run_key, chrome_reuse);
+                    runs.view(&handle).map(|view| view.raw_width_px())
+                }
+            });
             search_badge_content_width(
                 SEARCH_BADGE_ICON,
                 label,
                 search_font_size,
-                self.chrome_px(SEARCH_BAR_ICON_GAP),
-                self.font_stack.as_ref(),
+                search_gap_px,
+                measure.as_mut().map(|measure| measure as &mut dyn FnMut(&str) -> Option<f32>),
             )
         });
         let search_bar_layout = search_content_width.map(|content_w| {
@@ -7235,12 +7313,15 @@ impl GpuRenderer {
             // overlay glyph instance vec (sits above quad_overlay).
             if let (Some(stack), Some(search_state)) = (self.font_stack.as_ref(), search) {
                 let mut wt = stack.clone();
+                let icon_measure = self.chrome_caches.runs.prepare(
+                    stack,
+                    SEARCH_BADGE_ICON,
+                    search_run_key,
+                    chrome_reuse,
+                );
                 let icon_w = conservative_badge_text_width(
                     estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size),
-                    crate::frame_stats::shape_request(|| {
-                        stack.measure_text_width_for_frame(SEARCH_BADGE_ICON)
-                    })
-                    .ok(),
+                    self.chrome_caches.runs.view(&icon_measure).map(|view| view.raw_width_px()),
                 );
                 let icon_x = layout.border.x + self.chrome_px(SEARCH_BAR_PAD_LEFT);
                 let text_x = icon_x + icon_w + self.chrome_px(SEARCH_BAR_ICON_GAP);
@@ -7265,22 +7346,31 @@ impl GpuRenderer {
                     font_size_px: search_font_size,
                     native_em_px: search_font_size,
                 };
-                // One shaped run feeds caret, highlight, scroll, and the painted glyphs.
-                let search_run = chrome_text::ChromeShapedRun::shape(
+                // One run, kept or shaped now, feeds caret, highlight, scroll, and the glyphs.
+                let label_handle = self.chrome_caches.runs.prepare(
                     stack,
                     &search_text.label,
-                    ChromeAttrs::default(),
-                    search_font_size,
-                    search_font_size,
+                    search_run_key,
+                    chrome_reuse,
                 );
+                // The icon draws only on a drawable surface, as `chrome_text::layout` decides.
+                let icon_handle = (sw > 0.0 && sh > 0.0).then(|| {
+                    self.chrome_caches.runs.prepare(
+                        stack,
+                        SEARCH_BADGE_ICON,
+                        search_run_key,
+                        chrome_reuse,
+                    )
+                });
+                let search_run = self.chrome_caches.runs.view(&label_handle);
                 if search_run.is_none() {
                     // An unshaped label paints nothing, so every visible character is missing.
                     chrome_text::note_unshaped_chrome(&search_text.label);
                 }
-                let search_field = search_run.as_ref().map(|run| {
+                let search_field = search_run.map(|run| {
                     plan_field(
                         search_placement,
-                        &FieldBoundaries::from_run(run),
+                        &FieldBoundaries::from_view(run),
                         &search_text,
                         search_text.caret,
                         search_text.selection.clone(),
@@ -7290,32 +7380,49 @@ impl GpuRenderer {
                 });
                 field_candidates.search = search_field;
                 let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;
-                let icon_layout = chrome_text::layout(
-                    stack,
-                    &mut wt,
-                    &mut self.glyph_atlas,
-                    SEARCH_BADGE_ICON,
-                    search_badge_fg,
-                    ChromeAttrs::default(),
-                    search_font_size,
-                    search_font_size,
-                    (icon_x, baseline),
-                    (sw, sh),
-                    Some(ChromeClip {
-                        x: layout.border.x,
-                        y: layout.border.y,
-                        w: layout.border.w,
-                        h: layout.border.h,
-                    }),
-                );
+                let icon_clip = Some(ChromeClip {
+                    x: layout.border.x,
+                    y: layout.border.y,
+                    w: layout.border.w,
+                    h: layout.border.h,
+                });
+                let icon_view =
+                    icon_handle.as_ref().and_then(|handle| self.chrome_caches.runs.view(handle));
+                let icon_layout = match icon_view {
+                    // The icon run is kept or shaped, so it draws without shaping again.
+                    Some(view) => chrome_text::layout_view(
+                        view,
+                        &mut wt,
+                        &mut self.glyph_atlas,
+                        search_badge_fg,
+                        (icon_x, baseline),
+                        (sw, sh),
+                        icon_clip,
+                        GlyphRasterVariant::Normal,
+                    ),
+                    // With no surface or no run, the layout decides as it always did.
+                    None => chrome_text::layout(
+                        stack,
+                        &mut wt,
+                        &mut self.glyph_atlas,
+                        SEARCH_BADGE_ICON,
+                        search_badge_fg,
+                        ChromeAttrs::default(),
+                        search_font_size,
+                        search_font_size,
+                        (icon_x, baseline),
+                        (sw, sh),
+                        icon_clip,
+                    ),
+                };
                 overlay_glyph_instances.extend(icon_layout.glyphs);
                 quads_overlay.extend(icon_layout.missing_boxes);
                 let label_start = overlay_glyph_instances.len();
                 // Tofu outlines of the label; drawn after the selection and caret quads.
                 let mut field_tofu: Vec<QuadInstance> = Vec::new();
-                if let (Some(run), Some(field)) = (search_run.as_ref(), search_field) {
+                if let (Some(run), Some(field)) = (search_run, search_field) {
                     // The label paints from the run its field geometry was measured on.
-                    let chrome_layout = chrome_text::layout_prepared(
+                    let chrome_layout = chrome_text::layout_view(
                         run,
                         &mut wt,
                         &mut self.glyph_atlas,
@@ -7334,7 +7441,13 @@ impl GpuRenderer {
                     field_tofu = chrome_layout.missing_boxes;
                 }
                 // Layout only culls whole glyphs; scrolled glyphs crossing the edge are trimmed here.
-                clip_glyphs_to_rect(&mut overlay_glyph_instances, label_start, search_clip, sw, sh);
+                clip_glyphs_to_rect(
+                    &mut *overlay_glyph_instances,
+                    label_start,
+                    search_clip,
+                    sw,
+                    sh,
+                );
 
                 if let Some(field) = search_field {
                     // The label shaped, so caret and highlight come from its measured clusters.
@@ -7364,7 +7477,7 @@ impl GpuRenderer {
                         });
                     }
                     crate::cursor::paint_field_marks(
-                        &mut quads_overlay,
+                        &mut *quads_overlay,
                         &mut overlay_glyph_instances[label_start..],
                         std::mem::take(&mut field_tofu),
                         &marks,
@@ -7442,7 +7555,7 @@ impl GpuRenderer {
                     [badge_x, badge_y, badge_w, badge_h],
                     sw,
                     sh,
-                    &mut overlay_glyph_instances,
+                    &mut *overlay_glyph_instances,
                     None,
                 ));
                 quads_overlay.extend(emit_overlay_text_glyphs(
@@ -7459,7 +7572,7 @@ impl GpuRenderer {
                     [badge_x, badge_y, badge_w, badge_h],
                     sw,
                     sh,
-                    &mut overlay_glyph_instances,
+                    &mut *overlay_glyph_instances,
                     None,
                 ));
             }
@@ -7511,7 +7624,7 @@ impl GpuRenderer {
                         [text_x, layout.border.y, text_clip_w, layout.border.h],
                         sw,
                         sh,
-                        &mut overlay_glyph_instances,
+                        &mut *overlay_glyph_instances,
                         None,
                     ));
                 }
@@ -7532,7 +7645,7 @@ impl GpuRenderer {
                     [layout.close.x, layout.close.y, layout.close.w, layout.close.h],
                     sw,
                     sh,
-                    &mut overlay_glyph_instances,
+                    &mut *overlay_glyph_instances,
                     None,
                 ));
             }
@@ -7561,8 +7674,7 @@ impl GpuRenderer {
                 },
             );
             if let Some(layout) = layout {
-                let chrome =
-                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
+                let chrome = self.chrome_caches.palette.palette_for(theme);
                 let rect = layout.border;
                 quads_overlay.push(QuadInstance::rounded(
                     px_to_ndc(rect.x, rect.y, rect.w, rect.h, sw, sh),
@@ -7587,7 +7699,7 @@ impl GpuRenderer {
                         [rect.x, rect.y, rect.w, rect.h],
                         sw,
                         sh,
-                        &mut overlay_glyph_instances,
+                        &mut *overlay_glyph_instances,
                         None,
                     ));
                 }
@@ -7612,8 +7724,7 @@ impl GpuRenderer {
         if let Some(layout) = &palette_layout {
             // When: `palette_layout` is Some — the palette is open, so its
             // panel, query row, and result rows all need chrome this frame.
-            let palette_chrome =
-                sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
+            let palette_chrome = self.chrome_caches.palette.palette_for(theme);
             let accent_rgba = palette_chrome.accent;
             // Full-window scrim — sits below the modal so the underlying
             // terminal recedes visually.
@@ -7818,7 +7929,7 @@ impl GpuRenderer {
                     query_tofu = query_layout.missing_boxes;
                 }
                 // Layout only culls whole glyphs; a scrolled glyph crossing the edge is trimmed here.
-                clip_glyphs_to_rect(&mut overlay_glyph_instances, query_start, query_clip, sw, sh);
+                clip_glyphs_to_rect(&mut *overlay_glyph_instances, query_start, query_clip, sw, sh);
                 if let Some(field) = palette_field {
                     // The run shaped, so caret and highlight use its measured clusters.
                     let mut marks = Vec::new();
@@ -7841,7 +7952,7 @@ impl GpuRenderer {
                         });
                     }
                     crate::cursor::paint_field_marks(
-                        &mut quads_overlay,
+                        &mut *quads_overlay,
                         &mut overlay_glyph_instances[query_start..],
                         std::mem::take(&mut query_tofu),
                         &marks,
@@ -7937,7 +8048,7 @@ impl GpuRenderer {
                         [row.rect.x, row.rect.y, label_bounds_w, label_clip_h],
                         sw,
                         sh,
-                        &mut overlay_glyph_instances,
+                        &mut *overlay_glyph_instances,
                         None,
                     ));
                     if let (Some(hint), Some(width)) = (shortcut, shortcut_w) {
@@ -7962,7 +8073,7 @@ impl GpuRenderer {
                             [row.rect.x, row.rect.y, row.rect.w, row.rect.h],
                             sw,
                             sh,
-                            &mut overlay_glyph_instances,
+                            &mut *overlay_glyph_instances,
                             None,
                         ));
                     }
@@ -8033,7 +8144,7 @@ impl GpuRenderer {
                         bounds_bg,
                         sw,
                         sh,
-                        &mut overlay_glyph_instances,
+                        &mut *overlay_glyph_instances,
                         None,
                     ));
                     if let Some(hint) = &layout.empty_hint {
@@ -8054,7 +8165,7 @@ impl GpuRenderer {
                             bounds_bg,
                             sw,
                             sh,
-                            &mut overlay_glyph_instances,
+                            &mut *overlay_glyph_instances,
                             None,
                         ));
                     }
@@ -8212,7 +8323,7 @@ impl GpuRenderer {
                         [start_x, top_y, pre_w, line_h],
                         sw,
                         sh,
-                        &mut overlay_glyph_instances,
+                        &mut *overlay_glyph_instances,
                         None,
                     );
                     quads_overlay.extend(preedit_boxes.iter().copied());
@@ -8293,8 +8404,7 @@ impl GpuRenderer {
                 let lh = (ly1 - ly0).max(2.0 * dpi);
                 // Drop-line accent — theme-driven (was hardcoded ACCENT_BLUE).
                 let line_color = with_premultiplied_alpha(
-                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme)
-                        .accent,
+                    self.chrome_caches.palette.palette_for(theme).accent,
                     0.95,
                 );
                 // 3px line centered on lx; both the half-width offset and the
@@ -8442,19 +8552,18 @@ impl GpuRenderer {
 
         #[cfg(debug_assertions)]
         {
-            crate::quad::debug_assert_premultiplied_quads("base", &quads);
-            crate::quad::debug_assert_premultiplied_quads("overlay", &quads_overlay);
+            crate::quad::debug_assert_premultiplied_quads("base", quads);
+            crate::quad::debug_assert_premultiplied_quads("overlay", quads_overlay);
         }
 
+        // The pass assembled a drawable frame, so the restore trims by its use; the lease then
+        // travels inside the layers, so no exit up to the end of presentation loses the scratch.
+        scratch_lease.complete();
         Ok(Assembled::Layers(Box::new(AssembledLayers {
             surface_width: sw,
             surface_height: sh,
             subpixel_aa,
-            quads,
-            images: image_glyph_instances,
-            glyphs: glyph_instances,
-            overlay_quads: quads_overlay,
-            overlay_glyphs: overlay_glyph_instances,
+            scratch: scratch_lease,
             field_candidates,
             missing_chars: missing_chars_this_frame,
             missing_chrome_chars: missing_chrome_scope.finish(),
@@ -8500,11 +8609,7 @@ impl GpuRenderer {
             surface_width,
             surface_height,
             subpixel_aa,
-            quads,
-            images,
-            glyphs,
-            overlay_quads,
-            overlay_glyphs,
+            scratch,
             field_candidates,
             missing_chars,
             missing_chrome_chars,
@@ -8514,6 +8619,9 @@ impl GpuRenderer {
             recolor,
             tab_ink,
         } = assembled;
+        // The lease returns the scratch to the renderer when it drops, on every outcome, including
+        // a presenter `Err` and unwinding.
+        let batches = scratch.held();
         // The presenter borrows only the owned drawable layers; no grid or parser guard is held.
         let layers = FrameLayers {
             surface_width,
@@ -8523,11 +8631,11 @@ impl GpuRenderer {
             partial: plan.mode == RenderMode::Partial,
             subpixel_aa,
             batches: FrameBatches {
-                quads: &quads,
-                images: &images,
-                glyphs: &glyphs,
-                overlay_quads: &overlay_quads,
-                overlay_glyphs: &overlay_glyphs,
+                quads: &batches.quads,
+                images: &batches.images,
+                glyphs: &batches.glyphs,
+                overlay_quads: &batches.overlay_quads,
+                overlay_glyphs: &batches.overlay_glyphs,
             },
         };
         if std::mem::take(&mut self.fault_present_error) {
@@ -8756,7 +8864,8 @@ impl GpuRenderer {
         records: &mut sonicterm_text::row_glyph_cache::CachedRow,
         row: u16,
         style: RunStyle,
-        cells: &[(u16, Cell)],
+        // The run's cells borrowed from the grid, in strictly increasing column order.
+        cells: &[(u16, &Cell)],
         theme: &Theme,
         fg_default: ChromeColor,
         cell_w: f32,
@@ -8912,13 +9021,10 @@ impl GpuRenderer {
             }
         };
 
-        // A lookup from column to cell recovers per-cell attributes (colour, WIDE flag, the
-        // codepoint for tofu diagnostics) from the shaped output's `lead_col`.
-        let mut cell_by_col: std::collections::HashMap<u16, Cell> =
-            std::collections::HashMap::with_capacity(cells.len());
-        for (col, c) in cells {
-            cell_by_col.insert(*col, c.clone());
-        }
+        // Per-cell attributes (colour, WIDE flag, the codepoint for tofu diagnostics) are read
+        // from the borrowed run by the shaped output's `lead_col`; a column the run lacks reads
+        // as one default cell made per run, as the former owned lookup's fallback did.
+        let default_cell = Cell::default();
 
         // Shaped output projects straight into the shaped-glyph record; cluster byte offsets map
         // back through `cell_cols`.
@@ -8933,7 +9039,7 @@ impl GpuRenderer {
                 .unwrap_or(last_col);
             last_col = lead_col;
             let lead_ch =
-                cell_by_col.get(&lead_col).map(|c| c.ch).or(info.only_char).unwrap_or(' ');
+                run_cell_at(cells, lead_col).map(|c| c.ch).or(info.only_char).unwrap_or(' ');
             let cluster_cells = (info.num_cells as u16).max(1);
             shaped.push(sonicterm_text::shape::ShapedGlyph {
                 lead_col,
@@ -8953,7 +9059,7 @@ impl GpuRenderer {
         let mut positioned_cluster_col = None;
         let mut positioned_cluster_pen_x = 0.0;
         for g in &shaped {
-            let lead_cell = cell_by_col.get(&g.lead_col).cloned().unwrap_or_default();
+            let lead_cell: &Cell = run_cell_at(cells, g.lead_col).unwrap_or(&default_cell);
             let is_wide = lead_cell.flags.contains(CellFlags::WIDE);
             let cluster_cells = g.cluster_cells.max(1) as usize;
             let cells_to_span = if is_wide { 2 } else { cluster_cells };
@@ -9072,7 +9178,7 @@ impl GpuRenderer {
                     complete = false;
                     continue;
                 }
-                let color = cell_fg(&lead_cell, theme, fg_default);
+                let color = cell_fg(lead_cell, theme, fg_default);
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
@@ -9143,7 +9249,7 @@ impl GpuRenderer {
                     records.tofu.push(tofu_box(
                         g.lead_col,
                         cell_pixel_width,
-                        cell_fg(&lead_cell, theme, fg_default),
+                        cell_fg(lead_cell, theme, fg_default),
                     ));
                     records.missing_chars.push(ch);
                     continue;
@@ -9153,7 +9259,7 @@ impl GpuRenderer {
                     // face produced a zero-area tile, which has no pixels.
                     continue;
                 }
-                let color = cell_fg(&lead_cell, theme, fg_default);
+                let color = cell_fg(lead_cell, theme, fg_default);
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
@@ -9183,7 +9289,7 @@ impl GpuRenderer {
                     marker_fit,
                     g,
                     is_wide,
-                    &lead_cell,
+                    lead_cell,
                 );
                 records.glyphs.push(record);
                 continue;
@@ -9216,7 +9322,7 @@ impl GpuRenderer {
             }
             // Multi-cell ligature halves keep their natural overhang so paired
             // glyphs such as `=>` continue to fuse across adjacent cells.
-            let color = cell_fg(&lead_cell, theme, fg_default);
+            let color = cell_fg(lead_cell, theme, fg_default);
             let rgba = if info.is_color {
                 [1.0, 1.0, 1.0, 1.0]
             } else {
@@ -9246,7 +9352,7 @@ impl GpuRenderer {
                 marker_fit,
                 g,
                 is_wide,
-                &lead_cell,
+                lead_cell,
             );
             records.glyphs.push(record);
         }
@@ -9752,15 +9858,22 @@ pub fn emit_cell_bg_quads_clipped(
 #[doc(hidden)]
 #[must_use]
 pub fn build_snapped_cell_x(origin_x: f32, cell_w: f32, cols: u16) -> Vec<f32> {
-    (0..=cols)
-        .map(|col| {
-            sonicterm_render_model::geometry::snap_to_device_pixels(
-                (origin_x + (col as f32) * cell_w, 0.0, 0.0, 0.0),
-                1.0,
-            )
-            .0
-        })
-        .collect()
+    let mut edges = Vec::with_capacity(usize::from(cols) + 1);
+    fill_snapped_cell_x(&mut edges, origin_x, cell_w, cols);
+    edges
+}
+
+/// [`build_snapped_cell_x`] into a reused buffer: `edges` is cleared and refilled with the same
+/// `cols + 1` snapped edges, keeping its allocation across frames.
+pub(crate) fn fill_snapped_cell_x(edges: &mut Vec<f32>, origin_x: f32, cell_w: f32, cols: u16) {
+    edges.clear();
+    edges.extend((0..=cols).map(|col| {
+        sonicterm_render_model::geometry::snap_to_device_pixels(
+            (origin_x + (col as f32) * cell_w, 0.0, 0.0, 0.0),
+            1.0,
+        )
+        .0
+    }));
 }
 
 /// Pure column-from-pixel lookup that mirrors the renderer's
@@ -9881,6 +9994,12 @@ fn inject_shape_failure<T>(shaped: Result<T>) -> Result<T> {
 #[inline(always)]
 fn inject_shape_failure<T>(shaped: Result<T>) -> Result<T> {
     shaped
+}
+
+/// The cell at `col` in a style run whose columns strictly increase, found by binary search;
+/// `None` when the run holds no cell at that column.
+fn run_cell_at<'cell>(cells: &[(u16, &'cell Cell)], col: u16) -> Option<&'cell Cell> {
+    cells.binary_search_by_key(&col, |(cell_col, _)| *cell_col).ok().map(|index| cells[index].1)
 }
 
 /// Where one cached row is drawn this frame: its slot, origin, column edges, cell size, baseline,
@@ -10256,63 +10375,41 @@ pub(crate) fn emit_row_glyphs(
     // keeps the row out of the cache but never stops a later valid run from drawing.
     let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pane_id, slot);
     let mut complete = true;
-    let mut run_cells: Vec<(u16, Cell)> = Vec::new();
-    let mut run_style: Option<RunStyle> = None;
+    // Visible cells borrowed from the grid; each style run is a slice of this list.
     let cells: Vec<(u16, &Cell)> = row
         .iter()
         .enumerate()
         .filter(|(_, cell)| !cell.flags.contains(CellFlags::WIDE_CONT))
         .map(|(col, cell)| (col as u16, cell))
         .collect();
-    for (index, (col, cell)) in cells.iter().enumerate() {
-        let style = RunStyle::from_cell(cell);
-        if run_style.is_some_and(|open| open != style) {
-            // The style changed, so the open run is shaped before this cell starts a new one.
-            let run_complete = GpuRenderer::build_shape_run(
-                atlas,
-                &mut records,
-                slot,
-                run_style.expect("an open run"),
-                &run_cells,
-                theme,
-                fg_default,
-                cell_w,
-                cell_h,
-                origin.1,
-                snapped_cell_x,
-                font_stack,
-                wt_raster.as_deref_mut(),
-                row_hovered_url,
-                hovered_url_accent,
-                software_presenter,
-            );
-            complete &= run_complete;
-            run_cells.clear();
-        }
-        run_style = Some(style);
-        run_cells.push((*col, (*cell).clone()));
-        if index + 1 == cells.len() {
-            // This is the row's last visible cell, so its open run is shaped now.
-            let run_complete = GpuRenderer::build_shape_run(
-                atlas,
-                &mut records,
-                slot,
-                style,
-                &run_cells,
-                theme,
-                fg_default,
-                cell_w,
-                cell_h,
-                origin.1,
-                snapped_cell_x,
-                font_stack,
-                wt_raster.as_deref_mut(),
-                row_hovered_url,
-                hovered_url_accent,
-                software_presenter,
-            );
-            complete &= run_complete;
-        }
+    let mut run_start = 0;
+    while run_start < cells.len() {
+        let style = RunStyle::from_cell(cells[run_start].1);
+        // The run extends while the style holds; it ends at the first cell of another style.
+        let run_end = cells[run_start..]
+            .iter()
+            .position(|(_, cell)| RunStyle::from_cell(cell) != style)
+            .map_or(cells.len(), |offset| run_start + offset);
+        let run_complete = GpuRenderer::build_shape_run(
+            atlas,
+            &mut records,
+            slot,
+            style,
+            &cells[run_start..run_end],
+            theme,
+            fg_default,
+            cell_w,
+            cell_h,
+            origin.1,
+            snapped_cell_x,
+            font_stack,
+            wt_raster.as_deref_mut(),
+            row_hovered_url,
+            hovered_url_accent,
+            software_presenter,
+        );
+        complete &= run_complete;
+        run_start = run_end;
     }
     project_cached_row(&records, &at, software_presenter, frame.reborrow());
     if complete {
@@ -10341,6 +10438,8 @@ pub(crate) struct PaneGlyphSinks<'sink> {
     pub(crate) injected_row_glyph: Option<InjectedRowGlyph>,
     /// Test inspector: each slot is appended where its row is emitted; `None` in production.
     pub(crate) emitted_slots: Option<&'sink mut Vec<u16>>,
+    /// Reused buffer for one pane's row keys while its rows are pinned.
+    pub(crate) row_keys: &'sink mut Vec<u64>,
 }
 
 /// Start one glyph assembly pass over `panes`, each a planned pane with its grid's columns:
@@ -10376,19 +10475,19 @@ pub(crate) fn assemble_pane_glyph_rows(
 ) {
     let PaneGlyphRows { pane_id, grid, planned, origin, snapped_cell_x, pane_hovered_url } = pane;
     let view_top_abs = planned.view_top_abs;
-    // Pin phase.
-    let keys: Vec<u64> = planned
-        .rows()
-        .map(|(slot, _)| {
-            if planned.emit_rows[usize::from(slot)] {
-                emitted_row_key(&shaping, grid, view_top_abs, slot, pane_hovered_url)
-            } else {
-                // When: the plan does not emit `slot`, its key is never needed this pass.
-                0
-            }
-        })
-        .collect();
-    shaping.row_cache.pin(pane_id, &keys);
+    // Pin phase, into the frame scratch's key buffer, borrowed in place so an unwind leaves it
+    // in the scratch.
+    let keys: &mut Vec<u64> = &mut *sinks.row_keys;
+    keys.clear();
+    keys.extend(planned.rows().map(|(slot, _)| {
+        if planned.emit_rows[usize::from(slot)] {
+            emitted_row_key(&shaping, grid, view_top_abs, slot, pane_hovered_url)
+        } else {
+            // When: the plan does not emit `slot`, its key is never needed this pass.
+            0
+        }
+    }));
+    shaping.row_cache.pin(pane_id, keys);
     // Emit phase.
     for (slot, _) in planned.rows() {
         if !planned.emit_rows[usize::from(slot)] {

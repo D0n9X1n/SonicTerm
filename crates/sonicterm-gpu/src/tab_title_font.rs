@@ -106,6 +106,12 @@ impl TabTitleFont {
         &mut self.fallback_epoch
     }
 
+    /// The fallback epoch, read-only: a kept tab title is keyed by it, so an applied fallback
+    /// generation makes every kept title miss once.
+    pub(super) fn fallback_epoch(&self) -> u64 {
+        self.fallback_epoch
+    }
+
     pub(super) fn measure(
         &self,
         tabs: &mut TabBar,

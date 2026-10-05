@@ -80,6 +80,10 @@ pub fn emit_renderer_retention(label: &str, role: &str, retention: &RendererRete
         vertex_scratch_items = retention.vertex_scratch.items,
         row_ink_bytes = retention.row_ink.bytes,
         row_ink_items = retention.row_ink.items,
+        frame_scratch_bytes = retention.frame_scratch.bytes,
+        frame_scratch_items = retention.frame_scratch.items,
+        chrome_cache_bytes = retention.chrome_cache.bytes,
+        chrome_cache_items = retention.chrome_cache.items,
         "renderer retention"
     );
 }

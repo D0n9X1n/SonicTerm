@@ -945,6 +945,23 @@ mod frame_fallback {
         assert!(fixture.stack.rasterized_glyph_to_tile(raster(vec![0; 5], 3, 2)).is_none());
         assert!(fixture.stack.rasterized_glyph_to_tile(raster(vec![0; 4], 0, 0)).is_none());
     }
+
+    #[test]
+    fn memoized_face_shapes_a_merged_fallback() {
+        // A fallback merge mutates the loaded face in place without moving the face epoch, so a
+        // memoized face must be that shared `Rc`, not a copy: after the merge the warm memo
+        // shapes the new character with the merged handles.
+        let fixture = gated_stack("memo-merge");
+        let warm = fixture.stack.font_for_style(false, false).unwrap();
+        let before = fixture.stack.shape_text_for_frame("é", false, false).unwrap();
+        assert_eq!(before[0].glyph_pos, 0, "notdef while the fallback gate is closed");
+        open(&fixture.gate);
+        wait_for_generation(&fixture.stack, 1);
+        let after = fixture.stack.shape_text_for_frame("é", false, false).unwrap();
+        assert_ne!(after[0].glyph_pos, 0, "the memoized face shapes the merged fallback");
+        let memoized = fixture.stack.font_for_style(false, false).unwrap();
+        assert!(std::rc::Rc::ptr_eq(&warm, &memoized), "the merge kept the same face");
+    }
 }
 
 /// The diagnostic face resolution mirrors the rasterizer: a character key (glyph id 0) and the
@@ -977,4 +994,105 @@ fn a_character_key_and_its_shaped_key_resolve_to_one_face_and_strike() {
     assert_eq!(resolved.strike_px_milli, 18_667);
     assert!(resolved.face.source.ends_with("RecMonoSt.Helens-Regular.ttf"), "{resolved:?}");
     assert_eq!(resolved.face.face_index, 0);
+}
+
+/// A deterministic stack over the packaged Rec Mono faces, independent of host fonts.
+fn packaged_rec_mono_stack() -> FontStack {
+    let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    FontStack::try_new_with_font_dirs_for_test(
+        &[("Rec Mono St.Helens", false)],
+        vec![fonts],
+        14.0,
+        96,
+        1.0,
+    )
+    .unwrap()
+}
+
+/// The face today's path resolves for `(bold, italic)` on `stack`: the configured style, made
+/// bold or italic, at the stack's own point size.
+fn todays_face(
+    stack: &FontStack,
+    bold: bool,
+    italic: bool,
+) -> std::rc::Rc<sonicterm_font::LoadedFont> {
+    let mut style: TextStyle = stack.font_config.config().font.clone();
+    if bold {
+        style = style.make_bold();
+    }
+    if italic {
+        style = style.make_italic();
+    }
+    stack.font_config.resolve_font_at_size(&style, stack.font_size_pt).unwrap()
+}
+
+#[test]
+fn style_faces_match_todays_resolution() {
+    // The memo changes how often a face is resolved, never which face: every style returns the
+    // configuration's own `Rc`, a face replacement returns a new one, and a native-size view
+    // resolves at its own size.
+    let stack = packaged_rec_mono_stack();
+    for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+        let memoized = stack.font_for_style(bold, italic).unwrap();
+        assert!(std::rc::Rc::ptr_eq(&memoized, &todays_face(&stack, bold, italic)));
+        let again = stack.font_for_style(bold, italic).unwrap();
+        assert!(std::rc::Rc::ptr_eq(&memoized, &again), "a repeat returns the same face");
+    }
+    let before_scaling = stack.font_for_style(false, false).unwrap();
+    stack.change_scaling(stack.get_font_scale(), 192);
+    let after_scaling = stack.font_for_style(false, false).unwrap();
+    assert!(!std::rc::Rc::ptr_eq(&before_scaling, &after_scaling), "scaling replaces the face");
+    stack.font_config.config_changed(&stack.font_config.config()).unwrap();
+    let after_reload = stack.font_for_style(false, false).unwrap();
+    assert!(!std::rc::Rc::ptr_eq(&after_scaling, &after_reload), "a reload replaces the face");
+    let view = stack.with_font_size(20.0);
+    let view_face = view.font_for_style(false, false).unwrap();
+    assert!(std::rc::Rc::ptr_eq(&view_face, &todays_face(&view, false, false)));
+    assert!(!std::rc::Rc::ptr_eq(&view_face, &after_reload), "the view has its own size");
+}
+
+#[test]
+fn memo_skips_resolution_and_every_warmed_sibling_misses_after_a_shared_change() {
+    // A warm stack shapes without resolving its face again, and a face replacement made through
+    // any sibling (a clone or a native-size view sharing the configuration) makes every warmed
+    // sibling resolve exactly once at its next lookup and return the new face.
+    let stack = packaged_rec_mono_stack();
+    let resolves = || stack.font_config.resolve_count_for_test();
+    stack.shape_text_for_frame("abc", false, false).unwrap();
+    let warm = resolves();
+    stack.shape_text_for_frame("abc", false, false).unwrap();
+    assert_eq!(resolves() - warm, 0, "a warm style resolves nothing");
+
+    let clone = stack.clone();
+    let view = stack.with_font_size(20.0);
+    let siblings = [&stack, &clone, &view];
+    type Replace<'replace> = Box<dyn Fn() + 'replace>;
+    let replacements: [(&str, Replace<'_>); 2] = [
+        (
+            "change_scaling",
+            Box::new(|| {
+                clone.change_scaling(clone.get_font_scale(), 144);
+            }),
+        ),
+        (
+            "config_changed",
+            Box::new(|| {
+                clone.font_config.config_changed(&clone.font_config.config()).unwrap();
+            }),
+        ),
+    ];
+    for (name, replace) in replacements {
+        let old_faces: Vec<_> =
+            siblings.iter().map(|sibling| sibling.font_for_style(false, false).unwrap()).collect();
+        replace();
+        for (sibling, old_face) in siblings.iter().zip(&old_faces) {
+            let before = resolves();
+            let face = sibling.font_for_style(false, false).unwrap();
+            assert_eq!(resolves() - before, 1, "{name}: one resolve at the next lookup");
+            assert!(!std::rc::Rc::ptr_eq(&face, old_face), "{name}: the new face is returned");
+            let before_repeat = resolves();
+            sibling.font_for_style(false, false).unwrap();
+            assert_eq!(resolves() - before_repeat, 0, "{name}: then the memo is warm again");
+        }
+    }
 }

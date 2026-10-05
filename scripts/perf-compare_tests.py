@@ -5170,7 +5170,9 @@ COUNTER_CONTRACT = {
                   "apply_attempt_raster_ns", "apply_attempt_shape_requests", "apply_attempt_raster_calls",
                   "apply_attempt_raster_tiles",
                   # Glyph atlas growths and growths no frame presented; a base older than them shows n/a.
-                  "glyph_atlas_growths", "atlas_growth_abandoned"),
+                  "glyph_atlas_growths", "atlas_growth_abandoned",
+                  # Title and chrome-run cache reuses and prepares; a base older than them shows n/a.
+                  "tab_title_reuses", "tab_title_prepares", "chrome_run_reuses", "chrome_run_prepares"),
                  ("assembly_us", "atlas_growth_to_present_ms")),
 }
 CONTRACT_FIELD_COUNT = sum(len(counts) + len(histograms) for counts, histograms in COUNTER_CONTRACT.values())
@@ -8258,6 +8260,35 @@ class RowGlyphCacheReportTests(unittest.TestCase):
         fallback = derived["partial fallback ratio = partial_fallbacks / (partial_frames + partial_fallbacks), "
                            "context only"]
         self.assertEqual(fallback[3:], ["n/a (denominator 0, 2/2 runs)", "0.250 (1/4, 1/1 runs)", "n/a"])
+
+    def test_cache_reuse_rows_are_pooled_per_assembly_and_a_base_without_them_reads_na(self):
+        # The title and chrome-run reuse rows divide the pooled reuses by the pooled assembly samples; a
+        # base that predates the counters carries no field and reads n/a, while the head's figure stands.
+        older = counters_result({"renderer.assembly_us": ([0, 0, 4, 0, 0, 0, 0], 400)})
+        for phase in older["phases"]:
+            # A base built before the counters existed reports none of them.
+            for name in ("tab_title_reuses", "tab_title_prepares", "chrome_run_reuses", "chrome_run_prepares"):
+                del phase["frame_counters"]["renderer"][name]
+        base = perf.SideRuns(outcomes=[make_outcome(result=older)])
+        head = counters_side(
+            {"renderer.tab_title_reuses": 9, "renderer.chrome_run_reuses": 10,
+             "renderer.assembly_us": ([0, 3, 0, 0, 0, 0, 0], 300)},
+            {"renderer.tab_title_reuses": 3, "renderer.chrome_run_reuses": 0,
+             "renderer.assembly_us": ([0, 1, 0, 0, 0, 0, 0], 100)})
+        rows, _omitted = perf.counter_rows("S8/default", base, head)
+        derived = {row[2]: row for row in rows}
+        titles = derived["tab-title reuses per assembly = tab_title_reuses / Σ assembly_buckets, "
+                         "counters runs pooled"]
+        self.assertEqual(titles[4], "3.000 (12/4, 2/2 runs)")
+        self.assertTrue(titles[3].startswith("n/a"), titles[3])
+        runs = derived["chrome-run reuses per assembly = chrome_run_reuses / Σ assembly_buckets, "
+                       "counters runs pooled"]
+        self.assertEqual(runs[4], "2.500 (10/4, 2/2 runs)")
+        idle = counters_side({"renderer.tab_title_reuses": 0, "renderer.assembly_us": ([0] * 7, 0)})
+        rows, _omitted = perf.counter_rows("S8/default", idle, idle)
+        idle_row = {row[2]: row for row in rows}.get(
+            "tab-title reuses per assembly = tab_title_reuses / Σ assembly_buckets, counters runs pooled")
+        self.assertIsNone(idle_row, "a phase that assembled nothing prints no reuse row")
 
     def test_assembly_means_keep_every_runs_position(self):
         # A run that assembled nothing and a run whose result lacks the histogram keep their positions

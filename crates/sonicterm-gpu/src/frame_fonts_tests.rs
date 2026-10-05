@@ -23,6 +23,7 @@ struct Targets {
     atlas: GlyphAtlas,
     preedit: Option<&'static str>,
     epoch: u64,
+    runs: crate::chrome_cache::ChromeRunCache,
 }
 
 impl Targets {
@@ -42,6 +43,7 @@ impl Targets {
                 glyph_atlas: &mut self.atlas,
                 preedit_glyph_cache: &mut self.preedit,
                 fallback_epoch: &mut self.epoch,
+                chrome_runs: &mut self.runs,
             },
         );
         (token, change.invalidated())
@@ -61,6 +63,7 @@ impl Targets {
                 glyph_atlas: &mut self.atlas,
                 preedit_glyph_cache: &mut self.preedit,
                 fallback_epoch: &mut self.epoch,
+                chrome_runs: &mut self.runs,
             },
         );
     }
@@ -78,6 +81,7 @@ impl Targets {
                 glyph_atlas: &mut self.atlas,
                 preedit_glyph_cache: &mut self.preedit,
                 fallback_epoch: &mut self.epoch,
+                chrome_runs: &mut self.runs,
             },
         )
         .1
@@ -95,6 +99,7 @@ fn fresh_targets() -> Targets {
         atlas: GlyphAtlas::new(16, 16),
         preedit: None,
         epoch: 0,
+        runs: crate::chrome_cache::ChromeRunCache::default(),
     }
 }
 
@@ -196,6 +201,7 @@ fn one_apply_invalidates_each_target_and_a_repeat_in_the_same_generation_does_no
         atlas: GlyphAtlas::new(16, 16),
         preedit: Some("cached"),
         epoch: 0,
+        runs: crate::chrome_cache::ChromeRunCache::default(),
     };
     assert!(targets.atlas.get_or_insert(missing, &mut Unresolved).unwrap().missing);
     seed_caches(&mut targets);
@@ -242,6 +248,7 @@ fn an_apply_counts_one_fallback_apply_and_a_repeat_counts_none() {
         atlas: GlyphAtlas::new(16, 16),
         preedit: None,
         epoch: 0,
+        runs: crate::chrome_cache::ChromeRunCache::default(),
     };
     let sink = crate::frame_stats::FrameStatsSink::default();
     {
@@ -413,6 +420,7 @@ fn a_mid_frame_merge_lags_until_the_frame_that_applies_its_generation_remeasures
     let (mut rows, mut quads) = (RowGlyphCache::new(), LineQuadCache::new());
     let (mut style_rev, mut frame_key, mut preedit) = (0_u64, None::<u8>, None::<&str>);
     let mut atlas = GlyphAtlas::new(16, 16);
+    let mut runs = crate::chrome_cache::ChromeRunCache::default();
     let mut applied = None;
     let sink = crate::frame_stats::FrameStatsSink::default();
     let mut frame = |title_font: &mut crate::core::tab_title_font::TabTitleFont,
@@ -431,6 +439,7 @@ fn a_mid_frame_merge_lags_until_the_frame_that_applies_its_generation_remeasures
                 glyph_atlas: &mut atlas,
                 preedit_glyph_cache: &mut preedit,
                 fallback_epoch: title_font.fallback_epoch_mut(),
+                chrome_runs: &mut runs,
             },
         );
         let _ = title_font.measure(tabs, false, false, std::time::Instant::now());
@@ -473,4 +482,53 @@ fn a_mid_frame_merge_lags_until_the_frame_that_applies_its_generation_remeasures
     assert!(!frame(&mut title_font, &mut tabs, &mut applied).0, "the next frame applies nothing");
     assert!(!acknowledge_fallback_wake(Some(stack), applied, notice_id), "no further frame is due");
     assert_eq!(sink.snapshot().font_fallback_applies, 2, "generations 0 and 1, once each");
+}
+
+#[test]
+fn chrome_runs_follow_font_preparation() {
+    // The body stack has no epoch of its own, so a preparation that invalidates (Initial or
+    // Generation) empties the chrome-run cache, while an unchanged preparation keeps a run kept
+    // after the previous one. Tab titles are not cleared here: their key carries the fallback
+    // epoch, which the same preparation bumps.
+    let _lock = font_fixture_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let key = crate::chrome_cache::ChromeRunKey::new(
+        crate::chrome_cache::ChromeStack::Body,
+        crate::chrome_text::ChromeAttrs::default(),
+        15.0,
+        15.0,
+    );
+    let mut targets = fresh_targets();
+    let mut titles = crate::chrome_cache::TitleCache::default();
+    let title = |epoch: u64| crate::chrome_cache::TitleProbe {
+        text: "shell",
+        font_key: 1,
+        fallback_epoch: epoch,
+        raster_px: 15.0,
+        text_px: 400.0,
+    };
+    let _ = targets.runs.prepare(&stack, "label", key, true);
+    assert!(targets.prepare_notice(7, 0).1, "an Initial preparation");
+    assert_eq!(targets.runs.len(), 0, "Initial empties the chrome runs");
+    let _ = targets.runs.prepare(&stack, "label", key, true);
+    let _ = titles.prepare(0, &title(targets.epoch), &stack, true);
+    assert!(!targets.prepare_notice(7, 0).1, "an unchanged preparation");
+    assert_eq!(targets.runs.len(), 1, "an unchanged preparation keeps the new run");
+    assert!(targets.prepare_notice(7, 1).1, "a Generation preparation");
+    assert_eq!(targets.runs.len(), 0, "Generation empties the chrome runs");
+    assert!(titles.is_stored(0), "titles are not physically cleared");
+    let (_, stats) = counted_prepare(|| titles.prepare(0, &title(targets.epoch), &stack, true));
+    assert_eq!(stats.tab_title_prepares, 1, "but the bumped epoch makes the title miss");
+}
+
+/// Run `work` inside a counting scope and return its output with the counters it moved.
+fn counted_prepare<Output>(
+    work: impl FnOnce() -> Output,
+) -> (Output, crate::frame_stats::FrameStats) {
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let output = {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        work()
+    };
+    (output, sink.snapshot())
 }

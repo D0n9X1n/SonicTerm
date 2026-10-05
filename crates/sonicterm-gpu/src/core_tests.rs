@@ -1,4 +1,5 @@
 use super::*;
+use sonicterm_render_model::boundary::ui::tabs::TITLE_FIT_TOLERANCE_PX;
 use sonicterm_types::{ClassCoverage, PaneSeamTerm};
 
 #[test]
@@ -9,7 +10,8 @@ fn broadcast_warning_keeps_red_highlighting_without_label_text() {
     let end = source[start..].find("fnfinish_successful_frame(").unwrap() + start;
     let render = &source[start..end];
     assert!(!render.contains("BROADCAST"), "broadcast chrome must not emit warning text");
-    assert!(render.contains("emit_broadcast_borders(&mutquads_overlay,"));
+    // The overlay quads are the frame scratch's, reborrowed from the pass's lease.
+    assert!(render.contains("emit_broadcast_borders(&mut*quads_overlay,"));
     assert!(render.contains("theme.colors.bright.red"));
     assert!(render.contains("broadcast_participants_hash"));
 }
@@ -220,12 +222,15 @@ fn shape_run_for_test(
     missing: &mut Vec<char>,
 ) -> bool {
     let mut records = sonicterm_text::row_glyph_cache::CachedRow::default();
+    // The builder takes cells borrowed from a grid; the fixture owns its cells.
+    let borrowed: Vec<(u16, &Cell)> =
+        fixture.cells.iter().map(|(col, cell)| (*col, cell)).collect();
     let complete = GpuRenderer::build_shape_run(
         fixture.atlas,
         &mut records,
         fixture.row,
         fixture.style,
-        fixture.cells,
+        &borrowed,
         fixture.theme,
         fixture.fg_default,
         fixture.cell_size.0,
@@ -3022,8 +3027,9 @@ fn tab_titles_fit_their_stored_width_whole_or_cut_at_a_grapheme_boundary() {
         let tab = &tabs.tabs()[widget.idx];
         let content = TabContent::of(tab, now, layout.active == Some(widget.idx), false);
         let display = content.display_text();
-        let fitted = fit_tab_title(&stack, &display, 15.0, widget.title_rect.w)
-            .expect("the tracked font shapes every title");
+        let fitted =
+            crate::chrome_cache::fit_title_run(&stack, &display, 15.0, widget.title_rect.w);
+        assert!(fitted.complete, "the tracked font shapes every title");
         let drawn = drawn_tab_title_px(&stack, &fitted.text, 15.0);
         assert!(
             drawn <= widget.title_rect.w + TITLE_FIT_TOLERANCE_PX,
@@ -3031,7 +3037,8 @@ fn tab_titles_fit_their_stored_width_whole_or_cut_at_a_grapheme_boundary() {
             fitted.text,
             widget.title_rect.w
         );
-        if fitted.cut {
+        let is_cut = fitted.text != display;
+        if is_cut {
             let kept = fitted.text.strip_suffix('…').expect("a cut title ends with an ellipsis");
             assert!(display.starts_with(kept), "{kept:?} is not a prefix of {display:?}");
             assert!(!kept.ends_with('\u{200d}'), "{kept:?} splits a joined emoji");
@@ -3039,7 +3046,7 @@ fn tab_titles_fit_their_stored_width_whole_or_cut_at_a_grapheme_boundary() {
         } else {
             assert_eq!(fitted.text, display);
         }
-        cut.push(fitted.cut);
+        cut.push(is_cut);
     }
     assert!(!cut[0], "a short title that fits is drawn whole");
     assert!(cut[1], "a path wider than the maximum is cut");
@@ -4043,6 +4050,8 @@ fn every_reported_part_is_classified_exactly_once() {
         software_frame: amount(4 * 1024 * 1024, 1),
         vertex_scratch: amount(3 * 1024 * 1024, 1),
         row_ink: amount(64 * 1024, 40),
+        frame_scratch: amount(2 * 1024 * 1024, 6),
+        chrome_cache: amount(96 * 1024, 7),
     };
 
     let classes = retention.seam_classes();
@@ -4378,11 +4387,11 @@ fn row_spans_viewports_and_title_order_follow_the_assembly() {
         .find("begin_glyph_pass(&mutself.row_glyph_cache,&mutself.row_ink,")
         .expect("one pass start");
     let pane_loop = core
-        .find("forpvinpane_views.iter().filter(|pane|pane.planned.full_clip.is_some()){")
+        .find("for(pane_index,pv)inpane_views.iter().enumerate().filter(|(_,pane)|pane.planned.full_clip.is_some()){")
         .expect("per-pane loop");
     assert!(begin < pane_loop, "the pass starts before any pane pins or admits");
     let seam = core.find("pub(crate)fnassemble_pane_glyph_rows(").expect("pane seam");
-    let pin = seam + core[seam..].find("shaping.row_cache.pin(pane_id,&keys);").expect("pin");
+    let pin = seam + core[seam..].find("shaping.row_cache.pin(pane_id,keys);").expect("pin");
     let first_emit = seam + core[seam..].find("emit_row_glyphs(").expect("emit");
     assert!(pin < first_emit, "every key is pinned before the first admission");
     // One projection site records a row's span; the other is the test row-glyph seam's own.
@@ -4399,7 +4408,7 @@ fn row_spans_viewports_and_title_order_follow_the_assembly() {
     let insert = body.find("row_cache.insert(").expect("miss admission");
     assert!(hit < hit_return && hit_return < miss && miss < insert, "one span on each path");
     let calls: Vec<usize> = core
-        .match_indices("recolor_cursor_glyphs_in(&mutglyph_instances")
+        .match_indices("recolor_cursor_glyphs_in(&mut*glyph_instances")
         .map(|(at, _)| at)
         .collect();
     let titles = core.find("glyph_instances.extend(final_layout.glyphs);").expect("title append");
@@ -7108,6 +7117,7 @@ fn emit_pass_recording(
                 underline_owners: &mut owners,
                 injected_row_glyph: None,
                 emitted_slots: Some(&mut emitted_slots),
+                row_keys: &mut Vec::new(),
             },
         )
     });
@@ -7596,11 +7606,14 @@ impl FallbackFixture {
             surface_width: 240.0,
             surface_height: 200.0,
             subpixel_aa: SubpixelAaMode::Off,
-            quads: Vec::new(),
-            images: Vec::new(),
-            glyphs,
-            overlay_quads: Vec::new(),
-            overlay_glyphs: Vec::new(),
+            scratch: {
+                // The fixture leases a scratch of its own and fills it as assembly would.
+                let home = frame_scratch::ScratchHome::new();
+                let mut lease = home.lease();
+                lease.get().glyphs = glyphs;
+                lease.complete();
+                lease
+            },
             field_candidates: PresentedFields::default(),
             missing_chars: Vec::new(),
             missing_chrome_chars: Vec::new(),
@@ -7756,4 +7769,497 @@ fn plans_ignore_the_glyph_cache() {
     assert_eq!(before.panes[0].emit_rows, after.panes[0].emit_rows);
     let planner = include_str!("frame_plan.rs");
     assert!(!planner.contains("row_glyph_cache") && !planner.contains("RowGlyphCache"));
+}
+
+/// The body of the item whose signature is `signature` in `source`: from the signature to the
+/// closing brace at the signature's own indentation, so a method ends at its own `}`.
+fn item_body<'source>(source: &'source str, signature: &str) -> &'source str {
+    let start = source.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
+    let line_start = source[..start].rfind('\n').map_or(0, |newline| newline + 1);
+    let indent = &source[line_start..start];
+    let indent = &indent[..indent.len() - indent.trim_start().len()];
+    let close = format!("\n{indent}}}\n");
+    let body = &source[start..];
+    let end = body.find(&close).map_or(body.len(), |offset| offset + close.len());
+    &body[..end]
+}
+
+#[test]
+fn run_flush_clones_no_cells() {
+    // Style runs borrow the grid's cells: the row walk records runs as slices of borrowed cells
+    // and the run builder finds a cluster's lead cell by column without a cloned lookup table.
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let emit = item_body(&source, "pub(crate) fn emit_row_glyphs(");
+    assert!(!emit.contains("(*cell).clone()"), "emit_row_glyphs clones no cell into a run");
+    assert!(!emit.contains("Vec<(u16, Cell)>"), "emit_row_glyphs keeps no owned run");
+    let build = item_body(&source, "fn build_shape_run(");
+    assert!(!build.contains("cell_by_col"), "build_shape_run builds no column-to-cell table");
+    assert!(!build.contains("c.clone()"), "build_shape_run clones no cell");
+}
+
+/// An oracle row's projected glyphs, tofu outlines, missing characters and completeness.
+type OracleRow = (Vec<GlyphInstance>, Vec<frame_scratch::TofuQuad>, Vec<char>, bool);
+
+/// Draw `grid`'s row 0 the way an independent oracle does: group the row's non-continuation
+/// cells into consecutive style runs, build each run from owned copies of its cells and project
+/// it. Returns the projected glyphs, tofu and missing characters and the row's completeness.
+fn oracle_row(grid: &Grid, stack: &sonicterm_engine::FontStack) -> OracleRow {
+    let row = grid.row(0);
+    let visible: Vec<(u16, Cell)> = row
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| !cell.flags.contains(CellFlags::WIDE_CONT))
+        .map(|(col, cell)| (col as u16, cell.clone()))
+        .collect();
+    let mut runs: Vec<(RunStyle, Vec<(u16, Cell)>)> = Vec::new();
+    for (col, cell) in visible {
+        let style = RunStyle::from_cell(&cell);
+        match runs.last_mut() {
+            Some((open, cells)) if *open == style => cells.push((col, cell)),
+            _ => runs.push((style, vec![(col, cell)])),
+        }
+    }
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let mut raster = stack.clone();
+    let theme = Theme::default();
+    let snapped = build_snapped_cell_x(0.0, 10.0, grid.cols);
+    let (mut glyphs, mut tofu, mut missing) = (Vec::new(), Vec::new(), Vec::new());
+    let mut complete = true;
+    for (style, cells) in &runs {
+        complete &= shape_run_for_test(
+            ShapeRunFixture {
+                atlas: &mut atlas,
+                row: 0,
+                style: *style,
+                cells,
+                theme: &theme,
+                fg_default: ChromeColor::rgb(230, 230, 230),
+                cell_size: (10.0, 20.0),
+                origin: (0.0, 0.0),
+                surface: (400.0, 200.0),
+                baseline_y_in_cell: 16.0,
+                snapped_cell_x: &snapped,
+                font_stack: Some(stack),
+                wt_raster: Some(&mut raster),
+                hovered_url_cells: None,
+                hovered_url_accent: [0.0; 4],
+                software_presenter: false,
+            },
+            &mut glyphs,
+            &mut tofu,
+            &mut missing,
+        );
+    }
+    (glyphs, tofu, missing, complete)
+}
+
+/// A one-row grid of `cols` columns written cell by cell with each `(character, flags)`.
+fn styled_grid(cols: u16, cells: &[(char, CellFlags)]) -> Grid {
+    let mut grid = Grid::new(cols, 1);
+    for (character, flags) in cells {
+        grid.put_char(*character, Color::Default, Color::Default, *flags);
+    }
+    grid.clear_dirty();
+    grid
+}
+
+#[test]
+fn borrowed_runs_emit_the_same_records_and_completeness() {
+    // Flushing runs as borrowed cells changes no record: wide, combining, mixed-style and
+    // ligature rows draw exactly what an oracle building each run from owned cell copies draws,
+    // and a row is admitted exactly when the oracle calls it complete. A row whose first of three
+    // shaped runs fails still draws its later runs and is not admitted.
+    let plain = CellFlags::empty();
+    let rows = [
+        ("wide", styled_grid(8, &[('你', plain), ('好', plain), ('a', plain)])),
+        ("combining", styled_grid(8, &[('e', plain), ('\u{301}', plain), ('x', plain)])),
+        (
+            "mixed-style",
+            styled_grid(
+                8,
+                &[
+                    ('a', CellFlags::BOLD),
+                    ('b', CellFlags::BOLD),
+                    ('=', plain),
+                    ('>', plain),
+                    ('c', CellFlags::ITALIC),
+                ],
+            ),
+        ),
+        ("ligature", text_grid(8, &["a=>b!=c"])),
+    ];
+    for (name, grid) in &rows {
+        let stack = packaged_font_stack();
+        let (glyphs, tofu, missing, complete) = oracle_row(grid, &stack);
+        let mut rig = GlyphRig::with_stack(stack, false);
+        rig.begin(grid);
+        let emitted = rig.emit(grid, 0, 0);
+        assert!(!emitted.replayed, "{name}: the cold row misses");
+        assert_eq!(
+            emitted.glyph_bytes(),
+            bytemuck::cast_slice::<GlyphInstance, u8>(&glyphs).to_vec(),
+            "{name}: the same glyph records"
+        );
+        assert_eq!(emitted.missing, missing, "{name}: the same missing characters");
+        assert!(emitted.decorations.ends_with(&format!("{tofu:?}")), "{name}: the same tofu");
+        assert_eq!(rig.cache.contains(7, emitted.key), complete, "{name}: admitted iff complete");
+    }
+
+    let three_runs = styled_grid(
+        8,
+        &[
+            ('a', CellFlags::BOLD),
+            ('=', CellFlags::BOLD),
+            ('b', plain),
+            ('=', plain),
+            ('c', CellFlags::ITALIC),
+            ('=', CellFlags::ITALIC),
+        ],
+    );
+    let stack = packaged_font_stack();
+    let (whole, _, _, whole_complete) = oracle_row(&three_runs, &stack);
+    assert!(whole_complete, "the row is complete when every run shapes");
+    let mut rig = GlyphRig::with_stack(stack, false);
+    rig.begin(&three_runs);
+    fail_next_shape_for_test();
+    let failed = rig.emit(&three_runs, 0, 0);
+    assert!(!failed.glyphs.is_empty(), "runs 2 and 3 still draw");
+    assert!(failed.glyphs.len() < whole.len(), "run 1 draws nothing");
+    assert!(!rig.cache.contains(7, failed.key), "an incomplete row is not admitted");
+}
+
+#[test]
+fn face_replacement_sites_clear_both_caches() {
+    // Every place the renderer replaces faces without a title-key change drops the kept chrome
+    // runs and titles beside its row-cache invalidation; `set_font` reaches the clear only
+    // through `adopt_font_stacks`, which the test adoption seam shares. Scanned CRLF-normalized.
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    for signature in ["fn adopt_font_stacks(", "fn rebuild_for_sf(", "pub fn clear_shape_cache("] {
+        let body = item_body(&source, signature);
+        assert!(
+            body.contains("self.chrome_caches.clear_runs();"),
+            "{signature} clears both caches"
+        );
+        assert!(body.contains("row_glyph_cache.invalidate_all()"), "{signature} beside the rows");
+    }
+    let set_font = item_body(&source, "pub fn set_font(");
+    assert!(set_font.contains("self.adopt_font_stacks("), "set_font adopts through the seam");
+    assert!(!set_font.contains("clear_runs"), "and does not clear on its own");
+    let seam = item_body(&source, "pub fn __test_adopt_body_font_stack(");
+    assert!(seam.contains("self.adopt_font_stacks("), "the test seam shares the clear");
+}
+
+#[test]
+fn fill_snapped_cell_x_matches_build_bit_for_bit() {
+    // Filling a reused edge buffer gives the column edges the allocating builder gives, bit for
+    // bit, for fractional origins and cell widths such as fractional-DPI raster sizes, and the
+    // same as the snapping formula applied directly.
+    let mut seed: u64 = 0x5eed_1555;
+    let mut next = || {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) as u32
+    };
+    let mut edges = Vec::new();
+    for _ in 0..200 {
+        let origin_x = next() as f32 / 997.0 % 300.0;
+        let cell_w = 3.0 + (next() % 4000) as f32 / 333.0;
+        let cols = (next() % 400) as u16;
+        fill_snapped_cell_x(&mut edges, origin_x, cell_w, cols);
+        let built = build_snapped_cell_x(origin_x, cell_w, cols);
+        let oracle: Vec<f32> = (0..=cols)
+            .map(|col| {
+                sonicterm_render_model::geometry::snap_to_device_pixels(
+                    (origin_x + (col as f32) * cell_w, 0.0, 0.0, 0.0),
+                    1.0,
+                )
+                .0
+            })
+            .collect();
+        let bits = |values: &[f32]| values.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&edges), bits(&built), "origin {origin_x} cell {cell_w} cols {cols}");
+        assert_eq!(bits(&edges), bits(&oracle));
+    }
+}
+
+#[test]
+fn frame_scratch_and_chrome_cache_are_classified_parts_with_shared_envelopes() {
+    // The two parts this renderer reports beside its caches are classified once each, sum into
+    // `total()`, and their class envelopes are the same figures the renderer computes from its
+    // caps and table sizes, so neither side can drift alone.
+    let retention = RendererRetention {
+        frame_scratch: amount(3 * 1024, 2),
+        chrome_cache: amount(5 * 1024, 4),
+        ..RendererRetention::default()
+    };
+    let classes = retention.seam_classes();
+    assert_eq!(classes.len(), 9, "nine reported parts");
+    for (class, part) in [
+        (ResourceClass::FrameScratch, retention.frame_scratch),
+        (ResourceClass::ChromeCache, retention.chrome_cache),
+    ] {
+        let rows: Vec<_> = classes.iter().filter(|(row_class, _)| *row_class == class).collect();
+        assert_eq!(rows.len(), 1, "{class:?} is classified once");
+        assert_eq!(rows[0].1, part);
+        assert_eq!(class.pane_seam_term(), PaneSeamTerm::NotChargedInProduction);
+    }
+    assert_eq!(retention.total(), amount(8 * 1024, 6), "total() includes both parts");
+    assert_eq!(
+        ResourceClass::FrameScratch.coverage(),
+        ClassCoverage::UnchargedRetention { per_owner_bytes: frame_scratch::FRAME_SCRATCH_CAP }
+    );
+    assert_eq!(
+        ResourceClass::ChromeCache.coverage(),
+        ClassCoverage::UnchargedRetention {
+            per_owner_bytes: crate::chrome_cache::CHROME_CACHE_ENVELOPE_BYTES
+        }
+    );
+}
+
+#[test]
+fn unwinding_while_row_keys_are_in_use_keeps_the_key_buffer() {
+    // The pane seam borrows the frame scratch's row-key buffer in place while it pins and emits
+    // rows. An unwind during emission (here, column edges too short for a block glyph's lead
+    // column) must leave that buffer, with its warm allocation, in the scratch.
+    let grid = text_grid(8, &["─x", "ab", "cd"]);
+    let plan = policy_plan(3, 0.0, 1, Vec::new(), Vec::new(), None);
+    let mut rig = GlyphRig::new(false);
+    let mut ink = crate::row_ink::RowInkTable::default();
+    begin_pass(&mut rig, &mut ink, &grid, &plan);
+    let mut row_keys: Vec<u64> = Vec::with_capacity(64);
+    let warm_pointer = row_keys.as_ptr();
+    let planned = &plan.panes[0];
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (mut glyphs, mut underlines, mut tofu) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut missing, mut spans, mut owners) = (Vec::new(), Vec::new(), Vec::new());
+        assemble_pane_glyph_rows(
+            rig.shaping(),
+            PaneGlyphRows {
+                pane_id: planned.id,
+                grid: &grid,
+                planned,
+                origin: (planned.layout.x, planned.layout.y),
+                // No column edges: the block glyph's lookup unwinds mid-emission.
+                snapped_cell_x: &[],
+                pane_hovered_url: None,
+            },
+            GlyphFrame {
+                glyph_instances: &mut glyphs,
+                underlines: &mut underlines,
+                missing_tofu: &mut tofu,
+                missing_chars_this_frame: &mut missing,
+                row_spans: &mut spans,
+            },
+            PaneGlyphSinks {
+                row_ink: &mut ink,
+                ink_surface: plan.surface,
+                underline_owners: &mut owners,
+                injected_row_glyph: None,
+                emitted_slots: None,
+                row_keys: &mut row_keys,
+            },
+        );
+    }));
+    assert!(unwound.is_err(), "emission unwinds on the missing column edges");
+    assert!(row_keys.capacity() >= 64, "the key buffer stays in the scratch with its capacity");
+    assert_eq!(row_keys.as_ptr(), warm_pointer, "and keeps its warm allocation");
+}
+
+/// `owned` cells borrowed as the run builder takes them.
+fn borrow_cells(owned: &[(u16, Cell)]) -> Vec<(u16, &Cell)> {
+    owned.iter().map(|(col, cell)| (*col, cell)).collect()
+}
+
+/// The cell at column `col` of a borrowed run, by a linear scan independent of the builder.
+fn oracle_cell_at<'cell>(cells: &[(u16, &'cell Cell)], col: u16) -> Option<&'cell Cell> {
+    cells.iter().find(|(cell_col, _)| *cell_col == col).map(|(_, cell)| *cell)
+}
+
+/// Build one style run through the production run builder into fresh records with `atlas` and
+/// the packaged font, at row 0 of a 16-column, 10x20-cell row; returns the records and
+/// whether the run was complete.
+fn build_run_records(
+    atlas: &mut GlyphAtlas,
+    stack: &sonicterm_engine::FontStack,
+    style: RunStyle,
+    cells: &[(u16, &Cell)],
+    records: &mut sonicterm_text::row_glyph_cache::CachedRow,
+) -> bool {
+    let mut raster = stack.clone();
+    let theme = Theme::default();
+    let snapped = build_snapped_cell_x(0.0, 10.0, 16);
+    GpuRenderer::build_shape_run(
+        atlas,
+        records,
+        0,
+        style,
+        cells,
+        &theme,
+        ChromeColor::rgb(230, 230, 230),
+        10.0,
+        20.0,
+        0.0,
+        &snapped,
+        Some(stack),
+        Some(&mut raster),
+        None,
+        [0.0; 4],
+        false,
+    )
+}
+
+#[test]
+fn borrowed_run_records_follow_each_lead_cell() {
+    // The run builder finds each shaped cluster's lead cell among the borrowed cells by column.
+    // Over gapped columns (a wide cell's continuation is never in the run), wide cells, a combining
+    // cluster and a distinct colour per cell, every record's colour, wide bit and extras bit equal
+    // those of the cell an independent linear scan finds at the record's lead column, and every
+    // cell of the run leads at least one record.
+    let stack = packaged_font_stack();
+    let colours = [(200, 30, 30), (30, 200, 30), (30, 30, 200), (200, 200, 30), (30, 200, 200)];
+    let mut combining =
+        Cell::plain('e', Color::Rgb(200, 30, 200), Color::Default, CellFlags::empty());
+    combining.set_extras(Some("\u{301}".to_string().into_boxed_str()));
+    let owned: Vec<(u16, Cell)> = vec![
+        (
+            0,
+            Cell::plain(
+                'W',
+                Color::Rgb(colours[0].0, colours[0].1, colours[0].2),
+                Color::Default,
+                CellFlags::WIDE,
+            ),
+        ),
+        (
+            2,
+            Cell::plain(
+                'a',
+                Color::Rgb(colours[1].0, colours[1].1, colours[1].2),
+                Color::Default,
+                CellFlags::empty(),
+            ),
+        ),
+        (3, combining),
+        (
+            4,
+            Cell::plain(
+                'M',
+                Color::Rgb(colours[2].0, colours[2].1, colours[2].2),
+                Color::Default,
+                CellFlags::WIDE,
+            ),
+        ),
+        (
+            6,
+            Cell::plain(
+                'z',
+                Color::Rgb(colours[3].0, colours[3].1, colours[3].2),
+                Color::Default,
+                CellFlags::empty(),
+            ),
+        ),
+        (
+            7,
+            Cell::plain(
+                'é',
+                Color::Rgb(colours[4].0, colours[4].1, colours[4].2),
+                Color::Default,
+                CellFlags::empty(),
+            ),
+        ),
+    ];
+    let cells: Vec<(u16, &Cell)> = owned.iter().map(|(col, cell)| (*col, cell)).collect();
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let mut records = sonicterm_text::row_glyph_cache::CachedRow::default();
+    let style = RunStyle { bold: false, italic: false };
+    assert!(
+        build_run_records(&mut atlas, &stack, style, &cells, &mut records),
+        "the run is complete"
+    );
+    let theme = Theme::default();
+    let fg_default = ChromeColor::rgb(230, 230, 230);
+    let mut led = std::collections::BTreeSet::new();
+    for record in &records.glyphs {
+        let lead = oracle_cell_at(&cells, record.lead_col).expect("a record leads at a run column");
+        led.insert(record.lead_col);
+        let bits = record.bits();
+        assert_eq!(
+            bits.is_wide,
+            lead.flags.contains(CellFlags::WIDE),
+            "column {}",
+            record.lead_col
+        );
+        assert_eq!(bits.has_extras, lead.extras().is_some(), "column {}", record.lead_col);
+        if !bits.is_color {
+            let expected = chrome_color_to_linear_rgba(cell_fg(lead, &theme, fg_default));
+            assert_eq!(
+                record.color, expected,
+                "column {} draws its own cell's colour",
+                record.lead_col
+            );
+        }
+    }
+    for tofu in &records.tofu {
+        led.insert(tofu.lead_col);
+    }
+    let columns: std::collections::BTreeSet<u16> = cells.iter().map(|(col, _)| *col).collect();
+    assert_eq!(led, columns, "every cell of the run leads a record");
+}
+
+#[test]
+fn later_runs_keep_their_exact_records_after_the_first_fails() {
+    // Three styled runs share one row's records. When the first run's shaping fails, it adds no
+    // record and the row is incomplete, while runs 2 and 3 add exactly the records each builds
+    // on its own over the same atlas order: the failed run leaves nothing behind.
+    let stack = packaged_font_stack();
+    let run_cells = |text: &str, first_col: u16, flags: CellFlags, tint: u8| -> Vec<(u16, Cell)> {
+        text.chars()
+            .enumerate()
+            .map(|(offset, character)| {
+                let col = first_col + offset as u16;
+                let colour = Color::Rgb(tint, 255 - tint, (col as u8).wrapping_mul(37));
+                (col, Cell::plain(character, colour, Color::Default, flags))
+            })
+            .collect()
+    };
+    let first = run_cells("a=é", 0, CellFlags::BOLD, 40);
+    let second = run_cells("b=ñ", 3, CellFlags::empty(), 120);
+    let third = run_cells("c=ü", 6, CellFlags::ITALIC, 200);
+    let styles = [
+        RunStyle { bold: true, italic: false },
+        RunStyle { bold: false, italic: false },
+        RunStyle { bold: false, italic: true },
+    ];
+
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let mut records = sonicterm_text::row_glyph_cache::CachedRow::default();
+    fail_next_shape_for_test();
+    let first_done =
+        build_run_records(&mut atlas, &stack, styles[0], &borrow_cells(&first), &mut records);
+    assert!(!first_done, "the failed first run is incomplete");
+    assert!(records.glyphs.is_empty() && records.tofu.is_empty(), "and adds no record");
+    let after_first = records.glyphs.len();
+    assert!(build_run_records(&mut atlas, &stack, styles[1], &borrow_cells(&second), &mut records));
+    let after_second = records.glyphs.len();
+    assert!(build_run_records(&mut atlas, &stack, styles[2], &borrow_cells(&third), &mut records));
+
+    let mut oracle_atlas = GlyphAtlas::new(1024, 1024);
+    let mut expected_second = sonicterm_text::row_glyph_cache::CachedRow::default();
+    let mut expected_third = sonicterm_text::row_glyph_cache::CachedRow::default();
+    build_run_records(
+        &mut oracle_atlas,
+        &stack,
+        styles[1],
+        &borrow_cells(&second),
+        &mut expected_second,
+    );
+    build_run_records(
+        &mut oracle_atlas,
+        &stack,
+        styles[2],
+        &borrow_cells(&third),
+        &mut expected_third,
+    );
+    assert!(!expected_second.glyphs.is_empty() && !expected_third.glyphs.is_empty());
+    assert_eq!(&records.glyphs[after_first..after_second], &expected_second.glyphs[..], "run 2");
+    assert_eq!(&records.glyphs[after_second..], &expected_third.glyphs[..], "run 3");
 }

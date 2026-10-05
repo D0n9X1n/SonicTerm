@@ -1737,3 +1737,23 @@ fn partial_counters_join_the_renderer_record_after_full_frames() {
     .collect();
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{fields}");
 }
+
+#[test]
+fn title_and_chrome_run_counters_leave_the_renderer_under_their_own_names() {
+    // The four reuse and prepare counters reach the window record each from its own field, so a
+    // swapped or missing wire shows as a mismatch here.
+    let mut stats = sonicterm_gpu::frame_stats::FrameStats::ZERO;
+    stats.tab_title_reuses = 11;
+    stats.tab_title_prepares = 12;
+    stats.chrome_run_reuses = 13;
+    stats.chrome_run_prepares = 14;
+    let record = WindowFrameCounters::default().record(Some(stats), 0);
+    for (name, value) in [
+        ("tab_title_reuses", 11),
+        ("tab_title_prepares", 12),
+        ("chrome_run_reuses", 13),
+        ("chrome_run_prepares", 14),
+    ] {
+        assert_eq!(record.count(name), Some(value), "{name}");
+    }
+}

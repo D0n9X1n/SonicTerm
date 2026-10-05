@@ -629,3 +629,84 @@ fn a_late_footer_fallback_face_keeps_the_chrome_readout_waiting() {
     assert!(second.missing_boxes.is_empty(), "the footer draws é from the late face");
     assert!(second_chrome.is_empty(), "{second_chrome:?}");
 }
+
+/// Lay out `view` with uniform tiles and build field boundaries from the same view.
+fn lay_out_view(
+    view: ChromeRunView<'_>,
+    origin: (f32, f32),
+    screen: (f32, f32),
+) -> (ChromeTextLayout, crate::field_geometry::FieldBoundaries) {
+    let mut atlas = GlyphAtlas::new(512, 512);
+    let layout = layout_view(
+        view,
+        &mut SquareTiles,
+        &mut atlas,
+        ChromeColor::WHITE,
+        origin,
+        screen,
+        None,
+        GlyphRasterVariant::Normal,
+    );
+    (layout, crate::field_geometry::FieldBoundaries::from_view(view))
+}
+
+#[test]
+fn cached_view_drives_glyphs_and_field_boundaries() {
+    // A prepared run kept by a cache feeds glyph emission and field geometry through one
+    // borrowed view: both equal what a fresh run gives the existing entry points, and a change to
+    // the prepared run's glyphs is seen by both consumers, so neither shapes the text again.
+    let _lock = font_fixture_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let screen = (4096.0, 256.0);
+    let origin = (40.0, 20.0);
+    let bump_px = 7.0;
+    for text in ["a▏b", "x▏中\u{1f642} y", "", "=> != ->"] {
+        let fresh = ChromeShapedRun::shape(&stack, text, ChromeAttrs::default(), 15.0, 15.0)
+            .expect("the tracked font shapes every sample");
+        let (fresh_layout, fresh_boundaries) = lay_out_prepared(&fresh, origin, screen);
+        let mut prepared = PreparedChromeRun::from_run(
+            ChromeShapedRun::shape(&stack, text, ChromeAttrs::default(), 15.0, 15.0).unwrap(),
+        );
+        assert_eq!(prepared.view().text(), text, "the view carries the run's own text");
+        let (view_layout, view_boundaries) = lay_out_view(prepared.view(), origin, screen);
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&view_layout.glyphs),
+            bytemuck::cast_slice::<_, u8>(&fresh_layout.glyphs),
+            "{text:?}: the same glyphs"
+        );
+        assert_eq!(view_layout.width_px, fresh_layout.width_px, "{text:?}: the same width");
+        assert_eq!(view_boundaries, fresh_boundaries, "{text:?}: the same boundaries");
+        let advances: Vec<_> = prepared.view().advances().collect();
+        assert_eq!(advances, fresh.advances().collect::<Vec<_>>(), "{text:?}: same advances");
+
+        let Some(bar) = text.find('▏') else {
+            // When: the sample has no bar, the perturbation half does not apply.
+            continue;
+        };
+        let bar_glyph =
+            prepared.glyphs.iter_mut().find(|glyph| glyph.cluster == bar).expect("bar glyph");
+        bar_glyph.x_advance_px += bump_px;
+        let (bumped, bumped_boundaries) = lay_out_view(prepared.view(), origin, screen);
+        assert!(
+            (bumped_boundaries.total_width() - view_boundaries.total_width() - bump_px).abs()
+                < 0.01,
+            "{text:?}: the boundaries see the widened bar"
+        );
+        assert!((bumped.width_px - view_layout.width_px - bump_px).abs() < 0.01, "{text:?} drawn");
+    }
+}
+
+#[test]
+fn raw_width_is_the_measured_frame_width_bit_for_bit() {
+    // A chrome measure served from a prepared run must equal `measure_text_width_for_frame`
+    // exactly: both sum the shaper's unscaled advances in order, with no blank-cluster estimate.
+    let _lock = font_fixture_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    for text in ["\u{f002}", "search: foo 1/3", "検索 テキスト", "=> != ->", "a b  c"] {
+        let measured = stack.measure_text_width_for_frame(text).unwrap();
+        let run = PreparedChromeRun::from_run(
+            ChromeShapedRun::shape(&stack, text, ChromeAttrs::default(), 15.0, 15.0).unwrap(),
+        );
+        assert_eq!(run.view().raw_width_px().to_bits(), measured.to_bits(), "{text:?}");
+    }
+}

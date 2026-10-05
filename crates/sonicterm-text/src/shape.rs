@@ -45,19 +45,23 @@ fn is_ligature_trigger(b: u8) -> bool {
 /// shaping in the actual render path. The bias is deliberately toward
 /// "shape it" — a few extra sonicterm-font calls on prompts containing
 /// `=` cost less than a wrong rendering.
+///
+/// Generic over how the run holds its cells, so the renderer can pass cells borrowed from the
+/// grid (`(u16, &Cell)`) and tests can pass owned ones; the predicate is identical for both.
 #[inline]
-pub fn run_is_ascii_fast(cells: &[(u16, Cell)]) -> bool {
-    cells.iter().all(|(_, c)| {
-        c.extras().is_none()
+pub fn run_is_ascii_fast<C: std::borrow::Borrow<Cell>>(cells: &[(u16, C)]) -> bool {
+    cells.iter().all(|(_, held)| {
+        let cell: &Cell = held.borrow();
+        cell.extras().is_none()
             && {
-                let n = c.ch as u32;
-                (0x20..=0x7E).contains(&n) && !is_ligature_trigger(n as u8)
+                let codepoint = cell.ch as u32;
+                (0x20..=0x7E).contains(&codepoint) && !is_ligature_trigger(codepoint as u8)
             }
             // Reject anything carrying cluster intent through a flag
             // we don't model in the fast path. WIDE_CONT shouldn't
             // reach a run at all (caller filters), but be defensive.
-            && !c.flags.contains(CellFlags::WIDE_CONT)
-            && !c.flags.contains(CellFlags::WIDE)
+            && !cell.flags.contains(CellFlags::WIDE_CONT)
+            && !cell.flags.contains(CellFlags::WIDE)
     })
 }
 

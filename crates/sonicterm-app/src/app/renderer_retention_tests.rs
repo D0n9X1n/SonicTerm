@@ -86,6 +86,8 @@ fn retention(
         software_frame: ResourceAmount { bytes: frame, items: usize::from(frame > 0) },
         vertex_scratch: ResourceAmount { bytes: 4_352, items: 1 },
         row_ink: ResourceAmount { bytes: 2_736, items: 40 },
+        frame_scratch: ResourceAmount { bytes: 8_192, items: 3 },
+        chrome_cache: ResourceAmount { bytes: 1_536, items: 4 },
     }
 }
 
@@ -121,7 +123,12 @@ fn the_renderer_figures_reach_the_memory_log_by_name() {
         ("software_frame_bytes", 33_177_600),
         ("vertex_scratch_bytes", 4_352),
         ("row_ink_bytes", 2_736),
-        ("total_bytes", 16_777_216 + 524_288 + 4_096 + 2_048 + 33_177_600 + 4_352 + 2_736),
+        ("frame_scratch_bytes", 8_192),
+        ("chrome_cache_bytes", 1_536),
+        (
+            "total_bytes",
+            16_777_216 + 524_288 + 4_096 + 2_048 + 33_177_600 + 4_352 + 2_736 + 8_192 + 1_536,
+        ),
     ] {
         assert_eq!(
             line.field(field),
@@ -151,6 +158,9 @@ fn the_atlas_lines_carry_resident_entry_counts() {
     assert_eq!(line.field("vertex_scratch_items"), Some(1));
     // Row ink items are the committed per-row records.
     assert_eq!(line.field("row_ink_items"), Some(40));
+    // Frame-scratch items are allocated vectors; chrome-cache items are kept titles and runs.
+    assert_eq!(line.field("frame_scratch_items"), Some(3));
+    assert_eq!(line.field("chrome_cache_items"), Some(4));
 }
 
 /// The software frame is reported even when it is zero.

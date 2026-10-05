@@ -188,7 +188,9 @@ fn every_font_stack_shaping_call_goes_through_shape_request() {
     crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
     let (wrapped, bare) = shaping_calls(&sources);
     assert!(bare.is_empty(), "uncounted FontStack shaping calls: {bare:#?}");
-    assert_eq!(wrapped, 8, "the shaping sites changed; review the count");
+    // The search badge's icon and label measures are served from the chrome-run cache, which
+    // shapes through `ChromeShapedRun::shape`, so they are no longer separate sites.
+    assert_eq!(wrapped, 5, "the shaping sites changed; review the count");
 }
 
 /// `text` with comments, strings, raw strings and character literals blanked to spaces, so
@@ -550,7 +552,7 @@ fn only_the_quad_cache_drops_dirty_rows_inside_each_panes_loop() {
     let quad_call = "invalidate_planned_quad_rows(&mutself.line_quad_cache,pv.planned);";
     assert_eq!(core.matches(quad_call).count(), 1);
     let pane_loop = core
-        .find("forpvinpane_views.iter().filter(|pane|pane.planned.full_clip.is_some()){")
+        .find("for(pane_index,pv)inpane_views.iter().enumerate().filter(|(_,pane)|pane.planned.full_clip.is_some()){")
         .expect("per-pane loop");
     assert!(pane_loop < core.find(quad_call).expect("quad call"), "inside a pane loop");
 }
@@ -565,7 +567,7 @@ fn recolor_visits_count_the_main_glyph_list_and_never_an_overlay() {
         let call = &core[offset..core.len().min(offset + 80)];
         let after = &core[offset..core.len().min(offset + 260)];
         assert!(
-            call.contains("(&mutglyph_instances,&row_spans,"),
+            call.contains("(&mut*glyph_instances,row_spans,"),
             "unexpected main recolor: {call}"
         );
         assert!(
@@ -1281,4 +1283,36 @@ fn partial_counters_record_only_inside_a_counting_scope() {
         (total.partial_frames, total.partial_fallbacks, total.row_cells_hashed),
         (2, 2, 240)
     );
+}
+
+#[test]
+fn title_and_chrome_run_notes_count_only_inside_a_counting_scope() {
+    // With the gate on, each note moves exactly its own counter by one; with the gate off (no
+    // scope, or a scope of a renderer that does not count) none of the four moves.
+    let sink = FrameStatsSink::default();
+    {
+        let _counting = CollectGuard::enter(Some(&sink));
+        note_tab_title(true);
+        note_tab_title(false);
+        note_tab_title(false);
+        note_chrome_run(true);
+        note_chrome_run(true);
+        note_chrome_run(true);
+        note_chrome_run(false);
+    }
+    let on = sink.snapshot();
+    assert_eq!(
+        (on.tab_title_reuses, on.tab_title_prepares, on.chrome_run_reuses, on.chrome_run_prepares),
+        (1, 2, 3, 1)
+    );
+    let off = FrameStatsSink::default();
+    for counting in [false, true] {
+        let _scope = counting.then(|| CollectGuard::enter(None));
+        note_tab_title(true);
+        note_tab_title(false);
+        note_chrome_run(true);
+        note_chrome_run(false);
+    }
+    assert_eq!(off.snapshot(), FrameStats::ZERO, "the gate off moves no counter");
+    assert_eq!(sink.snapshot(), on, "and nothing reached the counting renderer afterwards");
 }

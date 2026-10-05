@@ -516,6 +516,10 @@ renderer that collected it.
 | `raster_tiles` | count | rasterizer calls that returned a tile with pixels; no tile and an empty tile are calls, not tiles |
 | `font_generation_applies` | count | preparations that applied a newer generation of the fallback notice already applied; unlike `font_fallback_applies` it leaves out the first preparation and a replaced font stack |
 | `font_prepare_ns`, `font_generation_prepare_ns` | ns | time inside frame font preparation, invalidation included, for every preparation and for those that applied a newer generation; outside every render attempt |
+| `tab_title_reuses` | count | tab titles drawn from the title cache with no shaping, one per title per assembly pass, presented or not |
+| `tab_title_prepares` | count | tab titles fitted and shaped on a title-cache miss, one per title per assembly pass; their shaping requests also count in `shape_requests` |
+| `chrome_run_reuses` | count | chrome-run lookups (the search overlay's icon and label measures and draws) served from the chrome-run cache with no shaping, one per lookup inside the assembly pass |
+| `chrome_run_prepares` | count | chrome-run lookups that shaped, one per lookup inside the assembly pass; their shaping requests also count in `shape_requests` |
 | `render_attempts`, `render_attempts_presented` | count | `render_releasing` calls, and those that presented |
 | `render_attempt_ns`, `render_attempt_shape_ns`, `render_attempt_raster_ns` | ns | time inside those calls, and the shaping and rasterizing time spent inside them |
 | `render_attempt_shape_requests`, `render_attempt_raster_calls`, `render_attempt_raster_tiles` | count | shaping requests, rasterizer calls and tiles inside those calls |
@@ -528,10 +532,11 @@ hosted Windows CI runner has no GPU, so its runs report `software_frames` and no
 `gpu_frames`. A frame presented through wgpu, including on its software adapter,
 counts as `gpu_frames`.
 
-`shape_requests` counts each call to `FontStack::shape_text_with_style`,
-`shape_text`, or `measure_text_width`, failures included; a call skipped for empty
-text is not a request. It counts requests, not HarfBuzz attempts or fallback
-retries.
+`shape_requests` counts each call to `FontStack::shape_text_for_frame` or
+`measure_text_width_for_frame` that the renderer makes through
+`frame_stats::shape_request`, failures included; a call skipped for empty text is
+not a request. It counts requests, not HarfBuzz attempts or fallback retries. A
+title or chrome run served from its cache makes no request.
 
 Each fallback generation apply is carried by exactly one render attempt: a
 preparation that applies a newer generation owes it, and the next
@@ -801,6 +806,8 @@ renderer retention window="<window-id>" role="visible" total_bytes=<bytes>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
                    vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
                    row_ink_bytes=<bytes> row_ink_items=<count>
+                   frame_scratch_bytes=<bytes> frame_scratch_items=<count>
+                   chrome_cache_bytes=<bytes> chrome_cache_items=<count>
 renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    glyph_atlas_bytes=<bytes> glyph_atlas_items=<count>
                    image_atlas_bytes=<bytes> image_atlas_items=<count>
@@ -808,6 +815,8 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
                    vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
                    row_ink_bytes=<bytes> row_ink_items=<count>
+                   frame_scratch_bytes=<bytes> frame_scratch_items=<count>
+                   chrome_cache_bytes=<bytes> chrome_cache_items=<count>
 ```
 
 | Field | What it owns | First response |
@@ -825,6 +834,10 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `vertex_scratch_items` | 1 while the vertex buffer holds an allocation, else 0 | — |
 | `row_ink_bytes` | the `RowInk` part: the allocated buckets of the per-row ink table (where each presented row drew, per pane and slot) plus one frame's staging buffer | bounded by the visible rows; a pane that shrinks or closes releases its records at the next presented frame |
 | `row_ink_items` | committed per-row ink records, one per visible row | — |
+| `frame_scratch_bytes` | the `FrameScratch` part: the per-frame draw vectors (glyphs, quads, overlays, images, row spans, underlines, staging indices, tofu, pane rects, column edges and row keys) the renderer keeps between assembled frames | every restoration clears each vector and holds it within its cap (16,384,000 bytes in total); only a completed assembly also shrinks a vector to twice its use once over four times that use and over 1 MiB and drops column-edge slots above its peak, so a failed or retried frame keeps its warm capacity; zero while a frame holds it |
+| `frame_scratch_items` | scratch vectors that hold an allocation | — |
+| `chrome_cache_bytes` | the `ChromeCache` part: the 64-slot tab-title table and the 32-slot chrome-run table, each kept run's text and glyphs, and the kept UI palette's color strings | bounded by the fixed tables and their admission limits (256 text bytes, 512 glyphs) and by a 4 KiB palette allowance (a larger palette is derived again on every request, never kept); a font change, scale change or `clear_shape_cache` empties both run tables |
+| `chrome_cache_items` | kept tab titles plus kept chrome runs | — |
 
 `role="warm"` means the renderer belongs to the standby pool, not a visible
 window; closing a window does not release it. Renderer figures are host memory,

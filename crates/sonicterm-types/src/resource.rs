@@ -88,6 +88,10 @@ pub enum ResourceClass {
     RowQuadCache,
     /// Per-row ink bounds a renderer presented, which decide the rows a partial frame emits.
     RowInk,
+    /// A renderer's reused per-frame draw vectors (glyphs, quads, spans and edges).
+    FrameScratch,
+    /// A renderer's kept tab titles, chrome runs and UI palette.
+    ChromeCache,
     /// VT escape and media capture storage.
     ParserCapture,
     /// Transient inline-media decoding storage.
@@ -244,6 +248,15 @@ impl ResourceClass {
             Self::RowInk => {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 144 * 1024 * 1024 }
             }
+            // The frame scratch holds each draw vector within its element cap after every pass:
+            // glyphs and quads 4 MiB each, six other draw lists 1 MiB each, two small lists
+            // 64 KiB each, two index lists 256 KiB each and the column edges 1 MiB, in total
+            // `FRAME_SCRATCH_CAP` in `sonicterm-gpu`.
+            Self::FrameScratch => ClassCoverage::UnchargedRetention { per_owner_bytes: 16_384_000 },
+            // The chrome caches hold at most 64 titles and 32 runs at their admission limits
+            // (256 text bytes, 512 glyphs) in fixed tables, plus palette strings totalling at most
+            // 4 KiB (a larger palette is never kept): `CHROME_CACHE_ENVELOPE_BYTES` in `sonicterm-gpu`.
+            Self::ChromeCache => ClassCoverage::UnchargedRetention { per_owner_bytes: 1_626_560 },
             Self::SoftwareFrame => {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 160 * 1024 * 1024 }
             }
@@ -401,6 +414,8 @@ impl ResourceClass {
             | Self::RowGlyphCache
             | Self::RowQuadCache
             | Self::RowInk
+            | Self::FrameScratch
+            | Self::ChromeCache
             | Self::SoftwareFrame => PaneSeamTerm::NotChargedInProduction,
 
             // Charged to the pane that owns the queue, so it appears in that

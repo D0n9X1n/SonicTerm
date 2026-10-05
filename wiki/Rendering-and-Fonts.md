@@ -225,9 +225,22 @@ Each frame calls `begin_frame_fonts` once, before tab widths and the frame key:
 when the notice or generation differs from the one last applied, it clears the
 row and line-quad caches and the frame key, bumps the style revision, drops the
 atlas's missing-glyph entries and the preedit cache, bumps the tab-title width
-epoch, and counts `font_fallback_applies`. A face merged during a frame can draw
-its real glyph while a title measured earlier in that frame keeps notdef's
-width; the next applied generation corrects it.
+epoch, empties the chrome-run cache, and counts `font_fallback_applies`. A face
+merged during a frame can draw its real glyph while a title measured earlier in
+that frame keeps notdef's width; the next applied generation corrects it.
+
+The renderer shapes through two frame entry points, `FontStack::shape_text_for_frame`
+and `measure_text_width_for_frame`. Each `FontStack` memoizes its face per
+bold/italic style, so a warm stack shapes without cloning a text style or hashing
+a loaded-font key. The memo is valid while the shared `FontConfiguration`'s
+`face_epoch` is unchanged. `config_changed` bumps the epoch right after it drops
+the loaded faces and before it reloads the font directories, and
+`change_scaling` bumps it beside its own clear; every clone and `with_font_size`
+view of the stack compares against that shared epoch, so a replacement made
+through one is seen by all. A fallback merge extends the same face in place and
+does not move the epoch, so a memoized face shapes with the merged handles. Tab
+titles and the search overlay's icon and label are shaped once per key and then
+drawn from kept runs (see [Row and shape caches](#row-and-shape-caches)).
 
 The atlas distinguishes a missing glyph from an empty one. A character no face
 resolves is cached as missing and draws a one-pixel outline box: one cell in
@@ -398,6 +411,37 @@ row: changed content misses by itself. `LineQuadCache` keeps one
 background/decoration projection per `(pane id, absolute row)`, validated by a
 row hash that includes the viewport slot and selection overlap; dirty rows
 invalidate their absolute entries and it clears at capacity.
+
+There is no shape-result cache below the row cache: the content-keyed row cache
+already replays a repeated row, and a row it misses is shaped again. Two chrome
+caches keep shaped runs outside the grid:
+
+- **Tab titles.** A fixed table of 64 slots, indexed by tab position, keeps each
+  title's fitted run. Its key is the display text, the tab font's key (family,
+  size, weight, scale and stack presence), the tab-title fallback epoch, the
+  raster size and the width available to the text; color is a draw argument, not
+  part of the key. A warm, unchanged title draws with no shaping. A title is kept
+  only when its whole-title measure, its ellipsis measure and its final shape all
+  succeed, within 256 text bytes and 512 glyphs; a failed measure draws as before
+  and keeps nothing. A tab at position 64 or later draws uncached, and slots at or
+  past the tab count are dropped each frame. An applied fallback generation bumps
+  the epoch, so a title kept with notdef misses once and reshapes with the
+  merged face: the same one-frame lag the rows have.
+- **Chrome runs.** A fixed table of 32 slots keeps the search overlay's icon and
+  label runs, looked up by style, size, native em, stack and text with a linear
+  scan; a miss on a full table replaces the least recently used entry. The badge
+  width reads a run's raw shaped advance, bit for bit the width
+  `measure_text_width_for_frame` gives; drawing and field geometry read the
+  blank-adjusted pen advances of the same run. Admission has the same 256-byte
+  and 512-glyph limits. The body stack has no epoch of its own, so an applied
+  fallback generation empties this table.
+
+A font change, a scale change and `clear_shape_cache` empty both tables beside
+the row-cache invalidation, because a replaced face can keep every title key. A
+theme change clears neither. The UI palette derived from the theme is kept too,
+seeded at construction and derived again only when the theme's colors differ. It
+is kept only while the theme's color strings total at most 4 KiB; a theme over
+that is derived again on every request and never kept.
 
 Font, theme, scale, pane identity, atlas reset, or atlas content-identity changes
 invalidate the affected entries. A font or DPI change rebuilds the body, footer,

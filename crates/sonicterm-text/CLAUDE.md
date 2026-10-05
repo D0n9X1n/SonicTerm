@@ -1,11 +1,12 @@
 # sonicterm-text
 
 ## Purpose
-Text shaping and glyph cache support for rendering. It owns shape caching,
-row glyph caching, and glyph atlas data consumed by the GPU renderer.
+Text shaping data and glyph cache support for rendering. It owns the shaping
+run model, row glyph caching, and glyph atlas data consumed by the GPU renderer.
+It holds no shape-result cache.
 
 ## Key files
-- `shape.rs` - shape cache and shaping entry points.
+- `shape.rs` - the ASCII fast-path predicate (generic over owned or borrowed cells), `RunStyle` and `ShapedGlyph`.
 - `glyph_atlas.rs` - atlas pages and glyph placement.
 - `row_glyph_cache.rs` - content-keyed row glyph cache: position-free records, pins, staged slots, quotas and budgets.
 - `lib.rs` - public exports.

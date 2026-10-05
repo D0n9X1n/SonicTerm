@@ -14,7 +14,8 @@ fn ascii(col: u16, ch: char) -> (u16, Cell) {
 
 #[test]
 fn empty_run_is_vacuously_fast() {
-    assert!(run_is_ascii_fast(&[]));
+    // The predicate is generic over how a run holds its cells; an empty run names owned cells.
+    assert!(run_is_ascii_fast::<Cell>(&[]));
 }
 
 #[test]
@@ -129,4 +130,36 @@ fn run_style_ignores_non_face_flags() {
     let flags = CellFlags::UNDERLINE | CellFlags::INVERSE | CellFlags::WIDE;
     let c = Cell::plain('a', Color::Default, Color::Default, flags);
     assert_eq!(RunStyle::from_cell(&c), RunStyle { bold: false, italic: false });
+}
+
+#[test]
+fn ascii_fast_verdicts_are_unchanged_for_borrowed_cells() {
+    // The renderer flushes runs as `(col, &Cell)` borrowed from the grid instead of cloned cells;
+    // every fast-path case above must give the same verdict through a borrowed run.
+    let mut extras_cell = Cell::plain('a', Color::Default, Color::Default, CellFlags::empty());
+    extras_cell.set_extras(Some("\u{300}".to_string().into_boxed_str()));
+    let styled = CellFlags::BOLD | CellFlags::ITALIC | CellFlags::UNDERLINE;
+    let cases: Vec<(Vec<(u16, Cell)>, bool)> = vec![
+        (Vec::new(), true),
+        (vec![ascii(0, 'h'), ascii(1, 'e'), ascii(2, 'l'), ascii(3, 'l'), ascii(4, 'o')], true),
+        (vec![ascii(0, ' ')], true),
+        (vec![ascii(0, '~')], true),
+        (vec![ascii(0, '\u{1f}')], false),
+        (vec![ascii(0, '\u{7f}')], false),
+        (vec![ascii(0, 'é')], false),
+        (vec![ascii(0, '你')], false),
+        (vec![ascii(0, 'a'), ascii(1, '='), ascii(2, 'b')], false),
+        (vec![ascii(0, '+'), ascii(1, '.'), ascii(2, '/'), ascii(3, '(')], true),
+        (vec![(0, extras_cell)], false),
+        (vec![cell(0, 'W', CellFlags::WIDE)], false),
+        (vec![cell(0, ' ', CellFlags::WIDE_CONT)], false),
+        (vec![cell(0, 'A', styled), cell(1, 'B', styled)], true),
+    ];
+    let triggers = ['=', '!', '<', '>', '-', '_', ':', '|', '&', '*'];
+    let trigger_cases = triggers.iter().map(|trigger| (vec![ascii(0, *trigger)], false));
+    for (index, (owned, expected)) in cases.into_iter().chain(trigger_cases).enumerate() {
+        let borrowed: Vec<(u16, &Cell)> = owned.iter().map(|(col, cell)| (*col, cell)).collect();
+        assert_eq!(run_is_ascii_fast(&owned), expected, "owned case {index}");
+        assert_eq!(run_is_ascii_fast(&borrowed), expected, "borrowed case {index}");
+    }
 }
