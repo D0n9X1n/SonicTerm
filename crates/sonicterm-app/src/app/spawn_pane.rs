@@ -291,6 +291,9 @@ pub(in crate::app) struct PaneVtHandles {
     inline_images: Arc<Mutex<Vec<InlineImage>>>,
     inline_media_charge: super::media::SharedInlineMediaCharge,
     frame_counters: Option<super::frame_counters::PaneFrameCounters>,
+    /// This worker's echo-watch target and recorded facts, so an armed watch locks its slot once
+    /// per token and once per fact.
+    echo_cache: std::cell::Cell<super::echo_watch::EchoCache>,
 }
 
 impl PaneVtHandles {
@@ -311,6 +314,7 @@ impl PaneVtHandles {
             inline_images: pane.inline_images.clone(),
             inline_media_charge: pane.inline_media_charge.clone(),
             frame_counters: pane.frame_counters.clone(),
+            echo_cache: std::cell::Cell::new(super::echo_watch::EchoCache::default()),
         }
     }
 }
@@ -589,6 +593,7 @@ impl PaneVtHandles {
             &self.redraw_target,
             &self.output_outstanding,
             self.frame_counters.as_ref(),
+            Instant::now,
             send,
         );
     }
@@ -600,6 +605,7 @@ fn send_pane_output(handles: &PaneVtHandles, proxy: &EventLoopProxy<UserEvent>, 
         &handles.redraw_target,
         &handles.output_outstanding,
         handles.frame_counters.as_ref(),
+        Instant::now,
         |window_id| proxy.send_event(UserEvent::PaneOutput { window_id, pane_id }).is_ok(),
     );
 }
@@ -609,37 +615,52 @@ fn send_pane_output(handles: &PaneVtHandles, proxy: &EventLoopProxy<UserEvent>, 
 /// A targeted flush always publishes its timestamp (gate on), then sends only when no event is
 /// outstanding; otherwise it is counted as suppressed (gate on). A send the event loop refuses
 /// releases the token so the next flush sends again. An untargeted flush leaves the token alone.
+/// An armed echo watch records the publication before the token decision and the decision after
+/// it, reading `now` only then; it never changes the decision or the send.
 // Ordering: output_outstanding swaps AcqRel with the event loop's acknowledgement; a refused send
 // stores Release. flushes_suppressed is a Relaxed statistic.
-pub(in crate::app) fn send_output_redraw<Target: Clone>(
-    redraw_target: &Mutex<Option<Target>>,
+pub(in crate::app) fn send_output_redraw(
+    redraw_target: &Mutex<Option<WindowId>>,
     output_outstanding: &AtomicBool,
     counters: Option<&super::frame_counters::PaneFrameCounters>,
-    send: impl FnOnce(Target) -> bool,
+    mut now: impl FnMut() -> Instant,
+    send: impl FnOnce(WindowId) -> bool,
 ) {
     let mut targeted = false;
+    let mut decided = None;
     super::redraw_target::dispatch(redraw_target, |target| {
         targeted = true;
-        if let Some(counters) = counters {
+        let publication = counters.and_then(|counters| {
             // The timestamp is published before the send, so the event loop never wakes without it.
             let now_ns = super::frame_counters::flush_clock_ns();
-            super::frame_counters::publish_flush(&counters.pending_flush, now_ns, &counters.vt);
-        }
-        if output_outstanding.swap(true, Ordering::AcqRel) {
-            // When: output_outstanding was already set, that queued event's service reads this batch.
+            let coalesced =
+                super::frame_counters::publish_flush(&counters.pending_flush, now_ns, &counters.vt);
+            counters.echo.record_publication(Some(target), coalesced, &mut now)
+        });
+        let outcome = if output_outstanding.swap(true, Ordering::AcqRel) {
+            // output_outstanding was already set: that queued event's service reads this batch.
             if let Some(counters) = counters {
                 counters.vt.flushes_suppressed.fetch_add(1, Ordering::Relaxed);
             }
-            return;
-        }
-        if !send(target) {
-            // The event loop is gone and nothing is queued, so the token must not stay set.
+            super::echo_watch::EchoDeliveryOutcome::Suppressed
+        } else if send(target) {
+            // When: send(target) queued the event, its token stays set until the event loop services it.
+            super::echo_watch::EchoDeliveryOutcome::Sent
+        } else {
+            // When: send refused the event, the loop is gone and nothing is queued; the token must not stay set.
             output_outstanding.store(false, Ordering::Release);
-        }
+            super::echo_watch::EchoDeliveryOutcome::Refused
+        };
+        decided = publication.map(|publication| (publication, outcome));
     });
+    if let (Some((publication, outcome)), Some(counters)) = (decided, counters) {
+        // the armed watch recorded this flush's publication, so its token decision is recorded too.
+        counters.echo.record_delivery(publication, outcome, now());
+    }
     if let (false, Some(counters)) = (targeted, counters) {
         // the pane has no redraw target, no window can consume a timestamp; none is stored.
         super::frame_counters::note_untargeted_flush(&counters.vt);
+        counters.echo.record_publication(None, false, &mut now);
     }
 }
 
@@ -726,8 +747,10 @@ pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>
     }
 }
 
-// Lock order: inline_images -> inline_media_charge; parser releases before either, and command_events locks after both.
-// Ordering: cursor_visible, keyboard_input and pointer_input use Relaxed; each word is self-contained, not a barrier for parser changes.
+// Lock order: parser -> echo slot (pre_read, post_read); inline_images -> inline_media_charge after parser releases,
+// command_events after both.
+// Ordering: cursor_visible, keyboard_input, pointer_input and the output_generation load are Relaxed:
+// self-contained words; this worker alone writes output_generation.
 #[allow(clippy::too_many_arguments)]
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
@@ -755,14 +778,29 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         }
     }
     loop {
-        // With the gate on, one clock read precedes lock() and three are taken under the guard;
-        // all arithmetic and every counter update wait until the guard has dropped.
+        // Gate on: one clock read before lock(), three under the guard (four when a new sync epoch opens);
+        // an armed echo watch reads the target cell around the parse and may lock its slot, all before the guard drops.
         let before_lock = counters.map(|_| now());
         let (result, section) = {
             let mut parser = handles.parser.lock();
             let locked_at = before_lock.map(|_| now());
+            let echo_before = counters
+                .and_then(|counters| counters.echo.pre_read(&handles.echo_cache, parser.grid()));
             let result = parser.advance_with_replies(remaining);
             let parsed_at = before_lock.map(|_| now());
+            if let (Some(counters), Some(before), Some(parsed_at)) =
+                (counters, echo_before, parsed_at)
+            {
+                // the watch was armed at the pre-read, so this section's facts are derived now.
+                // The worker is output_generation's sole writer, so the batch publishes this load plus one.
+                let section = super::echo_watch::SectionFacts {
+                    consumed: result.0,
+                    parsed_at,
+                    generation: handles.output_generation.load(Ordering::Relaxed) + 1,
+                    sync_open: parser.synchronized_output().set,
+                };
+                counters.echo.post_read(&handles.echo_cache, before, parser.grid(), section);
+            }
             handles.keyboard_input.store(parser.keyboard_input_snapshot(), Ordering::Relaxed);
             handles.pointer_input.store(parser.pointer_input_snapshot(), Ordering::Relaxed);
             let sync_state = parser.synchronized_output();

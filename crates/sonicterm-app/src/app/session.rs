@@ -186,6 +186,7 @@ impl App {
             session_finished: None,
             frame_counters: super::frame_counters::AppFrameCounters::from_tracing(),
             frame_counters_sealed: std::cell::Cell::new(false),
+            next_echo_arm: 1,
             main_window_id: None,
             frontmost_window: None,
             pending_os_drag_payloads: Vec::new(),

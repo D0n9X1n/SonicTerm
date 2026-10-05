@@ -168,6 +168,18 @@ fn vt_section_derives_wait_parse_and_hold_from_its_four_instants() {
     assert_eq!(stats.parse_bytes.load(Ordering::Relaxed), 4_096);
 }
 
+/// The first publication into an empty slot is not coalesced; one that finds a flush still
+/// pending is, and says so, so the echo watch can record it.
+#[test]
+fn publish_flush_reports_whether_it_coalesced() {
+    let stats = VtFrameStats::default();
+    let slot = AtomicU64::new(0);
+    assert!(!publish_flush(&slot, 1_000, &stats), "an empty slot stores the time");
+    assert!(publish_flush(&slot, 2_000, &stats), "a pending flush coalesces the next");
+    assert!(consume_flush(&slot, 3_000).is_some());
+    assert!(!publish_flush(&slot, 4_000, &stats), "consumed, so the next is fresh");
+}
+
 #[test]
 fn coalesced_flushes_give_one_observation_and_count_the_coalescing() {
     // The oldest pending flush is kept; a later one before the redraw only counts as coalesced.
@@ -507,6 +519,7 @@ const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/path_target.rs", "queue", 1),
     ("app/input_dispatch.rs", "test_pty_writes", 1),
     ("app/frame_counters.rs", "native", 8),
+    ("app/echo_watch.rs", "slot", 1),
     ("bin/pty_multi_round_helper.rs", "stdin", 1),
     ("bin/pty_multi_round_helper.rs", "stdout", 1),
 ];
