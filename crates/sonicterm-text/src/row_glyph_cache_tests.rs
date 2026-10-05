@@ -512,3 +512,62 @@ fn release_all_returns_to_a_new_caches_figures() {
     assert!(cache.insert(1, 99, 0, row_of(5)), "the next frame admits again");
     assert!(cache.contains(1, 99));
 }
+
+/// Rasterizes every glyph as one 16x16 coverage tile, so a small atlas fills after a few glyphs.
+struct SixteenPixelTiles;
+
+impl crate::glyph_atlas::Rasterizer for SixteenPixelTiles {
+    fn rasterize(
+        &mut self,
+        _key: sonicterm_types::GlyphKey,
+    ) -> Option<crate::glyph_atlas::RasterTile> {
+        Some(crate::glyph_atlas::RasterTile {
+            width: 16,
+            height: 16,
+            offset_x: 0,
+            offset_y: 0,
+            advance: 16.0,
+            coverage: vec![255; 16 * 16],
+            is_color: false,
+            is_subpixel: false,
+        })
+    }
+}
+
+/// A glyph key for code point `code`, plain style.
+fn atlas_key(code: u32) -> sonicterm_types::GlyphKey {
+    sonicterm_types::GlyphKey {
+        ch: char::from_u32(code).unwrap_or('a'),
+        font_slot: 0,
+        weight_bold: false,
+        italic: false,
+        glyph_id: code,
+        raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
+    }
+}
+
+/// Pin: a row admitted during an eviction-disabled retry stays a hit when eviction is re-enabled,
+/// because that changes no atlas identity, and misses once a later insertion evicts a glyph, so a
+/// kept row can never replay UVs a recycled tile now holds.
+#[test]
+fn a_row_admitted_before_an_eviction_misses_after_it() {
+    let mut atlas = crate::glyph_atlas::GlyphAtlas::new(256, 256);
+    let mut raster = SixteenPixelTiles;
+    atlas.__set_entry_cap_for_test(4);
+    atlas.set_eviction_enabled(false);
+    for code in 65..69u32 {
+        assert!(atlas.get_or_insert(atlas_key(code), &mut raster).is_some(), "{code} fits");
+    }
+    let mut cache = tracked(1, 1, 8);
+    let admitted_at = atlas.identity();
+    assert!(cache.insert(1, 5, admitted_at, row_of(4)));
+
+    atlas.set_eviction_enabled(true);
+    assert_eq!(atlas.identity(), admitted_at, "re-enabling eviction changes no identity");
+    assert!(cache.get(1, 5, atlas.identity(), |_| true).is_some(), "the kept row still hits");
+
+    let evictions = atlas.evictions();
+    assert!(atlas.get_or_insert(atlas_key(90), &mut raster).is_some(), "the fifth glyph evicts");
+    assert!(atlas.evictions() > evictions, "precondition: an eviction happened");
+    assert!(cache.get(1, 5, atlas.identity(), |_| true).is_none(), "the kept row misses after it");
+}

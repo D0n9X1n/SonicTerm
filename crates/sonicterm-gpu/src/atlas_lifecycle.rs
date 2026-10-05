@@ -378,9 +378,11 @@ impl GpuRenderer {
     /// Re-enable eviction only after the compaction retry presents successfully.
     pub(super) fn finish_glyph_atlas_retry(&mut self) {
         if std::mem::take(&mut self.glyph_atlas_retry_without_eviction) {
-            // Settling the eviction-disabled retry clears UV caches before later recycling resumes.
+            // Settling re-enables eviction. Cached rows stay valid: only complete rows were admitted,
+            // and a later eviction changes the identity they are checked against (the frame-wide
+            // stamp check covers a replay earlier in the same assembly). The preedit cache is dropped
+            // because chrome layout keeps a run whose glyph the retry refused.
             self.glyph_atlas.set_eviction_enabled(true);
-            self.row_glyph_cache.invalidate_all();
             self.preedit_glyph_cache = None;
             tracing::warn!(
                 target: "sonic::glyph_atlas",

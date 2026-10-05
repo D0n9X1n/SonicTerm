@@ -178,3 +178,25 @@ fn both_release_triggers_share_one_body_and_name_their_reason() {
     check_release_triggers(&lf);
     check_release_triggers(&lf.replace('\n', "\r\n"));
 }
+
+/// The settling body of `finish_glyph_atlas_retry`, read as LF.
+fn settlement_body(lifecycle: &str) -> String {
+    let lifecycle = lifecycle.replace("\r\n", "\n");
+    let body = lifecycle.split_once("fn finish_glyph_atlas_retry(").expect("the settlement").1;
+    body.split_once("\n    }\n").expect("the settlement ends").0.to_string()
+}
+
+/// Settling a presented eviction-disabled retry re-enables eviction and drops the preedit cache,
+/// whose partial chrome output a refused glyph left behind, but keeps the rows the recovered
+/// frame admitted: only complete rows were admitted, and any later eviction changes the atlas
+/// identity they are checked against. Scanned as given and as CRLF, as Windows checks out.
+#[test]
+fn settling_a_presented_retry_keeps_rows_and_drops_preedit() {
+    let lifecycle = include_str!("atlas_lifecycle.rs").replace("\r\n", "\n");
+    for text in [lifecycle.clone(), lifecycle.replace('\n', "\r\n")] {
+        let body = settlement_body(&text);
+        assert!(body.contains("self.glyph_atlas.set_eviction_enabled(true)"), "{body}");
+        assert!(body.contains("self.preedit_glyph_cache = None"), "{body}");
+        assert!(!body.contains("row_glyph_cache.invalidate_all"), "rows are kept: {body}");
+    }
+}
