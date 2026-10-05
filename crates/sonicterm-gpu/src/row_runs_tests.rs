@@ -84,6 +84,21 @@ fn materialized_text_keeps_extras_and_maps_every_byte_to_its_column() {
     assert_eq!(cell_cols, [3, 3, 3, 4, 4, 4, 6]);
 }
 
+/// A cell carrying 32 combining marks (one lead byte plus 64 extras bytes) materializes its whole
+/// cluster, and maps every one of its 65 bytes to the cell's column.
+#[test]
+fn a_long_combining_cluster_materializes_whole() {
+    let mut heavy = cell('e', CellFlags::empty(), Color::Default);
+    let marks = "\u{301}".repeat(32);
+    heavy.set_extras(Some(marks.as_str().into()));
+    let row = Row::from_flat(vec![cell(' ', CellFlags::empty(), Color::Default), heavy]);
+    let cells = visible_cells(&row);
+    let (text, cell_cols) = materialize_run_text(&cells[1..]);
+    assert_eq!(text, format!("e{marks}"));
+    assert_eq!(text.len(), 65);
+    assert_eq!(cell_cols, vec![1u16; 65]);
+}
+
 /// The inspector reports each run's exact text, padding included, its style and whether the
 /// emitter takes the ASCII fast path for it:
 /// - a bold plain-letter run is fast;

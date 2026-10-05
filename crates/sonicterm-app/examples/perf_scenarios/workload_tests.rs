@@ -1706,6 +1706,10 @@ fn expected_row_runs(workload: RowRunWorkload, row: u16, update: u32) -> Vec<Exp
 fn row_run_workloads_cut_into_the_contract_runs() {
     use sonicterm_grid::grid::Grid;
     use sonicterm_vt::vt::{CaptureStagingPool, Parser};
+    // The body is screen rows 2 to 69, stated here rather than taken from the generator's range.
+    let body_rows = 2..=69u16;
+    assert_eq!(ROW_RUN_BODY_ROWS, body_rows, "the generator writes the specified body rows");
+    assert_eq!(body_rows.clone().count(), 68);
     for workload in [RowRunWorkload::Powerline, RowRunWorkload::CjkTui, RowRunWorkload::Unique] {
         let mut parser =
             Parser::new_with_staging_pool(Grid::new(250, 70), None, CaptureStagingPool::new());
@@ -1713,7 +1717,7 @@ fn row_run_workloads_cut_into_the_contract_runs() {
         for update in 0..10 {
             parser.advance(&workload.update_bytes(update));
             let mut shaped = Vec::new();
-            for row in ROW_RUN_BODY_ROWS {
+            for row in body_rows.clone() {
                 let runs = sonicterm_gpu::__row_shape_runs(parser.grid().row(row - 1));
                 assert_eq!(
                     runs,

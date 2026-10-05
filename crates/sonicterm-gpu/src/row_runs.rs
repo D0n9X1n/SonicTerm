@@ -73,10 +73,14 @@ pub(crate) fn materialize_run_text(cells: &[(u16, &Cell)]) -> (String, Vec<u16>)
         let start = text.len();
         text.push(cell.ch);
         if let Some(extras) = cell.extras() {
-            text.push_str(extras);
+            for ch in extras.chars() {
+                text.push(ch);
+            }
         }
         let appended = text.len() - start;
-        cell_cols.extend(std::iter::repeat_n(*col, appended));
+        for _ in 0..appended {
+            cell_cols.push(*col);
+        }
     }
     (text, cell_cols)
 }
