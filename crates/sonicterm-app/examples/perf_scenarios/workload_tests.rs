@@ -1636,3 +1636,108 @@ mod real_renderer_coverage {
         probe.outcome.expect("resumed runs").unwrap_or_else(|error| panic!("{error}"));
     }
 }
+
+/// The grid width the row-run fixtures are written for.
+const ROW_RUN_COLS: usize = 250;
+
+/// Cells `text` occupies: every non-ASCII character in the row-run fixtures is a wide CJK
+/// character from the bundled faces, so it takes two cells.
+fn fixture_cells(text: &str) -> usize {
+    text.chars().map(|character| if character.is_ascii() { 1 } else { 2 }).sum()
+}
+
+/// One expected run: `(text, bold, italic, ascii_fast)`.
+type ExpectedRun = (String, bool, bool, bool);
+
+/// The runs body row `row` (1-based screen row) must cut into at update `update`, stated from
+/// the fixture contract rather than from the generator: the shaped CJK segments, the plain-digit
+/// field that stays ASCII-fast, then the default-style blank padding to column 250 as its own
+/// normal ASCII-fast run.
+fn expected_row_runs(workload: RowRunWorkload, row: u16, update: u32) -> Vec<ExpectedRun> {
+    let mut runs: Vec<ExpectedRun> = match workload {
+        RowRunWorkload::Powerline => vec![
+            ("用户 主机 ".to_owned(), true, false, false),
+            ("项目 终端 ".to_owned(), false, false, false),
+            ("分支 主 ".to_owned(), true, false, false),
+            (format!("{row:02} {update:06}"), false, true, true),
+        ],
+        RowRunWorkload::CjkTui => {
+            let names = [
+                "编译器",
+                "数据库",
+                "网络服务",
+                "缓存",
+                "调度器",
+                "日志",
+                "索引器",
+                "监视器",
+                "代理",
+                "队列",
+                "存储",
+                "认证",
+            ];
+            vec![
+                (names[usize::from(row) % 12].to_owned(), true, false, false),
+                (" 运行中 ".to_owned(), false, false, false),
+                (format!("{:05}", (update * 37 + u32::from(row)) % 100_000), false, true, true),
+            ]
+        }
+        RowRunWorkload::Unique => {
+            let mut segments: Vec<ExpectedRun> = (0..4)
+                .map(|segment| {
+                    (format!("段{update:06}行{row:02}节{segment}"), segment % 2 == 0, false, false)
+                })
+                .collect();
+            segments.push((format!("{row:02}"), false, true, true));
+            segments
+        }
+    };
+    let used: usize = runs.iter().map(|(text, ..)| fixture_cells(text)).sum();
+    runs.push((" ".repeat(ROW_RUN_COLS - used), false, false, true));
+    runs
+}
+
+/// Each row-run workload's first ten updates, fed in order through a real VT parser on a
+/// 250 x 70 grid, cut every body row into exactly the contract's runs: texts with padding, bold,
+/// italic and ASCII-fast flags. For S10/unique, no shaped `(text, bold, italic)` repeats within
+/// any nine consecutive updates; its digit and padding runs are asserted exactly above but are
+/// not part of that check.
+#[test]
+fn row_run_workloads_cut_into_the_contract_runs() {
+    use sonicterm_grid::grid::Grid;
+    use sonicterm_vt::vt::{CaptureStagingPool, Parser};
+    // The body is screen rows 2 to 69, stated here rather than taken from the generator's range.
+    let body_rows = 2..=69u16;
+    assert_eq!(ROW_RUN_BODY_ROWS, body_rows, "the generator writes the specified body rows");
+    assert_eq!(body_rows.clone().count(), 68);
+    for workload in [RowRunWorkload::Powerline, RowRunWorkload::CjkTui, RowRunWorkload::Unique] {
+        let mut parser =
+            Parser::new_with_staging_pool(Grid::new(250, 70), None, CaptureStagingPool::new());
+        let mut shaped_by_update: Vec<Vec<(String, bool, bool)>> = Vec::new();
+        for update in 0..10 {
+            parser.advance(&workload.update_bytes(update));
+            let mut shaped = Vec::new();
+            for row in body_rows.clone() {
+                let runs = sonicterm_gpu::__row_shape_runs(parser.grid().row(row - 1));
+                assert_eq!(
+                    runs,
+                    expected_row_runs(workload, row, update),
+                    "{workload:?} row {row} update {update}"
+                );
+                shaped.extend(
+                    runs.into_iter()
+                        .filter(|(.., ascii_fast)| !ascii_fast)
+                        .map(|(text, bold, italic, _)| (text, bold, italic)),
+                );
+            }
+            shaped_by_update.push(shaped);
+        }
+        if workload == RowRunWorkload::Unique {
+            for window in shaped_by_update.windows(9) {
+                let keys: Vec<&(String, bool, bool)> = window.iter().flatten().collect();
+                let distinct: std::collections::BTreeSet<_> = keys.iter().collect();
+                assert_eq!(distinct.len(), keys.len(), "a shaped run repeats within nine updates");
+            }
+        }
+    }
+}

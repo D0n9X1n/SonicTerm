@@ -1106,6 +1106,104 @@ pub(crate) fn run_program(scratch: &Path) -> u8 {
     run_steps(scratch, &mut NativeHost, &mut stdout.lock(), &mut stderr.lock())
 }
 
+/// The three row-run workloads' screens: a fixed bold title on row 1, 68 patterned body rows
+/// (rows 2-69) and a fixed normal footer on row 70, redrawn whole by every update.
+///
+/// Body rows mix bold, normal and italic segments; colour alternates per update but never
+/// splits a run. Segments meant to shape carry CJK characters from the bundled faces; the
+/// changing fields meant not to shape are plain digits and spaces. Each body row ends after its
+/// last segment, and the rest of the row is default-style blank cells. Only the tests use them
+/// in this change; registering them as scenario variants comes with their diagnostic.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowRunWorkload {
+    /// Repeated bold, normal and bold CJK segments, then an italic row and update number.
+    Powerline,
+    /// One of twelve CJK process names in bold, a normal CJK status, then an italic value.
+    CjkTui,
+    /// Four alternating bold and normal CJK segments unique to their row and update, then an
+    /// italic row number.
+    Unique,
+}
+
+/// The twelve process names `CjkTui` cycles through by row.
+#[cfg(test)]
+pub(crate) const CJK_TUI_NAMES: [&str; 12] = [
+    "编译器",
+    "数据库",
+    "网络服务",
+    "缓存",
+    "调度器",
+    "日志",
+    "索引器",
+    "监视器",
+    "代理",
+    "队列",
+    "存储",
+    "认证",
+];
+
+/// The first and last body rows, 1-based screen rows.
+#[cfg(test)]
+pub(crate) const ROW_RUN_BODY_ROWS: std::ops::RangeInclusive<u16> = 2..=69;
+
+#[cfg(test)]
+impl RowRunWorkload {
+    /// The bytes of update `update`: every row rewritten in place, with SGR colour cycling per
+    /// update. `update` is one counter that keeps counting across phases.
+    pub(crate) fn update_bytes(self, update: u32) -> Vec<u8> {
+        let colour = 31 + update % 6;
+        let mut screen = String::new();
+        screen.push_str(&format!("\x1b[1;1H\x1b[0;1m{}\x1b[0m\x1b[K", self.title()));
+        for row in ROW_RUN_BODY_ROWS {
+            screen.push_str(&format!("\x1b[{row};1H"));
+            for (bold, italic, text) in self.body_segments(row, update) {
+                let weight = if bold { ";1" } else { "" };
+                let slant = if italic { ";3" } else { "" };
+                screen.push_str(&format!("\x1b[0;{colour}{weight}{slant}m{text}"));
+            }
+            screen.push_str("\x1b[0m\x1b[K");
+        }
+        screen.push_str("\x1b[70;1H\x1b[0m按 q 退出\x1b[K");
+        screen.into_bytes()
+    }
+
+    /// Row 1's fixed bold title.
+    fn title(self) -> &'static str {
+        match self {
+            Self::Powerline => "提示符 工作负载",
+            Self::CjkTui => "进程 工作负载",
+            Self::Unique => "唯一 工作负载",
+        }
+    }
+
+    /// Body row `row`'s segments for update `update`, each `(bold, italic, text)`.
+    pub(crate) fn body_segments(self, row: u16, update: u32) -> Vec<(bool, bool, String)> {
+        match self {
+            Self::Powerline => vec![
+                (true, false, "用户 主机 ".to_owned()),
+                (false, false, "项目 终端 ".to_owned()),
+                (true, false, "分支 主 ".to_owned()),
+                (false, true, format!("{row:02} {update:06}")),
+            ],
+            Self::CjkTui => vec![
+                (true, false, CJK_TUI_NAMES[usize::from(row) % 12].to_owned()),
+                (false, false, " 运行中 ".to_owned()),
+                (false, true, format!("{:05}", (update * 37 + u32::from(row)) % 100_000)),
+            ],
+            Self::Unique => {
+                let mut segments: Vec<(bool, bool, String)> = (0..4)
+                    .map(|segment| {
+                        (segment % 2 == 0, false, format!("段{update:06}行{row:02}节{segment}"))
+                    })
+                    .collect();
+                segments.push((false, true, format!("{row:02}")));
+                segments
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "workload_tests.rs"]
 mod workload_tests;
