@@ -450,6 +450,7 @@ fn trim_image_atlas_and_restore(active: &ActiveEventLoop) -> Result<(), String> 
 
 /// On the GPU presenter, an image shown, removed, trimmed away and shown again presents at once, its
 /// atlas and GPU mirror promoted again, with exactly the pixels the frame before the trim read back.
+/// The reference is first shown to contain the image, against the image-free frame.
 fn trim_restores_the_image_on_wgpu(active: &ActiveEventLoop) -> Result<(), String> {
     let (_window, mut renderer) = renderer(active, SoftwareRenderMode::Off, "trim-image-wgpu")?;
     renderer.__enable_retained_frame_readback();
@@ -458,6 +459,18 @@ fn trim_restores_the_image_on_wgpu(active: &ActiveEventLoop) -> Result<(), Strin
     check(renderer.successful_frame_count() > frames, "the reference frame presents")?;
     let reference = wgpu_pixels(&mut renderer)?;
     render(&mut renderer, false)?;
+    // The reference must show the image: it differs from the frame without it, and only inside the
+    // image's 32x32 rect at the pane origin, so the comparison below cannot pass on two empty frames.
+    let absent = wgpu_pixels(&mut renderer)?;
+    let width_px = renderer.surface_size().0 as usize;
+    let changed: Vec<usize> = (0..reference.len() / 4)
+        .filter(|pixel| reference[pixel * 4..pixel * 4 + 4] != absent[pixel * 4..pixel * 4 + 4])
+        .collect();
+    check(!changed.is_empty(), "the reference frame shows the image")?;
+    check(
+        changed.iter().all(|pixel| pixel % width_px < 32 && pixel / width_px < 32),
+        "the reference differs from the image-free frame only inside the image",
+    )?;
     let _ = renderer.trim_for_occlusion();
     check(
         renderer.__test_image_atlas_dimensions() == ((1, 1), (1, 1)),
