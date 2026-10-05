@@ -360,9 +360,10 @@ struct AssembledLayers {
     surface_width: f32,
     surface_height: f32,
     subpixel_aa: SubpixelAaMode,
-    /// The renderer's frame scratch, holding this frame's quads, images and glyphs; presentation
-    /// restores it to the renderer on every outcome.
-    scratch: frame_scratch::FrameScratch,
+    /// The pass's lease on the renderer's frame scratch, holding this frame's quads, images and
+    /// glyphs. It travels with the frame and restores the scratch when it drops, on every
+    /// presentation outcome and on unwinding.
+    scratch: frame_scratch::ScratchLease,
     field_candidates: PresentedFields,
     missing_chars: Vec<char>,
     /// Chrome characters this frame drew as tofu or dropped; published only if it presents.
@@ -8555,11 +8556,14 @@ impl GpuRenderer {
             crate::quad::debug_assert_premultiplied_quads("overlay", quads_overlay);
         }
 
+        // The pass assembled a drawable frame, so the restore trims by its use; the lease then
+        // travels inside the layers, so no exit up to the end of presentation loses the scratch.
+        scratch_lease.complete();
         Ok(Assembled::Layers(Box::new(AssembledLayers {
             surface_width: sw,
             surface_height: sh,
             subpixel_aa,
-            scratch: scratch_lease.into_scratch(),
+            scratch: scratch_lease,
             field_candidates,
             missing_chars: missing_chars_this_frame,
             missing_chrome_chars: missing_chrome_scope.finish(),
@@ -8615,10 +8619,9 @@ impl GpuRenderer {
             recolor,
             tab_ink,
         } = assembled;
-        // The scratch returns to the renderer when this guard drops, on every outcome, including
-        // a presenter `Err`.
-        let held = self.frame_scratch.hold(scratch);
-        let batches = held.held();
+        // The lease returns the scratch to the renderer when it drops, on every outcome, including
+        // a presenter `Err` and unwinding.
+        let batches = scratch.held();
         // The presenter borrows only the owned drawable layers; no grid or parser guard is held.
         let layers = FrameLayers {
             surface_width,
@@ -10472,8 +10475,9 @@ pub(crate) fn assemble_pane_glyph_rows(
 ) {
     let PaneGlyphRows { pane_id, grid, planned, origin, snapped_cell_x, pane_hovered_url } = pane;
     let view_top_abs = planned.view_top_abs;
-    // Pin phase, into the frame scratch's key buffer.
-    let mut keys = std::mem::take(sinks.row_keys);
+    // Pin phase, into the frame scratch's key buffer, borrowed in place so an unwind leaves it
+    // in the scratch.
+    let keys: &mut Vec<u64> = &mut *sinks.row_keys;
     keys.clear();
     keys.extend(planned.rows().map(|(slot, _)| {
         if planned.emit_rows[usize::from(slot)] {
@@ -10483,7 +10487,7 @@ pub(crate) fn assemble_pane_glyph_rows(
             0
         }
     }));
-    shaping.row_cache.pin(pane_id, &keys);
+    shaping.row_cache.pin(pane_id, keys);
     // Emit phase.
     for (slot, _) in planned.rows() {
         if !planned.emit_rows[usize::from(slot)] {
@@ -10541,8 +10545,6 @@ pub(crate) fn assemble_pane_glyph_rows(
         );
         sinks.underline_owners.extend((underlines_before..frame.underlines.len()).map(|_| staged));
     }
-    // The key buffer returns to the frame scratch for the next pane.
-    *sinks.row_keys = keys;
 }
 
 /// The pane-focus flash: the pane's chrome rectangle, lifted 0.07 above the background, at `alpha`.

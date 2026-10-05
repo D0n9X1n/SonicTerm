@@ -4391,7 +4391,7 @@ fn row_spans_viewports_and_title_order_follow_the_assembly() {
         .expect("per-pane loop");
     assert!(begin < pane_loop, "the pass starts before any pane pins or admits");
     let seam = core.find("pub(crate)fnassemble_pane_glyph_rows(").expect("pane seam");
-    let pin = seam + core[seam..].find("shaping.row_cache.pin(pane_id,&keys);").expect("pin");
+    let pin = seam + core[seam..].find("shaping.row_cache.pin(pane_id,keys);").expect("pin");
     let first_emit = seam + core[seam..].find("emit_row_glyphs(").expect("emit");
     assert!(pin < first_emit, "every key is pinned before the first admission");
     // One projection site records a row's span; the other is the test row-glyph seam's own.
@@ -7606,7 +7606,14 @@ impl FallbackFixture {
             surface_width: 240.0,
             surface_height: 200.0,
             subpixel_aa: SubpixelAaMode::Off,
-            scratch: frame_scratch::FrameScratch { glyphs, ..Default::default() },
+            scratch: {
+                // The fixture leases a scratch of its own and fills it as assembly would.
+                let home = frame_scratch::ScratchHome::new();
+                let mut lease = home.lease();
+                lease.get().glyphs = glyphs;
+                lease.complete();
+                lease
+            },
             field_candidates: PresentedFields::default(),
             missing_chars: Vec::new(),
             missing_chrome_chars: Vec::new(),
@@ -8006,4 +8013,53 @@ fn frame_scratch_and_chrome_cache_are_classified_parts_with_shared_envelopes() {
             per_owner_bytes: crate::chrome_cache::CHROME_CACHE_ENVELOPE_BYTES
         }
     );
+}
+
+#[test]
+fn unwinding_while_row_keys_are_in_use_keeps_the_key_buffer() {
+    // The pane seam borrows the frame scratch's row-key buffer in place while it pins and emits
+    // rows. An unwind during emission (here, column edges too short for a block glyph's lead
+    // column) must leave that buffer, with its warm allocation, in the scratch.
+    let grid = text_grid(8, &["─x", "ab", "cd"]);
+    let plan = policy_plan(3, 0.0, 1, Vec::new(), Vec::new(), None);
+    let mut rig = GlyphRig::new(false);
+    let mut ink = crate::row_ink::RowInkTable::default();
+    begin_pass(&mut rig, &mut ink, &grid, &plan);
+    let mut row_keys: Vec<u64> = Vec::with_capacity(64);
+    let warm_pointer = row_keys.as_ptr();
+    let planned = &plan.panes[0];
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (mut glyphs, mut underlines, mut tofu) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut missing, mut spans, mut owners) = (Vec::new(), Vec::new(), Vec::new());
+        assemble_pane_glyph_rows(
+            rig.shaping(),
+            PaneGlyphRows {
+                pane_id: planned.id,
+                grid: &grid,
+                planned,
+                origin: (planned.layout.x, planned.layout.y),
+                // No column edges: the block glyph's lookup unwinds mid-emission.
+                snapped_cell_x: &[],
+                pane_hovered_url: None,
+            },
+            GlyphFrame {
+                glyph_instances: &mut glyphs,
+                underlines: &mut underlines,
+                missing_tofu: &mut tofu,
+                missing_chars_this_frame: &mut missing,
+                row_spans: &mut spans,
+            },
+            PaneGlyphSinks {
+                row_ink: &mut ink,
+                ink_surface: plan.surface,
+                underline_owners: &mut owners,
+                injected_row_glyph: None,
+                emitted_slots: None,
+                row_keys: &mut row_keys,
+            },
+        );
+    }));
+    assert!(unwound.is_err(), "emission unwinds on the missing column edges");
+    assert!(row_keys.capacity() >= 64, "the key buffer stays in the scratch with its capacity");
+    assert_eq!(row_keys.as_ptr(), warm_pointer, "and keeps its warm allocation");
 }

@@ -1,14 +1,15 @@
 //! Renderer-owned per-frame scratch: the draw vectors one assembly pass fills.
 //!
 //! The renderer keeps one [`FrameScratch`] between frames in a [`ScratchHome`]. An assembly pass
-//! leases it after its unchanged and no-op exits; the [`ScratchLease`] guard restores it on every
-//! other exit, including `?` errors, the atlas retry, the partial fallback and unwinding. A pass
-//! that produces drawable layers hands the scratch to presentation with
-//! [`ScratchLease::into_scratch`], and presentation restores it on every outcome. Exactly one of
-//! the home, a lease or presentation holds it at any time.
+//! leases it after its unchanged and no-op exits. The [`ScratchLease`] guard holds it from there
+//! to the end of presentation: a pass that produces drawable layers marks it complete and carries
+//! the lease inside those layers, and dropping the lease on any exit (presentation's end, `?`
+//! errors, the atlas retry, the partial fallback, unwinding) restores the scratch. Exactly one of
+//! the home or a lease holds it at any time.
 //!
-//! On restore each vector records its use, is cleared, is shrunk by the vertex scratch's release
-//! rule and is then held within its element cap, so one large frame cannot pin its peak.
+//! On restore each vector is cleared and held within its element cap. After a completed pass it
+//! is also shrunk by the vertex scratch's release rule, so one large frame cannot pin its peak;
+//! an incomplete pass keeps every warm buffer, because its use understates the frame.
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -82,10 +83,31 @@ pub(crate) fn finish_vec<T>(held: &mut Vec<T>, used: usize, cap_bytes: usize) {
     }
 }
 
-/// [`finish_vec`] for a vector whose current length is the pass's use.
-fn finish_used<T>(held: &mut Vec<T>, cap_bytes: usize) {
-    let used = held.len();
-    finish_vec(held, used, cap_bytes);
+/// End one pass for one vector: a completed pass releases by its use ([`finish_vec`]); an
+/// incomplete one only clears the vector and holds it within its cap, keeping its warm capacity.
+fn finish_part<T>(held: &mut Vec<T>, cap_bytes: usize, completed: bool) {
+    if completed {
+        // When: the pass `completed`, its length is the frame's use and drives the release rule.
+        let used = held.len();
+        finish_vec(held, used, cap_bytes);
+    } else {
+        // An incomplete pass's length understates the frame, so nothing is released by use.
+        held.clear();
+        let cap = cap_elems::<T>(cap_bytes);
+        if held.capacity() > cap {
+            // When: the vector reserves more than its cap, it is replaced at the cap.
+            *held = Vec::with_capacity(cap);
+        }
+    }
+}
+
+/// How a pass that leased the scratch ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PassEnd {
+    /// The pass assembled a drawable frame; presentation read it, whatever its outcome.
+    Completed,
+    /// The pass stopped part-way: an `Err`, an atlas retry, a partial fallback or unwinding.
+    Incomplete,
 }
 
 /// Bytes the column-edge slots reserve: the slot headers and every slot's buffer.
@@ -145,25 +167,31 @@ pub(crate) struct FrameScratch {
 }
 
 impl FrameScratch {
-    /// End a pass: record each vector's use, clear it and hold it within its release rule and
-    /// cap; then keep only the column-edge slots the pass used and drop the largest until all
-    /// of them fit their cap.
-    pub(crate) fn finish(&mut self) {
-        finish_used(&mut self.glyphs, GLYPHS_CAP_BYTES);
-        finish_used(&mut self.overlay_glyphs, OVERLAY_CAP_BYTES);
-        finish_used(&mut self.quads, QUADS_CAP_BYTES);
-        finish_used(&mut self.overlay_quads, OVERLAY_CAP_BYTES);
-        finish_used(&mut self.images, OVERLAY_CAP_BYTES);
-        finish_used(&mut self.row_spans, OVERLAY_CAP_BYTES);
-        finish_used(&mut self.underlines, OVERLAY_CAP_BYTES);
-        finish_used(&mut self.underline_owners, INDEX_CAP_BYTES);
-        finish_used(&mut self.staged_ranges, SMALL_CAP_BYTES);
-        finish_used(&mut self.missing_tofu, OVERLAY_CAP_BYTES);
-        finish_used(&mut self.pane_rects, SMALL_CAP_BYTES);
-        finish_used(&mut self.row_keys, INDEX_CAP_BYTES);
-        self.snapped.truncate(self.snapped_peak);
+    /// Return the scratch after a pass. Every vector is cleared and held within its cap. Only a
+    /// `Completed` pass, which assembled a drawable frame, also shrinks each vector by its use and
+    /// drops the column-edge slots above its peak; an `Incomplete` one (an `Err`, a retry, a
+    /// fallback or unwinding) stopped part-way, so its use understates the frame's working set
+    /// and keeps every warm buffer.
+    pub(crate) fn finish(&mut self, pass: PassEnd) {
+        let completed = pass == PassEnd::Completed;
+        finish_part(&mut self.glyphs, GLYPHS_CAP_BYTES, completed);
+        finish_part(&mut self.overlay_glyphs, OVERLAY_CAP_BYTES, completed);
+        finish_part(&mut self.quads, QUADS_CAP_BYTES, completed);
+        finish_part(&mut self.overlay_quads, OVERLAY_CAP_BYTES, completed);
+        finish_part(&mut self.images, OVERLAY_CAP_BYTES, completed);
+        finish_part(&mut self.row_spans, OVERLAY_CAP_BYTES, completed);
+        finish_part(&mut self.underlines, OVERLAY_CAP_BYTES, completed);
+        finish_part(&mut self.underline_owners, INDEX_CAP_BYTES, completed);
+        finish_part(&mut self.staged_ranges, SMALL_CAP_BYTES, completed);
+        finish_part(&mut self.missing_tofu, OVERLAY_CAP_BYTES, completed);
+        finish_part(&mut self.pane_rects, SMALL_CAP_BYTES, completed);
+        finish_part(&mut self.row_keys, INDEX_CAP_BYTES, completed);
+        if completed {
+            // When: the pass `completed`, slots above its peak are not part of the working set.
+            self.snapped.truncate(self.snapped_peak);
+        }
         for slot in &mut self.snapped {
-            finish_used(slot, SNAPPED_CAP_BYTES);
+            finish_part(slot, SNAPPED_CAP_BYTES, completed);
         }
         self.snapped_peak = 0;
         while snapped_bytes(&self.snapped) > SNAPPED_CAP_BYTES {
@@ -237,20 +265,13 @@ impl ScratchHome {
         let mut state = self.state.borrow_mut();
         state.lent = true;
         let scratch = state.held.take().unwrap_or_default();
-        ScratchLease { home: self.clone(), scratch: Some(scratch) }
+        ScratchLease { home: self.clone(), scratch: Some(scratch), pass: PassEnd::Incomplete }
     }
 
-    /// Guard a scratch handed out by [`ScratchLease::into_scratch`] while presentation reads it;
-    /// dropping the guard restores the scratch, whatever the outcome.
-    pub(crate) fn hold(&self, scratch: FrameScratch) -> ScratchLease {
-        debug_assert!(self.is_lent(), "only a scratch the home lent can be held");
-        ScratchLease { home: self.clone(), scratch: Some(scratch) }
-    }
-
-    /// Take the scratch back after a pass or presentation: finish it and keep it for the next
-    /// pass, or drop it when reuse is off.
-    pub(crate) fn restore(&self, mut scratch: FrameScratch) {
-        scratch.finish();
+    /// Take the scratch back from the lease that held it: finish it by how its `pass` ended and
+    /// keep it for the next pass, or drop it when reuse is off. Only the lease's drop calls this.
+    fn restore(&self, mut scratch: FrameScratch, pass: PassEnd) {
+        scratch.finish(pass);
         let mut state = self.state.borrow_mut();
         debug_assert!(state.lent, "only the one holder restores the frame scratch");
         debug_assert!(state.held.is_none(), "the home never holds a second scratch");
@@ -261,7 +282,8 @@ impl ScratchHome {
         }
     }
 
-    /// Whether a pass or presentation holds the scratch.
+    /// Whether a lease holds the scratch; tests check the one-holder rule with it.
+    #[cfg(test)]
     pub(crate) fn is_lent(&self) -> bool {
         self.state.borrow().lent
     }
@@ -283,11 +305,14 @@ impl ScratchHome {
     }
 }
 
-/// One assembly pass's hold on the frame scratch; dropping it restores the scratch.
+/// One pass's hold on the frame scratch, from assembly through presentation; dropping it, on
+/// any exit including unwinding, restores the scratch to its home.
 #[derive(Debug)]
 pub(crate) struct ScratchLease {
     home: ScratchHome,
     scratch: Option<FrameScratch>,
+    /// How the pass ended so far: `Incomplete` until assembly produced a drawable frame.
+    pass: PassEnd,
 }
 
 impl ScratchLease {
@@ -301,19 +326,20 @@ impl ScratchLease {
         self.scratch.as_ref().expect("a live lease holds the scratch")
     }
 
-    /// Hand the scratch to presentation, which must restore it on every outcome.
-    pub(crate) fn into_scratch(mut self) -> FrameScratch {
-        self.scratch.take().expect("a live lease holds the scratch")
+    /// Record that assembly produced a drawable frame, so the restore trims by this pass's use.
+    /// The lease itself then travels with the frame to presentation.
+    pub(crate) fn complete(&mut self) {
+        self.pass = PassEnd::Completed;
     }
 }
 
-// Lifecycle: a ScratchLease still holding its scratch when dropped (an `Err`, a retry, a
-// fallback or unwinding) restores it to its home, so no exit loses the buffers.
+// Lifecycle: a ScratchLease restores its scratch to its home when dropped, after presentation,
+// on an `Err`, a retry, a fallback or unwinding, so no exit loses the buffers.
 impl Drop for ScratchLease {
     fn drop(&mut self) {
         if let Some(scratch) = self.scratch.take() {
-            // The scratch was not handed to presentation, so the lease returns it.
-            self.home.restore(scratch);
+            // The lease holds the scratch until it drops, so it returns it here.
+            self.home.restore(scratch, self.pass);
         }
     }
 }

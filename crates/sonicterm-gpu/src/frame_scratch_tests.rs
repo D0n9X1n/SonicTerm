@@ -69,7 +69,7 @@ fn scratch_release_and_element_caps() {
     scratch.underline_owners.resize(MIB / 8, 0);
     scratch.row_keys.resize(MIB / 8, 0);
     scratch.staged_ranges.resize(MIB / 16, (0, 0..0));
-    scratch.finish();
+    scratch.finish(PassEnd::Completed);
     for (name, reserved, cap) in [
         ("glyphs", reserved_bytes(&scratch.glyphs), GLYPHS_CAP_BYTES),
         ("overlay glyphs", reserved_bytes(&scratch.overlay_glyphs), OVERLAY_CAP_BYTES),
@@ -87,11 +87,11 @@ fn scratch_release_and_element_caps() {
     for slot in 0..6 {
         fill_snapped_slot(&mut scratch.snapped, &mut scratch.snapped_peak, slot, 0.0, 1.0, 40_000);
     }
-    scratch.finish();
+    scratch.finish(PassEnd::Completed);
     scratch.snapped_peak = 0;
     fill_snapped_slot(&mut scratch.snapped, &mut scratch.snapped_peak, 0, 0.0, 1.0, 10);
     fill_snapped_slot(&mut scratch.snapped, &mut scratch.snapped_peak, 1, 0.0, 1.0, 10);
-    scratch.finish();
+    scratch.finish(PassEnd::Completed);
     assert_eq!(scratch.snapped.len(), 2, "slots above the pass's peak are dropped first");
     let mut heavy = FrameScratch::default();
     // Five slots of 65,000 columns reserve about 1.3 MB, over the 1 MiB cap.
@@ -99,7 +99,7 @@ fn scratch_release_and_element_caps() {
         fill_snapped_slot(&mut heavy.snapped, &mut heavy.snapped_peak, slot, 0.0, 1.0, 65_000);
     }
     assert!(snapped_bytes(&heavy.snapped) > SNAPPED_CAP_BYTES, "the pass exceeds the cap");
-    heavy.finish();
+    heavy.finish(PassEnd::Completed);
     assert!(
         snapped_bytes(&heavy.snapped) <= SNAPPED_CAP_BYTES,
         "then the largest until within 1 MiB"
@@ -108,10 +108,10 @@ fn scratch_release_and_element_caps() {
 
 #[test]
 fn scratch_restore_rule_per_exit() {
-    // Exactly one holder per exit: a pass leases the scratch, and whether it fails, retries, is
-    // dropped by a panic or hands the scratch to presentation and restores it, the next pass
-    // leases the same buffers with their capacity; an unchanged frame never leases, so nothing
-    // is released. A scratch lost after the hand-off leaves the next pass an empty one.
+    // Exactly one holder at a time, and no exit loses the scratch: a lease dropped by an `Err`, a
+    // retry or a fallback, a completed lease carried to presentation and dropped there, and a
+    // lease dropped by unwinding all return the same warm buffers to the home; an unchanged frame
+    // never leases, so nothing is released; with reuse off nothing is kept.
     let home = ScratchHome::new();
     let warm = |home: &ScratchHome| {
         let mut lease = home.lease();
@@ -128,15 +128,16 @@ fn scratch_restore_rule_per_exit() {
     };
 
     drop(warm(&home));
-    assert!(!home.is_lent(), "an `Err` or retry exit restores the scratch when its lease drops");
+    assert!(!home.is_lent(), "an `Err`, retry or fallback exit restores the scratch");
     let after_error = glyph_capacity(&home);
     assert!(after_error >= 1000, "with its capacity");
 
-    let handed = warm(&home).into_scratch();
-    assert!(home.is_lent(), "presentation holds the scratch; the home does not");
-    assert_eq!(handed.glyphs.len(), 1000, "with the pass's contents");
-    home.restore(handed);
-    assert!(!home.is_lent(), "every presentation outcome restores it");
+    let mut carried = warm(&home);
+    carried.complete();
+    assert!(home.is_lent(), "the lease carried to presentation still holds the scratch");
+    assert_eq!(carried.held().glyphs.len(), 1000, "with the pass's contents");
+    drop(carried);
+    assert!(!home.is_lent(), "presentation's end restores it");
     assert_eq!(glyph_capacity(&home), after_error, "the same buffers come back");
 
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -145,18 +146,129 @@ fn scratch_restore_rule_per_exit() {
     }));
     assert!(panicked.is_err());
     assert!(!home.is_lent(), "unwinding drops the lease, which restores the scratch");
+    assert_eq!(glyph_capacity(&home), after_error, "with its buffers");
 
     let before_unchanged = home.retained_amount();
     assert_eq!(home.retained_amount(), before_unchanged, "an unchanged frame leases nothing");
 
-    drop(warm(&home).into_scratch());
-    assert!(home.is_lent(), "a scratch lost after the hand-off is gone");
-    let lease = home.lease();
-    assert_eq!(lease.held().glyphs.capacity(), 0, "the next pass starts empty");
-    drop(lease);
-    assert!(!home.is_lent());
-
     home.set_reuse(false);
     drop(warm(&home));
     assert_eq!(home.retained_amount().bytes, 0, "with reuse off nothing is kept");
+}
+
+/// A drawable frame on its way to presentation, carrying its pass's lease as the renderer's
+/// assembled layers do.
+struct CarriedFrame {
+    scratch: ScratchLease,
+}
+
+#[test]
+fn unwinding_after_assembly_or_during_presentation_restores_the_scratch() {
+    // Once a pass completes, its lease travels with the frame: an unwind between assembly's return
+    // and presentation (the source release and upload rebuild), or one while presentation reads
+    // the batches, drops the frame and so the lease, which returns the warm scratch to its home.
+    for (name, reading) in [("after assembly", false), ("during presentation", true)] {
+        let home = ScratchHome::new();
+        let mut lease = home.lease();
+        lease.get().glyphs.resize(1000, glyph());
+        drop(lease);
+        let warm_bytes = home.retained_amount().bytes;
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut lease = home.lease();
+            lease.get().glyphs.resize(1000, glyph());
+            lease.complete();
+            let frame = CarriedFrame { scratch: lease };
+            if reading {
+                let batches = frame.scratch.held();
+                assert_eq!(batches.glyphs.len(), 1000, "presentation reads the batches");
+                panic!("presentation unwinds while it reads the batches");
+            }
+            panic!("the frame unwinds before presentation");
+        }));
+        assert!(unwound.is_err(), "{name}: the closure unwound");
+        assert!(!home.is_lent(), "{name}: the scratch is home again");
+        assert_eq!(home.retained_amount().bytes, warm_bytes, "{name}: with its buffers");
+    }
+}
+
+#[test]
+fn assembled_layers_carry_the_lease_itself() {
+    // The renderer's assembled layers hold the pass's lease, not raw scratch taken out of it, so
+    // nothing between assembly and the end of presentation can drop the scratch unguarded.
+    let core = include_str!("core.rs").replace("\r\n", "\n");
+    assert!(
+        core.contains("    scratch: frame_scratch::ScratchLease,"),
+        "the layers hold the lease"
+    );
+    assert!(!core.contains("into_scratch("), "no raw scratch leaves the lease");
+    assert!(!core.contains("std::mem::take(sinks.row_keys)"), "row keys are borrowed in place");
+}
+
+#[test]
+fn an_incomplete_pass_keeps_every_warm_edge_slot() {
+    // A frame uses column-edge slots 0 (glyphs) and 1 (background). A pass that stops after
+    // filling slot 0 only (an `Err` or a retry before the background loop) must not drop slot 1:
+    // that pass's peak understates the frame's working set, so its warm buffer is kept.
+    let home = ScratchHome::new();
+    let mut lease = home.lease();
+    for slot in 0..2 {
+        let scratch = lease.get();
+        fill_snapped_slot(&mut scratch.snapped, &mut scratch.snapped_peak, slot, 0.0, 10.0, 80);
+    }
+    drop(lease);
+    let before = home.retained_amount().bytes;
+    let mut lease = home.lease();
+    let scratch = lease.get();
+    fill_snapped_slot(&mut scratch.snapped, &mut scratch.snapped_peak, 0, 0.0, 10.0, 80);
+    drop(lease);
+    let after = home.retained_amount().bytes;
+    assert_eq!(after, before, "an incomplete pass kept {after} of {before} edge bytes");
+}
+
+#[test]
+fn every_scratch_vector_is_held_within_its_own_cap() {
+    // Each draw vector has its own byte cap, listed here independently of the module: a pass that
+    // leaves any one of them far above its cap returns it within that cap, kept warm rather than
+    // dropped, and the column-edge slots together stay within theirs. An incomplete pass applies
+    // only the caps, so every category is checked on its cap alone.
+    fn oversized<T>(cap_bytes: usize) -> Vec<T> {
+        Vec::with_capacity(4 * cap_bytes / std::mem::size_of::<T>() + 1)
+    }
+    const KIB: usize = 1024;
+    let mut scratch = FrameScratch {
+        glyphs: oversized(4 * MIB),
+        overlay_glyphs: oversized(MIB),
+        quads: oversized(4 * MIB),
+        overlay_quads: oversized(MIB),
+        images: oversized(MIB),
+        row_spans: oversized(MIB),
+        underlines: oversized(MIB),
+        underline_owners: oversized(256 * KIB),
+        staged_ranges: oversized(64 * KIB),
+        missing_tofu: oversized(MIB),
+        pane_rects: oversized(64 * KIB),
+        snapped: vec![oversized(MIB), oversized(MIB)],
+        snapped_peak: 2,
+        row_keys: oversized(256 * KIB),
+    };
+    scratch.finish(PassEnd::Incomplete);
+    for (name, reserved, cap) in [
+        ("glyphs", reserved_bytes(&scratch.glyphs), 4 * MIB),
+        ("overlay glyphs", reserved_bytes(&scratch.overlay_glyphs), MIB),
+        ("quads", reserved_bytes(&scratch.quads), 4 * MIB),
+        ("overlay quads", reserved_bytes(&scratch.overlay_quads), MIB),
+        ("images", reserved_bytes(&scratch.images), MIB),
+        ("row spans", reserved_bytes(&scratch.row_spans), MIB),
+        ("underlines", reserved_bytes(&scratch.underlines), MIB),
+        ("underline owners", reserved_bytes(&scratch.underline_owners), 256 * KIB),
+        ("staged ranges", reserved_bytes(&scratch.staged_ranges), 64 * KIB),
+        ("missing tofu", reserved_bytes(&scratch.missing_tofu), MIB),
+        ("pane rects", reserved_bytes(&scratch.pane_rects), 64 * KIB),
+        ("row keys", reserved_bytes(&scratch.row_keys), 256 * KIB),
+        ("column edges", snapped_bytes(&scratch.snapped), MIB),
+    ] {
+        assert!(reserved <= cap, "{name}: {reserved} bytes over its {cap}-byte cap");
+    }
+    assert!(reserved_bytes(&scratch.pane_rects) > 0, "a capped vector is kept warm, not dropped");
+    assert!(reserved_bytes(&scratch.glyphs) > 0, "a capped vector is kept warm, not dropped");
 }
