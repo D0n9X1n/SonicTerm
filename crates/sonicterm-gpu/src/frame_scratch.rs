@@ -12,7 +12,6 @@
 
 use std::cell::RefCell;
 use std::ops::Range;
-use std::rc::Rc;
 
 use sonicterm_render_model::boundary::ui::pane::Rect as PaneRect;
 use sonicterm_text::row_glyph_cache::UnderlineRun;
@@ -50,7 +49,9 @@ pub(crate) const INDEX_CAP_BYTES: usize = 256 * KIB;
 /// Byte cap of all column-edge slots together, headers included.
 pub(crate) const SNAPPED_CAP_BYTES: usize = MIB;
 
-/// The most one renderer's frame scratch retains: the sum of every cap.
+/// The most one renderer's frame scratch retains: the sum of every cap. `sonicterm-types` records
+/// the same figure for the `FrameScratch` class; a test ties the two.
+#[cfg(test)]
 pub(crate) const FRAME_SCRATCH_CAP: usize = GLYPHS_CAP_BYTES
     + QUADS_CAP_BYTES
     + 6 * OVERLAY_CAP_BYTES
@@ -166,7 +167,8 @@ impl FrameScratch {
         }
         self.snapped_peak = 0;
         while snapped_bytes(&self.snapped) > SNAPPED_CAP_BYTES {
-            let Some(largest) = (0..self.snapped.len()).max_by_key(|index| self.snapped[*index].capacity())
+            let Some(largest) =
+                (0..self.snapped.len()).max_by_key(|index| self.snapped[*index].capacity())
             else {
                 // When: no slot is left yet the headers alone pass the cap, they are released.
                 self.snapped = Vec::new();
@@ -221,7 +223,7 @@ struct HomeState {
 /// The renderer's frame scratch between passes, shared with the lease a pass holds.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ScratchHome {
-    state: Rc<RefCell<HomeState>>,
+    state: std::rc::Rc<RefCell<HomeState>>,
 }
 
 impl ScratchHome {

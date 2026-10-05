@@ -12,9 +12,9 @@ use sonicterm_render_model::boundary::cfg::theme::{Palette, Theme};
 use sonicterm_render_model::boundary::ui::tabs::{fit_title_to_width, TITLE_FIT_TOLERANCE_PX};
 use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
 
-use crate::chrome_text::{
-    ChromeAttrs, ChromeRunView, ChromeShapedRun, PreparedChromeRun, CHROME_SHAPED_GLYPH_BYTES,
-};
+#[cfg(test)]
+use crate::chrome_text::CHROME_SHAPED_GLYPH_BYTES;
+use crate::chrome_text::{ChromeAttrs, ChromeRunView, ChromeShapedRun, PreparedChromeRun};
 
 #[cfg(test)]
 #[path = "chrome_cache_tests.rs"]
@@ -33,6 +33,7 @@ pub(crate) const MAX_CACHED_TEXT_BYTES: usize = 256;
 pub(crate) const MAX_CACHED_GLYPHS: usize = 512;
 
 /// Longest drawn title text: a cut title keeps a prefix of the admitted text plus `…` (3 bytes).
+#[cfg(test)]
 const MAX_DRAWN_TITLE_BYTES: usize = MAX_CACHED_TEXT_BYTES + '…'.len_utf8();
 
 /// The admission bounds of one cache; tests lower them to reach the refusal paths.
@@ -96,12 +97,7 @@ pub(crate) fn fit_title_run(
 ) -> TitleFit {
     let Some(whole) = shape_title(stack, text, font_size_px) else {
         // When: the whole title cannot be shaped, nothing is drawn for it this frame.
-        return TitleFit {
-            text: String::new(),
-            run: None,
-            width_px: 0.0,
-            complete: false,
-        };
+        return TitleFit { text: String::new(), run: None, width_px: 0.0, complete: false };
     };
     let whole_px: f32 = whole.advances().map(|(_, advance)| advance).sum();
     if whole_px <= available_px + TITLE_FIT_TOLERANCE_PX {
@@ -262,7 +258,8 @@ impl TitleCache {
         stack: &FontStack,
         reuse: bool,
     ) -> TitleDraw {
-        let kept = self.slots.as_ref().and_then(|slots| slots.get(position)).and_then(Option::as_ref);
+        let kept =
+            self.slots.as_ref().and_then(|slots| slots.get(position)).and_then(Option::as_ref);
         if reuse && kept.is_some_and(|title| title.key.matches(probe)) {
             // When: the slot holds this exact key, the title draws from it without shaping.
             crate::frame_stats::note_tab_title(true);
@@ -273,7 +270,9 @@ impl TitleCache {
         let admitted = reuse
             && position < TITLE_SLOTS
             && fit.complete
-            && self.limits.admits(probe.text, fit.run.as_ref().map_or(0, |run| run.view().glyph_count()));
+            && self
+                .limits
+                .admits(probe.text, fit.run.as_ref().map_or(0, |run| run.view().glyph_count()));
         if !admitted {
             // When: the fit is not kept, a stale slot at this position is dropped with it.
             if let Some(slot) = self.slots.as_mut().and_then(|slots| slots.get_mut(position)) {
@@ -314,11 +313,13 @@ impl TitleCache {
     }
 
     /// Whether a title is kept at `position`.
+    #[cfg(test)]
     pub(crate) fn is_stored(&self, position: usize) -> bool {
         self.slots.as_ref().and_then(|slots| slots.get(position)).is_some_and(Option::is_some)
     }
 
     /// Slots in the table: [`TITLE_SLOTS`] once allocated, otherwise 0.
+    #[cfg(test)]
     pub(crate) fn slot_count(&self) -> usize {
         self.slots.as_ref().map_or(0, |slots| slots.len())
     }
@@ -339,15 +340,10 @@ impl TitleCache {
     pub(crate) fn len(&self) -> usize {
         self.slots.as_ref().map_or(0, |slots| slots.iter().flatten().count())
     }
-
-    /// Test seam: lower the admission limits.
-    #[cfg(test)]
-    pub(crate) fn set_limits_for_test(&mut self, limits: AdmissionLimits) {
-        self.limits = limits;
-    }
 }
 
 /// The most the title cache can hold: its table plus every slot at the admission limits.
+#[cfg(test)]
 pub(crate) const fn title_cache_envelope_bytes() -> usize {
     std::mem::size_of::<[Option<PreparedTitle>; TITLE_SLOTS]>()
         + TITLE_SLOTS
@@ -465,13 +461,9 @@ impl ChromeRunCache {
             }
         }
         crate::frame_stats::note_chrome_run(false);
-        let Some(shaped) = ChromeShapedRun::shape(
-            stack,
-            text,
-            key.attrs,
-            key.font_size_px(),
-            key.native_em_px(),
-        ) else {
+        let Some(shaped) =
+            ChromeShapedRun::shape(stack, text, key.attrs, key.font_size_px(), key.native_em_px())
+        else {
             // When: shaping failed, nothing is kept and the caller keeps its own fallback.
             return ChromeRunHandle::Failed;
         };
@@ -495,7 +487,10 @@ impl ChromeRunCache {
     }
 
     /// The run `handle` names, borrowed from this cache or from the handle; `None` for a failure.
-    pub(crate) fn view<'run>(&'run self, handle: &'run ChromeRunHandle) -> Option<ChromeRunView<'run>> {
+    pub(crate) fn view<'run>(
+        &'run self,
+        handle: &'run ChromeRunHandle,
+    ) -> Option<ChromeRunView<'run>> {
         match handle {
             ChromeRunHandle::Cached(index) => self
                 .slots
@@ -535,6 +530,7 @@ impl ChromeRunCache {
 }
 
 /// The most the chrome-run cache can hold: its table plus every slot at the admission limits.
+#[cfg(test)]
 pub(crate) const fn chrome_run_cache_envelope_bytes() -> usize {
     std::mem::size_of::<[Option<ChromeRunEntry>; CHROME_RUN_SLOTS]>()
         + CHROME_RUN_SLOTS * (MAX_CACHED_TEXT_BYTES + MAX_CACHED_GLYPHS * CHROME_SHAPED_GLYPH_BYTES)
@@ -624,10 +620,12 @@ fn palette_hex_capacity(palette: &Palette) -> usize {
 /// Bytes the envelope allows for the kept palette's color strings. A bundled theme's 30 colors
 /// take about 210 bytes; a user theme may write longer strings, so this is an allowance, not a
 /// bound, and the live report stays exact.
+#[cfg(test)]
 pub(crate) const PALETTE_ALLOWANCE_BYTES: usize = 4 * 1024;
 
 /// The `ChromeCache` class envelope per renderer: both run tables full of maximal entries plus
-/// the palette allowance. `sonicterm-types` records the same figure.
+/// the palette allowance. `sonicterm-types` records the same figure; a test ties the two.
+#[cfg(test)]
 pub(crate) const CHROME_CACHE_ENVELOPE_BYTES: usize =
     title_cache_envelope_bytes() + chrome_run_cache_envelope_bytes() + PALETTE_ALLOWANCE_BYTES;
 

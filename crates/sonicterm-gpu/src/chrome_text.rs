@@ -586,6 +586,7 @@ impl PreparedChromeRun {
 }
 
 /// Size of one kept shaped glyph, for retention envelopes outside this module.
+#[cfg(test)]
 pub(crate) const CHROME_SHAPED_GLYPH_BYTES: usize = std::mem::size_of::<ChromeShapedGlyph>();
 
 #[cfg(test)]

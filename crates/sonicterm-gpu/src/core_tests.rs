@@ -223,7 +223,8 @@ fn shape_run_for_test(
 ) -> bool {
     let mut records = sonicterm_text::row_glyph_cache::CachedRow::default();
     // The builder takes cells borrowed from a grid; the fixture owns its cells.
-    let borrowed: Vec<(u16, &Cell)> = fixture.cells.iter().map(|(col, cell)| (*col, cell)).collect();
+    let borrowed: Vec<(u16, &Cell)> =
+        fixture.cells.iter().map(|(col, cell)| (*col, cell)).collect();
     let complete = GpuRenderer::build_shape_run(
         fixture.atlas,
         &mut records,
@@ -3026,7 +3027,8 @@ fn tab_titles_fit_their_stored_width_whole_or_cut_at_a_grapheme_boundary() {
         let tab = &tabs.tabs()[widget.idx];
         let content = TabContent::of(tab, now, layout.active == Some(widget.idx), false);
         let display = content.display_text();
-        let fitted = crate::chrome_cache::fit_title_run(&stack, &display, 15.0, widget.title_rect.w);
+        let fitted =
+            crate::chrome_cache::fit_title_run(&stack, &display, 15.0, widget.title_rect.w);
         assert!(fitted.complete, "the tracked font shapes every title");
         let drawn = drawn_tab_title_px(&stack, &fitted.text, 15.0);
         assert!(
@@ -7788,13 +7790,13 @@ fn run_flush_clones_no_cells() {
     assert!(!build.contains("c.clone()"), "build_shape_run clones no cell");
 }
 
+/// An oracle row's projected glyphs, tofu outlines, missing characters and completeness.
+type OracleRow = (Vec<GlyphInstance>, Vec<frame_scratch::TofuQuad>, Vec<char>, bool);
+
 /// Draw `grid`'s row 0 the way an independent oracle does: group the row's non-continuation
 /// cells into consecutive style runs, build each run from owned copies of its cells and project
 /// it. Returns the projected glyphs, tofu and missing characters and the row's completeness.
-fn oracle_row(
-    grid: &Grid,
-    stack: &sonicterm_engine::FontStack,
-) -> (Vec<GlyphInstance>, Vec<(f32, f32, f32, f32, ChromeColor)>, Vec<char>, bool) {
+fn oracle_row(grid: &Grid, stack: &sonicterm_engine::FontStack) -> OracleRow {
     let row = grid.row(0);
     let visible: Vec<(u16, Cell)> = row
         .iter()
@@ -7927,7 +7929,10 @@ fn face_replacement_sites_clear_both_caches() {
     let source = include_str!("core.rs").replace("\r\n", "\n");
     for signature in ["fn adopt_font_stacks(", "fn rebuild_for_sf(", "pub fn clear_shape_cache("] {
         let body = item_body(&source, signature);
-        assert!(body.contains("self.chrome_caches.clear_runs();"), "{signature} clears both caches");
+        assert!(
+            body.contains("self.chrome_caches.clear_runs();"),
+            "{signature} clears both caches"
+        );
         assert!(body.contains("row_glyph_cache.invalidate_all()"), "{signature} beside the rows");
     }
     let set_font = item_body(&source, "pub fn set_font(");

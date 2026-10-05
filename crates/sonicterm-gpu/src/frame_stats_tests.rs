@@ -567,7 +567,7 @@ fn recolor_visits_count_the_main_glyph_list_and_never_an_overlay() {
         let call = &core[offset..core.len().min(offset + 80)];
         let after = &core[offset..core.len().min(offset + 260)];
         assert!(
-            call.contains("(&mut*glyph_instances,&row_spans,"),
+            call.contains("(&mut*glyph_instances,row_spans,"),
             "unexpected main recolor: {call}"
         );
         assert!(

@@ -508,13 +508,13 @@ fn chrome_runs_follow_font_preparation() {
         text_px: 400.0,
     };
     let _ = targets.runs.prepare(&stack, "label", key, true);
-    assert_eq!(targets.prepare_notice(7, 0).1, true, "an Initial preparation");
+    assert!(targets.prepare_notice(7, 0).1, "an Initial preparation");
     assert_eq!(targets.runs.len(), 0, "Initial empties the chrome runs");
     let _ = targets.runs.prepare(&stack, "label", key, true);
     let _ = titles.prepare(0, &title(targets.epoch), &stack, true);
-    assert_eq!(targets.prepare_notice(7, 0).1, false, "an unchanged preparation");
+    assert!(!targets.prepare_notice(7, 0).1, "an unchanged preparation");
     assert_eq!(targets.runs.len(), 1, "an unchanged preparation keeps the new run");
-    assert_eq!(targets.prepare_notice(7, 1).1, true, "a Generation preparation");
+    assert!(targets.prepare_notice(7, 1).1, "a Generation preparation");
     assert_eq!(targets.runs.len(), 0, "Generation empties the chrome runs");
     assert!(titles.is_stored(0), "titles are not physically cleared");
     let (_, stats) = counted_prepare(|| titles.prepare(0, &title(targets.epoch), &stack, true));
@@ -522,7 +522,9 @@ fn chrome_runs_follow_font_preparation() {
 }
 
 /// Run `work` inside a counting scope and return its output with the counters it moved.
-fn counted_prepare<Output>(work: impl FnOnce() -> Output) -> (Output, crate::frame_stats::FrameStats) {
+fn counted_prepare<Output>(
+    work: impl FnOnce() -> Output,
+) -> (Output, crate::frame_stats::FrameStats) {
     let sink = crate::frame_stats::FrameStatsSink::default();
     let output = {
         let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));

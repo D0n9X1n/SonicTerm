@@ -48,17 +48,24 @@ fn scratch_release_and_element_caps() {
     let mut wide = glyphs(6 * MIB / per_glyph, 3 * MIB / per_glyph);
     finish_vec(&mut wide, 3 * MIB / per_glyph, 4 * MIB);
     assert!(reserved_bytes(&wide) <= 4 * MIB, "glyphs at 6 MiB with 3 MiB used fall to the cap");
-    let mut at_cap = glyphs(cap_elems::<GlyphInstance>(4 * MIB), cap_elems::<GlyphInstance>(4 * MIB));
+    let mut at_cap =
+        glyphs(cap_elems::<GlyphInstance>(4 * MIB), cap_elems::<GlyphInstance>(4 * MIB));
     let pointer = at_cap.as_ptr();
     let at_cap_used = at_cap.len();
     finish_vec(&mut at_cap, at_cap_used, 4 * MIB);
     assert_eq!(at_cap.as_ptr(), pointer, "a vector at its cap keeps its allocation");
 
-    let mut scratch = FrameScratch::default();
-    scratch.glyphs = glyphs(8 * MIB / per_glyph, 8 * MIB / per_glyph);
-    scratch.overlay_glyphs = glyphs(3 * MIB / per_glyph, 3 * MIB / per_glyph);
-    scratch.quads.resize(6 * MIB / std::mem::size_of::<QuadInstance>(), bytemuck::Zeroable::zeroed());
-    scratch.overlay_quads.resize(3 * MIB / std::mem::size_of::<QuadInstance>(), bytemuck::Zeroable::zeroed());
+    let mut scratch = FrameScratch {
+        glyphs: glyphs(8 * MIB / per_glyph, 8 * MIB / per_glyph),
+        overlay_glyphs: glyphs(3 * MIB / per_glyph, 3 * MIB / per_glyph),
+        ..FrameScratch::default()
+    };
+    scratch
+        .quads
+        .resize(6 * MIB / std::mem::size_of::<QuadInstance>(), bytemuck::Zeroable::zeroed());
+    scratch
+        .overlay_quads
+        .resize(3 * MIB / std::mem::size_of::<QuadInstance>(), bytemuck::Zeroable::zeroed());
     scratch.underline_owners.resize(MIB / 8, 0);
     scratch.row_keys.resize(MIB / 8, 0);
     scratch.staged_ranges.resize(MIB / 16, (0, 0..0));
@@ -93,7 +100,10 @@ fn scratch_release_and_element_caps() {
     }
     assert!(snapped_bytes(&heavy.snapped) > SNAPPED_CAP_BYTES, "the pass exceeds the cap");
     heavy.finish();
-    assert!(snapped_bytes(&heavy.snapped) <= SNAPPED_CAP_BYTES, "then the largest until within 1 MiB");
+    assert!(
+        snapped_bytes(&heavy.snapped) <= SNAPPED_CAP_BYTES,
+        "then the largest until within 1 MiB"
+    );
 }
 
 #[test]

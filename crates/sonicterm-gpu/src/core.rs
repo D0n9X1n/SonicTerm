@@ -1433,9 +1433,7 @@ use sonicterm_render_model::boundary::ui::{
         tab_bar_height, Rect as TabTitleRect, TabBarLayout, ACTIVE_TOP_ACCENT_H,
         ACTIVE_TOP_ACCENT_INSET, TAB_BAR_HEIGHT, TAB_GAP, TAB_VERT_INSET,
     },
-    tabs::{
-        ContentWidthRefresh, TabBar, TabContent,
-    },
+    tabs::{ContentWidthRefresh, TabBar, TabContent},
 };
 use sonicterm_render_model::geometry::PixelRect;
 use sonicterm_text::GlyphInstance;
@@ -6269,10 +6267,8 @@ impl GpuRenderer {
                 // A test enabled the inspector: this pass records only what it emits itself.
                 probe.clear();
             }
-            for (pane_index, pv) in pane_views
-                .iter()
-                .enumerate()
-                .filter(|(_, pane)| pane.planned.full_clip.is_some())
+            for (pane_index, pv) in
+                pane_views.iter().enumerate().filter(|(_, pane)| pane.planned.full_clip.is_some())
             {
                 let pane_staged_start = self.row_ink.staged_len();
                 // The inspector's record of this pane's emitted slots; `None` in production.
@@ -6631,7 +6627,7 @@ impl GpuRenderer {
             ) {
                 let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
                     &mut *glyph_instances,
-                    &row_spans,
+                    row_spans,
                     cx,
                     cy,
                     self.cell_w,
@@ -6712,7 +6708,7 @@ impl GpuRenderer {
                         }
                         let RecolorOutcome { visited, record } = recolor_cursor_glyphs_in(
                             &mut *glyph_instances,
-                            &row_spans,
+                            row_spans,
                             cx,
                             cy,
                             cw,
@@ -6839,8 +6835,7 @@ impl GpuRenderer {
             if let Some(hovered_view) = pane_views.iter().find(|view| view.pane_id == h.pane_id) {
                 // When: `pane_views` finds `h.pane_id`, project all fragments through that pane's geometry.
                 let hov_accent = if h.active {
-                    self.chrome_caches.palette.palette_for(theme)
-                        .accent
+                    self.chrome_caches.palette.palette_for(theme).accent
                 } else {
                     // When: `h.active` is false, render the non-clickable hover hint in the theme's yellow rather than the action accent.
                     hex_to_premultiplied_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
@@ -6966,8 +6961,7 @@ impl GpuRenderer {
             // tab bar. The theme.tab.* colors remain authoritative for
             // the title text (active vs inactive fg) so per-theme accents
             // still read through.
-            let ui_palette =
-                self.chrome_caches.palette.palette_for(theme);
+            let ui_palette = self.chrome_caches.palette.palette_for(theme);
             // `tok::BG_BASE` is a hardcoded near-black
             // (`#0B0E14`) that is indistinguishable from most dark
             // themes' `theme.background` — the tab bar drew correctly
@@ -7067,8 +7061,12 @@ impl GpuRenderer {
                         text_px,
                     };
                     // A warm, unchanged title draws from its kept run with no shaping.
-                    let draw =
-                        self.chrome_caches.titles.prepare(position, &probe, stack, self.chrome_reuse);
+                    let draw = self.chrome_caches.titles.prepare(
+                        position,
+                        &probe,
+                        stack,
+                        self.chrome_reuse,
+                    );
                     let title = self.chrome_caches.titles.drawn(&draw);
                     let placement = tab_title_block_placement(
                         t.title_rect,
@@ -7210,7 +7208,7 @@ impl GpuRenderer {
                     // recorded row span, so this scan still examines each of them.
                     let RecolorOutcome { visited, .. } = recolor_cursor_glyphs_in(
                         &mut *glyph_instances,
-                        &row_spans,
+                        row_spans,
                         qx,
                         qy,
                         qw,
@@ -7386,7 +7384,8 @@ impl GpuRenderer {
                     w: layout.border.w,
                     h: layout.border.h,
                 });
-                let icon_view = icon_handle.as_ref().and_then(|handle| self.chrome_caches.runs.view(handle));
+                let icon_view =
+                    icon_handle.as_ref().and_then(|handle| self.chrome_caches.runs.view(handle));
                 let icon_layout = match icon_view {
                     // When: the icon run is kept or shaped, it draws without shaping again.
                     Some(view) => chrome_text::layout_view(
@@ -7440,7 +7439,13 @@ impl GpuRenderer {
                     field_tofu = chrome_layout.missing_boxes;
                 }
                 // Layout only culls whole glyphs; scrolled glyphs crossing the edge are trimmed here.
-                clip_glyphs_to_rect(&mut *overlay_glyph_instances, label_start, search_clip, sw, sh);
+                clip_glyphs_to_rect(
+                    &mut *overlay_glyph_instances,
+                    label_start,
+                    search_clip,
+                    sw,
+                    sh,
+                );
 
                 if let Some(field) = search_field {
                     // The label shaped, so caret and highlight come from its measured clusters.
@@ -7667,8 +7672,7 @@ impl GpuRenderer {
                 },
             );
             if let Some(layout) = layout {
-                let chrome =
-                    self.chrome_caches.palette.palette_for(theme);
+                let chrome = self.chrome_caches.palette.palette_for(theme);
                 let rect = layout.border;
                 quads_overlay.push(QuadInstance::rounded(
                     px_to_ndc(rect.x, rect.y, rect.w, rect.h, sw, sh),
@@ -7718,8 +7722,7 @@ impl GpuRenderer {
         if let Some(layout) = &palette_layout {
             // When: `palette_layout` is Some — the palette is open, so its
             // panel, query row, and result rows all need chrome this frame.
-            let palette_chrome =
-                self.chrome_caches.palette.palette_for(theme);
+            let palette_chrome = self.chrome_caches.palette.palette_for(theme);
             let accent_rgba = palette_chrome.accent;
             // Full-window scrim — sits below the modal so the underlying
             // terminal recedes visually.
@@ -8399,8 +8402,7 @@ impl GpuRenderer {
                 let lh = (ly1 - ly0).max(2.0 * dpi);
                 // Drop-line accent — theme-driven (was hardcoded ACCENT_BLUE).
                 let line_color = with_premultiplied_alpha(
-                    self.chrome_caches.palette.palette_for(theme)
-                        .accent,
+                    self.chrome_caches.palette.palette_for(theme).accent,
                     0.95,
                 );
                 // 3px line centered on lx; both the half-width offset and the
@@ -8548,8 +8550,8 @@ impl GpuRenderer {
 
         #[cfg(debug_assertions)]
         {
-            crate::quad::debug_assert_premultiplied_quads("base", &quads);
-            crate::quad::debug_assert_premultiplied_quads("overlay", &quads_overlay);
+            crate::quad::debug_assert_premultiplied_quads("base", quads);
+            crate::quad::debug_assert_premultiplied_quads("overlay", quads_overlay);
         }
 
         Ok(Assembled::Layers(Box::new(AssembledLayers {

@@ -205,8 +205,10 @@ impl Latch {
 fn pause_before_completion(
     stack: &sonicterm_engine::FontStack,
 ) -> (std::sync::Arc<Latch>, std::sync::Arc<Latch>) {
-    let (arrived, release) = (std::sync::Arc::new(Latch::default()), std::sync::Arc::new(Latch::default()));
-    let (worker_arrived, worker_release) = (std::sync::Arc::clone(&arrived), std::sync::Arc::clone(&release));
+    let (arrived, release) =
+        (std::sync::Arc::new(Latch::default()), std::sync::Arc::new(Latch::default()));
+    let (worker_arrived, worker_release) =
+        (std::sync::Arc::clone(&arrived), std::sync::Arc::clone(&release));
     stack.set_fallback_worker_hooks_for_test(sonicterm_font::FallbackWorkerHooks {
         before_completion: Some(std::sync::Arc::new(move || {
             worker_arrived.open();
@@ -221,7 +223,10 @@ fn pause_before_completion(
 fn wait_for_generation(stack: &sonicterm_engine::FontStack, generation: u64) {
     let started = std::time::Instant::now();
     while stack.fallback_notice().generation() < generation {
-        assert!(started.elapsed() < std::time::Duration::from_secs(10), "no generation {generation}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "no generation {generation}"
+        );
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
@@ -366,8 +371,16 @@ fn chrome_runs_hit_by_exact_key_and_text() {
     for (name, key, text) in [
         ("attrs", ChromeRunKey::new(ChromeStack::Body, bold, 15.0, 15.0), "label"),
         ("size", ChromeRunKey::new(ChromeStack::Body, ChromeAttrs::default(), 16.0, 15.0), "label"),
-        ("native em", ChromeRunKey::new(ChromeStack::Body, ChromeAttrs::default(), 15.0, 16.0), "label"),
-        ("stack", ChromeRunKey::new(ChromeStack::TabTitle, ChromeAttrs::default(), 15.0, 15.0), "label"),
+        (
+            "native em",
+            ChromeRunKey::new(ChromeStack::Body, ChromeAttrs::default(), 15.0, 16.0),
+            "label",
+        ),
+        (
+            "stack",
+            ChromeRunKey::new(ChromeStack::TabTitle, ChromeAttrs::default(), 15.0, 15.0),
+            "label",
+        ),
         ("text", body_key(), "labe1"),
     ] {
         let mut probe_cache = ChromeRunCache::default();
@@ -402,12 +415,25 @@ fn chrome_runs_hit_by_exact_key_and_text() {
     assert_eq!(cache.len(), 0, "a failed shape keeps nothing");
     let at_limit = "x".repeat(MAX_CACHED_TEXT_BYTES);
     let over_limit = "x".repeat(MAX_CACHED_TEXT_BYTES + 1);
-    assert!(matches!(cache.prepare(&stack, &over_limit, body_key(), true), ChromeRunHandle::Fresh(_)));
-    assert!(matches!(cache.prepare(&stack, &at_limit, body_key(), true), ChromeRunHandle::Cached(_)));
+    assert!(matches!(
+        cache.prepare(&stack, &over_limit, body_key(), true),
+        ChromeRunHandle::Fresh(_)
+    ));
+    assert!(matches!(
+        cache.prepare(&stack, &at_limit, body_key(), true),
+        ChromeRunHandle::Cached(_)
+    ));
     let mut few_glyphs = ChromeRunCache::default();
-    few_glyphs.set_limits_for_test(AdmissionLimits { text_bytes: MAX_CACHED_TEXT_BYTES, glyphs: 4 });
-    assert!(matches!(few_glyphs.prepare(&stack, "abcde", body_key(), true), ChromeRunHandle::Fresh(_)));
-    assert!(matches!(few_glyphs.prepare(&stack, "abcd", body_key(), true), ChromeRunHandle::Cached(_)));
+    few_glyphs
+        .set_limits_for_test(AdmissionLimits { text_bytes: MAX_CACHED_TEXT_BYTES, glyphs: 4 });
+    assert!(matches!(
+        few_glyphs.prepare(&stack, "abcde", body_key(), true),
+        ChromeRunHandle::Fresh(_)
+    ));
+    assert!(matches!(
+        few_glyphs.prepare(&stack, "abcd", body_key(), true),
+        ChromeRunHandle::Cached(_)
+    ));
 
     let mut one = ChromeRunCache::default();
     let _ = one.prepare(&stack, "label", body_key(), true);
@@ -435,4 +461,3 @@ fn pending_chrome_run_resolves_after_apply() {
     assert_eq!(stats.chrome_run_prepares, 1, "after the apply the lookup prepares");
     assert_ne!(cache.view(&handle).unwrap().glyph_ids_for_test(), vec![0], "and resolves");
 }
-

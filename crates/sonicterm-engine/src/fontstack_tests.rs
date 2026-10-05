@@ -1011,7 +1011,11 @@ fn packaged_rec_mono_stack() -> FontStack {
 
 /// The face today's path resolves for `(bold, italic)` on `stack`: the configured style, made
 /// bold or italic, at the stack's own point size.
-fn todays_face(stack: &FontStack, bold: bool, italic: bool) -> std::rc::Rc<sonicterm_font::LoadedFont> {
+fn todays_face(
+    stack: &FontStack,
+    bold: bool,
+    italic: bool,
+) -> std::rc::Rc<sonicterm_font::LoadedFont> {
     let mut style: TextStyle = stack.font_config.config().font.clone();
     if bold {
         style = style.make_bold();
@@ -1064,12 +1068,18 @@ fn memo_skips_resolution_and_every_warmed_sibling_misses_after_a_shared_change()
     let siblings = [&stack, &clone, &view];
     type Replace<'replace> = Box<dyn Fn() + 'replace>;
     let replacements: [(&str, Replace<'_>); 2] = [
-        ("change_scaling", Box::new(|| {
-            clone.change_scaling(clone.get_font_scale(), 144);
-        })),
-        ("config_changed", Box::new(|| {
-            clone.font_config.config_changed(&clone.font_config.config()).unwrap();
-        })),
+        (
+            "change_scaling",
+            Box::new(|| {
+                clone.change_scaling(clone.get_font_scale(), 144);
+            }),
+        ),
+        (
+            "config_changed",
+            Box::new(|| {
+                clone.font_config.config_changed(&clone.font_config.config()).unwrap();
+            }),
+        ),
     ];
     for (name, replace) in replacements {
         let old_faces: Vec<_> =

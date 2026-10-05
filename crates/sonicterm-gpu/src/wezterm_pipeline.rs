@@ -174,8 +174,7 @@ pub(crate) fn release_scratch_excess(scratch: &mut Vec<Vertex>, used_vertices: u
 /// Contents are kept.
 pub(crate) fn release_excess<T>(scratch: &mut Vec<T>, used: usize) {
     let capacity_bytes = scratch.capacity().saturating_mul(std::mem::size_of::<T>());
-    if scratch.capacity() > used.saturating_mul(4) && capacity_bytes > SCRATCH_RELEASE_FLOOR_BYTES
-    {
+    if scratch.capacity() > used.saturating_mul(4) && capacity_bytes > SCRATCH_RELEASE_FLOOR_BYTES {
         // The scratch is both oversized for this pass and large in absolute terms.
         scratch.shrink_to(used.saturating_mul(2));
     }
