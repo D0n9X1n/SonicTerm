@@ -215,10 +215,16 @@ const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
     ("S1 role-exit short", "0d41d14acc6768f69ad644df2a253a8eb87f4d470a4811d96212fd997b7622f5"),
     ("S1 wgpu full", "3229137b759764a6611e1940c8ed64e39b550d110d85962dce99ca4f23c1778d"),
     ("S1 wgpu short", "b1ca245149ddb1e11f30f8756495b95cea27e16b600e9cb7cca6622fd9ae5a39"),
+    ("S10 cjk-tui full", "6c99d44b9509f5852e40cd132156e9df8de2cc818bfc4cf77a851fd3a992f90a"),
+    ("S10 cjk-tui short", "ef72123c4dfe0337d03251e3de58d1a71482d52e9926c379c457344a171e50be"),
     ("S10 default full", "cb07c1e367527e027e25f645d99ae0439812691e70f261ed83d15027dc028e3a"),
     ("S10 default short", "81166f7998126b6f6e542b38c2f35bc713e3d4160bacc1642fc39c6de0e56da6"),
+    ("S10 powerline full", "b9cd0484e60c55d4cc4a6b4d36fbf640437f3f763b74f0a094b58b947307fe2b"),
+    ("S10 powerline short", "85776becea61803b06310066ca501ebab5f813c636ec857c6ff09bfd0f3b1ac3"),
     ("S10 sync full", "4f63a578b7af98adfb1119e792ce2df8f03887829f4df676d3102cd7f41b74fb"),
     ("S10 sync short", "52660b862b19d2e3b5f67e7fc1b3ca7622675dd9fdfe52d9ef71c9aa48dcb3f2"),
+    ("S10 unique full", "cc4fa3e298c864d4e71223a03b6ed2527e1ab094af0d537d206394d48f134f4c"),
+    ("S10 unique short", "1dd5fd82d6f6fb93f49baa6df1929956d74fffe67489c0a9e7857d438f7f7676"),
     ("S11 default full", "da59aee4c2d1ff1e729e54ec606c4f026a1b612937eb53d67a26a14e7fe1dfb9"),
     ("S11 default short", "34d256b25f0f1253a97b8df5e7aafc5fa8b64e9d5ad00ccc7acdd9d59b0ef63d"),
     ("S11 gdi full", "aa97aa1d01ffff0062e2f32c67169d1c405e0c77b00c1051e3ab0065387f625e"),
@@ -259,9 +265,9 @@ const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
 
 /// SHA-256 of every distinct fixture, keyed by file and length or by frame set.
 const FIXTURE_PINS: &[(&str, &str)] = &[
+    ("atlas-retry.txt 3430", "9d6de336ba30247c36ca1c68bc7217727464395eb0870f437cebce368f26ef39"),
     ("bulk.txt 5242880", "1c45218ab8edc05eb5964253bffd8809540e4b0f0e19c3918b821be59818a5c7"),
     ("bulk.txt 52428800", "6329aefe7c851b9410cf38309a0c5279e508b928f5cbb86610c8767f0b5f6d7e"),
-    ("atlas-retry.txt 3430", "9d6de336ba30247c36ca1c68bc7217727464395eb0870f437cebce368f26ef39"),
     ("dense.txt 17500", "1891903144eaf328e9013124afb2253fe5ba9948e0eb29b84b824fb9cde3fa36"),
     ("emoji-cjk.txt 25207", "2475f8724fa4dffa358dd6ecd12a90cb3483a1e7f839cb8d2e41f589f0282beb"),
     (
@@ -283,6 +289,30 @@ const FIXTURE_PINS: &[(&str, &str)] = &[
     ("history.txt 97500", "a23f9a80a94d5bce790e812b1ecdf5626f5c0e2ecdfdd856908663cdd7dc8a94"),
     ("image.sixel 377", "5811aa986380a75e770fa445490d45057bf949b5d52d6108995a05d0b7c7c0f0"),
     ("inline.osc 461289", "06c2d2935c10dfc293a38ec38149c97a1e97c90501694c5e75cb14d904476f2c"),
+    (
+        "rowrun kind=CjkTui total=5420",
+        "885af1c67f35640918c8e640e3bfad525161b4256a1fb2f99358652e73557b5f",
+    ),
+    (
+        "rowrun kind=CjkTui total=920",
+        "7ea39c8a11df618cfd012a804ef95547acb5ffdde1f32c90aaafaeaa2caff39c",
+    ),
+    (
+        "rowrun kind=Powerline total=5420",
+        "e468021bd7589466c2ea3b94cfcc746f6f1bf73d6c866d65ba2ddd23d9f17048",
+    ),
+    (
+        "rowrun kind=Powerline total=920",
+        "a8a508e86d3af8cd51d1775508732f3cd9f1ff2a7aafb5828e4efc9296541200",
+    ),
+    (
+        "rowrun kind=Unique total=5420",
+        "1b319ac5851d9749682da7d74ceb481fa5c88c87c10360bd19815a36baa7fff2",
+    ),
+    (
+        "rowrun kind=Unique total=920",
+        "dc8faee82cfa958f4619a22cafc48c8c56ad162abe84679f55656c6d32b24a20",
+    ),
     ("scrollback.txt 960000", "80f85648d2537805c9ea6b138a622d3055972d18904232b35380473a8d4dd8a0"),
     ("search.txt 17500", "3b7beea9b0581d1dcb96b3d10a1c3d879b7189051c1c1aff3b4d3a5187b62eba"),
 ];
@@ -301,18 +331,33 @@ fn fixture_sets() -> &'static BTreeMap<String, Vec<FixtureFile>> {
     SETS.get_or_init(|| {
         let mut sets = BTreeMap::new();
         for plan in all_plans().into_iter().chain(all_plans_on(Host::Windows)) {
-            let (frames, singles): (Vec<_>, Vec<_>) = fixtures(&plan)
-                .into_iter()
-                .partition(|fixture| fixture.relative_path.starts_with("frames/"));
+            // Frame and row-run sequences are pinned whole, one entry per sequence.
+            let row_runs = format!("{ROW_RUN_FIXTURES}/");
+            let (sequences, singles): (Vec<_>, Vec<_>) =
+                fixtures(&plan).into_iter().partition(|fixture| {
+                    fixture.relative_path.starts_with("frames/")
+                        || fixture.relative_path.starts_with(&row_runs)
+                });
             for fixture in singles {
                 let key = format!("{} {}", fixture.relative_path, fixture.byte_len());
                 sets.entry(key).or_insert_with(|| vec![fixture]);
             }
             for role in &plan.roles {
-                if let Workload::Frames { count, synchronized } = role {
-                    let key = format!("frames count={count} synchronized={synchronized}");
-                    sets.entry(key).or_insert_with(|| frames.clone());
-                }
+                let (key, prefix) = match role {
+                    Workload::Frames { count, synchronized } => {
+                        (format!("frames count={count} synchronized={synchronized}"), "frames/")
+                    }
+                    Workload::RowRuns { kind, total, .. } => {
+                        (format!("rowrun kind={kind:?} total={total}"), row_runs.as_str())
+                    }
+                    _ => continue,
+                };
+                let files: Vec<FixtureFile> = sequences
+                    .iter()
+                    .filter(|fixture| fixture.relative_path.starts_with(prefix))
+                    .cloned()
+                    .collect();
+                sets.entry(key).or_insert(files);
             }
         }
         sets
@@ -782,6 +827,14 @@ fn expected_role_output(plan: &Plan, role: usize) -> Vec<u8> {
         Workload::Frames { count, .. } => {
             (0..count).flat_map(|index| file_bytes(&format!("frames/{index}"))).collect()
         }
+        // A row-run role prints every update once, in order, then sleeps the bound: no sentinel.
+        Workload::RowRuns { total, .. } => {
+            let updates: Vec<u8> = (0..total)
+                .flat_map(|update| file_bytes(&format!("{ROW_RUN_FIXTURES}/{update}")))
+                .collect();
+            expected.extend(updates);
+            return expected;
+        }
     };
     expected.extend(body);
     expected.extend(format!("{}\n", sentinel_line(role, NONCE)).bytes());
@@ -822,7 +875,11 @@ fn run_steps_writes_nothing_between_ready_and_go() {
 fn run_steps_plays_each_fixture_in_order() {
     // Every role prints what its POSIX script prints, each fixture once, in order, then its sentinel.
     let plans = all_plans_on(BUILD_HOST).into_iter().filter(|plan| {
-        plan.short && !fixtures(plan).is_empty() && !plan.roles.contains(&Workload::DateLoop)
+        plan.short
+            && !fixtures(plan).is_empty()
+            && !plan.roles.contains(&Workload::DateLoop)
+            // A row-run role waits for the probe's presented marks; its own test writes them.
+            && !plan.roles.iter().any(|role| matches!(role, Workload::RowRuns { .. }))
     });
     for plan in plans {
         let key = plan_key(&plan);
@@ -1739,5 +1796,55 @@ fn row_run_workloads_cut_into_the_contract_runs() {
                 assert_eq!(distinct.len(), keys.len(), "a shaped run repeats within nine updates");
             }
         }
+    }
+}
+
+/// A row-run role writes each warm update only once the probe marked the one before presented,
+/// then streams the rest continuing the same count (update 20 follows 19, never 0 again), and
+/// ends sleeping the bound without a sentinel or a done file.
+#[test]
+fn a_row_run_role_waits_for_each_warm_mark_and_continues_the_count() {
+    for variant in ["powerline", "cjk-tui", "unique"] {
+        let plan = plan("S10", variant, true).unwrap();
+        let Workload::RowRuns { warm, total, .. } = plan.roles[0] else {
+            panic!("S10/{variant} plays a row-run workload");
+        };
+        assert_eq!((warm, total), (20, 20 + 900), "S10/{variant}");
+        let dir = program_dir(&format!("rowrun-{variant}"), &plan, true);
+        // Without the probe's marks the role stops after writing update 0 and waiting.
+        let mut waiting = FakeHost::new(5);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(run_steps(&dir, &mut waiting, &mut out, &mut err), 1, "S10/{variant}");
+        let ready = format!("{}\n", ready_line(0)).into_bytes();
+        let first =
+            std::fs::read(dir.join(format!("workload/fixtures/{ROW_RUN_FIXTURES}/0"))).unwrap();
+        assert_eq!(
+            out,
+            [ready.clone(), first].concat(),
+            "S10/{variant}: only update 0 before its mark"
+        );
+        std::fs::create_dir_all(dir.join(PRESENTED_DIRECTORY)).unwrap();
+        for update in 0..warm {
+            std::fs::write(dir.join(format!("{PRESENTED_DIRECTORY}/{update}")), "").unwrap();
+        }
+        std::fs::remove_dir_all(dir.join("roles/0")).unwrap();
+        let mut host = FakeHost::new(usize::MAX);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(
+            run_steps(&dir, &mut host, &mut out, &mut err),
+            0,
+            "{}",
+            String::from_utf8_lossy(&err)
+        );
+        assert!(
+            out == expected_role_output(&plan, 0),
+            "S10/{variant}: every update once, in order"
+        );
+        let bound = Duration::from_secs(plan.timeout_s + ANCHOR_MARGIN_S);
+        assert_eq!(host.sleeps.last(), Some(&bound), "S10/{variant} sleeps the bound");
+        let paced = host.sleeps.iter().filter(|sleep| **sleep == FRAME_INTERVAL).count();
+        assert_eq!(paced, (total - warm) as usize, "S10/{variant}: only the stream is paced");
+        assert!(!dir.join("done/0").exists(), "S10/{variant} writes no done file");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

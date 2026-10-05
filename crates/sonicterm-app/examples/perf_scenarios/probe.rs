@@ -572,6 +572,8 @@ struct Probe {
     /// The image atlas's retained bytes when startup ended; read only on Windows.
     image_atlas_start: Option<usize>,
     image: ImageState,
+    /// The row-run role and its warm handshake, for a plan that plays a row-run workload.
+    presented: Option<(usize, crate::presented_updates::PresentedUpdates)>,
     /// The running phase's frame barrier (S11/release's media-free and reshow), if it has one.
     barrier: Option<FrameBarrier>,
     /// Each ended phase's name, end instant and end Unix time, for anchored holds and freshness.
@@ -1361,6 +1363,12 @@ impl Probe {
         run_deadline: Instant,
     ) -> Self {
         let roles = plan.roles.len();
+        let presented = plan.roles.iter().enumerate().find_map(|(role, workload)| match workload {
+            Workload::RowRuns { kind, warm, .. } => {
+                Some((role, crate::presented_updates::PresentedUpdates::new(*kind, *warm)))
+            }
+            _ => None,
+        });
         let counters_mode = CountersMode::for_run(request.counters);
         Self {
             app,
@@ -1387,6 +1395,7 @@ impl Probe {
             sentinel_rows: vec![None; roles],
             image_atlas_start: None,
             image: ImageState::default(),
+            presented,
             barrier: None,
             phase_ends: Vec::new(),
             scan: ScanThrottle::new(SCAN_INTERVAL),
@@ -1596,6 +1605,7 @@ impl Probe {
         self.sentinel_roles.iter().any(|role| self.sentinel_seen[*role].is_none())
             || (self.image.role.is_some() && !self.image.present.seen())
             || matches!(&self.driver, DriverState::Typing(typing) if typing.origin.is_none())
+            || self.presented.as_ref().is_some_and(|(_, handshake)| !handshake.done())
     }
 
     /// Scan in dispatches the App already receives, at most every `SCAN_INTERVAL`. A throttled
@@ -1653,6 +1663,39 @@ impl Probe {
                 typing.cols = cols;
                 typing.first_at = Some(now);
             }
+        }
+        self.scan_presented_updates();
+    }
+
+    /// Advance the row-run warm handshake: once the awaited update is in the role's grid and a
+    /// later frame has presented, mark it presented so the role writes the next one.
+    fn scan_presented_updates(&mut self) {
+        let Some(role) = self
+            .presented
+            .as_ref()
+            .filter(|(_, handshake)| !handshake.done())
+            .map(|(role, _)| *role)
+        else {
+            // When: `presented` holds no handshake that is not `done`, there is nothing to mark.
+            return;
+        };
+        let Some(row_text) = self.role_grid(role, |grid| {
+            grid.row(crate::presented_updates::IDENTIFYING_ROW)
+                .iter()
+                .map(|cell| cell.ch)
+                .collect::<String>()
+        }) else {
+            // When: `role_grid` finds no pane or a busy parser, the next scan looks again.
+            return;
+        };
+        let frames = self.frame_count();
+        let marked =
+            self.presented.as_mut().and_then(|(_, handshake)| handshake.observe(&row_text, frames));
+        if let Some(update) = marked {
+            let directory = self.scratch.join(workload::PRESENTED_DIRECTORY);
+            // An unwritable mark leaves the role waiting, and the run's deadline invalidates it.
+            let _ = std::fs::create_dir_all(&directory)
+                .and_then(|()| std::fs::write(directory.join(update.to_string()), b""));
         }
     }
 
@@ -1817,6 +1860,9 @@ impl Probe {
         }
         if self.request.laps {
             notes.push("Laps run: logging at debug adds a render_timing line per frame, so it is never pooled with timed runs.".to_owned());
+        }
+        if self.plan.roles.iter().any(|role| matches!(role, Workload::RowRuns { .. })) {
+            notes.push("Row-run warm updates are written one at a time: each is marked presented only after the probe saw it in the grid and a later frame presented, and only then is the next written.".to_owned());
         }
         if self.plan.roles.iter().any(|role| matches!(role, Workload::Frames { .. })) {
             notes.push("Frames are paced by sleep 0.016 between writes, so slightly fewer than 60 arrive each second.".to_owned());
@@ -2424,6 +2470,9 @@ impl Probe {
             PhaseEnd::HoldFrom { .. } => {
                 self.phase_deadline(phase).is_some_and(|deadline| now >= deadline)
             }
+            PhaseEnd::PresentedUpdates(_) => {
+                self.presented.as_ref().is_some_and(|(_, handshake)| handshake.done())
+            }
             PhaseEnd::DriverDone => match &self.driver {
                 DriverState::Typing(typing) => {
                     typing.typed >= typing.chars
@@ -2463,7 +2512,7 @@ impl Probe {
                 };
                 barrier_phase_deadline(&phase.end, self.barrier.as_ref(), started, anchor)
             }
-            PhaseEnd::Sentinels(_) | PhaseEnd::DriverDone => None,
+            PhaseEnd::Sentinels(_) | PhaseEnd::DriverDone | PhaseEnd::PresentedUpdates(_) => None,
         }
     }
 

@@ -176,6 +176,17 @@ fn check_capture(request: &RunArgs, host: scenarios::Host) -> Result<(), String>
     if !DELIVERY_SCENARIOS.contains(&request.scenario) {
         return Err(format!("{} has no delivery replay", request.scenario));
     }
+    let row_runs = scenarios::plan_for(request.scenario, request.variant, request.short, host)
+        .is_some_and(|plan| {
+            plan.roles.iter().any(|role| matches!(role, scenarios::Workload::RowRuns { .. }))
+        });
+    if row_runs {
+        // When: `row_runs`, the variant runs only in the counters set and is never replayed.
+        return Err(format!(
+            "{}/{} runs only in the counters set and has no delivery replay",
+            request.scenario, request.variant
+        ));
+    }
     Ok(())
 }
 

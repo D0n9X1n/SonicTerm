@@ -4007,7 +4007,7 @@ RESULT_STEP = "Require every comparison job to succeed"
 # run beside their scenario's default, since a bare ID selects only the default; S1/atlas-retry runs only
 # its counters set.
 ALL_SCENARIOS = ["S1", "S1/atlas-retry", "S2", "S2/flood", "S3", "S4", "S5", "S6", "S6/flood", "S6/selection-drag",
-                 "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12"]
+                 "S7", "S8", "S9", "S10", "S10/sync", "S10/powerline", "S10/cjk-tui", "S10/unique", "S11", "S12"]
 # The variants only one platform's shards add: S11/release on both (capped at 1), the presenter controls on Windows.
 PLATFORM_SCENARIOS = {"macOS": ["S11/release"], "Windows": ["S11/release", "S11/gdi", "S11/wgpu"]}
 JOB_RESULTS = ("success", "failure", "cancelled", "skipped", "")
@@ -5122,6 +5122,24 @@ class WindowsComparisonLegTests(unittest.TestCase):
                 holders = [entry["shard"] for entry in self.matrix(job_id)
                            if "S1/atlas-retry" in entry["scenarios"].split()]
                 self.assertEqual(holders, [shard_name])
+
+    def test_the_row_run_variants_run_in_the_shards_their_placement_names(self):
+        # The placement: macOS powerline and cjk-tui on S4-S5-S11 and unique on S2-S10sync; Windows powerline and
+        # cjk-tui on S2-S10sync and unique on S1-S3-S6-S8-S12. Each matrix's comment carries the decided text.
+        placement = {"compare-macos": {"S10/powerline": "S4-S5-S11", "S10/cjk-tui": "S4-S5-S11",
+                                       "S10/unique": "S2-S10sync"},
+                     "compare-windows": {"S10/powerline": "S2-S10sync", "S10/cjk-tui": "S2-S10sync",
+                                         "S10/unique": "S1-S3-S6-S8-S12"}}
+        for job_id, variants in placement.items():
+            for variant, shard_name in variants.items():
+                with self.subTest(job=job_id, variant=variant):
+                    holders = [entry["shard"] for entry in self.matrix(job_id) if variant in entry["scenarios"].split()]
+                    self.assertEqual(holders, [shard_name])
+        workflow = (perf.ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        for line in ("# Put S10/powerline and S10/cjk-tui on S4-S5-S11, beside S1/atlas-retry, and",
+                     "# Put S10/powerline and S10/cjk-tui on S2-S10sync, and S10/unique on",
+                     "Reserve 140 s per variant for planning"):
+            self.assertIn(line, workflow)
 
     def test_only_the_s9_s10_shards_run_s9_laps(self):
         # Every matrix entry carries a laps field: S9 on the S9-S10 shard of each platform, empty elsewhere; each
@@ -9007,6 +9025,26 @@ class AtlasRetryVariantTests(CompareHarness, unittest.TestCase):
         self.assertEqual(perf.variant_sets("S1", "default", sets), sets)
         self.assertEqual(perf.variant_sets("S3", "atlas-retry", sets), sets)
         self.assertEqual(perf.variant_sets("S1", "atlas-retry", sets), [sets[2]])
+
+    def test_the_row_run_variants_are_counters_only_and_never_replayed(self):
+        # The fixed counters-only list holds S1/atlas-retry and the row-run diagnostic's three S10 workloads: each
+        # keeps only the counters set, is refused without one, and is never delivery-replayed, while S10/sync is.
+        sets = [("timed", "a", False, False, 5), ("laps", "a", True, False, 2),
+                ("counters", "a", False, True, 2), ("alloc", "b", False, False, 5)]
+        for variant in ("powerline", "cjk-tui", "unique"):
+            with self.subTest(variant=variant):
+                self.assertEqual(perf.variant_sets("S10", variant, sets), [sets[2]])
+                self.assertIn(f"S10/{variant} runs only in the counters set",
+                              perf.counters_only_problem([("S10", variant)], False))
+                self.assertIsNone(perf.counters_only_problem([("S10", variant)], True))
+                self.assertFalse(perf.delivery_replayed("S10", "win32", variant))
+        self.assertEqual(perf.variant_sets("S10", "sync", sets), sets)
+        self.assertTrue(perf.delivery_replayed("S10", "win32", "sync"))
+        listing = {"schema_version": 1, "scenarios": [
+            {"id": "S10", "variants": ["default", "sync", "powerline", "cjk-tui", "unique"], "title": "TUI",
+             "timeout_s": 300, "short_timeout_s": 240}]}
+        with self.assertRaisesRegex(ValueError, "S10/powerline runs only in the counters set"):
+            self.compare(listing=listing, scenarios=("S10/powerline",), head_manifest=COUNTERS_MANIFEST)
 
     def test_a_counters_only_variant_is_refused_when_no_counters_set_runs(self):
         # Selecting the variant without a counters set would measure nothing, so the selection is refused,

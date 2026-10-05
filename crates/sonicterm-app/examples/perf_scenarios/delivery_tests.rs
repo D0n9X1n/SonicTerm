@@ -121,6 +121,10 @@ fn limit_exceeds_every_replayed_plan() {
         for variant in find(scenario).unwrap().variants {
             for short in [false, true] {
                 let plan = plan_for(scenario, variant, short, Host::Windows).unwrap();
+                if plan.roles.iter().any(|role| matches!(role, Workload::RowRuns { .. })) {
+                    // The row-run variants run only in the counters set; their delivery is never replayed.
+                    continue;
+                }
                 if !keeps_output(plan.roles[0]) {
                     assert_eq!(scenario, "S3", "{scenario}/{variant} keeps no output");
                     continue;

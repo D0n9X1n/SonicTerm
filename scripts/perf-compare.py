@@ -2191,7 +2191,10 @@ def frame_counter_problems(counters: object, partial: bool = False) -> list[str]
 
 # Variants measured only in the counters set: their evidence is the counter record of injected episodes,
 # so a timed, laps or alloc run of them would measure nothing comparable.
-COUNTERS_ONLY_VARIANTS = frozenset({("S1", "atlas-retry")})
+# The fixed list of variants that run only in the counters set: S1/atlas-retry and the row-run diagnostic's
+# three S10 workloads. A selection naming one is refused when no counters set runs.
+COUNTERS_ONLY_VARIANTS = frozenset({("S1", "atlas-retry"), ("S10", "powerline"), ("S10", "cjk-tui"),
+                                    ("S10", "unique")})
 # S1/atlas-retry's recovery episodes: eight of frames A-D each.
 ATLAS_RECOVERY_EPISODES = 8
 ATLAS_RECOVERY_FRAMES = ("A", "B", "C", "D")
@@ -4495,9 +4498,11 @@ class DeliveryOutcome(NamedTuple):
     note: str | None = None
 
 
-def delivery_replayed(scenario_id: str, platform_name: str) -> bool:
-    """Whether a comparison on `platform_name` replays `scenario_id`'s delivery before its runs."""
-    return platform_name == "win32" and scenario_id in DELIVERY_SCENARIOS
+def delivery_replayed(scenario_id: str, platform_name: str, variant: str = "default") -> bool:
+    """Whether a comparison on `platform_name` replays `scenario_id`'s delivery before its runs. A counters-only
+    variant runs no timed set, whose rows are the only ones a replay reaches, so it is never replayed."""
+    return (platform_name == "win32" and scenario_id in DELIVERY_SCENARIOS
+            and (scenario_id, variant) not in COUNTERS_ONLY_VARIANTS)
 
 
 def capture_delivery_argv(binary: Path, scenario_id: str, variant: str, scratch: Path, *,
@@ -7390,7 +7395,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     deliveries: dict[str, DeliveryOutcome] = {}
     replay_evidence = out / "delivery"
     for scenario_id, variant in selected:
-        if delivery_replayed(scenario_id, sys.platform):
+        if delivery_replayed(scenario_id, sys.platform, variant):
             replay_evidence.mkdir(parents=True, exist_ok=True)
             index += 1
             deliveries[f"{scenario_id}/{variant}"] = run_delivery_replay(

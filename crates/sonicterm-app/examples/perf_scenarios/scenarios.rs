@@ -38,7 +38,18 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     spec("S7", "scrollback wheel", &["default"], 420, 360),
     spec("S8", "search", &["default"], 300, 240),
     spec("S9", "emoji and CJK text", &["default"], 300, 240),
-    spec("S10", "full-screen redraw", &["default", "sync"], 300, 240),
+    // The row-run diagnostic's workloads run only in the counters set (perf-compare enforces it),
+    // capped at 2 short runs per side.
+    capped(
+        spec(
+            "S10",
+            "full-screen redraw",
+            &["default", "sync", "powerline", "cjk-tui", "unique"],
+            300,
+            240,
+        ),
+        &[("powerline", 2), ("cjk-tui", 2), ("unique", 2)],
+    ),
     capped(
         spec("S11", "inline image tab switch", &["default", "gdi", "wgpu", "release"], 420, 300),
         &[("release", 1), ("gdi", 2), ("wgpu", 2)],
@@ -119,6 +130,10 @@ pub(crate) enum Workload {
     PrintThenSleep(Fixture),
     /// `count` full-screen frames paced at 60 per second; `synchronized` wraps each in DEC 2026.
     Frames { count: u32, synchronized: bool },
+    /// Row-run updates of `kind`: the first `warm` written one at a time, each only after the probe
+    /// saw the one before presented, then the rest of `total` paced at about 60 per second, the
+    /// update count continuing across both.
+    RowRuns { kind: crate::workload::RowRunWorkload, warm: u32, total: u32 },
     /// Exit 1 right after GO, printing nothing: `role-exit`, which runs only on Windows.
     ExitAfterGo,
 }
@@ -236,6 +251,16 @@ pub(crate) enum Driver {
     AtlasRetry,
 }
 
+/// Row-run warm updates: each is written only after the probe saw the previous one presented, so
+/// at least 8 committed passes of the same workload precede the stream.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const ROW_RUN_WARM_UPDATES: u32 = 20;
+/// The row-run stream phase's wall-clock length under `--short`, and in a full run.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const ROW_RUN_SHORT_STREAM_MS: u64 = 10_000;
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const ROW_RUN_FULL_STREAM_MS: u64 = 60_000;
+
 /// When a phase ends.
 #[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -257,6 +282,8 @@ pub(crate) enum PhaseEnd {
     Reshow,
     /// `hold_ms` after the end of the earlier phase `anchor`, however late this phase starts.
     HoldFrom { anchor: &'static str, hold_ms: u64 },
+    /// When the role's row-run warm updates have all been seen in its grid and then presented.
+    PresentedUpdates(usize),
 }
 
 /// Which checkpoint's memory reading becomes fresh only `delay_ms` after `anchor` phase ended.
@@ -479,6 +506,26 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 end,
             ],
         ),
+        ("S10", "powerline" | "cjk-tui" | "unique") => {
+            let kind = match variant {
+                "powerline" => crate::workload::RowRunWorkload::Powerline,
+                "cjk-tui" => crate::workload::RowRunWorkload::CjkTui,
+                _ => crate::workload::RowRunWorkload::Unique,
+            };
+            let stream_ms = if short { ROW_RUN_SHORT_STREAM_MS } else { ROW_RUN_FULL_STREAM_MS };
+            // Enough paced updates to outlast the stream at 60 a second; a slower host plays fewer.
+            let total = ROW_RUN_WARM_UPDATES + (stream_ms * 90 / 1_000) as u32;
+            let warm = PhaseSpec {
+                updates: Some(ROW_RUN_WARM_UPDATES),
+                ..timed("warm", PhaseEnd::PresentedUpdates(0))
+            };
+            let stream = timed("stream", PhaseEnd::Hold(stream_ms));
+            (
+                vec![Workload::RowRuns { kind, warm: ROW_RUN_WARM_UPDATES, total }],
+                vec![],
+                vec![Step::Phase(warm), Step::Phase(stream), end],
+            )
+        }
         ("S10", _) => {
             // 60 frames a second for 20 s, or 5 s short.
             let count = if short { 300 } else { 1_200 };

@@ -63,7 +63,8 @@ fn seconds_after_go(plan: &Plan, drivers: bool) -> u64 {
             | PhaseEnd::Sentinels(_)
             | PhaseEnd::ImageRegistered(_)
             | PhaseEnd::MediaFree
-            | PhaseEnd::Reshow => {}
+            | PhaseEnd::Reshow
+            | PhaseEnd::PresentedUpdates(_) => {}
         }
     }
     elapsed_ms.div_ceil(1_000)
@@ -76,7 +77,11 @@ fn catalog_lists_twelve_scenarios_with_their_variants() {
     assert_eq!(ids, ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S12"]);
     assert_eq!(find("S2").unwrap().variants, ["default", "flood"]);
     assert_eq!(find("S6").unwrap().variants, ["default", "flood", "selection-drag"]);
-    assert_eq!(find("S10").unwrap().variants, ["default", "sync"]);
+    // The row-run workloads run only in the counters set; perf-compare enforces it.
+    assert_eq!(
+        find("S10").unwrap().variants,
+        ["default", "sync", "powerline", "cjk-tui", "unique"]
+    );
     // The presenter variants and the role program's exit are Windows runs; the catalog lists them everywhere.
     // `atlas-retry` runs only in the counters set; perf-compare enforces it.
     assert_eq!(
@@ -167,8 +172,11 @@ fn trailing_idle_phase_appears_only_where_the_plan_ends_early() {
     // Plans that already pass 60 s after GO end with their own last phase; the rest idle to it.
     for plan in all_plans() {
         // S1/atlas-retry ends when its episodes do, well before GO + 60 s, so it idles to it.
-        let long_on_its_own = matches!(plan.scenario, "S1" | "S3" | "S4" | "S5" | "S11" | "S12")
-            && !(plan.scenario == "S1" && plan.variant == "atlas-retry");
+        // A row-run variant ends with its wall-clock stream, so it never idles either.
+        let long_on_its_own = (matches!(plan.scenario, "S1" | "S3" | "S4" | "S5" | "S11" | "S12")
+            && !(plan.scenario == "S1" && plan.variant == "atlas-retry"))
+            || (plan.scenario == "S10"
+                && matches!(plan.variant, "powerline" | "cjk-tui" | "unique"));
         let last_phase = plan
             .steps
             .iter()
@@ -458,6 +466,11 @@ fn run_caps_list_only_where_a_scenario_declares_them() {
             assert_eq!(entry["run_caps"], serde_json::json!({"atlas-retry": 2}));
         } else if entry["id"] == "S2" {
             assert_eq!(entry["run_caps"], serde_json::json!({"flood": 2}));
+        } else if entry["id"] == "S10" {
+            assert_eq!(
+                entry["run_caps"],
+                serde_json::json!({"powerline": 2, "cjk-tui": 2, "unique": 2})
+            );
         } else if entry["id"] == "S11" {
             assert_eq!(entry["run_caps"], serde_json::json!({"release": 1, "gdi": 2, "wgpu": 2}));
         } else {
@@ -471,9 +484,10 @@ fn run_caps_list_only_where_a_scenario_declares_them() {
     }
 }
 
-/// S10's `stream` phase records the update count its selected workload plays, 1,200 at full
-/// length and 300 with `--short`, read from the workload rather than a constant; every other phase
-/// of every scenario, variant and host records none.
+/// S10's frame variants' `stream` phase records the update count their workload plays, 1,200 at
+/// full length and 300 with `--short`, read from the workload rather than a constant; a row-run
+/// variant's `warm` phase records its 20 warm updates and its wall-clock stream none; every other
+/// phase of every scenario, variant and host records none.
 #[test]
 fn only_s10_stream_carries_its_workload_update_count() {
     for spec in SCENARIOS {
@@ -485,13 +499,24 @@ fn only_s10_stream_carries_its_workload_update_count() {
                     Workload::Frames { count, .. } => Some(*count),
                     _ => None,
                 });
+                let warm = plan.roles.iter().find_map(|role| match role {
+                    Workload::RowRuns { warm, .. } => Some(*warm),
+                    _ => None,
+                });
                 for step in &plan.steps {
                     let Step::Phase(phase) = step else { continue };
-                    let expected = (spec.id == "S10" && phase.name == "stream")
-                        .then(|| frames.expect("S10 plays frames"));
+                    let expected = match (spec.id, phase.name) {
+                        ("S10", "stream") if warm.is_none() => {
+                            Some(frames.expect("S10 plays frames"))
+                        }
+                        ("S10", "warm") => Some(warm.expect("a warm phase plays row runs")),
+                        _ => None,
+                    };
                     assert_eq!(phase.updates, expected, "{}/{variant} {}", spec.id, phase.name);
                 }
-                if spec.id == "S10" {
+                if warm.is_some() {
+                    assert_eq!((warm, frames), (Some(20), None), "{variant}");
+                } else if spec.id == "S10" {
                     assert_eq!(frames, Some(if short { 300 } else { 1_200 }), "{variant}");
                 }
             }
@@ -524,5 +549,36 @@ fn the_atlas_retry_plan_prints_its_rows_then_drives_the_episodes() {
             .iter()
             .any(|step| matches!(step, Step::Phase(phase) if phase.driver == Driver::AtlasRetry));
         assert_eq!(drives, other.scenario == "S1" && other.variant == "atlas-retry");
+    }
+}
+
+/// Each row-run variant plays its own workload: a warm phase that ends only once all 20 warm updates
+/// were presented, then a wall-clock stream of 10 s under `--short` (60 s full) with no fallback
+/// length, the update count continuing from warm into stream over one role.
+#[test]
+fn row_run_variants_warm_on_presented_updates_then_stream_on_the_clock() {
+    use crate::workload::RowRunWorkload;
+    let kinds = [
+        ("powerline", RowRunWorkload::Powerline),
+        ("cjk-tui", RowRunWorkload::CjkTui),
+        ("unique", RowRunWorkload::Unique),
+    ];
+    for (variant, kind) in kinds {
+        for (short, stream_ms) in [(true, 10_000), (false, 60_000)] {
+            let plan = plan("S10", variant, short).unwrap();
+            let total = 20 + (stream_ms * 90 / 1_000) as u32;
+            assert_eq!(plan.roles, [Workload::RowRuns { kind, warm: 20, total }], "{variant}");
+            let phases: Vec<&PhaseSpec> = plan
+                .steps
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Phase(phase) => Some(phase),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(phases.len(), 2, "{variant}: warm then stream, no trailing idle");
+            assert_eq!((phases[0].name, &phases[0].end), ("warm", &PhaseEnd::PresentedUpdates(0)));
+            assert_eq!((phases[1].name, &phases[1].end), ("stream", &PhaseEnd::Hold(stream_ms)));
+        }
     }
 }

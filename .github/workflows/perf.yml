@@ -211,6 +211,14 @@ jobs:
       # S1-S3-S6-S8-S12 9.1, S4-S5-S11 with S2/flood 10.2-11.2. S11/release (+7.3 at cap 1) cannot join
       # S2/flood, so S2/flood moves to S1-S3-S6-S8-S12, capped at 2 short runs to fit (about 12.2); the
       # cap rebalances the 30-minute budget, and a release comparison runs S2/flood uncapped.
+      # Row-run diagnostics are counters-only, capped at two runs per side under --short.
+      # Put S10/powerline and S10/cjk-tui on S4-S5-S11, beside S1/atlas-retry, and
+      # S10/unique on S2-S10sync. Reserve 140 s per variant for planning; this is not
+      # measured runtime. Replaying runs 37325514262, 37333587004, 37341446398 and
+      # 37353681544 at that cost leaves at least 184 s and 110 s respectively to
+      # their observed critical paths. The last run already includes atlas-retry;
+      # the older runs include its nominal 25 s addition. Queue-dependent slack is
+      # not budget headroom: exact-head creation-to-final must still be <= 1800 s.
       matrix:
         include:
           - platform: macOS
@@ -226,7 +234,7 @@ jobs:
           - platform: macOS
             runner: macos-14
             shard: S2-S10sync
-            scenarios: S2 S10/sync
+            scenarios: S2 S10/sync S10/unique
             laps: ""
           - platform: macOS
             runner: macos-14
@@ -241,7 +249,7 @@ jobs:
             # 37325514262, 37333587004) with 489-1385 s of slack to the critical path, so about 551-583 s
             # nominally. It is not in S1-S3-S6-S8-S12, which had 0 s of slack in two of those runs. The
             # exact-head CI run is the measurement.
-            scenarios: S4 S5 S11 S11/release S1/atlas-retry
+            scenarios: S4 S5 S11 S11/release S1/atlas-retry S10/powerline S10/cjk-tui
             laps: ""
           - platform: macOS
             runner: macos-14
@@ -424,6 +432,15 @@ jobs:
       # S9-S10 (about 22.0), so no shard passes the longest one. S2/flood's cap of 2 short runs saves about
       # 3.8 min there; a release comparison runs it uncapped. S9-S10 measured 22.6 (run 37147065934); S9's
       # laps set, two runs a side, adds about 0.4 (about 23.0).
+      # Row-run diagnostics are counters-only, capped at two runs per side under --short.
+      # Put S10/powerline and S10/cjk-tui on S2-S10sync, and S10/unique on
+      # S1-S3-S6-S8-S12 beside S1/atlas-retry. Reserve 140 s per variant for planning;
+      # this is not measured runtime. In run 37325514262, two variants consume
+      # 280 of S2-S10sync's 291 s slack; one consumes 140 of S1's 243 s after the
+      # nominal atlas-retry addition. That preserves the 1491 s critical path;
+      # spreading a variant onto S9-S10 instead projects 1559 s. Later checked runs
+      # also fit behind their observed critical paths. Exact-head CI supplies the
+      # actual variant costs and must finish within 1800 s including queueing.
       matrix:
         include:
           - platform: Windows
@@ -439,7 +456,7 @@ jobs:
           - platform: Windows
             runner: windows-latest
             shard: S2-S10sync
-            scenarios: S2 S10/sync
+            scenarios: S2 S10/sync S10/powerline S10/cjk-tui
             laps: ""
           - platform: Windows
             runner: windows-latest
@@ -457,7 +474,7 @@ jobs:
             # up to 3 times a side. Measured compare steps 1110-1326 s with 266-1910 s of slack (runs
             # 37318119545, 37325514262, 37333587004); S4-S5-S11 here had 0 s in one of them. The
             # exact-head CI run is the measurement.
-            scenarios: S1 S3 S6 S8 S12 S1/atlas-retry
+            scenarios: S1 S3 S6 S8 S12 S1/atlas-retry S10/unique
             laps: ""
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit

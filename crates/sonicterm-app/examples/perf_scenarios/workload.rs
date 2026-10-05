@@ -566,10 +566,21 @@ pub(crate) fn fixtures(plan: &Plan) -> Vec<FixtureFile> {
             Workload::Frames { count, synchronized } => {
                 files.extend(frame_fixtures(count, synchronized));
             }
+            Workload::RowRuns { kind, total, .. } => {
+                files.extend((0..total).map(|update| FixtureFile {
+                    relative_path: format!("{ROW_RUN_FIXTURES}/{update}"),
+                    body: FixtureBody::Bytes(kind.update_bytes(update)),
+                }))
+            }
         }
     }
     files
 }
+
+/// The directory under `workload/fixtures/` holding a row-run workload's update `n` as file `n`.
+pub(crate) const ROW_RUN_FIXTURES: &str = "rowrun";
+/// The directory under the scratch root where the probe marks warm update `n` presented, file `n`.
+pub(crate) const PRESENTED_DIRECTORY: &str = "presented";
 
 /// The file a single-file fixture is written to.
 fn fixture_file_name(fixture: Fixture) -> &'static str {
@@ -653,6 +664,16 @@ fn workload_lines(workload: Workload, role: usize, nonce: &str, bound_s: u64) ->
         Workload::PrintThenSleep(fixture) => {
             let sleep = vec![format!("exec sleep {bound_s}")];
             [vec![cat(fixture_file_name(fixture))], finish, sleep].concat()
+        }
+        Workload::RowRuns { warm, total, .. } => {
+            // Each warm update waits until the probe marks it presented; the stream keeps counting.
+            let acked = format!(
+                "while [ \"$update\" -lt {warm} ]; do cat \"$scratch/workload/fixtures/{ROW_RUN_FIXTURES}/$update\"; while [ ! -f \"$scratch/{PRESENTED_DIRECTORY}/$update\" ]; do sleep 0.01; done; update=$((update + 1)); done"
+            );
+            let paced = format!(
+                "while [ \"$update\" -lt {total} ]; do cat \"$scratch/workload/fixtures/{ROW_RUN_FIXTURES}/$update\"; sleep 0.016; update=$((update + 1)); done"
+            );
+            vec!["update=0".to_owned(), acked, paced, format!("exec sleep {bound_s}")]
         }
         Workload::Frames { count, .. } => {
             // `sleep 0.016` paces about 60 frames a second; process start-up makes it a little slower.
@@ -748,6 +769,11 @@ pub(crate) enum ProgramStep {
     DateLoop,
     /// Play this many frame files in order, each followed by a 16 ms sleep.
     Frames(u32),
+    /// Write row-run updates 0 to `count`-1, each once and then waiting until the probe marks it
+    /// presented.
+    AckedUpdates(u32),
+    /// Write row-run updates `first` to `end`-1 paced about 60 a second, continuing the count.
+    PacedUpdates { first: u32, end: u32 },
     /// Print the completion sentinel.
     Sentinel,
     /// Create `done/<role>`.
@@ -778,6 +804,11 @@ pub(crate) fn program_steps(workload: Workload) -> Vec<ProgramStep> {
             vec![Cat(fixture_file_name(fixture)), Sentinel, Done, SleepBound]
         }
         Workload::Frames { count, .. } => vec![ProgramStep::Frames(count), Sentinel, Done, Shell],
+        Workload::RowRuns { warm, total, .. } => vec![
+            ProgramStep::AckedUpdates(warm),
+            ProgramStep::PacedUpdates { first: warm, end: total },
+            SleepBound,
+        ],
     }
 }
 
@@ -801,6 +832,16 @@ pub(crate) fn posix_lines(
                 "while [ \"$frame\" -lt {count} ]; do cat \"$scratch/workload/fixtures/frames/$frame\"; sleep 0.016; frame=$((frame + 1)); done"
             ),
         ],
+        ProgramStep::AckedUpdates(count) => vec![
+            "update=0".to_owned(),
+            format!(
+                "while [ \"$update\" -lt {count} ]; do cat \"$scratch/workload/fixtures/{ROW_RUN_FIXTURES}/$update\"; while [ ! -f \"$scratch/{PRESENTED_DIRECTORY}/$update\" ]; do sleep 0.01; done; update=$((update + 1)); done"
+            ),
+        ],
+        // The shell's `update` already holds `first`, so the stream continues the warm count.
+        ProgramStep::PacedUpdates { end, .. } => vec![format!(
+            "while [ \"$update\" -lt {end} ]; do cat \"$scratch/workload/fixtures/{ROW_RUN_FIXTURES}/$update\"; sleep 0.016; update=$((update + 1)); done"
+        )],
         ProgramStep::Sentinel => vec![format!("printf '{}\\n'", sentinel_line(role, nonce))],
         ProgramStep::Done => vec![format!(": > \"$scratch/done/{role}\"")],
         ProgramStep::Shell => vec![format!("export PS1='{PROMPT}'"), "exec /bin/zsh -f".to_owned()],
@@ -1051,6 +1092,21 @@ fn run_step(
             }
             Ok(())
         }
+        ProgramStep::AckedUpdates(count) => {
+            for update in 0..count {
+                copy_file(&fixture_root.join(format!("{ROW_RUN_FIXTURES}/{update}")), out)?;
+                wait_for(host, &run.scratch.join(format!("{PRESENTED_DIRECTORY}/{update}")))?;
+            }
+            Ok(())
+        }
+        ProgramStep::PacedUpdates { first, end } => {
+            for update in first..end {
+                copy_file(&fixture_root.join(format!("{ROW_RUN_FIXTURES}/{update}")), out)?;
+                host.sleep(FRAME_INTERVAL)
+                    .map_err(|error| format!("pause after update {update}: {error}"))?;
+            }
+            Ok(())
+        }
         ProgramStep::Sentinel => writeln!(out, "{}", sentinel_line(run.role, &run.nonce))
             .and_then(|()| out.flush())
             .map_err(|error| format!("write the sentinel: {error}")),
@@ -1112,9 +1168,8 @@ pub(crate) fn run_program(scratch: &Path) -> u8 {
 /// Body rows mix bold, normal and italic segments; colour alternates per update but never
 /// splits a run. Segments meant to shape carry CJK characters from the bundled faces; the
 /// changing fields meant not to shape are plain digits and spaces. Each body row ends after its
-/// last segment, and the rest of the row is default-style blank cells. Only the tests use them
-/// in this change; registering them as scenario variants comes with their diagnostic.
-#[cfg(test)]
+/// last segment, and the rest of the row is default-style blank cells. The S10 powerline, cjk-tui
+/// and unique variants play them through `Workload::RowRuns`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RowRunWorkload {
     /// Repeated bold, normal and bold CJK segments, then an italic row and update number.
@@ -1127,7 +1182,6 @@ pub(crate) enum RowRunWorkload {
 }
 
 /// The twelve process names `CjkTui` cycles through by row.
-#[cfg(test)]
 pub(crate) const CJK_TUI_NAMES: [&str; 12] = [
     "编译器",
     "数据库",
@@ -1144,10 +1198,8 @@ pub(crate) const CJK_TUI_NAMES: [&str; 12] = [
 ];
 
 /// The first and last body rows, 1-based screen rows.
-#[cfg(test)]
 pub(crate) const ROW_RUN_BODY_ROWS: std::ops::RangeInclusive<u16> = 2..=69;
 
-#[cfg(test)]
 impl RowRunWorkload {
     /// The bytes of update `update`: every row rewritten in place, with SGR colour cycling per
     /// update. `update` is one counter that keeps counting across phases.

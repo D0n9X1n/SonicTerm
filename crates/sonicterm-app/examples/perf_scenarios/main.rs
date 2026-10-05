@@ -15,6 +15,8 @@ mod cli;
 mod counters;
 #[cfg(any(windows, test))]
 mod delivery;
+#[cfg(any(target_os = "macos", windows, test))]
+mod presented_updates;
 #[cfg(any(target_os = "macos", windows))]
 mod probe;
 #[cfg(any(target_os = "macos", windows, test))]

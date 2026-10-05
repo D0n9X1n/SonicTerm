@@ -198,13 +198,17 @@ fn capture_delivery_is_refused_off_windows() {
     assert!(parsed.capture_delivery && parsed.short && !parsed.managed);
     assert_eq!((parsed.scenario, parsed.variant), ("S10", "sync"));
     assert_eq!(parsed.scratch, "C:/tmp/replay");
-    // Every variant the catalog lists for a replayed scenario is accepted, S11's presenters included.
+    // Every variant the catalog lists for a replayed scenario is accepted, S11's presenters included,
+    // except S10's counters-only row-run variants, whose delivery is never replayed.
     for scenario in DELIVERY_SCENARIOS {
         for variant in scenarios::find(scenario).unwrap().variants {
             let request = ["--variant", variant, "--capture-delivery", "C:/tmp/replay"];
             let mut full = vec![scenario];
             full.extend(request);
-            assert!(parse_run_on(&args(&full), Host::Windows).is_ok(), "{scenario}/{variant}");
+            let row_run =
+                scenario == "S10" && matches!(*variant, "powerline" | "cjk-tui" | "unique");
+            let parsed = parse_run_on(&args(&full), Host::Windows);
+            assert_eq!(parsed.is_ok(), !row_run, "{scenario}/{variant}");
         }
     }
     let refused: &[&[&str]] = &[
