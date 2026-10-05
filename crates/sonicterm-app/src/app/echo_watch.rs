@@ -315,9 +315,21 @@ impl EchoWatch {
         self.armed.load(Ordering::Acquire)
     }
 
-    /// The target armed under `token`, if the slot is still armed with it.
-    pub(crate) fn target_for(&self, token: u64) -> Option<EchoWatchTarget> {
-        self.lock_slot().armed_trace(token).map(|trace| trace.target)
+    /// The target armed under `token` and the facts its record already holds, if the slot is
+    /// still armed with it. A worker resumes from those facts, so a fresh handle never re-derives one.
+    pub(crate) fn target_for(&self, token: u64) -> Option<(EchoWatchTarget, u8)> {
+        self.lock_slot().armed_trace(token).map(|trace| {
+            let recorded = [
+                (trace.appearance.is_some(), FACT_APPEARED),
+                (trace.pre_present, FACT_PRE_PRESENT),
+                (trace.identity_changed, FACT_IDENTITY_CHANGED),
+                (trace.lost, FACT_LOST),
+            ]
+            .into_iter()
+            .filter(|(held, _)| *held)
+            .fold(0, |bits, (_, fact)| bits | fact);
+            (trace.target, recorded)
+        })
     }
 
     /// Apply `change` to `token`'s record when the slot is still armed with it and `at` is no
@@ -468,8 +480,10 @@ impl EchoWatch {
             // When: this token's target was already fetched, no lock is taken.
             return cached.target;
         }
-        let target = self.target_for(token);
-        cache.set(EchoCache { token, target, recorded: 0 });
+        let fetched = self.target_for(token);
+        let target = fetched.map(|(target, _)| target);
+        let recorded = fetched.map_or(0, |(_, recorded)| recorded);
+        cache.set(EchoCache { token, target, recorded });
         target
     }
 }

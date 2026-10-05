@@ -1,6 +1,9 @@
 //! Per-phase samples, S2 latency attribution, grid scanning and the `result.json` and
 //! `progress.json` documents.
 
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use serde_json::{json, Map, Value};
@@ -61,22 +64,54 @@ pub(crate) fn echo_target(origin: (u64, u16), cols: u16, index: u32) -> EchoTarg
     }
 }
 
+/// The grid state a scrollback-absolute row index is valid under: rows evicted, screen
+/// incarnation and resize generation. Any change means the index may name another row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RowIdentity {
+    /// Rows the grid has evicted from history.
+    pub(crate) scrollback_evicted: u64,
+    /// The primary or alternate screen's incarnation.
+    pub(crate) screen_epoch: u64,
+    /// Resizes that changed the grid's size.
+    pub(crate) size_generation: u64,
+}
+
+/// The identity `grid` holds now; the harness reads it with the prompt origin, under one guard.
+pub(crate) fn prompt_identity(grid: &Grid) -> RowIdentity {
+    RowIdentity {
+        scrollback_evicted: grid.scrollback_evicted(),
+        screen_epoch: grid.screen_epoch(),
+        size_generation: grid.size_generation(),
+    }
+}
+
 /// What one nonblocking look at the echo cell found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EchoSnapshot {
     /// The parser lock was busy, so nothing was read.
     Busy,
-    /// The grid was read: whether the echo is there, and the grid's revision.
-    Read { present: bool, revision: u64 },
+    /// The grid was read: whether the echo is there, the grid's revision and its row identity.
+    Read { present: bool, revision: u64, identity: RowIdentity },
 }
 
-/// Whether `target`'s character is in `grid`, and the revision it was read under.
+/// Whether `target`'s character is in `grid`, and the revision and identity it was read under.
 pub(crate) fn snapshot_echo(grid: &Grid, target: &EchoTarget) -> EchoSnapshot {
     let present = grid
         .row_at_abs(target.abs_row)
         .and_then(|row| row.get(usize::from(target.col)))
         .is_some_and(|cell| cell.ch == target.character);
-    EchoSnapshot::Read { present, revision: grid.revision() }
+    EchoSnapshot::Read { present, revision: grid.revision(), identity: prompt_identity(grid) }
+}
+
+/// Whether either snapshot of a dispatch read a row identity other than `armed`; the harness's own
+/// check, which catches a change the worker never saw (an event-loop resize, for one).
+pub(crate) fn snapshot_identity_changed(
+    observation: &DispatchObservation,
+    armed: RowIdentity,
+) -> bool {
+    [observation.before, observation.after].iter().any(
+        |snapshot| matches!(snapshot, EchoSnapshot::Read { identity, .. } if *identity != armed),
+    )
 }
 
 /// One forwarded dispatch while a sample is open: a snapshot on each side, and whether the
@@ -146,7 +181,7 @@ pub(crate) fn attribute_dispatch(observation: &DispatchObservation) -> Attributi
             Attribution::Unattributed(UnattributedReason::LockBusy)
         }
         (
-            EchoSnapshot::Read { present: true, revision: before },
+            EchoSnapshot::Read { present: true, revision: before, .. },
             EchoSnapshot::Read { revision: after, .. },
         ) => {
             if before == after {
@@ -165,6 +200,300 @@ pub(crate) fn attribute_dispatch(observation: &DispatchObservation) -> Attributi
     }
 }
 
+/// Whether a sample of `scenario`/`variant` is split at the flush: only S2's single idle pane.
+/// S2/flood types into a pane beside a flood, so its samples are never armed.
+pub(crate) fn split_in_scope(scenario: &str, variant: &str) -> bool {
+    (scenario, variant) == ("S2", "default")
+}
+
+/// The schema of the split fields in `latency`; a harness that writes them lists the same number
+/// in `--list` as `capabilities.latency_split_schema`.
+pub(crate) const SPLIT_SCHEMA: u32 = 1;
+/// The split reason of a sample with no credited frame.
+pub(crate) const NOT_CREDITED: &str = "not-credited";
+/// The split reason of a credited sample that was split.
+pub(crate) const SPLIT: &str = "split";
+/// Every split reason of a credited sample, in precedence order: the first that applies wins.
+pub(crate) const SPLIT_REASONS: [&str; 22] = [
+    "unsupported",
+    "arm-gate-off",
+    "arm-no-pane",
+    "arm-exhausted",
+    "take-gate-off",
+    "take-no-pane",
+    "take-mismatch",
+    "take-already-taken",
+    "pane-not-shown",
+    "row-identity-changed",
+    "first-appearance-unobserved",
+    "no-appearance-observed",
+    "echo-overwritten",
+    "no-publication-observed-by-take",
+    "untargeted",
+    "other-window",
+    "send-refused",
+    "delivery-not-observed-by-take",
+    "presented-before-publication",
+    "delivered-after-present",
+    "clock-order",
+    SPLIT,
+];
+
+/// How an open sample's echo watch was armed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArmState {
+    /// The sample is outside the split's scope (not S2/default); nothing was armed.
+    OutOfScope,
+    /// This build has no `perf-echo-trace`; nothing was armed.
+    // Built only by the fallback adapter, which exists only without perf-echo-trace.
+    #[cfg_attr(feature = "perf-echo-trace", allow(dead_code))]
+    Unsupported,
+    // Built only by the echo_api adapter, which exists only with perf-echo-trace.
+    #[cfg_attr(not(feature = "perf-echo-trace"), allow(dead_code))]
+    /// The App refused the arm; the reason's name.
+    Failed(&'static str),
+    // Built only by the echo_api adapter, which exists only with perf-echo-trace.
+    #[cfg_attr(not(feature = "perf-echo-trace"), allow(dead_code))]
+    /// The watch is armed with this token.
+    Armed(EchoToken),
+}
+
+/// What the echo watch said about a credited sample, as `split_for` reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EchoOutcome {
+    /// No watch: no feature, or out of scope.
+    Unsupported,
+    /// The arm or the take failed; the reason's name.
+    Failed(&'static str),
+    // Built only by the echo_api adapter, which exists only with perf-echo-trace.
+    #[cfg_attr(not(feature = "perf-echo-trace"), allow(dead_code))]
+    /// The taken record.
+    Taken(TraceFacts),
+}
+
+/// The outcome for a credited sample armed as `arm`: `take` runs only for an armed token.
+pub(crate) fn echo_outcome(
+    arm: ArmState,
+    take: impl FnOnce(EchoToken) -> EchoOutcome,
+) -> EchoOutcome {
+    match arm {
+        ArmState::OutOfScope | ArmState::Unsupported => EchoOutcome::Unsupported,
+        ArmState::Failed(reason) => EchoOutcome::Failed(reason),
+        ArmState::Armed(token) => take(token),
+    }
+}
+
+/// A taken echo-watch record, in the harness's own types so the split builds without the feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TraceFacts {
+    /// The pane was in the main window's active tab at the take.
+    pub(crate) shown: bool,
+    /// The worker read an identity other than the armed one.
+    pub(crate) identity_changed: bool,
+    /// The worker found the echo already present before any appearance.
+    pub(crate) pre_present: bool,
+    /// The worker found the echo absent again after its appearance.
+    pub(crate) lost: bool,
+    /// The first absent-to-present section.
+    pub(crate) appearance: Option<AppearanceFacts>,
+    /// The first flush published after it.
+    pub(crate) publication: Option<PublicationFacts>,
+    /// That flush's token decision.
+    pub(crate) delivery: Option<DeliveryFacts>,
+}
+
+/// Where the echo first appeared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AppearanceFacts {
+    /// The output generation of the appearance's batch.
+    pub(crate) generation: u64,
+    /// When that section finished parsing.
+    pub(crate) parsed_at: Instant,
+    /// Whether a synchronized update was set after it.
+    pub(crate) sync_open: bool,
+}
+
+/// The flush that published the echo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PublicationFacts {
+    /// When the watch recorded the publication, before the token decision.
+    pub(crate) published_at: Instant,
+    /// Which window the flush targeted.
+    pub(crate) window: PublicationWindow,
+    /// Whether an earlier flush was still pending.
+    pub(crate) coalesced: bool,
+}
+
+/// The publication's redraw target, relative to the measurement window.
+// Built only by the echo_api adapter, which exists only with perf-echo-trace.
+#[cfg_attr(not(feature = "perf-echo-trace"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PublicationWindow {
+    /// The pane had no redraw target.
+    Untargeted,
+    /// The measurement window.
+    Main,
+    /// Some other window.
+    Other,
+}
+
+/// The token decision for the published flush.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DeliveryFacts {
+    /// What the worker decided.
+    pub(crate) outcome: Delivery,
+    /// When it recorded the decision.
+    pub(crate) decided_at: Instant,
+}
+
+/// The worker's decision for one output event.
+// Built only by the echo_api adapter, which exists only with perf-echo-trace.
+#[cfg_attr(not(feature = "perf-echo-trace"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    /// Sent to the event loop.
+    Sent,
+    /// An earlier event was outstanding; its service reads this flush.
+    Suppressed,
+    /// The event loop refused it.
+    Refused,
+}
+
+/// A credited sample's latency split at the flush publication, each part in whole nanoseconds.
+/// The three parts telescope exactly to `ended - injected`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Split {
+    /// Injection to the end of the section where the echo appeared.
+    pub(crate) input_to_parse_ns: u64,
+    /// That section's end to the flush's publication.
+    pub(crate) parse_to_publication_ns: u64,
+    /// The publication to the end of the credited dispatch.
+    pub(crate) publication_to_present_ns: u64,
+    /// The publication to the worker recording its token decision; not event-loop latency.
+    pub(crate) delivery_lag_ns: u64,
+    /// `Sent` or `Suppressed`; a refused send is never split.
+    pub(crate) delivery: Delivery,
+    /// Whether the publication coalesced with an earlier pending flush.
+    pub(crate) coalesced: bool,
+    /// Whether a synchronized update was set when the echo appeared.
+    pub(crate) sync_open: bool,
+    /// The output generation of the appearance's batch.
+    pub(crate) echo_generation: u64,
+}
+
+impl Serialize for Split {
+    fn serialize<Format: Serializer>(
+        &self,
+        serializer: Format,
+    ) -> Result<Format::Ok, Format::Error> {
+        let delivery = match self.delivery {
+            Delivery::Suppressed => "suppressed",
+            Delivery::Sent | Delivery::Refused => "sent",
+        };
+        let mut fields = serializer.serialize_struct("Split", 8)?;
+        fields.serialize_field("input_to_parse_ms", &ns_to_ms(self.input_to_parse_ns))?;
+        fields
+            .serialize_field("parse_to_publication_ms", &ns_to_ms(self.parse_to_publication_ns))?;
+        fields.serialize_field(
+            "publication_to_present_ms",
+            &ns_to_ms(self.publication_to_present_ns),
+        )?;
+        fields.serialize_field("delivery_lag_us", &(self.delivery_lag_ns as f64 / 1_000.0))?;
+        fields.serialize_field("delivery", delivery)?;
+        fields.serialize_field("coalesced", &self.coalesced)?;
+        fields.serialize_field("sync_open", &self.sync_open)?;
+        fields.serialize_field("echo_generation", &self.echo_generation)?;
+        fields.end()
+    }
+}
+
+/// Nanoseconds as milliseconds.
+fn ns_to_ms(nanoseconds: u64) -> f64 {
+    nanoseconds as f64 / 1_000_000.0
+}
+
+/// A duration in whole nanoseconds, or `None` when it does not fit in a `u64`.
+pub(crate) fn duration_ns(duration: Duration) -> Option<u64> {
+    u64::try_from(duration.as_nanos()).ok()
+}
+
+/// Split a sample injected at `injected` and credited to a dispatch that ended at `ended`, or name
+/// the first reason in `SPLIT_REASONS` order that it cannot be. `harness_identity_changed` is the
+/// harness's own snapshot check of the armed row identity.
+pub(crate) fn split_for(
+    injected: Instant,
+    ended: Instant,
+    outcome: &EchoOutcome,
+    harness_identity_changed: bool,
+) -> Result<Split, &'static str> {
+    let facts = match outcome {
+        EchoOutcome::Unsupported => return Err("unsupported"),
+        EchoOutcome::Failed(reason) => return Err(reason),
+        EchoOutcome::Taken(facts) => facts,
+    };
+    if !facts.shown {
+        return Err("pane-not-shown");
+    }
+    if facts.identity_changed || harness_identity_changed {
+        return Err("row-identity-changed");
+    }
+    if facts.pre_present {
+        return Err("first-appearance-unobserved");
+    }
+    let Some(appearance) = facts.appearance else {
+        return Err("no-appearance-observed");
+    };
+    if facts.lost {
+        return Err("echo-overwritten");
+    }
+    let Some(publication) = facts.publication else {
+        return Err("no-publication-observed-by-take");
+    };
+    match publication.window {
+        PublicationWindow::Untargeted => return Err("untargeted"),
+        PublicationWindow::Other => return Err("other-window"),
+        PublicationWindow::Main => {}
+    }
+    let delivery = match facts.delivery {
+        None => return Err("delivery-not-observed-by-take"),
+        Some(DeliveryFacts { outcome: Delivery::Refused, .. }) => return Err("send-refused"),
+        Some(delivery) => delivery,
+    };
+    if ended < publication.published_at {
+        return Err("presented-before-publication");
+    }
+    if delivery.decided_at > ended {
+        return Err("delivered-after-present");
+    }
+    // Checked intervals only: an out-of-order or unrepresentable endpoint is never saturated.
+    let part = |from: Instant, to: Instant| to.checked_duration_since(from).and_then(duration_ns);
+    let parts = (
+        part(injected, appearance.parsed_at),
+        part(appearance.parsed_at, publication.published_at),
+        part(publication.published_at, ended),
+        part(publication.published_at, delivery.decided_at),
+    );
+    let (
+        Some(input_to_parse_ns),
+        Some(parse_to_publication_ns),
+        Some(publication_to_present_ns),
+        Some(delivery_lag_ns),
+    ) = parts
+    else {
+        return Err("clock-order");
+    };
+    Ok(Split {
+        input_to_parse_ns,
+        parse_to_publication_ns,
+        publication_to_present_ns,
+        delivery_lag_ns,
+        delivery: delivery.outcome,
+        coalesced: publication.coalesced,
+        sync_open: appearance.sync_open,
+        echo_generation: appearance.generation,
+    })
+}
+
 /// One S2 sample: when its character was injected, and its latency or why it has none.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LatencySample {
@@ -174,6 +503,39 @@ pub(crate) struct LatencySample {
     pub(crate) latency_ms: Option<f64>,
     /// [`CREDITED`] or an [`UnattributedReason`] name.
     pub(crate) reason: &'static str,
+    /// The split at the flush; only for split reason [`SPLIT`].
+    pub(crate) split: Option<Split>,
+    /// [`NOT_CREDITED`] for an uncredited sample, else one of [`SPLIT_REASONS`].
+    pub(crate) split_reason: &'static str,
+}
+
+impl LatencySample {
+    /// A sample no frame was credited with, for `reason`.
+    pub(crate) fn uncredited(inject_unix_s: f64, reason: &'static str) -> Self {
+        Self { inject_unix_s, latency_ms: None, reason, split: None, split_reason: NOT_CREDITED }
+    }
+
+    /// A sample injected at `injected` and credited to the dispatch that ended at `ended`, split
+    /// from the echo watch's `outcome` when it can be.
+    pub(crate) fn credited(
+        inject_unix_s: f64,
+        injected: Instant,
+        ended: Instant,
+        outcome: &EchoOutcome,
+        harness_identity_changed: bool,
+    ) -> Self {
+        let latency_ms = ended.saturating_duration_since(injected).as_secs_f64() * 1_000.0;
+        let (split, split_reason) =
+            match split_for(injected, ended, outcome, harness_identity_changed) {
+                Ok(split) => (Some(split), SPLIT),
+                Err(reason) => (None, reason),
+            };
+        debug_assert!(
+            SPLIT_REASONS.contains(&split_reason),
+            "{split_reason} is not a split reason"
+        );
+        Self { inject_unix_s, latency_ms: Some(latency_ms), reason: CREDITED, split, split_reason }
+    }
 }
 
 impl Serialize for LatencySample {
@@ -182,18 +544,22 @@ impl Serialize for LatencySample {
         serializer: Format,
     ) -> Result<Format::Ok, Format::Error> {
         // `attributed` is derived from `latency_ms`, so a reader need not infer it.
-        let mut fields = serializer.serialize_struct("LatencySample", 4)?;
+        let mut fields = serializer.serialize_struct("LatencySample", 6)?;
         fields.serialize_field("inject_unix_s", &self.inject_unix_s)?;
         fields.serialize_field("latency_ms", &self.latency_ms)?;
         fields.serialize_field("attributed", &self.latency_ms.is_some())?;
         fields.serialize_field("reason", self.reason)?;
+        fields.serialize_field("split", &self.split)?;
+        fields.serialize_field("split_reason", self.split_reason)?;
         fields.end()
     }
 }
 
-/// The `latency` object: every sample, the attributed count, the total and the coverage.
+/// The `latency` object: every sample, the attributed count, the total and the coverage, and the
+/// split schema with its count, its reasons over credited samples and its coverage.
 ///
-/// Coverage of no samples is 0.0 rather than null, so a reader that needs a number gets one.
+/// Coverage of no samples is 0.0 rather than null, so a reader that needs a number gets one. Split
+/// coverage is null when nothing was credited, which reads as unavailable.
 struct LatencyReport<'run>(&'run [LatencySample]);
 
 impl Serialize for LatencyReport<'_> {
@@ -205,14 +571,162 @@ impl Serialize for LatencyReport<'_> {
         let attributed = samples.iter().filter(|sample| sample.latency_ms.is_some()).count();
         let coverage =
             if samples.is_empty() { 0.0 } else { attributed as f64 / samples.len() as f64 };
-        let mut fields = serializer.serialize_struct("LatencyReport", 4)?;
+        let mut reasons = BTreeMap::new();
+        for sample in samples.iter().filter(|sample| sample.latency_ms.is_some()) {
+            *reasons.entry(sample.split_reason).or_insert(0_usize) += 1;
+        }
+        let split_count = reasons.get(SPLIT).copied().unwrap_or(0);
+        let split_coverage = (attributed > 0).then(|| split_count as f64 / attributed as f64);
+        let mut fields = serializer.serialize_struct("LatencyReport", 8)?;
         fields.serialize_field("samples", samples)?;
         fields.serialize_field("attributed", &attributed)?;
         fields.serialize_field("total", &samples.len())?;
         fields.serialize_field("coverage", &coverage)?;
+        fields.serialize_field("split_schema", &SPLIT_SCHEMA)?;
+        fields.serialize_field("split_count", &split_count)?;
+        fields.serialize_field("split_reasons", &reasons)?;
+        fields.serialize_field("split_coverage", &split_coverage)?;
         fields.end()
     }
 }
+
+/// The App's echo-watch API, in a tree that declares `perf-echo-trace`.
+#[cfg(feature = "perf-echo-trace")]
+pub(crate) mod echo_api {
+    use sonicterm_app::app::{
+        App, ArmOutcome, ArmToken, EchoDeliveryOutcome, EchoRowIdentity, EchoTrace,
+        EchoWatchTarget, TakeOutcome,
+    };
+    use winit::window::WindowId;
+
+    use super::{
+        AppearanceFacts, ArmState, Delivery, DeliveryFacts, EchoOutcome, EchoTarget,
+        PublicationFacts, PublicationWindow, RowIdentity, TraceFacts,
+    };
+
+    /// The App's arm token.
+    pub(crate) type EchoToken = ArmToken;
+
+    /// Arm `pane`'s watch for `target` under `identity`; no parser lock is taken.
+    pub(crate) fn arm(
+        app: &mut App,
+        pane: u64,
+        target: &EchoTarget,
+        identity: RowIdentity,
+    ) -> ArmState {
+        let identity = EchoRowIdentity {
+            scrollback_evicted: identity.scrollback_evicted,
+            screen_epoch: identity.screen_epoch,
+            size_generation: identity.size_generation,
+        };
+        let watch = EchoWatchTarget {
+            abs_row: target.abs_row,
+            col: target.col,
+            character: target.character,
+            identity,
+        };
+        match app.arm_echo_watch(pane, watch) {
+            ArmOutcome::Armed(token) => ArmState::Armed(token),
+            ArmOutcome::GateOff => ArmState::Failed("arm-gate-off"),
+            ArmOutcome::NoPane => ArmState::Failed("arm-no-pane"),
+            ArmOutcome::Exhausted => ArmState::Failed("arm-exhausted"),
+        }
+    }
+
+    /// Take `pane`'s record for `token`, reading publications against the measurement window `main`.
+    pub(crate) fn take(
+        app: &mut App,
+        pane: u64,
+        token: EchoToken,
+        main: Option<WindowId>,
+    ) -> EchoOutcome {
+        match app.take_echo_watch(pane, token) {
+            TakeOutcome::Trace(trace) => EchoOutcome::Taken(facts_of(&trace, main)),
+            TakeOutcome::GateOff => EchoOutcome::Failed("take-gate-off"),
+            TakeOutcome::NoPane => EchoOutcome::Failed("take-no-pane"),
+            TakeOutcome::Mismatch => EchoOutcome::Failed("take-mismatch"),
+            TakeOutcome::AlreadyTaken => EchoOutcome::Failed("take-already-taken"),
+        }
+    }
+
+    /// Disarm `pane`'s watch for `token`, discarding its record.
+    pub(crate) fn discard(app: &mut App, pane: u64, token: EchoToken) {
+        // The record of an uncredited sample is not used; the take only disarms the watch.
+        let _ = app.take_echo_watch(pane, token);
+    }
+
+    /// The App's record in the harness's types.
+    fn facts_of(trace: &EchoTrace, main: Option<WindowId>) -> TraceFacts {
+        TraceFacts {
+            shown: trace.shown,
+            identity_changed: trace.identity_changed,
+            pre_present: trace.pre_present,
+            lost: trace.lost,
+            appearance: trace.appearance.map(|appearance| AppearanceFacts {
+                generation: appearance.generation,
+                parsed_at: appearance.parsed_at,
+                sync_open: appearance.sync_open,
+            }),
+            publication: trace.publication.map(|publication| PublicationFacts {
+                published_at: publication.published_at,
+                window: match publication.window {
+                    None => PublicationWindow::Untargeted,
+                    Some(window) if Some(window) == main => PublicationWindow::Main,
+                    Some(_) => PublicationWindow::Other,
+                },
+                coalesced: publication.coalesced,
+            }),
+            delivery: trace.delivery.map(|delivery| DeliveryFacts {
+                outcome: match delivery.outcome {
+                    EchoDeliveryOutcome::Sent => Delivery::Sent,
+                    EchoDeliveryOutcome::Suppressed => Delivery::Suppressed,
+                    EchoDeliveryOutcome::Refused => Delivery::Refused,
+                },
+                decided_at: delivery.decided_at,
+            }),
+        }
+    }
+}
+
+/// Without `perf-echo-trace` there is no watch: no token exists, and no sample is ever armed.
+#[cfg(not(feature = "perf-echo-trace"))]
+pub(crate) mod echo_api {
+    use sonicterm_app::app::App;
+    use winit::window::WindowId;
+
+    use super::{ArmState, EchoOutcome, EchoTarget, RowIdentity};
+
+    /// No token can exist in this build.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum EchoToken {}
+
+    /// Nothing to arm: every sample reads `unsupported`.
+    pub(crate) fn arm(
+        _app: &mut App,
+        _pane: u64,
+        _target: &EchoTarget,
+        _identity: RowIdentity,
+    ) -> ArmState {
+        ArmState::Unsupported
+    }
+
+    /// Unreachable: no token exists.
+    pub(crate) fn take(
+        _app: &mut App,
+        _pane: u64,
+        token: EchoToken,
+        _main: Option<WindowId>,
+    ) -> EchoOutcome {
+        match token {}
+    }
+
+    /// Unreachable: no token exists.
+    pub(crate) fn discard(_app: &mut App, _pane: u64, token: EchoToken) {
+        match token {}
+    }
+}
+
+pub(crate) use echo_api::EchoToken;
 
 /// Whether a visible row from the cursor's row up to `rows_above` rows above it starts with `text`.
 #[cfg_attr(not(test), allow(dead_code))]

@@ -30,6 +30,17 @@ fn latency_json(samples: &[LatencySample]) -> Value {
     serde_json::to_value(LatencyReport(samples)).expect("a latency report converts to JSON")
 }
 
+/// A credited sample of `latency_ms` from a build without the echo watch, as older fixtures record.
+fn credited_sample(inject_unix_s: f64, latency_ms: f64) -> LatencySample {
+    LatencySample {
+        inject_unix_s,
+        latency_ms: Some(latency_ms),
+        reason: CREDITED,
+        split: None,
+        split_reason: "unsupported",
+    }
+}
+
 fn observe(before: EchoSnapshot, after: EchoSnapshot, advanced: bool) -> Attribution {
     attribute_dispatch(&DispatchObservation { before, after, advanced })
 }
@@ -39,7 +50,10 @@ fn echo_parsed_before_the_input_frame_is_credited_to_that_frame() {
     // The frame the commit requested presents an echo that the PTY returned first.
     let (mut pane, target) = prompted();
     let revision = pane.grid().revision();
-    assert_eq!(snapshot(&pane, &target), EchoSnapshot::Read { present: false, revision });
+    assert_eq!(
+        snapshot(&pane, &target),
+        EchoSnapshot::Read { present: false, revision, identity: prompt_identity(pane.grid()) }
+    );
     pane.advance(b"a");
     let before = snapshot(&pane, &target);
     assert!(matches!(before, EchoSnapshot::Read { present: true, .. }));
@@ -111,7 +125,7 @@ fn echo_first_seen_during_a_presenting_frame_is_unattributed() {
 #[test]
 fn busy_lock_at_a_presenting_frame_forfeits_the_sample() {
     // A presenting frame whose grid could not be read may have drawn the echo.
-    let read = EchoSnapshot::Read { present: false, revision: 1 };
+    let read = EchoSnapshot::Read { present: false, revision: 1, identity: RowIdentity::default() };
     let busy = Attribution::Unattributed(UnattributedReason::LockBusy);
     for (before, after) in [(EchoSnapshot::Busy, read), (read, EchoSnapshot::Busy)] {
         assert_eq!(observe(before, after, true), busy);
@@ -155,23 +169,15 @@ fn protocol_lines_are_found_only_at_a_row_start_near_the_cursor() {
 fn latency_summary_reports_attribution_coverage() {
     // Latency acceptance needs coverage, so unattributed samples stay counted and named.
     let samples = [
-        LatencySample { inject_unix_s: 1.0, latency_ms: Some(12.5), reason: CREDITED },
-        LatencySample {
-            inject_unix_s: 1.25,
-            latency_ms: None,
-            reason: UnattributedReason::LockBusy.as_str(),
-        },
-        LatencySample { inject_unix_s: 1.5, latency_ms: Some(9.0), reason: CREDITED },
-        LatencySample {
-            inject_unix_s: 1.75,
-            latency_ms: None,
-            reason: UnattributedReason::NoCandidate.as_str(),
-        },
+        credited_sample(1.0, 12.5),
+        LatencySample::uncredited(1.25, UnattributedReason::LockBusy.as_str()),
+        credited_sample(1.5, 9.0),
+        LatencySample::uncredited(1.75, UnattributedReason::NoCandidate.as_str()),
     ];
     let summary = latency_json(&samples);
     assert_eq!((summary["attributed"].as_u64(), summary["total"].as_u64()), (Some(2), Some(4)));
     assert_eq!(summary["coverage"], 0.5);
-    let lock_busy = json!({"inject_unix_s": 1.25, "latency_ms": null, "attributed": false, "reason": "lock-busy"});
+    let lock_busy = json!({"inject_unix_s": 1.25, "latency_ms": null, "attributed": false, "reason": "lock-busy", "split": null, "split_reason": "not-credited"});
     assert_eq!(summary["samples"][1], lock_busy);
     assert_eq!(summary["samples"][0]["attributed"], true);
     assert_eq!(summary["samples"][3]["reason"], "no-candidate");
@@ -225,11 +231,7 @@ fn partial_result(status: Status) -> RunResult {
             frame_counters: None,
             updates: None,
         }],
-        latency: Some(vec![LatencySample {
-            inject_unix_s: 2.0,
-            latency_ms: None,
-            reason: "no-candidate",
-        }]),
+        latency: Some(vec![LatencySample::uncredited(2.0, "no-candidate")]),
         throughput: None,
         uncover_ms: None,
         scrollback_rows_retained: None,
@@ -366,12 +368,8 @@ fn measured_result() -> RunResult {
         updates: None,
     });
     result.latency = Some(vec![
-        LatencySample { inject_unix_s: 2.0, latency_ms: Some(12.5), reason: CREDITED },
-        LatencySample {
-            inject_unix_s: 2.1,
-            latency_ms: None,
-            reason: UnattributedReason::LockBusy.as_str(),
-        },
+        credited_sample(2.0, 12.5),
+        LatencySample::uncredited(2.1, UnattributedReason::LockBusy.as_str()),
     ]);
     result.throughput = Some(Throughput { bytes: 5_642_880, seconds: 0.25 });
     result.uncover_ms = Some(7.5);
@@ -434,12 +432,18 @@ fn result_json_records_every_measurement_in_its_pinned_shape() {
     assert_eq!(value["phases"][1], typing);
     let latency = json!({
         "samples": [
-            {"inject_unix_s": 2.0, "latency_ms": 12.5, "attributed": true, "reason": "credited"},
-            {"inject_unix_s": 2.1, "latency_ms": null, "attributed": false, "reason": "lock-busy"},
+            {"inject_unix_s": 2.0, "latency_ms": 12.5, "attributed": true, "reason": "credited",
+             "split": null, "split_reason": "unsupported"},
+            {"inject_unix_s": 2.1, "latency_ms": null, "attributed": false, "reason": "lock-busy",
+             "split": null, "split_reason": "not-credited"},
         ],
         "attributed": 1,
         "total": 2,
         "coverage": 0.5,
+        "split_schema": 1,
+        "split_count": 0,
+        "split_reasons": {"unsupported": 1},
+        "split_coverage": 0.0,
     });
     assert_eq!(value["latency"], latency);
     assert_eq!(value["throughput"], json!({"bytes": 5_642_880, "seconds": 0.25}));
@@ -517,10 +521,10 @@ fn typing_samples() -> Vec<LatencySample> {
             let inject_unix_s = 10.0 + f64::from(index) * 0.1;
             if index == 7 {
                 let reason = UnattributedReason::LockBusy.as_str();
-                LatencySample { inject_unix_s, latency_ms: None, reason }
+                LatencySample::uncredited(inject_unix_s, reason)
             } else {
                 let latency_ms = Some(20.0 + f64::from(index % 5));
-                LatencySample { inject_unix_s, latency_ms, reason: CREDITED }
+                credited_sample(inject_unix_s, latency_ms.expect("credited"))
             }
         })
         .collect()
@@ -987,4 +991,376 @@ fn a_phase_record_writes_updates_only_when_it_has_them() {
     assert!(serde_json::to_value(&record).unwrap().get("updates").is_none());
     record.updates = Some(300);
     assert_eq!(serde_json::to_value(&record).unwrap()["updates"], json!(300));
+}
+
+/// Instants for one fully split sample: injected, parsed, published, decided, ended, in that order,
+/// with odd nanosecond gaps so a rounding error would show.
+fn split_instants() -> [Instant; 5] {
+    let injected = Instant::now();
+    let parsed = injected + Duration::from_nanos(3_000_001);
+    let published = parsed + Duration::from_nanos(1_234_567);
+    let decided = published + Duration::from_nanos(41_003);
+    let ended = published + Duration::from_nanos(9_876_543);
+    [injected, parsed, published, decided, ended]
+}
+
+/// A taken record that splits: shown, unchanged, one appearance, a publication to the measurement
+/// window and a sent decision.
+fn split_facts([_, parsed, published, decided, _]: [Instant; 5]) -> TraceFacts {
+    TraceFacts {
+        shown: true,
+        identity_changed: false,
+        pre_present: false,
+        lost: false,
+        appearance: Some(AppearanceFacts { generation: 7, parsed_at: parsed, sync_open: false }),
+        publication: Some(PublicationFacts {
+            published_at: published,
+            window: PublicationWindow::Main,
+            coalesced: false,
+        }),
+        delivery: Some(DeliveryFacts { outcome: Delivery::Sent, decided_at: decided }),
+    }
+}
+
+/// The three parts are whole nanoseconds and add up exactly to `ended - injected`; a suppressed
+/// decision still splits, and the delivery lag is publication to decision.
+#[test]
+fn split_parts_telescope_exactly_to_ended_minus_injected() {
+    let instants = split_instants();
+    let [injected, _, _, _, ended] = instants;
+    let mut facts = split_facts(instants);
+    let split = split_for(injected, ended, &EchoOutcome::Taken(facts), false).expect("splits");
+    let total = duration_ns(ended - injected).expect("fits");
+    assert_eq!(
+        split.input_to_parse_ns + split.parse_to_publication_ns + split.publication_to_present_ns,
+        total
+    );
+    assert_eq!((split.input_to_parse_ns, split.delivery_lag_ns), (3_000_001, 41_003));
+    assert_eq!(split.echo_generation, 7);
+    facts.delivery = Some(DeliveryFacts { outcome: Delivery::Suppressed, decided_at: instants[3] });
+    let suppressed = split_for(injected, ended, &EchoOutcome::Taken(facts), false).expect("splits");
+    assert_eq!(suppressed.delivery, Delivery::Suppressed);
+}
+
+/// An appearance before the injection or a publication before the appearance fails a checked
+/// interval and reads `clock-order`, never a saturated zero; an unrepresentable interval does too.
+#[test]
+fn out_of_order_or_overflowing_endpoints_read_clock_order() {
+    let instants = split_instants();
+    let [injected, parsed, published, _, ended] = instants;
+    let mut early_parse = split_facts(instants);
+    early_parse.appearance.as_mut().expect("appeared").parsed_at =
+        injected - Duration::from_nanos(1);
+    assert_eq!(
+        split_for(injected, ended, &EchoOutcome::Taken(early_parse), false),
+        Err("clock-order")
+    );
+    let mut late_parse = split_facts(instants);
+    late_parse.appearance.as_mut().expect("appeared").parsed_at =
+        published + Duration::from_nanos(1);
+    assert_eq!(
+        split_for(injected, ended, &EchoOutcome::Taken(late_parse), false),
+        Err("clock-order")
+    );
+    assert_eq!(duration_ns(Duration::MAX), None, "an interval past u64 nanoseconds is refused");
+    assert_eq!(duration_ns(parsed - injected), Some(3_000_001));
+}
+
+/// Serialized in milliseconds, the three parts add up to the sample's latency within 0.001 ms.
+#[test]
+fn serialized_parts_sum_within_one_microsecond() {
+    let instants = split_instants();
+    let [injected, _, _, _, ended] = instants;
+    let sample = LatencySample::credited(
+        1.0,
+        injected,
+        ended,
+        &EchoOutcome::Taken(split_facts(instants)),
+        false,
+    );
+    let json = serde_json::to_value(sample).expect("a sample converts");
+    assert_eq!(json["split_reason"], "split");
+    let split = &json["split"];
+    let parts: f64 = ["input_to_parse_ms", "parse_to_publication_ms", "publication_to_present_ms"]
+        .iter()
+        .map(|key| split[*key].as_f64().expect("a number"))
+        .sum();
+    let latency = json["latency_ms"].as_f64().expect("credited");
+    assert!((parts - latency).abs() <= 0.001, "{parts} vs {latency}");
+    assert_eq!(split["delivery"], "sent");
+    assert_eq!(split["delivery_lag_us"], 41.003);
+    assert_eq!(
+        (split["coalesced"].clone(), split["sync_open"].clone()),
+        (json!(false), json!(false))
+    );
+}
+
+/// Each row of the precedence table applies when only its fact is set, and an earlier row wins
+/// over a later one. Rows the App protocol reaches are also pinned with real traces below.
+#[test]
+fn split_reason_follows_the_precedence_table() {
+    let instants = split_instants();
+    let [injected, _, published, _, ended] = instants;
+    let reason = |outcome: EchoOutcome, harness_changed: bool| {
+        split_for(injected, ended, &outcome, harness_changed).err().unwrap_or(SPLIT)
+    };
+    let with = |change: &dyn Fn(&mut TraceFacts)| {
+        let mut facts = split_facts(instants);
+        change(&mut facts);
+        EchoOutcome::Taken(facts)
+    };
+    assert_eq!(reason(EchoOutcome::Unsupported, true), "unsupported");
+    for failed in &SPLIT_REASONS[1..8] {
+        assert_eq!(reason(EchoOutcome::Failed(failed), true), *failed);
+    }
+    let rows: [(&str, &dyn Fn(&mut TraceFacts)); 11] = [
+        ("pane-not-shown", &|facts| {
+            facts.shown = false;
+            facts.identity_changed = true;
+        }),
+        ("row-identity-changed", &|facts| {
+            facts.identity_changed = true;
+            facts.pre_present = true;
+        }),
+        ("first-appearance-unobserved", &|facts| {
+            facts.pre_present = true;
+            facts.appearance = None;
+        }),
+        ("no-appearance-observed", &|facts| {
+            facts.appearance = None;
+            facts.lost = true;
+        }),
+        ("echo-overwritten", &|facts| {
+            facts.lost = true;
+            facts.publication = None;
+        }),
+        ("no-publication-observed-by-take", &|facts| facts.publication = None),
+        ("untargeted", &|facts| {
+            facts.publication.as_mut().expect("published").window = PublicationWindow::Untargeted;
+            facts.delivery = None;
+        }),
+        ("other-window", &|facts| {
+            facts.publication.as_mut().expect("published").window = PublicationWindow::Other;
+        }),
+        ("send-refused", &|facts| {
+            facts.delivery.as_mut().expect("decided").outcome = Delivery::Refused;
+        }),
+        ("delivery-not-observed-by-take", &|facts| facts.delivery = None),
+        ("delivered-after-present", &|facts| {
+            facts.delivery.as_mut().expect("decided").decided_at += Duration::from_secs(1);
+        }),
+    ];
+    for (expected, change) in rows {
+        assert_eq!(reason(with(change), false), expected);
+    }
+    assert_eq!(reason(with(&|_| {}), true), "row-identity-changed", "the harness's own check");
+    let before_publication = split_for(
+        injected,
+        published - Duration::from_nanos(1),
+        &with(&|facts| facts.delivery.as_mut().expect("decided").decided_at = published),
+        false,
+    );
+    assert_eq!(before_publication.err(), Some("presented-before-publication"));
+    assert_eq!(reason(with(&|_| {}), false), SPLIT);
+    assert_eq!(SPLIT_REASONS.len(), 22);
+    assert_eq!(SPLIT_REASONS[21], SPLIT);
+}
+
+/// A sample no frame was credited with reads `not-credited` with no split, whatever the build.
+#[test]
+fn uncredited_samples_read_not_credited() {
+    let sample = LatencySample::uncredited(3.0, UnattributedReason::NoCandidate.as_str());
+    assert_eq!((sample.split, sample.split_reason), (None, NOT_CREDITED));
+    let json = serde_json::to_value(sample).expect("a sample converts");
+    assert_eq!(
+        (json["split"].clone(), json["split_reason"].clone()),
+        (json!(null), json!("not-credited"))
+    );
+    let report = latency_json(&[sample]);
+    assert_eq!(report["split_reasons"], json!({}), "an uncredited sample is not a split reason");
+    assert_eq!(report["split_coverage"], json!(null));
+}
+
+/// A report of no samples still carries the split schema, with zero counts, no reasons and null
+/// coverage, so a reader never mistakes it for an older harness's report.
+#[test]
+fn an_empty_report_serializes_zero_counts_empty_reasons_and_null_coverage() {
+    let report = latency_json(&[]);
+    assert_eq!(report["split_schema"], 1);
+    assert_eq!(report["split_count"], 0);
+    assert_eq!(report["split_reasons"], json!({}));
+    assert_eq!(report["split_coverage"], json!(null));
+    let instants = split_instants();
+    let split = LatencySample::credited(
+        1.0,
+        instants[0],
+        instants[4],
+        &EchoOutcome::Taken(split_facts(instants)),
+        false,
+    );
+    let unsupported = credited_sample(2.0, 5.0);
+    let mixed = latency_json(&[split, unsupported]);
+    assert_eq!(mixed["split_reasons"], json!({"split": 1, "unsupported": 1}));
+    assert_eq!(
+        (mixed["split_count"].clone(), mixed["split_coverage"].clone()),
+        (json!(1), json!(0.5))
+    );
+}
+
+/// Without `perf-echo-trace` nothing is armed, so a credited sample reads `unsupported`.
+#[cfg(not(feature = "perf-echo-trace"))]
+#[test]
+fn credited_samples_read_unsupported_without_the_feature() {
+    let mut app = sonicterm_app::app::App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let target = echo_target((0, 6), 80, 0);
+    let arm = echo_api::arm(&mut app, 1, &target, RowIdentity::default());
+    assert_eq!(arm, ArmState::Unsupported);
+    let outcome = echo_outcome(arm, |token| echo_api::take(&mut app, 1, token, None));
+    let injected = Instant::now();
+    let sample = LatencySample::credited(
+        1.0,
+        injected,
+        injected + Duration::from_millis(4),
+        &outcome,
+        false,
+    );
+    assert_eq!((sample.split, sample.split_reason), (None, "unsupported"));
+}
+
+/// An App whose gate is on, with one seeded pane carrying real counter handles.
+#[cfg(feature = "perf-echo-trace")]
+fn counting_app() -> (sonicterm_app::app::App, u64) {
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+    let subscriber = Registry::default().with(EnvFilter::new("warn"));
+    let mut app = sonicterm_logging::test_capture::with_default(subscriber, || {
+        sonicterm_app::app::App::new(
+            sonicterm_cfg::theme::Theme::default(),
+            sonicterm_cfg::config::Config::default(),
+            sonicterm_cfg::keymap::Keymap::default(),
+        )
+    });
+    app.force_frame_counters_on().expect("no window or pane yet");
+    let pane = app.__test_seed_counting_tab("s2");
+    (app, pane)
+}
+
+/// The split reason of one sample through the real App protocol: arm `pane` for `a` at row 0,
+/// column 0, run `between`, then take and split with the dispatch ending at `ended`.
+#[cfg(feature = "perf-echo-trace")]
+fn app_reason(
+    app: &mut sonicterm_app::app::App,
+    pane: u64,
+    between: impl FnOnce(&mut sonicterm_app::app::App, Option<EchoToken>),
+    ended: impl FnOnce(Instant) -> Instant,
+) -> &'static str {
+    let main = sonicterm_app::app::synthetic_main_window_id();
+    let identity = app
+        .main_panes()
+        .and_then(|panes| panes.get(&pane))
+        .map_or(RowIdentity::default(), |state| prompt_identity(state.parser.lock().grid()));
+    let target = EchoTarget { abs_row: 0, col: 0, character: 'a' };
+    let injected = Instant::now();
+    let arm = echo_api::arm(app, pane, &target, identity);
+    let token = match arm {
+        ArmState::Armed(token) => Some(token),
+        _ => None,
+    };
+    between(app, token);
+    let outcome = echo_outcome(arm, |token| echo_api::take(app, pane, token, Some(main)));
+    LatencySample::credited(1.0, injected, ended(Instant::now()), &outcome, false).split_reason
+}
+
+/// The precedence rows the App protocol reaches, each from real arm, worker and take calls.
+#[cfg(feature = "perf-echo-trace")]
+#[test]
+fn split_reason_rows_reached_through_the_real_app() {
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+    let main = sonicterm_app::app::synthetic_main_window_id();
+    let after = |now: Instant| now + Duration::from_millis(5);
+    let publish = |bytes: &'static [u8]| {
+        move |app: &mut sonicterm_app::app::App, _: Option<EchoToken>| {
+            let pane = app.main().expect("main").tab_states[0].active_pane;
+            app.__test_publish_pane_output(main, pane, bytes);
+        }
+    };
+    let nothing = |_: &mut sonicterm_app::app::App, _: Option<EchoToken>| {};
+
+    let (mut app, pane) = counting_app();
+    assert_eq!(app_reason(&mut app, pane, publish(b"a"), after), "split");
+
+    let subscriber = Registry::default().with(EnvFilter::new("warn"));
+    let mut gate_off = sonicterm_logging::test_capture::with_default(subscriber, || {
+        sonicterm_app::app::App::new(
+            sonicterm_cfg::theme::Theme::default(),
+            sonicterm_cfg::config::Config::default(),
+            sonicterm_cfg::keymap::Keymap::default(),
+        )
+    });
+    let off_pane = gate_off.__test_seed_tab("off");
+    assert_eq!(app_reason(&mut gate_off, off_pane, nothing, after), "arm-gate-off");
+
+    let (mut app, pane) = counting_app();
+    assert_eq!(app_reason(&mut app, pane + 1000, nothing, after), "arm-no-pane");
+    app.__test_set_next_echo_arm(u64::MAX);
+    assert_eq!(app_reason(&mut app, pane, nothing, after), "arm-exhausted");
+
+    let (mut app, pane) = counting_app();
+    let remove = |app: &mut sonicterm_app::app::App, _: Option<EchoToken>| {
+        let pane = app.main().expect("main").tab_states[0].active_pane;
+        app.main_panes_mut().expect("main").remove(&pane);
+    };
+    assert_eq!(app_reason(&mut app, pane, remove, after), "take-no-pane");
+
+    let (mut app, pane) = counting_app();
+    let rearm = |app: &mut sonicterm_app::app::App, _: Option<EchoToken>| {
+        let pane = app.main().expect("main").tab_states[0].active_pane;
+        let target = EchoTarget { abs_row: 0, col: 1, character: 'b' };
+        echo_api::arm(app, pane, &target, RowIdentity::default());
+    };
+    assert_eq!(app_reason(&mut app, pane, rearm, after), "take-mismatch");
+
+    let (mut app, pane) = counting_app();
+    let take_early = |app: &mut sonicterm_app::app::App, token: Option<EchoToken>| {
+        let pane = app.main().expect("main").tab_states[0].active_pane;
+        echo_api::discard(app, pane, token.expect("armed"));
+    };
+    assert_eq!(app_reason(&mut app, pane, take_early, after), "take-already-taken");
+
+    let (mut app, pane) = counting_app();
+    app.__test_seed_tab("second");
+    assert!(app.__test_invoke_activate_main_tab(1), "the second tab is active");
+    assert_eq!(app_reason(&mut app, pane, nothing, after), "pane-not-shown");
+
+    let (mut app, pane) = counting_app();
+    assert_eq!(app_reason(&mut app, pane, publish(b"\x1b[?1049ha"), after), "row-identity-changed");
+
+    let (mut app, pane) = counting_app();
+    app.__test_publish_pane_output(main, pane, b"a");
+    assert_eq!(app_reason(&mut app, pane, publish(b"b"), after), "first-appearance-unobserved");
+
+    let (mut app, pane) = counting_app();
+    assert_eq!(app_reason(&mut app, pane, nothing, after), "no-appearance-observed");
+
+    let (mut app, pane) = counting_app();
+    let overwrite = |app: &mut sonicterm_app::app::App, token: Option<EchoToken>| {
+        publish(b"a")(app, token);
+        publish(b"\rb")(app, token);
+    };
+    assert_eq!(app_reason(&mut app, pane, overwrite, after), "echo-overwritten");
+
+    let (mut app, pane) = counting_app();
+    let unflushed = |app: &mut sonicterm_app::app::App, _: Option<EchoToken>| {
+        let pane = app.main().expect("main").tab_states[0].active_pane;
+        let mut worker = app.__test_pane_worker(main, pane).expect("worker");
+        assert!(worker.batch(b"a", Instant::now()).is_empty(), "a small batch waits to coalesce");
+    };
+    assert_eq!(app_reason(&mut app, pane, unflushed, after), "no-publication-observed-by-take");
+
+    let (mut app, pane) = counting_app();
+    let before = |now: Instant| now - Duration::from_secs(1);
+    assert_eq!(app_reason(&mut app, pane, publish(b"a"), before), "presented-before-publication");
 }

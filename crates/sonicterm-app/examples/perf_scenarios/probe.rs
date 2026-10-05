@@ -31,12 +31,14 @@ use winit::window::{Window, WindowId, WindowLevel};
 use crate::cli::{RunArgs, REFUSED};
 use crate::counters::{CounterTotals, CountersMode};
 use crate::record::{
-    attribute_dispatch, bulk_tail_mismatch, echo_target, line_row_near_cursor, missing_wide_tokens,
-    planned_rows, presenter_blocked, presenter_record_for, prompt_origin, protocol_rows,
-    retained_text, row_count_mismatch, snapshot_echo, wide_tokens, write_progress, AtlasReading,
-    Attribution, CheckpointRecord, DispatchObservation, EchoSnapshot, EchoTarget, LatencySample,
-    Measurements, MonitorInfo, PhaseRecord, PresenterRecord, RunResult, SlowDispatch,
-    SlowDispatches, Status, Throughput, UnattributedReason, CHECKPOINT_MEMORY, CREDITED,
+    attribute_dispatch, bulk_tail_mismatch, echo_api, echo_outcome, echo_target,
+    line_row_near_cursor, missing_wide_tokens, planned_rows, presenter_blocked,
+    presenter_record_for, prompt_identity, prompt_origin, protocol_rows, retained_text,
+    row_count_mismatch, snapshot_echo, snapshot_identity_changed, split_in_scope, wide_tokens,
+    write_progress, ArmState, AtlasReading, Attribution, CheckpointRecord, DispatchObservation,
+    EchoSnapshot, EchoTarget, LatencySample, Measurements, MonitorInfo, PhaseRecord,
+    PresenterRecord, RowIdentity, RunResult, SlowDispatch, SlowDispatches, Status, Throughput,
+    UnattributedReason, CHECKPOINT_MEMORY,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{
@@ -163,6 +165,8 @@ struct Typing {
     settle: Duration,
     /// Where typing starts, once the prompt is in the grid.
     origin: Option<(u64, u16)>,
+    /// The row identity read with the origin, under the same guard; every sample is armed with it.
+    identity: RowIdentity,
     cols: u16,
     first_at: Option<Instant>,
     typed: u32,
@@ -208,6 +212,10 @@ struct OpenSample {
     target: EchoTarget,
     injected: Instant,
     inject_unix_s: f64,
+    /// How the sample's echo watch was armed; an armed token is taken at every close.
+    arm: ArmState,
+    /// The row identity the sample was armed with.
+    identity: RowIdentity,
 }
 
 /// Native occlusion as delivered to the App, and the harness's own cover.
@@ -1401,26 +1409,40 @@ impl Probe {
             Attribution::Pending => {}
             Attribution::Credited => {
                 if let Some(sample) = self.open_sample.take() {
-                    self.samples.push(LatencySample {
-                        inject_unix_s: sample.inject_unix_s,
-                        latency_ms: Some(ms_between(sample.injected, ended)),
-                        reason: CREDITED,
+                    // The take runs after both snapshots have released the parser lock.
+                    let main = self.measurement_window();
+                    let outcome = echo_outcome(sample.arm, |token| {
+                        echo_api::take(&mut self.app, sample.pane, token, main)
                     });
+                    let changed = snapshot_identity_changed(observation, sample.identity);
+                    self.samples.push(LatencySample::credited(
+                        sample.inject_unix_s,
+                        sample.injected,
+                        ended,
+                        &outcome,
+                        changed,
+                    ));
                 }
             }
             Attribution::Unattributed(reason) => self.close_sample(reason),
         }
     }
 
-    /// Close the open sample, if any, as unattributed.
+    /// Close the open sample, if any, as unattributed; an armed watch is disarmed and its record
+    /// discarded, so a closed sample costs the worker nothing more.
     fn close_sample(&mut self, reason: UnattributedReason) {
         if let Some(sample) = self.open_sample.take() {
-            self.samples.push(LatencySample {
-                inject_unix_s: sample.inject_unix_s,
-                latency_ms: None,
-                reason: reason.as_str(),
-            });
+            if let ArmState::Armed(token) = sample.arm {
+                echo_api::discard(&mut self.app, sample.pane, token);
+            }
+            self.samples.push(LatencySample::uncredited(sample.inject_unix_s, reason.as_str()));
         }
+    }
+
+    /// The window the measurement presents in: the real main window, else the App's main entry.
+    fn measurement_window(&self) -> Option<WindowId> {
+        self.main_id
+            .or_else(|| self.app.main().map(|_| sonicterm_app::app::synthetic_main_window_id()))
     }
 
     /// A nonblocking look at the open sample's echo cell.
@@ -1528,11 +1550,15 @@ impl Probe {
         if let Some(role) = prompt_role {
             let found = self
                 .role_grid(role, |grid| {
-                    prompt_origin(grid, workload::PROMPT).map(|origin| (origin, grid.cols))
+                    prompt_origin(grid, workload::PROMPT)
+                        .map(|origin| (origin, grid.cols, prompt_identity(grid)))
                 })
                 .flatten();
-            if let (Some((origin, cols)), DriverState::Typing(typing)) = (found, &mut self.driver) {
+            if let (Some((origin, cols, identity)), DriverState::Typing(typing)) =
+                (found, &mut self.driver)
+            {
                 typing.origin = Some(origin);
+                typing.identity = identity;
                 typing.cols = cols;
                 typing.first_at = Some(now);
             }
@@ -2508,6 +2534,7 @@ impl Probe {
                     interval: Duration::from_secs(1) / per_second.max(1),
                     settle: Duration::from_millis(settle_ms),
                     origin: None,
+                    identity: RowIdentity::default(),
                     cols: 0,
                     first_at: None,
                     typed: 0,
@@ -2654,26 +2681,41 @@ impl Probe {
 
     /// Type the next character: the previous sample closes and this character's sample opens.
     fn inject_typing(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(character) = self.open_typing_sample(Instant::now()) {
+            self.window_input(event_loop, WindowEvent::Ime(Ime::Commit(character.to_string())));
+        }
+    }
+
+    /// Close the previous sample and open the next character's, injected at `injected`, arming its
+    /// echo watch only for S2/default; returns the character to type, or `None` when typing is done
+    /// or the prompt is not yet found. Needs no event loop.
+    fn open_typing_sample(&mut self, injected: Instant) -> Option<char> {
         let DriverState::Typing(typing) = &mut self.driver else {
-            return;
+            return None;
         };
-        let Some(origin) = typing.origin else {
-            return;
-        };
+        let origin = typing.origin?;
         if typing.typed >= typing.chars {
-            return;
+            return None;
         }
         let target = echo_target(origin, typing.cols, typing.typed);
-        let pane = typing.pane;
+        let (pane, identity) = (typing.pane, typing.identity);
         typing.typed += 1;
-        let injected = Instant::now();
         if typing.typed == typing.chars {
             typing.done_at = Some(injected);
         }
         // A sample with no candidate by the next injection is unattributed.
         self.close_sample(UnattributedReason::NoCandidate);
-        self.open_sample = Some(OpenSample { pane, target, injected, inject_unix_s: unix_now() });
-        self.window_input(event_loop, WindowEvent::Ime(Ime::Commit(target.character.to_string())));
+        // Every parser guard is released here, and the character is not yet injected.
+        let arm = if split_in_scope(self.plan.scenario, self.plan.variant) {
+            echo_api::arm(&mut self.app, pane, &target, identity)
+        } else {
+            // When: the plan is not S2/default, its samples are never armed and read unsupported.
+            ArmState::OutOfScope
+        };
+        let inject_unix_s = unix_now();
+        self.open_sample =
+            Some(OpenSample { pane, target, injected, inject_unix_s, arm, identity });
+        Some(target.character)
     }
 
     fn inject_sweep(&mut self, event_loop: &ActiveEventLoop) {

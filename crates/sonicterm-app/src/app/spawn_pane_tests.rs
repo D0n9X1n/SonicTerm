@@ -1976,3 +1976,19 @@ fn a_taken_watch_stops_the_workers_slot_locks() {
     echo_flush(&handles, base + Duration::from_millis(4), true);
     assert_eq!(slot_locks() - before, 0, "a taken watch costs the worker no lock");
 }
+
+/// A worker handle created after facts were recorded (a new handle for each batch, as the test
+/// hooks make) resumes from the record: the echo it saw appear reads lost when overwritten, never
+/// pre-present.
+#[test]
+fn a_new_worker_handle_resumes_from_the_recorded_facts() {
+    let (pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_batch(&handles, b"a", base + Duration::from_millis(1));
+    let fresh = PaneVtHandles::from_pane_state(&pane);
+    echo_batch(&fresh, b"\rb", base + Duration::from_millis(2));
+    let trace = echo_trace(&watch);
+    assert!(trace.lost, "the overwrite after the appearance is lost");
+    assert!(!trace.pre_present, "the recorded appearance is not re-read as pre-present");
+}
