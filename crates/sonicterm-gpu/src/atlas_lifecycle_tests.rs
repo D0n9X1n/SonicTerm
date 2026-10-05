@@ -179,24 +179,102 @@ fn both_release_triggers_share_one_body_and_name_their_reason() {
     check_release_triggers(&lf.replace('\n', "\r\n"));
 }
 
-/// The settling body of `finish_glyph_atlas_retry`, read as LF.
+/// The body of the free settlement function, read as LF.
 fn settlement_body(lifecycle: &str) -> String {
     let lifecycle = lifecycle.replace("\r\n", "\n");
-    let body = lifecycle.split_once("fn finish_glyph_atlas_retry(").expect("the settlement").1;
-    body.split_once("\n    }\n").expect("the settlement ends").0.to_string()
+    let body = lifecycle.split_once("fn settle_glyph_atlas_retry(").expect("the settlement").1;
+    body.split_once("\n}\n").expect("the settlement ends").0.to_string()
 }
 
-/// Settling a presented eviction-disabled retry re-enables eviction and drops the preedit cache,
-/// whose partial chrome output a refused glyph left behind, but keeps the rows the recovered
-/// frame admitted: only complete rows were admitted, and any later eviction changes the atlas
-/// identity they are checked against. Scanned as given and as CRLF, as Windows checks out.
+/// Secondary structural check beside the behavioural test below: the settlement re-enables
+/// eviction, drops the preedit cache and calls nothing that clears rows (`invalidate_all` or
+/// `release_all`), and the renderer's settle step delegates to it. Scanned as LF and as CRLF,
+/// as Windows checks out.
 #[test]
-fn settling_a_presented_retry_keeps_rows_and_drops_preedit() {
+fn the_settlement_source_keeps_rows_and_drops_preedit() {
     let lifecycle = include_str!("atlas_lifecycle.rs").replace("\r\n", "\n");
     for text in [lifecycle.clone(), lifecycle.replace('\n', "\r\n")] {
         let body = settlement_body(&text);
-        assert!(body.contains("self.glyph_atlas.set_eviction_enabled(true)"), "{body}");
-        assert!(body.contains("self.preedit_glyph_cache = None"), "{body}");
-        assert!(!body.contains("row_glyph_cache.invalidate_all"), "rows are kept: {body}");
+        assert!(body.contains("atlas.set_eviction_enabled(true)"), "{body}");
+        assert!(body.contains("*preedit = None"), "{body}");
+        assert!(!body.contains("invalidate_all"), "rows are kept: {body}");
+        assert!(!body.contains("release_all"), "rows are kept: {body}");
     }
+    let method = lifecycle.split_once("fn finish_glyph_atlas_retry(").expect("the method").1;
+    assert!(method.contains("settle_glyph_atlas_retry("), "the renderer settles through it");
+}
+
+/// A preedit slot holding one drawn run, stamped against `atlas`.
+fn populated_preedit(atlas: &GlyphAtlas) -> PreeditGlyphCache {
+    PreeditGlyphCache {
+        text: "\u{3042}".to_owned(),
+        font_size: 14.0,
+        start_x: 0.0,
+        top_y: 0.0,
+        color_bits: 0,
+        atlas_stamp: GlyphContentStamp::capture(0, 0, atlas),
+        glyphs: Vec::new(),
+        missing_boxes: Vec::new(),
+        missing_chrome_chars: Vec::new(),
+    }
+}
+
+/// Settling a presented eviction-disabled retry, on a real atlas, row cache and preedit slot:
+/// the row the recovered frame admitted still hits at the unchanged atlas identity, eviction is
+/// on again and the preedit slot is empty. A second settlement with nothing pending changes
+/// nothing, so a preedit filled after the first one survives it.
+#[test]
+fn settling_a_presented_retry_keeps_the_admitted_row_and_drops_preedit() {
+    const PANE: u64 = 7;
+    const KEY: u64 = 0x5eed;
+    let mut atlas = GlyphAtlas::new(256, 256);
+    // The retry's frame ran with eviction off and left one glyph resident.
+    atlas.set_eviction_enabled(false);
+    let glyph = sonicterm_types::glyph_key::GlyphKey {
+        ch: 'a',
+        font_slot: 0,
+        weight_bold: false,
+        italic: false,
+        glyph_id: 1,
+        raster_variant: GlyphRasterVariant::Normal,
+    };
+    let tile = || sonicterm_text::glyph_atlas::RasterTile {
+        width: 4,
+        height: 4,
+        offset_x: 0,
+        offset_y: 0,
+        advance: 4.0,
+        coverage: vec![255; 16],
+        is_color: false,
+        is_subpixel: false,
+    };
+    assert!(atlas.get_or_insert_lazy_without_eviction(glyph, 4, 4, tile).is_some());
+    let identity = row_cache_atlas_identity(&atlas);
+    let mut rows = sonicterm_text::row_glyph_cache::RowGlyphCache::new();
+    rows.begin_frame(&[(PANE, 4, 10)]);
+    let row = sonicterm_text::row_glyph_cache::CachedRow {
+        missing_chars: vec!['a'],
+        ..Default::default()
+    };
+    assert!(rows.insert(PANE, KEY, identity, row.clone()), "precondition: the row is admitted");
+    let mut pending = true;
+    let mut preedit = Some(populated_preedit(&atlas));
+
+    let kept = settle_glyph_atlas_retry(&mut pending, &mut atlas, &mut rows, &mut preedit);
+    // Row reuse is checked first: it is the contract the pre-fix row clear broke.
+    assert_eq!(rows.get(PANE, KEY, identity, |_| true), Some(&row), "the admitted row is reused");
+    assert_eq!(row_cache_atlas_identity(&atlas), identity, "re-enabling eviction keeps identity");
+    assert!(atlas.eviction_enabled(), "eviction is on again");
+    assert!(preedit.is_none(), "the preedit slot is dropped");
+    assert!(!pending, "the retry is no longer pending");
+    assert_eq!(kept, Some(1), "the settlement ran and kept the one row");
+
+    // A second settlement, with a preedit drawn since, finds nothing pending and changes nothing.
+    preedit = Some(populated_preedit(&atlas));
+    let again = settle_glyph_atlas_retry(&mut pending, &mut atlas, &mut rows, &mut preedit);
+    assert_eq!(again, None, "nothing was pending");
+    assert!(preedit.is_some(), "an idle settlement leaves the preedit slot alone");
+    assert!(atlas.eviction_enabled(), "eviction stays on");
+    assert_eq!(row_cache_atlas_identity(&atlas), identity, "the identity is unchanged");
+    assert_eq!(rows.get(PANE, KEY, identity, |_| true), Some(&row), "the row still hits");
 }
