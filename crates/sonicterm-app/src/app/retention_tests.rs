@@ -1534,3 +1534,286 @@ fn the_trim_hook_shares_the_scheduler_rules_and_runs_no_retention_pass() {
     assert_eq!(panes_after, panes_before);
     assert_eq!(app.windows.len(), 1, "no window was created or removed");
 }
+
+/// Captures the `renderer_total_bytes` of every INFO `memory snapshot` line.
+#[derive(Clone, Default)]
+struct RendererTotals(Arc<std::sync::Mutex<Vec<u64>>>);
+
+/// Reads one event's `renderer_total_bytes` field.
+#[derive(Default)]
+struct RendererTotalField(Option<u64>);
+
+impl tracing::field::Visit for RendererTotalField {
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if field.name() == "renderer_total_bytes" {
+            // When: the field is the renderer total, it is the figure the pass reported.
+            self.0 = Some(value);
+        }
+    }
+
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RendererTotals {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() != "memory" {
+            // When: the target differs, the event is not a memory snapshot.
+            return;
+        }
+        let mut total = RendererTotalField::default();
+        event.record(&mut total);
+        if let Some(bytes) = total.0 {
+            self.0.lock().expect("the totals lock").push(bytes);
+        }
+    }
+}
+
+/// Draw one frame of `rows` on window `window_id`'s renderer, outside any frame cadence.
+fn draw_window(app: &mut App, window_id: WindowId, rows: &str) -> Result<(), String> {
+    let mut grid = Grid::new(40, 8);
+    for (row, line) in (0u16..).zip(rows.lines()) {
+        grid.goto(row, 0);
+        for character in line.chars() {
+            grid.put_char(
+                character,
+                sonicterm_grid::grid::Color::Default,
+                sonicterm_grid::grid::Color::Default,
+                sonicterm_grid::grid::CellFlags::empty(),
+            );
+        }
+    }
+    let renderer = app.__test_window_renderer_mut(window_id).ok_or("the window has a renderer")?;
+    let frames = renderer.successful_frame_count();
+    let mut panes = [sonicterm_render_model::PaneRender {
+        id: 1,
+        rect_px: sonicterm_render_model::PixelRect { x: 0, y: 0, w: 400, h: 200 },
+        grid: &mut grid,
+        viewport_top_abs: None,
+        is_active: true,
+        cursor_style: sonicterm_render_model::CursorStyle::BlockSteady,
+        is_broadcast_participant: false,
+        scrollbar_alpha: 0.0,
+        inline_images: Vec::new(),
+    }];
+    renderer
+        .render(
+            &mut panes,
+            &sonicterm_cfg::theme::Theme::default(),
+            false,
+            None,
+            None,
+            &sonicterm_ui::tabs::TabBar::new(),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    if renderer.successful_frame_count() == frames {
+        // When: no frame presented, the renderer holds nothing a trim could release.
+        return Err(String::from("the frame did not present"));
+    }
+    Ok(())
+}
+
+/// A renderer for a live window, presenting through wgpu (WARP on the hosted runner).
+fn live_renderer(
+    event_loop: &winit::event_loop::ActiveEventLoop,
+    visible: bool,
+    role: &'static str,
+) -> Result<(Arc<winit::window::Window>, sonicterm_gpu::core::GpuRenderer), String> {
+    use sonicterm_cfg::config::{ScrollbarMode, SoftwareRenderMode};
+    use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
+    let window = Arc::new(
+        event_loop
+            .create_window(
+                winit::window::Window::default_attributes()
+                    .with_visible(visible)
+                    .with_inner_size(winit::dpi::PhysicalSize::new(400, 200)),
+            )
+            .map_err(|error| error.to_string())?,
+    );
+    let font_dirs =
+        [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    let settings = RendererSettings {
+        font_family: "Rec Mono St.Helens",
+        font_dirs: &font_dirs,
+        font_size: 16.0,
+        line_height_mult: 1.0,
+        font_weight_scale: 1.0,
+        subpixel_aa: Default::default(),
+        padding: [0.0; 4],
+        appearance: SurfaceAppearance {
+            backdrop: Default::default(),
+            opacity: 1.0,
+            scrollbar: ScrollbarMode::Never,
+            panel_padding: 0.0,
+            software_render_mode: SoftwareRenderMode::Off,
+        },
+        role,
+        glyph_atlas_start: GlyphAtlasStart::Normal,
+    };
+    let renderer = GpuRenderer::new(
+        window.clone(),
+        event_loop,
+        &sonicterm_cfg::theme::Theme::default(),
+        settings,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((window, renderer))
+}
+
+/// Run one retention pass at `secs` after `base` and return its scheduler decision for `window_id`.
+fn pass_at(app: &mut App, base: Instant, secs: u64, window_id: WindowId) -> Option<TrimDecision> {
+    app.test_scheduler_trims.clear();
+    app.last_retention_sample = None;
+    app.sample_pane_retention(base + Duration::from_secs(secs));
+    app.test_scheduler_trims
+        .iter()
+        .find(|(decided, _)| *decided == window_id)
+        .map(|(_, decision)| *decision)
+}
+
+/// Every committed charge of `pane_id`, summed in bytes.
+fn charged_bytes(app: &App, window_id: WindowId, pane_id: u64) -> usize {
+    app.__test_pane_charges(window_id, pane_id)
+        .map(|charges| charges.values().map(|amount| amount.bytes).sum())
+        .unwrap_or(0)
+}
+
+/// The live scheduler on a real renderer: nothing is trimmed at 29 s of cover; the first pass at
+/// 30 s trims once, and its INFO snapshot reports lower renderer retention than the snapshot just
+/// before it while the pane's charges stay the same; a later pass in the same stretch skips it.
+/// After the window is shown, drawn and covered again, a pass with no subscriber at all trims it
+/// a second time. A warm spare is never trimmed, by the hook or by the pass.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn run_live_scheduler(event_loop: &winit::event_loop::ActiveEventLoop) -> Result<(), String> {
+    use tracing_subscriber::layer::SubscriberExt;
+    let base = test_base();
+    set_fake_now(base);
+    let mut app = app_with_private_pools();
+    app.__test_set_dispatch_clock(fake_now);
+    let pane_id = app.__test_seed_tab("covered");
+    let main = app.main_window_id.ok_or("the seeded main window")?;
+    let (window, renderer) = live_renderer(event_loop, true, "live-scheduler")?;
+    if !app.__test_attach_window_renderer(main, window, renderer) {
+        return Err(String::from("the renderer attaches"));
+    }
+    draw_window(&mut app, main, "first row of text\nsecond row of text\nthird row")?;
+    if tracing::enabled!(target: "memory", tracing::Level::INFO) {
+        return Err(String::from("precondition: no memory subscriber outside a capture"));
+    }
+    app.handle_window_occlusion(main, true);
+
+    let early = pass_at(&mut app, base, 29, main);
+    if early != Some(TrimDecision::Skipped(TrimSkip::TooRecent)) {
+        return Err(format!("29 s of cover is too recent: {early:?}"));
+    }
+    let charges_before = charged_bytes(&app, main, pane_id);
+    let totals = RendererTotals::default();
+    let subscriber = tracing_subscriber::Registry::default()
+        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        .with(totals.clone());
+    let before_bytes = app.build_memory_snapshot().renderer_bytes() as u64;
+    let eligible = sonicterm_logging::test_capture::with_default(subscriber, || {
+        pass_at(&mut app, base, 30, main)
+    });
+    if eligible != Some(TrimDecision::Trimmed { trim_seq: 1 }) {
+        return Err(format!("the first pass at 30 s trims once: {eligible:?}"));
+    }
+    let reported = totals.0.lock().expect("the totals lock").clone();
+    if reported.len() != 1 || reported[0] >= before_bytes {
+        return Err(format!(
+            "the pass's snapshot reports lower renderer retention: {before_bytes} -> {reported:?}"
+        ));
+    }
+    if charged_bytes(&app, main, pane_id) != charges_before {
+        return Err(String::from("the trim leaves the pane's charges unchanged"));
+    }
+    let renderer = app.__test_window_renderer_mut(main).ok_or("the renderer")?;
+    if !renderer.__frame_texture_trimmed() {
+        return Err(String::from("the renderer's frame texture was trimmed"));
+    }
+    if (app.trim_seq, app.last_trim_source) != (1, Some(TrimSource::Scheduler)) {
+        return Err(format!("one scheduler trim: {:?}", (app.trim_seq, app.last_trim_source)));
+    }
+    let later = pass_at(&mut app, base, 60, main);
+    if later != Some(TrimDecision::Skipped(TrimSkip::AlreadyTrimmed)) || app.trim_seq != 1 {
+        return Err(format!("one trim per covered stretch: {later:?}, trim_seq {}", app.trim_seq));
+    }
+
+    // Shown, drawn and covered again, then a pass with no subscriber installed: still trimmed.
+    set_fake_now(base + Duration::from_secs(70));
+    app.handle_window_occlusion(main, false);
+    draw_window(&mut app, main, "regrown row\nanother regrown row")?;
+    app.handle_window_occlusion(main, true);
+    let unlogged = pass_at(&mut app, base, 100, main);
+    if unlogged != Some(TrimDecision::Trimmed { trim_seq: 2 }) {
+        return Err(format!("the pass trims with logging off: {unlogged:?}"));
+    }
+
+    // A warm spare holds a live renderer but is never shown: neither the hook nor a pass trims it.
+    let (spare_window, spare_renderer) = live_renderer(event_loop, false, "live-scheduler-spare")?;
+    let spare = spare_window.id();
+    let spare_before = spare_renderer.retained_amounts();
+    app.warm_window_pool.push(crate::app::WarmWindow {
+        window: spare_window,
+        renderer: spare_renderer,
+        created_at: Instant::now(),
+    });
+    if app.__trim_covered_now(spare) != TrimDecision::Skipped(TrimSkip::Warm) {
+        return Err(String::from("the hook skips a warm spare"));
+    }
+    let _ = pass_at(&mut app, base, 200, main);
+    if app.test_scheduler_trims.iter().any(|(decided, _)| *decided == spare) {
+        return Err(String::from("the pass never visits a warm spare"));
+    }
+    let spare_after = &app.warm_window_pool[0].renderer;
+    if spare_after.retained_amounts() != spare_before || spare_after.__frame_texture_trimmed() {
+        return Err(String::from("the warm spare's renderer is untouched"));
+    }
+    Ok(())
+}
+
+/// The live scheduler and the warm-spare exclusion on a real renderer, in an isolated process with
+/// its own event loop.
+#[cfg(windows)]
+#[test]
+fn the_live_scheduler_trims_a_covered_renderer_once_and_never_a_warm_spare() {
+    use crate::app::pty_test_support::isolated;
+    use winit::{
+        application::ApplicationHandler,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+    };
+    if isolated() {
+        return;
+    }
+    struct Probe {
+        outcome: Option<Result<(), String>>,
+    }
+    impl ApplicationHandler<crate::app::UserEvent> for Probe {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            self.outcome = Some(run_live_scheduler(event_loop));
+            event_loop.exit();
+        }
+        fn window_event(
+            &mut self,
+            _: &ActiveEventLoop,
+            _: winit::window::WindowId,
+            _: winit::event::WindowEvent,
+        ) {
+        }
+    }
+    let event_loop = EventLoop::<crate::app::UserEvent>::with_user_event()
+        .with_any_thread(true)
+        .build()
+        .expect("Windows event loop");
+    let mut probe = Probe { outcome: None };
+    event_loop.run_app(&mut probe).expect("live scheduler event loop");
+    probe.outcome.expect("resumed runs").unwrap_or_else(|error| panic!("{error}"));
+}
