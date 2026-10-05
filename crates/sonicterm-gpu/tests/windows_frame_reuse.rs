@@ -429,6 +429,12 @@ fn assembled_frames_reuse_scratch(active: &ActiveEventLoop) -> Result<(), String
         renderer.__set_frame_reuse(reuse);
         let mut scene = single_scene(&renderer, &["shell"]);
         let settled = settle_fallback(&mut renderer, &mut scene)?;
+        // Every edit's glyphs are drawn once first, so no measured frame rasterizes or grows the
+        // atlas and both sides count only their assembly.
+        for index in 0..10u16 {
+            write(&mut scene.panes[0].grid, 0, 0, &format!("edit {index:02}"));
+            forced(&mut renderer, &mut scene)?;
+        }
         for _ in 0..5 {
             forced(&mut renderer, &mut scene)?;
         }
@@ -454,10 +460,52 @@ fn assembled_frames_reuse_scratch(active: &ActiveEventLoop) -> Result<(), String
     check(reused_pixels == cold_pixels, "reuse draws the same pixels")
 }
 
+/// One forced frame's allocations and what it changed: whether it drew in a single attempt with
+/// no row-cache miss and no atlas growth (a steady frame), and the scratch bytes it left.
+struct ForcedFrame {
+    allocations: usize,
+    steady: bool,
+    scratch_bytes: usize,
+    figures: String,
+}
+
+/// Draw one forced frame of `scene`, counting its allocations and reading the identity figures
+/// that say whether it refilled a cache. Glyph-atlas growths are counted at the next frame's
+/// start, so a growth is read from the atlas's retained bytes instead.
+fn measured_forced(renderer: &mut GpuRenderer, scene: &mut Scene) -> Result<ForcedFrame, String> {
+    let before = renderer.frame_stats();
+    let atlas_before = renderer.retained_amounts().glyph_atlas.bytes;
+    let resets_before = renderer.__test_glyph_atlas_resets();
+    let (outcome, allocations) = allocations_of(|| forced(renderer, scene));
+    outcome?;
+    let after = renderer.frame_stats();
+    let atlas_after = renderer.retained_amounts().glyph_atlas.bytes;
+    let attempts = after.attempts.attempts - before.attempts.attempts;
+    let row_misses = after.row_cache_misses - before.row_cache_misses;
+    let resets = renderer.__test_glyph_atlas_resets() - resets_before;
+    let scratch_bytes = renderer.retained_amounts().frame_scratch.bytes;
+    Ok(ForcedFrame {
+        allocations,
+        steady: attempts == 1 && row_misses == 0 && atlas_after == atlas_before && resets == 0,
+        scratch_bytes,
+        figures: format!(
+            "allocations {allocations}, attempts {attempts}, row misses {row_misses}, row hits {}, \
+             atlas bytes {atlas_before} -> {atlas_after}, resets {resets}, scratch {scratch_bytes}",
+            after.row_cache_hits - before.row_cache_hits
+        ),
+    })
+}
+
+/// Frames a recovery may take to become steady again. After an atlas reset the first frame
+/// refills the row cache and its successful present clears it once more, as eviction resumes,
+/// so the second frame refills it again; the third is steady.
+const RECOVERY_FRAMES: usize = 4;
+
 /// T8: after a failed assembly, a failed presentation and an atlas retry, the scratch keeps its
-/// capacity and the next forced frame draws what a renderer with no failures draws. The partial
-/// fallback exit has no renderer seam; the device-free driver covers it. Both renderers settle
-/// their font fallback before any pixels are compared.
+/// capacity, never grows while the caches refill, and the first steady frame allocates no more
+/// than a steady frame before the fault and draws what a renderer with no failures draws. The
+/// partial fallback exit has no renderer seam; the device-free driver covers it. Both renderers
+/// settle their font fallback before any pixels are compared.
 fn scratch_survives_failed_and_retried_frames(active: &ActiveEventLoop) -> Result<(), String> {
     let (_window, mut candidate) =
         renderer(active, SoftwareRenderMode::Off, &Theme::default(), (640, 360), false)?;
@@ -467,13 +515,27 @@ fn scratch_survives_failed_and_retried_frames(active: &ActiveEventLoop) -> Resul
     let mut oracle_scene = single_scene(&oracle, &["shell"]);
     let candidate_settled = settle_fallback(&mut candidate, &mut scene)?;
     let oracle_settled = settle_fallback(&mut oracle, &mut oracle_scene)?;
-    // The most allocations a steady forced frame of this unchanged scene makes.
+    // The most allocations a steady forced frame of this unchanged scene makes, over three
+    // steady frames; a frame that still refilled a cache is not a steady sample.
     let mut steady_allocations = 0;
-    for _ in 0..3 {
-        let (outcome, allocations) = allocations_of(|| forced(&mut candidate, &mut scene));
-        outcome?;
-        steady_allocations = steady_allocations.max(allocations);
+    let mut steady_samples = 0;
+    let mut baseline_figures = Vec::new();
+    for _ in 0..3 + RECOVERY_FRAMES {
+        let measured = measured_forced(&mut candidate, &mut scene)?;
+        baseline_figures.push(measured.figures.clone());
+        if measured.steady {
+            // When: `measured.steady` holds, the frame refilled nothing and is a baseline sample.
+            steady_allocations = steady_allocations.max(measured.allocations);
+            steady_samples += 1;
+        }
+        if steady_samples == 3 {
+            break;
+        }
     }
+    check(
+        steady_samples == 3,
+        &format!("the settled scene draws three steady frames: {}", baseline_figures.join("; ")),
+    )?;
     type Arm = fn(&mut GpuRenderer);
     let arms: [(&str, Arm); 3] = [
         ("failed assembly", GpuRenderer::__fail_next_assembly),
@@ -490,16 +552,32 @@ fn scratch_survives_failed_and_retried_frames(active: &ActiveEventLoop) -> Resul
             after == before,
             &format!("{name}: the scratch kept its capacity ({before} -> {after})"),
         )?;
-        // An atlas retry resets the atlas, so one frame re-rasterizes before the scene is steady.
-        forced(&mut candidate, &mut scene)?;
-        let (outcome, recovered_allocations) =
-            allocations_of(|| forced(&mut candidate, &mut scene));
-        outcome?;
+        // Recovered frames refill the caches the fault dropped; the scratch grows in none of them,
+        // and the first steady one is held to the steady bound.
+        let mut recovery = Vec::new();
+        let mut recovered = None;
+        for _ in 0..RECOVERY_FRAMES {
+            let measured = measured_forced(&mut candidate, &mut scene)?;
+            recovery.push(measured.figures.clone());
+            check(
+                measured.scratch_bytes <= before,
+                &format!("{name}: no recovered frame grows the scratch: {}", recovery.join("; ")),
+            )?;
+            if measured.steady {
+                // When: `measured.steady` holds, the caches are full again and the frame is measured.
+                recovered = Some(measured);
+                break;
+            }
+        }
+        let recovered = recovered.ok_or_else(|| {
+            format!("{name}: a recovered frame is steady within bound: {}", recovery.join("; "))
+        })?;
         check(
-            recovered_allocations <= steady_allocations,
+            recovered.allocations <= steady_allocations && recovered.scratch_bytes == before,
             &format!(
-                "{name}: the recovered frame reuses the scratch ({recovered_allocations} allocations, \
-                 steady {steady_allocations})"
+                "{name}: the recovered frame reuses the scratch (steady {steady_allocations}, \
+                 scratch {before}): {}",
+                recovery.join("; ")
             ),
         )?;
         forced(&mut oracle, &mut oracle_scene)?;
