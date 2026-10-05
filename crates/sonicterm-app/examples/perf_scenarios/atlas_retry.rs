@@ -84,8 +84,9 @@ pub(crate) struct Scene {
 }
 
 impl Scene {
-    /// Whether fallback is complete as the renderer defines it: the last presented frame drew no
-    /// grid or chrome character as missing, so no fallback is outstanding for this scene.
+    /// Whether the last presented frame drew no grid or chrome character as missing. A fallback
+    /// that was published but not yet applied is not observed here; once a frame applies it, the
+    /// cumulative `font_fallback_applies` count in `fallback` moves, which ends a settled run.
     pub(crate) fn fallback_settled(&self) -> bool {
         self.fallback.2 == 0
     }
