@@ -631,7 +631,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
 | `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | 所有渲染器的逐行背景/装饰 quad 缓存存储及缓存行数 |
 | `live_renderers` | 进程级渲染器数量；若高于 `renderers` 条目数，可能存在仍存活但无法访问的渲染器 |
 | `live_fg_probe_workers` | 该 App 的前台探测 worker 线程数：首次需求之前或 worker 停止后为 0，否则为 1 |
-| `renderers` | 各渲染器角色及字形/图像/行缓存/软件帧存储明细；每个条目以 `trimmed` 与 `gpu_released_requested_bytes` 结尾，即遮挡窗口裁剪交还的 GPU 请求大小，不计入 `total` |
+| `renderers` | 各渲染器角色及字形/图像/行缓存/软件帧存储明细；每个条目以 `renderer_trimmed` 与 `renderer_gpu_released_requested_bytes` 结尾，即遮挡窗口裁剪交还的 GPU 请求大小，不计入 `total`；渲染器局部名称使它们与该行自身的 `trimmed` 标注区分开 |
 | `allocator_state` | `measured`、后端不支持报告或 GPU 设备已停止时的 `unsupported`，或还没有渲染器时的 `none` |
 | `allocator_source` / `allocator_label` | 这次共享设备读取所用的渲染器类别和标识 |
 | `allocator_allocated_bytes` | 分配给存活 wgpu allocation 的字节数 |

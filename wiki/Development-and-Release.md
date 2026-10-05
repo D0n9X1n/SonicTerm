@@ -350,9 +350,17 @@ unavailable. A real zero, or checkpoint sampling that is unavailable for another
 reason, can still appear. An older harness writes no `hooks`; a result that names
 any other outcome is refused.
 
-In that experiment the `covered` memory rows follow the trim: a side that
-trimmed counts only a sample whose `trim_seq` is at least `trim_seq_after_hook`
-(else `n/a: stale`), and trim tags on an `unsupported` side read `n/a: schema`.
+In that experiment the `covered` memory rows follow the trim. A side whose hook
+trimmed counts only a sample that reads `trimmed=true`, names `hook` or
+`scheduler` as its source, and carries a `trim_seq` at least
+`trim_seq_after_hook`: an older or untrimmed sample reads `n/a: stale`, and a
+missing state or another source reads `n/a: schema`. Trim tags on an
+`unsupported` side read `n/a: schema`. A side whose hook was `skipped`,
+`not-reached`, or not recorded reads `n/a: trim skipped`, `n/a: trim not
+reached` or `n/a: trim not recorded`, never a trimmed figure; its raw reading
+stays on a separate `covered renderer_total_bytes, uncredited trim` row. A result
+whose `hooks.trim` is `trimmed` must carry a positive `trim_seq_after_hook`, any
+other outcome must carry null, and a trim-experiment result must record `hooks`.
 Its `covered` phase reports wall time, presented frames and redraws as counts,
 and CPU, never a frame rate or present interval, on both hosts. A Windows result
 may carry `synthetic_occlusion = true` only for this experiment.

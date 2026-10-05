@@ -257,8 +257,12 @@ scratch 目录，以 `--managed` 启动，并以本侧的 worktree 为工作目�
 也不会让有效读数变为不可用。真实的 0，或因其他原因不可用的检查点取样，仍可能出现。较旧的 harness 不写
 `hooks`；给出其他结果的 result 会被拒绝。
 
-在该实验中，`covered` 内存行遵循裁剪规则：已裁剪的一侧只计入 `trim_seq` 不小于 `trim_seq_after_hook` 的样本
-（否则为 `n/a: stale`），`unsupported` 一侧带有裁剪标注时为 `n/a: schema`。其 `covered` 阶段在两个平台上报告
+在该实验中，`covered` 内存行遵循裁剪规则。钩子已裁剪的一侧只计入读数为 `trimmed=true`、来源为 `hook` 或
+`scheduler`、且 `trim_seq` 不小于 `trim_seq_after_hook` 的样本：较早或未裁剪的样本为 `n/a: stale`，缺少状态或来源
+为其他值时为 `n/a: schema`。`unsupported` 一侧带有裁剪标注时为 `n/a: schema`。钩子为 `skipped`、`not-reached` 或未记录
+的一侧分别为 `n/a: trim skipped`、`n/a: trim not reached` 或 `n/a: trim not recorded`，从不作为已裁剪的数值；其原始读数
+保留在单独的 `covered renderer_total_bytes, uncredited trim` 行中。`hooks.trim` 为 `trimmed` 的结果必须带有正整数的
+`trim_seq_after_hook`，其他结果必须为 null，裁剪实验的结果必须记录 `hooks`。其 `covered` 阶段在两个平台上报告
 墙钟时长、以计数表示的已呈现帧与重绘请求以及 CPU，从不报告帧率或呈现间隔。Windows 结果只有在该实验中才可以
 带有 `synthetic_occlusion = true`。
 

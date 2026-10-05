@@ -8706,7 +8706,10 @@ class TrimHookResultTests(unittest.TestCase):
         self.assertEqual(perf.validate_result(valid_result(), HARNESS_HASH, 0), [])
         for outcome in ("not-reached", "unsupported", "skipped", "trimmed"):
             with self.subTest(outcome=outcome):
-                self.assertEqual(perf.validate_result(valid_result(hooks={"trim": outcome}), HARNESS_HASH, 0), [])
+                # A trimmed hook names its trim number; every other outcome carries none.
+                after_hook = 1 if outcome == "trimmed" else None
+                result = valid_result(hooks={"trim": outcome}, trim_seq_after_hook=after_hook)
+                self.assertEqual(perf.validate_result(result, HARNESS_HASH, 0), [])
 
     def test_an_unknown_trim_outcome_or_shape_is_refused(self):
         for hooks in ({"trim": "maybe"}, {"trim": None}, {}, {"trim": 0}, [], "unsupported", None):
@@ -8753,6 +8756,29 @@ def covered_sample(trim_seq=None, trimmed=None, trim_source=None, renderer_mib=1
                              trimmed=trimmed, trim_source=trim_source, trim_seq=trim_seq)
 
 
+# One trimmed renderer entry exactly as the App's breakdown writes it. The App's own test asserts this text
+# byte for byte, so a rename on either side fails one of the two suites.
+TRIMMED_RENDERER_ENTRY = ("visible[WindowId(1)] glyph=512/5 image=256/2 row_glyph=64/4 row_quad=32/3 software=1024/1 vertex=272/1 row_ink=48/40 frame_scratch=96/2 chrome_cache=24/3 total=2328/61 glyph_atlas_dim=512 glyph_atlas_packed_pixels=4000 glyph_atlas_growths=1 glyph_atlas_evictions=0 glyph_atlas_fit=512 glyph_atlas_max_tile=25x16 renderer_trimmed=true renderer_gpu_released_requested_bytes=8388608")
+
+
+def renderer_entries(*trimmed_states):
+    """Renderer entries in the App's format, one per state, each with its own window id."""
+    return "; ".join(
+        TRIMMED_RENDERER_ENTRY.replace("WindowId(1)", f"WindowId({index + 1})")
+        .replace("renderer_trimmed=true", f"renderer_trimmed={str(state).lower()}")
+        for index, state in enumerate(trimmed_states))
+
+
+def formatted_covered_line(entries, trim_tags=""):
+    """A covered checkpoint `memory snapshot` line in the production field order, with `entries` inside the
+    renderer breakdown and `trim_tags` appended after the checkpoint tags (empty for a build without the hook)."""
+    return (f"{STAMP}  INFO memory: memory snapshot process_private_committed_bytes=unsupported "
+            f"process_resident_bytes=104857600 process_virtual_bytes=unsupported session_total_bytes=0 "
+            f"panes_total=1 panes_sampled=1 panes_contended=0 renderer_total_bytes=16777216 live_renderers=2 "
+            f"renderers={entries} allocator_state=unsupported checkpoint_index=0 checkpoint_label=\"covered\" "
+            f"checkpoint_attempt=1 checkpoint_complete=true{trim_tags}")
+
+
 class TrimExperimentTests(unittest.TestCase):
     """The short S12 trim experiment: covered-row rules, the Windows validator and the covered activity rows."""
 
@@ -8768,6 +8794,71 @@ class TrimExperimentTests(unittest.TestCase):
         self.assertEqual((sample.trimmed, sample.trim_source, sample.trim_seq), (True, "hook", 3))
         plain = perf.parse_memory_line(CheckpointMemoryTests.LINE)
         self.assertEqual((plain.trimmed, plain.trim_source, plain.trim_seq), (None, None, None))
+
+    def test_top_level_trim_tags_never_read_a_renderer_entry(self):
+        # Two renderer entries disagree with the line's own tag in both directions; the parser reads only the
+        # top-level tag, and the renderer entries still parse as glyph atlas facts.
+        for top, entries in ((True, (False, True)), (False, (True, True))):
+            with self.subTest(top=top):
+                tags = f' trimmed={str(top).lower()} trim_source="hook" trim_seq=2'
+                sample = perf.parse_memory_line(formatted_covered_line(renderer_entries(*entries), tags))
+                self.assertEqual((sample.trimmed, sample.trim_source, sample.trim_seq), (top, "hook", 2))
+                self.assertEqual(len(sample.glyph_atlases), 2)
+
+    def test_a_feature_off_line_with_renderer_entries_is_an_untrimmed_baseline(self):
+        # A build without the hook writes renderer entries but no checkpoint trim tags: every tag parses as None,
+        # and an unsupported side's covered reading stays a figure, never n/a: schema.
+        sample = perf.parse_memory_line(formatted_covered_line(renderer_entries(True, False)))
+        self.assertEqual((sample.trimmed, sample.trim_source, sample.trim_seq), (None, None, None))
+        base = trim_run("unsupported", None)
+        self.assertEqual(self.covered_metric(base, sample), 16.0)
+
+    def test_a_supported_experiment_that_did_not_trim_is_never_credited(self):
+        # Skipped, unreached or unrecorded hooks read n/a with their reason, never as an ordinary trimmed
+        # reading; the raw covered figure stays on its own row, never replaced by zero.
+        raw_key = ("covered renderer_total_bytes, uncredited trim", "MiB", "run")
+        cases = (("skipped", "trim skipped"), ("not-reached", "trim not reached"), (None, "trim not recorded"))
+        for outcome, reason in cases:
+            with self.subTest(outcome=outcome):
+                hooks = {"trim": outcome} if outcome else None
+                result = trim_run(after_hook=None, hooks=hooks)
+                metrics = perf.run_metrics(make_outcome(result=result, memory=[covered_sample(renderer_mib=12)]))
+                self.assertEqual(metrics[self.COVERED], perf.NotAvailable(reason))
+                self.assertEqual(metrics[raw_key], 12.0)
+
+    def test_a_credited_trim_needs_its_state_source_and_number(self):
+        # A trimmed hook counts only a sample that is trimmed, names hook or scheduler, and is at least the
+        # hook's number; a sample after the trim whose window reads untrimmed is stale, and a missing state or a
+        # source that names no trim is a schema problem.
+        head = trim_run("trimmed", 2)
+        for source in ("hook", "scheduler"):
+            with self.subTest(source=source):
+                self.assertEqual(self.covered_metric(head, covered_sample(2, True, source, 4)), 4.0)
+        self.assertEqual(self.covered_metric(head, covered_sample(2, False, "hook")), perf.NotAvailable("stale"))
+        for trimmed, source in ((None, "hook"), (True, "none"), (True, None), (True, "bogus")):
+            with self.subTest(trimmed=trimmed, source=source):
+                value = self.covered_metric(head, covered_sample(2, trimmed, source))
+                self.assertEqual(value, perf.NotAvailable("schema"))
+
+    def test_the_hook_outcome_and_its_number_must_agree(self):
+        # A trimmed hook needs a positive number; any other outcome carries none; an experiment records its hook.
+        # The results carry an `end` checkpoint, so each one's only problem is the one asserted.
+        points = [{"index": 0, "label": "covered", "unix_s": 15.0, "footprint_file": None},
+                  {"index": 1, "label": "end", "unix_s": 20.0, "footprint_file": None}]
+        self.assertEqual(perf.validate_result(trim_run("trimmed", 2, checkpoints=points), HARNESS_HASH, 0), [])
+        self.assertEqual(perf.validate_result(trim_run("unsupported", None, checkpoints=points), HARNESS_HASH, 0), [])
+        expected = {("trimmed", None): "hooks.trim is trimmed but trim_seq_after_hook is not a positive integer",
+                    ("unsupported", 2): "hooks.trim is 'unsupported' but trim_seq_after_hook is 2, not null",
+                    ("skipped", 1): "hooks.trim is 'skipped' but trim_seq_after_hook is 1, not null",
+                    ("not-reached", 3): "hooks.trim is 'not-reached' but trim_seq_after_hook is 3, not null"}
+        for (outcome, after_hook), problem in expected.items():
+            with self.subTest(outcome=outcome, after_hook=after_hook):
+                result = trim_run(outcome, after_hook, checkpoints=points)
+                self.assertEqual(perf.validate_result(result, HARNESS_HASH, 0), [problem])
+        unrecorded = trim_run(after_hook=None, checkpoints=points)
+        del unrecorded["hooks"]
+        self.assertEqual(perf.validate_result(unrecorded, HARNESS_HASH, 0),
+                         ["a trim experiment result records no hooks"])
 
     def test_covered_rows_follow_the_trim_rules(self):
         # An unsupported base without tags is an untrimmed baseline; a hooked sample at or after the hook's trim

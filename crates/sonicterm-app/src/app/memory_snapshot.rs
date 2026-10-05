@@ -258,7 +258,9 @@ impl RendererSummary {
             self.glyph_atlas_facts.max_tile[0],
             self.glyph_atlas_facts.max_tile[1],
         ) + &format!(
-            " trimmed={} gpu_released_requested_bytes={}",
+            // Renderer-local names: the checkpoint line also carries a top-level `trimmed`, and a
+            // reader scanning for `name=` must never find this one first.
+            " renderer_trimmed={} renderer_gpu_released_requested_bytes={}",
             self.trimmed, self.gpu_released_requested_bytes
         )
     }

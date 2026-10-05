@@ -2278,8 +2278,15 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
     if data.get("trim_experiment") not in (None, TRIM_EXPERIMENT):
         problems.append(f"trim_experiment is {data.get('trim_experiment')!r}, not null or {TRIM_EXPERIMENT!r}")
     after_hook = data.get("trim_seq_after_hook")
-    if after_hook is not None and not (_is_int(after_hook) and after_hook > 0):
-        problems.append("trim_seq_after_hook is not a positive integer or null")
+    hooks = data.get("hooks")
+    trim_outcome = hooks.get("trim") if isinstance(hooks, dict) else None
+    if trim_outcome == "trimmed" and not (_is_int(after_hook) and after_hook > 0):
+        # When: a trimmed hook must name its trim, or no covered sample can be checked against it.
+        problems.append("hooks.trim is trimmed but trim_seq_after_hook is not a positive integer")
+    elif trim_outcome != "trimmed" and after_hook is not None:
+        problems.append(f"hooks.trim is {trim_outcome!r} but trim_seq_after_hook is {after_hook!r}, not null")
+    if data.get("trim_experiment") is not None and "hooks" not in data:
+        problems.append("a trim experiment result records no hooks")
     if platform_name == "win32" and data.get("synthetic_occlusion") is True and not trim_experiment_run(data):
         # When: Windows reports no occlusion, so only the short S12 trim experiment may deliver one there.
         problems.append("synthetic_occlusion is true, but Windows reports no occlusion")
@@ -4029,6 +4036,12 @@ TRIM_CHECKPOINT = "covered"
 # trim tags on a side whose harness says it cannot trim.
 TRIM_STALE = "stale"
 TRIM_SCHEMA = "schema"
+# A supported trim experiment whose hook did not trim: its covered reading is never compared as a trimmed one,
+# and its raw figure is kept in a separate row.
+TRIM_NOT_RUN = {"skipped": "trim skipped", "not-reached": "trim not reached"}
+TRIM_NOT_RECORDED = "trim not recorded"
+# The sources a successful trim names on a checkpoint line.
+TRIM_SOURCES = ("hook", "scheduler")
 
 
 def trim_experiment_run(result: Mapping) -> bool:
@@ -4042,8 +4055,10 @@ def trim_reading_problem(result: Mapping, label: str, sample: MemorySample) -> s
     """Why a trim experiment's covered sample cannot be compared, or None when it can.
 
     An unsupported hook is an untrimmed baseline and must carry no trim tags. A trimmed hook's sample counts
-    only when its `trim_seq` is at least the number the hook reported, so it was taken after that trim. A
-    skipped or unreached hook, and every other checkpoint and run, keep the ordinary rules.
+    only when it says the window is trimmed, names a `hook` or `scheduler` source, and carries a `trim_seq`
+    at least the number the hook reported, so it was taken after that trim. A supported experiment that did
+    not trim (skipped, not reached, or no recorded hook) is never compared as a trimmed reading. Every other
+    checkpoint and run keeps the ordinary rules.
     """
     if label != TRIM_CHECKPOINT or not trim_experiment_run(result):
         return None
@@ -4053,11 +4068,23 @@ def trim_reading_problem(result: Mapping, label: str, sample: MemorySample) -> s
     if trim == "unsupported":
         return TRIM_SCHEMA if tagged else None
     if trim != "trimmed":
-        return None
+        return TRIM_NOT_RUN.get(trim, TRIM_NOT_RECORDED)
     after_hook = result.get("trim_seq_after_hook")
-    if not _is_int(after_hook) or not sample.trim_seq or sample.trim_seq < after_hook:
+    if not _is_int(after_hook):
+        # When: a trimmed hook without its number cannot be checked against any sample.
+        return TRIM_SCHEMA
+    if not sample.trim_seq or sample.trim_seq < after_hook:
+        # When: trim_seq is missing, zero or older than the hook's, the sample predates that trim.
+        return TRIM_STALE
+    if sample.trimmed is None or sample.trim_source not in TRIM_SOURCES:
+        # When: a current sample lacks its trim state or names no trimming source, its tags are malformed.
+        return TRIM_SCHEMA
+    if sample.trimmed is not True:
+        # When: trimmed is false, the window was no longer trimmed when the sample was taken.
         return TRIM_STALE
     return None
+
+
 CHECKPOINT_SAMPLING_STATES = ("complete", "exhausted", "active")
 
 
@@ -4142,6 +4169,10 @@ def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
         if trim_problem is not None:
             for key in keys:
                 metrics[(key, "MiB", "run")] = NotAvailable(trim_problem)
+            if trim_problem != TRIM_SCHEMA:
+                # When: the reading is real but not a credited trim, its figure stays visible on its own row.
+                metrics[(f"{point['label']} renderer_total_bytes, uncredited trim", "MiB", "run")] = \
+                    sample.renderer_total_bytes / MIB
             continue
         figure = PartialValue if reading.partial else float
         metrics[(keys[0], "MiB", "run")] = figure(sample.renderer_total_bytes / MIB)

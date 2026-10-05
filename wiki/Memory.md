@@ -376,7 +376,8 @@ view clears the trim mark.
 
 Renderer parts are reports, not ledger entries, so the trim lowers
 `renderer_total_bytes` in the same pass's snapshot and never a pane charge.
-Each renderer entry also reports `trimmed` and `gpu_released_requested_bytes`:
+Each renderer entry also reports `renderer_trimmed` and
+`renderer_gpu_released_requested_bytes`:
 the frame texture and present buffers the trim gave back, as request sizes, not
 residency, and outside the total.
 

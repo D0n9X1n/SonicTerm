@@ -1036,9 +1036,9 @@ fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
     drop(crowd);
 }
 
-/// A trimmed visible renderer reports `trimmed=true` and its released GPU request size inside the
-/// renderer breakdown, and that GPU figure never enters `renderer_total_bytes`, which counts CPU
-/// storage only.
+/// A trimmed visible renderer reports `renderer_trimmed=true` and its released GPU request size
+/// inside the renderer breakdown, and that GPU figure never enters `renderer_total_bytes`, which
+/// counts CPU storage only.
 #[test]
 fn a_trimmed_renderer_reports_its_gpu_release_outside_the_renderer_total() {
     let untrimmed = populated_snapshot();
@@ -1049,8 +1049,20 @@ fn a_trimmed_renderer_reports_its_gpu_release_outside_the_renderer_total() {
 
     let events = capture(|| emit_memory_snapshot(&trimmed, None));
     let breakdown = events[0].text("renderers").expect("the breakdown is emitted").to_string();
-    assert!(breakdown.contains("trimmed=true gpu_released_requested_bytes=8388608"), "{breakdown}");
-    assert!(breakdown.contains("trimmed=false gpu_released_requested_bytes=0"), "{breakdown}");
+    assert!(
+        breakdown.contains("renderer_trimmed=true renderer_gpu_released_requested_bytes=8388608"),
+        "{breakdown}"
+    );
+    assert!(
+        breakdown.contains("renderer_trimmed=false renderer_gpu_released_requested_bytes=0"),
+        "{breakdown}"
+    );
+    // No renderer entry may carry a bare `trimmed=`: a reader scanning the line for the top-level
+    // checkpoint tag would find it first.
+    assert!(
+        !breakdown.split_whitespace().any(|field| field.starts_with("trimmed=")),
+        "{breakdown}"
+    );
     assert_eq!(events[0].number("renderer_total_bytes"), Some(untrimmed.renderer_bytes() as u64));
 }
 
@@ -1103,4 +1115,27 @@ fn a_checkpoint_line_carries_the_trim_state_and_a_periodic_line_does_not() {
     for name in ["trimmed", "trim_source", "trim_seq"] {
         assert!(!periodic[0].field_names().contains(&name), "a periodic line has no {name}");
     }
+}
+
+/// One trimmed renderer entry exactly as the breakdown writes it. The comparison script's parser
+/// tests build their lines from this same text, so a rename on either side fails one of them.
+const TRIMMED_RENDERER_ENTRY: &str = "visible[WindowId(1)] glyph=512/5 image=256/2 row_glyph=64/4 \
+     row_quad=32/3 software=1024/1 vertex=272/1 row_ink=48/40 frame_scratch=96/2 chrome_cache=24/3 \
+     total=2328/61 glyph_atlas_dim=512 glyph_atlas_packed_pixels=4000 glyph_atlas_growths=1 \
+     glyph_atlas_evictions=0 glyph_atlas_fit=512 glyph_atlas_max_tile=25x16 renderer_trimmed=true \
+     renderer_gpu_released_requested_bytes=8388608";
+
+/// The renderer entry's trim fields keep renderer-local names, byte for byte as the comparison
+/// script's tests expect them, so its top-level `trimmed` tag can never be read from a renderer.
+#[test]
+fn the_renderer_entry_names_its_trim_fields_apart_from_the_checkpoint_tags() {
+    let mut summary = populated_snapshot().renderers.remove(0);
+    summary.trimmed = true;
+    summary.gpu_released_requested_bytes = 8_388_608;
+    assert_eq!(summary.render(), TRIMMED_RENDERER_ENTRY);
+    let python_tests = include_str!("../../../../scripts/perf-compare_tests.py");
+    assert!(
+        python_tests.contains(TRIMMED_RENDERER_ENTRY),
+        "perf-compare_tests.py builds its renderer entries from this exact text"
+    );
 }

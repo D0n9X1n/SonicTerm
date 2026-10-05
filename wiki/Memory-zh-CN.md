@@ -291,7 +291,7 @@ Windows 软件帧和预编辑缓存。拒绝该工作的设备不发生任何变
 路径重新增长；恢复可见会清除裁剪标记。
 
 渲染器部分只报告、不进入账本，因此裁剪会降低同一次处理快照中的 `renderer_total_bytes`，从不改变
-窗格的记账。每个渲染器条目还报告 `trimmed` 与 `gpu_released_requested_bytes`：裁剪交还的帧纹理和
+窗格的记账。每个渲染器条目还报告 `renderer_trimmed` 与 `renderer_gpu_released_requested_bytes`：裁剪交还的帧纹理和
 呈现缓冲，是请求大小而非常驻量，且不计入总量。
 
 窗口可见时呈现缓冲也会收缩：每个 600 次绘制的窗口结束时，如果容量超过该窗口峰值用量的四倍且超过

@@ -781,7 +781,7 @@ SonicTerm's own seams do not count.
 | `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | per-row background/decoration quad cache storage and cached row count across renderers |
 | `live_renderers` | process-wide renderer count; a count above the `renderers` entries can expose an unreachable live renderer |
 | `live_fg_probe_workers` | this App's foreground-probe worker threads: 0 before the first demand or after the worker stops, otherwise 1 |
-| `renderers` | per-renderer role and glyph/image/row-cache/software storage breakdown; each entry ends with `trimmed` and `gpu_released_requested_bytes`, the GPU request sizes a covered-window trim gave back, outside `total` |
+| `renderers` | per-renderer role and glyph/image/row-cache/software storage breakdown; each entry ends with `renderer_trimmed` and `renderer_gpu_released_requested_bytes`, the GPU request sizes a covered-window trim gave back, outside `total`; the renderer-local names keep them apart from the line's own `trimmed` tag |
 | `allocator_state` | `measured`, `unsupported` for a backend without a report or a stopped GPU device, or `none` before a renderer exists |
 | `allocator_source` / `allocator_label` | renderer class and identifier used for the one shared-device reading |
 | `allocator_allocated_bytes` | bytes assigned to live wgpu allocations |
