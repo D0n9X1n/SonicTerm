@@ -166,6 +166,30 @@ fn bold_style_resolves_separately_from_regular_style() {
     );
 }
 
+/// A row-run shaping identity names the face a style shapes with: bold and normal faces differ,
+/// another size resolves another face, and a second stack's face differs even though both
+/// stacks' configurations start at the same face epoch.
+#[test]
+fn row_shape_identity_changes_with_style_size_and_configuration() {
+    let Ok(stack) = FontStack::try_new(72) else {
+        return;
+    };
+    let (Some(normal), Some(bold)) =
+        (stack.row_shape_identity(false, false), stack.row_shape_identity(true, false))
+    else {
+        return;
+    };
+    assert_ne!(normal.face, bold.face, "bold and normal are distinct faces");
+    assert_eq!(stack.row_shape_identity(false, false), Some(normal), "a memoized face is stable");
+    let resized = stack.with_font_size(31.0).row_shape_identity(false, false).expect("resized");
+    assert_ne!(resized.face, normal.face, "another size is another face");
+    let Ok(replaced) = FontStack::try_new(72) else {
+        return;
+    };
+    let other = replaced.row_shape_identity(false, false).expect("replaced");
+    assert_ne!(other.face, normal.face, "a replaced configuration resolves a new face");
+}
+
 #[test]
 fn explicit_config_records_requested_font_size() {
     let cfg =
@@ -890,6 +914,28 @@ mod frame_fallback {
         assert!(frames.wake_due());
         assert!(frames.begin(), "the next frame applies generation 1");
         assert_ne!(frames.title_width(), notdef_width, "and remeasures");
+    }
+
+    #[test]
+    fn a_fallback_merge_inside_a_shape_call_moves_the_row_shape_identity() {
+        // The worker appends its handle and pauses before completing, so no generation moves;
+        // the next shape call merges the pending handle itself. The identity read before that
+        // call and the one read after it differ in handles only, which marks the call unstable.
+        let fixture = gated_stack("identity-merge");
+        let (entered, release): (Gate, Gate) = (Arc::default(), Arc::default());
+        fixture.stack.set_fallback_worker_hooks_for_test(sonicterm_font::FallbackWorkerHooks {
+            during_append: None,
+            before_completion: Some(pause_hook(&entered, &release)),
+        });
+        assert_eq!(shaped_e(&fixture.stack).0, 0, "é is notdef before the worker runs");
+        open(&fixture.gate);
+        wait(&entered);
+        let before = fixture.stack.row_shape_identity(false, false).expect("before");
+        let _ = shaped_e(&fixture.stack);
+        let after = fixture.stack.row_shape_identity(false, false).expect("after");
+        open(&release);
+        assert_eq!(before.face, after.face, "the merge keeps the face");
+        assert_eq!(after.handles, before.handles + 1, "the call merged one fallback handle");
     }
 
     #[test]

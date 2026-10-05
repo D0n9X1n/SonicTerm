@@ -316,6 +316,18 @@ impl FontStack {
         font.shape_for_frame(text, Some(Presentation::Text), Direction::LeftToRight, None, None)
     }
 
+    /// What the face `(bold, italic)` shapes with right now: its loaded font's process-unique id,
+    /// which changes whenever the face is resolved again (a configuration replacement, a scaling
+    /// change, another size), and its handle count, which grows on every fallback merge, including
+    /// the merge a shape call performs itself. `None` when the face cannot be resolved.
+    pub fn row_shape_identity(&self, bold: bool, italic: bool) -> Option<RowShapeIdentity> {
+        let font = self.font_for_style(bold, italic).ok()?;
+        Some(RowShapeIdentity {
+            face: font.id(),
+            handles: u32::try_from(font.handle_count()).unwrap_or(u32::MAX),
+        })
+    }
+
     /// Measure a run for a frame without waiting for fallback discovery; an unresolved
     /// character counts notdef's advance until its face is published.
     pub fn measure_text_width_for_frame(&self, text: &str) -> Result<f32> {
@@ -417,6 +429,15 @@ impl FontStack {
             descender: metrics.descender.get(),
         })
     }
+}
+
+/// The identity of the face one style shapes with; see [`FontStack::row_shape_identity`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowShapeIdentity {
+    /// The loaded font's process-unique id.
+    pub face: sonicterm_font::LoadedFontId,
+    /// How many handles it shapes with, primary and merged fallbacks.
+    pub handles: u32,
 }
 
 /// A loaded face's stable identity: its file path (canonical when it resolves) or the name of

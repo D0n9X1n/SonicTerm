@@ -7,7 +7,7 @@
 #![warn(clippy::min_ident_chars)]
 
 mod fontstack;
-pub use fontstack::{CellMetricsPx, FaceIdentity, FontStack, ResolvedGlyphFace};
+pub use fontstack::{CellMetricsPx, FaceIdentity, FontStack, ResolvedGlyphFace, RowShapeIdentity};
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

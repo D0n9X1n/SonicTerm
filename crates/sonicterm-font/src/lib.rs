@@ -467,6 +467,12 @@ impl LoadedFont {
         }
     }
 
+    /// How many handles this stack shapes with, primary and merged fallbacks; reads the list's
+    /// length without cloning it, and grows on every fallback merge.
+    pub fn handle_count(&self) -> usize {
+        self.handles.borrow().len()
+    }
+
     /// Clones the resolved primary and fallback font handles in shaping order.
     pub fn clone_handles(&self) -> Vec<ParsedFont> {
         self.handles.borrow().clone()
