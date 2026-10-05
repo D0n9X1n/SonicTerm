@@ -8497,6 +8497,32 @@ class LatencySplitTests(CompareHarness, unittest.TestCase):
         within["samples"][0]["split"]["publication_to_present_ms"] = 5.0009
         self.assertEqual(split_problems(within), [])
 
+    def test_a_schema_1_report_must_carry_every_nullable_key(self):
+        # A key the schema allows to be null must still be present: dropping it is an incomplete contract, not
+        # a null. Explicit nulls in the same places stay valid.
+        def without(latency, key, position=None):
+            if position is None:
+                del latency[key]
+            else:
+                del latency["samples"][position][key]
+            return latency
+        self.assertEqual(split_problems(split_latency([])), [])
+        self.assertEqual(split_problems(split_latency([reason_sample("not-credited", None),
+                                                       reason_sample("unsupported")])), [])
+        cases = {
+            "empty report without split_coverage": without(split_latency([]), "split_coverage"),
+            "uncredited sample without split": without(split_latency([reason_sample("not-credited", None)]),
+                                                       "split", 0),
+            "uncredited sample without latency_ms": without(split_latency([reason_sample("not-credited", None)]),
+                                                            "latency_ms", 0),
+            "unsupported credited sample without split": without(split_latency([reason_sample("unsupported")]),
+                                                                  "split", 0),
+        }
+        for name, latency in cases.items():
+            with self.subTest(name):
+                problems = split_problems(latency)
+                self.assertTrue(any("missing" in problem for problem in problems), problems)
+
     def test_split_validation_rejects_fabricated_aggregates(self):
         # Mutually consistent aggregates that the samples do not support are refused: no sample is split.
         fabricated = split_latency([reason_sample("unsupported")])
@@ -8538,6 +8564,23 @@ class LatencySplitTests(CompareHarness, unittest.TestCase):
         self.assertEqual(rows[0][4], "2.000 ms (1 splits)")
         head_only = perf.split_rows("S2/default", perf.SideRuns(blocked=perf.COUNTERS_HEAD_ONLY), head, 1)
         self.assertTrue(all(row[3] == "n/a" for row in head_only))
+
+    def test_split_coverage_reads_zero_unsupported_or_unavailable(self):
+        # Credited, supported samples with no split are 0% coverage, a number; only a build whose every credited
+        # sample reads unsupported is n/a (unsupported); no credited sample at all is unavailable. Timing cells
+        # without a split read n/a (no split), and an empty reason set is never taken as an unsupported build.
+        def cells(*samples):
+            rows = perf.split_rows("S2/default", split_side(list(samples)), split_side([split_sample()]), 1)
+            return {row[2]: row[3] for row in rows}
+        zero = cells(reason_sample("no-appearance-observed"), reason_sample("no-appearance-observed"))
+        self.assertEqual(zero["split coverage (%)"], "0.0% (0/2)")
+        self.assertEqual(zero["split input to parse, median (ms)"], "n/a (no split)")
+        unsupported = cells(reason_sample("unsupported"), reason_sample("unsupported"))
+        self.assertEqual(unsupported["split coverage (%)"], "n/a (unsupported)")
+        self.assertEqual(unsupported["split input to parse, median (ms)"], "n/a (unsupported)")
+        nothing = cells(reason_sample("not-credited", None))
+        self.assertEqual(nothing["split coverage (%)"], "unavailable")
+        self.assertEqual(nothing["split input to parse, median (ms)"], "n/a (no split)")
 
     def test_split_rows_are_absent_for_a_legacy_head(self):
         # A head harness without the capability has no split to tabulate, whatever its samples say.

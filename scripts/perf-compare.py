@@ -1881,6 +1881,9 @@ SPLIT_DELIVERIES = ("sent", "suppressed")
 # Serialized parts are rounded per part, so their sum may differ from latency_ms by this much.
 SPLIT_SUM_TOLERANCE_MS = 0.001
 SPLIT_COVERAGE_TOLERANCE = 1e-9
+# Keys a schema-1 sample and report must carry even when their value is null; absent is not null.
+SPLIT_SAMPLE_KEYS = ("latency_ms", "split", "split_reason")
+SPLIT_REPORT_KEYS = ("split_schema", "split_count", "split_reasons", "split_coverage")
 
 
 def _finite_nonnegative(value: object) -> bool:
@@ -1910,7 +1913,7 @@ def _split_problem(split: object, latency_ms: float) -> str | None:
 def latency_split_problems(latency: dict) -> list[str]:
     """Every way a schema-1 latency object breaks the split contract; the report's aggregates are recomputed
     from the samples, so mutually consistent but fabricated counts are refused too."""
-    problems = []
+    problems = [f"{key} is missing" for key in SPLIT_REPORT_KEYS if key not in latency]
     if not (_is_int(latency.get("split_schema")) and latency["split_schema"] == 1):
         problems.append(f"split_schema is {latency.get('split_schema')!r}, not 1")
     samples = latency.get("samples")
@@ -1920,6 +1923,11 @@ def latency_split_problems(latency: dict) -> list[str]:
     for position, sample in enumerate(samples):
         if not isinstance(sample, dict):
             problems.append(f"sample {position} is not an object")
+            continue
+        missing = [key for key in SPLIT_SAMPLE_KEYS if key not in sample]
+        if missing:
+            # When: a key the schema allows to be null is absent, the sample's contract is incomplete.
+            problems.append(f"sample {position} is missing {', '.join(missing)}")
             continue
         reason, latency_ms, split = sample.get("split_reason"), sample.get("latency_ms"), sample.get("split")
         credited = _finite_nonnegative(latency_ms)
@@ -5154,10 +5162,17 @@ def _split_cells(samples: list[dict] | None, side: SideRuns) -> dict[str, tuple[
     reason_text = ", ".join(f"{reason} {count}" for reason, count in sorted(reasons.items())) or "none"
     cells = {"reasons": (f"{reason_text}; " + ", ".join(f"{name} {count}" for name, count in flags.items()), None)}
     if not splits:
-        # A base built without the feature splits nothing; every credited sample reads unsupported.
-        unavailable = "n/a (unsupported)" if set(reasons) <= {"unsupported"} else "n/a (no split)"
-        cells["coverage"] = (unavailable if credited else "unavailable", None)
-        return {"empty": (unavailable, None), **cells}
+        # A base built without the feature splits nothing, so every credited sample reads unsupported. An empty
+        # reason set is no such evidence: nothing credited is unavailable, and supported samples are 0% covered.
+        unsupported = bool(reasons) and set(reasons) == {"unsupported"}
+        empty = "n/a (unsupported)" if unsupported else "n/a (no split)"
+        if unsupported:
+            cells["coverage"] = (empty, None)
+        elif credited:
+            cells["coverage"] = (f"0.0% (0/{len(credited)})", 0.0)
+        else:
+            cells["coverage"] = ("unavailable", None)
+        return {"empty": (empty, None), **cells}
     for part in SPLIT_PARTS:
         values = [split[part] for split in splits]
         cells[f"{part} median"] = (f"{median(values):.3f} ms ({len(values)} splits)", median(values))
