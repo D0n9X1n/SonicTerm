@@ -109,41 +109,80 @@ fn frozen_title_fit(
     (String::new(), 0.0)
 }
 
-#[test]
-fn title_admitted_only_when_fit_and_final_shape_succeed() {
-    // A title is kept only when its whole-title measure, ellipsis measure and final shape all
-    // succeed. With one shape failure injected at the whole title, the ellipsis or the first
-    // cut, the title draws the text and width the frozen pre-cache fit draws under the same
-    // failure, and nothing is kept; the next frame at the same epoch shapes, succeeds and keeps
-    // it. The empty title is kept.
+/// Fit `text` into `available_px` with one shape failure after `successes` good shapes, and
+/// check the title draws the text and width the frozen pre-cache fit draws under the same
+/// failure, is not kept, and is kept on the next frame at the same epoch as an unfailed fit.
+fn check_failed_fit(name: &str, text: &str, available_px: f32, successes: usize) {
     let _lock = font_lock();
     let stack = crate::lib_tests::tracked_font_stack(15.0);
-    let long = "a fairly long tab title that has to be cut";
-    let narrow_px = 120.0;
-    for (name, text, available_px, successes) in [
-        ("whole title", "fits", 400.0, 0),
-        ("ellipsis", long, narrow_px, 1),
-        ("first cut", long, narrow_px, 2),
-    ] {
-        crate::chrome_text::fail_chrome_shape_after_for_test(successes);
-        let frozen = frozen_title_fit(&stack, text, 15.0, available_px);
-        let mut cache = TitleCache::default();
-        crate::chrome_text::fail_chrome_shape_after_for_test(successes);
-        let draw = cache.prepare(0, &probe(text, available_px, 0), &stack, true);
-        let drawn = cache.drawn(&draw);
-        assert_eq!((drawn.text.to_string(), drawn.width_px), frozen, "{name}: drawn as before");
-        assert!(!cache.is_stored(0), "{name}: a failed fit is not kept");
-        let draw = cache.prepare(0, &probe(text, available_px, 0), &stack, true);
-        assert!(matches!(draw, TitleDraw::Cached(0)), "{name}: the next frame keeps it");
-        let healthy = frozen_title_fit(&stack, text, 15.0, available_px);
-        let drawn = cache.drawn(&draw);
-        assert_eq!((drawn.text.to_string(), drawn.width_px), healthy, "{name}: as an unfailed fit");
-    }
+    crate::chrome_text::fail_chrome_shape_after_for_test(successes);
+    let frozen = frozen_title_fit(&stack, text, 15.0, available_px);
+    let mut cache = TitleCache::default();
+    crate::chrome_text::fail_chrome_shape_after_for_test(successes);
+    let draw = cache.prepare(0, &probe(text, available_px, 0), &stack, true);
+    let drawn = cache.drawn(&draw);
+    assert_eq!((drawn.text.to_string(), drawn.width_px), frozen, "{name}: drawn as before");
+    assert!(!cache.is_stored(0), "{name}: a failed fit is not kept");
+    let draw = cache.prepare(0, &probe(text, available_px, 0), &stack, true);
+    assert!(matches!(draw, TitleDraw::Cached(0)), "{name}: the next frame keeps it");
+    let healthy = frozen_title_fit(&stack, text, 15.0, available_px);
+    let drawn = cache.drawn(&draw);
+    assert_eq!((drawn.text.to_string(), drawn.width_px), healthy, "{name}: as an unfailed fit");
+}
 
+/// A title long enough to be cut into a 120 px tab.
+const LONG_TITLE: &str = "a fairly long tab title that has to be cut";
+
+#[test]
+fn a_failed_whole_title_draws_nothing_and_is_not_kept() {
+    // The whole-title measure fails: nothing is drawn, as before, and nothing is kept.
+    check_failed_fit("whole title", "fits", 400.0, 0);
+}
+
+#[test]
+fn a_failed_ellipsis_draws_its_cut_but_is_not_kept() {
+    // The ellipsis measure fails: the cut is fitted with a 0 px ellipsis and its final run shapes,
+    // so the title is drawable, yet the incomplete fit is not kept.
+    check_failed_fit("ellipsis", LONG_TITLE, 120.0, 1);
+}
+
+#[test]
+fn a_failed_first_cut_draws_its_estimate_and_is_not_kept() {
+    // The first cut's measure fails: it counts its estimated width, as before, and is not kept.
+    check_failed_fit("first cut", LONG_TITLE, 120.0, 2);
+}
+
+#[test]
+fn the_empty_title_is_kept() {
+    // An empty title shapes to a valid empty run, so it is complete and kept.
+    let _lock = font_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
     let mut cache = TitleCache::default();
     let draw = cache.prepare(0, &probe("", 400.0, 0), &stack, true);
     assert!(matches!(draw, TitleDraw::Cached(0)), "the empty title is kept");
     assert_eq!(cache.drawn(&draw).text, "");
+}
+
+#[test]
+fn title_admission_stops_at_the_text_and_glyph_limits() {
+    // A title is kept at exactly the text-byte and glyph limits and drawn but not kept one past
+    // either of them.
+    let _lock = font_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let mut cache = TitleCache::default();
+    let at_limit = "x".repeat(MAX_CACHED_TEXT_BYTES);
+    let over_limit = "x".repeat(MAX_CACHED_TEXT_BYTES + 1);
+    let _ = cache.prepare(0, &probe(&at_limit, 100_000.0, 0), &stack, true);
+    assert!(cache.is_stored(0), "256 text bytes are kept");
+    let _ = cache.prepare(1, &probe(&over_limit, 100_000.0, 0), &stack, true);
+    assert!(!cache.is_stored(1), "257 text bytes are not");
+    let mut few = TitleCache::default();
+    few.set_limits_for_test(AdmissionLimits { text_bytes: MAX_CACHED_TEXT_BYTES, glyphs: 4 });
+    let _ = few.prepare(0, &probe("abcd", 400.0, 0), &stack, true);
+    assert!(few.is_stored(0), "a title at the glyph limit is kept");
+    let draw = few.prepare(1, &probe("abcde", 400.0, 0), &stack, true);
+    assert!(!few.is_stored(1), "one glyph past it is not");
+    assert_eq!(few.drawn(&draw).text, "abcde", "but it is drawn");
 }
 
 #[test]
@@ -460,4 +499,33 @@ fn pending_chrome_run_resolves_after_apply() {
     let (handle, stats) = counted(|| cache.prepare(stack, "é", body_key(), true));
     assert_eq!(stats.chrome_run_prepares, 1, "after the apply the lookup prepares");
     assert_ne!(cache.view(&handle).unwrap().glyph_ids_for_test(), vec![0], "and resolves");
+}
+
+#[test]
+fn an_oversized_palette_is_derived_and_never_kept() {
+    // The kept palette's color strings never pass the allowance: a theme over it, whether its
+    // strings are valid colors padded with whitespace or malformed text, is derived on every
+    // request (the same palette `UiPalette::from_theme` gives) and never stored, and a theme
+    // over it at construction seeds bounded colors instead.
+    let mut padded = Theme::default();
+    padded.colors.background = sonicterm_render_model::boundary::cfg::theme::Hex(format!(
+        "{}#123456",
+        " ".repeat(2 * 1024 * 1024)
+    ));
+    let mut malformed = Theme::default();
+    malformed.colors.tab.active_fg =
+        sonicterm_render_model::boundary::cfg::theme::Hex("not a color ".repeat(1024));
+    for (name, theme) in [("padded", &padded), ("malformed", &malformed)] {
+        let mut cache = PaletteCache::seeded(&Theme::default());
+        for request in 1..=3 {
+            assert_eq!(cache.palette_for(theme), UiPalette::from_theme(theme), "{name}");
+            assert_eq!(cache.computes(), request, "{name}: derived on every request");
+            assert!(cache.retained_bytes() <= PALETTE_ALLOWANCE_BYTES, "{name}: never kept");
+        }
+        let seeded = PaletteCache::seeded(theme);
+        assert!(
+            seeded.retained_bytes() <= PALETTE_ALLOWANCE_BYTES,
+            "{name}: seeding stays bounded"
+        );
+    }
 }

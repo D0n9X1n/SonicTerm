@@ -836,7 +836,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `row_ink_items` | committed per-row ink records, one per visible row | — |
 | `frame_scratch_bytes` | the `FrameScratch` part: the per-frame draw vectors (glyphs, quads, overlays, images, row spans, underlines, staging indices, tofu, pane rects, column edges and row keys) the renderer keeps between assembled frames | each vector shrinks to twice a pass's use once over four times that use and over 1 MiB, then is held within its cap (16,384,000 bytes in total); zero while a frame holds it |
 | `frame_scratch_items` | scratch vectors that hold an allocation | — |
-| `chrome_cache_bytes` | the `ChromeCache` part: the 64-slot tab-title table and the 32-slot chrome-run table, each kept run's text and glyphs, and the kept UI palette's color strings | bounded by the fixed tables and their admission limits (256 text bytes, 512 glyphs); a font change, scale change or `clear_shape_cache` empties both run tables |
+| `chrome_cache_bytes` | the `ChromeCache` part: the 64-slot tab-title table and the 32-slot chrome-run table, each kept run's text and glyphs, and the kept UI palette's color strings | bounded by the fixed tables and their admission limits (256 text bytes, 512 glyphs) and by a 4 KiB palette allowance (a larger palette is derived every frame, never kept); a font change, scale change or `clear_shape_cache` empties both run tables |
 | `chrome_cache_items` | kept tab titles plus kept chrome runs | — |
 
 `role="warm"` means the renderer belongs to the standby pool, not a visible

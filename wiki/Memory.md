@@ -244,9 +244,11 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
   32-slot chrome-run table (allocated on first use), each kept title's key text,
   drawn text and glyphs, each kept chrome run's one text and its glyphs, and the
   kept UI palette's color strings. A title or run is kept only within 256 text
-  bytes and 512 glyphs. The class's coverage figure, 1,626,560 bytes, is both
-  tables full of maximal entries plus a 4 KiB palette allowance. Items are the
-  kept titles and runs.
+  bytes and 512 glyphs. A palette is kept only while its color strings total at
+  most 4 KiB; a theme whose strings total more is derived on every frame and
+  never kept, so the kept strings never pass that allowance. The class's coverage
+  figure, 1,626,560 bytes, is both tables full of maximal entries plus that 4 KiB.
+  Items are the kept titles and runs.
 
 These are host-memory copies. GPU textures and buffers are not included because
 the driver owns them and wgpu does not expose their sizes. Row-cache reports use

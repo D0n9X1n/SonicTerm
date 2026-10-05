@@ -687,7 +687,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `row_ink_items` | 已提交的逐行墨迹记录数，每个可见行一条 | — |
 | `frame_scratch_bytes` | `FrameScratch` 部分：渲染器在已组装帧之间保留的逐帧绘制向量（字形、quad、叠加层、图像、行范围、下划线、暂存索引、缺字方框、窗格矩形、列边界与行键） | 每个向量在超过一次组装用量四倍且超过 1 MiB 时收缩到用量的两倍，再限制在其上限内（合计 16,384,000 字节）；帧持有期间为零 |
 | `frame_scratch_items` | 持有分配的暂存向量数 | — |
-| `chrome_cache_bytes` | `ChromeCache` 部分：64 槽标签标题表与 32 槽界面文本段表、每个保留段的文本与字形，以及保留的界面调色板颜色字符串 | 受固定表与准入上限（256 字节文本、512 个字形）约束；字体变更、缩放变更或 `clear_shape_cache` 会清空两张文本段表 |
+| `chrome_cache_bytes` | `ChromeCache` 部分：64 槽标签标题表与 32 槽界面文本段表、每个保留段的文本与字形，以及保留的界面调色板颜色字符串 | 受固定表与准入上限（256 字节文本、512 个字形）以及 4 KiB 调色板余量约束（更大的调色板每帧派生，从不保留）；字体变更、缩放变更或 `clear_shape_cache` 会清空两张文本段表 |
 | `chrome_cache_items` | 保留的标签标题数加保留的界面文本段数 | — |
 
 `role="warm"` 表示渲染器位于待命池，不属于可见窗口；关闭窗口不会释放它。

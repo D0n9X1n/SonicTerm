@@ -341,6 +341,12 @@ impl TitleCache {
     pub(crate) fn len(&self) -> usize {
         self.slots.as_ref().map_or(0, |slots| slots.iter().flatten().count())
     }
+
+    /// Test seam: lower the admission limits.
+    #[cfg(test)]
+    pub(crate) fn set_limits_for_test(&mut self, limits: AdmissionLimits) {
+        self.limits = limits;
+    }
 }
 
 /// The most the title cache can hold: its table plus every slot at the admission limits.
@@ -539,10 +545,12 @@ pub(crate) const fn chrome_run_cache_envelope_bytes() -> usize {
         + CHROME_RUN_SLOTS * (MAX_CACHED_TEXT_BYTES + MAX_CACHED_GLYPHS * CHROME_SHAPED_GLYPH_BYTES)
 }
 
-/// The UI palette last derived from a theme, kept while the theme's colors are equal.
+/// The UI palette last derived from a theme, kept while the theme's colors are equal. Only a
+/// palette whose color strings total at most [`PALETTE_ALLOWANCE_BYTES`] is kept; a larger one is
+/// derived on every request and never stored, so the kept colors stay within the allowance.
 #[derive(Debug)]
 pub(crate) struct PaletteCache {
-    /// The colors `palette` was derived from.
+    /// The colors `palette` was derived from; their strings total at most the allowance.
     colors: Palette,
     /// `UiPalette::from_theme` of a theme with `colors`; it reads only the colors.
     palette: UiPalette,
@@ -551,14 +559,31 @@ pub(crate) struct PaletteCache {
 }
 
 impl PaletteCache {
-    /// A cache seeded from `theme`, so the first frame derives nothing.
+    /// A cache seeded from `theme`, so the first frame derives nothing. A theme over the allowance
+    /// seeds the default theme's colors instead, and is derived when it is drawn.
     pub(crate) fn seeded(theme: &Theme) -> Self {
+        if palette_hex_bytes(&theme.colors, String::len) > PALETTE_ALLOWANCE_BYTES {
+            // When: the `theme` colors pass the allowance, they are never stored, so the bounded
+            // default colors seed the cache instead.
+            let fallback = Theme::default();
+            return Self {
+                colors: fallback.colors.clone(),
+                palette: UiPalette::from_theme(&fallback),
+                computes: 0,
+            };
+        }
         Self { colors: theme.colors.clone(), palette: UiPalette::from_theme(theme), computes: 0 }
     }
 
     /// The UI palette of `theme`: the kept one when `theme`'s colors equal the kept colors,
-    /// otherwise derived once and kept.
+    /// otherwise derived once and kept; colors over the allowance are derived and not kept.
     pub(crate) fn palette_for(&mut self, theme: &Theme) -> UiPalette {
+        if palette_hex_bytes(&theme.colors, String::len) > PALETTE_ALLOWANCE_BYTES {
+            // When: the `theme` colors pass the allowance, the palette is derived for this request
+            // only, so neither its strings nor a comparison of them is kept.
+            self.computes += 1;
+            return UiPalette::from_theme(theme);
+        }
         if theme.colors != self.colors {
             // The colors changed, so the palette is derived again and kept with them.
             self.palette = UiPalette::from_theme(theme);
@@ -575,12 +600,12 @@ impl PaletteCache {
 
     /// Heap bytes held: the capacity of every kept color string.
     pub(crate) fn retained_bytes(&self) -> usize {
-        palette_hex_capacity(&self.colors)
+        palette_hex_bytes(&self.colors, String::capacity)
     }
 }
 
-/// Sum of the string capacities of every color in `palette`.
-fn palette_hex_capacity(palette: &Palette) -> usize {
+/// Sum of `string_bytes` over every color string in `palette`: its lengths or its capacities.
+fn palette_hex_bytes(palette: &Palette, string_bytes: fn(&String) -> usize) -> usize {
     let ansi = |colors: &sonicterm_render_model::boundary::cfg::theme::AnsiColors| {
         [
             &colors.black,
@@ -593,7 +618,7 @@ fn palette_hex_capacity(palette: &Palette) -> usize {
             &colors.white,
         ]
         .iter()
-        .map(|hex| hex.0.capacity())
+        .map(|hex| string_bytes(&hex.0))
         .sum::<usize>()
     };
     let tab = &palette.tab;
@@ -614,16 +639,15 @@ fn palette_hex_capacity(palette: &Palette) -> usize {
         &tab.close_button_fg,
     ]
     .iter()
-    .map(|hex| hex.0.capacity())
+    .map(|hex| string_bytes(&hex.0))
     .sum::<usize>()
         + ansi(&palette.ansi)
         + ansi(&palette.bright)
 }
 
-/// Bytes the envelope allows for the kept palette's color strings. A bundled theme's 30 colors
-/// take about 210 bytes; a user theme may write longer strings, so this is an allowance, not a
-/// bound, and the live report stays exact.
-#[cfg(test)]
+/// Bytes the kept palette's color strings may total. A bundled theme's 30 colors take about 210
+/// bytes; a theme whose strings total more is derived on every request and never kept, so this
+/// bounds the palette's part of the `ChromeCache` envelope.
 pub(crate) const PALETTE_ALLOWANCE_BYTES: usize = 4 * 1024;
 
 /// The `ChromeCache` class envelope per renderer: both run tables full of maximal entries plus

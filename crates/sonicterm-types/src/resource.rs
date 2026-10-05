@@ -254,8 +254,8 @@ impl ResourceClass {
             // `FRAME_SCRATCH_CAP` in `sonicterm-gpu`.
             Self::FrameScratch => ClassCoverage::UnchargedRetention { per_owner_bytes: 16_384_000 },
             // The chrome caches hold at most 64 titles and 32 runs at their admission limits
-            // (256 text bytes, 512 glyphs) in fixed tables, plus a 4 KiB palette allowance:
-            // `CHROME_CACHE_ENVELOPE_BYTES` in `sonicterm-gpu`.
+            // (256 text bytes, 512 glyphs) in fixed tables, plus palette strings totalling at most
+            // 4 KiB (a larger palette is never kept): `CHROME_CACHE_ENVELOPE_BYTES` in `sonicterm-gpu`.
             Self::ChromeCache => ClassCoverage::UnchargedRetention { per_owner_bytes: 1_626_560 },
             Self::SoftwareFrame => {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 160 * 1024 * 1024 }
