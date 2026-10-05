@@ -1284,3 +1284,35 @@ fn partial_counters_record_only_inside_a_counting_scope() {
         (2, 2, 240)
     );
 }
+
+#[test]
+fn title_and_chrome_run_notes_count_only_inside_a_counting_scope() {
+    // With the gate on, each note moves exactly its own counter by one; with the gate off (no
+    // scope, or a scope of a renderer that does not count) none of the four moves.
+    let sink = FrameStatsSink::default();
+    {
+        let _counting = CollectGuard::enter(Some(&sink));
+        note_tab_title(true);
+        note_tab_title(false);
+        note_tab_title(false);
+        note_chrome_run(true);
+        note_chrome_run(true);
+        note_chrome_run(true);
+        note_chrome_run(false);
+    }
+    let on = sink.snapshot();
+    assert_eq!(
+        (on.tab_title_reuses, on.tab_title_prepares, on.chrome_run_reuses, on.chrome_run_prepares),
+        (1, 2, 3, 1)
+    );
+    let off = FrameStatsSink::default();
+    for counting in [false, true] {
+        let _scope = counting.then(|| CollectGuard::enter(None));
+        note_tab_title(true);
+        note_tab_title(false);
+        note_chrome_run(true);
+        note_chrome_run(false);
+    }
+    assert_eq!(off.snapshot(), FrameStats::ZERO, "the gate off moves no counter");
+    assert_eq!(sink.snapshot(), on, "and nothing reached the counting renderer afterwards");
+}
