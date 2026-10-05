@@ -2,7 +2,7 @@ use super::*;
 use enum_map::enum_map;
 use std::time::{Duration, Instant};
 
-const ALL_CLASSES: [ResourceClass; 25] = [
+const ALL_CLASSES: [ResourceClass; 27] = [
     ResourceClass::GridVisible,
     ResourceClass::GridHistory,
     ResourceClass::GridAlternate,
@@ -15,6 +15,8 @@ const ALL_CLASSES: [ResourceClass; 25] = [
     ResourceClass::RowGlyphCache,
     ResourceClass::RowQuadCache,
     ResourceClass::RowInk,
+    ResourceClass::FrameScratch,
+    ResourceClass::ChromeCache,
     ResourceClass::ParserCapture,
     ResourceClass::InlineMediaDecode,
     ResourceClass::InlineMediaRetained,
@@ -487,5 +489,21 @@ fn the_pane_charge_sites_are_exactly_the_contributing_classes() {
                  copy is stale"
             );
         }
+    }
+}
+
+#[test]
+fn frame_scratch_and_chrome_cache_are_uncharged_renderer_retention() {
+    // Both renderer parts are reported, not charged: each records the per-renderer envelope its
+    // caps give, and a pane's seam-cap sum carries no term for either.
+    for (class, envelope) in
+        [(ResourceClass::FrameScratch, 16_384_000), (ResourceClass::ChromeCache, 1_626_560)]
+    {
+        assert_eq!(
+            class.coverage(),
+            ClassCoverage::UnchargedRetention { per_owner_bytes: envelope },
+            "{class:?}"
+        );
+        assert_eq!(class.pane_seam_term(), PaneSeamTerm::NotChargedInProduction, "{class:?}");
     }
 }

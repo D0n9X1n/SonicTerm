@@ -9,7 +9,9 @@ Terminal parsing and grid state live in `sonicterm-vt` and
 `sonicterm-grid`, not here.
 
 ## Key files
-- `fontstack.rs` - font stack selection and cell metrics.
+- `fontstack.rs` - font stack selection and cell metrics. Each stack memoizes its four
+  bold/italic faces until the shared configuration's `face_epoch` moves; clones and
+  `with_font_size` views keep their own memo against that one epoch.
 - `lib.rs` - public re-exports.
 
 ## Local gate

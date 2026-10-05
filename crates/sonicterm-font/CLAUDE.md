@@ -25,6 +25,10 @@ cargo build -p sonicterm-font
 - Keep platform discovery behind `locator/`; callers should not branch on
   CoreText/GDI/Fontconfig details.
 - Do not introduce direct dependencies on vendor font modules.
+- `FontConfiguration::face_epoch` moves whenever `fonts` is cleared:
+  `config_changed` bumps it right after the clear and before the fallible reload,
+  and `change_scaling` beside its clear. A fallback merge extends a face in place
+  and never bumps it. Any new writer that clears or replaces `fonts` must bump it.
 
 ## Cross-references
 - Consumes: `sonicterm-font-config`, `sonicterm-fontconfig`,

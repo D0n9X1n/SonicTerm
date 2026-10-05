@@ -266,6 +266,8 @@ fn populated_snapshot() -> MemorySnapshot {
                 software_frame: ResourceAmount { bytes: 1_024, items: 1 },
                 vertex_scratch: ResourceAmount { bytes: 272, items: 1 },
                 row_ink: ResourceAmount { bytes: 48, items: 40 },
+                frame_scratch: ResourceAmount { bytes: 96, items: 2 },
+                chrome_cache: ResourceAmount { bytes: 24, items: 3 },
                 glyph_atlas_facts: sonicterm_gpu::core::GlyphAtlasFacts {
                     dim: 512,
                     packed_pixels: 4_000,
@@ -285,6 +287,8 @@ fn populated_snapshot() -> MemorySnapshot {
                 software_frame: ResourceAmount::default(),
                 vertex_scratch: ResourceAmount::default(),
                 row_ink: ResourceAmount::default(),
+                frame_scratch: ResourceAmount::default(),
+                chrome_cache: ResourceAmount::default(),
                 glyph_atlas_facts: Default::default(),
             },
         ],
@@ -459,6 +463,9 @@ fn visible_and_warm_renderers_are_both_reported_with_their_roles() {
     assert!(rendered.contains("vertex=272/1"), "visible vertex scratch bytes/items: {rendered}");
     // Per-row ink records are a renderer part, so the breakdown and its total carry them.
     assert!(rendered.contains("row_ink=48/40"), "visible row ink bytes/items: {rendered}");
+    // The frame scratch and chrome caches are renderer parts too, inside the same total.
+    assert!(rendered.contains("frame_scratch=96/2"), "frame scratch bytes/items: {rendered}");
+    assert!(rendered.contains("chrome_cache=24/3"), "chrome cache bytes/items: {rendered}");
     // The six glyph atlas facts each renderer reports, in the order perf-compare reads them.
     for field in [
         "glyph_atlas_dim=512",
@@ -491,6 +498,8 @@ fn renderer_breakdown_order_is_stable_across_input_order() {
         software_frame: ResourceAmount::default(),
         vertex_scratch: ResourceAmount::default(),
         row_ink: ResourceAmount::default(),
+        frame_scratch: ResourceAmount::default(),
+        chrome_cache: ResourceAmount::default(),
         glyph_atlas_facts: Default::default(),
     };
     let mut first = empty_snapshot();
@@ -517,10 +526,10 @@ fn renderer_totals_fold_every_renderer() {
     let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
     let event = &events[0];
 
-    // 512 + 256 + 64 + 32 + 1024 + 272 + 48 (visible) + 128 + 16 + 8 (warm)
-    assert_eq!(event.number("renderer_total_bytes"), Some(2_360));
-    // 5 + 2 + 4 + 3 + 1 + 1 + 40 (visible) + 3 + 2 + 1 (warm)
-    assert_eq!(event.number("renderer_total_items"), Some(62));
+    // 512 + 256 + 64 + 32 + 1024 + 272 + 48 + 96 + 24 (visible) + 128 + 16 + 8 (warm)
+    assert_eq!(event.number("renderer_total_bytes"), Some(2_480));
+    // 5 + 2 + 4 + 3 + 1 + 1 + 40 + 2 + 3 (visible) + 3 + 2 + 1 (warm)
+    assert_eq!(event.number("renderer_total_items"), Some(67));
     assert_eq!(event.number("renderer_row_glyph_cache_bytes"), Some(80));
     assert_eq!(event.number("renderer_row_glyph_cache_items"), Some(6));
     assert_eq!(event.number("renderer_row_quad_cache_bytes"), Some(40));

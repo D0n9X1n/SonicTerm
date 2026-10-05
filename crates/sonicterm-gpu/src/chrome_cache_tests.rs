@@ -435,3 +435,4 @@ fn pending_chrome_run_resolves_after_apply() {
     assert_eq!(stats.chrome_run_prepares, 1, "after the apply the lookup prepares");
     assert_ne!(cache.view(&handle).unwrap().glyph_ids_for_test(), vec![0], "and resolves");
 }
+

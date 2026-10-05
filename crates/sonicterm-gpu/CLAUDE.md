@@ -25,6 +25,8 @@ the production glyph path.
 - `chrome_text.rs`, `cursor.rs`, `color.rs` - UI text/cursor/color helpers; prepared chrome runs share shaping between field geometry and glyph emission.
 - `field_geometry.rs` - clipped query caret/selection geometry and hit testing bound to the last presented field.
 - `tab_title_font.rs` - device-free tab-title font state (stack, raster size, width key) that `set_font`, the scale rebuild and `measure_tab_widths` share.
+- `frame_scratch.rs` - renderer-owned per-frame draw vectors; a pass leases them after its unchanged and no-op exits, the lease or presentation restores them on every exit, and each vector is released by the vertex-scratch rule and held within its cap.
+- `chrome_cache.rs` - device-free tab-title (64 slots by position), search-overlay run (32 slots) and UI palette caches; `chrome_cache_seam.rs` is the hidden integration-test seam over them.
 
 ## Local gate
 ```bash
@@ -70,7 +72,12 @@ cargo build -p sonicterm-gpu
   the process. A per-window buffer that is never released shows as a
   staircase across window open/close, which is what the churn baseline
   measures; keep new renderer-owned allocations reported through
-  `retained_amounts` so they stay visible there.
+  `retained_amounts` so they stay visible there. The frame scratch and the chrome
+  caches report as the `frame_scratch` and `chrome_cache` parts.
+- A face replacement that can keep a title key (`adopt_font_stacks`,
+  `rebuild_for_sf`, `clear_shape_cache`) clears both chrome run caches beside the
+  row-cache invalidation; an applied fallback generation empties the chrome-run
+  cache through `FontApplyTargets.chrome_runs`, and titles miss by their epoch.
 - `retained_amounts()` answers about the instance you ask, and every instance
   reports the same atlas capacity. It cannot tell you whether the *previous*
   renderer was released — comparing it across open/close cycles compares a

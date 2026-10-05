@@ -85,6 +85,10 @@ pub struct RendererSummary {
     pub vertex_scratch: sonicterm_types::ResourceAmount,
     /// Per-row ink records of the presented frame and one frame's staging.
     pub row_ink: sonicterm_types::ResourceAmount,
+    /// Reused per-frame draw vectors held between frames.
+    pub frame_scratch: sonicterm_types::ResourceAmount,
+    /// Kept tab titles, chrome runs and the UI palette's colors.
+    pub chrome_cache: sonicterm_types::ResourceAmount,
     /// Glyph atlas size, packed area, growths, evictions, fit and largest tile.
     pub glyph_atlas_facts: sonicterm_gpu::core::GlyphAtlasFacts,
 }
@@ -195,6 +199,8 @@ impl RendererSummary {
             self.software_frame,
             self.vertex_scratch,
             self.row_ink,
+            self.frame_scratch,
+            self.chrome_cache,
         ]
         .into_iter()
         .fold(sonicterm_types::ResourceAmount::default(), |acc, part| {
@@ -213,7 +219,7 @@ impl RendererSummary {
     fn render(&self) -> String {
         let total = self.total();
         format!(
-            "{}[{}] glyph={}/{} image={}/{} row_glyph={}/{} row_quad={}/{} software={}/{} vertex={}/{} row_ink={}/{} total={}/{}",
+            "{}[{}] glyph={}/{} image={}/{} row_glyph={}/{} row_quad={}/{} software={}/{} vertex={}/{} row_ink={}/{} frame_scratch={}/{} chrome_cache={}/{} total={}/{}",
             self.role,
             self.label,
             self.glyph_atlas.bytes,
@@ -230,6 +236,10 @@ impl RendererSummary {
             self.vertex_scratch.items,
             self.row_ink.bytes,
             self.row_ink.items,
+            self.frame_scratch.bytes,
+            self.frame_scratch.items,
+            self.chrome_cache.bytes,
+            self.chrome_cache.items,
             total.bytes,
             total.items,
         ) + &format!(
@@ -670,6 +680,8 @@ fn summarize(
         software_frame: retention.software_frame,
         vertex_scratch: retention.vertex_scratch,
         row_ink: retention.row_ink,
+        frame_scratch: retention.frame_scratch,
+        chrome_cache: retention.chrome_cache,
         glyph_atlas_facts,
     }
 }

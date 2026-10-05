@@ -224,7 +224,29 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
   coverage figure, 34.5 MiB, is the upload envelope: two 16 MiB staging
   buffers, plus 2 uploads × 2 lists × 2 × 16,384 rects × 20 bytes for the rect
   lists during one sync. The vertex buffer is reported live beside it and has
-  no fixed ceiling, because it follows the frame's vertex count.
+  no fixed ceiling, because it follows the frame's vertex count;
+- `frame_scratch_bytes` / `frame_scratch_items`: the renderer's `FrameScratch`
+  part, counted in `renderer_total_bytes`. It holds the per-frame draw vectors
+  one assembly pass fills (glyphs, quads, overlay glyphs and quads, images, row
+  spans, underlines, underline owners, staged ranges, tofu, pane rects, column
+  edges and row keys), kept between assembled frames. After each pass every
+  vector is cleared, shrunk to twice its use once its capacity is over four
+  times that use and over 1 MiB, and then held within its cap: glyphs and quads
+  4 MiB each; overlay glyphs, overlay quads, images, row spans, underlines and
+  tofu 1 MiB each; pane rects and staged ranges 64 KiB each; underline owners
+  and row keys 256 KiB each; column edges 1 MiB in total, dropping slots above
+  the pass's peak first and then the largest. The class's coverage figure is the
+  sum, 16,384,000 bytes. An unchanged or no-op frame takes no scratch and
+  releases nothing. Items are the vectors that hold an allocation; the figure is
+  zero while a frame holds the scratch;
+- `chrome_cache_bytes` / `chrome_cache_items`: the renderer's `ChromeCache`
+  part, counted in `renderer_total_bytes`: the 64-slot tab-title table and the
+  32-slot chrome-run table (allocated on first use), each kept title's key text,
+  drawn text and glyphs, each kept chrome run's one text and its glyphs, and the
+  kept UI palette's color strings. A title or run is kept only within 256 text
+  bytes and 512 glyphs. The class's coverage figure, 1,626,560 bytes, is both
+  tables full of maximal entries plus a 4 KiB palette allowance. Items are the
+  kept titles and runs.
 
 These are host-memory copies. GPU textures and buffers are not included because
 the driver owns them and wgpu does not expose their sizes. Row-cache reports use
@@ -238,10 +260,12 @@ current bucket class. Every visible and warm renderer is listed.
 than the listed renderer set indicates a live renderer that is no longer
 reachable from window topology.
 
-These fields are not a whole-renderer heap census. Frame-key metadata,
-transient frame plans and the other per-frame draw vectors, and other unlisted host allocations
-are outside `renderer_total_bytes`; the OS process reading includes memory
-beyond the charged classes.
+These fields are not a whole-renderer heap census. The per-frame draw vectors
+the renderer keeps in its frame scratch are retained and reported under
+`frame_scratch`. Frame-key metadata, the transient frame plan, the per-frame
+pane views, the per-row and per-run shaping buffers, and other unlisted host
+allocations remain outside `renderer_total_bytes`; the OS process reading
+includes memory beyond the charged classes.
 
 While search is open, `SearchState` keeps the prepared matcher, including its
 compiled regex in regex mode; the matcher is released when search closes or when

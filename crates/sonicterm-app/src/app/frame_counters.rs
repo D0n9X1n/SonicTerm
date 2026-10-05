@@ -1613,6 +1613,12 @@ impl WindowFrameCounters {
                 ("font_generation_applies", stats.font_generation_applies),
                 ("font_prepare_ns", stats.font_prepare_ns),
                 ("font_generation_prepare_ns", stats.font_generation_prepare_ns),
+                // Kept tab titles and chrome runs drawn without shaping, and those shaped on a
+                // miss; the misses' requests also count in `shape_requests`.
+                ("tab_title_reuses", stats.tab_title_reuses),
+                ("tab_title_prepares", stats.tab_title_prepares),
+                ("chrome_run_reuses", stats.chrome_run_reuses),
+                ("chrome_run_prepares", stats.chrome_run_prepares),
                 ("render_attempts", stats.attempts.attempts),
                 ("render_attempts_presented", stats.attempts.presented),
                 ("render_attempt_ns", stats.attempts.attempt_ns),

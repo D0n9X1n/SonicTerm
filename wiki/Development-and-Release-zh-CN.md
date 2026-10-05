@@ -353,7 +353,9 @@ PR 与 Change。
   `assembly_sum_us / Σ assembly_buckets`，按运行精确计算并给出汇总均值（直方图没有精确分位数，因此只显示
   其 p95 边界，从不设门槛）；以及仅供参考的每个已绘制帧的塑形与测量请求数
   `shape_requests / (gpu_frames + software_frames)` 和部分帧回退比例
-  `partial_fallbacks / (partial_frames + partial_fallbacks)`。缺少这些字段或分母为 0 的一侧显示 `n/a`，没有变化。
+  `partial_fallbacks / (partial_frames + partial_fallbacks)`；以及每次组装的标签标题复用数
+  `tab_title_reuses / Σ assembly_buckets` 和每次组装的界面文本段复用数 `chrome_run_reuses / Σ assembly_buckets`，
+  汇总所有计数器运行。缺少这些字段或分母为 0 的一侧显示 `n/a`，没有变化。
 - Change 列比较计数的中位数，或直方图的 mean。base 不声明 `perf-counters` 时（该组只在 head 上运行），
   以及 base 较旧的契约缺少某个字段时，Baseline 列与变化为 `n/a`；缺少字段在 base 上不算 schema 失败，
   在 head 上算。

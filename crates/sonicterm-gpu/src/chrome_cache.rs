@@ -621,6 +621,16 @@ fn palette_hex_capacity(palette: &Palette) -> usize {
         + ansi(&palette.bright)
 }
 
+/// Bytes the envelope allows for the kept palette's color strings. A bundled theme's 30 colors
+/// take about 210 bytes; a user theme may write longer strings, so this is an allowance, not a
+/// bound, and the live report stays exact.
+pub(crate) const PALETTE_ALLOWANCE_BYTES: usize = 4 * 1024;
+
+/// The `ChromeCache` class envelope per renderer: both run tables full of maximal entries plus
+/// the palette allowance. `sonicterm-types` records the same figure.
+pub(crate) const CHROME_CACHE_ENVELOPE_BYTES: usize =
+    title_cache_envelope_bytes() + chrome_run_cache_envelope_bytes() + PALETTE_ALLOWANCE_BYTES;
+
 /// Every chrome cache a renderer owns, reported together as its `chrome_cache` part.
 #[derive(Debug)]
 pub(crate) struct ChromeCaches {

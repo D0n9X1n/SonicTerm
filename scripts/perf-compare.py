@@ -1991,7 +1991,10 @@ FRAME_COUNTER_FIELDS = {
                   "apply_attempt_raster_ns", "apply_attempt_shape_requests", "apply_attempt_raster_calls",
                   "apply_attempt_raster_tiles",
                   # Glyph atlas growths and growths no frame presented; a base older than them shows n/a.
-                  "glyph_atlas_growths", "atlas_growth_abandoned"),
+                  "glyph_atlas_growths", "atlas_growth_abandoned",
+                  # Tab titles and chrome runs drawn from their caches (reuses) and shaped on a miss
+                  # (prepares, whose requests also count in shape_requests); a base older than them shows n/a.
+                  "tab_title_reuses", "tab_title_prepares", "chrome_run_reuses", "chrome_run_prepares"),
                  ("assembly_us", "atlas_growth_to_present_ms")),
 }
 HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000]}
@@ -5010,6 +5013,24 @@ def _pooled_ratio(per_run: Sequence[dict], numerator: Sequence[str],
     return f"{top / bottom:.3f} ({top}/{bottom}, {scope})", top / bottom
 
 
+def _pooled_per_assembly(per_run: Sequence[dict], numerator: str) -> tuple[str | None, float | None]:
+    """`numerator` per assembled frame, pooled over the runs carrying it and the assembly histogram: the
+    sum of `numerator` over the sum of the histogram's sample counts. None text when no run carries both;
+    `n/a` when no run assembled a frame."""
+    runs = [sections["renderer"] for sections in per_run
+            if isinstance(sections.get("renderer"), dict)
+            and _is_int(sections["renderer"].get(numerator))
+            and isinstance(sections["renderer"].get("assembly_us"), dict)]
+    if not runs:
+        return None, None
+    top = sum(run[numerator] for run in runs)
+    bottom = sum(sum(run["assembly_us"]["counts"]) for run in runs)
+    scope = f"{len(runs)}/{len(per_run)} runs"
+    if bottom == 0:
+        return f"n/a (no assembly, {scope})", None
+    return f"{top / bottom:.3f} ({top}/{bottom}, {scope})", top / bottom
+
+
 def _assembly_means(per_run: Sequence[dict]) -> tuple[str | None, float | None]:
     """Each counters run's exact assembly mean, `assembly_sum_us / samples`, at its run position, and the
     pooled mean. A run without the histogram reads `n/a (no histogram)` and one that assembled nothing
@@ -5044,6 +5065,10 @@ DERIVED_COUNTER_ROWS = (
      lambda per_run: _pooled_ratio(per_run, ("shape_requests",), ("gpu_frames", "software_frames"))),
     ("partial fallback ratio = partial_fallbacks / (partial_frames + partial_fallbacks), context only",
      lambda per_run: _pooled_ratio(per_run, ("partial_fallbacks",), ("partial_frames", "partial_fallbacks"))),
+    ("tab-title reuses per assembly = tab_title_reuses / Σ assembly_buckets, counters runs pooled",
+     lambda per_run: _pooled_per_assembly(per_run, "tab_title_reuses")),
+    ("chrome-run reuses per assembly = chrome_run_reuses / Σ assembly_buckets, counters runs pooled",
+     lambda per_run: _pooled_per_assembly(per_run, "chrome_run_reuses")),
 )
 
 

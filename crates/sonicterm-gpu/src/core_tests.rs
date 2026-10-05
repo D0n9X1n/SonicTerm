@@ -4048,6 +4048,8 @@ fn every_reported_part_is_classified_exactly_once() {
         software_frame: amount(4 * 1024 * 1024, 1),
         vertex_scratch: amount(3 * 1024 * 1024, 1),
         row_ink: amount(64 * 1024, 40),
+        frame_scratch: amount(2 * 1024 * 1024, 6),
+        chrome_cache: amount(96 * 1024, 7),
     };
 
     let classes = retention.seam_classes();
@@ -7965,4 +7967,38 @@ fn fill_snapped_cell_x_matches_build_bit_for_bit() {
         assert_eq!(bits(&edges), bits(&built), "origin {origin_x} cell {cell_w} cols {cols}");
         assert_eq!(bits(&edges), bits(&oracle));
     }
+}
+
+#[test]
+fn frame_scratch_and_chrome_cache_are_classified_parts_with_shared_envelopes() {
+    // The two parts this renderer reports beside its caches are classified once each, sum into
+    // `total()`, and their class envelopes are the same figures the renderer computes from its
+    // caps and table sizes, so neither side can drift alone.
+    let retention = RendererRetention {
+        frame_scratch: amount(3 * 1024, 2),
+        chrome_cache: amount(5 * 1024, 4),
+        ..RendererRetention::default()
+    };
+    let classes = retention.seam_classes();
+    assert_eq!(classes.len(), 9, "nine reported parts");
+    for (class, part) in [
+        (ResourceClass::FrameScratch, retention.frame_scratch),
+        (ResourceClass::ChromeCache, retention.chrome_cache),
+    ] {
+        let rows: Vec<_> = classes.iter().filter(|(row_class, _)| *row_class == class).collect();
+        assert_eq!(rows.len(), 1, "{class:?} is classified once");
+        assert_eq!(rows[0].1, part);
+        assert_eq!(class.pane_seam_term(), PaneSeamTerm::NotChargedInProduction);
+    }
+    assert_eq!(retention.total(), amount(8 * 1024, 6), "total() includes both parts");
+    assert_eq!(
+        ResourceClass::FrameScratch.coverage(),
+        ClassCoverage::UnchargedRetention { per_owner_bytes: frame_scratch::FRAME_SCRATCH_CAP }
+    );
+    assert_eq!(
+        ResourceClass::ChromeCache.coverage(),
+        ClassCoverage::UnchargedRetention {
+            per_owner_bytes: crate::chrome_cache::CHROME_CACHE_ENVELOPE_BYTES
+        }
+    );
 }

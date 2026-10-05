@@ -2732,7 +2732,7 @@ pub fn live_renderer_count() -> usize {
 
 /// CPU-side storage a renderer holds, split by owning class.
 ///
-/// Deliberately not a single total. The six parts have different lifetimes
+/// Deliberately not a single total. The parts have different lifetimes
 /// and remedies: atlases grow with content, row caches follow viewport churn,
 /// a software frame is sized by the window, and the vertex scratch follows the
 /// largest recent frame.
@@ -2754,6 +2754,10 @@ pub struct RendererRetention {
     pub vertex_scratch: ResourceAmount,
     /// Per-row ink records of the presented frame and one frame's staging; items are records.
     pub row_ink: ResourceAmount,
+    /// The reused per-frame draw vectors held between frames; items are allocated vectors.
+    pub frame_scratch: ResourceAmount,
+    /// Kept tab titles and chrome runs plus the UI palette's colors; items are kept runs.
+    pub chrome_cache: ResourceAmount,
 }
 
 impl RendererRetention {
@@ -2773,7 +2777,7 @@ impl RendererRetention {
     /// `Vec`s — so charging both under one class would make the class mean two
     /// things and leave a reader unable to tell which allocation to act on.
     #[must_use]
-    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 7] {
+    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 9] {
         [
             (ResourceClass::GlyphAtlas, self.glyph_atlas),
             (ResourceClass::InlineMediaRetained, self.image_atlas),
@@ -2783,6 +2787,8 @@ impl RendererRetention {
             // The vertex scratch is CPU storage staged for the vertex-buffer upload.
             (ResourceClass::UploadStaging, self.vertex_scratch),
             (ResourceClass::RowInk, self.row_ink),
+            (ResourceClass::FrameScratch, self.frame_scratch),
+            (ResourceClass::ChromeCache, self.chrome_cache),
         ]
     }
 
@@ -2797,6 +2803,8 @@ impl RendererRetention {
             self.software_frame,
             self.vertex_scratch,
             self.row_ink,
+            self.frame_scratch,
+            self.chrome_cache,
         ]
         .into_iter()
         .fold(ResourceAmount::default(), |acc, part| ResourceAmount {
@@ -3744,6 +3752,11 @@ impl GpuRenderer {
             software_frame: self.software_frame_retained_amount(),
             vertex_scratch: self.upload_staging_retained(),
             row_ink: self.row_ink.retained_amount(),
+            frame_scratch: self.frame_scratch.retained_amount(),
+            chrome_cache: ResourceAmount {
+                bytes: self.chrome_caches.retained_bytes(),
+                items: self.chrome_caches.items(),
+            },
         }
     }
 
@@ -5339,6 +5352,25 @@ impl GpuRenderer {
     }
 
     /// Invalidate row glyphs, line quads, and the frame key, bumping `style_rev` so the next frame reshapes text.
+    /// Test seam: keep (`true`, the default) or drop the frame scratch and the kept chrome titles
+    /// and runs between frames, so a test can compare reuse against cold assembly.
+    #[doc(hidden)]
+    pub fn __set_frame_reuse(&mut self, reuse: bool) {
+        self.frame_scratch.set_reuse(reuse);
+        self.chrome_reuse = reuse;
+        if !reuse {
+            // When: reuse is turned off, kept titles and runs are dropped at once.
+            self.chrome_caches.clear_runs();
+        }
+    }
+
+    /// Test seam: how many times the UI palette was derived after construction.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __palette_computes(&self) -> u64 {
+        self.chrome_caches.palette.computes()
+    }
+
     pub fn clear_shape_cache(&mut self) {
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();

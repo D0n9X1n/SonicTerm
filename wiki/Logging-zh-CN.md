@@ -415,6 +415,10 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `raster_tiles` | 次数 | 返回有像素图块的光栅化调用；无图块与空图块算调用，不算图块 |
 | `font_generation_applies` | 次数 | 应用了已应用回退通知的更新代次的字体准备；与 `font_fallback_applies` 不同，它不含首次准备与替换字体栈 |
 | `font_prepare_ns`、`font_generation_prepare_ns` | 纳秒 | 帧字体准备内的时间（含失效），分别为全部准备与应用了更新代次的准备；不在任何渲染尝试之内 |
+| `tab_title_reuses` | 次数 | 从标题缓存绘制、未塑形的标签标题，每次组装中每个标题计一次，无论是否呈现 |
+| `tab_title_prepares` | 次数 | 标题缓存未命中而重新适配并塑形的标签标题，每次组装中每个标题计一次；其塑形请求同时计入 `shape_requests` |
+| `chrome_run_reuses` | 次数 | 由界面文本段缓存提供、未塑形的查找（搜索浮层图标与标签的测量和绘制），组装中每次查找计一次 |
+| `chrome_run_prepares` | 次数 | 进行了塑形的界面文本段查找，组装中每次查找计一次；其塑形请求同时计入 `shape_requests` |
 | `render_attempts`、`render_attempts_presented` | 次数 | `render_releasing` 调用，及其中完成呈现的调用 |
 | `render_attempt_ns`、`render_attempt_shape_ns`、`render_attempt_raster_ns` | 纳秒 | 这些调用内的时间，及其中的塑形与光栅化时间 |
 | `render_attempt_shape_requests`、`render_attempt_raster_calls`、`render_attempt_raster_tiles` | 次数 | 这些调用内的塑形请求、光栅化调用与图块 |
@@ -425,9 +429,9 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 在 Windows 上，GDI 呈现器绘制的帧计入 `software_frames`；托管的 Windows CI runner 没有 GPU，因此其运行
 报告 `software_frames` 而没有 `gpu_frames`。通过 wgpu 呈现的帧（包括其软件适配器）计入 `gpu_frames`。
 
-`shape_requests` 统计对 `FontStack::shape_text_with_style`、`shape_text` 或 `measure_text_width` 的每次
-调用，失败的调用也计入；因文本为空而跳过的调用不算请求。它统计的是请求，而不是 HarfBuzz 尝试或回退
-重试。
+`shape_requests` 统计渲染器经 `frame_stats::shape_request` 对 `FontStack::shape_text_for_frame` 或
+`measure_text_width_for_frame` 的每次调用，失败的调用也计入；因文本为空而跳过的调用不算请求。它统计的是
+请求，而不是 HarfBuzz 尝试或回退重试。从缓存提供的标题或界面文本段不发出请求。
 
 每次回退代次应用恰好由一个渲染尝试携带：应用了更新代次的准备记下它，下一次 `render_releasing` 调用取走它，
 无论其间有多少次准备或字体令牌副本。重试是之后的调用，不携带它。同一渲染器在尝试期间打开的辅助作用域（如通知
@@ -653,6 +657,8 @@ renderer retention window="<window-id>" role="visible" total_bytes=<bytes>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
                    vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
                    row_ink_bytes=<bytes> row_ink_items=<count>
+                   frame_scratch_bytes=<bytes> frame_scratch_items=<count>
+                   chrome_cache_bytes=<bytes> chrome_cache_items=<count>
 renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    glyph_atlas_bytes=<bytes> glyph_atlas_items=<count>
                    image_atlas_bytes=<bytes> image_atlas_items=<count>
@@ -660,6 +666,8 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    row_quad_cache_bytes=<bytes> row_quad_cache_items=<count> software_frame_bytes=<bytes>
                    vertex_scratch_bytes=<bytes> vertex_scratch_items=<count>
                    row_ink_bytes=<bytes> row_ink_items=<count>
+                   frame_scratch_bytes=<bytes> frame_scratch_items=<count>
+                   chrome_cache_bytes=<bytes> chrome_cache_items=<count>
 ```
 
 | 字段 | 归属内容 | 首先处理 |
@@ -677,6 +685,10 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `vertex_scratch_items` | 顶点缓冲持有分配时为 1，否则为 0 | — |
 | `row_ink_bytes` | `RowInk` 部分：逐行墨迹表（每个已呈现行按窗格与槽位记录的绘制范围）已分配的桶，加上一帧的暂存缓冲 | 受可见行数限制；窗格缩小或关闭后，下一帧呈现时释放其记录 |
 | `row_ink_items` | 已提交的逐行墨迹记录数，每个可见行一条 | — |
+| `frame_scratch_bytes` | `FrameScratch` 部分：渲染器在已组装帧之间保留的逐帧绘制向量（字形、quad、叠加层、图像、行范围、下划线、暂存索引、缺字方框、窗格矩形、列边界与行键） | 每个向量在超过一次组装用量四倍且超过 1 MiB 时收缩到用量的两倍，再限制在其上限内（合计 16,384,000 字节）；帧持有期间为零 |
+| `frame_scratch_items` | 持有分配的暂存向量数 | — |
+| `chrome_cache_bytes` | `ChromeCache` 部分：64 槽标签标题表与 32 槽界面文本段表、每个保留段的文本与字形，以及保留的界面调色板颜色字符串 | 受固定表与准入上限（256 字节文本、512 个字形）约束；字体变更、缩放变更或 `clear_shape_cache` 会清空两张文本段表 |
+| `chrome_cache_items` | 保留的标签标题数加保留的界面文本段数 | — |
 
 `role="warm"` 表示渲染器位于待命池，不属于可见窗口；关闭窗口不会释放它。
 这些数值是主机内存，不是 GPU 显存。
