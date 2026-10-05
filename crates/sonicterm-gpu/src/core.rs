@@ -664,7 +664,7 @@ fn effective_font_weight_scale(scale: f32) -> f32 {
 }
 
 #[path = "frame_scratch.rs"]
-pub(crate) mod frame_scratch;
+mod frame_scratch;
 
 #[path = "tab_title_font.rs"]
 mod tab_title_font;
@@ -5349,7 +5349,6 @@ impl GpuRenderer {
         );
     }
 
-    /// Invalidate row glyphs, line quads, and the frame key, bumping `style_rev` so the next frame reshapes text.
     /// Test seam: keep (`true`, the default) or drop the frame scratch and the kept chrome titles
     /// and runs between frames, so a test can compare reuse against cold assembly.
     #[doc(hidden)]
@@ -5357,7 +5356,7 @@ impl GpuRenderer {
         self.frame_scratch.set_reuse(reuse);
         self.chrome_reuse = reuse;
         if !reuse {
-            // When: reuse is turned off, kept titles and runs are dropped at once.
+            // Reuse is turned off, so kept titles and runs are dropped at once.
             self.chrome_caches.clear_runs();
         }
     }
@@ -5369,6 +5368,8 @@ impl GpuRenderer {
         self.chrome_caches.palette.computes()
     }
 
+    /// Invalidate row glyphs, line quads, kept chrome titles and runs, and the frame key, bumping
+    /// `style_rev` so the next frame reshapes text.
     pub fn clear_shape_cache(&mut self) {
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
@@ -7091,7 +7092,7 @@ impl GpuRenderer {
                     });
                     let title_origin = (placement.text_x, tab_baseline_y);
                     let final_layout = match title.view {
-                        // When: the fit kept or made its run, it draws without shaping again.
+                        // The fit kept or made its run, so it draws without shaping again.
                         Some(view) => chrome_text::layout_view(
                             view,
                             rasterizer,
@@ -7102,7 +7103,7 @@ impl GpuRenderer {
                             title_clip,
                             GlyphRasterVariant::TabTitle,
                         ),
-                        // When: the final cut did not shape, the text shapes at draw time as before.
+                        // The final cut did not shape, so the text shapes at draw time as before.
                         None => chrome_text::layout_with_raster_variant(
                             stack,
                             rasterizer,
@@ -7387,7 +7388,7 @@ impl GpuRenderer {
                 let icon_view =
                     icon_handle.as_ref().and_then(|handle| self.chrome_caches.runs.view(handle));
                 let icon_layout = match icon_view {
-                    // When: the icon run is kept or shaped, it draws without shaping again.
+                    // The icon run is kept or shaped, so it draws without shaping again.
                     Some(view) => chrome_text::layout_view(
                         view,
                         &mut wt,
@@ -7398,7 +7399,7 @@ impl GpuRenderer {
                         icon_clip,
                         GlyphRasterVariant::Normal,
                     ),
-                    // When: no surface or no run, the layout decides as it always did.
+                    // With no surface or no run, the layout decides as it always did.
                     None => chrome_text::layout(
                         stack,
                         &mut wt,

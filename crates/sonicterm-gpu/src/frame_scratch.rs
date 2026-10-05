@@ -77,7 +77,7 @@ pub(crate) fn finish_vec<T>(held: &mut Vec<T>, used: usize, cap_bytes: usize) {
     release_excess(held, used);
     let cap = cap_elems::<T>(cap_bytes);
     if held.capacity() > cap {
-        // When: the vector still reserves more than its cap, it is replaced at the cap.
+        // The vector still reserves more than its cap, so it is replaced at the cap.
         *held = Vec::with_capacity(cap);
     }
 }
@@ -104,7 +104,7 @@ pub(crate) fn fill_snapped_slot(
     cols: u16,
 ) {
     if snapped.len() <= slot {
-        // When: this pass reaches a slot the list has never held, empty slots are added.
+        // This pass reaches a slot the list has never held, so empty slots are added.
         snapped.resize_with(slot + 1, Vec::new);
     }
     *peak = (*peak).max(slot + 1);
@@ -170,12 +170,12 @@ impl FrameScratch {
             let Some(largest) =
                 (0..self.snapped.len()).max_by_key(|index| self.snapped[*index].capacity())
             else {
-                // When: no slot is left yet the headers alone pass the cap, they are released.
+                // When: there is no `largest` slot yet the headers pass the cap, they are released.
                 self.snapped = Vec::new();
                 break;
             };
             if self.snapped[largest].capacity() == 0 {
-                // When: every slot is already empty, only the header list is left to release.
+                // When: even the `largest` slot has no capacity, only the headers are left to release.
                 self.snapped = Vec::new();
                 break;
             }
@@ -256,7 +256,7 @@ impl ScratchHome {
         debug_assert!(state.held.is_none(), "the home never holds a second scratch");
         state.lent = false;
         if !state.no_reuse {
-            // When: reuse is on, the finished buffers wait for the next pass.
+            // Reuse is on, so the finished buffers wait for the next pass.
             state.held = Some(scratch);
         }
     }
@@ -272,7 +272,7 @@ impl ScratchHome {
         let mut state = self.state.borrow_mut();
         state.no_reuse = !reuse;
         if !reuse {
-            // When: reuse is turned off, the held buffers are released at once.
+            // Reuse is turned off, so the held buffers are released at once.
             state.held = None;
         }
     }
@@ -312,7 +312,7 @@ impl ScratchLease {
 impl Drop for ScratchLease {
     fn drop(&mut self) {
         if let Some(scratch) = self.scratch.take() {
-            // When: the scratch was not handed to presentation, the lease returns it.
+            // The scratch was not handed to presentation, so the lease returns it.
             self.home.restore(scratch);
         }
     }

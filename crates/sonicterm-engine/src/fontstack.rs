@@ -334,7 +334,7 @@ impl FontStack {
         let slot = usize::from(bold) | (usize::from(italic) << 1);
         let epoch = self.font_config.face_epoch();
         if self.faces_epoch.get() != epoch {
-            // When: the configuration dropped its faces since this memo was filled, every
+            // The configuration dropped its faces since this memo was filled, so every
             // memoized face is stale, so all four slots are cleared before the lookup.
             *self.faces.borrow_mut() = Default::default();
             self.faces_epoch.set(epoch);

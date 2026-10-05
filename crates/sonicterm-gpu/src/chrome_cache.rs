@@ -113,8 +113,8 @@ pub(crate) fn fit_title_run(
     let ellipsis_px: f32 = match shape_title(stack, "…", font_size_px) {
         Some(ellipsis) => ellipsis.advances().map(|(_, advance)| advance).sum(),
         None => {
-            // When: the ellipsis cannot be shaped it counts 0 px, as before, and the fit is
-            // not cached.
+            // The ellipsis could not be shaped: it counts 0 px, as before, and the fit is not
+            // cached.
             complete = false;
             0.0
         }
@@ -130,7 +130,7 @@ pub(crate) fn fit_title_run(
                 (drawn_px, Some(PreparedChromeRun::from_run(cut)))
             }
             None => {
-                // When: the cut cannot be shaped it counts its estimated width, as before, and
+                // The cut could not be shaped: it counts its estimated width, as before, and
                 // the fit is not cached.
                 complete = false;
                 (fitted.width_px, None)
@@ -274,14 +274,15 @@ impl TitleCache {
                 .limits
                 .admits(probe.text, fit.run.as_ref().map_or(0, |run| run.view().glyph_count()));
         if !admitted {
-            // When: the fit is not kept, a stale slot at this position is dropped with it.
+            // When: the fit is not `admitted`, a stale slot at this position is dropped and the
+            // fit draws this frame only.
             if let Some(slot) = self.slots.as_mut().and_then(|slots| slots.get_mut(position)) {
                 *slot = None;
             }
             return TitleDraw::Fresh(fit);
         }
         let TitleFit { run: Some(run), width_px, .. } = fit else {
-            // When: a complete fit always carries its run, so this arm is never reached.
+            // A complete fit always carries its run, so this arm is never reached.
             unreachable!("a complete title fit holds its run");
         };
         let slots = self.slots.get_or_insert_with(|| Box::new(std::array::from_fn(|_| None)));
@@ -446,14 +447,16 @@ impl ChromeRunCache {
         self.clock = self.clock.wrapping_add(1);
         let clock = self.clock;
         if reuse {
+            // When: `reuse` is on, a kept run with this key and text is served before shaping.
             if let Some(slots) = self.slots.as_mut() {
+                // When: the `slots` table exists, it is scanned for this key and text.
                 let hit = slots.iter_mut().enumerate().find_map(|(index, slot)| {
                     slot.as_mut()
                         .filter(|entry| entry.key == key && entry.run.view().text() == text)
                         .map(|entry| (index, entry))
                 });
                 if let Some((index, entry)) = hit {
-                    // When: a slot holds this key and text, the run is served without shaping.
+                    // When: `hit` names a slot with this key and text, it is served unshaped.
                     entry.last_used = clock;
                     crate::frame_stats::note_chrome_run(true);
                     return ChromeRunHandle::Cached(index);
@@ -464,7 +467,7 @@ impl ChromeRunCache {
         let Some(shaped) =
             ChromeShapedRun::shape(stack, text, key.attrs, key.font_size_px(), key.native_em_px())
         else {
-            // When: shaping failed, nothing is kept and the caller keeps its own fallback.
+            // When: no run is `shaped`, nothing is kept and the caller keeps its own fallback.
             return ChromeRunHandle::Failed;
         };
         let run = PreparedChromeRun::from_run(shaped);
@@ -474,7 +477,7 @@ impl ChromeRunCache {
         }
         let slots = self.slots.get_or_insert_with(|| Box::new(std::array::from_fn(|_| None)));
         let index = slots.iter().position(Option::is_none).unwrap_or_else(|| {
-            // When: every slot is full, the least recently used entry is replaced; `min_by_key`
+            // Every slot is full, so the least recently used entry is replaced; `min_by_key`
             // keeps the first minimum, so a tie goes to the lower slot.
             slots
                 .iter()
@@ -557,7 +560,7 @@ impl PaletteCache {
     /// otherwise derived once and kept.
     pub(crate) fn palette_for(&mut self, theme: &Theme) -> UiPalette {
         if theme.colors != self.colors {
-            // When: the colors changed, the palette is derived again and kept with them.
+            // The colors changed, so the palette is derived again and kept with them.
             self.palette = UiPalette::from_theme(theme);
             self.colors = theme.colors.clone();
             self.computes += 1;
