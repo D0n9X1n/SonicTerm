@@ -38,6 +38,10 @@ use winit::{
 
 /// Past the 30 s interval, so a due release runs when serviced.
 const AFTER_INTERVAL: Duration = Duration::from_secs(31);
+/// Width and height of the image every case draws, in pixels.
+const IMAGE_SIDE_PX: u32 = 32;
+/// The image's one colour: opaque red, as the BGRA bytes the wgpu frame stores it in.
+const IMAGE_BGRA: [u8; 4] = [0, 0, 255, 255];
 
 struct Probe {
     outcome: Option<Result<(), String>>,
@@ -144,7 +148,7 @@ fn admitted(renderer: &GpuRenderer) -> u64 {
     renderer.device_error_snapshot().admitted_work
 }
 
-/// Assemble and present one frame of a single pane, with a 32x32 image at its origin when `image`.
+/// Assemble and present one frame of a single pane, with the image at its first cell when `image`.
 fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
     let mut grid = Grid::new(10, 4);
     let mut panes = [PaneRender {
@@ -161,9 +165,9 @@ fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
                 id: 1,
                 row: 0,
                 col: 0,
-                width: 32,
-                height: 32,
-                bgra: Arc::from([0, 0, 255, 255].repeat(32 * 32)),
+                width: IMAGE_SIDE_PX,
+                height: IMAGE_SIDE_PX,
+                bgra: Arc::from(IMAGE_BGRA.repeat((IMAGE_SIDE_PX * IMAGE_SIDE_PX) as usize)),
             }]
         } else {
             Vec::new()
@@ -189,8 +193,119 @@ fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-/// The retained wgpu frame's BGRA bytes, copied out through the test hook and read back.
-fn wgpu_pixels(renderer: &mut GpuRenderer) -> Result<Vec<u8>, String> {
+/// A retained wgpu frame read back: BGRA bytes, row-major at the frame texture's own width.
+#[derive(PartialEq, Eq)]
+struct Readback {
+    bgra: Vec<u8>,
+    width_px: usize,
+    height_px: usize,
+}
+
+impl Readback {
+    /// The BGRA bytes of the pixel at `column`, `row`.
+    fn pixel(&self, column: usize, row: usize) -> &[u8] {
+        let start = (row * self.width_px + column) * 4;
+        &self.bgra[start..start + 4]
+    }
+}
+
+/// The pixels an image covers, as half-open column and row ranges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImageRect {
+    left: usize,
+    top: usize,
+    right: usize,
+    bottom: usize,
+}
+
+impl ImageRect {
+    /// Whether the pixel at `column`, `row` is inside.
+    fn contains(&self, column: usize, row: usize) -> bool {
+        (self.left..self.right).contains(&column) && (self.top..self.bottom).contains(&row)
+    }
+
+    /// Covered pixels.
+    fn area(&self) -> usize {
+        self.right.saturating_sub(self.left) * self.bottom.saturating_sub(self.top)
+    }
+
+    /// This rect grown to hold the pixel at `column`, `row`.
+    fn including(self, column: usize, row: usize) -> Self {
+        Self {
+            left: self.left.min(column),
+            top: self.top.min(row),
+            right: self.right.max(column + 1),
+            bottom: self.bottom.max(row + 1),
+        }
+    }
+}
+
+/// The pixels pane 1's image at `row`, `col` covers, placed as the renderer places it: from the
+/// pane's grid origin in the last frame's layout, which includes padding and the bottom alignment
+/// that moves a grid shorter than its pane down, plus whole cells, clipped to the grid and surface.
+fn expected_image_rect(renderer: &GpuRenderer, row: u16, col: u16) -> Result<ImageRect, String> {
+    let layout = renderer.pane_layout(1).ok_or("the pane has a layout")?;
+    let (cell_w, cell_h) = renderer.cell_size();
+    let (surface_w, surface_h) = renderer.surface_size();
+    let left = layout.origin_x_logical + f32::from(col) * cell_w;
+    let top = layout.origin_y_logical + f32::from(row) * cell_h;
+    let side = IMAGE_SIDE_PX as f32;
+    let right = (left + side).min(layout.origin_x_logical + layout.w_logical).min(surface_w as f32);
+    let bottom = (top + side).min(layout.origin_y_logical + layout.h_logical).min(surface_h as f32);
+    // A pixel is covered when its centre lies inside the quad, the rasterizer's rule.
+    let first_covered = |edge: f32| (edge - 0.5).ceil().max(0.0) as usize;
+    Ok(ImageRect {
+        left: first_covered(left.max(layout.origin_x_logical)),
+        top: first_covered(top.max(layout.origin_y_logical)),
+        right: first_covered(right),
+        bottom: first_covered(bottom),
+    })
+}
+
+/// Whether `reference` shows the image against the image-free `absent`: they differ on exactly the
+/// pixels of `rect`, and its centre pixel holds the image colour only in `reference`. The error
+/// names the measured changed box beside `rect`, so a failure explains itself.
+fn image_shown(reference: &Readback, absent: &Readback, rect: ImageRect) -> Result<(), String> {
+    if (reference.width_px, reference.height_px) != (absent.width_px, absent.height_px) {
+        return Err(format!(
+            "the frames differ in size: {}x{} and {}x{}",
+            reference.width_px, reference.height_px, absent.width_px, absent.height_px
+        ));
+    }
+    if rect.area() == 0 {
+        return Err(format!("the expected image rect {rect:?} is empty"));
+    }
+    let (mut changed, mut outside, mut measured) = (0usize, 0usize, None::<ImageRect>);
+    for row in 0..reference.height_px {
+        for column in 0..reference.width_px {
+            if reference.pixel(column, row) != absent.pixel(column, row) {
+                changed += 1;
+                outside += usize::from(!rect.contains(column, row));
+                let pixel =
+                    ImageRect { left: column, top: row, right: column + 1, bottom: row + 1 };
+                measured = Some(measured.map_or(pixel, |grown| grown.including(column, row)));
+            }
+        }
+    }
+    let (centre_x, centre_y) = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+    let centre_shown = reference.pixel(centre_x, centre_y) == IMAGE_BGRA
+        && absent.pixel(centre_x, centre_y) != IMAGE_BGRA;
+    if centre_shown && outside == 0 && changed == rect.area() {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected the {} pixels of {rect:?} to change, measured {changed} changed in {measured:?} \
+             with {outside} outside it; centre ({centre_x}, {centre_y}) is {:?} with the image and \
+             {:?} without",
+            rect.area(),
+            reference.pixel(centre_x, centre_y),
+            absent.pixel(centre_x, centre_y),
+        ))
+    }
+}
+
+/// The retained wgpu frame, copied out through the test hook and read back.
+fn wgpu_pixels(renderer: &mut GpuRenderer) -> Result<Readback, String> {
     let readback = renderer.__copy_retained_frame().ok_or("readback is enabled")?;
     let slice = readback.buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
@@ -199,7 +314,7 @@ fn wgpu_pixels(renderer: &mut GpuRenderer) -> Result<Vec<u8>, String> {
         .poll(wgpu::PollType::wait_indefinitely())
         .map_err(|error| format!("poll the readback: {error}"))?;
     let mapped = slice.get_mapped_range().map_err(|error| format!("map the readback: {error}"))?;
-    let bytes = unpad_readback_rows(
+    let bgra = unpad_readback_rows(
         &mapped,
         readback.width_px,
         readback.height_px,
@@ -207,7 +322,11 @@ fn wgpu_pixels(renderer: &mut GpuRenderer) -> Result<Vec<u8>, String> {
     );
     drop(mapped);
     readback.buffer.unmap();
-    Ok(bytes)
+    Ok(Readback {
+        bgra,
+        width_px: readback.width_px as usize,
+        height_px: readback.height_px as usize,
+    })
 }
 
 /// Every pixel of a GDI renderer's software frame. The hook exists only on Windows.
@@ -450,7 +569,8 @@ fn trim_image_atlas_and_restore(active: &ActiveEventLoop) -> Result<(), String> 
 
 /// On the GPU presenter, an image shown, removed, trimmed away and shown again presents at once, its
 /// atlas and GPU mirror promoted again, with exactly the pixels the frame before the trim read back.
-/// The reference is first shown to contain the image, against the image-free frame.
+/// The reference is first shown to contain the image, against the image-free frame, at the rect the
+/// renderer's own layout places it in; that check is shown to refuse an image-free reference.
 fn trim_restores_the_image_on_wgpu(active: &ActiveEventLoop) -> Result<(), String> {
     let (_window, mut renderer) = renderer(active, SoftwareRenderMode::Off, "trim-image-wgpu")?;
     renderer.__enable_retained_frame_readback();
@@ -458,18 +578,22 @@ fn trim_restores_the_image_on_wgpu(active: &ActiveEventLoop) -> Result<(), Strin
     render(&mut renderer, true)?;
     check(renderer.successful_frame_count() > frames, "the reference frame presents")?;
     let reference = wgpu_pixels(&mut renderer)?;
+    let rect = expected_image_rect(&renderer, 0, 0)?;
     render(&mut renderer, false)?;
-    // The reference must show the image: it differs from the frame without it, and only inside the
-    // image's 32x32 rect at the pane origin, so the comparison below cannot pass on two empty frames.
+    // The reference must show the image, exactly where the renderer placed it, so the comparison
+    // below cannot pass on two empty frames. The rect comes from the layout, not the pane origin:
+    // a grid shorter than its pane is bottom-aligned, which moves the image down.
     let absent = wgpu_pixels(&mut renderer)?;
-    let width_px = renderer.surface_size().0 as usize;
-    let changed: Vec<usize> = (0..reference.len() / 4)
-        .filter(|pixel| reference[pixel * 4..pixel * 4 + 4] != absent[pixel * 4..pixel * 4 + 4])
-        .collect();
-    check(!changed.is_empty(), "the reference frame shows the image")?;
+    image_shown(&reference, &absent, rect).map_err(|problem| {
+        format!(
+            "the reference shows the image only inside its rect: {problem}; cell {:?}, layout {:?}",
+            renderer.cell_size(),
+            renderer.pane_layout(1),
+        )
+    })?;
     check(
-        changed.iter().all(|pixel| pixel % width_px < 32 && pixel / width_px < 32),
-        "the reference differs from the image-free frame only inside the image",
+        image_shown(&absent, &absent, rect).is_err(),
+        "the image check refuses a reference drawn without the image",
     )?;
     let _ = renderer.trim_for_occlusion();
     check(
