@@ -315,20 +315,68 @@ fn a_pass_with_the_gate_off_records_nothing() {
     assert_eq!(diagnostics.table().retained_heap_bytes(), 0);
 }
 
-/// A pass that unwinds mid-assembly is left open; the next pass settles it as not presented.
+/// An attempt that unwinds mid-assembly settles its open pass as not presented before its scopes
+/// close: read straight after the attempt, with no later pass begun, the collector already holds
+/// the call as unpresented with its shaping and diagnostic time, and the table has no open pass.
 #[test]
-fn an_unwinding_pass_settles_as_not_presented() {
-    let mut diagnostics = RowRunDiagnostics::new();
+fn an_unwinding_attempt_settles_its_pass_before_the_attempt_closes() {
+    CLOCK_NS.with(|clock| clock.set(0));
+    let mut diagnostics = RowRunDiagnostics::with_clock(stepping_clock);
+    let sink = crate::frame_stats::FrameStatsSink::default();
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        diagnostics.begin_pass(true);
-        let _: Result<(), ()> = diagnostics.shape("甲", false, false, || FACE, || Ok(()));
-        panic!("assembly unwinds");
+        let mut owed_apply = false;
+        let _scope = crate::frame_stats::RenderScope::enter(Some(&sink), &mut owed_apply);
+        let attempt = catch_attempt(|| {
+            diagnostics.begin_gated_pass();
+            let _: Result<(), ()> = diagnostics.shape("甲", false, false, || FACE, || Ok(()));
+            panic!("assembly unwinds");
+        });
+        diagnostics.settle_attempt(attempt)
     }));
     assert!(unwound.is_err());
-    diagnostics.begin_pass(true);
-    diagnostics.end_pass(true);
-    let counts = diagnostics.take_counts();
-    assert_eq!((counts.unpresented_calls, counts.first), (1, 0));
+    let stats = sink.snapshot();
+    assert_eq!(stats.attempts.attempts, 1, "the attempt closed");
+    let counts = stats.row_runs;
+    assert_eq!((counts.calls, counts.unpresented_calls, counts.first), (1, 1, 0));
+    // 100 ns between the shaping readings; 200 ns of hashing and recording plus 100 ns settling.
+    assert_eq!((counts.unpresented_ns, counts.shape_ns, counts.diag_ns), (100, 0, 300));
+    assert!(!diagnostics.table().is_open(), "nothing is left for a later pass to settle");
+}
+
+/// An attempt that fails (returns without presenting) settles its pass as unpresented within the
+/// attempt; a following attempt whose pass presents settles it once, as committed, and the
+/// epilogue never settles a committed pass a second time.
+#[test]
+fn a_failed_attempt_settles_unpresented_and_a_presented_one_is_settled_once() {
+    let mut diagnostics = RowRunDiagnostics::new();
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let mut attempt = |presented: bool| {
+        let mut owed_apply = false;
+        let _scope = crate::frame_stats::RenderScope::enter(Some(&sink), &mut owed_apply);
+        let caught = catch_attempt(|| -> Result<(), &str> {
+            diagnostics.begin_gated_pass();
+            let _: Result<(), ()> = diagnostics.shape("甲", false, false, || FACE, || Ok(()));
+            if !presented {
+                // When: the attempt fails, it returns before any settlement of its own.
+                return Err("presenter failed");
+            }
+            diagnostics.end_pass(true);
+            crate::frame_stats::note_row_runs(&diagnostics.take_counts());
+            Ok(())
+        });
+        diagnostics.settle_attempt(caught)
+    };
+    assert!(attempt(false).is_err());
+    let failed = sink.snapshot().row_runs;
+    assert_eq!((failed.calls, failed.unpresented_calls, failed.first), (1, 1, 0));
+    assert!(attempt(true).is_ok());
+    let both = sink.snapshot().row_runs;
+    assert_eq!(
+        (both.calls, both.unpresented_calls),
+        (2, 1),
+        "the presented call is not unpresented"
+    );
+    assert_eq!((both.retry_repeats, both.first), (1, 0), "the failed call made the retry sighting");
 }
 
 /// The gated pass reads this thread's frame-counter gate: outside a counting scope the pass is

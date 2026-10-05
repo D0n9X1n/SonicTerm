@@ -587,6 +587,12 @@ pub(crate) const ROW_RUN_DIAG_ENVELOPE_BYTES: usize = SLOT_COUNT * std::mem::siz
     + PENDING_CAPACITY * std::mem::size_of::<PendingRecord>()
     + std::mem::size_of::<RowRunDiagnostics>();
 
+/// Run one render attempt's `body`, catching an unwind so the caller can settle the attempt's
+/// row-run pass with [`RowRunDiagnostics::settle_attempt`] before its scopes close.
+pub(crate) fn catch_attempt<Output>(body: impl FnOnce() -> Output) -> std::thread::Result<Output> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(body))
+}
+
 /// Nanoseconds since the first reading in this process.
 fn monotonic_ns() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -632,6 +638,22 @@ impl RowRunDiagnostics {
     /// Settle the open pass, committed when `presented`; nothing happens without one.
     pub(crate) fn end_pass(&mut self, presented: bool) {
         self.settle(presented);
+    }
+
+    /// Close one render attempt caught by [`catch_attempt`]: a pass it left open (an early return,
+    /// an error or an unwind) settles as not presented and every count is recorded, inside the
+    /// attempt's scopes; then the attempt's output returns or its unwind resumes unchanged. A pass
+    /// the attempt already settled (a presented frame) is not settled again.
+    pub(crate) fn settle_attempt<Output>(
+        &mut self,
+        attempt: std::thread::Result<Output>,
+    ) -> Output {
+        self.end_pass(false);
+        crate::frame_stats::note_row_runs(&self.take_counts());
+        match attempt {
+            Ok(output) => output,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     fn settle(&mut self, presented: bool) {

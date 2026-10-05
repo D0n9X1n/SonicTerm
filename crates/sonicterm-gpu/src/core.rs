@@ -5809,133 +5809,141 @@ impl GpuRenderer {
             self.frame_sink.as_ref(),
             &mut self.unattributed_apply,
         );
-        self.debug_assert_prepared(fonts);
-        let frame_start = Instant::now();
-        // Read before lending, so assembly itself never reaches the device.
-        let subpixel_aa = self.effective_subpixel_aa_mode();
-        let accepts_gpu_work = self.device_errors.accepts_gpu_work();
-        let assembled = lend_and_assemble(source, accepts_gpu_work, |panes| {
-            let mut palette = palette;
-            assemble_with_fallback(|force_full| {
-                self.assemble_frame(
-                    subpixel_aa,
-                    panes,
-                    theme,
-                    cursor_visible,
-                    selection,
-                    copy_mode,
-                    tabs,
-                    process_privileged,
-                    search,
-                    palette.as_deref_mut(),
-                    ime,
-                    viewport_top_abs,
-                    notification,
-                    hovered_url_cells,
-                    link_preview,
-                    force_full,
-                )
-            })
-        });
-        // The source is gone here: every arm below runs with no parser guard held.
-        self.flush_image_upload_rebuild();
-        // Any growth, from this assembly, outside it, or left by a reset retry, resizes the texture
-        // here, after release and before any present, so a grown atlas never syncs into a smaller
-        // texture and recreating one never holds the parser guards. Assembly reads no texture.
-        self.rebuild_glyph_upload_if_needed();
-        self.count_glyph_atlas_growths(frame_start);
-        self.finalize_growth_episodes_if_device_stopped();
-        let assembled = match assembled {
-            Ok(assembled) => assembled,
-            Err(error) => {
-                // When: assembly returned `error`, nothing was drawn; report it as failed, with no
-                // receipts, and forget the glyph slot keys its passes staged.
-                self.row_glyph_cache.discard_staged();
-                return FrameOutcome::without_receipts(PresentOutcome::Failed(error));
-            }
-        };
-        let assembled = match settle_without_renderer(assembled) {
-            Ok(outcome) => {
-                // When: `settle_without_renderer` settled an empty source, return it with no receipts.
-                return outcome;
-            }
-            Err(assembled) => assembled,
-        };
-        let outcome = match assembled {
-            // Settled above; kept so the match names every exit.
-            Assembled::NoPanes => PresentOutcome::Skipped(SkipReason::NoPanes),
-            Assembled::Unavailable => self.rendering_unavailable(),
-            Assembled::PartialFallback => {
-                // Only a forced-Full pass reaches here, and force_full makes a fallback impossible;
-                // present nothing and plan the next frame from scratch rather than trust the key.
-                self.last_frame_key = None;
-                self.row_glyph_cache.discard_staged();
-                self.request_window_redraw();
-                PresentOutcome::Skipped(SkipReason::Noop)
-            }
-            Assembled::Unchanged { focus_flash } => {
-                // When: `Unchanged`, retain the no-assembly fast path and the Windows cached-frame reblit.
-                self.skipped_frames = self.skipped_frames.wrapping_add(1);
-                tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
-                let outcome = if let Some(before) = self.prepare_cached_present() {
-                    // When: `before` describes a retained CPU frame, admit its reblit at this render boundary.
-                    let Some(reblit_scope) = self.device_errors.enter_gpu_work("render.reblit")
-                    else {
-                        // When: `enter_gpu_work` refuses, keep the stopped exit before the focus-flash redraw.
-                        return FrameOutcome::without_receipts(self.rendering_unavailable());
-                    };
-                    self.present_unchanged_frame(before, reblit_scope)
-                        .unwrap_or_else(PresentOutcome::Failed)
-                } else {
-                    // When: `before` is absent, no cached presenter is available for this unchanged plan.
-                    PresentOutcome::Skipped(SkipReason::Unchanged)
-                };
-                if focus_flash
-                    && !matches!(
-                        outcome,
-                        PresentOutcome::RenderingUnavailable(_) | PresentOutcome::Failed(_)
+        // A row-run pass this attempt leaves open (an error, a skip or an unwind) settles as not
+        // presented before the scope closes, so its counts belong to this attempt and its phase.
+        let attempt = crate::row_run_diag::catch_attempt(|| {
+            self.debug_assert_prepared(fonts);
+            let frame_start = Instant::now();
+            // Read before lending, so assembly itself never reaches the device.
+            let subpixel_aa = self.effective_subpixel_aa_mode();
+            let accepts_gpu_work = self.device_errors.accepts_gpu_work();
+            let assembled = lend_and_assemble(source, accepts_gpu_work, |panes| {
+                let mut palette = palette;
+                assemble_with_fallback(|force_full| {
+                    self.assemble_frame(
+                        subpixel_aa,
+                        panes,
+                        theme,
+                        cursor_visible,
+                        selection,
+                        copy_mode,
+                        tabs,
+                        process_privileged,
+                        search,
+                        palette.as_deref_mut(),
+                        ime,
+                        viewport_top_abs,
+                        notification,
+                        hovered_url_cells,
+                        link_preview,
+                        force_full,
                     )
-                {
-                    self.request_window_redraw();
-                }
-                outcome
-            }
-            Assembled::Noop(key) => {
-                // Nothing drawable changed: remember the key without acknowledging any dirt.
-                self.last_frame_key = Some(*key);
-                PresentOutcome::Skipped(SkipReason::Noop)
-            }
-            Assembled::AtlasRetry { stamp, evictions } => {
-                // The atlas changed during assembly, so its UVs are stale; each path requests a redraw.
-                let after = self.glyph_atlas_stamp();
-                if growth_only_change(stamp, after, evictions, self.glyph_atlas.evictions()) {
-                    self.retry_after_glyph_atlas_growth();
-                } else {
-                    // When: growth_only_change is false the atlas was evicted, reset or replaced,
-                    // so the frame takes the reset path with eviction disabled for one retry.
-                    self.reset_glyph_atlas_after_invalidation(stamp, evictions);
-                }
-                let _discarded = settle_retained_frame(
-                    &mut self.last_frame_key,
-                    &mut self.row_ink,
-                    &mut self.row_glyph_cache,
-                    &mut self.row_run_diag,
-                    &PresentOutcome::AtlasRetry,
-                    None,
-                    Vec::new(),
-                );
-                PresentOutcome::AtlasRetry
-            }
-            Assembled::Layers(layers) => {
-                // When: `Layers` carries owned batches, present them; only a presented frame returns
-                // receipts. A presenter `Err` skips settlement, so it discards staged slot keys here.
-                return self.present_layers(*layers).unwrap_or_else(|error| {
+                })
+            });
+            // The source is gone here: every arm below runs with no parser guard held.
+            self.flush_image_upload_rebuild();
+            // Any growth, from this assembly, outside it, or left by a reset retry, resizes the texture
+            // here, after release and before any present, so a grown atlas never syncs into a smaller
+            // texture and recreating one never holds the parser guards. Assembly reads no texture.
+            self.rebuild_glyph_upload_if_needed();
+            self.count_glyph_atlas_growths(frame_start);
+            self.finalize_growth_episodes_if_device_stopped();
+            let assembled = match assembled {
+                Ok(assembled) => assembled,
+                Err(error) => {
+                    // When: assembly returned `error`, nothing was drawn; report it as failed, with no
+                    // receipts, and forget the glyph slot keys its passes staged.
                     self.row_glyph_cache.discard_staged();
-                    FrameOutcome::without_receipts(PresentOutcome::Failed(error))
-                });
-            }
-        };
-        FrameOutcome::without_receipts(outcome)
+                    return FrameOutcome::without_receipts(PresentOutcome::Failed(error));
+                }
+            };
+            let assembled = match settle_without_renderer(assembled) {
+                Ok(outcome) => {
+                    // When: `settle_without_renderer` settled an empty source, return it with no receipts.
+                    return outcome;
+                }
+                Err(assembled) => assembled,
+            };
+            let outcome = match assembled {
+                // Settled above; kept so the match names every exit.
+                Assembled::NoPanes => PresentOutcome::Skipped(SkipReason::NoPanes),
+                Assembled::Unavailable => self.rendering_unavailable(),
+                Assembled::PartialFallback => {
+                    // Only a forced-Full pass reaches here, and force_full makes a fallback impossible;
+                    // present nothing and plan the next frame from scratch rather than trust the key.
+                    self.last_frame_key = None;
+                    self.row_glyph_cache.discard_staged();
+                    self.request_window_redraw();
+                    PresentOutcome::Skipped(SkipReason::Noop)
+                }
+                Assembled::Unchanged { focus_flash } => {
+                    // When: `Unchanged`, retain the no-assembly fast path and the Windows cached-frame reblit.
+                    self.skipped_frames = self.skipped_frames.wrapping_add(1);
+                    tracing::trace!(
+                        skipped = self.skipped_frames,
+                        "renderer: skipped unchanged frame"
+                    );
+                    let outcome = if let Some(before) = self.prepare_cached_present() {
+                        // When: `before` describes a retained CPU frame, admit its reblit at this render boundary.
+                        let Some(reblit_scope) = self.device_errors.enter_gpu_work("render.reblit")
+                        else {
+                            // When: `enter_gpu_work` refuses, keep the stopped exit before the focus-flash redraw.
+                            return FrameOutcome::without_receipts(self.rendering_unavailable());
+                        };
+                        self.present_unchanged_frame(before, reblit_scope)
+                            .unwrap_or_else(PresentOutcome::Failed)
+                    } else {
+                        // When: `before` is absent, no cached presenter is available for this unchanged plan.
+                        PresentOutcome::Skipped(SkipReason::Unchanged)
+                    };
+                    if focus_flash
+                        && !matches!(
+                            outcome,
+                            PresentOutcome::RenderingUnavailable(_) | PresentOutcome::Failed(_)
+                        )
+                    {
+                        self.request_window_redraw();
+                    }
+                    outcome
+                }
+                Assembled::Noop(key) => {
+                    // Nothing drawable changed: remember the key without acknowledging any dirt.
+                    self.last_frame_key = Some(*key);
+                    PresentOutcome::Skipped(SkipReason::Noop)
+                }
+                Assembled::AtlasRetry { stamp, evictions } => {
+                    // The atlas changed during assembly, so its UVs are stale; each path requests a redraw.
+                    let after = self.glyph_atlas_stamp();
+                    if growth_only_change(stamp, after, evictions, self.glyph_atlas.evictions()) {
+                        self.retry_after_glyph_atlas_growth();
+                    } else {
+                        // When: growth_only_change is false the atlas was evicted, reset or replaced,
+                        // so the frame takes the reset path with eviction disabled for one retry.
+                        self.reset_glyph_atlas_after_invalidation(stamp, evictions);
+                    }
+                    let _discarded = settle_retained_frame(
+                        &mut self.last_frame_key,
+                        &mut self.row_ink,
+                        &mut self.row_glyph_cache,
+                        &mut self.row_run_diag,
+                        &PresentOutcome::AtlasRetry,
+                        None,
+                        Vec::new(),
+                    );
+                    PresentOutcome::AtlasRetry
+                }
+                Assembled::Layers(layers) => {
+                    // When: `Layers` carries owned batches, present them; only a presented frame returns
+                    // receipts. A presenter `Err` skips settlement, so it discards staged slot keys here.
+                    return self.present_layers(*layers).unwrap_or_else(|error| {
+                        self.row_glyph_cache.discard_staged();
+                        FrameOutcome::without_receipts(PresentOutcome::Failed(error))
+                    });
+                }
+            };
+            FrameOutcome::without_receipts(outcome)
+        });
+        self.row_run_diag.settle_attempt(attempt)
     }
 
     // Same borrow shape as `render`, whose rationale covers this suppression too.
@@ -5962,9 +5970,9 @@ impl GpuRenderer {
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
         force_full: bool,
     ) -> Result<Assembled> {
-        // Each assembly is one row-run pass; a pass left open before it did not present.
+        // Each assembly is one row-run pass. A superseded first pass of a partial fallback settles
+        // here as not presented; the attempt's settlement records its counts with the rest.
         self.row_run_diag.begin_gated_pass();
-        crate::frame_stats::note_row_runs(&self.row_run_diag.take_counts());
         // `lend_and_assemble` has already taken the empty and stopped exits, so `panes` is not empty.
         let mut gpu_timing = tracing::enabled!(target: "render_timing", tracing::Level::DEBUG)
             .then(|| {

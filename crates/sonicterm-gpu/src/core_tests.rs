@@ -8442,6 +8442,28 @@ fn the_row_run_pass_commits_only_on_a_presented_frame_with_its_plan() {
     }
 }
 
+/// The render entry settles its row-run pass inside its own attempt: `render_releasing` opens the
+/// render scope, runs the whole attempt through `catch_attempt`, and settles it on the renderer's
+/// own diagnostic as its last statement, so the scope closes only after the settlement.
+#[test]
+fn render_releasing_settles_its_row_run_pass_inside_the_attempt() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let entry = method_body(&source, "    pub fn render_releasing(");
+    assert!(
+        entry.contains("self.row_run_diag.settle_attempt(attempt)"),
+        "the entry settles the attempt on its own diagnostic"
+    );
+    let scope = entry.find("RenderScope::enter(").expect("scope opened");
+    let caught = entry.find("crate::row_run_diag::catch_attempt(|| {").expect("attempt caught");
+    let lend = entry.find("lend_and_assemble(").expect("assembly");
+    let settled = entry.find("self.row_run_diag.settle_attempt(attempt)").expect("settled");
+    assert!(scope < caught && caught < lend && lend < settled);
+    assert!(
+        entry.trim_end().ends_with("self.row_run_diag.settle_attempt(attempt)"),
+        "the last statement"
+    );
+}
+
 /// Every assembly opens its row-run pass through the gated start before any row is shaped, and
 /// the settlement seam settles it first thing, so a frame's calls settle with that frame.
 #[test]
