@@ -1535,6 +1535,52 @@ fn the_trim_hook_shares_the_scheduler_rules_and_runs_no_retention_pass() {
     assert_eq!(app.windows.len(), 1, "no window was created or removed");
 }
 
+/// Captures the text of every named field of `memory` events, by name; the last event wins.
+#[derive(Clone, Default)]
+struct MemoryFields(Arc<std::sync::Mutex<Vec<(String, String)>>>);
+
+/// Records every field of one event as text.
+#[derive(Default)]
+struct FieldTexts(Vec<(String, String)>);
+
+impl tracing::field::Visit for FieldTexts {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.push((field.name().to_string(), format!("{value:?}")));
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.push((field.name().to_string(), value.to_string()));
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.0.push((field.name().to_string(), value.to_string()));
+    }
+
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.0.push((field.name().to_string(), value.to_string()));
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MemoryFields {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() != "memory" {
+            // When: the target differs, the event is not a memory snapshot.
+            return;
+        }
+        let mut texts = FieldTexts::default();
+        event.record(&mut texts);
+        *self.0.lock().expect("the fields lock") = texts.0;
+    }
+}
+
+impl MemoryFields {
+    /// The last captured event's `name` field, as text.
+    fn text(&self, name: &str) -> Option<String> {
+        let fields = self.0.lock().expect("the fields lock");
+        fields.iter().find(|(field, _)| field == name).map(|(_, value)| value.clone())
+    }
+}
+
 /// Captures the `renderer_total_bytes` of every INFO `memory snapshot` line.
 #[derive(Clone, Default)]
 struct RendererTotals(Arc<std::sync::Mutex<Vec<u64>>>);
@@ -1689,7 +1735,8 @@ fn charged_bytes(app: &App, window_id: WindowId, pane_id: u64) -> usize {
 /// 30 s trims once, and its INFO snapshot reports lower renderer retention than the snapshot just
 /// before it while the pane's charges stay the same; a later pass in the same stretch skips it.
 /// After the window is shown, drawn and covered again, a pass with no subscriber at all trims it
-/// a second time. A warm spare is never trimmed, by the hook or by the pass.
+/// a second time. After the first trim the App's snapshot and a tagged checkpoint line both carry
+/// the trim. A warm spare is never trimmed, by the hook or by the pass.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn run_live_scheduler(event_loop: &winit::event_loop::ActiveEventLoop) -> Result<(), String> {
     use tracing_subscriber::layer::SubscriberExt;
@@ -1740,6 +1787,42 @@ fn run_live_scheduler(event_loop: &winit::event_loop::ActiveEventLoop) -> Result
     }
     if (app.trim_seq, app.last_trim_source) != (1, Some(TrimSource::Scheduler)) {
         return Err(format!("one scheduler trim: {:?}", (app.trim_seq, app.last_trim_source)));
+    }
+    // The window's trim state reaches the App's own snapshot: its renderer summary says trimmed and
+    // carries the released request size, and a tagged checkpoint line names the scheduler's trim.
+    let snapshot = app.build_memory_snapshot();
+    let main_label = format!("{main:?}");
+    let summary = snapshot
+        .renderers
+        .iter()
+        .find(|summary| summary.label == main_label)
+        .ok_or("the snapshot reports the main renderer")?;
+    if !summary.trimmed || summary.gpu_released_requested_bytes == 0 {
+        return Err(format!(
+            "the summary carries the trim: trimmed={} released={}",
+            summary.trimmed, summary.gpu_released_requested_bytes
+        ));
+    }
+    let checkpoint = MemoryFields::default();
+    let subscriber = tracing_subscriber::Registry::default()
+        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        .with(checkpoint.clone());
+    sonicterm_logging::test_capture::with_default(subscriber, || {
+        app.__perf_checkpoint_memory(0, "covered", 1);
+    });
+    let tags =
+        (checkpoint.text("trimmed"), checkpoint.text("trim_source"), checkpoint.text("trim_seq"));
+    let expected = (Some("true".to_string()), Some("scheduler".to_string()), Some("1".to_string()));
+    if tags != expected {
+        return Err(format!("the checkpoint line carries the scheduler's trim: {tags:?}"));
+    }
+    let breakdown = checkpoint.text("renderers").unwrap_or_default();
+    let released = format!(
+        "renderer_trimmed=true renderer_gpu_released_requested_bytes={}",
+        summary.gpu_released_requested_bytes
+    );
+    if !breakdown.contains(&released) {
+        return Err(format!("the checkpoint's renderer entry carries the trim: {breakdown}"));
     }
     let later = pass_at(&mut app, base, 60, main);
     if later != Some(TrimDecision::Skipped(TrimSkip::AlreadyTrimmed)) || app.trim_seq != 1 {
