@@ -2667,6 +2667,40 @@ class RunSetTests(unittest.TestCase):
         self.assertEqual(result.attempts[1][2], "grid")
         self.assertEqual(len(result.head.outcomes), 1)
 
+    def test_each_attempt_persists_its_final_classification(self):
+        # outcome.json is written before the set's grid check, so a run the set rejects after a valid outcome
+        # still reads valid there. The set writes each attempt's final kind and reasons beside it, which the row-run
+        # loader binds its accepted and rejected lists to; an attempt without a directory gets none.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        plans = {side: perf.RunPlan(IDLE_SCENARIO, "default", side, Path(f"/{side}"), HARNESS_HASH)
+                 for side in perf.SIDES}
+        answers = {"base": ["valid"], "head": ["grid", "valid"]}
+
+        def run_case(plan, evidence):
+            evidence.mkdir(parents=True)
+            queue = answers[plan.side]
+            kind = queue.pop(0) if len(queue) > 1 else queue[0]
+            if kind == "grid":
+                return make_outcome(plan=plan, result=valid_result(grid={"cols": 200, "rows": 50}))
+            return outcome_of(kind)(plan)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = perf.run_set("S1/default", plans, None, 1, run_case, root)
+        paths = {Path(evidence).name: Path(evidence) / perf.ROW_RUN_CLASSIFICATION_FILE
+                 for _side, evidence, _kind, _why in result.attempts}
+        self.assertTrue(all(path.is_file() for path in paths.values()), "every attempt's classification is written")
+        written = {name: json.loads(path.read_text()) for name, path in paths.items()}
+        self.assertEqual(written["01-base"], {"side": "base", "kind": "valid", "reasons": []})
+        self.assertEqual((written["02-head"]["kind"], written["02-head"]["side"]), ("grid", "head"))
+        self.assertEqual(written["02-head"]["reasons"], list(result.attempts[1][3]))
+        self.assertEqual(written["03-head"]["kind"], "valid")
+        with contextlib.redirect_stdout(io.StringIO()):
+            bare = perf.run_set("S1/default", plans, None, 1, lambda plan, _evidence: outcome_of("valid")(plan),
+                                root / "absent")
+        self.assertFalse(any((Path(evidence) / perf.ROW_RUN_CLASSIFICATION_FILE).exists()
+                             for _side, evidence, _kind, _why in bare.attempts))
+
     def test_base_that_cannot_build_is_blocked_and_the_head_still_runs(self):
         # The base's build error is printed for the scenario; the head keeps its measured runs.
         result, calls = self.run_set({"base": ["valid"], "head": ["valid"]}, base_blocked="error[E0599]")
@@ -9618,14 +9652,18 @@ class RowRunWorkflow:
         that plays no row-run workload."""
         return copy.deepcopy(self.geometry[platform_key]) if label in ROW_RUN_GEOMETRY_LABELS else None
 
-    def write_run(self, run_dir, platform_key, side_name, label, renderer):
-        """An accepted run's outcome.json and kept result.json: a valid, managed, short counters run of `label`
-        under the platform's harness, reporting `renderer` for the stream phase and, for a row-run variant, the
-        platform's measured grid."""
+    def write_run(self, run_dir, platform_key, side_name, label, renderer, classification=("valid", ())):
+        """A run's outcome.json, its final run-set classification (`classification`: kind and reasons, valid by
+        default) and its kept result.json: a valid, managed, short counters run of `label` under the platform's
+        harness, reporting `renderer` for the stream phase and, for a row-run variant, the platform's measured
+        grid."""
         scenario, _, variant = label.partition("/")
         (run_dir / "scratch").mkdir(parents=True, exist_ok=True)
         perf._write_json(run_dir / "outcome.json",
                          {"kind": "valid", "side": side_name, "scenario": scenario, "variant": variant})
+        kind, reasons = classification
+        perf._write_json(run_dir / perf.ROW_RUN_CLASSIFICATION_FILE,
+                         {"side": side_name, "kind": kind, "reasons": list(reasons)})
         result = {"schema_version": perf.SCHEMA_VERSION, "managed": True,
                   "harness_hash": self.harness[platform_key], "scenario": scenario, "variant": variant,
                   "short": True, "status": "valid", "frame_counters": "on",
@@ -9860,7 +9898,7 @@ class RowRunDecideTests(unittest.TestCase):
         flood = dict(row_run_head(), row_run_shape_overflows=999)
         # The rejected attempt is a real attempt directory of the artifact, as every disclosed one is.
         workflow.write_run(workflow.directories[("macOS", "S9-S10")] / "runs/S10-default/counters/09-head", "macos",
-                           "head", "S10/default", flood)
+                           "head", "S10/default", flood, classification=("occluded", ["occlusion"]))
         workflow.edit("macOS", "S9-S10", lambda document: document["phases"][0]["head"]["rejected"].append(
             {"execution": "runs/S10-default/counters/09-head", "kind": "occluded", "reasons": ["occlusion"],
              "renderer": flood}))
@@ -10016,7 +10054,7 @@ class RowRunDecideTests(unittest.TestCase):
         self.refused([phantom], phantom.all_directories(), "do not match its attempt directories")
         repeated = self.workflow("repeated-rejection")
         repeated.write_run(repeated.directories[("macOS", "S9-S10")] / "runs/S10-default/counters/09-head", "macos",
-                           "head", "S10/default", row_run_head())
+                           "head", "S10/default", row_run_head(), classification=("occluded", []))
         disclosure = {"execution": "runs/S10-default/counters/09-head", "kind": "occluded", "reasons": []}
         repeated.edit("macOS", "S9-S10", lambda document: document["phases"][0]["head"]["rejected"].extend(
             [disclosure, dict(disclosure)]))
@@ -10110,12 +10148,124 @@ class RowRunDecideTests(unittest.TestCase):
                 perf._write_json(path, kept)
                 self.refused([workflow], workflow.all_directories(), expected)
 
+    def test_rejected_membership_is_bound_to_the_final_run_set_classification(self):
+        # An overflowing accepted run moved into `rejected` with a made-up kind and reason (its audit recomputed)
+        # decided BUILD. Each attempt's final run-set classification is persisted beside it; a rejected disclosure
+        # must name that kind and those reasons, and an accepted record must be classified valid. A run classified
+        # valid is rejected only when its side was blocked or failed, and a run the run set rejected after a valid
+        # outcome (a grid mismatch) is disclosed as that rejection and decides.
+        relabel = self.workflow("relabel", runs_per_side=3)
+        relabel.rewrite("macOS", "S9-S10", "S10/default", "head", 2, overflow)
+
+        def hide(document):
+            side = document["phases"][0]["head"]
+            record = side["accepted"].pop()
+            side["rejected"].append({"execution": record["execution"], "kind": "occluded",
+                                     "reasons": ["native occlusion change"]})
+            recompute_audit(side)
+        relabel.edit("macOS", "S9-S10", hide)
+        self.refused([relabel], relabel.all_directories(), "is not its final classification")
+        valid_rejected = self.workflow("valid-rejected", runs_per_side=3)
+
+        def reject_valid(document):
+            side = document["phases"][0]["head"]
+            record = side["accepted"].pop()
+            side["rejected"].append({"execution": record["execution"], "kind": "valid", "reasons": []})
+            recompute_audit(side)
+        valid_rejected.edit("macOS", "S9-S10", reject_valid)
+        self.refused([valid_rejected], valid_rejected.all_directories(), "rejects a run classified valid")
+        misclassified = self.workflow("misclassified")
+        directory = misclassified.directories[("macOS", "S9-S10")]
+        misclassified.write_run(directory / "runs/S10-default/counters/01-head", "macos", "head", "S10/default",
+                                row_run_head(), classification=("grid", ["grid differs"]))
+        self.refused([misclassified], misclassified.all_directories(), "accepts a run classified 'grid'")
+        reasons = self.workflow("other-reasons")
+        reasons.write_run(reasons.directories[("macOS", "S9-S10")] / "runs/S10-default/counters/09-head", "macos",
+                          "head", "S10/default", row_run_head(), classification=("occluded", ["occlusion"]))
+        reasons.edit("macOS", "S9-S10", lambda document: document["phases"][0]["head"]["rejected"].append(
+            {"execution": "runs/S10-default/counters/09-head", "kind": "occluded", "reasons": ["made up"]}))
+        self.refused([reasons], reasons.all_directories(), "is not its final classification")
+        other_side = self.workflow("other-side")
+        perf._write_json(other_side.directories[("macOS", "S9-S10")] / "runs/S10-default/counters/01-head"
+                         / perf.ROW_RUN_CLASSIFICATION_FILE, {"side": "base", "kind": "valid", "reasons": []})
+        self.refused([other_side], other_side.all_directories(), "no final head classification")
+        grid = self.workflow("grid-rejection", runs_per_side=3)
+        directory = grid.directories[("macOS", "S9-S10")]
+        grid.rewrite("macOS", "S9-S10", "S10/default", "head", 2, overflow)
+        grid.write_run(directory / "runs/S10-default/counters/03-head", "macos", "head", "S10/default",
+                       dict(row_run_head(), row_run_shape_overflows=1), classification=("grid", ["grid differs"]))
+
+        def disclose(document):
+            side = document["phases"][0]["head"]
+            record = side["accepted"].pop()
+            side["rejected"].append({"execution": record["execution"], "kind": "grid", "reasons": ["grid differs"]})
+            recompute_audit(side)
+        grid.edit("macOS", "S9-S10", disclose)
+        try:
+            report = decide([grid], grid.all_directories())
+        except perf.RowRunEvidenceError as error:
+            # When: the legitimate later rejection was refused, a valid outcome.json was taken as the final class.
+            self.fail(f"a run the run set rejected after a valid outcome was refused: {error}")
+        self.assertIn("- outcome: BUILD (step 4)", report)
+        blocked = self.workflow("blocked-side")
+
+        def block(document):
+            side = document["phases"][0]["base"]
+            side["rejected"] = [{"execution": record["execution"], "kind": "valid", "reasons": []}
+                                for record in side["accepted"]]
+            side["accepted"], side["status"] = [], "no 2 valid runs after 3 retries"
+            recompute_audit(side)
+        blocked.edit("macOS", "S9-S10", block)
+        try:
+            report = decide([blocked], blocked.all_directories())
+        except perf.RowRunEvidenceError as error:
+            # When: a blocked side's discarded valid runs were refused, the blocked side could never be disclosed.
+            self.fail(f"a blocked side's discarded valid runs were refused: {error}")
+        self.assertIn("macos S10/default stream base: 0 accepted counters runs", report)
+        status = self.workflow("status-with-runs")
+        status.edit("macOS", "S9-S10", lambda document: document["phases"][0]["base"].update(status="blocked"))
+        self.refused([status], status.all_directories(), "is blocked or failed but accepts runs")
+
+    def test_each_present_counter_must_be_a_non_negative_integer(self):
+        # Negative failed and unstable counts make negative shares that pass the classification bounds and decided
+        # BUILD. A present counter or histogram value that is not a non-negative integer of exact type is refused,
+        # on either side; an absent field stays missing evidence.
+        cases = {
+            "negative failed and unstable": (dict(row_run_shape_failed=-100, row_run_shape_unstable=-100), "head",
+                                             "row_run_shape_failed is not a non-negative integer"),
+            "boolean": (dict(row_run_shape_overflows=False), "head",
+                        "row_run_shape_overflows is not a non-negative integer"),
+            "fraction": (dict(row_run_shape_first=400.0), "head", "row_run_shape_first is not a non-negative integer"),
+            "negative histogram count": (dict(assembly_us=dict(row_run_assembly(), counts=[0, 0, 0, 0, 60, -10, 0])),
+                                         "head", "assembly_us counts is not"),
+            "negative base attempts": (dict(render_attempts=-50), "base",
+                                       "render_attempts is not a non-negative integer"),
+        }
+        for name, (fields, side_name, expected) in cases.items():
+            with self.subTest(case=name):
+                workflow = self.workflow("counters-" + name.replace(" ", "-"))
+                for index in range(2):
+                    workflow.rewrite("macOS", "S9-S10", "S10/default", side_name, index,
+                                     lambda renderer, fields=fields: renderer.update(fields))
+                self.refused([workflow], workflow.all_directories(), expected)
+        absent = self.workflow("counters-absent")
+        absent.rewrite("macOS", "S9-S10", "S10/default", "head", 0, lambda renderer: renderer.pop("row_run_shape_ok"))
+        try:
+            report = decide([absent], absent.all_directories())
+        except perf.RowRunEvidenceError as error:
+            # When: an absent field was refused, missing evidence was treated as malformed evidence.
+            self.fail(f"an absent counter was refused instead of read as missing: {error}")
+        self.assertIn("macos S10/default stream head: missing row_run_shape_ok", report)
+
     def test_build_settings_must_be_typed_complete_and_carry_the_counters_feature(self):
         # Settings that agree across every shard still decided BUILD when absent, mistyped or without the counters
         # feature on one side. Each describes no comparable counters build and is refused.
         cases = {
             "base without counters": (lambda document: document["features"].update(base=[]),
                                       "evidence features base [] lack 'perf-counters'"),
+            "unequal feature sets": (lambda document: document["features"].update(
+                base=["perf-counters"], head=["perf-counters", "perf-frame-texture"]),
+                "base and head built with different feature sets"),
             "unknown feature": (lambda document: document["features"]["head"].append("perf-unknown"),
                                 "evidence features head name an unknown feature 'perf-unknown'"),
             "no features": (lambda document: document.pop("features"), "evidence features None"),

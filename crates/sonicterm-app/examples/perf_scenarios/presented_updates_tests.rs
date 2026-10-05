@@ -82,7 +82,7 @@ fn a_late_first_sighting_owes_one_forced_presentation() {
 }
 
 /// A split PTY delivery, byte by byte: on every contract grid and workload, update 1 is never seen
-/// whole until its final byte (the footer's erase) is parsed, so no prefix is marked, and every cell
+/// whole until its final byte (the last byte of the footer text) is parsed, so no prefix is marked, and every cell
 /// of the grid is final when it is. This is the in-row case: on 250 x 70, Unique's digits all match
 /// at byte 8,775 of 8,828 while nine cells of the last body row are still stale.
 #[test]

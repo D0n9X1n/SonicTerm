@@ -1510,3 +1510,99 @@ fn the_result_carries_the_frozen_row_run_grid() {
     );
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+/// Before GO, a frozen row-run grid that must be rechecked schedules its own bounded poll: the warm phase
+/// has no deadline, driver or trailing scan, and the waiting role prints nothing, so without it the recheck
+/// would depend on unrelated App wakes. After GO the poll is no longer added.
+#[test]
+fn a_frozen_grid_awaiting_go_schedules_its_recheck_poll() {
+    let scratch = warm_scratch("recheck-poll");
+    std::fs::create_dir_all(&scratch).expect("scratch");
+    let (mut probe, _) = warm_probe(scratch.clone(), 10);
+    probe.prepare_measured(237, 43).expect("prepared");
+    let now = Instant::now();
+    assert_eq!(probe.next_deadline(now), Some(now + POLL_INTERVAL), "GO waits on a polled recheck");
+    probe.go_at = Some(now);
+    assert_ne!(probe.next_deadline(now), Some(now + POLL_INTERVAL), "no recheck poll after GO");
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// The step's grid gate on the probe's own state: before GO a busy parser holds GO (the step waits); after GO
+/// it proceeds; a grid changed by a forwarded dispatch is latched and invalidates even after it changes back;
+/// without a frozen grid nothing is latched.
+#[test]
+fn a_grid_change_after_a_dispatch_is_latched_even_when_it_reverts() {
+    let scratch = warm_scratch("latch");
+    std::fs::create_dir_all(&scratch).expect("scratch");
+    let (mut probe, _) = warm_probe(scratch.clone(), 10);
+    probe.test_row_run_dims = Some(Some((238, 43)));
+    probe.latch_row_run_geometry();
+    assert_eq!(probe.geometry_violation, None, "nothing is latched before the grid is frozen");
+    probe.prepare_measured(237, 43).expect("prepared");
+    probe.test_row_run_dims = Some(None);
+    assert_eq!(probe.step_geometry_gate(), GeometryGate::Wait, "a busy parser holds GO");
+    probe.go_at = Some(Instant::now());
+    assert_eq!(
+        probe.step_geometry_gate(),
+        GeometryGate::Proceed,
+        "a busy parser never stops a phase"
+    );
+    probe.test_row_run_dims = Some(Some((237, 43)));
+    probe.latch_row_run_geometry();
+    assert_eq!(probe.step_geometry_gate(), GeometryGate::Proceed);
+    probe.test_row_run_dims = Some(Some((238, 43)));
+    probe.latch_row_run_geometry();
+    probe.test_row_run_dims = Some(Some((237, 43)));
+    probe.latch_row_run_geometry();
+    let GeometryGate::Invalidate(reason) = probe.step_geometry_gate() else {
+        panic!("a reverted change still invalidates");
+    };
+    assert!(reason.contains("237x43") && reason.contains("238x43"), "{reason}");
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// The callers the geometry tests cannot drive without an event loop: every forwarded dispatch latches the
+/// row-run grid, and every plan step decides through `step_geometry_gate`.
+#[test]
+fn every_dispatch_latches_and_every_step_gates_the_row_run_grid() {
+    let source = include_str!("probe.rs");
+    let body = |name: &str| -> &str {
+        let start = source.find(&format!("    fn {name}(")).expect("the function exists");
+        let rest = &source[start + 1..];
+        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    };
+    assert!(body("forward").contains("self.latch_row_run_geometry();"), "forward latches the grid");
+    assert!(
+        body("advance_steps").contains("self.step_geometry_gate()"),
+        "every step gates the grid"
+    );
+}
+
+/// A busy parser reads as no dimensions for the step's non-blocking recheck, but the post-dispatch latch
+/// waits for it, so a resize cannot slip past while another thread holds the parser.
+#[test]
+fn the_latch_waits_for_a_busy_parser_and_the_recheck_does_not() {
+    use sonicterm_vt::vt::{CaptureStagingPool, Parser};
+    let parser = Arc::new(parking_lot::Mutex::new(Parser::new_with_staging_pool(
+        Grid::new(237, 43),
+        None,
+        CaptureStagingPool::new(),
+    )));
+    assert_eq!(parser_dims(&parser, false), Some((237, 43)));
+    let (held, release) = (mpsc::channel::<()>(), mpsc::channel::<()>());
+    let holder = {
+        let parser = Arc::clone(&parser);
+        let (held_tx, release_rx) = (held.0, release.1);
+        std::thread::spawn(move || {
+            let _guard = parser.lock();
+            held_tx.send(()).expect("held");
+            // The guard is held until the test has seen the busy read.
+            release_rx.recv().expect("release");
+        })
+    };
+    held.1.recv().expect("the other thread holds the parser");
+    assert_eq!(parser_dims(&parser, false), None, "the recheck does not wait");
+    release.0.send(()).expect("release");
+    assert_eq!(parser_dims(&parser, true), Some((237, 43)), "the latch waits for the parser");
+    holder.join().expect("holder thread");
+}

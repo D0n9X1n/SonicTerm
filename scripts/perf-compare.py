@@ -5889,6 +5889,8 @@ def row_run_rows(evidence: Mapping[tuple[str, str, str], RowRunPhase]) -> list[l
 # Row-run evidence: each comparison shard's machine-readable record of the decision phases it measured. The
 # decision is never made per shard; --row-run-decide combines the shards of one workflow execution.
 ROW_RUN_EVIDENCE_FILE = "row-run-evidence.json"
+# Each attempt directory's final run-set classification: its side, kind and reasons after every set check.
+ROW_RUN_CLASSIFICATION_FILE = "classification.json"
 ROW_RUN_EVIDENCE_SCHEMA = 1
 ROW_RUN_PROTOCOL_VERSION = 1
 # The PR pipeline's budget: from the run's creation to the attempt's final update, queueing included.
@@ -6084,6 +6086,45 @@ def _row_run_canonical(directory: Path, identity: object) -> str:
     return canonical
 
 
+def _row_run_classification(directory: Path, identity: str, side_name: str) -> tuple[str, list]:
+    """The final run-set classification persisted beside attempt `identity`: its kind and reasons. A missing or
+    malformed file, or one naming another side, is refused: membership cannot be checked without it."""
+    where = f"{directory.name}/{identity}"
+    document, problem = _read_json_object(directory / identity / ROW_RUN_CLASSIFICATION_FILE)
+    if problem is not None or not isinstance(document, dict) or document.get("side") != side_name \
+            or not isinstance(document.get("kind"), str) or not isinstance(document.get("reasons"), list):
+        raise RowRunEvidenceError(f"{where}: no final {side_name} classification "
+                                  f"({problem or ROW_RUN_CLASSIFICATION_FILE + ' is malformed'})")
+    return document["kind"], document["reasons"]
+
+
+def _row_run_check_membership(directory: Path, label: str, side_name: str, side: Mapping, identities: Sequence[str],
+                              rejected: Sequence[Mapping]) -> None:
+    """Bind a side's lists to each attempt's final classification: an accepted run is classified valid; a rejected
+    disclosure names its run's final kind and reasons; a run classified valid is rejected only when the side was
+    blocked or failed, which then accepts nothing."""
+    status = side.get("status", "")
+    if not isinstance(status, str):
+        raise RowRunEvidenceError(f"{directory.name}: {label} {side_name} status {status!r} is not text")
+    if status and identities:
+        raise RowRunEvidenceError(f"{directory.name}: {label} {side_name} is blocked or failed but accepts runs")
+    for identity in identities:
+        kind, _reasons = _row_run_classification(directory, identity, side_name)
+        if kind != "valid":
+            raise RowRunEvidenceError(f"{directory.name}: {label} {side_name} accepts a run classified {kind!r}: "
+                                      f"{identity}")
+    for item in rejected:
+        identity = item["execution"]
+        kind, reasons = _row_run_classification(directory, identity, side_name)
+        if (item.get("kind"), item.get("reasons")) != (kind, reasons):
+            raise RowRunEvidenceError(f"{directory.name}: {label} {side_name} rejection of {identity} "
+                                      f"{(item.get('kind'), item.get('reasons'))!r} is not its final classification "
+                                      f"{(kind, reasons)!r}")
+        if kind == "valid" and not status:
+            raise RowRunEvidenceError(f"{directory.name}: {label} {side_name} rejects a run classified valid on a "
+                                      f"side that was neither blocked nor failed: {identity}")
+
+
 def _row_run_inventory(directory: Path, label: str, side_name: str) -> set[str]:
     """Every `side_name` attempt directory the artifact holds for `label`'s counters set, as identities: the
     authoritative list the evidence's accepted and rejected executions must cover exactly."""
@@ -6167,12 +6208,20 @@ def _row_run_bind_phase(directory: Path, platform_key: str, entry: Mapping,
         if listed != inventory:
             raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} accepted and rejected executions "
                                       f"{sorted(listed)} do not match its attempt directories {sorted(inventory)}")
+        _row_run_check_membership(directory, key[1], side_name, side, identities,
+                                  [dict(item, execution=identity)
+                                   for item, identity in zip(side.get("rejected", []), rejected)])
         renderers, grids = [], []
         for identity, record in zip(identities, records):
             renderer, geometry = record.get("renderer"), record.get("geometry")
             if renderer is not None and not isinstance(renderer, dict):
                 raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} {identity}: renderer fields "
                                           f"{renderer!r} are not an object")
+            # A present counter must be a non-negative integer and a present histogram whole; an absent one stays
+            # missing evidence, which an older base may lack but never makes negative.
+            problems = [] if renderer is None else frame_counter_problems({"renderer": renderer}, partial=True)
+            if problems:
+                raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} {identity}: {problems[0]}")
             if key[1] in ROW_RUN_GEOMETRY_LABELS and not _row_run_valid_geometry(geometry):
                 # When: a row-run variant's grid is missing or invalid, its counts have no known exposure.
                 raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} {identity}: geometry {geometry!r} "
@@ -6224,6 +6273,10 @@ def _row_run_settings(directory: Path, evidence: Mapping) -> dict:
             # When: a side was built without the counters feature, it measured no row-run counters.
             raise RowRunEvidenceError(f"{directory.name}: evidence features {side_name} {named!r} lack "
                                       f"{COUNTERS_FEATURE!r}")
+    if features["base"] != features["head"]:
+        # When: the sides were built with different features, their counters are not one contract.
+        raise RowRunEvidenceError(f"{directory.name}: base and head built with different feature sets "
+                                  f"{features['base']} and {features['head']}")
     profile = evidence.get("profile")
     lto = profile.get("lto") if isinstance(profile, dict) else None
     if not isinstance(profile, dict) or not isinstance(lto, dict) or sorted(lto) != sorted(SIDES) \
@@ -6805,6 +6858,10 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
                     reference_presenter = presenter
                 display.learn(measured)
         result.attempts.append((side, str(run_evidence), kind, why))
+        if run_evidence.is_dir():
+            # outcome.json is written before the set's grid, display, renderer and presenter checks; this is the
+            # attempt's final classification, which the row-run loader binds its accepted and rejected lists to.
+            _write_json(run_evidence / ROW_RUN_CLASSIFICATION_FILE, {"side": side, "kind": kind, "reasons": list(why)})
         print(f"[perf-compare] {label} {set_name} {side} run {attempt}: {kind}"
               + (f": {'; '.join(why)}" if why else ""), flush=True)
         verdict = compare_verdict(kind)

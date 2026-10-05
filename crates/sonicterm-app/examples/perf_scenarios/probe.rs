@@ -101,6 +101,20 @@ enum GeometryCheck {
     Changed(String),
 }
 
+/// A pane parser's grid dimensions. A busy parser reads as `None` unless `blocking`, which waits for it; the
+/// parser lock is never held while the App dispatches, so the wait ends.
+fn parser_dims(
+    parser: &parking_lot::Mutex<sonicterm_vt::vt::Parser>,
+    blocking: bool,
+) -> Option<(u16, u16)> {
+    let guard = match parser.try_lock() {
+        Some(guard) => guard,
+        None if blocking => parser.lock(),
+        None => return None,
+    };
+    Some((guard.grid().cols, guard.grid().rows))
+}
+
 /// What a plan step does with the row-run grid recheck.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum GeometryGate {
@@ -629,6 +643,12 @@ struct Probe {
     row_run_geometry: Option<workload::RowRunGeometry>,
     /// The sentinel nonce; a row-run fixture must not contain it.
     nonce: String,
+    /// The first change of the frozen row-run grid seen after a forwarded dispatch; once set it stays
+    /// set, so a grid that changes and changes back still invalidates the run.
+    geometry_violation: Option<String>,
+    /// Tests: the row-run pane's grid dimensions, `Some(None)` for a busy parser, in place of a pane.
+    #[cfg(test)]
+    test_row_run_dims: Option<Option<(u16, u16)>>,
     /// Why writing a warm update's acknowledgement failed; the run's next step invalidates it.
     presented_failure: Option<String>,
     /// The running phase's frame barrier (S11/release's media-free and reshow), if it has one.
@@ -1457,6 +1477,9 @@ impl Probe {
             row_run,
             row_run_geometry: None,
             nonce: String::new(),
+            geometry_violation: None,
+            #[cfg(test)]
+            test_row_run_dims: None,
             presented_failure: None,
             barrier: None,
             phase_ends: Vec::new(),
@@ -1515,6 +1538,8 @@ impl Probe {
             .map(|(before_count, counter)| counter().saturating_sub(before_count));
         let ended = Instant::now();
         let frames_after = self.frame_count();
+        // Read after `ended`, so the measured dispatch time excludes it.
+        self.latch_row_run_geometry();
         if let Some((counts, scene)) = retry_before {
             // When: the atlas-retry driver runs, this dispatch's delta and scene feed its episode machine.
             self.observe_atlas_retry(counts, scene, ended);
@@ -1809,13 +1834,47 @@ impl Probe {
     /// Whether the row-run role's grid still has the frozen geometry: `Unchanged` when there is no
     /// frozen geometry, `Busy` when the parser cannot be read now.
     fn row_run_geometry_check(&self) -> GeometryCheck {
-        let (Some(frozen), Some(row_run)) = (self.row_run_geometry, self.row_run) else {
+        let Some(frozen) = self.row_run_geometry else {
             return GeometryCheck::Unchanged;
         };
-        match self.role_grid(row_run.role, |grid| (grid.cols, grid.rows)) {
+        if let Some(reason) = &self.geometry_violation {
+            // When: a forwarded dispatch already changed the grid, the change stands even if it reverted.
+            return GeometryCheck::Changed(reason.clone());
+        }
+        match self.row_run_dims(false) {
             None => GeometryCheck::Busy,
             Some((cols, rows)) => geometry_change(frozen, cols, rows)
                 .map_or(GeometryCheck::Unchanged, GeometryCheck::Changed),
+        }
+    }
+
+    /// The plan step's decision on the row-run grid: the recheck through `geometry_gate`, given whether GO
+    /// was released. `advance_steps` runs it before every step.
+    fn step_geometry_gate(&self) -> GeometryGate {
+        geometry_gate(self.row_run_geometry_check(), self.go_at.is_some())
+    }
+
+    /// The row-run pane's grid dimensions. Without `blocking`, a busy parser reads as `None`; with it, a busy
+    /// parser is waited for, so a dispatch's resize is seen before the next dispatch can revert it.
+    fn row_run_dims(&self, blocking: bool) -> Option<(u16, u16)> {
+        #[cfg(test)]
+        if let Some(dims) = self.test_row_run_dims {
+            // When: a test stands in for the pane, its dimensions are the reading.
+            return dims;
+        }
+        parser_dims(&self.role_pane(self.row_run?.role)?.parser, blocking)
+    }
+
+    /// After a forwarded dispatch, latch the first change of the frozen grid. Every native resize, scale
+    /// change or App action reaches the grid through a forwarded dispatch on this thread, so a change that
+    /// reverts before the next plan step is still recorded. The parser is read without blocking first.
+    fn latch_row_run_geometry(&mut self) {
+        let (Some(frozen), None) = (self.row_run_geometry, &self.geometry_violation) else {
+            // When: no grid is frozen, or a change is already latched, there is nothing to record.
+            return;
+        };
+        if let Some((cols, rows)) = self.row_run_dims(true) {
+            self.geometry_violation = geometry_change(frozen, cols, rows);
         }
     }
 
@@ -2351,7 +2410,7 @@ impl Probe {
                 self.finish(event_loop, Status::Valid, None);
                 return;
             };
-            match geometry_gate(self.row_run_geometry_check(), self.go_at.is_some()) {
+            match self.step_geometry_gate() {
                 GeometryGate::Invalidate(reason) => {
                     // When: the frozen grid changed, before or after GO, the workload no longer fits it.
                     self.invalidate(event_loop, reason);
@@ -3425,6 +3484,10 @@ impl Probe {
                     self.current_phase().and_then(|phase| self.phase_deadline(phase)),
                     self.scan.trailing(),
                     self.occlusion.wait.map(|(_, at)| at),
+                    // Before GO a frozen grid is rechecked on a bounded poll, since the waiting role
+                    // prints nothing and the warm phase has no other wake.
+                    (self.row_run_geometry.is_some() && self.go_at.is_none())
+                        .then(|| now + POLL_INTERVAL),
                 ],
                 self.run_deadline,
             ),
