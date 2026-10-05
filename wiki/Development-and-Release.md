@@ -171,11 +171,13 @@ with exactly the perf features it supports, in building, `--build-only` and
 step for that feature set: `perf-counters` when the tree declares it and has the
 filtered logging API, `perf-frame-texture` when declared, and
 `perf-hook-checkpoint-memory` when declared and the app source defines
-`App::__perf_checkpoint_memory`, and `perf-hook-trim` when declared and the app
-source defines `App::__trim_covered_now`. The local gate reviews one build step
-for every ordered subset of the five perf features: 32 subsets, 128 steps. A
-comparison compiles only the one subset each side supports. The manifest records
-each side's features, and a mismatch is refused.
+`App::__perf_checkpoint_memory`, `perf-echo-trace` when declared and the tree
+also supports `perf-counters`, and `perf-hook-trim` when declared and the app
+source defines `App::__trim_covered_now`. The local gate reviews four build steps
+for every ordered subset of the five perf features (base and head, each for the
+normal and the allocation-counting example): 32 subsets, 128 steps. A comparison
+builds only the subset each side supports, and only the examples its run asks
+for. The manifest records each side's features, and a mismatch is refused.
 
 A full comparison runs for hours with measurement windows on screen. To run one
 locally, keep the host idle, on AC power, with the display awake and the screen unlocked, for
@@ -336,8 +338,10 @@ neither waits nor changes the plan, so both sides run the same protocol.
 `result.json` records the outcome as `hooks.trim`: `not-reached` (the plan never
 covered the window), `unsupported`, `skipped` or `trimmed`. A build without
 `perf-hook-trim`, and an App whose hook cannot trim yet, both read `unsupported`:
-the run is an untrimmed baseline, and its checkpoint memory stays a measured
-figure, never `n/a` or 0. Today's App hook always returns `unsupported`. An older
+the run is an untrimmed baseline. `unsupported` leaves the memory reading as it
+is: a valid measurement stays numeric, and `unsupported` neither invents a zero
+nor makes a valid reading unavailable. A real zero, or checkpoint sampling that
+is unavailable for another reason, can still appear. Today's App hook always returns `unsupported`. An older
 harness writes no `hooks`; a result that names any other outcome is refused.
 
 Three kinds of run stop the comparison at once with exit 1 and are never
