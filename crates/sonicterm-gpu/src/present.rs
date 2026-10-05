@@ -402,6 +402,10 @@ impl GpuRenderer {
         layers: &FrameLayers<'_>,
         timing: &mut FrameTiming,
     ) -> anyhow::Result<PresentOutcome> {
+        if !self.ensure_frame_texture() {
+            // When: ensure_frame_texture is false, a trimmed texture could not be rebuilt; dirt stays for a retry.
+            return Ok(self.rendering_unavailable());
+        }
         let before = self.device_errors.gate();
         let Some(frame_scope) = self.device_errors.enter_gpu_work("render.upload") else {
             // When: `enter_gpu_work` refuses, assembly stopped the device; nothing is submitted.

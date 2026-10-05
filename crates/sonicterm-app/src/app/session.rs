@@ -170,6 +170,10 @@ impl App {
             test_post_snapshot_hook: None,
             pending_exit: false,
             last_retention_sample: None,
+            trim_seq: 0,
+            last_trim_source: None,
+            #[cfg(test)]
+            test_scheduler_trims: Vec::new(),
             last_memory_totals: None,
             breadcrumb_recorder: None,
             command_palette,

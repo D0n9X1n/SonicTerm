@@ -214,6 +214,18 @@ fn a_registered_image_that_is_not_promoted_is_blocked() {
     );
 }
 
+/// A requested trim waits for `Occluded(true)`, is called on the turn it is held, lapses when the
+/// hold ends first, and delivery wins when both happen on one turn. No request means nothing to do.
+#[test]
+fn a_trim_is_dispatched_only_after_the_cover_is_delivered() {
+    assert_eq!(trim_dispatch(false, Some(true), true), TrimDispatch::Idle);
+    assert_eq!(trim_dispatch(true, None, false), TrimDispatch::Wait);
+    assert_eq!(trim_dispatch(true, Some(false), false), TrimDispatch::Wait);
+    assert_eq!(trim_dispatch(true, Some(true), false), TrimDispatch::Call);
+    assert_eq!(trim_dispatch(true, Some(true), true), TrimDispatch::Call);
+    assert_eq!(trim_dispatch(true, None, true), TrimDispatch::Lapsed);
+}
+
 #[test]
 fn windows_cover_arms_no_synthetic_occlusion() {
     // winit reports no occlusion on Windows, so the cover arms no synthetic state there and

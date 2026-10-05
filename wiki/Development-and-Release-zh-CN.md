@@ -144,9 +144,10 @@ min(请求次数, 上限) 次有效运行；其行显示 `(runs N of M)`，`comp
 每棵树在构建、`--build-only` 与 `--prebuilt` 对比中都恰好以它支持的 perf feature 构建，每次构建都是本地
 门禁为该 feature 组合审阅过的步骤：声明了 `perf-counters` 且有带过滤器的日志 API 时用 `perf-counters`，声明了
 `perf-frame-texture` 时用它，声明了 `perf-hook-checkpoint-memory` 且 app 源码定义了
-`App::__perf_checkpoint_memory` 时用它，声明了 `perf-hook-trim` 且 app 源码定义了
-`App::__trim_covered_now` 时用它。本地门禁为五个 perf feature 的每个有序子集各审阅一个构建步骤：32 个子集，
-128 个步骤。一次对比只编译每侧支持的那一个子集。manifest 记录每一侧的 feature，不一致时拒绝。
+`App::__perf_checkpoint_memory` 时用它，声明了 `perf-echo-trace` 且该树也支持 `perf-counters` 时用它，
+声明了 `perf-hook-trim` 且 app 源码定义了 `App::__trim_covered_now` 时用它。本地门禁为五个 perf feature 的
+每个有序子集各审阅四个构建步骤（base 与 head，各自针对普通示例与分配计数示例）：32 个子集，128 个步骤。一次
+对比只构建每侧支持的那一个子集，且只构建其运行所需的示例。manifest 记录每一侧的 feature，不一致时拒绝。
 
 一次完整对比要运行数小时，期间测量窗口一直显示在屏幕上。在本地运行时，请让主机保持空闲、接通交流电源、
 显示器保持唤醒且屏幕不锁定，例如在 `caffeinate -dis` 下运行脚本：
@@ -190,8 +191,8 @@ caffeinate -dis python3 scripts/perf-compare.py --base <ref> --head <ref> --scen
   `force` 与 `off`。在 CPU 适配器上默认通过 GDI 呈现，因此只有 `wgpu` 测量 wgpu 呈现。没有通过 GDI 呈现
   的 `gdi` 运行，或发生降级的 `wgpu` 运行，为 `blocked`。S1 的 `role-exit` 变体用于 smoke。
 - **对比表。** 每个场景有一行 `presenter`，写出呈现器与适配器。macOS 结果也记录呈现器，因此 macOS 对比表
-  也有这一行，内容为 `wgpu` 或 `wgpu, degraded`；有效的 macOS 结果缺少该记录属于模式问题。S12 的 uncover 与遮挡期间释放内存两行
-  为 `n/a`，因为 Windows 不报告遮挡；每个检查点的 footprint 行为 `n/a`，因为 Windows 没有 `footprint`。
+  也有这一行，内容为 `wgpu` 或 `wgpu, degraded`；有效的 macOS 结果缺少该记录属于模式问题。在短裁剪实验之外，S12 的 uncover 与遮挡期间释放内存两行
+  为 `n/a`，因为 Windows 不报告遮挡；该实验以合成方式发送遮挡，因此其 uncover 行有实测值；每个检查点的 footprint 行为 `n/a`，因为 Windows 没有 `footprint`。
 - **交付。** 在测量运行之前，对比用 head 构建的 `--capture-delivery` 通过 ConPTY 回放 S3、S9、S10 与 S11，
   写出 `delivery.json`。每项检查成为双方共用的一行 `delivery:`；检查未通过，或记录与回放的退出码
   不一致，都会使该场景的每一组为 `blocked`。回放的清理未解决时（例如 job 的托管未经验证），对比以退出码 1
@@ -246,11 +247,25 @@ scratch 目录，以 `--managed` 启动，并以本侧的 worktree 为工作目�
 已应答、且取样已完整或次数用尽时才继续。`result.json` 记录 `checkpoint_memory`（`supported` 或
 `unsupported`），并为每个检查点记录 `sampling`、`attempts` 与 `last_attempt_complete`。
 
-计划遮挡测量窗口时，harness 在遮挡窗口打开后立即向 App 的遮挡窗口裁剪钩子询问该窗口；这一步既不等待也不
-改变计划，因此两侧运行同一套流程。`result.json` 把结果记为 `hooks.trim`：`not-reached`（计划从未遮挡
-窗口）、`unsupported`、`skipped` 或 `trimmed`。未启用 `perf-hook-trim` 的构建，以及钩子尚不能裁剪的 App，
-都记为 `unsupported`：该运行是未裁剪的基线，其检查点内存仍是测得的数值，绝不是 `n/a` 或 0。当前 App 的钩子
-总是返回 `unsupported`。较旧的 harness 不写 `hooks`；给出其他结果的 result 会被拒绝。
+短 S12 计划在 App 收到 `Occluded(true)`（macOS 上来自原生事件或 2 秒回退）后的第一轮，向 App 的遮挡窗口
+裁剪钩子询问测量窗口；如果遮挡保持阶段先结束，则从不调用钩子。Windows 不报告遮挡，因此 harness 在那里自行
+在钩子之前发送 `Occluded(true)`，并在取消遮挡时发送 `Occluded(false)`。这一步既不等待也不改变计划，因此两侧
+运行同一套流程。`result.json` 把结果记为 `hooks.trim`：`not-reached`（计划不请求裁剪，或保持阶段先结束）、
+`unsupported`、`skipped` 或 `trimmed`，另记 `trim_experiment`（该计划为 `s12-short-trim`，否则为 null）与
+`trim_seq_after_hook`（钩子的裁剪编号，未裁剪时为 null）。未启用 `perf-hook-trim` 的构建记为 `unsupported`：
+该运行是未裁剪的基线。`unsupported` 不改变内存读数：有效的测量仍是数值，`unsupported` 既不会凭空产生 0，
+也不会让有效读数变为不可用。真实的 0，或因其他原因不可用的检查点取样，仍可能出现。较旧的 harness 不写
+`hooks`；给出其他结果的 result 会被拒绝。
+
+在该实验中，`covered` 内存行遵循裁剪规则。钩子已裁剪的一侧只计入读数为 `trimmed=true`、来源为 `hook` 或
+`scheduler`、且 `trim_seq` 不小于 `trim_seq_after_hook` 的样本：较早或未裁剪的样本为 `n/a: stale`，缺少状态或来源
+为其他值时为 `n/a: schema`。`unsupported` 一侧带有裁剪标注时为 `n/a: schema`；任何一侧的行上出现值无法读取的裁剪标注（例如 `trimmed=bogus` 或
+`trim_seq=-1`）时也为 `n/a: schema`；只有完全不带裁剪标注的行才是未裁剪的基线。钩子为 `skipped`、`not-reached` 或未记录
+的一侧分别为 `n/a: trim skipped`、`n/a: trim not reached` 或 `n/a: trim not recorded`，从不作为已裁剪的数值；其原始读数
+保留在单独的 `covered renderer_total_bytes, uncredited trim` 行中。`hooks.trim` 为 `trimmed` 的结果必须带有正整数的
+`trim_seq_after_hook`，其他结果必须为 null，裁剪实验的结果必须记录 `hooks`。其 `covered` 阶段在两个平台上报告
+墙钟时长、以计数表示的已呈现帧与重绘请求以及 CPU，从不报告帧率或呈现间隔。Windows 结果只有在该实验中才可以
+带有 `synthetic_occlusion = true`。
 
 有三类运行会使对比立即以退出码 1 停止，且从不重试：未解决的清理、schema 失败与拒绝运行。
 `perf-compare.py` 中的 `classify_outcome` 在任何可重试的原因之前按以下顺序检查它们，因此带有其中之一的

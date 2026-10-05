@@ -5,6 +5,8 @@
 //! frames, and hold it within its cap. Warm tab titles and search-overlay runs draw without
 //! shaping, every face replacement makes them prepare again, and their pixels equal a renderer
 //! with reuse off, on wgpu and on GDI. The UI palette follows the theme passed to `render`.
+//! A covered-window trim releases what the renderer can rebuild, restores on the next present on
+//! wgpu and GDI, and leaves a pending glyph-atlas retry to settle on that present.
 //!
 //! Only the event-loop entry point is Windows-only (winit allows a test-thread event loop there);
 //! the case logic compiles on every host, so a non-Windows lint pass type-checks it.
@@ -842,8 +844,201 @@ fn search_overlay_reuses_its_runs(active: &ActiveEventLoop) -> Result<(), String
     Ok(())
 }
 
+/// `scene` split into two side-by-side panes, so a trim releases more than one pane's rows.
+fn split_scene(renderer: &GpuRenderer, titles: &[&str]) -> Scene {
+    let mut scene = single_scene(renderer, titles);
+    let whole = scene.panes[0].rect;
+    let left = PixelRect { w: whole.w / 2, ..whole };
+    let right = PixelRect {
+        x: whole.x + i32::try_from(left.w).unwrap_or(i32::MAX),
+        w: whole.w - left.w,
+        ..whole
+    };
+    scene.panes = vec![
+        ScenePane { id: 1, rect: left, grid: text_grid(renderer, left) },
+        ScenePane { id: 2, rect: right, grid: text_grid(renderer, right) },
+    ];
+    scene
+}
+
+/// The parts a covered-window trim releases, as a renderer reports them.
+fn released_parts(renderer: &GpuRenderer) -> [sonicterm_types::ResourceAmount; 5] {
+    let parts = renderer.retained_amounts();
+    [
+        parts.row_glyph_cache,
+        parts.row_quad_cache,
+        parts.row_ink,
+        parts.frame_scratch,
+        parts.chrome_cache,
+    ]
+}
+
+/// A trim on the GPU presenter returns every released part to a new renderer's figure, keeps the
+/// glyph atlas, lowers the vertex and upload storage, leaves a 1x1 frame texture marked trimmed, and
+/// reports the frame texture and present buffers it gave back as request sizes.
+fn trim_releases_and_accounts(active: &ActiveEventLoop) -> Result<(), String> {
+    // The fresh renderer is built first: the case's own binding shadows the helper's name.
+    let (_fresh_window, fresh) =
+        renderer(active, SoftwareRenderMode::Off, &Theme::default(), (480, 240), true)?;
+    let (_window, mut renderer) =
+        renderer(active, SoftwareRenderMode::Off, &Theme::default(), (480, 240), true)?;
+    let mut scene = split_scene(&renderer, &["shell", "logs"]);
+    settle_fallback(&mut renderer, &mut scene)?;
+    let surface = renderer.surface_size();
+    let before = renderer.retained_amounts();
+    let report = renderer.trim_for_occlusion();
+    let after = renderer.retained_amounts();
+    check(!report.refused, "a usable device admits the trim")?;
+    check(released_parts(&renderer) == released_parts(&fresh), "released parts read as new")?;
+    check(after.glyph_atlas == before.glyph_atlas, "the glyph atlas is kept")?;
+    check(after.image_atlas == fresh.retained_amounts().image_atlas, "no media: the placeholder")?;
+    check(
+        after.vertex_scratch.bytes < before.vertex_scratch.bytes,
+        "vertex and upload storage fall",
+    )?;
+    check(renderer.frame_texture_extent() == (1, 1), "the frame texture is 1x1")?;
+    check(renderer.__frame_texture_trimmed(), "the frame texture is marked trimmed")?;
+    check(report.frame_texture_before == surface, "the report names the released texture")?;
+    let texture_bytes = u64::from(surface.0) * u64::from(surface.1) * 4 - 4;
+    check(
+        report.gpu_released_requested_bytes >= texture_bytes
+            && report.present_buffer_bytes_before > 0,
+        &format!("the report counts the texture and buffers: {report:?}"),
+    )
+}
+
+/// After a trim, one frame of the same renderer presents at once: the texture is back at the surface
+/// size and the pixels equal the settled reference with the same fallback generation. A resize after
+/// a trim installs the surface-sized texture itself, so the next present rebuilds nothing.
+fn trim_restores_without_a_resize(active: &ActiveEventLoop) -> Result<(), String> {
+    let (_window, mut renderer) =
+        renderer(active, SoftwareRenderMode::Off, &Theme::default(), (480, 240), true)?;
+    let mut scene = split_scene(&renderer, &["shell", "logs"]);
+    let settled = settle_fallback(&mut renderer, &mut scene)?;
+    let reference = pixels(&mut renderer)?;
+    let _ = renderer.trim_for_occlusion();
+    check(
+        matches!(frame(&mut renderer, &mut scene), PresentOutcome::Presented),
+        "the first frame after the trim presents",
+    )?;
+    check(renderer.frame_texture_extent() == renderer.surface_size(), "the texture is restored")?;
+    check(!renderer.__frame_texture_trimmed(), "the mark is cleared")?;
+    check_settled(&scene, settled, "restored frame")?;
+    check(pixels(&mut renderer)? == reference, "the restored frame equals the reference")?;
+
+    let _ = renderer.trim_for_occlusion();
+    check(renderer.try_resize(400, 200), "the resize is accepted")?;
+    check(!renderer.__frame_texture_trimmed(), "the resize cleared the mark")?;
+    let rebuilds = renderer.__frame_texture_rebuilds();
+    let mut resized = split_scene(&renderer, &["shell", "logs"]);
+    present(&mut renderer, &mut resized)?;
+    check(renderer.__frame_texture_rebuilds() == rebuilds, "the next present rebuilds nothing")
+}
+
+/// Under the software presenter a trim leaves the 1x1 texture alone and never marks it, releases
+/// the CPU parts and any upload storage, keeps the software frame, and the next GDI frame equals the
+/// settled reference with the same fallback generation.
+fn trim_on_the_software_presenter(active: &ActiveEventLoop) -> Result<(), String> {
+    // The fresh renderer is built first: the case's own binding shadows the helper's name.
+    let (_fresh_window, fresh) =
+        renderer(active, SoftwareRenderMode::Force, &Theme::default(), (480, 240), true)?;
+    let (_window, mut renderer) =
+        renderer(active, SoftwareRenderMode::Force, &Theme::default(), (480, 240), true)?;
+    let mut scene = split_scene(&renderer, &["shell", "logs"]);
+    let settled = settle_fallback(&mut renderer, &mut scene)?;
+    let reference = pixels(&mut renderer)?;
+    let rebuilds = renderer.__frame_texture_rebuilds();
+    let before = renderer.retained_amounts();
+    let _ = renderer.trim_for_occlusion();
+    let after = renderer.retained_amounts();
+    check(renderer.frame_texture_extent() == (1, 1), "the GDI texture stays 1x1")?;
+    check(!renderer.__frame_texture_trimmed(), "the GDI texture is never marked")?;
+    check(renderer.__frame_texture_rebuilds() == rebuilds, "no texture was built")?;
+    check(released_parts(&renderer) == released_parts(&fresh), "released parts read as new")?;
+    check(after.software_frame == before.software_frame, "the software frame is kept")?;
+    check(after.vertex_scratch.bytes <= before.vertex_scratch.bytes, "upload storage is released")?;
+    forced(&mut renderer, &mut scene)?;
+    check_settled(&scene, settled, "GDI frame after the trim")?;
+    check(pixels(&mut renderer)? == reference, "the next GDI frame equals the reference")
+}
+
+/// Counts WARN events on `sonic::glyph_atlas` carrying the retry-settlement message.
+struct SettlementCounter(Arc<AtomicUsize>);
+
+/// The settlement message the atlas retry logs once it presents.
+const SETTLEMENT_MESSAGE: &str = "glyph atlas compaction retry presented with eviction disabled";
+
+/// Reads one event's message field.
+#[derive(Default)]
+struct MessageOf(String);
+
+impl tracing::field::Visit for MessageOf {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            // When: the field is the event message, it is the text compared.
+            self.0 = format!("{value:?}");
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SettlementCounter {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let metadata = event.metadata();
+        if metadata.target() != "sonic::glyph_atlas" || *metadata.level() != tracing::Level::WARN {
+            // When: the target or level differs, the event is not the settlement line.
+            return;
+        }
+        let mut message = MessageOf::default();
+        event.record(&mut message);
+        if message.0 == SETTLEMENT_MESSAGE {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// A trim between an atlas retry and its present keeps the retry armed and eviction off and adds no
+/// reset; the first recovered present settles it once, with the reference pixels and generation, and
+/// the next frame settles nothing more.
+fn trim_during_a_pending_atlas_retry(active: &ActiveEventLoop) -> Result<(), String> {
+    use tracing_subscriber::layer::SubscriberExt;
+    let (_window, mut renderer) =
+        renderer(active, SoftwareRenderMode::Off, &Theme::default(), (480, 240), true)?;
+    let mut scene = split_scene(&renderer, &["shell", "logs"]);
+    let settled = settle_fallback(&mut renderer, &mut scene)?;
+    let reference = pixels(&mut renderer)?;
+    let settlements = Arc::new(AtomicUsize::new(0));
+    let subscriber =
+        tracing_subscriber::Registry::default().with(SettlementCounter(Arc::clone(&settlements)));
+    sonicterm_logging::test_capture::with_default(subscriber, || -> Result<(), String> {
+        renderer.__change_glyph_atlas_during_next_assembly();
+        renderer.invalidate_retained_frame();
+        check(
+            matches!(frame(&mut renderer, &mut scene), PresentOutcome::AtlasRetry),
+            "the changed atlas retries",
+        )?;
+        check(renderer.__test_glyph_atlas_retry_state() == (true, false), "the retry is armed")?;
+        let resets = renderer.__test_glyph_atlas_resets();
+        let _ = renderer.trim_for_occlusion();
+        check(renderer.__test_glyph_atlas_retry_state() == (true, false), "the trim keeps it")?;
+        check(renderer.__test_glyph_atlas_resets() == resets, "the trim adds no reset")?;
+        check(
+            matches!(frame(&mut renderer, &mut scene), PresentOutcome::Presented),
+            "the first recovered frame presents",
+        )?;
+        check(renderer.__test_glyph_atlas_retry_state() == (false, true), "the retry settled")?;
+        check(settlements.load(Ordering::SeqCst) == 1, "the settlement is logged once")?;
+        check_settled(&scene, settled, "settled retry")?;
+        check(pixels(&mut renderer)? == reference, "the settled frame equals the reference")?;
+        forced(&mut renderer, &mut scene)?;
+        check(renderer.__test_glyph_atlas_retry_state() == (false, true), "still settled")?;
+        check(settlements.load(Ordering::SeqCst) == 1, "no second settlement")?;
+        check(renderer.__test_glyph_atlas_resets() == resets, "no reset afterwards")?;
+        check(pixels(&mut renderer)? == reference, "the next frame equals the reference")
+    })
+}
+
 fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
-    let cases: [(&str, Case); 7] = [
+    let cases: [(&str, Case); 11] = [
         ("assembled frames reuse scratch", assembled_frames_reuse_scratch),
         ("scratch survives failed and retried frames", scratch_survives_failed_and_retried_frames),
         ("scratch caps hold", scratch_caps_hold_after_unbounded_frames),
@@ -851,6 +1046,10 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
         ("cached titles draw like cold", cached_titles_draw_like_cold_titles),
         ("palette follows the render theme", renderer_palette_follows_the_render_theme),
         ("search overlay reuses its runs", search_overlay_reuses_its_runs),
+        ("trim releases and accounts", trim_releases_and_accounts),
+        ("trim restores without a resize", trim_restores_without_a_resize),
+        ("trim on the software presenter", trim_on_the_software_presenter),
+        ("trim during a pending atlas retry", trim_during_a_pending_atlas_retry),
     ];
     let mut failures = Vec::new();
     for (name, case) in cases {

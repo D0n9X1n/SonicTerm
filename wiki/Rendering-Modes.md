@@ -258,6 +258,13 @@ retry floor. A transition back to visible clears the retained renderer frame key
 marks one Visibility cause, and requests at most one frame on a usable device.
 Duplicate visible events add nothing; visibility cannot revive a stopped device.
 
+A window covered for 30 s is trimmed ([Memory](Memory)); on the GPU presenter its
+frame texture drops to 1×1. The next GPU present first rebuilds it at the surface
+size, before the device gate admits the frame's upload work; a refused rebuild
+returns rendering-unavailable before any size check and keeps the dirt for a
+later frame. A resize, a degrade switch or a recovery commit installs a
+surface-sized texture itself, so the present after it rebuilds nothing.
+
 Typed `SurfaceRetry(Timeout)` belongs to the app at the owner's next effective
 frame period, retaining dirt without a native self-retry loop. Typed
 `SurfaceRetry(Occluded)` suppresses frames. Atlas, Outdated, Suboptimal, and

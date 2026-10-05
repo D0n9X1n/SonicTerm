@@ -194,6 +194,9 @@ pub(crate) enum Act {
     Cover,
     /// Raise the window again and close the cover.
     Uncover,
+    /// Ask the App to trim the covered window once its occlusion has been delivered; on a host
+    /// without native occlusion the probe delivers a synthetic `Occluded(true)` first.
+    TrimCovered,
 }
 
 /// One step of a plan after GO.
@@ -304,6 +307,9 @@ pub(crate) struct Plan {
     pub(crate) presentation: Presentation,
     /// The checkpoint whose reading is fresh only some time after an earlier phase, if any.
     pub(crate) fresh_after: Option<FreshAfter>,
+    /// The covered-window trim experiment this plan runs, as `result.json` names it; `None` when
+    /// the plan asks for no trim.
+    pub(crate) trim_experiment: Option<&'static str>,
 }
 
 /// A phase with no driver, no entry actions and no throughput figure.
@@ -512,9 +518,14 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             vec![
                 print(vec![0, 1, 2]),
                 Step::Checkpoint("settled"),
+                // `--short` cannot reach the 30 s scheduler, so it asks for the trim once covered.
                 Step::Phase(entered(
                     "covered",
-                    vec![Act::Unfocus, Act::Cover],
+                    if short {
+                        vec![Act::Unfocus, Act::Cover, Act::TrimCovered]
+                    } else {
+                        vec![Act::Unfocus, Act::Cover]
+                    },
                     PhaseEnd::Hold(hold(90_000)),
                 )),
                 Step::Checkpoint("covered"),
@@ -546,8 +557,13 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             anchor: "media-free",
             delay_ms: 30_000,
         }),
+        trim_experiment: (spec.id == "S12" && short).then_some(TRIM_EXPERIMENT),
     })
 }
+
+/// The name `result.json` gives the short S12 plan's covered-window trim experiment.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const TRIM_EXPERIMENT: &str = "s12-short-trim";
 
 /// Every listed scenario, variant and length, for the tests that pin all plans.
 #[cfg(test)]

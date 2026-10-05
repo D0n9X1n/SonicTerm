@@ -995,3 +995,113 @@ fn gpu_readback_of_warm_and_cold_rows_is_identical() {
     assert!(cold_pixels.chunks(4).filter(|pixel| *pixel != first.as_slice()).count() > 50);
     assert!(warm_pixels == cold_pixels, "warm and cold GPU readbacks differ");
 }
+
+/// One megabyte, the shared scratch rule's strict floor.
+const MIB: usize = 1024 * 1024;
+/// A 768x768 coverage tile staged as BGRA: 2,359,296 bytes, 2.25 MiB.
+const LARGE_TILE_BYTES: usize = 768 * 768 * 4;
+/// A 64x64 coverage tile staged as BGRA: 16,384 bytes.
+const SMALL_TILE_BYTES: usize = 64 * 64 * 4;
+
+/// Sync `atlas` through `lists`, recording every staged slice's length in order.
+fn recorded_sync(lists: &mut UploadLists, atlas: &mut GlyphAtlas) -> Vec<usize> {
+    let mut lengths = Vec::new();
+    let _stats = lists.sync_with(atlas, |_, staged| lengths.push(staged.len()));
+    lengths
+}
+
+/// Insert one coverage tile `side` pixels square under the distinct key `index`.
+fn insert_coverage(atlas: &mut GlyphAtlas, index: u32, side: u32) {
+    let tile = list_tile(side, false, [0, 0, 0, 200]);
+    assert!(atlas.get_or_insert(list_key(index), &mut TestTileRasterizer(tile)).is_some());
+}
+
+/// A growable atlas holding one 768x768 tile, and lists that have synced it once: the largest
+/// slice is the whole tile and the staging buffer is over 1 MiB.
+fn after_large_sync() -> (UploadLists, GlyphAtlas) {
+    let mut atlas = GlyphAtlas::growable(1024, ATLAS_DIM);
+    insert_coverage(&mut atlas, 0, 768);
+    let mut lists = UploadLists::default();
+    let lengths = recorded_sync(&mut lists, &mut atlas);
+    assert_eq!(lengths.iter().max(), Some(&LARGE_TILE_BYTES), "precondition: the large write");
+    assert!(lengths.iter().max().is_some_and(|largest| *largest > MIB));
+    assert!(lists.scratch.capacity() > MIB, "precondition: staging over 1 MiB");
+    (lists, atlas)
+}
+
+/// The real sequence: a full write, a growth re-upload of every resident tile, then a sync with
+/// nothing dirty. The zero-dirty sync releases the staging buffer the re-upload left behind.
+#[test]
+fn a_zero_dirty_sync_after_a_growth_reupload_releases_the_staging_buffer() {
+    let (mut lists, mut atlas) = after_large_sync();
+    assert!(atlas.grow_to(ATLAS_DIM), "the next doubling is allowed");
+    let reupload = recorded_sync(&mut lists, &mut atlas);
+    assert_eq!(reupload.iter().max(), Some(&LARGE_TILE_BYTES), "growth re-uploads the tile");
+    assert!(lists.scratch.capacity() > MIB, "precondition: staging over 1 MiB before the sync");
+    assert!(recorded_sync(&mut lists, &mut atlas).is_empty(), "nothing is dirty");
+    assert_eq!(lists.scratch.capacity(), 0);
+}
+
+/// A large sync then a small one: the small sync releases the large buffer to at most twice
+/// its own write.
+#[test]
+fn a_small_sync_after_a_large_one_shrinks_the_staging_buffer() {
+    let (mut lists, mut atlas) = after_large_sync();
+    insert_coverage(&mut atlas, 1, 64);
+    let capacity = lists.scratch.capacity();
+    // Over 1 MiB is also over four small tiles (64 KiB), so the shrink rule applies.
+    assert!(capacity > MIB, "precondition: {capacity}");
+    assert_eq!(recorded_sync(&mut lists, &mut atlas), [SMALL_TILE_BYTES]);
+    assert!(lists.scratch.capacity() <= 2 * SMALL_TILE_BYTES, "{}", lists.scratch.capacity());
+}
+
+/// The rule keys on the largest write, not the last: a sync whose large coverage write comes
+/// before a small colour write keeps the large capacity.
+#[test]
+fn the_staging_rule_keys_on_the_largest_write_not_the_last() {
+    let mut atlas = GlyphAtlas::growable(1024, ATLAS_DIM);
+    insert_coverage(&mut atlas, 0, 768);
+    let color = list_tile(32, true, [9, 8, 7, 255]);
+    assert!(atlas.get_or_insert(list_key(1), &mut TestTileRasterizer(color)).is_some());
+    let mut lists = UploadLists::default();
+    assert_eq!(recorded_sync(&mut lists, &mut atlas), [LARGE_TILE_BYTES, 32 * 32 * 4]);
+    assert!(lists.scratch.capacity() >= LARGE_TILE_BYTES, "{}", lists.scratch.capacity());
+}
+
+/// Repeated small syncs, each writing a new glyph, reuse one staging allocation.
+#[test]
+fn repeated_small_syncs_reuse_one_staging_allocation() {
+    let mut atlas = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);
+    let mut lists = UploadLists::default();
+    insert_coverage(&mut atlas, 0, 64);
+    assert_eq!(recorded_sync(&mut lists, &mut atlas), [SMALL_TILE_BYTES]);
+    let (pointer, capacity) = (lists.scratch.as_ptr(), lists.scratch.capacity());
+    for index in 1..5 {
+        insert_coverage(&mut atlas, index, 64);
+        assert_eq!(recorded_sync(&mut lists, &mut atlas), [SMALL_TILE_BYTES]);
+        assert_eq!((lists.scratch.as_ptr(), lists.scratch.capacity()), (pointer, capacity));
+    }
+}
+
+/// The floor is strict: a staging buffer of exactly 1 MiB survives a zero-dirty sync.
+#[test]
+fn a_staging_buffer_of_exactly_one_mib_is_kept() {
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let mut lists = UploadLists::default();
+    insert_coverage(&mut atlas, 0, 512);
+    assert_eq!(recorded_sync(&mut lists, &mut atlas), [MIB]);
+    assert_eq!(lists.scratch.capacity(), MIB, "precondition: exactly 1 MiB");
+    assert!(recorded_sync(&mut lists, &mut atlas).is_empty());
+    assert_eq!(lists.scratch.capacity(), MIB);
+}
+
+/// A trim releases the staging buffer and both rect lists entirely.
+#[test]
+fn release_scratch_leaves_nothing_retained() {
+    let (mut lists, _atlas) = after_large_sync();
+    lists.dirty_rects.reserve(100);
+    lists.coalesced_rects.reserve(100);
+    assert!(lists.retained_bytes() > MIB, "precondition: storage is retained");
+    lists.release_scratch();
+    assert_eq!(lists.retained_bytes(), 0);
+}

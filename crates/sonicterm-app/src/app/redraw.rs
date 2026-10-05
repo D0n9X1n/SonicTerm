@@ -107,6 +107,13 @@ pub(crate) struct WindowRedrawState {
     pub(super) stopped_generation: Option<u64>,
     pub(super) native_occluded: bool,
     pub(super) backend_occluded: bool,
+    /// When native occlusion began, at the dispatch clock; `None` while visible. Backend-only
+    /// occlusion never sets it, so only a native cover can age into a trim.
+    pub(super) occluded_since: Option<Instant>,
+    /// The renderer was trimmed during the current covered stretch; visibility clears it.
+    pub(super) trimmed: bool,
+    /// Requested GPU bytes that stretch's trim gave back; zero while untrimmed.
+    pub(super) trim_released_requested_bytes: u64,
     pub(super) timeout_pending: bool,
     /// The pending admission's pacing mode, stored at the deferral that won; `None` when none is stored.
     pub(super) pacing: Option<super::display_link::PacingMode>,
@@ -150,6 +157,9 @@ impl Default for WindowRedrawState {
             stopped_generation: None,
             native_occluded: false,
             backend_occluded: false,
+            occluded_since: None,
+            trimmed: false,
+            trim_released_requested_bytes: 0,
             timeout_pending: false,
             pacing: None,
             link_generation: super::display_link::new_link_generation(),
@@ -345,15 +355,23 @@ impl WindowRedrawState {
     }
 
     /// A native event supersedes backend occlusion; return only a genuine transition back to visibility.
-    fn observe_native_occlusion(&mut self, occluded: bool) -> bool {
+    /// `now` stamps the start of a covered stretch; a repeated cover keeps the first stamp.
+    pub(super) fn observe_native_occlusion(&mut self, occluded: bool, now: Instant) -> bool {
         let was_occluded = self.native_occluded || self.backend_occluded;
         self.native_occluded = occluded;
         self.backend_occluded = false;
         self.cancel_surface_probe();
         if occluded {
+            // A repeated cover keeps the earlier `occluded_since`, so it cannot delay the trim.
+            self.occluded_since.get_or_insert(now);
             self.deferred = false;
             self.timeout_pending = false;
             self.invalidate_link_pacing();
+        } else {
+            // When: `occluded` is false, the covered stretch ends and a later one starts untrimmed.
+            self.occluded_since = None;
+            self.trimmed = false;
+            self.trim_released_requested_bytes = 0;
         }
         was_occluded && !occluded
     }
@@ -735,6 +753,8 @@ impl App {
             // When: `id` names a warm spare, native visibility cannot promote it into a terminal owner.
             return;
         }
+        // One dispatch-clock read stamps the covered stretch, so a test's fake clock ages it.
+        let now = (self.dispatch_clock)();
         let Some(window) = self.windows.get_mut(&id) else {
             // When: `id` is stale, no other window may inherit its visibility transition.
             return;
@@ -743,7 +763,7 @@ impl App {
             // A window that reappears may be on another display, so read its rate first.
             window.refresh_monitor_period();
         }
-        if window.redraw.observe_native_occlusion(occluded) {
+        if window.redraw.observe_native_occlusion(occluded, now) {
             window.invalidate_visibility_frame();
             window.request_visible_frame();
         }

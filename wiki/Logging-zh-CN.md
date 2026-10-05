@@ -610,7 +610,8 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
                 allocator_state=measured allocator_source=main allocator_label=<window-id>
                 allocator_allocated_bytes=<bytes> allocator_reserved_bytes=<bytes>
                 allocator_allocations=<count> allocator_blocks=<count> allocator_largest_block_bytes=<bytes>
-                [checkpoint_index=<index> checkpoint_label="<label>" checkpoint_attempt=<attempt> checkpoint_complete=<bool>]
+                [checkpoint_index=<index> checkpoint_label="<label>" checkpoint_attempt=<attempt> checkpoint_complete=<bool>
+                 trimmed=<bool> trim_source="<source>" trim_seq=<count>]
 ```
 
 进程数据来自操作系统，因此包含 SonicTerm 自身接缝未统计的分配器碎片、尚未归还的页、
@@ -630,7 +631,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
 | `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | 所有渲染器的逐行背景/装饰 quad 缓存存储及缓存行数 |
 | `live_renderers` | 进程级渲染器数量；若高于 `renderers` 条目数，可能存在仍存活但无法访问的渲染器 |
 | `live_fg_probe_workers` | 该 App 的前台探测 worker 线程数：首次需求之前或 worker 停止后为 0，否则为 1 |
-| `renderers` | 各渲染器角色及字形/图像/行缓存/软件帧存储明细 |
+| `renderers` | 各渲染器角色及字形/图像/行缓存/软件帧存储明细；每个条目以 `renderer_trimmed` 与 `renderer_gpu_released_requested_bytes` 结尾，即遮挡窗口裁剪交还的 GPU 请求大小，不计入 `total`；渲染器局部名称使它们与该行自身的 `trimmed` 标注区分开 |
 | `allocator_state` | `measured`、后端不支持报告或 GPU 设备已停止时的 `unsupported`，或还没有渲染器时的 `none` |
 | `allocator_source` / `allocator_label` | 这次共享设备读取所用的渲染器类别和标识 |
 | `allocator_allocated_bytes` | 分配给存活 wgpu allocation 的字节数 |
@@ -640,9 +641,14 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
 | `allocator_largest_block_bytes` | 最大分配器 block 的字节数 |
 | `checkpoint_index` / `checkpoint_label` / `checkpoint_attempt` | 仅出现在为性能检查点采集的样本中：哪个检查点，以及对它的第几次尝试（从 1 起） |
 | `checkpoint_complete` | 仅出现在检查点样本中：没有窗格被锁占用且每个窗格都已采样时为 `true` |
+| `trimmed` / `trim_source` / `trim_seq` | 仅出现在带裁剪钩子构建的检查点样本中：是否有可见渲染器在当前遮挡期间被裁剪、最近一次裁剪由谁请求（`scheduler`、`hook`，尚未裁剪时为 `none`），以及启动以来的裁剪次数 |
 
 共享设备/context 的分配器只报告一次，不会按每个渲染器重复。采样沿用保留量节奏；
 空闲会话会为到期采样唤醒，但该次唤醒会抑制重绘，不绘制任何帧。
+
+在 `debug` 级别，遮挡窗口裁剪会在 `memory` 上写一条 `covered window trimmed`，带有窗口、呈现器、
+释放的帧纹理尺寸、裁剪前的呈现缓冲字节数、`gpu_released_requested_bytes` 与 `reason="occlusion_trim"`；
+被释放的图像图集会以同一原因写出自己的释放行。
 
 `scripts/perf-compare.py` 从每次场景运行中读取这一行（[性能对比](Development-and-Release-zh-CN#性能对比)）。
 每个场景的最终内存检查点都至少在 GO（harness 让各负载开始运行的时刻）之后 60 秒（使用 `--short` 时为
@@ -727,7 +733,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `row_quad_cache_bytes` | 哈希表后备存储，以及缓存背景/装饰 quad 向量的容量 | 与缓存行数及窗格/窗口变化对照 |
 | `row_quad_cache_items` | 已缓存的 quad 行数 | 即使表容量有粘性，行数下降也能确认条目已淘汰 |
 | `software_frame_bytes` | Windows 软件呈现的整窗缓冲 | 缩小窗口；其它路径为零 |
-| `vertex_scratch_bytes` | `UploadStaging` 部分：呈现管线复用的 CPU 顶点组装缓冲，加上每个图集上传的脏矩形列表、合并矩形列表和暂存缓冲 | 顶点缓冲跟随最近最大的一帧，超过该帧用量四倍且超过 1 MiB 时收缩到用量的两倍；同步会释放矩形列表；暂存缓冲保留最大一次写入，至多一张图集 |
+| `vertex_scratch_bytes` | `UploadStaging` 部分：呈现管线复用的 CPU 顶点组装缓冲，加上每个图集上传的脏矩形列表、合并矩形列表和暂存缓冲 | 顶点缓冲跟随最近最大的一帧，超过该帧用量四倍且超过 1 MiB 时收缩到用量的两倍；同步会释放矩形列表；暂存缓冲在一次同步期间至多保存一张图集，每次 wgpu 同步后按该次同步的最大一次写入遵循顶点规则；遮挡窗口裁剪会全部释放 |
 | `vertex_scratch_items` | 顶点缓冲持有分配时为 1，否则为 0 | — |
 | `row_ink_bytes` | `RowInk` 部分：逐行墨迹表（每个已呈现行按窗格与槽位记录的绘制范围）已分配的桶，加上一帧的暂存缓冲 | 受可见行数限制；窗格缩小或关闭后，下一帧呈现时释放其记录 |
 | `row_ink_items` | 已提交的逐行墨迹记录数，每个可见行一条 | — |

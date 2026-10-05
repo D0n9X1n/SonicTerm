@@ -759,7 +759,8 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
                 allocator_state=measured allocator_source=main allocator_label=<window-id>
                 allocator_allocated_bytes=<bytes> allocator_reserved_bytes=<bytes>
                 allocator_allocations=<count> allocator_blocks=<count> allocator_largest_block_bytes=<bytes>
-                [checkpoint_index=<index> checkpoint_label="<label>" checkpoint_attempt=<attempt> checkpoint_complete=<bool>]
+                [checkpoint_index=<index> checkpoint_label="<label>" checkpoint_attempt=<attempt> checkpoint_complete=<bool>
+                 trimmed=<bool> trim_source="<source>" trim_seq=<count>]
 ```
 
 Process figures come from the OS, so they include allocator fragmentation,
@@ -780,7 +781,7 @@ SonicTerm's own seams do not count.
 | `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | per-row background/decoration quad cache storage and cached row count across renderers |
 | `live_renderers` | process-wide renderer count; a count above the `renderers` entries can expose an unreachable live renderer |
 | `live_fg_probe_workers` | this App's foreground-probe worker threads: 0 before the first demand or after the worker stops, otherwise 1 |
-| `renderers` | per-renderer role and glyph/image/row-cache/software storage breakdown |
+| `renderers` | per-renderer role and glyph/image/row-cache/software storage breakdown; each entry ends with `renderer_trimmed` and `renderer_gpu_released_requested_bytes`, the GPU request sizes a covered-window trim gave back, outside `total`; the renderer-local names keep them apart from the line's own `trimmed` tag |
 | `allocator_state` | `measured`, `unsupported` for a backend without a report or a stopped GPU device, or `none` before a renderer exists |
 | `allocator_source` / `allocator_label` | renderer class and identifier used for the one shared-device reading |
 | `allocator_allocated_bytes` | bytes assigned to live wgpu allocations |
@@ -790,10 +791,16 @@ SonicTerm's own seams do not count.
 | `allocator_largest_block_bytes` | largest allocator block in bytes |
 | `checkpoint_index` / `checkpoint_label` / `checkpoint_attempt` | only on a sample taken for a perf checkpoint: which checkpoint, and which attempt at it, from 1 |
 | `checkpoint_complete` | only on a checkpoint sample: `true` when no pane was contended and every pane was sampled |
+| `trimmed` / `trim_source` / `trim_seq` | only on a checkpoint sample from a build with the trim hook: whether a visible renderer was trimmed in its current covered stretch, what requested the latest trim (`scheduler`, `hook`, or `none` before any), and the trims since startup |
 
 The allocator is reported once per shared device/context, not once per renderer.
 Sampling shares the retention cadence. An idle session wakes for a due sample,
 but that wake suppresses redraw and draws no frame.
+
+At `debug`, a covered-window trim writes one `covered window trimmed` line on
+`memory` with the window, presenter, released frame-texture size, present-buffer
+bytes before the trim, `gpu_released_requested_bytes` and `reason="occlusion_trim"`;
+a released image atlas writes its own release line with the same reason.
 
 `scripts/perf-compare.py` reads this line from every scenario run
 ([Comparing performance](Development-and-Release#comparing-performance)). Each
@@ -890,7 +897,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `row_quad_cache_bytes` | hash-table backing plus cached background/decoration quad vector capacities | compare with cached rows and pane/window churn |
 | `row_quad_cache_items` | cached quad rows | a falling count confirms row eviction even when table capacity is sticky |
 | `software_frame_bytes` | full-window Windows software-present buffer | reduce window size; zero outside that path |
-| `vertex_scratch_bytes` | the `UploadStaging` part: the presentation pipeline's reused CPU vertex-assembly buffer plus each atlas upload's dirty and coalesced rect lists and staging buffer | the vertex buffer follows the largest recent frame and shrinks to twice a frame's use once over four times that use and over 1 MiB; a sync releases the rect lists; a staging buffer keeps its largest write, at most one atlas |
+| `vertex_scratch_bytes` | the `UploadStaging` part: the presentation pipeline's reused CPU vertex-assembly buffer plus each atlas upload's dirty and coalesced rect lists and staging buffer | the vertex buffer follows the largest recent frame and shrinks to twice a frame's use once over four times that use and over 1 MiB; a sync releases the rect lists; a staging buffer holds at most one atlas during a sync and follows the vertex rule, keyed on that sync's largest write, after each wgpu sync; a covered-window trim releases all of it |
 | `vertex_scratch_items` | 1 while the vertex buffer holds an allocation, else 0 | — |
 | `row_ink_bytes` | the `RowInk` part: the allocated buckets of the per-row ink table (where each presented row drew, per pane and slot) plus one frame's staging buffer | bounded by the visible rows; a pane that shrinks or closes releases its records at the next presented frame |
 | `row_ink_items` | committed per-row ink records, one per visible row | — |

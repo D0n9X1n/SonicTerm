@@ -2220,6 +2220,12 @@ pub struct GpuRenderer {
     /// In-place glyph atlas resets since construction, read only by tests through
     /// [`Self::__test_glyph_atlas_resets`] to prove a growth retry never resets.
     glyph_atlas_resets: u64,
+    /// True while a covered-window trim has replaced the frame texture with a 1x1 one; the next
+    /// GPU present, a resize, a degrade switch, a readback enablement or a recovery commit clears it.
+    frame_texture_trimmed: bool,
+    /// Frame textures installed after construction, by a rebuild or a recovery commit; read only
+    /// through [`Self::__frame_texture_rebuilds`].
+    frame_texture_installs: u64,
 
     font_family: String,
     font_dirs: Vec<PathBuf>,
@@ -2727,6 +2733,28 @@ static LIVE_RENDERERS: AtomicUsize = AtomicUsize::new(0);
 // `Ordering::AcqRel` RMWs in `new_async` and `Drop`. No payload is published.
 pub fn live_renderer_count() -> usize {
     LIVE_RENDERERS.load(Ordering::Acquire)
+}
+
+/// What one covered-window trim released, as request sizes rather than residency.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TrimReport {
+    /// The device refused GPU work, so nothing was released.
+    pub refused: bool,
+    /// The frame texture's extent before the trim; unchanged under the software presenter.
+    pub frame_texture_before: (u32, u32),
+    /// Bytes both present buffers requested before the trim.
+    pub present_buffer_bytes_before: u64,
+    /// Requested device bytes the trim gave back: the frame texture minus its 1x1 replacement,
+    /// plus each present buffer minus its initial-size replacement.
+    pub gpu_released_requested_bytes: u64,
+}
+
+impl TrimReport {
+    /// The report for a trim the device refused: nothing released.
+    #[must_use]
+    pub fn refused() -> Self {
+        Self { refused: true, ..Self::default() }
+    }
 }
 
 /// CPU-side storage a renderer holds, split by owning class.
@@ -3292,6 +3320,8 @@ impl GpuRenderer {
             growth_episodes: crate::frame_stats::GrowthEpisodes::default(),
             retained_frame_readback: false,
             glyph_atlas_resets: 0,
+            frame_texture_trimmed: false,
+            frame_texture_installs: 0,
             font_family: font_family.to_string(),
             font_dirs: font_dirs.to_vec(),
             font_size,
@@ -4661,6 +4691,101 @@ impl GpuRenderer {
         );
         self.frame_texture = frame_texture;
         self.frame_view = frame_view;
+        self.frame_texture_trimmed = false;
+        self.frame_texture_installs += 1;
+    }
+
+    /// Restore a trimmed frame texture to the surface size before a GPU present; returns false
+    /// when the device refused the rebuild, so the caller presents nothing and retries later.
+    pub(crate) fn ensure_frame_texture(&mut self) -> bool {
+        if !self.frame_texture_trimmed || self.uses_windows_software_presenter() {
+            // When: frame_texture_trimmed is clear or uses_windows_software_presenter, the texture already fits.
+            return true;
+        }
+        self.rebuild_frame_texture();
+        !self.frame_texture_trimmed
+    }
+
+    /// Release what a covered window does not need until it is shown again, inside the device
+    /// gate. A refused admission changes nothing; once admitted, the releases are not rolled back.
+    ///
+    /// The glyph atlas, its GPU texture, the retry and eviction state, the software frame and the
+    /// preedit cache are kept. The next frame is a full first frame.
+    pub fn trim_for_occlusion(&mut self) -> TrimReport {
+        let Some(_scope) = self.device_errors.enter_gpu_work("trim") else {
+            // When: enter_gpu_work refuses, the stopped device keeps every resource untouched.
+            return TrimReport::refused();
+        };
+        let frame_texture_before = self.frame_texture_extent();
+        let present_buffer_bytes_before = self.present_pipeline.present_buffer_bytes();
+        let mut released_bytes = 0_u64;
+        if !self.uses_windows_software_presenter() {
+            // The GPU presenter's texture is surface-sized; the software presenter's is already 1x1.
+            let (frame_texture, frame_view) = build_frame_texture(
+                &self.device,
+                false,
+                1,
+                1,
+                self.config.format,
+                self.retained_frame_readback,
+            );
+            self.frame_texture = frame_texture;
+            self.frame_view = frame_view;
+            self.frame_texture_trimmed = true;
+            released_bytes += frame_texture_payload_bytes(frame_texture_before)
+                .saturating_sub(frame_texture_payload_bytes((1, 1)));
+        }
+        released_bytes += self.present_pipeline.reset_to_initial(&self.device);
+        self.row_glyph_cache.release_all();
+        self.line_quad_cache.release_all();
+        self.row_ink.release_all();
+        self.glyph_upload.release_scratch();
+        self.image_upload.release_scratch();
+        self.frame_scratch.release_held();
+        self.chrome_caches.release_runs();
+        self.release_image_atlas_for_trim();
+        self.last_frame_key = None;
+        tracing::debug!(
+            target: "memory",
+            renderer_role = self.render_timing_label,
+            window_id = ?self.window.id(),
+            software_presenter = self.uses_windows_software_presenter(),
+            frame_texture_width = frame_texture_before.0,
+            frame_texture_height = frame_texture_before.1,
+            present_buffer_bytes_before,
+            gpu_released_requested_bytes = released_bytes,
+            reason = "occlusion_trim",
+            "covered window trimmed"
+        );
+        TrimReport {
+            refused: false,
+            frame_texture_before,
+            present_buffer_bytes_before,
+            gpu_released_requested_bytes: released_bytes,
+        }
+    }
+
+    /// Frame textures installed since construction by a rebuild or a recovery commit, so a native
+    /// test can tell whether a present rebuilt the texture.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __frame_texture_rebuilds(&self) -> u64 {
+        self.frame_texture_installs
+    }
+
+    /// Whether a covered-window trim left the frame texture at 1x1 awaiting the next present.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __frame_texture_trimmed(&self) -> bool {
+        self.frame_texture_trimmed
+    }
+
+    /// The glyph atlas's pending compaction retry and its configured eviction permission, so a
+    /// native test can check that a trim leaves both alone.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_glyph_atlas_retry_state(&self) -> (bool, bool) {
+        (self.glyph_atlas_retry_without_eviction, self.glyph_atlas.eviction_enabled())
     }
 
     /// Test hook: append one glyph drawing `rect_px` (`x, y, w, h` in surface pixels) in `color`

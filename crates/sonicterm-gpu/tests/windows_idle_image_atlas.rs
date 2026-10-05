@@ -1,11 +1,16 @@
-#![cfg(target_os = "windows")]
 //! The idle image-atlas release and the GDI frame texture on a real renderer, on the hosted runner's
 //! WARP device: the interval release without a frame, a still image that is never released, the re-shown
 //! frame's pixels, the frame texture's size under each presenter, and both on a stopped device and
-//! after recovery onto a new device.
+//! after recovery onto a new device. A covered-window trim's frame texture survives a stop and a
+//! recovery commit, and its image-atlas release restores the media on the next frame, on GDI and
+//! read back from wgpu. A trim the stopped device refuses changes nothing.
+//!
+//! Only the event-loop entry point is Windows-only (winit allows a test-thread event loop there);
+//! the case logic compiles on every host, so a non-Windows lint pass type-checks it.
+#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
 use sonicterm_gpu::{
-    core::{GpuRenderer, RendererSettings, SurfaceAppearance},
+    core::{unpad_readback_rows, GpuRenderer, RendererSettings, SurfaceAppearance},
     device_errors::{DeviceStateWaker, GpuFaultKind},
 };
 use sonicterm_render_model::{
@@ -27,13 +32,16 @@ use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop},
-    platform::windows::EventLoopBuilderExtWindows,
+    event_loop::ActiveEventLoop,
     window::{Window, WindowId},
 };
 
 /// Past the 30 s interval, so a due release runs when serviced.
 const AFTER_INTERVAL: Duration = Duration::from_secs(31);
+/// Width and height of the image every case draws, in pixels.
+const IMAGE_SIDE_PX: u32 = 32;
+/// The image's one colour: opaque red, as the BGRA bytes the wgpu frame stores it in.
+const IMAGE_BGRA: [u8; 4] = [0, 0, 255, 255];
 
 struct Probe {
     outcome: Option<Result<(), String>>,
@@ -111,6 +119,17 @@ fn recover(
     active: &ActiveEventLoop,
     mode: SoftwareRenderMode,
 ) -> Result<(), String> {
+    recover_checked(renderer, active, mode, |_| Ok(()))
+}
+
+/// [`recover`], running `between` after the rebind is prepared and before it is committed, so a
+/// case can check that preparation changed nothing.
+fn recover_checked(
+    renderer: &mut GpuRenderer,
+    active: &ActiveEventLoop,
+    mode: SoftwareRenderMode,
+    between: impl FnOnce(&GpuRenderer) -> Result<(), String>,
+) -> Result<(), String> {
     let request = renderer.recovery_request(active).map_err(|error| error.to_string())?;
     let recovered = request
         .run(|_generation| -> DeviceStateWaker { Arc::new(|| {}) })
@@ -119,6 +138,7 @@ fn recover(
     let prepared = renderer
         .prepare_rebind(&context, Some(surface), mode)
         .map_err(|error| error.to_string())?;
+    between(renderer)?;
     renderer.commit_rebind(prepared).map_err(|error| error.to_string())?;
     check(renderer.device_accepts_gpu_work(), "the recovered device accepts work")
 }
@@ -128,7 +148,7 @@ fn admitted(renderer: &GpuRenderer) -> u64 {
     renderer.device_error_snapshot().admitted_work
 }
 
-/// Assemble and present one frame of a single pane, with a 32x32 image at its origin when `image`.
+/// Assemble and present one frame of a single pane, with the image at its first cell when `image`.
 fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
     let mut grid = Grid::new(10, 4);
     let mut panes = [PaneRender {
@@ -145,9 +165,9 @@ fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
                 id: 1,
                 row: 0,
                 col: 0,
-                width: 32,
-                height: 32,
-                bgra: Arc::from([0, 0, 255, 255].repeat(32 * 32)),
+                width: IMAGE_SIDE_PX,
+                height: IMAGE_SIDE_PX,
+                bgra: Arc::from(IMAGE_BGRA.repeat((IMAGE_SIDE_PX * IMAGE_SIDE_PX) as usize)),
             }]
         } else {
             Vec::new()
@@ -173,6 +193,150 @@ fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// A retained wgpu frame read back: BGRA bytes, row-major at the frame texture's own width.
+#[derive(PartialEq, Eq)]
+struct Readback {
+    bgra: Vec<u8>,
+    width_px: usize,
+    height_px: usize,
+}
+
+impl Readback {
+    /// The BGRA bytes of the pixel at `column`, `row`.
+    fn pixel(&self, column: usize, row: usize) -> &[u8] {
+        let start = (row * self.width_px + column) * 4;
+        &self.bgra[start..start + 4]
+    }
+}
+
+/// The pixels an image covers, as half-open column and row ranges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImageRect {
+    left: usize,
+    top: usize,
+    right: usize,
+    bottom: usize,
+}
+
+impl ImageRect {
+    /// Whether the pixel at `column`, `row` is inside.
+    fn contains(&self, column: usize, row: usize) -> bool {
+        (self.left..self.right).contains(&column) && (self.top..self.bottom).contains(&row)
+    }
+
+    /// Covered pixels.
+    fn area(&self) -> usize {
+        self.right.saturating_sub(self.left) * self.bottom.saturating_sub(self.top)
+    }
+
+    /// This rect grown to hold the pixel at `column`, `row`.
+    fn including(self, column: usize, row: usize) -> Self {
+        Self {
+            left: self.left.min(column),
+            top: self.top.min(row),
+            right: self.right.max(column + 1),
+            bottom: self.bottom.max(row + 1),
+        }
+    }
+}
+
+/// The pixels pane 1's image at `row`, `col` covers, placed as the renderer places it: from the
+/// pane's grid origin in the last frame's layout, which includes padding and the bottom alignment
+/// that moves a grid shorter than its pane down, plus whole cells, clipped to the grid and surface.
+fn expected_image_rect(renderer: &GpuRenderer, row: u16, col: u16) -> Result<ImageRect, String> {
+    let layout = renderer.pane_layout(1).ok_or("the pane has a layout")?;
+    let (cell_w, cell_h) = renderer.cell_size();
+    let (surface_w, surface_h) = renderer.surface_size();
+    let left = layout.origin_x_logical + f32::from(col) * cell_w;
+    let top = layout.origin_y_logical + f32::from(row) * cell_h;
+    let side = IMAGE_SIDE_PX as f32;
+    let right = (left + side).min(layout.origin_x_logical + layout.w_logical).min(surface_w as f32);
+    let bottom = (top + side).min(layout.origin_y_logical + layout.h_logical).min(surface_h as f32);
+    // A pixel is covered when its centre lies inside the quad, the rasterizer's rule.
+    let first_covered = |edge: f32| (edge - 0.5).ceil().max(0.0) as usize;
+    Ok(ImageRect {
+        left: first_covered(left.max(layout.origin_x_logical)),
+        top: first_covered(top.max(layout.origin_y_logical)),
+        right: first_covered(right),
+        bottom: first_covered(bottom),
+    })
+}
+
+/// Whether `reference` shows the image against the image-free `absent`: they differ on exactly the
+/// pixels of `rect`, and its centre pixel holds the image colour only in `reference`. The error
+/// names the measured changed box beside `rect`, so a failure explains itself.
+fn image_shown(reference: &Readback, absent: &Readback, rect: ImageRect) -> Result<(), String> {
+    if (reference.width_px, reference.height_px) != (absent.width_px, absent.height_px) {
+        return Err(format!(
+            "the frames differ in size: {}x{} and {}x{}",
+            reference.width_px, reference.height_px, absent.width_px, absent.height_px
+        ));
+    }
+    if rect.area() == 0 {
+        return Err(format!("the expected image rect {rect:?} is empty"));
+    }
+    let (mut changed, mut outside, mut measured) = (0usize, 0usize, None::<ImageRect>);
+    for row in 0..reference.height_px {
+        for column in 0..reference.width_px {
+            if reference.pixel(column, row) != absent.pixel(column, row) {
+                changed += 1;
+                outside += usize::from(!rect.contains(column, row));
+                let pixel =
+                    ImageRect { left: column, top: row, right: column + 1, bottom: row + 1 };
+                measured = Some(measured.map_or(pixel, |grown| grown.including(column, row)));
+            }
+        }
+    }
+    let (centre_x, centre_y) = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+    let centre_shown = reference.pixel(centre_x, centre_y) == IMAGE_BGRA
+        && absent.pixel(centre_x, centre_y) != IMAGE_BGRA;
+    if centre_shown && outside == 0 && changed == rect.area() {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected the {} pixels of {rect:?} to change, measured {changed} changed in {measured:?} \
+             with {outside} outside it; centre ({centre_x}, {centre_y}) is {:?} with the image and \
+             {:?} without",
+            rect.area(),
+            reference.pixel(centre_x, centre_y),
+            absent.pixel(centre_x, centre_y),
+        ))
+    }
+}
+
+/// The retained wgpu frame, copied out through the test hook and read back.
+fn wgpu_pixels(renderer: &mut GpuRenderer) -> Result<Readback, String> {
+    let readback = renderer.__copy_retained_frame().ok_or("readback is enabled")?;
+    let slice = readback.buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    readback
+        .device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|error| format!("poll the readback: {error}"))?;
+    let mapped = slice.get_mapped_range().map_err(|error| format!("map the readback: {error}"))?;
+    let bgra = unpad_readback_rows(
+        &mapped,
+        readback.width_px,
+        readback.height_px,
+        readback.padded_row_bytes,
+    );
+    drop(mapped);
+    readback.buffer.unmap();
+    Ok(Readback {
+        bgra,
+        width_px: readback.width_px as usize,
+        height_px: readback.height_px as usize,
+    })
+}
+
+/// Every pixel of a GDI renderer's software frame. The hook exists only on Windows.
+#[cfg(not(target_os = "windows"))]
+fn software_pixels(_renderer: &GpuRenderer, _window: &Window) -> Result<Vec<[u8; 4]>, String> {
+    Err(String::from("the GDI presenter exists only on Windows"))
+}
+
+/// Every pixel of a GDI renderer's software frame, each read through the test hook.
+#[cfg(target_os = "windows")]
 fn software_pixels(renderer: &GpuRenderer, window: &Window) -> Result<Vec<[u8; 4]>, String> {
     let size = window.inner_size();
     (0..size.height)
@@ -310,8 +474,166 @@ fn stopped_device(active: &ActiveEventLoop) -> Result<(), String> {
     check(hardware.frame_texture_extent() == (1, 1), "recovery under degrade builds 1x1")
 }
 
+/// A trimmed frame texture across a stop: preparation changes nothing, the commit installs the
+/// presenter's texture and clears the mark, and the first recovered present rebuilds nothing. Every
+/// count is a delta of the renderer's own texture installs. Covered for wgpu recovering on wgpu,
+/// wgpu recovering onto GDI (the mark is read directly, since GDI never consults it), and GDI.
+fn trim_stop_rebind(active: &ActiveEventLoop) -> Result<(), String> {
+    for (start, target) in [
+        (SoftwareRenderMode::Off, SoftwareRenderMode::Off),
+        (SoftwareRenderMode::Off, SoftwareRenderMode::Force),
+        (SoftwareRenderMode::Force, SoftwareRenderMode::Force),
+    ] {
+        let label = format!("{start:?} to {target:?}");
+        let (window, mut renderer) = renderer(active, start, "trim-stop-rebind")?;
+        render(&mut renderer, false)?;
+        let starts_on_wgpu = matches!(start, SoftwareRenderMode::Off);
+        let installs = renderer.__frame_texture_rebuilds();
+        let _ = renderer.trim_for_occlusion();
+        check(
+            renderer.__frame_texture_trimmed() == starts_on_wgpu,
+            &format!("{label}: only the GPU presenter marks its texture"),
+        )?;
+        check(renderer.__frame_texture_rebuilds() == installs, &format!("{label}: no install"))?;
+        renderer.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
+        check(
+            render(&mut renderer, false).is_err(),
+            &format!("{label}: rendering is unavailable"),
+        )?;
+        recover_checked(&mut renderer, active, target, |prepared| {
+            check(
+                prepared.__frame_texture_trimmed() == starts_on_wgpu
+                    && prepared.__frame_texture_rebuilds() == installs,
+                &format!("{label}: preparation changes nothing"),
+            )
+        })?;
+        check(
+            !renderer.__frame_texture_trimmed(),
+            &format!("{label}: the commit clears the mark"),
+        )?;
+        check(
+            renderer.__frame_texture_rebuilds() == installs + 1,
+            &format!("{label}: the commit installs one texture"),
+        )?;
+        let expected = if matches!(target, SoftwareRenderMode::Force) {
+            (1, 1)
+        } else {
+            let size = window.inner_size();
+            (size.width, size.height)
+        };
+        check(renderer.frame_texture_extent() == expected, &format!("{label}: committed extent"))?;
+        let frames = renderer.successful_frame_count();
+        render(&mut renderer, false)?;
+        check(renderer.successful_frame_count() == frames + 1, &format!("{label}: presents"))?;
+        check(
+            renderer.__frame_texture_rebuilds() == installs + 1,
+            &format!("{label}: the first recovered present rebuilds nothing"),
+        )?;
+        check(renderer.frame_texture_extent() == expected, &format!("{label}: extent kept"))?;
+    }
+    Ok(())
+}
+
+/// The trim releases a promoted image atlas only when no media is visible, and a placeholder is left
+/// alone. Shown again after a trim, the image draws exactly the pixels of the frame before it.
+fn trim_image_atlas_and_restore(active: &ActiveEventLoop) -> Result<(), String> {
+    let (_window, mut absent) = renderer(active, SoftwareRenderMode::Off, "trim-image-absent")?;
+    render(&mut absent, true)?;
+    render(&mut absent, false)?;
+    let _ = absent.trim_for_occlusion();
+    check(
+        absent.__test_image_atlas_dimensions() == ((1, 1), (1, 1)),
+        "promoted with media absent: the atlas and its mirror are released",
+    )?;
+    let (_window, mut visible) = renderer(active, SoftwareRenderMode::Off, "trim-image-visible")?;
+    render(&mut visible, true)?;
+    let promoted = visible.__test_image_atlas_dimensions();
+    let _ = visible.trim_for_occlusion();
+    check(visible.__test_image_atlas_dimensions() == promoted, "visible media keeps its atlas")?;
+    let (_window, mut placeholder) =
+        renderer(active, SoftwareRenderMode::Off, "trim-image-placeholder")?;
+    let before = placeholder.__test_image_atlas_dimensions();
+    let _ = placeholder.trim_for_occlusion();
+    check(placeholder.__test_image_atlas_dimensions() == before, "a placeholder is left alone")?;
+
+    let (window, mut shown) = renderer(active, SoftwareRenderMode::Force, "trim-image-restore")?;
+    render(&mut shown, true)?;
+    let expected = software_pixels(&shown, &window)?;
+    render(&mut shown, false)?;
+    let _ = shown.trim_for_occlusion();
+    check(shown.__test_image_atlas_dimensions().0 == (1, 1), "the trim released the CPU atlas")?;
+    render(&mut shown, true)?;
+    check(shown.__test_image_atlas_dimensions().0 != (1, 1), "the media promotes it again")?;
+    check(software_pixels(&shown, &window)? == expected, "the restored frame equals the first")
+}
+
+/// On the GPU presenter, an image shown, removed, trimmed away and shown again presents at once, its
+/// atlas and GPU mirror promoted again, with exactly the pixels the frame before the trim read back.
+/// The reference is first shown to contain the image, against the image-free frame, at the rect the
+/// renderer's own layout places it in; that check is shown to refuse an image-free reference.
+fn trim_restores_the_image_on_wgpu(active: &ActiveEventLoop) -> Result<(), String> {
+    let (_window, mut renderer) = renderer(active, SoftwareRenderMode::Off, "trim-image-wgpu")?;
+    renderer.__enable_retained_frame_readback();
+    let frames = renderer.successful_frame_count();
+    render(&mut renderer, true)?;
+    check(renderer.successful_frame_count() > frames, "the reference frame presents")?;
+    let reference = wgpu_pixels(&mut renderer)?;
+    let rect = expected_image_rect(&renderer, 0, 0)?;
+    render(&mut renderer, false)?;
+    // The reference must show the image, exactly where the renderer placed it, so the comparison
+    // below cannot pass on two empty frames. The rect comes from the layout, not the pane origin:
+    // a grid shorter than its pane is bottom-aligned, which moves the image down.
+    let absent = wgpu_pixels(&mut renderer)?;
+    image_shown(&reference, &absent, rect).map_err(|problem| {
+        format!(
+            "the reference shows the image only inside its rect: {problem}; cell {:?}, layout {:?}",
+            renderer.cell_size(),
+            renderer.pane_layout(1),
+        )
+    })?;
+    check(
+        image_shown(&absent, &absent, rect).is_err(),
+        "the image check refuses a reference drawn without the image",
+    )?;
+    let _ = renderer.trim_for_occlusion();
+    check(
+        renderer.__test_image_atlas_dimensions() == ((1, 1), (1, 1)),
+        "the trim released the image atlas and its GPU mirror",
+    )?;
+    check(renderer.__frame_texture_trimmed(), "the frame texture is trimmed")?;
+    let frames = renderer.successful_frame_count();
+    render(&mut renderer, true)?;
+    check(renderer.successful_frame_count() == frames + 1, "the first recovered frame presents")?;
+    let (cpu, gpu) = renderer.__test_image_atlas_dimensions();
+    check(cpu != (1, 1) && gpu == cpu, "the atlas and its GPU mirror are promoted again")?;
+    check(wgpu_pixels(&mut renderer)? == reference, "the recovered image equals the reference")
+}
+
+/// A trim on a stopped device is refused before anything is released: the report says so and gives
+/// back nothing, and the retained parts, frame texture, image atlas and trim mark are unchanged.
+fn refused_trim_changes_nothing(active: &ActiveEventLoop) -> Result<(), String> {
+    let (_window, mut renderer) = renderer(active, SoftwareRenderMode::Off, "trim-refused")?;
+    render(&mut renderer, true)?;
+    render(&mut renderer, false)?;
+    renderer.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
+    check(!renderer.device_accepts_gpu_work(), "the device is stopped")?;
+    let amounts = renderer.retained_amounts();
+    let extent = renderer.frame_texture_extent();
+    let atlas = renderer.__test_image_atlas_dimensions();
+    let installs = renderer.__frame_texture_rebuilds();
+    let report = renderer.trim_for_occlusion();
+    check(report.refused && report.gpu_released_requested_bytes == 0, "the trim is refused")?;
+    check(renderer.retained_amounts() == amounts, "the retained parts are unchanged")?;
+    check(renderer.frame_texture_extent() == extent, "the frame texture is unchanged")?;
+    check(renderer.__test_image_atlas_dimensions() == atlas, "the image atlas is unchanged")?;
+    check(!renderer.__frame_texture_trimmed(), "the texture is not marked trimmed")?;
+    check(renderer.__frame_texture_rebuilds() == installs, "no texture was installed")
+}
+
+#[cfg(target_os = "windows")]
 #[test]
 fn windows_idle_image_atlas_and_gdi_frame_texture() {
+    use winit::{event_loop::EventLoop, platform::windows::EventLoopBuilderExtWindows};
     let event_loop =
         EventLoop::builder().with_any_thread(true).build().expect("Windows event loop");
     let mut probe = Probe { outcome: None };
@@ -327,6 +649,10 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
         ("reshow pixels", reshow_pixels),
         ("frame texture", frame_texture),
         ("stopped device", stopped_device),
+        ("trim, stop and rebind", trim_stop_rebind),
+        ("trim image atlas and restore", trim_image_atlas_and_restore),
+        ("trim restores the image on wgpu", trim_restores_the_image_on_wgpu),
+        ("refused trim changes nothing", refused_trim_changes_nothing),
     ] {
         if let Err(error) = case(active) {
             failures.push(format!("{name}: {error}"));

@@ -1376,21 +1376,527 @@ fn the_media_pool_follows_a_pane_across_window_moves() {
     }
 }
 
-/// The trim hook is an explicit stub: for a real window and for an unknown one it reports
-/// `Unsupported`, and it runs no retention pass, so the sample clock and every window's panes are
-/// exactly as they were.
+use crate::app::redraw::redraw_dispatch_tests::{fake_now, set_fake_now, test_base};
+use crate::app::redraw::WindowRedrawState;
+
+/// A redraw state natively covered since `since`, untrimmed, unparked and on a live device.
+fn covered_since(since: Instant) -> WindowRedrawState {
+    let mut redraw = WindowRedrawState::default();
+    assert!(!redraw.observe_native_occlusion(true, since), "covering is not a return to view");
+    redraw
+}
+
+/// The age rule: 29 s of cover is too recent, 30 s passes every rule up to the renderer, and the
+/// hook's rule ignores the age entirely. A covered window with a live device is eligible.
 #[test]
-fn the_trim_hook_reports_unsupported_and_changes_nothing() {
+fn a_window_covered_for_thirty_seconds_becomes_eligible_and_not_before() {
+    let base = test_base();
+    let redraw = covered_since(base);
+    let at = |secs| base + Duration::from_secs(secs);
+    assert_eq!(
+        trim_eligibility(&redraw, Some(true), at(29), TrimRule::After30s),
+        Err(TrimSkip::TooRecent)
+    );
+    assert_eq!(trim_eligibility(&redraw, Some(true), at(30), TrimRule::After30s), Ok(()));
+    assert_eq!(trim_eligibility(&redraw, Some(true), at(0), TrimRule::IgnoreAge), Ok(()));
+    // Without a renderer every earlier rule passed, so the renderer is the only reason left.
+    assert_eq!(
+        trim_eligibility(&redraw, None, at(30), TrimRule::After30s),
+        Err(TrimSkip::NoRenderer)
+    );
+}
+
+/// Each exclusion is reported as its own reason, whatever the age: not covered, backend-only
+/// cover, already trimmed, parked, stopped and a refusing device.
+#[test]
+fn every_exclusion_reports_its_own_reason() {
+    let base = test_base();
+    let late = base + Duration::from_secs(60);
+    let check = |redraw: &WindowRedrawState, accepts| {
+        trim_eligibility(redraw, accepts, late, TrimRule::After30s)
+    };
+    assert_eq!(check(&WindowRedrawState::default(), Some(true)), Err(TrimSkip::NotOccluded));
+
+    // Backend-only occlusion never stamps a covered stretch.
+    let mut backend = WindowRedrawState::default();
+    backend.backend_occluded = true;
+    assert_eq!(check(&backend, Some(true)), Err(TrimSkip::NotOccluded));
+
+    let mut trimmed = covered_since(base);
+    trimmed.trimmed = true;
+    assert_eq!(check(&trimmed, Some(true)), Err(TrimSkip::AlreadyTrimmed));
+
+    let mut parked = covered_since(base);
+    parked.parked = true;
+    assert_eq!(check(&parked, Some(true)), Err(TrimSkip::Parked));
+
+    let mut stopped = covered_since(base);
+    stopped.stopped_generation = Some(4);
+    assert_eq!(check(&stopped, Some(true)), Err(TrimSkip::DeviceUnavailable));
+
+    assert_eq!(check(&covered_since(base), Some(false)), Err(TrimSkip::DeviceUnavailable));
+}
+
+/// A repeated cover keeps the first stamp, so a second event cannot delay the trim; returning to
+/// view clears the stamp, the trimmed mark and the released figure, so a later stretch starts over.
+#[test]
+fn the_covered_stretch_starts_once_and_ends_on_visibility() {
+    let base = test_base();
+    let mut redraw = covered_since(base);
+    redraw.observe_native_occlusion(true, base + Duration::from_secs(20));
+    assert_eq!(redraw.occluded_since, Some(base));
+
+    redraw.trimmed = true;
+    redraw.trim_released_requested_bytes = 4_096;
+    assert!(redraw.observe_native_occlusion(false, base + Duration::from_secs(40)));
+    assert_eq!(
+        (redraw.occluded_since, redraw.trimmed, redraw.trim_released_requested_bytes),
+        (None, false, 0)
+    );
+}
+
+/// The retention pass reaches the scheduler with no `memory` subscriber installed. A window covered
+/// through the App's own occlusion path, on the fake dispatch clock, is too recent at 29 s, passes
+/// every rule but the absent renderer at the first pass after 30 s, and a window covered for 20 s
+/// then shown again is never reached.
+#[test]
+fn the_retention_pass_schedules_the_trim_after_thirty_seconds_of_cover() {
+    let base = test_base();
+    set_fake_now(base);
     let mut app = app_with_private_pools();
+    app.__test_set_dispatch_clock(fake_now);
     app.__test_seed_tab("covered");
     let main = app.main_window_id.expect("the seeded main window");
-    let sampled_at = Instant::now() - Duration::from_secs(5);
+    let child = app.__test_seed_child_window(&["shown again"]);
+    app.handle_window_occlusion(main, true);
+    app.handle_window_occlusion(child, true);
+    set_fake_now(base + Duration::from_secs(20));
+    app.handle_window_occlusion(child, false);
+
+    let pass = |app: &mut App, secs: u64| {
+        app.test_scheduler_trims.clear();
+        app.last_retention_sample = None;
+        // The return value reports only the debug walk, which no subscriber here enables; the
+        // recorded decisions are what show the pass reached the scheduler.
+        app.sample_pane_retention(base + Duration::from_secs(secs));
+        let mut decisions = app.test_scheduler_trims.clone();
+        decisions.sort_by_key(|(window_id, _)| *window_id != main);
+        decisions
+    };
+    assert_eq!(
+        pass(&mut app, 29),
+        [
+            (main, TrimDecision::Skipped(TrimSkip::TooRecent)),
+            (child, TrimDecision::Skipped(TrimSkip::NotOccluded)),
+        ]
+    );
+    assert_eq!(
+        pass(&mut app, 30),
+        [
+            (main, TrimDecision::Skipped(TrimSkip::NoRenderer)),
+            (child, TrimDecision::Skipped(TrimSkip::NotOccluded)),
+        ]
+    );
+    assert_eq!(app.trim_seq, 0, "nothing was released without a renderer");
+}
+
+/// The hook and the scheduler share one body: the hook applies every rule but the age, reports each
+/// exclusion as `Skipped` and releases nothing, and runs no retention pass, so the sample clock and
+/// every window's panes are exactly as they were.
+#[test]
+fn the_trim_hook_shares_the_scheduler_rules_and_runs_no_retention_pass() {
+    let base = test_base();
+    set_fake_now(base);
+    let mut app = app_with_private_pools();
+    app.__test_set_dispatch_clock(fake_now);
+    app.__test_seed_tab("covered");
+    let main = app.main_window_id.expect("the seeded main window");
+    let sampled_at = base - Duration::from_secs(5);
     app.last_retention_sample = Some(sampled_at);
     let panes_before: Vec<u64> = app.windows[&main].panes.keys().copied().collect();
-    assert_eq!(app.__trim_covered_now(main), TrimDecision::Unsupported);
-    assert_eq!(app.__trim_covered_now(WindowId::from(7)), TrimDecision::Unsupported);
+
+    assert_eq!(app.__trim_covered_now(main), TrimDecision::Skipped(TrimSkip::NotOccluded));
+    assert_eq!(
+        app.__trim_covered_now(WindowId::from(7)),
+        TrimDecision::Skipped(TrimSkip::NoWindow)
+    );
+    app.handle_window_occlusion(main, true);
+    // Covered this instant: the hook ignores the age, so only the absent renderer remains.
+    assert_eq!(app.__trim_covered_now(main), TrimDecision::Skipped(TrimSkip::NoRenderer));
+    app.windows.get_mut(&main).expect("main").redraw.trimmed = true;
+    assert_eq!(app.__trim_covered_now(main), TrimDecision::Skipped(TrimSkip::AlreadyTrimmed));
+
+    assert_eq!(app.trim_seq, 0);
+    assert_eq!(app.last_trim_source, None);
+    assert!(app.test_scheduler_trims.is_empty(), "the hook is not the scheduler");
     assert_eq!(app.last_retention_sample, Some(sampled_at), "no retention pass ran");
     let panes_after: Vec<u64> = app.windows[&main].panes.keys().copied().collect();
     assert_eq!(panes_after, panes_before);
     assert_eq!(app.windows.len(), 1, "no window was created or removed");
+}
+
+/// Captures the text of every named field of `memory` events, by name; the last event wins.
+#[derive(Clone, Default)]
+struct MemoryFields(Arc<std::sync::Mutex<Vec<(String, String)>>>);
+
+/// Records every field of one event as text.
+#[derive(Default)]
+struct FieldTexts(Vec<(String, String)>);
+
+impl tracing::field::Visit for FieldTexts {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.push((field.name().to_string(), format!("{value:?}")));
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.push((field.name().to_string(), value.to_string()));
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.0.push((field.name().to_string(), value.to_string()));
+    }
+
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.0.push((field.name().to_string(), value.to_string()));
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MemoryFields {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() != "memory" {
+            // When: the target differs, the event is not a memory snapshot.
+            return;
+        }
+        let mut texts = FieldTexts::default();
+        event.record(&mut texts);
+        *self.0.lock().expect("the fields lock") = texts.0;
+    }
+}
+
+impl MemoryFields {
+    /// The last captured event's `name` field, as text.
+    fn text(&self, name: &str) -> Option<String> {
+        let fields = self.0.lock().expect("the fields lock");
+        fields.iter().find(|(field, _)| field == name).map(|(_, value)| value.clone())
+    }
+}
+
+/// Captures the `renderer_total_bytes` of every INFO `memory snapshot` line.
+#[derive(Clone, Default)]
+struct RendererTotals(Arc<std::sync::Mutex<Vec<u64>>>);
+
+/// Reads one event's `renderer_total_bytes` field.
+#[derive(Default)]
+struct RendererTotalField(Option<u64>);
+
+impl tracing::field::Visit for RendererTotalField {
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if field.name() == "renderer_total_bytes" {
+            // When: the field is the renderer total, it is the figure the pass reported.
+            self.0 = Some(value);
+        }
+    }
+
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RendererTotals {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() != "memory" {
+            // When: the target differs, the event is not a memory snapshot.
+            return;
+        }
+        let mut total = RendererTotalField::default();
+        event.record(&mut total);
+        if let Some(bytes) = total.0 {
+            self.0.lock().expect("the totals lock").push(bytes);
+        }
+    }
+}
+
+/// Draw one frame of `rows` on window `window_id`'s renderer, outside any frame cadence.
+fn draw_window(app: &mut App, window_id: WindowId, rows: &str) -> Result<(), String> {
+    let mut grid = Grid::new(40, 8);
+    for (row, line) in (0u16..).zip(rows.lines()) {
+        grid.goto(row, 0);
+        for character in line.chars() {
+            grid.put_char(
+                character,
+                sonicterm_grid::grid::Color::Default,
+                sonicterm_grid::grid::Color::Default,
+                sonicterm_grid::grid::CellFlags::empty(),
+            );
+        }
+    }
+    let renderer = app.__test_window_renderer_mut(window_id).ok_or("the window has a renderer")?;
+    let frames = renderer.successful_frame_count();
+    let mut panes = [sonicterm_render_model::PaneRender {
+        id: 1,
+        rect_px: sonicterm_render_model::PixelRect { x: 0, y: 0, w: 400, h: 200 },
+        grid: &mut grid,
+        viewport_top_abs: None,
+        is_active: true,
+        cursor_style: sonicterm_render_model::CursorStyle::BlockSteady,
+        is_broadcast_participant: false,
+        scrollbar_alpha: 0.0,
+        inline_images: Vec::new(),
+    }];
+    renderer
+        .render(
+            &mut panes,
+            &sonicterm_cfg::theme::Theme::default(),
+            false,
+            None,
+            None,
+            &sonicterm_ui::tabs::TabBar::new(),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+    if renderer.successful_frame_count() == frames {
+        // When: no frame presented, the renderer holds nothing a trim could release.
+        return Err(String::from("the frame did not present"));
+    }
+    Ok(())
+}
+
+/// A renderer for a live window, presenting through wgpu (WARP on the hosted runner).
+fn live_renderer(
+    event_loop: &winit::event_loop::ActiveEventLoop,
+    visible: bool,
+    role: &'static str,
+) -> Result<(Arc<winit::window::Window>, sonicterm_gpu::core::GpuRenderer), String> {
+    use sonicterm_cfg::config::{ScrollbarMode, SoftwareRenderMode};
+    use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
+    let window = Arc::new(
+        event_loop
+            .create_window(
+                winit::window::Window::default_attributes()
+                    .with_visible(visible)
+                    .with_inner_size(winit::dpi::PhysicalSize::new(400, 200)),
+            )
+            .map_err(|error| error.to_string())?,
+    );
+    let font_dirs =
+        [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    let settings = RendererSettings {
+        font_family: "Rec Mono St.Helens",
+        font_dirs: &font_dirs,
+        font_size: 16.0,
+        line_height_mult: 1.0,
+        font_weight_scale: 1.0,
+        subpixel_aa: Default::default(),
+        padding: [0.0; 4],
+        appearance: SurfaceAppearance {
+            backdrop: Default::default(),
+            opacity: 1.0,
+            scrollbar: ScrollbarMode::Never,
+            panel_padding: 0.0,
+            software_render_mode: SoftwareRenderMode::Off,
+        },
+        role,
+        glyph_atlas_start: GlyphAtlasStart::Normal,
+    };
+    let renderer = GpuRenderer::new(
+        window.clone(),
+        event_loop,
+        &sonicterm_cfg::theme::Theme::default(),
+        settings,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((window, renderer))
+}
+
+/// Run one retention pass at `secs` after `base` and return its scheduler decision for `window_id`.
+fn pass_at(app: &mut App, base: Instant, secs: u64, window_id: WindowId) -> Option<TrimDecision> {
+    app.test_scheduler_trims.clear();
+    app.last_retention_sample = None;
+    app.sample_pane_retention(base + Duration::from_secs(secs));
+    app.test_scheduler_trims
+        .iter()
+        .find(|(decided, _)| *decided == window_id)
+        .map(|(_, decision)| *decision)
+}
+
+/// Every committed charge of `pane_id`, summed in bytes.
+fn charged_bytes(app: &App, window_id: WindowId, pane_id: u64) -> usize {
+    app.__test_pane_charges(window_id, pane_id)
+        .map(|charges| charges.values().map(|amount| amount.bytes).sum())
+        .unwrap_or(0)
+}
+
+/// The live scheduler on a real renderer: nothing is trimmed at 29 s of cover; the first pass at
+/// 30 s trims once, and its INFO snapshot reports lower renderer retention than the snapshot just
+/// before it while the pane's charges stay the same; a later pass in the same stretch skips it.
+/// After the window is shown, drawn and covered again, a pass with no subscriber at all trims it
+/// a second time. After the first trim the App's snapshot and a tagged checkpoint line both carry
+/// the trim. A warm spare is never trimmed, by the hook or by the pass.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn run_live_scheduler(event_loop: &winit::event_loop::ActiveEventLoop) -> Result<(), String> {
+    use tracing_subscriber::layer::SubscriberExt;
+    let base = test_base();
+    set_fake_now(base);
+    let mut app = app_with_private_pools();
+    app.__test_set_dispatch_clock(fake_now);
+    let pane_id = app.__test_seed_tab("covered");
+    let main = app.main_window_id.ok_or("the seeded main window")?;
+    let (window, renderer) = live_renderer(event_loop, true, "live-scheduler")?;
+    if !app.__test_attach_window_renderer(main, window, renderer) {
+        return Err(String::from("the renderer attaches"));
+    }
+    draw_window(&mut app, main, "first row of text\nsecond row of text\nthird row")?;
+    if tracing::enabled!(target: "memory", tracing::Level::INFO) {
+        return Err(String::from("precondition: no memory subscriber outside a capture"));
+    }
+    app.handle_window_occlusion(main, true);
+
+    let early = pass_at(&mut app, base, 29, main);
+    if early != Some(TrimDecision::Skipped(TrimSkip::TooRecent)) {
+        return Err(format!("29 s of cover is too recent: {early:?}"));
+    }
+    let charges_before = charged_bytes(&app, main, pane_id);
+    let totals = RendererTotals::default();
+    let subscriber = tracing_subscriber::Registry::default()
+        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        .with(totals.clone());
+    let before_bytes = app.build_memory_snapshot().renderer_bytes() as u64;
+    let eligible = sonicterm_logging::test_capture::with_default(subscriber, || {
+        pass_at(&mut app, base, 30, main)
+    });
+    if eligible != Some(TrimDecision::Trimmed { trim_seq: 1 }) {
+        return Err(format!("the first pass at 30 s trims once: {eligible:?}"));
+    }
+    let reported = totals.0.lock().expect("the totals lock").clone();
+    if reported.len() != 1 || reported[0] >= before_bytes {
+        return Err(format!(
+            "the pass's snapshot reports lower renderer retention: {before_bytes} -> {reported:?}"
+        ));
+    }
+    if charged_bytes(&app, main, pane_id) != charges_before {
+        return Err(String::from("the trim leaves the pane's charges unchanged"));
+    }
+    let renderer = app.__test_window_renderer_mut(main).ok_or("the renderer")?;
+    if !renderer.__frame_texture_trimmed() {
+        return Err(String::from("the renderer's frame texture was trimmed"));
+    }
+    if (app.trim_seq, app.last_trim_source) != (1, Some(TrimSource::Scheduler)) {
+        return Err(format!("one scheduler trim: {:?}", (app.trim_seq, app.last_trim_source)));
+    }
+    // The window's trim state reaches the App's own snapshot: its renderer summary says trimmed and
+    // carries the released request size, and a tagged checkpoint line names the scheduler's trim.
+    let snapshot = app.build_memory_snapshot();
+    let main_label = format!("{main:?}");
+    let summary = snapshot
+        .renderers
+        .iter()
+        .find(|summary| summary.label == main_label)
+        .ok_or("the snapshot reports the main renderer")?;
+    if !summary.trimmed || summary.gpu_released_requested_bytes == 0 {
+        return Err(format!(
+            "the summary carries the trim: trimmed={} released={}",
+            summary.trimmed, summary.gpu_released_requested_bytes
+        ));
+    }
+    let checkpoint = MemoryFields::default();
+    let subscriber = tracing_subscriber::Registry::default()
+        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        .with(checkpoint.clone());
+    sonicterm_logging::test_capture::with_default(subscriber, || {
+        app.__perf_checkpoint_memory(0, "covered", 1);
+    });
+    let tags =
+        (checkpoint.text("trimmed"), checkpoint.text("trim_source"), checkpoint.text("trim_seq"));
+    let expected = (Some("true".to_string()), Some("scheduler".to_string()), Some("1".to_string()));
+    if tags != expected {
+        return Err(format!("the checkpoint line carries the scheduler's trim: {tags:?}"));
+    }
+    let breakdown = checkpoint.text("renderers").unwrap_or_default();
+    let released = format!(
+        "renderer_trimmed=true renderer_gpu_released_requested_bytes={}",
+        summary.gpu_released_requested_bytes
+    );
+    if !breakdown.contains(&released) {
+        return Err(format!("the checkpoint's renderer entry carries the trim: {breakdown}"));
+    }
+    let later = pass_at(&mut app, base, 60, main);
+    if later != Some(TrimDecision::Skipped(TrimSkip::AlreadyTrimmed)) || app.trim_seq != 1 {
+        return Err(format!("one trim per covered stretch: {later:?}, trim_seq {}", app.trim_seq));
+    }
+
+    // Shown, drawn and covered again, then a pass with no subscriber installed: still trimmed.
+    set_fake_now(base + Duration::from_secs(70));
+    app.handle_window_occlusion(main, false);
+    draw_window(&mut app, main, "regrown row\nanother regrown row")?;
+    app.handle_window_occlusion(main, true);
+    let unlogged = pass_at(&mut app, base, 100, main);
+    if unlogged != Some(TrimDecision::Trimmed { trim_seq: 2 }) {
+        return Err(format!("the pass trims with logging off: {unlogged:?}"));
+    }
+
+    // A warm spare holds a live renderer but is never shown: neither the hook nor a pass trims it.
+    let (spare_window, spare_renderer) = live_renderer(event_loop, false, "live-scheduler-spare")?;
+    let spare = spare_window.id();
+    let spare_before = spare_renderer.retained_amounts();
+    app.warm_window_pool.push(crate::app::WarmWindow {
+        window: spare_window,
+        renderer: spare_renderer,
+        created_at: Instant::now(),
+    });
+    if app.__trim_covered_now(spare) != TrimDecision::Skipped(TrimSkip::Warm) {
+        return Err(String::from("the hook skips a warm spare"));
+    }
+    let _ = pass_at(&mut app, base, 200, main);
+    if app.test_scheduler_trims.iter().any(|(decided, _)| *decided == spare) {
+        return Err(String::from("the pass never visits a warm spare"));
+    }
+    let spare_after = &app.warm_window_pool[0].renderer;
+    if spare_after.retained_amounts() != spare_before || spare_after.__frame_texture_trimmed() {
+        return Err(String::from("the warm spare's renderer is untouched"));
+    }
+    Ok(())
+}
+
+/// The live scheduler and the warm-spare exclusion on a real renderer, in an isolated process with
+/// its own event loop.
+#[cfg(windows)]
+#[test]
+fn the_live_scheduler_trims_a_covered_renderer_once_and_never_a_warm_spare() {
+    use crate::app::pty_test_support::isolated;
+    use winit::{
+        application::ApplicationHandler,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+    };
+    if isolated() {
+        return;
+    }
+    struct Probe {
+        outcome: Option<Result<(), String>>,
+    }
+    impl ApplicationHandler<crate::app::UserEvent> for Probe {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            self.outcome = Some(run_live_scheduler(event_loop));
+            event_loop.exit();
+        }
+        fn window_event(
+            &mut self,
+            _: &ActiveEventLoop,
+            _: winit::window::WindowId,
+            _: winit::event::WindowEvent,
+        ) {
+        }
+    }
+    let event_loop = EventLoop::<crate::app::UserEvent>::with_user_event()
+        .with_any_thread(true)
+        .build()
+        .expect("Windows event loop");
+    let mut probe = Probe { outcome: None };
+    event_loop.run_app(&mut probe).expect("live scheduler event loop");
+    probe.outcome.expect("resumed runs").unwrap_or_else(|error| panic!("{error}"));
 }

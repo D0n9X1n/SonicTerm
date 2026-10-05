@@ -195,6 +195,37 @@ pub(crate) fn image_verdict(
     }
 }
 
+/// What the probe does with a requested covered-window trim on this loop turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrimDispatch {
+    /// No trim is requested.
+    Idle,
+    /// The App has not received `Occluded(true)` yet, so the trim waits.
+    Wait,
+    /// The App is covered: call the hook now, once.
+    Call,
+    /// The covered hold ended before the App was covered, so the hook is never reached.
+    Lapsed,
+}
+
+/// Decide a requested trim: it is called on the first turn the App holds `Occluded(true)`, and
+/// lapses when the covered hold ends first. Delivery wins over the end of the hold on one turn.
+pub(crate) fn trim_dispatch(
+    pending: bool,
+    delivered: Option<bool>,
+    hold_over: bool,
+) -> TrimDispatch {
+    if !pending {
+        TrimDispatch::Idle
+    } else if delivered == Some(true) {
+        TrimDispatch::Call
+    } else if hold_over {
+        TrimDispatch::Lapsed
+    } else {
+        TrimDispatch::Wait
+    }
+}
+
 /// Whether the cover expects an occlusion change and delivers it synthetically when none arrives:
 /// macOS reports occlusion natively, Windows reports none, so there the App gets no synthetic one.
 pub(crate) fn occlusion_wait_applies(host: Host) -> bool {

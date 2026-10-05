@@ -17,6 +17,7 @@ cargo test -p sonicterm-types
 ```
 
 ## Guardrails
+- `UploadStaging`'s coverage figure is the in-sync ceiling; the staging buffer follows the shared release rule after each wgpu sync and is released on a covered-window trim.
 - Keep this crate dependency-light and backend-free.
 - Public API changes require a manual review of the cross-crate boundary in
   `Architecture-Internals` and updates to affected crate/user documentation.

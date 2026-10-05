@@ -582,6 +582,13 @@ pub struct App {
     /// sampling every idle turn keeps a measurement that walks every pane off
     /// the path that governs idle CPU.
     pub(super) last_retention_sample: Option<std::time::Instant>,
+    /// Covered-window trims performed since startup; the latest trim's number.
+    pub(super) trim_seq: u64,
+    /// What requested the latest trim; `None` until the first one.
+    pub(super) last_trim_source: Option<retention::TrimSource>,
+    /// Unit-test observation of every scheduler trim decision, in pass order.
+    #[cfg(test)]
+    pub(super) test_scheduler_trims: Vec<(WindowId, retention::TrimDecision)>,
     /// The preceding cycle's totals, so a snapshot can report movement.
     ///
     /// `None` until the first sample has been taken, which is what makes the

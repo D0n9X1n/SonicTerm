@@ -17,6 +17,7 @@ cargo build -p sonicterm-text
 ```
 
 ## Guardrails
+- `RowGlyphCache::release_all` frees every pane record and the tables but keeps the hasher, budgets and frame clock, so the same row keeps its content key after a release.
 - Cache keys must account for font identity, size, weight, style, DPI, and
   glyph variants that change output.
 - Avoid atlas allocation or eviction surprises on the hottest draw path.

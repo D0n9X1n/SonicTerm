@@ -40,6 +40,9 @@ impl UploadLists {
     /// Drain `atlas`'s dirty rects, coalesce same-kind neighbours, and hand each staged rect to
     /// `write`. The stats are computed before the lists are released, so they report the work
     /// done; both lists are then cleared and shrunk when oversized, on the zero-dirty path too.
+    /// The staging buffer is cleared after the last write returns (the queue has copied each
+    /// slice) and released by the shared scratch rule against this sync's largest write, so a
+    /// full-atlas re-upload holds its staging for one sync only.
     pub(crate) fn sync_with(
         &mut self,
         atlas: &mut GlyphAtlas,
@@ -48,18 +51,21 @@ impl UploadLists {
         atlas.drain_dirty_rects_into(&mut self.dirty_rects);
         let dirty_rects = self.dirty_rects.len();
         if dirty_rects == 0 {
-            // When: `dirty_rects` is zero, skip queue writes, release any oversized list, and
-            // report an idle synchronization.
+            // When: `dirty_rects` is zero, skip queue writes, release any oversized list and
+            // staging buffer, and report an idle synchronization.
             self.release_rect_lists();
+            self.release_staging(0);
             return AtlasUploadStats::default();
         }
         coalesce_dirty_rects(&self.dirty_rects, &mut self.coalesced_rects);
         let atlas_w = atlas.width();
         let pixels = atlas.pixels();
         let mut uploaded_bytes = 0usize;
+        let mut largest = 0usize;
         for &rect in &self.coalesced_rects {
             copy_rect_into_scratch(pixels, atlas_w, rect, &mut self.scratch);
             uploaded_bytes = uploaded_bytes.saturating_add(self.scratch.len());
+            largest = largest.max(self.scratch.len());
             write(rect, &self.scratch);
         }
         let stats = AtlasUploadStats {
@@ -68,7 +74,24 @@ impl UploadLists {
             uploaded_bytes,
         };
         self.release_rect_lists();
+        self.release_staging(largest);
         stats
+    }
+
+    /// Empty the staging buffer, then release its excess against `largest`, the biggest write of
+    /// the sync that just ended. Clearing first matters: the shared rule cannot shrink below the
+    /// buffer's length, so a buffer still holding its last write would never be released.
+    fn release_staging(&mut self, largest: usize) {
+        self.scratch.clear();
+        crate::wezterm_pipeline::release_excess(&mut self.scratch, largest);
+    }
+
+    /// Release the staging buffer and both rect lists entirely, for a covered window's trim. The
+    /// next sync allocates what it needs again.
+    pub(crate) fn release_scratch(&mut self) {
+        self.scratch = Vec::new();
+        self.dirty_rects = Vec::new();
+        self.coalesced_rects = Vec::new();
     }
 
     /// Clear both rect lists and shrink any whose capacity exceeds 1,024 rects back to 64.
@@ -288,6 +311,11 @@ impl AtlasUpload {
     /// Bytes this upload's CPU storage keeps: its rect lists and its staging buffer.
     pub(crate) fn retained_bytes(&self) -> usize {
         self.lists.retained_bytes()
+    }
+
+    /// Release this upload's staging buffer and rect lists, for a covered window's trim.
+    pub(crate) fn release_scratch(&mut self) {
+        self.lists.release_scratch();
     }
 
     /// Unorm view used by mask and subpixel coverage consumers.

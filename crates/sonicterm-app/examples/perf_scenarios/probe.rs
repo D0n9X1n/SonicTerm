@@ -46,8 +46,8 @@ use crate::scenarios::{
 };
 use crate::waits::{
     self, BarrierProgress, CheckpointProgress, CheckpointSampling, FirstPresentBound,
-    FootprintStatus, FrameBarrier, ImagePresent, ImageProgress, ImageVerdict, FIRST_PRESENT_WAIT,
-    IMAGE_REGISTER_WAIT,
+    FootprintStatus, FrameBarrier, ImagePresent, ImageProgress, ImageVerdict, TrimDispatch,
+    FIRST_PRESENT_WAIT, IMAGE_REGISTER_WAIT,
 };
 use crate::workload;
 
@@ -263,21 +263,22 @@ fn sample_checkpoint_memory(_app: &mut App, _index: usize, _label: &str, _attemp
     false
 }
 
-/// Call the App's covered-window trim hook for `window_id`; only a tree that declares the hook builds this.
+/// Call the App's covered-window trim hook for `window_id`, with the trim number a trim reported;
+/// only a tree that declares the hook builds this.
 #[cfg(feature = "perf-hook-trim")]
-fn trim_covered(app: &mut App, window_id: WindowId) -> TrimHookOutcome {
+fn trim_covered(app: &mut App, window_id: WindowId) -> (TrimHookOutcome, Option<u64>) {
     use sonicterm_app::app::TrimDecision;
     match app.__trim_covered_now(window_id) {
-        TrimDecision::Trimmed { .. } => TrimHookOutcome::Trimmed,
-        TrimDecision::Skipped(_) => TrimHookOutcome::Skipped,
-        TrimDecision::Unsupported => TrimHookOutcome::Unsupported,
+        TrimDecision::Trimmed { trim_seq } => (TrimHookOutcome::Trimmed, Some(trim_seq)),
+        TrimDecision::Skipped(_) => (TrimHookOutcome::Skipped, None),
+        TrimDecision::Unsupported => (TrimHookOutcome::Unsupported, None),
     }
 }
 
 /// This build has no trim hook, so the covered window is never trimmed and the run is a baseline.
 #[cfg(not(feature = "perf-hook-trim"))]
-fn trim_covered(_app: &mut App, _window_id: WindowId) -> TrimHookOutcome {
-    TrimHookOutcome::Unsupported
+fn trim_covered(_app: &mut App, _window_id: WindowId) -> (TrimHookOutcome, Option<u64>) {
+    (TrimHookOutcome::Unsupported, None)
 }
 
 /// A checkpoint the plan reached and has not yet moved past: its footprint wait (managed runs) and
@@ -539,6 +540,10 @@ struct Probe {
     synthetic_occlusion: bool,
     /// What the trim hook reported when the window was covered.
     trim_hook: TrimHookOutcome,
+    /// A trim the plan asked for that waits for the App to be covered.
+    trim_pending: bool,
+    /// The App's trim number the hook's own trim reported.
+    trim_seq_after_hook: Option<u64>,
     first_present_bound: FirstPresentBound,
     /// How the main window presents, recorded at the end of startup on Windows.
     presenter: Option<PresenterRecord>,
@@ -711,6 +716,7 @@ impl ApplicationHandler<UserEvent> for Probe {
             return;
         }
         self.deliver_overdue_occlusion(event_loop, now);
+        self.service_trim(false);
         if matches!(self.stage, Stage::Steps(_)) {
             self.maybe_scan(Instant::now(), ScanTrigger::Harness);
         }
@@ -1343,6 +1349,8 @@ impl Probe {
             native_pointer: waits::NativePointer::default(),
             synthetic_occlusion: false,
             trim_hook: TrimHookOutcome::NotReached,
+            trim_pending: false,
+            trim_seq_after_hook: None,
             first_present_bound: FirstPresentBound::default(),
             presenter: None,
             software_render_mode: "",
@@ -1708,6 +1716,8 @@ impl Probe {
             window_path: "production",
             synthetic_occlusion: self.synthetic_occlusion,
             trim_hook: self.trim_hook,
+            trim_experiment: self.plan.trim_experiment,
+            trim_seq_after_hook: self.trim_seq_after_hook,
             native_focus_events_dropped: self.native_focus_dropped,
             native_cursor_rest_events_dropped: self.native_pointer.rest_dropped(),
             finish_session_settled: settled,
@@ -1757,10 +1767,14 @@ impl Probe {
             ));
         }
         if self.synthetic_occlusion {
-            notes.push(
+            notes.push(if waits::occlusion_wait_applies(scenarios::BUILD_HOST) {
                 "No native occlusion change arrived within 2 s, so a synthetic one was delivered."
-                    .to_owned(),
-            );
+                    .to_owned()
+            } else {
+                "This host reports no occlusion, so the trim experiment delivered Occluded(true) \
+                 and Occluded(false) synthetically."
+                    .to_owned()
+            });
         }
         if let Some(note) = &self.foreground_lock_failure {
             notes.push(note.clone());
@@ -2289,6 +2303,8 @@ impl Probe {
 
     /// End a measured phase: release a held button, close the open sample, record the phase.
     fn end_phase(&mut self, event_loop: &ActiveEventLoop, phase: &PhaseSpec) {
+        // A trim still waiting for the cover lapses with the phase that asked for it.
+        self.service_trim(true);
         if matches!(&self.driver, DriverState::Drag(drag) if drag.pressed) {
             self.button(event_loop, ElementState::Released);
         }
@@ -2495,11 +2511,18 @@ impl Probe {
                     self.invalidate(event_loop, format!("the App refused ActivateTab({index})"));
                 }
             }
-            Act::Cover => {
-                self.cover(event_loop);
-                self.run_trim_hook();
+            Act::Cover => self.cover(event_loop),
+            Act::Uncover => {
+                self.uncover();
+                if !waits::occlusion_wait_applies(scenarios::BUILD_HOST)
+                    && self.occlusion.delivered == Some(true)
+                {
+                    // When: this host reports no occlusion and the trim delivered `Occluded(true)`, the
+                    // probe reveals the window to the App itself, which starts the uncover time.
+                    self.deliver_occlusion(event_loop, false);
+                }
             }
-            Act::Uncover => self.uncover(),
+            Act::TrimCovered => self.request_trim(event_loop),
         }
     }
 
@@ -2858,12 +2881,42 @@ impl Probe {
         }
     }
 
-    /// Call the trim hook once the cover is up. It neither waits nor changes the plan's steps, so
-    /// both sides of a comparison run the same protocol whatever their hook reports.
-    fn run_trim_hook(&mut self) {
-        if let (Some(window_id), true) = (self.main_id, self.cover.is_some()) {
-            // When: the cover opened over a known measurement window, the hook is asked about it.
-            self.trim_hook = trim_covered(&mut self.app, window_id);
+    /// Ask for the covered-window trim. On a host without native occlusion the probe delivers
+    /// `Occluded(true)` itself first; elsewhere the trim waits for the native event or its fallback.
+    /// Both sides of a comparison run this same protocol whatever their hook reports.
+    fn request_trim(&mut self, event_loop: &ActiveEventLoop) {
+        if self.cover.is_none() {
+            // When: cover is None, no cover opened, so there is no covered window to trim.
+            return;
+        }
+        self.trim_pending = true;
+        if !waits::occlusion_wait_applies(scenarios::BUILD_HOST)
+            && self.occlusion.delivered != Some(true)
+        {
+            // When: this host reports no occlusion, the App learns of the cover only from the probe.
+            self.synthetic_occlusion = true;
+            self.deliver_occlusion(event_loop, true);
+        }
+        self.service_trim(false);
+    }
+
+    /// Call the trim hook on the first turn the App holds `Occluded(true)`, once; when the covered
+    /// hold ends first (`hold_over`), the hook stays unreached. It never changes the plan's steps.
+    fn service_trim(&mut self, hold_over: bool) {
+        match waits::trim_dispatch(self.trim_pending, self.occlusion.delivered, hold_over) {
+            TrimDispatch::Idle | TrimDispatch::Wait => {}
+            TrimDispatch::Call => {
+                self.trim_pending = false;
+                if let Some(window_id) = self.main_id {
+                    // When: main_id names the measurement window, the hook is asked about it.
+                    (self.trim_hook, self.trim_seq_after_hook) =
+                        trim_covered(&mut self.app, window_id);
+                }
+            }
+            TrimDispatch::Lapsed => {
+                self.trim_pending = false;
+                self.trim_hook = TrimHookOutcome::NotReached;
+            }
         }
     }
 
@@ -2882,8 +2935,8 @@ impl Probe {
     /// no native event brings it within 2 s.
     fn arm_occlusion_wait(&mut self, occluded: bool) {
         if waits::occlusion_wait_applies(scenarios::BUILD_HOST) {
-            // When: the host reports occlusion natively (macOS); Windows reports none, so no
-            // synthetic state reaches the App there and `uncover_ms` stays null.
+            // When: the host reports occlusion natively (macOS), the 2 s fallback covers a missing event.
+            // Windows reports none: only the trim experiment delivers occlusion there, itself.
             self.occlusion.wait = Some((occluded, Instant::now() + OCCLUSION_FALLBACK));
         }
     }
