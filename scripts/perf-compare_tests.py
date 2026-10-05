@@ -5107,9 +5107,20 @@ class WindowsComparisonLegTests(unittest.TestCase):
                 self.assertEqual(sorted(scenarios), sorted(ALL_SCENARIOS + PLATFORM_SCENARIOS[platform_name]))
                 # The S11 variants join the existing S4-S5-S11 shard; no shard is renamed.
                 shard = next(entry for entry in entries if entry["shard"] == "S4-S5-S11")
+                platform_variants = PLATFORM_SCENARIOS[platform_name]
                 self.assertEqual(shard["scenarios"].split()[:3], ["S4", "S5", "S11"])
-                self.assertEqual(shard["scenarios"].split()[3:], PLATFORM_SCENARIOS[platform_name])
+                self.assertEqual(shard["scenarios"].split()[3:3 + len(platform_variants)], platform_variants)
                 self.assertEqual(len({entry["shard"] for entry in entries}), len(entries))
+
+    def test_the_atlas_retry_variant_runs_in_the_shard_its_projection_names(self):
+        # The projection in perf.yml places S1/atlas-retry where measured slack absorbs it: macOS S4-S5-S11, since
+        # macOS S1-S3-S6-S8-S12 was the zero-slack critical path, and Windows S1-S3-S6-S8-S12, since Windows
+        # S4-S5-S11 was critical once.
+        for job_id, shard_name in (("compare-macos", "S4-S5-S11"), ("compare-windows", "S1-S3-S6-S8-S12")):
+            with self.subTest(job=job_id):
+                holders = [entry["shard"] for entry in self.matrix(job_id)
+                           if "S1/atlas-retry" in entry["scenarios"].split()]
+                self.assertEqual(holders, [shard_name])
 
     def test_only_the_s9_s10_shards_run_s9_laps(self):
         # Every matrix entry carries a laps field: S9 on the S9-S10 shard of each platform, empty elsewhere; each

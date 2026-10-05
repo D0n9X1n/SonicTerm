@@ -806,8 +806,8 @@ a base that cannot build, list or fill a set's valid runs fails the shard, and
 its `comparison.md` opens with `**Incomplete comparison:**`. The one allowed gap
 is a counters set on a base that does not declare `perf-counters`, which still
 reads `n/a`. The macOS shards run S7; S9, S10, S6/flood and S6/selection-drag;
-S2 and S10/sync; S4, S5, S11 and S11/release; and S1, S3, S6, S8, S12,
-S2/flood and S1/atlas-retry. The Windows shards of the same names run S7; S9, S10, S6/flood,
+S2 and S10/sync; S4, S5, S11, S11/release and S1/atlas-retry; and S1, S3, S6,
+S8, S12 and S2/flood. The Windows shards of the same names run S7; S9, S10, S6/flood,
 S6/selection-drag and S2/flood; S2 and S10/sync; S4, S5, S11, S11/release,
 S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12 and S1/atlas-retry, which balances each
 platform's measured shard times. On both platforms the S9-S10 shard also runs

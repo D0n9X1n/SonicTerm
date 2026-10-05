@@ -22,8 +22,8 @@ pub(crate) struct ScenarioSpec {
 
 /// Every scenario the harness can run, in id order.
 pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
-    // S1/atlas-retry runs only in the counters set (perf-compare enforces it); its 2-run cap keeps the
-    // PR comparison inside 30 minutes.
+    // S1/atlas-retry runs only in the counters set (perf-compare enforces it), capped at 2 short runs
+    // per side; perf.yml places it in a shard with measured slack and records the projection.
     capped(
         spec("S1", "idle shell", &["default", "gdi", "wgpu", "role-exit", "atlas-retry"], 300, 80),
         &[("atlas-retry", 2)],
