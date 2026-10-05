@@ -232,8 +232,16 @@ jobs:
             runner: macos-14
             shard: S4-S5-S11
             # S11/release holds 65 s after its media-free frame, so --short caps it at one run per side
-            # (--list run_caps): about 12.1-13.1 min.
-            scenarios: S4 S5 S11 S11/release
+            # (--list run_caps). S1/atlas-retry runs only in the counters set, twice per side. Nominal cost,
+            # not measured: four runs at S1's measured 5.8 s plus 0.34 s between runs, about 25 s, assuming
+            # its recovery ends inside the 5 s --short hold (0.58 s in one local debug run). A slow or
+            # invalid run is longer: it can fail late in its eighth episode, up to the 10 s settle plus 32
+            # steps of 2 s (about 74 s, inside the 80 s short timeout), and perf-compare retries an
+            # invalid run up to 3 times a side. Measured compare steps 526-558 s (runs 37318119545,
+            # 37325514262, 37333587004) with 489-1385 s of slack to the critical path, so about 551-583 s
+            # nominally. It is not in S1-S3-S6-S8-S12, which had 0 s of slack in two of those runs. The
+            # exact-head CI run is the measurement.
+            scenarios: S4 S5 S11 S11/release S1/atlas-retry
             laps: ""
           - platform: macOS
             runner: macos-14
@@ -443,7 +451,13 @@ jobs:
           - platform: Windows
             runner: windows-latest
             shard: S1-S3-S6-S8-S12
-            scenarios: S1 S3 S6 S8 S12
+            # S1/atlas-retry runs only in the counters set, twice per side. Nominal cost, not measured: four
+            # runs at S1's measured 5.5 s plus 0.23 s between runs, about 23 s, assuming its recovery ends
+            # inside the 5 s --short hold; a slow or invalid run can take up to about 74 s and is retried
+            # up to 3 times a side. Measured compare steps 1110-1326 s with 266-1910 s of slack (runs
+            # 37318119545, 37325514262, 37333587004); S4-S5-S11 here had 0 s in one of them. The
+            # exact-head CI run is the measurement.
+            scenarios: S1 S3 S6 S8 S12 S1/atlas-retry
             laps: ""
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit

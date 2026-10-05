@@ -42,6 +42,8 @@ fn driver_ms(plan: &Plan, driver: Driver) -> u64 {
             let ticks = (plan.scrollback_rows as u64).div_ceil(3);
             2 * ticks * 1_000 / u64::from(hertz)
         }
+        // The settle and 32 single-frame steps take a few frame periods each; 2 s is generous.
+        Driver::AtlasRetry => 2_000,
         Driver::None | Driver::Sweep { .. } | Driver::Drag { .. } => 0,
     }
 }
@@ -76,7 +78,11 @@ fn catalog_lists_twelve_scenarios_with_their_variants() {
     assert_eq!(find("S6").unwrap().variants, ["default", "flood", "selection-drag"]);
     assert_eq!(find("S10").unwrap().variants, ["default", "sync"]);
     // The presenter variants and the role program's exit are Windows runs; the catalog lists them everywhere.
-    assert_eq!(find("S1").unwrap().variants, ["default", "gdi", "wgpu", "role-exit"]);
+    // `atlas-retry` runs only in the counters set; perf-compare enforces it.
+    assert_eq!(
+        find("S1").unwrap().variants,
+        ["default", "gdi", "wgpu", "role-exit", "atlas-retry"]
+    );
     // S11 adds `release`, whose run cap and plan are pinned by their own tests.
     assert_eq!(find("S5").unwrap().variants, ["default", "gdi", "wgpu"]);
     for (variant, presentation) in [
@@ -160,7 +166,9 @@ fn every_plan_ends_with_a_safe_end_checkpoint() {
 fn trailing_idle_phase_appears_only_where_the_plan_ends_early() {
     // Plans that already pass 60 s after GO end with their own last phase; the rest idle to it.
     for plan in all_plans() {
-        let long_on_its_own = matches!(plan.scenario, "S1" | "S3" | "S4" | "S5" | "S11" | "S12");
+        // S1/atlas-retry ends when its episodes do, well before GO + 60 s, so it idles to it.
+        let long_on_its_own = matches!(plan.scenario, "S1" | "S3" | "S4" | "S5" | "S11" | "S12")
+            && !(plan.scenario == "S1" && plan.variant == "atlas-retry");
         let last_phase = plan
             .steps
             .iter()
@@ -436,15 +444,19 @@ fn image_release_variant_waits_for_media_free_holds_and_reshows() {
 
 #[test]
 fn run_caps_list_only_where_a_scenario_declares_them() {
-    // `--list` carries `run_caps` only for S2 and S11: S2/flood at 2 (it rebalances the PR budget; a
-    // release comparison runs it in full), S11/release at 1 and the Windows presenter variants at 2.
+    // `--list` carries `run_caps` only for S1, S2 and S11: S1/atlas-retry at 2, S2/flood at 2 (it
+    // rebalances the PR budget; a release comparison runs it in full), S11/release at 1 and the
+    // Windows presenter variants at 2.
+    assert_eq!(find("S1").unwrap().run_caps, [("atlas-retry", 2)]);
     assert_eq!(find("S2").unwrap().variants, ["default", "flood"]);
     assert_eq!(find("S2").unwrap().run_caps, [("flood", 2)]);
     assert_eq!(find("S11").unwrap().variants, ["default", "gdi", "wgpu", "release"]);
     assert_eq!(find("S11").unwrap().run_caps, [("release", 1), ("gdi", 2), ("wgpu", 2)]);
     let value: serde_json::Value = serde_json::from_str(&list_json()).unwrap();
     for entry in value["scenarios"].as_array().unwrap() {
-        if entry["id"] == "S2" {
+        if entry["id"] == "S1" {
+            assert_eq!(entry["run_caps"], serde_json::json!({"atlas-retry": 2}));
+        } else if entry["id"] == "S2" {
             assert_eq!(entry["run_caps"], serde_json::json!({"flood": 2}));
         } else if entry["id"] == "S11" {
             assert_eq!(entry["run_caps"], serde_json::json!({"release": 1, "gdi": 2, "wgpu": 2}));
@@ -494,4 +506,23 @@ fn list_json_declares_the_latency_split_capability() {
     let listed: serde_json::Value = serde_json::from_str(&list_json()).expect("valid JSON");
     assert_eq!(listed["capabilities"], serde_json::json!({ "latency_split_schema": 1 }));
     assert_eq!(listed["schema_version"], 1, "the list's own schema is unchanged");
+}
+
+/// S1/atlas-retry prints its 70 rows, drives the recovery episodes until they end, idles to the
+/// memory threshold and ends; it is the only plan that drives them.
+#[test]
+fn the_atlas_retry_plan_prints_its_rows_then_drives_the_episodes() {
+    let plan = plan("S1", "atlas-retry", true).unwrap();
+    assert_eq!(plan.roles, [Workload::PrintThenSleep(Fixture::AtlasRetryRows)]);
+    assert_eq!(phase_names(&plan), ["print", "recovery", "idle"]);
+    assert_eq!(phase(&plan, "recovery").driver, Driver::AtlasRetry);
+    assert_eq!(phase(&plan, "recovery").end, PhaseEnd::DriverDone);
+    assert_eq!(checkpoint_labels(&plan), ["end"]);
+    for other in all_plans() {
+        let drives = other
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::Phase(phase) if phase.driver == Driver::AtlasRetry));
+        assert_eq!(drives, other.scenario == "S1" && other.variant == "atlas-retry");
+    }
 }

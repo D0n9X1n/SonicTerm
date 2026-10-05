@@ -377,11 +377,14 @@ impl GpuRenderer {
 
     /// Re-enable eviction only after the compaction retry presents successfully.
     pub(super) fn finish_glyph_atlas_retry(&mut self) {
-        if std::mem::take(&mut self.glyph_atlas_retry_without_eviction) {
-            // Settling the eviction-disabled retry clears UV caches before later recycling resumes.
-            self.glyph_atlas.set_eviction_enabled(true);
-            self.row_glyph_cache.invalidate_all();
-            self.preedit_glyph_cache = None;
+        let settled = settle_glyph_atlas_retry(
+            &mut self.glyph_atlas_retry_without_eviction,
+            &mut self.glyph_atlas,
+            &mut self.row_glyph_cache,
+            &mut self.preedit_glyph_cache,
+        );
+        if settled.is_some() {
+            // A settled retry is reported once; an idle settlement logs nothing.
             tracing::warn!(
                 target: "sonic::glyph_atlas",
                 resident = self.glyph_atlas.len(),
@@ -390,6 +393,30 @@ impl GpuRenderer {
             );
         }
     }
+}
+
+/// Settle a presented eviction-disabled retry when `pending`: clear the flag, re-enable eviction
+/// on `atlas`, drop the preedit cache and keep every row `rows` holds. Returns the rows kept, or
+/// `None` when no retry was pending, which changes nothing.
+///
+/// Cached rows stay valid: only complete rows were admitted, re-enabling eviction leaves the atlas
+/// identity unchanged, and a later eviction changes the identity they are checked against (the
+/// frame-wide stamp check covers a replay earlier in the same assembly). The preedit cache is
+/// dropped because chrome layout keeps a run whose glyph the retry refused. `rows` is borrowed
+/// mutably because settlement is the one place that decides what the retry's rows become.
+fn settle_glyph_atlas_retry(
+    pending: &mut bool,
+    atlas: &mut GlyphAtlas,
+    rows: &mut sonicterm_text::row_glyph_cache::RowGlyphCache,
+    preedit: &mut Option<PreeditGlyphCache>,
+) -> Option<usize> {
+    if !std::mem::take(pending) {
+        // When: no retry is pending, eviction is already on and every cache stays as it is.
+        return None;
+    }
+    atlas.set_eviction_enabled(true);
+    *preedit = None;
+    Some(rows.len())
 }
 
 #[cfg(test)]

@@ -4002,10 +4002,11 @@ COMPARE_STEP = "Compare the base and the head"
 SUMMARY_STEP = "Publish the table in the job summary"
 EVIDENCE_STEP = "Upload the comparison evidence"
 RESULT_STEP = "Require every comparison job to succeed"
-# Every scenario set a comparison measures: each runs in exactly one shard per platform. The three named
-# variants run beside their scenario's default, since a bare ID selects only the default.
-ALL_SCENARIOS = ["S1", "S2", "S2/flood", "S3", "S4", "S5", "S6", "S6/flood", "S6/selection-drag", "S7", "S8", "S9",
-                 "S10", "S10/sync", "S11", "S12"]
+# Every scenario set a comparison measures: each runs in exactly one shard per platform. The named variants
+# run beside their scenario's default, since a bare ID selects only the default; S1/atlas-retry runs only
+# its counters set.
+ALL_SCENARIOS = ["S1", "S1/atlas-retry", "S2", "S2/flood", "S3", "S4", "S5", "S6", "S6/flood", "S6/selection-drag",
+                 "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12"]
 # The variants only one platform's shards add: S11/release on both (capped at 1), the presenter controls on Windows.
 PLATFORM_SCENARIOS = {"macOS": ["S11/release"], "Windows": ["S11/release", "S11/gdi", "S11/wgpu"]}
 JOB_RESULTS = ("success", "failure", "cancelled", "skipped", "")
@@ -5106,9 +5107,20 @@ class WindowsComparisonLegTests(unittest.TestCase):
                 self.assertEqual(sorted(scenarios), sorted(ALL_SCENARIOS + PLATFORM_SCENARIOS[platform_name]))
                 # The S11 variants join the existing S4-S5-S11 shard; no shard is renamed.
                 shard = next(entry for entry in entries if entry["shard"] == "S4-S5-S11")
+                platform_variants = PLATFORM_SCENARIOS[platform_name]
                 self.assertEqual(shard["scenarios"].split()[:3], ["S4", "S5", "S11"])
-                self.assertEqual(shard["scenarios"].split()[3:], PLATFORM_SCENARIOS[platform_name])
+                self.assertEqual(shard["scenarios"].split()[3:3 + len(platform_variants)], platform_variants)
                 self.assertEqual(len({entry["shard"] for entry in entries}), len(entries))
+
+    def test_the_atlas_retry_variant_runs_in_the_shard_its_projection_names(self):
+        # The projection in perf.yml places S1/atlas-retry where measured slack absorbs it: macOS S4-S5-S11, since
+        # macOS S1-S3-S6-S8-S12 was the zero-slack critical path, and Windows S1-S3-S6-S8-S12, since Windows
+        # S4-S5-S11 was critical once.
+        for job_id, shard_name in (("compare-macos", "S4-S5-S11"), ("compare-windows", "S1-S3-S6-S8-S12")):
+            with self.subTest(job=job_id):
+                holders = [entry["shard"] for entry in self.matrix(job_id)
+                           if "S1/atlas-retry" in entry["scenarios"].split()]
+                self.assertEqual(holders, [shard_name])
 
     def test_only_the_s9_s10_shards_run_s9_laps(self):
         # Every matrix entry carries a laps field: S9 on the S9-S10 shard of each platform, empty elsewhere; each
@@ -8943,6 +8955,183 @@ class TrimExperimentTests(unittest.TestCase):
         metrics = perf.run_metrics(make_outcome(result=trim_run(trim_experiment=None)))
         self.assertIn(("covered presented frames", "fps", "run"), metrics)
         self.assertIn(("covered present interval", "ms", "frame"), metrics)
+
+
+# A listing whose S1 also offers the counters-only atlas-retry variant.
+ATLAS_RETRY_LIST = {"schema_version": 1, "scenarios": [
+    {"id": "S1", "variants": ["default", "atlas-retry"], "title": "Idle", "timeout_s": 120, "short_timeout_s": 30,
+     "run_caps": {"atlas-retry": 2}}]}
+
+
+def recovery_records(changes=None):
+    """S1/atlas-retry's 32 well-formed records: 8 episodes of A (reset, not presented) and B-D (presented).
+
+    `changes` maps a record index to the fields that replace that record's values."""
+    changes = changes or {}
+    records = []
+    for index in range(32):
+        frame = "ABCD"[index % 4]
+        record = {"episode": index // 4, "frame": frame, "attempts": 1, "presented": 0 if frame == "A" else 1,
+                  "resets": 1 if frame == "A" else 0, "hits": 0 if frame in "AB" else 70,
+                  "misses": 70 if frame == "B" else 0, "shapes": 70 if frame == "B" else 0, "atlas_dim": 1024}
+        record.update(changes.get(index, {}))
+        records.append(record)
+    return records
+
+
+def recovery_result(recovery=MISSING, **overrides):
+    """A valid S1/atlas-retry counters result carrying `recovery` (the well-formed block unless given)."""
+    result = counters_result(**overrides)
+    result.setdefault("scenario", "S1")
+    result.setdefault("variant", "atlas-retry")
+    if recovery is MISSING:
+        recovery = {"episodes": 8, "distinct_keys": 70, "records": recovery_records()}
+    if recovery is not None:
+        result["atlas_recovery"] = recovery
+    return result
+
+
+class AtlasRetryVariantTests(CompareHarness, unittest.TestCase):
+    def test_only_the_counters_set_runs_a_counters_only_variant(self):
+        # S1/atlas-retry measures its injected episodes through counters, so the timed, laps and alloc sets are
+        # dropped for it; every other variant keeps every set it was given.
+        sets = [("timed", "a", False, False, 5), ("laps", "a", True, False, 2),
+                ("counters", "a", False, True, 2), ("alloc", "b", False, False, 5)]
+        self.assertEqual(perf.variant_sets("S1", "default", sets), sets)
+        self.assertEqual(perf.variant_sets("S3", "atlas-retry", sets), sets)
+        self.assertEqual(perf.variant_sets("S1", "atlas-retry", sets), [sets[2]])
+
+    def test_a_counters_only_variant_is_refused_when_no_counters_set_runs(self):
+        # Selecting the variant without a counters set would measure nothing, so the selection is refused,
+        # naming the variant; ordinary selections are never refused.
+        self.assertIsNone(perf.counters_only_problem([("S1", "default")], False))
+        self.assertIsNone(perf.counters_only_problem([("S1", "atlas-retry")], True))
+        problem = perf.counters_only_problem([("S1", "default"), ("S1", "atlas-retry")], False)
+        self.assertIn("S1/atlas-retry", problem)
+        self.assertIn("--counters", problem)
+
+    def test_the_comparison_refuses_the_variant_without_counters(self):
+        # The refusal reaches the driver before any run: nothing is planned, and compare_main's ValueError
+        # handling turns it into a failed comparison.
+        with self.assertRaisesRegex(ValueError, "S1/atlas-retry runs only in the counters set"):
+            self.compare(listing=ATLAS_RETRY_LIST, scenarios=("S1/atlas-retry",), head_manifest=COUNTERS_MANIFEST)
+
+    def test_the_comparison_refuses_the_variant_when_the_head_has_no_counters(self):
+        # --counters with a head that does not declare perf-counters builds no counters set, so it is refused too.
+        with self.assertRaisesRegex(ValueError, "S1/atlas-retry runs only in the counters set"):
+            self.compare(listing=ATLAS_RETRY_LIST, scenarios=("S1/atlas-retry",), options=("--counters",))
+
+    def test_a_counters_only_comparison_runs_counter_plans_and_passes_strictly(self):
+        # Selected with --counters on both sides, the variant runs counters plans only and its complete
+        # counter-only results leave no strict problem, so --require-base passes.
+        code, _gate, _calls, plans, _work, out = self.compare(
+            listing=ATLAS_RETRY_LIST, scenarios=("S1/atlas-retry",),
+            options=("--counters", "--counters-runs", "2", "--require-base"),
+            head_manifest=COUNTERS_MANIFEST, base_manifest=BASE_COUNTERS_MANIFEST)
+        self.assertEqual(code, 0, self.printed)
+        self.assertTrue(plans)
+        self.assertTrue(all(plan.counters for plan in plans))
+        self.assertEqual(sorted(plan.side for plan in plans), ["base", "base", "head", "head"])
+        self.assertTrue((out / "comparison.md").is_file())
+        results = [perf.SetResult("S1/atlas-retry", "counters",
+                                  perf.SideRuns([make_outcome(result=recovery_result())] * 2),
+                                  perf.SideRuns([make_outcome(result=recovery_result())] * 2), target_runs=2)]
+        self.assertEqual(perf.strict_problems(results), [])
+
+    def test_a_well_formed_recovery_block_validates(self):
+        # The harness's block for a valid counters run passes; a timed-out run may omit it.
+        self.assertIsNone(perf.atlas_recovery_problem(recovery_result()))
+        self.assertIsNone(perf.atlas_recovery_problem(recovery_result(None, status="timeout")))
+        self.assertIsNone(perf.atlas_recovery_problem(counters_result(scenario="S1", variant="default")))
+
+    def test_each_malformed_recovery_block_is_refused(self):
+        # Every way the block can misdescribe the episodes is a schema problem that keeps the run out of the
+        # comparison, and validate_result reports it.
+        good = {"episodes": 8, "distinct_keys": 70, "records": recovery_records()}
+        cases = {
+            "missing on a valid run": recovery_result(None),
+            "seven episodes": recovery_result(dict(good, episodes=7)),
+            "distinct keys not an integer": recovery_result(dict(good, distinct_keys="70")),
+            "distinct keys a boolean": recovery_result(dict(good, distinct_keys=True)),
+            "records not a list": recovery_result(dict(good, records={})),
+            "31 records": recovery_result(dict(good, records=recovery_records()[:31])),
+            "frames out of order": recovery_result(dict(good, records=[
+                recovery_records()[index] for index in (1, 0, *range(2, 32))])),
+            "wrong episode": recovery_result(dict(good, records=recovery_records({4: {"episode": 0}}))),
+            "a field missing": recovery_result(dict(good, records=[
+                {key: value for key, value in record.items() if key != "shapes"} if index == 6 else record
+                for index, record in enumerate(recovery_records())])),
+            "two attempts": recovery_result(dict(good, records=recovery_records({2: {"attempts": 2}}))),
+            "A presented": recovery_result(dict(good, records=recovery_records({0: {"presented": 1}}))),
+            "A without a reset": recovery_result(dict(good, records=recovery_records({8: {"resets": 0}}))),
+            "C reset": recovery_result(dict(good, records=recovery_records({2: {"resets": 1}}))),
+            "D not presented": recovery_result(dict(good, records=recovery_records({3: {"presented": 0}}))),
+            "B-D at two dimensions": recovery_result(dict(good, records=recovery_records({31: {"atlas_dim": 2048}}))),
+            "on another variant": recovery_result(scenario="S1", variant="default"),
+            "on a run without counters": dict(recovery_result(), frame_counters="off"),
+            "a valid run without counters": dict(recovery_result(None), frame_counters="off"),
+        }
+        for name, data in cases.items():
+            with self.subTest(case=name):
+                self.assertIsNotNone(perf.atlas_recovery_problem(data))
+
+    def test_impossible_numbers_in_the_recovery_block_are_refused(self):
+        # Equal-comparing floats and booleans are not the harness's integers, counters cannot be negative,
+        # and a scene with no row keys or an atlas with no size measured nothing; each refuses the block.
+        good = {"episodes": 8, "distinct_keys": 70, "records": recovery_records()}
+        every_dim_zero = recovery_records({index: {"atlas_dim": 0} for index in range(32)})
+        cases = {
+            "episodes as a float": dict(good, episodes=8.0),
+            "no distinct keys": dict(good, distinct_keys=0),
+            "negative distinct keys": dict(good, distinct_keys=-1),
+            "a boolean episode index": dict(good, records=recovery_records({4: {"episode": True}})),
+            "a float episode index": dict(good, records=recovery_records({0: {"episode": 0.0}})),
+            "negative misses": dict(good, records=recovery_records({1: {"misses": -1}})),
+            "negative hits": dict(good, records=recovery_records({2: {"hits": -5}})),
+            "negative shapes": dict(good, records=recovery_records({5: {"shapes": -1}})),
+            "a zero atlas dimension throughout": dict(good, records=every_dim_zero),
+        }
+        for name, recovery in cases.items():
+            with self.subTest(case=name):
+                self.assertIsNotNone(perf.atlas_recovery_problem(recovery_result(recovery)))
+        self.assertIsNone(perf.atlas_recovery_problem(recovery_result(good)))
+
+    def test_validate_result_reports_a_recovery_problem(self):
+        # The recovery check is part of the schema check, so a bad block refuses the run.
+        broken = recovery_result({"episodes": 8, "distinct_keys": 70, "records": []})
+        problems = perf.validate_result(broken, HARNESS_HASH, 0, counters=True)
+        self.assertTrue(any("atlas_recovery" in problem for problem in problems), problems)
+        self.assertFalse(any("atlas_recovery" in problem
+                             for problem in perf.validate_result(recovery_result(), HARNESS_HASH, 0, counters=True)))
+
+    def test_the_recovery_table_sums_each_frame_over_accepted_runs(self):
+        # Each frame's cell sums misses, hits, shapes and attempts over every episode of every valid run; the
+        # first row counts runs, episodes and distinct keys, and the last totals A-D.
+        reused = recovery_records({index: {"misses": 0, "hits": 70, "shapes": 0} for index in range(1, 32, 4)})
+        base = perf.SideRuns([make_outcome(result=recovery_result())] * 2)
+        head = perf.SideRuns([make_outcome(result=recovery_result({"episodes": 8, "distinct_keys": 70,
+                                                                   "records": reused}))] * 2)
+        rows = perf.atlas_recovery_rows("S1/atlas-retry", base, head)
+        self.assertEqual(rows[0], ["runs", "2 runs, 16 episodes, distinct keys 70",
+                                   "2 runs, 16 episodes, distinct keys 70"])
+        self.assertEqual([row[0] for row in rows], ["runs", "A", "B", "C", "D", "A-D total"])
+        self.assertEqual(rows[2], ["B", "misses 1120, hits 0, shapes 1120, attempts 16",
+                                   "misses 0, hits 1120, shapes 0, attempts 16"])
+        self.assertEqual(rows[5][1], "misses 1120, hits 2240, shapes 1120, attempts 64")
+        document = perf.comparison_document([], [], [], [], [], recovery_rows=rows)
+        self.assertIn("### Atlas retry recovery", document)
+        self.assertIn("| B | misses 1120, hits 0, shapes 1120, attempts 16 |", document)
+
+    def test_no_recovery_table_without_recovery_runs(self):
+        # Another variant, or a side with no accepted recovery runs on either side, adds no table, and the
+        # document has no recovery section.
+        runs = perf.SideRuns([make_outcome(result=recovery_result())])
+        self.assertEqual(perf.atlas_recovery_rows("S1/default", runs, runs), [])
+        empty = perf.SideRuns([make_outcome(result=counters_result())])
+        self.assertEqual(perf.atlas_recovery_rows("S1/atlas-retry", empty, perf.SideRuns(blocked="exit 5")), [])
+        head_only = perf.atlas_recovery_rows("S1/atlas-retry", perf.SideRuns(blocked="exit 5"), runs)
+        self.assertEqual(head_only[1][1], "n/a")
+        self.assertNotIn("Atlas retry recovery", perf.comparison_document([], [], [], [], []))
 
 
 if __name__ == "__main__":

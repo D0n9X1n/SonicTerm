@@ -2183,6 +2183,79 @@ def frame_counter_problems(counters: object, partial: bool = False) -> list[str]
     return problems
 
 
+# Variants measured only in the counters set: their evidence is the counter record of injected episodes,
+# so a timed, laps or alloc run of them would measure nothing comparable.
+COUNTERS_ONLY_VARIANTS = frozenset({("S1", "atlas-retry")})
+# S1/atlas-retry's recovery episodes: eight of frames A-D each.
+ATLAS_RECOVERY_EPISODES = 8
+ATLAS_RECOVERY_FRAMES = ("A", "B", "C", "D")
+ATLAS_RECOVERY_FIELDS = ("attempts", "presented", "resets", "hits", "misses", "shapes", "atlas_dim")
+
+
+def variant_sets(scenario_id: str, variant: str, sets: Sequence[tuple]) -> list[tuple]:
+    """The run sets one selected variant takes: every set, or only the counters set for a counters-only variant."""
+    if (scenario_id, variant) in COUNTERS_ONLY_VARIANTS:
+        return [entry for entry in sets if entry[0] == "counters"]
+    return list(sets)
+
+
+def counters_only_problem(selected: Sequence[tuple[str, str]], counters_set: bool) -> str | None:
+    """Why the selection cannot run: a counters-only variant selected when no counters set runs."""
+    named = [f"{scenario_id}/{variant}" for scenario_id, variant in selected
+             if (scenario_id, variant) in COUNTERS_ONLY_VARIANTS]
+    if named and not counters_set:
+        return (f"{', '.join(named)} runs only in the counters set; pass --counters with a head that "
+                "declares perf-counters")
+    return None
+
+
+def atlas_recovery_problem(data: Mapping) -> str | None:
+    """Why result.json's `atlas_recovery` cannot be read, or None when it can.
+
+    Only a valid S1/atlas-retry run with frame counters on carries it, and such a run must: 8 episodes of
+    A, B, C, D in order, one attempt each, A resetting without presenting, B-D presenting without a reset,
+    and B-D at one atlas dimension. Every number is an exact integer (never a float or a boolean that
+    compares equal), every counter is nonnegative, and the distinct key count and the atlas dimension are
+    positive. Any other result must not carry it.
+    """
+    counters_only = (data.get("scenario"), data.get("variant")) in COUNTERS_ONLY_VARIANTS
+    recovery = data.get("atlas_recovery")
+    if not counters_only or data.get("frame_counters") != "on":
+        if counters_only and data.get("status") == "valid":
+            # When: a valid S1/atlas-retry result ran without counters, it measured nothing.
+            return "S1/atlas-retry ran without frame counters"
+        return None if recovery is None else "atlas_recovery on a result that is not an S1/atlas-retry counters run"
+    if recovery is None:
+        return "a valid S1/atlas-retry counters run has no atlas_recovery" if data.get("status") == "valid" else None
+    if not isinstance(recovery, dict) or not _is_int(recovery.get("episodes")) \
+            or recovery["episodes"] != ATLAS_RECOVERY_EPISODES or not _is_int(recovery.get("distinct_keys")) \
+            or recovery["distinct_keys"] < 1 or not isinstance(recovery.get("records"), list):
+        return "atlas_recovery needs integer episodes 8, a positive integer distinct_keys and a records list"
+    records = recovery["records"]
+    if len(records) != ATLAS_RECOVERY_EPISODES * len(ATLAS_RECOVERY_FRAMES):
+        return f"atlas_recovery has {len(records)} records, not 32"
+    recovered_dims = set()
+    for index, record in enumerate(records):
+        frame = ATLAS_RECOVERY_FRAMES[index % 4]
+        if not isinstance(record, dict) or not _is_int(record.get("episode")) \
+                or record["episode"] != index // 4 or record.get("frame") != frame:
+            return f"atlas_recovery record {index} is not episode {index // 4} {frame}"
+        if not all(_is_int(record.get(name)) for name in ATLAS_RECOVERY_FIELDS):
+            return f"atlas_recovery record {index} lacks an integer field"
+        if any(record[name] < 0 for name in ATLAS_RECOVERY_FIELDS) or record["atlas_dim"] < 1:
+            return f"atlas_recovery record {index} has a negative count or a zero atlas dimension"
+        if record["attempts"] != 1:
+            return f"atlas_recovery record {index} has {record['attempts']} attempts"
+        expected = (1, 0) if frame == "A" else (0, 1)
+        if (record["resets"], record["presented"]) != expected:
+            return f"atlas_recovery record {index} ({frame}) has resets {record['resets']}, presented {record['presented']}"
+        if frame != "A":
+            recovered_dims.add(record["atlas_dim"])
+    if len(recovered_dims) != 1:
+        return "atlas_recovery frames B-D draw at more than one atlas dimension"
+    return None
+
+
 def validate_result(data: object, harness_hash: str, process_exit_code: int | None, *,
                     counters: bool = False, partial_counters: bool = False,
                     platform_name: str = "darwin", latency_split_schema: int | None = None) -> list[str]:
@@ -2296,6 +2369,9 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
         problems.append(f"hooks.trim is {trim_outcome!r} but trim_seq_after_hook is {after_hook!r}, not null")
     if data.get("trim_experiment") is not None and "hooks" not in data:
         problems.append("a trim experiment result records no hooks")
+    recovery_problem = atlas_recovery_problem(data)
+    if recovery_problem is not None:
+        problems.append(recovery_problem)
     if platform_name == "win32" and data.get("synthetic_occlusion") is True and not trim_experiment_run(data):
         # When: Windows reports no occlusion, so only the short S12 trim experiment may deliver one there.
         problems.append("synthetic_occlusion is true, but Windows reports no occlusion")
@@ -6150,11 +6226,54 @@ def host_block_windows(outputs: Mapping[str, str], monitor: Mapping | None,
     ]
 
 
+RECOVERY_HEADER = "| Frame | Baseline | PR |\n|---|---|---|\n"
+RECOVERY_NOTE = ("Each cell sums, over every episode of every accepted counters run, the row-cache misses and hits, "
+                 "the shaping requests and the render attempts of that frame: A retries an injected atlas change, B "
+                 "is the first recovered presentation, C and D are forced frames of the unchanged scene.")
+
+
+def atlas_recovery_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
+    """The atlas retry recovery table for S1/atlas-retry: one row per frame A-D and a sequence total, each
+    cell summed over every episode of every accepted counters run, with the run and episode counts and each
+    side's distinct row keys in the first row. Empty for any other label or when no run recorded episodes."""
+    if tuple(label.split("/", 1)) not in COUNTERS_ONLY_VARIANTS:
+        return []
+    per_side = []
+    for side in (base, head):
+        recoveries = [outcome.result["atlas_recovery"] for outcome in side.outcomes
+                      if isinstance((outcome.result or {}).get("atlas_recovery"), dict)]
+        per_side.append(recoveries)
+    if not any(per_side):
+        return []
+
+    def cell(recoveries: list, frames: Sequence[str]) -> str:
+        if not recoveries:
+            return "n/a"
+        sums = {name: sum(record[name] for recovery in recoveries for record in recovery["records"]
+                          if record["frame"] in frames)
+                for name in ("misses", "hits", "shapes", "attempts")}
+        return (f"misses {sums['misses']}, hits {sums['hits']}, shapes {sums['shapes']}, "
+                f"attempts {sums['attempts']}")
+
+    def header(recoveries: list) -> str:
+        if not recoveries:
+            return "n/a"
+        keys = sorted({recovery["distinct_keys"] for recovery in recoveries})
+        episodes = sum(recovery["episodes"] for recovery in recoveries)
+        return f"{len(recoveries)} runs, {episodes} episodes, distinct keys {', '.join(map(str, keys))}"
+
+    rows = [["runs", header(per_side[0]), header(per_side[1])]]
+    for frame in ATLAS_RECOVERY_FRAMES:
+        rows.append([frame, cell(per_side[0], (frame,)), cell(per_side[1], (frame,))])
+    rows.append(["A-D total", cell(per_side[0], ATLAS_RECOVERY_FRAMES), cell(per_side[1], ATLAS_RECOVERY_FRAMES)])
+    return rows
+
+
 def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequence[str]],
                         alloc_rows: Sequence[Sequence[str]], host_lines: Sequence[str],
                         detail_lines: Sequence[str], *, counter_rows: Sequence[Sequence[str]] = (),
                         counters_note: str = "", overhead_rows: Sequence[Sequence[str]] = (),
-                        capped_note: str = "") -> str:
+                        capped_note: str = "", recovery_rows: Sequence[Sequence[str]] = ()) -> str:
     """Assemble comparison.md: the PR table, the laps, counters, overhead and allocation tables when run,
     the host block and details.
 
@@ -6170,6 +6289,9 @@ def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequen
         if counters_note:
             section += counters_note + "\n\n"
         parts.append(section + (render_table(counter_rows, COUNTERS_HEADER) if counter_rows else ""))
+    if recovery_rows:
+        parts.append(f"### Atlas retry recovery (S1/atlas-retry counters runs)\n\n{RECOVERY_NOTE}\n\n"
+                     + render_table(recovery_rows, RECOVERY_HEADER))
     if overhead_rows:
         parts.append(f"### Counters overhead (S2 and S3)\n\n{OVERHEAD_NOTE}.\n\n"
                      + render_table(overhead_rows, OVERHEAD_HEADER))
@@ -6602,6 +6724,10 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         print(f"[perf-compare] {COUNTERS_UNSUPPORTED}", flush=True)
     if args.alloc:
         sets.append(("alloc", ALLOC_EXAMPLE, False, False, runs))
+    # Checked once the sets are known: --counters on a head without perf-counters runs no counters set either.
+    refusal = counters_only_problem(selected, any(set_name == "counters" for set_name, *_ in sets))
+    if refusal is not None:
+        raise ValueError(refusal)
     results = []
     marks["measure_start"] = time.time()
     # One untimed replay per delivered scenario, before any measured run; both sides share the overlaid harness.
@@ -6623,10 +6749,10 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         if delivery_problem is not None:
             # When: the replay could not show how ConPTY delivered the scenario, no set of it is measured.
             results.extend(blocked_set_results(label, delivery_problem, [
-                set_name for set_name, *_ in sets
+                set_name for set_name, *_ in variant_sets(scenario_id, variant, sets)
                 if set_name != "laps" or (scenario_id, variant) in laps_selection]))
             continue
-        for set_name, example, laps, counters, requested_runs in sets:
+        for set_name, example, laps, counters, requested_runs in variant_sets(scenario_id, variant, sets):
             if laps and (scenario_id, variant) not in laps_selection:
                 # When: --laps-scenario does not name this variant, it runs no laps set.
                 continue
@@ -6651,6 +6777,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             results.append(result)
     marks["measure_end"] = time.time()
     timed_rows, lap_rows, alloc_rows, counters_table, overhead = [], [], [], [], []
+    recovery_rows: list[list[str]] = []
     split_details: list[str] = []
     timed_heads: dict[str, SideRuns] = {}
     omitted = 0
@@ -6669,6 +6796,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         elif result.set_name == "counters":
             rows, left_out = counter_rows(shown, result.base, result.head)
             counters_table.extend(rows)
+            recovery_rows.extend(atlas_recovery_rows(result.label, result.base, result.head))
             counters_table.extend(glyph_atlas_reconciliation_rows(shown, result.base, result.head))
             split_details.extend(attempt_split_details(shown, result.base, result.head))
             counters_table.extend(split_rows(result.label, result.base, result.head,
@@ -6728,7 +6856,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         details += ["", "Per-run render-attempt splits (phases with a render attempt):", ""] + split_details
     document = comparison_document(timed_rows, lap_rows, alloc_rows, host_lines, details,
                                    counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead,
-                                   capped_note=capped_note)
+                                   capped_note=capped_note, recovery_rows=recovery_rows)
     problems = strict_problems(results) if args.require_base else []
     if problems:
         # The first line says the table is partial, so nobody reads a head-only table as a comparison.

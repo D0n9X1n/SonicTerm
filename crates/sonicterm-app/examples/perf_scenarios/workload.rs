@@ -369,6 +369,7 @@ fn fixture_bytes(fixture: Fixture) -> Vec<u8> {
         Fixture::EmojiCjk => emoji_cjk_lines(&mut text),
         Fixture::Sixel => return sixel_image(),
         Fixture::InlinePng => return inline_png_osc(),
+        Fixture::AtlasRetryRows => text.push_str(&crate::atlas_retry::fixture_text()),
     }
     text.into_bytes()
 }
@@ -580,6 +581,7 @@ fn fixture_file_name(fixture: Fixture) -> &'static str {
         Fixture::EmojiCjk => "emoji-cjk.txt",
         Fixture::Sixel => "image.sixel",
         Fixture::InlinePng => "inline.osc",
+        Fixture::AtlasRetryRows => "atlas-retry.txt",
     }
 }
 

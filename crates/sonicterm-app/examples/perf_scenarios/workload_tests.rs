@@ -205,6 +205,8 @@ esac
 
 /// SHA-256 of every plan's role script, keyed `<scenario> <variant> <full|short>`.
 const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
+    ("S1 atlas-retry full", "5f421ba9b70f6192e1d4873044c970d0173ba23e068e18dfcf19e2514ca47d0b"),
+    ("S1 atlas-retry short", "f17352b1a7ac0623741485790348964943a48fcaea4129aa5cafea90be7daf9d"),
     ("S1 default full", "edbe606ddd384910eb1da472407c41ea22dfbe76e4328017a831cc47042f83c6"),
     ("S1 default short", "e0f2554d5d2cd7cd9db6a15f9fa3086652357ac3088181b86996174afe2e1359"),
     ("S1 gdi full", "922fa48f7c0b81b136e107ede7f96feea700eaf36fb7cafe41e880ec913d4d5d"),
@@ -259,6 +261,7 @@ const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
 const FIXTURE_PINS: &[(&str, &str)] = &[
     ("bulk.txt 5242880", "1c45218ab8edc05eb5964253bffd8809540e4b0f0e19c3918b821be59818a5c7"),
     ("bulk.txt 52428800", "6329aefe7c851b9410cf38309a0c5279e508b928f5cbb86610c8767f0b5f6d7e"),
+    ("atlas-retry.txt 3430", "9d6de336ba30247c36ca1c68bc7217727464395eb0870f437cebce368f26ef39"),
     ("dense.txt 17500", "1891903144eaf328e9013124afb2253fe5ba9948e0eb29b84b824fb9cde3fa36"),
     ("emoji-cjk.txt 25207", "2475f8724fa4dffa358dd6ecd12a90cb3483a1e7f839cb8d2e41f589f0282beb"),
     (

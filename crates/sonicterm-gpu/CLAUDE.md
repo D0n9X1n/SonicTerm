@@ -49,7 +49,8 @@ cargo build -p sonicterm-gpu
 - Preserve per-cell foreground/background, inverse, underline, and 256-color
   semantics when moving data through the renderer.
 - Row glyph cache reads and writes use the atlas content identity; eviction
-  counts remain diagnostic and must not become UV-bearing cache keys.
+  counts remain diagnostic and must not become UV-bearing cache keys. Settling an
+  atlas retry keeps the rows it admitted and drops only the preedit cache.
 - The row glyph cache is keyed by content, never by absolute row, slot, origin,
   surface or selection. Hit and miss both project position-free records through
   `project_cached_row`, in the order cell origin, raster offset, shaping offset,

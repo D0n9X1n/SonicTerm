@@ -28,6 +28,7 @@ use winit::event::{
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId, WindowLevel};
 
+use crate::atlas_retry::{self, Arm, Counts, Progress, RecoveryEpisodes, Scene, SceneReading};
 use crate::cli::{RunArgs, REFUSED};
 use crate::counters::{CounterTotals, CountersMode};
 use crate::record::{
@@ -154,6 +155,18 @@ enum DriverState {
     Sweep(Sweep),
     Drag(Drag),
     Wheel(Wheel),
+    AtlasRetry(Box<AtlasRetryDriver>),
+}
+
+/// S1/atlas-retry: the episode machine, what is armed for its next frame, and the scene it settled on.
+struct AtlasRetryDriver {
+    machine: RecoveryEpisodes,
+    /// A redraw request the next drive forwards.
+    redraw_pending: bool,
+    /// When the pending arm was made; the drive is due from then.
+    armed_at: Instant,
+    /// Why the run cannot be read; the next drive ends it as invalid.
+    failure: Option<String>,
 }
 
 /// S2 typing: one `Ime::Commit` per character once the prompt shows, then a settle.
@@ -261,6 +274,46 @@ fn sample_checkpoint_memory(app: &mut App, index: usize, label: &str, attempt: u
 #[cfg(not(feature = "perf-hook-checkpoint-memory"))]
 fn sample_checkpoint_memory(_app: &mut App, _index: usize, _label: &str, _attempt: u32) -> bool {
     false
+}
+
+/// The main renderer's attempt, presentation, row-cache and shaping counts from its window's counter
+/// record, its glyph atlas resets and its atlas dimension; `None` when any counter field is missing.
+#[cfg(feature = "perf-counters")]
+fn atlas_retry_counts(app: &App) -> Option<Counts> {
+    let window_id = app.main_window()?.id();
+    let snapshot = app.frame_counters_snapshot()?;
+    let record = &snapshot.windows.iter().find(|(id, _)| *id == window_id)?.1;
+    let renderer = app.main_renderer()?;
+    Some(Counts {
+        attempts: record.count("render_attempts")?,
+        presented: record.count("render_attempts_presented")?,
+        resets: renderer.__test_glyph_atlas_resets(),
+        hits: record.count("row_cache_hits")?,
+        misses: record.count("row_cache_misses")?,
+        shapes: record.count("shape_requests")?,
+        atlas_dim: renderer.glyph_atlas_facts().dim,
+    })
+}
+
+/// This build has no counter API, so the episodes cannot be observed.
+#[cfg(not(feature = "perf-counters"))]
+fn atlas_retry_counts(_app: &App) -> Option<Counts> {
+    None
+}
+
+/// Frames the main window's renderer applied a font fallback in, cumulative; `None` when the
+/// counter cannot be read.
+#[cfg(feature = "perf-counters")]
+fn atlas_retry_fallback_applies(app: &App) -> Option<u64> {
+    let window_id = app.main_window()?.id();
+    let snapshot = app.frame_counters_snapshot()?;
+    snapshot.windows.iter().find(|(id, _)| *id == window_id)?.1.count("font_fallback_applies")
+}
+
+/// This build has no counter API, so the fallback state cannot be read.
+#[cfg(not(feature = "perf-counters"))]
+fn atlas_retry_fallback_applies(_app: &App) -> Option<u64> {
+    None
 }
 
 /// Call the App's covered-window trim hook for `window_id`, with the trim number a trim reported;
@@ -544,6 +597,8 @@ struct Probe {
     trim_pending: bool,
     /// The App's trim number the hook's own trim reported.
     trim_seq_after_hook: Option<u64>,
+    /// S1/atlas-retry's `atlas_recovery`, once every episode is recorded and validated.
+    atlas_recovery: Option<serde_json::Value>,
     first_present_bound: FirstPresentBound,
     /// How the main window presents, recorded at the end of startup on Windows.
     presenter: Option<PresenterRecord>,
@@ -1351,6 +1406,7 @@ impl Probe {
             trim_hook: TrimHookOutcome::NotReached,
             trim_pending: false,
             trim_seq_after_hook: None,
+            atlas_recovery: None,
             first_present_bound: FirstPresentBound::default(),
             presenter: None,
             software_render_mode: "",
@@ -1372,6 +1428,9 @@ impl Probe {
         dispatch: impl FnOnce(&mut App, &ActiveEventLoop),
     ) {
         let frames_before = self.frame_count();
+        // S1/atlas-retry reads the main renderer's counts and the scene around every forwarded dispatch.
+        let retry_before = matches!(self.driver, DriverState::AtlasRetry(_))
+            .then(|| (atlas_retry_counts(&self.app), self.atlas_retry_scene()));
         // The snapshot is released before the dispatch; whether it advanced is known only after.
         let before = self.open_sample.is_some().then(|| self.echo_snapshot());
         let allocations_before = match kind {
@@ -1385,6 +1444,10 @@ impl Probe {
             .map(|(before_count, counter)| counter().saturating_sub(before_count));
         let ended = Instant::now();
         let frames_after = self.frame_count();
+        if let Some((counts, scene)) = retry_before {
+            // When: the atlas-retry driver runs, this dispatch's delta and scene feed its episode machine.
+            self.observe_atlas_retry(counts, scene, ended);
+        }
         let advanced = frames_after > frames_before;
         self.frames = frames_after;
         if advanced {
@@ -1718,6 +1781,7 @@ impl Probe {
             trim_hook: self.trim_hook,
             trim_experiment: self.plan.trim_experiment,
             trim_seq_after_hook: self.trim_seq_after_hook,
+            atlas_recovery: self.atlas_recovery.clone(),
             native_focus_events_dropped: self.native_focus_dropped,
             native_cursor_rest_events_dropped: self.native_pointer.rest_dropped(),
             finish_session_settled: settled,
@@ -2369,6 +2433,9 @@ impl Probe {
                 DriverState::Wheel(wheel) => {
                     wheel.sent >= wheel.total && now >= wheel.started + wheel.interval * wheel.total
                 }
+                DriverState::AtlasRetry(retry) => {
+                    retry.machine.is_done() && retry.failure.is_none()
+                }
                 _ => true,
             },
         }
@@ -2625,6 +2692,7 @@ impl Probe {
                     finished: false,
                 })
             }
+            Driver::AtlasRetry => self.start_atlas_retry(event_loop),
             Driver::Wheel { hertz, role } => {
                 let Some((retained, center)) = self.wheel_setup(role) else {
                     self.invalidate(event_loop, format!("no pane layout for role {role}'s wheel"));
@@ -2644,6 +2712,137 @@ impl Probe {
                 })
             }
         }
+    }
+
+    /// Start S1/atlas-retry's driver: settle the scene first. It measures only the counters set,
+    /// so a run without counters is refused rather than measured without them.
+    fn start_atlas_retry(&mut self, event_loop: &ActiveEventLoop) -> DriverState {
+        if self.counters_mode != CountersMode::On {
+            // When: counters are off or unsupported, the episodes cannot be observed at all.
+            self.invalidate(event_loop, "S1/atlas-retry runs only with --counters".to_owned());
+            return DriverState::None;
+        }
+        let now = Instant::now();
+        let mut retry = AtlasRetryDriver {
+            machine: RecoveryEpisodes::new(now),
+            redraw_pending: false,
+            armed_at: now,
+            failure: None,
+        };
+        self.arm_atlas_retry(&mut retry, Arm::Redraw);
+        DriverState::AtlasRetry(Box::new(retry))
+    }
+
+    /// Arm the main renderer for the next frame of `retry`'s machine, at once, before another
+    /// dispatch is forwarded.
+    fn arm_atlas_retry(&mut self, retry: &mut AtlasRetryDriver, arm: Arm) {
+        let Some(renderer) = self.app.main_renderer_mut() else {
+            // When: there is no main renderer, nothing can be armed or measured.
+            retry.failure = Some("no main renderer to arm".to_owned());
+            return;
+        };
+        if arm == Arm::ChangeAtlas {
+            // When: frame A is next, its assembly changes the atlas so the frame retries.
+            renderer.__change_glyph_atlas_during_next_assembly();
+        }
+        renderer.invalidate_retained_frame();
+        // B is redrawn by the retry's own request; every other frame asks for one.
+        retry.redraw_pending = arm != Arm::InvalidateOnly;
+        retry.armed_at = Instant::now();
+    }
+
+    /// Feed one forwarded dispatch to the episode machine: the counts it moved from `before`, the
+    /// scene read before it (`scene_before`) and after it, and `now`, when it completed. The
+    /// machine qualifies the scene; the probe only reads it.
+    fn observe_atlas_retry(
+        &mut self,
+        before: Option<Counts>,
+        scene_before: Option<Scene>,
+        now: Instant,
+    ) {
+        if !matches!(self.driver, DriverState::AtlasRetry(_)) {
+            // When: the driver ended during the dispatch, there is no machine to feed.
+            return;
+        }
+        let after = atlas_retry_counts(&self.app);
+        let delta = before.zip(after).map(|(earlier, later)| later.since(earlier));
+        let reading = SceneReading { before: scene_before, after: self.atlas_retry_scene() };
+        let DriverState::AtlasRetry(mut retry) =
+            std::mem::replace(&mut self.driver, DriverState::None)
+        else {
+            return;
+        };
+        match retry.machine.observe(delta, &reading, now) {
+            Progress::Waiting => {}
+            Progress::Arm(arm) => self.arm_atlas_retry(&mut retry, arm),
+            Progress::Done => match atlas_retry::records_problem(retry.machine.records()) {
+                Some(problem) => retry.failure = Some(problem),
+                None => {
+                    let distinct = retry
+                        .machine
+                        .scene()
+                        .map_or(0, |scene| atlas_retry::distinct_keys(&scene.rows));
+                    self.atlas_recovery =
+                        Some(atlas_retry::recovery_json(retry.machine.records(), distinct));
+                }
+            },
+            Progress::Invalid(reason) => retry.failure = Some(reason),
+        }
+        self.driver = DriverState::AtlasRetry(retry);
+    }
+
+    /// End the run on a failure or an expired step, else forward a pending redraw request.
+    fn drive_atlas_retry(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
+        let DriverState::AtlasRetry(retry) = &mut self.driver else {
+            return;
+        };
+        if let Some(reason) = retry.failure.take().or_else(|| retry.machine.expire(now)) {
+            // When: the run failed or a step was not attempted in time, it cannot be read.
+            self.invalidate(event_loop, format!("S1/atlas-retry: {reason}"));
+            return;
+        }
+        if !std::mem::take(&mut retry.redraw_pending) {
+            // When: no redraw is pending, the drive waits for the step's attempt.
+            return;
+        }
+        let Some(window_id) = self.main_id else {
+            return;
+        };
+        self.forward(event_loop, Dispatch::Harness, |app, active| {
+            app.user_event(active, UserEvent::RequestRedraw(window_id))
+        });
+    }
+
+    /// What the main window shows for S1/atlas-retry: the active tab's title, the font fallback
+    /// state, the active pane's grid size, cursor and visible rows (trailing blanks trimmed).
+    /// `None` when any part cannot be read. Every API it reads exists on the comparison base too.
+    fn atlas_retry_scene(&self) -> Option<Scene> {
+        let window_id = self.main_id?;
+        let title = self.app.__test_window_active_tab_title(window_id)?;
+        let renderer = self.app.main_renderer()?;
+        let missing = renderer.last_missing_tofu().len() + renderer.last_missing_chrome().len();
+        let fallback = (
+            renderer.font_fallback_notice_id()?,
+            atlas_retry_fallback_applies(&self.app)?,
+            missing,
+        );
+        let pane = self.active_pane()?;
+        let state = self.app.main_panes()?.get(&pane)?;
+        let parser = state.parser.lock();
+        let grid = parser.grid();
+        let rows = (0..grid.rows)
+            .map(|row| {
+                let text: String = grid.row(row).iter().map(|cell| cell.ch).collect();
+                text.trim_end().to_owned()
+            })
+            .collect();
+        Some(Scene {
+            title,
+            fallback,
+            grid: (grid.cols, grid.rows),
+            cursor: (grid.cursor.row, grid.cursor.col),
+            rows,
+        })
     }
 
     /// Hover-only sweep lanes: the middle of the tab bar and three grid rows, and the x range.
@@ -2709,6 +2908,14 @@ impl Probe {
             DriverState::Wheel(wheel) => {
                 Some(wheel.started + wheel.interval * wheel.sent.min(wheel.total))
             }
+            DriverState::AtlasRetry(retry) => {
+                if retry.failure.is_some() || retry.redraw_pending {
+                    // When: a failure or a redraw waits, the drive is due from when it was armed.
+                    Some(retry.armed_at)
+                } else {
+                    retry.machine.deadline()
+                }
+            }
         }
     }
 
@@ -2723,6 +2930,7 @@ impl Probe {
             DriverState::Sweep(_) => self.inject_sweep(event_loop),
             DriverState::Drag(_) => self.inject_drag(event_loop),
             DriverState::Wheel(_) => self.inject_wheel(event_loop),
+            DriverState::AtlasRetry(_) => self.drive_atlas_retry(event_loop, now),
         }
     }
 
