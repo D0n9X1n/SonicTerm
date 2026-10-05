@@ -8063,3 +8063,203 @@ fn unwinding_while_row_keys_are_in_use_keeps_the_key_buffer() {
     assert!(row_keys.capacity() >= 64, "the key buffer stays in the scratch with its capacity");
     assert_eq!(row_keys.as_ptr(), warm_pointer, "and keeps its warm allocation");
 }
+
+/// `owned` cells borrowed as the run builder takes them.
+fn borrow_cells(owned: &[(u16, Cell)]) -> Vec<(u16, &Cell)> {
+    owned.iter().map(|(col, cell)| (*col, cell)).collect()
+}
+
+/// The cell at column `col` of a borrowed run, by a linear scan independent of the builder.
+fn oracle_cell_at<'cell>(cells: &[(u16, &'cell Cell)], col: u16) -> Option<&'cell Cell> {
+    cells.iter().find(|(cell_col, _)| *cell_col == col).map(|(_, cell)| *cell)
+}
+
+/// Build one style run through the production run builder into fresh records with `atlas` and
+/// the packaged font, at row 0 of a 16-column, 10x20-cell row; returns the records and
+/// whether the run was complete.
+fn build_run_records(
+    atlas: &mut GlyphAtlas,
+    stack: &sonicterm_engine::FontStack,
+    style: RunStyle,
+    cells: &[(u16, &Cell)],
+    records: &mut sonicterm_text::row_glyph_cache::CachedRow,
+) -> bool {
+    let mut raster = stack.clone();
+    let theme = Theme::default();
+    let snapped = build_snapped_cell_x(0.0, 10.0, 16);
+    GpuRenderer::build_shape_run(
+        atlas,
+        records,
+        0,
+        style,
+        cells,
+        &theme,
+        ChromeColor::rgb(230, 230, 230),
+        10.0,
+        20.0,
+        0.0,
+        &snapped,
+        Some(stack),
+        Some(&mut raster),
+        None,
+        [0.0; 4],
+        false,
+    )
+}
+
+#[test]
+fn borrowed_run_records_follow_each_lead_cell() {
+    // The run builder finds each shaped cluster's lead cell among the borrowed cells by column.
+    // Over gapped columns (a wide cell's continuation is never in the run), wide cells, a combining
+    // cluster and a distinct colour per cell, every record's colour, wide bit and extras bit equal
+    // those of the cell an independent linear scan finds at the record's lead column, and every
+    // cell of the run leads at least one record.
+    let stack = packaged_font_stack();
+    let colours = [(200, 30, 30), (30, 200, 30), (30, 30, 200), (200, 200, 30), (30, 200, 200)];
+    let mut combining =
+        Cell::plain('e', Color::Rgb(200, 30, 200), Color::Default, CellFlags::empty());
+    combining.set_extras(Some("\u{301}".to_string().into_boxed_str()));
+    let owned: Vec<(u16, Cell)> = vec![
+        (
+            0,
+            Cell::plain(
+                'W',
+                Color::Rgb(colours[0].0, colours[0].1, colours[0].2),
+                Color::Default,
+                CellFlags::WIDE,
+            ),
+        ),
+        (
+            2,
+            Cell::plain(
+                'a',
+                Color::Rgb(colours[1].0, colours[1].1, colours[1].2),
+                Color::Default,
+                CellFlags::empty(),
+            ),
+        ),
+        (3, combining),
+        (
+            4,
+            Cell::plain(
+                'M',
+                Color::Rgb(colours[2].0, colours[2].1, colours[2].2),
+                Color::Default,
+                CellFlags::WIDE,
+            ),
+        ),
+        (
+            6,
+            Cell::plain(
+                'z',
+                Color::Rgb(colours[3].0, colours[3].1, colours[3].2),
+                Color::Default,
+                CellFlags::empty(),
+            ),
+        ),
+        (
+            7,
+            Cell::plain(
+                'é',
+                Color::Rgb(colours[4].0, colours[4].1, colours[4].2),
+                Color::Default,
+                CellFlags::empty(),
+            ),
+        ),
+    ];
+    let cells: Vec<(u16, &Cell)> = owned.iter().map(|(col, cell)| (*col, cell)).collect();
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let mut records = sonicterm_text::row_glyph_cache::CachedRow::default();
+    let style = RunStyle { bold: false, italic: false };
+    assert!(
+        build_run_records(&mut atlas, &stack, style, &cells, &mut records),
+        "the run is complete"
+    );
+    let theme = Theme::default();
+    let fg_default = ChromeColor::rgb(230, 230, 230);
+    let mut led = std::collections::BTreeSet::new();
+    for record in &records.glyphs {
+        let lead = oracle_cell_at(&cells, record.lead_col).expect("a record leads at a run column");
+        led.insert(record.lead_col);
+        let bits = record.bits();
+        assert_eq!(
+            bits.is_wide,
+            lead.flags.contains(CellFlags::WIDE),
+            "column {}",
+            record.lead_col
+        );
+        assert_eq!(bits.has_extras, lead.extras().is_some(), "column {}", record.lead_col);
+        if !bits.is_color {
+            let expected = chrome_color_to_linear_rgba(cell_fg(lead, &theme, fg_default));
+            assert_eq!(
+                record.color, expected,
+                "column {} draws its own cell's colour",
+                record.lead_col
+            );
+        }
+    }
+    for tofu in &records.tofu {
+        led.insert(tofu.lead_col);
+    }
+    let columns: std::collections::BTreeSet<u16> = cells.iter().map(|(col, _)| *col).collect();
+    assert_eq!(led, columns, "every cell of the run leads a record");
+}
+
+#[test]
+fn later_runs_keep_their_exact_records_after_the_first_fails() {
+    // Three styled runs share one row's records. When the first run's shaping fails, it adds no
+    // record and the row is incomplete, while runs 2 and 3 add exactly the records each builds
+    // on its own over the same atlas order: the failed run leaves nothing behind.
+    let stack = packaged_font_stack();
+    let run_cells = |text: &str, first_col: u16, flags: CellFlags, tint: u8| -> Vec<(u16, Cell)> {
+        text.chars()
+            .enumerate()
+            .map(|(offset, character)| {
+                let col = first_col + offset as u16;
+                let colour = Color::Rgb(tint, 255 - tint, (col as u8).wrapping_mul(37));
+                (col, Cell::plain(character, colour, Color::Default, flags))
+            })
+            .collect()
+    };
+    let first = run_cells("a=é", 0, CellFlags::BOLD, 40);
+    let second = run_cells("b=ñ", 3, CellFlags::empty(), 120);
+    let third = run_cells("c=ü", 6, CellFlags::ITALIC, 200);
+    let styles = [
+        RunStyle { bold: true, italic: false },
+        RunStyle { bold: false, italic: false },
+        RunStyle { bold: false, italic: true },
+    ];
+
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let mut records = sonicterm_text::row_glyph_cache::CachedRow::default();
+    fail_next_shape_for_test();
+    let first_done =
+        build_run_records(&mut atlas, &stack, styles[0], &borrow_cells(&first), &mut records);
+    assert!(!first_done, "the failed first run is incomplete");
+    assert!(records.glyphs.is_empty() && records.tofu.is_empty(), "and adds no record");
+    let after_first = records.glyphs.len();
+    assert!(build_run_records(&mut atlas, &stack, styles[1], &borrow_cells(&second), &mut records));
+    let after_second = records.glyphs.len();
+    assert!(build_run_records(&mut atlas, &stack, styles[2], &borrow_cells(&third), &mut records));
+
+    let mut oracle_atlas = GlyphAtlas::new(1024, 1024);
+    let mut expected_second = sonicterm_text::row_glyph_cache::CachedRow::default();
+    let mut expected_third = sonicterm_text::row_glyph_cache::CachedRow::default();
+    build_run_records(
+        &mut oracle_atlas,
+        &stack,
+        styles[1],
+        &borrow_cells(&second),
+        &mut expected_second,
+    );
+    build_run_records(
+        &mut oracle_atlas,
+        &stack,
+        styles[2],
+        &borrow_cells(&third),
+        &mut expected_third,
+    );
+    assert!(!expected_second.glyphs.is_empty() && !expected_third.glyphs.is_empty());
+    assert_eq!(&records.glyphs[after_first..after_second], &expected_second.glyphs[..], "run 2");
+    assert_eq!(&records.glyphs[after_second..], &expected_third.glyphs[..], "run 3");
+}

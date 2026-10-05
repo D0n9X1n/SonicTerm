@@ -51,17 +51,17 @@ fn is_ligature_trigger(b: u8) -> bool {
 #[inline]
 pub fn run_is_ascii_fast<C: std::borrow::Borrow<Cell>>(cells: &[(u16, C)]) -> bool {
     cells.iter().all(|(_, held)| {
-        let c: &Cell = held.borrow();
-        c.extras().is_none()
+        let cell: &Cell = held.borrow();
+        cell.extras().is_none()
             && {
-                let n = c.ch as u32;
-                (0x20..=0x7E).contains(&n) && !is_ligature_trigger(n as u8)
+                let codepoint = cell.ch as u32;
+                (0x20..=0x7E).contains(&codepoint) && !is_ligature_trigger(codepoint as u8)
             }
             // Reject anything carrying cluster intent through a flag
             // we don't model in the fast path. WIDE_CONT shouldn't
             // reach a run at all (caller filters), but be defensive.
-            && !c.flags.contains(CellFlags::WIDE_CONT)
-            && !c.flags.contains(CellFlags::WIDE)
+            && !cell.flags.contains(CellFlags::WIDE_CONT)
+            && !cell.flags.contains(CellFlags::WIDE)
     })
 }
 
