@@ -45,9 +45,13 @@ fn is_ligature_trigger(b: u8) -> bool {
 /// shaping in the actual render path. The bias is deliberately toward
 /// "shape it" — a few extra sonicterm-font calls on prompts containing
 /// `=` cost less than a wrong rendering.
+///
+/// Generic over how the run holds its cells, so the renderer can pass cells borrowed from the
+/// grid (`(u16, &Cell)`) and tests can pass owned ones; the predicate is identical for both.
 #[inline]
-pub fn run_is_ascii_fast(cells: &[(u16, Cell)]) -> bool {
-    cells.iter().all(|(_, c)| {
+pub fn run_is_ascii_fast<C: std::borrow::Borrow<Cell>>(cells: &[(u16, C)]) -> bool {
+    cells.iter().all(|(_, held)| {
+        let c: &Cell = held.borrow();
         c.extras().is_none()
             && {
                 let n = c.ch as u32;

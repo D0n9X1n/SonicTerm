@@ -8756,7 +8756,8 @@ impl GpuRenderer {
         records: &mut sonicterm_text::row_glyph_cache::CachedRow,
         row: u16,
         style: RunStyle,
-        cells: &[(u16, Cell)],
+        // The run's cells borrowed from the grid, in strictly increasing column order.
+        cells: &[(u16, &Cell)],
         theme: &Theme,
         fg_default: ChromeColor,
         cell_w: f32,
@@ -8912,13 +8913,10 @@ impl GpuRenderer {
             }
         };
 
-        // A lookup from column to cell recovers per-cell attributes (colour, WIDE flag, the
-        // codepoint for tofu diagnostics) from the shaped output's `lead_col`.
-        let mut cell_by_col: std::collections::HashMap<u16, Cell> =
-            std::collections::HashMap::with_capacity(cells.len());
-        for (col, c) in cells {
-            cell_by_col.insert(*col, c.clone());
-        }
+        // Per-cell attributes (colour, WIDE flag, the codepoint for tofu diagnostics) are read
+        // from the borrowed run by the shaped output's `lead_col`; a column the run lacks reads
+        // as one default cell made per run, as the former owned lookup's fallback did.
+        let default_cell = Cell::default();
 
         // Shaped output projects straight into the shaped-glyph record; cluster byte offsets map
         // back through `cell_cols`.
@@ -8933,7 +8931,7 @@ impl GpuRenderer {
                 .unwrap_or(last_col);
             last_col = lead_col;
             let lead_ch =
-                cell_by_col.get(&lead_col).map(|c| c.ch).or(info.only_char).unwrap_or(' ');
+                run_cell_at(cells, lead_col).map(|c| c.ch).or(info.only_char).unwrap_or(' ');
             let cluster_cells = (info.num_cells as u16).max(1);
             shaped.push(sonicterm_text::shape::ShapedGlyph {
                 lead_col,
@@ -8953,7 +8951,7 @@ impl GpuRenderer {
         let mut positioned_cluster_col = None;
         let mut positioned_cluster_pen_x = 0.0;
         for g in &shaped {
-            let lead_cell = cell_by_col.get(&g.lead_col).cloned().unwrap_or_default();
+            let lead_cell: &Cell = run_cell_at(cells, g.lead_col).unwrap_or(&default_cell);
             let is_wide = lead_cell.flags.contains(CellFlags::WIDE);
             let cluster_cells = g.cluster_cells.max(1) as usize;
             let cells_to_span = if is_wide { 2 } else { cluster_cells };
@@ -9072,7 +9070,7 @@ impl GpuRenderer {
                     complete = false;
                     continue;
                 }
-                let color = cell_fg(&lead_cell, theme, fg_default);
+                let color = cell_fg(lead_cell, theme, fg_default);
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
@@ -9143,7 +9141,7 @@ impl GpuRenderer {
                     records.tofu.push(tofu_box(
                         g.lead_col,
                         cell_pixel_width,
-                        cell_fg(&lead_cell, theme, fg_default),
+                        cell_fg(lead_cell, theme, fg_default),
                     ));
                     records.missing_chars.push(ch);
                     continue;
@@ -9153,7 +9151,7 @@ impl GpuRenderer {
                     // face produced a zero-area tile, which has no pixels.
                     continue;
                 }
-                let color = cell_fg(&lead_cell, theme, fg_default);
+                let color = cell_fg(lead_cell, theme, fg_default);
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
@@ -9183,7 +9181,7 @@ impl GpuRenderer {
                     marker_fit,
                     g,
                     is_wide,
-                    &lead_cell,
+                    lead_cell,
                 );
                 records.glyphs.push(record);
                 continue;
@@ -9216,7 +9214,7 @@ impl GpuRenderer {
             }
             // Multi-cell ligature halves keep their natural overhang so paired
             // glyphs such as `=>` continue to fuse across adjacent cells.
-            let color = cell_fg(&lead_cell, theme, fg_default);
+            let color = cell_fg(lead_cell, theme, fg_default);
             let rgba = if info.is_color {
                 [1.0, 1.0, 1.0, 1.0]
             } else {
@@ -9246,7 +9244,7 @@ impl GpuRenderer {
                 marker_fit,
                 g,
                 is_wide,
-                &lead_cell,
+                lead_cell,
             );
             records.glyphs.push(record);
         }
@@ -9883,6 +9881,12 @@ fn inject_shape_failure<T>(shaped: Result<T>) -> Result<T> {
     shaped
 }
 
+/// The cell at `col` in a style run whose columns strictly increase, found by binary search;
+/// `None` when the run holds no cell at that column.
+fn run_cell_at<'cell>(cells: &[(u16, &'cell Cell)], col: u16) -> Option<&'cell Cell> {
+    cells.binary_search_by_key(&col, |(cell_col, _)| *cell_col).ok().map(|index| cells[index].1)
+}
+
 /// Where one cached row is drawn this frame: its slot, origin, column edges, cell size, baseline,
 /// surface and presenter. Everything the content key omits lives here, so one row's records
 /// project correctly wherever it is drawn.
@@ -10256,63 +10260,41 @@ pub(crate) fn emit_row_glyphs(
     // keeps the row out of the cache but never stops a later valid run from drawing.
     let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pane_id, slot);
     let mut complete = true;
-    let mut run_cells: Vec<(u16, Cell)> = Vec::new();
-    let mut run_style: Option<RunStyle> = None;
+    // Visible cells borrowed from the grid; each style run is a slice of this list.
     let cells: Vec<(u16, &Cell)> = row
         .iter()
         .enumerate()
         .filter(|(_, cell)| !cell.flags.contains(CellFlags::WIDE_CONT))
         .map(|(col, cell)| (col as u16, cell))
         .collect();
-    for (index, (col, cell)) in cells.iter().enumerate() {
-        let style = RunStyle::from_cell(cell);
-        if run_style.is_some_and(|open| open != style) {
-            // The style changed, so the open run is shaped before this cell starts a new one.
-            let run_complete = GpuRenderer::build_shape_run(
-                atlas,
-                &mut records,
-                slot,
-                run_style.expect("an open run"),
-                &run_cells,
-                theme,
-                fg_default,
-                cell_w,
-                cell_h,
-                origin.1,
-                snapped_cell_x,
-                font_stack,
-                wt_raster.as_deref_mut(),
-                row_hovered_url,
-                hovered_url_accent,
-                software_presenter,
-            );
-            complete &= run_complete;
-            run_cells.clear();
-        }
-        run_style = Some(style);
-        run_cells.push((*col, (*cell).clone()));
-        if index + 1 == cells.len() {
-            // This is the row's last visible cell, so its open run is shaped now.
-            let run_complete = GpuRenderer::build_shape_run(
-                atlas,
-                &mut records,
-                slot,
-                style,
-                &run_cells,
-                theme,
-                fg_default,
-                cell_w,
-                cell_h,
-                origin.1,
-                snapped_cell_x,
-                font_stack,
-                wt_raster.as_deref_mut(),
-                row_hovered_url,
-                hovered_url_accent,
-                software_presenter,
-            );
-            complete &= run_complete;
-        }
+    let mut run_start = 0;
+    while run_start < cells.len() {
+        let style = RunStyle::from_cell(cells[run_start].1);
+        // The run extends while the style holds; it ends at the first cell of another style.
+        let run_end = cells[run_start..]
+            .iter()
+            .position(|(_, cell)| RunStyle::from_cell(cell) != style)
+            .map_or(cells.len(), |offset| run_start + offset);
+        let run_complete = GpuRenderer::build_shape_run(
+            atlas,
+            &mut records,
+            slot,
+            style,
+            &cells[run_start..run_end],
+            theme,
+            fg_default,
+            cell_w,
+            cell_h,
+            origin.1,
+            snapped_cell_x,
+            font_stack,
+            wt_raster.as_deref_mut(),
+            row_hovered_url,
+            hovered_url_accent,
+            software_presenter,
+        );
+        complete &= run_complete;
+        run_start = run_end;
     }
     project_cached_row(&records, &at, software_presenter, frame.reborrow());
     if complete {

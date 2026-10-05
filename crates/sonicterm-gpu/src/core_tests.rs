@@ -220,12 +220,14 @@ fn shape_run_for_test(
     missing: &mut Vec<char>,
 ) -> bool {
     let mut records = sonicterm_text::row_glyph_cache::CachedRow::default();
+    // The builder takes cells borrowed from a grid; the fixture owns its cells.
+    let borrowed: Vec<(u16, &Cell)> = fixture.cells.iter().map(|(col, cell)| (*col, cell)).collect();
     let complete = GpuRenderer::build_shape_run(
         fixture.atlas,
         &mut records,
         fixture.row,
         fixture.style,
-        fixture.cells,
+        &borrowed,
         fixture.theme,
         fixture.fg_default,
         fixture.cell_size.0,
@@ -7756,4 +7758,161 @@ fn plans_ignore_the_glyph_cache() {
     assert_eq!(before.panes[0].emit_rows, after.panes[0].emit_rows);
     let planner = include_str!("frame_plan.rs");
     assert!(!planner.contains("row_glyph_cache") && !planner.contains("RowGlyphCache"));
+}
+
+/// The body of the item whose signature is `signature` in `source`: from the signature to the
+/// closing brace at the signature's own indentation, so a method ends at its own `}`.
+fn item_body<'source>(source: &'source str, signature: &str) -> &'source str {
+    let start = source.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
+    let line_start = source[..start].rfind('\n').map_or(0, |newline| newline + 1);
+    let indent = &source[line_start..start];
+    let indent = &indent[..indent.len() - indent.trim_start().len()];
+    let close = format!("\n{indent}}}\n");
+    let body = &source[start..];
+    let end = body.find(&close).map_or(body.len(), |offset| offset + close.len());
+    &body[..end]
+}
+
+#[test]
+fn run_flush_clones_no_cells() {
+    // Style runs borrow the grid's cells: the row walk records runs as slices of borrowed cells
+    // and the run builder finds a cluster's lead cell by column without a cloned lookup table.
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let emit = item_body(&source, "pub(crate) fn emit_row_glyphs(");
+    assert!(!emit.contains("(*cell).clone()"), "emit_row_glyphs clones no cell into a run");
+    assert!(!emit.contains("Vec<(u16, Cell)>"), "emit_row_glyphs keeps no owned run");
+    let build = item_body(&source, "fn build_shape_run(");
+    assert!(!build.contains("cell_by_col"), "build_shape_run builds no column-to-cell table");
+    assert!(!build.contains("c.clone()"), "build_shape_run clones no cell");
+}
+
+/// Draw `grid`'s row 0 the way an independent oracle does: group the row's non-continuation
+/// cells into consecutive style runs, build each run from owned copies of its cells and project
+/// it. Returns the projected glyphs, tofu and missing characters and the row's completeness.
+fn oracle_row(
+    grid: &Grid,
+    stack: &sonicterm_engine::FontStack,
+) -> (Vec<GlyphInstance>, Vec<(f32, f32, f32, f32, ChromeColor)>, Vec<char>, bool) {
+    let row = grid.row(0);
+    let visible: Vec<(u16, Cell)> = row
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| !cell.flags.contains(CellFlags::WIDE_CONT))
+        .map(|(col, cell)| (col as u16, cell.clone()))
+        .collect();
+    let mut runs: Vec<(RunStyle, Vec<(u16, Cell)>)> = Vec::new();
+    for (col, cell) in visible {
+        let style = RunStyle::from_cell(&cell);
+        match runs.last_mut() {
+            Some((open, cells)) if *open == style => cells.push((col, cell)),
+            _ => runs.push((style, vec![(col, cell)])),
+        }
+    }
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let mut raster = stack.clone();
+    let theme = Theme::default();
+    let snapped = build_snapped_cell_x(0.0, 10.0, grid.cols);
+    let (mut glyphs, mut tofu, mut missing) = (Vec::new(), Vec::new(), Vec::new());
+    let mut complete = true;
+    for (style, cells) in &runs {
+        complete &= shape_run_for_test(
+            ShapeRunFixture {
+                atlas: &mut atlas,
+                row: 0,
+                style: *style,
+                cells,
+                theme: &theme,
+                fg_default: ChromeColor::rgb(230, 230, 230),
+                cell_size: (10.0, 20.0),
+                origin: (0.0, 0.0),
+                surface: (400.0, 200.0),
+                baseline_y_in_cell: 16.0,
+                snapped_cell_x: &snapped,
+                font_stack: Some(stack),
+                wt_raster: Some(&mut raster),
+                hovered_url_cells: None,
+                hovered_url_accent: [0.0; 4],
+                software_presenter: false,
+            },
+            &mut glyphs,
+            &mut tofu,
+            &mut missing,
+        );
+    }
+    (glyphs, tofu, missing, complete)
+}
+
+/// A one-row grid of `cols` columns written cell by cell with each `(character, flags)`.
+fn styled_grid(cols: u16, cells: &[(char, CellFlags)]) -> Grid {
+    let mut grid = Grid::new(cols, 1);
+    for (character, flags) in cells {
+        grid.put_char(*character, Color::Default, Color::Default, *flags);
+    }
+    grid.clear_dirty();
+    grid
+}
+
+#[test]
+fn borrowed_runs_emit_the_same_records_and_completeness() {
+    // Flushing runs as borrowed cells changes no record: wide, combining, mixed-style and
+    // ligature rows draw exactly what an oracle building each run from owned cell copies draws,
+    // and a row is admitted exactly when the oracle calls it complete. A row whose first of three
+    // shaped runs fails still draws its later runs and is not admitted.
+    let plain = CellFlags::empty();
+    let rows = [
+        ("wide", styled_grid(8, &[('你', plain), ('好', plain), ('a', plain)])),
+        ("combining", styled_grid(8, &[('e', plain), ('\u{301}', plain), ('x', plain)])),
+        (
+            "mixed-style",
+            styled_grid(
+                8,
+                &[
+                    ('a', CellFlags::BOLD),
+                    ('b', CellFlags::BOLD),
+                    ('=', plain),
+                    ('>', plain),
+                    ('c', CellFlags::ITALIC),
+                ],
+            ),
+        ),
+        ("ligature", text_grid(8, &["a=>b!=c"])),
+    ];
+    for (name, grid) in &rows {
+        let stack = packaged_font_stack();
+        let (glyphs, tofu, missing, complete) = oracle_row(grid, &stack);
+        let mut rig = GlyphRig::with_stack(stack, false);
+        rig.begin(grid);
+        let emitted = rig.emit(grid, 0, 0);
+        assert!(!emitted.replayed, "{name}: the cold row misses");
+        assert_eq!(
+            emitted.glyph_bytes(),
+            bytemuck::cast_slice::<GlyphInstance, u8>(&glyphs).to_vec(),
+            "{name}: the same glyph records"
+        );
+        assert_eq!(emitted.missing, missing, "{name}: the same missing characters");
+        assert!(emitted.decorations.ends_with(&format!("{tofu:?}")), "{name}: the same tofu");
+        assert_eq!(rig.cache.contains(7, emitted.key), complete, "{name}: admitted iff complete");
+    }
+
+    let three_runs = styled_grid(
+        8,
+        &[
+            ('a', CellFlags::BOLD),
+            ('=', CellFlags::BOLD),
+            ('b', plain),
+            ('=', plain),
+            ('c', CellFlags::ITALIC),
+            ('=', CellFlags::ITALIC),
+        ],
+    );
+    let stack = packaged_font_stack();
+    let (whole, _, _, whole_complete) = oracle_row(&three_runs, &stack);
+    assert!(whole_complete, "the row is complete when every run shapes");
+    let mut rig = GlyphRig::with_stack(stack, false);
+    rig.begin(&three_runs);
+    fail_next_shape_for_test();
+    let failed = rig.emit(&three_runs, 0, 0);
+    assert!(!failed.glyphs.is_empty(), "runs 2 and 3 still draw");
+    assert!(failed.glyphs.len() < whole.len(), "run 1 draws nothing");
+    assert!(!rig.cache.contains(7, failed.key), "an incomplete row is not admitted");
 }
