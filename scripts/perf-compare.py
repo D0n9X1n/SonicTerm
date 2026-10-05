@@ -5858,6 +5858,21 @@ ROW_RUN_COMPARISON_JOB = re.compile(r"(?P<platform>macOS|Windows) before/after c
 ROW_RUN_RESULT_JOB = "Performance comparison result"
 ROW_RUN_PLATFORM_KEYS = {"macOS": "macos", "Windows": "windows"}
 ROW_RUN_DEFAULT_REPOSITORY = "D0n9X1n/SonicTerm"
+# The job that builds both refs' binaries, and each comparison job's shards on both platforms: with the result job,
+# the job inventory every eligible attempt holds exactly once. A test pins these to perf.yml.
+ROW_RUN_PRODUCER_JOB = "macOS perf binaries (base and head)"
+ROW_RUN_SHARDS = ("S7", "S9-S10", "S2-S10sync", "S4-S5-S11", "S1-S3-S6-S8-S12")
+# A harness digest as harness_hash writes it, and an attempt directory as run_set names it.
+ROW_RUN_HARNESS_HASH = re.compile(r"[0-9a-f]{64}")
+ROW_RUN_ATTEMPT_DIRECTORY = re.compile(r"\d{2,}-(?P<side>base|head)")
+
+
+def row_run_expected_jobs() -> list[str]:
+    """The sorted job names of one eligible attempt: the producer, every comparison shard and the result job."""
+    jobs = [ROW_RUN_PRODUCER_JOB, ROW_RUN_RESULT_JOB]
+    jobs += [f"{platform_name} before/after comparison ({shard})"
+             for platform_name in ROW_RUN_PLATFORM_KEYS for shard in ROW_RUN_SHARDS]
+    return sorted(jobs)
 
 
 def row_run_protocol_digest() -> str:
@@ -5883,11 +5898,13 @@ def _row_run_identity(evidence: object, out: Path) -> str:
         return Path(str(evidence)).as_posix()
 
 
-def _row_run_renderer(outcome: RunOutcome, phase_name: str) -> dict | None:
-    """The renderer section a run reported for `phase_name`, its fields as written (none filled in), or None
-    when the run reported no counters for that phase, as the shard table reads it."""
-    for phase in (outcome.result or {}).get("phases") or []:
-        if str(phase.get("name")) == phase_name and isinstance(phase.get("frame_counters"), dict):
+def _row_run_result_renderer(result: object, phase_name: str) -> dict | None:
+    """The renderer section `result` reported for `phase_name`, its fields as written (none filled in), or None
+    when it reported no counters for that phase, as the shard table reads it. The exporter and the loader share it."""
+    phases = result.get("phases") if isinstance(result, dict) else None
+    for phase in phases or []:
+        if isinstance(phase, dict) and str(phase.get("name")) == phase_name \
+                and isinstance(phase.get("frame_counters"), dict):
             renderer = phase["frame_counters"].get("renderer")
             return dict(renderer) if isinstance(renderer, Mapping) else {}
     return None
@@ -5906,8 +5923,9 @@ def row_run_export_side(result: SetResult, side_name: str, phase_name: str, out:
     """One side's accepted execution records for one phase, and its attempts that were not accepted.
 
     Only runs the final run-set classification kept (after the schema, focus, display and presenter checks) are
-    records, each with its attempt-directory identity and renderer fields; every other attempt is disclosed with
-    its kind and reasons and carries no value. A blocked or failed side has no accepted run."""
+    records, each with its attempt-directory identity and renderer fields; one that reported no counters for the
+    phase is still a record, with no renderer. Every other attempt is disclosed with its kind and reasons and carries
+    no value. A blocked or failed side has no accepted run."""
     side = getattr(result, side_name)
     accepted_runs = [] if side.blocked or side.failed else side.outcomes
     valid = [evidence for name, evidence, kind, _why in result.attempts if name == side_name and kind == "valid"]
@@ -5916,14 +5934,13 @@ def row_run_export_side(result: SetResult, side_name: str, phase_name: str, out:
     for evidence, outcome in zip(valid, accepted_runs):
         identity = _row_run_identity(evidence, out)
         accepted_ids.add(identity)
-        renderer = _row_run_renderer(outcome, phase_name)
-        if renderer is not None:
-            records.append({"execution": identity, "renderer": renderer})
+        # No accepted execution is dropped: one without the phase's counters reads as a run missing every field.
+        records.append({"execution": identity, "renderer": _row_run_result_renderer(outcome.result, phase_name)})
     rejected = [{"execution": _row_run_identity(evidence, out), "kind": kind, "reasons": list(why)}
                 for name, evidence, kind, why in result.attempts
                 if name == side_name and _row_run_identity(evidence, out) not in accepted_ids]
     return {"status": side.blocked or side.failed or "", "accepted": records, "rejected": rejected,
-            "audit": row_run_audit([record["renderer"] for record in records])}
+            "audit": row_run_audit([record["renderer"] or {} for record in records])}
 
 
 def row_run_evidence_document(results: Iterable[SetResult], out: Path, shas: Mapping[str, str], harness_hash: str,
@@ -5964,6 +5981,11 @@ class RowRunExecution:
     settings: dict
     missing: list
     claimed: set
+    run_id: str
+    attempt: int
+    # The attempt's start, and its end: the later of its update time and its last job's completion.
+    started_s: int
+    ended_s: int
 
 
 def _critical_path_module():
@@ -5982,59 +6004,156 @@ def _row_run_timing_run(directory: Path) -> str:
     return str(timing.get("run_id")) if isinstance(timing, dict) else ""
 
 
-def _row_run_check_record(directory: Path, identity: object, side_name: str, label: str, phase_name: str,
-                          renderer: Mapping) -> None:
-    """An accepted record must name an attempt directory whose outcome.json is this valid run and whose kept
-    result.json reported exactly these renderer fields for the phase."""
-    if not isinstance(identity, str) or not identity or Path(identity).is_absolute() or ".." in Path(identity).parts:
+def _row_run_canonical(directory: Path, identity: object) -> str:
+    """An execution identity's path under the artifact `directory`, which must be its own canonical form. An alias
+    (`./`, `//`, `..` or a symlinked step) or a path resolving outside the artifact is refused, so one attempt
+    directory is never counted twice and none is borrowed from elsewhere."""
+    if not isinstance(identity, str) or not identity or Path(identity).is_absolute():
         raise RowRunEvidenceError(f"{directory.name}: execution identity {identity!r} is not a directory under it")
+    resolved = (directory / identity).resolve()
+    try:
+        canonical = resolved.relative_to(directory.resolve()).as_posix()
+    except ValueError:
+        raise RowRunEvidenceError(f"{directory.name}: execution {identity!r} escapes the artifact to "
+                                  f"{resolved}") from None
+    if canonical != identity:
+        raise RowRunEvidenceError(f"{directory.name}: execution {identity!r} is not its canonical path {canonical!r}")
+    return canonical
+
+
+def _row_run_inventory(directory: Path, label: str, side_name: str) -> set[str]:
+    """Every `side_name` attempt directory the artifact holds for `label`'s counters set, as identities: the
+    authoritative list the evidence's accepted and rejected executions must cover exactly."""
+    scenario, _, variant = label.partition("/")
+    counters = Path("runs") / f"{scenario}-{variant}" / "counters"
+    try:
+        children = list((directory / counters).iterdir())
+    except FileNotFoundError:
+        # When: the artifact holds no counters set for `label`, it holds no attempt of it.
+        return set()
+    return {(counters / child.name).as_posix() for child in children
+            if (named := ROW_RUN_ATTEMPT_DIRECTORY.fullmatch(child.name)) is not None
+            and named["side"] == side_name and child.is_dir()}
+
+
+def _row_run_check_record(directory: Path, identity: str, side_name: str, label: str, phase_name: str,
+                          renderer: Mapping | None, settings: Mapping) -> None:
+    """An accepted record must name an attempt directory whose outcome.json is this valid run and whose kept
+    result.json is the valid, managed counters run of `label` under the evidence's harness and short mode, with
+    exactly one `phase_name` phase reporting the record's renderer fields. A record with no renderer must read a
+    result with no counters for the phase. A base's renderer may lack counters its tree predates."""
     run_dir = directory / identity
+    where = f"{directory.name}/{identity}"
     outcome, problem = _read_json_object(run_dir / "outcome.json")
     scenario, _, variant = label.partition("/")
     if problem is not None or not isinstance(outcome, dict):
-        raise RowRunEvidenceError(f"{directory.name}/{identity}: {problem or 'outcome.json is not an object'}")
+        raise RowRunEvidenceError(f"{where}: {problem or 'outcome.json is not an object'}")
     if (outcome.get("kind"), outcome.get("side"), outcome.get("scenario"), outcome.get("variant")) != \
             ("valid", side_name, scenario, variant):
-        raise RowRunEvidenceError(f"{directory.name}/{identity}: outcome.json is not an accepted {side_name} run "
-                                  f"of {label}")
+        raise RowRunEvidenceError(f"{where}: outcome.json is not an accepted {side_name} run of {label}")
     result, problem = _read_json_object(run_dir / "scratch" / "result.json")
-    reported = [phase.get("frame_counters", {}).get("renderer") for phase in (result or {}).get("phases") or []
-                if isinstance(phase, dict) and str(phase.get("name")) == phase_name
-                and isinstance(phase.get("frame_counters"), dict)] if isinstance(result, dict) else []
-    if problem is not None or reported[:1] != [renderer]:
-        raise RowRunEvidenceError(f"{directory.name}/{identity}: result.json does not report the record's "
-                                  f"{phase_name} renderer fields ({problem or 'they differ'})")
+    if problem is not None or not isinstance(result, dict):
+        raise RowRunEvidenceError(f"{where}: result.json does not report the record's {phase_name} renderer fields "
+                                  f"({problem or 'not an object'})")
+    expected = {"status": "valid", "frame_counters": "on", "harness_hash": settings["harness_hash"],
+                "scenario": scenario, "variant": variant, "short": settings["short"], "managed": True}
+    for field_name, value in expected.items():
+        # frame_counter_state reads a result without the key as a harness built without the counters feature.
+        found = frame_counter_state(result) if field_name == "frame_counters" else result.get(field_name)
+        if found != value or type(found) is not type(value):
+            raise RowRunEvidenceError(f"{where}: result.json {field_name} {found!r} is not {value!r}")
+    named = [phase for phase in result.get("phases") or []
+             if isinstance(phase, dict) and str(phase.get("name")) == phase_name]
+    if len(named) > 1:
+        raise RowRunEvidenceError(f"{where}: result.json reports {len(named)} {phase_name} phases")
+    if _row_run_result_renderer(result, phase_name) != renderer:
+        raise RowRunEvidenceError(f"{where}: result.json does not report the record's {phase_name} renderer fields "
+                                  "(they differ)")
 
 
-def _row_run_bind_phase(directory: Path, platform_key: str, entry: Mapping) -> tuple[tuple, RowRunPhase]:
-    """Validate one phase entry of a shard's evidence and rebuild its RowRunPhase from the accepted records."""
+def _row_run_bind_phase(directory: Path, platform_key: str, entry: Mapping,
+                        settings: Mapping) -> tuple[tuple, RowRunPhase]:
+    """Validate one phase entry of a shard's evidence and rebuild its RowRunPhase from the accepted records. Each
+    side's accepted and rejected executions are canonical, distinct, and together exactly the artifact's attempt
+    directories for the phase's counters set; a record with no renderer is an accepted run missing every field."""
     key = (platform_key, entry.get("label"), entry.get("phase"))
     if key[1:] not in ROW_RUN_DECISION_PHASES:
         raise RowRunEvidenceError(f"{directory.name}: {key[1]} {key[2]} is not a decision phase")
     sides = []
     for side_name in SIDES:
         side = entry.get(side_name)
-        if not isinstance(side, dict) or not isinstance(side.get("accepted"), list):
+        if not isinstance(side, dict) or not isinstance(side.get("accepted"), list) \
+                or not isinstance(side.get("rejected", []), list):
             raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} has no accepted records")
         records = side["accepted"]
-        identities = [record.get("execution") if isinstance(record, dict) else None for record in records]
+        identities = [_row_run_canonical(directory, record.get("execution") if isinstance(record, dict) else None)
+                      for record in records]
+        rejected = [_row_run_canonical(directory, item.get("execution") if isinstance(item, dict) else None)
+                    for item in side.get("rejected", [])]
         if len(set(identities)) != len(identities):
             raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} lists one accepted execution twice")
-        rejected = {item.get("execution") for item in side.get("rejected") or [] if isinstance(item, dict)}
-        if rejected & set(identities):
+        if len(set(rejected)) != len(rejected):
+            raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} lists one rejected execution twice")
+        if set(rejected) & set(identities):
             raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} execution both accepted and rejected")
+        listed, inventory = set(identities) | set(rejected), _row_run_inventory(directory, key[1], side_name)
+        if listed != inventory:
+            raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} accepted and rejected executions "
+                                      f"{sorted(listed)} do not match its attempt directories {sorted(inventory)}")
         renderers = []
         for identity, record in zip(identities, records):
             renderer = record.get("renderer")
-            if not isinstance(renderer, dict):
-                raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} {identity}: no renderer fields")
-            _row_run_check_record(directory, identity, side_name, key[1], key[2], renderer)
-            renderers.append(renderer)
+            if renderer is not None and not isinstance(renderer, dict):
+                raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} {identity}: renderer fields "
+                                          f"{renderer!r} are not an object")
+            _row_run_check_record(directory, identity, side_name, key[1], key[2], renderer, settings)
+            renderers.append({} if renderer is None else renderer)
         if side.get("audit") != row_run_audit(renderers):
             raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} sums or counts disagree with its "
                                       "individual records")
         sides.append(tuple(renderers))
     return key, RowRunPhase(sides[0], sides[1])
+
+
+def _row_run_settings(directory: Path, evidence: Mapping) -> dict:
+    """The evidence's build settings, validated: a harness digest, a boolean short mode, each side's sorted known
+    perf features including the counters feature, and one LTO setting both sides share. Shards and a replacement
+    compare these validated settings, so absent or mistyped settings never compare equal."""
+    harness = evidence.get("harness_hash")
+    if not isinstance(harness, str) or ROW_RUN_HARNESS_HASH.fullmatch(harness) is None:
+        raise RowRunEvidenceError(f"{directory.name}: evidence harness_hash {harness!r} is not 64 lowercase hex "
+                                  "digits")
+    short = evidence.get("short")
+    if not isinstance(short, bool):
+        raise RowRunEvidenceError(f"{directory.name}: evidence short {short!r} is not a boolean")
+    features = evidence.get("features")
+    if not isinstance(features, dict) or sorted(features) != sorted(SIDES):
+        raise RowRunEvidenceError(f"{directory.name}: evidence features {features!r} do not name each side's")
+    for side_name in SIDES:
+        named = features[side_name]
+        if not isinstance(named, list) or not all(isinstance(name, str) for name in named) \
+                or named != sorted(set(named)):
+            raise RowRunEvidenceError(f"{directory.name}: evidence features {side_name} {named!r} are not a sorted "
+                                      "list of distinct names")
+        unknown = [name for name in named if name not in PERF_FEATURES]
+        if unknown:
+            raise RowRunEvidenceError(f"{directory.name}: evidence features {side_name} name an unknown feature "
+                                      f"{unknown[0]!r}")
+        if COUNTERS_FEATURE not in named:
+            # When: a side was built without the counters feature, it measured no row-run counters.
+            raise RowRunEvidenceError(f"{directory.name}: evidence features {side_name} {named!r} lack "
+                                      f"{COUNTERS_FEATURE!r}")
+    profile = evidence.get("profile")
+    lto = profile.get("lto") if isinstance(profile, dict) else None
+    if not isinstance(profile, dict) or not isinstance(lto, dict) or sorted(lto) != sorted(SIDES) \
+            or not all(isinstance(lto[side_name], str) for side_name in SIDES) \
+            or not isinstance(profile.get("overrides"), str):
+        raise RowRunEvidenceError(f"{directory.name}: evidence profile {profile!r} does not name each side's lto "
+                                  "and the overrides")
+    if lto["base"] != lto["head"]:
+        raise RowRunEvidenceError(f"{directory.name}: base and head built with different profiles {lto}")
+    return {"harness_hash": harness, "short": short, "features": {side: list(features[side]) for side in SIDES},
+            "profile": {"lto": dict(lto), "overrides": profile["overrides"]}}
 
 
 def _row_run_bind_artifact(directory: Path, row_name: str, origin: int, run_id: str, repository: str,
@@ -6064,10 +6183,7 @@ def _row_run_bind_artifact(directory: Path, row_name: str, origin: int, run_id: 
         if evidence.get(field_name) != value:
             raise RowRunEvidenceError(f"{directory.name}: evidence {field_name} {evidence.get(field_name)!r} "
                                       f"is not {value!r}")
-    lto = (evidence.get("profile") or {}).get("lto") or {}
-    if lto.get("base") != lto.get("head"):
-        raise RowRunEvidenceError(f"{directory.name}: base and head built with different profiles {lto}")
-    settings = {name: evidence.get(name) for name in ("harness_hash", "short", "features", "profile")}
+    settings = _row_run_settings(directory, evidence)
     if not isinstance(evidence.get("phases"), list):
         raise RowRunEvidenceError(f"{directory.name}: evidence has no phase list")
     return platform_key, settings, evidence["phases"]
@@ -6077,8 +6193,9 @@ def row_run_load_execution(record: Mapping, attempt: int, directories: Sequence[
                            base_sha: str, repository: str) -> RowRunExecution:
     """Bind supplied artifact directories to one workflow execution (run and attempt) and rebuild its evidence.
 
-    The run must be the reviewed head; every job of the attempt must have succeeded, the result job included;
-    creation to the attempt's final update must fit the budget. Each comparison job, executed or inherited from
+    The run must be the reviewed head; the attempt must hold exactly perf.yml's job inventory, every job succeeded;
+    creation to the attempt's end (its update time or its last job's completion, whichever is later) must fit the
+    budget. Each comparison job, executed or inherited from
     its validated origin, claims the one artifact of its origin attempt; that artifact's name, timing.json and
     evidence must agree with it. A shard whose artifact was not supplied is missing coverage. Each decision
     phase may be owned once per platform; its records are rebuilt into RowRunPhase, never summed across owners."""
@@ -6091,20 +6208,33 @@ def row_run_load_execution(record: Mapping, attempt: int, directories: Sequence[
         raise RowRunEvidenceError(f"run {run_id} belongs to {(run.get('repository') or {}).get('full_name')}")
     try:
         rows = critical.resolve_rows(record)
-        elapsed_s = (critical.parse_time(record["attempts"][str(attempt)]["updated_at"])
-                     - critical.parse_time(run["created_at"]))
+        created_s = critical.parse_time(run["created_at"])
     except critical.AccountingError as error:
         raise RowRunEvidenceError(f"run {run_id}: {error}") from error
     identity = f"run {run_id} attempt {attempt}"
     if attempt not in rows:
         raise RowRunEvidenceError(f"{identity} is not an attempt of the run")
-    if elapsed_s > ROW_RUN_MAX_ELAPSED_S:
-        raise RowRunEvidenceError(f"{identity} took {elapsed_s} s from creation, over {ROW_RUN_MAX_ELAPSED_S} s")
     if not any(row.name == ROW_RUN_RESULT_JOB for row in rows[attempt]):
         raise RowRunEvidenceError(f"{identity} has no {ROW_RUN_RESULT_JOB!r} job")
     for row in rows[attempt]:
         if row.data.get("conclusion") != "success":
             raise RowRunEvidenceError(f"{identity}: required job {row.name!r} is {row.data.get('conclusion')}")
+    names, expected_jobs = sorted(row.name for row in rows[attempt]), row_run_expected_jobs()
+    if names != expected_jobs:
+        # When: a job is absent, unexpected or repeated, the attempt is not one eligible execution.
+        missing_jobs = sorted(set(expected_jobs) - set(names))
+        extra_jobs = sorted(name for name in set(names) if names.count(name) > expected_jobs.count(name))
+        raise RowRunEvidenceError(f"{identity}: job inventory differs from perf.yml's: missing {missing_jobs}, "
+                                  f"unexpected or repeated {extra_jobs}")
+    try:
+        times = record["attempts"][str(attempt)]
+        started_s = critical.parse_time(times["run_started_at"])
+        ended_s = max([critical.parse_time(times["updated_at"])] + [row.finished_s for row in rows[attempt]])
+    except (critical.AccountingError, KeyError) as error:
+        raise RowRunEvidenceError(f"{identity}: unreadable time envelope: {error}") from error
+    elapsed_s = ended_s - created_s
+    if elapsed_s > ROW_RUN_MAX_ELAPSED_S:
+        raise RowRunEvidenceError(f"{identity} took {elapsed_s} s from creation, over {ROW_RUN_MAX_ELAPSED_S} s")
     evidence, settings, missing, claimed = {}, {}, [], set()
     for row in rows[attempt]:
         if ROW_RUN_COMPARISON_JOB.fullmatch(row.name) is None:
@@ -6131,11 +6261,11 @@ def row_run_load_execution(record: Mapping, attempt: int, directories: Sequence[
             raise RowRunEvidenceError(f"{identity}: {candidates[0].name} settings differ from another "
                                       f"{platform_key} shard's")
         for entry in phases:
-            key, phase = _row_run_bind_phase(candidates[0], platform_key, entry)
+            key, phase = _row_run_bind_phase(candidates[0], platform_key, entry, artifact_settings)
             if key in evidence:
                 raise RowRunEvidenceError(f"{identity}: {' '.join(key)} is owned by two shards")
             evidence[key] = phase
-    return RowRunExecution(identity, evidence, settings, missing, claimed)
+    return RowRunExecution(identity, evidence, settings, missing, claimed, run_id, attempt, started_s, ended_s)
 
 
 def row_run_step_lines(decision: RowRunDecision) -> list[str]:
@@ -6158,7 +6288,10 @@ def row_run_decide(executions: Sequence[tuple[Mapping, int]], directories: Seque
                    base_sha: str, restarts: int, repository: str) -> str:
     """Validate one eligible execution and its optional same-head replacement, call row_run_final once on their
     separately rebuilt evidence maps, and return the report: both identities, the selected execution, every
-    step's status and reason, the overhead gate and the outcome."""
+    step's status and reason, the overhead gate and the outcome. The replacement must start after the first
+    execution ended, and a later attempt of one run never precedes an earlier one."""
+    if isinstance(restarts, bool) or not isinstance(restarts, int) or restarts < 0:
+        raise RowRunEvidenceError(f"restarts {restarts!r} is not a non-negative integer")
     if len(set(directories)) != len(directories):
         raise RowRunEvidenceError("duplicate artifact: one directory was supplied twice")
     loaded = [row_run_load_execution(record, attempt, directories, head_sha, base_sha, repository)
@@ -6171,6 +6304,10 @@ def row_run_decide(executions: Sequence[tuple[Mapping, int]], directories: Seque
     if rerun is not None:
         if rerun.identity == first.identity:
             raise RowRunEvidenceError(f"the replacement is the first execution again: {first.identity}")
+        if rerun.run_id == first.run_id and rerun.attempt <= first.attempt:
+            raise RowRunEvidenceError(f"the replacement {rerun.identity} does not follow {first.identity}")
+        if rerun.started_s < first.ended_s:
+            raise RowRunEvidenceError(f"the replacement {rerun.identity} started before {first.identity} ended")
         for platform_key in set(first.settings) & set(rerun.settings):
             if first.settings[platform_key] != rerun.settings[platform_key]:
                 raise RowRunEvidenceError(f"{platform_key} settings differ between {first.identity} and "

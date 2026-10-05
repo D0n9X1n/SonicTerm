@@ -9524,6 +9524,8 @@ ROW_RUN_PLACEMENT = {
                 "S7": ()},
 }
 ROW_RUN_CREATED_S = 1_800_000_000
+# A replacement run created after a first execution of the default 1,500 s has ended.
+ROW_RUN_RERUN_CREATED_S = ROW_RUN_CREATED_S + 2000
 
 
 def github_time(epoch_s):
@@ -9536,9 +9538,12 @@ class RowRunWorkflow:
     artifacts under `root`, every shard healthy: each decision phase it owns has `runs_per_side` accepted runs per
     side, each with its kept outcome.json and result.json."""
 
-    def __init__(self, root, run_id=777, runs_per_side=2, elapsed_s=1500):
-        self.root, self.run_id, self.attempt = Path(root), run_id, 1
+    def __init__(self, root, run_id=777, runs_per_side=2, elapsed_s=1500, created_s=ROW_RUN_CREATED_S):
+        self.root, self.run_id, self.attempt, self.created_s = Path(root), run_id, 1, created_s
         self.directories = {}
+        # Each platform's harness digest: 64 lowercase hex digits, as perf-compare.py's harness_hash writes it.
+        self.harness = {key: hashlib.sha256(f"harness-{key}".encode()).hexdigest()
+                        for key in perf.ROW_RUN_PLATFORM_KEYS.values()}
         rows = [self.row("macOS perf binaries (base and head)", 60, 1)]
         artifacts = []
         for platform_name, shards in ROW_RUN_PLACEMENT.items():
@@ -9551,18 +9556,17 @@ class RowRunWorkflow:
                                                                          runs_per_side)
         rows.append(self.row(perf.ROW_RUN_RESULT_JOB, elapsed_s - 20, len(rows) + 1))
         self.record = {"run": {"id": run_id, "head_sha": ROW_RUN_HEAD_SHA,
-                               "created_at": github_time(ROW_RUN_CREATED_S),
+                               "created_at": github_time(created_s),
                                "repository": {"full_name": perf.ROW_RUN_DEFAULT_REPOSITORY}},
-                       "attempts": {"1": {"run_started_at": github_time(ROW_RUN_CREATED_S + 5),
-                                          "updated_at": github_time(ROW_RUN_CREATED_S + elapsed_s)}},
+                       "attempts": {"1": {"run_started_at": github_time(created_s + 5),
+                                          "updated_at": github_time(created_s + elapsed_s)}},
                        "jobs": {"1": rows}, "artifacts": artifacts}
 
-    @staticmethod
-    def row(name, finish_offset_s, runner):
-        """A job row that ran successfully inside attempt 1."""
-        return {"name": name, "conclusion": "success", "created_at": github_time(ROW_RUN_CREATED_S + 10),
-                "started_at": github_time(ROW_RUN_CREATED_S + 20),
-                "completed_at": github_time(ROW_RUN_CREATED_S + finish_offset_s), "runner_id": runner}
+    def row(self, name, finish_offset_s, runner):
+        """A job row that ran successfully inside attempt 1, finishing `finish_offset_s` after the run's creation."""
+        return {"name": name, "conclusion": "success", "created_at": github_time(self.created_s + 10),
+                "started_at": github_time(self.created_s + 20),
+                "completed_at": github_time(self.created_s + finish_offset_s), "runner_id": runner}
 
     def artifact(self, name, job, platform_name, shard, labels, runs_per_side):
         """One shard's artifact directory: timing.json, row-run-evidence.json and every accepted run's files."""
@@ -9571,6 +9575,7 @@ class RowRunWorkflow:
         perf._write_json(directory / perf.TIMING_FILE, {"schema_version": 1, "run_id": str(self.run_id),
                                                         "run_attempt": "1", "job": job, "shard": shard,
                                                         "marks": {}})
+        platform_key = perf.ROW_RUN_PLATFORM_KEYS[platform_name]
         phases = []
         for label in labels:
             entry = {"label": label, "phase": "stream"}
@@ -9580,16 +9585,15 @@ class RowRunWorkflow:
                 records = []
                 for index, renderer in enumerate(renderers, 1):
                     identity = f"runs/{label.replace('/', '-')}/counters/{index:02d}-{side_name}"
-                    self.write_run(directory / identity, side_name, label, renderer)
+                    self.write_run(directory / identity, platform_key, side_name, label, renderer)
                     records.append({"execution": identity, "renderer": renderer})
                 entry[side_name] = {"status": "", "accepted": records, "rejected": [],
                                     "audit": perf.row_run_audit(renderers)}
             phases.append(entry)
-        platform_key = perf.ROW_RUN_PLATFORM_KEYS[platform_name]
         perf._write_json(directory / perf.ROW_RUN_EVIDENCE_FILE, {
             "schema_version": perf.ROW_RUN_EVIDENCE_SCHEMA, "repository": perf.ROW_RUN_DEFAULT_REPOSITORY,
             "run_id": str(self.run_id), "run_attempt": "1", "job": job, "shard": shard, "platform": platform_key,
-            "base_sha": ROW_RUN_BASE_SHA, "head_sha": ROW_RUN_HEAD_SHA, "harness_hash": f"harness-{platform_key}",
+            "base_sha": ROW_RUN_BASE_SHA, "head_sha": ROW_RUN_HEAD_SHA, "harness_hash": self.harness[platform_key],
             "dataset": "counters", "short": True,
             "features": {"base": ["perf-counters"], "head": ["perf-counters"]},
             "profile": {"lto": {"base": "off", "head": "off"}, "overrides": "none"},
@@ -9597,15 +9601,18 @@ class RowRunWorkflow:
             "phases": phases})
         return directory
 
-    @staticmethod
-    def write_run(run_dir, side_name, label, renderer):
-        """An accepted run's outcome.json and kept result.json reporting `renderer` for the stream phase."""
+    def write_run(self, run_dir, platform_key, side_name, label, renderer):
+        """An accepted run's outcome.json and kept result.json: a valid, managed, short counters run of `label`
+        under the platform's harness, reporting `renderer` for the stream phase."""
         scenario, _, variant = label.partition("/")
         (run_dir / "scratch").mkdir(parents=True, exist_ok=True)
         perf._write_json(run_dir / "outcome.json",
                          {"kind": "valid", "side": side_name, "scenario": scenario, "variant": variant})
         perf._write_json(run_dir / "scratch" / "result.json",
-                         {"phases": [{"name": "stream", "frame_counters": {"renderer": renderer}}]})
+                         {"schema_version": perf.SCHEMA_VERSION, "managed": True,
+                          "harness_hash": self.harness[platform_key], "scenario": scenario, "variant": variant,
+                          "short": True, "status": "valid", "frame_counters": "on",
+                          "phases": [{"name": "stream", "frame_counters": {"renderer": renderer}}]})
 
     def edit(self, platform_name, shard, change):
         """Apply `change` to one shard's row-run-evidence.json as written, nothing recomputed."""
@@ -9624,7 +9631,8 @@ class RowRunWorkflow:
             record = entry[side_name]["accepted"][index]
             change(record["renderer"])
             entry[side_name]["audit"] = perf.row_run_audit([item["renderer"] for item in entry[side_name]["accepted"]])
-            self.write_run(directory / record["execution"], side_name, label, record["renderer"])
+            self.write_run(directory / record["execution"], perf.ROW_RUN_PLATFORM_KEYS[platform_name], side_name,
+                           label, record["renderer"])
         self.edit(platform_name, shard, apply)
 
     def all_directories(self):
@@ -9636,6 +9644,31 @@ def decide(workflows, directories, restarts=0, head=ROW_RUN_HEAD_SHA, base=ROW_R
     """The decide mode's report for `workflows` (first, then the replacement) over `directories`."""
     return perf.row_run_decide([(workflow.record, workflow.attempt) for workflow in workflows], directories, head,
                                base, restarts, perf.ROW_RUN_DEFAULT_REPOSITORY)
+
+
+def add_inheriting_attempt(workflow):
+    """Give `workflow` an attempt 2 that reruns only the result job and inherits every other job of attempt 1."""
+    rows = []
+    for data in workflow.record["jobs"]["1"]:
+        inherited = dict(data, created_at=github_time(workflow.created_s + 1700))
+        if data["name"] == perf.ROW_RUN_RESULT_JOB:
+            inherited.update(started_at=github_time(workflow.created_s + 1710),
+                             completed_at=github_time(workflow.created_s + 1750), runner_id=99)
+        rows.append(inherited)
+    workflow.record["jobs"]["2"] = rows
+    workflow.record["attempts"]["2"] = {"run_started_at": github_time(workflow.created_s + 1705),
+                                        "updated_at": github_time(workflow.created_s + 1760)}
+
+
+def edit_every_shard(workflow, change):
+    """Apply `change` to every shard's row-run-evidence.json as written, nothing recomputed."""
+    for platform_name, shard in workflow.directories:
+        workflow.edit(platform_name, shard, change)
+
+
+def recompute_audit(side):
+    """Recompute one side's audit from its accepted records, as the exporter writes it."""
+    side["audit"] = perf.row_run_audit([record["renderer"] or {} for record in side["accepted"]])
 
 
 def overflow(renderer):
@@ -9654,10 +9687,16 @@ class RowRunDecideTests(unittest.TestCase):
         return RowRunWorkflow(self.root / name, **options)
 
     def refused(self, workflows, directories, expected, **options):
-        """The evidence is a validation error naming `expected`, never a decision."""
-        with self.assertRaises(perf.RowRunEvidenceError) as raised:
+        """The evidence is a validation error naming `expected`, never a decision and never another exception."""
+        try:
             decide(workflows, directories, **options)
-        self.assertIn(expected, str(raised.exception))
+        except perf.RowRunEvidenceError as error:
+            self.assertIn(expected, str(error))
+        except Exception as error:  # noqa: BLE001 - any other exception is the failure under test.
+            # When: the loader crashed instead of refusing, the evidence was not validated.
+            self.fail(f"{type(error).__name__} instead of a validation error naming {expected!r}: {error}")
+        else:
+            self.fail(f"no validation error naming {expected!r}: the evidence decided")
 
     def test_six_phases_on_two_platforms_combine_from_separate_shards(self):
         # Ten shards under the real placement (three variants on macOS S4-S5-S11 and on Windows S2-S10sync, none
@@ -9748,7 +9787,7 @@ class RowRunDecideTests(unittest.TestCase):
                           "timing.json job 'Windows before/after comparison (S7)'"),
             "wrong head": (None, {"head": "c" * 40}, f"run 777 measured head {ROW_RUN_HEAD_SHA}"),
             "wrong base": (None, {"base": "c" * 40}, "evidence base_sha"),
-            "wrong harness": (evidence(lambda document: document.update(harness_hash="other")), {},
+            "wrong harness": (evidence(lambda document: document.update(harness_hash="f" * 64)), {},
                               "settings differ from another windows shard's"),
             "wrong protocol": (evidence(lambda document: document.update(protocol_digest="0" * 64)), {},
                                "evidence protocol_digest"),
@@ -9797,6 +9836,9 @@ class RowRunDecideTests(unittest.TestCase):
         # both accepted and rejected is refused.
         workflow = self.workflow("rejected")
         flood = dict(row_run_head(), row_run_shape_overflows=999)
+        # The rejected attempt is a real attempt directory of the artifact, as every disclosed one is.
+        workflow.write_run(workflow.directories[("macOS", "S9-S10")] / "runs/S10-default/counters/09-head", "macos",
+                           "head", "S10/default", flood)
         workflow.edit("macOS", "S9-S10", lambda document: document["phases"][0]["head"]["rejected"].append(
             {"execution": "runs/S10-default/counters/09-head", "kind": "occluded", "reasons": ["occlusion"],
              "renderer": flood}))
@@ -9846,11 +9888,12 @@ class RowRunDecideTests(unittest.TestCase):
         # Two executions of one run per phase each would decide BUILD only if pooled; a complete first execution
         # failing step 2 and a healthy rerun missing one shard would decide BUILD only if the rerun's hole were
         # filled from the first. The replacement stands alone, so both are PENDING (evidence).
-        first, rerun = self.workflow("single-1", runs_per_side=1), self.workflow("single-2", run_id=778,
-                                                                                    runs_per_side=1)
+        first = self.workflow("single-1", runs_per_side=1)
+        rerun = self.workflow("single-2", run_id=778, runs_per_side=1, created_s=ROW_RUN_RERUN_CREATED_S)
         report = decide([first, rerun], first.all_directories() + rerun.all_directories())
         self.assertIn("- outcome: PENDING (evidence) (step 1): runs run 777 attempt 1 and run 778 attempt 1: ", report)
-        failing, holed = self.workflow("failing"), self.workflow("holed", run_id=778)
+        failing = self.workflow("failing")
+        holed = self.workflow("holed", run_id=778, created_s=ROW_RUN_RERUN_CREATED_S)
         failing.rewrite("macOS", "S9-S10", "S10/default", "head", 0, overflow)
         directories = failing.all_directories() + [directory for key, directory in holed.directories.items()
                                                    if key != ("Windows", "S9-S10")]
@@ -9858,7 +9901,7 @@ class RowRunDecideTests(unittest.TestCase):
         self.assertIn("- selected execution: run 778 attempt 1", report)
         # The restart count is the one given, never inferred: a rerun failing step 2 again restarts at 0 and is
         # posted PENDING at the limit.
-        again = self.workflow("again", run_id=778)
+        again = self.workflow("again", run_id=778, created_s=ROW_RUN_RERUN_CREATED_S)
         again.rewrite("macOS", "S9-S10", "S10/default", "head", 0, overflow)
         both = failing.all_directories() + again.all_directories()
         self.assertIn("- outcome: PENDING (diagnostic) (step 2)", decide([failing, again], both))
@@ -9870,7 +9913,7 @@ class RowRunDecideTests(unittest.TestCase):
         # A first execution failing step 2 and a healthy same-head replacement: the CLI calls row_run_final once
         # and prints both identities, the replacement as selected, and its BUILD. Invalid evidence prints the
         # validation error with exit 2, and the mode refuses incomplete arguments.
-        first, rerun = self.workflow("cli-1"), self.workflow("cli-2", run_id=778)
+        first, rerun = self.workflow("cli-1"), self.workflow("cli-2", run_id=778, created_s=ROW_RUN_RERUN_CREATED_S)
         first.rewrite("macOS", "S9-S10", "S10/default", "head", 0, overflow)
         executions = []
         for workflow in (first, rerun):
@@ -9898,20 +9941,221 @@ class RowRunDecideTests(unittest.TestCase):
             perf.parse_args(["--row-run-decide", directories[0], "--row-run-head", ROW_RUN_HEAD_SHA,
                              "--row-run-base", ROW_RUN_BASE_SHA])
 
+    def test_aliased_or_escaping_execution_paths_are_refused(self):
+        # One real execution per side listed again as `./` plus its path would meet the two-run minimum and decide
+        # BUILD; a path through a symlink, to a sibling attempt or outside the artifact, names another directory
+        # than it says. Each is refused as a validation error, never counted.
+        alias = self.workflow("alias", runs_per_side=1)
+
+        def respell(document):
+            for entry in document["phases"]:
+                for side_name in perf.SIDES:
+                    side = entry[side_name]
+                    side["accepted"].append({"execution": "./" + side["accepted"][0]["execution"],
+                                             "renderer": dict(side["accepted"][0]["renderer"])})
+                    recompute_audit(side)
+        edit_every_shard(alias, respell)
+        self.refused([alias], alias.all_directories(), "is not its canonical path")
+        sibling = self.workflow("sibling", runs_per_side=1)
+        counters = sibling.directories[("macOS", "S9-S10")] / "runs" / "S10-default" / "counters"
+        (counters / "02-head").symlink_to(counters / "01-head", target_is_directory=True)
+
+        def link(document):
+            side = document["phases"][0]["head"]
+            side["accepted"].append({"execution": "runs/S10-default/counters/02-head",
+                                     "renderer": dict(side["accepted"][0]["renderer"])})
+            recompute_audit(side)
+        sibling.edit("macOS", "S9-S10", link)
+        self.refused([sibling], sibling.all_directories(), "is not its canonical path")
+        escape = self.workflow("escape")
+        run_dir = escape.directories[("macOS", "S9-S10")] / "runs" / "S10-default" / "counters" / "02-head"
+        outside = self.root / "outside" / "02-head"
+        shutil.copytree(run_dir, outside)
+        shutil.rmtree(run_dir)
+        run_dir.symlink_to(outside, target_is_directory=True)
+        self.refused([escape], escape.all_directories(), "escapes")
+
+    def test_accepted_and_rejected_executions_reconcile_with_the_artifacts_attempt_directories(self):
+        # Three accepted head runs, the third overflowing: dropping it from the evidence (its audit recomputed) would
+        # leave two healthy runs and decide BUILD. A disclosed rejected attempt with no directory is no attempt of
+        # the artifact. Both disagree with the attempt directories the artifact holds and are refused.
+        omitted = self.workflow("omitted", runs_per_side=3)
+        omitted.rewrite("macOS", "S9-S10", "S10/default", "head", 2, overflow)
+
+        def drop(document):
+            side = document["phases"][0]["head"]
+            side["accepted"].pop()
+            recompute_audit(side)
+        omitted.edit("macOS", "S9-S10", drop)
+        self.refused([omitted], omitted.all_directories(), "do not match its attempt directories")
+        phantom = self.workflow("phantom")
+        phantom.edit("macOS", "S9-S10", lambda document: document["phases"][0]["head"]["rejected"].append(
+            {"execution": "runs/S10-default/counters/09-head", "kind": "occluded", "reasons": []}))
+        self.refused([phantom], phantom.all_directories(), "do not match its attempt directories")
+        repeated = self.workflow("repeated-rejection")
+        repeated.write_run(repeated.directories[("macOS", "S9-S10")] / "runs/S10-default/counters/09-head", "macos",
+                           "head", "S10/default", row_run_head())
+        disclosure = {"execution": "runs/S10-default/counters/09-head", "kind": "occluded", "reasons": []}
+        repeated.edit("macOS", "S9-S10", lambda document: document["phases"][0]["head"]["rejected"].extend(
+            [disclosure, dict(disclosure)]))
+        self.refused([repeated], repeated.all_directories(), "lists one rejected execution twice")
+
+    def test_an_accepted_execution_without_the_phases_counters_is_exported_and_reads_as_missing(self):
+        # A valid run whose result has no stream phase is still an accepted execution: the shard exports it with no
+        # renderer instead of dropping it, and the decision reads it as an accepted run missing every field, so
+        # step 1 is PENDING (evidence), never BUILD from the remaining runs.
+        scenario = perf.Scenario("S4", ("default",), "Streaming", 120, 30)
+        plans = {side: perf.RunPlan(scenario, "default", side, Path(f"/{side}"), HARNESS_HASH) for side in perf.SIDES}
+
+        def counted(plan, phase_name):
+            result = counters_result({"renderer.row_run_shape_first": 7})
+            for phase in result["phases"]:
+                phase["name"] = phase_name
+            return make_outcome(plan=plan, exit_code=0, result=result)
+        queues = {side: [lambda plan: counted(plan, "warm"), lambda plan: counted(plan, "stream")]
+                  for side in perf.SIDES}
+
+        def run_case(plan, _evidence):
+            queue = queues[plan.side]
+            return (queue.pop(0) if len(queue) > 1 else queue[0])(plan)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = perf.run_set("S4/default", plans, None, 2, run_case, Path("/e"), "counters")
+        try:
+            exported = perf.row_run_export_side(result, "head", "stream", Path("/e"))
+        except (TypeError, AttributeError) as error:
+            # When: the export could not read its own record, the shard would write no evidence at all.
+            self.fail(f"exporting an accepted execution without the phase's counters failed: {error}")
+        self.assertEqual(len(exported["accepted"]), 2, "the run without a stream phase is exported, not dropped")
+        self.assertEqual(sorted(record["renderer"] is None for record in exported["accepted"]), [False, True])
+        self.assertEqual(exported["rejected"], [])
+        self.assertEqual(exported["audit"]["accepted_runs"], 2)
+        missing = self.workflow("missing")
+        directory = missing.directories[("macOS", "S9-S10")]
+
+        def strip(document):
+            side = document["phases"][0]["head"]
+            record = side["accepted"][0]
+            record["renderer"] = None
+            recompute_audit(side)
+            path = directory / record["execution"] / "scratch" / "result.json"
+            kept = json.loads(path.read_text(encoding="utf-8"))
+            kept["phases"] = []
+            perf._write_json(path, kept)
+        missing.edit("macOS", "S9-S10", strip)
+        try:
+            report = decide([missing], missing.all_directories())
+        except (perf.RowRunEvidenceError, TypeError, AttributeError) as error:
+            # When: the record was refused or unreadable, the accepted execution was not counted as missing evidence.
+            self.fail(f"an accepted execution without the phase's counters was not counted as missing: {error}")
+        self.assertIn("- step 1 (evidence): PENDING (evidence): macos S10/default stream head: missing ", report)
+
+    def test_each_kept_result_must_be_the_claimed_counters_run_under_the_envelope(self):
+        # Each change to one kept head result.json, its stream renderer section untouched, decided BUILD when only
+        # that section was read. The result's status, counters mode, harness, scenario, variant, short mode and
+        # managed flag must match the claimed run and the evidence, and it must report exactly one stream phase.
+        cases = {
+            "status": (dict(status="invalid"), "result.json status 'invalid' is not 'valid'"),
+            "counters off": (dict(frame_counters="off"), "result.json frame_counters 'off' is not 'on'"),
+            "harness": (dict(harness_hash="f" * 64), "result.json harness_hash 'ffff"),
+            "scenario": (dict(scenario="S4"), "result.json scenario 'S4' is not 'S10'"),
+            "variant": (dict(variant="sync"), "result.json variant 'sync' is not 'default'"),
+            "short": (dict(short=False), "result.json short False is not True"),
+            "managed": (dict(managed=False), "result.json managed False is not True"),
+            "managed as 1": (dict(managed=1), "result.json managed 1 is not True"),
+            "repeated phase": (None, "result.json reports 2 stream phases"),
+        }
+        for name, (fields, expected) in cases.items():
+            with self.subTest(case=name):
+                workflow = self.workflow("result-" + name.replace(" ", "-"))
+                path = (workflow.directories[("macOS", "S9-S10")] / "runs" / "S10-default" / "counters" / "01-head"
+                        / "scratch" / "result.json")
+                kept = json.loads(path.read_text(encoding="utf-8"))
+                if fields is None:
+                    # When: no field changes, the stream phase is repeated, the second one overflowing.
+                    repeated = copy.deepcopy(kept["phases"][0])
+                    repeated["frame_counters"]["renderer"]["row_run_shape_overflows"] = 1
+                    kept["phases"].append(repeated)
+                else:
+                    kept.update(fields)
+                perf._write_json(path, kept)
+                self.refused([workflow], workflow.all_directories(), expected)
+
+    def test_build_settings_must_be_typed_complete_and_carry_the_counters_feature(self):
+        # Settings that agree across every shard still decided BUILD when absent, mistyped or without the counters
+        # feature on one side. Each describes no comparable counters build and is refused.
+        cases = {
+            "base without counters": (lambda document: document["features"].update(base=[]),
+                                      "evidence features base [] lack 'perf-counters'"),
+            "unknown feature": (lambda document: document["features"]["head"].append("perf-unknown"),
+                                "evidence features head name an unknown feature 'perf-unknown'"),
+            "no features": (lambda document: document.pop("features"), "evidence features None"),
+            "one side's features": (lambda document: document["features"].pop("base"),
+                                    "do not name each side's"),
+            "no profile": (lambda document: document.pop("profile"), "evidence profile None"),
+            "no lto": (lambda document: document["profile"].pop("lto"), "does not name each side's lto"),
+            "no overrides": (lambda document: document["profile"].pop("overrides"), "lto and the overrides"),
+            "unsorted features": (lambda document: document["features"].update(head=["perf-hook-trim", "perf-counters"]),
+                                  "are not a sorted list of distinct names"),
+            "no harness": (lambda document: document.pop("harness_hash"), "evidence harness_hash None"),
+            "harness not hex": (lambda document: document.update(harness_hash="harness"),
+                                "is not 64 lowercase hex digits"),
+            "no short": (lambda document: document.pop("short"), "evidence short None is not a boolean"),
+            "short not boolean": (lambda document: document.update(short="yes"), "evidence short 'yes'"),
+        }
+        for name, (change, expected) in cases.items():
+            with self.subTest(case=name):
+                workflow = self.workflow("settings-" + name.replace(" ", "-"))
+                edit_every_shard(workflow, change)
+                self.refused([workflow], workflow.all_directories(), expected)
+
+    def test_the_job_inventory_time_envelope_restarts_and_replacement_order_are_enforced(self):
+        # Each decided BUILD before: a run without the macOS producer job, or without a comparison job and its
+        # artifact; a job finishing after 1,800 s while the attempt's update time is inside it; a newer failing
+        # execution replaced by an older healthy one; and a negative restart count. A later attempt of one run
+        # replaced by an earlier one is refused too.
+        no_producer = self.workflow("no-producer")
+        no_producer.record["jobs"]["1"].pop(0)
+        self.refused([no_producer], no_producer.all_directories(), "job inventory")
+        no_shard = self.workflow("no-shard")
+        job = "Windows before/after comparison (S7)"
+        no_shard.record["jobs"]["1"] = [row for row in no_shard.record["jobs"]["1"] if row["name"] != job]
+        no_shard.record["artifacts"] = [item for item in no_shard.record["artifacts"] if "-Windows-S7-" not in item["name"]]
+        directories = [directory for key, directory in no_shard.directories.items() if key != ("Windows", "S7")]
+        self.refused([no_shard], directories, "job inventory")
+        repeated_job = self.workflow("repeated-job")
+        repeated_job.record["jobs"]["1"].insert(1, dict(repeated_job.record["jobs"]["1"][0], runner_id=50))
+        self.refused([repeated_job], repeated_job.all_directories(), "job inventory")
+        late_job = self.workflow("late-job")
+        late_job.record["jobs"]["1"][3]["completed_at"] = github_time(ROW_RUN_CREATED_S + 1801)
+        self.refused([late_job], late_job.all_directories(), "took 1801 s from creation, over 1800 s")
+        newer = self.workflow("newer", created_s=ROW_RUN_RERUN_CREATED_S)
+        newer.rewrite("macOS", "S9-S10", "S10/default", "head", 0, overflow)
+        older = self.workflow("older", run_id=778)
+        self.refused([newer, older], newer.all_directories() + older.all_directories(),
+                     "run 778 attempt 1 started before run 777 attempt 1 ended")
+        attempts = self.workflow("attempts")
+        add_inheriting_attempt(attempts)
+        later, earlier = (SimpleNamespace(record=attempts.record, attempt=number) for number in (2, 1))
+        self.refused([later, earlier], attempts.all_directories(),
+                     "run 777 attempt 1 does not follow run 777 attempt 2")
+        restarts = self.workflow("restarts")
+        self.refused([restarts], restarts.all_directories(), "restarts -1 is not a non-negative integer",
+                     restarts=-1)
+
+    def test_the_expected_job_inventory_is_perf_ymls(self):
+        # The loader's job inventory is the workflow's: the producer's name and each comparison job's shards.
+        jobs = load_perf_workflow()["jobs"]
+        self.assertEqual(jobs["perf-build-macos"]["name"], perf.ROW_RUN_PRODUCER_JOB)
+        for job_id in ("compare-macos", "compare-windows"):
+            shards = [entry["shard"] for entry in jobs[job_id]["strategy"]["matrix"]["include"]]
+            self.assertEqual(sorted(shards), sorted(perf.ROW_RUN_SHARDS), job_id)
+        self.assertEqual(sorted(perf.ROW_RUN_SHARDS), sorted(ROW_RUN_PLACEMENT["macOS"]))
+
     def test_an_attempt_inheriting_its_comparisons_binds_their_executed_origins(self):
         # Attempt 2 reruns only the result job and inherits every comparison: each inherited job claims its executed
         # origin's attempt-1 artifact, and the execution decides as run 777 attempt 2.
         workflow = self.workflow("inherit")
-        rows = []
-        for data in workflow.record["jobs"]["1"]:
-            inherited = dict(data, created_at=github_time(ROW_RUN_CREATED_S + 1700))
-            if data["name"] == perf.ROW_RUN_RESULT_JOB:
-                inherited.update(started_at=github_time(ROW_RUN_CREATED_S + 1710),
-                                 completed_at=github_time(ROW_RUN_CREATED_S + 1750), runner_id=99)
-            rows.append(inherited)
-        workflow.record["jobs"]["2"] = rows
-        workflow.record["attempts"]["2"] = {"run_started_at": github_time(ROW_RUN_CREATED_S + 1705),
-                                            "updated_at": github_time(ROW_RUN_CREATED_S + 1760)}
+        add_inheriting_attempt(workflow)
         workflow.attempt = 2
         try:
             report = decide([workflow], workflow.all_directories())
