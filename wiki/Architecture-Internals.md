@@ -648,8 +648,8 @@ reset or a replacement, resets the atlas in place, invalidates UV-bearing caches
 and disables eviction until one frame presents successfully. That presentation
 re-enables eviction and keeps the rows the recovered frame admitted: only
 complete rows enter the row glyph cache, and any later eviction changes the
-identity they are checked against. Only the preedit output is dropped, because
-chrome layout keeps a run whose glyph the retry refused. Diagnostic eviction
+identity they are checked against. Only the preedit output (`PreeditGlyphCache`) is
+dropped, because chrome layout keeps a run whose glyph the retry refused. Diagnostic eviction
 fields remain actual counts, and reset/replacement has a distinct reason.
 The glyph texture is resized after the frame source releases its parser guards
 and before any present, so a grown atlas never syncs into a smaller texture and
