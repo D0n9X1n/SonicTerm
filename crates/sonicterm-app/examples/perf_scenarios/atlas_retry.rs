@@ -94,7 +94,9 @@ impl Frame {
     fn fits(self, counts: Counts) -> bool {
         match self {
             Self::Retried => counts.resets == 1 && counts.presented == 0,
-            Self::Recovered | Self::Reused | Self::Repeated => counts.resets == 0 && counts.presented == 1,
+            Self::Recovered | Self::Reused | Self::Repeated => {
+                counts.resets == 0 && counts.presented == 1
+            }
         }
     }
 }
@@ -176,7 +178,8 @@ impl RecoveryEpisodes {
         }
         let label = self.label();
         if delta.attempts > 1 {
-            return self.fail(format!("{label}: {} attempts in one dispatch: {delta:?}", delta.attempts));
+            return self
+                .fail(format!("{label}: {} attempts in one dispatch: {delta:?}", delta.attempts));
         }
         match self.stage {
             Stage::Settling { steady, deadline } => {
@@ -184,8 +187,11 @@ impl RecoveryEpisodes {
                 let steady = if steady_frame { steady + 1 } else { 0 };
                 if steady >= STEADY_FRAMES {
                     // When: the scene drew STEADY_FRAMES steady frames in a row, the episodes start.
-                    self.stage =
-                        Stage::Step { episode: 0, frame: Frame::Retried, deadline: now + STEP_BOUND };
+                    self.stage = Stage::Step {
+                        episode: 0,
+                        frame: Frame::Retried,
+                        deadline: now + STEP_BOUND,
+                    };
                     return Progress::Arm(Arm::ChangeAtlas);
                 }
                 self.stage = Stage::Settling { steady, deadline };
@@ -294,10 +300,18 @@ pub(crate) fn records_problem(records: &[Record]) -> Option<String> {
     for (index, record) in records.iter().enumerate() {
         let (episode, frame) = (index / 4, frames[index % 4]);
         if record.episode != episode || record.frame != frame {
-            return Some(format!("record {index} is episode {} {}", record.episode, record.frame.as_str()));
+            return Some(format!(
+                "record {index} is episode {} {}",
+                record.episode,
+                record.frame.as_str()
+            ));
         }
         if record.counts.attempts != 1 || !frame.fits(record.counts) {
-            return Some(format!("record {index} does not fit {}: {:?}", frame.as_str(), record.counts));
+            return Some(format!(
+                "record {index} does not fit {}: {:?}",
+                frame.as_str(),
+                record.counts
+            ));
         }
         if frame != Frame::Retried && record.counts.atlas_dim != recovered_dim {
             return Some(format!("record {index} draws at another atlas dimension"));
@@ -329,7 +343,9 @@ pub(crate) fn recovery_json(records: &[Record], distinct_keys: usize) -> Value {
 
 /// The fixture: one numbered line per row of the 70-row grid, every line distinct.
 pub(crate) fn fixture_text() -> String {
-    (1..=70).map(|number| format!("{ROW_PREFIX}{number:02} abcdefghijklmnopqrstuvwxyz {number:02}\n")).collect()
+    (1..=70)
+        .map(|number| format!("{ROW_PREFIX}{number:02} abcdefghijklmnopqrstuvwxyz {number:02}\n"))
+        .collect()
 }
 
 /// Why the visible rows are not the fixture: every row but at most the last two (the sentinel and

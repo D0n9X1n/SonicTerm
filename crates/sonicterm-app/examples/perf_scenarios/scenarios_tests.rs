@@ -79,7 +79,10 @@ fn catalog_lists_twelve_scenarios_with_their_variants() {
     assert_eq!(find("S10").unwrap().variants, ["default", "sync"]);
     // The presenter variants and the role program's exit are Windows runs; the catalog lists them everywhere.
     // `atlas-retry` runs only in the counters set; perf-compare enforces it.
-    assert_eq!(find("S1").unwrap().variants, ["default", "gdi", "wgpu", "role-exit", "atlas-retry"]);
+    assert_eq!(
+        find("S1").unwrap().variants,
+        ["default", "gdi", "wgpu", "role-exit", "atlas-retry"]
+    );
     // S11 adds `release`, whose run cap and plan are pinned by their own tests.
     assert_eq!(find("S5").unwrap().variants, ["default", "gdi", "wgpu"]);
     for (variant, presentation) in [
@@ -516,9 +519,10 @@ fn the_atlas_retry_plan_prints_its_rows_then_drives_the_episodes() {
     assert_eq!(phase(&plan, "recovery").end, PhaseEnd::DriverDone);
     assert_eq!(checkpoint_labels(&plan), ["end"]);
     for other in all_plans() {
-        let drives = other.steps.iter().any(|step| {
-            matches!(step, Step::Phase(phase) if phase.driver == Driver::AtlasRetry)
-        });
+        let drives = other
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::Phase(phase) if phase.driver == Driver::AtlasRetry));
         assert_eq!(drives, other.scenario == "S1" && other.variant == "atlas-retry");
     }
 }

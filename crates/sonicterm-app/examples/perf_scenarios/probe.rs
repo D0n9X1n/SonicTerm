@@ -2750,7 +2750,8 @@ impl Probe {
         let progress = retry.machine.observe(delta, now);
         let just_settled = !was_settled && retry.machine.settled();
         let scene = (just_settled || progress == Progress::Done).then(|| self.atlas_retry_scene());
-        let DriverState::AtlasRetry(mut retry) = std::mem::replace(&mut self.driver, DriverState::None)
+        let DriverState::AtlasRetry(mut retry) =
+            std::mem::replace(&mut self.driver, DriverState::None)
         else {
             return;
         };
@@ -2763,7 +2764,8 @@ impl Probe {
                     if let Some(problem) = atlas_retry::scene_problem(&rows) {
                         retry.failure = Some(format!("the scene is not the fixture: {problem}"));
                     } else if retry.settled_scene.is_some_and(|settled| settled != qualifiers) {
-                        retry.failure = Some(format!("the scene changed during the run: {qualifiers:?}"));
+                        retry.failure =
+                            Some(format!("the scene changed during the run: {qualifiers:?}"));
                     }
                     retry.settled_scene.get_or_insert(qualifiers);
                 }
