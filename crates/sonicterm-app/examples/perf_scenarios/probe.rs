@@ -2935,8 +2935,8 @@ impl Probe {
     /// no native event brings it within 2 s.
     fn arm_occlusion_wait(&mut self, occluded: bool) {
         if waits::occlusion_wait_applies(scenarios::BUILD_HOST) {
-            // When: the host reports occlusion natively (macOS); Windows reports none, so no
-            // synthetic state reaches the App there and `uncover_ms` stays null.
+            // When: the host reports occlusion natively (macOS), the 2 s fallback covers a missing event.
+            // Windows reports none: only the trim experiment delivers occlusion there, itself.
             self.occlusion.wait = Some((occluded, Instant::now() + OCCLUSION_FALLBACK));
         }
     }
