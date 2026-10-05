@@ -470,8 +470,9 @@ struct ForcedFrame {
 }
 
 /// Draw one forced frame of `scene`, counting its allocations and reading the identity figures
-/// that say whether it refilled a cache. Glyph-atlas growths are counted at the next frame's
-/// start, so a growth is read from the atlas's retained bytes instead.
+/// that say whether it refilled a cache. Atlas growths are counted after assembly in the same
+/// render call, so the growth delta is exact; unchanged atlas bytes (pixels plus the dirty list)
+/// are a stricter stability condition on top of it.
 fn measured_forced(renderer: &mut GpuRenderer, scene: &mut Scene) -> Result<ForcedFrame, String> {
     let before = renderer.frame_stats();
     let atlas_before = renderer.retained_amounts().glyph_atlas.bytes;
@@ -482,15 +483,21 @@ fn measured_forced(renderer: &mut GpuRenderer, scene: &mut Scene) -> Result<Forc
     let atlas_after = renderer.retained_amounts().glyph_atlas.bytes;
     let attempts = after.attempts.attempts - before.attempts.attempts;
     let row_misses = after.row_cache_misses - before.row_cache_misses;
+    let growths = after.glyph_atlas_growths - before.glyph_atlas_growths;
     let resets = renderer.__test_glyph_atlas_resets() - resets_before;
     let scratch_bytes = renderer.retained_amounts().frame_scratch.bytes;
     Ok(ForcedFrame {
         allocations,
-        steady: attempts == 1 && row_misses == 0 && atlas_after == atlas_before && resets == 0,
+        steady: attempts == 1
+            && row_misses == 0
+            && growths == 0
+            && atlas_after == atlas_before
+            && resets == 0,
         scratch_bytes,
         figures: format!(
             "allocations {allocations}, attempts {attempts}, row misses {row_misses}, row hits {}, \
-             atlas bytes {atlas_before} -> {atlas_after}, resets {resets}, scratch {scratch_bytes}",
+             atlas growths {growths}, atlas bytes {atlas_before} -> {atlas_after}, resets {resets}, \
+             scratch {scratch_bytes}",
             after.row_cache_hits - before.row_cache_hits
         ),
     })
