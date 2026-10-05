@@ -523,8 +523,7 @@ fn typing_samples() -> Vec<LatencySample> {
                 let reason = UnattributedReason::LockBusy.as_str();
                 LatencySample::uncredited(inject_unix_s, reason)
             } else {
-                let latency_ms = Some(20.0 + f64::from(index % 5));
-                credited_sample(inject_unix_s, latency_ms.expect("credited"))
+                credited_sample(inject_unix_s, 20.0 + f64::from(index % 5))
             }
         })
         .collect()
@@ -1199,7 +1198,9 @@ fn an_empty_report_serializes_zero_counts_empty_reasons_and_null_coverage() {
         false,
     );
     let unsupported = credited_sample(2.0, 5.0);
-    let mixed = latency_json(&[split, unsupported]);
+    let uncredited = LatencySample::uncredited(3.0, UnattributedReason::NoCandidate.as_str());
+    // Coverage and reasons count credited samples only: the uncredited one changes neither.
+    let mixed = latency_json(&[split, unsupported, uncredited]);
     assert_eq!(mixed["split_reasons"], json!({"split": 1, "unsupported": 1}));
     assert_eq!(
         (mixed["split_count"].clone(), mixed["split_coverage"].clone()),
