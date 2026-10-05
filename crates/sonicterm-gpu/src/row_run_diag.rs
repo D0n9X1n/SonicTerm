@@ -295,18 +295,19 @@ impl RowRunTable {
             let current_epoch =
                 self.identities[usize::from(self.slots[record.slot as usize].style)].epoch;
             let slot = &mut self.slots[record.slot as usize];
-            // Only the slot's first record this pass settles it; the marker is cleared either way.
-            let first_record = slot.pending_pass == pass;
+            // A record owns its slot only while the slot keeps the record's generation and epoch;
+            // a stale record (its slot reassigned this pass) never consumes the new owner's marker.
+            let owned =
+                slot.generation == record.generation && slot.style_epoch == record.style_epoch;
+            // Only the owner's first record this pass settles the slot and clears its marker.
+            let first_record = owned && slot.pending_pass == pass;
             if first_record {
                 slot.pending_pass = ABSENT;
             }
-            let live = slot.flags & OCCUPIED != 0
-                && slot.generation == record.generation
-                && slot.style_epoch == record.style_epoch
-                && slot.style_epoch == current_epoch;
+            let live = slot.flags & OCCUPIED != 0 && slot.style_epoch == current_epoch;
             if !(first_record && live) {
-                // When: not `first_record`, or the slot is no longer `live` (reassigned or cleared),
-                // the record has no transition to apply.
+                // When: not the owner's `first_record`, or the slot is no longer `live` (cleared or
+                // its style identity moved on), the record has no transition to apply.
                 continue;
             }
             if presented {

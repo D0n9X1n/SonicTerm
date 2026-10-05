@@ -416,3 +416,28 @@ fn a_pass_left_open_settles_when_the_gate_turns_off() {
     let counts = diagnostics.take_counts();
     assert_eq!((counts.calls, counts.unpresented_calls, counts.first), (1, 1, 0));
 }
+
+/// A record whose slot was reassigned within its pass, after an identity transition killed the
+/// entry, never consumes the new owner's marker: the reassigned key's sighting settles, committed
+/// (a later window repeat) or not presented (a later retry repeat).
+#[test]
+fn a_stale_record_never_consumes_a_reassigned_slots_marker() {
+    for (presented, expected) in [(true, RunClass::Window), (false, RunClass::Retry)] {
+        let mut table = RowRunTable::new();
+        let stale = RowRunKey { hash: 0, len: 1, style: 1 };
+        let reassigned = RowRunKey { hash: 0, len: 2, style: 1 };
+        let merged = (8, 1);
+        table.begin_pass();
+        assert_eq!(table.observe_call(stale, FACE, FACE, true, 10), Some(RunClass::First));
+        // The face changes before this stable call, killing the stale entry; the call takes its slot.
+        assert_eq!(table.observe_call(reassigned, merged, merged, true, 10), Some(RunClass::First));
+        table.end_pass(presented);
+        table.begin_pass();
+        assert_eq!(
+            table.observe_call(reassigned, merged, merged, true, 10),
+            Some(expected),
+            "presented {presented}"
+        );
+        table.end_pass(true);
+    }
+}

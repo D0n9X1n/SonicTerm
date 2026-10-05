@@ -5,6 +5,7 @@ use std::cell::Cell;
 
 use super::*;
 use crate::counters::{FieldValue, Section, SourceValue};
+use crate::workload::RowRunWorkload;
 
 /// Totals whose only supported field is `attempts`, standing in for an App snapshot.
 fn totals_with_attempts(attempts: u64) -> CounterTotals {
@@ -1287,4 +1288,96 @@ fn the_trim_act_is_serviced_after_delivery_and_lapses_with_its_phase() {
     assert!(overdue < service, "the trim sees an occlusion delivered on the same turn");
     assert!(method("end_phase").contains("self.service_trim(true);"));
     assert!(!method("service_trim").contains("stage"), "the trim never changes the plan's steps");
+}
+
+/// A headless S10/powerline probe on its warm phase, with `scratch` as its scratch directory and
+/// the renderer stubbed at `frames` presented.
+fn warm_probe(scratch: PathBuf, frames: u64) -> (Probe, PhaseSpec) {
+    let plan = scenarios::plan_for("S10", "powerline", true, Host::Posix).expect("S10/powerline");
+    let (index, phase) = plan
+        .steps
+        .iter()
+        .enumerate()
+        .find_map(|(index, step)| match step {
+            Step::Phase(phase) if phase.name == "warm" => Some((index, phase.clone())),
+            _ => None,
+        })
+        .expect("S10/powerline has a warm phase");
+    let request = RunArgs {
+        scenario: "S10",
+        variant: "powerline",
+        managed: false,
+        short: true,
+        laps: false,
+        counters: true,
+        harness_hash: None,
+        scratch: scratch.display().to_string(),
+        capture_delivery: false,
+    };
+    let app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let now = Instant::now();
+    let mut probe = Probe::new(app, plan, request, scratch, now + Duration::from_secs(3600));
+    probe.test_readings = Some((frames, ResourceAmount::default()));
+    probe.stage = Stage::Steps(index);
+    probe.meter = Some(PhaseMeter::start(phase.name, false, None, None));
+    (probe, phase)
+}
+
+/// Every body row of `kind`'s update `update`, as the probe's scan reads them from the grid.
+fn warm_grid(kind: RowRunWorkload, update: u32) -> Vec<String> {
+    crate::workload::ROW_RUN_BODY_ROWS
+        .map(|row| kind.body_segments(row, update).into_iter().map(|(_, _, text)| text).collect())
+        .collect()
+}
+
+/// A presentation after a complete sighting writes the update's acknowledgement file, which
+/// releases the role; no failure is recorded.
+#[test]
+fn a_presented_warm_update_writes_its_acknowledgement() {
+    let scratch = std::env::temp_dir().join(format!(
+        "sonicterm-warm-ack-{}-{}",
+        std::process::id(),
+        nonce_seed()
+    ));
+    std::fs::create_dir_all(&scratch).expect("scratch");
+    let (mut probe, _) = warm_probe(scratch.clone(), 10);
+    let (_, handshake) = probe.presented.as_mut().expect("a row-run handshake");
+    handshake.observe_grid(&warm_grid(RowRunWorkload::Powerline, 0), 10);
+    probe.observe_presented_frames(11);
+    assert!(
+        scratch.join(workload::PRESENTED_DIRECTORY).join("0").is_file(),
+        "update 0 acknowledged"
+    );
+    assert_eq!(probe.presented_failure, None);
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// An acknowledgement that cannot be written (the scratch path is a file, so its directory cannot
+/// be created) records an acknowledgement-write reason, and the warm phase never ends as done even
+/// when the handshake marked its last update: the step invalidates the run with that reason.
+#[test]
+fn a_failed_acknowledgement_write_never_completes_the_warm_phase() {
+    let scratch = std::env::temp_dir().join(format!(
+        "sonicterm-warm-ack-file-{}-{}",
+        std::process::id(),
+        nonce_seed()
+    ));
+    std::fs::write(&scratch, b"not a directory").expect("scratch file");
+    let (mut probe, phase) = warm_probe(scratch.clone(), 10);
+    let kind = RowRunWorkload::Powerline;
+    let count = crate::scenarios::ROW_RUN_WARM_UPDATES;
+    for update in 0..count {
+        let frames = 10 + 2 * u64::from(update);
+        let (_, handshake) = probe.presented.as_mut().expect("a row-run handshake");
+        handshake.observe_grid(&warm_grid(kind, update), frames);
+        probe.observe_presented_frames(frames + 1);
+    }
+    assert!(probe.presented.as_ref().is_some_and(|(_, handshake)| handshake.done()));
+    let reason = probe.presented_failure.clone().expect("a failure reason");
+    assert!(
+        reason.starts_with("acknowledgement write failed for row-run warm update 0"),
+        "{reason}"
+    );
+    assert!(!probe.phase_done(&phase, Instant::now()), "a failed acknowledgement ends nothing");
+    let _ = std::fs::remove_file(&scratch);
 }

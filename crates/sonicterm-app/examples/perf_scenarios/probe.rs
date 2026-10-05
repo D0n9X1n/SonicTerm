@@ -574,6 +574,8 @@ struct Probe {
     image: ImageState,
     /// The row-run role and its warm handshake, for a plan that plays a row-run workload.
     presented: Option<(usize, crate::presented_updates::PresentedUpdates)>,
+    /// Why writing a warm update's acknowledgement failed; the run's next step invalidates it.
+    presented_failure: Option<String>,
     /// The running phase's frame barrier (S11/release's media-free and reshow), if it has one.
     barrier: Option<FrameBarrier>,
     /// Each ended phase's name, end instant and end Unix time, for anchored holds and freshness.
@@ -1396,6 +1398,7 @@ impl Probe {
             image_atlas_start: None,
             image: ImageState::default(),
             presented,
+            presented_failure: None,
             barrier: None,
             phase_ends: Vec::new(),
             scan: ScanThrottle::new(SCAN_INTERVAL),
@@ -1465,6 +1468,7 @@ impl Probe {
                 self.uncover_ms = Some(ms_between(from, ended));
             }
             self.image.present.observe_frames(frames_after);
+            self.observe_presented_frames(frames_after);
             self.observe_barrier_frame(ended);
         }
         if let Some(meter) = self.meter.as_mut() {
@@ -1560,10 +1564,10 @@ impl Probe {
     }
 
     /// Fully redraw the measurement window once, through the App's own output path, after the
-    /// scan first sees S11's image registered. The renderer skips a frame whose identity is
-    /// unchanged, and a skip presents nothing, so the retained identity is cleared first: the
-    /// frame then presents whenever the window can present at all.
-    fn request_image_redraw(&mut self, event_loop: &ActiveEventLoop) {
+    /// scan first sees S11's image registered or a warm update complete. The renderer skips a frame
+    /// whose identity is unchanged, and a skip presents nothing, so the retained identity is cleared
+    /// first: the frame then presents whenever the window can present at all.
+    fn force_presentation(&mut self, event_loop: &ActiveEventLoop) {
         let Some(window_id) = self.main_id else {
             return;
         };
@@ -1667,8 +1671,8 @@ impl Probe {
         self.scan_presented_updates();
     }
 
-    /// Advance the row-run warm handshake: once the awaited update is in the role's grid and a
-    /// later frame has presented, mark it presented so the role writes the next one.
+    /// Feed the row-run warm handshake one scan: every body row of the role's grid and the
+    /// presented-frame count. A presentation after a complete sighting marks the update.
     fn scan_presented_updates(&mut self) {
         let Some(role) = self
             .presented
@@ -1679,23 +1683,38 @@ impl Probe {
             // When: `presented` holds no handshake that is not `done`, there is nothing to mark.
             return;
         };
-        let Some(row_text) = self.role_grid(role, |grid| {
-            grid.row(crate::presented_updates::IDENTIFYING_ROW)
-                .iter()
-                .map(|cell| cell.ch)
-                .collect::<String>()
-        }) else {
+        let Some(body_rows) =
+            self.role_grid(role, crate::presented_updates::PresentedUpdates::body_rows)
+        else {
             // When: `role_grid` finds no pane or a busy parser, the next scan looks again.
             return;
         };
         let frames = self.frame_count();
+        if let Some((_, handshake)) = self.presented.as_mut() {
+            handshake.observe_grid(&body_rows, frames);
+        }
+    }
+
+    /// Feed the warm handshake a presentation's frame count, marking a sighted update presented.
+    fn observe_presented_frames(&mut self, frames: u64) {
         let marked =
-            self.presented.as_mut().and_then(|(_, handshake)| handshake.observe(&row_text, frames));
+            self.presented.as_mut().and_then(|(_, handshake)| handshake.observe_frames(frames));
         if let Some(update) = marked {
-            let directory = self.scratch.join(workload::PRESENTED_DIRECTORY);
-            // An unwritable mark leaves the role waiting, and the run's deadline invalidates it.
-            let _ = std::fs::create_dir_all(&directory)
-                .and_then(|()| std::fs::write(directory.join(update.to_string()), b""));
+            self.mark_presented(update);
+        }
+    }
+
+    /// Write update `update`'s acknowledgement, which releases the role into its next update. A
+    /// failed write records why, and the phase's next step invalidates the run with that reason.
+    fn mark_presented(&mut self, update: u32) {
+        let directory = self.scratch.join(workload::PRESENTED_DIRECTORY);
+        let written = std::fs::create_dir_all(&directory)
+            .and_then(|()| std::fs::write(directory.join(update.to_string()), b""));
+        if let Err(error) = written {
+            // When: the write failed, only the first failure is kept as the run's reason.
+            self.presented_failure.get_or_insert_with(|| {
+                format!("acknowledgement write failed for row-run warm update {update}: {error}")
+            });
         }
     }
 
@@ -1862,7 +1881,7 @@ impl Probe {
             notes.push("Laps run: logging at debug adds a render_timing line per frame, so it is never pooled with timed runs.".to_owned());
         }
         if self.plan.roles.iter().any(|role| matches!(role, Workload::RowRuns { .. })) {
-            notes.push("Row-run warm updates are written one at a time: each is marked presented only after the probe saw it in the grid and a later frame presented, and only then is the next written.".to_owned());
+            notes.push("Row-run warm updates are written one at a time: each is marked presented only after the probe saw every body row of it in the grid and a later frame presented (forced once when nothing else presents), and only then is the next written.".to_owned());
         }
         if self.plan.roles.iter().any(|role| matches!(role, Workload::Frames { .. })) {
             notes.push("Frames are paced by sleep 0.016 between writes, so slightly fewer than 60 arrive each second.".to_owned());
@@ -2230,8 +2249,23 @@ impl Probe {
                     if self.stage == Stage::Done {
                         return;
                     }
+                    if let Some(reason) = self.presented_failure.clone() {
+                        // When: a warm acknowledgement could not be written, the role never got its
+                        // release, so the run is not accepted evidence whatever the handshake marked.
+                        self.invalidate(event_loop, reason);
+                        return;
+                    }
                     if self.image.present.take_redraw_request() {
-                        self.request_image_redraw(event_loop);
+                        self.force_presentation(event_loop);
+                    }
+                    let warm_redraw = self
+                        .presented
+                        .as_mut()
+                        .is_some_and(|(_, handshake)| handshake.take_redraw_request());
+                    if warm_redraw {
+                        // The frame that drew the warm update may have presented before the scan saw
+                        // it complete; nothing else need present, so one presentation is forced.
+                        self.force_presentation(event_loop);
                     }
                     if self.image.role.is_some() {
                         let now = Instant::now();
@@ -2470,8 +2504,10 @@ impl Probe {
             PhaseEnd::HoldFrom { .. } => {
                 self.phase_deadline(phase).is_some_and(|deadline| now >= deadline)
             }
+            // A failed acknowledgement never ends the phase; the step invalidates the run instead.
             PhaseEnd::PresentedUpdates(_) => {
-                self.presented.as_ref().is_some_and(|(_, handshake)| handshake.done())
+                self.presented_failure.is_none()
+                    && self.presented.as_ref().is_some_and(|(_, handshake)| handshake.done())
             }
             PhaseEnd::DriverDone => match &self.driver {
                 DriverState::Typing(typing) => {
