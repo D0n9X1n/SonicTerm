@@ -52,6 +52,8 @@ pub(crate) struct Counts {
 
 impl Counts {
     /// The counts that moved from `before` to `self`; the atlas dimension is `self`'s.
+    // Only the macOS/Windows probe takes these deltas; elsewhere this module builds for its tests alone.
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     pub(crate) fn since(self, before: Counts) -> Counts {
         Counts {
             attempts: self.attempts.saturating_sub(before.attempts),
