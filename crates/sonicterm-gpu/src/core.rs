@@ -5448,6 +5448,20 @@ impl GpuRenderer {
         }
     }
 
+    /// Test hook: the body stack's fallback notice id, the generation it has published and the
+    /// generation this renderer's last frame applied (0 before any frame); `None` without a stack.
+    /// A harness reads it to tell a settled fallback from one still waiting for a frame.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_font_fallback_generations(&self) -> Option<(u64, u64, u64)> {
+        let notice = self.font_stack.as_ref()?.fallback_notice();
+        let applied = self
+            .applied_fonts
+            .filter(|(notice_id, _)| *notice_id == notice.id())
+            .map_or(0, |(_, generation)| generation);
+        Some((notice.id(), notice.generation(), applied))
+    }
+
     /// The id of the fallback notice this renderer's body stack publishes to, if it has a stack.
     #[must_use]
     pub fn font_fallback_notice_id(&self) -> Option<u64> {

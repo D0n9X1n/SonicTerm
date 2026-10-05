@@ -28,7 +28,7 @@ use winit::event::{
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId, WindowLevel};
 
-use crate::atlas_retry::{self, Arm, Counts, Progress, RecoveryEpisodes};
+use crate::atlas_retry::{self, Arm, Counts, Progress, RecoveryEpisodes, Scene, SceneReading};
 use crate::cli::{RunArgs, REFUSED};
 use crate::counters::{CounterTotals, CountersMode};
 use crate::record::{
@@ -167,8 +167,6 @@ struct AtlasRetryDriver {
     armed_at: Instant,
     /// Why the run cannot be read; the next drive ends it as invalid.
     failure: Option<String>,
-    /// The settled scene's distinct row keys and grid size; any later change invalidates the run.
-    settled_scene: Option<(usize, (u16, u16))>,
 }
 
 /// S2 typing: one `Ime::Commit` per character once the prompt shows, then a settle.
@@ -1415,9 +1413,9 @@ impl Probe {
         dispatch: impl FnOnce(&mut App, &ActiveEventLoop),
     ) {
         let frames_before = self.frame_count();
-        // S1/atlas-retry reads the main renderer's counts around every forwarded dispatch.
+        // S1/atlas-retry reads the main renderer's counts and the scene around every forwarded dispatch.
         let retry_before = matches!(self.driver, DriverState::AtlasRetry(_))
-            .then(|| atlas_retry_counts(&self.app));
+            .then(|| (atlas_retry_counts(&self.app), self.atlas_retry_scene()));
         // The snapshot is released before the dispatch; whether it advanced is known only after.
         let before = self.open_sample.is_some().then(|| self.echo_snapshot());
         let allocations_before = match kind {
@@ -1431,9 +1429,9 @@ impl Probe {
             .map(|(before_count, counter)| counter().saturating_sub(before_count));
         let ended = Instant::now();
         let frames_after = self.frame_count();
-        if let Some(before) = retry_before {
-            // When: the atlas-retry driver runs, this dispatch's delta feeds its episode machine.
-            self.observe_atlas_retry(before, ended);
+        if let Some((counts, scene)) = retry_before {
+            // When: the atlas-retry driver runs, this dispatch's delta and scene feed its episode machine.
+            self.observe_atlas_retry(counts, scene, ended);
         }
         let advanced = frames_after > frames_before;
         self.frames = frames_after;
@@ -2715,7 +2713,6 @@ impl Probe {
             redraw_pending: false,
             armed_at: now,
             failure: None,
-            settled_scene: None,
         };
         self.arm_atlas_retry(&mut retry, Arm::Redraw);
         DriverState::AtlasRetry(Box::new(retry))
@@ -2739,45 +2736,37 @@ impl Probe {
         retry.armed_at = Instant::now();
     }
 
-    /// Feed the counts one forwarded dispatch moved to the episode machine, from `before`.
-    fn observe_atlas_retry(&mut self, before: Option<Counts>, now: Instant) {
+    /// Feed one forwarded dispatch to the episode machine: the counts it moved from `before`, the
+    /// scene read before it (`scene_before`) and after it, and `now`, when it completed. The
+    /// machine qualifies the scene; the probe only reads it.
+    fn observe_atlas_retry(
+        &mut self,
+        before: Option<Counts>,
+        scene_before: Option<Scene>,
+        now: Instant,
+    ) {
+        if !matches!(self.driver, DriverState::AtlasRetry(_)) {
+            // When: the driver ended during the dispatch, there is no machine to feed.
+            return;
+        }
         let after = atlas_retry_counts(&self.app);
         let delta = before.zip(after).map(|(earlier, later)| later.since(earlier));
-        let DriverState::AtlasRetry(retry) = &mut self.driver else {
-            return;
-        };
-        let was_settled = retry.machine.settled();
-        let progress = retry.machine.observe(delta, now);
-        let just_settled = !was_settled && retry.machine.settled();
-        let scene = (just_settled || progress == Progress::Done).then(|| self.atlas_retry_scene());
+        let reading = SceneReading { before: scene_before, after: self.atlas_retry_scene() };
         let DriverState::AtlasRetry(mut retry) =
             std::mem::replace(&mut self.driver, DriverState::None)
         else {
             return;
         };
-        if let Some(scene) = scene {
-            // When: the scene just settled or the episodes ended, it is checked and compared.
-            match scene {
-                None => retry.failure = Some("the active pane's grid cannot be read".to_owned()),
-                Some((rows, grid)) => {
-                    let qualifiers = (atlas_retry::distinct_keys(&rows), grid);
-                    if let Some(problem) = atlas_retry::scene_problem(&rows) {
-                        retry.failure = Some(format!("the scene is not the fixture: {problem}"));
-                    } else if retry.settled_scene.is_some_and(|settled| settled != qualifiers) {
-                        retry.failure =
-                            Some(format!("the scene changed during the run: {qualifiers:?}"));
-                    }
-                    retry.settled_scene.get_or_insert(qualifiers);
-                }
-            }
-        }
-        match progress {
+        match retry.machine.observe(delta, &reading, now) {
             Progress::Waiting => {}
             Progress::Arm(arm) => self.arm_atlas_retry(&mut retry, arm),
             Progress::Done => match atlas_retry::records_problem(retry.machine.records()) {
                 Some(problem) => retry.failure = Some(problem),
                 None => {
-                    let distinct = retry.settled_scene.map_or(0, |(keys, _)| keys);
+                    let distinct = retry
+                        .machine
+                        .scene()
+                        .map_or(0, |scene| atlas_retry::distinct_keys(&scene.rows));
                     self.atlas_recovery =
                         Some(atlas_retry::recovery_json(retry.machine.records(), distinct));
                 }
@@ -2809,8 +2798,13 @@ impl Probe {
         });
     }
 
-    /// The active pane's visible rows, trailing blanks trimmed, and its grid size.
-    fn atlas_retry_scene(&self) -> Option<(Vec<String>, (u16, u16))> {
+    /// What the main window shows for S1/atlas-retry: the active tab's title, the font fallback
+    /// generations, the active pane's grid size, cursor and visible rows (trailing blanks trimmed).
+    /// `None` when any part cannot be read.
+    fn atlas_retry_scene(&self) -> Option<Scene> {
+        let window_id = self.main_id?;
+        let title = self.app.__test_window_active_tab_title(window_id)?;
+        let fallback = self.app.main_renderer()?.__test_font_fallback_generations()?;
         let pane = self.active_pane()?;
         let state = self.app.main_panes()?.get(&pane)?;
         let parser = state.parser.lock();
@@ -2821,7 +2815,13 @@ impl Probe {
                 text.trim_end().to_owned()
             })
             .collect();
-        Some((rows, (grid.cols, grid.rows)))
+        Some(Scene {
+            title,
+            fallback,
+            grid: (grid.cols, grid.rows),
+            cursor: (grid.cursor.row, grid.cursor.col),
+            rows,
+        })
     }
 
     /// Hover-only sweep lanes: the middle of the tab bar and three grid rows, and the x range.

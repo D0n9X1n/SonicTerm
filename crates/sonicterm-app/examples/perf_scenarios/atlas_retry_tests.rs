@@ -6,6 +6,30 @@ fn fitting(frame: Frame) -> Counts {
     Counts { attempts: 1, presented, resets, hits: 0, misses: 0, shapes: 0, atlas_dim: 2048 }
 }
 
+/// The planned scene: fixture rows with the sentinel and a prompt below, fallback applied.
+fn fixture_scene() -> Scene {
+    let mut rows: Vec<String> = fixture_text().lines().skip(2).map(str::to_owned).collect();
+    rows.push("sentinel".to_owned());
+    rows.push(String::new());
+    Scene {
+        title: "sonicterm".to_owned(),
+        fallback: (1, 0, 0),
+        grid: (281, 70),
+        cursor: (69, 0),
+        rows,
+    }
+}
+
+/// A dispatch that leaves `scene` as it found it.
+fn around(scene: Scene) -> SceneReading {
+    SceneReading { before: Some(scene.clone()), after: Some(scene) }
+}
+
+/// A dispatch that leaves the planned scene unchanged.
+fn same() -> SceneReading {
+    around(fixture_scene())
+}
+
 /// A steady settling frame.
 fn steady() -> Counts {
     fitting(Frame::Reused)
@@ -15,9 +39,9 @@ fn steady() -> Counts {
 fn settled(now: Instant) -> RecoveryEpisodes {
     let mut machine = RecoveryEpisodes::new(now);
     for _ in 0..STEADY_FRAMES - 1 {
-        assert_eq!(machine.observe(Some(steady()), now), Progress::Arm(Arm::Redraw));
+        assert_eq!(machine.observe(Some(steady()), &same(), now), Progress::Arm(Arm::Redraw));
     }
-    assert_eq!(machine.observe(Some(steady()), now), Progress::Arm(Arm::ChangeAtlas));
+    assert_eq!(machine.observe(Some(steady()), &same(), now), Progress::Arm(Arm::ChangeAtlas));
     assert!(machine.settled());
     machine
 }
@@ -27,10 +51,10 @@ fn settled(now: Instant) -> RecoveryEpisodes {
 fn a_dispatch_without_an_attempt_advances_nothing() {
     let now = Instant::now();
     let mut machine = RecoveryEpisodes::new(now);
-    assert_eq!(machine.observe(Some(Counts::default()), now), Progress::Waiting);
+    assert_eq!(machine.observe(Some(Counts::default()), &same(), now), Progress::Waiting);
     assert!(!machine.settled());
     let mut machine = settled(now);
-    assert_eq!(machine.observe(Some(Counts::default()), now), Progress::Waiting);
+    assert_eq!(machine.observe(Some(Counts::default()), &same(), now), Progress::Waiting);
     assert!(machine.records().is_empty());
 }
 
@@ -39,14 +63,14 @@ fn a_dispatch_without_an_attempt_advances_nothing() {
 fn only_consecutive_steady_frames_settle_the_scene() {
     let now = Instant::now();
     let mut machine = RecoveryEpisodes::new(now);
-    machine.observe(Some(steady()), now);
-    machine.observe(Some(steady()), now);
+    machine.observe(Some(steady()), &same(), now);
+    machine.observe(Some(steady()), &same(), now);
     let missed = Counts { misses: 3, ..steady() };
-    assert_eq!(machine.observe(Some(missed), now), Progress::Arm(Arm::Redraw));
-    machine.observe(Some(steady()), now);
-    machine.observe(Some(steady()), now);
+    assert_eq!(machine.observe(Some(missed), &same(), now), Progress::Arm(Arm::Redraw));
+    machine.observe(Some(steady()), &same(), now);
+    machine.observe(Some(steady()), &same(), now);
     assert!(!machine.settled(), "the miss restarted the count");
-    assert_eq!(machine.observe(Some(steady()), now), Progress::Arm(Arm::ChangeAtlas));
+    assert_eq!(machine.observe(Some(steady()), &same(), now), Progress::Arm(Arm::ChangeAtlas));
 }
 
 /// A normal run records eight episodes of A, B, C, D in order, arming the change for A, the
@@ -57,7 +81,7 @@ fn eight_normal_episodes_complete_and_validate() {
     let mut machine = settled(now);
     for episode in 0..EPISODES {
         for frame in [Frame::Retried, Frame::Recovered, Frame::Reused, Frame::Repeated] {
-            let progress = machine.observe(Some(fitting(frame)), now);
+            let progress = machine.observe(Some(fitting(frame)), &same(), now);
             let expected = match (episode, frame) {
                 (_, Frame::Retried) => Progress::Arm(Arm::InvalidateOnly),
                 (_, Frame::Recovered | Frame::Reused) => Progress::Arm(Arm::Redraw),
@@ -84,10 +108,10 @@ fn an_extra_attempt_is_invalid() {
     let mut machine = settled(now);
     let doubled = Counts { attempts: 2, ..fitting(Frame::Retried) };
     assert!(
-        matches!(machine.observe(Some(doubled), now), Progress::Invalid(reason) if reason.contains("2 attempts"))
+        matches!(machine.observe(Some(doubled), &same(), now), Progress::Invalid(reason) if reason.contains("2 attempts"))
     );
     assert_eq!(
-        machine.observe(Some(fitting(Frame::Retried)), now),
+        machine.observe(Some(fitting(Frame::Retried)), &same(), now),
         Progress::Waiting,
         "an ended run ignores later frames"
     );
@@ -100,21 +124,21 @@ fn a_frame_whose_counts_do_not_fit_is_invalid() {
     let mut machine = settled(now);
     let presented_a = Counts { presented: 1, ..fitting(Frame::Retried) };
     assert!(
-        matches!(machine.observe(Some(presented_a), now), Progress::Invalid(reason) if reason.contains("episode 0 A"))
+        matches!(machine.observe(Some(presented_a), &same(), now), Progress::Invalid(reason) if reason.contains("episode 0 A"))
     );
     // An A that neither presents nor resets is a deferral-like attempt the change never reached,
     // so it is no retry and must not be recorded as one.
     let mut machine = settled(now);
     let unreset_a = Counts { resets: 0, ..fitting(Frame::Retried) };
     assert!(
-        matches!(machine.observe(Some(unreset_a), now), Progress::Invalid(reason) if reason.contains("episode 0 A"))
+        matches!(machine.observe(Some(unreset_a), &same(), now), Progress::Invalid(reason) if reason.contains("episode 0 A"))
     );
     let mut machine = settled(now);
-    machine.observe(Some(fitting(Frame::Retried)), now);
-    machine.observe(Some(fitting(Frame::Recovered)), now);
+    machine.observe(Some(fitting(Frame::Retried)), &same(), now);
+    machine.observe(Some(fitting(Frame::Recovered)), &same(), now);
     let reset_c = Counts { resets: 1, ..fitting(Frame::Reused) };
     assert!(
-        matches!(machine.observe(Some(reset_c), now), Progress::Invalid(reason) if reason.contains("episode 0 C"))
+        matches!(machine.observe(Some(reset_c), &same(), now), Progress::Invalid(reason) if reason.contains("episode 0 C"))
     );
 }
 
@@ -123,11 +147,11 @@ fn a_frame_whose_counts_do_not_fit_is_invalid() {
 fn a_recovered_frame_at_another_atlas_dimension_is_invalid() {
     let now = Instant::now();
     let mut machine = settled(now);
-    machine.observe(Some(fitting(Frame::Retried)), now);
-    machine.observe(Some(fitting(Frame::Recovered)), now);
+    machine.observe(Some(fitting(Frame::Retried)), &same(), now);
+    machine.observe(Some(fitting(Frame::Recovered)), &same(), now);
     let grown = Counts { atlas_dim: 4096, ..fitting(Frame::Reused) };
     assert!(
-        matches!(machine.observe(Some(grown), now), Progress::Invalid(reason) if reason.contains("dimension"))
+        matches!(machine.observe(Some(grown), &same(), now), Progress::Invalid(reason) if reason.contains("dimension"))
     );
 }
 
@@ -150,7 +174,10 @@ fn a_step_past_its_bound_times_out() {
 fn a_missing_counter_field_is_invalid() {
     let now = Instant::now();
     let mut machine = settled(now);
-    assert_eq!(machine.observe(None, now), Progress::Invalid("counters unavailable".to_owned()));
+    assert_eq!(
+        machine.observe(None, &same(), now),
+        Progress::Invalid("counters unavailable".to_owned())
+    );
 }
 
 /// Validation refuses a short run, a misordered frame, an extra attempt, an A without a reset and a
@@ -161,7 +188,7 @@ fn records_validation_refuses_every_malformed_run() {
     let mut machine = settled(now);
     for _ in 0..EPISODES {
         for frame in [Frame::Retried, Frame::Recovered, Frame::Reused, Frame::Repeated] {
-            machine.observe(Some(fitting(frame)), now);
+            machine.observe(Some(fitting(frame)), &same(), now);
         }
     }
     let good = machine.records().to_vec();
@@ -181,7 +208,8 @@ fn records_validation_refuses_every_malformed_run() {
 }
 
 /// The fixture is 70 distinct numbered lines; a scene of them, with a sentinel and a prompt below,
-/// passes, while a scene missing fixture lines or out of order does not.
+/// passes, while a scene missing fixture lines, out of order or with one line's text replaced
+/// does not.
 #[test]
 fn the_scene_check_accepts_the_fixture_and_nothing_else() {
     let lines: Vec<String> = fixture_text().lines().map(str::to_owned).collect();
@@ -196,7 +224,170 @@ fn the_scene_check_accepts_the_fixture_and_nothing_else() {
     short[6] = "unrelated".to_owned();
     short[7] = "unrelated".to_owned();
     assert!(scene_problem(&short).is_some());
-    let mut misordered = scene;
+    let mut misordered = scene.clone();
     misordered.swap(3, 4);
     assert!(scene_problem(&misordered).is_some());
+    // A row with the fixture's prefix and number but other text is not a fixture line.
+    let mut replaced = scene;
+    replaced[10] = format!("{ROW_PREFIX}13 ZZZZZZZZZZZZZZZZZZZZZZZZZZ 13");
+    assert!(scene_problem(&replaced).is_some());
+}
+
+/// A frame completing exactly at its step's deadline is late: `observe` ends the run before reading
+/// its counts, so it never installs the next step's deadline. One instant earlier it is on time.
+#[test]
+fn a_frame_completing_at_or_past_its_deadline_is_refused_through_observe() {
+    let now = Instant::now();
+    let mut machine = settled(now);
+    let on_time = now + STEP_BOUND - Duration::from_millis(1);
+    assert_eq!(
+        machine.observe(Some(fitting(Frame::Retried)), &same(), on_time),
+        Progress::Arm(Arm::InvalidateOnly)
+    );
+    let at_deadline = on_time + STEP_BOUND;
+    let late = machine.observe(Some(fitting(Frame::Recovered)), &same(), at_deadline);
+    assert!(
+        matches!(&late, Progress::Invalid(reason) if reason.contains("episode 0 B") && reason.contains("past its bound")),
+        "{late:?}"
+    );
+    assert_eq!(machine.deadline(), None, "the late frame installed no deadline");
+    assert_eq!(machine.records().len(), 1, "the late frame is not recorded");
+    let mut overdue = settled(now);
+    let past = overdue.observe(Some(fitting(Frame::Retried)), &same(), now + STEP_BOUND * 2);
+    assert!(matches!(past, Progress::Invalid(_)), "a frame past the deadline is late");
+    assert!(overdue.records().is_empty());
+}
+
+/// The final settling frame is judged the same way against the settle bound.
+#[test]
+fn the_final_settling_frame_is_refused_at_the_settle_bound() {
+    let now = Instant::now();
+    for (completed, on_time) in
+        [(now + SETTLE_BOUND - Duration::from_millis(1), true), (now + SETTLE_BOUND, false)]
+    {
+        let mut machine = RecoveryEpisodes::new(now);
+        for _ in 0..STEADY_FRAMES - 1 {
+            machine.observe(Some(steady()), &same(), now);
+        }
+        let last = machine.observe(Some(steady()), &same(), completed);
+        if on_time {
+            assert_eq!(last, Progress::Arm(Arm::ChangeAtlas));
+        } else {
+            assert!(
+                matches!(&last, Progress::Invalid(reason) if reason.contains("settle")),
+                "{last:?}"
+            );
+            assert!(machine.scene().is_none(), "the late settle recorded no scene");
+        }
+    }
+}
+
+/// A font fallback applied between B and C changes the settled scene, so C ends the run.
+#[test]
+fn a_fallback_applied_between_b_and_c_is_invalid() {
+    let now = Instant::now();
+    let mut machine = settled(now);
+    machine.observe(Some(fitting(Frame::Retried)), &same(), now);
+    machine.observe(Some(fitting(Frame::Recovered)), &same(), now);
+    let published = Scene { fallback: (1, 1, 0), ..fixture_scene() };
+    let applied = Scene { fallback: (1, 1, 1), ..fixture_scene() };
+    let reading = SceneReading { before: Some(published), after: Some(applied) };
+    let progress = machine.observe(Some(fitting(Frame::Reused)), &reading, now);
+    assert!(
+        matches!(&progress, Progress::Invalid(reason) if reason.contains("font fallback")),
+        "{progress:?}"
+    );
+}
+
+/// A title change during the episodes ends the run.
+#[test]
+fn a_title_change_is_invalid() {
+    let now = Instant::now();
+    let mut machine = settled(now);
+    let retitled = around(Scene { title: "vim".to_owned(), ..fixture_scene() });
+    let progress = machine.observe(Some(fitting(Frame::Retried)), &retitled, now);
+    assert!(
+        matches!(&progress, Progress::Invalid(reason) if reason.contains("title")),
+        "{progress:?}"
+    );
+}
+
+/// Text replaced with text of the same length and count ends the run: the rows are compared exactly.
+#[test]
+fn a_same_count_text_replacement_is_invalid() {
+    let now = Instant::now();
+    let mut machine = settled(now);
+    let mut scene = fixture_scene();
+    scene.rows[10] =
+        scene.rows[10].replace("abcdefghijklmnopqrstuvwxyz", "ZYXWVUTSRQPONMLKJIHGFEDCBA");
+    let progress = machine.observe(Some(fitting(Frame::Retried)), &around(scene), now);
+    assert!(
+        matches!(&progress, Progress::Invalid(reason) if reason.contains("row text")),
+        "{progress:?}"
+    );
+}
+
+/// A transient change is caught where it is seen, before it can revert: a dispatch that attempts no
+/// frame but leaves the scene changed, and a dispatch whose scene changed before it and reverts in it.
+#[test]
+fn a_transient_change_is_invalid_at_the_dispatch_that_shows_it() {
+    let now = Instant::now();
+    let changed = Scene { cursor: (0, 5), ..fixture_scene() };
+    let mut machine = settled(now);
+    let reading = SceneReading { before: Some(fixture_scene()), after: Some(changed.clone()) };
+    let progress = machine.observe(Some(Counts::default()), &reading, now);
+    assert!(
+        matches!(&progress, Progress::Invalid(reason) if reason.contains("cursor")),
+        "{progress:?}"
+    );
+    let mut machine = settled(now);
+    let reverting = SceneReading { before: Some(changed), after: Some(fixture_scene()) };
+    let progress = machine.observe(Some(fitting(Frame::Retried)), &reverting, now);
+    assert!(
+        matches!(&progress, Progress::Invalid(reason) if reason.contains("cursor")),
+        "{progress:?}"
+    );
+}
+
+/// Settling needs consecutive steady frames of one scene: a scene that changes mid-count restarts
+/// it, a pending fallback or a non-fixture scene never settles, and an unreadable scene ends the run.
+#[test]
+fn settling_requires_one_applied_fixture_scene() {
+    let now = Instant::now();
+    let mut machine = RecoveryEpisodes::new(now);
+    machine.observe(Some(steady()), &same(), now);
+    machine.observe(Some(steady()), &same(), now);
+    let retitled = around(Scene { title: "retitled".to_owned(), ..fixture_scene() });
+    // The frame that shows the change is not steady; three steady frames of the new scene follow.
+    assert_eq!(machine.observe(Some(steady()), &retitled, now), Progress::Arm(Arm::Redraw));
+    assert!(!machine.settled(), "the change restarted the count");
+    for _ in 0..STEADY_FRAMES - 1 {
+        assert_eq!(machine.observe(Some(steady()), &retitled, now), Progress::Arm(Arm::Redraw));
+    }
+    assert_eq!(machine.observe(Some(steady()), &retitled, now), Progress::Arm(Arm::ChangeAtlas));
+    assert_eq!(machine.scene().map(|scene| scene.title.as_str()), Some("retitled"));
+
+    let pending = around(Scene { fallback: (1, 1, 0), ..fixture_scene() });
+    let mut machine = RecoveryEpisodes::new(now);
+    for _ in 0..STEADY_FRAMES + 2 {
+        assert_eq!(machine.observe(Some(steady()), &pending, now), Progress::Arm(Arm::Redraw));
+    }
+    let mut stranger = fixture_scene();
+    stranger.rows[0] = "unrelated".to_owned();
+    stranger.rows[1] = "unrelated".to_owned();
+    stranger.rows[2] = "unrelated".to_owned();
+    let mut machine = RecoveryEpisodes::new(now);
+    for _ in 0..STEADY_FRAMES + 2 {
+        assert_eq!(
+            machine.observe(Some(steady()), &around(stranger.clone()), now),
+            Progress::Arm(Arm::Redraw)
+        );
+    }
+    let mut machine = RecoveryEpisodes::new(now);
+    let unread = SceneReading { before: Some(fixture_scene()), after: None };
+    let progress = machine.observe(Some(steady()), &unread, now);
+    assert!(
+        matches!(&progress, Progress::Invalid(reason) if reason.contains("cannot be read")),
+        "{progress:?}"
+    );
 }

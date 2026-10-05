@@ -5,6 +5,11 @@
 //! the unchanged scene. The probe feeds this pure machine one counter delta per forwarded dispatch;
 //! the machine says what to arm next and records each frame. Any delta that does not fit its frame
 //! ends the run as invalid; nothing is folded or guessed.
+//!
+//! The scene is qualified as well as the counts. The probe reads it (title, font fallback, grid,
+//! cursor and every visible row) before and after each forwarded dispatch; settling records it
+//! once fallback has been applied and the rows are exactly the fixture, and any later reading that
+//! differs ends the run, so C and D always redraw one unchanged scene.
 
 use std::time::{Duration, Instant};
 
@@ -53,6 +58,52 @@ impl Counts {
             atlas_dim: self.atlas_dim,
         }
     }
+}
+
+/// What a frame of the planned scene shows, read around every forwarded dispatch. Settling records
+/// it; any later reading that differs means C and D no longer redraw one unchanged scene.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Scene {
+    /// The active tab's title.
+    pub(crate) title: String,
+    /// The body stack's fallback notice: its id, the generation it published and the generation
+    /// the last frame applied.
+    pub(crate) fallback: (u64, u64, u64),
+    /// The grid's columns and rows.
+    pub(crate) grid: (u16, u16),
+    /// The cursor's row and column.
+    pub(crate) cursor: (u16, u16),
+    /// Every visible row's text, trailing blanks trimmed.
+    pub(crate) rows: Vec<String>,
+}
+
+impl Scene {
+    /// Whether every fallback the stack published has been applied by a frame.
+    pub(crate) fn fallback_settled(&self) -> bool {
+        self.fallback.1 == self.fallback.2
+    }
+
+    /// The first field in which `other` differs from this scene, named for a reason.
+    pub(crate) fn difference(&self, other: &Scene) -> Option<&'static str> {
+        [
+            ("title", self.title != other.title),
+            ("font fallback", self.fallback != other.fallback),
+            ("grid size", self.grid != other.grid),
+            ("cursor", self.cursor != other.cursor),
+            ("row text", self.rows != other.rows),
+        ]
+        .into_iter()
+        .find_map(|(field, differs)| differs.then_some(field))
+    }
+}
+
+/// The scene read before and after one forwarded dispatch; a side is `None` when it could not be read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SceneReading {
+    /// Read just before the dispatch.
+    pub(crate) before: Option<Scene>,
+    /// Read just after it.
+    pub(crate) after: Option<Scene>,
 }
 
 /// One frame of an episode.
@@ -150,6 +201,10 @@ pub(crate) struct RecoveryEpisodes {
     stage: Stage,
     records: Vec<Record>,
     recovered_dim: Option<u32>,
+    /// While settling, the scene the current run of steady frames showed.
+    candidate: Option<Scene>,
+    /// The scene settling recorded; every later reading must equal it.
+    scene: Option<Scene>,
 }
 
 impl RecoveryEpisodes {
@@ -159,14 +214,44 @@ impl RecoveryEpisodes {
             stage: Stage::Settling { steady: 0, deadline: now + SETTLE_BOUND },
             records: Vec::new(),
             recovered_dim: None,
+            candidate: None,
+            scene: None,
         }
     }
 
-    /// Feed the counts one forwarded dispatch moved, or `None` when a counter field is missing.
-    pub(crate) fn observe(&mut self, delta: Option<Counts>, now: Instant) -> Progress {
+    /// Feed one forwarded dispatch: the counts it moved (`None` when a counter field is missing),
+    /// the scene read around it, and `now`, the instant the dispatch completed.
+    ///
+    /// Deadlines are judged at completion: a dispatch completing at or after the current deadline
+    /// (the settle's while settling) ends the run before its counts are read, as [`Self::expire`]
+    /// would at that instant, so a late frame never installs the next step's deadline. Once
+    /// settled, a reading on either side of any dispatch that differs from the settled scene ends
+    /// the run, whether or not the dispatch attempted a frame.
+    pub(crate) fn observe(
+        &mut self,
+        delta: Option<Counts>,
+        reading: &SceneReading,
+        now: Instant,
+    ) -> Progress {
         if matches!(self.stage, Stage::Done | Stage::Invalid) {
             // When: the machine has ended, later dispatches are not part of the run.
             return Progress::Waiting;
+        }
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
+            // When: the dispatch completed at or past the current deadline, its frame is late.
+            return self.fail(format!("{}: completed past its bound", self.label()));
+        }
+        let (Some(before), Some(after)) = (&reading.before, &reading.after) else {
+            // When: the scene could not be read around the dispatch, nothing can be qualified.
+            return self.fail(format!("{}: the scene cannot be read", self.label()));
+        };
+        let changed = self
+            .scene
+            .as_ref()
+            .and_then(|settled| settled.difference(before).or_else(|| settled.difference(after)));
+        if let Some(field) = changed {
+            // When: the settled scene's `field` differs on either side, C and D no longer redraw it.
+            return self.fail(format!("{}: the scene's {field} changed", self.label()));
         }
         let Some(delta) = delta else {
             // When: a counter field is missing, nothing can be measured, never read as zero.
@@ -183,10 +268,21 @@ impl RecoveryEpisodes {
         }
         match self.stage {
             Stage::Settling { steady, deadline } => {
-                let steady_frame = delta.presented == 1 && delta.resets == 0 && delta.misses == 0;
+                // A steady frame drew without a miss or reset, left the scene as it found it, showed
+                // the scene of the frames before it, with fallback applied and exactly the fixture.
+                let unchanged = before == after
+                    && self.candidate.as_ref().is_none_or(|candidate| candidate == after);
+                let steady_frame = delta.presented == 1
+                    && delta.resets == 0
+                    && delta.misses == 0
+                    && unchanged
+                    && after.fallback_settled()
+                    && scene_problem(&after.rows).is_none();
                 let steady = if steady_frame { steady + 1 } else { 0 };
+                self.candidate = steady_frame.then(|| after.clone());
                 if steady >= STEADY_FRAMES {
                     // When: the scene drew STEADY_FRAMES steady frames in a row, the episodes start.
+                    self.scene = Some(after.clone());
                     self.stage = Stage::Step {
                         episode: 0,
                         frame: Frame::Retried,
@@ -257,7 +353,8 @@ impl RecoveryEpisodes {
         }
     }
 
-    /// Whether the scene has settled and the episodes have started or ended.
+    /// Whether the scene has settled and the episodes have started or ended; tests read it.
+    #[cfg(test)]
     pub(crate) fn settled(&self) -> bool {
         !matches!(self.stage, Stage::Settling { .. })
     }
@@ -270,6 +367,11 @@ impl RecoveryEpisodes {
     /// The frames recorded so far, in order.
     pub(crate) fn records(&self) -> &[Record] {
         &self.records
+    }
+
+    /// The scene settling recorded, `None` before it settles.
+    pub(crate) fn scene(&self) -> Option<&Scene> {
+        self.scene.as_ref()
     }
 
     /// The step the machine is on, for a reason.
@@ -349,12 +451,11 @@ pub(crate) fn fixture_text() -> String {
 }
 
 /// Why the visible rows are not the fixture: every row but at most the last two (the sentinel and
-/// a prompt) must be a fixture line, numbered consecutively upward.
+/// a prompt) must be exactly a fixture line, and those lines must be consecutive.
 pub(crate) fn scene_problem(rows: &[String]) -> Option<String> {
-    let numbers: Vec<u32> = rows
-        .iter()
-        .filter_map(|row| row.strip_prefix(ROW_PREFIX)?.get(..2)?.parse().ok())
-        .collect();
+    let fixture: Vec<String> = fixture_text().lines().map(str::to_owned).collect();
+    let numbers: Vec<usize> =
+        rows.iter().filter_map(|row| fixture.iter().position(|line| line == row)).collect();
     if numbers.len() + 2 < rows.len() {
         return Some(format!("{} of {} visible rows are fixture lines", numbers.len(), rows.len()));
     }
