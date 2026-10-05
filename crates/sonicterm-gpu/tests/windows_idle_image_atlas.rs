@@ -2,14 +2,15 @@
 //! WARP device: the interval release without a frame, a still image that is never released, the re-shown
 //! frame's pixels, the frame texture's size under each presenter, and both on a stopped device and
 //! after recovery onto a new device. A covered-window trim's frame texture survives a stop and a
-//! recovery commit, and its image-atlas release restores the media on the next frame.
+//! recovery commit, and its image-atlas release restores the media on the next frame, on GDI and
+//! read back from wgpu. A trim the stopped device refuses changes nothing.
 //!
 //! Only the event-loop entry point is Windows-only (winit allows a test-thread event loop there);
 //! the case logic compiles on every host, so a non-Windows lint pass type-checks it.
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
 use sonicterm_gpu::{
-    core::{GpuRenderer, RendererSettings, SurfaceAppearance},
+    core::{unpad_readback_rows, GpuRenderer, RendererSettings, SurfaceAppearance},
     device_errors::{DeviceStateWaker, GpuFaultKind},
 };
 use sonicterm_render_model::{
@@ -186,6 +187,27 @@ fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
             None,
         )
         .map_err(|error| error.to_string())
+}
+
+/// The retained wgpu frame's BGRA bytes, copied out through the test hook and read back.
+fn wgpu_pixels(renderer: &mut GpuRenderer) -> Result<Vec<u8>, String> {
+    let readback = renderer.__copy_retained_frame().ok_or("readback is enabled")?;
+    let slice = readback.buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    readback
+        .device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|error| format!("poll the readback: {error}"))?;
+    let mapped = slice.get_mapped_range().map_err(|error| format!("map the readback: {error}"))?;
+    let bytes = unpad_readback_rows(
+        &mapped,
+        readback.width_px,
+        readback.height_px,
+        readback.padded_row_bytes,
+    );
+    drop(mapped);
+    readback.buffer.unmap();
+    Ok(bytes)
 }
 
 /// Every pixel of a GDI renderer's software frame. The hook exists only on Windows.
@@ -426,6 +448,51 @@ fn trim_image_atlas_and_restore(active: &ActiveEventLoop) -> Result<(), String> 
     check(software_pixels(&shown, &window)? == expected, "the restored frame equals the first")
 }
 
+/// On the GPU presenter, an image shown, removed, trimmed away and shown again presents at once, its
+/// atlas and GPU mirror promoted again, with exactly the pixels the frame before the trim read back.
+fn trim_restores_the_image_on_wgpu(active: &ActiveEventLoop) -> Result<(), String> {
+    let (_window, mut renderer) = renderer(active, SoftwareRenderMode::Off, "trim-image-wgpu")?;
+    renderer.__enable_retained_frame_readback();
+    let frames = renderer.successful_frame_count();
+    render(&mut renderer, true)?;
+    check(renderer.successful_frame_count() > frames, "the reference frame presents")?;
+    let reference = wgpu_pixels(&mut renderer)?;
+    render(&mut renderer, false)?;
+    let _ = renderer.trim_for_occlusion();
+    check(
+        renderer.__test_image_atlas_dimensions() == ((1, 1), (1, 1)),
+        "the trim released the image atlas and its GPU mirror",
+    )?;
+    check(renderer.__frame_texture_trimmed(), "the frame texture is trimmed")?;
+    let frames = renderer.successful_frame_count();
+    render(&mut renderer, true)?;
+    check(renderer.successful_frame_count() == frames + 1, "the first recovered frame presents")?;
+    let (cpu, gpu) = renderer.__test_image_atlas_dimensions();
+    check(cpu != (1, 1) && gpu == cpu, "the atlas and its GPU mirror are promoted again")?;
+    check(wgpu_pixels(&mut renderer)? == reference, "the recovered image equals the reference")
+}
+
+/// A trim on a stopped device is refused before anything is released: the report says so and gives
+/// back nothing, and the retained parts, frame texture, image atlas and trim mark are unchanged.
+fn refused_trim_changes_nothing(active: &ActiveEventLoop) -> Result<(), String> {
+    let (_window, mut renderer) = renderer(active, SoftwareRenderMode::Off, "trim-refused")?;
+    render(&mut renderer, true)?;
+    render(&mut renderer, false)?;
+    renderer.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
+    check(!renderer.device_accepts_gpu_work(), "the device is stopped")?;
+    let amounts = renderer.retained_amounts();
+    let extent = renderer.frame_texture_extent();
+    let atlas = renderer.__test_image_atlas_dimensions();
+    let installs = renderer.__frame_texture_rebuilds();
+    let report = renderer.trim_for_occlusion();
+    check(report.refused && report.gpu_released_requested_bytes == 0, "the trim is refused")?;
+    check(renderer.retained_amounts() == amounts, "the retained parts are unchanged")?;
+    check(renderer.frame_texture_extent() == extent, "the frame texture is unchanged")?;
+    check(renderer.__test_image_atlas_dimensions() == atlas, "the image atlas is unchanged")?;
+    check(!renderer.__frame_texture_trimmed(), "the texture is not marked trimmed")?;
+    check(renderer.__frame_texture_rebuilds() == installs, "no texture was installed")
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn windows_idle_image_atlas_and_gdi_frame_texture() {
@@ -447,6 +514,8 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
         ("stopped device", stopped_device),
         ("trim, stop and rebind", trim_stop_rebind),
         ("trim image atlas and restore", trim_image_atlas_and_restore),
+        ("trim restores the image on wgpu", trim_restores_the_image_on_wgpu),
+        ("refused trim changes nothing", refused_trim_changes_nothing),
     ] {
         if let Err(error) = case(active) {
             failures.push(format!("{name}: {error}"));
