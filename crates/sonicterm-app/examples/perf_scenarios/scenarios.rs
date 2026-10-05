@@ -83,10 +83,14 @@ pub(crate) fn list_json() -> String {
         .collect();
     // The capability is unconditional: every build of this harness writes the split fields, a build
     // without perf-echo-trace with every credited sample `unsupported`.
-    let capabilities = serde_json::json!({ "latency_split_schema": crate::record::SPLIT_SCHEMA });
+    let capabilities = serde_json::json!({ "latency_split_schema": SPLIT_SCHEMA });
     serde_json::json!({ "schema_version": 1, "capabilities": capabilities, "scenarios": scenarios })
         .to_string()
 }
+
+/// The schema of the split fields in `latency`; a harness that writes them lists the same number
+/// in `--list` as `capabilities.latency_split_schema`.
+pub(crate) const SPLIT_SCHEMA: u32 = 1;
 
 /// The catalog entry for `id`, if the harness knows it.
 #[cfg(any(target_os = "macos", windows, test))]

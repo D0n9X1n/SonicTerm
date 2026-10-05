@@ -206,9 +206,9 @@ pub(crate) fn split_in_scope(scenario: &str, variant: &str) -> bool {
     (scenario, variant) == ("S2", "default")
 }
 
-/// The schema of the split fields in `latency`; a harness that writes them lists the same number
-/// in `--list` as `capabilities.latency_split_schema`.
-pub(crate) const SPLIT_SCHEMA: u32 = 1;
+// The split schema lives in `scenarios`, which every build compiles, because `--list` declares it
+// on hosts where this module is not built.
+pub(crate) use crate::scenarios::SPLIT_SCHEMA;
 /// The split reason of a sample with no credited frame.
 pub(crate) const NOT_CREDITED: &str = "not-credited";
 /// The split reason of a credited sample that was split.
