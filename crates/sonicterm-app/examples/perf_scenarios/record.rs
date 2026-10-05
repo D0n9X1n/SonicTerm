@@ -1114,6 +1114,8 @@ pub(crate) struct RunResult {
     pub(crate) window_path: &'static str,
     /// Whether an occlusion change was delivered without a native event.
     pub(crate) synthetic_occlusion: bool,
+    /// What the App's covered-window trim hook reported, as `result.json`'s `hooks.trim`.
+    pub(crate) trim_hook: TrimHookOutcome,
     /// Native `Focused` events the probe recorded and dropped.
     pub(crate) native_focus_events_dropped: u64,
     /// Windows: native `CursorMoved` events dropped because the pointer rested where the window
@@ -1182,6 +1184,7 @@ impl RunResult {
         put("native_cursor_rest_events_dropped", json!(self.native_cursor_rest_events_dropped));
         put("finish_session_settled", json!(self.finish_session_settled));
         put("checkpoint_memory", json!(checkpoint_memory_support()));
+        put("hooks", json!({ "trim": self.trim_hook.as_str() }));
         // The measurement fields come from the serializer progress.json streams, so both
         // documents record them identically. Every field converts; a non-finite float is null.
         let measured =
@@ -1272,6 +1275,36 @@ pub(crate) fn checkpoint_memory_support() -> &'static str {
     } else {
         // When: `CHECKPOINT_MEMORY` is false, this build takes no checkpoint sample.
         "unsupported"
+    }
+}
+
+/// What the App's covered-window trim hook reported for a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrimHookOutcome {
+    /// The plan never covered the window, so the hook was never called.
+    NotReached,
+    /// No trim: a build without `perf-hook-trim`, or an App whose hook cannot trim yet. The run
+    /// measures an untrimmed baseline, so its memory readings stay valid figures.
+    Unsupported,
+    /// The App examined the window and skipped it.
+    // Built only by the hook adapter, which exists only with perf-hook-trim.
+    #[cfg_attr(not(feature = "perf-hook-trim"), allow(dead_code))]
+    Skipped,
+    /// The App trimmed the window's renderer.
+    // Built only by the hook adapter, which exists only with perf-hook-trim.
+    #[cfg_attr(not(feature = "perf-hook-trim"), allow(dead_code))]
+    Trimmed,
+}
+
+impl TrimHookOutcome {
+    /// The outcome's name in `result.json`'s `hooks.trim`.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::NotReached => "not-reached",
+            Self::Unsupported => "unsupported",
+            Self::Skipped => "skipped",
+            Self::Trimmed => "trimmed",
+        }
     }
 }
 

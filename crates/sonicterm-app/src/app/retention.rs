@@ -913,6 +913,52 @@ impl super::App {
     }
 }
 
+/// What a covered-window trim did for one window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrimDecision {
+    /// The window's renderer released what it can rebuild; `trim_seq` numbers this trim.
+    Trimmed {
+        /// The App's trim count after this trim, starting at 1.
+        trim_seq: u64,
+    },
+    /// The window was not trimmed, for this reason.
+    Skipped(TrimSkip),
+    /// This build cannot trim a covered renderer; nothing was examined or changed.
+    Unsupported,
+}
+
+/// Why a covered window was not trimmed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrimSkip {
+    /// No window has this id.
+    NoWindow,
+    /// The window is not natively occluded.
+    NotOccluded,
+    /// The window has been occluded for less than the required time.
+    TooRecent,
+    /// The window was already trimmed in this covered stretch.
+    AlreadyTrimmed,
+    /// The window's frame scheduling is parked.
+    Parked,
+    /// The window's device is stopped or refuses GPU work.
+    DeviceUnavailable,
+    /// The window has no renderer.
+    NoRenderer,
+    /// The window is a warm spare, never shown.
+    Warm,
+}
+
+impl super::App {
+    /// Trim window `window_id`'s renderer now, as the covered-window retention rule would, for a
+    /// perf checkpoint. This build cannot trim yet: it returns [`TrimDecision::Unsupported`] and
+    /// reads and changes nothing, so a harness built with the hook measures an untrimmed baseline.
+    #[cfg(any(test, feature = "perf-hook-trim"))]
+    #[doc(hidden)]
+    pub fn __trim_covered_now(&mut self, _window_id: winit::window::WindowId) -> TrimDecision {
+        TrimDecision::Unsupported
+    }
+}
+
 #[cfg(test)]
 #[path = "retention_tests.rs"]
 mod retention_tests;

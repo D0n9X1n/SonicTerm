@@ -341,6 +341,12 @@ const ECHO_TRACE_CALLS: &[&str] = &[
     "EchoDeliveryOutcome",
 ];
 
+/// The trim hook's gate.
+const TRIM_HOOK_GATE: &str = "#[cfg(feature = \"perf-hook-trim\")]";
+
+/// The trim hook API the harness may name only behind `perf-hook-trim`: the method and its result types.
+const TRIM_HOOK_CALLS: &[&str] = &["__trim_covered_now", "TrimDecision", "TrimSkip"];
+
 /// Each of `calls` in `text` outside an item gated by `gate`, by line.
 fn ungated_calls(text: &str, gate: &str, calls: &[&str]) -> Vec<String> {
     // A CRLF checkout is read as LF, so line numbers and comment starts match either way.
@@ -426,6 +432,32 @@ fn every_echo_trace_call_in_the_harness_is_behind_its_feature() {
     assert_eq!(
         ungated_calls(fixture, ECHO_TRACE_GATE, ECHO_TRACE_CALLS),
         vec!["9: arm_echo_watch".to_owned()]
+    );
+}
+
+#[test]
+fn every_trim_hook_call_in_the_harness_is_behind_its_feature() {
+    // perf-compare overlays this harness onto a base whose App has no trim hook, so an ungated
+    // reference to the hook or its result types would not compile there.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/perf_scenarios");
+    let mut scanned = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let entry_path = entry.unwrap().path();
+        let name = entry_path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+            continue;
+        }
+        scanned += 1;
+        let source = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
+        let found = ungated_calls(&source, TRIM_HOOK_GATE, TRIM_HOOK_CALLS);
+        assert!(found.is_empty(), "{name}: {found:#?}");
+    }
+    assert!(scanned >= 10, "the harness sources were not found");
+    // Negative fixture: a hook call outside the gated item is reported; the gated one is not.
+    let fixture = "#[cfg(feature = \"perf-hook-trim\")]\nfn on(app: &mut App) {\n    app.__trim_covered_now(window);\n}\n\nfn off(app: &mut App) {\n    let _ = app.__trim_covered_now(window);\n}\n";
+    assert_eq!(
+        ungated_calls(fixture, TRIM_HOOK_GATE, TRIM_HOOK_CALLS),
+        vec!["7: __trim_covered_now".to_owned()]
     );
 }
 
@@ -586,7 +618,11 @@ fn the_feature_gate_scan_reads_a_crlf_checkout_as_it_reads_an_lf_one() {
         }
         let lf_text = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
         let crlf_text = lf_text.replace('\n', "\r\n");
-        for (gate, calls) in [(COUNTERS_GATE, GATED_CALLS), (ECHO_TRACE_GATE, ECHO_TRACE_CALLS)] {
+        for (gate, calls) in [
+            (COUNTERS_GATE, GATED_CALLS),
+            (ECHO_TRACE_GATE, ECHO_TRACE_CALLS),
+            (TRIM_HOOK_GATE, TRIM_HOOK_CALLS),
+        ] {
             assert_eq!(
                 ungated_calls(&crlf_text, gate, calls),
                 ungated_calls(&lf_text, gate, calls),

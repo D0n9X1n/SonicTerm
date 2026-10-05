@@ -105,6 +105,9 @@ perf-hook-checkpoint-memory = []
 # perf_scenarios example calls it, so the same harness source also builds against a tree without it.
 # The watch exists only while the frame-counter gate is on, so the feature implies perf-counters.
 perf-echo-trace = ["perf-counters"]
+# Marks that this tree's App has the covered-window trim hook (App::__trim_covered_now); only the
+# perf_scenarios example calls it, so the same harness source also builds against a tree without it.
+perf-hook-trim = []
 
 # AppKit objects exist only on the main thread, so the native display-link test owns its main.
 [[test]]

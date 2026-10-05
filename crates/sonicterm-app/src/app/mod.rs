@@ -373,6 +373,7 @@ mod redraw;
 mod render_timing;
 pub mod renderer_retention;
 pub mod retention;
+pub use retention::{TrimDecision, TrimSkip};
 mod scroll;
 pub mod scrollbar_input;
 pub mod scrollbar_visibility;

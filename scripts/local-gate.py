@@ -220,12 +220,12 @@ STEPS = (
          ("rust",), _CORE_CHECKS),
     Step("clippy", ("cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
-    # perf-counters marks only that the App has the counter API, and perf-hook-checkpoint-memory that it has
-    # the checkpoint memory hook; the perf_scenarios example is their sole reader, so every host lints that
-    # example with both as well as without them.
+    # perf-counters marks only that the App has the counter API, and perf-hook-checkpoint-memory and
+    # perf-hook-trim that it has the checkpoint memory and covered-window trim hooks; the perf_scenarios
+    # example is their sole reader, so every host lints that example with them as well as without them.
     Step("perf-scenarios-counters-clippy",
          ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
-          "--features", "perf-counters,perf-hook-checkpoint-memory", "--", "-D", "warnings"),
+          "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim", "--", "-D", "warnings"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     # perf-frame-texture marks only that the renderer reports its frame texture's extent; the same example
     # is its sole reader, so every host lints it with that feature too.
@@ -266,11 +266,11 @@ STEPS = (
     # workspace-crates' `--lib --bins --tests` skips examples, so the scenario harness's unit tests run here.
     Step("perf-scenarios-tests", ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
-    # The same unit tests with the counter API and the checkpoint memory hook compiled in, wherever the plain
-    # ones run.
+    # The same unit tests with the counter API and the checkpoint memory and trim hooks compiled in, wherever
+    # the plain ones run.
     Step("perf-scenarios-counters-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
-          "--features", "perf-counters,perf-hook-checkpoint-memory"),
+          "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
     # The ignored working-set check: each start constant covers this host's measured glyph atlas need.
     Step("glyph-atlas-working-set",
@@ -373,7 +373,8 @@ PERF_COUNTER_BUILDS = {step.id: step for step in (
     for side in ("head", "base") for example in ("perf_scenarios", "perf_scenarios_alloc"))}
 # Every perf feature a tree may declare, in the canonical order a build passes them; later hooks append.
 # perf-compare.py's PERF_FEATURES must equal this.
-PERF_FEATURES = ("perf-counters", "perf-frame-texture", "perf-hook-checkpoint-memory", "perf-echo-trace")
+PERF_FEATURES = ("perf-counters", "perf-frame-texture", "perf-hook-checkpoint-memory", "perf-echo-trace",
+                 "perf-hook-trim")
 
 
 def _feature_subsets(features: tuple[str, ...]) -> list[tuple[str, ...]]:

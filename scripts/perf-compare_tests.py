@@ -3020,7 +3020,8 @@ class CompareHarness:
     def compare(self, base_build="PASS", assets=("base", "head"), options=(), environ=None,
                 head_manifest=HEAD_MANIFEST, listing=None, scenarios=("S1",), base_manifest=BASE_MANIFEST,
                 logging_api=("base", "head"), build_status="PASS", list_fail=(), base_run=None,
-                head_build="PASS", real_binaries=False, toolchain=None, hook_trees=(), head_run=None):
+                head_build="PASS", real_binaries=False, toolchain=None, hook_trees=(), head_run=None,
+                trim_trees=()):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths.
 
         A counters run answers with the gate on; what the comparison printed is kept in `self.printed`.
@@ -3028,7 +3029,8 @@ class CompareHarness:
         and `head_run` every head run outside the counters set.
         `real_binaries` writes each build's executable under the test's directory, so build-only can copy
         it; `toolchain` replaces the `rustc -vV` text, and a `--build-only` or `--prebuilt` run takes no
-        `--scenario` or `--runs`. `hook_trees` names the trees whose app source defines the
+        `--scenario` or `--runs`. `trim_trees` names the trees whose app source defines the trim hook method;
+        `hook_trees` names the trees whose app source defines the
         checkpoint-memory hook method.
         """
         temporary = tempfile.TemporaryDirectory()
@@ -3059,6 +3061,10 @@ class CompareHarness:
                     hook = tree / perf.APP_SOURCE_DIRECTORY / "app" / "memory_snapshot.rs"
                     hook.parent.mkdir(parents=True, exist_ok=True)
                     hook.write_text(HOOK_SOURCE, encoding="utf-8")
+                if tree.name in trim_trees:
+                    trim = tree / perf.APP_SOURCE_DIRECTORY / "app" / "retention.rs"
+                    trim.parent.mkdir(parents=True, exist_ok=True)
+                    trim.write_text(TRIM_SOURCE, encoding="utf-8")
                 if tree.name in assets:
                     font = tree / "assets" / "fonts" / "RecMonoSt.Helens-Regular.ttf"
                     font.parent.mkdir(parents=True)
@@ -7089,17 +7095,19 @@ class FrameTextureFeatureTests(PrebuiltHarness, unittest.TestCase):
 
     def test_the_gate_reviews_one_build_per_feature_set(self):
         # Every feature combination has the gate's own reviewed steps; the plain and counters sets are the old ones.
-        # Four features give 16 ordered subsets, each with its four side/example build steps.
+        # Five features give 32 ordered subsets, each with its four side/example build steps. The catalog is
+        # checked as data: no subset is compiled here.
         catalog = REAL_GATE.PERF_FEATURE_BUILDS
-        counters, texture, hook, echo = perf.PERF_FEATURES
-        self.assertEqual(echo, "perf-echo-trace")
+        counters, texture, hook, echo, trim = perf.PERF_FEATURES
+        self.assertEqual((echo, trim), ("perf-echo-trace", "perf-hook-trim"))
         subsets = [()]
         for feature in perf.PERF_FEATURES:
             subsets += [subset + (feature,) for subset in subsets]
         self.assertEqual(set(catalog), set(subsets))
-        self.assertEqual(len(catalog), 16)
-        self.assertIn((counters, texture, hook, echo), catalog)
-        self.assertEqual(sum(len(steps) for steps in catalog.values()), 64)
+        self.assertEqual(len(catalog), 32)
+        self.assertIn((counters, texture, hook, echo, trim), catalog)
+        self.assertIn((counters, hook, echo), catalog, "a base without the trim hook keeps its own step")
+        self.assertEqual(sum(len(steps) for steps in catalog.values()), 128)
         for features, steps in catalog.items():
             for step in steps.values():
                 self.assertTrue(REAL_GATE._reviewed_step(step))
@@ -7407,6 +7415,13 @@ class FallbackVerdictTests(unittest.TestCase):
 HOOK_SOURCE = ("impl App {\n    #[doc(hidden)]\n    pub fn __perf_checkpoint_memory(&mut self, index: usize) {}\n}\n")
 HOOK_TABLE = "\n[features]\nperf-hook-checkpoint-memory = []\n"
 HOOK_MANIFEST = HEAD_MANIFEST + HOOK_TABLE
+# An app source file defining the trim hook, and manifests that declare it: alone, and with every other feature.
+TRIM_SOURCE = ("impl App {\n    #[doc(hidden)]\n    pub fn __trim_covered_now(&mut self, window_id: WindowId) {}\n}\n")
+TRIM_MANIFEST = HEAD_MANIFEST + "\n[features]\nperf-hook-trim = []\n"
+ALL_FEATURES_TABLE = ("\n[features]\nperf-counters = []\nperf-frame-texture = []\nperf-hook-checkpoint-memory = []\n"
+                      "perf-echo-trace = [\"perf-counters\"]\n")
+FOUR_FEATURES_MANIFEST = HEAD_MANIFEST + ALL_FEATURES_TABLE
+FIVE_FEATURES_MANIFEST = FOUR_FEATURES_MANIFEST + "perf-hook-trim = []\n"
 COUNTERS_HOOK_MANIFEST = HEAD_MANIFEST + "\n[features]\nperf-counters = []\nperf-hook-checkpoint-memory = []\n"
 
 
@@ -8616,6 +8631,106 @@ class LatencySplitTests(CompareHarness, unittest.TestCase):
         listed = [name.strip().strip('"') for name in table.split(",") if name.strip()]
         listed = ["split" if name == "SPLIT" else name for name in listed]
         self.assertEqual(tuple(listed), perf.SPLIT_REASONS)
+
+
+
+class TrimHookFeatureTests(PrebuiltHarness, unittest.TestCase):
+    """perf-hook-trim reaches only a tree that defines the trim hook, through the gate's reviewed steps."""
+
+    def build_step(self, gate, side):
+        return next(step for step in gate.steps if step.id == f"build-{side}-perf_scenarios")
+
+    def test_a_tree_needs_the_declaration_and_the_trim_method(self):
+        # The feature alone, or the method only in a comment, does not make a tree trim-capable.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / perf.APP_MANIFEST).parent.mkdir(parents=True)
+            (root / perf.APP_MANIFEST).write_text(TRIM_MANIFEST, encoding="utf-8")
+            source = root / perf.APP_SOURCE_DIRECTORY / "app" / "retention.rs"
+            source.parent.mkdir(parents=True)
+            method = perf.HOOK_METHODS[perf.TRIM_HOOK_FEATURE]
+            self.assertFalse(perf.tree_supports_hook(root, perf.TRIM_HOOK_FEATURE, method))
+            source.write_text("// pub fn __trim_covered_now is coming\n", encoding="utf-8")
+            self.assertFalse(perf.tree_supports_hook(root, perf.TRIM_HOOK_FEATURE, method))
+            source.write_text(TRIM_SOURCE, encoding="utf-8")
+            self.assertTrue(perf.tree_supports_hook(root, perf.TRIM_HOOK_FEATURE, method))
+            (root / perf.APP_MANIFEST).write_text(HEAD_MANIFEST, encoding="utf-8")
+            self.assertFalse(perf.tree_supports_hook(root, perf.TRIM_HOOK_FEATURE, method))
+
+    def test_a_five_feature_head_and_a_four_feature_base_each_build_their_own_catalog_step(self):
+        # The head declares every feature and defines both hooks; the base predates the trim hook. Each side's
+        # step is the gate's catalog entry for exactly its tuple, and both run one harness hash.
+        code, gate, _calls, plans, _work, out = self.compare(
+            head_manifest=FIVE_FEATURES_MANIFEST, base_manifest=FOUR_FEATURES_MANIFEST,
+            hook_trees=("head", "base"), trim_trees=("head",))
+        self.assertEqual(code, perf.EXIT_PASS)
+        catalog = REAL_GATE.PERF_FEATURE_BUILDS
+        five = perf.PERF_FEATURES
+        four = tuple(feature for feature in five if feature != perf.TRIM_HOOK_FEATURE)
+        self.assertIs(self.build_step(gate, "head"), catalog[five]["build-head-perf_scenarios"])
+        self.assertIs(self.build_step(gate, "base"), catalog[four]["build-base-perf_scenarios"])
+        self.assertEqual(self.build_step(gate, "head").argv[-1], ",".join(five))
+        self.assertEqual(len({plan.harness_hash for plan in plans}), 1, "both sides run one overlaid harness")
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertIn("- Built with `--features perf-hook-trim`: head", document)
+
+    def test_a_trim_declaration_without_the_method_builds_without_the_feature(self):
+        _code, gate, *_rest = self.compare(head_manifest=TRIM_MANIFEST)
+        self.assertNotIn("--features", self.build_step(gate, "head").argv)
+
+    def test_the_manifest_records_the_trim_feature_and_a_mismatch_fails(self):
+        binaries, digest = self.produce(head_manifest=TRIM_MANIFEST, trim_trees=("head",))
+        manifest = json.loads((binaries / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["features"], {"base": [], "head": [perf.TRIM_HOOK_FEATURE]})
+        with self.assertRaisesRegex(ValueError, "refusing the prebuilt binaries: features"):
+            self.consume(binaries, digest, head_manifest=TRIM_MANIFEST)
+        code, *_rest = self.consume(binaries, digest, head_manifest=TRIM_MANIFEST, trim_trees=("head",))
+        self.assertEqual(code, perf.EXIT_PASS)
+
+    def test_the_gate_rejects_a_lookalike_trim_build_step(self):
+        # A copy of a reviewed step with the same id and argv is not the gate's own step.
+        step = REAL_GATE.PERF_FEATURE_BUILDS[perf.PERF_FEATURES]["build-head-perf_scenarios"]
+        self.assertTrue(REAL_GATE._reviewed_step(step))
+        self.assertFalse(REAL_GATE._reviewed_step(copy.copy(step)))
+
+    def test_both_scripts_list_the_same_five_perf_features(self):
+        self.assertEqual(perf.PERF_FEATURES, REAL_GATE.PERF_FEATURES)
+        self.assertEqual(perf.PERF_FEATURES[-1], perf.TRIM_HOOK_FEATURE)
+
+
+class TrimHookResultTests(unittest.TestCase):
+    """result.json's `hooks.trim`: optional for an older harness, one known outcome when present."""
+
+    def test_a_result_with_or_without_hooks_validates(self):
+        # An older harness writes no `hooks`; this harness writes one of four outcomes.
+        self.assertEqual(perf.validate_result(valid_result(), HARNESS_HASH, 0), [])
+        for outcome in ("not-reached", "unsupported", "skipped", "trimmed"):
+            with self.subTest(outcome=outcome):
+                self.assertEqual(perf.validate_result(valid_result(hooks={"trim": outcome}), HARNESS_HASH, 0), [])
+
+    def test_an_unknown_trim_outcome_or_shape_is_refused(self):
+        for hooks in ({"trim": "maybe"}, {"trim": None}, {}, {"trim": 0}, [], "unsupported", None):
+            with self.subTest(hooks=hooks):
+                self.assertTrue(perf.validate_result(valid_result(hooks=hooks), HARNESS_HASH, 0))
+
+    def test_an_unsupported_trim_keeps_checkpoint_memory_numeric(self):
+        # An unsupported trim is an untrimmed baseline: the supported golden run's checkpoint memory stays a
+        # figure, exactly as it reads without `hooks`; nothing reads n/a and nothing reads zero.
+        result, samples = fixture_run("supported", "deadline-610")
+        baseline = perf.run_metrics(make_outcome(result=result, memory=samples))
+        hooked = dict(result, hooks={"trim": "unsupported"})
+        metrics = perf.run_metrics(make_outcome(result=hooked, memory=samples))
+        self.assertEqual(metrics, baseline)
+        memory = {key: value for key, value in metrics.items()
+                  if key[0].endswith(("renderer_total_bytes", "process_resident_bytes"))}
+        self.assertTrue(memory, "the golden run has checkpoint memory")
+        for key, value in memory.items():
+            with self.subTest(key=key):
+                self.assertIsInstance(value, float)
+                self.assertNotIsInstance(value, perf.NotAvailable)
+        # The golden run has no renderer, so its renderer reading is a real 0; resident memory is never 0.
+        resident = [value for key, value in memory.items() if key[0].endswith("process_resident_bytes")]
+        self.assertTrue(resident and all(value > 0 for value in resident), resident)
 
 
 if __name__ == "__main__":
