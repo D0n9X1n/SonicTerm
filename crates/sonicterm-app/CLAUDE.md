@@ -19,6 +19,7 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/keymap_dispatch.rs` - action execution and READONLY whitelist.
 - `src/app/event_loop.rs` - window creation and window-ready hooks.
 - `src/app/spawn_pane.rs` - PTY thread pump and redraw coalescing.
+- `src/app/echo_watch.rs` - the per-pane S2 echo watch the perf harness arms and takes.
 - `src/app/reaper_driver.rs` - one App-owned native PTY teardown driver and retained transport custody.
 - `src/app/path_target.rs` - contextual target resolution, openability probes, and direct-open workers.
   `path_target/unix.rs` is the command runner the macOS and Linux openers share;
@@ -87,6 +88,10 @@ cargo build -p sonicterm-app
 - Recovery prepares and commits all live/warm renderers in one callback, retires
   failed candidates before dispatch resumes, and never joins its request worker.
 - Do not add unconditional heartbeat redraws at the tail of event handling.
+- The echo watch exists only while the frame-counter gate is on (`PaneFrameCounters.echo`).
+  Lock order is parser, then watch slot; `arm_echo_watch` and `take_echo_watch` take only the
+  slot. It records the appearance, publication and token decision; it never changes the token
+  decision or the send, and it reads the flush path's clock only on the armed, eligible path.
 - Synchronized output (DEC 2026): a pane runs exactly one VT worker, which publishes
   `sync_word` (resets, epoch, set bit) and the epoch-tagged `sync_deadline_word` under
   the parser lock; lock-free readers use `read_published_sync` and treat an untagged

@@ -475,11 +475,16 @@ flowchart TD
     target -- 是 --> pending{"仍有待处理的 flush？"}
     pending -- 是 --> coalesced["保留更早的时间，计入 flushes_coalesced"]
     pending -- 否 --> store["把 flush 时间存入窗格的槽位"]
-    coalesced --> token{"有未处理的输出事件？"}
-    store --> token
+    coalesced --> watch["已布防的回显监视记录发布"]
+    store --> watch
+    watch --> token{"有未处理的输出事件？"}
     token -- 是 --> suppressed["不发送，计入 flushes_suppressed"]
     token -- 否 --> send["发出 PaneOutput"]
-    send --> redraw["显示该窗格的窗口的第一次 RedrawRequested"]
+    send -- 被拒绝 --> refused["清除令牌"]
+    suppressed --> decision["已布防的回显监视记录决定"]
+    send -- 已发送 --> decision
+    refused --> decision
+    send -- 已发送 --> redraw["显示该窗格的窗口的第一次 RedrawRequested"]
     redraw --> take["取走该时间，把其时长记入 flush_to_redraw"]
 ```
 
@@ -489,10 +494,51 @@ flowchart TD
 读数是观察性的。各字段是依次读取的，而不是作为一次原子快照；一个计数归属于在其发布之后读取它的那一行
 或快照，两次字段读取之间可能有多个批次发布。
 
+#### S2 回显监视
+
+计数器开启时，每个窗格还有一个回显监视。性能测试工具只为 S2/default 的样本布防，而且只在以
+`perf-echo-trace` 构建时布防；S2/flood 在洪流旁边输入，从不布防。每次布防发出一个非零令牌，同一个 App
+从不复用；测试工具在某帧被记功时取走记录一次，样本的其他每种关闭方式都会取走并丢弃它。写入方只在令牌
+仍是已布防的令牌、记录尚未被取走、且时刻不早于布防时刻时才修改记录，因此在取走或重新布防期间暂停的写入
+方不会改变任何内容。锁顺序是先解析器、后监视槽位；布防与取走只获取槽位锁。
+
+工作线程在解析器锁内于解析之前（`locked_at` 读数之后）和解析之后（`parsed_at` 读数之后、键盘快照写入之前）
+各读一次目标单元格。目标单元格从无到有、且两次读取时行身份（`scrollback_evicted`、`screen_epoch`、
+`size_generation`）都未改变的那个段就是出现段：它记录其批次发布的代号、解析时刻，以及同步更新是否处于设置
+状态。任何身份变化、出现之前回显已存在、出现之后回显再次消失，都会作为粘性事实被记录。
+
+拆分的边界是发布：在 `publish_flush` 返回之后、令牌决定之前，已布防、已有出现段且尚无发布的监视会在其槽位锁
+内读时钟。随后的决定（`sent`、`suppressed` 或 `refused`）在其后记录。监视从不改变决定或发送。
+
+| 部分 | 起点 | 终点 |
+| --- | --- | --- |
+| `input_to_parse_ms` | 注入 | 出现段的解析时刻 |
+| `parse_to_publication_ms` | 该解析时刻 | 发布 |
+| `publication_to_present_ms` | 发布 | 被记功的分发结束 |
+| `delivery_lag_us` | 发布 | 工作线程记录其决定，`sent` 时包含发送调用 |
+
+三个部分之和恰好等于样本的延迟。`delivery_lag_us` 不是事件循环的投递延迟。`suppressed` 的发布同样会被
+拆分：它的 `publication_to_present_ms` 包含先前事件剩余的排队等待，这是真实的延迟。`refused` 的发布记为
+`send-refused`。
+
+| 工作 | 锁等待 | `parse_us` | 持有 |
+| --- | --- | --- | --- |
+| 未布防时的 `Acquire` 读取与前读 | 否 | 是 | 是 |
+| 后读与任何记录事实的槽位锁 | 否 | 否 | 是 |
+
+未布防时，每个段和每次 flush 各只需一次读取。布防时，取目标时锁一次槽位，每个新事实最多一次，每次符合条件
+的发布一次，其决定再一次。flush 路径在未布防或没有符合条件的发布时读时钟 0 次，符合条件的无目标 flush 读
+1 次，符合条件的有目标 flush 读 2 次。
+
+同步输出：工作线程持住更新，在重置时或在已发布的截止时刻发布，因此它的持有落在 `parse_to_publication_ms`
+中，与 `flush_to_redraw` 的处理相同。对同一个 epoch，窗口不能持有超过该截止时刻，因此
+`publication_to_present_ms` 只会包含来自另一个可见窗格或之后 epoch 的持有，每段最长 150 ms。`sync_open`
+是出现段之后解析器的设置位，不能证明发生过持有。
+
 ### 计数器不测量的内容
 
-计数器不会在 flush 处拆分按键延迟。`flush_to_redraw` 测量的是到第一次重绘的投递与调度延迟，不计入
-呈现的帧。最大值与 p95 是桶上界，总和包含插桩本身的开销，塑形计数是请求而不是 HarfBuzz 的工作量。
+计数器本身不会在 flush 处拆分按键延迟；上面的 S2 回显监视会拆分，但只针对 S2/default。
+`flush_to_redraw` 测量的是到第一次重绘的投递与调度延迟，不计入呈现的帧。最大值与 p95 是桶上界，总和包含插桩本身的开销，塑形计数是请求而不是 HarfBuzz 的工作量。
 
 ## GPU 设备错误诊断
 

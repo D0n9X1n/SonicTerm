@@ -544,8 +544,9 @@ free. It shortens only the shared closing idle phase, which ends 60 s after GO
 (5 s with `--short`) and starts after the previous phase's write; that phase
 closes every variant of S2, S6, and S10, and S7, S8, and S9. Every other timed
 interval starts after the write or ends on an event. In one run each, a write
-took about 2.4 ms with S2's 200 latency samples (48 KB), and 0.1 to 0.5 ms
-without samples. A write also delays what follows it and can touch caches and
+took about 2.4 ms with S2's 200 latency samples (48 KB, measured before each
+sample carried its split fields; the split makes the write somewhat larger), and
+0.1 to 0.5 ms without samples. A write also delays what follows it and can touch caches and
 background I/O. Both sides of a comparison run the same harness, so both pay
 the cost, and an A/A comparison, with one ref on both sides, measures with it.
 
