@@ -1089,10 +1089,15 @@ fn atlas_frame_detector_production_capture_and_retry_precede_presentation() {
     // Frame and preedit checks share qualified identity; diagnostic eviction counts cannot admit a frame.
     let source = include_str!("core.rs");
     let start = source.find("let atlas_stamp_at_frame_start = self.glyph_atlas_stamp();").unwrap();
+    // `assemble_frame` hands the start stamp and the current one to the shared pass-end helper,
+    // which checks them before any batch reaches the presenter.
+    let handoff = source.find("atlas_stamp_now: self.glyph_atlas_stamp(),").unwrap();
+    let call = source.find("Self::finish_assembly_pass(&mut plan, panes, pass_end)").unwrap();
+    assert!(start < handoff && handoff < call);
     let guard = source
-        .find("if atlas_changed_during_frame(atlas_stamp_at_frame_start, self.glyph_atlas_stamp())")
+        .find("if atlas_changed_during_frame(pass.atlas_stamp_at_start, pass.atlas_stamp_now)")
         .unwrap();
-    let retry = source[guard..].find("return Ok(Assembled::AtlasRetry {").unwrap() + guard;
+    let retry = source[guard..].find("return Err(Assembled::AtlasRetry {").unwrap() + guard;
     let present = source.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
     let acknowledge = source.find("self.finish_successful_frame(").unwrap();
     assert!(start < guard && guard < retry && retry < present && present < acknowledge);
@@ -4369,8 +4374,9 @@ fn vertex_scratch_is_part_of_the_retained_report() {
 #[test]
 fn row_spans_viewports_and_title_order_follow_the_assembly() {
     let core: String = include_str!("core.rs").split_whitespace().collect();
-    let begin =
-        core.find("self.row_glyph_cache.begin_frame(&drawn_panes);").expect("one pass start");
+    let begin = core
+        .find("begin_glyph_pass(&mutself.row_glyph_cache,&mutself.row_ink,")
+        .expect("one pass start");
     let pane_loop = core
         .find("forpvinpane_views.iter().filter(|pane|pane.planned.full_clip.is_some()){")
         .expect("per-pane loop");
@@ -5746,9 +5752,18 @@ fn damage_classes_are_wired_through_the_renderer() {
     assert!(compact.contains("cursor_cell:drawn_cursor_cell("));
     assert!(compact.contains("previous_recolor:self.last_recolor,"));
     assert_eq!(compact.matches("frame_recolor=frame_recolor.merge(record);").count(), 2);
-    let widen = source.find("plan.widen_for_recolor(self.last_recolor, frame_recolor);").unwrap();
+    // `assemble_frame` hands both recolor records to the shared pass-end helper, which widens
+    // the damage by them before reading receipts, and the layers are built only after it.
+    assert!(compact.contains("current_recolor:frame_recolor,"));
+    let helper = method_body(&source, "    fn finish_assembly_pass(");
+    let widen = helper
+        .find("plan.widen_for_recolor(pass.previous_recolor, pass.current_recolor);")
+        .expect("the helper widens by the recolors");
+    let receipts = helper.find("Ok(presented_receipts(plan, panes))").expect("receipts");
+    assert!(widen < receipts, "damage is widened before the receipts are read");
+    let call = source.find("Self::finish_assembly_pass(&mut plan, panes, pass_end)").unwrap();
     let layers = source.find("Ok(Assembled::Layers(Box::new(AssembledLayers {").unwrap();
-    assert!(widen < layers, "damage is widened before the layers carry it");
+    assert!(call < layers, "damage is widened before the layers carry it");
     // The record is stored after the presenter reports `Presented` and before the frame finishes.
     let present = function_body(&source, "    fn present_layers(");
     let guard = present.find("return Ok(FrameOutcome::without_receipts(outcome));").unwrap();
@@ -5824,9 +5839,15 @@ fn tab_title_ink_is_measured_widened_and_kept_only_by_a_presented_frame() {
         assembly.find("glyph_ink_bounds(&glyph_instances[tab_glyph_start..]").expect("ink");
     let search = assembly.find("// -------- Search highlights").expect("search block");
     assert!(start < bar && bar < measure && measure < search);
-    let widen =
-        assembly.find("plan.widen_for_tab_ink(self.last_tab_ink, tab_ink);").expect("widen");
-    let receipts = assembly.find("let receipts = presented_receipts(").expect("receipts");
+    let handoff = assembly.find("previous_tab_ink: self.last_tab_ink,").expect("handed off");
+    assert!(assembly.contains("current_tab_ink: tab_ink,"));
+    let call = assembly.find("Self::finish_assembly_pass(&mut plan, panes, pass_end)").unwrap();
+    assert!(handoff < call, "the title ink reaches the shared pass-end helper");
+    let helper = method_body(&source, "    fn finish_assembly_pass(");
+    let widen = helper
+        .find("plan.widen_for_tab_ink(pass.previous_tab_ink, pass.current_tab_ink);")
+        .expect("widen");
+    let receipts = helper.find("Ok(presented_receipts(plan, panes))").expect("receipts");
     assert!(widen < receipts, "damage is widened before the layers carry it");
     let present = source.split_once("    fn present_layers(").expect("present_layers").1;
     let guard = present.find("if !matches!(outcome, PresentOutcome::Presented)").expect("guard");
@@ -5961,7 +5982,10 @@ fn ink_records_and_partial_frames_commit_only_on_a_presented_frame() {
     let finish_call = present.find("self.finish_successful_frame(").unwrap();
     assert!(unpresented < guard && guard < finish_call, "only a presented frame finishes");
     let assemble = method_body(&source, "    fn assemble_frame(");
-    let begin = assemble.find("self.row_ink.begin_frame();").expect("a fresh stage per assembly");
+    let begin = assemble.find("begin_glyph_pass(").expect("a fresh stage per assembly");
+    let pass_start = source.split_once("pub(crate) fn begin_glyph_pass<").expect("helper").1;
+    let pass_start = &pass_start[..pass_start.find("\n}\n").expect("helper end")];
+    assert!(pass_start.contains("row_ink.begin_frame();"), "the shared pass start stages afresh");
     let glyph_loop = assemble.find("assemble_pane_glyph_rows(").unwrap();
     assert!(begin < glyph_loop);
 }
@@ -5972,12 +5996,17 @@ fn ink_records_and_partial_frames_commit_only_on_a_presented_frame() {
 #[test]
 fn a_partial_plan_reaching_unemitted_ink_is_reassembled_full() {
     let source = include_str!("core.rs").replace("\r\n", "\n");
+    let helper = method_body(&source, "    fn finish_assembly_pass(");
+    let widen = helper.find("plan.widen_for_tab_ink(").unwrap();
+    let check = helper.find("plan.partial_reaches_unemitted_ink()").expect("checked");
+    let receipts = helper.find("Ok(presented_receipts(plan, panes))").unwrap();
+    assert!(widen < check && check < receipts);
+    assert!(helper.contains("return Err(Assembled::PartialFallback);"));
     let assemble = method_body(&source, "    fn assemble_frame(");
-    let widen = assemble.find("plan.widen_for_tab_ink(").unwrap();
-    let check = assemble.find("plan.partial_reaches_unemitted_ink()").expect("checked");
+    let call = assemble.find("Self::finish_assembly_pass(&mut plan, panes, pass_end)").unwrap();
     let layers = assemble.find("Ok(Assembled::Layers(Box::new(AssembledLayers {").unwrap();
-    assert!(widen < check && check < layers);
-    assert!(assemble.contains("return Ok(Assembled::PartialFallback);"));
+    assert!(call < layers, "the pass ends in the shared helper before the layers are built");
+    assert!(assemble.contains("return Ok(early_exit);"), "its early exit leaves assembly");
     assert!(assemble.contains("plan.force_full();"), "the second pass plans Full");
     let releasing = method_body(&source, "    pub fn render_releasing(");
     assert!(releasing.contains("assemble_with_fallback(|force_full|"), "one orchestration");
@@ -7019,17 +7048,15 @@ fn assemble_pass(
     emit_pass(rig, ink, grid, plan)
 }
 
-/// Start one assembly pass as `assemble_frame` does: one glyph-cache pass for the drawn pane
-/// (which discards the previous pass's stage) and a fresh ink stage.
+/// Start one assembly pass through `begin_glyph_pass`, the helper `assemble_frame` starts every
+/// pass with, so the fixture exercises production's pass start rather than a copy of it.
 fn begin_pass(
     rig: &mut GlyphRig,
     ink: &mut crate::row_ink::RowInkTable,
     grid: &Grid,
     plan: &FramePlan,
 ) {
-    let planned = &plan.panes[0];
-    rig.cache.begin_frame(&[(planned.id, planned.row_count, grid.cols)]);
-    ink.begin_frame();
+    begin_glyph_pass(&mut rig.cache, ink, plan.panes.iter().map(|planned| (planned, grid.cols)));
 }
 
 /// Emit `plan`'s pane rows through the production pane seam into a pass already begun,
@@ -7040,7 +7067,20 @@ fn emit_pass(
     grid: &Grid,
     plan: &FramePlan,
 ) -> (Vec<GlyphInstance>, crate::frame_stats::FrameStats) {
+    let (glyphs, stats, _slots) = emit_pass_recording(rig, ink, grid, plan);
+    (glyphs, stats)
+}
+
+/// [`emit_pass`], also returning the slots the pane seam emitted, in emission order, as its
+/// recording sink saw them at each `emit_row_glyphs` call.
+fn emit_pass_recording(
+    rig: &mut GlyphRig,
+    ink: &mut crate::row_ink::RowInkTable,
+    grid: &Grid,
+    plan: &FramePlan,
+) -> (Vec<GlyphInstance>, crate::frame_stats::FrameStats, Vec<u16>) {
     let planned = &plan.panes[0];
+    let mut emitted_slots = Vec::new();
     let snapped = build_snapped_cell_x(planned.layout.x, rig.cell_size.0, grid.cols);
     let (mut glyphs, mut underlines, mut tofu) = (Vec::new(), Vec::new(), Vec::new());
     let (mut missing, mut spans, mut owners) = (Vec::new(), Vec::new(), Vec::new());
@@ -7067,10 +7107,11 @@ fn emit_pass(
                 ink_surface: plan.surface,
                 underline_owners: &mut owners,
                 injected_row_glyph: None,
+                emitted_slots: Some(&mut emitted_slots),
             },
         )
     });
-    (glyphs, stats)
+    (glyphs, stats, emitted_slots)
 }
 
 /// Settle a pass as presented: commit its staged glyph slot keys and ink records.
@@ -7419,6 +7460,16 @@ enum AtlasChange {
     Growth,
 }
 
+/// Which of the last presented frame's ink reaches slot 0, the row a partial plan does not emit:
+/// the cursor recolor or the tab-title ink. Either widens the plan's damage onto that row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Widening {
+    /// The last frame recolored glyphs over slot 0.
+    Recolor,
+    /// The last frame drew tab-title ink over slot 0.
+    TabInk,
+}
+
 /// A six-row pane presented in full, then edited at slot 2, for the fallback orchestration tests:
 /// the rig (with a growable atlas), its ink table, the edited grid, the presented plan, slot 2's
 /// committed key before the edit, and the stage each pass found at its start.
@@ -7481,15 +7532,20 @@ impl FallbackFixture {
         (0..6).map(|slot| self.rig.cache.staged_slot(7, slot).unwrap()).collect()
     }
 
-    /// One assembly pass as `assemble_frame` ends it: stamp the atlas, begin the pass, emit the
-    /// pane's rows, apply `change` to the atlas, then decide with the production helpers, in
-    /// production order: an atlas change is `AtlasRetry`; a partial plan whose damage, widened by
-    /// the tab ink the last frame drew over slot 0, reaches unemitted ink is `PartialFallback`;
-    /// otherwise the layers carry the plan and its receipts from `presented_receipts`.
-    fn assemble(&mut self, force_full: bool, change: AtlasChange) -> Result<Assembled> {
+    /// One assembly pass through the production pass helpers: `begin_glyph_pass` starts it, the
+    /// pane seam emits its rows, `change` is applied to the atlas as assembly could change it,
+    /// and `GpuRenderer::finish_assembly_pass` takes the atlas check, the damage widening by the
+    /// last frame's `widening` ink over slot 0, the fallback decision and the receipts, exactly
+    /// as `assemble_frame` does.
+    fn assemble(
+        &mut self,
+        force_full: bool,
+        change: AtlasChange,
+        widening: Widening,
+    ) -> Result<Assembled> {
         let mut plan = self.plan(force_full);
-        let stamp = GlyphContentStamp::capture(1, 1, &self.rig.atlas);
-        let evictions = self.rig.atlas.evictions();
+        let atlas_stamp_at_start = GlyphContentStamp::capture(1, 1, &self.rig.atlas);
+        let atlas_evictions_at_start = self.rig.atlas.evictions();
         begin_pass(&mut self.rig, &mut self.ink, &self.grid, &plan);
         self.stages_at_pass_start.push(self.staged());
         let (glyphs, _) = emit_pass(&mut self.rig, &mut self.ink, &self.grid, &plan);
@@ -7502,19 +7558,23 @@ impl FallbackFixture {
                 assert!(self.rig.atlas.grow_to(doubled), "the atlas doubles");
             }
         }
-        if atlas_changed_during_frame(stamp, GlyphContentStamp::capture(1, 1, &self.rig.atlas)) {
-            // When: the atlas changed while the pass assembled, its UVs are stale.
-            return Ok(Assembled::AtlasRetry { stamp, evictions });
-        }
-        let slot_zero = strip_records(6)[0].expect("slot 0 has a strip");
-        plan.widen_for_tab_ink(
-            crate::cursor::RecolorBounds::Rect(slot_zero),
-            crate::cursor::RecolorBounds::Empty,
-        );
-        if plan.partial_reaches_unemitted_ink() {
-            // When: the widened damage reaches slot 0, which the partial plan did not emit.
-            return Ok(Assembled::PartialFallback);
-        }
+        let slot_zero = crate::cursor::RecolorBounds::Rect(strip_records(6)[0].expect("strip"));
+        let (previous_recolor, previous_tab_ink) = match widening {
+            Widening::Recolor => (
+                crate::cursor::RecolorRecord { bounds: slot_zero, hash: 1 },
+                crate::cursor::RecolorBounds::Empty,
+            ),
+            Widening::TabInk => (crate::cursor::RecolorRecord::default(), slot_zero),
+        };
+        let pass_end = PassEnd {
+            atlas_stamp_at_start,
+            atlas_stamp_now: GlyphContentStamp::capture(1, 1, &self.rig.atlas),
+            atlas_evictions_at_start,
+            previous_recolor,
+            current_recolor: crate::cursor::RecolorRecord::default(),
+            previous_tab_ink,
+            current_tab_ink: crate::cursor::RecolorBounds::Empty,
+        };
         let panes = [sonicterm_render_model::PaneRender {
             id: 7,
             rect_px: PixelRect { x: 0, y: 0, w: 80, h: 120 },
@@ -7526,8 +7586,12 @@ impl FallbackFixture {
             scrollbar_alpha: 0.0,
             inline_images: Vec::new(),
         }];
-        let receipts = presented_receipts(&plan, &panes);
+        let ended = GpuRenderer::finish_assembly_pass(&mut plan, &panes, pass_end);
         drop(panes);
+        let receipts = match ended {
+            Ok(receipts) => receipts,
+            Err(early_exit) => return Ok(early_exit),
+        };
         Ok(Assembled::Layers(Box::new(AssembledLayers {
             surface_width: 240.0,
             surface_height: 200.0,
@@ -7550,7 +7614,9 @@ impl FallbackFixture {
 }
 
 /// A Partial plan whose widened damage reaches an unemitted row falls back through the
-/// production orchestration with real admissions, real atlas checks and real receipts. The
+/// production orchestration and production pass helpers (`begin_glyph_pass` and
+/// `finish_assembly_pass`), with real admissions, real atlas checks and real receipts, for the
+/// last frame's cursor recolor and for its tab-title ink over slot 0. The
 /// first pass admits and stages the edited row but commits nothing; the second pass's own
 /// start discards that stage; its layers carry the forced-Full plan and `presented_receipts`
 /// gives that plan's `All` receipt for the fixture grid; and the one settlement commits the
@@ -7560,45 +7626,47 @@ impl FallbackFixture {
 #[test]
 fn a_partial_fallback_never_commits_its_first_pass() {
     use sonicterm_render_model::{AckReceipt, AckRows};
-    let mut fixture = FallbackFixture::new();
-    assert_eq!(fixture.plan(false).mode, RenderMode::Partial, "the first pass plans Partial");
-    let mut calls = 0;
-    let assembled = assemble_with_fallback(|force_full| {
-        calls += 1;
-        fixture.assemble(force_full, AtlasChange::Unchanged)
-    });
-    assert_eq!(calls, 2, "the partial pass fell back and was assembled again");
-    let Ok(Assembled::Layers(layers)) = assembled else {
-        panic!("the forced-Full pass presents layers");
-    };
-    let AssembledLayers { plan, receipts, .. } = *layers;
-    assert_eq!(plan.mode, RenderMode::Full, "the layers carry the forced-Full plan");
-    assert_eq!(fixture.stages_at_pass_start[0], vec![0; 6], "the first pass starts empty");
-    assert_ne!(fixture.staged()[2], 0, "the second pass staged the edited row");
-    assert_eq!(
-        fixture.stages_at_pass_start[1],
-        vec![0; 6],
-        "the second start discards the first stage"
-    );
-    for (pass, committed) in fixture.committed_after_pass.iter().enumerate() {
-        assert_eq!(*committed, fixture.committed_before, "pass {pass} commits nothing itself");
+    for widening in [Widening::Recolor, Widening::TabInk] {
+        let mut fixture = FallbackFixture::new();
+        assert_eq!(fixture.plan(false).mode, RenderMode::Partial, "{widening:?}: plans Partial");
+        let mut calls = 0;
+        let assembled = assemble_with_fallback(|force_full| {
+            calls += 1;
+            fixture.assemble(force_full, AtlasChange::Unchanged, widening)
+        });
+        assert_eq!(calls, 2, "{widening:?}: the partial pass fell back and was assembled again");
+        let Ok(Assembled::Layers(layers)) = assembled else {
+            panic!("{widening:?}: the forced-Full pass presents layers");
+        };
+        let AssembledLayers { plan, receipts, .. } = *layers;
+        assert_eq!(plan.mode, RenderMode::Full, "{widening:?}: the layers carry the Full plan");
+        assert_eq!(fixture.stages_at_pass_start[0], vec![0; 6], "{widening:?}: starts empty");
+        assert_ne!(fixture.staged()[2], 0, "{widening:?}: the second pass staged the edit");
+        assert_eq!(
+            fixture.stages_at_pass_start[1],
+            vec![0; 6],
+            "{widening:?}: the second start discards the first stage"
+        );
+        for (pass, committed) in fixture.committed_after_pass.iter().enumerate() {
+            assert_eq!(*committed, fixture.committed_before, "{widening:?}: pass {pass} commits");
+        }
+        let expected_receipts = vec![AckReceipt::of(0, 7, &fixture.grid, AckRows::All)];
+        assert_eq!(receipts, expected_receipts, "{widening:?}: the Full plan acknowledges all");
+        let staged = fixture.staged();
+        let mut key = Some(fixture.warm.key.clone());
+        let settled = settle_retained_frame(
+            &mut key,
+            &mut fixture.ink,
+            &mut fixture.rig.cache,
+            &PresentOutcome::Presented,
+            Some(plan),
+            receipts,
+        );
+        assert_eq!(settled, expected_receipts, "{widening:?}: one settlement returns them");
+        assert_eq!(fixture.committed(), staged, "{widening:?}: the second pass's keys commit");
+        assert_ne!(fixture.committed()[2], fixture.committed_before[2]);
+        assert_eq!(fixture.staged(), vec![0; 6], "{widening:?}: no stage survives the commit");
     }
-    let expected_receipts = vec![AckReceipt::of(0, 7, &fixture.grid, AckRows::All)];
-    assert_eq!(receipts, expected_receipts, "the Full plan acknowledges every row");
-    let staged = fixture.staged();
-    let mut key = Some(fixture.warm.key.clone());
-    let settled = settle_retained_frame(
-        &mut key,
-        &mut fixture.ink,
-        &mut fixture.rig.cache,
-        &PresentOutcome::Presented,
-        Some(plan),
-        receipts,
-    );
-    assert_eq!(settled, expected_receipts, "one settlement returns those receipts");
-    assert_eq!(fixture.committed(), staged, "the second pass's keys are the ones committed");
-    assert_ne!(fixture.committed()[2], fixture.committed_before[2]);
-    assert_eq!(fixture.staged(), vec![0; 6], "no stage survives the commit");
 
     for retry_pass in [1usize, 2] {
         for change in [AtlasChange::Reset, AtlasChange::Growth] {
@@ -7608,7 +7676,7 @@ fn a_partial_fallback_never_commits_its_first_pass() {
             let assembled = assemble_with_fallback(|force_full| {
                 calls += 1;
                 let pass_change = if calls == retry_pass { change } else { AtlasChange::Unchanged };
-                fixture.assemble(force_full, pass_change)
+                fixture.assemble(force_full, pass_change, Widening::TabInk)
             });
             assert_eq!(calls, retry_pass, "{case}: assembly calls");
             assert!(matches!(assembled, Ok(Assembled::AtlasRetry { .. })), "{case}: AtlasRetry");
@@ -7625,6 +7693,30 @@ fn a_partial_fallback_never_commits_its_first_pass() {
             assert_eq!(fixture.committed(), fixture.committed_before, "{case}: unchanged");
             assert_eq!(fixture.staged(), vec![0; 6], "{case}: no surviving stage");
         }
+    }
+}
+
+/// The pane seam records each slot at the moment its row is emitted, in ascending order and
+/// exactly as the plan's mask says: every slot for a Full plan, and only the masked slots for
+/// the Partial edits of F0 and F20. The record comes from the emission loop, not the plan, so a
+/// loop that skips, adds or reorders a row fails here on every host.
+#[test]
+fn the_pane_seam_records_exactly_the_slots_it_emits() {
+    for (pad, mask) in [(0.0, vec![2u16]), (20.0, vec![0, 1, 2, 3, 4])] {
+        let mut grid = text_grid(8, &["row0", "row1", "row2", "row3", "row4", "row5"]);
+        let mut rig = GlyphRig::new(false);
+        let mut ink = crate::row_ink::RowInkTable::default();
+        let warm = policy_plan(6, pad, 1, Vec::new(), Vec::new(), None);
+        begin_pass(&mut rig, &mut ink, &grid, &warm);
+        let (_, _, full_slots) = emit_pass_recording(&mut rig, &mut ink, &grid, &warm);
+        assert_eq!(full_slots, (0..6).collect::<Vec<u16>>(), "pad {pad}: Full emits every slot");
+        present_pass(&mut rig, &mut ink, &warm);
+        write_row(&mut grid, 2, "EDIT");
+        let edit = policy_plan(6, pad, 2, vec![2], strip_records(6), Some(&warm.key));
+        assert_eq!(edit.mode, RenderMode::Partial, "pad {pad}");
+        begin_pass(&mut rig, &mut ink, &grid, &edit);
+        let (_, _, partial_slots) = emit_pass_recording(&mut rig, &mut ink, &grid, &edit);
+        assert_eq!(partial_slots, mask, "pad {pad}: Partial emits exactly the mask");
     }
 }
 

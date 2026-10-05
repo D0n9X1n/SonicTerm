@@ -509,8 +509,10 @@ fn assembly_runs_from_the_frame_key_lap_to_the_overlays_lap_after_the_noop_retur
         core.find("letassembly_started=crate::frame_stats::assembly_clock();").expect("start");
     let overlays = core.find("gpu_lap!(\"overlays\");").expect("overlays lap");
     let sample = core.find("crate::frame_stats::note_assembly(assembly_started);").expect("sample");
-    let retry =
-        overlays + core[overlays..].find("atlas_changed_during_frame(").expect("retry check");
+    let retry = overlays
+        + core[overlays..]
+            .find("Self::finish_assembly_pass(&mutplan,panes,pass_end)")
+            .expect("retry check");
     assert!(
         noop < key_lap
             && key_lap < start

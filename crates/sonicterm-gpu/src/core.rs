@@ -342,6 +342,19 @@ enum Assembled {
     Layers(Box<AssembledLayers>),
 }
 
+/// What ending one assembly pass reads besides its plan and panes: the atlas content stamp when
+/// the pass started and now, the evictions when it started, and the recolors and tab-title ink of
+/// the last presented frame and of this pass.
+struct PassEnd {
+    atlas_stamp_at_start: GlyphContentStamp,
+    atlas_stamp_now: GlyphContentStamp,
+    atlas_evictions_at_start: u64,
+    previous_recolor: crate::cursor::RecolorRecord,
+    current_recolor: crate::cursor::RecolorRecord,
+    previous_tab_ink: crate::cursor::RecolorBounds,
+    current_tab_ink: crate::cursor::RecolorBounds,
+}
+
 /// An assembled frame's owned batches, geometry, plan and receipts.
 struct AssembledLayers {
     surface_width: f32,
@@ -2186,8 +2199,8 @@ pub struct GpuRenderer {
     fault_frame_probe: Option<wgpu::Buffer>,
     /// Test seam: the next assembly returns `Err` after its glyph rows were staged.
     fault_assembly_error: bool,
-    /// Test inspector: when `Some`, each assembly pass records every drawn pane's emitted slots
-    /// here, the last pass winning; production leaves it `None` and records nothing.
+    /// Test inspector: when `Some`, each assembly pass clears it at its start and records, per
+    /// drawn pane, every slot at the moment its row is emitted; production leaves it `None`.
     emitted_rows_probe: Option<Vec<(u64, Vec<u16>)>>,
     /// Test seam: the next presentation returns `Err` from the presenter call.
     fault_present_error: bool,
@@ -6236,18 +6249,21 @@ impl GpuRenderer {
                 // the underline, so the accent is never sampled.
                 [0.0, 0.0, 0.0, 0.0]
             };
-            // One cache pass per assembly pass, before any pane pins or admits a row: it releases
-            // panes not drawn or resized, clears every stage and pin list, and tracks new panes.
-            let drawn_panes: Vec<(sonicterm_text::row_glyph_cache::PaneId, u16, u16)> = pane_views
-                .iter()
-                .filter(|pane| pane.planned.full_clip.is_some())
-                .map(|pane| (pane.pane_id, pane.planned.row_count, pane.grid.cols))
-                .collect();
-            self.row_glyph_cache.begin_frame(&drawn_panes);
-            // A fresh stage: records an unpresented frame staged are discarded.
-            self.row_ink.begin_frame();
+            // One cache pass and one fresh ink stage per assembly pass, before any pane pins or
+            // admits a row; the test fixture starts its passes through the same helper.
+            begin_glyph_pass(
+                &mut self.row_glyph_cache,
+                &mut self.row_ink,
+                pane_views.iter().map(|pane| (pane.planned, pane.grid.cols)),
+            );
+            if let Some(probe) = self.emitted_rows_probe.as_mut() {
+                // A test enabled the inspector: this pass records only what it emits itself.
+                probe.clear();
+            }
             for pv in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
                 let pane_staged_start = self.row_ink.staged_len();
+                // The inspector's record of this pane's emitted slots; `None` in production.
+                let mut pane_emitted = self.emitted_rows_probe.as_ref().map(|_| Vec::new());
                 // Per-cell device-pixel snapping rounds each cell's left edge independently, which
                 // at fractional DPI alternates the cell pitch; every glyph path derives its cell
                 // edges from these shared snapped edges, so adjacent cells share an edge.
@@ -6293,24 +6309,16 @@ impl GpuRenderer {
                         ink_surface: plan.surface,
                         underline_owners: &mut underline_owners,
                         injected_row_glyph: self.injected_row_glyph,
+                        emitted_slots: pane_emitted.as_mut(),
                     },
                 );
                 staged_ranges.push((pv.pane_id, pane_staged_start..self.row_ink.staged_len()));
+                if let (Some(probe), Some(slots)) = (self.emitted_rows_probe.as_mut(), pane_emitted)
+                {
+                    // The inspector is on: keep the slots this pane's rows were emitted at.
+                    probe.push((pv.pane_id, slots));
+                }
             } // end per-pane loop
-        }
-        if let Some(probe) = self.emitted_rows_probe.as_mut() {
-            // A test enabled the inspector: record what this pass emitted, per drawn pane.
-            *probe = plan
-                .panes
-                .iter()
-                .filter(|planned| planned.full_clip.is_some())
-                .map(|planned| {
-                    let slots = (0..planned.row_count)
-                        .filter(|slot| planned.emit_rows[usize::from(*slot)])
-                        .collect();
-                    (planned.id, slots)
-                })
-                .collect();
         }
         if std::mem::take(&mut self.fault_assembly_error) {
             // When: `fault_assembly_error` is armed, assembly fails as a real `Err` would, after
@@ -8414,13 +8422,23 @@ impl GpuRenderer {
             // The test seam stands in for an atlas reset during assembly: only its identity moves.
             self.glyph_atlas_generation = self.glyph_atlas_generation.wrapping_add(1);
         }
-        if atlas_changed_during_frame(atlas_stamp_at_frame_start, self.glyph_atlas_stamp()) {
-            // When: atlas_changed_during_frame detects stale UVs, discard them after the source is released.
-            return Ok(Assembled::AtlasRetry {
-                stamp: atlas_stamp_at_frame_start,
-                evictions: atlas_evictions_at_frame_start,
-            });
-        }
+        let pass_end = PassEnd {
+            atlas_stamp_at_start: atlas_stamp_at_frame_start,
+            atlas_stamp_now: self.glyph_atlas_stamp(),
+            atlas_evictions_at_start: atlas_evictions_at_frame_start,
+            previous_recolor: self.last_recolor,
+            current_recolor: frame_recolor,
+            previous_tab_ink: self.last_tab_ink,
+            current_tab_ink: tab_ink,
+        };
+        let receipts = match Self::finish_assembly_pass(&mut plan, panes, pass_end) {
+            Ok(receipts) => receipts,
+            Err(early_exit) => {
+                // When: the atlas changed or the partial plan reached unemitted ink, the helper
+                // decided the exit: `AtlasRetry` or `PartialFallback`.
+                return Ok(early_exit);
+            }
+        };
 
         #[cfg(debug_assertions)]
         {
@@ -8428,15 +8446,6 @@ impl GpuRenderer {
             crate::quad::debug_assert_premultiplied_quads("overlay", &quads_overlay);
         }
 
-        // Widen the damage by this frame's recolors before the layers carry it to the presenter.
-        plan.widen_for_recolor(self.last_recolor, frame_recolor);
-        plan.widen_for_tab_ink(self.last_tab_ink, tab_ink);
-        if plan.partial_reaches_unemitted_ink() {
-            // When: `partial_reaches_unemitted_ink` holds, the scissor would erase a skipped row's ink.
-            return Ok(Assembled::PartialFallback);
-        }
-        // Receipts are read under the same guards the plan was built from; they carry no borrow.
-        let receipts = presented_receipts(&plan, panes);
         Ok(Assembled::Layers(Box::new(AssembledLayers {
             surface_width: sw,
             surface_height: sh,
@@ -8455,6 +8464,34 @@ impl GpuRenderer {
             recolor: frame_recolor,
             tab_ink,
         })))
+    }
+
+    /// End one assembly pass with the decisions every pass takes, in this order, so production
+    /// and the fallback tests run the same code: an atlas whose content stamp moved since the
+    /// pass started has stale UVs, so the pass is `AtlasRetry`; otherwise the plan's damage is
+    /// widened by this pass's recolors and tab-title ink against the last presented frame's; a
+    /// partial plan whose widened damage reaches a row it did not emit is `PartialFallback`,
+    /// since the scissor would erase that row's ink; otherwise the plan's receipts are read under
+    /// the same guards the plan was built from. `Err` carries the early exit.
+    fn finish_assembly_pass(
+        plan: &mut FramePlan,
+        panes: &[sonicterm_render_model::PaneRender<'_>],
+        pass: PassEnd,
+    ) -> std::result::Result<Vec<sonicterm_render_model::AckReceipt>, Assembled> {
+        if atlas_changed_during_frame(pass.atlas_stamp_at_start, pass.atlas_stamp_now) {
+            // When: atlas_changed_during_frame detects stale UVs, discard them after the source is released.
+            return Err(Assembled::AtlasRetry {
+                stamp: pass.atlas_stamp_at_start,
+                evictions: pass.atlas_evictions_at_start,
+            });
+        }
+        plan.widen_for_recolor(pass.previous_recolor, pass.current_recolor);
+        plan.widen_for_tab_ink(pass.previous_tab_ink, pass.current_tab_ink);
+        if plan.partial_reaches_unemitted_ink() {
+            // When: `partial_reaches_unemitted_ink` holds, the scissor would erase a skipped row's ink.
+            return Err(Assembled::PartialFallback);
+        }
+        Ok(presented_receipts(plan, panes))
     }
 
     /// Hand assembled batches to the presenter; on `Presented`, finish the frame and return its receipts.
@@ -10302,6 +10339,27 @@ pub(crate) struct PaneGlyphSinks<'sink> {
     pub(crate) ink_surface: PixelRect,
     pub(crate) underline_owners: &'sink mut Vec<usize>,
     pub(crate) injected_row_glyph: Option<InjectedRowGlyph>,
+    /// Test inspector: each slot is appended where its row is emitted; `None` in production.
+    pub(crate) emitted_slots: Option<&'sink mut Vec<u16>>,
+}
+
+/// Start one glyph assembly pass over `panes`, each a planned pane with its grid's columns:
+/// one row-cache pass for the panes the plan draws (it releases panes not drawn or resized,
+/// clears every stage and pin list, and tracks new panes) and a fresh ink stage, so records an
+/// unpresented frame staged are discarded. Production and the fallback tests both start every
+/// pass here, before any pane pins or admits a row.
+pub(crate) fn begin_glyph_pass<'plan>(
+    row_cache: &mut sonicterm_text::row_glyph_cache::RowGlyphCache,
+    row_ink: &mut crate::row_ink::RowInkTable,
+    panes: impl IntoIterator<Item = (&'plan PlannedPane, u16)>,
+) {
+    let drawn: Vec<(sonicterm_text::row_glyph_cache::PaneId, u16, u16)> = panes
+        .into_iter()
+        .filter(|(planned, _)| planned.full_clip.is_some())
+        .map(|(planned, cols)| (planned.id, planned.row_count, cols))
+        .collect();
+    row_cache.begin_frame(&drawn);
+    row_ink.begin_frame();
 }
 
 /// Assemble one pane's emitted glyph rows in two phases. The pin phase computes the content key
@@ -10314,7 +10372,7 @@ pub(crate) fn assemble_pane_glyph_rows(
     mut shaping: GlyphShaping<'_>,
     pane: PaneGlyphRows<'_>,
     mut frame: GlyphFrame<'_>,
-    sinks: PaneGlyphSinks<'_>,
+    mut sinks: PaneGlyphSinks<'_>,
 ) {
     let PaneGlyphRows { pane_id, grid, planned, origin, snapped_cell_x, pane_hovered_url } = pane;
     let view_top_abs = planned.view_top_abs;
@@ -10354,6 +10412,10 @@ pub(crate) fn assemble_pane_glyph_rows(
             },
             frame.reborrow(),
         );
+        if let Some(slots) = sinks.emitted_slots.as_deref_mut() {
+            // A test inspector is attached: this slot's row was just emitted.
+            slots.push(slot);
+        }
         if key != 0 {
             // The row exists, so its key is this slot's staged key until the frame settles.
             shaping.row_cache.stage_slot(pane_id, slot, key);

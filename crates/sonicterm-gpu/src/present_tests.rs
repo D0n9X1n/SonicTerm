@@ -166,10 +166,18 @@ fn noop_and_atlas_retry_are_wired_to_unacknowledged_exits() {
             "Noop reaches {forbidden}"
         );
     }
-    // A changed atlas leaves assembly before any batch is presented, and its reset runs after release.
-    let guard = "ifatlas_changed_during_frame(atlas_stamp_at_frame_start,";
-    let atlas = source_between(&core, guard, "#[cfg(debug_assertions)]");
-    assert!(atlas.contains("returnOk(Assembled::AtlasRetry{stamp:atlas_stamp_at_frame_start,evictions:atlas_evictions_at_frame_start,});"));
+    // A changed atlas leaves assembly before any batch is presented, and its reset runs after
+    // release. The pass-end helper decides it from the stamps `assemble_frame` hands it, and
+    // `assemble_frame` returns the helper's early exit.
+    let guard = "ifatlas_changed_during_frame(pass.atlas_stamp_at_start,pass.atlas_stamp_now){";
+    let atlas = source_between(&core, guard, "plan.widen_for_recolor(");
+    assert!(atlas.contains("returnErr(Assembled::AtlasRetry{stamp:pass.atlas_stamp_at_start,evictions:pass.atlas_evictions_at_start,});"));
+    let handoff = source_between(&core, "letpass_end=PassEnd{", "#[cfg(debug_assertions)]");
+    assert!(handoff.contains("atlas_stamp_at_start:atlas_stamp_at_frame_start,"));
+    assert!(handoff.contains("atlas_stamp_now:self.glyph_atlas_stamp(),"));
+    assert!(handoff.contains("atlas_evictions_at_start:atlas_evictions_at_frame_start,"));
+    assert!(handoff.contains("Self::finish_assembly_pass(&mutplan,panes,pass_end)"));
+    assert!(handoff.contains("returnOk(early_exit);"));
     let atlas_arm = source_between(
         &core,
         "Assembled::AtlasRetry{stamp,evictions}=>{",
@@ -205,7 +213,7 @@ fn noop_and_atlas_retry_are_wired_to_unacknowledged_exits() {
         );
     }
     let guard_position = core.find(guard).unwrap();
-    let retry_position = guard_position + atlas.find("returnOk(Assembled::AtlasRetry{").unwrap();
+    let retry_position = guard_position + atlas.find("returnErr(Assembled::AtlasRetry{").unwrap();
     assert!(retry_position < core.find("self.present_frame(&layers,").unwrap());
     assert!(retry_position < core.find("self.finish_successful_frame(plan,").unwrap());
     let lifecycle = compact(include_str!("atlas_lifecycle.rs"));
