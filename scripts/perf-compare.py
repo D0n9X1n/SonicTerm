@@ -1236,6 +1236,8 @@ class MemorySample:
     trimmed: bool | None = None
     trim_source: str | None = None
     trim_seq: int | None = None
+    # Trim tags present on the line whose value did not parse, by name; a malformed tag is never read as absent.
+    malformed_trim_tags: tuple = ()
 
     def totals(self) -> tuple:
         """The figures a checkpoint reading compares: two samples with equal totals are the same reading."""
@@ -1313,6 +1315,12 @@ def parse_memory_line(line: str) -> MemorySample | None:
     resident_bytes = int(resident) if resident and resident.isdigit() else None
     complete = _field(fields, "checkpoint_complete")
     trimmed = _field(fields, "trimmed")
+    raw_source, raw_seq = _field(fields, "trim_source"), _field(fields, "trim_seq")
+    malformed = tuple(name for name, present, valid in (
+        ("trimmed", trimmed is not None, trimmed in ("true", "false")),
+        ("trim_source", raw_source is not None, bool(_optional_text(fields, "trim_source"))),
+        ("trim_seq", raw_seq is not None, bool(raw_seq) and raw_seq.isdigit()),
+    ) if present and not valid)
     return MemorySample(
         unix_s, resident_bytes, int(renderer), int(session),
         checkpoint_index=_optional_count(fields, "checkpoint_index"),
@@ -1329,7 +1337,8 @@ def parse_memory_line(line: str) -> MemorySample | None:
         renderer_row_glyph_cache_bytes=_optional_count(fields, "renderer_row_glyph_cache_bytes"),
         trimmed={"true": True, "false": False}.get(trimmed) if trimmed else None,
         trim_source=_optional_text(fields, "trim_source"),
-        trim_seq=_optional_count(fields, "trim_seq"))
+        trim_seq=_optional_count(fields, "trim_seq"),
+        malformed_trim_tags=malformed)
 
 
 @dataclass(frozen=True)
@@ -4064,6 +4073,9 @@ def trim_reading_problem(result: Mapping, label: str, sample: MemorySample) -> s
         return None
     hooks = result.get("hooks")
     trim = hooks.get("trim") if isinstance(hooks, dict) else None
+    if sample.malformed_trim_tags:
+        # When: a trim tag is present but unreadable, the sample cannot count as tagged or untagged.
+        return TRIM_SCHEMA
     tagged = sample.trimmed is not None or sample.trim_source is not None or sample.trim_seq is not None
     if trim == "unsupported":
         return TRIM_SCHEMA if tagged else None

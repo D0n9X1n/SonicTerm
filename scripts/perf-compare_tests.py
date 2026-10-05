@@ -8813,6 +8813,23 @@ class TrimExperimentTests(unittest.TestCase):
         base = trim_run("unsupported", None)
         self.assertEqual(self.covered_metric(base, sample), 16.0)
 
+    def test_a_malformed_trim_tag_is_a_schema_problem_never_an_absent_one(self):
+        # A present but unreadable trim tag is recorded as malformed rather than read as absent, so an
+        # unsupported side carrying one reads n/a: schema, and a trimmed side does too. A line with no trim
+        # tags at all keeps the numeric unsupported baseline.
+        base = trim_run("unsupported", None)
+        head = trim_run("trimmed", 2)
+        for tags, malformed in ((" trimmed=bogus", ("trimmed",)), (" trim_seq=-1", ("trim_seq",)),
+                                (' trimmed=true trim_source="hook" trim_seq=x2', ("trim_seq",))):
+            with self.subTest(tags=tags):
+                sample = perf.parse_memory_line(formatted_covered_line(renderer_entries(True), tags))
+                self.assertEqual(sample.malformed_trim_tags, malformed)
+                self.assertEqual(self.covered_metric(base, sample), perf.NotAvailable("schema"))
+                self.assertEqual(self.covered_metric(head, sample), perf.NotAvailable("schema"))
+        absent = perf.parse_memory_line(formatted_covered_line(renderer_entries(True)))
+        self.assertEqual(absent.malformed_trim_tags, ())
+        self.assertEqual(self.covered_metric(base, absent), 16.0)
+
     def test_a_supported_experiment_that_did_not_trim_is_never_credited(self):
         # Skipped, unreached or unrecorded hooks read n/a with their reason, never as an ordinary trimmed
         # reading; the raw covered figure stays on its own row, never replaced by zero.
@@ -8824,6 +8841,7 @@ class TrimExperimentTests(unittest.TestCase):
                 result = trim_run(after_hook=None, hooks=hooks)
                 metrics = perf.run_metrics(make_outcome(result=result, memory=[covered_sample(renderer_mib=12)]))
                 self.assertEqual(metrics[self.COVERED], perf.NotAvailable(reason))
+                self.assertIn(raw_key, metrics, "the raw covered figure keeps its own row")
                 self.assertEqual(metrics[raw_key], 12.0)
 
     def test_a_credited_trim_needs_its_state_source_and_number(self):

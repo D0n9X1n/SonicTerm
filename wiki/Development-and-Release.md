@@ -355,7 +355,9 @@ trimmed counts only a sample that reads `trimmed=true`, names `hook` or
 `scheduler` as its source, and carries a `trim_seq` at least
 `trim_seq_after_hook`: an older or untrimmed sample reads `n/a: stale`, and a
 missing state or another source reads `n/a: schema`. Trim tags on an
-`unsupported` side read `n/a: schema`. A side whose hook was `skipped`,
+`unsupported` side read `n/a: schema`, and so does a trim tag present on the line
+with an unreadable value (such as `trimmed=bogus` or `trim_seq=-1`) on any side;
+only a line with no trim tags at all is an untrimmed baseline. A side whose hook was `skipped`,
 `not-reached`, or not recorded reads `n/a: trim skipped`, `n/a: trim not
 reached` or `n/a: trim not recorded`, never a trimmed figure; its raw reading
 stays on a separate `covered renderer_total_bytes, uncredited trim` row. A result
