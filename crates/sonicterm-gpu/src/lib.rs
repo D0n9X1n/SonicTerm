@@ -82,6 +82,12 @@ pub mod glyph_working_set;
 mod frame_plan;
 /// Per-row ink records that decide which rows a partial frame must emit.
 mod row_ink;
+/// A row's style runs and their shaping text, shared by the row emitter and a test inspector.
+mod row_runs;
+
+/// Test hook: the style runs the row emitter cuts a row into; not a supported API.
+#[doc(hidden)]
+pub use row_runs::__row_shape_runs;
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

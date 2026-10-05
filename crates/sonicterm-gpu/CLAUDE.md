@@ -22,6 +22,7 @@ the production glyph path.
 - `text_pipeline.rs` - legacy alpha-only compatibility pipeline.
 - `atlas_upload.rs` - glyph atlas uploads.
 - `row_quad_cache.rs` - row background/quad caching.
+- `row_runs.rs` - a row's visible cells cut into bold/italic style runs as borrowed slices, and the one text-and-column materializer the emitter calls only for a run it shapes; the doc-hidden `__row_shape_runs` test inspector reuses both.
 - `chrome_text.rs`, `cursor.rs`, `color.rs` - UI text/cursor/color helpers; prepared chrome runs share shaping between field geometry and glyph emission.
 - `field_geometry.rs` - clipped query caret/selection geometry and hit testing bound to the last presented field.
 - `tab_title_font.rs` - device-free tab-title font state (stack, raster size, width key) that `set_font`, the scale rebuild and `measure_tab_widths` share.

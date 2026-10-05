@@ -9113,21 +9113,8 @@ impl GpuRenderer {
             // emit nothing and the row is not cached.
             return false;
         };
-        let mut text = String::with_capacity(cells.len() * 2);
-        let mut cell_cols: Vec<u16> = Vec::with_capacity(cells.len() * 2);
-        for (col, cell) in cells {
-            let start = text.len();
-            text.push(cell.ch);
-            if let Some(extras) = cell.extras() {
-                for ch in extras.chars() {
-                    text.push(ch);
-                }
-            }
-            let appended = text.len() - start;
-            for _ in 0..appended {
-                cell_cols.push(*col);
-            }
-        }
+        // Only a run that reaches the shaper has its text and byte-to-column map built.
+        let (text, cell_cols) = crate::row_runs::materialize_run_text(cells);
         if text.is_empty() {
             // When: `text.is_empty()` — every cell in the run was a wide
             // continuation, so the shaper has no bytes to work on.
@@ -10501,26 +10488,14 @@ pub(crate) fn emit_row_glyphs(
     let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pane_id, slot);
     let mut complete = true;
     // Visible cells borrowed from the grid; each style run is a slice of this list.
-    let cells: Vec<(u16, &Cell)> = row
-        .iter()
-        .enumerate()
-        .filter(|(_, cell)| !cell.flags.contains(CellFlags::WIDE_CONT))
-        .map(|(col, cell)| (col as u16, cell))
-        .collect();
-    let mut run_start = 0;
-    while run_start < cells.len() {
-        let style = RunStyle::from_cell(cells[run_start].1);
-        // The run extends while the style holds; it ends at the first cell of another style.
-        let run_end = cells[run_start..]
-            .iter()
-            .position(|(_, cell)| RunStyle::from_cell(cell) != style)
-            .map_or(cells.len(), |offset| run_start + offset);
+    let cells = crate::row_runs::visible_cells(row);
+    for run in crate::row_runs::row_shape_runs(&cells) {
         let run_complete = GpuRenderer::build_shape_run(
             atlas,
             &mut records,
             slot,
-            style,
-            &cells[run_start..run_end],
+            run.style,
+            run.cells,
             theme,
             fg_default,
             cell_w,
@@ -10534,7 +10509,6 @@ pub(crate) fn emit_row_glyphs(
             software_presenter,
         );
         complete &= run_complete;
-        run_start = run_end;
     }
     project_cached_row(&records, &at, software_presenter, frame.reborrow());
     if complete {

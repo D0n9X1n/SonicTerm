@@ -8293,3 +8293,62 @@ fn later_runs_keep_their_exact_records_after_the_first_fails() {
     assert_eq!(&records.glyphs[after_first..after_second], &expected_second.glyphs[..], "run 2");
     assert_eq!(&records.glyphs[after_second..], &expected_third.glyphs[..], "run 3");
 }
+
+/// Runs the row emitter materialized while emitting `grid`'s row 0 on `rig`, with the row.
+fn emit_counting_materialized(rig: &mut GlyphRig, grid: &Grid) -> (EmittedRow, u64) {
+    rig.begin(grid);
+    let before = crate::row_runs::materialized_runs();
+    let emitted = rig.emit(grid, 0, 0);
+    (emitted, crate::row_runs::materialized_runs() - before)
+}
+
+/// An ASCII fast-path run draws its glyphs from each cell's key and never builds run text, even
+/// with a font stack present. Pins existing behaviour; the count is scoped to this emit.
+#[test]
+fn an_ascii_fast_run_builds_no_run_text() {
+    let plain = CellFlags::empty();
+    let grid = styled_grid(8, &[('a', plain), ('b', plain), ('c', plain)]);
+    let mut rig = GlyphRig::new(false);
+    let (emitted, materialized) = emit_counting_materialized(&mut rig, &grid);
+    assert!(!emitted.glyphs.is_empty(), "the fast path still draws");
+    assert_eq!(materialized, 0, "no run text is built for an ASCII fast-path run");
+}
+
+/// A non-ASCII run with no font stack returns incomplete before any run text is built; the
+/// rasterizer is kept, so the ASCII path's behaviour is untouched. Pins existing behaviour.
+#[test]
+fn a_shaped_run_without_a_font_stack_builds_no_run_text() {
+    let grid = styled_grid(8, &[('中', CellFlags::empty())]);
+    let mut rig = GlyphRig::new(false);
+    rig.stack = None;
+    let (emitted, materialized) = emit_counting_materialized(&mut rig, &grid);
+    assert_eq!(materialized, 0, "no run text is built without a font stack");
+    assert!(!rig.cache.contains(7, emitted.key), "the incomplete row is not admitted");
+}
+
+/// With a font stack, each non-ASCII run is materialized exactly once and an ASCII run not at
+/// all: a bold `中` run, then a plain `ab` run, builds one run text.
+#[test]
+fn only_the_shaped_run_builds_its_text_once() {
+    let grid = styled_grid(
+        8,
+        &[('中', CellFlags::BOLD), ('a', CellFlags::empty()), ('b', CellFlags::empty())],
+    );
+    let mut rig = GlyphRig::new(false);
+    let (emitted, materialized) = emit_counting_materialized(&mut rig, &grid);
+    assert_eq!(materialized, 1, "one shaped run, one materialization");
+    assert!(rig.cache.contains(7, emitted.key), "a complete row is admitted");
+}
+
+/// A run that cannot complete does not stop the runs after it: with no font stack, a bold `中`
+/// run is incomplete, and the plain `abc` run after it still draws its three glyphs.
+#[test]
+fn later_runs_are_processed_after_an_incomplete_run() {
+    let plain = CellFlags::empty();
+    let grid = styled_grid(8, &[('中', CellFlags::BOLD), ('a', plain), ('b', plain), ('c', plain)]);
+    let mut rig = GlyphRig::new(false);
+    rig.stack = None;
+    let (emitted, _) = emit_counting_materialized(&mut rig, &grid);
+    assert_eq!(emitted.glyphs.len(), 3, "the ASCII run after the incomplete one draws");
+    assert!(!rig.cache.contains(7, emitted.key), "the row is not admitted");
+}
