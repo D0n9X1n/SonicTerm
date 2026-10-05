@@ -145,6 +145,8 @@ pub struct FrameStats {
     pub attempts: AttemptStats,
     /// Render attempts that carried a fallback generation apply.
     pub apply_attempts: AttemptStats,
+    /// The row-run shaping diagnostic's counters.
+    pub row_runs: crate::row_run_diag::RowRunCounts,
 }
 
 /// Upper bounds of the `atlas_growth_to_present_ms` buckets in milliseconds, the App's frame bounds.
@@ -200,6 +202,7 @@ impl FrameStats {
         chrome_run_prepares: 0,
         attempts: AttemptStats::ZERO,
         apply_attempts: AttemptStats::ZERO,
+        row_runs: crate::row_run_diag::RowRunCounts::ZERO,
     };
 
     /// Add `other`'s counts to these.
@@ -250,6 +253,7 @@ impl FrameStats {
         self.chrome_run_prepares += other.chrome_run_prepares;
         self.attempts.add(&other.attempts);
         self.apply_attempts.add(&other.apply_attempts);
+        self.row_runs.add(&other.row_runs);
     }
 }
 
@@ -732,6 +736,17 @@ pub(crate) fn note_partial_frame(partial: bool) {
 /// Count one partial plan reassembled as `Full` by the post-assembly check.
 pub(crate) fn note_partial_fallback() {
     record(|stats| stats.partial_fallbacks += 1);
+}
+
+/// Whether a counting renderer's scope is open on this thread: the frame-counter gate is on for
+/// the renderer drawing now. The row-run diagnostic opens a counted pass only then.
+pub(crate) fn collecting() -> bool {
+    COLLECTING.with(Cell::get)
+}
+
+/// Add the row-run diagnostic's counters recorded since its last take.
+pub(crate) fn note_row_runs(counts: &crate::row_run_diag::RowRunCounts) {
+    record(|stats| stats.row_runs.add(counts));
 }
 
 /// Count the cells one row hashed into its row-cache key. `cells` runs only inside a counting

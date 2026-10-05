@@ -238,6 +238,7 @@ fn shape_run_for_test(
         fixture.origin.1,
         fixture.snapped_cell_x,
         fixture.font_stack,
+        &mut crate::row_run_diag::RowRunDiagnostics::new(),
         fixture.wt_raster,
         fixture.hovered_url_cells,
         fixture.hovered_url_accent,
@@ -4052,6 +4053,7 @@ fn every_reported_part_is_classified_exactly_once() {
         row_ink: amount(64 * 1024, 40),
         frame_scratch: amount(2 * 1024 * 1024, 6),
         chrome_cache: amount(96 * 1024, 7),
+        row_run_diagnostics: amount(393_216 + 512, 4096),
     };
 
     let classes = retention.seam_classes();
@@ -4830,9 +4832,11 @@ fn render_parity_frame(
         surface,
         max_cols: grid.cols,
     };
+    let mut row_runs = crate::row_run_diag::RowRunDiagnostics::new();
     let mut shaping = GlyphShaping {
         atlas: &mut *atlas,
         row_cache: &mut caches.glyph_rows,
+        row_runs: &mut row_runs,
         font_stack: Some(stack),
         wt_raster: Some(&mut raster),
         style_rev: 0,
@@ -6238,7 +6242,15 @@ fn every_frame_outcome_settles_records_receipts_counts_and_the_key() {
         let sink = crate::frame_stats::FrameStatsSink::default();
         let settled = {
             let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
-            settle_retained_frame(&mut key, &mut table, &mut glyphs, &outcome, None, receipts())
+            settle_retained_frame(
+                &mut key,
+                &mut table,
+                &mut glyphs,
+                &mut crate::row_run_diag::RowRunDiagnostics::new(),
+                &outcome,
+                None,
+                receipts(),
+            )
         };
         assert_eq!(glyphs.staged_slot(7, 1), Some(0), "{name}: the staged glyph key is discarded");
         assert_eq!(glyphs.committed_slot(7, 1), Some(11), "{name}: the committed key stays");
@@ -6264,6 +6276,7 @@ fn every_frame_outcome_settles_records_receipts_counts_and_the_key() {
             &mut key,
             &mut table,
             &mut glyphs,
+            &mut crate::row_run_diag::RowRunDiagnostics::new(),
             &PresentOutcome::Presented,
             Some(plan),
             receipts(),
@@ -6328,6 +6341,7 @@ impl EmittedRow {
 struct GlyphRig {
     atlas: GlyphAtlas,
     cache: sonicterm_text::row_glyph_cache::RowGlyphCache,
+    row_runs: crate::row_run_diag::RowRunDiagnostics,
     stack: Option<sonicterm_engine::FontStack>,
     raster: Option<sonicterm_engine::FontStack>,
     theme: Theme,
@@ -6349,6 +6363,7 @@ impl GlyphRig {
         Self {
             atlas: GlyphAtlas::new(1024, 1024),
             cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
+            row_runs: crate::row_run_diag::RowRunDiagnostics::new(),
             raster: Some(stack.clone()),
             stack: Some(stack),
             theme: Theme::default(),
@@ -6365,6 +6380,7 @@ impl GlyphRig {
         GlyphShaping {
             atlas: &mut self.atlas,
             row_cache: &mut self.cache,
+            row_runs: &mut self.row_runs,
             font_stack: self.stack.as_ref(),
             wt_raster: self.raster.as_mut(),
             style_rev: 0,
@@ -7671,6 +7687,7 @@ fn a_partial_fallback_never_commits_its_first_pass() {
             &mut key,
             &mut fixture.ink,
             &mut fixture.rig.cache,
+            &mut crate::row_run_diag::RowRunDiagnostics::new(),
             &PresentOutcome::Presented,
             Some(plan),
             receipts,
@@ -7698,6 +7715,7 @@ fn a_partial_fallback_never_commits_its_first_pass() {
                 &mut key,
                 &mut fixture.ink,
                 &mut fixture.rig.cache,
+                &mut crate::row_run_diag::RowRunDiagnostics::new(),
                 &PresentOutcome::AtlasRetry,
                 None,
                 Vec::new(),
@@ -8022,7 +8040,7 @@ fn frame_scratch_and_chrome_cache_are_classified_parts_with_shared_envelopes() {
         ..RendererRetention::default()
     };
     let classes = retention.seam_classes();
-    assert_eq!(classes.len(), 9, "nine reported parts");
+    assert_eq!(classes.len(), 10, "ten reported parts");
     for (class, part) in [
         (ResourceClass::FrameScratch, retention.frame_scratch),
         (ResourceClass::ChromeCache, retention.chrome_cache),
@@ -8041,6 +8059,13 @@ fn frame_scratch_and_chrome_cache_are_classified_parts_with_shared_envelopes() {
         ResourceClass::ChromeCache.coverage(),
         ClassCoverage::UnchargedRetention {
             per_owner_bytes: crate::chrome_cache::CHROME_CACHE_ENVELOPE_BYTES
+        }
+    );
+    // The row-run diagnostic's class records the figure the renderer computes from its table.
+    assert_eq!(
+        ResourceClass::RowRunDiagnostics.coverage(),
+        ClassCoverage::UnchargedRetention {
+            per_owner_bytes: crate::row_run_diag::ROW_RUN_DIAG_ENVELOPE_BYTES
         }
     );
 }
@@ -8130,6 +8155,7 @@ fn build_run_records(
         0.0,
         &snapped,
         Some(stack),
+        &mut crate::row_run_diag::RowRunDiagnostics::new(),
         Some(&mut raster),
         None,
         [0.0; 4],
@@ -8351,4 +8377,81 @@ fn later_runs_are_processed_after_an_incomplete_run() {
     let (emitted, _) = emit_counting_materialized(&mut rig, &grid);
     assert_eq!(emitted.glyphs.len(), 3, "the ASCII run after the incomplete one draws");
     assert!(!rig.cache.contains(7, emitted.key), "the row is not admitted");
+}
+
+/// The row emitter's non-ASCII shape call goes through the row-run diagnostic: with no counted
+/// pass open the emission counts nothing, and inside a counted pass every shaping request of
+/// the emission is one counted call, each first for a fresh table.
+#[test]
+fn the_row_emitter_shapes_through_the_row_run_diagnostic_only_in_a_counted_pass() {
+    let grid = text_grid(8, &["p0=>é"]);
+    let plan = policy_plan(1, 0.0, 1, Vec::new(), Vec::new(), None);
+    let mut rig = GlyphRig::new(false);
+    let mut ink = crate::row_ink::RowInkTable::default();
+    rig.row_runs.begin_gated_pass();
+    let (_, uncounted) = assemble_pass(&mut rig, &mut ink, &grid, &plan);
+    assert!(uncounted.shape_requests > 0, "the fixture row reaches the shaper");
+    rig.row_runs.end_pass(true);
+    assert_eq!(rig.row_runs.take_counts(), crate::row_run_diag::RowRunCounts::default());
+
+    let mut rig = GlyphRig::new(false);
+    let mut ink = crate::row_ink::RowInkTable::default();
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        rig.row_runs.begin_gated_pass();
+    }
+    let (_, counted_stats) = assemble_pass(&mut rig, &mut ink, &grid, &plan);
+    rig.row_runs.end_pass(true);
+    let counts = rig.row_runs.take_counts();
+    assert_eq!(counts.calls, counted_stats.shape_requests, "one counted call per shape request");
+    assert_eq!((counts.ok, counts.first), (counts.calls, counts.calls));
+}
+
+/// The settlement seam commits the row-run pass exactly where it commits the row slots: only a
+/// presented frame with its plan counts the call as first; an atlas retry, or a presented
+/// outcome without a plan, counts it unpresented. The counts reach the frame statistics there.
+#[test]
+fn the_row_run_pass_commits_only_on_a_presented_frame_with_its_plan() {
+    for (outcome, with_plan, committed) in [
+        (PresentOutcome::Presented, true, true),
+        (PresentOutcome::Presented, false, false),
+        (PresentOutcome::AtlasRetry, true, false),
+        (PresentOutcome::AtlasRetry, false, false),
+    ] {
+        let case = format!("{outcome:?} with plan {with_plan}");
+        let plan = policy_plan(1, 0.0, 1, Vec::new(), Vec::new(), None);
+        let mut rig = GlyphRig::new(false);
+        let mut ink = crate::row_ink::RowInkTable::default();
+        let mut key = None;
+        let (_, stats) = counted(|| {
+            rig.row_runs.begin_gated_pass();
+            let _: Result<(), ()> = rig.row_runs.shape("甲", false, false, || (1, 1), || Ok(()));
+            settle_retained_frame(
+                &mut key,
+                &mut ink,
+                &mut rig.cache,
+                &mut rig.row_runs,
+                &outcome,
+                with_plan.then_some(plan),
+                Vec::new(),
+            )
+        });
+        let expected = if committed { (1, 0) } else { (0, 1) };
+        assert_eq!((stats.row_runs.first, stats.row_runs.unpresented_calls), expected, "{case}");
+    }
+}
+
+/// Every assembly opens its row-run pass through the gated start before any row is shaped, and
+/// the settlement seam settles it first thing, so a frame's calls settle with that frame.
+#[test]
+fn assembly_opens_a_gated_row_run_pass_before_shaping() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let assembly = function_body(&source, "    fn assemble_frame(");
+    let open = assembly.find("self.row_run_diag.begin_gated_pass();").expect("gated pass");
+    let shaping = assembly.find("row_runs: &mut self.row_run_diag,").expect("shaping handoff");
+    assert!(open < shaping);
+    let settle = function_body(&source, "fn settle_retained_frame(");
+    let end = settle.find("row_runs.end_pass(").expect("settled");
+    assert!(end < settle.find("match (outcome, presented_plan)").expect("slot settlement"));
 }

@@ -2,7 +2,7 @@ use super::*;
 use enum_map::enum_map;
 use std::time::{Duration, Instant};
 
-const ALL_CLASSES: [ResourceClass; 27] = [
+const ALL_CLASSES: [ResourceClass; 28] = [
     ResourceClass::GridVisible,
     ResourceClass::GridHistory,
     ResourceClass::GridAlternate,
@@ -17,6 +17,7 @@ const ALL_CLASSES: [ResourceClass; 27] = [
     ResourceClass::RowInk,
     ResourceClass::FrameScratch,
     ResourceClass::ChromeCache,
+    ResourceClass::RowRunDiagnostics,
     ResourceClass::ParserCapture,
     ResourceClass::InlineMediaDecode,
     ResourceClass::InlineMediaRetained,

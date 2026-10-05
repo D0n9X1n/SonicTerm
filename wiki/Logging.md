@@ -875,6 +875,7 @@ renderer retention window="<window-id>" role="visible" total_bytes=<bytes>
                    row_ink_bytes=<bytes> row_ink_items=<count>
                    frame_scratch_bytes=<bytes> frame_scratch_items=<count>
                    chrome_cache_bytes=<bytes> chrome_cache_items=<count>
+                   row_run_diagnostics_bytes=<bytes> row_run_diagnostics_items=<count>
 renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    glyph_atlas_bytes=<bytes> glyph_atlas_items=<count>
                    image_atlas_bytes=<bytes> image_atlas_items=<count>
@@ -884,6 +885,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    row_ink_bytes=<bytes> row_ink_items=<count>
                    frame_scratch_bytes=<bytes> frame_scratch_items=<count>
                    chrome_cache_bytes=<bytes> chrome_cache_items=<count>
+                   row_run_diagnostics_bytes=<bytes> row_run_diagnostics_items=<count>
 ```
 
 | Field | What it owns | First response |
@@ -905,6 +907,8 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `frame_scratch_items` | scratch vectors that hold an allocation | — |
 | `chrome_cache_bytes` | the `ChromeCache` part: the 64-slot tab-title table and the 32-slot chrome-run table, each kept run's text and glyphs, and the kept UI palette's color strings | bounded by the fixed tables and their admission limits (256 text bytes, 512 glyphs) and by a 4 KiB palette allowance (a larger palette is derived again on every request, never kept); a font change, scale change or `clear_shape_cache` empties both run tables |
 | `chrome_cache_items` | kept tab titles plus kept chrome runs | — |
+| `row_run_diagnostics_bytes` | the `RowRunDiagnostics` part: the row-run shaping diagnostic's fixed state plus, once a frame-counter run has counted a row-run shaping call, its 4,096-slot table and 8,192-record pending list (393,216 bytes) | allocated only while frame counters are on; with them off the figure stays at the fixed state and no table is built |
+| `row_run_diagnostics_items` | table slots allocated: 0 before the first counted call, then 4,096 | — |
 
 `role="warm"` means the renderer belongs to the standby pool, not a visible
 window; closing a window does not release it. Renderer figures are host memory,

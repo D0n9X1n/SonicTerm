@@ -82,6 +82,8 @@ pub mod glyph_working_set;
 mod frame_plan;
 /// Per-row ink records that decide which rows a partial frame must emit.
 mod row_ink;
+/// The row-run shaping diagnostic: repeated row-run shape calls, counted with frame counters on.
+pub mod row_run_diag;
 /// A row's style runs and their shaping text, shared by the row emitter and a test inspector.
 mod row_runs;
 

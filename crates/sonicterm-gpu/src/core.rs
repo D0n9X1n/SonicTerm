@@ -248,10 +248,14 @@ fn settle_retained_frame(
     last_frame_key: &mut Option<FrameKey>,
     row_ink: &mut crate::row_ink::RowInkTable,
     row_glyphs: &mut sonicterm_text::row_glyph_cache::RowGlyphCache,
+    row_runs: &mut crate::row_run_diag::RowRunDiagnostics,
     outcome: &PresentOutcome,
     presented_plan: Option<FramePlan>,
     receipts: Vec<sonicterm_render_model::AckReceipt>,
 ) -> Vec<sonicterm_render_model::AckReceipt> {
+    // The row-run pass commits exactly where the row slots do: a presented frame with its plan.
+    row_runs.end_pass(matches!((outcome, &presented_plan), (PresentOutcome::Presented, Some(_))));
+    crate::frame_stats::note_row_runs(&row_runs.take_counts());
     match (outcome, presented_plan) {
         (PresentOutcome::Presented, Some(plan)) => {
             row_ink.commit(&plan.drawn_row_counts());
@@ -2408,6 +2412,8 @@ pub struct GpuRenderer {
     palette_footer_font_stack: Option<sonicterm_engine::FontStack>,
     /// Kept tab titles, search-overlay runs and the UI palette; reported as `chrome_cache`.
     chrome_caches: crate::chrome_cache::ChromeCaches,
+    /// The row-run shaping diagnostic; it counts only while the frame-counter gate is on.
+    row_run_diag: crate::row_run_diag::RowRunDiagnostics,
     /// Whether the title and chrome-run caches keep what they shape; a test turns it off to
     /// compare against cold drawing.
     chrome_reuse: bool,
@@ -2785,6 +2791,9 @@ pub struct RendererRetention {
     pub frame_scratch: ResourceAmount,
     /// Kept tab titles and chrome runs plus the UI palette's colors; items are kept runs.
     pub chrome_cache: ResourceAmount,
+    /// The row-run shaping diagnostic: its inline state always, its table only once frame
+    /// counters counted a call; items are allocated slots.
+    pub row_run_diagnostics: ResourceAmount,
 }
 
 impl RendererRetention {
@@ -2804,7 +2813,7 @@ impl RendererRetention {
     /// `Vec`s — so charging both under one class would make the class mean two
     /// things and leave a reader unable to tell which allocation to act on.
     #[must_use]
-    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 9] {
+    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 10] {
         [
             (ResourceClass::GlyphAtlas, self.glyph_atlas),
             (ResourceClass::InlineMediaRetained, self.image_atlas),
@@ -2816,6 +2825,7 @@ impl RendererRetention {
             (ResourceClass::RowInk, self.row_ink),
             (ResourceClass::FrameScratch, self.frame_scratch),
             (ResourceClass::ChromeCache, self.chrome_cache),
+            (ResourceClass::RowRunDiagnostics, self.row_run_diagnostics),
         ]
     }
 
@@ -2832,6 +2842,7 @@ impl RendererRetention {
             self.row_ink,
             self.frame_scratch,
             self.chrome_cache,
+            self.row_run_diagnostics,
         ]
         .into_iter()
         .fold(ResourceAmount::default(), |acc, part| ResourceAmount {
@@ -3399,6 +3410,7 @@ impl GpuRenderer {
             palette_footer_font_stack: font_stacks.palette_footer,
             // Seeded from the constructor theme, so the first frame derives no palette.
             chrome_caches: crate::chrome_cache::ChromeCaches::new(theme),
+            row_run_diag: crate::row_run_diag::RowRunDiagnostics::new(),
             chrome_reuse: true,
             frame_scratch: frame_scratch::ScratchHome::new(),
             row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
@@ -3785,6 +3797,10 @@ impl GpuRenderer {
             chrome_cache: ResourceAmount {
                 bytes: self.chrome_caches.retained_bytes(),
                 items: self.chrome_caches.items(),
+            },
+            row_run_diagnostics: ResourceAmount {
+                bytes: self.row_run_diag.retained_bytes(),
+                items: self.row_run_diag.retained_items(),
             },
         }
     }
@@ -5903,6 +5919,7 @@ impl GpuRenderer {
                     &mut self.last_frame_key,
                     &mut self.row_ink,
                     &mut self.row_glyph_cache,
+                    &mut self.row_run_diag,
                     &PresentOutcome::AtlasRetry,
                     None,
                     Vec::new(),
@@ -5945,6 +5962,9 @@ impl GpuRenderer {
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
         force_full: bool,
     ) -> Result<Assembled> {
+        // Each assembly is one row-run pass; a pass left open before it did not present.
+        self.row_run_diag.begin_gated_pass();
+        crate::frame_stats::note_row_runs(&self.row_run_diag.take_counts());
         // `lend_and_assemble` has already taken the empty and stopped exits, so `panes` is not empty.
         let mut gpu_timing = tracing::enabled!(target: "render_timing", tracing::Level::DEBUG)
             .then(|| {
@@ -6422,6 +6442,7 @@ impl GpuRenderer {
                     GlyphShaping {
                         atlas: &mut self.glyph_atlas,
                         row_cache: &mut self.row_glyph_cache,
+                        row_runs: &mut self.row_run_diag,
                         font_stack: self.font_stack.as_ref(),
                         wt_raster: wt_raster.as_mut(),
                         style_rev: self.style_rev,
@@ -8778,6 +8799,7 @@ impl GpuRenderer {
                 &mut self.last_frame_key,
                 &mut self.row_ink,
                 &mut self.row_glyph_cache,
+                &mut self.row_run_diag,
                 &outcome,
                 None,
                 receipts,
@@ -8879,6 +8901,7 @@ impl GpuRenderer {
             &mut self.last_frame_key,
             &mut self.row_ink,
             &mut self.row_glyph_cache,
+            &mut self.row_run_diag,
             &PresentOutcome::Presented,
             Some(plan),
             receipts,
@@ -9000,6 +9023,8 @@ impl GpuRenderer {
         // The sole shape entry point; `None` only in test fixtures without bundled fonts, where
         // non-ASCII runs emit nothing and are reported incomplete.
         font_stack: Option<&sonicterm_engine::FontStack>,
+        // Observes the shape call; it counts only inside a counted pass.
+        row_runs: &mut crate::row_run_diag::RowRunDiagnostics,
         // The rasterizer; `None` only in test fixtures, where no glyph is drawn and the run is
         // reported incomplete, while background, cursor and underline quads remain.
         mut wt_raster: Option<&mut sonicterm_engine::FontStack>,
@@ -9121,8 +9146,17 @@ impl GpuRenderer {
             return true;
         }
 
+        // The diagnostic reads the style's face identity around the call, inside the same request.
+        let face_identity = || {
+            stack
+                .row_shape_identity(style.bold, style.italic)
+                .map_or(crate::row_run_diag::UNRESOLVED, |identity| {
+                    (u64::try_from(identity.face).unwrap_or(u64::MAX), identity.handles)
+                })
+        };
         let shaped_text = crate::frame_stats::shape_request(|| {
-            stack.shape_text_for_frame(&text, style.bold, style.italic)
+            let shape = || stack.shape_text_for_frame(&text, style.bold, style.italic);
+            row_runs.shape(&text, style.bold, style.italic, face_identity, shape)
         });
         let infos = match inject_shape_failure(shaped_text) {
             Ok(infos) => infos,
@@ -10268,6 +10302,8 @@ pub(crate) fn software_blocks_fit(
 pub(crate) struct GlyphShaping<'frame> {
     pub(crate) atlas: &'frame mut GlyphAtlas,
     pub(crate) row_cache: &'frame mut sonicterm_text::row_glyph_cache::RowGlyphCache,
+    /// The row-run shaping diagnostic every shaped run is observed by.
+    pub(crate) row_runs: &'frame mut crate::row_run_diag::RowRunDiagnostics,
     pub(crate) font_stack: Option<&'frame sonicterm_engine::FontStack>,
     pub(crate) wt_raster: Option<&'frame mut sonicterm_engine::FontStack>,
     pub(crate) style_rev: u64,
@@ -10287,6 +10323,7 @@ impl GlyphShaping<'_> {
         GlyphShaping {
             atlas: &mut *self.atlas,
             row_cache: &mut *self.row_cache,
+            row_runs: &mut *self.row_runs,
             font_stack: self.font_stack,
             wt_raster: self.wt_raster.as_deref_mut(),
             style_rev: self.style_rev,
@@ -10379,6 +10416,7 @@ pub(crate) fn emit_row_glyphs(
     let GlyphShaping {
         atlas,
         row_cache,
+        row_runs,
         font_stack,
         mut wt_raster,
         theme,
@@ -10503,6 +10541,7 @@ pub(crate) fn emit_row_glyphs(
             origin.1,
             snapped_cell_x,
             font_stack,
+            &mut *row_runs,
             wt_raster.as_deref_mut(),
             row_hovered_url,
             hovered_url_accent,

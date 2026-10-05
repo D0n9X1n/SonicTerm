@@ -5190,7 +5190,13 @@ COUNTER_CONTRACT = {
                   # Glyph atlas growths and growths no frame presented; a base older than them shows n/a.
                   "glyph_atlas_growths", "atlas_growth_abandoned",
                   # Title and chrome-run cache reuses and prepares; a base older than them shows n/a.
-                  "tab_title_reuses", "tab_title_prepares", "chrome_run_reuses", "chrome_run_prepares"),
+                  "tab_title_reuses", "tab_title_prepares", "chrome_run_reuses", "chrome_run_prepares",
+                  # Row-run shaping diagnostic counters; a base older than them shows n/a.
+                  "row_run_shape_calls", "row_run_shape_ok", "row_run_shape_failed", "row_run_shape_ns",
+                  "row_run_shape_first", "row_run_shape_repeats", "row_run_shape_same_pass_repeats",
+                  "row_run_shape_repeat_ns", "row_run_shape_unstable", "row_run_shape_retry_repeats",
+                  "row_run_unpresented_calls", "row_run_unpresented_ns", "row_run_identity_resets",
+                  "row_run_shape_overflows", "row_run_pass_overflows", "row_run_diag_ns"),
                  ("assembly_us", "atlas_growth_to_present_ms")),
 }
 CONTRACT_FIELD_COUNT = sum(len(counts) + len(histograms) for counts, histograms in COUNTER_CONTRACT.values())
@@ -8770,7 +8776,7 @@ def covered_sample(trim_seq=None, trimmed=None, trim_source=None, renderer_mib=1
 
 # One trimmed renderer entry exactly as the App's breakdown writes it. The App's own test asserts this text
 # byte for byte, so a rename on either side fails one of the two suites.
-TRIMMED_RENDERER_ENTRY = ("visible[WindowId(1)] glyph=512/5 image=256/2 row_glyph=64/4 row_quad=32/3 software=1024/1 vertex=272/1 row_ink=48/40 frame_scratch=96/2 chrome_cache=24/3 total=2328/61 glyph_atlas_dim=512 glyph_atlas_packed_pixels=4000 glyph_atlas_growths=1 glyph_atlas_evictions=0 glyph_atlas_fit=512 glyph_atlas_max_tile=25x16 renderer_trimmed=true renderer_gpu_released_requested_bytes=8388608")
+TRIMMED_RENDERER_ENTRY = ("visible[WindowId(1)] glyph=512/5 image=256/2 row_glyph=64/4 row_quad=32/3 software=1024/1 vertex=272/1 row_ink=48/40 frame_scratch=96/2 chrome_cache=24/3 row_run_diag=0/0 total=2328/61 glyph_atlas_dim=512 glyph_atlas_packed_pixels=4000 glyph_atlas_growths=1 glyph_atlas_evictions=0 glyph_atlas_fit=512 glyph_atlas_max_tile=25x16 renderer_trimmed=true renderer_gpu_released_requested_bytes=8388608")
 
 
 def renderer_entries(*trimmed_states):

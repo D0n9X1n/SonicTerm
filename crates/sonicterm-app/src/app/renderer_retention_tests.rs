@@ -88,6 +88,7 @@ fn retention(
         row_ink: ResourceAmount { bytes: 2_736, items: 40 },
         frame_scratch: ResourceAmount { bytes: 8_192, items: 3 },
         chrome_cache: ResourceAmount { bytes: 1_536, items: 4 },
+        row_run_diagnostics: ResourceAmount::default(),
     }
 }
 

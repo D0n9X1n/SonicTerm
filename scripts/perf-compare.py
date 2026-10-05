@@ -2115,7 +2115,13 @@ FRAME_COUNTER_FIELDS = {
                   "glyph_atlas_growths", "atlas_growth_abandoned",
                   # Tab titles and chrome runs drawn from their caches (reuses) and shaped on a miss
                   # (prepares, whose requests also count in shape_requests); a base older than them shows n/a.
-                  "tab_title_reuses", "tab_title_prepares", "chrome_run_reuses", "chrome_run_prepares"),
+                  "tab_title_reuses", "tab_title_prepares", "chrome_run_reuses", "chrome_run_prepares",
+                  # The row-run shaping diagnostic's 16 counters; a base older than them shows n/a.
+                  "row_run_shape_calls", "row_run_shape_ok", "row_run_shape_failed", "row_run_shape_ns",
+                  "row_run_shape_first", "row_run_shape_repeats", "row_run_shape_same_pass_repeats",
+                  "row_run_shape_repeat_ns", "row_run_shape_unstable", "row_run_shape_retry_repeats",
+                  "row_run_unpresented_calls", "row_run_unpresented_ns", "row_run_identity_resets",
+                  "row_run_shape_overflows", "row_run_pass_overflows", "row_run_diag_ns"),
                  ("assembly_us", "atlas_growth_to_present_ms")),
 }
 HISTOGRAM_BOUNDS = {"ms": [4, 7, 9, 12, 17, 25, 34, 50, 100], "us": [10, 50, 100, 500, 1000, 5000]}

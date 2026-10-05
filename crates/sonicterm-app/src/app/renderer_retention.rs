@@ -84,6 +84,8 @@ pub fn emit_renderer_retention(label: &str, role: &str, retention: &RendererRete
         frame_scratch_items = retention.frame_scratch.items,
         chrome_cache_bytes = retention.chrome_cache.bytes,
         chrome_cache_items = retention.chrome_cache.items,
+        row_run_diagnostics_bytes = retention.row_run_diagnostics.bytes,
+        row_run_diagnostics_items = retention.row_run_diagnostics.items,
         "renderer retention"
     );
 }

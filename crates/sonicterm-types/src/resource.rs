@@ -92,6 +92,8 @@ pub enum ResourceClass {
     FrameScratch,
     /// A renderer's kept tab titles, chrome runs and UI palette.
     ChromeCache,
+    /// A renderer's row-run shaping diagnostic table, allocated only with frame counters on.
+    RowRunDiagnostics,
     /// VT escape and media capture storage.
     ParserCapture,
     /// Transient inline-media decoding storage.
@@ -257,6 +259,11 @@ impl ResourceClass {
             // (256 text bytes, 512 glyphs) in fixed tables, plus palette strings totalling at most
             // 4 KiB (a larger palette is never kept): `CHROME_CACHE_ENVELOPE_BYTES` in `sonicterm-gpu`.
             Self::ChromeCache => ClassCoverage::UnchargedRetention { per_owner_bytes: 1_626_560 },
+            // The row-run diagnostic's two fixed vectors (4,096 slots of 48 B and 8,192 pending
+            // records of 24 B) plus its inline state: `ROW_RUN_DIAG_ENVELOPE_BYTES` in `sonicterm-gpu`.
+            Self::RowRunDiagnostics => {
+                ClassCoverage::UnchargedRetention { per_owner_bytes: 393_552 }
+            }
             Self::SoftwareFrame => {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 160 * 1024 * 1024 }
             }
@@ -416,6 +423,7 @@ impl ResourceClass {
             | Self::RowInk
             | Self::FrameScratch
             | Self::ChromeCache
+            | Self::RowRunDiagnostics
             | Self::SoftwareFrame => PaneSeamTerm::NotChargedInProduction,
 
             // Charged to the pane that owns the queue, so it appears in that

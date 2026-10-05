@@ -89,6 +89,8 @@ pub struct RendererSummary {
     pub frame_scratch: sonicterm_types::ResourceAmount,
     /// Kept tab titles, chrome runs and the UI palette's colors.
     pub chrome_cache: sonicterm_types::ResourceAmount,
+    /// The renderer's row-run shaping diagnostic.
+    pub row_run_diagnostics: sonicterm_types::ResourceAmount,
     /// Glyph atlas size, packed area, growths, evictions, fit and largest tile.
     pub glyph_atlas_facts: sonicterm_gpu::core::GlyphAtlasFacts,
     /// The window was trimmed during its current covered stretch; always false for a warm one.
@@ -206,6 +208,7 @@ impl RendererSummary {
             self.row_ink,
             self.frame_scratch,
             self.chrome_cache,
+            self.row_run_diagnostics,
         ]
         .into_iter()
         .fold(sonicterm_types::ResourceAmount::default(), |acc, part| {
@@ -224,7 +227,7 @@ impl RendererSummary {
     fn render(&self) -> String {
         let total = self.total();
         format!(
-            "{}[{}] glyph={}/{} image={}/{} row_glyph={}/{} row_quad={}/{} software={}/{} vertex={}/{} row_ink={}/{} frame_scratch={}/{} chrome_cache={}/{} total={}/{}",
+            "{}[{}] glyph={}/{} image={}/{} row_glyph={}/{} row_quad={}/{} software={}/{} vertex={}/{} row_ink={}/{} frame_scratch={}/{} chrome_cache={}/{} row_run_diag={}/{} total={}/{}",
             self.role,
             self.label,
             self.glyph_atlas.bytes,
@@ -245,6 +248,8 @@ impl RendererSummary {
             self.frame_scratch.items,
             self.chrome_cache.bytes,
             self.chrome_cache.items,
+            self.row_run_diagnostics.bytes,
+            self.row_run_diagnostics.items,
             total.bytes,
             total.items,
         ) + &format!(
@@ -716,6 +721,7 @@ fn summarize(
         row_ink: retention.row_ink,
         frame_scratch: retention.frame_scratch,
         chrome_cache: retention.chrome_cache,
+        row_run_diagnostics: retention.row_run_diagnostics,
         glyph_atlas_facts,
         trimmed: false,
         gpu_released_requested_bytes: 0,

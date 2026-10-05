@@ -268,6 +268,7 @@ fn populated_snapshot() -> MemorySnapshot {
                 row_ink: ResourceAmount { bytes: 48, items: 40 },
                 frame_scratch: ResourceAmount { bytes: 96, items: 2 },
                 chrome_cache: ResourceAmount { bytes: 24, items: 3 },
+                row_run_diagnostics: ResourceAmount::default(),
                 glyph_atlas_facts: sonicterm_gpu::core::GlyphAtlasFacts {
                     dim: 512,
                     packed_pixels: 4_000,
@@ -291,6 +292,7 @@ fn populated_snapshot() -> MemorySnapshot {
                 row_ink: ResourceAmount::default(),
                 frame_scratch: ResourceAmount::default(),
                 chrome_cache: ResourceAmount::default(),
+                row_run_diagnostics: ResourceAmount::default(),
                 glyph_atlas_facts: Default::default(),
                 trimmed: false,
                 gpu_released_requested_bytes: 0,
@@ -508,6 +510,7 @@ fn renderer_breakdown_order_is_stable_across_input_order() {
         row_ink: ResourceAmount::default(),
         frame_scratch: ResourceAmount::default(),
         chrome_cache: ResourceAmount::default(),
+        row_run_diagnostics: ResourceAmount::default(),
         glyph_atlas_facts: Default::default(),
         trimmed: false,
         gpu_released_requested_bytes: 0,
@@ -1096,6 +1099,7 @@ fn a_checkpoint_line_carries_the_trim_state_and_a_periodic_line_does_not() {
         row_ink: ResourceAmount::default(),
         frame_scratch: ResourceAmount::default(),
         chrome_cache: ResourceAmount::default(),
+        row_run_diagnostics: ResourceAmount::default(),
         glyph_atlas_facts: Default::default(),
         trimmed: true,
         gpu_released_requested_bytes: 4_096,
@@ -1121,7 +1125,7 @@ fn a_checkpoint_line_carries_the_trim_state_and_a_periodic_line_does_not() {
 /// tests build their lines from this same text, so a rename on either side fails one of them.
 const TRIMMED_RENDERER_ENTRY: &str = "visible[WindowId(1)] glyph=512/5 image=256/2 row_glyph=64/4 \
      row_quad=32/3 software=1024/1 vertex=272/1 row_ink=48/40 frame_scratch=96/2 chrome_cache=24/3 \
-     total=2328/61 glyph_atlas_dim=512 glyph_atlas_packed_pixels=4000 glyph_atlas_growths=1 \
+     row_run_diag=0/0 total=2328/61 glyph_atlas_dim=512 glyph_atlas_packed_pixels=4000 glyph_atlas_growths=1 \
      glyph_atlas_evictions=0 glyph_atlas_fit=512 glyph_atlas_max_tile=25x16 renderer_trimmed=true \
      renderer_gpu_released_requested_bytes=8388608";
 

@@ -711,6 +711,7 @@ renderer retention window="<window-id>" role="visible" total_bytes=<bytes>
                    row_ink_bytes=<bytes> row_ink_items=<count>
                    frame_scratch_bytes=<bytes> frame_scratch_items=<count>
                    chrome_cache_bytes=<bytes> chrome_cache_items=<count>
+                   row_run_diagnostics_bytes=<bytes> row_run_diagnostics_items=<count>
 renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    glyph_atlas_bytes=<bytes> glyph_atlas_items=<count>
                    image_atlas_bytes=<bytes> image_atlas_items=<count>
@@ -720,6 +721,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
                    row_ink_bytes=<bytes> row_ink_items=<count>
                    frame_scratch_bytes=<bytes> frame_scratch_items=<count>
                    chrome_cache_bytes=<bytes> chrome_cache_items=<count>
+                   row_run_diagnostics_bytes=<bytes> row_run_diagnostics_items=<count>
 ```
 
 | 字段 | 归属内容 | 首先处理 |
@@ -741,6 +743,8 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `frame_scratch_items` | 持有分配的暂存向量数 | — |
 | `chrome_cache_bytes` | `ChromeCache` 部分：64 槽标签标题表与 32 槽界面文本段表、每个保留段的文本与字形，以及保留的界面调色板颜色字符串 | 受固定表与准入上限（256 字节文本、512 个字形）以及 4 KiB 调色板余量约束（更大的调色板每次请求都重新派生，从不保留）；字体变更、缩放变更或 `clear_shape_cache` 会清空两张文本段表 |
 | `chrome_cache_items` | 保留的标签标题数加保留的界面文本段数 | — |
+| `row_run_diagnostics_bytes` | `RowRunDiagnostics` 部分：行文本段塑形诊断的固定状态，以及帧计数器运行计入第一次行文本段塑形调用后分配的 4,096 槽表与 8,192 条待定记录列表（393,216 字节） | 只在帧计数器开启时分配；关闭时数值保持为固定状态，不建表 |
+| `row_run_diagnostics_items` | 已分配的表槽数：第一次计数调用前为 0，之后为 4,096 | — |
 
 `role="warm"` 表示渲染器位于待命池，不属于可见窗口；关闭窗口不会释放它。
 这些数值是主机内存，不是 GPU 显存。
