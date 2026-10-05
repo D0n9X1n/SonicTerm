@@ -7015,9 +7015,32 @@ fn assemble_pass(
     grid: &Grid,
     plan: &FramePlan,
 ) -> (Vec<GlyphInstance>, crate::frame_stats::FrameStats) {
+    begin_pass(rig, ink, grid, plan);
+    emit_pass(rig, ink, grid, plan)
+}
+
+/// Start one assembly pass as `assemble_frame` does: one glyph-cache pass for the drawn pane
+/// (which discards the previous pass's stage) and a fresh ink stage.
+fn begin_pass(
+    rig: &mut GlyphRig,
+    ink: &mut crate::row_ink::RowInkTable,
+    grid: &Grid,
+    plan: &FramePlan,
+) {
     let planned = &plan.panes[0];
     rig.cache.begin_frame(&[(planned.id, planned.row_count, grid.cols)]);
     ink.begin_frame();
+}
+
+/// Emit `plan`'s pane rows through the production pane seam into a pass already begun,
+/// returning the glyphs and the counters the emission moved.
+fn emit_pass(
+    rig: &mut GlyphRig,
+    ink: &mut crate::row_ink::RowInkTable,
+    grid: &Grid,
+    plan: &FramePlan,
+) -> (Vec<GlyphInstance>, crate::frame_stats::FrameStats) {
+    let planned = &plan.panes[0];
     let snapped = build_snapped_cell_x(planned.layout.x, rig.cell_size.0, grid.cols);
     let (mut glyphs, mut underlines, mut tofu) = (Vec::new(), Vec::new(), Vec::new());
     let (mut missing, mut spans, mut owners) = (Vec::new(), Vec::new(), Vec::new());
@@ -7384,33 +7407,64 @@ fn a_partial_fallbacks_staged_keys_never_commit() {
     assert_eq!(rig.cache.staged_slot(7, 2), Some(0));
 }
 
+/// How one fallback pass changes the glyph atlas while it assembles, as eviction, a reset or a
+/// growth can during a real assembly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AtlasChange {
+    /// The atlas is left alone.
+    Unchanged,
+    /// The atlas is reset in place, giving it a new content identity.
+    Reset,
+    /// The atlas doubles, recomputing every UV.
+    Growth,
+}
+
 /// A six-row pane presented in full, then edited at slot 2, for the fallback orchestration tests:
-/// the rig, its ink table, the edited grid, the presented plan and slot 2's committed key.
+/// the rig (with a growable atlas), its ink table, the edited grid, the presented plan, slot 2's
+/// committed key before the edit, and the stage each pass found at its start.
 struct FallbackFixture {
     rig: GlyphRig,
     ink: crate::row_ink::RowInkTable,
     grid: Grid,
     warm: FramePlan,
     committed_before: Vec<u64>,
+    stages_at_pass_start: Vec<Vec<u64>>,
+    committed_after_pass: Vec<Vec<u64>>,
 }
 
 impl FallbackFixture {
     fn new() -> Self {
         let mut grid = text_grid(8, &["row0", "row1", "row2", "row3", "row4", "row5"]);
         let mut rig = GlyphRig::new(false);
+        rig.atlas = GlyphAtlas::growable(256, 2048);
         let mut ink = crate::row_ink::RowInkTable::default();
-        let warm = policy_plan(6, 0.0, 1, Vec::new(), Vec::new(), None);
+        let warm = policy_plan(6, 0.0, grid.revision(), Vec::new(), Vec::new(), None);
         assemble_pass(&mut rig, &mut ink, &grid, &warm);
         present_pass(&mut rig, &mut ink, &warm);
         write_row(&mut grid, 2, "EDIT");
         let committed_before =
             (0..6).map(|slot| rig.cache.committed_slot(7, slot).unwrap()).collect();
-        Self { rig, ink, grid, warm, committed_before }
+        Self {
+            rig,
+            ink,
+            grid,
+            warm,
+            committed_before,
+            stages_at_pass_start: Vec::new(),
+            committed_after_pass: Vec::new(),
+        }
     }
 
-    /// The edit's plan, `Partial` unless `force_full` makes it the fallback's second pass.
+    /// The edit's plan at the grid's current revision, `Partial` unless `force_full`.
     fn plan(&self, force_full: bool) -> FramePlan {
-        let mut plan = policy_plan(6, 0.0, 2, vec![2], strip_records(6), Some(&self.warm.key));
+        let mut plan = policy_plan(
+            6,
+            0.0,
+            self.grid.revision(),
+            vec![2],
+            strip_records(6),
+            Some(&self.warm.key),
+        );
         if force_full {
             plan.force_full();
         }
@@ -7426,90 +7480,151 @@ impl FallbackFixture {
     fn staged(&self) -> Vec<u64> {
         (0..6).map(|slot| self.rig.cache.staged_slot(7, slot).unwrap()).collect()
     }
+
+    /// One assembly pass as `assemble_frame` ends it: stamp the atlas, begin the pass, emit the
+    /// pane's rows, apply `change` to the atlas, then decide with the production helpers, in
+    /// production order: an atlas change is `AtlasRetry`; a partial plan whose damage, widened by
+    /// the tab ink the last frame drew over slot 0, reaches unemitted ink is `PartialFallback`;
+    /// otherwise the layers carry the plan and its receipts from `presented_receipts`.
+    fn assemble(&mut self, force_full: bool, change: AtlasChange) -> Result<Assembled> {
+        let mut plan = self.plan(force_full);
+        let stamp = GlyphContentStamp::capture(1, 1, &self.rig.atlas);
+        let evictions = self.rig.atlas.evictions();
+        begin_pass(&mut self.rig, &mut self.ink, &self.grid, &plan);
+        self.stages_at_pass_start.push(self.staged());
+        let (glyphs, _) = emit_pass(&mut self.rig, &mut self.ink, &self.grid, &plan);
+        self.committed_after_pass.push(self.committed());
+        match change {
+            AtlasChange::Unchanged => {}
+            AtlasChange::Reset => self.rig.atlas.reset_in_place(),
+            AtlasChange::Growth => {
+                let doubled = self.rig.atlas.width() * 2;
+                assert!(self.rig.atlas.grow_to(doubled), "the atlas doubles");
+            }
+        }
+        if atlas_changed_during_frame(stamp, GlyphContentStamp::capture(1, 1, &self.rig.atlas)) {
+            // When: the atlas changed while the pass assembled, its UVs are stale.
+            return Ok(Assembled::AtlasRetry { stamp, evictions });
+        }
+        let slot_zero = strip_records(6)[0].expect("slot 0 has a strip");
+        plan.widen_for_tab_ink(
+            crate::cursor::RecolorBounds::Rect(slot_zero),
+            crate::cursor::RecolorBounds::Empty,
+        );
+        if plan.partial_reaches_unemitted_ink() {
+            // When: the widened damage reaches slot 0, which the partial plan did not emit.
+            return Ok(Assembled::PartialFallback);
+        }
+        let panes = [sonicterm_render_model::PaneRender {
+            id: 7,
+            rect_px: PixelRect { x: 0, y: 0, w: 80, h: 120 },
+            grid: &mut self.grid,
+            viewport_top_abs: None,
+            is_active: true,
+            cursor_style: sonicterm_render_model::CursorStyle::default(),
+            is_broadcast_participant: false,
+            scrollbar_alpha: 0.0,
+            inline_images: Vec::new(),
+        }];
+        let receipts = presented_receipts(&plan, &panes);
+        drop(panes);
+        Ok(Assembled::Layers(Box::new(AssembledLayers {
+            surface_width: 240.0,
+            surface_height: 200.0,
+            subpixel_aa: SubpixelAaMode::Off,
+            quads: Vec::new(),
+            images: Vec::new(),
+            glyphs,
+            overlay_quads: Vec::new(),
+            overlay_glyphs: Vec::new(),
+            field_candidates: PresentedFields::default(),
+            missing_chars: Vec::new(),
+            missing_chrome_chars: Vec::new(),
+            gpu_timing: None,
+            plan,
+            receipts,
+            recolor: crate::cursor::RecolorRecord::default(),
+            tab_ink: crate::cursor::RecolorBounds::Empty,
+        })))
+    }
 }
 
-/// A Partial plan's first pass, assembled through the production orchestration with real
-/// admissions, never commits: after it the committed keys are unchanged although it admitted
-/// and staged the edited row; the forced-Full second pass starts with that stage discarded; and
-/// one settlement through `settle_retained_frame` commits the second pass's keys and returns
-/// its receipts. An atlas change in the first pass (one assembly call) or the second (two)
-/// settles as `AtlasRetry`: no receipt, committed keys unchanged, no surviving stage.
+/// A Partial plan whose widened damage reaches an unemitted row falls back through the
+/// production orchestration with real admissions, real atlas checks and real receipts. The
+/// first pass admits and stages the edited row but commits nothing; the second pass's own
+/// start discards that stage; its layers carry the forced-Full plan and `presented_receipts`
+/// gives that plan's `All` receipt for the fixture grid; and the one settlement commits the
+/// second pass's keys. A real atlas reset or growth during the first pass (one assembly call)
+/// or the second (two calls) settles as `AtlasRetry`: no receipt, committed keys unchanged and
+/// no surviving stage.
 #[test]
 fn a_partial_fallback_never_commits_its_first_pass() {
     use sonicterm_render_model::{AckReceipt, AckRows};
-    let receipts =
-        || vec![AckReceipt::of(0, 7, &Grid::new(8, 6), AckRows::Rows([2].into_iter().collect()))];
     let mut fixture = FallbackFixture::new();
+    assert_eq!(fixture.plan(false).mode, RenderMode::Partial, "the first pass plans Partial");
     let mut calls = 0;
     let assembled = assemble_with_fallback(|force_full| {
         calls += 1;
-        let plan = fixture.plan(force_full);
-        if force_full {
-            // The second pass's own begin_frame discards the first pass's stage.
-            fixture.rig.cache.begin_frame(&[(7, 6, 8)]);
-            assert_eq!(fixture.staged(), vec![0; 6], "the first pass's stage was discarded");
-            assert_eq!(fixture.committed(), fixture.committed_before, "still nothing committed");
-            let (_, stats) =
-                assemble_pass(&mut fixture.rig, &mut fixture.ink, &fixture.grid, &plan);
-            assert_eq!((stats.row_cache_hits, stats.row_cache_misses), (6, 0));
-            return Ok(Assembled::Noop(Box::new(plan.key.clone())));
-        }
-        assert_eq!(plan.mode, RenderMode::Partial);
-        let (_, stats) = assemble_pass(&mut fixture.rig, &mut fixture.ink, &fixture.grid, &plan);
-        assert_eq!(stats.row_cache_misses, 1, "the first pass admits the edited row");
-        assert_ne!(fixture.staged()[2], 0, "and stages its key");
-        assert_eq!(fixture.committed(), fixture.committed_before, "the first pass commits nothing");
-        Ok(Assembled::PartialFallback)
+        fixture.assemble(force_full, AtlasChange::Unchanged)
     });
-    assert_eq!(calls, 2);
-    assert!(matches!(assembled, Ok(Assembled::Noop(_))));
+    assert_eq!(calls, 2, "the partial pass fell back and was assembled again");
+    let Ok(Assembled::Layers(layers)) = assembled else {
+        panic!("the forced-Full pass presents layers");
+    };
+    let AssembledLayers { plan, receipts, .. } = *layers;
+    assert_eq!(plan.mode, RenderMode::Full, "the layers carry the forced-Full plan");
+    assert_eq!(fixture.stages_at_pass_start[0], vec![0; 6], "the first pass starts empty");
+    assert_ne!(fixture.staged()[2], 0, "the second pass staged the edited row");
+    assert_eq!(
+        fixture.stages_at_pass_start[1],
+        vec![0; 6],
+        "the second start discards the first stage"
+    );
+    for (pass, committed) in fixture.committed_after_pass.iter().enumerate() {
+        assert_eq!(*committed, fixture.committed_before, "pass {pass} commits nothing itself");
+    }
+    let expected_receipts = vec![AckReceipt::of(0, 7, &fixture.grid, AckRows::All)];
+    assert_eq!(receipts, expected_receipts, "the Full plan acknowledges every row");
     let staged = fixture.staged();
-    let presented_plan = fixture.plan(true);
     let mut key = Some(fixture.warm.key.clone());
     let settled = settle_retained_frame(
         &mut key,
         &mut fixture.ink,
         &mut fixture.rig.cache,
         &PresentOutcome::Presented,
-        Some(presented_plan),
-        receipts(),
+        Some(plan),
+        receipts,
     );
-    assert_eq!(settled, receipts(), "one settlement returns the presented plan's receipts");
+    assert_eq!(settled, expected_receipts, "one settlement returns those receipts");
     assert_eq!(fixture.committed(), staged, "the second pass's keys are the ones committed");
     assert_ne!(fixture.committed()[2], fixture.committed_before[2]);
     assert_eq!(fixture.staged(), vec![0; 6], "no stage survives the commit");
 
     for retry_pass in [1usize, 2] {
-        let mut fixture = FallbackFixture::new();
-        let stamp = GlyphContentStamp::capture(1, 1, &fixture.rig.atlas);
-        let mut calls = 0;
-        let assembled = assemble_with_fallback(|force_full| {
-            calls += 1;
-            let plan = fixture.plan(force_full);
-            if force_full {
-                fixture.rig.cache.begin_frame(&[(7, 6, 8)]);
-            }
-            assemble_pass(&mut fixture.rig, &mut fixture.ink, &fixture.grid, &plan);
-            if calls == retry_pass {
-                // When: this is the pass whose assembly changed the atlas, its UVs are stale.
-                return Ok(Assembled::AtlasRetry { stamp, evictions: 0 });
-            }
-            Ok(Assembled::PartialFallback)
-        });
-        assert_eq!(calls, retry_pass, "pass {retry_pass}: assembly calls");
-        assert!(matches!(assembled, Ok(Assembled::AtlasRetry { .. })), "pass {retry_pass}");
-        let mut key = Some(fixture.warm.key.clone());
-        let settled = settle_retained_frame(
-            &mut key,
-            &mut fixture.ink,
-            &mut fixture.rig.cache,
-            &PresentOutcome::AtlasRetry,
-            None,
-            receipts(),
-        );
-        assert!(settled.is_empty() && key.is_none(), "pass {retry_pass}: no receipt, no key");
-        assert_eq!(fixture.committed(), fixture.committed_before, "pass {retry_pass}: unchanged");
-        assert_eq!(fixture.staged(), vec![0; 6], "pass {retry_pass}: no surviving stage");
+        for change in [AtlasChange::Reset, AtlasChange::Growth] {
+            let case = format!("{change:?} in pass {retry_pass}");
+            let mut fixture = FallbackFixture::new();
+            let mut calls = 0;
+            let assembled = assemble_with_fallback(|force_full| {
+                calls += 1;
+                let pass_change = if calls == retry_pass { change } else { AtlasChange::Unchanged };
+                fixture.assemble(force_full, pass_change)
+            });
+            assert_eq!(calls, retry_pass, "{case}: assembly calls");
+            assert!(matches!(assembled, Ok(Assembled::AtlasRetry { .. })), "{case}: AtlasRetry");
+            let mut key = Some(fixture.warm.key.clone());
+            let settled = settle_retained_frame(
+                &mut key,
+                &mut fixture.ink,
+                &mut fixture.rig.cache,
+                &PresentOutcome::AtlasRetry,
+                None,
+                Vec::new(),
+            );
+            assert!(settled.is_empty() && key.is_none(), "{case}: no receipt and no key");
+            assert_eq!(fixture.committed(), fixture.committed_before, "{case}: unchanged");
+            assert_eq!(fixture.staged(), vec![0; 6], "{case}: no surviving stage");
+        }
     }
 }
 

@@ -2186,6 +2186,9 @@ pub struct GpuRenderer {
     fault_frame_probe: Option<wgpu::Buffer>,
     /// Test seam: the next assembly returns `Err` after its glyph rows were staged.
     fault_assembly_error: bool,
+    /// Test inspector: when `Some`, each assembly pass records every drawn pane's emitted slots
+    /// here, the last pass winning; production leaves it `None` and records nothing.
+    emitted_rows_probe: Option<Vec<(u64, Vec<u16>)>>,
     /// Test seam: the next presentation returns `Err` from the presenter call.
     fault_present_error: bool,
     /// Test seam: return one backend occlusion after the normal frame device gate.
@@ -3277,6 +3280,7 @@ impl GpuRenderer {
             fault_invalid_glyph_upload: false,
             fault_frame_probe: None,
             fault_assembly_error: false,
+            emitted_rows_probe: None,
             fault_present_error: false,
             fault_surface_occluded: false,
             #[cfg(target_os = "windows")]
@@ -4732,6 +4736,21 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn __fail_next_present(&mut self) {
         self.fault_present_error = true;
+    }
+
+    /// Test hook: record the slots each later assembly pass emits, per drawn pane, for
+    /// `__take_emitted_rows`. Production never calls it, so no frame records anything.
+    #[doc(hidden)]
+    pub fn __enable_emitted_rows(&mut self) {
+        self.emitted_rows_probe = Some(Vec::new());
+    }
+
+    /// Test hook: the emitted slots of every drawn pane in the last assembly pass, cleared by
+    /// this read; empty when the inspector is off or no pass ran since the last read.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __take_emitted_rows(&mut self) -> Vec<(u64, Vec<u16>)> {
+        self.emitted_rows_probe.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// Test hook: keep each later presented frame's damage for `__take_presented_damage`.
@@ -6278,6 +6297,20 @@ impl GpuRenderer {
                 );
                 staged_ranges.push((pv.pane_id, pane_staged_start..self.row_ink.staged_len()));
             } // end per-pane loop
+        }
+        if let Some(probe) = self.emitted_rows_probe.as_mut() {
+            // A test enabled the inspector: record what this pass emitted, per drawn pane.
+            *probe = plan
+                .panes
+                .iter()
+                .filter(|planned| planned.full_clip.is_some())
+                .map(|planned| {
+                    let slots = (0..planned.row_count)
+                        .filter(|slot| planned.emit_rows[usize::from(*slot)])
+                        .collect();
+                    (planned.id, slots)
+                })
+                .collect();
         }
         if std::mem::take(&mut self.fault_assembly_error) {
             // When: `fault_assembly_error` is armed, assembly fails as a real `Err` would, after

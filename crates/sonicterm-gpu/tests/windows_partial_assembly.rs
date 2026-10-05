@@ -1477,7 +1477,13 @@ fn warm_rows_match_a_cold_renderer(
         let expected = expected_partial_rows(&layout, &warm_scene, &candidate);
         let (hits_before, misses_before) = row_cache_counts(&candidate);
         let before = counts(&candidate);
+        candidate.__enable_emitted_rows();
         let narrow = present(&mut candidate, &mut warm_scene)?;
+        let emitted = candidate.__take_emitted_rows();
+        check(
+            emitted == vec![(PANE_ID, expected.clone())],
+            &format!("{case}: the frame emits exactly the rows {expected:?}: {emitted:?}"),
+        )?;
         let moved = delta(before, counts(&candidate));
         let (hits_after, misses_after) = row_cache_counts(&candidate);
         let expected_rows = expected.len() as u64;
