@@ -8250,14 +8250,32 @@ class RowGlyphCacheReportTests(unittest.TestCase):
         hit = derived["row-cache hit ratio = hits / (hits + misses), counters runs pooled"]
         self.assertEqual(hit[3:], ["0.200 (40/200, 2/2 runs)", "0.900 (90/100, 1/1 runs)", "+350.0%"])
         assembly = derived["assembly mean per counters run = assembly_sum_us / Σ assembly_buckets, per run"]
-        self.assertEqual(assembly[3], "per run 100.00, 150.00 us; pooled 116.67 us (2/2 runs)")
-        self.assertEqual(assembly[4], "per run 50.00 us; pooled 50.00 us (1/1 runs)")
+        self.assertEqual(assembly[3], "run 1 100.00 us, run 2 150.00 us; pooled 116.67 us (2/2 runs)")
+        self.assertEqual(assembly[4], "run 1 50.00 us; pooled 50.00 us (1/1 runs)")
         shapes = derived["shape+measure requests per drawn frame = shape_requests / (gpu_frames + "
                          "software_frames), context only"]
         self.assertEqual(shapes[3:5], ["5.000 (100/20, 2/2 runs)", "1.000 (10/10, 1/1 runs)"])
         fallback = derived["partial fallback ratio = partial_fallbacks / (partial_frames + partial_fallbacks), "
                            "context only"]
         self.assertEqual(fallback[3:], ["n/a (denominator 0, 2/2 runs)", "0.250 (1/4, 1/1 runs)", "n/a"])
+
+    def test_assembly_means_keep_every_runs_position(self):
+        # A run that assembled nothing and a run whose result lacks the histogram keep their positions
+        # and read n/a; the pooled mean is still the sum over every sampled run's events.
+        missing = counters_result({"renderer.assembly_us": ([0, 2, 0, 0, 0, 0, 0], 100)})
+        del missing["phases"][0]["frame_counters"]["renderer"]["assembly_us"]
+        side = perf.SideRuns(outcomes=[
+            make_outcome(result=counters_result({"renderer.row_cache_hits": 1})),
+            make_outcome(result=counters_result({"renderer.assembly_us": ([0, 4, 0, 0, 0, 0, 0], 200)})),
+            make_outcome(result=missing),
+            make_outcome(result=counters_result({"renderer.assembly_us": ([0, 1, 0, 0, 0, 0, 0], 100)}))])
+        rows, _omitted = perf.counter_rows("S3/default", perf.SideRuns(blocked=perf.COUNTERS_HEAD_ONLY), side)
+        assembly = [row for row in rows if row[2].startswith("assembly mean per counters run")]
+        self.assertEqual(assembly[0][4], "run 1 n/a (no assembly), run 2 50.00 us, run 3 n/a (no histogram), "
+                                         "run 4 100.00 us; pooled 60.00 us (2/4 runs)")
+        quiet = perf.SideRuns(outcomes=[make_outcome(result=counters_result({}))])
+        self.assertEqual(perf._assembly_means(perf._counter_phases(quiet)["workload"]),
+                         ("run 1 n/a (no assembly); pooled n/a (0/1 runs)", None))
 
     def test_a_side_without_the_fields_reads_n_a_and_all_zero_rows_are_left_out(self):
         # A base lacking the counters reads n/a with no change; a phase where no side has a denominator

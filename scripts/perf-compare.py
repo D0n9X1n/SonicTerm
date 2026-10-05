@@ -5011,21 +5011,28 @@ def _pooled_ratio(per_run: Sequence[dict], numerator: Sequence[str],
 
 
 def _assembly_means(per_run: Sequence[dict]) -> tuple[str | None, float | None]:
-    """Each counters run's exact assembly mean, `assembly_sum_us / samples`, and the pooled mean.
-    None text when no run carries the histogram; `n/a` when no run assembled a frame."""
-    histograms = [sections["renderer"]["assembly_us"] for sections in per_run
-                  if isinstance(sections.get("renderer"), dict)
-                  and isinstance(sections["renderer"].get("assembly_us"), dict)]
-    if not histograms:
+    """Each counters run's exact assembly mean, `assembly_sum_us / samples`, at its run position, and the
+    pooled mean. A run without the histogram reads `n/a (no histogram)` and one that assembled nothing
+    `n/a (no assembly)`, so every run keeps its place. None text when no run carries the histogram; the
+    pooled figure is None when no run assembled a frame."""
+    histograms = [sections["renderer"].get("assembly_us") if isinstance(sections.get("renderer"), dict) else None
+                  for sections in per_run]
+    if not any(isinstance(histogram, dict) for histogram in histograms):
         return None, None
-    means = [histogram["sum_us"] / sum(histogram["counts"]) for histogram in histograms
-             if sum(histogram["counts"])]
-    samples = sum(sum(histogram["counts"]) for histogram in histograms)
+    cells = []
+    for position, histogram in enumerate(histograms, 1):
+        if not isinstance(histogram, dict):
+            cells.append(f"run {position} n/a (no histogram)")
+        elif not sum(histogram["counts"]):
+            cells.append(f"run {position} n/a (no assembly)")
+        else:
+            cells.append(f"run {position} {histogram['sum_us'] / sum(histogram['counts']):.2f} us")
+    sampled = [histogram for histogram in histograms if isinstance(histogram, dict) and sum(histogram["counts"])]
+    samples = sum(sum(histogram["counts"]) for histogram in sampled)
     if not samples:
-        return f"n/a (no assembly, {len(histograms)}/{len(per_run)} runs)", None
-    pooled = sum(histogram["sum_us"] for histogram in histograms) / samples
-    per_run_text = ", ".join(f"{mean:.2f}" for mean in means)
-    return f"per run {per_run_text} us; pooled {pooled:.2f} us ({len(means)}/{len(per_run)} runs)", pooled
+        return f"{', '.join(cells)}; pooled n/a ({len(sampled)}/{len(per_run)} runs)", None
+    pooled = sum(histogram["sum_us"] for histogram in sampled) / samples
+    return f"{', '.join(cells)}; pooled {pooled:.2f} us ({len(sampled)}/{len(per_run)} runs)", pooled
 
 
 # Derived rows: a label naming the formula and pooling, and the function computing one side's cell.

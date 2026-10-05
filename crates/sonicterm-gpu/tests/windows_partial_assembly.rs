@@ -428,6 +428,15 @@ fn single(layout: &Layout) -> Scene {
 /// Draw `scene` once through the releasing call over borrowed grids, as the App's adapters do.
 /// A presented frame's receipts are applied to the grids and kept on the scene.
 fn frame(renderer: &mut GpuRenderer, scene: &mut Scene) -> PresentOutcome {
+    frame_with_receipts(renderer, scene).0
+}
+
+/// [`frame`], also returning the receipts the releasing call returned, read before settlement
+/// discards those of any outcome but `Presented`, so a test can require a failure issues none.
+fn frame_with_receipts(
+    renderer: &mut GpuRenderer,
+    scene: &mut Scene,
+) -> (PresentOutcome, Vec<AckReceipt>) {
     let theme = Theme::default();
     let fonts = renderer.begin_frame_fonts();
     let generation = fonts.generation();
@@ -468,10 +477,10 @@ fn frame(renderer: &mut GpuRenderer, scene: &mut Scene) -> PresentOutcome {
     drop(panes);
     if matches!(outcome, PresentOutcome::Presented) {
         // Only a presented frame issues receipts; a retry keeps the last presented frame's.
-        scene.receipts = receipts;
+        scene.receipts = receipts.clone();
         scene.font_generation = Some(generation);
     }
-    outcome
+    (outcome, receipts)
 }
 
 /// Draw `scene` until a frame presents, at most four tries, and return that frame's damage.
@@ -1432,12 +1441,23 @@ fn warm_rows_match_a_cold_renderer(
         let layout = layout(&candidate, &window);
         let (mut warm_scene, mut cold_scene) = (unique_scene(&layout), unique_scene(&layout));
         baseline(&mut candidate, &mut warm_scene)?;
+        let generation = warm_scene.font_generation;
         scroll_one_line(&mut warm_scene, layout.rows, layout.cols, 9_000);
         scroll_one_line(&mut cold_scene, layout.rows, layout.cols, 9_000);
-        let (hits, _) = presented_frame(&mut candidate, &mut warm_scene, false, &case)?;
+        let before = counts(&candidate);
+        let (hits, misses) = presented_frame(&mut candidate, &mut warm_scene, false, &case)?;
+        let moved = delta(before, counts(&candidate));
         check(
-            hits + 1 >= u64::from(layout.rows),
-            &format!("{case}: every moved row hits on the warm renderer: {hits}"),
+            warm_scene.font_generation == generation,
+            &format!("{case}: the font generation held across the scroll"),
+        )?;
+        check(
+            moved.full_frames == 1 && moved.partial_frames == 0,
+            &format!("{case}: the scroll is one Full assembly: {moved:?}"),
+        )?;
+        check(
+            (hits, misses) == (u64::from(layout.rows) - 1, 1),
+            &format!("{case}: every moved row hits and only the new row misses: {hits}, {misses}"),
         )?;
         let (warm, width) = retained_pixels(&mut candidate)?;
         cold_oracle_frame(&mut oracle, &mut cold_scene, false, &case)?;
@@ -1454,12 +1474,35 @@ fn warm_rows_match_a_cold_renderer(
             write(scene.grid(), EDIT_ROW, 3, "Z");
             scene.cursor_visible = true;
         }
+        let expected = expected_partial_rows(&layout, &warm_scene, &candidate);
+        let (hits_before, misses_before) = row_cache_counts(&candidate);
         let before = counts(&candidate);
         let narrow = present(&mut candidate, &mut warm_scene)?;
         let moved = delta(before, counts(&candidate));
+        let (hits_after, misses_after) = row_cache_counts(&candidate);
+        let expected_rows = expected.len() as u64;
         check(
-            moved.partial_frames == 1 && !narrow.first_frame && narrow.is_narrow(),
+            moved.partial_frames == 1
+                && moved.full_frames == 0
+                && moved.partial_fallbacks == 0
+                && !narrow.first_frame
+                && narrow.is_narrow(),
             &format!("{case}: the edit presents one Partial frame: {moved:?} {narrow:?}"),
+        )?;
+        check(
+            moved.row_cells_hashed == expected_rows * u64::from(layout.cols),
+            &format!(
+                "{case}: the frame emits exactly the rows {expected:?}: hashed {} cells",
+                moved.row_cells_hashed
+            ),
+        )?;
+        check(
+            (hits_after - hits_before, misses_after - misses_before) == (expected_rows - 1, 1),
+            &format!(
+                "{case}: only the edited row misses among {expected:?}: {} hits, {} misses",
+                hits_after - hits_before,
+                misses_after - misses_before
+            ),
         )?;
         let (warm, width) = retained_pixels(&mut candidate)?;
         cold_oracle_frame(&mut oracle, &mut cold_scene, false, &case)?;
@@ -1470,6 +1513,35 @@ fn warm_rows_match_a_cold_renderer(
         )?;
     }
     Ok(())
+}
+
+/// The rows a `Partial` frame of `scene` must emit, from the geometry and the grid's actual dirt:
+/// the bounding union of every dirty row's ink-padded strip and the cursor row's strip (the cell
+/// where the block cursor recolors), then every row whose strip or committed ink record meets
+/// it. `Grid::goto` dirties the row the cursor leaves even when it is hidden, so the dirt is read
+/// from the grid rather than assumed.
+fn expected_partial_rows(layout: &Layout, scene: &Scene, renderer: &GpuRenderer) -> Vec<u16> {
+    let grid = &scene.panes[0].grid;
+    let mut reach: Vec<u16> = grid.dirty_rows().map(|row| row as u16).collect();
+    if scene.cursor_visible {
+        reach.push(grid.cursor.row);
+    }
+    let damage = reach
+        .iter()
+        .filter_map(|row| layout.strip_rect(*row))
+        .reduce(|union, rect| union.union(rect));
+    let Some(damage) = damage else {
+        // When: nothing is dirty, a Partial frame emits no row.
+        return Vec::new();
+    };
+    let meets = |rect: Option<PixelRect>| rect.is_some_and(|rect| rect.intersect(damage).is_some());
+    (0..layout.rows)
+        .filter(|row| {
+            reach.contains(row)
+                || meets(layout.strip_rect(*row))
+                || meets(renderer.__test_row_ink(PANE_ID, *row))
+        })
+        .collect()
 }
 
 /// Every BGRA pixel of a GDI renderer's software frame, each read through the test hook and
@@ -1558,10 +1630,22 @@ fn error_exits_discard_staged_keys(
             // When: the presenter seam is armed instead, the `Err` comes from presentation.
             renderer.__fail_next_present();
         }
-        let outcome = frame(renderer, &mut scene);
+        let (lookups_before_hits, lookups_before_misses) = row_cache_counts(renderer);
+        let (outcome, raw_receipts) = frame_with_receipts(renderer, &mut scene);
         check(
             matches!(outcome, PresentOutcome::Failed(_)),
             &format!("{case}: Failed: {outcome:?}"),
+        )?;
+        check(
+            raw_receipts.is_empty(),
+            &format!("{case}: the releasing call returned no receipt: {raw_receipts:?}"),
+        )?;
+        let (lookups_after_hits, lookups_after_misses) = row_cache_counts(renderer);
+        check(
+            lookups_after_hits + lookups_after_misses > lookups_before_hits + lookups_before_misses,
+            &format!(
+                "{case}: row-cache lookups ran before the fault, so there was a stage to discard"
+            ),
         )?;
         let moved = delta(before, counts(renderer));
         check(

@@ -39,10 +39,10 @@ pub mod start_size_inputs;
 /// One drawable glyph in NDC space with its atlas UV rect and color.
 ///
 /// This is the hand-off record between the CPU text layer and the GPU
-/// text pass. It lives here (not in `sonicterm-gpu`) because the row-glyph
-/// cache pre-builds vectors of these from shaping output, well before
-/// any GPU work happens. The struct carries only `[f32; 4]` arrays so
-/// it has no wgpu dependency.
+/// text pass. The row glyph cache does not store it: it keeps
+/// position-free [`row_glyph_cache::RowGlyph`] records, which the renderer
+/// projects into these at each row's current slot and origin. The struct
+/// carries only `[f32; 4]` arrays so it has no wgpu dependency.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GlyphInstance {

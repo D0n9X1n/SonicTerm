@@ -337,13 +337,13 @@ fn budgets_refuse_payload_and_untrack_panes() {
     assert!(contracting.tracking_bytes() < large);
 }
 
-/// The packed kind and flags decode to what was packed, for every kind, every flag and every
-/// cluster cell count.
+/// The packed kind and flags decode to what was packed, for every kind, every flag combination
+/// and every `u16` cluster cell count.
 #[test]
 fn row_glyph_bits_round_trip() {
     for kind in RowGlyphKind::ALL {
         for flags in 0..32_u32 {
-            for cluster_cells in [0, 1, 2, 3, 255, 256, u16::MAX] {
+            for cluster_cells in 0..=u16::MAX {
                 let bits = RowGlyphBits {
                     kind,
                     is_color: flags & 1 != 0,

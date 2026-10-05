@@ -8895,8 +8895,8 @@ impl GpuRenderer {
             if let Some(block_key) = sonicterm_block_glyph::BlockKey::from_char(lead_cell.ch) {
                 // When: `BlockKey::from_char` is Some — a box/block codepoint,
                 // drawn from vendored geometry rather than the font's glyph.
-                let cx = snapped_cell_x[g.lead_col as usize];
-                let cy = top_inset + f32::from(row) * cell_h;
+                let cell_left_px = snapped_cell_x[g.lead_col as usize];
+                let cell_top_px = top_inset + f32::from(row) * cell_h;
                 let span = if is_wide { 2usize } else { cluster_cells };
                 let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
                 let cell_right = snapped_cell_x[end_col];
@@ -8905,8 +8905,12 @@ impl GpuRenderer {
                 // which a cache lookup revalidates. The GPU keeps the fractional cell geometry.
                 let (target_w, target_h) = if software_presenter {
                     let cell_bottom = top_inset + (f32::from(row) + 1.0) * cell_h;
-                    let (_, _, width, height) =
-                        software_block_glyph_target_rect(cx, cy, cell_right, cell_bottom);
+                    let (_, _, width, height) = software_block_glyph_target_rect(
+                        cell_left_px,
+                        cell_top_px,
+                        cell_right,
+                        cell_bottom,
+                    );
                     (width, height)
                 } else {
                     // When: `!software_presenter` — the GPU path keeps the
@@ -9836,25 +9840,25 @@ pub(crate) fn project_row_glyph(
     use sonicterm_text::row_glyph_cache::RowGlyphKind;
     let bits = glyph.bits();
     let (cell_w, cell_h) = at.cell_size;
-    let (sw, sh) = at.surface;
+    let (surface_width_px, surface_height_px) = at.surface;
     let top_inset = at.origin.1;
-    let cx = at.snapped_cell_x[usize::from(glyph.lead_col)];
-    let cy = top_inset + f32::from(at.slot) * cell_h;
+    let cell_left_px = at.snapped_cell_x[usize::from(glyph.lead_col)];
+    let cell_top_px = top_inset + f32::from(at.slot) * cell_h;
     let rect = match bits.kind {
         RowGlyphKind::Block => {
             let cell_right = at.snapped_cell_x[usize::from(glyph.end_col)];
             if software_presenter {
                 let cell_bottom = top_inset + (f32::from(at.slot) + 1.0) * cell_h;
-                software_block_glyph_target_rect(cx, cy, cell_right, cell_bottom)
+                software_block_glyph_target_rect(cell_left_px, cell_top_px, cell_right, cell_bottom)
             } else {
                 // When: `software_presenter` is false, the block keeps the fractional cell box.
-                (cx, cy, cell_right - cx, cell_h)
+                (cell_left_px, cell_top_px, cell_right - cell_left_px, cell_h)
             }
         }
         RowGlyphKind::Natural => {
             let natural = (
-                cx + glyph.raster_offset[0],
-                cy + at.baseline_y_in_cell + glyph.raster_offset[1],
+                cell_left_px + glyph.raster_offset[0],
+                cell_top_px + at.baseline_y_in_cell + glyph.raster_offset[1],
                 glyph.raster_size[0],
                 glyph.raster_size[1],
             );
@@ -9862,8 +9866,8 @@ pub(crate) fn project_row_glyph(
         }
         RowGlyphKind::Fallback | RowGlyphKind::Shaped => {
             let natural = (
-                cx + glyph.raster_offset[0],
-                cy + at.baseline_y_in_cell + glyph.raster_offset[1],
+                cell_left_px + glyph.raster_offset[0],
+                cell_top_px + at.baseline_y_in_cell + glyph.raster_offset[1],
                 glyph.raster_size[0],
                 glyph.raster_size[1],
             );
@@ -9875,8 +9879,11 @@ pub(crate) fn project_row_glyph(
                     .snapped_cell_x
                     .get(usize::from(glyph.lead_col) + 1)
                     .copied()
-                    .unwrap_or(cx + cell_w);
-                fit_status_marker_rect(positioned, (cx, cy, cell_right - cx, cell_h))
+                    .unwrap_or(cell_left_px + cell_w);
+                fit_status_marker_rect(
+                    positioned,
+                    (cell_left_px, cell_top_px, cell_right - cell_left_px, cell_h),
+                )
             } else {
                 // When: `marker_fit_eligible` is false, the glyph keeps its natural overhang, as ligature halves must.
                 positioned
@@ -9885,7 +9892,7 @@ pub(crate) fn project_row_glyph(
         }
     };
     GlyphInstance {
-        rect: px_to_ndc(rect.0, rect.1, rect.2, rect.3, sw, sh),
+        rect: px_to_ndc(rect.0, rect.1, rect.2, rect.3, surface_width_px, surface_height_px),
         uv: glyph.uv,
         color: glyph.color,
         flags: glyph_flags(bits.is_color, bits.is_subpixel),
@@ -9920,12 +9927,12 @@ pub(crate) fn project_cached_row(
         ));
     }
     frame.missing_chars_this_frame.extend_from_slice(&row.missing_chars);
-    let (sw, sh) = at.surface;
+    let (surface_width_px, surface_height_px) = at.surface;
     frame.row_spans.push(RowGlyphSpan::new(
         frame.glyph_instances,
         glyph_base..frame.glyph_instances.len(),
-        sw,
-        sh,
+        surface_width_px,
+        surface_height_px,
     ));
 }
 
@@ -10086,20 +10093,20 @@ pub(crate) fn emit_row_glyphs(
         pane_id,
         grid,
         view_top_abs,
-        slot: r,
+        slot,
         origin,
         snapped_cell_x,
         pane_hovered_url,
         key,
     } = placement;
-    let row_abs = view_top_abs.saturating_add(u64::from(r));
+    let row_abs = view_top_abs.saturating_add(u64::from(slot));
     let Some(row) = grid.row_at_abs(row_abs) else {
         // When: `grid.row_at_abs(row_abs)` is None — that
         // absolute row is outside the scrollback still held.
         return false;
     };
     let at = RowPlacement {
-        slot: r,
+        slot,
         origin,
         cols: grid.cols,
         snapped_cell_x,
@@ -10177,7 +10184,7 @@ pub(crate) fn emit_row_glyphs(
     // Second pass: group cells into style runs and shape each one. Every run is built, whatever
     // an earlier run reported, and its completeness is then folded into the row's: a failed run
     // keeps the row out of the cache but never stops a later valid run from drawing.
-    let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pane_id, r);
+    let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pane_id, slot);
     let mut complete = true;
     let mut run_cells: Vec<(u16, Cell)> = Vec::new();
     let mut run_style: Option<RunStyle> = None;
@@ -10194,7 +10201,7 @@ pub(crate) fn emit_row_glyphs(
             let run_complete = GpuRenderer::build_shape_run(
                 atlas,
                 &mut records,
-                r,
+                slot,
                 run_style.expect("an open run"),
                 &run_cells,
                 theme,
@@ -10219,7 +10226,7 @@ pub(crate) fn emit_row_glyphs(
             let run_complete = GpuRenderer::build_shape_run(
                 atlas,
                 &mut records,
-                r,
+                slot,
                 style,
                 &run_cells,
                 theme,

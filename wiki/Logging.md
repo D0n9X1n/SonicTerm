@@ -816,7 +816,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `glyph_atlas_items` | glyph entries in that atlas | use with bytes to distinguish occupancy from capacity |
 | `image_atlas_bytes` | CPU inline-image atlas pixel-buffer capacity, including the nonempty 1×1 placeholder allocation | reduce image use or renderer count |
 | `image_atlas_items` | inline-image atlas entries | use with bytes to identify image occupancy |
-| `row_glyph_cache_bytes` | cached glyph-record, underline, tofu and missing-character vector capacities plus tables, slot vectors and pin lists | at most 512 MiB per renderer; a pane not drawn in a frame is released at the next frame |
+| `row_glyph_cache_bytes` | cached glyph-record, underline, tofu and missing-character vector capacities plus tables, slot vectors and pin lists | at most 512 MiB per renderer; a pane is released when an assembly pass's `begin_frame` omits that pane |
 | `row_glyph_cache_items` | cached glyph rows | a falling count with flat bytes can mean reusable table capacity remains |
 | `row_quad_cache_bytes` | hash-table backing plus cached background/decoration quad vector capacities | compare with cached rows and pane/window churn |
 | `row_quad_cache_items` | cached quad rows | a falling count confirms row eviction even when table capacity is sticky |

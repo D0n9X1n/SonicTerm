@@ -87,17 +87,24 @@ fn row(width: usize) -> CachedRow {
 }
 
 /// Reported payload and tracking capacities track the heap the cache retains, through quota
-/// eviction, and dropping the cache returns every byte.
+/// eviction, and dropping the cache returns every byte. The fixture inserts past the pane's
+/// `4 × rows` quota, so eviction runs: the oldest keys are gone, the newest stay, and the pane
+/// stays within its quota.
 #[test]
 fn reported_glyph_cache_bytes_track_live_heap() {
     const ROWS: u16 = 32;
     const WIDTH: usize = 512;
+    let quota = usize::from(ROWS) * 4;
+    let inserted = quota + quota / 4;
     let before = held();
     let mut cache = RowGlyphCache::new();
     cache.begin_frame(&[(7, ROWS, WIDTH as u16)]);
-    for index in 0..usize::from(ROWS) * 4 {
+    for index in 0..inserted {
         assert!(cache.insert(7, index as u64 + 1, 1, row(WIDTH)));
     }
+    assert!(!cache.contains(7, 1), "the oldest unpinned row was evicted");
+    assert!(cache.contains(7, inserted as u64), "the newest row stayed");
+    assert!(cache.len() <= quota, "the pane stays within its quota: {}", cache.len());
 
     let truth = held().saturating_sub(before);
     let reported = cache.retained_amount();

@@ -6303,7 +6303,11 @@ struct GlyphRig {
 impl GlyphRig {
     /// A rig with the packaged fonts, 10x20 cells, baseline 16 and a 400x200 surface.
     fn new(software_presenter: bool) -> Self {
-        let stack = packaged_font_stack();
+        Self::with_stack(packaged_font_stack(), software_presenter)
+    }
+
+    /// A rig shaping and rasterizing with `stack`, otherwise as [`GlyphRig::new`] builds one.
+    fn with_stack(stack: sonicterm_engine::FontStack, software_presenter: bool) -> Self {
         Self {
             atlas: GlyphAtlas::new(1024, 1024),
             cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
@@ -6506,7 +6510,7 @@ fn scrolling_one_line_at_the_history_cap_reshapes_only_the_new_row() {
     assert_eq!(replays, [false, true, true, true]);
 }
 
-/// The inputs one frozen oracle rectangle reads.
+/// The inputs one frozen oracle instance reads.
 struct OracleCell {
     snapped: Vec<f32>,
     cell_size: (f32, f32),
@@ -6516,87 +6520,179 @@ struct OracleCell {
     surface: (f32, f32),
 }
 
-/// Frozen copy of the pre-record ASCII emission geometry.
+/// Frozen, test-local copy of the pre-record status-marker predicate and fit arithmetic. It is
+/// deliberately independent of production, so a change to either the predicate or the fit is
+/// caught by `record_projection_matches_the_frozen_emission_geometry`.
+fn frozen_fit_single_cell_status_marker(
+    ch: char,
+    cluster_cells: usize,
+    is_wide: bool,
+    has_extras: bool,
+    natural: (f32, f32, f32, f32),
+    cell: (f32, f32, f32, f32),
+) -> (f32, f32, f32, f32) {
+    if !matches!(ch, '\u{23fa}' | '\u{25ef}' | '\u{25cf}')
+        || cluster_cells != 1
+        || is_wide
+        || has_extras
+    {
+        return natural;
+    }
+    let (_, _, glyph_w, glyph_h) = natural;
+    let (cell_x, cell_y, cell_w, cell_h) = cell;
+    if glyph_w <= 0.0 || glyph_h <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
+        return natural;
+    }
+    let scale = (cell_w / glyph_w).min(cell_h / glyph_h);
+    let fitted_w = glyph_w * scale;
+    let fitted_h = glyph_h * scale;
+    (cell_x + (cell_w - fitted_w) * 0.5, cell_y + (cell_h - fitted_h) * 0.5, fitted_w, fitted_h)
+}
+
+/// Frozen copy of the pre-record HarfBuzz placement: offsets move the tile, never resize it.
+fn frozen_positioned_shaped_glyph_rect(
+    natural: (f32, f32, f32, f32),
+    x_offset: f32,
+    y_offset: f32,
+) -> (f32, f32, f32, f32) {
+    (natural.0 + x_offset, natural.1 + y_offset, natural.2, natural.3)
+}
+
+/// Frozen copy of the pre-record software block target: integer edges, at least one pixel.
+fn frozen_software_block_glyph_target_rect(
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) -> (f32, f32, f32, f32) {
+    let left = (left - 0.5).ceil();
+    let top = (top - 0.5).ceil();
+    let right = (right - 0.5).ceil().max(left + 1.0);
+    let bottom = (bottom - 0.5).ceil().max(top + 1.0);
+    (left, top, right - left, bottom - top)
+}
+
+/// Frozen copy of the pre-record instance flags: colour in x, subpixel coverage in y.
+fn frozen_glyph_flags(is_color: bool, is_subpixel: bool) -> [f32; 4] {
+    [if is_color { 1.0 } else { 0.0 }, if is_subpixel { 1.0 } else { 0.0 }, 0.0, 0.0]
+}
+
+/// The whole instance the pre-record renderer pushed for `rect` from `info` in `rgba`.
+fn frozen_instance(
+    cell: &OracleCell,
+    rect: (f32, f32, f32, f32),
+    info: &sonicterm_text::glyph_atlas::GlyphInfo,
+    rgba: [f32; 4],
+) -> GlyphInstance {
+    let (glyph_x, glyph_y, glyph_w, glyph_h) = rect;
+    GlyphInstance {
+        rect: px_to_ndc(glyph_x, glyph_y, glyph_w, glyph_h, cell.surface.0, cell.surface.1),
+        uv: info.uv,
+        color: rgba,
+        flags: frozen_glyph_flags(info.is_color, info.is_subpixel),
+    }
+}
+
+/// Frozen copy of the pre-record ASCII emission.
 fn oracle_natural(
     cell: &OracleCell,
     col: u16,
     info: &sonicterm_text::glyph_atlas::GlyphInfo,
-) -> [f32; 4] {
-    let cx = cell.snapped[col as usize];
-    let cy = cell.top_inset + f32::from(cell.row) * cell.cell_size.1;
+    rgba: [f32; 4],
+) -> GlyphInstance {
+    let cell_left_px = cell.snapped[col as usize];
+    let cell_top_px = cell.top_inset + f32::from(cell.row) * cell.cell_size.1;
     let inv_s = 1.0_f32;
-    let gx = cx + info.px_offset[0] as f32 * inv_s;
-    let gy = cy + cell.baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
-    let gw = info.px_size[0] as f32 * inv_s;
-    let gh = info.px_size[1] as f32 * inv_s;
-    let (gx, gy, gw, gh) =
-        sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
-    px_to_ndc(gx, gy, gw, gh, cell.surface.0, cell.surface.1)
+    let glyph_x = cell_left_px + info.px_offset[0] as f32 * inv_s;
+    let glyph_y = cell_top_px + cell.baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+    let glyph_w = info.px_size[0] as f32 * inv_s;
+    let glyph_h = info.px_size[1] as f32 * inv_s;
+    let rect = sonicterm_render_model::geometry::snap_to_device_pixels(
+        (glyph_x, glyph_y, glyph_w, glyph_h),
+        1.0,
+    );
+    frozen_instance(cell, rect, info, rgba)
 }
 
-/// Frozen copy of the pre-record fallback and shaped emission geometry.
+/// Frozen copy of the pre-record fallback and shaped emission.
 fn oracle_shaped(
     cell: &OracleCell,
     lead: (u16, char, usize, bool, bool),
     info: &sonicterm_text::glyph_atlas::GlyphInfo,
     shape_offset: (f32, f32),
-) -> [f32; 4] {
+    rgba: [f32; 4],
+) -> GlyphInstance {
     let (col, character, cluster_cells, is_wide, has_extras) = lead;
     let (cell_w, cell_h) = cell.cell_size;
-    let cx = cell.snapped[col as usize];
-    let cy = cell.top_inset + f32::from(cell.row) * cell_h;
+    let cell_left_px = cell.snapped[col as usize];
+    let cell_top_px = cell.top_inset + f32::from(cell.row) * cell_h;
     let inv_s = 1.0_f32;
-    let gx = cx + info.px_offset[0] as f32 * inv_s;
-    let gy = cy + cell.baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
-    let gw = info.px_size[0] as f32 * inv_s;
-    let gh = info.px_size[1] as f32 * inv_s;
-    let (gx, gy, gw, gh) =
-        positioned_shaped_glyph_rect((gx, gy, gw, gh), shape_offset.0, shape_offset.1);
-    let cell_right = cell.snapped.get(col as usize + 1).copied().unwrap_or(cx + cell_w);
-    let (gx, gy, gw, gh) = fit_single_cell_status_marker(
+    let glyph_x = cell_left_px + info.px_offset[0] as f32 * inv_s;
+    let glyph_y = cell_top_px + cell.baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+    let glyph_w = info.px_size[0] as f32 * inv_s;
+    let glyph_h = info.px_size[1] as f32 * inv_s;
+    let positioned = frozen_positioned_shaped_glyph_rect(
+        (glyph_x, glyph_y, glyph_w, glyph_h),
+        shape_offset.0,
+        shape_offset.1,
+    );
+    let cell_right = cell.snapped.get(col as usize + 1).copied().unwrap_or(cell_left_px + cell_w);
+    let fitted = frozen_fit_single_cell_status_marker(
         character,
         cluster_cells,
         is_wide,
         has_extras,
-        (gx, gy, gw, gh),
-        (cx, cy, cell_right - cx, cell_h),
+        positioned,
+        (cell_left_px, cell_top_px, cell_right - cell_left_px, cell_h),
     );
-    let (gx, gy, gw, gh) =
-        sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
-    px_to_ndc(gx, gy, gw, gh, cell.surface.0, cell.surface.1)
+    let rect = sonicterm_render_model::geometry::snap_to_device_pixels(fitted, 1.0);
+    frozen_instance(cell, rect, info, rgba)
 }
 
-/// Frozen copy of the pre-record block emission geometry.
-fn oracle_block(cell: &OracleCell, col: u16, span: usize, software_presenter: bool) -> [f32; 4] {
+/// Frozen copy of the pre-record block emission.
+fn oracle_block(
+    cell: &OracleCell,
+    col: u16,
+    span: usize,
+    software_presenter: bool,
+    info: &sonicterm_text::glyph_atlas::GlyphInfo,
+    rgba: [f32; 4],
+) -> GlyphInstance {
     let cell_h = cell.cell_size.1;
-    let cx = cell.snapped[col as usize];
-    let cy = cell.top_inset + f32::from(cell.row) * cell_h;
+    let cell_left_px = cell.snapped[col as usize];
+    let cell_top_px = cell.top_inset + f32::from(cell.row) * cell_h;
     let end_col = (col as usize + span).min(cell.snapped.len() - 1);
     let cell_right = cell.snapped[end_col];
-    let (gx, gy, gw, gh) = if software_presenter {
+    let rect = if software_presenter {
         let cell_bottom = cell.top_inset + (f32::from(cell.row) + 1.0) * cell_h;
-        software_block_glyph_target_rect(cx, cy, cell_right, cell_bottom)
+        frozen_software_block_glyph_target_rect(cell_left_px, cell_top_px, cell_right, cell_bottom)
     } else {
-        (cx, cy, cell_right - cx, cell_h)
+        (cell_left_px, cell_top_px, cell_right - cell_left_px, cell_h)
     };
-    px_to_ndc(gx, gy, gw, gh, cell.surface.0, cell.surface.1)
+    frozen_instance(cell, rect, info, rgba)
 }
 
-/// Projecting position-free records reproduces the frozen pre-record geometry bit for bit, for
-/// every kind: separate raster and shaping offsets (including 1.9, 7 and 8.7), a small surface,
-/// a fractional origin and pitch, cluster pens, status-marker eligibility, wide and combining
-/// lead cells, and blocks spanning one and two columns on both presenters.
+/// One instance's bytes, so comparisons are bit-exact rather than f32 equality.
+fn instance_bytes(instance: &GlyphInstance) -> Vec<u8> {
+    bytemuck::bytes_of(instance).to_vec()
+}
+
+/// Projecting position-free records reproduces the frozen pre-record emission byte for byte,
+/// whole instances included, for every kind: separate raster and shaping offsets (including
+/// 1.9, 7 and 8.7), a small surface, a fractional origin and pitch, status-marker eligibility,
+/// wide and combining lead cells, colour (emoji-style) and subpixel tiles, and blocks spanning
+/// one and two columns on both presenters. The oracle is independent of production arithmetic.
 #[test]
 fn record_projection_matches_the_frozen_emission_geometry() {
     use sonicterm_text::glyph_atlas::GlyphInfo;
     use sonicterm_text::row_glyph_cache::RowGlyphKind;
-    let info = |offset: [i32; 2], size: [u32; 2]| GlyphInfo {
+    let info = |offset: [i32; 2], size: [u32; 2], is_color: bool| GlyphInfo {
         uv: [0.1, 0.2, 0.3, 0.4],
         px_size: size,
         px_offset: offset,
         advance: 0.0,
-        is_color: false,
-        is_subpixel: true,
+        is_color,
+        is_subpixel: !is_color,
         missing: false,
     };
     let geometries = [
@@ -6604,6 +6700,7 @@ fn record_projection_matches_the_frozen_emission_geometry() {
         ((1.9, 7.0), (8.7, 17.3), 13.84, (80.0, 80.0)),
         ((0.5, 0.1), (10.5, 20.25), 16.2, (123.0, 77.0)),
     ];
+    let mut compared = 0;
     for (origin, cell_size, baseline, surface) in geometries {
         for row in [0u16, 1, 3] {
             let cell = OracleCell {
@@ -6623,121 +6720,197 @@ fn record_projection_matches_the_frozen_emission_geometry() {
                 baseline_y_in_cell: baseline,
                 surface,
             };
-            let tile = info([1, -12], [7, 13]);
-            let natural = tile_record(RowGlyphKind::Natural, 2, &tile, [1.0; 4]);
-            assert_eq!(
-                project_row_glyph(&natural, &at, false).rect,
-                oracle_natural(&cell, 2, &tile)
-            );
-            let leads = [
-                ('\u{25cf}', 1usize, false, false),
-                ('\u{25cf}', 1, true, false),
-                ('\u{25cf}', 1, false, true),
-                ('\u{25cf}', 2, false, false),
-                ('x', 1, false, false),
-            ];
-            for (character, cluster_cells, is_wide, has_extras) in leads {
-                for kind in [RowGlyphKind::Fallback, RowGlyphKind::Shaped] {
-                    for shape_offset in [(0.0, 0.0), (1.9, -7.0), (8.7, 2.5)] {
-                        let tile = info([2, -9], [9, 9]);
-                        let mut record = tile_record(kind, 3, &tile, [1.0; 4]);
-                        let mut lead_cell = Cell::plain(
-                            character,
-                            Color::Default,
-                            Color::Default,
-                            CellFlags::empty(),
-                        );
-                        if is_wide {
-                            lead_cell.flags = CellFlags::WIDE;
+            for is_color in [false, true] {
+                let rgba = if is_color { [1.0; 4] } else { [0.3, 0.6, 0.9, 1.0] };
+                let tile = info([1, -12], [7, 13], is_color);
+                let natural = tile_record(RowGlyphKind::Natural, 2, &tile, rgba);
+                assert_eq!(
+                    instance_bytes(&project_row_glyph(&natural, &at, false)),
+                    instance_bytes(&oracle_natural(&cell, 2, &tile, rgba)),
+                    "natural colour={is_color}"
+                );
+                compared += 1;
+                let leads = [
+                    ('\u{25cf}', 1usize, false, false),
+                    ('\u{23fa}', 1, false, false),
+                    ('\u{25ef}', 1, false, false),
+                    ('\u{25cf}', 1, true, false),
+                    ('\u{25cf}', 1, false, true),
+                    ('\u{25cf}', 2, false, false),
+                    ('x', 1, false, false),
+                    ('😀', 2, true, false),
+                ];
+                for (character, cluster_cells, is_wide, has_extras) in leads {
+                    for kind in [RowGlyphKind::Fallback, RowGlyphKind::Shaped] {
+                        for shape_offset in [(0.0, 0.0), (1.9, -7.0), (8.7, 2.5)] {
+                            let tile = info([2, -9], [9, 9], is_color);
+                            let mut record = tile_record(kind, 3, &tile, rgba);
+                            let mut lead_cell = Cell::plain(
+                                character,
+                                Color::Default,
+                                Color::Default,
+                                CellFlags::empty(),
+                            );
+                            if is_wide {
+                                lead_cell.flags = CellFlags::WIDE;
+                            }
+                            if has_extras {
+                                lead_cell.set_extras(Some("\u{301}".into()));
+                            }
+                            let shaped = sonicterm_text::shape::ShapedGlyph {
+                                lead_col: 3,
+                                cluster_cells: cluster_cells as u16,
+                                font_slot: 0,
+                                glyph_id: 5,
+                                x_advance: 0.0,
+                                x_offset: 0.0,
+                                y_offset: 0.0,
+                                ch: character,
+                            };
+                            let eligible = status_marker_fit_eligible(
+                                character,
+                                cluster_cells,
+                                is_wide,
+                                has_extras,
+                            );
+                            set_shaped_bits(
+                                &mut record,
+                                [shape_offset.0, shape_offset.1],
+                                eligible,
+                                &shaped,
+                                is_wide,
+                                &lead_cell,
+                            );
+                            let expected = oracle_shaped(
+                                &cell,
+                                (3, character, cluster_cells, is_wide, has_extras),
+                                &tile,
+                                shape_offset,
+                                rgba,
+                            );
+                            assert_eq!(
+                                instance_bytes(&project_row_glyph(&record, &at, false)),
+                                instance_bytes(&expected),
+                                "{kind:?} {character:?} cells={cluster_cells} wide={is_wide} \
+                                 extras={has_extras} offset={shape_offset:?} colour={is_color}"
+                            );
+                            compared += 1;
                         }
-                        if has_extras {
-                            lead_cell.set_extras(Some("\u{301}".into()));
-                        }
-                        let shaped = sonicterm_text::shape::ShapedGlyph {
-                            lead_col: 3,
-                            cluster_cells: cluster_cells as u16,
-                            font_slot: 0,
-                            glyph_id: 5,
-                            x_advance: 0.0,
-                            x_offset: 0.0,
-                            y_offset: 0.0,
-                            ch: character,
-                        };
-                        let eligible = status_marker_fit_eligible(
-                            character,
-                            cluster_cells,
-                            is_wide,
-                            has_extras,
-                        );
-                        set_shaped_bits(
-                            &mut record,
-                            [shape_offset.0, shape_offset.1],
-                            eligible,
-                            &shaped,
-                            is_wide,
-                            &lead_cell,
-                        );
-                        let expected = oracle_shaped(
-                            &cell,
-                            (3, character, cluster_cells, is_wide, has_extras),
-                            &tile,
-                            shape_offset,
-                        );
-                        assert_eq!(
-                            project_row_glyph(&record, &at, false).rect,
-                            expected,
-                            "{kind:?} {character:?} cells={cluster_cells} wide={is_wide} \
-                             extras={has_extras} offset={shape_offset:?}"
-                        );
                     }
                 }
-            }
-            for span in [1usize, 2] {
-                for software in [false, true] {
-                    let tile = info([0, 0], [10, 20]);
-                    let mut record = tile_record(RowGlyphKind::Block, 4, &tile, [1.0; 4]);
-                    record.raster_offset = [0.0; 2];
-                    record.end_col = (4 + span).min(cell.snapped.len() - 1) as u16;
-                    assert_eq!(
-                        project_row_glyph(&record, &at, software).rect,
-                        oracle_block(&cell, 4, span, software),
-                        "block span {span} software {software}"
-                    );
+                for span in [1usize, 2] {
+                    for software in [false, true] {
+                        let tile = info([0, 0], [10, 20], is_color);
+                        let mut record = tile_record(RowGlyphKind::Block, 4, &tile, rgba);
+                        record.raster_offset = [0.0; 2];
+                        record.end_col = (4 + span).min(cell.snapped.len() - 1) as u16;
+                        assert_eq!(
+                            instance_bytes(&project_row_glyph(&record, &at, software)),
+                            instance_bytes(&oracle_block(&cell, 4, span, software, &tile, rgba)),
+                            "block span {span} software {software} colour={is_color}"
+                        );
+                        compared += 1;
+                    }
                 }
             }
         }
     }
+    assert_eq!(compared, 3 * 3 * 2 * (1 + 8 * 2 * 3 + 2 * 2), "every case was compared");
 }
 
-/// Real fonts, warm and cold, draw the same bytes: text, a ligature trigger, box drawing,
-/// arrows and a combining cluster are shaped cold after every style was warmed into a shared
-/// atlas, then replayed warm. Only monochrome faces are chosen, so no glyph is a colour tile.
+/// The tracked font faces only (no OS font discovery), warm and cold, draw the same bytes. The
+/// grid covers normal, bold, italic and bold-italic runs, a ligature trigger, box drawing, a
+/// combining cluster, and CJK, emoji and wide clusters. Fallback is controlled: the stack has no
+/// system font source, so CJK draws from the tracked faces and the emoji is a stable missing
+/// glyph. Exactly these rows are drawn once to
+/// warm the atlas and fonts; then only the row cache is cleared, a cold pass misses every row,
+/// and a warm pass hits every row with identical glyphs, decorations and missing characters.
 #[test]
-fn real_fonts_draw_the_same_warm_and_cold() {
-    let mut grid = text_grid(10, &["ab=>c->d", "│─┼█▌", "→é é", "plain"]);
-    grid.goto(3, 6);
-    grid.put_char('e', Color::Default, Color::Default, CellFlags::empty());
+fn tracked_fonts_draw_the_same_warm_and_cold() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let styles = [
+        CellFlags::empty(),
+        CellFlags::BOLD,
+        CellFlags::ITALIC,
+        CellFlags::BOLD | CellFlags::ITALIC,
+    ];
+    let mut grid = Grid::new(12, 8);
+    for (row, flags) in styles.iter().enumerate() {
+        grid.goto(row as u16, 0);
+        for character in "ab=>c->d".chars() {
+            grid.put_char(character, Color::Default, Color::Default, *flags);
+        }
+    }
+    write_row(&mut grid, 4, "│─┼█▌ e");
     grid.put_char('\u{301}', Color::Default, Color::Default, CellFlags::empty());
-    let mut rig = GlyphRig::new(false);
+    write_row(&mut grid, 5, "中文 x");
+    write_row(&mut grid, 6, "😀 ok");
+    write_row(&mut grid, 7, "a中😀b");
+    grid.clear_dirty();
+    let rows = grid.rows;
+    let mut rig = GlyphRig::with_stack(crate::lib_tests::tracked_font_stack(14.0), false);
+    rig.surface = (400.0, 400.0);
     rig.begin(&grid);
-    for slot in 0..4 {
+    for slot in 0..rows {
         rig.emit(&grid, 0, slot);
     }
     rig.cache.invalidate_all();
     rig.begin(&grid);
-    let cold: Vec<EmittedRow> = (0..4).map(|slot| rig.emit(&grid, 0, slot)).collect();
+    let (cold, cold_stats) =
+        counted(|| (0..rows).map(|slot| rig.emit(&grid, 0, slot)).collect::<Vec<_>>());
     rig.begin(&grid);
-    let warm: Vec<EmittedRow> = (0..4).map(|slot| rig.emit(&grid, 0, slot)).collect();
+    let (warm, warm_stats) =
+        counted(|| (0..rows).map(|slot| rig.emit(&grid, 0, slot)).collect::<Vec<_>>());
+    let row_count = u64::from(rows);
+    assert_eq!((cold_stats.row_cache_hits, cold_stats.row_cache_misses), (0, row_count));
+    assert_eq!((warm_stats.row_cache_hits, warm_stats.row_cache_misses), (row_count, 0));
+    assert_eq!(warm_stats.shape_requests, 0, "the warm pass shapes nothing");
     for (slot, (cold_row, warm_row)) in cold.iter().zip(&warm).enumerate() {
-        assert!(!cold_row.replayed && warm_row.replayed, "slot {slot}: cold misses, warm hits");
-        assert!(!cold_row.glyphs.is_empty(), "slot {slot} draws glyphs");
+        assert!(!cold_row.glyphs.is_empty() || !cold_row.missing.is_empty(), "slot {slot} draws");
         assert_eq!(warm_row.glyph_bytes(), cold_row.glyph_bytes(), "slot {slot} glyph bytes");
         assert_eq!(warm_row.decorations, cold_row.decorations, "slot {slot} decorations");
-        assert!(
-            cold_row.glyphs.iter().all(|glyph| glyph.flags[0] == 0.0),
-            "slot {slot}: monochrome faces give no colour coverage"
-        );
+        assert_eq!(warm_row.missing, cold_row.missing, "slot {slot} missing characters");
     }
+    let style_bytes: Vec<Vec<u8>> = cold[..4].iter().map(EmittedRow::glyph_bytes).collect();
+    for (index, bytes) in style_bytes.iter().enumerate().skip(1) {
+        assert_ne!(*bytes, style_bytes[0], "style row {index} draws other faces than normal");
+    }
+    // `ConfigDirsOnly` installs no system source, so CJK draws from the tracked face's own
+    // coverage and the emoji, which no tracked face has, is a stable missing glyph.
+    assert!(
+        !cold[5].glyphs.is_empty() && cold[5].missing.is_empty(),
+        "CJK draws from tracked faces"
+    );
+    assert!(cold[6].missing.contains(&'😀'), "emoji resolves to the controlled missing glyph");
+}
+
+/// A pane left untracked by a zero tracking budget still draws: every row emitted through the
+/// renderer seam equals a cold draw from a tracked cache, glyphs, decorations and missing
+/// characters alike, and nothing is cached for it.
+#[test]
+fn untracked_panes_draw_like_cold_rows() {
+    let grid = text_grid(10, &["ab=>c", "│─┼█", "plain", "→é x"]);
+    let mut untracked = GlyphRig::new(false);
+    untracked.cache = sonicterm_text::row_glyph_cache::RowGlyphCache::with_budgets(
+        sonicterm_text::row_glyph_cache::DEFAULT_PAYLOAD_BUDGET_BYTES,
+        0,
+    );
+    untracked.begin(&grid);
+    assert!(!untracked.cache.is_tracked(7), "a zero tracking budget leaves the pane untracked");
+    let mut cold = GlyphRig::new(false);
+    cold.begin(&grid);
+    for slot in 0..4 {
+        let drawn = untracked.emit(&grid, 0, slot);
+        let reference = cold.emit(&grid, 0, slot);
+        assert!(!drawn.replayed, "slot {slot}: an untracked pane never replays");
+        assert!(!reference.glyphs.is_empty(), "slot {slot}: the reference draws glyphs");
+        assert_eq!(drawn.glyph_bytes(), reference.glyph_bytes(), "slot {slot} glyph bytes");
+        assert_eq!(drawn.decorations, reference.decorations, "slot {slot} decorations");
+        assert_eq!(drawn.missing, reference.missing, "slot {slot} missing characters");
+    }
+    assert!(untracked.cache.is_empty() && untracked.cache.retained_amount().bytes == 0);
 }
 
 /// The glyph atlas and the cold and warm glyph lists of one scrolled frame on the software
@@ -7209,6 +7382,135 @@ fn a_partial_fallbacks_staged_keys_never_commit() {
     rig.cache.stage_slot(7, 2, 99);
     rig.cache.begin_frame(&[(7, 6, 8)]);
     assert_eq!(rig.cache.staged_slot(7, 2), Some(0));
+}
+
+/// A six-row pane presented in full, then edited at slot 2, for the fallback orchestration tests:
+/// the rig, its ink table, the edited grid, the presented plan and slot 2's committed key.
+struct FallbackFixture {
+    rig: GlyphRig,
+    ink: crate::row_ink::RowInkTable,
+    grid: Grid,
+    warm: FramePlan,
+    committed_before: Vec<u64>,
+}
+
+impl FallbackFixture {
+    fn new() -> Self {
+        let mut grid = text_grid(8, &["row0", "row1", "row2", "row3", "row4", "row5"]);
+        let mut rig = GlyphRig::new(false);
+        let mut ink = crate::row_ink::RowInkTable::default();
+        let warm = policy_plan(6, 0.0, 1, Vec::new(), Vec::new(), None);
+        assemble_pass(&mut rig, &mut ink, &grid, &warm);
+        present_pass(&mut rig, &mut ink, &warm);
+        write_row(&mut grid, 2, "EDIT");
+        let committed_before =
+            (0..6).map(|slot| rig.cache.committed_slot(7, slot).unwrap()).collect();
+        Self { rig, ink, grid, warm, committed_before }
+    }
+
+    /// The edit's plan, `Partial` unless `force_full` makes it the fallback's second pass.
+    fn plan(&self, force_full: bool) -> FramePlan {
+        let mut plan = policy_plan(6, 0.0, 2, vec![2], strip_records(6), Some(&self.warm.key));
+        if force_full {
+            plan.force_full();
+        }
+        plan
+    }
+
+    /// Every slot's committed glyph key.
+    fn committed(&self) -> Vec<u64> {
+        (0..6).map(|slot| self.rig.cache.committed_slot(7, slot).unwrap()).collect()
+    }
+
+    /// Every slot's staged glyph key.
+    fn staged(&self) -> Vec<u64> {
+        (0..6).map(|slot| self.rig.cache.staged_slot(7, slot).unwrap()).collect()
+    }
+}
+
+/// A Partial plan's first pass, assembled through the production orchestration with real
+/// admissions, never commits: after it the committed keys are unchanged although it admitted
+/// and staged the edited row; the forced-Full second pass starts with that stage discarded; and
+/// one settlement through `settle_retained_frame` commits the second pass's keys and returns
+/// its receipts. An atlas change in the first pass (one assembly call) or the second (two)
+/// settles as `AtlasRetry`: no receipt, committed keys unchanged, no surviving stage.
+#[test]
+fn a_partial_fallback_never_commits_its_first_pass() {
+    use sonicterm_render_model::{AckReceipt, AckRows};
+    let receipts =
+        || vec![AckReceipt::of(0, 7, &Grid::new(8, 6), AckRows::Rows([2].into_iter().collect()))];
+    let mut fixture = FallbackFixture::new();
+    let mut calls = 0;
+    let assembled = assemble_with_fallback(|force_full| {
+        calls += 1;
+        let plan = fixture.plan(force_full);
+        if force_full {
+            // The second pass's own begin_frame discards the first pass's stage.
+            fixture.rig.cache.begin_frame(&[(7, 6, 8)]);
+            assert_eq!(fixture.staged(), vec![0; 6], "the first pass's stage was discarded");
+            assert_eq!(fixture.committed(), fixture.committed_before, "still nothing committed");
+            let (_, stats) =
+                assemble_pass(&mut fixture.rig, &mut fixture.ink, &fixture.grid, &plan);
+            assert_eq!((stats.row_cache_hits, stats.row_cache_misses), (6, 0));
+            return Ok(Assembled::Noop(Box::new(plan.key.clone())));
+        }
+        assert_eq!(plan.mode, RenderMode::Partial);
+        let (_, stats) = assemble_pass(&mut fixture.rig, &mut fixture.ink, &fixture.grid, &plan);
+        assert_eq!(stats.row_cache_misses, 1, "the first pass admits the edited row");
+        assert_ne!(fixture.staged()[2], 0, "and stages its key");
+        assert_eq!(fixture.committed(), fixture.committed_before, "the first pass commits nothing");
+        Ok(Assembled::PartialFallback)
+    });
+    assert_eq!(calls, 2);
+    assert!(matches!(assembled, Ok(Assembled::Noop(_))));
+    let staged = fixture.staged();
+    let presented_plan = fixture.plan(true);
+    let mut key = Some(fixture.warm.key.clone());
+    let settled = settle_retained_frame(
+        &mut key,
+        &mut fixture.ink,
+        &mut fixture.rig.cache,
+        &PresentOutcome::Presented,
+        Some(presented_plan),
+        receipts(),
+    );
+    assert_eq!(settled, receipts(), "one settlement returns the presented plan's receipts");
+    assert_eq!(fixture.committed(), staged, "the second pass's keys are the ones committed");
+    assert_ne!(fixture.committed()[2], fixture.committed_before[2]);
+    assert_eq!(fixture.staged(), vec![0; 6], "no stage survives the commit");
+
+    for retry_pass in [1usize, 2] {
+        let mut fixture = FallbackFixture::new();
+        let stamp = GlyphContentStamp::capture(1, 1, &fixture.rig.atlas);
+        let mut calls = 0;
+        let assembled = assemble_with_fallback(|force_full| {
+            calls += 1;
+            let plan = fixture.plan(force_full);
+            if force_full {
+                fixture.rig.cache.begin_frame(&[(7, 6, 8)]);
+            }
+            assemble_pass(&mut fixture.rig, &mut fixture.ink, &fixture.grid, &plan);
+            if calls == retry_pass {
+                // When: this is the pass whose assembly changed the atlas, its UVs are stale.
+                return Ok(Assembled::AtlasRetry { stamp, evictions: 0 });
+            }
+            Ok(Assembled::PartialFallback)
+        });
+        assert_eq!(calls, retry_pass, "pass {retry_pass}: assembly calls");
+        assert!(matches!(assembled, Ok(Assembled::AtlasRetry { .. })), "pass {retry_pass}");
+        let mut key = Some(fixture.warm.key.clone());
+        let settled = settle_retained_frame(
+            &mut key,
+            &mut fixture.ink,
+            &mut fixture.rig.cache,
+            &PresentOutcome::AtlasRetry,
+            None,
+            receipts(),
+        );
+        assert!(settled.is_empty() && key.is_none(), "pass {retry_pass}: no receipt, no key");
+        assert_eq!(fixture.committed(), fixture.committed_before, "pass {retry_pass}: unchanged");
+        assert_eq!(fixture.staged(), vec![0; 6], "pass {retry_pass}: no surviving stage");
+    }
 }
 
 /// Both direct `Err` exits discard the staged glyph slot keys: the assembly error arm and the

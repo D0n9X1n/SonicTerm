@@ -668,7 +668,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `glyph_atlas_items` | 图集中的字形条目数 | 与字节数一起判断实际占用与容量 |
 | `image_atlas_bytes` | CPU 内联图像图集像素缓冲容量，包含非空的 1×1 占位分配 | 减少图像或渲染器数量 |
 | `image_atlas_items` | 内联图像图集条目数 | 与字节数一起识别图像占用 |
-| `row_glyph_cache_bytes` | 缓存的字形记录、下划线、缺字方框与缺失字符向量容量，加上表、行位置向量与固定列表 | 每个渲染器至多 512 MiB；某帧未绘制的窗格在下一帧被释放 |
+| `row_glyph_cache_bytes` | 缓存的字形记录、下划线、缺字方框与缺失字符向量容量，加上表、行位置向量与固定列表 | 每个渲染器至多 512 MiB；某次组装的 `begin_frame` 不包含某窗格时，该窗格被释放 |
 | `row_glyph_cache_items` | 已缓存的字形行数 | 行数下降而字节不变，可能表示可复用表容量仍保留 |
 | `row_quad_cache_bytes` | 哈希表后备存储，以及缓存背景/装饰 quad 向量的容量 | 与缓存行数及窗格/窗口变化对照 |
 | `row_quad_cache_items` | 已缓存的 quad 行数 | 即使表容量有粘性，行数下降也能确认条目已淘汰 |
