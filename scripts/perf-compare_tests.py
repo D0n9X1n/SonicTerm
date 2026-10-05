@@ -9064,6 +9064,27 @@ class AtlasRetryVariantTests(CompareHarness, unittest.TestCase):
             with self.subTest(case=name):
                 self.assertIsNotNone(perf.atlas_recovery_problem(data))
 
+    def test_impossible_numbers_in_the_recovery_block_are_refused(self):
+        # Equal-comparing floats and booleans are not the harness's integers, counters cannot be negative,
+        # and a scene with no row keys or an atlas with no size measured nothing; each refuses the block.
+        good = {"episodes": 8, "distinct_keys": 70, "records": recovery_records()}
+        every_dim_zero = recovery_records({index: {"atlas_dim": 0} for index in range(32)})
+        cases = {
+            "episodes as a float": dict(good, episodes=8.0),
+            "no distinct keys": dict(good, distinct_keys=0),
+            "negative distinct keys": dict(good, distinct_keys=-1),
+            "a boolean episode index": dict(good, records=recovery_records({4: {"episode": True}})),
+            "a float episode index": dict(good, records=recovery_records({0: {"episode": 0.0}})),
+            "negative misses": dict(good, records=recovery_records({1: {"misses": -1}})),
+            "negative hits": dict(good, records=recovery_records({2: {"hits": -5}})),
+            "negative shapes": dict(good, records=recovery_records({5: {"shapes": -1}})),
+            "a zero atlas dimension throughout": dict(good, records=every_dim_zero),
+        }
+        for name, recovery in cases.items():
+            with self.subTest(case=name):
+                self.assertIsNotNone(perf.atlas_recovery_problem(recovery_result(recovery)))
+        self.assertIsNone(perf.atlas_recovery_problem(recovery_result(good)))
+
     def test_validate_result_reports_a_recovery_problem(self):
         # The recovery check is part of the schema check, so a bad block refuses the run.
         broken = recovery_result({"episodes": 8, "distinct_keys": 70, "records": []})

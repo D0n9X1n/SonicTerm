@@ -2214,7 +2214,9 @@ def atlas_recovery_problem(data: Mapping) -> str | None:
 
     Only a valid S1/atlas-retry run with frame counters on carries it, and such a run must: 8 episodes of
     A, B, C, D in order, one attempt each, A resetting without presenting, B-D presenting without a reset,
-    and B-D at one atlas dimension. Any other result must not carry it.
+    and B-D at one atlas dimension. Every number is an exact integer (never a float or a boolean that
+    compares equal), every counter is nonnegative, and the distinct key count and the atlas dimension are
+    positive. Any other result must not carry it.
     """
     counters_only = (data.get("scenario"), data.get("variant")) in COUNTERS_ONLY_VARIANTS
     recovery = data.get("atlas_recovery")
@@ -2225,19 +2227,23 @@ def atlas_recovery_problem(data: Mapping) -> str | None:
         return None if recovery is None else "atlas_recovery on a result that is not an S1/atlas-retry counters run"
     if recovery is None:
         return "a valid S1/atlas-retry counters run has no atlas_recovery" if data.get("status") == "valid" else None
-    if not isinstance(recovery, dict) or recovery.get("episodes") != ATLAS_RECOVERY_EPISODES \
-            or not _is_int(recovery.get("distinct_keys")) or not isinstance(recovery.get("records"), list):
-        return "atlas_recovery needs episodes 8, an integer distinct_keys and a records list"
+    if not isinstance(recovery, dict) or not _is_int(recovery.get("episodes")) \
+            or recovery["episodes"] != ATLAS_RECOVERY_EPISODES or not _is_int(recovery.get("distinct_keys")) \
+            or recovery["distinct_keys"] < 1 or not isinstance(recovery.get("records"), list):
+        return "atlas_recovery needs integer episodes 8, a positive integer distinct_keys and a records list"
     records = recovery["records"]
     if len(records) != ATLAS_RECOVERY_EPISODES * len(ATLAS_RECOVERY_FRAMES):
         return f"atlas_recovery has {len(records)} records, not 32"
     recovered_dims = set()
     for index, record in enumerate(records):
         frame = ATLAS_RECOVERY_FRAMES[index % 4]
-        if not isinstance(record, dict) or record.get("episode") != index // 4 or record.get("frame") != frame:
+        if not isinstance(record, dict) or not _is_int(record.get("episode")) \
+                or record["episode"] != index // 4 or record.get("frame") != frame:
             return f"atlas_recovery record {index} is not episode {index // 4} {frame}"
         if not all(_is_int(record.get(name)) for name in ATLAS_RECOVERY_FIELDS):
             return f"atlas_recovery record {index} lacks an integer field"
+        if any(record[name] < 0 for name in ATLAS_RECOVERY_FIELDS) or record["atlas_dim"] < 1:
+            return f"atlas_recovery record {index} has a negative count or a zero atlas dimension"
         if record["attempts"] != 1:
             return f"atlas_recovery record {index} has {record['attempts']} attempts"
         expected = (1, 0) if frame == "A" else (0, 1)
