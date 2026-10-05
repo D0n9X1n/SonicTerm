@@ -1232,6 +1232,10 @@ class MemorySample:
     glyph_atlases: tuple = ()
     # Row glyph cache storage summed over every renderer; None on a line from a build that lacks the field.
     renderer_row_glyph_cache_bytes: int | None = None
+    # A checkpoint line's trim tags, written only by a build with the trim hook; None when absent.
+    trimmed: bool | None = None
+    trim_source: str | None = None
+    trim_seq: int | None = None
 
     def totals(self) -> tuple:
         """The figures a checkpoint reading compares: two samples with equal totals are the same reading."""
@@ -1308,6 +1312,7 @@ def parse_memory_line(line: str) -> MemorySample | None:
         return None
     resident_bytes = int(resident) if resident and resident.isdigit() else None
     complete = _field(fields, "checkpoint_complete")
+    trimmed = _field(fields, "trimmed")
     return MemorySample(
         unix_s, resident_bytes, int(renderer), int(session),
         checkpoint_index=_optional_count(fields, "checkpoint_index"),
@@ -1321,7 +1326,10 @@ def parse_memory_line(line: str) -> MemorySample | None:
         grid_history_bytes=_optional_count(fields, "grid_history_bytes"),
         grid_alternate_bytes=_optional_count(fields, "grid_alternate_bytes"),
         glyph_atlases=parse_glyph_atlases(fields),
-        renderer_row_glyph_cache_bytes=_optional_count(fields, "renderer_row_glyph_cache_bytes"))
+        renderer_row_glyph_cache_bytes=_optional_count(fields, "renderer_row_glyph_cache_bytes"),
+        trimmed={"true": True, "false": False}.get(trimmed) if trimmed else None,
+        trim_source=_optional_text(fields, "trim_source"),
+        trim_seq=_optional_count(fields, "trim_seq"))
 
 
 @dataclass(frozen=True)
@@ -2267,8 +2275,13 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
         # trusted; a macOS row counts only when that record shows the hardware path.
         host = "Windows" if platform_name == "win32" else "macOS"
         problems.append(f"a valid {host} result has no presenter")
-    if platform_name == "win32" and data.get("synthetic_occlusion") is True:
-        # When: Windows reports no occlusion, so the harness must never deliver a synthetic one there.
+    if data.get("trim_experiment") not in (None, TRIM_EXPERIMENT):
+        problems.append(f"trim_experiment is {data.get('trim_experiment')!r}, not null or {TRIM_EXPERIMENT!r}")
+    after_hook = data.get("trim_seq_after_hook")
+    if after_hook is not None and not (_is_int(after_hook) and after_hook > 0):
+        problems.append("trim_seq_after_hook is not a positive integer or null")
+    if platform_name == "win32" and data.get("synthetic_occlusion") is True and not trim_experiment_run(data):
+        # When: Windows reports no occlusion, so only the short S12 trim experiment may deliver one there.
         problems.append("synthetic_occlusion is true, but Windows reports no occlusion")
     notes = data.get("notes")
     if not isinstance(notes, list) or not all(isinstance(note, str) for note in notes):
@@ -4008,6 +4021,43 @@ CHECKPOINT_MEMORY_STATES = ("supported", "unsupported")
 # result.json's `hooks.trim`. `unsupported` is an untrimmed baseline whose memory readings stay figures; an
 # older harness writes no `hooks` at all.
 TRIM_HOOK_OUTCOMES = ("not-reached", "unsupported", "skipped", "trimmed")
+# The short S12 plan's covered-window trim experiment, as result.json's `trim_experiment` names it, and the
+# checkpoint its trim rules govern.
+TRIM_EXPERIMENT = "s12-short-trim"
+TRIM_CHECKPOINT = "covered"
+# Why a trim experiment's covered reading is not compared: a hooked sample taken before the hook's trim, or
+# trim tags on a side whose harness says it cannot trim.
+TRIM_STALE = "stale"
+TRIM_SCHEMA = "schema"
+
+
+def trim_experiment_run(result: Mapping) -> bool:
+    """Whether a result is the short S12 trim experiment, the one run whose covered phase is held covered by
+    the harness on every host and whose covered window may be trimmed on request."""
+    return (result.get("scenario") == "S12" and result.get("short") is True
+            and result.get("trim_experiment") == TRIM_EXPERIMENT)
+
+
+def trim_reading_problem(result: Mapping, label: str, sample: MemorySample) -> str | None:
+    """Why a trim experiment's covered sample cannot be compared, or None when it can.
+
+    An unsupported hook is an untrimmed baseline and must carry no trim tags. A trimmed hook's sample counts
+    only when its `trim_seq` is at least the number the hook reported, so it was taken after that trim. A
+    skipped or unreached hook, and every other checkpoint and run, keep the ordinary rules.
+    """
+    if label != TRIM_CHECKPOINT or not trim_experiment_run(result):
+        return None
+    hooks = result.get("hooks")
+    trim = hooks.get("trim") if isinstance(hooks, dict) else None
+    tagged = sample.trimmed is not None or sample.trim_source is not None or sample.trim_seq is not None
+    if trim == "unsupported":
+        return TRIM_SCHEMA if tagged else None
+    if trim != "trimmed":
+        return None
+    after_hook = result.get("trim_seq_after_hook")
+    if not _is_int(after_hook) or not sample.trim_seq or sample.trim_seq < after_hook:
+        return TRIM_STALE
+    return None
 CHECKPOINT_SAMPLING_STATES = ("complete", "exhausted", "active")
 
 
@@ -4019,12 +4069,23 @@ def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
     """
     result = outcome.result or {}
     metrics: dict[tuple[str, str, str], object] = {}
+    trim_run = trim_experiment_run(result)
     for phase in result.get("phases") or []:
         name = phase.get("name")
         start, end = phase.get("start_unix_s"), phase.get("end_unix_s")
         wall_s = end - start if _is_number(start) and _is_number(end) else None
         if wall_s is not None:
             metrics[(f"{name} wall", "s", "run")] = wall_s
+        if trim_run and name == TRIM_CHECKPOINT:
+            # The trim experiment holds this phase covered on every host, so it draws almost nothing: a rate or
+            # an interval would describe the harness, not the renderer. It reports activity counts instead.
+            if _is_int(phase.get("presented_frames")):
+                metrics[(f"{name} presented frames", "count", "run")] = phase["presented_frames"]
+            if _is_int(phase.get("redraw_requested")):
+                metrics[(f"{name} redraws requested", "count", "run")] = phase["redraw_requested"]
+            if _is_number(phase.get("cpu_user_s")) and _is_number(phase.get("cpu_system_s")):
+                metrics[(f"{name} CPU", "s", "run")] = phase["cpu_user_s"] + phase["cpu_system_s"]
+            continue
         if wall_s and _is_int(phase.get("presented_frames")):
             metrics[(f"{name} presented frames", "fps", "run")] = phase["presented_frames"] / wall_s
         # Presented frames per logical update, divided by this run's own recorded count, never a constant;
@@ -4077,6 +4138,11 @@ def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
         fresh_after = point.get("fresh_after_unix_s")
         if fresh_after is not None and sample.unix_s < fresh_after:
             continue  # Taken before the checkpoint's reading is fresh: unavailable, never a stale figure.
+        trim_problem = trim_reading_problem(result, point["label"], sample)
+        if trim_problem is not None:
+            for key in keys:
+                metrics[(key, "MiB", "run")] = NotAvailable(trim_problem)
+            continue
         figure = PartialValue if reading.partial else float
         metrics[(keys[0], "MiB", "run")] = figure(sample.renderer_total_bytes / MIB)
         if sample.process_resident_bytes is not None:

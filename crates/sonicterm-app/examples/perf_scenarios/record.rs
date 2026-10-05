@@ -1116,6 +1116,11 @@ pub(crate) struct RunResult {
     pub(crate) synthetic_occlusion: bool,
     /// What the App's covered-window trim hook reported, as `result.json`'s `hooks.trim`.
     pub(crate) trim_hook: TrimHookOutcome,
+    /// The plan's trim experiment, as `result.json`'s `trim_experiment`; `None` for every other plan.
+    pub(crate) trim_experiment: Option<&'static str>,
+    /// The App's trim number the hook's own trim reported; `None` unless the hook trimmed. A
+    /// checkpoint sample whose `trim_seq` is at least this one was taken after that trim.
+    pub(crate) trim_seq_after_hook: Option<u64>,
     /// Native `Focused` events the probe recorded and dropped.
     pub(crate) native_focus_events_dropped: u64,
     /// Windows: native `CursorMoved` events dropped because the pointer rested where the window
@@ -1185,6 +1190,8 @@ impl RunResult {
         put("finish_session_settled", json!(self.finish_session_settled));
         put("checkpoint_memory", json!(checkpoint_memory_support()));
         put("hooks", json!({ "trim": self.trim_hook.as_str() }));
+        put("trim_experiment", json!(self.trim_experiment));
+        put("trim_seq_after_hook", json!(self.trim_seq_after_hook));
         // The measurement fields come from the serializer progress.json streams, so both
         // documents record them identically. Every field converts; a non-finite float is null.
         let measured =
@@ -1281,7 +1288,8 @@ pub(crate) fn checkpoint_memory_support() -> &'static str {
 /// What the App's covered-window trim hook reported for a run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrimHookOutcome {
-    /// The plan never covered the window, so the hook was never called.
+    /// The hook was never called: the plan asks for no trim, or the covered hold ended before the
+    /// App was covered.
     NotReached,
     /// No trim: a build without `perf-hook-trim`, or an App whose hook cannot trim yet. The run
     /// measures an untrimmed baseline, so its memory readings stay valid figures.

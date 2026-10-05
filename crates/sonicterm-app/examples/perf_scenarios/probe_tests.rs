@@ -831,6 +831,8 @@ fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
         window_path: "production",
         synthetic_occlusion: false,
         trim_hook: TrimHookOutcome::NotReached,
+        trim_experiment: None,
+        trim_seq_after_hook: None,
         native_focus_events_dropped: 0,
         native_cursor_rest_events_dropped: 0,
         finish_session_settled: true,
@@ -1232,29 +1234,56 @@ fn a_harness_snapshot_identity_change_reads_row_identity_changed() {
     assert_eq!(sample.split_reason, "row-identity-changed");
 }
 
-/// Today every build's trim hook reports `Unsupported`: without the feature the adapter says so
-/// itself, and with it the App's stub does. Either way the run measures an untrimmed baseline.
+/// Without the feature the adapter reports `Unsupported` itself, so the run is an untrimmed
+/// baseline; with it the App's real rules apply, and an uncovered window is skipped with no trim
+/// number.
 #[test]
-fn the_trim_hook_reports_unsupported_in_every_build() {
+fn the_trim_adapter_reports_what_this_build_can_do() {
     let (mut probe, _pane) = typing_probe("S12", "default");
     let main = sonicterm_app::app::synthetic_main_window_id();
-    assert_eq!(trim_covered(&mut probe.app, main), TrimHookOutcome::Unsupported);
-    // Without a cover over a known window the hook is not asked, so the outcome stays unreached.
-    probe.run_trim_hook();
-    assert_eq!(probe.trim_hook, TrimHookOutcome::NotReached);
+    let expected = if cfg!(feature = "perf-hook-trim") {
+        TrimHookOutcome::Skipped
+    } else {
+        TrimHookOutcome::Unsupported
+    };
+    assert_eq!(trim_covered(&mut probe.app, main), (expected, None));
 }
 
-/// The cover act opens the cover, then asks the hook; the hook step neither waits nor touches the
-/// occlusion state, so both sides of a comparison keep one protocol whatever the hook reports.
+/// A requested trim waits while the App is not covered, lapses as `not-reached` when the hold
+/// ends first, and is called exactly once on the first turn the App holds `Occluded(true)`.
 #[test]
-fn covering_asks_the_trim_hook_after_the_cover_opens() {
+fn a_requested_trim_is_called_once_after_the_cover_is_delivered() {
+    let (mut probe, _pane) = typing_probe("S12", "default");
+    probe.main_id = Some(sonicterm_app::app::synthetic_main_window_id());
+
+    probe.trim_pending = true;
+    probe.service_trim(false);
+    assert!(probe.trim_pending, "no occlusion delivered yet, so the trim waits");
+    probe.service_trim(true);
+    assert_eq!((probe.trim_pending, probe.trim_hook), (false, TrimHookOutcome::NotReached));
+
+    probe.trim_pending = true;
+    probe.occlusion.delivered = Some(true);
+    probe.service_trim(false);
+    assert!(!probe.trim_pending, "the hook was called");
+    assert_ne!(probe.trim_hook, TrimHookOutcome::NotReached);
+    let called = probe.trim_hook;
+    probe.service_trim(true);
+    assert_eq!(probe.trim_hook, called, "a second turn calls nothing");
+}
+
+/// The cover act only opens the cover; the trim act asks for the trim, the turn handler services
+/// it after any overdue occlusion is delivered, and the end of a phase lapses one still waiting.
+/// The trim step never touches the plan's stage.
+#[test]
+fn the_trim_act_is_serviced_after_delivery_and_lapses_with_its_phase() {
     let perform = method("perform");
-    let arm = perform.find("Act::Cover => {").expect("the cover act");
-    let cover = arm + perform[arm..].find("self.cover(event_loop);").expect("cover call");
-    let hook = arm + perform[arm..].find("self.run_trim_hook();").expect("hook call");
-    assert!(cover < hook, "the hook runs after the cover opens");
-    let body = method("run_trim_hook");
-    for untouched in ["occlusion", "arm_occlusion_wait", "stage", "deliver_occlusion"] {
-        assert!(!body.contains(untouched), "run_trim_hook touches {untouched}");
-    }
+    assert!(perform.contains("Act::Cover => self.cover(event_loop),"), "{perform}");
+    assert!(perform.contains("Act::TrimCovered => self.request_trim(event_loop),"));
+    let turn = method("about_to_wait");
+    let overdue = turn.find("self.deliver_overdue_occlusion(").expect("overdue delivery");
+    let service = turn.find("self.service_trim(false);").expect("trim service");
+    assert!(overdue < service, "the trim sees an occlusion delivered on the same turn");
+    assert!(method("end_phase").contains("self.service_trim(true);"));
+    assert!(!method("service_trim").contains("stage"), "the trim never changes the plan's steps");
 }

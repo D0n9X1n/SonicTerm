@@ -342,6 +342,33 @@ fn cover_plan_blurs_covers_and_uncovers_with_checkpoints() {
     assert_eq!(phase(&short, "covered").end, PhaseEnd::Hold(5_000));
 }
 
+/// Only the short S12 plan asks for the covered-window trim: its trim act follows the cover inside
+/// the covered phase, so it runs before the `covered` checkpoint, and only that plan names the
+/// trim experiment. The full plan reaches the 30 s scheduler instead and asks for nothing.
+#[test]
+fn only_the_short_cover_plan_asks_for_the_trim() {
+    let short = plan("S12", "default", true).unwrap();
+    assert_eq!(phase(&short, "covered").enter, [Act::Unfocus, Act::Cover, Act::TrimCovered]);
+    assert_eq!(checkpoint_labels(&short), ["settled", "covered", "end"]);
+    assert_eq!(short.trim_experiment, Some("s12-short-trim"));
+    for host in [Host::Posix, Host::Windows] {
+        for other in all_plans_on(host) {
+            let asks = other.steps.iter().any(|step| match step {
+                Step::Phase(phase) => phase.enter.contains(&Act::TrimCovered),
+                Step::Act(act) => *act == Act::TrimCovered,
+                Step::Checkpoint(_) => false,
+            });
+            let is_short_cover = other.scenario == "S12" && other.short;
+            assert_eq!(
+                asks, is_short_cover,
+                "{} {} short={}",
+                other.scenario, other.variant, other.short
+            );
+            assert_eq!(other.trim_experiment.is_some(), is_short_cover);
+        }
+    }
+}
+
 #[test]
 fn windows_image_plan_sends_an_osc_1337_png() {
     // Sixel never arrives through ConPTY, so Windows S11 prints an inline PNG; Posix keeps the Sixel.

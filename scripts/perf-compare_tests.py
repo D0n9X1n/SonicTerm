@@ -8733,5 +8733,108 @@ class TrimHookResultTests(unittest.TestCase):
         self.assertTrue(resident and all(value > 0 for value in resident), resident)
 
 
+
+def trim_run(platform_trim="trimmed", after_hook=2, **overrides):
+    """A short S12 trim-experiment result whose `covered` checkpoint is index 0."""
+    covered = {"name": "covered", "start_unix_s": 10.0, "end_unix_s": 15.0, "cpu_user_s": 0.2,
+               "cpu_system_s": 0.1, "presented_frames": 1, "redraw_requested": 2,
+               "dispatch_ms": [1.0], "present_interval_ms": [16.6], "allocations_per_frame": None}
+    fields = dict(scenario="S12", short=True, trim_experiment="s12-short-trim", hooks={"trim": platform_trim},
+                  trim_seq_after_hook=after_hook, phases=[covered], checkpoint_memory="supported",
+                  checkpoints=[{"index": 0, "label": "covered", "unix_s": 15.0, "footprint_file": None}])
+    fields.update(overrides)
+    return valid_result(**fields)
+
+
+def covered_sample(trim_seq=None, trimmed=None, trim_source=None, renderer_mib=16):
+    """A complete `covered` checkpoint sample with the given trim tags."""
+    return perf.MemorySample(15.0, 100 * 1048576, renderer_mib * 1048576, 0, checkpoint_index=0,
+                             checkpoint_label="covered", checkpoint_attempt=1, checkpoint_complete=True,
+                             trimmed=trimmed, trim_source=trim_source, trim_seq=trim_seq)
+
+
+class TrimExperimentTests(unittest.TestCase):
+    """The short S12 trim experiment: covered-row rules, the Windows validator and the covered activity rows."""
+
+    COVERED = ("covered renderer_total_bytes", "MiB", "run")
+
+    def covered_metric(self, result, sample):
+        return perf.run_metrics(make_outcome(result=result, memory=[sample]))[self.COVERED]
+
+    def test_a_tagged_line_parses_its_three_trim_tags(self):
+        # The trim tags come back typed; a line without them reads None for each.
+        line = (CheckpointMemoryTests.LINE + ' trimmed=true trim_source="hook" trim_seq=3')
+        sample = perf.parse_memory_line(line)
+        self.assertEqual((sample.trimmed, sample.trim_source, sample.trim_seq), (True, "hook", 3))
+        plain = perf.parse_memory_line(CheckpointMemoryTests.LINE)
+        self.assertEqual((plain.trimmed, plain.trim_source, plain.trim_seq), (None, None, None))
+
+    def test_covered_rows_follow_the_trim_rules(self):
+        # An unsupported base without tags is an untrimmed baseline; a hooked sample at or after the hook's trim
+        # number compares; one before it, or without a number, is stale; tags on an unsupported side are a schema
+        # problem.
+        base = trim_run("unsupported", None)
+        self.assertEqual(self.covered_metric(base, covered_sample()), 16.0)
+        head = trim_run("trimmed", 2)
+        self.assertEqual(self.covered_metric(head, covered_sample(2, True, "hook", 4)), 4.0)
+        self.assertEqual(self.covered_metric(head, covered_sample(3, True, "hook", 4)), 4.0)
+        for stale in (covered_sample(1, True, "hook"), covered_sample(0, False, "none"), covered_sample()):
+            with self.subTest(trim_seq=stale.trim_seq):
+                self.assertEqual(self.covered_metric(head, stale), perf.NotAvailable("stale"))
+        tagged = covered_sample(0, False, "none")
+        self.assertEqual(self.covered_metric(base, tagged), perf.NotAvailable("schema"))
+
+    def test_the_trim_rules_leave_other_checkpoints_and_runs_alone(self):
+        # Pins: a partial authoritative sample still reads partial; an unsupported checkpoint hook still reads
+        # n/a: unsupported; a result outside the experiment ignores its tags.
+        point = {"index": 0, "label": "covered", "unix_s": 15.0, "footprint_file": None,
+                 "sampling": "exhausted", "attempts": 1, "last_attempt_complete": False}
+        partial = perf.MemorySample(15.0, 100 * 1048576, 8 * 1048576, 0, checkpoint_index=0,
+                                    checkpoint_label="covered", checkpoint_attempt=1, checkpoint_complete=False,
+                                    trimmed=True, trim_source="hook", trim_seq=2)
+        value = self.covered_metric(trim_run(checkpoints=[point]), partial)
+        self.assertIsInstance(value, perf.PartialValue)
+        unsupported = self.covered_metric(trim_run(checkpoint_memory="unsupported"), covered_sample())
+        self.assertEqual(unsupported, perf.NotAvailable("unsupported"))
+        outside = trim_run("unsupported", None, trim_experiment=None)
+        self.assertEqual(self.covered_metric(outside, covered_sample(0, False, "none")), 16.0)
+
+    def test_windows_accepts_synthetic_occlusion_only_for_the_trim_experiment(self):
+        # The one valid combination: win32, synthetic occlusion, S12, short and the experiment name.
+        points = [{"index": 0, "label": "covered", "unix_s": 15.0, "footprint_file": None},
+                  {"index": 1, "label": "end", "unix_s": 20.0, "footprint_file": None}]
+        good = trim_run(synthetic_occlusion=True, presenter=dict(WGPU_PRESENTER), checkpoints=points)
+        self.assertEqual(perf.validate_result(good, HARNESS_HASH, 0, platform_name="win32"), [])
+        for change in ({"scenario": "S1"}, {"short": False}, {"trim_experiment": None}):
+            with self.subTest(change=change):
+                broken = dict(good, **change)
+                self.assertTrue(perf.validate_result(broken, HARNESS_HASH, 0, platform_name="win32"))
+        self.assertEqual(perf.validate_result(good, HARNESS_HASH, 0, platform_name="darwin"), [])
+        for bad in ({"trim_experiment": "other"}, {"trim_seq_after_hook": 0}, {"trim_seq_after_hook": "2"}):
+            with self.subTest(bad=bad):
+                self.assertTrue(perf.validate_result(dict(good, **bad), HARNESS_HASH, 0))
+
+    def test_the_covered_phase_reports_activity_not_rates(self):
+        # On both hosts the experiment's covered phase prints wall, presented frames and redraws as counts and
+        # CPU, never a frame rate or a present interval; the stored interval samples are untouched.
+        for platform_name in ("darwin", "win32"):
+            with self.subTest(platform=platform_name):
+                result = trim_run()
+                metrics = perf.run_metrics(make_outcome(result=result))
+                self.assertNotIn(("covered presented frames", "fps", "run"), metrics)
+                self.assertNotIn(("covered present interval", "ms", "frame"), metrics)
+                self.assertEqual(metrics[("covered wall", "s", "run")], 5.0)
+                self.assertEqual(metrics[("covered presented frames", "count", "run")], 1)
+                self.assertEqual(metrics[("covered redraws requested", "count", "run")], 2)
+                self.assertAlmostEqual(metrics[("covered CPU", "s", "run")], 0.3)
+                self.assertEqual(result["phases"][0]["present_interval_ms"], [16.6])
+
+    def test_without_the_experiment_the_covered_phase_keeps_its_rates(self):
+        # Pin: the same result without `trim_experiment` keeps today's rate and interval rows.
+        metrics = perf.run_metrics(make_outcome(result=trim_run(trim_experiment=None)))
+        self.assertIn(("covered presented frames", "fps", "run"), metrics)
+        self.assertIn(("covered present interval", "ms", "frame"), metrics)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
