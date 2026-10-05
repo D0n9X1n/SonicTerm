@@ -222,9 +222,9 @@ fn one_apply_invalidates_each_target_and_a_repeat_in_the_same_generation_does_no
 
 /// Cache one shaped row and one row of line quads, as a frame drawn before the apply would.
 fn seed_caches(targets: &mut Targets) {
-    targets.rows.resize(4);
+    targets.rows.begin_frame(&[(1, 4, 8)]);
     targets.quads.resize(4);
-    targets.rows.insert(1, 0, 11, 0, sonicterm_text::row_glyph_cache::CachedRow::default());
+    assert!(targets.rows.insert(1, 11, 0, sonicterm_text::row_glyph_cache::CachedRow::default()));
     targets.quads.insert(1, 0, 11, crate::row_quad_cache::CachedRowQuads::default());
     assert_eq!((targets.rows.len(), targets.quads.len()), (1, 1));
 }

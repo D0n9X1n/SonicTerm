@@ -1230,12 +1230,14 @@ class MemorySample:
     grid_alternate_bytes: int | None = None
     # Each renderer's glyph atlas facts, in breakdown order; empty on a line from an older build.
     glyph_atlases: tuple = ()
+    # Row glyph cache storage summed over every renderer; None on a line from a build that lacks the field.
+    renderer_row_glyph_cache_bytes: int | None = None
 
     def totals(self) -> tuple:
         """The figures a checkpoint reading compares: two samples with equal totals are the same reading."""
         return (self.process_resident_bytes, self.renderer_total_bytes, self.session_total_bytes,
                 self.panes_total, self.panes_sampled, self.panes_contended, self.grid_visible_bytes,
-                self.grid_history_bytes, self.grid_alternate_bytes)
+                self.grid_history_bytes, self.grid_alternate_bytes, self.renderer_row_glyph_cache_bytes)
 
     def grid_bytes_per_pane(self) -> float | None:
         """Visible, history and alternate grid bytes divided by the panes sampled, or None when a
@@ -1318,7 +1320,8 @@ def parse_memory_line(line: str) -> MemorySample | None:
         grid_visible_bytes=_optional_count(fields, "grid_visible_bytes"),
         grid_history_bytes=_optional_count(fields, "grid_history_bytes"),
         grid_alternate_bytes=_optional_count(fields, "grid_alternate_bytes"),
-        glyph_atlases=parse_glyph_atlases(fields))
+        glyph_atlases=parse_glyph_atlases(fields),
+        renderer_row_glyph_cache_bytes=_optional_count(fields, "renderer_row_glyph_cache_bytes"))
 
 
 @dataclass(frozen=True)
@@ -3905,7 +3908,7 @@ def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
             # The frame texture's own reading, not a memory sample; a base without the feature has none.
             metrics[(f"{point['label']} frame_texture_bytes", "B", "run")] = point["frame_texture_bytes"]
         keys = (f"{point['label']} renderer_total_bytes", f"{point['label']} process_resident_bytes",
-                f"{point['label']} grid bytes per pane")
+                f"{point['label']} grid bytes per pane", f"{point['label']} renderer_row_glyph_cache_bytes")
         if not supported:
             # A harness without the hook takes no checkpoint sample; a periodic one is never substituted.
             for key in keys:
@@ -3929,6 +3932,9 @@ def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
         grid_per_pane = sample.grid_bytes_per_pane()
         if grid_per_pane is not None:
             metrics[(keys[2], "MiB", "run")] = figure(grid_per_pane / MIB)
+        if sample.renderer_row_glyph_cache_bytes is not None:
+            # Summed over every renderer, so it is read against live renderers x 512 MiB; never gated.
+            metrics[(keys[3], "MiB", "run")] = figure(sample.renderer_row_glyph_cache_bytes / MIB)
     for stem, record in outcome.footprints.items():
         if _is_int(record.get("bytes")):
             metrics[(f"{stem.partition('-')[2] or stem} footprint", "MiB", "footprint")] = record["bytes"] / MIB
@@ -4978,7 +4984,82 @@ def counter_rows(label: str, base: SideRuns, head: SideRuns) -> tuple[list[list[
                              texts[0], texts[1],
                              percent_change(cells[0][1], cells[1][1])])
         rows.extend(_attempt_split_rows(label, phase_name, sides, per_side, head_only))
+        rows.extend(_derived_counter_rows(label, phase_name, sides, per_side, head_only))
     return rows, omitted
+
+
+def _renderer_runs(per_run: Sequence[dict], fields: Sequence[str]) -> list[dict]:
+    """The renderer sections of the runs that carry every integer field in `fields`."""
+    return [sections["renderer"] for sections in per_run
+            if isinstance(sections.get("renderer"), dict)
+            and all(_is_int(sections["renderer"].get(field)) for field in fields)]
+
+
+def _pooled_ratio(per_run: Sequence[dict], numerator: Sequence[str],
+                  denominator: Sequence[str]) -> tuple[str | None, float | None]:
+    """A pooled ratio over the runs carrying every field: the sums of `numerator` over the sums of
+    `denominator`. None text when no run carries the fields; `n/a` when the pooled denominator is 0."""
+    runs = _renderer_runs(per_run, list(numerator) + list(denominator))
+    if not runs:
+        return None, None
+    top = sum(run[field] for run in runs for field in numerator)
+    bottom = sum(run[field] for run in runs for field in denominator)
+    scope = f"{len(runs)}/{len(per_run)} runs"
+    if bottom == 0:
+        return f"n/a (denominator 0, {scope})", None
+    return f"{top / bottom:.3f} ({top}/{bottom}, {scope})", top / bottom
+
+
+def _assembly_means(per_run: Sequence[dict]) -> tuple[str | None, float | None]:
+    """Each counters run's exact assembly mean, `assembly_sum_us / samples`, at its run position, and the
+    pooled mean. A run without the histogram reads `n/a (no histogram)` and one that assembled nothing
+    `n/a (no assembly)`, so every run keeps its place. None text when no run carries the histogram; the
+    pooled figure is None when no run assembled a frame."""
+    histograms = [sections["renderer"].get("assembly_us") if isinstance(sections.get("renderer"), dict) else None
+                  for sections in per_run]
+    if not any(isinstance(histogram, dict) for histogram in histograms):
+        return None, None
+    cells = []
+    for position, histogram in enumerate(histograms, 1):
+        if not isinstance(histogram, dict):
+            cells.append(f"run {position} n/a (no histogram)")
+        elif not sum(histogram["counts"]):
+            cells.append(f"run {position} n/a (no assembly)")
+        else:
+            cells.append(f"run {position} {histogram['sum_us'] / sum(histogram['counts']):.2f} us")
+    sampled = [histogram for histogram in histograms if isinstance(histogram, dict) and sum(histogram["counts"])]
+    samples = sum(sum(histogram["counts"]) for histogram in sampled)
+    if not samples:
+        return f"{', '.join(cells)}; pooled n/a ({len(sampled)}/{len(per_run)} runs)", None
+    pooled = sum(histogram["sum_us"] for histogram in sampled) / samples
+    return f"{', '.join(cells)}; pooled {pooled:.2f} us ({len(sampled)}/{len(per_run)} runs)", pooled
+
+
+# Derived rows: a label naming the formula and pooling, and the function computing one side's cell.
+DERIVED_COUNTER_ROWS = (
+    ("row-cache hit ratio = hits / (hits + misses), counters runs pooled",
+     lambda per_run: _pooled_ratio(per_run, ("row_cache_hits",), ("row_cache_hits", "row_cache_misses"))),
+    ("assembly mean per counters run = assembly_sum_us / Σ assembly_buckets, per run", _assembly_means),
+    ("shape+measure requests per drawn frame = shape_requests / (gpu_frames + software_frames), context only",
+     lambda per_run: _pooled_ratio(per_run, ("shape_requests",), ("gpu_frames", "software_frames"))),
+    ("partial fallback ratio = partial_fallbacks / (partial_frames + partial_fallbacks), context only",
+     lambda per_run: _pooled_ratio(per_run, ("partial_fallbacks",), ("partial_frames", "partial_fallbacks"))),
+)
+
+
+def _derived_counter_rows(label: str, phase_name: str, sides: Sequence[SideRuns], per_side: Sequence[dict],
+                          head_only: bool) -> list[list[str]]:
+    """One phase's derived rows, each printed only when some side has a nonzero denominator; a side whose runs
+    lack the fields, or whose denominator is 0, reads `n/a`, and the change compares the two figures."""
+    rows = []
+    for row_label, compute in DERIVED_COUNTER_ROWS:
+        cells = [compute(phases.get(phase_name, [])) for phases in per_side]
+        if all(figure is None for _text, figure in cells):
+            continue
+        texts = [text if text is not None else ("n/a" if head_only else _missing_cell(side))
+                 for (text, _figure), side in zip(cells, sides)]
+        rows.append([label, phase_name, row_label, texts[0], texts[1], percent_change(cells[0][1], cells[1][1])])
+    return rows
 
 
 def _attempt_split_rows(label: str, phase_name: str, sides: Sequence[SideRuns], per_side: Sequence[dict],

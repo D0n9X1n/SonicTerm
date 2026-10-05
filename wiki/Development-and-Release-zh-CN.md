@@ -321,6 +321,10 @@ PR 与 Change。
   总量不同时显示 `n/a: conflicting samples`，harness 没有该钩子的一侧显示 `n/a: unsupported`。
   该样本带有网格字段时，检查点还会多一行 `grid bytes per pane`：
   `grid_visible_bytes + grid_history_bytes + grid_alternate_bytes` 除以 `panes_sampled`。
+  该样本带有 `renderer_row_glyph_cache_bytes` 时，检查点还会多出这一行，遵循相同的 unsupported、partial、
+  conflicting 与过时规则；该字段属于比较两个样本时使用的总量。它是所有渲染器之和，因此按存活渲染器数
+  × 512 MiB 解读，从不作为门槛。行中缺少该字段的 base 显示 `n/a`，其他总量照常比较。短运行中 S3 的
+  `end` 检查点在洪泛结束 5 秒后取样（完整运行为 60 秒）；S7 的 `end` 至少在滚轮停止 1.5 秒后取样。
   该样本带有字形图集事实时，其中列出的每个渲染器以逻辑身份各多出六行，例如
   `end main glyph_atlas_dim (px)`：`glyph_atlas_dim`、`glyph_atlas_packed_pixels`、`glyph_atlas_fit`、
   `glyph_atlas_growths`、`glyph_atlas_evictions` 与 `glyph_atlas_max_tile`。可见渲染器在分解中的标签是原生
@@ -344,6 +348,12 @@ PR 与 Change。
   先对匹配的总和求和，再分为塑形、光栅化与其余部分的占比，并给出每次尝试的平均值，因此占比之和总是 100%。
   任何一侧都没有绘制尝试的阶段显示为一行 `no render attempts`；缺少这些字段的一侧显示 `n/a`。详情块为
   任何运行绘制了渲染尝试的每个阶段列出各次运行自己的拆分。
+- 每个阶段还有派生行，每行标明其公式与汇总方式，只在某一侧的分母非零时列出：行缓存命中率
+  `hits / (hits + misses)`，汇总所有计数器运行；每次计数器运行的组装均值
+  `assembly_sum_us / Σ assembly_buckets`，按运行精确计算并给出汇总均值（直方图没有精确分位数，因此只显示
+  其 p95 边界，从不设门槛）；以及仅供参考的每个已绘制帧的塑形与测量请求数
+  `shape_requests / (gpu_frames + software_frames)` 和部分帧回退比例
+  `partial_fallbacks / (partial_frames + partial_fallbacks)`。缺少这些字段或分母为 0 的一侧显示 `n/a`，没有变化。
 - Change 列比较计数的中位数，或直方图的 mean。base 不声明 `perf-counters` 时（该组只在 head 上运行），
   以及 base 较旧的契约缺少某个字段时，Baseline 列与变化为 `n/a`；缺少字段在 base 上不算 schema 失败，
   在 head 上算。

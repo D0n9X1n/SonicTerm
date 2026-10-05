@@ -409,9 +409,12 @@ viewport slot that draws it. Live row `r` is absolute row `scrollback_len + r`.
 A primary view scrolled back by `k` rows draws it at slot `r + k`, and draws it
 nowhere when `r + k` is past the last row. Primary-screen damage covers only
 those slots; the alternate screen keeps no scrollback and still damages its
-whole pane. On every assembled frame, `Full` or `Partial`, both row caches drop
-absolute row `scrollback_len + r` for every dirty live row of each pane on the
-surface, whether that row is on screen or not.
+whole pane. On every assembled frame, `Full` or `Partial`, the background-quad
+cache drops absolute row `scrollback_len + r` for every dirty live row of each
+pane on the surface, whether that row is on screen or not. The glyph cache drops
+nothing for dirt: it keys rows by content, so unchanged content stays eligible
+for reuse at another position. Reuse still needs a retained complete entry,
+matching keyed inputs and atlas identity, and valid software-block dimensions.
 
 A `Partial` frame assembles only the rows listed above. A row it does not emit
 keeps its retained pixels and its ink record, and a dirty live row whose slot the

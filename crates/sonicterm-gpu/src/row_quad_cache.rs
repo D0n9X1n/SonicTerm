@@ -16,8 +16,8 @@
 //!
 //! Per-pane keying: a `pane_id` is folded into the cache key so split
 //! panes never read each other's slot when they happen to have the
-//! same `(abs_row, content_hash)` pair. This matches `RowGlyphCache`'s
-//! decision and keeps invalidation pane-local where it matters.
+//! same `(abs_row, content_hash)` pair, which keeps invalidation pane-local
+//! where it matters.
 //!
 //! What is NOT cached:
 //! * Cursor quads — frame-specific position; drawn after the per-row
@@ -55,8 +55,7 @@ pub struct CachedRowQuads {
 pub struct LineQuadCache {
     entries: HashMap<(PaneId, u64), (u64, CachedRowQuads)>,
     /// Soft cap so long sessions with heavy scrollback don't grow
-    /// without bound. Sized to `rows * CACHE_HEADROOM_FACTOR` like
-    /// `RowGlyphCache`.
+    /// without bound. Sized to `rows * CACHE_HEADROOM_FACTOR`.
     cap: usize,
 }
 
@@ -237,7 +236,7 @@ where
     if let Some((s_row, s_col, e_row, e_col)) = selection {
         // Rows are scrollback-ABSOLUTE; compare against this row's absolute
         // index so background-fill invalidation tracks the selected TEXT as
-        // the viewport scrolls (mirrors `row_hash_cells`).
+        // the viewport scrolls. The glyph cache keys rows by content instead.
         let (lo, hi) = if (s_row, s_col) <= (e_row, e_col) {
             ((s_row, s_col), (e_row, e_col))
         } else {

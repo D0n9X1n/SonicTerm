@@ -448,6 +448,13 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   When the sample carries the grid fields, the checkpoint also gets a `grid bytes
   per pane` row: `grid_visible_bytes + grid_history_bytes + grid_alternate_bytes`
   divided by `panes_sampled`.
+  When the sample carries `renderer_row_glyph_cache_bytes`, the checkpoint also
+  gets that row, under the same unsupported, partial, conflicting and stale
+  rules; the field is part of the totals two samples are compared by. It sums
+  every renderer, so it is read against live renderers × 512 MiB and is never
+  gated. A base whose lines lack it reads `n/a` while its other totals compare.
+  S3's `end` checkpoint is taken 5 s after the flood in a short run (60 s in a
+  full one); S7's `end` comes at least 1.5 s after the wheel stops.
   When the sample carries glyph atlas facts, each renderer it lists adds six rows
   under a logical identity, such as `end main glyph_atlas_dim (px)`:
   `glyph_atlas_dim`, `glyph_atlas_packed_pixels`, `glyph_atlas_fit`,
@@ -486,6 +493,15 @@ head, one row per scenario, phase and non-zero counter;
   side drew an attempt reads as one row, `no render attempts`, and a side
   without the fields reads `n/a`. The details block lists each run's own split
   for every phase in which any run drew a render attempt.
+- Each phase also gets derived rows, each labelled with its formula and pooling
+  and printed only when some side has a nonzero denominator: the row-cache hit
+  ratio `hits / (hits + misses)`, counters runs pooled; the assembly mean per
+  counters run, `assembly_sum_us / Σ assembly_buckets`, exact per run with the
+  pooled mean (the histogram has no exact quantiles, so its p95 bound is shown
+  but never thresholded); and, for context only, shape+measure requests per
+  drawn frame `shape_requests / (gpu_frames + software_frames)` and the partial
+  fallback ratio `partial_fallbacks / (partial_frames + partial_fallbacks)`. A
+  side without the fields, or with a 0 denominator, reads `n/a`, with no change.
 - The Change column compares a count's medians, or a histogram's means. The
   Baseline column, and the change, read `n/a` when the base does not declare
   `perf-counters` (the set then runs on the head only), and for a field the

@@ -8196,5 +8196,100 @@ class CellLayoutUndecodableEvidenceTests(unittest.TestCase):
         self.assertEqual(runs, {"macOS": [], "Windows": []})
         self.assertEqual(perf.cell_layout_decision(runs).outcome, "Inconclusive")
 
+class RowGlyphCacheReportTests(unittest.TestCase):
+    """The row glyph cache's checkpoint field and the derived counter rows its evaluation reads."""
+
+    LINE = ("2026-10-03T00:00:01Z  INFO memory: memory snapshot process_resident_bytes=10 "
+            "session_total_bytes=3 renderer_total_bytes=7 renderer_row_glyph_cache_bytes=5 "
+            "checkpoint_index=0 checkpoint_label=\"end\" checkpoint_attempt=1 checkpoint_complete=true")
+
+    def test_the_checkpoint_field_parses_and_an_older_line_lacks_it(self):
+        # The field is optional: a line from an older build reads None and still parses.
+        self.assertEqual(perf.parse_memory_line(self.LINE).renderer_row_glyph_cache_bytes, 5)
+        self.assertIsNone(perf.parse_memory_line(memory_line()).renderer_row_glyph_cache_bytes)
+
+    def test_complete_samples_differing_only_in_row_cache_bytes_conflict(self):
+        # The field joins the totals a reading compares, so two complete samples of one attempt that agree
+        # on every other total but differ in row-cache bytes are conflicting samples, not one reading.
+        first = dataclasses.replace(tagged_sample(0, 1, True), renderer_row_glyph_cache_bytes=10)
+        second = dataclasses.replace(tagged_sample(0, 1, True), renderer_row_glyph_cache_bytes=11)
+        self.assertEqual(perf.checkpoint_memory([first, second], 0).problem, "conflicting samples")
+        self.assertIsNone(perf.checkpoint_memory([first, first], 0).problem)
+
+    def test_the_checkpoint_row_is_reported_n_a_on_an_older_base_and_partial_when_partial(self):
+        # A base whose lines lack the field reads n/a for that row while its other totals still compare;
+        # a reading from a partial attempt is marked partial, as renderer_total_bytes is.
+        def outcome(cache_bytes, complete=True):
+            out = timed_outcome([1.0])
+            sample = dataclasses.replace(out.memory[0], renderer_row_glyph_cache_bytes=cache_bytes,
+                                         checkpoint_complete=complete)
+            return dataclasses.replace(out, memory=[sample])
+        rows = perf.comparison_rows("S3/default", perf.SideRuns([outcome(None)]),
+                                    perf.SideRuns([outcome(64 * 1048576)]))
+        self.assertEqual(row_for(rows, "end renderer_row_glyph_cache_bytes (MiB)")[2:4],
+                         ["n/a", "64.00 (64.00–64.00)"])
+        self.assertEqual(row_for(rows, "end renderer_total_bytes (MiB)")[2], "100.00 (100.00–100.00)")
+        partial = perf.comparison_rows("S3/default", perf.SideRuns([outcome(None)]),
+                                       perf.SideRuns([outcome(64 * 1048576, complete=False)]))
+        self.assertIn("partial", row_for(partial, "end renderer_row_glyph_cache_bytes (MiB)")[3])
+
+    def test_derived_rows_name_their_denominators_and_pool_as_labelled(self):
+        # The hit ratio pools every counters run; the assembly mean is exact per run (sum_us / samples)
+        # with the pooled mean; shape requests per drawn frame and the fallback ratio are context rows.
+        base = counters_side(
+            {"renderer.row_cache_hits": 30, "renderer.row_cache_misses": 70, "renderer.shape_requests": 40,
+             "renderer.gpu_frames": 10, "renderer.assembly_us": ([0, 0, 4, 0, 0, 0, 0], 400)},
+            {"renderer.row_cache_hits": 10, "renderer.row_cache_misses": 90, "renderer.shape_requests": 60,
+             "renderer.gpu_frames": 10, "renderer.assembly_us": ([0, 0, 2, 0, 0, 0, 0], 300)})
+        head = counters_side(
+            {"renderer.row_cache_hits": 90, "renderer.row_cache_misses": 10, "renderer.shape_requests": 10,
+             "renderer.gpu_frames": 10, "renderer.partial_frames": 3, "renderer.partial_fallbacks": 1,
+             "renderer.assembly_us": ([0, 4, 0, 0, 0, 0, 0], 200)})
+        rows, _omitted = perf.counter_rows("S3/default", base, head)
+        derived = {row[2]: row for row in rows}
+        hit = derived["row-cache hit ratio = hits / (hits + misses), counters runs pooled"]
+        self.assertEqual(hit[3:], ["0.200 (40/200, 2/2 runs)", "0.900 (90/100, 1/1 runs)", "+350.0%"])
+        assembly = derived["assembly mean per counters run = assembly_sum_us / Σ assembly_buckets, per run"]
+        self.assertEqual(assembly[3], "run 1 100.00 us, run 2 150.00 us; pooled 116.67 us (2/2 runs)")
+        self.assertEqual(assembly[4], "run 1 50.00 us; pooled 50.00 us (1/1 runs)")
+        shapes = derived["shape+measure requests per drawn frame = shape_requests / (gpu_frames + "
+                         "software_frames), context only"]
+        self.assertEqual(shapes[3:5], ["5.000 (100/20, 2/2 runs)", "1.000 (10/10, 1/1 runs)"])
+        fallback = derived["partial fallback ratio = partial_fallbacks / (partial_frames + partial_fallbacks), "
+                           "context only"]
+        self.assertEqual(fallback[3:], ["n/a (denominator 0, 2/2 runs)", "0.250 (1/4, 1/1 runs)", "n/a"])
+
+    def test_assembly_means_keep_every_runs_position(self):
+        # A run that assembled nothing and a run whose result lacks the histogram keep their positions
+        # and read n/a; the pooled mean is still the sum over every sampled run's events.
+        missing = counters_result({"renderer.assembly_us": ([0, 2, 0, 0, 0, 0, 0], 100)})
+        del missing["phases"][0]["frame_counters"]["renderer"]["assembly_us"]
+        side = perf.SideRuns(outcomes=[
+            make_outcome(result=counters_result({"renderer.row_cache_hits": 1})),
+            make_outcome(result=counters_result({"renderer.assembly_us": ([0, 4, 0, 0, 0, 0, 0], 200)})),
+            make_outcome(result=missing),
+            make_outcome(result=counters_result({"renderer.assembly_us": ([0, 1, 0, 0, 0, 0, 0], 100)}))])
+        rows, _omitted = perf.counter_rows("S3/default", perf.SideRuns(blocked=perf.COUNTERS_HEAD_ONLY), side)
+        assembly = [row for row in rows if row[2].startswith("assembly mean per counters run")]
+        self.assertEqual(assembly[0][4], "run 1 n/a (no assembly), run 2 50.00 us, run 3 n/a (no histogram), "
+                                         "run 4 100.00 us; pooled 60.00 us (2/4 runs)")
+        quiet = perf.SideRuns(outcomes=[make_outcome(result=counters_result({}))])
+        self.assertEqual(perf._assembly_means(perf._counter_phases(quiet)["workload"]),
+                         ("run 1 n/a (no assembly); pooled n/a (0/1 runs)", None))
+
+    def test_a_side_without_the_fields_reads_n_a_and_all_zero_rows_are_left_out(self):
+        # A base lacking the counters reads n/a with no change; a phase where no side has a denominator
+        # prints no derived row at all.
+        older = counters_result({})
+        del older["phases"][0]["frame_counters"]["renderer"]["row_cache_hits"]
+        base = perf.SideRuns(outcomes=[make_outcome(result=older)])
+        head = counters_side({"renderer.row_cache_hits": 3, "renderer.row_cache_misses": 1})
+        rows, _omitted = perf.counter_rows("S7/default", base, head)
+        hit = [row for row in rows if row[2].startswith("row-cache hit ratio")]
+        self.assertEqual(hit[0][3:], ["n/a", "0.750 (3/4, 1/1 runs)", "n/a"])
+        quiet, _omitted = perf.counter_rows("S1/default", counters_side({}), counters_side({}))
+        self.assertFalse([row for row in quiet if "=" in row[2]])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

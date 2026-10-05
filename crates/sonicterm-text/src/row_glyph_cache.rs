@@ -1,82 +1,99 @@
-//! Per-row glyph cache layered on top of the dirty-bitset foundation.
+//! Content-keyed per-row glyph cache.
 //!
-//! The terminal renderer (see `render.rs::render`) walks every visible
-//! row, groups cells into style runs, and feeds each run through
-//! `flush_shape_run` which routes glyphs through the font rasterizer +
-//! `GlyphAtlas`, appending one `GlyphInstance` per cell into a
-//! frame-local `Vec`. On a typical idle frame the same row content is
-//! re-shaped over and over: a 60-line tmux pane that only changes its
-//! clock cell still re-shapes the other 59 rows on every redraw, which
-//! is the wall-clock cost the profiler kept attributing to "atlas
-//! lookup + push_glyph".
+//! The renderer walks every emitted row, groups its cells into style runs and shapes each run
+//! through the font stack and the glyph atlas. Shaping is the expensive part of a frame, and most
+//! rows a frame emits were shaped before: a scroll moves every row one slot, a selection drag or
+//! a focus change redraws rows whose text is unchanged.
 //!
-//! This cache memoises the per-row output (glyph instances, underline
-//! coalescing, missing-tofu list) keyed on a hash of every input that
-//! affects what those instances should be: absolute row position,
-//! cells, style-run flags, cell dimensions, scale factor, and selection
-//! overlap. When the next frame asks for the same row with the same
-//! key, we splice the cached `Vec` straight into the frame buffer and
-//! skip the shaping pass.
+//! **Key.** An entry is keyed by `(pane, content key)`. The content key hashes every cell of the
+//! row in order, the column count, the style revision, the cell size, the baseline, the raster
+//! size, whether the software presenter draws the frame, and the active hover fragment of the
+//! row. It folds no position: not the absolute row, the viewport slot, the pane origin, the
+//! surface extent or the selection. A row that moves keeps its key, so the cache hits wherever
+//! it is drawn. The hash is SipHash with keys drawn once per cache from a [`RandomState`], so a
+//! colliding row cannot be built offline; a 64-bit collision is still possible, and is the one
+//! case this probabilistic cache can replay a wrong row. Key 0 is reserved for an empty slot.
 //!
-//! **Per-pane keying:** the table is keyed by `(pane_id, abs_row)`, and each
-//! entry stores the row hash and atlas identity it was built against; a lookup
-//! hits only when both match. The pane identifier is load-bearing: without it
-//! two panes showing the same absolute row would share one slot and corrupt
-//! each other's glyphs. One slot per row makes dropping a dirty row a single
-//! keyed removal, and re-shaping a cached row a replacement rather than a new
-//! admission.
+//! **Records.** A cached row holds [`RowGlyph`] records positioned in the row's cell grid, not
+//! on the surface: atlas region, colour, raster and shaping offsets kept apart, raster size, the
+//! columns the glyph spans and a packed kind. The renderer projects them onto the surface at the
+//! row's current slot and origin, on a hit and on a miss alike, so both paths draw the same
+//! bytes. Underlines are column runs and tofu boxes are column records, projected the same way.
 //!
-//! **Viewport-aware eviction:** the renderer names every pane it draws and its
-//! visible absolute-row range through [`RowGlyphCache::begin_frame`]. Admitting
-//! a new row at capacity first drops rows outside those ranges, and clears the
-//! table only when every cached row is still visible.
+//! **Validity.** Each entry records the atlas content identity its UVs belong to, and a lookup
+//! with another identity misses. A row containing software-presenter block glyphs is accepted
+//! only when the caller's validator confirms each block still rasterizes at its stored size at
+//! the current position. Only complete rows are admitted: the renderer withholds a row in which
+//! any glyph was refused by the atlas, any block drew nothing, or any run failed to shape.
 //!
-//! Cursor movement does NOT need to be folded into the hash: the cursor
-//! is drawn as a quad (`render::render` builds it from the cursor
-//! position after the text pass, not from cached glyphs), and the row
-//! it moves out of is marked dirty by Grid's existing
-//! `mark_all_dirty` hook, so its cache entry is dropped
-//! before it is reused.
+//! **Pin, stage, commit.** Each assembly pass calls [`RowGlyphCache::begin_frame`] once with the
+//! panes it draws, then per pane [`RowGlyphCache::pin`] with the keys of every row it will emit,
+//! before its first admission; eviction never removes a pinned key. Each emitted slot's key is
+//! staged with [`RowGlyphCache::stage_slot`] and becomes the slot's committed key only through
+//! [`RowGlyphCache::commit_slots`] when the frame presents; any other outcome calls
+//! [`RowGlyphCache::discard_staged`]. Committed keys are pinned on later passes, so a row still
+//! on screen keeps its entry.
 //!
-//! Selection IS folded in because selection inverts fg/bg per cell,
-//! changing the colour we hand to the glyph atlas. The hash includes
-//! the selection bbox whenever any of its rows overlap row `r`. A
-//! coarser approach — "invalidate the entire cache on any selection
-//! change" — was rejected because click-drag updates the selection on
-//! every mouse-move sample, which would mean a full re-shape of the
-//! whole viewport ~60×/sec while dragging.
-//!
-//! Atlas churn is guarded twice: every entry records the atlas content
-//! identity it was built against, and the renderer invalidates the cache when
-//! eviction occurs during frame assembly. Identity-gated lookups prevent stale
-//! UV reuse even if a future caller misses the wholesale invalidation hook.
-//! Bounding the cache by visible row count keeps the memory cost trivial.
+//! **Bounds.** A pane holds at most `4 × rows` entries and `4 × rows × cols` cells' worth of
+//! payload ([`row_payload_limit`]); an admission that would exceed either evicts this pane's
+//! unpinned entries, oldest first, down to three quarters of each. Payload across every pane stays within the payload budget (448 MiB in
+//! production) by refusing admission, and the tables, slot and pin vectors stay within the
+//! tracking budget (64 MiB) by leaving a pane untracked: it draws, and caches nothing. Both hold
+//! after every public mutation, so the cache's reported storage never exceeds their sum.
+//! A pane not drawn in a pass is released at its next `begin_frame`.
 
-use crate::GlyphInstance;
-use std::borrow::Borrow;
-// The tofu colour was previously `cosmic_text::Color` (an
-// opaque 4-byte struct). The renderer just feeds it into
-// `chrome_color_to_linear_rgba` at replay time; storing the same
-// four sRGB-encoded bytes here keeps the cache decoupled from any
-// specific chrome / shape crate. Conversion to `ChromeColor` happens
-// at the replay site in `sonicterm-gpu::core`.
-pub type TofuColor = [u8; 4];
 use sonicterm_types::{retained_hash_table_bytes, Cell, Color, ResourceAmount, UnderlineStyle};
-use std::collections::hash_map::DefaultHasher;
+use std::borrow::Borrow;
+use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-use std::ops::Range;
+use std::hash::{BuildHasher, Hash, Hasher};
 
-const CACHE_HEADROOM_FACTOR: usize = 4;
+/// sRGB-encoded RGBA of a tofu box, converted to the renderer's colour type at projection.
+pub type TofuColor = [u8; 4];
 
-/// Viewport-list capacity kept even when the pane set contracts; above it, a list
-/// filled to under a quarter of its capacity is shrunk.
-const VISIBLE_LIST_KEEP_CAPACITY: usize = 16;
-
-/// Opaque per-pane identifier used as part of the cache key. Today the
-/// renderer only has one pane so callers pass `0`; once the per-pane
-/// render loop lands every pane will pass its own stable id.
+/// Opaque per-pane identifier; every entry belongs to exactly one pane.
 pub type PaneId = u64;
+
+/// Production bound on the payload every pane of one renderer's cache holds together.
+pub const DEFAULT_PAYLOAD_BUDGET_BYTES: usize = 448 * 1024 * 1024;
+
+/// Production bound on the cache's tables, slot vectors and pin lists together.
+pub const DEFAULT_TRACKING_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
+/// Entries a pane may hold, per visible row; its payload quota is the same multiple of a row.
+pub const QUOTA_ROWS_FACTOR: usize = 4;
+
+/// Pinned keys a pane can need at once, per visible row: its committed slots and this pass's.
+pub const PIN_ROWS_FACTOR: usize = 2;
+
+/// Outer-table capacity kept when the drawn pane set contracts; above it a table filled to under
+/// a quarter of its capacity is shrunk.
+const PANE_TABLE_KEEP_CAPACITY: usize = 16;
+
+/// Bytes one cell of a row may add to a cached row: one glyph, one underline run, one tofu box
+/// and one missing character. A row above `cols` times this is never admitted.
+pub const ROW_PAYLOAD_PER_CELL_BYTES: usize = std::mem::size_of::<RowGlyph>()
+    + std::mem::size_of::<UnderlineRun>()
+    + std::mem::size_of::<RowTofu>()
+    + std::mem::size_of::<char>();
+
+/// The largest payload one admitted row of `cols` columns may hold.
+#[must_use]
+pub fn row_payload_limit(cols: u16) -> usize {
+    usize::from(cols).saturating_mul(ROW_PAYLOAD_PER_CELL_BYTES)
+}
+
+/// The most entries a pane of `rows` visible rows may hold.
+#[must_use]
+pub fn pane_entry_quota(rows: u16) -> usize {
+    usize::from(rows).saturating_mul(QUOTA_ROWS_FACTOR)
+}
+
+/// The most payload a pane of `rows` by `cols` cells may hold.
+#[must_use]
+pub fn pane_payload_quota(rows: u16, cols: u16) -> usize {
+    pane_entry_quota(rows).saturating_mul(row_payload_limit(cols))
+}
 
 /// Cell-decoration run for an underlined span.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,357 +109,686 @@ pub struct UnderlineRun {
     pub color: Color,
 }
 
-/// One cached row's render artefacts. Replayed verbatim into the
-/// frame's glyph_instances / underlines / missing_chars vectors when
-/// the cache hits.
-#[derive(Clone, Default, Debug)]
+/// How a [`RowGlyph`] is projected onto the surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RowGlyphKind {
+    /// An ASCII fast-path glyph: cell origin plus raster offset, nothing else.
+    Natural = 0,
+    /// A character-fallback glyph: natural, then shaping offset and optional marker fit.
+    Fallback = 1,
+    /// A shaped glyph: natural, then shaping offset and optional marker fit.
+    Shaped = 2,
+    /// A block-sprite glyph filling its cells; its rectangle comes from the column edges.
+    Block = 3,
+}
+
+impl RowGlyphKind {
+    /// Every kind, in encoding order.
+    pub const ALL: [Self; 4] = [Self::Natural, Self::Fallback, Self::Shaped, Self::Block];
+}
+
+/// The decoded form of [`RowGlyph::kind_and_bits`].
+///
+/// Layout: bits 0-1 kind, bit 2 colour tile, bit 3 subpixel coverage, bit 4 marker-fit
+/// eligibility, bit 5 wide lead cell, bit 6 cluster extras, bits 16-31 cluster cell count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowGlyphBits {
+    /// Projection kind.
+    pub kind: RowGlyphKind,
+    /// The tile holds premultiplied colour pixels.
+    pub is_color: bool,
+    /// The tile holds subpixel coverage.
+    pub is_subpixel: bool,
+    /// Projection fits the glyph inside its cell, as standalone status markers are fitted.
+    pub marker_fit_eligible: bool,
+    /// The lead cell is a wide cell.
+    pub is_wide: bool,
+    /// The lead cell carries combining extras.
+    pub has_extras: bool,
+    /// Cells the shaped cluster covers.
+    pub cluster_cells: u16,
+}
+
+const KIND_MASK: u32 = 0b11;
+const COLOR_BIT: u32 = 1 << 2;
+const SUBPIXEL_BIT: u32 = 1 << 3;
+const MARKER_FIT_BIT: u32 = 1 << 4;
+const WIDE_BIT: u32 = 1 << 5;
+const EXTRAS_BIT: u32 = 1 << 6;
+const CLUSTER_SHIFT: u32 = 16;
+
+impl RowGlyphBits {
+    /// Pack these fields into the record's `kind_and_bits` word.
+    #[must_use]
+    pub fn pack(self) -> u32 {
+        let flag = |set: bool, bit: u32| if set { bit } else { 0 };
+        u32::from(self.kind as u8)
+            | flag(self.is_color, COLOR_BIT)
+            | flag(self.is_subpixel, SUBPIXEL_BIT)
+            | flag(self.marker_fit_eligible, MARKER_FIT_BIT)
+            | flag(self.is_wide, WIDE_BIT)
+            | flag(self.has_extras, EXTRAS_BIT)
+            | (u32::from(self.cluster_cells) << CLUSTER_SHIFT)
+    }
+
+    /// Decode a `kind_and_bits` word written by [`Self::pack`].
+    #[must_use]
+    pub fn unpack(packed: u32) -> Self {
+        Self {
+            kind: RowGlyphKind::ALL[(packed & KIND_MASK) as usize],
+            is_color: packed & COLOR_BIT != 0,
+            is_subpixel: packed & SUBPIXEL_BIT != 0,
+            marker_fit_eligible: packed & MARKER_FIT_BIT != 0,
+            is_wide: packed & WIDE_BIT != 0,
+            has_extras: packed & EXTRAS_BIT != 0,
+            cluster_cells: (packed >> CLUSTER_SHIFT) as u16,
+        }
+    }
+}
+
+/// One cached glyph, positioned in its row's cell grid rather than on the surface.
+///
+/// Offsets and sizes are raster pixels. Projection adds the row's current cell origin, so the
+/// same record draws correctly at any slot, origin and surface size the key does not fold.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RowGlyph {
+    /// Normalized atlas region `[u0, v0, u1, v1]`.
+    pub uv: [f32; 4],
+    /// Linear RGBA the coverage is modulated by, as the renderer emits it.
+    pub color: [f32; 4],
+    /// The atlas tile's raster offset; zero for blocks.
+    pub raster_offset: [f32; 2],
+    /// The resolved shaping offset (x with its cluster pen, and y); zero for natural and block.
+    pub shape_offset: [f32; 2],
+    /// The atlas tile's size; for a block, the target size it was rasterized at.
+    pub raster_size: [f32; 2],
+    /// The column the glyph is anchored to.
+    pub lead_col: u16,
+    /// For a block, the clamped column after its span; otherwise `lead_col + 1`.
+    pub end_col: u16,
+    /// The packed [`RowGlyphBits`].
+    pub kind_and_bits: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<RowGlyph>() == 64);
+
+impl RowGlyph {
+    /// The decoded kind and flags.
+    #[must_use]
+    pub fn bits(&self) -> RowGlyphBits {
+        RowGlyphBits::unpack(self.kind_and_bits)
+    }
+}
+
+/// One missing-glyph box, positioned in its row's cell grid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RowTofu {
+    /// The column the box starts in.
+    pub lead_col: u16,
+    /// The inset from the cell's left and top edges, in raster pixels.
+    pub inset: f32,
+    /// The box width, in raster pixels.
+    pub width: f32,
+    /// The box height, in raster pixels.
+    pub height: f32,
+    /// The box colour.
+    pub color: TofuColor,
+}
+
+/// One cached row's position-free render artefacts.
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct CachedRow {
-    /// Glyph instances composing the row.
-    pub glyphs: Vec<GlyphInstance>,
-    /// Underline runs for this row; the row index is implied by the key.
+    /// Glyph records composing the row.
+    pub glyphs: Vec<RowGlyph>,
+    /// Underline runs for this row; the row is implied by where it is drawn.
     pub underlines: Vec<UnderlineRun>,
-    /// Missing-glyph tofu quads for this row.
-    /// Tuple: `(x, y, w, h, color)`.
-    pub tofu: Vec<(f32, f32, f32, f32, TofuColor)>,
-    /// Codepoints that were missing this row — published into
-    /// `last_missing_chars` so the unicode-e2e gate stays meaningful.
+    /// Missing-glyph tofu boxes for this row.
+    pub tofu: Vec<RowTofu>,
+    /// Codepoints that were missing this row, published for the unicode gate.
     pub missing_chars: Vec<char>,
 }
 
-#[derive(Clone, Debug)]
-struct CachedRowEntry {
-    /// Content and geometry hash the row was shaped from.
-    hash: u64,
+impl CachedRow {
+    /// Whether the row holds any block glyph, whose software rasterization can depend on position.
+    #[must_use]
+    pub fn has_blocks(&self) -> bool {
+        self.glyphs.iter().any(|glyph| glyph.bits().kind == RowGlyphKind::Block)
+    }
+}
+
+/// The payload one cached row retains: every vector's capacity times its element size. One
+/// function drives admission, the running sums and the retained report.
+#[must_use]
+pub fn cached_row_payload_bytes(row: &CachedRow) -> usize {
+    row.glyphs
+        .capacity()
+        .saturating_mul(std::mem::size_of::<RowGlyph>())
+        .saturating_add(
+            row.underlines.capacity().saturating_mul(std::mem::size_of::<UnderlineRun>()),
+        )
+        .saturating_add(row.tofu.capacity().saturating_mul(std::mem::size_of::<RowTofu>()))
+        .saturating_add(row.missing_chars.capacity().saturating_mul(std::mem::size_of::<char>()))
+}
+
+/// Everything besides the cells that decides a row's records.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RowKeyInputs {
+    /// Theme, palette and font revision.
+    pub style_rev: u64,
+    /// Cell width in raster pixels.
+    pub cell_w: f32,
+    /// Cell height in raster pixels.
+    pub cell_h: f32,
+    /// Baseline offset inside a cell, in raster pixels.
+    pub baseline_y_in_cell: f32,
+    /// Font raster size.
+    pub raster_px: f32,
+    /// The Windows software presenter draws the frame, which changes block rasterization.
+    pub software_presenter: bool,
+    /// The row's active (recoloring) hover fragment as inclusive start and end columns.
+    pub hover_span: Option<(u16, u16)>,
+}
+
+/// One cached row with its validity data.
+#[derive(Debug)]
+struct CacheEntry {
     /// Atlas content identity the row's UVs belong to.
     atlas_identity: u64,
+    /// The row holds block glyphs, so a lookup asks the caller to validate them.
+    has_blocks: bool,
+    /// Frame clock of the last accepted hit or insertion.
+    last_used: u64,
+    /// [`cached_row_payload_bytes`] of `row`, measured at admission.
+    payload_bytes: usize,
     row: CachedRow,
 }
 
-/// Per-row glyph cache keyed by `(pane_id, abs_row)`. A row's cached output
-/// is only valid while that row's content, styling, selection overlap and
-/// geometry hash is unchanged and the atlas identity matches, so both are
-/// stored in the entry and checked on lookup.
-#[derive(Default, Debug)]
+/// One tracked pane: its entries, slot keys and pin list, reserved at creation.
+#[derive(Debug)]
+struct PaneRows {
+    entries: HashMap<u64, CacheEntry>,
+    /// Per slot, the key of the row the presented frame drew; 0 for none.
+    committed: Vec<u64>,
+    /// Per slot, the key this pass emitted; 0 for none.
+    staged: Vec<u64>,
+    /// Sorted keys eviction must keep this pass.
+    pinned: Vec<u64>,
+    rows: u16,
+    cols: u16,
+    payload_bytes: usize,
+}
+
+impl PaneRows {
+    fn new(rows: u16, cols: u16) -> Self {
+        let row_count = usize::from(rows);
+        Self {
+            entries: HashMap::with_capacity(pane_entry_quota(rows)),
+            committed: vec![0; row_count],
+            staged: vec![0; row_count],
+            pinned: Vec::with_capacity(row_count.saturating_mul(PIN_ROWS_FACTOR)),
+            rows,
+            cols,
+            payload_bytes: 0,
+        }
+    }
+
+    /// Tables and vectors this pane holds besides payload, at their actual capacities.
+    fn tracking_bytes(&self) -> usize {
+        let slots = self
+            .committed
+            .capacity()
+            .saturating_add(self.staged.capacity())
+            .saturating_add(self.pinned.capacity());
+        retained_hash_table_bytes::<u64, CacheEntry>(self.entries.capacity())
+            .saturating_add(slots.saturating_mul(std::mem::size_of::<u64>()))
+    }
+
+    fn is_pinned(&self, key: u64) -> bool {
+        self.pinned.binary_search(&key).is_ok()
+    }
+
+    /// When `added` more entries or `incoming` more bytes would exceed either quota, evict
+    /// unpinned entries other than `keep`, oldest first by `(last_used, key)`, until they fit
+    /// within three quarters of each quota or nothing evictable remains; below the quotas
+    /// nothing is evicted. Survivors are drained and reinserted rather than removed in
+    /// place: draining resets every slot, while removal leaves deleted markers that can make a
+    /// later insertion grow the table. Returns the payload bytes freed.
+    fn evict_toward_target(&mut self, keep: u64, added: usize, incoming: usize) -> usize {
+        let (entry_quota, payload_quota) =
+            (pane_entry_quota(self.rows), pane_payload_quota(self.rows, self.cols));
+        let (mut count, mut bytes) = (self.entries.len(), self.payload_bytes);
+        if count + added <= entry_quota && bytes.saturating_add(incoming) <= payload_quota {
+            // When: `count + added` and `bytes + incoming` fit both quotas, nothing is evicted.
+            return 0;
+        }
+        let (entry_target, payload_target) = (entry_quota * 3 / 4, payload_quota * 3 / 4);
+        let fits = |count: usize, bytes: usize| {
+            count + added <= entry_target && bytes.saturating_add(incoming) <= payload_target
+        };
+        let mut victims: Vec<(u64, u64, usize)> = self
+            .entries
+            .iter()
+            .filter(|(key, _)| **key != keep && !self.is_pinned(**key))
+            .map(|(key, entry)| (entry.last_used, *key, entry.payload_bytes))
+            .collect();
+        victims.sort_unstable();
+        let mut evicted: Vec<u64> = Vec::new();
+        for (_, key, size) in victims {
+            if fits(count, bytes) {
+                // When: `fits(count, bytes)`, the targets are met and older entries stay cached.
+                break;
+            }
+            evicted.push(key);
+            count -= 1;
+            bytes -= size;
+        }
+        if evicted.is_empty() {
+            // When: `evicted` is empty, every entry is pinned or is the key being replaced.
+            return 0;
+        }
+        evicted.sort_unstable();
+        let kept: Vec<(u64, CacheEntry)> =
+            self.entries.drain().filter(|(key, _)| evicted.binary_search(key).is_err()).collect();
+        for (key, entry) in kept {
+            self.entries.insert(key, entry);
+        }
+        let freed = self.payload_bytes - bytes;
+        self.payload_bytes = bytes;
+        freed
+    }
+}
+
+/// Per-pane, content-keyed row glyph cache with pinned slots and two enforced budgets.
+#[derive(Debug)]
 pub struct RowGlyphCache {
-    /// (pane_id, abs_row) -> cached artefacts with their hash and atlas identity.
-    entries: HashMap<(PaneId, u64), CachedRowEntry>,
-    /// Soft cap so that long-running sessions with heavy scrollback
-    /// don't grow without bound. The renderer calls `resize(grid.rows)`
-    /// each frame; we keep ~4× headroom for scroll jiggle and call it
-    /// good. With multiple panes, callers should call `resize` with the
-    /// sum of every pane's visible row count so the cap scales with the
-    /// total addressable working set rather than a single pane.
-    cap: usize,
-    /// Every pane drawn this frame with its visible absolute-row range.
-    visible: Vec<(PaneId, Range<u64>)>,
-    /// Entries one `invalidate_row_abs` call examined, for tests.
-    #[cfg(test)]
-    invalidate_visits: usize,
+    /// Keys the content hash; drawn once per cache.
+    hasher: RandomState,
+    /// Ticked once per assembly pass by [`Self::begin_frame`].
+    frame_clock: u64,
+    payload_budget: usize,
+    tracking_budget: usize,
+    /// Running sum of every entry's payload.
+    payload_bytes: usize,
+    panes: HashMap<PaneId, PaneRows>,
+}
+
+impl Default for RowGlyphCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RowGlyphCache {
-    /// Construct an empty cache. Call [`resize`](Self::resize) before use.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Record every pane drawn this frame with its visible absolute-row range.
-    ///
-    /// Call once per frame before any insert. Eviction at capacity keeps rows
-    /// inside these ranges. The owned list is refilled in place so its
-    /// allocation is reused, and released when the pane set contracts.
-    pub fn begin_frame(&mut self, visible: &[(PaneId, Range<u64>)]) {
-        self.visible.clear();
-        self.visible.extend_from_slice(visible);
-        if self.visible.len() < self.visible.capacity() / 4
-            && self.visible.capacity() > VISIBLE_LIST_KEEP_CAPACITY
-        {
-            // The pane set shrank well below the list's allocation; release the excess.
-            self.visible.shrink_to_fit();
-        }
-    }
-
-    /// Resize the cache to match the current visible grid height. Cheap
-    /// no-op unless the row count changes; when it does, this updates the
-    /// soft cap and drops stale entries from the old viewport geometry.
-    ///
-    /// For multi-pane callers, pass the sum of every pane's
-    /// visible row count.
-    #[inline]
-    pub fn resize(&mut self, rows: u16) {
-        let new_cap = usize::from(rows).saturating_mul(CACHE_HEADROOM_FACTOR).max(1);
-        if self.cap != new_cap {
-            self.cap = new_cap;
-            self.entries.clear();
-            self.visible.clear();
-        }
-    }
-
-    /// Drop every cache entry. Called on font / theme / scale / resize
-    /// / atlas-rebuild events — anything that invalidates UVs or
-    /// colours across the whole grid.
-    #[inline]
-    pub fn invalidate_all(&mut self) {
-        self.entries.clear();
-        self.visible.clear();
-    }
-
-    /// Drop every cache entry belonging to a specific pane. Useful when
-    /// a pane is closed or its grid is replaced wholesale; cheaper than
-    /// `invalidate_all` because peer panes keep their entries.
-    #[inline]
-    pub fn invalidate_pane(&mut self, pane_id: PaneId) {
-        self.entries.retain(|(p, _), _| *p != pane_id);
-        self.entries.shrink_to_fit();
-        self.visible.retain(|(visible_pane, _)| *visible_pane != pane_id);
-    }
-
-    /// Return retained table, entry, and nested row-vector storage.
+    /// An empty cache with the production budgets.
     #[must_use]
-    pub fn retained_amount(&self) -> ResourceAmount {
-        let table =
-            retained_hash_table_bytes::<(PaneId, u64), CachedRowEntry>(self.entries.capacity());
-        let visible =
-            self.visible.capacity().saturating_mul(std::mem::size_of::<(PaneId, Range<u64>)>());
-        let payload = self.entries.values().fold(0usize, |total, entry| {
-            total
-                .saturating_add(
-                    entry
-                        .row
-                        .glyphs
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<GlyphInstance>()),
-                )
-                .saturating_add(
-                    entry
-                        .row
-                        .underlines
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<UnderlineRun>()),
-                )
-                .saturating_add(entry.row.tofu.capacity().saturating_mul(std::mem::size_of::<(
-                    f32,
-                    f32,
-                    f32,
-                    f32,
-                    TofuColor,
-                )>()))
-                .saturating_add(
-                    entry.row.missing_chars.capacity().saturating_mul(std::mem::size_of::<char>()),
-                )
-        });
-        ResourceAmount {
-            bytes: table.saturating_add(payload).saturating_add(visible),
-            items: self.entries.len(),
+    pub fn new() -> Self {
+        Self::with_budgets(DEFAULT_PAYLOAD_BUDGET_BYTES, DEFAULT_TRACKING_BUDGET_BYTES)
+    }
+
+    /// An empty cache whose payload and tracking storage are bounded by the given budgets.
+    #[must_use]
+    pub fn with_budgets(payload_budget: usize, tracking_budget: usize) -> Self {
+        Self {
+            hasher: RandomState::new(),
+            frame_clock: 0,
+            payload_budget,
+            tracking_budget,
+            payload_bytes: 0,
+            panes: HashMap::new(),
         }
     }
 
-    /// Drop the cache entry for absolute row `abs_row` in pane `pane_id`
-    /// regardless of hash. Called per dirty row from the renderer; one keyed
-    /// removal that examines no other entry.
-    #[inline]
-    pub fn invalidate_row_abs(&mut self, pane_id: PaneId, abs_row: u64) {
-        #[cfg(test)]
-        {
-            self.invalidate_visits += 1;
+    /// The content key of a row of `cols` cells drawn with `inputs`; never 0.
+    #[must_use]
+    pub fn content_key<I, C>(&self, cells: I, cols: u16, inputs: &RowKeyInputs) -> u64
+    where
+        I: IntoIterator<Item = C>,
+        C: Borrow<Cell>,
+    {
+        let mut hasher = self.hasher.build_hasher();
+        for cell in cells {
+            cell.borrow().hash(&mut hasher);
         }
-        self.entries.remove(&(pane_id, abs_row));
+        cols.hash(&mut hasher);
+        inputs.style_rev.hash(&mut hasher);
+        inputs.cell_w.to_bits().hash(&mut hasher);
+        inputs.cell_h.to_bits().hash(&mut hasher);
+        inputs.baseline_y_in_cell.to_bits().hash(&mut hasher);
+        inputs.raster_px.to_bits().hash(&mut hasher);
+        inputs.software_presenter.hash(&mut hasher);
+        if let Some((start_col, end_col)) = inputs.hover_span {
+            // A recoloring hover fragment changes the fragment's glyph colours.
+            0x55_524C_u64.hash(&mut hasher);
+            start_col.hash(&mut hasher);
+            end_col.hash(&mut hasher);
+        }
+        hasher.finish().max(1)
     }
 
-    /// Number of cached rows. Useful for tests and tracing.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// True when no rows are cached.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Look up a cached row by key and atlas content identity. UV-bearing
-    /// entries built before an eviction or reset are rejected because their
-    /// atlas rectangles may now belong to unrelated glyphs.
-    #[inline]
-    pub fn get(
-        &self,
-        pane_id: PaneId,
-        abs_row: u64,
-        hash: u64,
-        atlas_identity: u64,
-    ) -> Option<&CachedRow> {
-        self.entries
-            .get(&(pane_id, abs_row))
-            .filter(|entry| entry.hash == hash && entry.atlas_identity == atlas_identity)
-            .map(|entry| &entry.row)
-    }
-
-    /// Insert or replace a cached row.
+    /// Start one assembly pass drawing `drawn` panes, each `(pane, rows, cols)`.
     ///
-    /// Replacing a row already cached never evicts. Admitting a new row at
-    /// capacity first drops rows outside this frame's viewports (see
-    /// [`begin_frame`](Self::begin_frame)); only when that frees nothing is
-    /// the table cleared. The cap tracks the visible row total via `resize`.
+    /// Ticks the recency clock, releases panes not drawn and panes whose size changed, clears
+    /// every pane's staged keys and pin list, and tracks each new pane when its reserved storage
+    /// fits the tracking budget; a pane that does not fit stays untracked this pass.
+    pub fn begin_frame(&mut self, drawn: &[(PaneId, u16, u16)]) {
+        self.frame_clock = self.frame_clock.wrapping_add(1);
+        let mut released = 0usize;
+        self.panes.retain(|pane_id, pane| {
+            let keep = drawn.iter().any(|(drawn_id, rows, cols)| {
+                drawn_id == pane_id && *rows == pane.rows && *cols == pane.cols
+            });
+            if !keep {
+                // A pane not drawn at this size has its storage released now.
+                released += pane.payload_bytes;
+            }
+            keep
+        });
+        self.payload_bytes -= released;
+        self.shrink_pane_table();
+        for pane in self.panes.values_mut() {
+            pane.staged.fill(0);
+            pane.pinned.clear();
+        }
+        for &(pane_id, rows, cols) in drawn {
+            if rows == 0 || cols == 0 || self.panes.contains_key(&pane_id) {
+                // When: `rows` or `cols` is 0 nothing is cached, and a pane in `panes` is already tracked.
+                continue;
+            }
+            self.track_pane(pane_id, rows, cols);
+        }
+        self.debug_assert_budgets();
+    }
+
+    /// Track `pane_id`, charged at the capacities its reservation and the outer table's growth
+    /// actually produced; released at once, leaving nothing retained, when that is over budget.
+    fn track_pane(&mut self, pane_id: PaneId, rows: u16, cols: u16) -> bool {
+        let outer_before = self.panes.capacity();
+        self.panes.insert(pane_id, PaneRows::new(rows, cols));
+        if self.tracking_bytes() <= self.tracking_budget {
+            // When: `tracking_bytes` fits `tracking_budget`, the reservation is kept.
+            return true;
+        }
+        self.panes.remove(&pane_id);
+        if self.panes.capacity() > outer_before {
+            // Inserting grew the outer table, so it returns to its previous size.
+            self.panes.shrink_to(outer_before);
+        }
+        false
+    }
+
+    fn shrink_pane_table(&mut self) {
+        let (len, capacity) = (self.panes.len(), self.panes.capacity());
+        if capacity > PANE_TABLE_KEEP_CAPACITY && len < capacity / 4 {
+            // The drawn pane set shrank well below the table's allocation.
+            self.panes.shrink_to((2 * len).max(PANE_TABLE_KEEP_CAPACITY));
+        }
+    }
+
+    /// Pin `pane_id`'s committed slot keys and `keys`, the rows this pass will emit, before any
+    /// admission; eviction keeps every pinned key. Zero keys are ignored, and at most one key per
+    /// visible row is taken from `keys`.
+    pub fn pin(&mut self, pane_id: PaneId, keys: &[u64]) {
+        let Some(pane) = self.panes.get_mut(&pane_id) else {
+            // When: the pane is untracked, nothing it emits can be admitted, so nothing is pinned.
+            return;
+        };
+        let limit = usize::from(pane.rows);
+        pane.pinned.clear();
+        pane.pinned.extend(pane.committed.iter().copied().filter(|key| *key != 0));
+        pane.pinned.extend(keys.iter().copied().filter(|key| *key != 0).take(limit));
+        pane.pinned.sort_unstable();
+        pane.pinned.dedup();
+    }
+
+    /// Look up `pane_id`'s row with content `key` built against `atlas_identity`. A row holding
+    /// block glyphs is accepted only when `validate_blocks` accepts it. An accepted hit is the
+    /// entry's most recent use.
+    pub fn get(
+        &mut self,
+        pane_id: PaneId,
+        key: u64,
+        atlas_identity: u64,
+        validate_blocks: impl FnOnce(&CachedRow) -> bool,
+    ) -> Option<&CachedRow> {
+        let clock = self.frame_clock;
+        let entry = self.panes.get_mut(&pane_id)?.entries.get_mut(&key)?;
+        if entry.atlas_identity != atlas_identity {
+            // When: `atlas_identity` differs, the row's UVs may name other glyphs.
+            return None;
+        }
+        if entry.has_blocks && !validate_blocks(&entry.row) {
+            // When: a block would rasterize at another size here, the row is shaped again.
+            return None;
+        }
+        entry.last_used = clock;
+        Some(&entry.row)
+    }
+
+    /// Admit a complete row for `pane_id` under `key`, replacing any entry with that key.
+    ///
+    /// Returns whether it was admitted. A row above [`row_payload_limit`] is refused; otherwise
+    /// this pane's unpinned entries are evicted until its quotas hold, and the row is refused
+    /// when the renderer-wide payload budget would be exceeded. A refused row is a miss next
+    /// pass, never a wrong pixel.
     pub fn insert(
         &mut self,
         pane_id: PaneId,
-        abs_row: u64,
-        hash: u64,
+        key: u64,
         atlas_identity: u64,
-        row: CachedRow,
-    ) {
-        let entry = CachedRowEntry { hash, atlas_identity, row };
-        let key = (pane_id, abs_row);
-        if let Some(existing) = self.entries.get_mut(&key) {
-            // When: `key` is already cached, replace it in place without charging a new slot.
-            *existing = entry;
-            return;
+        mut row: CachedRow,
+    ) -> bool {
+        let Some(pane) = self.panes.get_mut(&pane_id) else {
+            // When: the pane is untracked this pass, its rows are drawn but not cached.
+            return false;
+        };
+        row.glyphs.shrink_to_fit();
+        row.underlines.shrink_to_fit();
+        row.tofu.shrink_to_fit();
+        row.missing_chars.shrink_to_fit();
+        let incoming = cached_row_payload_bytes(&row);
+        if incoming > row_payload_limit(pane.cols) {
+            // When: `incoming` exceeds `row_payload_limit`, the quota proof would not hold.
+            return false;
         }
-        if self.entries.len() >= self.cap {
-            self.evict_outside_viewports();
-            if self.entries.len() >= self.cap {
-                // Every cached row is still visible, so nothing was evictable; clear as before.
-                self.entries.clear();
+        let existing = pane.entries.get(&key).map(|entry| entry.payload_bytes);
+        let added = usize::from(existing.is_none());
+        // Replacement is decided on `total - old + new`: the old payload leaves with the new.
+        let old = existing.unwrap_or(0);
+        pane.payload_bytes -= old;
+        let freed = pane.evict_toward_target(key, added, incoming);
+        let pane_after = pane.payload_bytes;
+        pane.payload_bytes += old;
+        self.payload_bytes -= freed;
+        let total_after = self.payload_bytes - old;
+        let pane = self.panes.get_mut(&pane_id).expect("tracked above");
+        if pane.entries.len() + added > pane_entry_quota(pane.rows)
+            || pane_after.saturating_add(incoming) > pane_payload_quota(pane.rows, pane.cols)
+            || total_after.saturating_add(incoming) > self.payload_budget
+        {
+            // When: an entry quota, `pane_payload_quota` or `payload_budget` would be passed, refuse.
+            self.debug_assert_budgets();
+            return false;
+        }
+        let capacity_before = pane.entries.capacity();
+        let entry = CacheEntry {
+            atlas_identity,
+            has_blocks: row.has_blocks(),
+            last_used: self.frame_clock,
+            payload_bytes: incoming,
+            row,
+        };
+        if let Some(slot) = pane.entries.get_mut(&key) {
+            // A cached key is replaced in place, leaving no deleted marker.
+            *slot = entry;
+        } else {
+            // When: the key is new, the reserved table has room by the entry quota.
+            pane.entries.insert(key, entry);
+        }
+        pane.payload_bytes = pane_after + incoming;
+        self.payload_bytes = total_after + incoming;
+        if pane.entries.capacity() != capacity_before {
+            // The table grew after its reservation, an invariant broke; stop tracking the pane.
+            debug_assert!(false, "a pane's row table grew after its reservation");
+            self.untrack(pane_id);
+        }
+        self.debug_assert_budgets();
+        true
+    }
+
+    /// Record that this pass emitted the row with `key` at `slot` of `pane_id`.
+    pub fn stage_slot(&mut self, pane_id: PaneId, slot: u16, key: u64) {
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            if let Some(staged) = pane.staged.get_mut(usize::from(slot)) {
+                *staged = key;
             }
         }
-        self.entries.insert(key, entry);
     }
 
-    /// Drop rows whose pane was not drawn this frame or whose row lies outside
-    /// that pane's visible range. Ranges are per pane, so one pane's range
-    /// never protects another pane's row with the same number.
-    ///
-    /// The survivors are drained and reinserted rather than filtered in place:
-    /// draining resets every slot to empty, while in-place removal leaves
-    /// deleted markers that use up the table's spare room and make a later
-    /// admission double the allocation although the row count never passes the cap.
-    fn evict_outside_viewports(&mut self) {
-        let visible = &self.visible;
-        let kept: Vec<((PaneId, u64), CachedRowEntry)> = self
-            .entries
-            .drain()
-            .filter(|((pane_id, abs_row), _)| {
-                visible
-                    .iter()
-                    .any(|(visible_pane, rows)| visible_pane == pane_id && rows.contains(abs_row))
-            })
-            .collect();
-        self.entries.extend(kept);
-    }
-}
-
-/// Compute the cache key for a row.
-///
-/// Inputs folded in:
-/// * `view_top_abs + r` — identifies the row's scrollback content.
-/// * `r` — identifies its viewport Y slot because cached glyphs carry screen coordinates.
-/// * row cell contents (Cell already derives Hash).
-/// * `style_rev` — opaque counter bumped on theme / palette / default
-///   fg/bg changes; lets the renderer invalidate without iterating.
-/// * `cell_w`, `cell_h`, `scale_factor` — geometry changes redraw
-///   every cell at a new physical position.
-/// * `origin_x`, `origin_y` — the pane origin embedded into each cached glyph.
-/// * `surface_w`, `surface_h` — the projection extent used to build cached NDC.
-/// * `selection` bbox — but only when it overlaps row `r`. A
-///   selection outside this row's range doesn't change its rendering.
-///
-/// Note: the pane identifier is NOT folded into this hash because it
-/// is a separate component of the cache key tuple (see
-/// `RowGlyphCache`). Keeping pane separation in the tuple rather than
-/// the hash makes per-pane invalidation cheap and avoids spurious
-/// re-shaping if two panes happen to share content.
-#[allow(clippy::too_many_arguments)]
-pub fn row_hash(
-    view_top_abs: u64,
-    r: usize,
-    row_cells: &[Cell],
-    style_rev: u64,
-    cell_w: f32,
-    cell_h: f32,
-    scale_factor: f32,
-    origin_x: f32,
-    origin_y: f32,
-    surface_w: f32,
-    surface_h: f32,
-    selection: Option<(u64, u16, u64, u16)>,
-) -> u64 {
-    row_hash_cells(
-        view_top_abs,
-        r,
-        row_cells.iter(),
-        style_rev,
-        cell_w,
-        cell_h,
-        scale_factor,
-        origin_x,
-        origin_y,
-        surface_w,
-        surface_h,
-        selection,
-    )
-}
-
-/// Hash row content and rendering inputs without requiring a concrete cell container.
-#[allow(clippy::too_many_arguments)]
-pub fn row_hash_cells<I, C>(
-    view_top_abs: u64,
-    r: usize,
-    row_cells: I,
-    style_rev: u64,
-    cell_w: f32,
-    cell_h: f32,
-    scale_factor: f32,
-    origin_x: f32,
-    origin_y: f32,
-    surface_w: f32,
-    surface_h: f32,
-    selection: Option<(u64, u16, u64, u16)>,
-) -> u64
-where
-    I: IntoIterator<Item = C>,
-    C: Borrow<Cell>,
-{
-    let mut h = DefaultHasher::new();
-    let row_abs = view_top_abs + r as u64;
-    row_abs.hash(&mut h);
-    r.hash(&mut h);
-    for cell in row_cells {
-        cell.borrow().hash(&mut h);
-    }
-    style_rev.hash(&mut h);
-    cell_w.to_bits().hash(&mut h);
-    cell_h.to_bits().hash(&mut h);
-    scale_factor.to_bits().hash(&mut h);
-    origin_x.to_bits().hash(&mut h);
-    origin_y.to_bits().hash(&mut h);
-    surface_w.to_bits().hash(&mut h);
-    surface_h.to_bits().hash(&mut h);
-    if let Some((s_row, s_col, e_row, e_col)) = selection {
-        // Normalise so (start, end) order doesn't perturb the hash. Rows
-        // are scrollback-ABSOLUTE, so we compare against this row's
-        // absolute index (`row_abs`), not its viewport offset `r`.
-        let (lo, hi) = if (s_row, s_col) <= (e_row, e_col) {
-            ((s_row, s_col), (e_row, e_col))
-        } else {
-            // When: `(s_row, s_col)` follows `(e_row, e_col)`, normalize endpoints so drag direction cannot change the hash.
-            ((e_row, e_col), (s_row, s_col))
-        };
-        // Only fold the bbox in if it overlaps this absolute row. A
-        // selection that doesn't touch this row has no effect on its
-        // glyphs, so including it would needlessly invalidate cache
-        // entries every time the user clicks elsewhere. Folding the
-        // ABSOLUTE membership keeps invalidation correct as scrolling
-        // changes which abs rows are visible.
-        if row_abs >= lo.0 && row_abs <= hi.0 {
-            0x5E1E_C7104_u64.hash(&mut h);
-            lo.0.hash(&mut h);
-            lo.1.hash(&mut h);
-            hi.0.hash(&mut h);
-            hi.1.hash(&mut h);
+    /// The pass presented: each slot it emitted now shows its staged key. Slots it did not emit
+    /// keep their committed key, as their pixels stay on screen.
+    pub fn commit_slots(&mut self) {
+        for pane in self.panes.values_mut() {
+            for (committed, staged) in pane.committed.iter_mut().zip(pane.staged.iter_mut()) {
+                if *staged != 0 {
+                    // The slot was emitted this pass, so its staged key replaces the old one.
+                    *committed = std::mem::take(staged);
+                }
+            }
         }
     }
-    h.finish()
+
+    /// The pass did not present: forget its staged keys and keep the committed ones.
+    pub fn discard_staged(&mut self) {
+        for pane in self.panes.values_mut() {
+            pane.staged.fill(0);
+        }
+    }
+
+    /// Drop every cached row. Called on font, theme, scale, resize and atlas rebuild events,
+    /// anything that invalidates UVs or colours across the whole grid. Panes stay tracked;
+    /// committed keys that now name no entry pin nothing.
+    pub fn invalidate_all(&mut self) {
+        for pane in self.panes.values_mut() {
+            pane.entries.clear();
+            pane.payload_bytes = 0;
+        }
+        self.payload_bytes = 0;
+        self.debug_assert_budgets();
+    }
+
+    /// Release one pane: its rows, its committed and staged slots and its pin list.
+    pub fn invalidate_pane(&mut self, pane_id: PaneId) {
+        self.untrack(pane_id);
+        self.shrink_pane_table();
+        self.debug_assert_budgets();
+    }
+
+    fn untrack(&mut self, pane_id: PaneId) {
+        if let Some(pane) = self.panes.remove(&pane_id) {
+            self.payload_bytes -= pane.payload_bytes;
+        }
+    }
+
+    /// Retained payload plus tracking storage, and the number of cached rows.
+    #[must_use]
+    pub fn retained_amount(&self) -> ResourceAmount {
+        ResourceAmount {
+            bytes: self.payload_bytes.saturating_add(self.tracking_bytes()),
+            items: self.len(),
+        }
+    }
+
+    /// Payload every cached row retains, by [`cached_row_payload_bytes`].
+    #[must_use]
+    pub fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+    }
+
+    /// Tables, slot vectors and pin lists, at their actual capacities.
+    #[must_use]
+    pub fn tracking_bytes(&self) -> usize {
+        self.panes.values().fold(
+            retained_hash_table_bytes::<PaneId, PaneRows>(self.panes.capacity()),
+            |total, pane| total.saturating_add(pane.tracking_bytes()),
+        )
+    }
+
+    /// The renderer-wide payload bound.
+    #[must_use]
+    pub fn payload_budget(&self) -> usize {
+        self.payload_budget
+    }
+
+    /// The renderer-wide tracking bound.
+    #[must_use]
+    pub fn tracking_budget(&self) -> usize {
+        self.tracking_budget
+    }
+
+    /// Number of cached rows across every pane.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.panes.values().map(|pane| pane.entries.len()).sum()
+    }
+
+    /// True when no rows are cached.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether `pane_id` is tracked this pass; an untracked pane draws but caches nothing.
+    #[must_use]
+    pub fn is_tracked(&self, pane_id: PaneId) -> bool {
+        self.panes.contains_key(&pane_id)
+    }
+
+    /// Rows cached for `pane_id`, or `None` when it is untracked.
+    #[must_use]
+    pub fn pane_len(&self, pane_id: PaneId) -> Option<usize> {
+        self.panes.get(&pane_id).map(|pane| pane.entries.len())
+    }
+
+    /// Payload cached for `pane_id`, or `None` when it is untracked.
+    #[must_use]
+    pub fn pane_payload_bytes(&self, pane_id: PaneId) -> Option<usize> {
+        self.panes.get(&pane_id).map(|pane| pane.payload_bytes)
+    }
+
+    /// Whether `pane_id` caches a row under `key`, whatever its atlas identity.
+    #[must_use]
+    pub fn contains(&self, pane_id: PaneId, key: u64) -> bool {
+        self.panes.get(&pane_id).is_some_and(|pane| pane.entries.contains_key(&key))
+    }
+
+    /// The committed key of `slot` of `pane_id`; 0 when the slot shows no committed row.
+    #[must_use]
+    pub fn committed_slot(&self, pane_id: PaneId, slot: u16) -> Option<u64> {
+        self.panes.get(&pane_id)?.committed.get(usize::from(slot)).copied()
+    }
+
+    /// The key this pass staged for `slot` of `pane_id`; 0 when none.
+    #[must_use]
+    pub fn staged_slot(&self, pane_id: PaneId, slot: u16) -> Option<u64> {
+        self.panes.get(&pane_id)?.staged.get(usize::from(slot)).copied()
+    }
+
+    /// Payload recomputed from every entry, for checking the running sums.
+    #[must_use]
+    pub fn folded_payload_bytes(&self) -> usize {
+        self.panes
+            .values()
+            .flat_map(|pane| pane.entries.values())
+            .map(|entry| cached_row_payload_bytes(&entry.row))
+            .sum()
+    }
+
+    fn debug_assert_budgets(&self) {
+        debug_assert!(self.payload_bytes <= self.payload_budget, "payload over its budget");
+        debug_assert!(self.tracking_bytes() <= self.tracking_budget, "tracking over its budget");
+    }
 }
 
 #[cfg(test)]

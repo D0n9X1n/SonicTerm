@@ -7,7 +7,7 @@ row glyph caching, and glyph atlas data consumed by the GPU renderer.
 ## Key files
 - `shape.rs` - shape cache and shaping entry points.
 - `glyph_atlas.rs` - atlas pages and glyph placement.
-- `row_glyph_cache.rs` - row-level glyph cache.
+- `row_glyph_cache.rs` - content-keyed row glyph cache: position-free records, pins, staged slots, quotas and budgets.
 - `lib.rs` - public exports.
 
 ## Local gate
@@ -19,6 +19,14 @@ cargo build -p sonicterm-text
 - Cache keys must account for font identity, size, weight, style, DPI, and
   glyph variants that change output.
 - Avoid atlas allocation or eviction surprises on the hottest draw path.
+- `RowGlyphCache` keys rows by content (SipHash with per-cache random keys; 0
+  marks an empty slot), stores position-free `RowGlyph` records, and holds every
+  public mutation within its two budgets: payload (448 MiB) by refusing
+  admission, tracking (64 MiB) by leaving a pane untracked. A pane holds at most
+  `4 × rows` entries and `4 × rows × cols` cells of payload; eviction removes only
+  that pane's unpinned rows, oldest first, to three quarters of each quota.
+  Payload is measured by `cached_row_payload_bytes` after shrinking, and every
+  running sum and report uses that one function.
 - UV-bearing caches use `GlyphAtlas::identity()`, not the resettable eviction
   counter, and still clear promptly when their owning seam changes.
 - A `GlyphAtlas::growable` atlas doubles up to its maximum before it evicts;

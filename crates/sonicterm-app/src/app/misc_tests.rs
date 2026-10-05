@@ -3,7 +3,7 @@ use sonicterm_gpu::{
     core::{build_snapped_cell_x, emit_cell_bg_quads_for_row},
     row_quad_cache::{row_quad_hash_cells, CachedRowQuads, LineQuadCache},
 };
-use sonicterm_text::row_glyph_cache::row_hash_cells;
+use sonicterm_text::row_glyph_cache::{RowGlyphCache, RowKeyInputs};
 
 /// The cross-platform native-menu drain gives its resolved READONLY search paste ownership before terminal refusal.
 #[cfg(any(windows, unix))]
@@ -684,7 +684,9 @@ fn new_window_constructor_reuses_the_live_gpu_device() {
     assert!(!body.contains("match GpuRenderer::new("));
 }
 
-/// Prompt navigation must move cached colored rows without relying on later PTY output or dirty invalidation.
+/// Prompt navigation must move cached colored rows without relying on later PTY output or dirty
+/// invalidation: the background quads reproject at the new slot, and the glyph row keeps its
+/// content key, so its cached glyphs replay wherever the row is drawn.
 #[test]
 fn prompt_navigation_reprojects_overlapping_colored_history_without_dirty_rows() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
@@ -713,10 +715,21 @@ fn prompt_navigation_reprojects_overlapping_colored_history_without_dirty_rows()
         let row = guard.grid().row_at_abs(10).unwrap();
         row_quad_hash_cells(top, slot, row.iter(), 1, 10.0, 20.0, 0.0, 0.0, 40.0, 60.0, None)
     };
-    let glyph_hash_at = |top, slot| {
+    let glyph_keys = RowGlyphCache::new();
+    let glyph_inputs = RowKeyInputs {
+        style_rev: 1,
+        cell_w: 10.0,
+        cell_h: 20.0,
+        baseline_y_in_cell: 16.0,
+        raster_px: 14.0,
+        software_presenter: false,
+        hover_span: None,
+    };
+    // The glyph key reads the row's cells and drawing inputs only, never its view top or slot.
+    let glyph_key_of_row = || {
         let guard = parser.lock();
         let row = guard.grid().row_at_abs(10).unwrap();
-        row_hash_cells(top, slot, row.iter(), 1, 10.0, 20.0, 1.0, 0.0, 0.0, 40.0, 60.0, None)
+        glyph_keys.content_key(row.iter(), 4, &glyph_inputs)
     };
     let project = |top, slot| {
         let guard = parser.lock();
@@ -739,7 +752,7 @@ fn prompt_navigation_reprojects_overlapping_colored_history_without_dirty_rows()
         quads
     };
     let first_key = hash_at(10, 0);
-    let first_glyph_key = glyph_hash_at(10, 0);
+    let first_glyph_key = glyph_key_of_row();
     let first = project(10, 0);
     assert_eq!(first.len(), 1, "non-default background must emit visible geometry");
     cache.insert(pane_id, 10, first_key, CachedRowQuads { quads: first.clone() });
@@ -758,7 +771,7 @@ fn prompt_navigation_reprojects_overlapping_colored_history_without_dirty_rows()
         .get(pane_id, 10, shifted_key)
         .map(|cached| cached.quads.clone())
         .unwrap_or_else(|| expected.clone());
-    assert_ne!(glyph_hash_at(top, 1), first_glyph_key, "glyphs already track their viewport slot");
+    assert_eq!(glyph_key_of_row(), first_glyph_key, "the moved row keeps its glyph key");
     assert_ne!(expected[0].rect, first[0].rect);
     assert_eq!(replayed[0].rect, expected[0].rect, "background must follow the same moved row");
     assert!(cache.get(pane_id + 1, 10, first_key).is_some());

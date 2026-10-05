@@ -161,8 +161,9 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 - `glyph_atlas_bytes`：CPU 字形图集像素容量加上脏矩形列表容量，因此会随图集增长而上升；
 - 每个渲染器在 `total=` 之后附加：`glyph_atlas_dim`、`glyph_atlas_packed_pixels`、`glyph_atlas_growths`、`glyph_atlas_evictions`、`glyph_atlas_fit` 和 `glyph_atlas_max_tile`。fit 是 256、512、1024 与 2048 中能放下常驻图块并保留四分之一高度空余的最小值。否则为 `no_headroom`（每个图块都能在 2048 放下，但没有尺寸能留出这四分之一）、`does_not_fit`（某个图块即使在 2048 也放不下）或 `evicted`（图集发生过淘汰，常驻集合已不再是工作集）。`glyph_atlas_growths` 统计渲染器自构建以来的翻倍次数，重置不会清零；
 - `image_atlas_bytes`：CPU 内联图像图集容量；
-- `row_glyph_cache_bytes` / `row_glyph_cache_items`：哈希表后备存储、缓存字形实例、
-  下划线段、tofu 几何、缺失字符和缓存行数；
+- `row_glyph_cache_bytes` / `row_glyph_cache_items`：缓存的字形记录、下划线段、缺字方框和
+  缺失字符的负载，加上跟踪存储（表、行位置向量与固定列表），以及缓存行数。每个渲染器的负载
+  不超过 448 MiB，跟踪存储不超过 64 MiB；
 - `row_quad_cache_bytes` / `row_quad_cache_items`：哈希表后备存储、缓存背景/装饰
   quad 向量和缓存行数；
 - `software_frame_bytes`：Windows CPU/GDI 帧，其它平台为零；

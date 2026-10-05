@@ -97,9 +97,10 @@ pub struct FrameStats {
     pub partial_fallbacks: u64,
     /// Cells hashed into row glyph cache keys, one row per emitted terminal row.
     pub row_cells_hashed: u64,
-    /// Row glyph cache entries `invalidate_row_abs` examined: one per call, a keyed removal.
+    /// Row glyph cache entries examined to drop dirty rows. Kept for counter-contract
+    /// compatibility: the content-keyed cache drops nothing for dirt, so it is always 0.
     pub row_cache_invalidate_visits: u64,
-    /// Microseconds spent invalidating dirty rows; one clock pair per pane with a dirty row.
+    /// Microseconds spent dropping dirty glyph rows. Kept for compatibility; always 0.
     pub row_cache_invalidate_us: u64,
     /// Glyphs `recolor_cursor_glyphs_in` examined on the frame's main glyph list.
     pub recolor_glyphs_visited: u64,
@@ -702,27 +703,6 @@ pub(crate) fn note_row_cells_hashed(cells: impl FnOnce() -> usize) {
 /// Count one frame whose font preparation applied a newer fallback notice or generation.
 pub(crate) fn note_font_fallback_apply() {
     record(|stats| stats.font_fallback_applies += 1);
-}
-
-/// Count the row glyph cache entries one `invalidate_row_abs` call examines; a keyed removal
-/// examines one. `visited` runs only inside a counting scope.
-pub(crate) fn note_row_cache_invalidate_visits(visited: impl FnOnce() -> usize) {
-    record(|stats| stats.row_cache_invalidate_visits += visited() as u64);
-}
-
-/// The start of one pane's row invalidation: read only inside a counting scope and only when
-/// `dirty_rows` is at least one, so a pane that invalidates nothing reads no clock.
-pub(crate) fn invalidation_clock(dirty_rows: impl FnOnce() -> usize) -> Option<Instant> {
-    (COLLECTING.with(Cell::get) && dirty_rows() > 0).then(Instant::now)
-}
-
-/// Add one pane's invalidation time, measured from `started`, as plain microseconds.
-pub(crate) fn note_row_cache_invalidate_us(started: Option<Instant>) {
-    if let Some(started) = started {
-        // the pane invalidated rows under a counting scope, so its clock pair closes here.
-        let elapsed_us = micros_since(started);
-        record(|stats| stats.row_cache_invalidate_us += elapsed_us);
-    }
 }
 
 /// Count the glyphs one `recolor_cursor_glyphs_in` call examined on the main glyph list: rows

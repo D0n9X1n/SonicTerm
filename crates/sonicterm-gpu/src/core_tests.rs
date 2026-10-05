@@ -191,6 +191,78 @@ fn production_frame_decisions_use_one_plan_and_preserve_retry_boundaries() {
     }
 }
 
+/// A style run and the row it shapes into, for driving the record builder directly.
+struct ShapeRunFixture<'run> {
+    atlas: &'run mut GlyphAtlas,
+    row: u16,
+    style: RunStyle,
+    cells: &'run [(u16, Cell)],
+    theme: &'run Theme,
+    fg_default: ChromeColor,
+    cell_size: (f32, f32),
+    origin: (f32, f32),
+    surface: (f32, f32),
+    baseline_y_in_cell: f32,
+    snapped_cell_x: &'run [f32],
+    font_stack: Option<&'run sonicterm_engine::FontStack>,
+    wt_raster: Option<&'run mut sonicterm_engine::FontStack>,
+    hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+    hovered_url_accent: [f32; 4],
+    software_presenter: bool,
+}
+
+/// Build one style run's records and project them at `fixture.row`, as a missed row is drawn,
+/// appending glyphs, tofu and missing characters; returns the run's completeness.
+fn shape_run_for_test(
+    fixture: ShapeRunFixture<'_>,
+    glyphs: &mut Vec<GlyphInstance>,
+    tofu: &mut Vec<(f32, f32, f32, f32, ChromeColor)>,
+    missing: &mut Vec<char>,
+) -> bool {
+    let mut records = sonicterm_text::row_glyph_cache::CachedRow::default();
+    let complete = GpuRenderer::build_shape_run(
+        fixture.atlas,
+        &mut records,
+        fixture.row,
+        fixture.style,
+        fixture.cells,
+        fixture.theme,
+        fixture.fg_default,
+        fixture.cell_size.0,
+        fixture.cell_size.1,
+        fixture.origin.1,
+        fixture.snapped_cell_x,
+        fixture.font_stack,
+        fixture.wt_raster,
+        fixture.hovered_url_cells,
+        fixture.hovered_url_accent,
+        fixture.software_presenter,
+    );
+    let at = RowPlacement {
+        slot: fixture.row,
+        origin: fixture.origin,
+        cols: (fixture.snapped_cell_x.len().saturating_sub(1)) as u16,
+        snapped_cell_x: fixture.snapped_cell_x,
+        cell_size: fixture.cell_size,
+        baseline_y_in_cell: fixture.baseline_y_in_cell,
+        surface: fixture.surface,
+    };
+    let (mut underlines, mut spans) = (Vec::new(), Vec::new());
+    project_cached_row(
+        &records,
+        &at,
+        fixture.software_presenter,
+        GlyphFrame {
+            glyph_instances: glyphs,
+            underlines: &mut underlines,
+            missing_tofu: tofu,
+            missing_chars_this_frame: missing,
+            row_spans: &mut spans,
+        },
+    );
+    complete
+}
+
 #[derive(Clone, Default)]
 struct GlyphLogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -273,32 +345,28 @@ fn ordinary_white_and_color_glyph_emission_does_not_warn() {
                     let mut glyphs = Vec::new();
                     let mut tofu = Vec::new();
                     let mut missing = Vec::new();
-                    GpuRenderer::flush_shape_run(
-                        &mut atlas,
-                        "Rec Mono St.Helens",
-                        14.0,
+                    let _complete = shape_run_for_test(
+                        ShapeRunFixture {
+                            atlas: &mut atlas,
+                            row: 0,
+                            style,
+                            cells: &[(0, cell)],
+                            theme: &Theme::default(),
+                            fg_default: ChromeColor::rgb(255, 255, 255),
+                            cell_size: (10.0, 20.0),
+                            origin: (0.0, 0.0),
+                            surface: (100.0, 100.0),
+                            baseline_y_in_cell: 15.0,
+                            snapped_cell_x: &[0.0, 10.0],
+                            font_stack: Some(&shaper),
+                            wt_raster: Some(&mut stack),
+                            hovered_url_cells: None,
+                            hovered_url_accent: [0.0; 4],
+                            software_presenter: false,
+                        },
                         &mut glyphs,
                         &mut tofu,
                         &mut missing,
-                        0,
-                        0,
-                        style,
-                        &[(0, cell)],
-                        &Theme::default(),
-                        ChromeColor::rgb(255, 255, 255),
-                        10.0,
-                        20.0,
-                        0.0,
-                        0.0,
-                        100.0,
-                        100.0,
-                        15.0,
-                        &[0.0, 10.0],
-                        Some(&shaper),
-                        Some(&mut stack),
-                        None,
-                        [0.0; 4],
-                        false,
                     );
                     assert_eq!(glyphs.len(), 1);
                     assert!(tofu.is_empty() && missing.is_empty());
@@ -1021,10 +1089,15 @@ fn atlas_frame_detector_production_capture_and_retry_precede_presentation() {
     // Frame and preedit checks share qualified identity; diagnostic eviction counts cannot admit a frame.
     let source = include_str!("core.rs");
     let start = source.find("let atlas_stamp_at_frame_start = self.glyph_atlas_stamp();").unwrap();
+    // `assemble_frame` hands the start stamp and the current one to the shared pass-end helper,
+    // which checks them before any batch reaches the presenter.
+    let handoff = source.find("atlas_stamp_now: self.glyph_atlas_stamp(),").unwrap();
+    let call = source.find("Self::finish_assembly_pass(&mut plan, panes, pass_end)").unwrap();
+    assert!(start < handoff && handoff < call);
     let guard = source
-        .find("if atlas_changed_during_frame(atlas_stamp_at_frame_start, self.glyph_atlas_stamp())")
+        .find("if atlas_changed_during_frame(pass.atlas_stamp_at_start, pass.atlas_stamp_now)")
         .unwrap();
-    let retry = source[guard..].find("return Ok(Assembled::AtlasRetry {").unwrap() + guard;
+    let retry = source[guard..].find("return Err(Assembled::AtlasRetry {").unwrap() + guard;
     let present = source.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
     let acknowledge = source.find("self.finish_successful_frame(").unwrap();
     assert!(start < guard && guard < retry && retry < present && present < acknowledge);
@@ -1612,16 +1685,21 @@ fn atlas_eviction_during_frame_requires_retry() {
 fn row_cache_uses_nonrepeating_atlas_identity() {
     let mut atlas = GlyphAtlas::new(1, 1);
     let mut cache = sonicterm_text::row_glyph_cache::RowGlyphCache::new();
-    cache.resize(1);
+    cache.begin_frame(&[(7, 1, 8)]);
     let stale_identity = row_cache_atlas_identity(&atlas);
     let stale_evictions = atlas.evictions();
-    cache.insert(7, 11, 13, stale_identity, sonicterm_text::row_glyph_cache::CachedRow::default());
+    assert!(cache.insert(
+        7,
+        13,
+        stale_identity,
+        sonicterm_text::row_glyph_cache::CachedRow::default()
+    ));
 
     atlas.reset_in_place();
 
     assert_eq!(atlas.evictions(), stale_evictions, "the diagnostic counter repeats after reset");
     assert_ne!(row_cache_atlas_identity(&atlas), stale_identity);
-    assert!(cache.get(7, 11, 13, row_cache_atlas_identity(&atlas)).is_none());
+    assert!(cache.get(7, 13, row_cache_atlas_identity(&atlas), |_| true).is_none());
 }
 
 #[test]
@@ -1763,25 +1841,31 @@ fn status_marker_fit_leaves_degenerate_geometry_unchanged() {
     );
 }
 
+/// Fallback and shaped glyphs both carry the marker-fit decision made at shape time from the
+/// lead cell, and projection applies the fit to those two kinds only, after the shaping offset
+/// and before the device-pixel snap and NDC conversion.
 #[test]
 fn status_marker_fit_is_wired_before_both_terminal_glyph_emissions() {
-    // Contract: fallback and shaped producers both fit before creating GlyphInstance rectangles.
-    const SOURCE: &str = include_str!("core.rs");
-    const CALL: &str = "let (gx, gy, gw, gh) = fit_single_cell_status_marker(";
-    const PUSH: &str = "glyph_instances.push(GlyphInstance";
-    let fallback_start = SOURCE.find("if g.glyph_id == 0 {").expect("fallback branch");
-    let shaped_offset = SOURCE[fallback_start..]
-        .find("let key = sonicterm_types::glyph_key::GlyphKey::shaped(")
-        .expect("shaped branch");
-    let shaped_start = fallback_start + shaped_offset;
-
-    assert_eq!(SOURCE.matches(CALL).count(), 2);
-    for section in [&SOURCE[fallback_start..shaped_start], &SOURCE[shaped_start..]] {
-        let fit = section.find(CALL).expect("shared marker fit call");
-        let push = section.find(PUSH).expect("glyph instance emission");
-        assert!(section.contains("lead_cell.extras().is_some()"));
-        assert!(fit < push, "marker fitting must precede GlyphInstance creation");
-    }
+    let source: String = include_str!("core.rs").split_whitespace().collect();
+    let build = source.find("fnbuild_shape_run(").expect("record builder");
+    let builder = &source[build..];
+    let decide = builder.find("letmarker_fit=status_marker_fit_eligible(").expect("decision");
+    let fallback = builder.find("ifg.glyph_id==0{").expect("fallback branch");
+    assert!(decide < fallback, "one decision serves both the fallback and the shaped branch");
+    assert_eq!(
+        builder
+            .matches("set_shaped_bits(&mutrecord,[shape_x_offset,g.y_offset],marker_fit,")
+            .count(),
+        2
+    );
+    let project = source.find("pub(crate)fnproject_row_glyph(").expect("projection");
+    let body = &source[project..project + source[project..].find("\n}").unwrap_or(4000).min(4000)];
+    let arm = body.find("RowGlyphKind::Fallback|RowGlyphKind::Shaped=>{").expect("fit arm");
+    let offset = body.find("positioned_shaped_glyph_rect(").expect("shaping offset");
+    let fit = body.find("fit_status_marker_rect(positioned,").expect("fit");
+    let snap = arm + body[arm..].find("snap_to_device_pixels(fitted,").expect("snap");
+    let ndc = body.find("rect:px_to_ndc(").expect("ndc");
+    assert!(arm < offset && offset < fit && fit < snap && snap < ndc);
 }
 
 /// Glyph flags preserve color selection in x and raw subpixel coverage in y.
@@ -3478,16 +3562,13 @@ fn wrapped_hover_cache_identity_is_pane_and_row_local() {
         true,
     )
     .unwrap();
-    let baseline = 41;
     let first = hovered_url_for_pane_row(Some(hovered), 7, 2).unwrap();
     let second = hovered_url_for_pane_row(Some(hovered), 7, 3).unwrap();
 
-    assert_ne!(hovered_url_row_cache_key(baseline, Some(first), 2), baseline);
-    assert_ne!(hovered_url_row_cache_key(baseline, Some(second), 3), baseline);
-    assert_ne!(
-        hovered_url_row_cache_key(baseline, Some(first), 2),
-        hovered_url_row_cache_key(baseline, Some(second), 3)
-    );
+    // Each row folds only its own fragment's columns into its content key.
+    assert_eq!(hovered_url_row_key_span(Some(first), 2), Some((3, 10)));
+    assert_eq!(hovered_url_row_key_span(Some(second), 3), Some((0, 4)));
+    assert_eq!(hovered_url_row_key_span(Some(first), 3), None, "no fragment on that row");
     assert!(hovered_url_for_pane_row(Some(hovered), 8, 2).is_none());
     assert!(hovered_url_for_pane_row(Some(hovered), 7, 1).is_none());
 }
@@ -3555,7 +3636,7 @@ fn wrapped_hover_hint_keeps_plain_row_cache_identity() {
     .unwrap();
     let row = hovered_url_for_pane_row(Some(hovered), 7, 3).unwrap();
 
-    assert_eq!(hovered_url_row_cache_key(41, Some(row), 3), 41);
+    assert_eq!(hovered_url_row_key_span(Some(row), 3), None, "a hint folds nothing");
 }
 
 /// HarfBuzz placement offsets move the origin without resizing the tile.
@@ -4024,34 +4105,29 @@ fn row_cache_parts_have_distinct_uncharged_classes() {
     }
 }
 
-/// The row-cache coverage envelopes contain four maximum viewport working sets.
-///
-/// The table rows are deliberately conservative high-water envelopes, not the
-/// live report. This pins them to the current replay-record layouts and the
-/// grid's maximum visible-cell seam so either changing cannot silently make the
-/// recorded uncharged gap smaller than reachable cache payload.
+/// The row-cache coverage envelopes bound what each cache can retain. The glyph cache enforces
+/// its envelope: the production payload and tracking budgets sum to exactly the recorded
+/// figure, so reported storage cannot pass it however many panes are drawn. The quad envelope
+/// is pinned to four maximum viewport working sets of its replay record.
 #[test]
 fn row_cache_coverage_envelopes_cover_maximum_visible_payloads() {
-    let visible_cells =
-        sonicterm_render_model::boundary::grid::grid::MAX_VISIBLE_GRID_CELLS as usize;
-    let headroom = 4usize;
-    let table_entry = std::mem::size_of::<((u64, u64, u64), (u64, Vec<u8>))>() + 2;
-
-    let glyph_per_cell = std::mem::size_of::<sonicterm_text::GlyphInstance>()
-        + std::mem::size_of::<sonicterm_text::row_glyph_cache::UnderlineRun>()
-        + std::mem::size_of::<(f32, f32, f32, f32, [u8; 4])>()
-        + std::mem::size_of::<char>();
-    let glyph_required = visible_cells
-        .saturating_mul(headroom)
-        .saturating_mul(glyph_per_cell)
-        .saturating_add(usize::from(u16::MAX).saturating_mul(table_entry));
+    use sonicterm_text::row_glyph_cache::{
+        DEFAULT_PAYLOAD_BUDGET_BYTES, DEFAULT_TRACKING_BUDGET_BYTES,
+    };
     let ClassCoverage::UnchargedRetention { per_owner_bytes: glyph_bound } =
         ResourceClass::RowGlyphCache.coverage()
     else {
         panic!("RowGlyphCache must record its uncharged high-water envelope");
     };
-    assert!(glyph_bound >= glyph_required, "glyph bound {glyph_bound} < {glyph_required}");
+    assert_eq!(DEFAULT_PAYLOAD_BUDGET_BYTES + DEFAULT_TRACKING_BUDGET_BYTES, glyph_bound);
+    assert_eq!(glyph_bound, 512 * 1024 * 1024);
+    let cache = sonicterm_text::row_glyph_cache::RowGlyphCache::new();
+    assert_eq!(cache.payload_budget() + cache.tracking_budget(), glyph_bound);
 
+    let visible_cells =
+        sonicterm_render_model::boundary::grid::grid::MAX_VISIBLE_GRID_CELLS as usize;
+    let headroom = 4usize;
+    let table_entry = std::mem::size_of::<((u64, u64, u64), (u64, Vec<u8>))>() + 2;
     let quad_required = visible_cells
         .saturating_mul(headroom)
         .saturating_mul(std::mem::size_of::<crate::quad::QuadInstance>())
@@ -4271,47 +4347,6 @@ fn copy_mode_rows_use_the_transposed_coordinate_slot() {
     assert_eq!(GpuRenderer::viewport_relative_row(start.0, 10, 8), None);
 }
 
-/// The capacity case where invalidation order decides what survives: capacity 8, seven
-/// unrelated entries, one for pane B's dirty row, pane A's dirty row not cached, and no
-/// viewport recorded, so an admission at capacity evicts every row. Each pane's rows are
-/// invalidated and then inserted, pane A first, as `render_frame` does. Returns the cache.
-fn per_pane_invalidation_then_insertion() -> sonicterm_text::row_glyph_cache::RowGlyphCache {
-    use sonicterm_text::row_glyph_cache::{CachedRow, RowGlyphCache};
-    let (pane_a, pane_b, unrelated) = (1, 2, 3);
-    let mut cache = RowGlyphCache::new();
-    cache.resize(2);
-    for row in 100..107 {
-        cache.insert(unrelated, row, 1, 0, CachedRow::default());
-    }
-    cache.insert(pane_b, 50, 1, 0, CachedRow::default());
-    assert_eq!(cache.len(), 8, "the cache starts full");
-    for (pane_id, dirty_row) in [(pane_a, 10_usize), (pane_b, 50)] {
-        invalidate_dirty_rows(&mut cache, pane_id, 0, &[dirty_row]);
-        cache.insert(pane_id, dirty_row as u64, 3, 0, CachedRow::default());
-    }
-    cache
-}
-
-#[test]
-fn row_invalidation_keeps_the_original_per_pane_order_with_the_gate_on_or_off() {
-    // Pane A's insertion finds the cache full and evicts every row (no viewport is recorded),
-    // so only the two fresh rows remain. Invalidating every pane first would let pane A's row
-    // in without eviction and pane B's insertion would then evict it, leaving one; counting
-    // must never change which entries capacity eviction drops.
-    let uncounted = per_pane_invalidation_then_insertion();
-    let sink = crate::frame_stats::FrameStatsSink::default();
-    let counted = {
-        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
-        per_pane_invalidation_then_insertion()
-    };
-    for cache in [&uncounted, &counted] {
-        assert_eq!(cache.len(), 2);
-        assert!(cache.get(1, 10, 3, 0).is_some() && cache.get(2, 50, 3, 0).is_some());
-    }
-    // Each call is one keyed removal, so each pane's one dirty row examines one entry.
-    assert_eq!(sink.snapshot().row_cache_invalidate_visits, 2);
-}
-
 /// The vertex scratch is renderer-held CPU storage: `retained_amounts` reports the
 /// presentation pipeline's figure together with both atlas uploads' rect lists, `total()` counts
 /// it, and it is tagged as upload staging.
@@ -4332,29 +4367,37 @@ fn vertex_scratch_is_part_of_the_retained_report() {
     assert!(staging[..300].contains("self.present_pipeline.vertex_scratch_retained()"));
 }
 
-/// Frame assembly records each emitted row's glyph span on both the cache-hit and miss paths of
-/// `emit_row_glyphs`, names every drawn pane's viewport to the row cache before any row is
-/// inserted, and appends the tab titles after the cursor recolors and before search recolor.
+/// Frame assembly starts one glyph cache pass before the pane loop; each pane's pin phase pins
+/// every emitted row's key before its first admission; the cache-hit and miss paths of
+/// `emit_row_glyphs` each record exactly one span, through the shared projection; and the tab
+/// titles are appended after the cursor recolors and before search recolor.
 #[test]
 fn row_spans_viewports_and_title_order_follow_the_assembly() {
     let core: String = include_str!("core.rs").split_whitespace().collect();
-    let resize =
-        core.find("self.row_glyph_cache.resize(total_glyph_rows.max(1));").expect("resize");
-    let begin = core.find("self.row_glyph_cache.begin_frame(&visible_rows);").expect("begin_frame");
+    let begin = core
+        .find("begin_glyph_pass(&mutself.row_glyph_cache,&mutself.row_ink,")
+        .expect("one pass start");
     let pane_loop = core
         .find("forpvinpane_views.iter().filter(|pane|pane.planned.full_clip.is_some()){")
         .expect("per-pane loop");
-    assert!(resize < begin && begin < pane_loop, "viewports are named before any insert");
-    // Two sites record a row's own glyphs; the third is the test row-glyph seam's own span.
-    assert_eq!(core.matches("row_spans.push(RowGlyphSpan::new(").count(), 3);
-    let seam = core.find("fnpush_injected_row_glyph(").expect("row glyph seam");
-    assert!(core[seam..].find("row_spans.push(RowGlyphSpan::new(").is_some());
-    let hit = core.find("glyph_instances.extend_from_slice(&cached.glyphs);").expect("hit replay");
-    let hit_span = hit + core[hit..].find("row_spans.push(").expect("hit span");
-    let hit_return = hit + core[hit..].find("returntrue;").expect("hit return");
-    assert!(hit_span < hit_return, "the cache-hit row records its span before returning");
-    let insert = core.find("row_cache.insert(").expect("miss insert");
-    assert!(core[insert..].find("row_spans.push(").is_some(), "the miss path records its span");
+    assert!(begin < pane_loop, "the pass starts before any pane pins or admits");
+    let seam = core.find("pub(crate)fnassemble_pane_glyph_rows(").expect("pane seam");
+    let pin = seam + core[seam..].find("shaping.row_cache.pin(pane_id,&keys);").expect("pin");
+    let first_emit = seam + core[seam..].find("emit_row_glyphs(").expect("emit");
+    assert!(pin < first_emit, "every key is pinned before the first admission");
+    // One projection site records a row's span; the other is the test row-glyph seam's own.
+    assert_eq!(core.matches("row_spans.push(RowGlyphSpan::new(").count(), 2);
+    let injected = core.find("fnpush_injected_row_glyph(").expect("row glyph seam");
+    assert!(core[injected..].find("row_spans.push(RowGlyphSpan::new(").is_some());
+    let project = core.find("pub(crate)fnproject_cached_row(").expect("shared projection");
+    assert!(core[project..].find("frame.row_spans.push(RowGlyphSpan::new(").is_some());
+    let emit = core.find("pub(crate)fnemit_row_glyphs(").expect("emit_row_glyphs");
+    let body = &core[emit..];
+    let hit = body.find("project_cached_row(cached,&at,").expect("hit projection");
+    let hit_return = body.find("returntrue;").expect("hit return");
+    let miss = body.find("project_cached_row(&records,&at,").expect("miss projection");
+    let insert = body.find("row_cache.insert(").expect("miss admission");
+    assert!(hit < hit_return && hit_return < miss && miss < insert, "one span on each path");
     let calls: Vec<usize> = core
         .match_indices("recolor_cursor_glyphs_in(&mutglyph_instances")
         .map(|(at, _)| at)
@@ -4555,27 +4598,18 @@ fn scrolled_back_cache_plan(dirty_live_rows: Vec<usize>) -> FramePlan {
     FramePlan::build(frame_facts(), [metadata(2, dirty_live_rows)], Some(&baseline.key))
 }
 
-/// Seed both row caches with every row in `SEEDED_ABS_ROWS`, then run the planned pane
-/// through the same two invalidation calls `render_frame` makes, and report which seeded
-/// absolute rows each cache still holds as `(glyph, quad)`.
-fn surviving_cached_rows(plan: &FramePlan) -> (Vec<u64>, Vec<u64>) {
-    use sonicterm_text::row_glyph_cache::{CachedRow, RowGlyphCache};
+/// Seed the background-quad cache with every row in `SEEDED_ABS_ROWS`, run the planned pane
+/// through the quad invalidation `render_frame` makes, and report which seeded absolute rows it
+/// still holds. The glyph cache is keyed by content and drops nothing for dirt.
+fn surviving_cached_rows(plan: &FramePlan) -> Vec<u64> {
     let planned = &plan.panes[0];
-    let mut glyphs = RowGlyphCache::new();
-    glyphs.resize(planned.row_count);
     let mut quads = crate::row_quad_cache::LineQuadCache::new();
     quads.resize(planned.row_count);
     for row_abs in SEEDED_ABS_ROWS {
-        glyphs.insert(planned.id, row_abs, 1, 0, CachedRow::default());
         quads.insert(planned.id, row_abs, 1, crate::row_quad_cache::CachedRowQuads::default());
     }
-    invalidate_planned_glyph_rows(&mut glyphs, planned);
     invalidate_planned_quad_rows(&mut quads, planned);
-    let glyph_rows =
-        SEEDED_ABS_ROWS.into_iter().filter(|&row| glyphs.get(planned.id, row, 1, 0).is_some());
-    let quad_rows =
-        SEEDED_ABS_ROWS.into_iter().filter(|&row| quads.get(planned.id, row, 1).is_some());
-    (glyph_rows.collect(), quad_rows.collect())
+    SEEDED_ABS_ROWS.into_iter().filter(|&row| quads.get(planned.id, row, 1).is_some()).collect()
 }
 
 /// The damage rectangle of one viewport slot of the scrolled-back cache plan.
@@ -4596,8 +4630,8 @@ fn cache_plan_slot_rect(plan: &FramePlan, slot: usize) -> PixelRect {
     .expect("the slot has pixels")
 }
 
-/// A Full frame for an edit to live row 5 of a view scrolled back three rows drops both
-/// caches' entry for absolute row 105 and damages slot 8, which draws it; it neither damages
+/// A Full frame for an edit to live row 5 of a view scrolled back three rows drops the quad
+/// cache's entry for absolute row 105 and damages slot 8, which draws it; it neither damages
 /// slot 5 nor drops the entries for absolute row 102 (drawn at slot 5) or 108.
 #[test]
 fn scrolled_back_edit_invalidates_the_live_rows_absolute_entry_in_both_caches() {
@@ -4608,21 +4642,17 @@ fn scrolled_back_edit_invalidates_the_live_rows_absolute_entry_in_both_caches() 
         Some(cache_plan_slot_rect(&plan, 8))
     );
     assert_eq!(plan.damage.intersect(cache_plan_slot_rect(&plan, 5)), None);
-    let (glyph_rows, quad_rows) = surviving_cached_rows(&plan);
-    assert_eq!(glyph_rows, [102, 108, 122], "glyph cache");
-    assert_eq!(quad_rows, [102, 108, 122], "quad cache");
+    assert_eq!(surviving_cached_rows(&plan), [102, 108, 122], "quad cache");
 }
 
 /// With one dirty live row drawn and one below the view, a Full frame drops both absolute
-/// rows from both caches while its damage covers only the drawn row's slot.
+/// rows from the quad cache while its damage covers only the drawn row's slot.
 #[test]
 fn mixed_scrolled_back_edit_invalidates_both_rows_and_damages_one_slot() {
     let plan = scrolled_back_cache_plan(vec![5, 22]);
     assert_eq!(plan.mode, RenderMode::Full);
     assert_eq!(plan.damage, cache_plan_slot_rect(&plan, 8));
-    let (glyph_rows, quad_rows) = surviving_cached_rows(&plan);
-    assert_eq!(glyph_rows, [102, 108], "glyph cache");
-    assert_eq!(quad_rows, [102, 108], "quad cache");
+    assert_eq!(surviving_cached_rows(&plan), [102, 108], "quad cache");
 }
 
 /// The cursor is drawn when the view is live and hidden when it is scrolled back, even by
@@ -4723,13 +4753,15 @@ fn parity_grid(cols: u16) -> Grid {
     grid
 }
 
-/// One pointer-visible frame state: viewport top, pane origin, selection and focus.
+/// One pointer-visible frame state: viewport top, pane origin, selection, focus, and the scale
+/// the cell geometry is drawn at.
 #[derive(Clone, Copy)]
 struct ParityFrame {
     view_top_abs: u64,
     origin_x: f32,
     selection: Option<(u64, u64)>,
     focused: bool,
+    scale: f32,
 }
 
 /// One frame's drawn output: quads, glyph instances, and the decorations kept as records.
@@ -4766,7 +4798,8 @@ fn render_parity_frame(
     frame: ParityFrame,
 ) -> (RenderedFrame, usize, usize) {
     let theme = Theme::default();
-    let (cell_w, cell_h) = (10.0, 20.0);
+    let (cell_w, cell_h) = (10.0 * frame.scale, 20.0 * frame.scale);
+    let baseline_y_in_cell = 16.0 * frame.scale;
     let surface = (400.0, 200.0);
     let pane_size = (f32::from(grid.cols) * cell_w, f32::from(grid.rows) * cell_h);
     let snapped = build_snapped_cell_x(frame.origin_x, cell_w, grid.cols);
@@ -4775,10 +4808,8 @@ fn render_parity_frame(
         let (lo, hi) = sel.normalized();
         (lo.0, lo.1, hi.0, hi.1)
     });
-    caches.glyph_rows.resize(grid.rows);
+    caches.glyph_rows.begin_frame(&[(7, grid.rows, grid.cols)]);
     caches.background_rows.resize(grid.rows);
-    let visible = [(7, frame.view_top_abs..frame.view_top_abs + u64::from(grid.rows))];
-    caches.glyph_rows.begin_frame(&visible);
     let mut raster = stack.clone();
     let (mut quads, mut glyph_instances, mut underlines) = (Vec::new(), Vec::new(), Vec::new());
     let (mut missing_tofu, mut missing_chars, mut row_spans) = (Vec::new(), Vec::new(), Vec::new());
@@ -4790,6 +4821,26 @@ fn render_parity_frame(
         surface,
         max_cols: grid.cols,
     };
+    let mut shaping = GlyphShaping {
+        atlas: &mut *atlas,
+        row_cache: &mut caches.glyph_rows,
+        font_stack: Some(stack),
+        wt_raster: Some(&mut raster),
+        style_rev: 0,
+        theme: &theme,
+        fg_default: ChromeColor::rgb(230, 230, 230),
+        raster_px: 14.0,
+        cell_size: (cell_w, cell_h),
+        surface,
+        baseline_y_in_cell,
+        hovered_url_accent: [0.0; 4],
+        software_presenter: false,
+    };
+    // Pin phase, as the production pass runs it: every row's key before any admission.
+    let keys: Vec<u64> = (0..grid.rows)
+        .map(|slot| emitted_row_key(&shaping, grid, frame.view_top_abs, slot, None))
+        .collect();
+    shaping.row_cache.pin(7, &keys);
     for slot in 0..grid.rows {
         let row = grid.row_at_abs(frame.view_top_abs + u64::from(slot)).expect("retained row");
         background_replays += usize::from(emit_row_background(
@@ -4802,22 +4853,7 @@ fn render_parity_frame(
             &mut quads,
         ));
         glyph_replays += usize::from(emit_row_glyphs(
-            GlyphShaping {
-                atlas: &mut *atlas,
-                row_cache: &mut caches.glyph_rows,
-                font_family: "Rec Mono St.Helens",
-                font_stack: Some(stack),
-                wt_raster: Some(&mut raster),
-                style_rev: 0,
-                theme: &theme,
-                fg_default: ChromeColor::rgb(230, 230, 230),
-                raster_px: 14.0,
-                cell_size: (cell_w, cell_h),
-                surface,
-                baseline_y_in_cell: 16.0,
-                hovered_url_accent: [0.0; 4],
-                software_presenter: false,
-            },
+            shaping.reborrow(),
             GlyphRow {
                 pane_id: 7,
                 grid,
@@ -4825,8 +4861,8 @@ fn render_parity_frame(
                 slot,
                 origin: (frame.origin_x, 0.0),
                 snapped_cell_x: &snapped,
-                selection: sel_bbox,
                 pane_hovered_url: None,
+                key: keys[usize::from(slot)],
             },
             GlyphFrame {
                 glyph_instances: &mut glyph_instances,
@@ -4836,7 +4872,10 @@ fn render_parity_frame(
                 row_spans: &mut row_spans,
             },
         ));
+        shaping.row_cache.stage_slot(7, slot, keys[usize::from(slot)]);
     }
+    // Every parity frame is presented, so its slot keys commit.
+    caches.glyph_rows.commit_slots();
     if frame.focused {
         // Focus chrome: the pane flash.
         quads.push(focus_flash_quad(
@@ -4886,58 +4925,74 @@ fn render_parity_frame(
 }
 
 /// With clean grids (no row dirt), a renderer whose caches were warmed by the previous frame
-/// draws each pointer operation exactly as a renderer with empty caches: glyph instance bytes
-/// (position, atlas region, colour, cursor recolour), underline and tofu records, background,
-/// selection and focus chrome all match, and rows the operation did not change still replay.
+/// draws each pointer operation exactly as a renderer with empty caches, at scales 1, 1.25, 1.5
+/// and 2: glyph instance bytes (position, atlas region, colour, cursor recolour), underline and
+/// tofu records, background, selection and focus chrome all match. Because the glyph key is the
+/// row's content, every row whose cells are unchanged replays wherever it is drawn: a selection,
+/// a focus change and a moved pane replay all four rows, a two-row viewport move replays the two
+/// rows still shown, and only a resized pane, released with its old width, replays none.
 #[test]
 fn pointer_operations_render_the_same_from_warmed_caches_as_from_fresh_ones() {
     let stack = packaged_font_stack();
     let wide = parity_grid(6);
     let narrow = parity_grid(4);
     let live_top = wide.scrollback_len() as u64;
-    let rest =
-        ParityFrame { view_top_abs: live_top, origin_x: 0.0, selection: None, focused: false };
-    let focused = ParityFrame { focused: true, ..rest };
-    let cases = [
-        // name, before frame and grid, after frame and grid, glyph and background replays.
-        (
-            "selection",
-            (rest, &wide),
-            (ParityFrame { selection: Some((live_top + 1, live_top + 1)), ..rest }, &wide),
-            3,
-            3,
-        ),
-        ("focus gained", (rest, &wide), (focused, &wide), 4, 4),
-        ("focus lost", (focused, &wide), (rest, &wide), 4, 4),
-        (
-            "viewport",
-            (rest, &wide),
-            (ParityFrame { view_top_abs: live_top - 2, ..rest }, &wide),
-            0,
-            0,
-        ),
-        ("moved pane", (rest, &wide), (ParityFrame { origin_x: 120.0, ..rest }, &wide), 0, 0),
-        ("resized pane", (rest, &wide), (rest, &narrow), 0, 0),
-    ];
-    for (name, (before, before_grid), (after, after_grid), glyph_hits, background_hits) in cases {
-        let mut atlas = GlyphAtlas::new(1024, 1024);
-        let mut warmed = ParityCaches::new();
-        let (before_output, _, _) =
-            render_parity_frame(&stack, &mut atlas, &mut warmed, before_grid, before);
-        let (cached, glyph_replays, background_replays) =
-            render_parity_frame(&stack, &mut atlas, &mut warmed, after_grid, after);
-        // The forced-fresh render shares the atlas, so glyph regions keep their placement.
-        let (fresh, fresh_replays, _) =
-            render_parity_frame(&stack, &mut atlas, &mut ParityCaches::new(), after_grid, after);
-        assert!(!fresh.glyphs.is_empty(), "{name}: the fixture draws real glyphs");
-        assert_eq!(fresh_replays, 0, "{name}: empty caches replay nothing");
-        assert_eq!(cached, fresh, "{name}: warmed caches must draw what fresh ones do");
-        assert_ne!(cached, before_output, "{name}: the operation changes the frame");
-        assert_eq!(
-            (glyph_replays, background_replays),
-            (glyph_hits, background_hits),
-            "{name}: rows the operation did not change still replay"
-        );
+    for scale in [1.0, 1.25, 1.5, 2.0] {
+        let rest = ParityFrame {
+            view_top_abs: live_top,
+            origin_x: 0.0,
+            selection: None,
+            focused: false,
+            scale,
+        };
+        let focused = ParityFrame { focused: true, ..rest };
+        let cases = [
+            // name, before frame and grid, after frame and grid, glyph and background replays.
+            (
+                "selection",
+                (rest, &wide),
+                (ParityFrame { selection: Some((live_top + 1, live_top + 1)), ..rest }, &wide),
+                4,
+                3,
+            ),
+            ("focus gained", (rest, &wide), (focused, &wide), 4, 4),
+            ("focus lost", (focused, &wide), (rest, &wide), 4, 4),
+            (
+                "viewport",
+                (rest, &wide),
+                (ParityFrame { view_top_abs: live_top - 2, ..rest }, &wide),
+                2,
+                0,
+            ),
+            ("moved pane", (rest, &wide), (ParityFrame { origin_x: 120.0, ..rest }, &wide), 4, 0),
+            ("resized pane", (rest, &wide), (rest, &narrow), 0, 0),
+        ];
+        for (name, (before, before_grid), (after, after_grid), glyph_hits, background_hits) in cases
+        {
+            let mut atlas = GlyphAtlas::new(1024, 1024);
+            let mut warmed = ParityCaches::new();
+            let (before_output, _, _) =
+                render_parity_frame(&stack, &mut atlas, &mut warmed, before_grid, before);
+            let (cached, glyph_replays, background_replays) =
+                render_parity_frame(&stack, &mut atlas, &mut warmed, after_grid, after);
+            // The forced-fresh render shares the atlas, so glyph regions keep their placement.
+            let (fresh, fresh_replays, _) = render_parity_frame(
+                &stack,
+                &mut atlas,
+                &mut ParityCaches::new(),
+                after_grid,
+                after,
+            );
+            assert!(!fresh.glyphs.is_empty(), "{name} at {scale}: the fixture draws real glyphs");
+            assert_eq!(fresh_replays, 0, "{name} at {scale}: empty caches replay nothing");
+            assert_eq!(cached, fresh, "{name} at {scale}: warmed caches draw what fresh ones do");
+            assert_ne!(cached, before_output, "{name} at {scale}: the operation changes the frame");
+            assert_eq!(
+                (glyph_replays, background_replays),
+                (glyph_hits, background_hits),
+                "{name} at {scale}: rows whose content did not change still replay"
+            );
+        }
     }
 }
 
@@ -5077,32 +5132,28 @@ fn the_ascii_fast_path_draws_tofu_for_a_missing_glyph_and_skips_a_space() {
         assert!(atlas.get_or_insert(key, &mut NoGlyphs).unwrap().missing);
         let cell = Cell::plain(character, Color::Default, Color::Default, CellFlags::empty());
         let (mut glyphs, mut tofu, mut missing) = (Vec::new(), Vec::new(), Vec::new());
-        GpuRenderer::flush_shape_run(
-            &mut atlas,
-            "Rec Mono St.Helens",
-            14.0,
+        let _complete = shape_run_for_test(
+            ShapeRunFixture {
+                atlas: &mut atlas,
+                row: 1,
+                style: RunStyle::from_cell(&cell),
+                cells: &[(0, cell)],
+                theme: &Theme::default(),
+                fg_default: ChromeColor::rgb(255, 255, 255),
+                cell_size: (10.0, 20.0),
+                origin: (0.0, 4.0),
+                surface: (100.0, 100.0),
+                baseline_y_in_cell: 15.0,
+                snapped_cell_x: &[0.0, 10.0],
+                font_stack: Some(&shaper),
+                wt_raster: Some(&mut stack),
+                hovered_url_cells: None,
+                hovered_url_accent: [0.0; 4],
+                software_presenter: false,
+            },
             &mut glyphs,
             &mut tofu,
             &mut missing,
-            1,
-            0,
-            RunStyle::from_cell(&cell),
-            &[(0, cell)],
-            &Theme::default(),
-            ChromeColor::rgb(255, 255, 255),
-            10.0,
-            20.0,
-            4.0,
-            0.0,
-            100.0,
-            100.0,
-            15.0,
-            &[0.0, 10.0],
-            Some(&shaper),
-            Some(&mut stack),
-            None,
-            [0.0; 4],
-            false,
         );
         assert!(glyphs.is_empty(), "{character:?} draws no tile");
         if expect_box {
@@ -5142,32 +5193,28 @@ fn a_real_space_passes_through_the_atlas_and_emission_without_tofu() {
         (1, Cell::plain(' ', Color::Default, Color::Default, CellFlags::empty())),
     ];
     let (mut glyphs, mut tofu, mut missing) = (Vec::new(), Vec::new(), Vec::new());
-    GpuRenderer::flush_shape_run(
-        &mut atlas,
-        "Rec Mono St.Helens",
-        14.0,
+    let _complete = shape_run_for_test(
+        ShapeRunFixture {
+            atlas: &mut atlas,
+            row: 0,
+            style: RunStyle::from_cell(&cells[0].1),
+            cells: &cells,
+            theme: &Theme::default(),
+            fg_default: ChromeColor::rgb(255, 255, 255),
+            cell_size: (10.0, 20.0),
+            origin: (0.0, 0.0),
+            surface: (100.0, 100.0),
+            baseline_y_in_cell: 15.0,
+            snapped_cell_x: &[0.0, 10.0, 20.0],
+            font_stack: Some(&shaper),
+            wt_raster: Some(&mut stack),
+            hovered_url_cells: None,
+            hovered_url_accent: [0.0; 4],
+            software_presenter: false,
+        },
         &mut glyphs,
         &mut tofu,
         &mut missing,
-        0,
-        0,
-        RunStyle::from_cell(&cells[0].1),
-        &cells,
-        &Theme::default(),
-        ChromeColor::rgb(255, 255, 255),
-        10.0,
-        20.0,
-        0.0,
-        0.0,
-        100.0,
-        100.0,
-        15.0,
-        &[0.0, 10.0, 20.0],
-        Some(&shaper),
-        Some(&mut stack),
-        None,
-        [0.0; 4],
-        false,
     );
     assert_eq!(glyphs.len(), 1, "only A draws a glyph");
     assert!(tofu.is_empty(), "the space draws no tofu box");
@@ -5705,9 +5752,18 @@ fn damage_classes_are_wired_through_the_renderer() {
     assert!(compact.contains("cursor_cell:drawn_cursor_cell("));
     assert!(compact.contains("previous_recolor:self.last_recolor,"));
     assert_eq!(compact.matches("frame_recolor=frame_recolor.merge(record);").count(), 2);
-    let widen = source.find("plan.widen_for_recolor(self.last_recolor, frame_recolor);").unwrap();
+    // `assemble_frame` hands both recolor records to the shared pass-end helper, which widens
+    // the damage by them before reading receipts, and the layers are built only after it.
+    assert!(compact.contains("current_recolor:frame_recolor,"));
+    let helper = method_body(&source, "    fn finish_assembly_pass(");
+    let widen = helper
+        .find("plan.widen_for_recolor(pass.previous_recolor, pass.current_recolor);")
+        .expect("the helper widens by the recolors");
+    let receipts = helper.find("Ok(presented_receipts(plan, panes))").expect("receipts");
+    assert!(widen < receipts, "damage is widened before the receipts are read");
+    let call = source.find("Self::finish_assembly_pass(&mut plan, panes, pass_end)").unwrap();
     let layers = source.find("Ok(Assembled::Layers(Box::new(AssembledLayers {").unwrap();
-    assert!(widen < layers, "damage is widened before the layers carry it");
+    assert!(call < layers, "damage is widened before the layers carry it");
     // The record is stored after the presenter reports `Presented` and before the frame finishes.
     let present = function_body(&source, "    fn present_layers(");
     let guard = present.find("return Ok(FrameOutcome::without_receipts(outcome));").unwrap();
@@ -5783,9 +5839,15 @@ fn tab_title_ink_is_measured_widened_and_kept_only_by_a_presented_frame() {
         assembly.find("glyph_ink_bounds(&glyph_instances[tab_glyph_start..]").expect("ink");
     let search = assembly.find("// -------- Search highlights").expect("search block");
     assert!(start < bar && bar < measure && measure < search);
-    let widen =
-        assembly.find("plan.widen_for_tab_ink(self.last_tab_ink, tab_ink);").expect("widen");
-    let receipts = assembly.find("let receipts = presented_receipts(").expect("receipts");
+    let handoff = assembly.find("previous_tab_ink: self.last_tab_ink,").expect("handed off");
+    assert!(assembly.contains("current_tab_ink: tab_ink,"));
+    let call = assembly.find("Self::finish_assembly_pass(&mut plan, panes, pass_end)").unwrap();
+    assert!(handoff < call, "the title ink reaches the shared pass-end helper");
+    let helper = method_body(&source, "    fn finish_assembly_pass(");
+    let widen = helper
+        .find("plan.widen_for_tab_ink(pass.previous_tab_ink, pass.current_tab_ink);")
+        .expect("widen");
+    let receipts = helper.find("Ok(presented_receipts(plan, panes))").expect("receipts");
     assert!(widen < receipts, "damage is widened before the layers carry it");
     let present = source.split_once("    fn present_layers(").expect("present_layers").1;
     let guard = present.find("if !matches!(outcome, PresentOutcome::Presented)").expect("guard");
@@ -5877,11 +5939,12 @@ fn both_row_loops_emit_by_the_planned_bitset() {
         assert!(!source.contains("dirty_rows.contains("), "no dirty-row scan decides emission");
         assert!(!source.contains("dirty_slots.contains("), "no dirty-slot scan decides emission");
         assert!(!source.contains("emit_full_rows"), "no whole-frame emission flag");
-        for marker in ["for (r, _) in pv.planned.rows() {", "for (r, row_abs) in pv.planned.rows()"]
+        for marker in
+            ["    for (slot, _) in planned.rows() {", "for (r, row_abs) in pv.planned.rows()"]
         {
             let start = source.find(marker).unwrap_or_else(|| panic!("{marker}"));
             let head: String = source[start..].lines().take(3).collect();
-            assert!(head.contains("pv.planned.emit_rows["), "{marker} tests emit_rows: {head}");
+            assert!(head.contains("planned.emit_rows["), "{marker} tests emit_rows: {head}");
         }
     }
 }
@@ -5896,12 +5959,16 @@ fn both_row_loops_emit_by_the_planned_bitset() {
 fn ink_records_and_partial_frames_commit_only_on_a_presented_frame() {
     let source = include_str!("core.rs").replace("\r\n", "\n");
     assert_eq!(source.matches("row_ink.commit(").count(), 1, "one commit site");
+    assert_eq!(source.matches("row_glyphs.commit_slots();").count(), 1, "one glyph slot commit");
     assert_eq!(source.matches("note_partial_frame(").count(), 1, "one partial-frame count");
     let settle = source.split_once("fn settle_retained_frame(").expect("settlement seam").1;
     let presented = settle.find("(PresentOutcome::Presented, Some(plan)) => {").expect("arm");
     let commit = settle.find("row_ink.commit(").expect("commit");
     let key = settle.find("*last_frame_key = Some(plan.key);").expect("key");
-    assert!(presented < commit && commit < key);
+    let glyph_commit = settle.find("row_glyphs.commit_slots();").expect("glyph slot commit");
+    let glyph_discard = settle.find("row_glyphs.discard_staged();").expect("glyph slot discard");
+    assert!(presented < commit && commit < glyph_commit && glyph_commit < key);
+    assert!(key < glyph_discard, "every other outcome discards the staged glyph keys");
     assert_eq!(
         source.matches("settle_retained_frame(\n").count(),
         4,
@@ -5915,8 +5982,11 @@ fn ink_records_and_partial_frames_commit_only_on_a_presented_frame() {
     let finish_call = present.find("self.finish_successful_frame(").unwrap();
     assert!(unpresented < guard && guard < finish_call, "only a presented frame finishes");
     let assemble = method_body(&source, "    fn assemble_frame(");
-    let begin = assemble.find("self.row_ink.begin_frame();").expect("a fresh stage per assembly");
-    let glyph_loop = assemble.find("for (r, _) in pv.planned.rows() {").unwrap();
+    let begin = assemble.find("begin_glyph_pass(").expect("a fresh stage per assembly");
+    let pass_start = source.split_once("pub(crate) fn begin_glyph_pass<").expect("helper").1;
+    let pass_start = &pass_start[..pass_start.find("\n}\n").expect("helper end")];
+    assert!(pass_start.contains("row_ink.begin_frame();"), "the shared pass start stages afresh");
+    let glyph_loop = assemble.find("assemble_pane_glyph_rows(").unwrap();
     assert!(begin < glyph_loop);
 }
 
@@ -5926,12 +5996,17 @@ fn ink_records_and_partial_frames_commit_only_on_a_presented_frame() {
 #[test]
 fn a_partial_plan_reaching_unemitted_ink_is_reassembled_full() {
     let source = include_str!("core.rs").replace("\r\n", "\n");
+    let helper = method_body(&source, "    fn finish_assembly_pass(");
+    let widen = helper.find("plan.widen_for_tab_ink(").unwrap();
+    let check = helper.find("plan.partial_reaches_unemitted_ink()").expect("checked");
+    let receipts = helper.find("Ok(presented_receipts(plan, panes))").unwrap();
+    assert!(widen < check && check < receipts);
+    assert!(helper.contains("return Err(Assembled::PartialFallback);"));
     let assemble = method_body(&source, "    fn assemble_frame(");
-    let widen = assemble.find("plan.widen_for_tab_ink(").unwrap();
-    let check = assemble.find("plan.partial_reaches_unemitted_ink()").expect("checked");
+    let call = assemble.find("Self::finish_assembly_pass(&mut plan, panes, pass_end)").unwrap();
     let layers = assemble.find("Ok(Assembled::Layers(Box::new(AssembledLayers {").unwrap();
-    assert!(widen < check && check < layers);
-    assert!(assemble.contains("return Ok(Assembled::PartialFallback);"));
+    assert!(call < layers, "the pass ends in the shared helper before the layers are built");
+    assert!(assemble.contains("return Ok(early_exit);"), "its early exit leaves assembly");
     assert!(assemble.contains("plan.force_full();"), "the second pass plans Full");
     let releasing = method_body(&source, "    pub fn render_releasing(");
     assert!(releasing.contains("assemble_with_fallback(|force_full|"), "one orchestration");
@@ -5971,11 +6046,12 @@ fn partial_failure_seams_keep_the_frame_key_when_armed() {
 #[test]
 fn an_injected_row_glyph_joins_its_rows_span_and_record() {
     let source = include_str!("core.rs").replace("\r\n", "\n");
-    let assemble = method_body(&source, "    fn assemble_frame(");
-    let row_loop = assemble.find("for (r, _) in pv.planned.rows() {").unwrap();
-    let emit = row_loop + assemble[row_loop..].find("emit_row_glyphs(").unwrap();
-    let inject = assemble.find("push_injected_row_glyph(\n").expect("the seam is pushed");
-    let ink = assemble.find("crate::row_ink::emitted_row_ink(").unwrap();
+    let start = source.find("pub(crate) fn assemble_pane_glyph_rows(").expect("pane seam");
+    let pane = &source[start..start + source[start..].find("\n}\n").expect("seam end")];
+    let row_loop = pane.find("    for (slot, _) in planned.rows() {").unwrap();
+    let emit = row_loop + pane[row_loop..].find("emit_row_glyphs(").unwrap();
+    let inject = pane.find("push_injected_row_glyph(\n").expect("the seam is pushed");
+    let ink = pane.find("crate::row_ink::emitted_row_ink(").unwrap();
     assert!(row_loop < emit && emit < inject && inject < ink);
 }
 
@@ -6118,6 +6194,16 @@ fn every_frame_outcome_settles_records_receipts_counts_and_the_key() {
         table.stage(7, 1, RowInk { rect: replacement, abs_row: 1, content_seq: Some(2) });
         table
     };
+    // The glyph cache mirrors the ink table: slot 1 committed with key 11, key 22 staged for it.
+    let glyph_slots = || {
+        let mut cache = sonicterm_text::row_glyph_cache::RowGlyphCache::new();
+        cache.begin_frame(&[(7, 4, 8)]);
+        cache.stage_slot(7, 1, 11);
+        cache.commit_slots();
+        cache.begin_frame(&[(7, 4, 8)]);
+        cache.stage_slot(7, 1, 22);
+        cache
+    };
     let receipts =
         || vec![AckReceipt::of(0, 7, &Grid::new(8, 4), AckRows::Rows([1].into_iter().collect()))];
     let stopped = || {
@@ -6139,11 +6225,14 @@ fn every_frame_outcome_settles_records_receipts_counts_and_the_key() {
         assert_eq!(plan.mode, RenderMode::Partial, "{name}: the failing frame is partial");
         let mut key = Some(first.key.clone());
         let mut table = retained();
+        let mut glyphs = glyph_slots();
         let sink = crate::frame_stats::FrameStatsSink::default();
         let settled = {
             let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
-            settle_retained_frame(&mut key, &mut table, &outcome, None, receipts())
+            settle_retained_frame(&mut key, &mut table, &mut glyphs, &outcome, None, receipts())
         };
+        assert_eq!(glyphs.staged_slot(7, 1), Some(0), "{name}: the staged glyph key is discarded");
+        assert_eq!(glyphs.committed_slot(7, 1), Some(11), "{name}: the committed key stays");
         assert!(settled.is_empty(), "{name}: no receipt");
         assert_eq!(key, None, "{name}: the key is cleared");
         assert_eq!(sink.snapshot().partial_frames, 0, "{name}: nothing presented");
@@ -6158,12 +6247,14 @@ fn every_frame_outcome_settles_records_receipts_counts_and_the_key() {
     let plan_key = plan.key.clone();
     let mut key = Some(first.key.clone());
     let mut table = retained();
+    let mut glyphs = glyph_slots();
     let sink = crate::frame_stats::FrameStatsSink::default();
     let settled = {
         let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
         settle_retained_frame(
             &mut key,
             &mut table,
+            &mut glyphs,
             &PresentOutcome::Presented,
             Some(plan),
             receipts(),
@@ -6173,6 +6264,7 @@ fn every_frame_outcome_settles_records_receipts_counts_and_the_key() {
     assert_eq!(key.as_ref(), Some(&plan_key), "the presented plan's key is kept");
     assert_eq!(sink.snapshot().partial_frames, 1);
     assert_eq!(table.committed_rect(7, 1), Some(replacement), "the replacement commits");
+    assert_eq!(glyphs.committed_slot(7, 1), Some(22), "the staged glyph key commits");
     let next = edit(key.as_ref(), 3);
     assert!(!next.first_frame && next.mode == RenderMode::Partial, "the next edit is partial");
 }
@@ -6200,4 +6292,1468 @@ fn an_injected_row_glyph_draws_in_a_blank_row_emitted_first() {
     assert!(uv[2] > uv[0] && uv[3] > uv[1], "the glyph samples a resident tile: {uv:?}");
     push_injected_row_glyph(&mut atlas, Some(seam), 7, 11, &mut glyphs, &mut row_spans, surface);
     assert_eq!(glyphs.len(), 1, "another row draws nothing");
+}
+
+// ---------------------------------------------------------------------------
+// Content-keyed row glyph cache: production seams driven with real fonts and plans.
+// ---------------------------------------------------------------------------
+
+/// One emitted row: whether it replayed, its key, its projected glyphs, and its decorations.
+struct EmittedRow {
+    replayed: bool,
+    key: u64,
+    glyphs: Vec<GlyphInstance>,
+    decorations: String,
+    missing: Vec<char>,
+}
+
+impl EmittedRow {
+    /// The row's projected glyph bytes, for bit-exact comparison.
+    fn glyph_bytes(&self) -> Vec<u8> {
+        bytemuck::cast_slice(&self.glyphs).to_vec()
+    }
+}
+
+/// A renderer's glyph state for driving `emit_row_glyphs` and `assemble_pane_glyph_rows`
+/// directly: the atlas, the content-keyed cache, the fonts and the row geometry.
+struct GlyphRig {
+    atlas: GlyphAtlas,
+    cache: sonicterm_text::row_glyph_cache::RowGlyphCache,
+    stack: Option<sonicterm_engine::FontStack>,
+    raster: Option<sonicterm_engine::FontStack>,
+    theme: Theme,
+    cell_size: (f32, f32),
+    baseline_y_in_cell: f32,
+    origin: (f32, f32),
+    surface: (f32, f32),
+    software_presenter: bool,
+}
+
+impl GlyphRig {
+    /// A rig with the packaged fonts, 10x20 cells, baseline 16 and a 400x200 surface.
+    fn new(software_presenter: bool) -> Self {
+        Self::with_stack(packaged_font_stack(), software_presenter)
+    }
+
+    /// A rig shaping and rasterizing with `stack`, otherwise as [`GlyphRig::new`] builds one.
+    fn with_stack(stack: sonicterm_engine::FontStack, software_presenter: bool) -> Self {
+        Self {
+            atlas: GlyphAtlas::new(1024, 1024),
+            cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
+            raster: Some(stack.clone()),
+            stack: Some(stack),
+            theme: Theme::default(),
+            cell_size: (10.0, 20.0),
+            baseline_y_in_cell: 16.0,
+            origin: (0.0, 0.0),
+            surface: (400.0, 200.0),
+            software_presenter,
+        }
+    }
+
+    /// The rig's shaping inputs, borrowed for one call.
+    fn shaping(&mut self) -> GlyphShaping<'_> {
+        GlyphShaping {
+            atlas: &mut self.atlas,
+            row_cache: &mut self.cache,
+            font_stack: self.stack.as_ref(),
+            wt_raster: self.raster.as_mut(),
+            style_rev: 0,
+            theme: &self.theme,
+            fg_default: ChromeColor::rgb(230, 230, 230),
+            raster_px: 14.0,
+            cell_size: self.cell_size,
+            surface: self.surface,
+            baseline_y_in_cell: self.baseline_y_in_cell,
+            hovered_url_accent: [0.0; 4],
+            software_presenter: self.software_presenter,
+        }
+    }
+
+    /// Start one cache pass drawing pane 7 at `grid`'s size.
+    fn begin(&mut self, grid: &Grid) {
+        self.cache.begin_frame(&[(7, grid.rows, grid.cols)]);
+    }
+
+    /// Emit the row at `slot` of a view whose top is `view_top_abs`, pinning its key with the
+    /// committed slots first and staging it after, as the pane pass does for one row.
+    fn emit(&mut self, grid: &Grid, view_top_abs: u64, slot: u16) -> EmittedRow {
+        let snapped = build_snapped_cell_x(self.origin.0, self.cell_size.0, grid.cols);
+        let origin = self.origin;
+        let mut shaping = self.shaping();
+        let key = emitted_row_key(&shaping, grid, view_top_abs, slot, None);
+        shaping.row_cache.pin(7, &[key]);
+        let (mut glyphs, mut underlines, mut tofu) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut missing, mut spans) = (Vec::new(), Vec::new());
+        let replayed = emit_row_glyphs(
+            shaping.reborrow(),
+            GlyphRow {
+                pane_id: 7,
+                grid,
+                view_top_abs,
+                slot,
+                origin,
+                snapped_cell_x: &snapped,
+                pane_hovered_url: None,
+                key,
+            },
+            GlyphFrame {
+                glyph_instances: &mut glyphs,
+                underlines: &mut underlines,
+                missing_tofu: &mut tofu,
+                missing_chars_this_frame: &mut missing,
+                row_spans: &mut spans,
+            },
+        );
+        shaping.row_cache.stage_slot(7, slot, key);
+        EmittedRow {
+            replayed,
+            key,
+            glyphs,
+            decorations: format!("{underlines:?} {tofu:?}"),
+            missing,
+        }
+    }
+}
+
+/// Run `work` inside a counting scope and return its output with the counters it moved.
+fn counted<Output>(work: impl FnOnce() -> Output) -> (Output, crate::frame_stats::FrameStats) {
+    let sink = crate::frame_stats::FrameStatsSink::default();
+    let output = {
+        let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
+        work()
+    };
+    (output, sink.snapshot())
+}
+
+/// Overwrite visible row `row` from column 0 with `text` in default colours.
+fn write_row(grid: &mut Grid, row: u16, text: &str) {
+    grid.goto(row, 0);
+    for character in text.chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+    }
+}
+
+/// A grid of `cols` columns holding one visible row per entry of `lines`, with no dirt.
+fn text_grid(cols: u16, lines: &[&str]) -> Grid {
+    let mut grid = Grid::new(cols, lines.len() as u16);
+    for (row, line) in lines.iter().enumerate() {
+        write_row(&mut grid, row as u16, line);
+    }
+    grid.clear_dirty();
+    grid
+}
+
+/// A row of base characters each carrying the most combining marks a cell may hold shapes to
+/// more records than its columns' share of the envelope: it is drawn but never admitted, and
+/// every emission draws exactly what a cold draw does.
+#[test]
+fn refused_rows_draw_like_cold_rows() {
+    let mut grid = Grid::new(2, 1);
+    for base in ['a', 'b'] {
+        grid.put_char(base, Color::Default, Color::Default, CellFlags::empty());
+        // Each U+0301 is two bytes, so 32 fill the cell's 64-byte extras bound.
+        for _ in 0..32 {
+            grid.put_char('\u{301}', Color::Default, Color::Default, CellFlags::empty());
+        }
+    }
+    let limit = sonicterm_text::row_glyph_cache::row_payload_limit(2);
+    let mut rig = GlyphRig::new(false);
+    rig.begin(&grid);
+    let first = rig.emit(&grid, 0, 0);
+    assert!(
+        first.glyphs.len() * std::mem::size_of::<sonicterm_text::row_glyph_cache::RowGlyph>()
+            > limit,
+        "the fixture's records exceed the row envelope: {} glyphs",
+        first.glyphs.len()
+    );
+    assert!(!first.replayed && !rig.cache.contains(7, first.key), "an oversized row is refused");
+    let second = rig.emit(&grid, 0, 0);
+    assert!(!second.replayed, "a refused row is shaped again");
+    assert_eq!(second.glyph_bytes(), first.glyph_bytes(), "and draws what a cold draw does");
+}
+
+/// At the history cap a scroll shifts every absolute row, yet only the new row reshapes: the
+/// three rows that moved one slot up replay with no shape request, and the unique shaping row
+/// written after the linefeed (the positive control) is shaped. A wheel move starts cold.
+#[test]
+fn scrolling_one_line_at_the_history_cap_reshapes_only_the_new_row() {
+    let mut grid = Grid::new(8, 4);
+    grid.set_scrollback_limit(4);
+    for index in 0..10 {
+        if index > 0 {
+            grid.carriage_return();
+            grid.linefeed();
+        }
+        for character in format!("r{index}=>é").chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+        }
+    }
+    assert_eq!(grid.scrollback_len(), 4);
+    let mut rig = GlyphRig::new(false);
+    rig.begin(&grid);
+    let top = grid.scrollback_len() as u64;
+    for slot in 0..4 {
+        rig.emit(&grid, top, slot);
+    }
+    rig.cache.commit_slots();
+    grid.carriage_return();
+    grid.linefeed();
+    for character in "r10=>é".chars() {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+    }
+    assert_eq!(grid.scrollback_len(), 4, "the history stayed at its cap");
+    rig.begin(&grid);
+    let top = grid.scrollback_len() as u64;
+    for slot in 0..4u16 {
+        let (row, stats) = counted(|| rig.emit(&grid, top, slot));
+        if slot < 3 {
+            assert!(row.replayed, "slot {slot} moved up and replays");
+            assert_eq!(stats.shape_requests, 0, "slot {slot} is not shaped");
+        } else {
+            assert!(!row.replayed, "the new row misses");
+            assert!(stats.shape_requests >= 1, "the new row is shaped");
+        }
+    }
+
+    // A wheel move up one row from a cold cache and history: three rows replay one slot lower.
+    let mut grid = Grid::new(8, 4);
+    for index in 0..8 {
+        if index > 0 {
+            grid.carriage_return();
+            grid.linefeed();
+        }
+        for character in format!("w{index}=>é").chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+        }
+    }
+    let mut rig = GlyphRig::new(false);
+    let live = grid.scrollback_len() as u64;
+    rig.begin(&grid);
+    for slot in 0..4 {
+        rig.emit(&grid, live, slot);
+    }
+    rig.cache.commit_slots();
+    rig.begin(&grid);
+    let replays: Vec<bool> = (0..4).map(|slot| rig.emit(&grid, live - 1, slot).replayed).collect();
+    assert_eq!(replays, [false, true, true, true]);
+}
+
+/// The inputs one frozen oracle instance reads.
+struct OracleCell {
+    snapped: Vec<f32>,
+    cell_size: (f32, f32),
+    top_inset: f32,
+    row: u16,
+    baseline_y_in_cell: f32,
+    surface: (f32, f32),
+}
+
+/// Frozen, test-local copy of the pre-record status-marker predicate and fit arithmetic. It is
+/// deliberately independent of production, so a change to either the predicate or the fit is
+/// caught by `record_projection_matches_the_frozen_emission_geometry`.
+fn frozen_fit_single_cell_status_marker(
+    ch: char,
+    cluster_cells: usize,
+    is_wide: bool,
+    has_extras: bool,
+    natural: (f32, f32, f32, f32),
+    cell: (f32, f32, f32, f32),
+) -> (f32, f32, f32, f32) {
+    if !matches!(ch, '\u{23fa}' | '\u{25ef}' | '\u{25cf}')
+        || cluster_cells != 1
+        || is_wide
+        || has_extras
+    {
+        return natural;
+    }
+    let (_, _, glyph_w, glyph_h) = natural;
+    let (cell_x, cell_y, cell_w, cell_h) = cell;
+    if glyph_w <= 0.0 || glyph_h <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
+        return natural;
+    }
+    let scale = (cell_w / glyph_w).min(cell_h / glyph_h);
+    let fitted_w = glyph_w * scale;
+    let fitted_h = glyph_h * scale;
+    (cell_x + (cell_w - fitted_w) * 0.5, cell_y + (cell_h - fitted_h) * 0.5, fitted_w, fitted_h)
+}
+
+/// Frozen copy of the pre-record HarfBuzz placement: offsets move the tile, never resize it.
+fn frozen_positioned_shaped_glyph_rect(
+    natural: (f32, f32, f32, f32),
+    x_offset: f32,
+    y_offset: f32,
+) -> (f32, f32, f32, f32) {
+    (natural.0 + x_offset, natural.1 + y_offset, natural.2, natural.3)
+}
+
+/// Frozen copy of the pre-record software block target: integer edges, at least one pixel.
+fn frozen_software_block_glyph_target_rect(
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) -> (f32, f32, f32, f32) {
+    let left = (left - 0.5).ceil();
+    let top = (top - 0.5).ceil();
+    let right = (right - 0.5).ceil().max(left + 1.0);
+    let bottom = (bottom - 0.5).ceil().max(top + 1.0);
+    (left, top, right - left, bottom - top)
+}
+
+/// Frozen copy of the pre-record instance flags: colour in x, subpixel coverage in y.
+fn frozen_glyph_flags(is_color: bool, is_subpixel: bool) -> [f32; 4] {
+    [if is_color { 1.0 } else { 0.0 }, if is_subpixel { 1.0 } else { 0.0 }, 0.0, 0.0]
+}
+
+/// The whole instance the pre-record renderer pushed for `rect` from `info` in `rgba`.
+fn frozen_instance(
+    cell: &OracleCell,
+    rect: (f32, f32, f32, f32),
+    info: &sonicterm_text::glyph_atlas::GlyphInfo,
+    rgba: [f32; 4],
+) -> GlyphInstance {
+    let (glyph_x, glyph_y, glyph_w, glyph_h) = rect;
+    GlyphInstance {
+        rect: px_to_ndc(glyph_x, glyph_y, glyph_w, glyph_h, cell.surface.0, cell.surface.1),
+        uv: info.uv,
+        color: rgba,
+        flags: frozen_glyph_flags(info.is_color, info.is_subpixel),
+    }
+}
+
+/// Frozen copy of the pre-record ASCII emission.
+fn oracle_natural(
+    cell: &OracleCell,
+    col: u16,
+    info: &sonicterm_text::glyph_atlas::GlyphInfo,
+    rgba: [f32; 4],
+) -> GlyphInstance {
+    let cell_left_px = cell.snapped[col as usize];
+    let cell_top_px = cell.top_inset + f32::from(cell.row) * cell.cell_size.1;
+    let inv_s = 1.0_f32;
+    let glyph_x = cell_left_px + info.px_offset[0] as f32 * inv_s;
+    let glyph_y = cell_top_px + cell.baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+    let glyph_w = info.px_size[0] as f32 * inv_s;
+    let glyph_h = info.px_size[1] as f32 * inv_s;
+    let rect = sonicterm_render_model::geometry::snap_to_device_pixels(
+        (glyph_x, glyph_y, glyph_w, glyph_h),
+        1.0,
+    );
+    frozen_instance(cell, rect, info, rgba)
+}
+
+/// Frozen copy of the pre-record fallback and shaped emission.
+fn oracle_shaped(
+    cell: &OracleCell,
+    lead: (u16, char, usize, bool, bool),
+    info: &sonicterm_text::glyph_atlas::GlyphInfo,
+    shape_offset: (f32, f32),
+    rgba: [f32; 4],
+) -> GlyphInstance {
+    let (col, character, cluster_cells, is_wide, has_extras) = lead;
+    let (cell_w, cell_h) = cell.cell_size;
+    let cell_left_px = cell.snapped[col as usize];
+    let cell_top_px = cell.top_inset + f32::from(cell.row) * cell_h;
+    let inv_s = 1.0_f32;
+    let glyph_x = cell_left_px + info.px_offset[0] as f32 * inv_s;
+    let glyph_y = cell_top_px + cell.baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
+    let glyph_w = info.px_size[0] as f32 * inv_s;
+    let glyph_h = info.px_size[1] as f32 * inv_s;
+    let positioned = frozen_positioned_shaped_glyph_rect(
+        (glyph_x, glyph_y, glyph_w, glyph_h),
+        shape_offset.0,
+        shape_offset.1,
+    );
+    let cell_right = cell.snapped.get(col as usize + 1).copied().unwrap_or(cell_left_px + cell_w);
+    let fitted = frozen_fit_single_cell_status_marker(
+        character,
+        cluster_cells,
+        is_wide,
+        has_extras,
+        positioned,
+        (cell_left_px, cell_top_px, cell_right - cell_left_px, cell_h),
+    );
+    let rect = sonicterm_render_model::geometry::snap_to_device_pixels(fitted, 1.0);
+    frozen_instance(cell, rect, info, rgba)
+}
+
+/// Frozen copy of the pre-record block emission.
+fn oracle_block(
+    cell: &OracleCell,
+    col: u16,
+    span: usize,
+    software_presenter: bool,
+    info: &sonicterm_text::glyph_atlas::GlyphInfo,
+    rgba: [f32; 4],
+) -> GlyphInstance {
+    let cell_h = cell.cell_size.1;
+    let cell_left_px = cell.snapped[col as usize];
+    let cell_top_px = cell.top_inset + f32::from(cell.row) * cell_h;
+    let end_col = (col as usize + span).min(cell.snapped.len() - 1);
+    let cell_right = cell.snapped[end_col];
+    let rect = if software_presenter {
+        let cell_bottom = cell.top_inset + (f32::from(cell.row) + 1.0) * cell_h;
+        frozen_software_block_glyph_target_rect(cell_left_px, cell_top_px, cell_right, cell_bottom)
+    } else {
+        (cell_left_px, cell_top_px, cell_right - cell_left_px, cell_h)
+    };
+    frozen_instance(cell, rect, info, rgba)
+}
+
+/// One instance's bytes, so comparisons are bit-exact rather than f32 equality.
+fn instance_bytes(instance: &GlyphInstance) -> Vec<u8> {
+    bytemuck::bytes_of(instance).to_vec()
+}
+
+/// Projecting position-free records reproduces the frozen pre-record emission byte for byte,
+/// whole instances included, for every kind: separate raster and shaping offsets (including
+/// 1.9, 7 and 8.7), a small surface, a fractional origin and pitch, status-marker eligibility,
+/// wide and combining lead cells, colour (emoji-style) and subpixel tiles, and blocks spanning
+/// one and two columns on both presenters. The oracle is independent of production arithmetic.
+#[test]
+fn record_projection_matches_the_frozen_emission_geometry() {
+    use sonicterm_text::glyph_atlas::GlyphInfo;
+    use sonicterm_text::row_glyph_cache::RowGlyphKind;
+    let info = |offset: [i32; 2], size: [u32; 2], is_color: bool| GlyphInfo {
+        uv: [0.1, 0.2, 0.3, 0.4],
+        px_size: size,
+        px_offset: offset,
+        advance: 0.0,
+        is_color,
+        is_subpixel: !is_color,
+        missing: false,
+    };
+    let geometries = [
+        ((0.0, 0.0), (10.0, 20.0), 16.0, (400.0, 200.0)),
+        ((1.9, 7.0), (8.7, 17.3), 13.84, (80.0, 80.0)),
+        ((0.5, 0.1), (10.5, 20.25), 16.2, (123.0, 77.0)),
+    ];
+    let mut compared = 0;
+    for (origin, cell_size, baseline, surface) in geometries {
+        for row in [0u16, 1, 3] {
+            let cell = OracleCell {
+                snapped: build_snapped_cell_x(origin.0, cell_size.0, 6),
+                cell_size,
+                top_inset: origin.1,
+                row,
+                baseline_y_in_cell: baseline,
+                surface,
+            };
+            let at = RowPlacement {
+                slot: row,
+                origin,
+                cols: 6,
+                snapped_cell_x: &cell.snapped,
+                cell_size,
+                baseline_y_in_cell: baseline,
+                surface,
+            };
+            for is_color in [false, true] {
+                let rgba = if is_color { [1.0; 4] } else { [0.3, 0.6, 0.9, 1.0] };
+                let tile = info([1, -12], [7, 13], is_color);
+                let natural = tile_record(RowGlyphKind::Natural, 2, &tile, rgba);
+                assert_eq!(
+                    instance_bytes(&project_row_glyph(&natural, &at, false)),
+                    instance_bytes(&oracle_natural(&cell, 2, &tile, rgba)),
+                    "natural colour={is_color}"
+                );
+                compared += 1;
+                let leads = [
+                    ('\u{25cf}', 1usize, false, false),
+                    ('\u{23fa}', 1, false, false),
+                    ('\u{25ef}', 1, false, false),
+                    ('\u{25cf}', 1, true, false),
+                    ('\u{25cf}', 1, false, true),
+                    ('\u{25cf}', 2, false, false),
+                    ('x', 1, false, false),
+                    ('😀', 2, true, false),
+                ];
+                for (character, cluster_cells, is_wide, has_extras) in leads {
+                    for kind in [RowGlyphKind::Fallback, RowGlyphKind::Shaped] {
+                        for shape_offset in [(0.0, 0.0), (1.9, -7.0), (8.7, 2.5)] {
+                            let tile = info([2, -9], [9, 9], is_color);
+                            let mut record = tile_record(kind, 3, &tile, rgba);
+                            let mut lead_cell = Cell::plain(
+                                character,
+                                Color::Default,
+                                Color::Default,
+                                CellFlags::empty(),
+                            );
+                            if is_wide {
+                                lead_cell.flags = CellFlags::WIDE;
+                            }
+                            if has_extras {
+                                lead_cell.set_extras(Some("\u{301}".into()));
+                            }
+                            let shaped = sonicterm_text::shape::ShapedGlyph {
+                                lead_col: 3,
+                                cluster_cells: cluster_cells as u16,
+                                font_slot: 0,
+                                glyph_id: 5,
+                                x_advance: 0.0,
+                                x_offset: 0.0,
+                                y_offset: 0.0,
+                                ch: character,
+                            };
+                            let eligible = status_marker_fit_eligible(
+                                character,
+                                cluster_cells,
+                                is_wide,
+                                has_extras,
+                            );
+                            set_shaped_bits(
+                                &mut record,
+                                [shape_offset.0, shape_offset.1],
+                                eligible,
+                                &shaped,
+                                is_wide,
+                                &lead_cell,
+                            );
+                            let expected = oracle_shaped(
+                                &cell,
+                                (3, character, cluster_cells, is_wide, has_extras),
+                                &tile,
+                                shape_offset,
+                                rgba,
+                            );
+                            assert_eq!(
+                                instance_bytes(&project_row_glyph(&record, &at, false)),
+                                instance_bytes(&expected),
+                                "{kind:?} {character:?} cells={cluster_cells} wide={is_wide} \
+                                 extras={has_extras} offset={shape_offset:?} colour={is_color}"
+                            );
+                            compared += 1;
+                        }
+                    }
+                }
+                for span in [1usize, 2] {
+                    for software in [false, true] {
+                        let tile = info([0, 0], [10, 20], is_color);
+                        let mut record = tile_record(RowGlyphKind::Block, 4, &tile, rgba);
+                        record.raster_offset = [0.0; 2];
+                        record.end_col = (4 + span).min(cell.snapped.len() - 1) as u16;
+                        assert_eq!(
+                            instance_bytes(&project_row_glyph(&record, &at, software)),
+                            instance_bytes(&oracle_block(&cell, 4, span, software, &tile, rgba)),
+                            "block span {span} software {software} colour={is_color}"
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(compared, 3 * 3 * 2 * (1 + 8 * 2 * 3 + 2 * 2), "every case was compared");
+}
+
+/// The tracked font faces only (no OS font discovery), warm and cold, draw the same bytes. The
+/// grid covers normal, bold, italic and bold-italic runs, a ligature trigger, box drawing, a
+/// combining cluster, and CJK, emoji and wide clusters. Fallback is controlled: the stack has no
+/// system font source, so CJK draws from the tracked faces and the emoji is a stable missing
+/// glyph. Exactly these rows are drawn once to
+/// warm the atlas and fonts; then only the row cache is cleared, a cold pass misses every row,
+/// and a warm pass hits every row with identical glyphs, decorations and missing characters.
+#[test]
+fn tracked_fonts_draw_the_same_warm_and_cold() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let styles = [
+        CellFlags::empty(),
+        CellFlags::BOLD,
+        CellFlags::ITALIC,
+        CellFlags::BOLD | CellFlags::ITALIC,
+    ];
+    let mut grid = Grid::new(12, 8);
+    for (row, flags) in styles.iter().enumerate() {
+        grid.goto(row as u16, 0);
+        for character in "ab=>c->d".chars() {
+            grid.put_char(character, Color::Default, Color::Default, *flags);
+        }
+    }
+    write_row(&mut grid, 4, "│─┼█▌ e");
+    grid.put_char('\u{301}', Color::Default, Color::Default, CellFlags::empty());
+    write_row(&mut grid, 5, "中文 x");
+    write_row(&mut grid, 6, "😀 ok");
+    write_row(&mut grid, 7, "a中😀b");
+    grid.clear_dirty();
+    let rows = grid.rows;
+    let mut rig = GlyphRig::with_stack(crate::lib_tests::tracked_font_stack(14.0), false);
+    rig.surface = (400.0, 400.0);
+    rig.begin(&grid);
+    for slot in 0..rows {
+        rig.emit(&grid, 0, slot);
+    }
+    rig.cache.invalidate_all();
+    rig.begin(&grid);
+    let (cold, cold_stats) =
+        counted(|| (0..rows).map(|slot| rig.emit(&grid, 0, slot)).collect::<Vec<_>>());
+    rig.begin(&grid);
+    let (warm, warm_stats) =
+        counted(|| (0..rows).map(|slot| rig.emit(&grid, 0, slot)).collect::<Vec<_>>());
+    let row_count = u64::from(rows);
+    assert_eq!((cold_stats.row_cache_hits, cold_stats.row_cache_misses), (0, row_count));
+    assert_eq!((warm_stats.row_cache_hits, warm_stats.row_cache_misses), (row_count, 0));
+    assert_eq!(warm_stats.shape_requests, 0, "the warm pass shapes nothing");
+    for (slot, (cold_row, warm_row)) in cold.iter().zip(&warm).enumerate() {
+        assert!(!cold_row.glyphs.is_empty() || !cold_row.missing.is_empty(), "slot {slot} draws");
+        assert_eq!(warm_row.glyph_bytes(), cold_row.glyph_bytes(), "slot {slot} glyph bytes");
+        assert_eq!(warm_row.decorations, cold_row.decorations, "slot {slot} decorations");
+        assert_eq!(warm_row.missing, cold_row.missing, "slot {slot} missing characters");
+    }
+    let style_bytes: Vec<Vec<u8>> = cold[..4].iter().map(EmittedRow::glyph_bytes).collect();
+    for (index, bytes) in style_bytes.iter().enumerate().skip(1) {
+        assert_ne!(*bytes, style_bytes[0], "style row {index} draws other faces than normal");
+    }
+    // `ConfigDirsOnly` installs no system source, so CJK draws from the tracked face's own
+    // coverage and the emoji, which no tracked face has, is a stable missing glyph.
+    assert!(
+        !cold[5].glyphs.is_empty() && cold[5].missing.is_empty(),
+        "CJK draws from tracked faces"
+    );
+    assert!(cold[6].missing.contains(&'😀'), "emoji resolves to the controlled missing glyph");
+}
+
+/// A pane left untracked by a zero tracking budget still draws: every row emitted through the
+/// renderer seam equals a cold draw from a tracked cache, glyphs, decorations and missing
+/// characters alike, and nothing is cached for it.
+#[test]
+fn untracked_panes_draw_like_cold_rows() {
+    let grid = text_grid(10, &["ab=>c", "│─┼█", "plain", "→é x"]);
+    let mut untracked = GlyphRig::new(false);
+    untracked.cache = sonicterm_text::row_glyph_cache::RowGlyphCache::with_budgets(
+        sonicterm_text::row_glyph_cache::DEFAULT_PAYLOAD_BUDGET_BYTES,
+        0,
+    );
+    untracked.begin(&grid);
+    assert!(!untracked.cache.is_tracked(7), "a zero tracking budget leaves the pane untracked");
+    let mut cold = GlyphRig::new(false);
+    cold.begin(&grid);
+    for slot in 0..4 {
+        let drawn = untracked.emit(&grid, 0, slot);
+        let reference = cold.emit(&grid, 0, slot);
+        assert!(!drawn.replayed, "slot {slot}: an untracked pane never replays");
+        assert!(!reference.glyphs.is_empty(), "slot {slot}: the reference draws glyphs");
+        assert_eq!(drawn.glyph_bytes(), reference.glyph_bytes(), "slot {slot} glyph bytes");
+        assert_eq!(drawn.decorations, reference.decorations, "slot {slot} decorations");
+        assert_eq!(drawn.missing, reference.missing, "slot {slot} missing characters");
+    }
+    assert!(untracked.cache.is_empty() && untracked.cache.retained_amount().bytes == 0);
+}
+
+/// The glyph atlas and the cold and warm glyph lists of one scrolled frame on the software
+/// presenter at a fractional pitch: the warm list replays rows cached at other slots, and both
+/// lists are returned with the frame's surface size, for compositor parity tests.
+pub(crate) fn warm_and_cold_row_glyphs(
+) -> (GlyphAtlas, Vec<GlyphInstance>, Vec<GlyphInstance>, (u32, u32)) {
+    let mut grid = Grid::new(8, 4);
+    let lines = ["ab=>c", "│─┼█", "→ é x", "plain", "▌▐ AB", "q->r", "last", "zz"];
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            grid.carriage_return();
+            grid.linefeed();
+        }
+        for character in line.chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+        }
+    }
+    let mut rig = GlyphRig::new(true);
+    rig.atlas = GlyphAtlas::new(512, 512);
+    rig.cell_size = (10.5, 20.3);
+    rig.baseline_y_in_cell = 16.2;
+    rig.origin = (0.5, 0.1);
+    rig.surface = (85.0, 82.0);
+    let live = grid.scrollback_len() as u64;
+    let scrolled = live - 2;
+    let frame = |rig: &mut GlyphRig, top: u64| -> Vec<EmittedRow> {
+        rig.begin(&grid);
+        let rows = (0..4).map(|slot| rig.emit(&grid, top, slot)).collect();
+        rig.cache.commit_slots();
+        rows
+    };
+    frame(&mut rig, scrolled);
+    let warm = frame(&mut rig, live);
+    assert!(warm.iter().any(|row| row.replayed), "the warm frame replays moved rows");
+    rig.cache.invalidate_all();
+    let cold = frame(&mut rig, live);
+    assert!(cold.iter().all(|row| !row.replayed), "the cold frame shapes every row");
+    let flatten = |rows: Vec<EmittedRow>| rows.into_iter().flat_map(|row| row.glyphs).collect();
+    (rig.atlas, flatten(cold), flatten(warm), (85, 82))
+}
+
+/// Warm and cold glyph lists of the scrolled software frame are byte-identical.
+#[test]
+fn warm_and_cold_scrolled_frames_emit_identical_glyphs() {
+    let (_atlas, cold, warm, _size) = warm_and_cold_row_glyphs();
+    assert!(!cold.is_empty());
+    assert_eq!(bytemuck::cast_slice::<_, u8>(&warm), bytemuck::cast_slice::<_, u8>(&cold));
+}
+
+/// The plan fixture of the cache policy tests: one primary pane of `rows` rows by 8 columns at
+/// layout and origin y 0, padding 0, 10x20 cells and `vertical_ink_pad`, cursor hidden, no
+/// overlay, not degraded.
+fn policy_plan(
+    rows: u16,
+    vertical_ink_pad: f32,
+    revision: u64,
+    dirty_rows: Vec<usize>,
+    row_ink: Vec<Option<PixelRect>>,
+    previous: Option<&FrameKey>,
+) -> FramePlan {
+    let facts = FrameFacts {
+        window: WindowIdentity { width: 240, height: 200, ..Default::default() },
+        cell_w: 10.0,
+        cell_h: 20.0,
+        padding: [0.0; 4],
+        vertical_ink_pad,
+        scrollbar_mode: ScrollbarMode::Never,
+        degraded: false,
+        tab_bar_top: None,
+        scale: 1.0,
+        previous_recolor: crate::cursor::RecolorRecord::default(),
+    };
+    let pane = PaneMetadata {
+        id: 7,
+        revision,
+        dirty_generation: 0,
+        rect: PixelRect { x: 0, y: 0, w: 80, h: u32::from(rows) * 20 },
+        cols: 8,
+        rows,
+        scrollback_len: 0,
+        viewport_top_abs: None,
+        is_active: true,
+        is_alt: false,
+        scrollbar_alpha: 0.0,
+        dirty_rows,
+        row_ink,
+    };
+    FramePlan::build(facts, [pane], previous)
+}
+
+/// Each slot's committed ink set to its own strip `[20 s, 20 s + 20)`.
+fn strip_records(rows: u16) -> Vec<Option<PixelRect>> {
+    (0..i32::from(rows)).map(|slot| Some(PixelRect { x: 0, y: 20 * slot, w: 80, h: 20 })).collect()
+}
+
+/// Assemble one pass of `plan`'s pane through the production pane seam, after the pass's
+/// `begin_frame`, returning the glyphs and the counters the pass moved.
+fn assemble_pass(
+    rig: &mut GlyphRig,
+    ink: &mut crate::row_ink::RowInkTable,
+    grid: &Grid,
+    plan: &FramePlan,
+) -> (Vec<GlyphInstance>, crate::frame_stats::FrameStats) {
+    begin_pass(rig, ink, grid, plan);
+    emit_pass(rig, ink, grid, plan)
+}
+
+/// Start one assembly pass through `begin_glyph_pass`, the helper `assemble_frame` starts every
+/// pass with, so the fixture exercises production's pass start rather than a copy of it.
+fn begin_pass(
+    rig: &mut GlyphRig,
+    ink: &mut crate::row_ink::RowInkTable,
+    grid: &Grid,
+    plan: &FramePlan,
+) {
+    begin_glyph_pass(&mut rig.cache, ink, plan.panes.iter().map(|planned| (planned, grid.cols)));
+}
+
+/// Emit `plan`'s pane rows through the production pane seam into a pass already begun,
+/// returning the glyphs and the counters the emission moved.
+fn emit_pass(
+    rig: &mut GlyphRig,
+    ink: &mut crate::row_ink::RowInkTable,
+    grid: &Grid,
+    plan: &FramePlan,
+) -> (Vec<GlyphInstance>, crate::frame_stats::FrameStats) {
+    let (glyphs, stats, _slots) = emit_pass_recording(rig, ink, grid, plan);
+    (glyphs, stats)
+}
+
+/// [`emit_pass`], also returning the slots the pane seam emitted, in emission order, as its
+/// recording sink saw them at each `emit_row_glyphs` call.
+fn emit_pass_recording(
+    rig: &mut GlyphRig,
+    ink: &mut crate::row_ink::RowInkTable,
+    grid: &Grid,
+    plan: &FramePlan,
+) -> (Vec<GlyphInstance>, crate::frame_stats::FrameStats, Vec<u16>) {
+    let planned = &plan.panes[0];
+    let mut emitted_slots = Vec::new();
+    let snapped = build_snapped_cell_x(planned.layout.x, rig.cell_size.0, grid.cols);
+    let (mut glyphs, mut underlines, mut tofu) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut missing, mut spans, mut owners) = (Vec::new(), Vec::new(), Vec::new());
+    let ((), stats) = counted(|| {
+        assemble_pane_glyph_rows(
+            rig.shaping(),
+            PaneGlyphRows {
+                pane_id: planned.id,
+                grid,
+                planned,
+                origin: (planned.layout.x, planned.layout.y),
+                snapped_cell_x: &snapped,
+                pane_hovered_url: None,
+            },
+            GlyphFrame {
+                glyph_instances: &mut glyphs,
+                underlines: &mut underlines,
+                missing_tofu: &mut tofu,
+                missing_chars_this_frame: &mut missing,
+                row_spans: &mut spans,
+            },
+            PaneGlyphSinks {
+                row_ink: ink,
+                ink_surface: plan.surface,
+                underline_owners: &mut owners,
+                injected_row_glyph: None,
+                emitted_slots: Some(&mut emitted_slots),
+            },
+        )
+    });
+    (glyphs, stats, emitted_slots)
+}
+
+/// Settle a pass as presented: commit its staged glyph slot keys and ink records.
+fn present_pass(rig: &mut GlyphRig, ink: &mut crate::row_ink::RowInkTable, plan: &FramePlan) {
+    rig.cache.commit_slots();
+    ink.commit(&plan.drawn_row_counts());
+}
+
+/// Presentation-only dirt (every row marked dirty with unchanged cells) replays every row
+/// through the production pane seam with no shaping, and the glyph cache's invalidation
+/// counters stay 0 because nothing drops a glyph row for dirt.
+#[test]
+fn presentation_only_dirt_replays_through_the_production_seam() {
+    let mut grid = text_grid(8, &["p0=>é", "p1=>é", "p2=>é", "p3=>é"]);
+    let mut rig = GlyphRig::new(false);
+    let mut ink = crate::row_ink::RowInkTable::default();
+    let first = policy_plan(4, 0.0, 1, Vec::new(), Vec::new(), None);
+    let (_, warm) = assemble_pass(&mut rig, &mut ink, &grid, &first);
+    assert_eq!(warm.row_cache_misses, 4);
+    present_pass(&mut rig, &mut ink, &first);
+    grid.mark_all_dirty();
+    let dirty: Vec<usize> = grid.dirty_rows().collect();
+    let second = policy_plan(4, 0.0, 2, dirty, Vec::new(), Some(&first.key));
+    assert!(second.panes[0].emit_rows.iter().all(|emitted| *emitted));
+    let (_, stats) = assemble_pass(&mut rig, &mut ink, &grid, &second);
+    assert_eq!((stats.row_cache_hits, stats.row_cache_misses), (4, 0), "every row replays");
+    assert_eq!(stats.shape_requests, 0, "nothing is shaped again");
+    assert_eq!((stats.row_cache_invalidate_visits, stats.row_cache_invalidate_us), (0, 0));
+}
+
+/// A software-presenter block row is accepted only where every block still rasterizes at its
+/// stored size: at a fractional cell height two slots with different integer heights miss, and
+/// the second's shape replaces the entry; a slot with the second's height then hits. A
+/// half-pixel origin at a fractional pitch changes a block's width and misses. GPU blocks and
+/// ASCII rows hit at any slot.
+#[test]
+fn software_block_rows_hit_only_where_their_size_holds() {
+    let block_rows: Vec<&str> = vec!["██"; 64];
+    let grid = text_grid(2, &block_rows);
+    let height_at = |cell_h: f32, top_inset: f32, slot: u16| {
+        let top = top_inset + f32::from(slot) * cell_h;
+        let bottom = top_inset + (f32::from(slot) + 1.0) * cell_h;
+        software_block_glyph_target_rect(0.0, top, 10.0, bottom).3
+    };
+    let (cell_h, top_inset) = (7.3, 0.1);
+    let first_slot = 0u16;
+    let other = (1..64)
+        .find(|slot| {
+            height_at(cell_h, top_inset, *slot) != height_at(cell_h, top_inset, first_slot)
+        })
+        .unwrap();
+    let same_as_other = (0..64)
+        .find(|slot| {
+            *slot != other
+                && height_at(cell_h, top_inset, *slot) == height_at(cell_h, top_inset, other)
+        })
+        .unwrap();
+    let mut rig = GlyphRig::new(true);
+    rig.cell_size = (10.0, cell_h);
+    rig.origin = (0.0, top_inset);
+    rig.surface = (40.0, 480.0);
+    rig.begin(&grid);
+    assert!(!rig.emit(&grid, 0, first_slot).replayed, "the first draw is shaped");
+    assert!(!rig.emit(&grid, 0, other).replayed, "another integer height misses");
+    assert!(rig.emit(&grid, 0, same_as_other).replayed, "the replacement fits its own height");
+    assert!(!rig.emit(&grid, 0, first_slot).replayed, "and no longer fits the first height");
+
+    let mut rig = GlyphRig::new(true);
+    rig.cell_size = (10.5, 20.0);
+    rig.surface = (40.0, 480.0);
+    let width_at = |origin_x: f32| {
+        let snapped = build_snapped_cell_x(origin_x, 10.5, 2);
+        software_block_glyph_target_rect(snapped[0], 0.0, snapped[1], 20.0).2
+    };
+    assert_ne!(width_at(0.0), width_at(0.5), "the fixture changes a block's width");
+    rig.begin(&grid);
+    rig.emit(&grid, 0, 0);
+    rig.origin = (0.5, 0.0);
+    assert!(!rig.emit(&grid, 0, 0).replayed, "a half-pixel origin changes the width");
+    assert!(rig.emit(&grid, 0, 0).replayed, "the same width hits");
+
+    let mut rig = GlyphRig::new(false);
+    rig.cell_size = (10.0, cell_h);
+    rig.origin = (0.0, top_inset);
+    rig.surface = (40.0, 480.0);
+    rig.begin(&grid);
+    rig.emit(&grid, 0, first_slot);
+    assert!(rig.emit(&grid, 0, other).replayed, "GPU blocks hit at any slot");
+    let ascii = text_grid(8, &["text", "text"]);
+    let mut rig = GlyphRig::new(true);
+    rig.begin(&ascii);
+    rig.emit(&ascii, 0, 0);
+    assert!(rig.emit(&ascii, 0, 1).replayed, "ASCII rows hit at any slot");
+}
+
+/// A block that drew nothing is never cached: on the software presenter at cell height 2048.4
+/// and top 0.1 the block's target is 2049 pixels at slot 1, past a 2048 atlas, so it is
+/// skipped and the row is not admitted; at slot 0 the target is 2048, so the row misses and
+/// draws the block as a cold draw does. A glyph the atlas refuses because its entry index is
+/// full with eviction barred keeps its row out of the cache too, while drawing tofu.
+#[test]
+fn blocks_that_drew_nothing_are_never_cached() {
+    let height_at = |slot: u16| {
+        let top = 0.1 + f32::from(slot) * 2048.4;
+        software_block_glyph_target_rect(0.0, top, 10.0, top + 2048.4).3
+    };
+    assert_eq!((height_at(0), height_at(1)), (2048.0, 2049.0));
+    let grid = text_grid(2, &["█", "█"]);
+    let mut rig = GlyphRig::new(true);
+    rig.atlas = GlyphAtlas::new(2048, 2048);
+    rig.cell_size = (10.0, 2048.4);
+    rig.origin = (0.0, 0.1);
+    rig.surface = (40.0, 4200.0);
+    rig.begin(&grid);
+    let skipped = rig.emit(&grid, 0, 1);
+    assert!(skipped.glyphs.is_empty(), "the block drew nothing at slot 1");
+    assert!(!rig.cache.contains(7, skipped.key), "and its row was not admitted");
+    let drawn = rig.emit(&grid, 0, 0);
+    assert!(!drawn.replayed && !drawn.glyphs.is_empty(), "slot 0 misses and draws the block");
+    rig.cache.invalidate_all();
+    assert_eq!(rig.emit(&grid, 0, 0).glyph_bytes(), drawn.glyph_bytes(), "as a cold draw does");
+
+    let grid = text_grid(4, &["AB"]);
+    let mut rig = GlyphRig::new(false);
+    rig.atlas = GlyphAtlas::new(256, 256);
+    rig.atlas.__set_entry_cap_for_test(1);
+    rig.atlas.set_eviction_enabled(false);
+    rig.begin(&grid);
+    let refused = rig.emit(&grid, 0, 0);
+    assert_eq!(refused.missing, vec!['B'], "the refused glyph draws tofu");
+    assert!(!rig.cache.contains(7, refused.key), "a row with a refused glyph is not admitted");
+}
+
+/// A run whose shaping fails is drawn (as nothing) but its row is never cached; the next
+/// emission at the same pane, slot, origin, surface, cells, style and atlas identity, with no
+/// cache clear and no dirt, shapes it again and admits it, and the one after replays. A row
+/// whose first style run fails still draws its later run and is not admitted, and a row drawn
+/// with no font stack is not admitted.
+#[test]
+fn failed_shaping_runs_are_drawn_but_never_cached() {
+    let grid = text_grid(8, &["a=>b"]);
+    let mut rig = GlyphRig::new(false);
+    rig.begin(&grid);
+    fail_next_shape_for_test();
+    let failed = rig.emit(&grid, 0, 0);
+    assert!(failed.glyphs.is_empty(), "the failed run draws nothing");
+    assert!(!rig.cache.contains(7, failed.key), "a row with a failed run is not admitted");
+    let (second, stats) = counted(|| rig.emit(&grid, 0, 0));
+    assert!(!second.replayed && stats.shape_requests >= 1, "the run is shaped again");
+    assert!(!second.glyphs.is_empty() && rig.cache.contains(7, second.key), "and admitted");
+    let (third, stats) = counted(|| rig.emit(&grid, 0, 0));
+    assert!(third.replayed && stats.shape_requests == 0, "then it replays");
+    rig.cache.invalidate_all();
+    assert_eq!(rig.emit(&grid, 0, 0).glyph_bytes(), second.glyph_bytes(), "a cold draw agrees");
+
+    let mut mixed = Grid::new(8, 1);
+    for (character, flags) in [
+        ('a', CellFlags::BOLD),
+        ('=', CellFlags::BOLD),
+        ('>', CellFlags::empty()),
+        ('b', CellFlags::empty()),
+    ] {
+        mixed.put_char(character, Color::Default, Color::Default, flags);
+    }
+    let mut rig = GlyphRig::new(false);
+    rig.begin(&mixed);
+    fail_next_shape_for_test();
+    let partial = rig.emit(&mixed, 0, 0);
+    assert!(!partial.glyphs.is_empty(), "the later run still draws");
+    assert!(!rig.cache.contains(7, partial.key), "the row is not admitted");
+
+    let mut rig = GlyphRig::new(false);
+    rig.stack = None;
+    rig.raster = None;
+    rig.begin(&grid);
+    let unshaped = rig.emit(&grid, 0, 0);
+    assert!(!rig.cache.contains(7, unshaped.key), "no font stack: the row is not admitted");
+}
+
+/// A Partial frame reuses cached rows: with F0 an edit of slot 2 emits slot 2 alone, one miss
+/// that adds a seventh entry and evicts nothing; with the production-like pad of F20 the same
+/// edit emits slots 0 to 4, four of them hits. A later Full repaint hits all six rows, five
+/// unchanged and the admitted edited row.
+#[test]
+fn partial_frames_reuse_cached_rows() {
+    for (pad, mask, hits) in [(0.0, vec![2usize], 0u64), (20.0, vec![0, 1, 2, 3, 4], 4)] {
+        let mut grid = text_grid(8, &["row0", "row1", "row2", "row3", "row4", "row5"]);
+        let mut rig = GlyphRig::new(false);
+        let mut ink = crate::row_ink::RowInkTable::default();
+        let warm = policy_plan(6, pad, 1, Vec::new(), Vec::new(), None);
+        assemble_pass(&mut rig, &mut ink, &grid, &warm);
+        present_pass(&mut rig, &mut ink, &warm);
+        assert_eq!(rig.cache.len(), 6);
+        write_row(&mut grid, 2, "EDIT");
+        let edit = policy_plan(6, pad, 2, vec![2], strip_records(6), Some(&warm.key));
+        assert_eq!(edit.mode, RenderMode::Partial, "pad {pad}");
+        let emitted: Vec<usize> = (0..6).filter(|slot| edit.panes[0].emit_rows[*slot]).collect();
+        assert_eq!(emitted, mask, "pad {pad}: the planned mask");
+        let (_, stats) = assemble_pass(&mut rig, &mut ink, &grid, &edit);
+        assert_eq!((stats.row_cache_hits, stats.row_cache_misses), (hits, 1), "pad {pad}");
+        assert_eq!(rig.cache.len(), 7, "pad {pad}: one admission and no eviction");
+        present_pass(&mut rig, &mut ink, &edit);
+        let full = policy_plan(6, pad, 3, Vec::new(), Vec::new(), None);
+        let (_, stats) = assemble_pass(&mut rig, &mut ink, &grid, &full);
+        assert_eq!((stats.row_cache_hits, stats.row_cache_misses), (6, 0), "pad {pad}");
+    }
+}
+
+/// Pinned rows survive quota churn: a hundred presented Partial frames each edit slot 5 of a
+/// six-row pane (quota 24) with new content, and the committed rows of slots 0 to 4, never
+/// touched since the warm frame and the oldest entries, survive; the final Full repaint hits
+/// all six rows.
+#[test]
+fn pinned_rows_survive_quota_churn() {
+    let mut grid = text_grid(8, &["row0", "row1", "row2", "row3", "row4", "row5"]);
+    let mut rig = GlyphRig::new(false);
+    let mut ink = crate::row_ink::RowInkTable::default();
+    let mut previous = policy_plan(6, 0.0, 1, Vec::new(), Vec::new(), None);
+    assemble_pass(&mut rig, &mut ink, &grid, &previous);
+    present_pass(&mut rig, &mut ink, &previous);
+    let unchanged: Vec<u64> =
+        (0..5).map(|slot| rig.cache.committed_slot(7, slot).unwrap()).collect();
+    for frame in 0..100u64 {
+        write_row(&mut grid, 5, &format!("e{frame:03}"));
+        let edit = policy_plan(6, 0.0, 2 + frame, vec![5], strip_records(6), Some(&previous.key));
+        assert_eq!(edit.mode, RenderMode::Partial);
+        assemble_pass(&mut rig, &mut ink, &grid, &edit);
+        present_pass(&mut rig, &mut ink, &edit);
+        previous = edit;
+    }
+    for (slot, key) in unchanged.iter().enumerate() {
+        assert!(rig.cache.contains(7, *key), "slot {slot}'s committed row survived");
+    }
+    let full = policy_plan(6, 0.0, 500, Vec::new(), Vec::new(), None);
+    let (_, stats) = assemble_pass(&mut rig, &mut ink, &grid, &full);
+    assert_eq!((stats.row_cache_hits, stats.row_cache_misses), (6, 0));
+}
+
+/// A moved row is pinned before any admission: with three rows (quota 12), eleven entries of
+/// which the committed `[A, B, C]` are the oldest, a Full pass emitting `[X, Y, A]` admits X
+/// and Y, evicting only unpinned filler, and A hits. When that pass is not presented, its
+/// staged keys are discarded, the committed keys stay `[A, B, C]`, and the retry draws the
+/// same bytes. The history-cap drain that shifts every absolute row is covered by
+/// `scrolling_one_line_at_the_history_cap_reshapes_only_the_new_row`.
+#[test]
+fn moved_rows_are_pinned_before_any_admission() {
+    let first = text_grid(8, &["A=>1", "B=>2", "C=>3"]);
+    let moved = text_grid(8, &["X=>4", "Y=>5", "A=>1"]);
+    let mut rig = GlyphRig::new(false);
+    let mut ink = crate::row_ink::RowInkTable::default();
+    let plan = policy_plan(3, 0.0, 1, Vec::new(), Vec::new(), None);
+    assemble_pass(&mut rig, &mut ink, &first, &plan);
+    present_pass(&mut rig, &mut ink, &plan);
+    let committed: Vec<u64> =
+        (0..3).map(|slot| rig.cache.committed_slot(7, slot).unwrap()).collect();
+    rig.cache.begin_frame(&[(7, 3, 8)]);
+    // Fillers are admitted on a later pass, with the committed slots pinned as every pass pins them.
+    rig.cache.pin(7, &[]);
+    let identity = row_cache_atlas_identity(&rig.atlas);
+    for filler in 0..8u64 {
+        let row = sonicterm_text::row_glyph_cache::CachedRow::default();
+        assert!(rig.cache.insert(7, 1_000 + filler, identity, row));
+    }
+    assert_eq!(rig.cache.len(), 11);
+    let full = policy_plan(3, 0.0, 2, Vec::new(), Vec::new(), None);
+    let (glyphs, stats) = assemble_pass(&mut rig, &mut ink, &moved, &full);
+    assert_eq!((stats.row_cache_hits, stats.row_cache_misses), (1, 2), "A hits, X and Y miss");
+    for key in &committed {
+        assert!(rig.cache.contains(7, *key), "committed row {key} stayed pinned");
+    }
+    rig.cache.discard_staged();
+    let after: Vec<u64> = (0..3).map(|slot| rig.cache.committed_slot(7, slot).unwrap()).collect();
+    assert_eq!(after, committed, "an unpresented pass commits nothing");
+    let (retry, stats) = assemble_pass(&mut rig, &mut ink, &moved, &full);
+    assert_eq!(stats.row_cache_hits, 3, "the retry replays all three rows");
+    assert_eq!(bytemuck::cast_slice::<_, u8>(&retry), bytemuck::cast_slice::<_, u8>(&glyphs));
+}
+
+/// Identical rows in one pass share one entry: the first misses and is admitted, the others
+/// hit it and draw what a cold draw of their own slot does. An atlas growth changes the atlas
+/// identity, so the clean retry misses every row rather than replaying stale UVs.
+#[test]
+fn identical_rows_share_an_entry_and_atlas_growth_misses() {
+    let grid = text_grid(8, &["same=>x", "same=>x", "same=>x"]);
+    let mut rig = GlyphRig::new(false);
+    rig.atlas = GlyphAtlas::growable(256, 2048);
+    rig.begin(&grid);
+    let replays: Vec<bool> = (0..3).map(|slot| rig.emit(&grid, 0, slot).replayed).collect();
+    assert_eq!(replays, [false, true, true]);
+    rig.begin(&grid);
+    let warm_slot_two = rig.emit(&grid, 0, 2);
+    rig.cache.invalidate_all();
+    rig.begin(&grid);
+    assert_eq!(rig.emit(&grid, 0, 2).glyph_bytes(), warm_slot_two.glyph_bytes());
+    assert!(rig.atlas.grow_to(512), "the atlas doubles");
+    rig.begin(&grid);
+    assert!(!rig.emit(&grid, 0, 0).replayed, "a grown atlas's identity misses");
+}
+
+/// A Partial first pass that falls back admits its real entries; the forced-Full second pass
+/// starts with an empty stage, replays the admitted row, draws what a cold Full does, stages
+/// one ink record per emitted slot, and its keys, not the first pass's, are the ones committed.
+#[test]
+fn a_partial_fallbacks_staged_keys_never_commit() {
+    let mut grid = text_grid(8, &["row0", "row1", "row2", "row3", "row4", "row5"]);
+    let mut rig = GlyphRig::new(false);
+    let mut ink = crate::row_ink::RowInkTable::default();
+    let warm = policy_plan(6, 0.0, 1, Vec::new(), Vec::new(), None);
+    assemble_pass(&mut rig, &mut ink, &grid, &warm);
+    present_pass(&mut rig, &mut ink, &warm);
+    let warm_key = rig.cache.committed_slot(7, 2).unwrap();
+    write_row(&mut grid, 2, "EDIT");
+    let partial = policy_plan(6, 0.0, 2, vec![2], strip_records(6), Some(&warm.key));
+    assert_eq!(partial.mode, RenderMode::Partial);
+    let (_, first) = assemble_pass(&mut rig, &mut ink, &grid, &partial);
+    assert_eq!(first.row_cache_misses, 1, "the first pass admits the edited row");
+    let edited_key = rig.cache.staged_slot(7, 2).unwrap();
+    assert_ne!(edited_key, warm_key);
+    let mut forced = policy_plan(6, 0.0, 2, vec![2], strip_records(6), Some(&warm.key));
+    forced.force_full();
+    let (forced_glyphs, second) = assemble_pass(&mut rig, &mut ink, &grid, &forced);
+    assert_eq!((second.row_cache_hits, second.row_cache_misses), (6, 0));
+    assert_eq!(ink.staged_len(), 6, "one surviving ink record per emitted slot");
+    present_pass(&mut rig, &mut ink, &forced);
+    assert_eq!(rig.cache.committed_slot(7, 2), Some(edited_key));
+    rig.cache.invalidate_all();
+    let (cold, _) = assemble_pass(&mut rig, &mut ink, &grid, &forced);
+    assert_eq!(bytemuck::cast_slice::<_, u8>(&forced_glyphs), bytemuck::cast_slice::<_, u8>(&cold));
+
+    // The first pass's stage is cleared before the second pass emits anything.
+    rig.cache.begin_frame(&[(7, 6, 8)]);
+    rig.cache.stage_slot(7, 2, 99);
+    rig.cache.begin_frame(&[(7, 6, 8)]);
+    assert_eq!(rig.cache.staged_slot(7, 2), Some(0));
+}
+
+/// How one fallback pass changes the glyph atlas while it assembles, as eviction, a reset or a
+/// growth can during a real assembly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AtlasChange {
+    /// The atlas is left alone.
+    Unchanged,
+    /// The atlas is reset in place, giving it a new content identity.
+    Reset,
+    /// The atlas doubles, recomputing every UV.
+    Growth,
+}
+
+/// Which of the last presented frame's ink reaches slot 0, the row a partial plan does not emit:
+/// the cursor recolor or the tab-title ink. Either widens the plan's damage onto that row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Widening {
+    /// The last frame recolored glyphs over slot 0.
+    Recolor,
+    /// The last frame drew tab-title ink over slot 0.
+    TabInk,
+}
+
+/// A six-row pane presented in full, then edited at slot 2, for the fallback orchestration tests:
+/// the rig (with a growable atlas), its ink table, the edited grid, the presented plan, slot 2's
+/// committed key before the edit, and the stage each pass found at its start.
+struct FallbackFixture {
+    rig: GlyphRig,
+    ink: crate::row_ink::RowInkTable,
+    grid: Grid,
+    warm: FramePlan,
+    committed_before: Vec<u64>,
+    stages_at_pass_start: Vec<Vec<u64>>,
+    committed_after_pass: Vec<Vec<u64>>,
+}
+
+impl FallbackFixture {
+    fn new() -> Self {
+        let mut grid = text_grid(8, &["row0", "row1", "row2", "row3", "row4", "row5"]);
+        let mut rig = GlyphRig::new(false);
+        rig.atlas = GlyphAtlas::growable(256, 2048);
+        let mut ink = crate::row_ink::RowInkTable::default();
+        let warm = policy_plan(6, 0.0, grid.revision(), Vec::new(), Vec::new(), None);
+        assemble_pass(&mut rig, &mut ink, &grid, &warm);
+        present_pass(&mut rig, &mut ink, &warm);
+        write_row(&mut grid, 2, "EDIT");
+        let committed_before =
+            (0..6).map(|slot| rig.cache.committed_slot(7, slot).unwrap()).collect();
+        Self {
+            rig,
+            ink,
+            grid,
+            warm,
+            committed_before,
+            stages_at_pass_start: Vec::new(),
+            committed_after_pass: Vec::new(),
+        }
+    }
+
+    /// The edit's plan at the grid's current revision, `Partial` unless `force_full`.
+    fn plan(&self, force_full: bool) -> FramePlan {
+        let mut plan = policy_plan(
+            6,
+            0.0,
+            self.grid.revision(),
+            vec![2],
+            strip_records(6),
+            Some(&self.warm.key),
+        );
+        if force_full {
+            plan.force_full();
+        }
+        plan
+    }
+
+    /// Every slot's committed glyph key.
+    fn committed(&self) -> Vec<u64> {
+        (0..6).map(|slot| self.rig.cache.committed_slot(7, slot).unwrap()).collect()
+    }
+
+    /// Every slot's staged glyph key.
+    fn staged(&self) -> Vec<u64> {
+        (0..6).map(|slot| self.rig.cache.staged_slot(7, slot).unwrap()).collect()
+    }
+
+    /// One assembly pass through the production pass helpers: `begin_glyph_pass` starts it, the
+    /// pane seam emits its rows, `change` is applied to the atlas as assembly could change it,
+    /// and `GpuRenderer::finish_assembly_pass` takes the atlas check, the damage widening by the
+    /// last frame's `widening` ink over slot 0, the fallback decision and the receipts, exactly
+    /// as `assemble_frame` does.
+    fn assemble(
+        &mut self,
+        force_full: bool,
+        change: AtlasChange,
+        widening: Widening,
+    ) -> Result<Assembled> {
+        let mut plan = self.plan(force_full);
+        let atlas_stamp_at_start = GlyphContentStamp::capture(1, 1, &self.rig.atlas);
+        let atlas_evictions_at_start = self.rig.atlas.evictions();
+        begin_pass(&mut self.rig, &mut self.ink, &self.grid, &plan);
+        self.stages_at_pass_start.push(self.staged());
+        let (glyphs, _) = emit_pass(&mut self.rig, &mut self.ink, &self.grid, &plan);
+        self.committed_after_pass.push(self.committed());
+        match change {
+            AtlasChange::Unchanged => {}
+            AtlasChange::Reset => self.rig.atlas.reset_in_place(),
+            AtlasChange::Growth => {
+                let doubled = self.rig.atlas.width() * 2;
+                assert!(self.rig.atlas.grow_to(doubled), "the atlas doubles");
+            }
+        }
+        let slot_zero = crate::cursor::RecolorBounds::Rect(strip_records(6)[0].expect("strip"));
+        let (previous_recolor, previous_tab_ink) = match widening {
+            Widening::Recolor => (
+                crate::cursor::RecolorRecord { bounds: slot_zero, hash: 1 },
+                crate::cursor::RecolorBounds::Empty,
+            ),
+            Widening::TabInk => (crate::cursor::RecolorRecord::default(), slot_zero),
+        };
+        let pass_end = PassEnd {
+            atlas_stamp_at_start,
+            atlas_stamp_now: GlyphContentStamp::capture(1, 1, &self.rig.atlas),
+            atlas_evictions_at_start,
+            previous_recolor,
+            current_recolor: crate::cursor::RecolorRecord::default(),
+            previous_tab_ink,
+            current_tab_ink: crate::cursor::RecolorBounds::Empty,
+        };
+        let panes = [sonicterm_render_model::PaneRender {
+            id: 7,
+            rect_px: PixelRect { x: 0, y: 0, w: 80, h: 120 },
+            grid: &mut self.grid,
+            viewport_top_abs: None,
+            is_active: true,
+            cursor_style: sonicterm_render_model::CursorStyle::default(),
+            is_broadcast_participant: false,
+            scrollbar_alpha: 0.0,
+            inline_images: Vec::new(),
+        }];
+        let ended = GpuRenderer::finish_assembly_pass(&mut plan, &panes, pass_end);
+        drop(panes);
+        let receipts = match ended {
+            Ok(receipts) => receipts,
+            Err(early_exit) => return Ok(early_exit),
+        };
+        Ok(Assembled::Layers(Box::new(AssembledLayers {
+            surface_width: 240.0,
+            surface_height: 200.0,
+            subpixel_aa: SubpixelAaMode::Off,
+            quads: Vec::new(),
+            images: Vec::new(),
+            glyphs,
+            overlay_quads: Vec::new(),
+            overlay_glyphs: Vec::new(),
+            field_candidates: PresentedFields::default(),
+            missing_chars: Vec::new(),
+            missing_chrome_chars: Vec::new(),
+            gpu_timing: None,
+            plan,
+            receipts,
+            recolor: crate::cursor::RecolorRecord::default(),
+            tab_ink: crate::cursor::RecolorBounds::Empty,
+        })))
+    }
+}
+
+/// A Partial plan whose widened damage reaches an unemitted row falls back through the
+/// production orchestration and production pass helpers (`begin_glyph_pass` and
+/// `finish_assembly_pass`), with real admissions, real atlas checks and real receipts, for the
+/// last frame's cursor recolor and for its tab-title ink over slot 0. The
+/// first pass admits and stages the edited row but commits nothing; the second pass's own
+/// start discards that stage; its layers carry the forced-Full plan and `presented_receipts`
+/// gives that plan's `All` receipt for the fixture grid; and the one settlement commits the
+/// second pass's keys. A real atlas reset or growth during the first pass (one assembly call)
+/// or the second (two calls) settles as `AtlasRetry`: no receipt, committed keys unchanged and
+/// no surviving stage.
+#[test]
+fn a_partial_fallback_never_commits_its_first_pass() {
+    use sonicterm_render_model::{AckReceipt, AckRows};
+    for widening in [Widening::Recolor, Widening::TabInk] {
+        let mut fixture = FallbackFixture::new();
+        assert_eq!(fixture.plan(false).mode, RenderMode::Partial, "{widening:?}: plans Partial");
+        let mut calls = 0;
+        let assembled = assemble_with_fallback(|force_full| {
+            calls += 1;
+            fixture.assemble(force_full, AtlasChange::Unchanged, widening)
+        });
+        assert_eq!(calls, 2, "{widening:?}: the partial pass fell back and was assembled again");
+        let Ok(Assembled::Layers(layers)) = assembled else {
+            panic!("{widening:?}: the forced-Full pass presents layers");
+        };
+        let AssembledLayers { plan, receipts, .. } = *layers;
+        assert_eq!(plan.mode, RenderMode::Full, "{widening:?}: the layers carry the Full plan");
+        assert_eq!(fixture.stages_at_pass_start[0], vec![0; 6], "{widening:?}: starts empty");
+        assert_ne!(fixture.staged()[2], 0, "{widening:?}: the second pass staged the edit");
+        assert_eq!(
+            fixture.stages_at_pass_start[1],
+            vec![0; 6],
+            "{widening:?}: the second start discards the first stage"
+        );
+        for (pass, committed) in fixture.committed_after_pass.iter().enumerate() {
+            assert_eq!(*committed, fixture.committed_before, "{widening:?}: pass {pass} commits");
+        }
+        let expected_receipts = vec![AckReceipt::of(0, 7, &fixture.grid, AckRows::All)];
+        assert_eq!(receipts, expected_receipts, "{widening:?}: the Full plan acknowledges all");
+        let staged = fixture.staged();
+        let mut key = Some(fixture.warm.key.clone());
+        let settled = settle_retained_frame(
+            &mut key,
+            &mut fixture.ink,
+            &mut fixture.rig.cache,
+            &PresentOutcome::Presented,
+            Some(plan),
+            receipts,
+        );
+        assert_eq!(settled, expected_receipts, "{widening:?}: one settlement returns them");
+        assert_eq!(fixture.committed(), staged, "{widening:?}: the second pass's keys commit");
+        assert_ne!(fixture.committed()[2], fixture.committed_before[2]);
+        assert_eq!(fixture.staged(), vec![0; 6], "{widening:?}: no stage survives the commit");
+    }
+
+    for retry_pass in [1usize, 2] {
+        for change in [AtlasChange::Reset, AtlasChange::Growth] {
+            let case = format!("{change:?} in pass {retry_pass}");
+            let mut fixture = FallbackFixture::new();
+            let mut calls = 0;
+            let assembled = assemble_with_fallback(|force_full| {
+                calls += 1;
+                let pass_change = if calls == retry_pass { change } else { AtlasChange::Unchanged };
+                fixture.assemble(force_full, pass_change, Widening::TabInk)
+            });
+            assert_eq!(calls, retry_pass, "{case}: assembly calls");
+            assert!(matches!(assembled, Ok(Assembled::AtlasRetry { .. })), "{case}: AtlasRetry");
+            let mut key = Some(fixture.warm.key.clone());
+            let settled = settle_retained_frame(
+                &mut key,
+                &mut fixture.ink,
+                &mut fixture.rig.cache,
+                &PresentOutcome::AtlasRetry,
+                None,
+                Vec::new(),
+            );
+            assert!(settled.is_empty() && key.is_none(), "{case}: no receipt and no key");
+            assert_eq!(fixture.committed(), fixture.committed_before, "{case}: unchanged");
+            assert_eq!(fixture.staged(), vec![0; 6], "{case}: no surviving stage");
+        }
+    }
+}
+
+/// The pane seam records each slot at the moment its row is emitted, in ascending order and
+/// exactly as the plan's mask says: every slot for a Full plan, and only the masked slots for
+/// the Partial edits of F0 and F20. The record comes from the emission loop, not the plan, so a
+/// loop that skips, adds or reorders a row fails here on every host.
+#[test]
+fn the_pane_seam_records_exactly_the_slots_it_emits() {
+    for (pad, mask) in [(0.0, vec![2u16]), (20.0, vec![0, 1, 2, 3, 4])] {
+        let mut grid = text_grid(8, &["row0", "row1", "row2", "row3", "row4", "row5"]);
+        let mut rig = GlyphRig::new(false);
+        let mut ink = crate::row_ink::RowInkTable::default();
+        let warm = policy_plan(6, pad, 1, Vec::new(), Vec::new(), None);
+        begin_pass(&mut rig, &mut ink, &grid, &warm);
+        let (_, _, full_slots) = emit_pass_recording(&mut rig, &mut ink, &grid, &warm);
+        assert_eq!(full_slots, (0..6).collect::<Vec<u16>>(), "pad {pad}: Full emits every slot");
+        present_pass(&mut rig, &mut ink, &warm);
+        write_row(&mut grid, 2, "EDIT");
+        let edit = policy_plan(6, pad, 2, vec![2], strip_records(6), Some(&warm.key));
+        assert_eq!(edit.mode, RenderMode::Partial, "pad {pad}");
+        begin_pass(&mut rig, &mut ink, &grid, &edit);
+        let (_, _, partial_slots) = emit_pass_recording(&mut rig, &mut ink, &grid, &edit);
+        assert_eq!(partial_slots, mask, "pad {pad}: Partial emits exactly the mask");
+    }
+}
+
+/// Both direct `Err` exits discard the staged glyph slot keys: the assembly error arm and the
+/// presenter `Err` handled where `present_layers` returns, besides the partial-fallback arm.
+/// The assembly fault fires after the pane loop staged its rows. Exercised on a real renderer
+/// in the Windows partial-assembly suite.
+#[test]
+fn both_error_exits_discard_staged_glyph_slots() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let releasing = method_body(&source, "    pub fn render_releasing(");
+    assert_eq!(releasing.matches("self.row_glyph_cache.discard_staged();").count(), 3);
+    let error_arm = releasing.find("Err(error) => {").unwrap();
+    assert!(releasing[error_arm..error_arm + 400].contains("discard_staged()"));
+    let layers = releasing.find("self.present_layers(*layers).unwrap_or_else(|error| {").unwrap();
+    assert!(releasing[layers..layers + 200].contains("discard_staged()"));
+    let assemble = method_body(&source, "    fn assemble_frame(");
+    let staged = assemble.find("staged_ranges.push((pv.pane_id,").unwrap();
+    let fault = assemble.find("std::mem::take(&mut self.fault_assembly_error)").unwrap();
+    assert!(staged < fault, "the assembly fault fires after rows were staged");
+}
+
+/// Plans ignore the glyph cache: the same facts, inputs and previous key give the same plan
+/// whatever the cache holds, and the planner's source never names the cache.
+#[test]
+fn plans_ignore_the_glyph_cache() {
+    let warm = policy_plan(6, 20.0, 1, Vec::new(), Vec::new(), None);
+    let before = policy_plan(6, 20.0, 2, vec![2], strip_records(6), Some(&warm.key));
+    let mut rig = GlyphRig::new(false);
+    let mut ink = crate::row_ink::RowInkTable::default();
+    let grid = text_grid(8, &["row0", "row1", "row2", "row3", "row4", "row5"]);
+    assemble_pass(&mut rig, &mut ink, &grid, &warm);
+    let after = policy_plan(6, 20.0, 2, vec![2], strip_records(6), Some(&warm.key));
+    assert_eq!(before.key, after.key);
+    assert_eq!(before.mode, after.mode);
+    assert_eq!(before.damage, after.damage);
+    assert_eq!(before.panes[0].emit_rows, after.panes[0].emit_rows);
+    let planner = include_str!("frame_plan.rs");
+    assert!(!planner.contains("row_glyph_cache") && !planner.contains("RowGlyphCache"));
 }

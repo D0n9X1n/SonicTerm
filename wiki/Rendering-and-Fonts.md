@@ -353,23 +353,51 @@ Update and verification commands are in
 
 ### Row and shape caches
 
-`RowGlyphCache` stores glyph instances, underlines, missing-glyph records, and
-tofu quads, and `LineQuadCache` stores one background/decoration projection, each
-under one entry per `(pane id, absolute row)`. Each entry keeps the row hash it
-was built from, and the glyph entry also its atlas content identity; a lookup hits
-only when they match. The hash includes the viewport row slot, so a slot change
-re-shapes or reprojects that row and replaces its entry instead of consuming
-another. Invalidating a dirty row is one keyed removal of that pane's entry and
-examines no other row. Replacing a cached row never evicts. Before assembling
-rows, the renderer gives `RowGlyphCache::begin_frame` every drawn pane with its
-visible absolute-row range, scrolled-back viewports included. Admitting a new
-glyph row at capacity first drops rows whose pane was not drawn or whose row lies
-outside that pane's range (ranges are per pane), and clears the table only when
-every cached row is still visible. `LineQuadCache` clears at capacity. Because
-cached glyph instances already carry projected screen coordinates, their keys include
-pane origin and surface extent as well as cell content, font/style revision, cell
-metrics, display scale, atlas content identity, and a selection rectangle only
-when it intersects that row.
+`RowGlyphCache` stores each row's glyph records, underline runs, tofu boxes and
+missing characters under `(pane id, content key)`. The content key is a SipHash,
+with keys drawn once per cache, of every cell of the row in order, the column
+count, the style revision, the cell size, the baseline, the raster size, whether
+the software presenter draws the frame, and the row's active hover fragment. It
+holds no absolute row, viewport slot, pane origin, surface extent or selection,
+so a row that scrolls, moves with its pane or is selected keeps its key and
+replays. Records are positioned in the row's cell grid: atlas region, colour,
+raster offset and shaping offset kept apart, raster size, and the columns a glyph
+spans. Hit and miss both project them at the row's current slot and origin
+(cell origin, raster offset, shaping offset, status-marker fit, device-pixel
+snap, NDC), so a replayed row draws the bytes shaping it again would. Each entry
+also records its atlas content identity, and a lookup with another identity
+misses. Random keys stop offline collision searches; a 64-bit collision is
+still possible, and is the one case in which this probabilistic cache replays a
+wrong row until eviction.
+
+Only complete rows are admitted. A row in which the atlas refused a glyph, a
+block glyph drew nothing, a style run failed to shape, or no shaper or
+rasterizer was available is drawn from its local buffer and not cached; every
+run is still shaped and drawn. A glyph cached as missing, whitespace and empty
+non-block tiles are stable and stay admissible. On the software presenter a
+block glyph rasterizes at an integer target that depends on the row's position,
+so a lookup of a row holding blocks recomputes each block's target at the
+current position and misses when a size differs; the new shape replaces the
+entry.
+
+Each assembly pass calls `begin_frame` once with every drawn pane's size; a pane
+not drawn, or drawn at another size, is released then. Per pane, the pin phase
+computes the key of every row the plan emits and pins those keys with the keys
+the presented frame shows (its committed slots) before the first admission, and
+eviction never removes a pinned key. Each emitted slot's key is staged, and
+becomes committed only when the frame presents; any other outcome, including an
+`Err` from assembly or the presenter, discards the stage. A pane holds at most
+`4 × rows` entries and `4 × rows × cols` cells' worth of payload; an admission
+that would pass either evicts that pane's unpinned rows, least recently used
+first, to three quarters of each. A row larger than `cols` cells' worth is never
+admitted. Across all panes, payload stays within 448 MiB by refusing admission
+and tables, slot vectors and pin lists stay within 64 MiB by leaving a pane
+untracked (it draws and caches nothing), so the cache's reported storage stays
+within its 512 MiB per-renderer envelope after every change. Dirt drops no glyph
+row: changed content misses by itself. `LineQuadCache` keeps one
+background/decoration projection per `(pane id, absolute row)`, validated by a
+row hash that includes the viewport slot and selection overlap; dirty rows
+invalidate their absolute entries and it clears at capacity.
 
 Font, theme, scale, pane identity, atlas reset, or atlas content-identity changes
 invalidate the affected entries. A font or DPI change rebuilds the body, footer,
@@ -384,9 +412,9 @@ All three stacks use the same family, DPI, and weight scale. Native raster-role
 tags keep their atlas entries distinct, so a footer or tab title does not scale
 a cached body bitmap.
 
-Both row caches hold about four times total visible rows; capacity/geometry
-changes clear the affected cache. Dirty rows invalidate absolute entries.
-`remove_pane` evicts that pane's glyph then quad rows, preserving peers and
+The quad cache holds about four times total visible rows and clears at capacity
+or on a geometry change; the glyph cache bounds itself by the per-pane quotas and
+budgets above. `remove_pane` evicts that pane's glyph then quad rows, preserving peers and
 requesting table compaction. Current allocation includes table and nested-vector
 capacity, not merely live lengths.
 
@@ -644,7 +672,8 @@ mutation must mark the affected rows in the same update.
 Pointer pane focus, selection press, drag and release, wheel scrolling, scrollbar
 drags and splitter drags add no window-wide grid dirt. Selection and focus are
 window identity and the viewport is pane identity, so the frame plan repaints
-them, and the row caches key on selection overlap and row position. Pointer focus
+them; the quad cache keys on selection overlap and row position, while the glyph
+cache keys on content only. Pointer focus
 and splitter drags complete their topology change with `TopologyDirt::ResizeOnly`:
 a grid whose size changed is dirty on every row, a moved pane forces a full frame,
 and an unchanged pane keeps its rows. Tab activation, reorder and transfer keep

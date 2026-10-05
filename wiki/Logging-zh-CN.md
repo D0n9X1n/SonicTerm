@@ -403,8 +403,8 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `partial_frames` | 次数 | 渲染计划为 `Partial`（只组装与损伤区域相交的行）且已呈现的帧；呈现后才计数，应除以已呈现帧数，而非 `full_frames` |
 | `partial_fallbacks` | 次数 | 因最终损伤区域触及未组装的行，在同一帧内重新按 `Full` 组装的 `Partial` 计划 |
 | `row_cells_hashed` | 次数 | 写入行字形缓存键的单元格数，每个已组装的终端行一行 |
-| `row_cache_invalidate_visits` | 次数 | 使脏行失效时检查的行字形缓存条目：每次 `invalidate_row_abs` 调用检查一个，即按 `(窗格, 绝对行)` 键删除该条目 |
-| `row_cache_invalidate_us` | 微秒 | 使脏行失效所花的总时间，为普通累加和；至少使一行失效的窗格在其行循环内读取一对时钟，因此计数不会改变保留哪些缓存行 |
+| `row_cache_invalidate_visits` | 次数 | 为计数器契约兼容而保留，恒为 0：按内容建键的行字形缓存不因脏行删除任何行 |
+| `row_cache_invalidate_us` | 微秒 | 为计数器契约兼容而保留，恒为 0 |
 | `recolor_glyphs_visited` | 次数 | 在帧的主字形列表上为光标、复制模式光标或搜索匹配下的字形重新着色时检查的字形：墨迹与目标相交的行，加上终端行之外的全部字形（如标签标题）；叠加层文字不计入 |
 | `font_fallback_applies` | 次数 | 字体准备应用了更新的回退通知或代次的帧，每次清除一次已塑形的行、图集中缺失字形的条目与标签标题宽度纪元；它只是已解析的回退字体到达屏幕的佐证，像素由测试证明 |
 | `glyph_atlas_growths` | 次数 | 字形图集翻倍次数，在每次帧末检查以及渲染器结算统计时计入；让图集增长的帧开始一个增长片段 |
@@ -576,7 +576,7 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
 | `panes_sampled` | 计入 `session_total_bytes` 的窗格 |
 | `panes_contended` | 因解析器或内联图像锁被占用而跳过的窗格；非零表示会话总量不完整 |
 | `renderer_total_bytes` / `renderer_total_items` | 所有可见与预热渲染器的 CPU 存储 |
-| `renderer_row_glyph_cache_bytes` / `renderer_row_glyph_cache_items` | 所有渲染器的逐行字形实例与装饰缓存存储及缓存行数 |
+| `renderer_row_glyph_cache_bytes` / `renderer_row_glyph_cache_items` | 行字形缓存负载加跟踪存储及缓存行数，为所有渲染器之和（每个渲染器不超过 512 MiB） |
 | `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | 所有渲染器的逐行背景/装饰 quad 缓存存储及缓存行数 |
 | `live_renderers` | 进程级渲染器数量；若高于 `renderers` 条目数，可能存在仍存活但无法访问的渲染器 |
 | `live_fg_probe_workers` | 该 App 的前台探测 worker 线程数：首次需求之前或 worker 停止后为 0，否则为 1 |
@@ -668,7 +668,7 @@ renderer retention window="warm[<slot>]" role="warm" total_bytes=<bytes>
 | `glyph_atlas_items` | 图集中的字形条目数 | 与字节数一起判断实际占用与容量 |
 | `image_atlas_bytes` | CPU 内联图像图集像素缓冲容量，包含非空的 1×1 占位分配 | 减少图像或渲染器数量 |
 | `image_atlas_items` | 内联图像图集条目数 | 与字节数一起识别图像占用 |
-| `row_glyph_cache_bytes` | 哈希表后备存储，以及缓存字形、下划线、tofu 与缺失字符向量的容量 | 与缓存行数对照；窗格离开时释放其负载，但表容量可能保持高水位 |
+| `row_glyph_cache_bytes` | 缓存的字形记录、下划线、缺字方框与缺失字符向量容量，加上表、行位置向量与固定列表 | 每个渲染器至多 512 MiB；某次组装的 `begin_frame` 不包含某窗格时，该窗格被释放 |
 | `row_glyph_cache_items` | 已缓存的字形行数 | 行数下降而字节不变，可能表示可复用表容量仍保留 |
 | `row_quad_cache_bytes` | 哈希表后备存储，以及缓存背景/装饰 quad 向量的容量 | 与缓存行数及窗格/窗口变化对照 |
 | `row_quad_cache_items` | 已缓存的 quad 行数 | 即使表容量有粘性，行数下降也能确认条目已淘汰 |

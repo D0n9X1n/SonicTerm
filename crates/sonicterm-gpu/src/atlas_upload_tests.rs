@@ -113,13 +113,26 @@ pub(crate) fn render_image_instances_readback(
     height: u32,
     clear: [f32; 4],
 ) -> Vec<u8> {
+    render_instances_readback(atlas, images, &[], (width, height), clear)
+}
+
+/// Draw `images` and `glyphs` from `atlas` through the real unified pipeline over `clear` and
+/// return the BGRA readback. Uploading drains the atlas's dirty rects, so the atlas binding
+/// the instances use is the one synchronized: the glyph binding when any glyph is drawn.
+fn render_instances_readback(
+    atlas: &mut GlyphAtlas,
+    images: &[crate::wezterm_pipeline::ImageInstance],
+    glyphs: &[sonicterm_text::GlyphInstance],
+    (width, height): (u32, u32),
+    clear: [f32; 4],
+) -> Vec<u8> {
     let stride = (width * BYTES_PER_PIXEL).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
         * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let (device, queue) = headless_device();
     let mut pipeline = crate::wezterm_pipeline::WeztermPipeline::new(
         &device,
         wgpu::TextureFormat::Bgra8UnormSrgb,
-        images.len() as u64,
+        (images.len() + glyphs.len()).max(1) as u64,
     );
     let cpu_pixels = atlas.pixels_bgra().to_vec();
     let mut image_upload = AtlasUpload::new(
@@ -128,13 +141,18 @@ pub(crate) fn render_image_instances_readback(
         pipeline.image_bind_group_layout(),
         AtlasBindingKind::Image,
     );
-    let glyph_upload = AtlasUpload::new(
+    let mut glyph_upload = AtlasUpload::new(
         &device,
         atlas,
         pipeline.glyph_bind_group_layout(),
         AtlasBindingKind::Glyph,
     );
-    image_upload.sync(&queue, atlas);
+    if glyphs.is_empty() {
+        image_upload.sync(&queue, atlas);
+    } else {
+        // When: glyphs are drawn, the glyph binding receives the atlas's pending tiles.
+        glyph_upload.sync(&queue, atlas);
+    }
     assert_eq!(atlas.pixels_bgra(), cpu_pixels, "GPU upload must not rewrite CPU atlas bytes");
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -189,7 +207,7 @@ pub(crate) fn render_image_instances_readback(
             None,
             &[],
             images,
-            &[],
+            glyphs,
             &[],
             &[],
         );
@@ -958,4 +976,22 @@ fn releasing_the_image_upload_frees_its_staging_from_the_upload_staging_part() {
     let after = crate::core::upload_staging_amount(vertex, &glyph_upload, &released).bytes;
     println!("image upload staging released: {promoted_kept} bytes ({before} -> {after})");
     assert_eq!(before - after, promoted_kept, "the part drops by everything the upload kept");
+}
+
+/// Headless wgpu draws the scrolled frame's warm (replayed) and cold (shaped) rows to the same
+/// pixels. Uploading drains an atlas's pending tiles, so each side draws from its own atlas,
+/// built by the same deterministic sequence; the atlases are checked equal first.
+#[test]
+fn gpu_readback_of_warm_and_cold_rows_is_identical() {
+    let (mut cold_atlas, cold, _, (width, height)) = crate::core::warm_and_cold_row_glyphs();
+    let (mut warm_atlas, _, warm, _) = crate::core::warm_and_cold_row_glyphs();
+    assert_eq!(cold_atlas.pixels_bgra(), warm_atlas.pixels_bgra(), "both atlases packed alike");
+    let clear = [0.05, 0.05, 0.08, 1.0];
+    let cold_pixels =
+        render_instances_readback(&mut cold_atlas, &[], &cold, (width, height), clear);
+    let warm_pixels =
+        render_instances_readback(&mut warm_atlas, &[], &warm, (width, height), clear);
+    let first = cold_pixels[..4].to_vec();
+    assert!(cold_pixels.chunks(4).filter(|pixel| *pixel != first.as_slice()).count() > 50);
+    assert!(warm_pixels == cold_pixels, "warm and cold GPU readbacks differ");
 }
