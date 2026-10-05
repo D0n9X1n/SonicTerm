@@ -9524,6 +9524,11 @@ ROW_RUN_PLACEMENT = {
                 "S7": ()},
 }
 ROW_RUN_CREATED_S = 1_800_000_000
+# The measured grids hosted runs report: macOS 237 x 43 and Windows 281 x 58, each with rows - 2 body rows.
+ROW_RUN_GEOMETRY = {"macos": {"contract": 1, "cols": 237, "rows": 43, "body_rows": 41},
+                    "windows": {"contract": 1, "cols": 281, "rows": 58, "body_rows": 56}}
+# The variants that play a row-run workload on a measured grid.
+ROW_RUN_GEOMETRY_LABELS = ("S10/powerline", "S10/cjk-tui", "S10/unique")
 # A replacement run created after a first execution of the default 1,500 s has ended.
 ROW_RUN_RERUN_CREATED_S = ROW_RUN_CREATED_S + 2000
 
@@ -9538,12 +9543,18 @@ class RowRunWorkflow:
     artifacts under `root`, every shard healthy: each decision phase it owns has `runs_per_side` accepted runs per
     side, each with its kept outcome.json and result.json."""
 
-    def __init__(self, root, run_id=777, runs_per_side=2, elapsed_s=1500, created_s=ROW_RUN_CREATED_S):
+    def __init__(self, root, run_id=777, runs_per_side=2, elapsed_s=1500, created_s=ROW_RUN_CREATED_S,
+                 geometry=None):
         self.root, self.run_id, self.attempt, self.created_s = Path(root), run_id, 1, created_s
         self.directories = {}
         # Each platform's harness digest: 64 lowercase hex digits, as perf-compare.py's harness_hash writes it.
         self.harness = {key: hashlib.sha256(f"harness-{key}".encode()).hexdigest()
                         for key in perf.ROW_RUN_PLATFORM_KEYS.values()}
+        # Each platform's measured row-run grid, as its result.json and evidence records carry it; `geometry`
+        # overrides fields per platform before any artifact is built.
+        self.geometry = copy.deepcopy(ROW_RUN_GEOMETRY)
+        for platform_key, fields in (geometry or {}).items():
+            self.geometry[platform_key].update(fields)
         rows = [self.row("macOS perf binaries (base and head)", 60, 1)]
         artifacts = []
         for platform_name, shards in ROW_RUN_PLACEMENT.items():
@@ -9586,7 +9597,8 @@ class RowRunWorkflow:
                 for index, renderer in enumerate(renderers, 1):
                     identity = f"runs/{label.replace('/', '-')}/counters/{index:02d}-{side_name}"
                     self.write_run(directory / identity, platform_key, side_name, label, renderer)
-                    records.append({"execution": identity, "renderer": renderer})
+                    records.append({"execution": identity, "renderer": renderer,
+                                    "geometry": self.geometry_for(platform_key, label)})
                 entry[side_name] = {"status": "", "accepted": records, "rejected": [],
                                     "audit": perf.row_run_audit(renderers)}
             phases.append(entry)
@@ -9601,18 +9613,28 @@ class RowRunWorkflow:
             "phases": phases})
         return directory
 
+    def geometry_for(self, platform_key, label):
+        """The measured grid a run of `label` records on the platform: its row-run grid, or None for a variant
+        that plays no row-run workload."""
+        return copy.deepcopy(self.geometry[platform_key]) if label in ROW_RUN_GEOMETRY_LABELS else None
+
     def write_run(self, run_dir, platform_key, side_name, label, renderer):
         """An accepted run's outcome.json and kept result.json: a valid, managed, short counters run of `label`
-        under the platform's harness, reporting `renderer` for the stream phase."""
+        under the platform's harness, reporting `renderer` for the stream phase and, for a row-run variant, the
+        platform's measured grid."""
         scenario, _, variant = label.partition("/")
         (run_dir / "scratch").mkdir(parents=True, exist_ok=True)
         perf._write_json(run_dir / "outcome.json",
                          {"kind": "valid", "side": side_name, "scenario": scenario, "variant": variant})
-        perf._write_json(run_dir / "scratch" / "result.json",
-                         {"schema_version": perf.SCHEMA_VERSION, "managed": True,
-                          "harness_hash": self.harness[platform_key], "scenario": scenario, "variant": variant,
-                          "short": True, "status": "valid", "frame_counters": "on",
-                          "phases": [{"name": "stream", "frame_counters": {"renderer": renderer}}]})
+        result = {"schema_version": perf.SCHEMA_VERSION, "managed": True,
+                  "harness_hash": self.harness[platform_key], "scenario": scenario, "variant": variant,
+                  "short": True, "status": "valid", "frame_counters": "on",
+                  "phases": [{"name": "stream", "frame_counters": {"renderer": renderer}}]}
+        geometry = self.geometry_for(platform_key, label)
+        if geometry is not None:
+            # When: the variant plays a row-run workload, its result records the frozen grid.
+            result["row_run_geometry"] = geometry
+        perf._write_json(run_dir / "scratch" / "result.json", result)
 
     def edit(self, platform_name, shard, change):
         """Apply `change` to one shard's row-run-evidence.json as written, nothing recomputed."""
@@ -10011,6 +10033,9 @@ class RowRunDecideTests(unittest.TestCase):
             result = counters_result({"renderer.row_run_shape_first": 7})
             for phase in result["phases"]:
                 phase["name"] = phase_name
+            if phase_name == "stream":
+                # When: the run reached the stream, it recorded the frozen grid as a row-run run does.
+                result["row_run_geometry"] = dict(ROW_RUN_GEOMETRY["macos"])
             return make_outcome(plan=plan, exit_code=0, result=result)
         queues = {side: [lambda plan: counted(plan, "warm"), lambda plan: counted(plan, "stream")]
                   for side in perf.SIDES}
@@ -10027,6 +10052,11 @@ class RowRunDecideTests(unittest.TestCase):
             self.fail(f"exporting an accepted execution without the phase's counters failed: {error}")
         self.assertEqual(len(exported["accepted"]), 2, "the run without a stream phase is exported, not dropped")
         self.assertEqual(sorted(record["renderer"] is None for record in exported["accepted"]), [False, True])
+        # Each record carries its own result's measured grid, or None where the result recorded none.
+        self.assertEqual(sorted(record["geometry"] is None for record in exported["accepted"]), [False, True])
+        self.assertIn(ROW_RUN_GEOMETRY["macos"], [record["geometry"] for record in exported["accepted"]])
+        phase = perf.row_run_phase(result.base, result.head, "stream")
+        self.assertEqual(sorted(grid is None for grid in phase.head_grids), [False, True])
         self.assertEqual(exported["rejected"], [])
         self.assertEqual(exported["audit"]["accepted_runs"], 2)
         missing = self.workflow("missing")
@@ -10150,6 +10180,122 @@ class RowRunDecideTests(unittest.TestCase):
             shards = [entry["shard"] for entry in jobs[job_id]["strategy"]["matrix"]["include"]]
             self.assertEqual(sorted(shards), sorted(perf.ROW_RUN_SHARDS), job_id)
         self.assertEqual(sorted(perf.ROW_RUN_SHARDS), sorted(ROW_RUN_PLACEMENT["macOS"]))
+
+    def test_row_run_geometry_is_bound_to_each_result_and_equal_across_sides_variants_and_replacements(self):
+        # The row-run counts depend on the measured grid, so a decision needs one grid per platform: each
+        # record's geometry must be its kept result's, valid under the contract, absent off the row-run variants,
+        # and equal across base and head, across the three variants and across a replacement. Each fault below
+        # decided BUILD when the geometry was not read.
+        mac = ("macOS", "S4-S5-S11")
+
+        def kept(workflow, label, side_name, index=0):
+            return (workflow.directories[mac] / "runs" / label.replace("/", "-") / "counters"
+                    / f"{index + 1:02d}-{side_name}" / "scratch" / "result.json")
+
+        def edit_result(workflow, label, side_name, change):
+            path = kept(workflow, label, side_name)
+            document = json.loads(path.read_text(encoding="utf-8"))
+            change(document)
+            perf._write_json(path, document)
+
+        def edit_records(workflow, label, side_names, change):
+            # The records and their kept results change together, so only the cross-run check can see it.
+            def apply(document):
+                entry = next(item for item in document["phases"] if item["label"] == label)
+                for side_name in side_names:
+                    for index, record in enumerate(entry[side_name]["accepted"]):
+                        change(record["geometry"])
+                        path = kept(workflow, label, side_name, index)
+                        result = json.loads(path.read_text(encoding="utf-8"))
+                        result["row_run_geometry"] = record["geometry"]
+                        perf._write_json(path, result)
+            workflow.edit(*mac, apply)
+        cases = {
+            "result differs from record": (lambda workflow: edit_result(
+                workflow, "S10/powerline", "head", lambda document: document["row_run_geometry"].update(rows=44,
+                                                                                                        body_rows=42)),
+                "row_run_geometry"),
+            "result lacks it": (lambda workflow: edit_result(
+                workflow, "S10/powerline", "head", lambda document: document.pop("row_run_geometry")),
+                "row_run_geometry"),
+            "base and head differ": (lambda workflow: edit_records(
+                workflow, "S10/powerline", ("head",), lambda geometry: geometry.update(cols=238)),
+                "S10/powerline base and head ran on different grids"),
+            "variants differ": (lambda workflow: edit_records(
+                workflow, "S10/cjk-tui", ("base", "head"), lambda geometry: geometry.update(cols=238)),
+                "macos row-run variants ran on different grids"),
+            "body rows not rows - 2": (lambda workflow: edit_records(
+                workflow, "S10/powerline", ("base", "head"), lambda geometry: geometry.update(body_rows=40)),
+                "is not a measured row-run grid"),
+            "below the floor": (lambda workflow: edit_records(
+                workflow, "S10/powerline", ("base", "head"), lambda geometry: geometry.update(rows=21, body_rows=19)),
+                "is not a measured row-run grid"),
+            "too narrow": (lambda workflow: edit_records(
+                workflow, "S10/powerline", ("base", "head"), lambda geometry: geometry.update(cols=119)),
+                "is not a measured row-run grid"),
+            "an extra field": (lambda workflow: edit_records(
+                workflow, "S10/powerline", ("base", "head"), lambda geometry: geometry.update(extra=1)),
+                "is not a measured row-run grid"),
+            "another contract": (lambda workflow: edit_records(
+                workflow, "S10/powerline", ("base", "head"), lambda geometry: geometry.update(contract=2)),
+                "is not a measured row-run grid"),
+        }
+        for name, (change, expected) in cases.items():
+            with self.subTest(case=name):
+                workflow = self.workflow("geometry-" + name.replace(" ", "-"))
+                change(workflow)
+                self.refused([workflow], workflow.all_directories(), expected)
+        missing = self.workflow("geometry-missing")
+
+        def drop(document):
+            for record in document["phases"][1]["head"]["accepted"]:
+                record.pop("geometry")
+        missing.edit(*mac, drop)
+        for index in range(2):
+            path = kept(missing, "S10/powerline", "head", index)
+            result = json.loads(path.read_text(encoding="utf-8"))
+            result.pop("row_run_geometry")
+            perf._write_json(path, result)
+        self.refused([missing], missing.all_directories(), "is not a measured row-run grid")
+        stray = self.workflow("geometry-stray")
+        stray.edit(*mac, lambda document: document["phases"][0]["head"]["accepted"][0].update(
+            geometry=copy.deepcopy(ROW_RUN_GEOMETRY["macos"])))
+        self.refused([stray], stray.all_directories(), "S4/default records a row-run grid")
+        failing = self.workflow("geometry-first")
+        failing.rewrite("macOS", "S9-S10", "S10/default", "head", 0, overflow)
+        # A healthy replacement whose macOS grid is 237 x 44 would decide BUILD on another grid than the first.
+        regrown = self.workflow("geometry-rerun", run_id=778, created_s=ROW_RUN_RERUN_CREATED_S,
+                                geometry={"macos": {"rows": 44, "body_rows": 42}})
+        self.refused([failing, regrown], failing.all_directories() + regrown.all_directories(),
+                     "macos row-run grid differs between run 777 attempt 1 and run 778 attempt 1")
+
+    def test_the_decision_prints_each_platforms_measured_grid_and_binds_its_contract(self):
+        # The report prints each platform's measured grid beside R, T and overhead, never a requested size, and
+        # the protocol digest changes with the geometry contract, so evidence from another contract is refused.
+        workflow = self.workflow("geometry-report")
+        report = decide([workflow], workflow.all_directories())
+        self.assertIn("- macos row-run grid: 237x43 measured, 41 body rows, geometry contract 1", report)
+        self.assertIn("- windows row-run grid: 281x58 measured, 56 body rows, geometry contract 1", report)
+        self.assertIn("R, T and overhead depend on these grids", report)
+        before = perf.row_run_protocol_digest()
+        with mock.patch.object(perf, "ROW_RUN_GEOMETRY_CONTRACT", 2, create=True):
+            self.assertNotEqual(perf.row_run_protocol_digest(), before)
+
+    def test_the_shard_table_prints_each_row_run_variants_measured_grid(self):
+        # A shard's table prints the grid each side's accepted runs measured beside R, T and overhead for a row-run
+        # variant, and each distinct grid when they differ; a variant with no row-run workload prints no grid row.
+        grid = dict(ROW_RUN_GEOMETRY["windows"])
+        other = dict(grid, cols=282)
+        evidence = {("windows", "S10/unique", "stream"): perf.RowRunPhase((row_run_base(),), (row_run_head(),),
+                                                                           (grid,), (grid, other)),
+                    ("windows", "S10/default", "stream"): perf.RowRunPhase((row_run_base(),), (row_run_head(),),
+                                                                            (None,), (None,))}
+        rows = {(row[1], row[3]): row[4:] for row in perf.row_run_rows(evidence)}
+        self.assertEqual(rows[("S10/unique", "grid (cols x rows, body rows)")],
+                         ["281x58 measured, 56 body rows, geometry contract 1",
+                          "281x58 measured, 56 body rows, geometry contract 1 / "
+                          "282x58 measured, 56 body rows, geometry contract 1"])
+        self.assertNotIn(("S10/default", "grid (cols x rows, body rows)"), rows)
 
     def test_an_attempt_inheriting_its_comparisons_binds_their_executed_origins(self):
         # Attempt 2 reruns only the result job and inherits every comparison: each inherited job claims its executed

@@ -291,31 +291,48 @@ const FIXTURE_PINS: &[(&str, &str)] = &[
     ("inline.osc 461289", "06c2d2935c10dfc293a38ec38149c97a1e97c90501694c5e75cb14d904476f2c"),
     (
         "rowrun kind=CjkTui total=5420",
-        "885af1c67f35640918c8e640e3bfad525161b4256a1fb2f99358652e73557b5f",
+        "48c6b82c08809cee32bb7cd1303b153d2e9e9aec7dfbb72c235b7dc09555fccf",
     ),
     (
         "rowrun kind=CjkTui total=920",
-        "7ea39c8a11df618cfd012a804ef95547acb5ffdde1f32c90aaafaeaa2caff39c",
+        "583ecabf086ecc4c7aa0a82fecc5cecd11ef3c6b20312a733de0523d6af85769",
     ),
     (
         "rowrun kind=Powerline total=5420",
-        "e468021bd7589466c2ea3b94cfcc746f6f1bf73d6c866d65ba2ddd23d9f17048",
+        "4897991efd22ff3a7939f87de5acd658097e421422b7194318849a5702c8f276",
     ),
     (
         "rowrun kind=Powerline total=920",
-        "a8a508e86d3af8cd51d1775508732f3cd9f1ff2a7aafb5828e4efc9296541200",
+        "e0d342c8b92199ede8bf5d0364f6b4a33d434d0cca52e819cbc88a058428b970",
     ),
     (
         "rowrun kind=Unique total=5420",
-        "1b319ac5851d9749682da7d74ceb481fa5c88c87c10360bd19815a36baa7fff2",
+        "f8f7af1d20cf738b74862019d0ac941adf5b6123d48395d75798fb86962f88ea",
     ),
     (
         "rowrun kind=Unique total=920",
-        "dc8faee82cfa958f4619a22cafc48c8c56ad162abe84679f55656c6d32b24a20",
+        "948c40890a9789aa0b41f45fbdc696bca2c52fb450481f6eb84edeb523ae7525",
     ),
     ("scrollback.txt 960000", "80f85648d2537805c9ea6b138a622d3055972d18904232b35380473a8d4dd8a0"),
     ("search.txt 17500", "3b7beea9b0581d1dcb96b3d10a1c3d879b7189051c1c1aff3b4d3a5187b62eba"),
 ];
+
+/// The geometry the pinned row-run fixtures and the program tests use: PR A's reference 250 x 70
+/// grid. Hosted runs generate for their measured grid instead.
+const PIN_GEOMETRY: RowRunGeometry = RowRunGeometry { cols: 250, rows: 70 };
+
+/// Every fixture file `plan`'s roles read, the row-run ones generated for `PIN_GEOMETRY`.
+fn played_fixtures(plan: &Plan) -> Vec<FixtureFile> {
+    let mut files = fixtures(plan);
+    for (index, role) in plan.roles.iter().enumerate() {
+        if let (Workload::RowRuns { kind, total, .. }, false) =
+            (*role, plan.roles[..index].contains(role))
+        {
+            files.extend(row_run_fixtures(kind, total, PIN_GEOMETRY).expect("250 x 70 fits"));
+        }
+    }
+    files
+}
 
 fn render_pins(pins: &BTreeMap<String, String>) -> String {
     pins.iter().map(|(key, value)| format!("    ({key:?}, {value:?}),\n")).collect()
@@ -334,7 +351,7 @@ fn fixture_sets() -> &'static BTreeMap<String, Vec<FixtureFile>> {
             // Frame and row-run sequences are pinned whole, one entry per sequence.
             let row_runs = format!("{ROW_RUN_FIXTURES}/");
             let (sequences, singles): (Vec<_>, Vec<_>) =
-                fixtures(&plan).into_iter().partition(|fixture| {
+                played_fixtures(&plan).into_iter().partition(|fixture| {
                     fixture.relative_path.starts_with("frames/")
                         || fixture.relative_path.starts_with(&row_runs)
                 });
@@ -790,7 +807,7 @@ fn program_dir(label: &str, plan: &Plan, go_written: bool) -> std::path::PathBuf
     for sub in ["workload/fixtures", "roles", "sessions", "acks", "go", "done"] {
         std::fs::create_dir_all(dir.join(sub)).unwrap();
     }
-    for fixture in fixtures(plan) {
+    for fixture in played_fixtures(plan) {
         fixture.write_under(&dir.join("workload/fixtures")).unwrap();
     }
     std::fs::write(dir.join("workload/program.json"), program_json(plan, NONCE)).unwrap();
@@ -806,7 +823,7 @@ fn program_dir(label: &str, plan: &Plan, go_written: bool) -> std::path::PathBuf
 /// What `role`'s POSIX script prints after it is acknowledged, derived from the workload alone:
 /// READY, the workload's bytes with each fixture once and in order, then the sentinel.
 fn expected_role_output(plan: &Plan, role: usize) -> Vec<u8> {
-    let files = fixtures(plan);
+    let files = played_fixtures(plan);
     let file_bytes = |name: &str| -> Vec<u8> {
         let file = files.iter().find(|file| file.relative_path == name).expect("a planned fixture");
         match &file.body {
@@ -1694,8 +1711,9 @@ mod real_renderer_coverage {
     }
 }
 
-/// The grid width the row-run fixtures are written for.
-const ROW_RUN_COLS: usize = 250;
+/// The grids the row-run contract is checked on: PR A's 250 x 70 reference, the hosted macOS
+/// (237 x 43) and Windows (281 x 58) grids, and the 120 x 22 floor.
+const CONTRACT_GEOMETRIES: [(u16, u16); 4] = [(250, 70), (237, 43), (281, 58), (120, 22)];
 
 /// Cells `text` occupies: every non-ASCII character in the row-run fixtures is a wide CJK
 /// character from the bundled faces, so it takes two cells.
@@ -1706,11 +1724,16 @@ fn fixture_cells(text: &str) -> usize {
 /// One expected run: `(text, bold, italic, ascii_fast)`.
 type ExpectedRun = (String, bool, bool, bool);
 
-/// The runs body row `row` (1-based screen row) must cut into at update `update`, stated from
-/// the fixture contract rather than from the generator: the shaped CJK segments, the plain-digit
-/// field that stays ASCII-fast, then the default-style blank padding to column 250 as its own
-/// normal ASCII-fast run.
-fn expected_row_runs(workload: RowRunWorkload, row: u16, update: u32) -> Vec<ExpectedRun> {
+/// The runs body row `row` (1-based screen row) must cut into at update `update` on a grid `cols`
+/// wide, stated from the fixture contract rather than from the generator: the shaped CJK segments,
+/// the plain-digit field that stays ASCII-fast, then the default-style blank padding to the last
+/// column as its own normal ASCII-fast run.
+fn expected_row_runs(
+    workload: RowRunWorkload,
+    row: u16,
+    update: u32,
+    cols: usize,
+) -> Vec<ExpectedRun> {
     let mut runs: Vec<ExpectedRun> = match workload {
         RowRunWorkload::Powerline => vec![
             ("用户 主机 ".to_owned(), true, false, false),
@@ -1750,52 +1773,135 @@ fn expected_row_runs(workload: RowRunWorkload, row: u16, update: u32) -> Vec<Exp
         }
     };
     let used: usize = runs.iter().map(|(text, ..)| fixture_cells(text)).sum();
-    runs.push((" ".repeat(ROW_RUN_COLS - used), false, false, true));
+    runs.push((" ".repeat(cols - used), false, false, true));
     runs
 }
 
-/// Each row-run workload's first ten updates, fed in order through a real VT parser on a
-/// 250 x 70 grid, cut every body row into exactly the contract's runs: texts with padding, bold,
-/// italic and ASCII-fast flags. For S10/unique, no shaped `(text, bold, italic)` repeats within
-/// any nine consecutive updates; its digit and padding runs are asserted exactly above but are
-/// not part of that check.
+/// Each row-run workload's first ten updates, fed in order through a real VT parser on each contract
+/// grid, cut every body row into exactly the contract's runs: texts with padding, bold, italic and
+/// ASCII-fast flags. The body is exactly rows - 2 rows, with the title first and the footer last;
+/// nothing scrolls into history (no cursor placement out of range, no wrap) and the cursor rests
+/// just past the footer. For S10/unique, no shaped `(text, bold, italic)` repeats within any nine
+/// consecutive updates; its digit and padding runs are asserted exactly above but are not part of
+/// that check.
 #[test]
 fn row_run_workloads_cut_into_the_contract_runs() {
     use sonicterm_grid::grid::Grid;
     use sonicterm_vt::vt::{CaptureStagingPool, Parser};
-    // The body is screen rows 2 to 69, stated here rather than taken from the generator's range.
-    let body_rows = 2..=69u16;
-    assert_eq!(ROW_RUN_BODY_ROWS, body_rows, "the generator writes the specified body rows");
-    assert_eq!(body_rows.clone().count(), 68);
-    for workload in [RowRunWorkload::Powerline, RowRunWorkload::CjkTui, RowRunWorkload::Unique] {
-        let mut parser =
-            Parser::new_with_staging_pool(Grid::new(250, 70), None, CaptureStagingPool::new());
-        let mut shaped_by_update: Vec<Vec<(String, bool, bool)>> = Vec::new();
-        for update in 0..10 {
-            parser.advance(&workload.update_bytes(update));
-            let mut shaped = Vec::new();
-            for row in body_rows.clone() {
-                let runs = sonicterm_gpu::__row_shape_runs(parser.grid().row(row - 1));
+    for (cols, rows) in CONTRACT_GEOMETRIES {
+        let geometry = RowRunGeometry::measured(cols, rows).expect("a contract grid");
+        // The body is screen rows 2 to rows - 1, stated here rather than taken from the generator.
+        let body_rows = 2..=rows - 1;
+        assert_eq!(geometry.body_screen_rows(), body_rows, "{cols}x{rows}");
+        assert_eq!(usize::from(geometry.body_rows()), usize::from(rows) - 2, "{cols}x{rows}");
+        if (cols, rows) == (250, 70) {
+            // PR A's reference grid keeps its 68 body rows, rows 2 to 69.
+            assert_eq!(body_rows, 2..=69);
+        }
+        for workload in [RowRunWorkload::Powerline, RowRunWorkload::CjkTui, RowRunWorkload::Unique]
+        {
+            let mut parser = Parser::new_with_staging_pool(
+                Grid::new(cols, rows),
+                None,
+                CaptureStagingPool::new(),
+            );
+            let mut shaped_by_update: Vec<Vec<(String, bool, bool)>> = Vec::new();
+            for update in 0..10 {
+                parser.advance(&workload.update_bytes(update, geometry));
+                let grid = parser.grid();
+                let at = format!("{workload:?} {cols}x{rows} update {update}");
+                assert_eq!(grid.scrollback_len(), 0, "{at}: nothing scrolled or wrapped");
+                let text = |index: u16| -> String {
+                    let line: String = grid.row(index).iter().map(|cell| cell.ch).collect();
+                    line.replace(['\0', ' '], "")
+                };
+                assert_eq!(text(0), workload_title(workload).replace(' ', ""), "{at}: title first");
+                assert_eq!(text(rows - 1), ROW_RUN_FOOTER.replace(' ', ""), "{at}: footer last");
                 assert_eq!(
-                    runs,
-                    expected_row_runs(workload, row, update),
-                    "{workload:?} row {row} update {update}"
+                    (grid.cursor.row, grid.cursor.col),
+                    geometry.footer_end(),
+                    "{at}: the cursor rests past the footer"
                 );
-                shaped.extend(
-                    runs.into_iter()
-                        .filter(|(.., ascii_fast)| !ascii_fast)
-                        .map(|(text, bold, italic, _)| (text, bold, italic)),
-                );
+                let mut shaped = Vec::new();
+                for row in body_rows.clone() {
+                    let runs = sonicterm_gpu::__row_shape_runs(grid.row(row - 1));
+                    assert_eq!(
+                        runs,
+                        expected_row_runs(workload, row, update, usize::from(cols)),
+                        "{at} row {row}"
+                    );
+                    shaped.extend(
+                        runs.into_iter()
+                            .filter(|(.., ascii_fast)| !ascii_fast)
+                            .map(|(text, bold, italic, _)| (text, bold, italic)),
+                    );
+                }
+                shaped_by_update.push(shaped);
             }
-            shaped_by_update.push(shaped);
-        }
-        if workload == RowRunWorkload::Unique {
-            for window in shaped_by_update.windows(9) {
-                let keys: Vec<&(String, bool, bool)> = window.iter().flatten().collect();
-                let distinct: std::collections::BTreeSet<_> = keys.iter().collect();
-                assert_eq!(distinct.len(), keys.len(), "a shaped run repeats within nine updates");
+            if workload == RowRunWorkload::Unique {
+                for window in shaped_by_update.windows(9) {
+                    let keys: Vec<&(String, bool, bool)> = window.iter().flatten().collect();
+                    let distinct: std::collections::BTreeSet<_> = keys.iter().collect();
+                    assert_eq!(
+                        distinct.len(),
+                        keys.len(),
+                        "a shaped run repeats within nine updates"
+                    );
+                }
             }
         }
+    }
+}
+
+/// The title each workload's screen starts with, stated from the fixture contract.
+fn workload_title(workload: RowRunWorkload) -> &'static str {
+    match workload {
+        RowRunWorkload::Powerline => "提示符 工作负载",
+        RowRunWorkload::CjkTui => "进程 工作负载",
+        RowRunWorkload::Unique => "唯一 工作负载",
+    }
+}
+
+/// A grid below the 120 x 22 floor is refused with the named reason and its observed dimensions;
+/// the floor itself is accepted with 20 body rows.
+#[test]
+fn a_row_run_grid_below_the_floor_is_refused() {
+    for (cols, rows) in [(119, 22), (120, 21), (80, 24), (237, 20)] {
+        let refused = RowRunGeometry::measured(cols, rows).expect_err("below the floor");
+        assert!(refused.starts_with(ROW_RUN_GRID_TOO_SMALL), "{refused}");
+        assert!(refused.contains(&format!("{cols}x{rows}")), "{refused}");
+    }
+    assert_eq!(RowRunGeometry::measured(120, 22).map(RowRunGeometry::body_rows), Ok(20));
+}
+
+/// Every update of every plan's row-run workload fits each contract grid, so a full plan's largest
+/// update numbers never wrap; a grid too narrow for a row is refused rather than clipped, naming it.
+#[test]
+fn row_run_fixtures_fit_the_contract_grids_and_refuse_a_narrow_one() {
+    for (cols, rows) in CONTRACT_GEOMETRIES {
+        let geometry = RowRunGeometry::measured(cols, rows).unwrap();
+        for plan in all_plans().into_iter().chain(all_plans_on(Host::Windows)) {
+            for role in &plan.roles {
+                if let Workload::RowRuns { kind, total, .. } = *role {
+                    let files = row_run_fixtures(kind, total, geometry).expect("fits");
+                    assert_eq!(files.len(), total as usize, "{} {cols}x{rows}", plan_key(&plan));
+                }
+            }
+        }
+    }
+    // Only a test builds a geometry below the floor; `measured` never returns one.
+    let narrow = RowRunGeometry { cols: 40, rows: 22 };
+    let refused = row_run_fixtures(RowRunWorkload::Unique, 920, narrow).expect_err("too narrow");
+    assert!(refused.contains("needs") && refused.contains("40"), "{refused}");
+}
+
+/// The general fixture list holds no row-run file: those are generated for the measured grid
+/// before GO, so nothing generated for another grid can be read.
+#[test]
+fn plan_fixtures_leave_row_run_files_to_the_measured_grid() {
+    for variant in ["powerline", "cjk-tui", "unique"] {
+        let plan = plan("S10", variant, true).unwrap();
+        assert!(fixtures(&plan).is_empty(), "S10/{variant}");
     }
 }
 

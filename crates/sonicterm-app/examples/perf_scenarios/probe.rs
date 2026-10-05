@@ -84,6 +84,54 @@ enum Stage {
     Done,
 }
 
+/// The plan's row-run role: which role plays it, its workload and its warm and total update counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowRunRole {
+    role: usize,
+    kind: workload::RowRunWorkload,
+    warm: u32,
+    total: u32,
+}
+
+/// The row-run grid recheck: unchanged (or nothing frozen), unreadable now, or changed with a reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GeometryCheck {
+    Unchanged,
+    Busy,
+    Changed(String),
+}
+
+/// What a plan step does with the row-run grid recheck.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GeometryGate {
+    /// The grid is unchanged, or unreadable after GO (the next poll rechecks it).
+    Proceed,
+    /// The grid is unreadable before GO: GO waits until it can be rechecked.
+    Wait,
+    /// The grid changed: the run is invalid, before or after GO.
+    Invalidate(String),
+}
+
+/// The step's decision for `check`, given whether GO was released: a change always invalidates, and an
+/// unreadable grid holds GO back but never stops a running phase.
+fn geometry_gate(check: GeometryCheck, released: bool) -> GeometryGate {
+    match check {
+        GeometryCheck::Changed(reason) => GeometryGate::Invalidate(reason),
+        GeometryCheck::Busy if !released => GeometryGate::Wait,
+        GeometryCheck::Busy | GeometryCheck::Unchanged => GeometryGate::Proceed,
+    }
+}
+
+/// Why a `cols` x `rows` grid no longer matches the `frozen` row-run geometry, or `None` when it does.
+fn geometry_change(frozen: workload::RowRunGeometry, cols: u16, rows: u16) -> Option<String> {
+    ((cols, rows) != (frozen.cols, frozen.rows)).then(|| {
+        format!(
+            "the row-run pane's grid changed from the frozen {}x{} to {cols}x{rows}",
+            frozen.cols, frozen.rows
+        )
+    })
+}
+
 /// What a forwarded dispatch was, for the per-phase counts and the scan throttle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Dispatch {
@@ -572,8 +620,15 @@ struct Probe {
     /// The image atlas's retained bytes when startup ended; read only on Windows.
     image_atlas_start: Option<usize>,
     image: ImageState,
-    /// The row-run role and its warm handshake, for a plan that plays a row-run workload.
+    /// The row-run role and its warm handshake, configured by `prepare_row_run` before GO.
     presented: Option<(usize, crate::presented_updates::PresentedUpdates)>,
+    /// The plan's row-run role, for a plan that plays a row-run workload.
+    row_run: Option<RowRunRole>,
+    /// The row-run role's measured grid, frozen by `prepare_row_run`; any change after it
+    /// invalidates the run.
+    row_run_geometry: Option<workload::RowRunGeometry>,
+    /// The sentinel nonce; a row-run fixture must not contain it.
+    nonce: String,
     /// Why writing a warm update's acknowledgement failed; the run's next step invalidates it.
     presented_failure: Option<String>,
     /// The running phase's frame barrier (S11/release's media-free and reshow), if it has one.
@@ -1080,6 +1135,7 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
         App::new_with_proxy(Theme::default(), prepared.config, Keymap::default(), Some(proxy));
     let mut probe = Probe {
         sentinels,
+        nonce: prepared.nonce.clone(),
         allocation_counter,
         meter: Some(meter),
         software_render_mode,
@@ -1365,9 +1421,9 @@ impl Probe {
         run_deadline: Instant,
     ) -> Self {
         let roles = plan.roles.len();
-        let presented = plan.roles.iter().enumerate().find_map(|(role, workload)| match workload {
-            Workload::RowRuns { kind, warm, .. } => {
-                Some((role, crate::presented_updates::PresentedUpdates::new(*kind, *warm)))
+        let row_run = plan.roles.iter().enumerate().find_map(|(role, workload)| match workload {
+            Workload::RowRuns { kind, warm, total } => {
+                Some(RowRunRole { role, kind: *kind, warm: *warm, total: *total })
             }
             _ => None,
         });
@@ -1397,7 +1453,10 @@ impl Probe {
             sentinel_rows: vec![None; roles],
             image_atlas_start: None,
             image: ImageState::default(),
-            presented,
+            presented: None,
+            row_run,
+            row_run_geometry: None,
+            nonce: String::new(),
             presented_failure: None,
             barrier: None,
             phase_ends: Vec::new(),
@@ -1674,25 +1733,17 @@ impl Probe {
     /// Feed the row-run warm handshake one scan: every body row of the role's grid and the
     /// presented-frame count. A presentation after a complete sighting marks the update.
     fn scan_presented_updates(&mut self) {
-        let Some(role) = self
-            .presented
-            .as_ref()
-            .filter(|(_, handshake)| !handshake.done())
-            .map(|(role, _)| *role)
+        let Some((role, mut handshake)) =
+            self.presented.take().filter(|(_, handshake)| !handshake.done())
         else {
             // When: `presented` holds no handshake that is not `done`, there is nothing to mark.
             return;
         };
-        let Some(body_rows) =
-            self.role_grid(role, crate::presented_updates::PresentedUpdates::body_rows)
-        else {
-            // When: `role_grid` finds no pane or a busy parser, the next scan looks again.
-            return;
-        };
         let frames = self.frame_count();
-        if let Some((_, handshake)) = self.presented.as_mut() {
-            handshake.observe_grid(&body_rows, frames);
-        }
+        // The handshake is taken out while the grid is borrowed and put back before returning.
+        // When `role_grid` finds no pane or a busy parser, nothing is observed and the next scan looks again.
+        let _ = self.role_grid(role, |grid| handshake.observe_grid(grid, frames));
+        self.presented = Some((role, handshake));
     }
 
     /// Feed the warm handshake a presentation's frame count, marking a sighted update presented.
@@ -1715,6 +1766,56 @@ impl Probe {
             self.presented_failure.get_or_insert_with(|| {
                 format!("acknowledgement write failed for row-run warm update {update}: {error}")
             });
+        }
+    }
+
+    /// Generate the row-run workload's fixtures for the measured `geometry`, write and close every
+    /// file, configure the warm handshake and freeze the geometry. Runs after READY and before GO,
+    /// with no parser guard held; the role reads no fixture before GO. An error invalidates the run.
+    fn prepare_row_run(&mut self, geometry: workload::RowRunGeometry) -> Result<(), String> {
+        let Some(row_run) = self.row_run else {
+            // When: the plan plays no row-run workload, there is nothing to prepare.
+            return Ok(());
+        };
+        let files = workload::row_run_fixtures(row_run.kind, row_run.total, geometry)?;
+        if let Some(file) = files.iter().find(|file| file.contains(self.nonce.as_bytes())) {
+            // When: the final bytes contain the sentinel nonce, a sentinel match would be ambiguous.
+            return Err(format!(
+                "row-run fixture {} contains the sentinel nonce",
+                file.relative_path
+            ));
+        }
+        let fixture_root = self.scratch.join("workload/fixtures");
+        for file in &files {
+            file.write_under(&fixture_root)
+                .map_err(|error| format!("write fixture {}: {error}", file.relative_path))?;
+        }
+        let handshake =
+            crate::presented_updates::PresentedUpdates::new(row_run.kind, geometry, row_run.warm);
+        self.presented = Some((row_run.role, handshake));
+        self.row_run_geometry = Some(geometry);
+        tracing::info!(target: LOG_TARGET, cols = geometry.cols, rows = geometry.rows,
+            fixture_files = files.len(), "perf_scenarios row-run fixtures written");
+        Ok(())
+    }
+
+    /// Freeze the row-run pane's measured `cols` x `rows` grid and prepare its fixtures, or the reason
+    /// the run ends before GO: a grid below the floor (`row-run-grid-too-small`) or a failed preparation.
+    fn prepare_measured(&mut self, cols: u16, rows: u16) -> Result<(), String> {
+        let geometry = workload::RowRunGeometry::measured(cols, rows)?;
+        self.prepare_row_run(geometry)
+    }
+
+    /// Whether the row-run role's grid still has the frozen geometry: `Unchanged` when there is no
+    /// frozen geometry, `Busy` when the parser cannot be read now.
+    fn row_run_geometry_check(&self) -> GeometryCheck {
+        let (Some(frozen), Some(row_run)) = (self.row_run_geometry, self.row_run) else {
+            return GeometryCheck::Unchanged;
+        };
+        match self.role_grid(row_run.role, |grid| (grid.cols, grid.rows)) {
+            None => GeometryCheck::Busy,
+            Some((cols, rows)) => geometry_change(frozen, cols, rows)
+                .map_or(GeometryCheck::Unchanged, GeometryCheck::Changed),
         }
     }
 
@@ -1844,6 +1945,7 @@ impl Probe {
             trim_experiment: self.plan.trim_experiment,
             trim_seq_after_hook: self.trim_seq_after_hook,
             atlas_recovery: self.atlas_recovery.clone(),
+            row_run_geometry: self.row_run_geometry,
             native_focus_events_dropped: self.native_focus_dropped,
             native_cursor_rest_events_dropped: self.native_pointer.rest_dropped(),
             finish_session_settled: settled,
@@ -1881,7 +1983,7 @@ impl Probe {
             notes.push("Laps run: logging at debug adds a render_timing line per frame, so it is never pooled with timed runs.".to_owned());
         }
         if self.plan.roles.iter().any(|role| matches!(role, Workload::RowRuns { .. })) {
-            notes.push("Row-run warm updates are written one at a time: each is marked presented only after the probe saw every body row of it in the grid and a later frame presented (forced once when nothing else presents), and only then is the next written.".to_owned());
+            notes.push("Row-run warm updates are written one at a time: each is marked presented only after the probe saw all of it in the measured grid (every body row's digits, with the cursor past the footer, the update's final write) and a later frame presented (forced once when nothing else presents), and only then is the next written. The workload is generated for the row-run pane's measured grid, frozen before GO.".to_owned());
         }
         if self.plan.roles.iter().any(|role| matches!(role, Workload::Frames { .. })) {
             notes.push("Frames are paced by sleep 0.016 between writes, so slightly fewer than 60 arrive each second.".to_owned());
@@ -2226,6 +2328,18 @@ impl Probe {
             // The first sighting is kept; a row's lifetime number never changes once printed.
             self.ready_rows[role].get_or_insert(row);
         }
+        if let (Some(row_run), None) = (self.row_run, self.row_run_geometry) {
+            let Some((cols, rows)) = self.role_grid(row_run.role, |grid| (grid.cols, grid.rows))
+            else {
+                // When: the row-run pane's parser is busy, the grid is measured on the next poll.
+                return;
+            };
+            if let Err(reason) = self.prepare_measured(cols, rows) {
+                // When: the grid is below the floor or preparation failed, the run ends before GO.
+                self.invalidate(event_loop, reason);
+                return;
+            }
+        }
         self.stage = Stage::Steps(0);
     }
 
@@ -2237,6 +2351,19 @@ impl Probe {
                 self.finish(event_loop, Status::Valid, None);
                 return;
             };
+            match geometry_gate(self.row_run_geometry_check(), self.go_at.is_some()) {
+                GeometryGate::Invalidate(reason) => {
+                    // When: the frozen grid changed, before or after GO, the workload no longer fits it.
+                    self.invalidate(event_loop, reason);
+                    return;
+                }
+                GeometryGate::Wait => {
+                    // When: the grid cannot be rechecked yet, GO waits for a recheck.
+                    self.stage = Stage::Steps(index);
+                    return;
+                }
+                GeometryGate::Proceed => {}
+            }
             match step {
                 Step::Phase(phase) => {
                     if self.meter.is_none() {

@@ -566,15 +566,28 @@ pub(crate) fn fixtures(plan: &Plan) -> Vec<FixtureFile> {
             Workload::Frames { count, synchronized } => {
                 files.extend(frame_fixtures(count, synchronized));
             }
-            Workload::RowRuns { kind, total, .. } => {
-                files.extend((0..total).map(|update| FixtureFile {
-                    relative_path: format!("{ROW_RUN_FIXTURES}/{update}"),
-                    body: FixtureBody::Bytes(kind.update_bytes(update)),
-                }))
-            }
+            // A row-run workload's fixtures depend on the measured grid, so the probe writes them
+            // with `row_run_fixtures` once the role's pane exists, before GO.
+            Workload::RowRuns { .. } => {}
         }
     }
     files
+}
+
+/// Every fixture file of a row-run workload `kind` with `total` updates, generated for the frozen
+/// `geometry`; an error when a row of any update would not fit the measured columns.
+pub(crate) fn row_run_fixtures(
+    kind: RowRunWorkload,
+    total: u32,
+    geometry: RowRunGeometry,
+) -> Result<Vec<FixtureFile>, String> {
+    geometry.fits(kind, total)?;
+    Ok((0..total)
+        .map(|update| FixtureFile {
+            relative_path: format!("{ROW_RUN_FIXTURES}/{update}"),
+            body: FixtureBody::Bytes(kind.update_bytes(update, geometry)),
+        })
+        .collect())
 }
 
 /// The directory under `workload/fixtures/` holding a row-run workload's update `n` as file `n`.
@@ -1162,8 +1175,9 @@ pub(crate) fn run_program(scratch: &Path) -> u8 {
     run_steps(scratch, &mut NativeHost, &mut stdout.lock(), &mut stderr.lock())
 }
 
-/// The three row-run workloads' screens: a fixed bold title on row 1, 68 patterned body rows
-/// (rows 2-69) and a fixed normal footer on row 70, redrawn whole by every update.
+/// The three row-run workloads' screens on a measured grid: a fixed bold title on row 1, patterned
+/// body rows on rows 2 to rows - 1 and a fixed normal footer on the last row, redrawn whole by
+/// every update. The geometry is frozen before GO; see [`RowRunGeometry`].
 ///
 /// Body rows mix bold, normal and italic segments; colour alternates per update but never
 /// splits a run. Segments meant to shape carry CJK characters from the bundled faces; the
@@ -1197,17 +1211,96 @@ pub(crate) const CJK_TUI_NAMES: [&str; 12] = [
     "认证",
 ];
 
-/// The first and last body rows, 1-based screen rows.
-pub(crate) const ROW_RUN_BODY_ROWS: std::ops::RangeInclusive<u16> = 2..=69;
+/// The workload-geometry contract version `result.json` and the row-run evidence record; a change
+/// to how the measured grid is laid out or validated changes it.
+pub(crate) const ROW_RUN_GEOMETRY_CONTRACT: u32 = 1;
+/// The smallest grid a row-run workload runs on: 120 columns and 22 rows (20 body rows).
+pub(crate) const ROW_RUN_MIN_COLS: u16 = 120;
+/// See [`ROW_RUN_MIN_COLS`].
+pub(crate) const ROW_RUN_MIN_ROWS: u16 = 22;
+/// The reason a row-run execution is refused before GO on a grid below the floor.
+pub(crate) const ROW_RUN_GRID_TOO_SMALL: &str = "row-run-grid-too-small";
+/// The fixed footer on the last screen row; written last, so the cursor after it marks an update's end.
+pub(crate) const ROW_RUN_FOOTER: &str = "按 q 退出";
+
+/// The measured grid a row-run execution is frozen to: title on screen row 1, body on screen rows 2
+/// to `rows - 1`, footer on screen row `rows`. The generator and the presented-update handshake
+/// both read this one value; it never changes after GO.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RowRunGeometry {
+    /// Grid columns, as measured.
+    pub(crate) cols: u16,
+    /// Grid rows, as measured: title, body and footer.
+    pub(crate) rows: u16,
+}
+
+impl RowRunGeometry {
+    /// The geometry of a measured `cols` x `rows` grid, or the `row-run-grid-too-small` reason with
+    /// the observed dimensions when it is below the 120 x 22 floor.
+    pub(crate) fn measured(cols: u16, rows: u16) -> Result<Self, String> {
+        if cols < ROW_RUN_MIN_COLS || rows < ROW_RUN_MIN_ROWS {
+            return Err(format!(
+                "{ROW_RUN_GRID_TOO_SMALL}: the row-run pane's grid is {cols}x{rows}, below the \
+                 {ROW_RUN_MIN_COLS}x{ROW_RUN_MIN_ROWS} floor"
+            ));
+        }
+        Ok(Self { cols, rows })
+    }
+
+    /// The number of body rows: every row but the title and the footer.
+    pub(crate) fn body_rows(self) -> u16 {
+        self.rows - 2
+    }
+
+    /// The body's 1-based screen rows, 2 to `rows - 1`.
+    pub(crate) fn body_screen_rows(self) -> std::ops::RangeInclusive<u16> {
+        2..=self.rows - 1
+    }
+
+    /// The 0-based cell the cursor rests on after an update's final write: just past the footer.
+    pub(crate) fn footer_end(self) -> (u16, u16) {
+        (self.rows - 1, cells(ROW_RUN_FOOTER) as u16)
+    }
+
+    /// Whether every row of updates 0 to `total`-1 of `kind`, title and footer included, fits the
+    /// columns without wrapping or clipping. Each row's width depends only on its row's and update's
+    /// digit counts, so the widest numbers (the last body row of the last update) bound them all;
+    /// the first row and update are checked as well.
+    pub(crate) fn fits(self, kind: RowRunWorkload, total: u32) -> Result<(), String> {
+        let last_update = total.saturating_sub(1);
+        let body = self.body_screen_rows();
+        let mut widths = vec![("title", cells(kind.title())), ("footer", cells(ROW_RUN_FOOTER))];
+        for row in [*body.start(), *body.end()] {
+            for update in [0, last_update] {
+                let segments = kind.body_segments(row, update);
+                widths.push(("a body row", segments.iter().map(|(_, _, text)| cells(text)).sum()));
+            }
+        }
+        match widths.into_iter().find(|(_, width)| *width > usize::from(self.cols)) {
+            Some((name, width)) => Err(format!(
+                "{kind:?}'s {name} needs {width} columns; the measured grid has {}",
+                self.cols
+            )),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Cells `text` occupies on the grid: every non-ASCII character the row-run screens use is a wide
+/// CJK character from the bundled faces, so it takes two cells.
+fn cells(text: &str) -> usize {
+    text.chars().map(|character| if character.is_ascii() { 1 } else { 2 }).sum()
+}
 
 impl RowRunWorkload {
-    /// The bytes of update `update`: every row rewritten in place, with SGR colour cycling per
-    /// update. `update` is one counter that keeps counting across phases.
-    pub(crate) fn update_bytes(self, update: u32) -> Vec<u8> {
+    /// The bytes of update `update` on `geometry`: every row rewritten in place, with SGR colour
+    /// cycling per update. `update` is one counter that keeps counting across phases. The footer
+    /// is written last, so the cursor resting after it marks the update's final write.
+    pub(crate) fn update_bytes(self, update: u32, geometry: RowRunGeometry) -> Vec<u8> {
         let colour = 31 + update % 6;
         let mut screen = String::new();
         screen.push_str(&format!("\x1b[1;1H\x1b[0;1m{}\x1b[0m\x1b[K", self.title()));
-        for row in ROW_RUN_BODY_ROWS {
+        for row in geometry.body_screen_rows() {
             screen.push_str(&format!("\x1b[{row};1H"));
             for (bold, italic, text) in self.body_segments(row, update) {
                 let weight = if bold { ";1" } else { "" };
@@ -1216,7 +1309,9 @@ impl RowRunWorkload {
             }
             screen.push_str("\x1b[0m\x1b[K");
         }
-        screen.push_str("\x1b[70;1H\x1b[0m按 q 退出\x1b[K");
+        // The footer row is erased first, so the footer text is the update's final write and the
+        // cursor resting after it means every byte of the update was parsed.
+        screen.push_str(&format!("\x1b[{};1H\x1b[0m\x1b[K{ROW_RUN_FOOTER}", geometry.rows));
         screen.into_bytes()
     }
 

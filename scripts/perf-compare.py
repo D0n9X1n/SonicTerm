@@ -5607,10 +5607,20 @@ ROW_RUN_NOTE = ("Each figure sums the accepted counters runs of the phase before
 
 @dataclass(frozen=True)
 class RowRunPhase:
-    """One decision phase's accepted counters runs: each run's renderer section, base and head."""
+    """One decision phase's accepted counters runs: each run's renderer section, base and head, and each run's
+    measured row-run grid (None for a variant that plays no row-run workload)."""
 
     base: tuple
     head: tuple
+    base_grids: tuple = ()
+    head_grids: tuple = ()
+
+
+# The workload-geometry contract the harness records as `row_run_geometry`; a change to it changes the protocol.
+ROW_RUN_GEOMETRY_CONTRACT = 1
+# The smallest measured grid a row-run workload runs on, as the harness refuses below it.
+ROW_RUN_MIN_COLS = 120
+ROW_RUN_MIN_ROWS = 22
 
 
 @dataclass(frozen=True)
@@ -5639,9 +5649,17 @@ def _accepted_renderers(side: SideRuns, phase_name: str) -> tuple:
     return tuple(renderers)
 
 
+def _accepted_grids(side: SideRuns) -> tuple:
+    """Each of `side`'s accepted runs' measured row-run grid, or None where it recorded none."""
+    if side.blocked or side.failed:
+        return ()
+    return tuple(_row_run_result_geometry(outcome.result) for outcome in side.outcomes)
+
+
 def row_run_phase(base: SideRuns, head: SideRuns, phase_name: str) -> RowRunPhase:
-    """One decision phase's accepted runs on each side."""
-    return RowRunPhase(_accepted_renderers(base, phase_name), _accepted_renderers(head, phase_name))
+    """One decision phase's accepted runs on each side, with each run's measured grid."""
+    return RowRunPhase(_accepted_renderers(base, phase_name), _accepted_renderers(head, phase_name),
+                       _accepted_grids(base), _accepted_grids(head))
 
 
 def _row_run_total(runs: Sequence[Mapping], field_name: str) -> int | None:
@@ -5825,6 +5843,25 @@ def _row_run_sum_cell(runs: Sequence[Mapping], field_name: str) -> str:
     return "n/a" if total is None else f"{total} ({len(runs)} runs)"
 
 
+def _row_run_grid_text(grid: object) -> str:
+    """One measured grid as the reports print it, or `not measured`."""
+    if not isinstance(grid, Mapping):
+        return "not measured"
+    return (f"{grid.get('cols')}x{grid.get('rows')} measured, {grid.get('body_rows')} body rows, "
+            f"geometry contract {grid.get('contract')}")
+
+
+def _row_run_grid_cell(grids: Sequence) -> str:
+    """The grid every accepted run measured, `n/a` with no run, or each distinct grid when they differ."""
+    distinct = []
+    for grid in grids:
+        if grid not in distinct:
+            distinct.append(grid)
+    if not distinct:
+        return "n/a"
+    return " / ".join(_row_run_grid_text(grid) for grid in distinct)
+
+
 def row_run_rows(evidence: Mapping[tuple[str, str, str], RowRunPhase]) -> list[list[str]]:
     """The Row-run shaping table: each measured decision phase's pooled sums and R, T, O_asm and O_att. A shard
     measures only some phases, so it prints no decision; --row-run-decide decides over the whole execution."""
@@ -5837,6 +5874,10 @@ def row_run_rows(evidence: Mapping[tuple[str, str, str], RowRunPhase]) -> list[l
         assemblies = [_assembly_totals(runs) for runs in (phase.base, phase.head)]
         rows.append(prefix + ["assembly sum_us / events"]
                     + ["n/a" if totals is None else f"{totals[0]} / {totals[1]}" for totals in assemblies])
+        if label in ROW_RUN_GEOMETRY_LABELS:
+            # The counts scale with the measured body rows, so the grid is printed beside R, T and overhead.
+            rows.append(prefix + ["grid (cols x rows, body rows)", _row_run_grid_cell(phase.base_grids),
+                                  _row_run_grid_cell(phase.head_grids)])
         metrics = row_run_metrics(phase)
         for name in ("R", "T"):
             rows.append(prefix + [name, "n/a", _percent(metrics[name])])
@@ -5865,6 +5906,8 @@ ROW_RUN_SHARDS = ("S7", "S9-S10", "S2-S10sync", "S4-S5-S11", "S1-S3-S6-S8-S12")
 # A harness digest as harness_hash writes it, and an attempt directory as run_set names it.
 ROW_RUN_HARNESS_HASH = re.compile(r"[0-9a-f]{64}")
 ROW_RUN_ATTEMPT_DIRECTORY = re.compile(r"\d{2,}-(?P<side>base|head)")
+# The variants that play a row-run workload on a measured grid: the positive and negative controls.
+ROW_RUN_GEOMETRY_LABELS = ROW_RUN_POSITIVE_LABELS + (ROW_RUN_NEGATIVE_LABEL,)
 
 
 def row_run_expected_jobs() -> list[str]:
@@ -5885,7 +5928,8 @@ def row_run_protocol_digest() -> str:
                 "bounds": [ROW_RUN_MAX_FAILED_SHARE, ROW_RUN_MAX_UNSTABLE_SHARE, ROW_RUN_MAX_NEGATIVE_REPEAT,
                            ROW_RUN_MIN_POSITIVE_REPEAT, ROW_RUN_MAX_OVERHEAD, ROW_RUN_MIN_OPPORTUNITY],
                 "max_restarts": ROW_RUN_MAX_RESTARTS, "head_fields": ROW_RUN_HEAD_FIELDS,
-                "attempt_fields": ROW_RUN_ATTEMPT_FIELDS}
+                "attempt_fields": ROW_RUN_ATTEMPT_FIELDS, "geometry_contract": ROW_RUN_GEOMETRY_CONTRACT,
+                "geometry_floor": [ROW_RUN_MIN_COLS, ROW_RUN_MIN_ROWS]}
     return hashlib.sha256(json.dumps(protocol, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
@@ -5908,6 +5952,22 @@ def _row_run_result_renderer(result: object, phase_name: str) -> dict | None:
             renderer = phase["frame_counters"].get("renderer")
             return dict(renderer) if isinstance(renderer, Mapping) else {}
     return None
+
+
+def _row_run_result_geometry(result: object) -> dict | None:
+    """The measured row-run grid `result` recorded, as written, or None when it recorded none."""
+    grid = result.get("row_run_geometry") if isinstance(result, dict) else None
+    return dict(grid) if isinstance(grid, Mapping) else None
+
+
+def _row_run_valid_geometry(grid: object) -> bool:
+    """Whether `grid` is a measured row-run grid under this contract: integer columns and rows at or above the
+    floor, and rows - 2 body rows."""
+    if not isinstance(grid, dict) or sorted(grid) != ["body_rows", "cols", "contract", "rows"] \
+            or not all(_is_int(value) for value in grid.values()):
+        return False
+    return (grid["contract"] == ROW_RUN_GEOMETRY_CONTRACT and grid["cols"] >= ROW_RUN_MIN_COLS
+            and grid["rows"] >= ROW_RUN_MIN_ROWS and grid["body_rows"] == grid["rows"] - 2)
 
 
 def row_run_audit(renderers: Sequence[Mapping]) -> dict:
@@ -5935,7 +5995,8 @@ def row_run_export_side(result: SetResult, side_name: str, phase_name: str, out:
         identity = _row_run_identity(evidence, out)
         accepted_ids.add(identity)
         # No accepted execution is dropped: one without the phase's counters reads as a run missing every field.
-        records.append({"execution": identity, "renderer": _row_run_result_renderer(outcome.result, phase_name)})
+        records.append({"execution": identity, "renderer": _row_run_result_renderer(outcome.result, phase_name),
+                        "geometry": _row_run_result_geometry(outcome.result)})
     rejected = [{"execution": _row_run_identity(evidence, out), "kind": kind, "reasons": list(why)}
                 for name, evidence, kind, why in result.attempts
                 if name == side_name and _row_run_identity(evidence, out) not in accepted_ids]
@@ -5986,6 +6047,8 @@ class RowRunExecution:
     # The attempt's start, and its end: the later of its update time and its last job's completion.
     started_s: int
     ended_s: int
+    # Each platform's measured row-run grid, one for all three row-run variants.
+    geometry: dict = field(default_factory=dict)
 
 
 def _critical_path_module():
@@ -6037,11 +6100,12 @@ def _row_run_inventory(directory: Path, label: str, side_name: str) -> set[str]:
 
 
 def _row_run_check_record(directory: Path, identity: str, side_name: str, label: str, phase_name: str,
-                          renderer: Mapping | None, settings: Mapping) -> None:
+                          renderer: Mapping | None, settings: Mapping, geometry: Mapping | None) -> None:
     """An accepted record must name an attempt directory whose outcome.json is this valid run and whose kept
     result.json is the valid, managed counters run of `label` under the evidence's harness and short mode, with
     exactly one `phase_name` phase reporting the record's renderer fields. A record with no renderer must read a
-    result with no counters for the phase. A base's renderer may lack counters its tree predates."""
+    result with no counters for the phase. The record's measured grid must be the result's `row_run_geometry`. A
+    base's renderer may lack counters its tree predates."""
     run_dir = directory / identity
     where = f"{directory.name}/{identity}"
     outcome, problem = _read_json_object(run_dir / "outcome.json")
@@ -6062,6 +6126,9 @@ def _row_run_check_record(directory: Path, identity: str, side_name: str, label:
         found = frame_counter_state(result) if field_name == "frame_counters" else result.get(field_name)
         if found != value or type(found) is not type(value):
             raise RowRunEvidenceError(f"{where}: result.json {field_name} {found!r} is not {value!r}")
+    if _row_run_result_geometry(result) != geometry:
+        raise RowRunEvidenceError(f"{where}: result.json row_run_geometry {result.get('row_run_geometry')!r} is not "
+                                  f"the record's {geometry!r}")
     named = [phase for phase in result.get("phases") or []
              if isinstance(phase, dict) and str(phase.get("name")) == phase_name]
     if len(named) > 1:
@@ -6100,19 +6167,33 @@ def _row_run_bind_phase(directory: Path, platform_key: str, entry: Mapping,
         if listed != inventory:
             raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} accepted and rejected executions "
                                       f"{sorted(listed)} do not match its attempt directories {sorted(inventory)}")
-        renderers = []
+        renderers, grids = [], []
         for identity, record in zip(identities, records):
-            renderer = record.get("renderer")
+            renderer, geometry = record.get("renderer"), record.get("geometry")
             if renderer is not None and not isinstance(renderer, dict):
                 raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} {identity}: renderer fields "
                                           f"{renderer!r} are not an object")
-            _row_run_check_record(directory, identity, side_name, key[1], key[2], renderer, settings)
+            if key[1] in ROW_RUN_GEOMETRY_LABELS and not _row_run_valid_geometry(geometry):
+                # When: a row-run variant's grid is missing or invalid, its counts have no known exposure.
+                raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} {identity}: geometry {geometry!r} "
+                                          f"is not a measured row-run grid under contract {ROW_RUN_GEOMETRY_CONTRACT}")
+            if key[1] not in ROW_RUN_GEOMETRY_LABELS and geometry is not None:
+                raise RowRunEvidenceError(f"{directory.name}: {key[1]} records a row-run grid {geometry!r} but plays "
+                                          "no row-run workload")
+            _row_run_check_record(directory, identity, side_name, key[1], key[2], renderer, settings, geometry)
             renderers.append({} if renderer is None else renderer)
+            grids.append(geometry)
         if side.get("audit") != row_run_audit(renderers):
             raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} sums or counts disagree with its "
                                       "individual records")
-        sides.append(tuple(renderers))
-    return key, RowRunPhase(sides[0], sides[1])
+        sides.append((tuple(renderers), tuple(grids)))
+    distinct = []
+    for grid in sides[0][1] + sides[1][1]:
+        if grid not in distinct:
+            distinct.append(grid)
+    if len(distinct) > 1:
+        raise RowRunEvidenceError(f"{directory.name}: {key[1]} base and head ran on different grids {distinct}")
+    return key, RowRunPhase(sides[0][0], sides[1][0], sides[0][1], sides[1][1])
 
 
 def _row_run_settings(directory: Path, evidence: Mapping) -> dict:
@@ -6265,7 +6346,15 @@ def row_run_load_execution(record: Mapping, attempt: int, directories: Sequence[
             if key in evidence:
                 raise RowRunEvidenceError(f"{identity}: {' '.join(key)} is owned by two shards")
             evidence[key] = phase
-    return RowRunExecution(identity, evidence, settings, missing, claimed, run_id, attempt, started_s, ended_s)
+    geometry = {}
+    for (platform_key, label, _phase_name), phase in evidence.items():
+        for grid in phase.base_grids + phase.head_grids:
+            if label in ROW_RUN_GEOMETRY_LABELS and geometry.setdefault(platform_key, grid) != grid:
+                # When: two row-run variants of one platform ran on different grids, their exposure differs.
+                raise RowRunEvidenceError(f"{identity}: {platform_key} row-run variants ran on different grids "
+                                          f"{geometry[platform_key]} and {grid}")
+    return RowRunExecution(identity, evidence, settings, missing, claimed, run_id, attempt, started_s, ended_s,
+                           geometry=geometry)
 
 
 def row_run_step_lines(decision: RowRunDecision) -> list[str]:
@@ -6308,6 +6397,10 @@ def row_run_decide(executions: Sequence[tuple[Mapping, int]], directories: Seque
             raise RowRunEvidenceError(f"the replacement {rerun.identity} does not follow {first.identity}")
         if rerun.started_s < first.ended_s:
             raise RowRunEvidenceError(f"the replacement {rerun.identity} started before {first.identity} ended")
+        for platform_key in set(first.geometry) & set(rerun.geometry):
+            if first.geometry[platform_key] != rerun.geometry[platform_key]:
+                raise RowRunEvidenceError(f"{platform_key} row-run grid differs between {first.identity} and "
+                                          f"{rerun.identity}")
         for platform_key in set(first.settings) & set(rerun.settings):
             if first.settings[platform_key] != rerun.settings[platform_key]:
                 raise RowRunEvidenceError(f"{platform_key} settings differ between {first.identity} and "
@@ -6323,6 +6416,10 @@ def row_run_decide(executions: Sequence[tuple[Mapping, int]], directories: Seque
              f"- replacement execution: {'none' if rerun is None else rerun.identity}",
              f"- selected execution: {selected.identity}"]
     lines += [f"- missing shard artifact of {selected.identity}: {name}" for name in selected.missing]
+    lines += [f"- {platform_key} row-run grid: {_row_run_grid_text(selected.geometry.get(platform_key))}"
+              for platform_key in ROW_RUN_PLATFORMS]
+    lines.append("- R, T and overhead depend on these grids: the row-run counts scale with the measured body rows, "
+                 "so figures from different grids are not comparable.")
     lines += row_run_step_lines(row_run_decision(selected.evidence))
     lines.append(f"- outcome: {final.outcome} (step {final.step}): {final.reason}")
     lines.append("- exit status 0 means the evidence validated, not that the diagnostic may merge: read the "

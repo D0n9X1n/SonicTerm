@@ -835,6 +835,7 @@ fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
         trim_experiment: None,
         trim_seq_after_hook: None,
         atlas_recovery: None,
+        row_run_geometry: None,
         native_focus_events_dropped: 0,
         native_cursor_rest_events_dropped: 0,
         finish_session_settled: true,
@@ -1320,29 +1321,101 @@ fn warm_probe(scratch: PathBuf, frames: u64) -> (Probe, PhaseSpec) {
     probe.test_readings = Some((frames, ResourceAmount::default()));
     probe.stage = Stage::Steps(index);
     probe.meter = Some(PhaseMeter::start(phase.name, false, None, None));
+    // A real run's sentinel nonce: 16 hex digits, which no row-run fixture contains.
+    probe.nonce = "0123456789abcdef".to_owned();
     (probe, phase)
 }
 
-/// Every body row of `kind`'s update `update`, as the probe's scan reads them from the grid.
-fn warm_grid(kind: RowRunWorkload, update: u32) -> Vec<String> {
-    crate::workload::ROW_RUN_BODY_ROWS
-        .map(|row| kind.body_segments(row, update).into_iter().map(|(_, _, text)| text).collect())
-        .collect()
-}
-
-/// A presentation after a complete sighting writes the update's acknowledgement file, which
-/// releases the role; no failure is recorded.
-#[test]
-fn a_presented_warm_update_writes_its_acknowledgement() {
-    let scratch = std::env::temp_dir().join(format!(
-        "sonicterm-warm-ack-{}-{}",
+/// A scratch directory unique to this test process and `label`.
+fn warm_scratch(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "sonicterm-warm-{label}-{}-{}",
         std::process::id(),
         nonce_seed()
-    ));
+    ))
+}
+
+/// The hosted macOS grid the probe tests freeze.
+fn hosted_geometry() -> workload::RowRunGeometry {
+    workload::RowRunGeometry::measured(237, 43).expect("the hosted grid")
+}
+
+/// Preparation after READY writes and closes every row-run fixture for the measured grid, configures
+/// the warm handshake for it and freezes the geometry, all before GO: no GO file exists yet, and each
+/// fixture holds exactly the generator's bytes for that grid.
+#[test]
+fn preparation_writes_every_fixture_for_the_measured_grid_before_go() {
+    let scratch = warm_scratch("prepare");
+    std::fs::create_dir_all(scratch.join("go")).expect("scratch");
+    let (mut probe, _) = warm_probe(scratch.clone(), 10);
+    assert_eq!(probe.presented, None, "no handshake before the grid is measured");
+    let geometry = hosted_geometry();
+    probe.prepare_row_run(geometry).expect("prepared");
+    let Workload::RowRuns { kind, warm, total } = probe.plan.roles[0] else {
+        panic!("S10/powerline plays a row-run workload");
+    };
+    for update in 0..total {
+        let path =
+            scratch.join(format!("workload/fixtures/{}/{update}", workload::ROW_RUN_FIXTURES));
+        let written = std::fs::read(&path).expect("every fixture is written");
+        assert_eq!(written, kind.update_bytes(update, geometry), "update {update}");
+    }
+    assert_eq!(probe.row_run_geometry, Some(geometry));
+    assert_eq!(
+        probe.presented,
+        Some((0, crate::presented_updates::PresentedUpdates::new(kind, geometry, warm)))
+    );
+    assert!(!scratch.join("go/0").exists(), "GO is not written by preparation");
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// A grid below the floor is refused before preparation writes anything, naming the reason and the
+/// observed dimensions; a preparation that cannot write its fixtures fails without freezing a
+/// geometry or configuring the handshake, so the run is invalidated before GO.
+#[test]
+fn a_below_floor_grid_or_a_failed_preparation_releases_nothing() {
+    let scratch = warm_scratch("floor");
     std::fs::create_dir_all(&scratch).expect("scratch");
     let (mut probe, _) = warm_probe(scratch.clone(), 10);
+    let refused = probe.prepare_measured(119, 22).expect_err("below the floor");
+    assert!(refused.starts_with(workload::ROW_RUN_GRID_TOO_SMALL) && refused.contains("119x22"));
+    assert!(!scratch.join("workload").exists(), "nothing written for a refused grid");
+    assert_eq!(probe.row_run_geometry, None);
+    let _ = std::fs::remove_dir_all(&scratch);
+    let blocked = warm_scratch("blocked");
+    std::fs::write(&blocked, b"not a directory").expect("scratch file");
+    let (mut probe, _) = warm_probe(blocked.clone(), 10);
+    let failed = probe.prepare_row_run(hosted_geometry()).expect_err("unwritable fixtures");
+    assert!(failed.starts_with("write fixture rowrun/0"), "{failed}");
+    assert_eq!((probe.row_run_geometry, probe.presented.is_none()), (None, true));
+    let _ = std::fs::remove_file(&blocked);
+}
+
+/// After the grid is frozen, the same dimensions read as unchanged and any other dimensions as a
+/// change naming both, which the step invalidates before or after GO.
+#[test]
+fn a_changed_row_run_grid_is_a_named_change() {
+    let frozen = hosted_geometry();
+    assert_eq!(geometry_change(frozen, 237, 43), None);
+    for (cols, rows) in [(237, 44), (236, 43), (281, 58)] {
+        let reason = geometry_change(frozen, cols, rows).expect("a change");
+        assert!(
+            reason.contains("237x43") && reason.contains(&format!("{cols}x{rows}")),
+            "{reason}"
+        );
+    }
+}
+
+/// A presentation after a whole sighting writes the update's acknowledgement file, which releases
+/// the role; no failure is recorded.
+#[test]
+fn a_presented_warm_update_writes_its_acknowledgement() {
+    let scratch = warm_scratch("ack");
+    std::fs::create_dir_all(&scratch).expect("scratch");
+    let (mut probe, _) = warm_probe(scratch.clone(), 10);
+    probe.prepare_row_run(hosted_geometry()).expect("prepared");
     let (_, handshake) = probe.presented.as_mut().expect("a row-run handshake");
-    handshake.observe_grid(&warm_grid(RowRunWorkload::Powerline, 0), 10);
+    handshake.observe(true, 10);
     probe.observe_presented_frames(11);
     assert!(
         scratch.join(workload::PRESENTED_DIRECTORY).join("0").is_file(),
@@ -1357,19 +1430,21 @@ fn a_presented_warm_update_writes_its_acknowledgement() {
 /// when the handshake marked its last update: the step invalidates the run with that reason.
 #[test]
 fn a_failed_acknowledgement_write_never_completes_the_warm_phase() {
-    let scratch = std::env::temp_dir().join(format!(
-        "sonicterm-warm-ack-file-{}-{}",
-        std::process::id(),
-        nonce_seed()
-    ));
+    let scratch = warm_scratch("ack-file");
     std::fs::write(&scratch, b"not a directory").expect("scratch file");
     let (mut probe, phase) = warm_probe(scratch.clone(), 10);
-    let kind = RowRunWorkload::Powerline;
     let count = crate::scenarios::ROW_RUN_WARM_UPDATES;
+    // The fixtures cannot be written under a file, so the handshake is configured directly.
+    let handshake = crate::presented_updates::PresentedUpdates::new(
+        RowRunWorkload::Powerline,
+        hosted_geometry(),
+        count,
+    );
+    probe.presented = Some((0, handshake));
     for update in 0..count {
         let frames = 10 + 2 * u64::from(update);
         let (_, handshake) = probe.presented.as_mut().expect("a row-run handshake");
-        handshake.observe_grid(&warm_grid(kind, update), frames);
+        handshake.observe(true, frames);
         probe.observe_presented_frames(frames + 1);
     }
     assert!(probe.presented.as_ref().is_some_and(|(_, handshake)| handshake.done()));
@@ -1380,4 +1455,58 @@ fn a_failed_acknowledgement_write_never_completes_the_warm_phase() {
     );
     assert!(!probe.phase_done(&phase, Instant::now()), "a failed acknowledgement ends nothing");
     let _ = std::fs::remove_file(&scratch);
+}
+
+/// The step's grid gate: a changed grid invalidates before and after GO; an unreadable grid holds GO
+/// back until it can be rechecked but never stops a running phase; an unchanged grid proceeds.
+#[test]
+fn the_geometry_gate_holds_go_for_a_recheck_and_invalidates_any_change() {
+    let changed = GeometryCheck::Changed("changed".to_owned());
+    for released in [false, true] {
+        assert_eq!(
+            geometry_gate(changed.clone(), released),
+            GeometryGate::Invalidate("changed".to_owned())
+        );
+        assert_eq!(geometry_gate(GeometryCheck::Unchanged, released), GeometryGate::Proceed);
+    }
+    assert_eq!(geometry_gate(GeometryCheck::Busy, false), GeometryGate::Wait);
+    assert_eq!(geometry_gate(GeometryCheck::Busy, true), GeometryGate::Proceed);
+}
+
+/// A measured grid at or above the floor is frozen and prepared by the same method `advance_ready`
+/// calls; the final fixture bytes must not contain the sentinel nonce, or preparation fails and
+/// freezes nothing.
+#[test]
+fn a_measured_grid_is_frozen_unless_a_fixture_holds_the_nonce() {
+    let scratch = warm_scratch("measured");
+    std::fs::create_dir_all(&scratch).expect("scratch");
+    let (mut probe, _) = warm_probe(scratch.clone(), 10);
+    probe.prepare_measured(120, 22).expect("the floor is prepared");
+    assert_eq!(probe.row_run_geometry, workload::RowRunGeometry::measured(120, 22).ok());
+    let _ = std::fs::remove_dir_all(&scratch);
+    let clash = warm_scratch("nonce");
+    std::fs::create_dir_all(&clash).expect("scratch");
+    let (mut probe, _) = warm_probe(clash.clone(), 10);
+    // Every Powerline update writes its six-digit update number; update 0's is 000000.
+    probe.nonce = "000000".to_owned();
+    let failed = probe.prepare_measured(237, 43).expect_err("the nonce occurs");
+    assert!(failed.contains("contains the sentinel nonce"), "{failed}");
+    assert_eq!((probe.row_run_geometry, probe.presented.is_none()), (None, true));
+    let _ = std::fs::remove_dir_all(&clash);
+}
+
+/// The run's result carries the frozen row-run grid, so `result.json` records the grid the counts
+/// were measured on.
+#[test]
+fn the_result_carries_the_frozen_row_run_grid() {
+    let scratch = warm_scratch("result");
+    std::fs::create_dir_all(&scratch).expect("scratch");
+    let (mut probe, _) = warm_probe(scratch.clone(), 10);
+    assert_eq!(probe.result(true).row_run_geometry, None, "no grid before it is measured");
+    probe.prepare_measured(281, 58).expect("prepared");
+    assert_eq!(
+        probe.result(true).row_run_geometry,
+        workload::RowRunGeometry::measured(281, 58).ok()
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
 }

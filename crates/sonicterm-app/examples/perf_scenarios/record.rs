@@ -1123,6 +1123,9 @@ pub(crate) struct RunResult {
     pub(crate) trim_seq_after_hook: Option<u64>,
     /// S1/atlas-retry's recovery episodes, as `result.json`'s `atlas_recovery`; absent elsewhere.
     pub(crate) atlas_recovery: Option<Value>,
+    /// A row-run execution's frozen measured grid, as `result.json`'s `row_run_geometry`; absent
+    /// elsewhere and when the run ended before the grid was measured.
+    pub(crate) row_run_geometry: Option<crate::workload::RowRunGeometry>,
     /// Native `Focused` events the probe recorded and dropped.
     pub(crate) native_focus_events_dropped: u64,
     /// Windows: native `CursorMoved` events dropped because the pointer rested where the window
@@ -1194,6 +1197,18 @@ impl RunResult {
         put("hooks", json!({ "trim": self.trim_hook.as_str() }));
         put("trim_experiment", json!(self.trim_experiment));
         put("trim_seq_after_hook", json!(self.trim_seq_after_hook));
+        if let Some(geometry) = self.row_run_geometry {
+            // When: a row-run grid was frozen, its contract and dimensions bind the evidence.
+            put(
+                "row_run_geometry",
+                json!({
+                    "contract": crate::workload::ROW_RUN_GEOMETRY_CONTRACT,
+                    "cols": geometry.cols,
+                    "rows": geometry.rows,
+                    "body_rows": geometry.body_rows(),
+                }),
+            );
+        }
         if let Some(recovery) = &self.atlas_recovery {
             // When: the run recorded recovery episodes; every other result omits the key.
             put("atlas_recovery", recovery.clone());

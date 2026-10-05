@@ -214,6 +214,7 @@ fn partial_result(status: Status) -> RunResult {
         trim_experiment: None,
         trim_seq_after_hook: None,
         atlas_recovery: None,
+        row_run_geometry: None,
         native_focus_events_dropped: 1,
         native_cursor_rest_events_dropped: 0,
         finish_session_settled: true,
@@ -1391,4 +1392,17 @@ fn result_json_records_the_trim_hooks_outcome() {
     .map(|outcome| outcome.as_str())
     .collect();
     assert_eq!(names, ["not-reached", "unsupported", "skipped", "trimmed"]);
+}
+
+/// A row-run run's frozen grid is in `result.json` as `row_run_geometry`, with the contract version and
+/// rows - 2 body rows; every other run omits the key.
+#[test]
+fn a_row_run_result_records_its_frozen_grid() {
+    let mut result = partial_result(Status::Valid);
+    assert!(result.to_json().get("row_run_geometry").is_none(), "absent without a row-run grid");
+    result.row_run_geometry = crate::workload::RowRunGeometry::measured(237, 43).ok();
+    assert_eq!(
+        result.to_json()["row_run_geometry"],
+        json!({"contract": crate::workload::ROW_RUN_GEOMETRY_CONTRACT, "cols": 237, "rows": 43, "body_rows": 41})
+    );
 }
