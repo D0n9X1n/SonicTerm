@@ -1865,6 +1865,102 @@ def latency_values(latency: object) -> list[float] | None:
     return values
 
 
+# Every split reason of a credited sample, in the harness's precedence order; record.rs's SPLIT_REASONS.
+SPLIT_REASONS = (
+    "unsupported", "arm-gate-off", "arm-no-pane", "arm-exhausted", "take-gate-off", "take-no-pane",
+    "take-mismatch", "take-already-taken", "pane-not-shown", "row-identity-changed",
+    "first-appearance-unobserved", "no-appearance-observed", "echo-overwritten",
+    "no-publication-observed-by-take", "untargeted", "other-window", "send-refused",
+    "delivery-not-observed-by-take", "presented-before-publication", "delivered-after-present", "clock-order",
+    "split",
+)
+NOT_CREDITED = "not-credited"
+# The three parts of a split, in milliseconds, which add up to the sample's latency.
+SPLIT_PARTS = ("input_to_parse_ms", "parse_to_publication_ms", "publication_to_present_ms")
+SPLIT_DELIVERIES = ("sent", "suppressed")
+# Serialized parts are rounded per part, so their sum may differ from latency_ms by this much.
+SPLIT_SUM_TOLERANCE_MS = 0.001
+SPLIT_COVERAGE_TOLERANCE = 1e-9
+
+
+def _finite_nonnegative(value: object) -> bool:
+    return _is_number(value) and math.isfinite(value) and value >= 0
+
+
+def _split_problem(split: object, latency_ms: float) -> str | None:
+    """Why one split object breaks the contract, or None."""
+    if not isinstance(split, dict):
+        return "is not an object"
+    for part in SPLIT_PARTS + ("delivery_lag_us",):
+        if not _finite_nonnegative(split.get(part)):
+            return f"{part} is not a finite number >= 0"
+    if split.get("delivery") not in SPLIT_DELIVERIES:
+        return f"delivery is {split.get('delivery')!r}, not sent or suppressed"
+    for flag in ("coalesced", "sync_open"):
+        if not isinstance(split.get(flag), bool):
+            return f"{flag} is not a boolean"
+    if not (_is_int(split.get("echo_generation")) and split["echo_generation"] >= 0):
+        return "echo_generation is not an integer >= 0"
+    total = sum(split[part] for part in SPLIT_PARTS)
+    if abs(total - latency_ms) > SPLIT_SUM_TOLERANCE_MS:
+        return f"parts sum to {total} ms, not latency_ms {latency_ms} within {SPLIT_SUM_TOLERANCE_MS} ms"
+    return None
+
+
+def latency_split_problems(latency: dict) -> list[str]:
+    """Every way a schema-1 latency object breaks the split contract; the report's aggregates are recomputed
+    from the samples, so mutually consistent but fabricated counts are refused too."""
+    problems = []
+    if not (_is_int(latency.get("split_schema")) and latency["split_schema"] == 1):
+        problems.append(f"split_schema is {latency.get('split_schema')!r}, not 1")
+    samples = latency.get("samples")
+    if not isinstance(samples, list):
+        return problems + ["samples is not a list"]
+    credited_count, reasons = 0, {}
+    for position, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            problems.append(f"sample {position} is not an object")
+            continue
+        reason, latency_ms, split = sample.get("split_reason"), sample.get("latency_ms"), sample.get("split")
+        credited = _finite_nonnegative(latency_ms)
+        if not credited and latency_ms is not None:
+            problems.append(f"sample {position} latency_ms is neither null nor a finite number >= 0")
+            continue
+        if reason not in SPLIT_REASONS and reason != NOT_CREDITED:
+            problems.append(f"sample {position} split_reason {reason!r} is not a known reason")
+            continue
+        if credited == (reason == NOT_CREDITED):
+            problems.append(f"sample {position} is {'credited' if credited else 'uncredited'} but reads {reason!r}")
+            continue
+        if (split is not None) != (reason == "split"):
+            problems.append(f"sample {position} split is {'absent' if split is None else 'present'} for {reason!r}")
+            continue
+        if split is not None:
+            problem = _split_problem(split, latency_ms)
+            if problem:
+                problems.append(f"sample {position} split {problem}")
+        if credited:
+            credited_count += 1
+            reasons[reason] = reasons.get(reason, 0) + 1
+    split_count = reasons.get("split", 0)
+    if not (_is_int(latency.get("attributed")) and latency["attributed"] == credited_count):
+        problems.append(f"attributed is {latency.get('attributed')!r}, but {credited_count} samples are credited")
+    recorded = latency.get("split_reasons")
+    if not (isinstance(recorded, dict) and all(_is_int(count) for count in recorded.values())
+            and recorded == reasons):
+        problems.append(f"split_reasons is {recorded!r}, but the samples give {reasons!r}")
+    if not (_is_int(latency.get("split_count")) and latency["split_count"] == split_count):
+        problems.append(f"split_count is {latency.get('split_count')!r}, but {split_count} samples are split")
+    coverage = latency.get("split_coverage")
+    if credited_count == 0:
+        if coverage is not None:
+            problems.append(f"split_coverage is {coverage!r}, but nothing is credited, so it must be null")
+    elif not (_is_number(coverage)
+              and abs(coverage - split_count / credited_count) <= SPLIT_COVERAGE_TOLERANCE):
+        problems.append(f"split_coverage is {coverage!r}, not {split_count}/{credited_count}")
+    return problems
+
+
 def _monitor_ok(monitor: object) -> bool:
     """A measurement display gives its name or null, its refresh in millihertz or null, and its scale factor."""
     return (isinstance(monitor, dict)
@@ -2064,14 +2160,16 @@ def frame_counter_problems(counters: object, partial: bool = False) -> list[str]
 
 def validate_result(data: object, harness_hash: str, process_exit_code: int | None, *,
                     counters: bool = False, partial_counters: bool = False,
-                    platform_name: str = "darwin") -> list[str]:
+                    platform_name: str = "darwin", latency_split_schema: int | None = None) -> list[str]:
     """Check result.json against schema version 1; an empty list means it can be read.
 
     A result whose `managed` is not true, or whose harness hash differs from the one this
     script passed, is a schema failure: it is a standalone run or another harness's run.
     `counters` says whether the run passed --counters: only then must the gate be on, and only
     with the gate on does every phase carry a whole frame_counters object. `partial_counters` lets a
-    base's counters lack fields its older contract never had.
+    base's counters lack fields its older contract never had. `latency_split_schema` is the harness's
+    declared split schema: with 1, every non-null latency object must carry the whole split contract; with
+    None (an older harness) the split fields are neither required nor trusted.
     """
     if not isinstance(data, dict):
         return ["result.json is not an object"]
@@ -2123,6 +2221,8 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
                                     and "coverage" in latency
                                     and (latency["coverage"] is None or _is_number(latency["coverage"]))):
         problems.append("latency needs samples, attributed, total and coverage")
+    elif latency is not None and latency_split_schema == 1:
+        problems.extend(f"latency {problem}" for problem in latency_split_problems(latency))
     throughput = data.get("throughput")
     if throughput is not None and not (isinstance(throughput, dict) and _is_int(throughput.get("bytes"))
                                        and _is_number(throughput.get("seconds"))):
@@ -2453,8 +2553,10 @@ COUNTERS_FEATURE = "perf-counters"
 FRAME_TEXTURE_FEATURE = "perf-frame-texture"
 # Marks a tree whose App can take a memory sample tagged with a perf checkpoint; the harness then samples at each.
 CHECKPOINT_MEMORY_FEATURE = "perf-hook-checkpoint-memory"
+# Marks a tree whose App has the S2 echo watch; the harness then splits S2/default latency at the flush.
+ECHO_TRACE_FEATURE = "perf-echo-trace"
 # Every perf feature a tree may declare, in the order a build passes them; later hooks append.
-PERF_FEATURES = (COUNTERS_FEATURE, FRAME_TEXTURE_FEATURE, CHECKPOINT_MEMORY_FEATURE)
+PERF_FEATURES = (COUNTERS_FEATURE, FRAME_TEXTURE_FEATURE, CHECKPOINT_MEMORY_FEATURE, ECHO_TRACE_FEATURE)
 # The app source a hook's method lives in, and the definition each hook feature needs there.
 APP_SOURCE_DIRECTORY = "crates/sonicterm-app/src"
 HOOK_METHODS = {CHECKPOINT_MEMORY_FEATURE: re.compile(r"^\s*pub fn __perf_checkpoint_memory\b", re.M)}
@@ -2592,7 +2694,8 @@ def tree_features(root: Path) -> tuple[str, ...]:
 
     perf-counters needs the logging API too (`tree_supports_counters`); perf-frame-texture needs
     only its declaration, since its accessor ships in the same change as the feature; each hook
-    needs its method (`tree_supports_hook`).
+    needs its method (`tree_supports_hook`). perf-echo-trace implies perf-counters, so a tree adds it
+    only when it declares it and supports counters.
     """
     manifest = _read_manifest(root)
     features = []
@@ -2603,6 +2706,8 @@ def tree_features(root: Path) -> tuple[str, ...]:
     for feature, method in HOOK_METHODS.items():
         if tree_supports_hook(root, feature, method):
             features.append(feature)
+    if COUNTERS_FEATURE in features and declares_feature(manifest, ECHO_TRACE_FEATURE):
+        features.append(ECHO_TRACE_FEATURE)
     return tuple(feature for feature in PERF_FEATURES if feature in features)
 
 
@@ -2659,6 +2764,8 @@ class Scenario:
     short_timeout_s: int
     # Per-variant caps on a --short comparison's valid runs, as (variant, cap) pairs; empty for none.
     run_caps: tuple[tuple[str, int], ...] = ()
+    # The latency split schema the harness declares in `capabilities`; None for a harness that predates it.
+    latency_split_schema: int | None = None
 
     def cap(self, variant: str) -> int | None:
         """This variant's short-mode run cap, or None when it has none."""
@@ -2739,6 +2846,25 @@ def log_tail(text: str, count: int = 12) -> str:
     return "\n".join(lines[-count:])
 
 
+# The latency split schemas this script can validate.
+LATENCY_SPLIT_SCHEMAS = (1,)
+
+
+def _latency_split_capability(data: dict) -> int | None:
+    """The list's `capabilities.latency_split_schema`: None when the list has no capabilities (a harness that
+    predates the split), else exactly a known schema; any other shape or value is refused, because a contract
+    this script does not know cannot be validated."""
+    if "capabilities" not in data:
+        return None
+    capabilities = data["capabilities"]
+    if not isinstance(capabilities, dict) or set(capabilities) != {"latency_split_schema"}:
+        raise ValueError(f"scenario list capabilities {capabilities!r} are not {{'latency_split_schema': 1}}")
+    schema = capabilities["latency_split_schema"]
+    if not _is_int(schema) or schema not in LATENCY_SPLIT_SCHEMAS:
+        raise ValueError(f"scenario list latency_split_schema is {schema!r}, not one of {LATENCY_SPLIT_SCHEMAS}")
+    return schema
+
+
 def parse_scenario_list(text: str) -> list[Scenario]:
     """Parse `--list` output: the JSON object line among the launcher's header and footer."""
     data = None
@@ -2756,6 +2882,7 @@ def parse_scenario_list(text: str) -> list[Scenario]:
         raise ValueError("the harness printed no scenario list")
     if not _is_int(data.get("schema_version")) or data["schema_version"] != SCHEMA_VERSION:
         raise ValueError(f"scenario list schema_version is {data.get('schema_version')!r}")
+    split_schema = _latency_split_capability(data)
     entries = data.get("scenarios")
     if not isinstance(entries, list) or not entries:
         raise ValueError("the scenario list is empty")
@@ -2773,7 +2900,7 @@ def parse_scenario_list(text: str) -> list[Scenario]:
         if caps is None:
             raise ValueError(f"malformed scenario entry {entry!r}")
         scenarios.append(Scenario(entry["id"], tuple(variants), entry["title"], entry["timeout_s"],
-                                  entry["short_timeout_s"], caps))
+                                  entry["short_timeout_s"], caps, split_schema))
     if len({scenario.id for scenario in scenarios}) != len(scenarios):
         raise ValueError("the scenario list repeats an id")
     return scenarios
@@ -3356,6 +3483,8 @@ class RunPlan:
     kill_at_go: bool = False
     # The tree that built the binary; the run's cwd, so asset_dir() finds that tree's assets.
     source_root: Path = ROOT
+    # The head harness's latency split schema; both sides run that harness, so both are held to it.
+    latency_split_schema: int | None = None
 
 
 @dataclass
@@ -3780,7 +3909,8 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                 exit_code = step_result.exit_code if step_result.status != "TIMEOUT" else None
                 # A base may predate a contract field; the head is the contract under test.
                 schema = validate_result(parsed, plan.harness_hash, exit_code, counters=plan.counters,
-                                         partial_counters=plan.side == "base", platform_name=host.platform)
+                                         partial_counters=plan.side == "base", platform_name=host.platform,
+                                         latency_split_schema=plan.latency_split_schema)
             data = parsed if isinstance(parsed, dict) else None
     if host.platform == "win32":
         focus = judge_foreground(sampler.readings, user_session=has_user_session(host.environ))
@@ -4991,6 +5121,85 @@ def counter_rows(label: str, base: SideRuns, head: SideRuns) -> tuple[list[list[
     return rows, omitted
 
 
+# The only variant whose samples are split; S2/flood types beside a flood and is never armed.
+SPLIT_LABEL = "S2/default"
+
+
+def _side_latency_samples(side: SideRuns) -> list[dict] | None:
+    """Every latency sample of a side's valid runs, or None when the side has no valid run to read."""
+    if side.blocked or side.failed or not side.outcomes:
+        return None
+    samples = []
+    for outcome in side.outcomes:
+        latency = (outcome.result or {}).get("latency")
+        if isinstance(latency, dict) and isinstance(latency.get("samples"), list):
+            samples.extend(sample for sample in latency["samples"] if isinstance(sample, dict))
+    return samples
+
+
+def _split_cells(samples: list[dict] | None, side: SideRuns) -> dict[str, tuple[str, float | None]]:
+    """One side's split rows: each row's cell and the figure its change compares."""
+    if samples is None:
+        missing = "n/a" if side.blocked == COUNTERS_HEAD_ONLY else _missing_cell(side)
+        return {"missing": (missing, None)}
+    credited = [sample for sample in samples if sample.get("split_reason") not in (None, NOT_CREDITED)]
+    splits = [sample["split"] for sample in credited if isinstance(sample.get("split"), dict)]
+    reasons: dict[str, int] = {}
+    for sample in credited:
+        reasons[sample["split_reason"]] = reasons.get(sample["split_reason"], 0) + 1
+    flags = {name: sum(1 for split in splits if test(split)) for name, test in (
+        ("suppressed", lambda split: split.get("delivery") == "suppressed"),
+        ("coalesced", lambda split: split.get("coalesced") is True),
+        ("sync_open", lambda split: split.get("sync_open") is True))}
+    reason_text = ", ".join(f"{reason} {count}" for reason, count in sorted(reasons.items())) or "none"
+    cells = {"reasons": (f"{reason_text}; " + ", ".join(f"{name} {count}" for name, count in flags.items()), None)}
+    if not splits:
+        # A base built without the feature splits nothing; every credited sample reads unsupported.
+        unavailable = "n/a (unsupported)" if set(reasons) <= {"unsupported"} else "n/a (no split)"
+        cells["coverage"] = (unavailable if credited else "unavailable", None)
+        return {"empty": (unavailable, None), **cells}
+    for part in SPLIT_PARTS:
+        values = [split[part] for split in splits]
+        cells[f"{part} median"] = (f"{median(values):.3f} ms ({len(values)} splits)", median(values))
+        cells[f"{part} p95"] = (f"{percentile_95(values):.3f} ms", percentile_95(values))
+    lags = [split["delivery_lag_us"] for split in splits]
+    cells["delivery_lag_us p95"] = (f"{percentile_95(lags):.1f} us", percentile_95(lags))
+    coverage = len(splits) / len(credited)
+    cells["coverage"] = (f"{coverage * 100:.1f}% ({len(splits)}/{len(credited)})", coverage * 100)
+    return cells
+
+
+# The split rows' labels, in order, and the key of each row's cell.
+SPLIT_ROWS = (
+    ("split input to parse, median (ms)", "input_to_parse_ms median"),
+    ("split input to parse, p95 (ms)", "input_to_parse_ms p95"),
+    ("split parse to publication, median (ms)", "parse_to_publication_ms median"),
+    ("split parse to publication, p95 (ms)", "parse_to_publication_ms p95"),
+    ("split publication to present, median (ms)", "publication_to_present_ms median"),
+    ("split publication to present, p95 (ms)", "publication_to_present_ms p95"),
+    ("split delivery lag, p95 (us)", "delivery_lag_us p95"),
+    ("split coverage (%)", "coverage"),
+    ("split reasons (credited samples)", "reasons"),
+)
+
+
+def split_rows(label: str, base: SideRuns, head: SideRuns, latency_split_schema: int | None) -> list[list[str]]:
+    """The counters table's split rows for S2/default's typing phase, only when the head harness declares split
+    schema 1. A side without the split reads `n/a (unsupported)`; a change compares the two figures."""
+    if label != SPLIT_LABEL or latency_split_schema != 1:
+        return []
+    sides = [_split_cells(_side_latency_samples(side), side) for side in (base, head)]
+    rows = []
+    for row_label, key in SPLIT_ROWS:
+        texts, figures = [], []
+        for cells in sides:
+            text, figure = cells.get(key) or cells.get("empty") or cells["missing"]
+            texts.append(text)
+            figures.append(figure)
+        rows.append([label, "typing", row_label, texts[0], texts[1], percent_change(figures[0], figures[1])])
+    return rows
+
+
 def _renderer_runs(per_run: Sequence[dict], fields: Sequence[str]) -> list[dict]:
     """The renderer sections of the runs that carry every integer field in `fields`."""
     return [sections["renderer"] for sections in per_run
@@ -5228,7 +5437,8 @@ def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: s
     for case in cases:
         name = case.name
         plan = RunPlan(scenarios[case.scenario], case.variant, "smoke", binary, harness_hash, short=True,
-                       smoke=True, kill_at_go=case.kill_at_go, source_root=ROOT)
+                       smoke=True, kill_at_go=case.kill_at_go, source_root=ROOT,
+                       latency_split_schema=scenarios[case.scenario].latency_split_schema)
         reasons: list[str] = []
         for attempt in range(1, RETRY_LIMIT + 2):
             # A variant's `/` would make a subdirectory, so evidence names use `-`.
@@ -6289,9 +6499,11 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             set_runs = capped_runs(by_id[scenario_id], variant, requested_runs, args.short)
             built = {side: builds[side][example] for side in SIDES}
             # A base that did not build is retired before its first slot, so its placeholder path never runs.
+            # Both sides run the head's overlaid harness (equal hashes), so the head's list decides the split schema.
             plans = {side: RunPlan(by_id[scenario_id], variant, side,
                                    built[side] if isinstance(built[side], Path) else Path("unbuilt"),
-                                   digest, short=args.short, laps=laps, counters=counters, source_root=trees[side])
+                                   digest, short=args.short, laps=laps, counters=counters, source_root=trees[side],
+                                   latency_split_schema=by_id[scenario_id].latency_split_schema)
                      for side in SIDES}
             base_blocked = built["base"] if isinstance(built["base"], str) else None
             if counters and not supports["base"]:
@@ -6324,6 +6536,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             counters_table.extend(rows)
             counters_table.extend(glyph_atlas_reconciliation_rows(shown, result.base, result.head))
             split_details.extend(attempt_split_details(shown, result.base, result.head))
+            counters_table.extend(split_rows(result.label, result.base, result.head,
+                                             by_id[result.label.split("/")[0]].latency_split_schema))
             omitted += left_out
             for side_name, side in (("base", result.base), ("head", result.head)):
                 presenter_notes.extend(presenter_counter_notes(result.label, side_name, side))
@@ -6367,6 +6581,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                f"{', '.join(side for side in SIDES if FRAME_TEXTURE_FEATURE in features[side]) or 'neither ref'}",
                f"- Built with `--features {CHECKPOINT_MEMORY_FEATURE}`: "
                f"{', '.join(side for side in SIDES if CHECKPOINT_MEMORY_FEATURE in features[side]) or 'neither ref'}",
+               f"- Built with `--features {ECHO_TRACE_FEATURE}`: "
+               f"{', '.join(side for side in SIDES if ECHO_TRACE_FEATURE in features[side]) or 'neither ref'}",
                f"- Evidence: `{out}`", "", "Raw logs:", ""]
     for result in results:
         for side, evidence, kind, _reasons in result.attempts:

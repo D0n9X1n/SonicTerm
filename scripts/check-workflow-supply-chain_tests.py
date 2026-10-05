@@ -674,9 +674,10 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(
             optional_feature_packages(),
             {"sonicterm-resource": ("test-util",),
-             "sonicterm-app": ("perf-counters", "perf-frame-texture", "perf-hook-checkpoint-memory")},
+             "sonicterm-app": ("perf-counters", "perf-echo-trace", "perf-frame-texture",
+                               "perf-hook-checkpoint-memory")},
         )
-        feature_sets = ("perf-counters,perf-hook-checkpoint-memory", "perf-frame-texture")
+        feature_sets = ("perf-counters,perf-hook-checkpoint-memory", "perf-frame-texture", "perf-echo-trace")
         covered = [feature for feature_set in feature_sets for feature in feature_set.split(",")]
         self.assertEqual(sorted(covered), sorted(optional_feature_packages()["sonicterm-app"]))
         manifest = (_HERE.parent / "crates" / "sonicterm-logging" / "Cargo.toml").read_text(
