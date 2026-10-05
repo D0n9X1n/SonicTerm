@@ -10,7 +10,8 @@ fn broadcast_warning_keeps_red_highlighting_without_label_text() {
     let end = source[start..].find("fnfinish_successful_frame(").unwrap() + start;
     let render = &source[start..end];
     assert!(!render.contains("BROADCAST"), "broadcast chrome must not emit warning text");
-    assert!(render.contains("emit_broadcast_borders(&mutquads_overlay,"));
+    // The overlay quads are the frame scratch's, reborrowed from the pass's lease.
+    assert!(render.contains("emit_broadcast_borders(&mut*quads_overlay,"));
     assert!(render.contains("theme.colors.bright.red"));
     assert!(render.contains("broadcast_participants_hash"));
 }
@@ -4382,7 +4383,7 @@ fn row_spans_viewports_and_title_order_follow_the_assembly() {
         .find("begin_glyph_pass(&mutself.row_glyph_cache,&mutself.row_ink,")
         .expect("one pass start");
     let pane_loop = core
-        .find("forpvinpane_views.iter().filter(|pane|pane.planned.full_clip.is_some()){")
+        .find("for(pane_index,pv)inpane_views.iter().enumerate().filter(|(_,pane)|pane.planned.full_clip.is_some()){")
         .expect("per-pane loop");
     assert!(begin < pane_loop, "the pass starts before any pane pins or admits");
     let seam = core.find("pub(crate)fnassemble_pane_glyph_rows(").expect("pane seam");
@@ -4403,7 +4404,7 @@ fn row_spans_viewports_and_title_order_follow_the_assembly() {
     let insert = body.find("row_cache.insert(").expect("miss admission");
     assert!(hit < hit_return && hit_return < miss && miss < insert, "one span on each path");
     let calls: Vec<usize> = core
-        .match_indices("recolor_cursor_glyphs_in(&mutglyph_instances")
+        .match_indices("recolor_cursor_glyphs_in(&mut*glyph_instances")
         .map(|(at, _)| at)
         .collect();
     let titles = core.find("glyph_instances.extend(final_layout.glyphs);").expect("title append");
@@ -7112,6 +7113,7 @@ fn emit_pass_recording(
                 underline_owners: &mut owners,
                 injected_row_glyph: None,
                 emitted_slots: Some(&mut emitted_slots),
+                row_keys: &mut Vec::new(),
             },
         )
     });
@@ -7600,11 +7602,7 @@ impl FallbackFixture {
             surface_width: 240.0,
             surface_height: 200.0,
             subpixel_aa: SubpixelAaMode::Off,
-            quads: Vec::new(),
-            images: Vec::new(),
-            glyphs,
-            overlay_quads: Vec::new(),
-            overlay_glyphs: Vec::new(),
+            scratch: frame_scratch::FrameScratch { glyphs, ..Default::default() },
             field_candidates: PresentedFields::default(),
             missing_chars: Vec::new(),
             missing_chrome_chars: Vec::new(),
@@ -7935,4 +7933,36 @@ fn face_replacement_sites_clear_both_caches() {
     assert!(!set_font.contains("clear_runs"), "and does not clear on its own");
     let seam = item_body(&source, "pub fn __test_adopt_body_font_stack(");
     assert!(seam.contains("self.adopt_font_stacks("), "the test seam shares the clear");
+}
+
+#[test]
+fn fill_snapped_cell_x_matches_build_bit_for_bit() {
+    // Filling a reused edge buffer gives the column edges the allocating builder gives, bit for
+    // bit, for fractional origins and cell widths such as fractional-DPI raster sizes, and the
+    // same as the snapping formula applied directly.
+    let mut seed: u64 = 0x5eed_1555;
+    let mut next = || {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) as u32
+    };
+    let mut edges = Vec::new();
+    for _ in 0..200 {
+        let origin_x = next() as f32 / 997.0 % 300.0;
+        let cell_w = 3.0 + (next() % 4000) as f32 / 333.0;
+        let cols = (next() % 400) as u16;
+        fill_snapped_cell_x(&mut edges, origin_x, cell_w, cols);
+        let built = build_snapped_cell_x(origin_x, cell_w, cols);
+        let oracle: Vec<f32> = (0..=cols)
+            .map(|col| {
+                sonicterm_render_model::geometry::snap_to_device_pixels(
+                    (origin_x + (col as f32) * cell_w, 0.0, 0.0, 0.0),
+                    1.0,
+                )
+                .0
+            })
+            .collect();
+        let bits = |values: &[f32]| values.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&edges), bits(&built), "origin {origin_x} cell {cell_w} cols {cols}");
+        assert_eq!(bits(&edges), bits(&oracle));
+    }
 }

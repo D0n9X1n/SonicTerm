@@ -166,12 +166,18 @@ const SCRATCH_RELEASE_FLOOR_BYTES: usize = 1024 * 1024;
 /// vertices therefore releases a scratch over 1 MiB entirely; a smaller one is kept.
 /// Contents are kept.
 pub(crate) fn release_scratch_excess(scratch: &mut Vec<Vertex>, used_vertices: usize) {
-    let capacity_bytes = scratch.capacity().saturating_mul(std::mem::size_of::<Vertex>());
-    if scratch.capacity() > used_vertices.saturating_mul(4)
-        && capacity_bytes > SCRATCH_RELEASE_FLOOR_BYTES
+    release_excess(scratch, used_vertices);
+}
+
+/// Shrink any reused `scratch` after a pass that used `used` of its elements, by the vertex
+/// scratch's rule: a capacity over four times the use and over 1 MiB is cut to twice the use.
+/// Contents are kept.
+pub(crate) fn release_excess<T>(scratch: &mut Vec<T>, used: usize) {
+    let capacity_bytes = scratch.capacity().saturating_mul(std::mem::size_of::<T>());
+    if scratch.capacity() > used.saturating_mul(4) && capacity_bytes > SCRATCH_RELEASE_FLOOR_BYTES
     {
-        // The scratch is both oversized for this frame and large in absolute terms.
-        scratch.shrink_to(used_vertices.saturating_mul(2));
+        // The scratch is both oversized for this pass and large in absolute terms.
+        scratch.shrink_to(used.saturating_mul(2));
     }
 }
 

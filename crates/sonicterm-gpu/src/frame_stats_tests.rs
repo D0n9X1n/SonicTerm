@@ -552,7 +552,7 @@ fn only_the_quad_cache_drops_dirty_rows_inside_each_panes_loop() {
     let quad_call = "invalidate_planned_quad_rows(&mutself.line_quad_cache,pv.planned);";
     assert_eq!(core.matches(quad_call).count(), 1);
     let pane_loop = core
-        .find("forpvinpane_views.iter().filter(|pane|pane.planned.full_clip.is_some()){")
+        .find("for(pane_index,pv)inpane_views.iter().enumerate().filter(|(_,pane)|pane.planned.full_clip.is_some()){")
         .expect("per-pane loop");
     assert!(pane_loop < core.find(quad_call).expect("quad call"), "inside a pane loop");
 }
@@ -567,7 +567,7 @@ fn recolor_visits_count_the_main_glyph_list_and_never_an_overlay() {
         let call = &core[offset..core.len().min(offset + 80)];
         let after = &core[offset..core.len().min(offset + 260)];
         assert!(
-            call.contains("(&mutglyph_instances,&row_spans,"),
+            call.contains("(&mut*glyph_instances,&row_spans,"),
             "unexpected main recolor: {call}"
         );
         assert!(
