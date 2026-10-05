@@ -1,8 +1,12 @@
-#![cfg(target_os = "windows")]
 //! The idle image-atlas release and the GDI frame texture on a real renderer, on the hosted runner's
 //! WARP device: the interval release without a frame, a still image that is never released, the re-shown
 //! frame's pixels, the frame texture's size under each presenter, and both on a stopped device and
-//! after recovery onto a new device.
+//! after recovery onto a new device. A covered-window trim's frame texture survives a stop and a
+//! recovery commit, and its image-atlas release restores the media on the next frame.
+//!
+//! Only the event-loop entry point is Windows-only (winit allows a test-thread event loop there);
+//! the case logic compiles on every host, so a non-Windows lint pass type-checks it.
+#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
 use sonicterm_gpu::{
     core::{GpuRenderer, RendererSettings, SurfaceAppearance},
@@ -27,8 +31,7 @@ use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop},
-    platform::windows::EventLoopBuilderExtWindows,
+    event_loop::ActiveEventLoop,
     window::{Window, WindowId},
 };
 
@@ -111,6 +114,17 @@ fn recover(
     active: &ActiveEventLoop,
     mode: SoftwareRenderMode,
 ) -> Result<(), String> {
+    recover_checked(renderer, active, mode, |_| Ok(()))
+}
+
+/// [`recover`], running `between` after the rebind is prepared and before it is committed, so a
+/// case can check that preparation changed nothing.
+fn recover_checked(
+    renderer: &mut GpuRenderer,
+    active: &ActiveEventLoop,
+    mode: SoftwareRenderMode,
+    between: impl FnOnce(&GpuRenderer) -> Result<(), String>,
+) -> Result<(), String> {
     let request = renderer.recovery_request(active).map_err(|error| error.to_string())?;
     let recovered = request
         .run(|_generation| -> DeviceStateWaker { Arc::new(|| {}) })
@@ -119,6 +133,7 @@ fn recover(
     let prepared = renderer
         .prepare_rebind(&context, Some(surface), mode)
         .map_err(|error| error.to_string())?;
+    between(renderer)?;
     renderer.commit_rebind(prepared).map_err(|error| error.to_string())?;
     check(renderer.device_accepts_gpu_work(), "the recovered device accepts work")
 }
@@ -173,6 +188,14 @@ fn render(renderer: &mut GpuRenderer, image: bool) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Every pixel of a GDI renderer's software frame. The hook exists only on Windows.
+#[cfg(not(target_os = "windows"))]
+fn software_pixels(_renderer: &GpuRenderer, _window: &Window) -> Result<Vec<[u8; 4]>, String> {
+    Err(String::from("the GDI presenter exists only on Windows"))
+}
+
+/// Every pixel of a GDI renderer's software frame, each read through the test hook.
+#[cfg(target_os = "windows")]
 fn software_pixels(renderer: &GpuRenderer, window: &Window) -> Result<Vec<[u8; 4]>, String> {
     let size = window.inner_size();
     (0..size.height)
@@ -310,8 +333,103 @@ fn stopped_device(active: &ActiveEventLoop) -> Result<(), String> {
     check(hardware.frame_texture_extent() == (1, 1), "recovery under degrade builds 1x1")
 }
 
+/// A trimmed frame texture across a stop: preparation changes nothing, the commit installs the
+/// presenter's texture and clears the mark, and the first recovered present rebuilds nothing. Every
+/// count is a delta of the renderer's own texture installs. Covered for wgpu recovering on wgpu,
+/// wgpu recovering onto GDI (the mark is read directly, since GDI never consults it), and GDI.
+fn trim_stop_rebind(active: &ActiveEventLoop) -> Result<(), String> {
+    for (start, target) in [
+        (SoftwareRenderMode::Off, SoftwareRenderMode::Off),
+        (SoftwareRenderMode::Off, SoftwareRenderMode::Force),
+        (SoftwareRenderMode::Force, SoftwareRenderMode::Force),
+    ] {
+        let label = format!("{start:?} to {target:?}");
+        let (window, mut renderer) = renderer(active, start, "trim-stop-rebind")?;
+        render(&mut renderer, false)?;
+        let starts_on_wgpu = matches!(start, SoftwareRenderMode::Off);
+        let installs = renderer.__frame_texture_rebuilds();
+        let _ = renderer.trim_for_occlusion();
+        check(
+            renderer.__frame_texture_trimmed() == starts_on_wgpu,
+            &format!("{label}: only the GPU presenter marks its texture"),
+        )?;
+        check(renderer.__frame_texture_rebuilds() == installs, &format!("{label}: no install"))?;
+        renderer.__inject_gpu_fault(GpuFaultKind::DestroyDevice);
+        check(
+            render(&mut renderer, false).is_err(),
+            &format!("{label}: rendering is unavailable"),
+        )?;
+        recover_checked(&mut renderer, active, target, |prepared| {
+            check(
+                prepared.__frame_texture_trimmed() == starts_on_wgpu
+                    && prepared.__frame_texture_rebuilds() == installs,
+                &format!("{label}: preparation changes nothing"),
+            )
+        })?;
+        check(
+            !renderer.__frame_texture_trimmed(),
+            &format!("{label}: the commit clears the mark"),
+        )?;
+        check(
+            renderer.__frame_texture_rebuilds() == installs + 1,
+            &format!("{label}: the commit installs one texture"),
+        )?;
+        let expected = if matches!(target, SoftwareRenderMode::Force) {
+            (1, 1)
+        } else {
+            let size = window.inner_size();
+            (size.width, size.height)
+        };
+        check(renderer.frame_texture_extent() == expected, &format!("{label}: committed extent"))?;
+        let frames = renderer.successful_frame_count();
+        render(&mut renderer, false)?;
+        check(renderer.successful_frame_count() == frames + 1, &format!("{label}: presents"))?;
+        check(
+            renderer.__frame_texture_rebuilds() == installs + 1,
+            &format!("{label}: the first recovered present rebuilds nothing"),
+        )?;
+        check(renderer.frame_texture_extent() == expected, &format!("{label}: extent kept"))?;
+    }
+    Ok(())
+}
+
+/// The trim releases a promoted image atlas only when no media is visible, and a placeholder is left
+/// alone. Shown again after a trim, the image draws exactly the pixels of the frame before it.
+fn trim_image_atlas_and_restore(active: &ActiveEventLoop) -> Result<(), String> {
+    let (_window, mut absent) = renderer(active, SoftwareRenderMode::Off, "trim-image-absent")?;
+    render(&mut absent, true)?;
+    render(&mut absent, false)?;
+    let _ = absent.trim_for_occlusion();
+    check(
+        absent.__test_image_atlas_dimensions() == ((1, 1), (1, 1)),
+        "promoted with media absent: the atlas and its mirror are released",
+    )?;
+    let (_window, mut visible) = renderer(active, SoftwareRenderMode::Off, "trim-image-visible")?;
+    render(&mut visible, true)?;
+    let promoted = visible.__test_image_atlas_dimensions();
+    let _ = visible.trim_for_occlusion();
+    check(visible.__test_image_atlas_dimensions() == promoted, "visible media keeps its atlas")?;
+    let (_window, mut placeholder) =
+        renderer(active, SoftwareRenderMode::Off, "trim-image-placeholder")?;
+    let before = placeholder.__test_image_atlas_dimensions();
+    let _ = placeholder.trim_for_occlusion();
+    check(placeholder.__test_image_atlas_dimensions() == before, "a placeholder is left alone")?;
+
+    let (window, mut shown) = renderer(active, SoftwareRenderMode::Force, "trim-image-restore")?;
+    render(&mut shown, true)?;
+    let expected = software_pixels(&shown, &window)?;
+    render(&mut shown, false)?;
+    let _ = shown.trim_for_occlusion();
+    check(shown.__test_image_atlas_dimensions().0 == (1, 1), "the trim released the CPU atlas")?;
+    render(&mut shown, true)?;
+    check(shown.__test_image_atlas_dimensions().0 != (1, 1), "the media promotes it again")?;
+    check(software_pixels(&shown, &window)? == expected, "the restored frame equals the first")
+}
+
+#[cfg(target_os = "windows")]
 #[test]
 fn windows_idle_image_atlas_and_gdi_frame_texture() {
+    use winit::{event_loop::EventLoop, platform::windows::EventLoopBuilderExtWindows};
     let event_loop =
         EventLoop::builder().with_any_thread(true).build().expect("Windows event loop");
     let mut probe = Probe { outcome: None };
@@ -327,6 +445,8 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
         ("reshow pixels", reshow_pixels),
         ("frame texture", frame_texture),
         ("stopped device", stopped_device),
+        ("trim, stop and rebind", trim_stop_rebind),
+        ("trim image atlas and restore", trim_image_atlas_and_restore),
     ] {
         if let Err(error) = case(active) {
             failures.push(format!("{name}: {error}"));

@@ -7928,6 +7928,36 @@ fn borrowed_runs_emit_the_same_records_and_completeness() {
     assert!(!rig.cache.contains(7, failed.key), "an incomplete row is not admitted");
 }
 
+/// With eviction off, as during a glyph-atlas retry, and the atlas full, a row needing a new glyph
+/// still draws its resident glyphs but is never admitted to the row cache. The positive control drops
+/// a resident row's cache entry first, so its admission in the same configuration is a new one.
+#[test]
+fn a_row_the_full_retry_atlas_refuses_is_drawn_but_not_admitted() {
+    let plain = CellFlags::empty();
+    let resident = styled_grid(4, &[('a', plain), ('b', plain)]);
+    let novel = styled_grid(4, &[('a', plain), ('z', plain)]);
+    let mut rig = GlyphRig::new(false);
+    rig.begin(&resident);
+    let first = rig.emit(&resident, 0, 0);
+    assert!(rig.cache.contains(7, first.key), "precondition: a complete row is admitted");
+    rig.atlas.set_eviction_enabled(false);
+    let full = rig.atlas.len();
+    rig.atlas.__set_entry_cap_for_test(full);
+
+    rig.cache.invalidate_pane(7);
+    assert!(!rig.cache.contains(7, first.key), "precondition: the entry was dropped");
+    rig.begin(&resident);
+    let again = rig.emit(&resident, 0, 0);
+    assert_eq!(again.key, first.key);
+    assert!(rig.cache.contains(7, again.key), "a resident row is admitted afresh");
+
+    rig.begin(&novel);
+    let refused = rig.emit(&novel, 0, 0);
+    assert!(!refused.glyphs.is_empty(), "the resident glyph still draws");
+    assert_eq!(rig.atlas.len(), full, "the full atlas admitted nothing");
+    assert!(!rig.cache.contains(7, refused.key), "a row missing a glyph is not admitted");
+}
+
 #[test]
 fn face_replacement_sites_clear_both_caches() {
     // Every place the renderer replaces faces without a title-key change drops the kept chrome
