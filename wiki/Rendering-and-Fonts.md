@@ -441,7 +441,7 @@ the row-cache invalidation, because a replaced face can keep every title key. A
 theme change clears neither. The UI palette derived from the theme is kept too,
 seeded at construction and derived again only when the theme's colors differ. It
 is kept only while the theme's color strings total at most 4 KiB; a theme over
-that is derived on every frame and never kept.
+that is derived again on every request and never kept.
 
 Font, theme, scale, pane identity, atlas reset, or atlas content-identity changes
 invalidate the affected entries. A font or DPI change rebuilds the body, footer,

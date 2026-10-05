@@ -229,14 +229,15 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
   part, counted in `renderer_total_bytes`. It holds the per-frame draw vectors
   one assembly pass fills (glyphs, quads, overlay glyphs and quads, images, row
   spans, underlines, underline owners, staged ranges, tofu, pane rects, column
-  edges and row keys), kept between assembled frames. After each pass every
-  vector is cleared, shrunk to twice its use once its capacity is over four
-  times that use and over 1 MiB, and then held within its cap: glyphs and quads
-  4 MiB each; overlay glyphs, overlay quads, images, row spans, underlines and
-  tofu 1 MiB each; pane rects and staged ranges 64 KiB each; underline owners
-  and row keys 256 KiB each; column edges 1 MiB in total, dropping slots above
-  the pass's peak first and then the largest. The class's coverage figure is the
-  sum, 16,384,000 bytes. An unchanged or no-op frame takes no scratch and
+  edges and row keys), kept between assembled frames. Every restoration clears
+  each vector and holds it within its cap: glyphs and quads 4 MiB each; overlay
+  glyphs, overlay quads, images, row spans, underlines and tofu 1 MiB each; pane
+  rects and staged ranges 64 KiB each; underline owners and row keys 256 KiB
+  each; column edges 1 MiB in total, dropping the largest slots first. Only a
+  completed assembly also shrinks a vector to twice its use once its capacity is
+  over four times that use and over 1 MiB, and drops the column-edge slots above
+  its peak. A failed or retried frame's use understates the frame, so it keeps
+  its warm capacity. The class's coverage figure is the sum, 16,384,000 bytes. An unchanged or no-op frame takes no scratch and
   releases nothing. Items are the vectors that hold an allocation; the figure is
   zero while a frame holds the scratch;
 - `chrome_cache_bytes` / `chrome_cache_items`: the renderer's `ChromeCache`
@@ -245,8 +246,8 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
   drawn text and glyphs, each kept chrome run's one text and its glyphs, and the
   kept UI palette's color strings. A title or run is kept only within 256 text
   bytes and 512 glyphs. A palette is kept only while its color strings total at
-  most 4 KiB; a theme whose strings total more is derived on every frame and
-  never kept, so the kept strings never pass that allowance. The class's coverage
+  most 4 KiB; a theme whose strings total more is derived again on every
+  request and never kept, so the kept strings never pass that allowance. The class's coverage
   figure, 1,626,560 bytes, is both tables full of maximal entries plus that 4 KiB.
   Items are the kept titles and runs.
 
