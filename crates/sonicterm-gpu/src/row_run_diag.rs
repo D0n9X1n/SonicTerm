@@ -717,6 +717,11 @@ impl RowRunDiagnostics {
         self.table.slots.capacity()
     }
 
+    /// Slots holding a live key: each is a shaping record or sighting the table keeps.
+    pub(crate) fn occupied_slots(&self) -> usize {
+        self.table.slots.iter().filter(|slot| self.table.live(slot)).count()
+    }
+
     /// Test hook: the table.
     #[cfg(test)]
     pub(crate) fn table(&self) -> &RowRunTable {

@@ -628,9 +628,16 @@ display with its refresh rate and scale.
 | `S11/release` | The image, then a switch to a media-free tab until the first frame after the switch presents (5 s bound), a 65 s hold from that frame (never shortened), the `released` checkpoint, whose memory reading counts only from a sample at least 30 s after that frame (`fresh_after_unix_s`), then a switch back until a frame with an image atlas item presents (10 s bound). |
 | `S1/role-exit` | Windows only: the role's program exits 1 right after GO, which must end the run invalid; the smoke uses it. |
 | `S1/atlas-retry` | Counters set only, and refused when no counters set runs. After 70 static rows settle, 8 recovery episodes of four forced frames each: A retries an injected glyph-atlas change, B is the first presented recovery, C and D redraw the unchanged scene. `result.json` records each frame's counter deltas as `atlas_recovery`, and the comparison adds an "Atlas retry recovery" table that sums each frame's row-cache misses and hits, shaping requests and attempts over the accepted counters runs. |
+| `S10/powerline`, `S10/cjk-tui`, `S10/unique` | Counters set only, and refused when no counters set runs. The row-run shaping diagnostic's workloads: 68 body rows of bold, normal and italic segments, CJK segments meant to shape and digit fields that stay ASCII-fast. A `warm` phase writes 20 updates one at a time, each only after the probe saw the one before in the grid and a later frame presented; then a `stream` phase paced at about 60 updates a second for 10 s under `--short` (60 s full), the update count continuing from warm. powerline and cjk-tui repeat their shaped segments; unique, the negative control, never repeats one within 9 updates. They are never delivery-replayed. |
 
 The pull-request perf pipeline runs `S2/flood`, `S6/flood`, `S6/selection-drag`
-and `S1/atlas-retry` by name on macOS and Windows; [What CI measures](#what-ci-measures) lists their shards.
+`S1/atlas-retry`, `S10/powerline`, `S10/cjk-tui` and `S10/unique` by name on macOS and Windows; [What CI measures](#what-ci-measures) lists their shards.
+
+`S10/powerline`, `S10/cjk-tui` and `S10/unique` run only in the counters dataset. Under `--short`, each runs twice per side, with a warm phase of 20 presented updates followed by a 10-second stream. On macOS, powerline and cjk-tui run on S4-S5-S11, and unique runs on S2-S10sync. On Windows, powerline and cjk-tui run on S2-S10sync, and unique runs on S1-S3-S6-S8-S12. Existing atlas-retry placement is unchanged.
+
+Shard planning reserves 140 seconds per variant across both sides. This is a conservative, unmeasured allowance—not the scenario duration or an execution cap. The placement was checked against runs 37325514262, 37333587004, 37341446398 and 37353681544. Historical critical-path slack does not establish compliance with the 1,800-second budget. Before merge, replace nominal costs with exact-head CI evidence, disclose retries and queueing, and rebalance if needed without reducing the required evidence or adding a cap fallback.
+
+Each comparison shard's report has a "Row-run shaping (partial shard evidence)" table: per decision phase it measured, each counter's sum over the accepted counters runs and R, T, O_asm and O_att. It makes no decision. The shard also writes `row-run-evidence.json` beside `comparison.md` and `timing.json`: its identity, settings, the protocol digest and, per phase and side, every accepted run's own fields and the rejected attempts. `perf-compare.py --row-run-decide <artifact-dir>... --row-run-execution <run-record> <attempt> --row-run-head <sha> --row-run-base <sha>` is analysis only: it validates that the artifacts belong to one eligible workflow execution (and its one same-head replacement), rebuilds each phase from the individual runs, and prints both executions, the selected one, every step's status, the overhead gate and the outcome. Invalid evidence exits 2 and decides nothing; exit 0 only means the evidence validated. The coordinator posts that output on the issue and the PR before merge. A BUILD, CLOSE or PENDING outcome does not change the Performance comparison job's result, and step 3's overhead limit is a manual merge gate: when an earlier step decides, overhead reads "not evaluated", never passed.
 
 Every scenario's final memory checkpoint comes at least 60 s after GO, when the
 harness releases the workloads (5 s with `--short`, which the smoke uses). Most
@@ -806,17 +813,17 @@ a base that cannot build, list or fill a set's valid runs fails the shard, and
 its `comparison.md` opens with `**Incomplete comparison:**`. The one allowed gap
 is a counters set on a base that does not declare `perf-counters`, which still
 reads `n/a`. The macOS shards run S7; S9, S10, S6/flood and S6/selection-drag;
-S2 and S10/sync; S4, S5, S11, S11/release and S1/atlas-retry; and S1, S3, S6,
-S8, S12 and S2/flood. The Windows shards of the same names run S7; S9, S10, S6/flood,
-S6/selection-drag and S2/flood; S2 and S10/sync; S4, S5, S11, S11/release,
-S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12 and S1/atlas-retry, which balances each
+S2, S10/sync and S10/unique; S4, S5, S11, S11/release, S1/atlas-retry, S10/powerline and
+S10/cjk-tui; and S1, S3, S6, S8, S12 and S2/flood. The Windows shards of the same names run S7; S9, S10, S6/flood,
+S6/selection-drag and S2/flood; S2, S10/sync, S10/powerline and S10/cjk-tui; S4, S5, S11, S11/release,
+S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12, S1/atlas-retry and S10/unique, which balances each
 platform's measured shard times. On both platforms the S9-S10 shard also runs
 S9's laps set (`--laps-scenario S9 --laps-runs 2`, set by that matrix entry's
 `laps` field; the other entries pass no laps flags), and each platform's table
 gives its own `fallback_receive` verdict. A bare scenario ID selects only its default
 variant, so every variant is named explicitly. Under `--short`, `S2/flood` is
-capped at 2 runs per side, `S11/release` at 1, and `S11/gdi`, `S11/wgpu` and
-`S1/atlas-retry` at 2. The `S2/flood` cap only keeps the pull-request comparison within 30 minutes:
+capped at 2 runs per side, `S11/release` at 1, and `S11/gdi`, `S11/wgpu`,
+`S1/atlas-retry`, `S10/powerline`, `S10/cjk-tui` and `S10/unique` at 2. The `S2/flood` cap only keeps the pull-request comparison within 30 minutes:
 a release comparison runs it in full. With `perf-frame-texture`, S11's
 `end` checkpoint records `frame_texture_bytes`: 4 B under GDI on the head, `n/a`
 on a base without the feature. Each shard runs its sets' base and head runs

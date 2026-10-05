@@ -195,6 +195,12 @@ fn a_warm_title_is_reused_without_shaping_and_a_key_change_prepares() {
     let (_, cold) = counted(|| cache.prepare(0, &probe("shell", 400.0, 0), &stack, true));
     assert_eq!((cold.tab_title_prepares, cold.tab_title_reuses), (1, 0));
     assert!(cold.shape_requests >= 1, "a cold title shapes");
+    // Chrome shaping moves the general counters but never the row-run diagnostic's.
+    assert_eq!(
+        cold.row_runs,
+        crate::row_run_diag::RowRunCounts::default(),
+        "a title is no row run"
+    );
     let (_, warm) = counted(|| cache.prepare(0, &probe("shell", 400.0, 0), &stack, true));
     assert_eq!((warm.tab_title_prepares, warm.tab_title_reuses, warm.shape_requests), (0, 1, 0));
     for changed in [
@@ -206,6 +212,7 @@ fn a_warm_title_is_reused_without_shaping_and_a_key_change_prepares() {
     ] {
         let (_, stats) = counted(|| cache.prepare(0, &changed, &stack, true));
         assert_eq!((stats.tab_title_prepares, stats.tab_title_reuses), (1, 0), "{changed:?}");
+        assert_eq!(stats.row_runs, crate::row_run_diag::RowRunCounts::default(), "{changed:?}");
     }
     let mut off = TitleCache::default();
     let _ = off.prepare(0, &probe("shell", 400.0, 0), &stack, false);

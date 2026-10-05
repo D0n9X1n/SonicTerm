@@ -5024,6 +5024,14 @@ impl GpuRenderer {
         self.glyph_atlas_resets
     }
 
+    /// Test hook: row-run diagnostic slots holding a live key, each a kept shaping record or
+    /// sighting; a frame that shapes no terminal row run leaves it unchanged.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_row_run_occupied_slots(&self) -> usize {
+        self.row_run_diag.occupied_slots()
+    }
+
     /// Test hook: glyph atlas lookups that missed, each one a rasterization; a reset zeroes it.
     #[doc(hidden)]
     #[must_use]

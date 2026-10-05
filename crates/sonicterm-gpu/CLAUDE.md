@@ -107,3 +107,4 @@ cargo build -p sonicterm-gpu
   — the renderer no longer depends on `sonicterm-cfg`/`sonicterm-ui`/`sonicterm-grid`
   directly, so `render-model` is the single declared vt/grid -> gpu and ui -> gpu seam.
 - Consumed by: `sonicterm-app`.
+- The row-run shaping diagnostic (`row_run_diag.rs`) is counters-only: it opens a pass only while the frame-counter gate is on, counts only terminal row runs (never chrome text), and settles each pass before its render attempt closes.

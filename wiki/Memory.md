@@ -252,6 +252,13 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
   request and never kept, so the kept strings never pass that allowance. The class's coverage
   figure, 1,626,560 bytes, is both tables full of maximal entries plus that 4 KiB.
   Items are the kept titles and runs.
+- `row_run_diagnostics_bytes` / `row_run_diagnostics_items`: the renderer's
+  `RowRunDiagnostics` part (`ResourceClass::RowRunDiagnostics`), counted in
+  `renderer_total_bytes`: the row-run shaping diagnostic's 336 B fixed state, always, plus its
+  table, allocated only on the first row-run shape call counted with frame counters on and never
+  grown: 4,096 slots of 48 B and 8,192 pending records of 24 B, 393,216 B of heap. With counters
+  off the figure stays at the fixed state. The class is not charged in production; its coverage
+  figure is 393,552 B. Items are the allocated slots, 0 or 4,096.
 
 These are host-memory copies. GPU textures and buffers are not included because
 the driver owns them and wgpu does not expose their sizes. Row-cache reports use

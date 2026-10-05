@@ -520,6 +520,12 @@ renderer that collected it.
 | `tab_title_prepares` | count | tab titles fitted and shaped on a title-cache miss, one per title per assembly pass; their shaping requests also count in `shape_requests` |
 | `chrome_run_reuses` | count | chrome-run lookups (the search overlay's icon and label measures and draws) served from the chrome-run cache with no shaping, one per lookup inside the assembly pass |
 | `chrome_run_prepares` | count | chrome-run lookups that shaped, one per lookup inside the assembly pass; their shaping requests also count in `shape_requests` |
+| `row_run_shape_calls`, `row_run_shape_ok`, `row_run_shape_failed`, `row_run_shape_unstable` | count | terminal row-run shape calls inside a counted pass, those that succeeded, failed, and succeeded while the style's face identity changed during the call; chrome text is never counted |
+| `row_run_shape_first`, `row_run_shape_repeats`, `row_run_shape_same_pass_repeats`, `row_run_shape_retry_repeats` | count | settled classes of a presented pass's calls: first sighting, repeat (same pass or within the last 8 presented passes; same-pass repeats are a subset), and repeat of a call last seen only in a pass that did not present |
+| `row_run_shape_ns`, `row_run_shape_repeat_ns` | ns | shaping time of a presented pass's classified calls, and of its repeats |
+| `row_run_unpresented_calls`, `row_run_unpresented_ns` | count, ns | classified calls of passes that did not present (an error, a skip, an unwind or a superseded partial pass), settled before their render attempt closes |
+| `row_run_identity_resets`, `row_run_shape_overflows`, `row_run_pass_overflows` | count | face-identity changes that cleared a style's entries; calls that found no free slot, and calls that found the pass's pending list full |
+| `row_run_diag_ns` | ns | the diagnostic's own hashing, probing and settlement time; attribution only |
 | `render_attempts`, `render_attempts_presented` | count | `render_releasing` calls, and those that presented |
 | `render_attempt_ns`, `render_attempt_shape_ns`, `render_attempt_raster_ns` | ns | time inside those calls, and the shaping and rasterizing time spent inside them |
 | `render_attempt_shape_requests`, `render_attempt_raster_calls`, `render_attempt_raster_tiles` | count | shaping requests, rasterizer calls and tiles inside those calls |
@@ -548,6 +554,8 @@ nanoseconds; perf-compare subtracts and pools them exactly and shows them in
 microseconds. Per phase it adds a pooled split of every attempt and of the apply
 attempts: the matched totals of the runs that carry them all are summed, then
 divided into shaping, rasterizing and remaining shares, with means per attempt.
+
+The `row_run_*` fields come from the row-run shaping diagnostic, which runs only while frame counters are on. Its key is a 64-bit hash of the run's text with its byte length and style, so two different texts with one hash count as a repeat; this is assumed rare and is not detected. A repeat needs a sighting within the last 8 presented passes, so the first passes after start, a face change or a table clear count as first: the counts include that warm-up boundary. `row_run_shape_repeat_ns` is the shaping time a perfect cache could avoid, a ceiling and not a saving: a real cache pays its own lookup and retention.
 
 ### Histograms
 

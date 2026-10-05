@@ -419,6 +419,12 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | `tab_title_prepares` | 次数 | 标题缓存未命中而重新适配并塑形的标签标题，每次组装中每个标题计一次；其塑形请求同时计入 `shape_requests` |
 | `chrome_run_reuses` | 次数 | 由界面文本段缓存提供、未塑形的查找（搜索浮层图标与标签的测量和绘制），组装中每次查找计一次 |
 | `chrome_run_prepares` | 次数 | 进行了塑形的界面文本段查找，组装中每次查找计一次；其塑形请求同时计入 `shape_requests` |
+| `row_run_shape_calls`、`row_run_shape_ok`、`row_run_shape_failed`、`row_run_shape_unstable` | 次数 | 计数中的通道里终端行文本段的塑形调用，以及其中成功、失败、和成功但调用期间该样式字体标识发生变化的调用；界面文本从不计入 |
+| `row_run_shape_first`、`row_run_shape_repeats`、`row_run_shape_same_pass_repeats`、`row_run_shape_retry_repeats` | 次数 | 已呈现通道中调用的结算类别：首次出现、重复（同一通道内或最近 8 个已呈现通道内；同通道重复是其子集），以及上次只出现在未呈现通道中的调用的重复 |
+| `row_run_shape_ns`、`row_run_shape_repeat_ns` | 纳秒 | 已呈现通道中已分类调用的塑形时间，以及其中重复调用的塑形时间 |
+| `row_run_unpresented_calls`、`row_run_unpresented_ns` | 次数、纳秒 | 未呈现通道（出错、跳过、展开或被取代的部分通道）中已分类的调用，在其渲染尝试关闭前结算 |
+| `row_run_identity_resets`、`row_run_shape_overflows`、`row_run_pass_overflows` | 次数 | 清空某样式条目的字体标识变化；找不到空槽的调用，以及通道待定列表已满的调用 |
+| `row_run_diag_ns` | 纳秒 | 诊断自身的哈希、探查与结算时间；仅用于归因 |
 | `render_attempts`、`render_attempts_presented` | 次数 | `render_releasing` 调用，及其中完成呈现的调用 |
 | `render_attempt_ns`、`render_attempt_shape_ns`、`render_attempt_raster_ns` | 纳秒 | 这些调用内的时间，及其中的塑形与光栅化时间 |
 | `render_attempt_shape_requests`、`render_attempt_raster_calls`、`render_attempt_raster_tiles` | 次数 | 这些调用内的塑形请求、光栅化调用与图块 |
@@ -438,6 +444,8 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 文字布局）并入该尝试；其他渲染器的工作不并入。每个 `_ns` 字段都是累加的纳秒；perf-compare 精确地相减与汇总，
 并以微秒显示。它为每个阶段增加全部尝试与应用尝试的汇总拆分：先对具备全部字段的运行求匹配总和，再分为塑形、
 光栅化与其余部分的占比，并给出每次尝试的平均值。
+
+`row_run_*` 字段来自行文本段塑形诊断，它只在帧计数器开启时运行。它的键是文本段文本的 64 位哈希加字节长度与样式，因此哈希相同的两个不同文本计为一次重复；这被假定为罕见，且不会被检测。重复需要最近 8 个已呈现通道内的一次出现，所以启动、字体变化或清表之后的最初几个通道计为首次：计数包含这一预热边界。`row_run_shape_repeat_ns` 是理想缓存能省下的塑形时间，是上限而不是节省：真实缓存还要付出自身的查找与保留成本。
 
 ### 直方图
 

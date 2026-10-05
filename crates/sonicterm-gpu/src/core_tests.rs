@@ -8477,3 +8477,25 @@ fn assembly_opens_a_gated_row_run_pass_before_shaping() {
     let end = settle.find("row_runs.end_pass(").expect("settled");
     assert!(end < settle.find("match (outcome, presented_plan)").expect("slot settlement"));
 }
+
+/// Chrome text never reaches the row-run diagnostic: the renderer's diagnostic shapes only inside
+/// `build_shape_run`, and the chrome shaping modules never name it. The Windows frame-reuse suite
+/// measures the same exclusion on a real renderer.
+#[test]
+fn only_terminal_row_runs_reach_the_row_run_diagnostic() {
+    let core = include_str!("core.rs").replace("\r\n", "\n");
+    assert_eq!(core.matches("row_runs.shape(").count(), 1, "one terminal row-run shape site");
+    assert_eq!(
+        core.matches("row_run_diag.shape(").count(),
+        0,
+        "the renderer shapes no chrome through it"
+    );
+    let shape_run = method_body(&core, "    fn build_shape_run(");
+    assert!(shape_run.contains("row_runs.shape("), "the site is the terminal row emitter");
+    for (name, source) in [
+        ("chrome_text.rs", include_str!("chrome_text.rs")),
+        ("chrome_cache.rs", include_str!("chrome_cache.rs")),
+    ] {
+        assert!(!source.contains("row_run"), "{name} reaches the row-run diagnostic");
+    }
+}

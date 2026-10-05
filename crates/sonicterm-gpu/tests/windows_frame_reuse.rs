@@ -1315,12 +1315,90 @@ fn trim_during_a_pending_atlas_retry(active: &ActiveEventLoop) -> Result<(), Str
     })
 }
 
+/// T20: chrome text never reaches the row-run diagnostic. On a counting renderer with its fallback
+/// settled and its ASCII body rows warm, a title not yet kept, of the settled title's glyphs, is
+/// prepared and shaped in one presented attempt while every body row replays from the row cache;
+/// no row-run counter but `row_run_diag_ns` moves and no slot is committed. Then a CJK body row
+/// does reach the diagnostic, so the exclusion is not a diagnostic switched off.
+fn chrome_titles_never_reach_the_row_run_diagnostic(
+    active: &ActiveEventLoop,
+) -> Result<(), String> {
+    let (_window, mut renderer) =
+        renderer(active, SoftwareRenderMode::Off, &Theme::default(), (640, 240), true)?;
+    let mut scene = single_scene(&renderer, &["shell"]);
+    let settled = settle_fallback(&mut renderer, &mut scene)?;
+    forced(&mut renderer, &mut scene)?;
+    let mut measured = None;
+    // Each try uses a title not yet kept, so a retried attempt never leaves the next one warm.
+    for title in ["hells", "sells", "shells", "hell"] {
+        scene.tabs = TabBar::new();
+        scene.tabs.push(Tab::new(title));
+        let before = renderer.frame_stats();
+        let slots_before = renderer.__test_row_run_occupied_slots();
+        let frame = single_frame(&mut renderer, &mut scene, title);
+        if presented_once(&frame) {
+            // When: the title frame presented in one attempt, its counters are exact.
+            measured = Some((before, renderer.frame_stats(), slots_before, frame));
+            break;
+        }
+    }
+    let (before, after, slots_before, frame) =
+        measured.ok_or("no title frame presented in a single render attempt")?;
+    check_settled(&scene, settled, "the title frame")?;
+    check(after.tab_title_prepares - before.tab_title_prepares == 1, "one title prepares")?;
+    check(after.shape_requests > before.shape_requests, "the new title shapes")?;
+    check(
+        frame.misses == 0 && frame.hits == visible_rows(&scene),
+        &format!("every body row replays: {} hits, {} misses", frame.hits, frame.misses),
+    )?;
+    let (moved, kept) = (after.row_runs, before.row_runs);
+    let deltas = [
+        ("calls", moved.calls - kept.calls),
+        ("ok", moved.ok - kept.ok),
+        ("failed", moved.failed - kept.failed),
+        ("shape_ns", moved.shape_ns - kept.shape_ns),
+        ("first", moved.first - kept.first),
+        ("repeats", moved.repeats - kept.repeats),
+        ("same_pass_repeats", moved.same_pass_repeats - kept.same_pass_repeats),
+        ("repeat_ns", moved.repeat_ns - kept.repeat_ns),
+        ("unstable", moved.unstable - kept.unstable),
+        ("retry_repeats", moved.retry_repeats - kept.retry_repeats),
+        ("unpresented_calls", moved.unpresented_calls - kept.unpresented_calls),
+        ("unpresented_ns", moved.unpresented_ns - kept.unpresented_ns),
+        ("identity_resets", moved.identity_resets - kept.identity_resets),
+        ("shape_overflows", moved.overflows - kept.overflows),
+        ("pass_overflows", moved.pass_overflows - kept.pass_overflows),
+    ];
+    for (name, delta) in deltas {
+        check(delta == 0, &format!("row-run {name} moved by {delta} for chrome text"))?;
+    }
+    check(
+        renderer.__test_row_run_occupied_slots() == slots_before,
+        "no row-run record or sighting is committed for the title",
+    )?;
+    write(&mut scene.panes[0].grid, 0, 0, "中文 行");
+    let (slots_before, before) =
+        (renderer.__test_row_run_occupied_slots(), renderer.frame_stats().row_runs);
+    forced(&mut renderer, &mut scene)?;
+    let after = renderer.frame_stats().row_runs;
+    check(
+        after.calls > before.calls && after.first + after.repeats > before.first + before.repeats,
+        "a CJK body row reaches the diagnostic",
+    )?;
+    check(renderer.__test_row_run_occupied_slots() > slots_before, "and commits its run")?;
+    Ok(())
+}
+
 fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
-    let cases: [(&str, Case); 13] = [
+    let cases: [(&str, Case); 14] = [
         ("assembled frames reuse scratch", assembled_frames_reuse_scratch),
         ("scratch survives failed and retried frames", scratch_survives_failed_and_retried_frames),
         ("scratch caps hold", scratch_caps_hold_after_unbounded_frames),
         ("titles reuse and clear", renderer_reuses_titles_and_clears_on_face_replacement),
+        (
+            "chrome titles never reach the row-run diagnostic",
+            chrome_titles_never_reach_the_row_run_diagnostic,
+        ),
         ("cached titles draw like cold", cached_titles_draw_like_cold_titles),
         ("palette follows the render theme", renderer_palette_follows_the_render_theme),
         ("search overlay reuses its runs", search_overlay_reuses_its_runs),

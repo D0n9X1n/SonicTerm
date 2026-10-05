@@ -441,9 +441,16 @@ Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 
 | `S11/release` | 显示图像后切换到没有媒体的标签页，直到切换后第一帧呈现（上限 5 秒），从该帧起保持 65 秒（从不缩短），记录 `released` 检查点，其内存读数只采用该帧之后至少 30 秒的样本（`fresh_after_unix_s`），然后切换回来，直到呈现一个图像图集含有条目的帧（上限 10 秒）。 |
 | `S1/role-exit` | 仅 Windows：角色程序在 GO 之后立即以 1 退出，该次运行必须以无效结束；smoke 使用它。 |
 | `S1/atlas-retry` | 只在计数器组中运行；没有计数器组时被拒绝。70 行静态文本稳定后，运行 8 个恢复回合，每回合四个强制帧：A 重试一次注入的字形图集变更，B 是第一次呈现的恢复帧，C 与 D 重绘不变的画面。`result.json` 以 `atlas_recovery` 记录每帧的计数器增量，对比增加一张 "Atlas retry recovery" 表，在被接受的计数器运行上汇总每帧的行缓存未命中与命中、塑形请求和尝试次数。 |
+| `S10/powerline`、`S10/cjk-tui`、`S10/unique` | 只在计数器组中运行；没有计数器组时被拒绝。行文本段塑形诊断的工作负载：68 行正文，由粗体、常规与斜体段组成，其中 CJK 段需要塑形，数字字段保持 ASCII 快速路径。`warm` 阶段逐个写入 20 次更新，每次都在探针看到上一次更新出现在网格中且之后有一帧呈现后才写入；随后 `stream` 阶段以约每秒 60 次的速度运行，`--short` 下 10 秒（完整 60 秒），更新计数从 warm 延续。powerline 与 cjk-tui 重复其需塑形的段；unique 作为负对照，9 次更新内从不重复。它们从不做投递回放。 |
 
 pull request 性能流水线在 macOS 和 Windows 上按名称运行 `S2/flood`、`S6/flood`、
-`S6/selection-drag` 和 `S1/atlas-retry`；它们所在的分片见 [CI 能测量什么](#ci-能测量什么)。
+`S6/selection-drag`、`S1/atlas-retry`、`S10/powerline`、`S10/cjk-tui` 和 `S10/unique`；它们所在的分片见 [CI 能测量什么](#ci-能测量什么)。
+
+`S10/powerline`、`S10/cjk-tui` 与 `S10/unique` 只在计数器数据集中运行。在 `--short` 下，每个变体每侧运行两次，先是 20 次已呈现更新的预热阶段，再是 10 秒的流式阶段。macOS 上，powerline 与 cjk-tui 运行在 S4-S5-S11，unique 运行在 S2-S10sync。Windows 上，powerline 与 cjk-tui 运行在 S2-S10sync，unique 运行在 S1-S3-S6-S8-S12。现有 atlas-retry 的分片不变。
+
+分片规划为每个变体（两侧合计）预留 140 秒。这是保守且未经测量的余量，不是场景时长，也不是执行上限。该分片安排已对照运行 37325514262、37333587004、37341446398 与 37353681544 检查。历史关键路径的富余不能证明满足 1,800 秒预算。合并前，用确切 head 的 CI 证据替换名义成本，披露重试与排队，必要时重新均衡，但不减少所需证据，也不添加上限回退。
+
+每个对比分片的报告有一张 "Row-run shaping (partial shard evidence)" 表：对其测量的每个决策阶段，给出各计数器在被接受的计数器运行上的总和，以及 R、T、O_asm 与 O_att。它不做决策。分片还在 `comparison.md` 与 `timing.json` 旁写出 `row-run-evidence.json`：其标识、设置、协议摘要，以及每个阶段每侧每次被接受运行的原始字段和被拒绝的尝试。`perf-compare.py --row-run-decide <artifact-dir>... --row-run-execution <run-record> <attempt> --row-run-head <sha> --row-run-base <sha>` 只做分析：它校验这些产物属于同一个合格的工作流执行（及其唯一一次同 head 替换），从各次运行重建每个阶段，并打印两次执行、被选中的执行、每一步的状态、开销门槛与结果。无效证据以 2 退出且不做决策；退出码 0 只表示证据通过校验。协调者在合并前把该输出发到 issue 与 PR。BUILD、CLOSE 或 PENDING 结果不改变 Performance comparison 作业的结果，第 3 步的开销上限是人工合并门槛：较早的步骤已做出决定时，开销显示 "not evaluated"，从不算通过。
 
 每个场景的最终内存检查点都至少在 GO（harness 让各负载开始运行的时刻）之后 60 秒（使用 `--short` 时为
 5 秒，smoke 即如此）。多数场景以一段至少持续到那时的空闲期结束；S4 与 S5 则结束于 60 秒的输出流阶段，此时
@@ -562,13 +569,13 @@ job 完成。被取代、被取消或被跳过的运行从不算作成功。
 
 每个 CI 对比都通过 `--require-base` 让 base 与 head 适用同样的标准：base 无法构建、无法列出场景或无法凑满某组的有效运行时，
 该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。唯一允许的缺口是 base 未声明 `perf-counters` 时的计数器组，
-它仍显示 `n/a`。macOS 分片运行 S7；S9、S10、S6/flood 与 S6/selection-drag；S2 与 S10/sync；S4、S5、S11、S11/release 与 S1/atlas-retry；
+它仍显示 `n/a`。macOS 分片运行 S7；S9、S10、S6/flood 与 S6/selection-drag；S2、S10/sync 与 S10/unique；S4、S5、S11、S11/release、S1/atlas-retry、S10/powerline 与 S10/cjk-tui；
 以及 S1、S3、S6、S8、S12 与 S2/flood。同名的 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
-S2 与 S10/sync；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8、S12 与 S1/atlas-retry，以均衡各平台分片的实测时长。
+S2、S10/sync、S10/powerline 与 S10/cjk-tui；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8、S12、S1/atlas-retry 与 S10/unique，以均衡各平台分片的实测时长。
 两个平台的 S9-S10 分片还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传
 lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结论。
 裸场景 ID 只选择其默认变体，因此每个变体都按名称列出。在 `--short` 下，`S2/flood` 每侧上限 2 次，`S11/release` 上限 1 次，
-`S11/gdi`、`S11/wgpu` 与 `S1/atlas-retry` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 30 分钟内：release 对比完整运行它。
+`S11/gdi`、`S11/wgpu`、`S1/atlas-retry`、`S10/powerline`、`S10/cjk-tui` 与 `S10/unique` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 30 分钟内：release 对比完整运行它。
 带 `perf-frame-texture` 时，S11 的 `end` 检查点记录 `frame_texture_bytes`：head 在 GDI 下为 4 B，未声明该 feature 的 base
 为 `n/a`。每个分片在自己的 runner 上交错运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。macOS 分片数（目前为五个）
 根据实测的关键路径选定。两种模式都会运行计数器组，在 head 上，以及在声明 `perf-counters` 的 base 上：pull request 为每个场景、
