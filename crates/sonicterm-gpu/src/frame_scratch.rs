@@ -87,15 +87,15 @@ pub(crate) fn finish_vec<T>(held: &mut Vec<T>, used: usize, cap_bytes: usize) {
 /// incomplete one only clears the vector and holds it within its cap, keeping its warm capacity.
 fn finish_part<T>(held: &mut Vec<T>, cap_bytes: usize, completed: bool) {
     if completed {
-        // When: the pass `completed`, its length is the frame's use and drives the release rule.
+        // A completed pass's length is the frame's use, so it drives the release rule.
         let used = held.len();
         finish_vec(held, used, cap_bytes);
     } else {
-        // An incomplete pass's length understates the frame, so nothing is released by use.
+        // When: `completed` is false, the length understates the frame; nothing is released by use.
         held.clear();
         let cap = cap_elems::<T>(cap_bytes);
         if held.capacity() > cap {
-            // When: the vector reserves more than its cap, it is replaced at the cap.
+            // A vector reserving more than its cap is replaced at the cap.
             *held = Vec::with_capacity(cap);
         }
     }
@@ -187,7 +187,7 @@ impl FrameScratch {
         finish_part(&mut self.pane_rects, SMALL_CAP_BYTES, completed);
         finish_part(&mut self.row_keys, INDEX_CAP_BYTES, completed);
         if completed {
-            // When: the pass `completed`, slots above its peak are not part of the working set.
+            // After a completed pass, slots above its peak are not part of the working set.
             self.snapped.truncate(self.snapped_peak);
         }
         for slot in &mut self.snapped {
