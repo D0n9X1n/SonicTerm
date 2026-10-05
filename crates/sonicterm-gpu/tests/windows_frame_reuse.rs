@@ -194,6 +194,8 @@ struct Scene {
     tabs: TabBar,
     search: Option<SearchState>,
     theme: Theme,
+    /// The font-fallback generation the last drawn frame applied.
+    generation: Option<u64>,
 }
 
 /// Write `text` from `(row, col)` in default colours.
@@ -235,12 +237,14 @@ fn single_scene(renderer: &GpuRenderer, titles: &[&str]) -> Scene {
         tabs,
         search: None,
         theme: Theme::default(),
+        generation: None,
     }
 }
 
 /// Draw `scene` once through the releasing call, measuring tab widths first as the App does.
 fn frame(renderer: &mut GpuRenderer, scene: &mut Scene) -> PresentOutcome {
     let fonts = renderer.begin_frame_fonts();
+    scene.generation = Some(fonts.generation());
     let _ = renderer.measure_tab_widths(&fonts, &mut scene.tabs, false, false, Instant::now());
     let mut panes: Vec<PaneRender<'_>> = scene
         .panes
@@ -288,10 +292,76 @@ fn present(renderer: &mut GpuRenderer, scene: &mut Scene) -> Result<(), String> 
     Err(String::from("the frame never presented"))
 }
 
+/// Draw `scene` on `renderer` until its applied font-fallback generation has held for a second
+/// with no tofu (five seconds while tofu remains), within twenty seconds, and return that
+/// generation. Two renderers discover fallback faces independently, so a comparison of their
+/// pixels starts only after each has settled.
+fn settle_fallback(renderer: &mut GpuRenderer, scene: &mut Scene) -> Result<u64, String> {
+    let deadline = Instant::now() + std::time::Duration::from_secs(20);
+    let mut held: Option<(u64, Instant)> = None;
+    loop {
+        forced(renderer, scene)?;
+        let generation = scene.generation.ok_or("a drawn frame records its fonts")?;
+        let tofu =
+            !renderer.last_missing_tofu().is_empty() || !renderer.last_missing_chrome().is_empty();
+        let since = match held {
+            Some((kept, since)) if kept == generation => since,
+            _ => {
+                // A first observation or a newly applied generation restarts the wait.
+                held = Some((generation, Instant::now()));
+                Instant::now()
+            }
+        };
+        let needed = std::time::Duration::from_secs(if tofu { 5 } else { 1 });
+        if since.elapsed() >= needed {
+            return Ok(generation);
+        }
+        check(
+            Instant::now() < deadline,
+            &format!("the font fallback settles; generation {generation}"),
+        )?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// Present `scene` with the retained frame forgotten, so the frame assembles even unchanged.
 fn forced(renderer: &mut GpuRenderer, scene: &mut Scene) -> Result<(), String> {
     renderer.invalidate_retained_frame();
     present(renderer, scene)
+}
+
+/// `counts` read before and after one forced frame that presented in exactly one render attempt,
+/// running `prepare` before each try, at most four tries. An atlas retry assembles a frame twice
+/// and notes its chrome twice, so an exact per-frame count is read only across a single attempt.
+fn counted_forced<Counts>(
+    renderer: &mut GpuRenderer,
+    scene: &mut Scene,
+    prepare: impl Fn(&mut GpuRenderer),
+    counts: fn(&GpuRenderer) -> Counts,
+) -> Result<(Counts, Counts), String> {
+    for _ in 0..4 {
+        prepare(renderer);
+        let attempts_before = renderer.frame_stats().attempts.attempts;
+        let before = counts(renderer);
+        forced(renderer, scene)?;
+        if renderer.frame_stats().attempts.attempts - attempts_before == 1 {
+            // When: one attempt drew the frame, no retry noted the frame's chrome a second time.
+            return Ok((before, counts(renderer)));
+        }
+    }
+    Err(String::from("no forced frame presented in a single render attempt"))
+}
+
+/// Check that `scene`'s last frame applied the `settled` fallback generation, so a pixel
+/// comparison after it does not race a fallback face applied since settling.
+fn check_settled(scene: &Scene, settled: u64, context: &str) -> Result<(), String> {
+    check(
+        scene.generation == Some(settled),
+        &format!(
+            "{context}: no fallback generation applied after settling ({:?}, settled {settled})",
+            scene.generation
+        ),
+    )
 }
 
 /// The presented frame's pixels: the GDI frame on the software presenter, else the retained
@@ -336,7 +406,7 @@ fn gdi_pixels(renderer: &GpuRenderer) -> Result<Vec<u8>, String> {
             bytes.extend(
                 renderer
                     .__test_software_frame_pixel_bgra(pixel_x, pixel_y)
-                    .ok_or(format!("GDI pixel ({pixel_x}, {pixel_y}) is readable"))?,
+                    .ok_or_else(|| format!("GDI pixel ({pixel_x}, {pixel_y}) is readable"))?,
             );
         }
     }
@@ -350,7 +420,7 @@ type Case = fn(&ActiveEventLoop) -> Result<(), String>;
 
 /// T7: forced assemblies reuse the frame scratch: ten forced frames with one changed cell each
 /// allocate fewer times with reuse on than off, by at least one per non-empty scratch vector per
-/// frame, and the last frames' pixels are equal.
+/// frame, and the last frames' pixels are equal. Each renderer settles its font fallback first.
 fn assembled_frames_reuse_scratch(active: &ActiveEventLoop) -> Result<(), String> {
     let mut runs = Vec::new();
     for reuse in [true, false] {
@@ -358,6 +428,7 @@ fn assembled_frames_reuse_scratch(active: &ActiveEventLoop) -> Result<(), String
             renderer(active, SoftwareRenderMode::Off, &Theme::default(), (640, 360), false)?;
         renderer.__set_frame_reuse(reuse);
         let mut scene = single_scene(&renderer, &["shell"]);
+        let settled = settle_fallback(&mut renderer, &mut scene)?;
         for _ in 0..5 {
             forced(&mut renderer, &mut scene)?;
         }
@@ -370,6 +441,7 @@ fn assembled_frames_reuse_scratch(active: &ActiveEventLoop) -> Result<(), String
             Ok(())
         });
         outcome?;
+        check_settled(&scene, settled, &format!("reuse {reuse}"))?;
         runs.push((allocations, vectors, pixels(&mut renderer)?));
     }
     let (with_reuse, vectors, reused_pixels) = &runs[0];
@@ -384,7 +456,8 @@ fn assembled_frames_reuse_scratch(active: &ActiveEventLoop) -> Result<(), String
 
 /// T8: after a failed assembly, a failed presentation and an atlas retry, the scratch keeps its
 /// capacity and the next forced frame draws what a renderer with no failures draws. The partial
-/// fallback exit has no renderer seam; the device-free driver covers it.
+/// fallback exit has no renderer seam; the device-free driver covers it. Both renderers settle
+/// their font fallback before any pixels are compared.
 fn scratch_survives_failed_and_retried_frames(active: &ActiveEventLoop) -> Result<(), String> {
     let (_window, mut candidate) =
         renderer(active, SoftwareRenderMode::Off, &Theme::default(), (640, 360), false)?;
@@ -392,9 +465,14 @@ fn scratch_survives_failed_and_retried_frames(active: &ActiveEventLoop) -> Resul
         renderer(active, SoftwareRenderMode::Off, &Theme::default(), (640, 360), false)?;
     let mut scene = single_scene(&candidate, &["shell"]);
     let mut oracle_scene = single_scene(&oracle, &["shell"]);
+    let candidate_settled = settle_fallback(&mut candidate, &mut scene)?;
+    let oracle_settled = settle_fallback(&mut oracle, &mut oracle_scene)?;
+    // The most allocations a steady forced frame of this unchanged scene makes.
+    let mut steady_allocations = 0;
     for _ in 0..3 {
-        forced(&mut candidate, &mut scene)?;
-        forced(&mut oracle, &mut oracle_scene)?;
+        let (outcome, allocations) = allocations_of(|| forced(&mut candidate, &mut scene));
+        outcome?;
+        steady_allocations = steady_allocations.max(allocations);
     }
     type Arm = fn(&mut GpuRenderer);
     let arms: [(&str, Arm); 3] = [
@@ -412,8 +490,22 @@ fn scratch_survives_failed_and_retried_frames(active: &ActiveEventLoop) -> Resul
             after == before,
             &format!("{name}: the scratch kept its capacity ({before} -> {after})"),
         )?;
+        // An atlas retry resets the atlas, so one frame re-rasterizes before the scene is steady.
         forced(&mut candidate, &mut scene)?;
+        let (outcome, recovered_allocations) =
+            allocations_of(|| forced(&mut candidate, &mut scene));
+        outcome?;
+        check(
+            recovered_allocations <= steady_allocations,
+            &format!(
+                "{name}: the recovered frame reuses the scratch ({recovered_allocations} allocations, \
+                 steady {steady_allocations})"
+            ),
+        )?;
         forced(&mut oracle, &mut oracle_scene)?;
+        forced(&mut oracle, &mut oracle_scene)?;
+        check_settled(&scene, candidate_settled, &format!("{name} candidate"))?;
+        check_settled(&oracle_scene, oracle_settled, &format!("{name} oracle"))?;
         check(
             pixels(&mut candidate)? == pixels(&mut oracle)?,
             &format!("{name}: the next frame draws as a renderer with no failure"),
@@ -487,7 +579,7 @@ fn title_counts(renderer: &GpuRenderer) -> (u64, u64, u64) {
 
 /// T15: three tabs, one cut, on a warm renderer: a forced assembly reuses all three titles with no
 /// prepare and no shaping, and draws the same pixels; each face replacement then makes the next
-/// assembly prepare every title again.
+/// assembly prepare every title again. The warm counts are read across a single render attempt.
 fn renderer_reuses_titles_and_clears_on_face_replacement(
     active: &ActiveEventLoop,
 ) -> Result<(), String> {
@@ -495,12 +587,10 @@ fn renderer_reuses_titles_and_clears_on_face_replacement(
         renderer(active, SoftwareRenderMode::Off, &Theme::default(), (640, 240), true)?;
     let long = "a very long tab title that cannot fit its tab and must be cut short";
     let mut scene = single_scene(&renderer, &["shell", "logs", long]);
-    present(&mut renderer, &mut scene)?;
-    forced(&mut renderer, &mut scene)?;
+    let settled = settle_fallback(&mut renderer, &mut scene)?;
     let warm_pixels = pixels(&mut renderer)?;
-    let before = title_counts(&renderer);
-    forced(&mut renderer, &mut scene)?;
-    let after = title_counts(&renderer);
+    let (before, after) = counted_forced(&mut renderer, &mut scene, |_| {}, title_counts)?;
+    check_settled(&scene, settled, "warm titles")?;
     check(after.0 - before.0 == 3, &format!("three warm reuses: {before:?} -> {after:?}"))?;
     check(after.1 == before.1, "no title prepares on a warm assembly")?;
     check(after.2 == before.2, "a warm assembly of ASCII rows and kept titles shapes nothing")?;
@@ -545,13 +635,20 @@ fn renderer_reuses_titles_and_clears_on_face_replacement(
 }
 
 /// T16: over 200 forced assemblies with changing titles, a renderer that keeps titles draws the
-/// pixels of one that keeps none, on wgpu and on GDI.
+/// pixels of one that keeps none, on wgpu and on GDI. Both renderers settle their font fallback
+/// first, and every comparison checks that neither applied a newer generation since.
 fn cached_titles_draw_like_cold_titles(active: &ActiveEventLoop) -> Result<(), String> {
     let titles = ["shell", "logs", "build ~/src/sonicterm", "é ñ ü", "中文标题", "vim main.rs"];
     for mode in MODES {
         let (_window, mut warm) = renderer(active, mode, &Theme::default(), (320, 120), true)?;
         let (_cold_window, mut cold) = renderer(active, mode, &Theme::default(), (320, 120), true)?;
         cold.__set_frame_reuse(false);
+        // Every title is drawn once on each renderer and its fallback faces settle first, so no
+        // comparison races an asynchronous fallback discovery.
+        let mut warm_all = single_scene(&warm, &titles);
+        let warm_settled = settle_fallback(&mut warm, &mut warm_all)?;
+        let mut cold_all = single_scene(&cold, &titles);
+        let cold_settled = settle_fallback(&mut cold, &mut cold_all)?;
         for assembly in 0..200usize {
             let chosen: Vec<&str> =
                 (0..3).map(|offset| titles[(assembly / 3 + offset) % titles.len()]).collect();
@@ -559,6 +656,15 @@ fn cached_titles_draw_like_cold_titles(active: &ActiveEventLoop) -> Result<(), S
             let mut cold_scene = single_scene(&cold, &chosen);
             forced(&mut warm, &mut warm_scene)?;
             forced(&mut cold, &mut cold_scene)?;
+            check(
+                (warm_scene.generation, cold_scene.generation)
+                    == (Some(warm_settled), Some(cold_settled)),
+                &format!(
+                    "{mode:?} assembly {assembly}: no fallback generation applied after settling \
+                     ({:?}, {:?})",
+                    warm_scene.generation, cold_scene.generation
+                ),
+            )?;
             check(
                 pixels(&mut warm)? == pixels(&mut cold)?,
                 &format!("{mode:?} assembly {assembly}: kept titles draw like cold titles"),
@@ -570,7 +676,7 @@ fn cached_titles_draw_like_cold_titles(active: &ActiveEventLoop) -> Result<(), S
 
 /// T19: the palette is seeded from the constructor theme, so the first frame derives none; after
 /// `set_theme(A)` a frame rendered with theme B draws B's tab bar, as a renderer that only ever
-/// rendered B does.
+/// rendered B does. Both renderers settle their font fallback before the pixels are compared.
 fn renderer_palette_follows_the_render_theme(active: &ActiveEventLoop) -> Result<(), String> {
     let theme_a = Theme::default();
     let mut theme_b = Theme::default();
@@ -578,7 +684,7 @@ fn renderer_palette_follows_the_render_theme(active: &ActiveEventLoop) -> Result
     let (_window, mut candidate) =
         renderer(active, SoftwareRenderMode::Off, &theme_a, (640, 240), true)?;
     let mut scene = single_scene(&candidate, &["shell", "logs"]);
-    present(&mut candidate, &mut scene)?;
+    let candidate_settled = settle_fallback(&mut candidate, &mut scene)?;
     check(candidate.__palette_computes() == 0, "the constructor theme's palette is seeded")?;
     candidate.set_theme(&theme_a);
     scene.theme = theme_b.clone();
@@ -587,7 +693,9 @@ fn renderer_palette_follows_the_render_theme(active: &ActiveEventLoop) -> Result
         renderer(active, SoftwareRenderMode::Off, &theme_a, (640, 240), true)?;
     let mut oracle_scene = single_scene(&oracle, &["shell", "logs"]);
     oracle_scene.theme = theme_b;
-    forced(&mut oracle, &mut oracle_scene)?;
+    let oracle_settled = settle_fallback(&mut oracle, &mut oracle_scene)?;
+    check_settled(&scene, candidate_settled, "theme B candidate")?;
+    check_settled(&oracle_scene, oracle_settled, "theme B oracle")?;
     check(pixels(&mut candidate)? == pixels(&mut oracle)?, "the render theme's palette is drawn")?;
     check(candidate.__palette_computes() == 1, "the changed colors derive the palette once")
 }
@@ -601,6 +709,8 @@ fn run_counts(renderer: &GpuRenderer) -> (u64, u64, u64) {
 /// T25: with search open on a fixed query and the tab bar hidden, a cold assembly prepares the
 /// icon and label runs (2) and reuses them three times; a warm one prepares none, reuses five and
 /// shapes nothing; and the overlay draws as a renderer that keeps no runs, on wgpu and on GDI.
+/// Each count is read across a single render attempt, and both renderers settle their font
+/// fallback before the pixels are compared.
 fn search_overlay_reuses_its_runs(active: &ActiveEventLoop) -> Result<(), String> {
     for mode in MODES {
         let (_window, mut warm) = renderer(active, mode, &Theme::default(), (640, 240), false)?;
@@ -618,20 +728,18 @@ fn search_overlay_reuses_its_runs(active: &ActiveEventLoop) -> Result<(), String
         }
         let (warm_scene, cold_scene) = scenes.split_at_mut(1);
         let (warm_scene, cold_scene) = (&mut warm_scene[0], &mut cold_scene[0]);
-        // The first frame fills the atlas; the cache is then emptied for a cold assembly.
-        present(&mut warm, warm_scene)?;
-        warm.clear_shape_cache();
-        let before = run_counts(&warm);
-        forced(&mut warm, warm_scene)?;
-        let cold_counts = run_counts(&warm);
+        // Settling fills the atlas; the cache is then emptied before each try at a cold assembly.
+        let warm_settled = settle_fallback(&mut warm, warm_scene)?;
+        let cold_settled = settle_fallback(&mut cold, cold_scene)?;
+        let (before, cold_counts) =
+            counted_forced(&mut warm, warm_scene, GpuRenderer::clear_shape_cache, run_counts)?;
         check(
             (cold_counts.1 - before.1, cold_counts.0 - before.0) == (2, 3),
             &format!(
                 "{mode:?}: a cold overlay prepares 2 and reuses 3: {before:?} -> {cold_counts:?}"
             ),
         )?;
-        forced(&mut warm, warm_scene)?;
-        let warm_counts = run_counts(&warm);
+        let (cold_counts, warm_counts) = counted_forced(&mut warm, warm_scene, |_| {}, run_counts)?;
         check(
             (warm_counts.1 - cold_counts.1, warm_counts.0 - cold_counts.0) == (0, 5),
             &format!("{mode:?}: a warm overlay reuses 5: {cold_counts:?} -> {warm_counts:?}"),
@@ -639,6 +747,8 @@ fn search_overlay_reuses_its_runs(active: &ActiveEventLoop) -> Result<(), String
         check(warm_counts.2 == cold_counts.2, "a warm overlay shapes nothing")?;
         forced(&mut cold, cold_scene)?;
         forced(&mut cold, cold_scene)?;
+        check_settled(warm_scene, warm_settled, &format!("{mode:?} warm overlay"))?;
+        check_settled(cold_scene, cold_settled, &format!("{mode:?} cold overlay"))?;
         check(
             pixels(&mut warm)? == pixels(&mut cold)?,
             &format!("{mode:?}: kept runs draw the overlay as cold runs do"),
