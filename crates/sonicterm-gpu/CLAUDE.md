@@ -34,6 +34,7 @@ cargo build -p sonicterm-gpu
 ```
 
 ## Guardrails
+- `trim_for_occlusion` releases only what the next frame rebuilds, inside the device gate; it never touches the glyph atlas, its retry or eviction state. A trimmed frame texture is restored by `ensure_frame_texture`, the first step of the wgpu present, and every other texture install clears the mark.
 - `core.rs` and `text_pipeline.rs` are hot files; keep changes narrow.
 - CPU composition stays in `software_frame`, compiled for Windows and every host's
   unit tests, with no native imports or unsafe code. Preserve pixel assertions and

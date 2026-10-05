@@ -88,9 +88,10 @@ cargo build -p sonicterm-app
 - Recovery prepares and commits all live/warm renderers in one callback, retires
   failed candidates before dispatch resumes, and never joins its request worker.
 - Do not add unconditional heartbeat redraws at the tail of event handling.
-- `App::__trim_covered_now` (feature `perf-hook-trim`, doc-hidden) is the perf harness's covered-window
-  trim hook. It currently returns `TrimDecision::Unsupported` and reads or changes nothing, so a run that
-  calls it measures an untrimmed baseline; it runs no retention pass, reclaim or charge.
+- The retention pass trims each window natively covered for 30 s through `trim_window_if_eligible`,
+  before charging and the snapshot and outside every logging gate. `App::__trim_covered_now` (feature
+  `perf-hook-trim`, doc-hidden) runs the same body without the age rule; it runs no retention pass,
+  reclaim or charge. `occluded_since` is stamped only by native occlusion, on the dispatch clock.
 - The echo watch exists only while the frame-counter gate is on (`PaneFrameCounters.echo`).
   Lock order is parser, then watch slot; `arm_echo_watch` and `take_echo_watch` take only the
   slot. It records the appearance, publication and token decision; it never changes the token

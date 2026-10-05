@@ -190,7 +190,8 @@ A `memory snapshot` line taken for a perf checkpoint carries the same fields plu
 four tags: `checkpoint_index`, `checkpoint_label`, `checkpoint_attempt`, and
 `checkpoint_complete` (no pane contended and every pane sampled). Taking it
 changes nothing the periodic sample does: no retention pass, reclamation, trim,
-or reset of the sampling cadence.
+or reset of the sampling cadence. In a build with the trim hook it also carries
+`trimmed`, `trim_source` and `trim_seq`.
 
 Renderer memory is separate because it is window-owned rather than pane-owned:
 
@@ -218,8 +219,9 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
   times that frame's vertices and over 1 MiB is shrunk to twice its use; a frame
   that emits no vertices releases a buffer over 1 MiB entirely. Each upload
   clears both rect lists after a sync and shrinks a list over 1,024 rects to 64.
-  The staging buffer keeps its largest write's capacity, at most one whole
-  atlas. The items count only the vertex buffer: 1 while it holds an
+  During a sync the staging buffer holds at most one whole atlas; after each
+  wgpu sync it follows the vertex buffer's rule, keyed on that sync's largest
+  write, and a covered-window trim releases it entirely. The items count only the vertex buffer: 1 while it holds an
   allocation. Dropping the renderer frees all of them. The class's recorded
   coverage figure, 34.5 MiB, is the upload envelope: two 16 MiB staging
   buffers, plus 2 uploads × 2 lists × 2 × 16,384 rects × 20 bytes for the rect
@@ -349,6 +351,39 @@ Software adapters use wgpu 30 `MemoryHints::MemoryUsage`; hardware adapters use
 allocator blocks from 128 MiB device / 64 MiB host to 8 MiB device / 4 MiB host.
 Those are placement and block-sizing hints, not allocation caps; larger
 resources still allocate.
+
+### Covered-window trim
+
+A window natively occluded for 30 s gives back what its renderer can rebuild.
+The retention pass checks every window once per 30 s interval, so the trim lands
+30–60 s after the cover, with no timer or wake of its own. It runs before
+charging and the snapshot and outside every logging gate, so it happens at the
+default log level. It skips a window already trimmed in this covered stretch, a
+parked one, one whose device is stopped or refuses work, and a warm spare.
+Backend-only occlusion never starts the 30 s count.
+
+The trim releases, inside the device gate: the retained frame texture, down to
+1×1 on the GPU presenter (the software presenter's is already 1×1); both present
+buffers, back to their initial 4,096 quads, and the vertex scratch; the row
+glyph, row quad and row ink caches; both atlas uploads' staging buffers and rect
+lists; the held frame scratch (a lent one is dropped when its lease returns);
+the chrome title and run tables, keeping the palette; and a promoted image atlas
+when no media is visible. It keeps the glyph atlas and its GPU texture, a
+pending atlas retry and its eviction state, the Windows software frame and the
+preedit cache. A device that refuses the work changes nothing. The next frame
+is a full first frame, and everything regrows on its normal path; returning to
+view clears the trim mark.
+
+Renderer parts are reports, not ledger entries, so the trim lowers
+`renderer_total_bytes` in the same pass's snapshot and never a pane charge.
+Each renderer entry also reports `trimmed` and `gpu_released_requested_bytes`:
+the frame texture and present buffers the trim gave back, as request sizes, not
+residency, and outside the total.
+
+While a window is visible, the present buffers shrink too: at the end of each
+600-draw window, if their capacity exceeds four times that window's peak use
+and the initial 4,096 quads, both are recreated at twice the peak rounded up to
+a power of two, never below 4,096 quads.
 
 ### Detailed retention and reclamation
 

@@ -246,8 +246,9 @@ What differs from macOS:
 - **Table.** Each scenario gets a `presenter` row naming the presenter and
   adapter. macOS results record their presenter too, so a macOS table also has
   the row, reading `wgpu` or `wgpu, degraded`; a valid macOS result without the
-  record is a schema problem. S12's uncover and memory-released-while-covered rows read `n/a`,
-  because Windows reports no occlusion, and every checkpoint's footprint row
+  record is a schema problem. Outside the short trim experiment, S12's uncover and memory-released-while-covered
+  rows read `n/a`, because Windows reports no occlusion; that experiment delivers
+  its occlusion synthetically, so its uncover row is measured. Every checkpoint's footprint row
   reads `n/a`, because Windows has no `footprint`.
 - **Delivery.** Before its measured runs, a comparison replays S3, S9, S10 and
   S11 through ConPTY with the head build's `--capture-delivery`, which writes
@@ -332,17 +333,29 @@ sampling is complete or out of attempts. `result.json` records
 `checkpoint_memory` (`supported` or `unsupported`) and, per checkpoint,
 `sampling`, `attempts` and `last_attempt_complete`.
 
-When the plan covers the measurement window, the harness asks the App's
-covered-window trim hook about it right after the cover opens; the hook step
-neither waits nor changes the plan, so both sides run the same protocol.
-`result.json` records the outcome as `hooks.trim`: `not-reached` (the plan never
-covered the window), `unsupported`, `skipped` or `trimmed`. A build without
-`perf-hook-trim`, and an App whose hook cannot trim yet, both read `unsupported`:
-the run is an untrimmed baseline. `unsupported` leaves the memory reading as it
-is: a valid measurement stays numeric, and `unsupported` neither invents a zero
-nor makes a valid reading unavailable. A real zero, or checkpoint sampling that
-is unavailable for another reason, can still appear. Today's App hook always returns `unsupported`. An older
-harness writes no `hooks`; a result that names any other outcome is refused.
+The short S12 plan asks the App's covered-window trim hook about the measurement
+window on the first turn the App holds `Occluded(true)`, delivered natively on
+macOS or by the 2 s fallback; when the covered hold ends first, the hook is never
+called. Windows reports no occlusion, so there the harness delivers
+`Occluded(true)` before the hook and `Occluded(false)` on uncover itself. The hook
+step neither waits nor changes the plan, so both sides run the same protocol.
+`result.json` records the outcome as `hooks.trim`: `not-reached` (the plan asks
+for no trim, or the hold ended first), `unsupported`, `skipped` or `trimmed`,
+plus `trim_experiment` (`s12-short-trim` for that plan, else null) and
+`trim_seq_after_hook` (the hook's trim number, null unless it trimmed). A build
+without `perf-hook-trim` reads `unsupported`: the run is an untrimmed baseline.
+`unsupported` leaves the memory reading as it is: a valid measurement stays
+numeric, and `unsupported` neither invents a zero nor makes a valid reading
+unavailable. A real zero, or checkpoint sampling that is unavailable for another
+reason, can still appear. An older harness writes no `hooks`; a result that names
+any other outcome is refused.
+
+In that experiment the `covered` memory rows follow the trim: a side that
+trimmed counts only a sample whose `trim_seq` is at least `trim_seq_after_hook`
+(else `n/a: stale`), and trim tags on an `unsupported` side read `n/a: schema`.
+Its `covered` phase reports wall time, presented frames and redraws as counts,
+and CPU, never a frame rate or present interval, on both hosts. A Windows result
+may carry `synthetic_occlusion = true` only for this experiment.
 
 Three kinds of run stop the comparison at once with exit 1 and are never
 retried: an unresolved cleanup, a schema failure, and a refusal.
