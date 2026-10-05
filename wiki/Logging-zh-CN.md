@@ -530,8 +530,8 @@ flowchart TD
 的发布一次，其决定再一次。flush 路径在未布防或没有符合条件的发布时读时钟 0 次，符合条件的无目标 flush 读
 1 次，符合条件的有目标 flush 读 2 次。
 
-同步输出：工作线程持住更新，在重置时或在已发布的截止时刻发布，因此它的持有落在 `parse_to_publication_ms`
-中，与 `flush_to_redraw` 的处理相同。对同一个 epoch，窗口不能持有超过该截止时刻，因此
+同步输出：工作线程持住更新，在重置时或在已发布的截止时刻发布，因此它的持有计入 `parse_to_publication_ms`，
+而不计入从发布开始的 `flush_to_redraw`。对同一个 epoch，窗口不能持有超过该截止时刻，因此
 `publication_to_present_ms` 只会包含来自另一个可见窗格或之后 epoch 的持有，每段最长 150 ms。`sync_open`
 是出现段之后解析器的设置位，不能证明发生过持有。
 

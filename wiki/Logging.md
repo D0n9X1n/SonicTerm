@@ -665,8 +665,8 @@ publication, once for an eligible untargeted flush and twice for an eligible tar
 one.
 
 Synchronized output: a worker holds its update and publishes at the reset, or at the
-published deadline, so its hold lands in `parse_to_publication_ms`, as it does in
-`flush_to_redraw`. A window cannot hold past that deadline for the same epoch, so
+published deadline, so its hold is included in `parse_to_publication_ms` and
+excluded from `flush_to_redraw`, which starts at the publication. A window cannot hold past that deadline for the same epoch, so
 `publication_to_present_ms` includes a hold only from another visible pane or a later
 epoch, each stretch capped at 150 ms. `sync_open` is the parser's set bit after the
 appearance section, not proof of a hold.
