@@ -301,6 +301,21 @@ fn atlas_retry_counts(_app: &App) -> Option<Counts> {
     None
 }
 
+/// Frames the main window's renderer applied a font fallback in, cumulative; `None` when the
+/// counter cannot be read.
+#[cfg(feature = "perf-counters")]
+fn atlas_retry_fallback_applies(app: &App) -> Option<u64> {
+    let window_id = app.main_window()?.id();
+    let snapshot = app.frame_counters_snapshot()?;
+    snapshot.windows.iter().find(|(id, _)| *id == window_id)?.1.count("font_fallback_applies")
+}
+
+/// This build has no counter API, so the fallback state cannot be read.
+#[cfg(not(feature = "perf-counters"))]
+fn atlas_retry_fallback_applies(_app: &App) -> Option<u64> {
+    None
+}
+
 /// Call the App's covered-window trim hook for `window_id`, with the trim number a trim reported;
 /// only a tree that declares the hook builds this.
 #[cfg(feature = "perf-hook-trim")]
@@ -2799,12 +2814,18 @@ impl Probe {
     }
 
     /// What the main window shows for S1/atlas-retry: the active tab's title, the font fallback
-    /// generations, the active pane's grid size, cursor and visible rows (trailing blanks trimmed).
-    /// `None` when any part cannot be read.
+    /// state, the active pane's grid size, cursor and visible rows (trailing blanks trimmed).
+    /// `None` when any part cannot be read. Every API it reads exists on the comparison base too.
     fn atlas_retry_scene(&self) -> Option<Scene> {
         let window_id = self.main_id?;
         let title = self.app.__test_window_active_tab_title(window_id)?;
-        let fallback = self.app.main_renderer()?.__test_font_fallback_generations()?;
+        let renderer = self.app.main_renderer()?;
+        let missing = renderer.last_missing_tofu().len() + renderer.last_missing_chrome().len();
+        let fallback = (
+            renderer.font_fallback_notice_id()?,
+            atlas_retry_fallback_applies(&self.app)?,
+            missing,
+        );
         let pane = self.active_pane()?;
         let state = self.app.main_panes()?.get(&pane)?;
         let parser = state.parser.lock();

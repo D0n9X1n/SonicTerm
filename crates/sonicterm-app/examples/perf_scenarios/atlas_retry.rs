@@ -6,10 +6,15 @@
 //! the machine says what to arm next and records each frame. Any delta that does not fit its frame
 //! ends the run as invalid; nothing is folded or guessed.
 //!
-//! The scene is qualified as well as the counts. The probe reads it (title, font fallback, grid,
-//! cursor and every visible row) before and after each forwarded dispatch; settling records it
-//! once fallback has been applied and the rows are exactly the fixture, and any later reading that
-//! differs ends the run, so C and D always redraw one unchanged scene.
+//! The scene is qualified as well as the counts. The probe samples it (title, font fallback state,
+//! grid, cursor and every visible row) at the boundaries of each forwarded dispatch: just before
+//! and just after it. Settling records it once the last presented frame drew no character as
+//! missing and the rows are exactly the fixture; any later sample that differs ends the run.
+//!
+//! What the samples cannot see: a change that appears and reverts inside one dispatch leaves both
+//! samples equal, so it is not detected. Row text is each cell's character with trailing blanks
+//! trimmed; it does not capture cell attributes (colours, bold, underline). The fallback state is
+//! read through APIs the comparison base shares, since the base runs this same harness source.
 
 use std::time::{Duration, Instant};
 
@@ -66,9 +71,10 @@ impl Counts {
 pub(crate) struct Scene {
     /// The active tab's title.
     pub(crate) title: String,
-    /// The body stack's fallback notice: its id, the generation it published and the generation
-    /// the last frame applied.
-    pub(crate) fallback: (u64, u64, u64),
+    /// The font fallback state: the body stack's fallback notice id, the cumulative count of frames
+    /// that applied a fallback (`font_fallback_applies`), and how many characters the last presented
+    /// frame drew as missing, in the grid and in chrome.
+    pub(crate) fallback: (u64, u64, usize),
     /// The grid's columns and rows.
     pub(crate) grid: (u16, u16),
     /// The cursor's row and column.
@@ -78,9 +84,10 @@ pub(crate) struct Scene {
 }
 
 impl Scene {
-    /// Whether every fallback the stack published has been applied by a frame.
+    /// Whether fallback is complete as the renderer defines it: the last presented frame drew no
+    /// grid or chrome character as missing, so no fallback is outstanding for this scene.
     pub(crate) fn fallback_settled(&self) -> bool {
-        self.fallback.1 == self.fallback.2
+        self.fallback.2 == 0
     }
 
     /// The first field in which `other` differs from this scene, named for a reason.
@@ -269,7 +276,7 @@ impl RecoveryEpisodes {
         match self.stage {
             Stage::Settling { steady, deadline } => {
                 // A steady frame drew without a miss or reset, left the scene as it found it, showed
-                // the scene of the frames before it, with fallback applied and exactly the fixture.
+                // the scene of the frames before it, with nothing drawn missing and exactly the fixture.
                 let unchanged = before == after
                     && self.candidate.as_ref().is_none_or(|candidate| candidate == after);
                 let steady_frame = delta.presented == 1

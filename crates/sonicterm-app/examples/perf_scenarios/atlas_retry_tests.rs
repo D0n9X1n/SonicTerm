@@ -6,7 +6,7 @@ fn fitting(frame: Frame) -> Counts {
     Counts { attempts: 1, presented, resets, hits: 0, misses: 0, shapes: 0, atlas_dim: 2048 }
 }
 
-/// The planned scene: fixture rows with the sentinel and a prompt below, fallback applied.
+/// The planned scene: fixture rows with the sentinel and a prompt below, nothing drawn missing.
 fn fixture_scene() -> Scene {
     let mut rows: Vec<String> = fixture_text().lines().skip(2).map(str::to_owned).collect();
     rows.push("sentinel".to_owned());
@@ -282,16 +282,16 @@ fn the_final_settling_frame_is_refused_at_the_settle_bound() {
     }
 }
 
-/// A font fallback applied between B and C changes the settled scene, so C ends the run.
+/// A font fallback applied between B and C (the applies count moves) changes the settled scene, so
+/// C ends the run.
 #[test]
 fn a_fallback_applied_between_b_and_c_is_invalid() {
     let now = Instant::now();
     let mut machine = settled(now);
     machine.observe(Some(fitting(Frame::Retried)), &same(), now);
     machine.observe(Some(fitting(Frame::Recovered)), &same(), now);
-    let published = Scene { fallback: (1, 1, 0), ..fixture_scene() };
-    let applied = Scene { fallback: (1, 1, 1), ..fixture_scene() };
-    let reading = SceneReading { before: Some(published), after: Some(applied) };
+    let applied = Scene { fallback: (1, 1, 0), ..fixture_scene() };
+    let reading = SceneReading { before: Some(fixture_scene()), after: Some(applied) };
     let progress = machine.observe(Some(fitting(Frame::Reused)), &reading, now);
     assert!(
         matches!(&progress, Progress::Invalid(reason) if reason.contains("font fallback")),
@@ -350,7 +350,8 @@ fn a_transient_change_is_invalid_at_the_dispatch_that_shows_it() {
 }
 
 /// Settling needs consecutive steady frames of one scene: a scene that changes mid-count restarts
-/// it, a pending fallback or a non-fixture scene never settles, and an unreadable scene ends the run.
+/// it, a scene whose last frame drew characters missing (fallback outstanding) or a non-fixture
+/// scene never settles, and an unreadable scene ends the run.
 #[test]
 fn settling_requires_one_applied_fixture_scene() {
     let now = Instant::now();
@@ -367,7 +368,7 @@ fn settling_requires_one_applied_fixture_scene() {
     assert_eq!(machine.observe(Some(steady()), &retitled, now), Progress::Arm(Arm::ChangeAtlas));
     assert_eq!(machine.scene().map(|scene| scene.title.as_str()), Some("retitled"));
 
-    let pending = around(Scene { fallback: (1, 1, 0), ..fixture_scene() });
+    let pending = around(Scene { fallback: (1, 0, 2), ..fixture_scene() });
     let mut machine = RecoveryEpisodes::new(now);
     for _ in 0..STEADY_FRAMES + 2 {
         assert_eq!(machine.observe(Some(steady()), &pending, now), Progress::Arm(Arm::Redraw));
@@ -390,4 +391,23 @@ fn settling_requires_one_applied_fixture_scene() {
         matches!(&progress, Progress::Invalid(reason) if reason.contains("cannot be read")),
         "{progress:?}"
     );
+}
+
+/// After settling, a frame that draws a character missing, or a replaced fallback notice, changes
+/// the fallback state the scene recorded, so the run ends naming it.
+#[test]
+fn a_missing_character_or_a_new_notice_after_settling_is_invalid() {
+    let now = Instant::now();
+    for fallback in [(1, 0, 1), (2, 0, 0)] {
+        let mut machine = settled(now);
+        let changed = SceneReading {
+            before: Some(fixture_scene()),
+            after: Some(Scene { fallback, ..fixture_scene() }),
+        };
+        let progress = machine.observe(Some(fitting(Frame::Retried)), &changed, now);
+        assert!(
+            matches!(&progress, Progress::Invalid(reason) if reason.contains("font fallback")),
+            "{fallback:?}: {progress:?}"
+        );
+    }
 }
