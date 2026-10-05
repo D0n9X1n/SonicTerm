@@ -133,6 +133,14 @@ pub struct FrameStats {
     pub font_prepare_ns: u64,
     /// Of `font_prepare_ns`, the preparations that applied a newer generation.
     pub font_generation_prepare_ns: u64,
+    /// Tab titles drawn from the title cache, with no shaping, in assembly passes.
+    pub tab_title_reuses: u64,
+    /// Tab titles shaped on a title-cache miss; their requests also count in `shape_requests`.
+    pub tab_title_prepares: u64,
+    /// Chrome-run lookups served from the chrome-run cache, with no shaping.
+    pub chrome_run_reuses: u64,
+    /// Chrome-run lookups that shaped; their requests also count in `shape_requests`.
+    pub chrome_run_prepares: u64,
     /// Every render attempt.
     pub attempts: AttemptStats,
     /// Render attempts that carried a fallback generation apply.
@@ -186,6 +194,10 @@ impl FrameStats {
         font_generation_applies: 0,
         font_prepare_ns: 0,
         font_generation_prepare_ns: 0,
+        tab_title_reuses: 0,
+        tab_title_prepares: 0,
+        chrome_run_reuses: 0,
+        chrome_run_prepares: 0,
         attempts: AttemptStats::ZERO,
         apply_attempts: AttemptStats::ZERO,
     };
@@ -232,6 +244,10 @@ impl FrameStats {
         self.font_generation_applies += other.font_generation_applies;
         self.font_prepare_ns += other.font_prepare_ns;
         self.font_generation_prepare_ns += other.font_generation_prepare_ns;
+        self.tab_title_reuses += other.tab_title_reuses;
+        self.tab_title_prepares += other.tab_title_prepares;
+        self.chrome_run_reuses += other.chrome_run_reuses;
+        self.chrome_run_prepares += other.chrome_run_prepares;
         self.attempts.add(&other.attempts);
         self.apply_attempts.add(&other.apply_attempts);
     }
@@ -662,6 +678,30 @@ pub(crate) fn note_frame(software: bool) {
         } else {
             // When: `software` is false, the frame went through the wgpu presenter.
             stats.gpu_frames += 1;
+        }
+    });
+}
+
+/// Count one tab title drawn: from the title cache when `reused`, otherwise shaped on a miss.
+pub(crate) fn note_tab_title(reused: bool) {
+    record(|stats| {
+        if reused {
+            stats.tab_title_reuses += 1;
+        } else {
+            // When: `reused` is false, the title was fitted and shaped on a miss.
+            stats.tab_title_prepares += 1;
+        }
+    });
+}
+
+/// Count one chrome-run lookup: served from the cache when `reused`, otherwise shaped.
+pub(crate) fn note_chrome_run(reused: bool) {
+    record(|stats| {
+        if reused {
+            stats.chrome_run_reuses += 1;
+        } else {
+            // When: `reused` is false, the lookup shaped its run.
+            stats.chrome_run_prepares += 1;
         }
     });
 }

@@ -20,7 +20,7 @@ use sonicterm_render_model::boundary::ui::overlays::{
 use sonicterm_render_model::boundary::ui::search::SearchState;
 use sonicterm_text::GlyphInstance;
 
-use crate::chrome_text::{ChromeAttrs, ChromeShapedRun};
+use crate::chrome_text::{ChromeAttrs, ChromeRunView, ChromeShapedRun};
 
 #[cfg(test)]
 #[path = "field_geometry_tests.rs"]
@@ -207,10 +207,19 @@ impl FieldBoundaries {
     /// by these same advances, so geometry and glyphs share one shaping result.
     #[must_use]
     pub fn from_run(run: &ChromeShapedRun<'_>) -> Self {
-        Self::from_advance_iter(run.text(), run.advances())
+        Self::from_view(run.view())
     }
 
-    /// Shared accumulator behind [`Self::from_advances`] and [`Self::from_run`].
+    /// Build boundaries from a borrowed run view, transient or kept by a renderer cache.
+    ///
+    /// [`crate::chrome_text::layout_view`] moves the pen by the view's same advances, so the
+    /// geometry and the painted glyphs of one view share one shaping result.
+    #[must_use]
+    pub fn from_view(view: ChromeRunView<'_>) -> Self {
+        Self::from_advance_iter(view.text(), view.advances())
+    }
+
+    /// Shared accumulator behind [`Self::from_advances`] and [`Self::from_view`].
     fn from_advance_iter(text: &str, advances: impl Iterator<Item = (usize, f32)>) -> Self {
         let mut stops: Vec<(usize, f32)> = Vec::with_capacity(advances.size_hint().0 + 1);
         let mut pen_px = 0.0_f32;

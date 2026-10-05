@@ -1,4 +1,5 @@
 use super::*;
+use sonicterm_render_model::boundary::ui::tabs::TITLE_FIT_TOLERANCE_PX;
 use sonicterm_types::{ClassCoverage, PaneSeamTerm};
 
 #[test]
@@ -3024,8 +3025,8 @@ fn tab_titles_fit_their_stored_width_whole_or_cut_at_a_grapheme_boundary() {
         let tab = &tabs.tabs()[widget.idx];
         let content = TabContent::of(tab, now, layout.active == Some(widget.idx), false);
         let display = content.display_text();
-        let fitted = fit_tab_title(&stack, &display, 15.0, widget.title_rect.w)
-            .expect("the tracked font shapes every title");
+        let fitted = crate::chrome_cache::fit_title_run(&stack, &display, 15.0, widget.title_rect.w);
+        assert!(fitted.complete, "the tracked font shapes every title");
         let drawn = drawn_tab_title_px(&stack, &fitted.text, 15.0);
         assert!(
             drawn <= widget.title_rect.w + TITLE_FIT_TOLERANCE_PX,
@@ -3033,7 +3034,8 @@ fn tab_titles_fit_their_stored_width_whole_or_cut_at_a_grapheme_boundary() {
             fitted.text,
             widget.title_rect.w
         );
-        if fitted.cut {
+        let is_cut = fitted.text != display;
+        if is_cut {
             let kept = fitted.text.strip_suffix('…').expect("a cut title ends with an ellipsis");
             assert!(display.starts_with(kept), "{kept:?} is not a prefix of {display:?}");
             assert!(!kept.ends_with('\u{200d}'), "{kept:?} splits a joined emoji");
@@ -3041,7 +3043,7 @@ fn tab_titles_fit_their_stored_width_whole_or_cut_at_a_grapheme_boundary() {
         } else {
             assert_eq!(fitted.text, display);
         }
-        cut.push(fitted.cut);
+        cut.push(is_cut);
     }
     assert!(!cut[0], "a short title that fits is drawn whole");
     assert!(cut[1], "a path wider than the maximum is cut");
@@ -7915,4 +7917,22 @@ fn borrowed_runs_emit_the_same_records_and_completeness() {
     assert!(!failed.glyphs.is_empty(), "runs 2 and 3 still draw");
     assert!(failed.glyphs.len() < whole.len(), "run 1 draws nothing");
     assert!(!rig.cache.contains(7, failed.key), "an incomplete row is not admitted");
+}
+
+#[test]
+fn face_replacement_sites_clear_both_caches() {
+    // Every place the renderer replaces faces without a title-key change drops the kept chrome
+    // runs and titles beside its row-cache invalidation; `set_font` reaches the clear only
+    // through `adopt_font_stacks`, which the test adoption seam shares. Scanned CRLF-normalized.
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    for signature in ["fn adopt_font_stacks(", "fn rebuild_for_sf(", "pub fn clear_shape_cache("] {
+        let body = item_body(&source, signature);
+        assert!(body.contains("self.chrome_caches.clear_runs();"), "{signature} clears both caches");
+        assert!(body.contains("row_glyph_cache.invalidate_all()"), "{signature} beside the rows");
+    }
+    let set_font = item_body(&source, "pub fn set_font(");
+    assert!(set_font.contains("self.adopt_font_stacks("), "set_font adopts through the seam");
+    assert!(!set_font.contains("clear_runs"), "and does not clear on its own");
+    let seam = item_body(&source, "pub fn __test_adopt_body_font_stack(");
+    assert!(seam.contains("self.adopt_font_stacks("), "the test seam shares the clear");
 }

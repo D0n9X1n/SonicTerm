@@ -188,7 +188,9 @@ fn every_font_stack_shaping_call_goes_through_shape_request() {
     crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
     let (wrapped, bare) = shaping_calls(&sources);
     assert!(bare.is_empty(), "uncounted FontStack shaping calls: {bare:#?}");
-    assert_eq!(wrapped, 8, "the shaping sites changed; review the count");
+    // The search badge's icon and label measures are served from the chrome-run cache, which
+    // shapes through `ChromeShapedRun::shape`, so they are no longer separate sites.
+    assert_eq!(wrapped, 5, "the shaping sites changed; review the count");
 }
 
 /// `text` with comments, strings, raw strings and character literals blanked to spaces, so

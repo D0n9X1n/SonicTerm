@@ -2,9 +2,9 @@
 //!
 //! When a fallback notice has published a newer generation than the renderer applied, the
 //! frame's preparation invalidates everything that may hold a placeholder: shaped rows and
-//! line quads, the frame key, missing atlas sentinels, the preedit cache, and stored tab widths
-//! (through the tab-title fallback epoch). A second preparation in the same generation does
-//! nothing.
+//! line quads, the frame key, missing atlas sentinels, the preedit cache, the body stack's kept
+//! chrome runs, and stored tab widths and kept tab titles (through the tab-title fallback epoch).
+//! A second preparation in the same generation does nothing.
 
 use crate::frame_plan::FrameKey;
 use sonicterm_text::glyph_atlas::GlyphAtlas;
@@ -93,6 +93,9 @@ pub(super) struct FontApplyTargets<'targets, Key = FrameKey, Preedit = super::Pr
     pub(super) glyph_atlas: &'targets mut GlyphAtlas,
     pub(super) preedit_glyph_cache: &'targets mut Option<Preedit>,
     pub(super) fallback_epoch: &'targets mut u64,
+    /// Chrome runs shaped with the body stack, which has no epoch of its own, so an apply
+    /// empties them to retire any run kept with notdef.
+    pub(super) chrome_runs: &'targets mut crate::chrome_cache::ChromeRunCache,
 }
 
 /// Whether an acknowledged fallback `current` still needs a frame: true unless the last frame
@@ -172,6 +175,7 @@ pub(super) fn prepare_frame_fonts<Key, Preedit>(
     // The preedit key lacks `style_rev`, so it is dropped outright.
     *targets.preedit_glyph_cache = None;
     *targets.fallback_epoch += 1;
+    targets.chrome_runs.clear();
     crate::frame_stats::note_font_fallback_apply();
     if change == FontChange::Generation {
         // A newer generation of the same notice, counted apart from initial setups.

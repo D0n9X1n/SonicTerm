@@ -412,10 +412,10 @@ impl<'text> ChromeShapedRun<'text> {
             Vec::new()
         } else {
             // When: `text` is not empty, shape it; a shaping failure means no run at all.
-            crate::frame_stats::shape_request(|| {
+            let shaped = crate::frame_stats::shape_request(|| {
                 font_stack.shape_text_for_frame(text, attrs.bold, attrs.italic)
-            })
-            .ok()?
+            });
+            inject_chrome_shape_failure(shaped).ok()?
         };
         let glyphs = shaped
             .iter()
@@ -441,15 +441,15 @@ impl<'text> ChromeShapedRun<'text> {
         self.text
     }
 
-    /// Pen advance of one glyph under the drawing rules: blank notdef clusters
-    /// fall back to their display width when the shaper reports none.
-    fn pen_advance(&self, glyph: &ChromeShapedGlyph) -> f32 {
-        if glyph.is_blank() {
-            // A blank notdef cluster is skipped without a tile, so its width may be estimated.
-            blank_pen_advance(glyph.x_advance_px, glyph.lead_ch, self.font_size_px)
-        } else {
-            // When: `glyph` is not blank, the shaper's advance moves the pen unchanged.
-            glyph.x_advance_px
+    /// A borrowed view of this run, the form [`layout_view`] and field geometry consume.
+    #[must_use]
+    pub fn view(&self) -> ChromeRunView<'_> {
+        ChromeRunView {
+            text: self.text,
+            attrs: self.attrs,
+            font_size_px: self.font_size_px,
+            scale: self.scale,
+            glyphs: &self.glyphs,
         }
     }
 
@@ -468,8 +468,167 @@ impl<'text> ChromeShapedRun<'text> {
     /// `(cluster byte, pen advance)` pairs in left-to-right order, exactly as
     /// [`layout_prepared`] moves the pen.
     pub fn advances(&self) -> impl Iterator<Item = (usize, f32)> + '_ {
-        self.glyphs.iter().map(|glyph| (glyph.cluster, self.pen_advance(glyph)))
+        let font_size_px = self.font_size_px;
+        self.glyphs.iter().map(move |glyph| (glyph.cluster, pen_advance(glyph, font_size_px)))
     }
+}
+
+/// Pen advance of one glyph under the drawing rules: blank notdef clusters fall back to their
+/// display width when the shaper reports none.
+fn pen_advance(glyph: &ChromeShapedGlyph, font_size_px: f32) -> f32 {
+    if glyph.is_blank() {
+        // A blank notdef cluster is skipped without a tile, so its width may be estimated.
+        blank_pen_advance(glyph.x_advance_px, glyph.lead_ch, font_size_px)
+    } else {
+        // When: `glyph` is not blank, the shaper's advance moves the pen unchanged.
+        glyph.x_advance_px
+    }
+}
+
+/// A borrowed, copyable view of one shaped chrome run: its text, style, size and glyphs.
+///
+/// Both a transient [`ChromeShapedRun`] and a run a renderer cache keeps hand out this view, so
+/// [`layout_view`] and [`crate::field_geometry::FieldBoundaries::from_view`] draw and measure
+/// either one without copying glyphs.
+#[derive(Debug, Clone, Copy)]
+pub struct ChromeRunView<'run> {
+    /// Text the run was shaped from.
+    text: &'run str,
+    /// Style the run was shaped with; it keys the atlas tiles.
+    attrs: ChromeAttrs,
+    /// Requested size the advances are projected to.
+    font_size_px: f32,
+    /// Atlas-native to requested size ratio.
+    scale: f32,
+    /// Shaped glyphs in left-to-right order.
+    glyphs: &'run [ChromeShapedGlyph],
+}
+
+impl<'run> ChromeRunView<'run> {
+    /// Text the run was shaped from.
+    #[must_use]
+    pub fn text(&self) -> &'run str {
+        self.text
+    }
+
+    /// `(cluster byte, pen advance)` pairs in left-to-right order, exactly as [`layout_view`]
+    /// moves the pen: blank notdef clusters use their display-width estimate. For drawing and
+    /// field geometry; measures use [`Self::raw_width_px`].
+    pub fn advances(&self) -> impl Iterator<Item = (usize, f32)> + 'run {
+        let font_size_px = self.font_size_px;
+        self.glyphs.iter().map(move |glyph| (glyph.cluster, pen_advance(glyph, font_size_px)))
+    }
+
+    /// Sum of the projected shaper advances, in glyph order and with no blank-cluster estimate:
+    /// the sum `FontStack::measure_text_width_for_frame` takes when the run was shaped at its
+    /// native size (scale 1). Only measures read it; drawing uses [`Self::advances`].
+    #[must_use]
+    pub fn raw_width_px(&self) -> f32 {
+        self.glyphs.iter().map(|glyph| glyph.x_advance_px).sum()
+    }
+
+    /// Number of shaped glyphs in the run.
+    #[must_use]
+    pub fn glyph_count(&self) -> usize {
+        self.glyphs.len()
+    }
+
+    /// Test seam: the shaper glyph ids in order; 0 is notdef.
+    #[cfg(test)]
+    pub(crate) fn glyph_ids_for_test(&self) -> Vec<u32> {
+        self.glyphs.iter().map(|glyph| glyph.glyph_pos).collect()
+    }
+}
+
+/// A shaped chrome run that owns its text and glyphs, so a renderer cache can keep it across
+/// frames. It holds exactly one text allocation and one glyph slice.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedChromeRun {
+    /// Text the run was shaped from; the run's only text allocation.
+    text: Box<str>,
+    /// Style the run was shaped with.
+    attrs: ChromeAttrs,
+    /// Requested size the advances are projected to.
+    font_size_px: f32,
+    /// Atlas-native to requested size ratio.
+    scale: f32,
+    /// Shaped glyphs in left-to-right order.
+    glyphs: Box<[ChromeShapedGlyph]>,
+}
+
+impl PreparedChromeRun {
+    /// Take ownership of a transient run: one text allocation, glyphs moved into a boxed slice.
+    pub(crate) fn from_run(run: ChromeShapedRun<'_>) -> Self {
+        Self {
+            text: Box::from(run.text),
+            attrs: run.attrs,
+            font_size_px: run.font_size_px,
+            scale: run.scale,
+            glyphs: run.glyphs.into_boxed_slice(),
+        }
+    }
+
+    /// A borrowed view of the kept run.
+    pub(crate) fn view(&self) -> ChromeRunView<'_> {
+        ChromeRunView {
+            text: &self.text,
+            attrs: self.attrs,
+            font_size_px: self.font_size_px,
+            scale: self.scale,
+            glyphs: &self.glyphs,
+        }
+    }
+
+    /// Heap bytes the run retains: its text and its glyph slice.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.text.len() + self.glyphs.len() * std::mem::size_of::<ChromeShapedGlyph>()
+    }
+}
+
+/// Size of one kept shaped glyph, for retention envelopes outside this module.
+pub(crate) const CHROME_SHAPED_GLYPH_BYTES: usize = std::mem::size_of::<ChromeShapedGlyph>();
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: how many more chrome shaping calls on this thread succeed before one fails;
+    /// `None` when no failure is armed.
+    static FAIL_CHROME_SHAPE_AFTER: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Test seam: let `successes` more [`ChromeShapedRun::shape`] calls on this thread succeed, then
+/// fail the next one once, after its request is counted, as a real shaping error would.
+#[cfg(test)]
+pub(crate) fn fail_chrome_shape_after_for_test(successes: usize) {
+    FAIL_CHROME_SHAPE_AFTER.with(|armed| armed.set(Some(successes)));
+}
+
+/// `shaped`, or an error in its place when the armed seam reaches this call, consuming it.
+#[cfg(test)]
+fn inject_chrome_shape_failure<T>(shaped: anyhow::Result<T>) -> anyhow::Result<T> {
+    let fails = FAIL_CHROME_SHAPE_AFTER.with(|armed| match armed.get() {
+        Some(0) => {
+            armed.set(None);
+            true
+        }
+        Some(remaining) => {
+            armed.set(Some(remaining - 1));
+            false
+        }
+        None => false,
+    });
+    if fails {
+        // When: the armed seam reached this call, the chrome shape fails as a real error would.
+        return Err(anyhow::anyhow!("injected chrome shaping failure"));
+    }
+    shaped
+}
+
+/// Production never injects a chrome shaping failure: the result passes through.
+#[cfg(not(test))]
+#[inline(always)]
+fn inject_chrome_shape_failure<T>(shaped: anyhow::Result<T>) -> anyhow::Result<T> {
+    shaped
 }
 
 /// The atlas key `glyph` draws with under `attrs` and `raster_variant`, or `None` for a notdef
@@ -565,6 +724,23 @@ pub fn layout_prepared(
     clip: Option<ChromeClip>,
     raster_variant: GlyphRasterVariant,
 ) -> ChromeTextLayout {
+    layout_view(run.view(), wt_raster, atlas, color, origin, screen, clip, raster_variant)
+}
+
+/// Paint a borrowed run view into atlas glyph instances: the body behind [`layout_prepared`],
+/// also used for runs a renderer cache keeps. The pen moves by exactly
+/// [`ChromeRunView::advances`], so field boundaries built from the same view line up.
+#[allow(clippy::too_many_arguments)]
+pub fn layout_view(
+    run: ChromeRunView<'_>,
+    wt_raster: &mut impl Rasterizer,
+    atlas: &mut GlyphAtlas,
+    color: ChromeColor,
+    origin: (f32, f32),
+    screen: (f32, f32),
+    clip: Option<ChromeClip>,
+    raster_variant: GlyphRasterVariant,
+) -> ChromeTextLayout {
     let mut out = ChromeTextLayout {
         glyphs: Vec::new(),
         width_px: 0.0,
@@ -591,8 +767,8 @@ pub fn layout_prepared(
     let baseline_y = origin.1;
     let mut max_y_extent: f32 = 0.0;
 
-    for glyph in &run.glyphs {
-        let advance = run.pen_advance(glyph);
+    for glyph in run.glyphs {
+        let advance = pen_advance(glyph, run.font_size_px);
         let Some(key) = glyph_tile_key(glyph, attrs, raster_variant) else {
             // When: a notdef blank (space, control, NUL) has no pixels, the pen advances
             // without consuming an atlas slot that a visible glyph needs.

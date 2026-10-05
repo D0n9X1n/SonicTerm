@@ -496,21 +496,22 @@ fn conservative_badge_text_width(fallback: f32, shaped: Option<f32>) -> f32 {
     shaped.filter(|width| width.is_finite() && *width >= 0.0).unwrap_or(fallback).max(fallback)
 }
 
+/// Content width of the search badge: icon, gap and label. `measure` returns a text's shaped
+/// width, or `None` when it cannot be shaped; with no measure, or when either text fails, the
+/// conservative estimate stands, and a shaped width below the estimate never shrinks the badge.
 fn search_badge_content_width(
     icon: &str,
     label: &str,
     font_size: f32,
     gap: f32,
-    font_stack: Option<&sonicterm_engine::FontStack>,
+    measure: Option<&mut dyn FnMut(&str) -> Option<f32>>,
 ) -> f32 {
     let fallback = estimate_badge_text_width(icon, font_size)
         + gap
         + estimate_badge_text_width(label, font_size);
-    let shaped = font_stack.and_then(|stack| {
-        let icon_w =
-            crate::frame_stats::shape_request(|| stack.measure_text_width_for_frame(icon)).ok()?;
-        let label_w =
-            crate::frame_stats::shape_request(|| stack.measure_text_width_for_frame(label)).ok()?;
+    let shaped = measure.and_then(|measure| {
+        let icon_w = measure(icon)?;
+        let label_w = measure(label)?;
         Some(icon_w + gap + label_w)
     });
     conservative_badge_text_width(fallback, shaped)
@@ -998,51 +999,6 @@ fn tab_content_width_px(
     Some(reserve_px + advances.iter().map(|(_, advance)| advance).sum::<f32>())
 }
 
-/// Fit a tab's display text into `available_px` of the tab font.
-///
-/// Text that fits is drawn whole. Otherwise the longest grapheme prefix that
-/// fits beside `…` is kept and the cut text is shaped again; when kerning or a
-/// ligature makes it wider than its advances promised, the cut steps back a
-/// grapheme, so a drawn title never passes its tab. Returns `None` when the
-/// text cannot be shaped.
-fn fit_tab_title(
-    stack: &sonicterm_engine::FontStack,
-    text: &str,
-    font_size_px: f32,
-    available_px: f32,
-) -> Option<FittedTitle> {
-    let measure = |candidate: &str| {
-        chrome_text::shaped_advances(
-            stack,
-            candidate,
-            ChromeAttrs::default(),
-            font_size_px,
-            font_size_px,
-        )
-    };
-    let advances = measure(text)?;
-    let whole_px: f32 = advances.iter().map(|(_, advance)| advance).sum();
-    if whole_px <= available_px + TITLE_FIT_TOLERANCE_PX {
-        // When: `whole_px` fits `available_px`, draw the whole title without shaping `…`.
-        return Some(FittedTitle { text: text.to_string(), width_px: whole_px, cut: false });
-    }
-    let ellipsis_px: f32 =
-        measure("…").map_or(0.0, |ellipsis| ellipsis.iter().map(|(_, advance)| advance).sum());
-    let mut budget_px = available_px;
-    // Each pass keeps a strictly shorter prefix, so the text length bounds the passes.
-    for _ in 0..=text.len() {
-        let fitted = fit_title_to_width(text, &advances, ellipsis_px, budget_px);
-        let drawn_px: f32 = measure(fitted.text.as_str())
-            .map_or(fitted.width_px, |cut| cut.iter().map(|(_, advance)| advance).sum());
-        if fitted.text.is_empty() || drawn_px <= available_px + TITLE_FIT_TOLERANCE_PX {
-            // When: `fitted` is empty or its shaped `drawn_px` fits `available_px`, draw it.
-            return Some(FittedTitle { width_px: drawn_px, ..fitted });
-        }
-        budget_px = fitted.width_px - TITLE_FIT_TOLERANCE_PX - 0.01;
-    }
-    Some(FittedTitle { text: String::new(), width_px: 0.0, cut: true })
-}
-
 /// Identity of the font and scale that tab titles are measured with. A change
 /// measures and lays out every tab again, even while the bar is held.
 fn tab_font_key(
@@ -1477,8 +1433,7 @@ use sonicterm_render_model::boundary::ui::{
         ACTIVE_TOP_ACCENT_INSET, TAB_BAR_HEIGHT, TAB_GAP, TAB_VERT_INSET,
     },
     tabs::{
-        fit_title_to_width, ContentWidthRefresh, FittedTitle, TabBar, TabContent,
-        TITLE_FIT_TOLERANCE_PX,
+        ContentWidthRefresh, TabBar, TabContent,
     },
 };
 use sonicterm_render_model::geometry::PixelRect;
@@ -2445,6 +2400,11 @@ pub struct GpuRenderer {
     tab_title_font: TabTitleFont,
     /// Native-size stack for the command-palette footer (`body - 1`).
     palette_footer_font_stack: Option<sonicterm_engine::FontStack>,
+    /// Kept tab titles, search-overlay runs and the UI palette; reported as `chrome_cache`.
+    chrome_caches: crate::chrome_cache::ChromeCaches,
+    /// Whether the title and chrome-run caches keep what they shape; a test turns it off to
+    /// compare against cold drawing.
+    chrome_reuse: bool,
     /// Per-row glyph cache. Stores the shaped
     /// `GlyphInstance`s, underline coalescing, and missing-tofu list
     /// for each visible row, keyed by absolute row index + a content
@@ -3397,6 +3357,9 @@ impl GpuRenderer {
                 font_stacks.tab_title,
             ),
             palette_footer_font_stack: font_stacks.palette_footer,
+            // Seeded from the constructor theme, so the first frame derives no palette.
+            chrome_caches: crate::chrome_cache::ChromeCaches::new(theme),
+            chrome_reuse: true,
             row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
             line_quad_cache: crate::row_quad_cache::LineQuadCache::new(),
             last_emit_origins: Vec::new(),
@@ -5135,6 +5098,8 @@ impl GpuRenderer {
         // SwashRasterizer prebake gone. Atlas is now lazily
         // filled by the wezterm rasterizer on the next render.
         self.row_glyph_cache.invalidate_all();
+        // Kept titles and chrome runs hold the old faces' glyph ids, whatever their keys say.
+        self.chrome_caches.clear_runs();
         self.line_quad_cache.invalidate_all();
         self.last_frame_key = None;
         self.last_pane_layout.clear();
@@ -5219,6 +5184,8 @@ impl GpuRenderer {
         }
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
+        // Every stack rescaled in place, so kept titles and runs hold old-size glyphs.
+        self.chrome_caches.clear_runs();
         // The GPU-side AtlasUpload owns a texture sized to the old atlas
         // dimensions and a bind group pointing at it. After replacing the
         // CPU `GlyphAtlas` with one of a different size, the next
@@ -5282,6 +5249,8 @@ impl GpuRenderer {
             hex_to_premultiplied_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
         self.search_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         self.search_bg = hex_to_premultiplied_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
+        // Refresh the kept UI palette now, so the next frame with this theme derives nothing.
+        let _palette = self.chrome_caches.palette.palette_for(theme);
         self.last_frame_key = None;
         self.style_rev = self.style_rev.wrapping_add(1);
         self.row_glyph_cache.invalidate_all();
@@ -5310,6 +5279,7 @@ impl GpuRenderer {
                 glyph_atlas: &mut self.glyph_atlas,
                 preedit_glyph_cache: &mut self.preedit_glyph_cache,
                 fallback_epoch: self.tab_title_font.fallback_epoch_mut(),
+                chrome_runs: &mut self.chrome_caches.runs,
             },
         )
     }
@@ -5368,6 +5338,7 @@ impl GpuRenderer {
     pub fn clear_shape_cache(&mut self) {
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
+        self.chrome_caches.clear_runs();
         self.style_rev = self.style_rev.wrapping_add(1);
         self.last_frame_key = None;
         tracing::info!(
@@ -6243,7 +6214,7 @@ impl GpuRenderer {
             // plain hover draws only a yellow underline, so compute lazily —
             // `[0.0;4]` otherwise. #perf
             let hovered_url_accent: [f32; 4] = if hovered_url_needs_accent(hovered_url_cells) {
-                sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme).accent
+                self.chrome_caches.palette.palette_for(theme).accent
             } else {
                 // When: `!hovered_url_needs_accent` — plain hover draws only
                 // the underline, so the accent is never sampled.
@@ -6807,7 +6778,7 @@ impl GpuRenderer {
             if let Some(hovered_view) = pane_views.iter().find(|view| view.pane_id == h.pane_id) {
                 // When: `pane_views` finds `h.pane_id`, project all fragments through that pane's geometry.
                 let hov_accent = if h.active {
-                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme)
+                    self.chrome_caches.palette.palette_for(theme)
                         .accent
                 } else {
                     // When: `h.active` is false, render the non-clickable hover hint in the theme's yellow rather than the action accent.
@@ -6935,7 +6906,7 @@ impl GpuRenderer {
             // the title text (active vs inactive fg) so per-theme accents
             // still read through.
             let ui_palette =
-                sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
+                self.chrome_caches.palette.palette_for(theme);
             // `tok::BG_BASE` is a hardcoded near-black
             // (`#0B0E14`) that is indistinguishable from most dark
             // themes' `theme.background` — the tab bar drew correctly
@@ -6993,7 +6964,11 @@ impl GpuRenderer {
             let tab_baseline_y = title_top + tab_raster_px * 0.95;
             let native_em = tab_raster_px;
             let mut tab_rasterizer = self.tab_title_font.stack().cloned();
-            for t in &layout.tabs {
+            // Kept titles are keyed by tab position; a closed tab's slot is dropped.
+            let title_font_key = self.tab_title_font.key();
+            let title_fallback_epoch = self.tab_title_font.fallback_epoch();
+            self.chrome_caches.titles.retain_tabs(layout.tabs.len());
+            for (position, t) in layout.tabs.iter().enumerate() {
                 let Some(tab) = tabs.tabs().get(t.idx) else {
                     // When: `tabs.tabs().get(t.idx)` is None — the layout
                     // outlived a closed tab, so there is no title to draw.
@@ -7022,9 +6997,18 @@ impl GpuRenderer {
                     if source_tab_idx == Some(t.idx) {
                         color = scale_chrome_text_alpha(color, source_alpha);
                     }
-                    let title =
-                        fit_tab_title(stack, &content.display_text(), tab_raster_px, text_px)
-                            .unwrap_or_default();
+                    let display = content.display_text();
+                    let probe = crate::chrome_cache::TitleProbe {
+                        text: &display,
+                        font_key: title_font_key,
+                        fallback_epoch: title_fallback_epoch,
+                        raster_px: tab_raster_px,
+                        text_px,
+                    };
+                    // A warm, unchanged title draws from its kept run with no shaping.
+                    let draw =
+                        self.chrome_caches.titles.prepare(position, &probe, stack, self.chrome_reuse);
+                    let title = self.chrome_caches.titles.drawn(&draw);
                     let placement = tab_title_block_placement(
                         t.title_rect,
                         title.width_px,
@@ -7040,25 +7024,41 @@ impl GpuRenderer {
                             (sw, sh),
                         );
                     }
-                    let final_layout = chrome_text::layout_with_raster_variant(
-                        stack,
-                        rasterizer,
-                        &mut self.glyph_atlas,
-                        &title.text,
-                        color,
-                        ChromeAttrs::default(),
-                        tab_raster_px,
-                        native_em,
-                        (placement.text_x, tab_baseline_y),
-                        (sw, sh),
-                        Some(ChromeClip {
-                            x: placement.text_clip.x,
-                            y: placement.text_clip.y,
-                            w: placement.text_clip.w,
-                            h: placement.text_clip.h,
-                        }),
-                        GlyphRasterVariant::TabTitle,
-                    );
+                    let title_clip = Some(ChromeClip {
+                        x: placement.text_clip.x,
+                        y: placement.text_clip.y,
+                        w: placement.text_clip.w,
+                        h: placement.text_clip.h,
+                    });
+                    let title_origin = (placement.text_x, tab_baseline_y);
+                    let final_layout = match title.view {
+                        // When: the fit kept or made its run, it draws without shaping again.
+                        Some(view) => chrome_text::layout_view(
+                            view,
+                            rasterizer,
+                            &mut self.glyph_atlas,
+                            color,
+                            title_origin,
+                            (sw, sh),
+                            title_clip,
+                            GlyphRasterVariant::TabTitle,
+                        ),
+                        // When: the final cut did not shape, the text shapes at draw time as before.
+                        None => chrome_text::layout_with_raster_variant(
+                            stack,
+                            rasterizer,
+                            &mut self.glyph_atlas,
+                            title.text,
+                            color,
+                            ChromeAttrs::default(),
+                            tab_raster_px,
+                            native_em,
+                            title_origin,
+                            (sw, sh),
+                            title_clip,
+                            GlyphRasterVariant::TabTitle,
+                        ),
+                    };
                     glyph_instances.extend(final_layout.glyphs);
                     quads.extend(final_layout.missing_boxes);
                 } else if show_privilege_badge {
@@ -7190,13 +7190,30 @@ impl GpuRenderer {
         let search_preedit: &str =
             search.and(ime).map(|i| i.preedit()).filter(|s| !s.is_empty()).unwrap_or("");
         let search_label = search.map(|s| search_bar_label(s, search_preedit));
+        // The overlay's icon and label are looked up in the chrome-run cache: a warm overlay with
+        // an unchanged label measures and draws them without shaping.
+        let search_run_key = crate::chrome_cache::ChromeRunKey::new(
+            crate::chrome_cache::ChromeStack::Body,
+            ChromeAttrs::default(),
+            search_font_size,
+            search_font_size,
+        );
+        let chrome_reuse = self.chrome_reuse;
+        let search_gap_px = self.chrome_px(SEARCH_BAR_ICON_GAP);
         let search_content_width = search_label.as_ref().map(|label| {
+            let runs = &mut self.chrome_caches.runs;
+            let mut measure = self.font_stack.as_ref().map(|stack| {
+                move |text: &str| {
+                    let handle = runs.prepare(stack, text, search_run_key, chrome_reuse);
+                    runs.view(&handle).map(|view| view.raw_width_px())
+                }
+            });
             search_badge_content_width(
                 SEARCH_BADGE_ICON,
                 label,
                 search_font_size,
-                self.chrome_px(SEARCH_BAR_ICON_GAP),
-                self.font_stack.as_ref(),
+                search_gap_px,
+                measure.as_mut().map(|measure| measure as &mut dyn FnMut(&str) -> Option<f32>),
             )
         });
         let search_bar_layout = search_content_width.map(|content_w| {
@@ -7235,12 +7252,15 @@ impl GpuRenderer {
             // overlay glyph instance vec (sits above quad_overlay).
             if let (Some(stack), Some(search_state)) = (self.font_stack.as_ref(), search) {
                 let mut wt = stack.clone();
+                let icon_measure = self.chrome_caches.runs.prepare(
+                    stack,
+                    SEARCH_BADGE_ICON,
+                    search_run_key,
+                    chrome_reuse,
+                );
                 let icon_w = conservative_badge_text_width(
                     estimate_badge_text_width(SEARCH_BADGE_ICON, search_font_size),
-                    crate::frame_stats::shape_request(|| {
-                        stack.measure_text_width_for_frame(SEARCH_BADGE_ICON)
-                    })
-                    .ok(),
+                    self.chrome_caches.runs.view(&icon_measure).map(|view| view.raw_width_px()),
                 );
                 let icon_x = layout.border.x + self.chrome_px(SEARCH_BAR_PAD_LEFT);
                 let text_x = icon_x + icon_w + self.chrome_px(SEARCH_BAR_ICON_GAP);
@@ -7265,22 +7285,31 @@ impl GpuRenderer {
                     font_size_px: search_font_size,
                     native_em_px: search_font_size,
                 };
-                // One shaped run feeds caret, highlight, scroll, and the painted glyphs.
-                let search_run = chrome_text::ChromeShapedRun::shape(
+                // One run, kept or shaped now, feeds caret, highlight, scroll, and the glyphs.
+                let label_handle = self.chrome_caches.runs.prepare(
                     stack,
                     &search_text.label,
-                    ChromeAttrs::default(),
-                    search_font_size,
-                    search_font_size,
+                    search_run_key,
+                    chrome_reuse,
                 );
+                // The icon draws only on a drawable surface, as `chrome_text::layout` decides.
+                let icon_handle = (sw > 0.0 && sh > 0.0).then(|| {
+                    self.chrome_caches.runs.prepare(
+                        stack,
+                        SEARCH_BADGE_ICON,
+                        search_run_key,
+                        chrome_reuse,
+                    )
+                });
+                let search_run = self.chrome_caches.runs.view(&label_handle);
                 if search_run.is_none() {
                     // An unshaped label paints nothing, so every visible character is missing.
                     chrome_text::note_unshaped_chrome(&search_text.label);
                 }
-                let search_field = search_run.as_ref().map(|run| {
+                let search_field = search_run.map(|run| {
                     plan_field(
                         search_placement,
-                        &FieldBoundaries::from_run(run),
+                        &FieldBoundaries::from_view(run),
                         &search_text,
                         search_text.caret,
                         search_text.selection.clone(),
@@ -7290,32 +7319,48 @@ impl GpuRenderer {
                 });
                 field_candidates.search = search_field;
                 let baseline = layout.border.y + (layout.border.h + search_font_size * 0.8) * 0.5;
-                let icon_layout = chrome_text::layout(
-                    stack,
-                    &mut wt,
-                    &mut self.glyph_atlas,
-                    SEARCH_BADGE_ICON,
-                    search_badge_fg,
-                    ChromeAttrs::default(),
-                    search_font_size,
-                    search_font_size,
-                    (icon_x, baseline),
-                    (sw, sh),
-                    Some(ChromeClip {
-                        x: layout.border.x,
-                        y: layout.border.y,
-                        w: layout.border.w,
-                        h: layout.border.h,
-                    }),
-                );
+                let icon_clip = Some(ChromeClip {
+                    x: layout.border.x,
+                    y: layout.border.y,
+                    w: layout.border.w,
+                    h: layout.border.h,
+                });
+                let icon_view = icon_handle.as_ref().and_then(|handle| self.chrome_caches.runs.view(handle));
+                let icon_layout = match icon_view {
+                    // When: the icon run is kept or shaped, it draws without shaping again.
+                    Some(view) => chrome_text::layout_view(
+                        view,
+                        &mut wt,
+                        &mut self.glyph_atlas,
+                        search_badge_fg,
+                        (icon_x, baseline),
+                        (sw, sh),
+                        icon_clip,
+                        GlyphRasterVariant::Normal,
+                    ),
+                    // When: no surface or no run, the layout decides as it always did.
+                    None => chrome_text::layout(
+                        stack,
+                        &mut wt,
+                        &mut self.glyph_atlas,
+                        SEARCH_BADGE_ICON,
+                        search_badge_fg,
+                        ChromeAttrs::default(),
+                        search_font_size,
+                        search_font_size,
+                        (icon_x, baseline),
+                        (sw, sh),
+                        icon_clip,
+                    ),
+                };
                 overlay_glyph_instances.extend(icon_layout.glyphs);
                 quads_overlay.extend(icon_layout.missing_boxes);
                 let label_start = overlay_glyph_instances.len();
                 // Tofu outlines of the label; drawn after the selection and caret quads.
                 let mut field_tofu: Vec<QuadInstance> = Vec::new();
-                if let (Some(run), Some(field)) = (search_run.as_ref(), search_field) {
+                if let (Some(run), Some(field)) = (search_run, search_field) {
                     // The label paints from the run its field geometry was measured on.
-                    let chrome_layout = chrome_text::layout_prepared(
+                    let chrome_layout = chrome_text::layout_view(
                         run,
                         &mut wt,
                         &mut self.glyph_atlas,
@@ -7562,7 +7607,7 @@ impl GpuRenderer {
             );
             if let Some(layout) = layout {
                 let chrome =
-                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
+                    self.chrome_caches.palette.palette_for(theme);
                 let rect = layout.border;
                 quads_overlay.push(QuadInstance::rounded(
                     px_to_ndc(rect.x, rect.y, rect.w, rect.h, sw, sh),
@@ -7613,7 +7658,7 @@ impl GpuRenderer {
             // When: `palette_layout` is Some — the palette is open, so its
             // panel, query row, and result rows all need chrome this frame.
             let palette_chrome =
-                sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
+                self.chrome_caches.palette.palette_for(theme);
             let accent_rgba = palette_chrome.accent;
             // Full-window scrim — sits below the modal so the underlying
             // terminal recedes visually.
@@ -8293,7 +8338,7 @@ impl GpuRenderer {
                 let lh = (ly1 - ly0).max(2.0 * dpi);
                 // Drop-line accent — theme-driven (was hardcoded ACCENT_BLUE).
                 let line_color = with_premultiplied_alpha(
-                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme)
+                    self.chrome_caches.palette.palette_for(theme)
                         .accent,
                     0.95,
                 );

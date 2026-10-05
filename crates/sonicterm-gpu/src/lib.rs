@@ -27,6 +27,11 @@
 pub mod atlas_upload;
 /// Batch chrome text into the shared atlas and production [`wezterm_pipeline`] buffer.
 pub mod chrome_text;
+/// Device-free chrome caches: tab titles, search-overlay runs and the UI palette.
+pub(crate) mod chrome_cache;
+/// Test seam over the chrome caches for integration tests; not a supported API.
+#[doc(hidden)]
+pub mod chrome_cache_seam;
 /// Color / sRGB conversion helpers that produce `wgpu::Color` and linear RGBA
 /// arrays from chrome-text colors and `#rrggbb` strings. They consume
 /// [`color::ChromeColor`] and keep GPU color conversion behind this crate's
