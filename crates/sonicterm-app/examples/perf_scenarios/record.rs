@@ -105,6 +105,7 @@ pub(crate) fn snapshot_echo(grid: &Grid, target: &EchoTarget) -> EchoSnapshot {
 
 /// Whether either snapshot of a dispatch read a row identity other than `armed`; the harness's own
 /// check, which catches a change the worker never saw (an event-loop resize, for one).
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub(crate) fn snapshot_identity_changed(
     observation: &DispatchObservation,
     armed: RowIdentity,
@@ -202,6 +203,7 @@ pub(crate) fn attribute_dispatch(observation: &DispatchObservation) -> Attributi
 
 /// Whether a sample of `scenario`/`variant` is split at the flush: only S2's single idle pane.
 /// S2/flood types into a pane beside a flood, so its samples are never armed.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub(crate) fn split_in_scope(scenario: &str, variant: &str) -> bool {
     (scenario, variant) == ("S2", "default")
 }
@@ -243,6 +245,7 @@ pub(crate) const SPLIT_REASONS: [&str; 22] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ArmState {
     /// The sample is outside the split's scope (not S2/default); nothing was armed.
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     OutOfScope,
     /// This build has no `perf-echo-trace`; nothing was armed.
     // Built only by the fallback adapter, which exists only without perf-echo-trace.
@@ -721,6 +724,7 @@ pub(crate) mod echo_api {
     }
 
     /// Unreachable: no token exists.
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     pub(crate) fn discard(_app: &mut App, _pane: u64, token: EchoToken) {
         match token {}
     }
