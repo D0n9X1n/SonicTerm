@@ -1294,3 +1294,24 @@ fn a_shrink_or_a_reset_rewrites_the_index_pattern() {
     assert_eq!(after.red_columns, vec![5]);
     assert_eq!(harness.index_buffer(), build_indices(1));
 }
+
+/// Empty draws count toward the 600-call shrink window: after one wide draw, a window made only of
+/// empty draws closes oversized and shrinks the buffers, and the next non-empty draw rewrites the
+/// index pattern for the new capacity.
+#[test]
+fn a_window_of_empty_draws_still_shrinks_the_buffers() {
+    let mut harness = FrameHarness::new(1);
+    let wide: Vec<QuadInstance> = (0..64).map(|index| red_column(index % HARNESS_WIDTH)).collect();
+    let _grown = harness.draw(None, &wide, &[]);
+    assert!(harness.pipeline.index_capacity >= 64 * INDICES_PER_QUAD as u64, "precondition");
+    // The wide draw opened the first window (peak 64), which closes unshrunk; the second window
+    // holds only empty draws, so its peak is zero and it closes oversized.
+    for _ in 0..2 * SHRINK_WINDOW_CALLS - 1 {
+        let empty = harness.draw(None, &[], &[]);
+        assert!(empty.red_columns.is_empty(), "an empty draw draws nothing");
+    }
+    assert_eq!(harness.pipeline.index_capacity, INDICES_PER_QUAD as u64, "shrunk to 1 quad");
+    let next = harness.draw(None, &[red_column(4)], &[]);
+    assert_eq!(next.red_columns, vec![4]);
+    assert_eq!(harness.index_buffer(), build_indices(1));
+}

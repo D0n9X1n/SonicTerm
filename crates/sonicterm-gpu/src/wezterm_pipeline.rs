@@ -498,7 +498,9 @@ impl WeztermPipeline {
         release_scratch_excess(&mut vertices, used_vertices);
         self.vertex_scratch = vertices;
         if main_range.end == 0 {
-            // When: `main_range.end` is zero, the frame emitted no vertices and nothing is drawn.
+            // When: `main_range.end` is zero, nothing is drawn, but the call still counts toward the
+            // shrink window, so a run of empty frames releases buffers a large frame grew.
+            self.shrink_if_oversized(device, 0);
             return;
         }
         self.ensure_capacity(device, used_vertices as u64, u64::from(main_range.end));

@@ -382,7 +382,7 @@ the frame texture and present buffers the trim gave back, as request sizes, not
 residency, and outside the total.
 
 While a window is visible, the present buffers shrink too: at the end of each
-600-draw window, if their capacity exceeds four times that window's peak use
+600-draw window, empty draws included, if their capacity exceeds four times that window's peak use
 and the initial 4,096 quads, both are recreated at twice the peak rounded up to
 a power of two, never below 4,096 quads.
 
