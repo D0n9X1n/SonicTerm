@@ -31,6 +31,7 @@ python3 scripts/local-gate.py
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
+| `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS、Windows、Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
@@ -45,6 +46,7 @@ python3 scripts/local-gate.py
 | `perf-scenarios-counters-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
 | `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS、Windows | `local` | `rust`、`native` | `macos-core`、`windows-tests` |
 | `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
+| `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
@@ -336,6 +338,15 @@ PR 与 Change。
   早于这些事实构建的 base 显示 `n/a`。
 - S2 只在能把样本无歧义地归属到某一帧时才计入按键到呈现的延迟，并报告归属覆盖率；阅读延迟时
   要同时看覆盖率。
+- 当测试工具以 `perf-echo-trace` 构建且计数器开启时，S2/default 被记功的样本还会在 flush 发布处拆分
+  （各部分的定义见[日志](Logging-zh-CN#s2-回显监视)）。测试工具的 `--list` 在每种构建中都声明
+  `capabilities.latency_split_schema: 1`，其 `latency` 对象随之带有 `split_schema: 1`、`split_count`、
+  `split_reasons` 与 `split_coverage`。对比从 head 的列表读取这一能力，并以它约束两侧，因为两侧运行的
+  都是 head 的测试工具；早于该能力的 head 沿用旧的延迟约定。无法拆分的样本给出 22 种原因之一；
+  `unsupported` 表示未启用该特性的构建，或 S2/default 之外的变体。计数器表增加 S2/default `typing` 行：
+  三个部分的中位数与 p95、投递滞后的 p95、拆分覆盖率，以及原因计数与 suppressed、coalesced、
+  `sync_open` 的计数。未启用该特性构建的 base 显示 `n/a (unsupported)`。计时运行保持计数器关闭，因此
+  其样本记为 `arm-gate-off`。
 
 使用 `--counters` 时，计时对比表（以及运行了 lap 组时的 lap 表）之后还有两张表。Frame counters 表
 给出 base 与 head 的计数器运行，每个场景、阶段与非零计数器一行；各字段的含义见[日志](Logging-zh-CN#帧与锁计数器)。
@@ -384,7 +395,7 @@ Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 
 | ID | 负载 |
 | --- | --- |
 | S1 | 空闲 60 秒。 |
-| S2 | 以每秒 10 个字符输入 200 个字符；按键到呈现的延迟及其归属覆盖率。 |
+| S2 | 以每秒 10 个字符输入 200 个字符；按键到呈现的延迟及其归属覆盖率，在计数器运行中于 flush 处拆分。 |
 | S3 | `yes \| head -n 2000000`，再 `cat` 一个 50 MB 文件（吞吐量），然后空闲 60 秒。 |
 | S4 | 每 10 毫秒刷新一次的可见 `date` 循环，持续 60 秒。 |
 | S5 | S4 的循环在后台标签页中运行，活动标签页保持空闲。 |

@@ -56,7 +56,8 @@ const fn capped(spec: ScenarioSpec, run_caps: &'static [(&'static str, u32)]) ->
     ScenarioSpec { run_caps, ..spec }
 }
 
-/// The `--list` document: schema version 1 and every scenario with its bounds.
+/// The `--list` document: schema version 1, the harness's capabilities and every scenario with
+/// its bounds.
 pub(crate) fn list_json() -> String {
     let scenarios: Vec<_> = SCENARIOS
         .iter()
@@ -80,8 +81,16 @@ pub(crate) fn list_json() -> String {
             entry
         })
         .collect();
-    serde_json::json!({ "schema_version": 1, "scenarios": scenarios }).to_string()
+    // The capability is unconditional: every build of this harness writes the split fields, a build
+    // without perf-echo-trace with every credited sample `unsupported`.
+    let capabilities = serde_json::json!({ "latency_split_schema": SPLIT_SCHEMA });
+    serde_json::json!({ "schema_version": 1, "capabilities": capabilities, "scenarios": scenarios })
+        .to_string()
 }
+
+/// The schema of the split fields in `latency`; a harness that writes them lists the same number
+/// in `--list` as `capabilities.latency_split_schema`.
+pub(crate) const SPLIT_SCHEMA: u32 = 1;
 
 /// The catalog entry for `id`, if the harness knows it.
 #[cfg(any(target_os = "macos", windows, test))]

@@ -33,6 +33,7 @@ python3 scripts/local-gate.py
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
@@ -47,6 +48,7 @@ python3 scripts/local-gate.py
 | `perf-scenarios-counters-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS, Windows | `local` | `rust`, `native` | `macos-core`, `windows-tests` |
 | `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
+| `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
@@ -472,6 +474,20 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
 - S2 credits a keypress-to-present latency only when it can attribute the
   sample to one frame unambiguously, and reports the attribution coverage; read
   the latency together with its coverage.
+- S2/default's credited samples are also split at the flush publication when the
+  harness is built with `perf-echo-trace` and the counter gate is on
+  ([Logging](Logging#the-s2-echo-watch) defines the parts). The harness's `--list`
+  declares `capabilities.latency_split_schema: 1` in every build, and its
+  `latency` object then carries `split_schema: 1`, `split_count`,
+  `split_reasons` and `split_coverage`. The comparison reads the capability from
+  the head's list and holds both sides to it, because both run the head's
+  harness; a head that predates it keeps the old latency contract. A sample that
+  cannot be split names one of 22 reasons; `unsupported` means a build without
+  the feature or a variant outside S2/default. The counters table adds S2/default
+  `typing` rows: the three parts' median and p95, delivery lag p95, split
+  coverage, and the reason counts with the suppressed, coalesced and `sync_open`
+  counts. A base built without the feature reads `n/a (unsupported)`. The timed
+  runs keep the gate off, so their samples read `arm-gate-off`.
 
 With `--counters`, two more tables follow the timed table (and the laps table,
 when run). The Frame counters table shows the counters runs of the base and the
@@ -549,7 +565,7 @@ display with its refresh rate and scale.
 | ID | Workload |
 | --- | --- |
 | S1 | Idle for 60 s. |
-| S2 | Type 200 characters at 10 per second; keypress-to-present latency with its attribution coverage. |
+| S2 | Type 200 characters at 10 per second; keypress-to-present latency with its attribution coverage, split at the flush in counters runs. |
 | S3 | `yes \| head -n 2000000`, then `cat` of a 50 MB file (throughput), then 60 s idle. |
 | S4 | A visible `date` loop every 10 ms for 60 s. |
 | S5 | The S4 loop in a background tab while the active tab idles. |

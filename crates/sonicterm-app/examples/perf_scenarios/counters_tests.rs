@@ -321,14 +321,33 @@ const GATED_CALLS: &[&str] = &[
     "gate_on(",
 ];
 
-/// Each counter API call in `text` outside a `#[cfg(feature = "perf-counters")]` item, by line.
-fn ungated_calls(text: &str) -> Vec<String> {
+/// The counter API's gate.
+const COUNTERS_GATE: &str = "#[cfg(feature = \"perf-counters\")]";
+
+/// The echo-watch API's gate.
+const ECHO_TRACE_GATE: &str = "#[cfg(feature = \"perf-echo-trace\")]";
+
+/// The echo-watch API the harness may name only behind `perf-echo-trace`: its calls and every type
+/// a base without the watch lacks.
+const ECHO_TRACE_CALLS: &[&str] = &[
+    "arm_echo_watch",
+    "take_echo_watch",
+    "ArmToken",
+    "EchoTrace",
+    "ArmOutcome",
+    "TakeOutcome",
+    "EchoWatchTarget",
+    "EchoRowIdentity",
+    "EchoDeliveryOutcome",
+];
+
+/// Each of `calls` in `text` outside an item gated by `gate`, by line.
+fn ungated_calls(text: &str, gate: &str, calls: &[&str]) -> Vec<String> {
     // A CRLF checkout is read as LF, so line numbers and comment starts match either way.
     let text = &text.replace("\r\n", "\n");
-    const GATE: &str = "#[cfg(feature = \"perf-counters\")]";
     let mut gated = Vec::new();
-    for (offset, _) in text.match_indices(GATE) {
-        let after = offset + GATE.len();
+    for (offset, _) in text.match_indices(gate) {
+        let after = offset + gate.len();
         let open = after + text[after..].find('{').expect("a gated item has a body");
         let mut depth = 0_usize;
         for (index, character) in text[open..].char_indices() {
@@ -346,7 +365,7 @@ fn ungated_calls(text: &str) -> Vec<String> {
         }
     }
     let mut found = Vec::new();
-    for call in GATED_CALLS {
+    for call in calls {
         for (offset, _) in text.match_indices(call) {
             let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
             let comment = text[line_start..offset].trim_start().starts_with("//");
@@ -372,13 +391,68 @@ fn every_counter_api_call_in_the_harness_is_behind_the_feature() {
         }
         scanned += 1;
         let source = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
-        let found = ungated_calls(&source);
+        let found = ungated_calls(&source, COUNTERS_GATE, GATED_CALLS);
         assert!(found.is_empty(), "{name}: {found:#?}");
     }
     assert!(scanned >= 10, "the harness sources were not found");
     // Negative fixture: the same call outside a gated item is reported.
     let fixture = "#[cfg(feature = \"perf-counters\")]\nfn on(app: &mut App) {\n    app.force_frame_counters_on();\n}\n\nfn off(app: &mut App) {\n    let _ = app.frame_counters_snapshot();\n}\n";
-    assert_eq!(ungated_calls(fixture), vec!["7: frame_counters_snapshot".to_owned()]);
+    assert_eq!(
+        ungated_calls(fixture, COUNTERS_GATE, GATED_CALLS),
+        vec!["7: frame_counters_snapshot".to_owned()]
+    );
+}
+
+#[test]
+fn every_echo_trace_call_in_the_harness_is_behind_its_feature() {
+    // perf-compare overlays this harness onto a base whose App has no echo watch, so an ungated
+    // reference to the watch's API would not compile there.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/perf_scenarios");
+    let mut scanned = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let entry_path = entry.unwrap().path();
+        let name = entry_path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+            continue;
+        }
+        scanned += 1;
+        let source = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
+        let found = ungated_calls(&source, ECHO_TRACE_GATE, ECHO_TRACE_CALLS);
+        assert!(found.is_empty(), "{name}: {found:#?}");
+    }
+    assert!(scanned >= 10, "the harness sources were not found");
+    // Negative fixture: an arm outside the gated item is reported; the gated one is not.
+    let fixture = "#[cfg(feature = \"perf-echo-trace\")]\nmod on {\n    fn arm(app: &mut App) {\n        app.take_echo_watch(1, token);\n    }\n}\n\nfn off(app: &mut App) {\n    app.arm_echo_watch(1, target);\n}\n";
+    assert_eq!(
+        ungated_calls(fixture, ECHO_TRACE_GATE, ECHO_TRACE_CALLS),
+        vec!["9: arm_echo_watch".to_owned()]
+    );
+}
+
+/// A feature-on build whose App never turned the counter gate on arms nothing: every credited
+/// sample reads `arm-gate-off`, through the same arm, take and split path the probe runs.
+#[cfg(feature = "perf-echo-trace")]
+#[test]
+fn gate_off_run_reads_arm_gate_off_for_every_credited_sample() {
+    use crate::record::{echo_api, echo_outcome, echo_target, LatencySample, RowIdentity};
+    let mut app = sonicterm_app::app::App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let pane = app.__test_seed_tab("s2");
+    let injected = std::time::Instant::now();
+    let samples: Vec<_> = (0..5_u32)
+        .map(|index| {
+            let target = echo_target((0, 6), 80, index);
+            let arm = echo_api::arm(&mut app, pane, &target, RowIdentity::default());
+            let outcome = echo_outcome(arm, |token| echo_api::take(&mut app, pane, token, None));
+            let ended = injected + std::time::Duration::from_millis(u64::from(index) + 1);
+            LatencySample::credited(f64::from(index), injected, ended, &outcome, false)
+        })
+        .collect();
+    assert!(samples.iter().all(|sample| sample.split_reason == "arm-gate-off"), "{samples:?}");
+    assert!(samples.iter().all(|sample| sample.split.is_none() && sample.latency_ms.is_some()));
 }
 
 /// The window, vt and renderer fields a base without the newest counters cannot read, by API name.
@@ -512,7 +586,13 @@ fn the_feature_gate_scan_reads_a_crlf_checkout_as_it_reads_an_lf_one() {
         }
         let lf_text = std::fs::read_to_string(&entry_path).unwrap().replace("\r\n", "\n");
         let crlf_text = lf_text.replace('\n', "\r\n");
-        assert_eq!(ungated_calls(&crlf_text), ungated_calls(&lf_text), "{name}");
+        for (gate, calls) in [(COUNTERS_GATE, GATED_CALLS), (ECHO_TRACE_GATE, ECHO_TRACE_CALLS)] {
+            assert_eq!(
+                ungated_calls(&crlf_text, gate, calls),
+                ungated_calls(&lf_text, gate, calls),
+                "{name}"
+            );
+        }
     }
 }
 

@@ -7089,10 +7089,17 @@ class FrameTextureFeatureTests(PrebuiltHarness, unittest.TestCase):
 
     def test_the_gate_reviews_one_build_per_feature_set(self):
         # Every feature combination has the gate's own reviewed steps; the plain and counters sets are the old ones.
+        # Four features give 16 ordered subsets, each with its four side/example build steps.
         catalog = REAL_GATE.PERF_FEATURE_BUILDS
-        counters, texture, hook = perf.PERF_FEATURES
-        self.assertEqual(set(catalog), {(), (counters,), (texture,), (hook,), (counters, texture),
-                                        (counters, hook), (texture, hook), (counters, texture, hook)})
+        counters, texture, hook, echo = perf.PERF_FEATURES
+        self.assertEqual(echo, "perf-echo-trace")
+        subsets = [()]
+        for feature in perf.PERF_FEATURES:
+            subsets += [subset + (feature,) for subset in subsets]
+        self.assertEqual(set(catalog), set(subsets))
+        self.assertEqual(len(catalog), 16)
+        self.assertIn((counters, texture, hook, echo), catalog)
+        self.assertEqual(sum(len(steps) for steps in catalog.values()), 64)
         for features, steps in catalog.items():
             for step in steps.values():
                 self.assertTrue(REAL_GATE._reviewed_step(step))
@@ -8320,6 +8327,295 @@ class RowGlyphCacheReportTests(unittest.TestCase):
         self.assertEqual(hit[0][3:], ["n/a", "0.750 (3/4, 1/1 runs)", "n/a"])
         quiet, _omitted = perf.counter_rows("S1/default", counters_side({}), counters_side({}))
         self.assertFalse([row for row in quiet if "=" in row[2]])
+
+
+def split_sample(parts=(2.0, 3.0, 5.0), **overrides):
+    """A credited sample split into `parts` (ms), whose latency is their sum; overrides replace sample keys."""
+    split = {"input_to_parse_ms": parts[0], "parse_to_publication_ms": parts[1],
+             "publication_to_present_ms": parts[2], "delivery_lag_us": 40.0, "delivery": "sent",
+             "coalesced": False, "sync_open": False, "echo_generation": 3}
+    sample = {"inject_unix_s": 1.0, "latency_ms": sum(parts), "attributed": True, "reason": "credited",
+              "split": split, "split_reason": "split"}
+    sample.update(overrides)
+    return sample
+
+
+def reason_sample(split_reason, latency_ms=8.0):
+    """A sample with no split: credited when `latency_ms` is a number, else uncredited."""
+    return {"inject_unix_s": 2.0, "latency_ms": latency_ms, "attributed": latency_ms is not None,
+            "reason": "credited" if latency_ms is not None else "no-candidate", "split": None,
+            "split_reason": split_reason}
+
+
+def split_latency(samples):
+    """A schema-1 latency object whose aggregates are recomputed from `samples`, as the harness writes it."""
+    credited = [sample for sample in samples if sample["latency_ms"] is not None]
+    reasons = {}
+    for sample in credited:
+        reasons[sample["split_reason"]] = reasons.get(sample["split_reason"], 0) + 1
+    split_count = reasons.get("split", 0)
+    return {"samples": samples, "attributed": len(credited), "total": len(samples),
+            "coverage": len(credited) / len(samples) if samples else 0.0, "split_schema": 1,
+            "split_count": split_count, "split_reasons": reasons,
+            "split_coverage": split_count / len(credited) if credited else None}
+
+
+def split_problems(latency, schema=1):
+    """What validate_result reports for a result carrying `latency`, under the harness's split schema."""
+    return perf.validate_result(valid_result(latency=latency), HARNESS_HASH, 0, latency_split_schema=schema)
+
+
+LIST_WITH_SPLIT = {**LIST_JSON, "capabilities": {"latency_split_schema": 1}}
+
+
+def split_side(*samples_per_run):
+    """A side's valid counters runs, each carrying one latency object built from its samples."""
+    return perf.SideRuns(outcomes=[make_outcome(result=counters_result(latency=split_latency(list(samples))))
+                                   for samples in samples_per_run])
+
+
+class LatencySplitTests(CompareHarness, unittest.TestCase):
+    def test_scenario_list_reads_the_latency_split_capability(self):
+        # A harness that writes the split fields lists the schema; every scenario carries it into its plans.
+        scenarios = perf.parse_scenario_list(json.dumps(LIST_WITH_SPLIT))
+        self.assertEqual([scenario.latency_split_schema for scenario in scenarios], [1, 1])
+
+    def test_a_list_without_capabilities_is_a_legacy_harness(self):
+        # A head that predates the split lists no capabilities, and its results keep the old contract.
+        scenarios = perf.parse_scenario_list(json.dumps(LIST_JSON))
+        self.assertEqual([scenario.latency_split_schema for scenario in scenarios], [None, None])
+
+    def test_an_unknown_split_capability_is_refused(self):
+        # An unknown schema, a non-object, a non-integer value (True and 1.0 included) or an extra key cannot be
+        # validated, so the list is refused rather than read as legacy.
+        for capabilities in ({"latency_split_schema": 2}, [], "1", {"latency_split_schema": True},
+                             {"latency_split_schema": 1.0}, {"latency_split_schema": 1, "other": 1}, {}):
+            with self.subTest(capabilities=capabilities), self.assertRaises(ValueError):
+                perf.parse_scenario_list(json.dumps({**LIST_JSON, "capabilities": capabilities}))
+
+    def test_an_older_head_with_a_matching_hash_and_unsplit_latency_is_accepted(self):
+        # With no declared schema the latency object is read as before; split fields, even malformed, are not
+        # required and not trusted.
+        legacy = {"samples": [{"inject_unix_s": 2.0, "latency_ms": 7.5, "attributed": True, "reason": "credited"}],
+                  "attributed": 1, "total": 1, "coverage": 1.0}
+        self.assertEqual(split_problems(legacy, schema=None), [])
+        self.assertEqual(split_problems({**legacy, "split_count": "many"}, schema=None), [])
+
+    def test_a_schema_1_harness_without_the_discriminator_fails(self):
+        # A harness that declares schema 1 must say so in every latency object.
+        latency = split_latency([split_sample()])
+        self.assertEqual(split_problems(latency), [])
+        del latency["split_schema"]
+        problems = split_problems(latency)
+        self.assertTrue(any("split_schema" in problem for problem in problems), problems)
+        self.assertEqual(split_problems(latency, schema=None), [])
+
+    def test_a_schema_1_harness_missing_split_fields_fails(self):
+        # Every sample, every report field, and an empty list's zero aggregates are required.
+        no_reason = split_latency([split_sample(), reason_sample("unsupported")])
+        for sample in no_reason["samples"]:
+            del sample["split_reason"]
+        mixed = split_latency([split_sample(), reason_sample("unsupported")])
+        del mixed["samples"][1]["split_reason"]
+        empty_with_counts = {**split_latency([]), "attributed": 2, "split_count": 1, "split_reasons": {"split": 1},
+                             "split_coverage": 0.5}
+        cases = {"every sample": no_reason, "one sample": mixed, "empty with counts": empty_with_counts}
+        for field_name in ("split_count", "split_reasons", "split_coverage"):
+            missing = split_latency([split_sample()])
+            del missing[field_name]
+            cases[f"no {field_name}"] = missing
+        for name, latency in cases.items():
+            with self.subTest(name):
+                self.assertTrue(split_problems(latency))
+
+    def test_an_overlaid_base_without_the_feature_still_requires_schema_1(self):
+        # Both sides run the head's overlaid harness, so the head's list decides both plans' schema; a base
+        # result without the discriminator is then refused like a head result.
+        code, _gate, _calls, plans, _work, _out = self.compare(listing=LIST_WITH_SPLIT)
+        self.assertEqual(code, 0)
+        self.assertEqual({plan.side for plan in plans}, {"base", "head"})
+        self.assertEqual({plan.latency_split_schema for plan in plans}, {1})
+        base_plan = next(plan for plan in plans if plan.side == "base")
+        unmarked = split_latency([reason_sample("unsupported")])
+        del unmarked["split_schema"]
+        self.assertTrue(perf.validate_result(valid_result(latency=unmarked), HARNESS_HASH, 0, partial_counters=True,
+                                             latency_split_schema=base_plan.latency_split_schema))
+
+    def test_split_validation_rejects_each_rule(self):
+        # One valid object (a split, an unsupported and an uncredited sample); each rule broken alone is refused.
+        def base():
+            return split_latency([split_sample(), reason_sample("unsupported"), reason_sample("not-credited", None)])
+        self.assertEqual(split_problems(base()), [])
+
+        def sample_change(position, **changes):
+            def change(latency):
+                latency["samples"][position].update(changes)
+            return change
+
+        def split_change(**changes):
+            def change(latency):
+                latency["samples"][0]["split"].update(changes)
+            return change
+
+        def report_change(**changes):
+            def change(latency):
+                latency.update(changes)
+            return change
+
+        rules = {
+            "unknown reason": sample_change(1, split_reason="made-up"),
+            "credited reads not-credited": sample_change(1, split_reason="not-credited"),
+            "uncredited reads a reason": sample_change(2, split_reason="unsupported"),
+            "negative latency": sample_change(1, latency_ms=-1.0),
+            "string latency": sample_change(1, latency_ms="slow"),
+            "split for another reason": sample_change(1, split=dict(split_sample()["split"])),
+            "no split for split": sample_change(0, split=None),
+            "negative part": split_change(input_to_parse_ms=-0.5),
+            "infinite part": split_change(parse_to_publication_ms=float("inf")),
+            "string lag": split_change(delivery_lag_us="slow"),
+            "refused delivery": split_change(delivery="refused"),
+            "coalesced not a boolean": split_change(coalesced=0),
+            "sync_open not a boolean": split_change(sync_open=None),
+            "negative generation": split_change(echo_generation=-1),
+            "fractional generation": split_change(echo_generation=1.5),
+            "boolean generation": split_change(echo_generation=True),
+            "parts off the latency": split_change(publication_to_present_ms=5.01),
+            "attributed": report_change(attributed=3),
+            "reasons": report_change(split_reasons={"split": 1, "unsupported": 1, "not-credited": 1}),
+            "boolean reason count": report_change(split_reasons={"split": True, "unsupported": 1}),
+            "split count": report_change(split_count=2),
+            "coverage": report_change(split_coverage=1.0),
+            "null coverage when credited": report_change(split_coverage=None),
+        }
+        for name, change in rules.items():
+            with self.subTest(name):
+                latency = base()
+                change(latency)
+                self.assertTrue(split_problems(latency))
+        # Serialized parts are rounded per part, so a sum within 0.001 ms of the latency is accepted.
+        within = base()
+        within["samples"][0]["split"]["publication_to_present_ms"] = 5.0009
+        self.assertEqual(split_problems(within), [])
+
+    def test_a_schema_1_report_must_carry_every_nullable_key(self):
+        # A key the schema allows to be null must still be present: dropping it is an incomplete contract, not
+        # a null. Explicit nulls in the same places stay valid.
+        def without(latency, key, position=None):
+            if position is None:
+                del latency[key]
+            else:
+                del latency["samples"][position][key]
+            return latency
+        self.assertEqual(split_problems(split_latency([])), [])
+        self.assertEqual(split_problems(split_latency([reason_sample("not-credited", None),
+                                                       reason_sample("unsupported")])), [])
+        cases = {
+            "empty report without split_coverage": without(split_latency([]), "split_coverage"),
+            "uncredited sample without split": without(split_latency([reason_sample("not-credited", None)]),
+                                                       "split", 0),
+            "uncredited sample without latency_ms": without(split_latency([reason_sample("not-credited", None)]),
+                                                            "latency_ms", 0),
+            "unsupported credited sample without split": without(split_latency([reason_sample("unsupported")]),
+                                                                  "split", 0),
+        }
+        for name, latency in cases.items():
+            with self.subTest(name):
+                problems = split_problems(latency)
+                self.assertTrue(any("missing" in problem for problem in problems), problems)
+
+    def test_split_validation_rejects_fabricated_aggregates(self):
+        # Mutually consistent aggregates that the samples do not support are refused: no sample is split.
+        fabricated = split_latency([reason_sample("unsupported")])
+        fabricated.update(split_count=10, split_reasons={"split": 10}, split_coverage=1.0, attributed=10)
+        problems = split_problems(fabricated)
+        for field_name in ("attributed", "split_reasons", "split_count", "split_coverage"):
+            self.assertTrue(any(problem.startswith(f"latency {field_name}") for problem in problems), field_name)
+
+    def test_an_empty_split_report_validates(self):
+        # No samples: zero counts, no reasons and null coverage.
+        self.assertEqual(split_problems(split_latency([])), [])
+        self.assertEqual(split_latency([])["split_coverage"], None)
+
+    def test_split_rows_appear_only_for_s2_default(self):
+        # The split covers S2/default's typing phase alone, so no other variant gets rows.
+        side = split_side([split_sample(), split_sample((1.0, 1.0, 1.0)), reason_sample("unsupported")])
+        rows = perf.split_rows("S2/default", side, side, 1)
+        self.assertEqual([row[2] for row in rows], [row_label for row_label, _ in perf.SPLIT_ROWS])
+        self.assertTrue(all(row[:2] == ["S2/default", "typing"] for row in rows))
+        by_label = {row[2]: row for row in rows}
+        self.assertEqual(by_label["split input to parse, median (ms)"][4], "1.500 ms (2 splits)")
+        self.assertEqual(by_label["split coverage (%)"][4], "66.7% (2/3)")
+        self.assertEqual(by_label["split coverage (%)"][5], "+0.0%")
+        self.assertIn("split 2, unsupported 1", by_label["split reasons (credited samples)"][4])
+        self.assertIn("suppressed 0, coalesced 0, sync_open 0", by_label["split reasons (credited samples)"][4])
+        for label in ("S2/flood", "S1/default", "S10/sync"):
+            with self.subTest(label):
+                self.assertEqual(perf.split_rows(label, side, side, 1), [])
+
+    def test_split_rows_read_unsupported_on_a_base_without_the_feature(self):
+        # A base built without perf-echo-trace credits samples but splits none: its cells read n/a (unsupported)
+        # and nothing is compared; a head-only set reads n/a.
+        base = split_side([reason_sample("unsupported"), reason_sample("unsupported")])
+        head = split_side([split_sample(), reason_sample("arm-gate-off")])
+        rows = perf.split_rows("S2/default", base, head, 1)
+        timing = [row for row in rows if row[2] != "split reasons (credited samples)"]
+        self.assertTrue(all(row[3] == "n/a (unsupported)" for row in timing), timing)
+        self.assertTrue(all(row[5] == "n/a" for row in rows))
+        self.assertEqual(rows[0][4], "2.000 ms (1 splits)")
+        head_only = perf.split_rows("S2/default", perf.SideRuns(blocked=perf.COUNTERS_HEAD_ONLY), head, 1)
+        self.assertTrue(all(row[3] == "n/a" for row in head_only))
+
+    def test_split_coverage_reads_zero_unsupported_or_unavailable(self):
+        # Credited, supported samples with no split are 0% coverage, a number; only a build whose every credited
+        # sample reads unsupported is n/a (unsupported); no credited sample at all is unavailable. Timing cells
+        # without a split read n/a (no split), and an empty reason set is never taken as an unsupported build.
+        def cells(*samples):
+            rows = perf.split_rows("S2/default", split_side(list(samples)), split_side([split_sample()]), 1)
+            return {row[2]: row[3] for row in rows}
+        zero = cells(reason_sample("no-appearance-observed"), reason_sample("no-appearance-observed"))
+        self.assertEqual(zero["split coverage (%)"], "0.0% (0/2)")
+        self.assertEqual(zero["split input to parse, median (ms)"], "n/a (no split)")
+        unsupported = cells(reason_sample("unsupported"), reason_sample("unsupported"))
+        self.assertEqual(unsupported["split coverage (%)"], "n/a (unsupported)")
+        self.assertEqual(unsupported["split input to parse, median (ms)"], "n/a (unsupported)")
+        nothing = cells(reason_sample("not-credited", None))
+        self.assertEqual(nothing["split coverage (%)"], "unavailable")
+        self.assertEqual(nothing["split input to parse, median (ms)"], "n/a (no split)")
+
+    def test_split_rows_are_absent_for_a_legacy_head(self):
+        # A head harness without the capability has no split to tabulate, whatever its samples say.
+        side = split_side([split_sample()])
+        self.assertEqual(perf.split_rows("S2/default", side, side, None), [])
+
+    def test_tree_features_adds_echo_trace_only_with_counters(self):
+        # perf-echo-trace implies perf-counters: a tree builds with it only when it declares it and supports
+        # counters, and a build passes it after the other features.
+        echo_table = "\n[features]\nperf-counters = []\nperf-echo-trace = [\"perf-counters\"]\n"
+
+        def tree(manifest, logging_source):
+            temporary = tempfile.TemporaryDirectory()
+            self.addCleanup(temporary.cleanup)
+            root = Path(temporary.name)
+            (root / perf.APP_MANIFEST).parent.mkdir(parents=True)
+            (root / perf.APP_MANIFEST).write_text(manifest, encoding="utf-8")
+            (root / LOGGING_LIB).parent.mkdir(parents=True)
+            (root / LOGGING_LIB).write_text(logging_source, encoding="utf-8")
+            return root
+        self.assertEqual(perf.tree_features(tree(HEAD_MANIFEST + echo_table, LOGGING_WITH_FILTER)),
+                         ("perf-counters", "perf-echo-trace"))
+        self.assertEqual(perf.tree_features(tree(HEAD_MANIFEST + echo_table, LOGGING_WITHOUT_FILTER)), ())
+        self.assertEqual(perf.tree_features(tree(COUNTERS_MANIFEST, LOGGING_WITH_FILTER)), ("perf-counters",))
+        self.assertEqual(perf.build_argv("perf_scenarios", True, features=("perf-counters", "perf-echo-trace"))[-1],
+                         "perf-counters,perf-echo-trace")
+
+    def test_the_split_reasons_match_the_harness(self):
+        # The harness's precedence table is the reason set this script accepts, in the same order.
+        record = (Path(__file__).parent.parent / "crates" / "sonicterm-app" / "examples" / "perf_scenarios"
+                  / "record.rs").read_text(encoding="utf-8")
+        table = record.split("pub(crate) const SPLIT_REASONS: [&str; 22] = [", 1)[1].split("];", 1)[0]
+        listed = [name.strip().strip('"') for name in table.split(",") if name.strip()]
+        listed = ["split" if name == "SPLIT" else name for name in listed]
+        self.assertEqual(tuple(listed), perf.SPLIT_REASONS)
 
 
 if __name__ == "__main__":

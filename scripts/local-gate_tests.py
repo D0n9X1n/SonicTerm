@@ -512,7 +512,7 @@ class CustodyPolicyTests(unittest.TestCase):
         # Only these reviewed standalone compilation steps may accept forced owned cleanup.
         self.assertEqual({step.id for step in gate.STEPS if step.windows_policy == gate.WindowsPolicy.COMPILE_ONLY},
                          {"clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
-                          "doc", "doc-resource-features",
+                          "perf-scenarios-echo-trace-clippy", "doc", "doc-resource-features",
                           "release-windows", "windows-perf-build"})
         self.assertEqual(python_step("mixed", "pass").windows_policy, gate.WindowsPolicy.STRICT)
 

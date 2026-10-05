@@ -704,34 +704,35 @@ fn output_redraw_publishes_the_flush_before_sending() {
     use std::sync::atomic::Ordering::{Acquire, Relaxed};
     let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
     let counters = crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(&stats));
-    let target = Mutex::new(Some(7_u32));
+    let window_id = WindowId::from(7);
+    let target = Mutex::new(Some(window_id));
     let outstanding = AtomicBool::new(false);
     let mut sent = Vec::new();
-    send_output_redraw(&target, &outstanding, Some(&counters), |window| {
+    send_output_redraw(&target, &outstanding, Some(&counters), Instant::now, |window| {
         assert_ne!(counters.pending_flush.load(Acquire), 0, "published before the send");
         sent.push(window);
         true
     });
     outstanding.store(false, Relaxed);
-    send_output_redraw(&target, &outstanding, Some(&counters), |window| {
+    send_output_redraw(&target, &outstanding, Some(&counters), Instant::now, |window| {
         sent.push(window);
         true
     });
     assert_eq!((stats.flushes.load(Relaxed), stats.flushes_coalesced.load(Relaxed)), (2, 1));
     assert_ne!(counters.pending_flush.swap(0, Acquire), 0);
-    let untargeted = Mutex::new(None::<u32>);
+    let untargeted = Mutex::new(None::<WindowId>);
     outstanding.store(false, Relaxed);
-    send_output_redraw(&untargeted, &outstanding, Some(&counters), |window| {
+    send_output_redraw(&untargeted, &outstanding, Some(&counters), Instant::now, |window| {
         sent.push(window);
         true
     });
     assert_eq!(counters.pending_flush.load(Relaxed), 0, "nothing stored without a target");
     assert_eq!(stats.flushes_untargeted.load(Relaxed), 1);
-    send_output_redraw(&target, &outstanding, None, |window| {
+    send_output_redraw(&target, &outstanding, None, Instant::now, |window| {
         sent.push(window);
         true
     });
-    assert_eq!(sent, [7, 7, 7]);
+    assert_eq!(sent, [window_id; 3]);
 }
 
 /// N targeted flushes before their event is serviced send one event and count N-1 as
@@ -742,13 +743,14 @@ fn outstanding_output_event_coalesces_later_flushes() {
     use std::sync::atomic::Ordering::{Acquire, Relaxed};
     let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
     let counters = crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(&stats));
-    let target = Mutex::new(Some(7_u32));
+    let window_id = WindowId::from(7);
+    let target = Mutex::new(Some(window_id));
     let outstanding = AtomicBool::new(false);
     let mut sent = Vec::new();
     let flush_count = 5_u64;
     let mut first_published = 0;
     for flush in 0..flush_count {
-        send_output_redraw(&target, &outstanding, Some(&counters), |window| {
+        send_output_redraw(&target, &outstanding, Some(&counters), Instant::now, |window| {
             sent.push(window);
             true
         });
@@ -756,14 +758,14 @@ fn outstanding_output_event_coalesces_later_flushes() {
             first_published = counters.pending_flush.load(Acquire);
         }
     }
-    assert_eq!(sent, [7], "one event while it is outstanding");
+    assert_eq!(sent, [window_id], "one event while it is outstanding");
     assert!(outstanding.load(Acquire), "the token stays set until the event is serviced");
     assert_eq!(stats.flushes.load(Relaxed), flush_count);
     assert_eq!(stats.flushes_suppressed.load(Relaxed), flush_count - 1);
     assert_eq!(counters.pending_flush.load(Acquire), first_published, "oldest flush kept");
 
-    let untargeted = Mutex::new(None::<u32>);
-    send_output_redraw(&untargeted, &outstanding, Some(&counters), |window| {
+    let untargeted = Mutex::new(None::<WindowId>);
+    send_output_redraw(&untargeted, &outstanding, Some(&counters), Instant::now, |window| {
         sent.push(window);
         true
     });
@@ -775,12 +777,12 @@ fn outstanding_output_event_coalesces_later_flushes() {
     );
     assert!(outstanding.load(Acquire), "an untargeted flush leaves the token");
     outstanding.store(false, Relaxed);
-    send_output_redraw(&untargeted, &outstanding, Some(&counters), |window| {
+    send_output_redraw(&untargeted, &outstanding, Some(&counters), Instant::now, |window| {
         sent.push(window);
         true
     });
     assert!(!outstanding.load(Acquire), "an untargeted flush never sets the token");
-    assert_eq!(sent, [7]);
+    assert_eq!(sent, [window_id]);
 }
 
 /// A send the event loop refuses (it has gone) clears the token and is not counted as
@@ -790,26 +792,27 @@ fn failed_output_send_clears_the_token_and_the_next_flush_sends() {
     use std::sync::atomic::Ordering::{Acquire, Relaxed};
     let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
     let counters = crate::app::frame_counters::PaneFrameCounters::new(Arc::clone(&stats));
-    let target = Mutex::new(Some(7_u32));
+    let window_id = WindowId::from(7);
+    let target = Mutex::new(Some(window_id));
     let outstanding = AtomicBool::new(false);
     let mut attempts = Vec::new();
-    send_output_redraw(&target, &outstanding, Some(&counters), |window| {
+    send_output_redraw(&target, &outstanding, Some(&counters), Instant::now, |window| {
         attempts.push(window);
         false
     });
     assert!(!outstanding.load(Acquire), "a failed send releases the token");
     assert_eq!(stats.flushes_suppressed.load(Relaxed), 0, "a failed send is not suppressed");
-    send_output_redraw(&target, &outstanding, Some(&counters), |window| {
+    send_output_redraw(&target, &outstanding, Some(&counters), Instant::now, |window| {
         attempts.push(window);
         true
     });
-    assert_eq!(attempts, [7, 7], "the next flush sends");
+    assert_eq!(attempts, [window_id; 2], "the next flush sends");
     assert!(outstanding.load(Acquire), "a delivered send holds the token");
-    send_output_redraw(&target, &outstanding, Some(&counters), |window| {
+    send_output_redraw(&target, &outstanding, Some(&counters), Instant::now, |window| {
         attempts.push(window);
         true
     });
-    assert_eq!(attempts, [7, 7]);
+    assert_eq!(attempts, [window_id; 2]);
     assert_eq!(stats.flushes_suppressed.load(Relaxed), 1);
 }
 
@@ -818,17 +821,18 @@ fn failed_output_send_clears_the_token_and_the_next_flush_sends() {
 #[test]
 fn gate_off_output_events_still_coalesce_without_reading_the_flush_clock() {
     use crate::app::frame_counters::flush_clock_reads;
-    let target = Mutex::new(Some(7_u32));
+    let window_id = WindowId::from(7);
+    let target = Mutex::new(Some(window_id));
     let outstanding = AtomicBool::new(false);
     let mut sent = Vec::new();
     let before = flush_clock_reads();
     for _ in 0..3 {
-        send_output_redraw(&target, &outstanding, None, |window| {
+        send_output_redraw(&target, &outstanding, None, Instant::now, |window| {
             sent.push(window);
             true
         });
     }
-    assert_eq!(sent, [7], "the token coalesces with the gate off too");
+    assert_eq!(sent, [window_id], "the token coalesces with the gate off too");
     assert_eq!(flush_clock_reads(), before, "no clock read with the gate off");
 
     let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
@@ -836,7 +840,7 @@ fn gate_off_output_events_still_coalesce_without_reading_the_flush_clock() {
     let gate_on = AtomicBool::new(false);
     let before = flush_clock_reads();
     for _ in 0..3 {
-        send_output_redraw(&target, &gate_on, Some(&counters), |_| true);
+        send_output_redraw(&target, &gate_on, Some(&counters), Instant::now, |_| true);
     }
     assert_eq!(flush_clock_reads(), before + 3, "one read per targeted flush with the gate on");
 }
@@ -1211,13 +1215,19 @@ fn release_is_sent_after_the_batch_generation_is_published() {
     };
     let mut queued = Vec::new();
     let deliver = |handles: &PaneVtHandles, queued: &mut Vec<(u64, usize)>| {
-        send_output_redraw(&handles.redraw_target, &handles.output_outstanding, None, |_| {
-            queued.push((
-                handles.output_generation.load(Ordering::Acquire),
-                handles.inline_images.lock().len(),
-            ));
-            true
-        });
+        send_output_redraw(
+            &handles.redraw_target,
+            &handles.output_outstanding,
+            None,
+            Instant::now,
+            |_| {
+                queued.push((
+                    handles.output_generation.load(Ordering::Acquire),
+                    handles.inline_images.lock().len(),
+                ));
+                true
+            },
+        );
     };
 
     // A previous batch has been flushed, serviced and presented, so its generation is settled.
@@ -1463,4 +1473,522 @@ fn an_update_after_the_published_epoch_wraps_still_holds() {
     flush.on_quiet(&handles, deadline, || sends.push(0));
     assert_eq!(sends.len(), 3, "and expires once at its deadline");
     assert_eq!(stats.sync_timeouts.load(Ordering::Relaxed), 2);
+}
+
+/// A counting worker over a `cols` x `rows` grid keeping `scrollback` history rows, targeted at
+/// window 7, with its pane's echo watch.
+fn echo_worker(
+    cols: u16,
+    rows: u16,
+    scrollback: usize,
+) -> (PaneState, PaneVtHandles, Arc<crate::app::echo_watch::EchoWatch>) {
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let mut grid = Grid::new(cols, rows);
+    grid.set_scrollback_limit(scrollback);
+    let parser = Parser::new_with_staging_pool(grid, None, CaptureStagingPool::new());
+    let mut pane = PaneState::new_with_media_pool(
+        Arc::new(Mutex::new(parser)),
+        None,
+        &crate::app::media::InlineMediaPool::new(),
+    );
+    pane.frame_counters = Some(crate::app::frame_counters::PaneFrameCounters::new(stats));
+    *pane.redraw_target.lock() = Some(echo_window());
+    let handles = PaneVtHandles::from_pane_state(&pane);
+    let watch = Arc::clone(&handles.frame_counters.as_ref().expect("counting").echo);
+    (pane, handles, watch)
+}
+
+/// The window every echo worker targets.
+fn echo_window() -> WindowId {
+    WindowId::from(7)
+}
+
+/// Arm `watch` with `token` for `character` at (`abs_row`, `col`) under the grid's identity now.
+fn arm_echo(
+    watch: &crate::app::echo_watch::EchoWatch,
+    handles: &PaneVtHandles,
+    token: u64,
+    (abs_row, col, character): (u64, u16, char),
+    armed_at: Instant,
+) {
+    let identity = crate::app::echo_watch::EchoRowIdentity::of(handles.parser.lock().grid());
+    let target = crate::app::echo_watch::EchoWatchTarget { abs_row, col, character, identity };
+    watch.arm(crate::app::echo_watch::ArmToken::for_test(token), target, armed_at);
+}
+
+/// Parse and publish one batch with every clock read at `at`.
+fn echo_batch(handles: &PaneVtHandles, bytes: &[u8], at: Instant) {
+    publish_pane_vt_batch_with(
+        handles,
+        bytes,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| {},
+        || at,
+        |_| {},
+    );
+}
+
+/// Flush the worker's output with every new clock read at `at`, delivering through `accept`;
+/// returns the windows it sent to.
+fn echo_flush(handles: &PaneVtHandles, at: Instant, accept: bool) -> Vec<WindowId> {
+    let mut sent = Vec::new();
+    send_output_redraw(
+        &handles.redraw_target,
+        &handles.output_outstanding,
+        handles.frame_counters.as_ref(),
+        || at,
+        |window| {
+            sent.push(window);
+            accept
+        },
+    );
+    sent
+}
+
+/// The watch's record, which every armed test has.
+fn echo_trace(watch: &crate::app::echo_watch::EchoWatch) -> crate::app::echo_watch::EchoTrace {
+    watch.peek().expect("an armed record")
+}
+
+/// The section in which the target goes from absent to present records the generation its batch
+/// publishes and that section's parse instant.
+#[test]
+fn absent_to_present_records_the_batch_generation() {
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_batch(&handles, b"a", base + Duration::from_millis(2));
+    let appearance = echo_trace(&watch).appearance.expect("the echo appeared");
+    assert_eq!(appearance.generation, 1);
+    assert_eq!(handles.output_generation.load(Ordering::Acquire), 1, "the batch it names");
+    assert_eq!(appearance.parsed_at, base + Duration::from_millis(2));
+    assert!(!appearance.sync_open);
+}
+
+/// A batch that parses in several sections, split at a DECRQM reply, records the one generation
+/// the whole batch publishes, whichever section the echo appears in.
+#[test]
+fn a_reply_split_batch_records_one_generation() {
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    echo_batch(&handles, b"z", base);
+    arm_echo(&watch, &handles, 1, (0, 2, 'X'), base);
+    let stats = Arc::clone(&handles.frame_counters.as_ref().expect("counting").vt);
+    let sections_before = sections_parsed(&stats);
+    echo_batch(&handles, b"a\x1b[?2026$pX", base + Duration::from_millis(1));
+    assert!(sections_parsed(&stats) - sections_before >= 2, "the batch took several sections");
+    let appearance = echo_trace(&watch).appearance.expect("the echo appeared");
+    assert_eq!(appearance.generation, 2, "the batch's generation, not a section's");
+    assert_eq!(handles.output_generation.load(Ordering::Acquire), 2);
+}
+
+/// An empty batch parses nothing, so it records no fact.
+#[test]
+fn an_empty_batch_records_nothing() {
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_batch(&handles, b"", base);
+    let trace = echo_trace(&watch);
+    assert_eq!(trace.appearance, None);
+    assert!(!(trace.pre_present || trace.identity_changed || trace.lost));
+}
+
+/// An echo already in the cell before arming is never an absent-to-present appearance; the next
+/// section's pre-read records it as pre-present.
+#[test]
+fn a_present_echo_before_arming_reads_first_appearance_unobserved() {
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    echo_batch(&handles, b"a", base);
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_batch(&handles, b"b", base + Duration::from_millis(1));
+    let trace = echo_trace(&watch);
+    assert!(trace.pre_present);
+    assert_eq!(trace.appearance, None);
+}
+
+/// Evicting an older history row changes what every absolute index names, even when the target
+/// row survives, so the section records an identity change and no appearance.
+#[test]
+fn eviction_of_an_older_row_reads_row_identity_changed() {
+    let (_pane, handles, watch) = echo_worker(10, 2, 2);
+    let base = test_base();
+    // Two rows in history, two visible: r0, r1 | r2, r3.
+    echo_batch(&handles, b"r0\r\nr1\r\nr2\r\nr3", base);
+    // The target is r3's column 3, still absent; r0 is evicted by the next line.
+    arm_echo(&watch, &handles, 1, (3, 3, 'q'), base);
+    echo_batch(&handles, b"\r\nzz", base + Duration::from_millis(1));
+    let trace = echo_trace(&watch);
+    assert!(trace.identity_changed);
+    assert_eq!(trace.appearance, None);
+}
+
+/// Evicting the target row itself records an identity change.
+#[test]
+fn eviction_of_the_target_reads_row_identity_changed() {
+    let (_pane, handles, watch) = echo_worker(10, 2, 1);
+    let base = test_base();
+    // History holds r0; r1 and r2 are visible.
+    echo_batch(&handles, b"r0\r\nr1\r\nr2", base);
+    arm_echo(&watch, &handles, 1, (0, 5, 'q'), base);
+    echo_batch(&handles, b"\r\nzz", base + Duration::from_millis(1));
+    let trace = echo_trace(&watch);
+    assert!(trace.identity_changed, "the target row was evicted");
+    assert_eq!(trace.appearance, None);
+}
+
+/// Switching to the alternate screen changes the screen epoch, so the section records an
+/// identity change.
+#[test]
+fn a_screen_switch_reads_row_identity_changed() {
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_batch(&handles, b"\x1b[?1049ha", base + Duration::from_millis(1));
+    let trace = echo_trace(&watch);
+    assert!(trace.identity_changed);
+    assert_eq!(trace.appearance, None, "an identity change records no appearance");
+}
+
+/// An echo that appears, is overwritten and reappears keeps its first appearance and is marked
+/// lost; the reappearance is not a second appearance.
+#[test]
+fn overwrite_then_reappearance_reads_echo_overwritten() {
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_batch(&handles, b"a", base + Duration::from_millis(1));
+    echo_batch(&handles, b"\rb", base + Duration::from_millis(2));
+    echo_batch(&handles, b"\ra", base + Duration::from_millis(3));
+    let trace = echo_trace(&watch);
+    assert!(trace.lost);
+    let appearance = trace.appearance.expect("the first appearance");
+    assert_eq!((appearance.generation, appearance.parsed_at), (1, base + Duration::from_millis(1)));
+}
+
+/// Every targeted flush takes exactly one token decision and sends once, whatever the watch's
+/// state: unarmed, armed with no appearance, eligible, already published, and armed again under a
+/// new token while a publication was in flight. Only the eligible flush records a publication and
+/// its delivery.
+#[test]
+fn each_targeted_flush_takes_one_token_decision_in_every_watch_state() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let stats = Arc::clone(&handles.frame_counters.as_ref().expect("counting").vt);
+    let base = test_base();
+    let release = |handles: &PaneVtHandles| handles.output_outstanding.store(false, Relaxed);
+    // Unarmed.
+    assert_eq!(echo_flush(&handles, base, true), [echo_window()]);
+    assert_eq!(watch.peek(), None, "nothing recorded while unarmed");
+    release(&handles);
+    // Armed, no appearance.
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    assert_eq!(echo_flush(&handles, base, true), [echo_window()]);
+    assert_eq!(echo_trace(&watch).publication, None);
+    release(&handles);
+    // Eligible.
+    echo_batch(&handles, b"a", base + Duration::from_millis(1));
+    assert_eq!(echo_flush(&handles, base + Duration::from_millis(2), true), [echo_window()]);
+    let trace = echo_trace(&watch);
+    let publication = trace.publication.expect("the eligible flush is published");
+    assert_eq!(publication.window, Some(echo_window()));
+    let delivery = trace.delivery.expect("and its decision");
+    assert_eq!(
+        (delivery.seq, delivery.outcome),
+        (publication.seq, crate::app::echo_watch::EchoDeliveryOutcome::Sent)
+    );
+    release(&handles);
+    // Already published.
+    assert_eq!(echo_flush(&handles, base + Duration::from_millis(3), true), [echo_window()]);
+    assert_eq!(echo_trace(&watch).publication, Some(publication), "the first one stays");
+    release(&handles);
+    // A re-arm between the flush's token load and its slot lock: the stale publication is discarded.
+    let rearm_watch = Arc::clone(&watch);
+    let identity = trace.target.identity;
+    crate::app::echo_watch::pause_next_writer(move || {
+        let target = crate::app::echo_watch::EchoWatchTarget {
+            abs_row: 0,
+            col: 1,
+            character: 'b',
+            identity,
+        };
+        rearm_watch.arm(crate::app::echo_watch::ArmToken::for_test(2), target, base);
+    });
+    assert_eq!(echo_flush(&handles, base + Duration::from_millis(4), true), [echo_window()]);
+    let fresh = echo_trace(&watch);
+    assert_eq!(
+        (fresh.target.character, fresh.publication),
+        ('b', None),
+        "nothing for the new token"
+    );
+    assert_eq!(stats.flushes.load(Relaxed), 5, "one decision per flush");
+    assert_eq!(stats.flushes_suppressed.load(Relaxed), 0);
+}
+
+/// A flush published while the previous event is outstanding still records its decision, as
+/// suppressed, and counts as suppressed.
+#[test]
+fn a_suppressed_flush_reaches_delivery_recording() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let stats = Arc::clone(&handles.frame_counters.as_ref().expect("counting").vt);
+    let base = test_base();
+    handles.output_outstanding.store(true, Relaxed);
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_batch(&handles, b"a", base + Duration::from_millis(1));
+    assert!(echo_flush(&handles, base + Duration::from_millis(2), true).is_empty());
+    let delivery = echo_trace(&watch).delivery.expect("the decision is recorded");
+    assert_eq!(delivery.outcome, crate::app::echo_watch::EchoDeliveryOutcome::Suppressed);
+    assert_eq!(stats.flushes_suppressed.load(Relaxed), 1);
+}
+
+/// A send the event loop refuses records `Refused` and still clears the token.
+#[test]
+fn a_refused_send_reads_send_refused_and_clears_the_token() {
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_batch(&handles, b"a", base + Duration::from_millis(1));
+    assert_eq!(echo_flush(&handles, base + Duration::from_millis(2), false), [echo_window()]);
+    let delivery = echo_trace(&watch).delivery.expect("the decision is recorded");
+    assert_eq!(delivery.outcome, crate::app::echo_watch::EchoDeliveryOutcome::Refused);
+    assert!(!handles.output_outstanding.load(Ordering::Acquire), "the token is cleared");
+}
+
+/// The flush path's own clock is read 0 times unarmed (targeted or not), 0 times armed before any
+/// appearance, once for an eligible untargeted flush and twice for an eligible targeted one.
+#[test]
+fn new_clock_reads_by_state() {
+    use std::cell::Cell;
+    let base = test_base();
+    let reads = Cell::new(0_u32);
+    let clock = || {
+        reads.set(reads.get() + 1);
+        base + Duration::from_millis(5)
+    };
+    let flush = |handles: &PaneVtHandles, clock: &mut dyn FnMut() -> Instant| {
+        send_output_redraw(
+            &handles.redraw_target,
+            &handles.output_outstanding,
+            handles.frame_counters.as_ref(),
+            clock,
+            |_| true,
+        );
+        handles.output_outstanding.store(false, Ordering::Relaxed);
+    };
+    let mut counted = Vec::new();
+    let mut measure = |handles: &PaneVtHandles| {
+        let before = reads.get();
+        let mut tick = clock;
+        flush(handles, &mut tick);
+        counted.push(reads.get() - before);
+    };
+    let (_pane, targeted, watch) = echo_worker(80, 24, 100);
+    measure(&targeted);
+    let (_untargeted_pane, untargeted, untargeted_watch) = echo_worker(80, 24, 100);
+    *untargeted.redraw_target.lock() = None;
+    measure(&untargeted);
+    arm_echo(&watch, &targeted, 1, (0, 0, 'a'), base);
+    measure(&targeted);
+    arm_echo(&untargeted_watch, &untargeted, 1, (0, 0, 'a'), base);
+    echo_batch(&untargeted, b"a", base + Duration::from_millis(1));
+    measure(&untargeted);
+    echo_batch(&targeted, b"a", base + Duration::from_millis(1));
+    measure(&targeted);
+    assert_eq!(counted, [0, 0, 0, 1, 2]);
+}
+
+/// The publication is in the record when the token decision runs, and is stamped before it.
+#[test]
+fn publication_is_recorded_before_the_token_decision() {
+    use std::cell::Cell;
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_batch(&handles, b"a", base + Duration::from_millis(1));
+    let tick = Cell::new(0_u64);
+    let mut seen_at_send = None;
+    send_output_redraw(
+        &handles.redraw_target,
+        &handles.output_outstanding,
+        handles.frame_counters.as_ref(),
+        || {
+            tick.set(tick.get() + 1);
+            base + Duration::from_millis(10 * tick.get())
+        },
+        |_| {
+            let trace = watch.peek().expect("armed");
+            seen_at_send = Some((trace.publication.is_some(), trace.delivery.is_some()));
+            true
+        },
+    );
+    assert_eq!(seen_at_send, Some((true, false)), "published, not yet decided, at the send");
+    let trace = echo_trace(&watch);
+    let published_at = trace.publication.expect("published").published_at;
+    assert!(published_at < trace.delivery.expect("decided").decided_at);
+}
+
+/// A take between the publication and its decision sees the publication without a decision, and
+/// the decision written after the take is discarded; without the pause the decision is recorded,
+/// stamped after the publication.
+#[test]
+fn a_writer_paused_between_publication_and_delivery_reads_not_observed_or_after_present() {
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_batch(&handles, b"a", base + Duration::from_millis(1));
+    let (taken_tx, taken_rx) = std::sync::mpsc::channel();
+    let pause_watch = Arc::clone(&watch);
+    crate::app::echo_watch::pause_before_delivery(move || {
+        let taken = pause_watch.take(crate::app::echo_watch::ArmToken::for_test(1));
+        taken_tx.send(taken).expect("test receiver");
+    });
+    echo_flush(&handles, base + Duration::from_millis(2), true);
+    let taken = taken_rx.recv_timeout(Duration::from_secs(5)).expect("the pause point ran");
+    let crate::app::echo_watch::SlotTake::Trace(trace) = taken else {
+        panic!("take at the pause returned {taken:?}")
+    };
+    assert!(trace.publication.is_some(), "the publication is in the taken record");
+    assert_eq!(trace.delivery, None, "the decision was not yet recorded");
+    assert_eq!(echo_trace(&watch).delivery, None, "the late decision was discarded");
+
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_batch(&handles, b"a", base + Duration::from_millis(1));
+    let tick = std::cell::Cell::new(0_u64);
+    send_output_redraw(
+        &handles.redraw_target,
+        &handles.output_outstanding,
+        handles.frame_counters.as_ref(),
+        || {
+            tick.set(tick.get() + 1);
+            base + Duration::from_millis(10 * tick.get())
+        },
+        |_| true,
+    );
+    let trace = echo_trace(&watch);
+    let decided_at = trace.delivery.expect("recorded").decided_at;
+    assert!(decided_at > trace.publication.expect("published").published_at);
+}
+
+/// The echo's publication finds an earlier flush still pending, so it is marked coalesced.
+#[test]
+fn a_coalesced_flush_sets_coalesced() {
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    echo_batch(&handles, b"z", base);
+    echo_flush(&handles, base, true);
+    handles.output_outstanding.store(false, Ordering::Relaxed);
+    arm_echo(&watch, &handles, 1, (0, 1, 'a'), base);
+    echo_batch(&handles, b"a", base + Duration::from_millis(1));
+    echo_flush(&handles, base + Duration::from_millis(2), true);
+    assert!(echo_trace(&watch).publication.expect("published").coalesced);
+}
+
+/// One worker step through the production flush decision, delivering through `send_output_redraw`
+/// with every clock read at `at`.
+fn echo_worker_step(
+    handles: &PaneVtHandles,
+    flush: &mut OutputFlush,
+    bytes: &[u8],
+    at: Instant,
+    sends: &mut Vec<WindowId>,
+) {
+    flush.receive(bytes.len(), at);
+    publish_pane_vt_batch_with(
+        handles,
+        bytes,
+        &mut None,
+        &mut flush.sync_latch,
+        |_| None,
+        |_| {},
+        || at,
+        |_| {},
+    );
+    flush.after_batch(handles, at, || sends.extend(echo_flush(handles, at, true)));
+}
+
+/// An echo parsed inside a synchronized update is held with it: nothing is published until the
+/// reset's flush, and the appearance records that the update was open.
+#[test]
+fn an_echo_held_by_a_synchronized_update_publishes_at_the_reset_with_sync_open() {
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let mut flush = OutputFlush::new(1, &handles);
+    let base = test_base();
+    let mut sends = Vec::new();
+    echo_worker_step(&handles, &mut flush, b"\x1b[?2026h", base, &mut sends);
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_worker_step(&handles, &mut flush, b"a", base + Duration::from_millis(1), &mut sends);
+    assert!(sends.is_empty(), "held while the update is open");
+    assert_eq!(echo_trace(&watch).publication, None);
+    echo_worker_step(
+        &handles,
+        &mut flush,
+        b"\x1b[?2026l",
+        base + Duration::from_millis(4),
+        &mut sends,
+    );
+    assert_eq!(sends, [echo_window()], "the reset flushes once");
+    let trace = echo_trace(&watch);
+    assert!(trace.appearance.expect("appeared").sync_open);
+    let published_at = trace.publication.expect("published at the reset").published_at;
+    assert_eq!(published_at, base + Duration::from_millis(4));
+}
+
+/// An update that never resets is released at its published deadline, and the echo it held is
+/// published by that release.
+#[test]
+fn an_echo_held_past_the_deadline_publishes_at_release_timeout() {
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let mut flush = OutputFlush::new(1, &handles);
+    let base = test_base();
+    let mut sends = Vec::new();
+    echo_worker_step(&handles, &mut flush, b"\x1b[?2026h", base, &mut sends);
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_worker_step(&handles, &mut flush, b"a", base + Duration::from_millis(1), &mut sends);
+    let deadline = published_deadline(&handles);
+    flush.on_quiet(&handles, deadline, || sends.extend(echo_flush(&handles, deadline, true)));
+    assert_eq!(sends, [echo_window()], "released once at the deadline");
+    let published_at = echo_trace(&watch).publication.expect("published").published_at;
+    assert_eq!(published_at, deadline);
+}
+
+/// An armed batch takes the slot lock on the worker thread; once the harness takes the record the
+/// worker takes none. Each count brackets only the worker's batch and flush, on its own thread.
+#[test]
+fn a_taken_watch_stops_the_workers_slot_locks() {
+    use crate::app::echo_watch::slot_locks;
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    let before = slot_locks();
+    echo_batch(&handles, b"a", base + Duration::from_millis(1));
+    echo_flush(&handles, base + Duration::from_millis(2), true);
+    let armed_locks = slot_locks() - before;
+    assert!(armed_locks >= 1, "an armed batch locks the slot");
+    watch.take(crate::app::echo_watch::ArmToken::for_test(1));
+    handles.output_outstanding.store(false, Ordering::Relaxed);
+    let before = slot_locks();
+    echo_batch(&handles, b"b", base + Duration::from_millis(3));
+    echo_flush(&handles, base + Duration::from_millis(4), true);
+    assert_eq!(slot_locks() - before, 0, "a taken watch costs the worker no lock");
+}
+
+/// A worker handle created after facts were recorded (a new handle for each batch, as the test
+/// hooks make) resumes from the record: the echo it saw appear reads lost when overwritten, never
+/// pre-present.
+#[test]
+fn a_new_worker_handle_resumes_from_the_recorded_facts() {
+    let (pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    arm_echo(&watch, &handles, 1, (0, 0, 'a'), base);
+    echo_batch(&handles, b"a", base + Duration::from_millis(1));
+    let fresh = PaneVtHandles::from_pane_state(&pane);
+    echo_batch(&fresh, b"\rb", base + Duration::from_millis(2));
+    let trace = echo_trace(&watch);
+    assert!(trace.lost, "the overwrite after the appearance is lost");
+    assert!(!trace.pre_present, "the recorded appearance is not re-read as pre-present");
 }

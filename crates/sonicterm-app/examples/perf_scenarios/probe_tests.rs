@@ -1110,3 +1110,123 @@ fn a_phase_meter_records_the_update_count_it_started_with() {
     assert_eq!(PhaseMeter::start("stream", false, None, Some(300)).finish(None).updates, Some(300));
     assert_eq!(PhaseMeter::start("idle", false, None, None).finish(None).updates, None);
 }
+
+/// A probe for `scenario`/`variant` whose App forces the counter gate on and holds one counting
+/// pane, typing into that pane from row 0, column 0 under the grid's current identity.
+fn typing_probe(scenario: &'static str, variant: &'static str) -> (Probe, u64) {
+    use crate::record::prompt_identity;
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.force_frame_counters_on().expect("no window or pane yet");
+    let pane = app.__test_seed_counting_tab("s2");
+    let identity = app
+        .main_panes()
+        .and_then(|panes| panes.get(&pane))
+        .map(|state| prompt_identity(state.parser.lock().grid()))
+        .expect("seeded pane");
+    let plan = scenarios::plan_for(scenario, variant, false, Host::Posix).expect("listed plan");
+    let request = RunArgs {
+        scenario,
+        variant,
+        managed: false,
+        short: false,
+        laps: false,
+        counters: true,
+        harness_hash: None,
+        scratch: String::from("unused"),
+        capture_delivery: false,
+    };
+    let now = Instant::now();
+    let mut probe =
+        Probe::new(app, plan, request, PathBuf::from("unused"), now + Duration::from_secs(3600));
+    probe.driver = DriverState::Typing(Typing {
+        role: 0,
+        pane,
+        chars: 3,
+        interval: Duration::from_millis(100),
+        settle: Duration::from_millis(100),
+        origin: Some((0, 0)),
+        identity,
+        cols: 80,
+        first_at: Some(now),
+        typed: 0,
+        done_at: None,
+    });
+    (probe, pane)
+}
+
+/// Settle the open sample from a presenting dispatch observed now, with snapshots read now.
+fn credit_now(probe: &mut Probe) {
+    let snapshot = probe.echo_snapshot();
+    probe.attribute(
+        &DispatchObservation { before: snapshot, after: probe.echo_snapshot(), advanced: true },
+        Instant::now(),
+    );
+}
+
+/// Closing a sample that no frame was credited with takes its armed watch, so the worker stops
+/// paying for it: a later take of the same token finds it already taken.
+#[cfg(feature = "perf-echo-trace")]
+#[test]
+fn closing_an_unattributed_sample_disarms_its_watch() {
+    use sonicterm_app::app::TakeOutcome;
+    let (mut probe, pane) = typing_probe("S2", "default");
+    assert_eq!(probe.open_typing_sample(Instant::now()), Some('a'));
+    let ArmState::Armed(token) = probe.open_sample.as_ref().expect("open").arm else {
+        panic!("precondition: S2/default arms its sample");
+    };
+    probe.close_sample(UnattributedReason::NoCandidate);
+    assert_eq!(probe.app.take_echo_watch(pane, token), TakeOutcome::AlreadyTaken);
+    assert_eq!(probe.samples.last().map(|sample| sample.split_reason), Some("not-credited"));
+}
+
+/// With the feature, only S2/default arms its samples; S2/flood's are out of scope and never armed.
+#[cfg(feature = "perf-echo-trace")]
+#[test]
+fn open_typing_sample_arms_only_for_s2_default() {
+    let (mut default, _) = typing_probe("S2", "default");
+    default.open_typing_sample(Instant::now());
+    assert!(matches!(default.open_sample.as_ref().expect("open").arm, ArmState::Armed(_)));
+    let (mut flood, _) = typing_probe("S2", "flood");
+    flood.open_typing_sample(Instant::now());
+    assert_eq!(flood.open_sample.as_ref().expect("open").arm, ArmState::OutOfScope);
+}
+
+/// S2/flood still credits its samples exactly as before, and every credited one reads
+/// `unsupported` because it is outside the split's scope, in every build.
+#[test]
+fn s2_flood_attributes_as_before_and_reads_unsupported() {
+    let (mut probe, pane) = typing_probe("S2", "flood");
+    assert_eq!(probe.open_typing_sample(Instant::now()), Some('a'));
+    let main = sonicterm_app::app::synthetic_main_window_id();
+    probe.app.__test_publish_pane_output(main, pane, b"a");
+    credit_now(&mut probe);
+    let sample = probe.samples.last().expect("a credited sample");
+    assert_eq!(sample.reason, crate::record::CREDITED);
+    assert!(sample.latency_ms.is_some());
+    assert_eq!((sample.split, sample.split_reason), (None, "unsupported"));
+}
+
+/// A resize on the event loop after the echo appeared, which the worker never sees, changes the
+/// grid's size generation; the harness's own snapshots catch it and the split is refused.
+#[cfg(feature = "perf-echo-trace")]
+#[test]
+fn a_harness_snapshot_identity_change_reads_row_identity_changed() {
+    let (mut probe, pane) = typing_probe("S2", "default");
+    probe.open_typing_sample(Instant::now());
+    let main = sonicterm_app::app::synthetic_main_window_id();
+    probe.app.__test_publish_pane_output(main, pane, b"a");
+    let generation = |probe: &Probe| {
+        let panes = probe.app.main_panes().expect("main");
+        panes[&pane].parser.lock().grid().size_generation()
+    };
+    let before = generation(&probe);
+    // 80 x 30 cells: more rows, the same columns, so row 0 keeps the echo.
+    let outer = sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 600.0);
+    assert!(probe.app.__test_set_main_pane_viewport(outer, 10.0, 20.0));
+    probe.app.__test_resize_visible_panes();
+    assert_ne!(generation(&probe), before, "precondition: the resize changed the grid's size");
+    credit_now(&mut probe);
+    let sample = probe.samples.last().expect("a credited sample");
+    assert_eq!(sample.reason, crate::record::CREDITED, "the attribution itself is unchanged");
+    assert_eq!(sample.split_reason, "row-identity-changed");
+}

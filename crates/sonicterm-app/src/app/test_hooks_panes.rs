@@ -407,6 +407,7 @@ impl App {
             &pane.redraw_target,
             &pane.output_outstanding,
             pane.frame_counters.as_ref(),
+            Instant::now,
             |window| {
                 queued.push(window);
                 true
@@ -510,6 +511,19 @@ impl App {
             main.panes.insert(pane_id, PaneState::new_with_media_pool(parser, None, &media_pool));
             main.tabs.push(Tab::new(title));
             main.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
+        }
+        pane_id
+    }
+
+    /// Test-only: seed a tab like [`Self::__test_seed_tab`] whose pane carries the App's real
+    /// counter handles, as a spawned pane does. Attaching them seals the frame-counter gate, so a
+    /// test that forces counters on must do so before calling this.
+    #[doc(hidden)]
+    pub fn __test_seed_counting_tab(&mut self, title: &str) -> u64 {
+        let pane_id = self.__test_seed_tab(title);
+        let frame_counters = self.pane_frame_counters();
+        if let Some(pane) = self.main_mut().and_then(|main| main.panes.get_mut(&pane_id)) {
+            pane.frame_counters = frame_counters;
         }
         pane_id
     }

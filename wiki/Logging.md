@@ -594,11 +594,16 @@ flowchart TD
     target -- yes --> pending{"a flush still pending?"}
     pending -- yes --> coalesced["keep the older time, count flushes_coalesced"]
     pending -- no --> store["store the flush time in the pane's slot"]
-    coalesced --> token{"an output event outstanding?"}
-    store --> token
+    coalesced --> watch["an armed echo watch records the publication"]
+    store --> watch
+    watch --> token{"an output event outstanding?"}
     token -- yes --> suppressed["send nothing, count flushes_suppressed"]
     token -- no --> send["send PaneOutput"]
-    send --> redraw["first RedrawRequested of a window that shows the pane"]
+    send -- refused --> refused["clear the token"]
+    suppressed --> decision["an armed echo watch records the decision"]
+    send -- sent --> decision
+    refused --> decision
+    send -- sent --> redraw["first RedrawRequested of a window that shows the pane"]
     redraw --> take["take the time and record its age in flush_to_redraw"]
 ```
 
@@ -611,11 +616,66 @@ Readings are observational. Fields are read one after another, not as one atomic
 snapshot, and a count belongs to the line or snapshot that read it after it was
 published; several batches may publish between two field reads.
 
+#### The S2 echo watch
+
+Each pane also has an echo watch while the gate is on. The perf harness arms it
+only for S2/default samples, and only when it is built with `perf-echo-trace`; S2/flood
+types beside a flood and is never armed. Arming issues a nonzero token that an App
+never reuses; the harness takes the record once, when a frame is credited, and every
+other close of the sample takes and discards it. A writer changes the record only for
+the armed token, while it is not yet taken, and only with an instant no earlier than
+the arm, so a writer paused across a take or a re-arm changes nothing. The lock order
+is parser, then watch slot; arming and taking take only the slot.
+
+Under the parser guard, the worker reads the target cell before parsing (after the
+`locked_at` read) and after it (after the `parsed_at` read, before the keyboard
+snapshot is stored). The section in which the cell goes from absent to present, with
+the row identity (`scrollback_evicted`, `screen_epoch`, `size_generation`) unchanged
+at both reads, is the appearance: it records the generation its batch publishes,
+the parse instant and whether a synchronized update is set. Any identity change,
+an echo already present before an appearance, and an echo absent again after it are
+recorded as sticky facts.
+
+The split's boundary is the publication: after `publish_flush` returns and before
+the token decision, an armed watch with an appearance and no publication reads the
+clock under its slot lock. The decision that follows, `sent`, `suppressed` or
+`refused`, is recorded after it. The watch never changes the decision or the send.
+
+| Part | From | To |
+| --- | --- | --- |
+| `input_to_parse_ms` | injection | the appearance section's parse instant |
+| `parse_to_publication_ms` | that parse instant | the publication |
+| `publication_to_present_ms` | the publication | the end of the credited dispatch |
+| `delivery_lag_us` | the publication | the worker recording its decision, including the send call for `sent` |
+
+The three parts add up exactly to the sample's latency. `delivery_lag_us` is not
+event-loop delivery latency. A `suppressed` publication is split: its
+`publication_to_present_ms` includes the remaining queue wait of the earlier event,
+which is real latency. A `refused` one reads `send-refused`.
+
+| Work | Lock wait | `parse_us` | Hold |
+| --- | --- | --- | --- |
+| The unarmed `Acquire` load and the pre-read | no | yes | yes |
+| The post-read and any recorded-fact slot lock | no | no | yes |
+
+Unarmed, a section and a flush each cost one load. Armed, the slot is locked once to
+fetch the target, at most once per new fact, once per eligible publication and once
+for its decision. The flush path reads the clock 0 times unarmed or with no eligible
+publication, once for an eligible untargeted flush and twice for an eligible targeted
+one.
+
+Synchronized output: a worker holds its update and publishes at the reset, or at the
+published deadline, so its hold is included in `parse_to_publication_ms` and
+excluded from `flush_to_redraw`, which starts at the publication. A window cannot hold past that deadline for the same epoch, so
+`publication_to_present_ms` includes a hold only from another visible pane or a later
+epoch, each stretch capped at 150 ms. `sync_open` is the parser's set bit after the
+appearance section, not proof of a hold.
+
 ### What the counters do not measure
 
-The counters do not split keystroke latency at the flush. `flush_to_redraw`
-measures delivery and scheduling delay to the first redraw, and does not credit a
-presented frame. Maxima and p95s are bucket bounds, sums include the
+The counters themselves do not split keystroke latency at the flush; the S2 echo
+watch above does, for S2/default only. `flush_to_redraw` measures delivery and
+scheduling delay to the first redraw, and does not credit a presented frame. Maxima and p95s are bucket bounds, sums include the
 instrumentation's own cost, and shaping counts are requests, not HarfBuzz work.
 
 ## GPU device error diagnostics

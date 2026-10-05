@@ -657,12 +657,18 @@ pub(crate) struct PaneFrameCounters {
     pub(crate) vt: Arc<VtFrameStats>,
     /// The oldest flush not yet consumed, as `flush_clock_ns`; 0 means none.
     pub(crate) pending_flush: Arc<AtomicU64>,
+    /// The pane's echo watch; it lives as long as the pane or its worker's handles.
+    pub(crate) echo: Arc<super::echo_watch::EchoWatch>,
 }
 
 impl PaneFrameCounters {
-    /// A pane's handles over its App's VT statistics, with no pending flush.
+    /// A pane's handles over its App's VT statistics, with no pending flush and an idle watch.
     pub(crate) fn new(vt: Arc<VtFrameStats>) -> Self {
-        Self { vt, pending_flush: Arc::new(AtomicU64::new(0)) }
+        Self {
+            vt,
+            pending_flush: Arc::new(AtomicU64::new(0)),
+            echo: Arc::new(super::echo_watch::EchoWatch::new()),
+        }
     }
 }
 
@@ -688,16 +694,18 @@ pub(crate) fn flush_clock_ns() -> u64 {
 }
 
 /// Publish a targeted flush before its redraw request is sent. The oldest pending flush stays;
-/// one that finds it still pending is counted as coalesced.
+/// one that finds it still pending is counted as coalesced, and returns true.
 // Ordering: slot's Release exchange precedes send_event; consume_flush's Acquire swap pairs with it.
 // Its failure load, flushes and flushes_coalesced are Relaxed.
-pub(crate) fn publish_flush(slot: &AtomicU64, now_ns: u64, stats: &VtFrameStats) {
+pub(crate) fn publish_flush(slot: &AtomicU64, now_ns: u64, stats: &VtFrameStats) -> bool {
     stats.flushes.fetch_add(1, Ordering::Relaxed);
     let stored = slot.compare_exchange(0, now_ns.max(1), Ordering::Release, Ordering::Relaxed);
-    if stored.is_err() {
+    let coalesced = stored.is_err();
+    if coalesced {
         // an earlier flush is still pending, it keeps its time and this one only counts.
         stats.flushes_coalesced.fetch_add(1, Ordering::Relaxed);
     }
+    coalesced
 }
 
 /// Count a flush while the pane has no redraw target; no timestamp is stored.

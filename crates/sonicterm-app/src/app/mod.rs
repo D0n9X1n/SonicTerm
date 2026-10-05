@@ -302,6 +302,11 @@ mod command_events;
 use command_events::{append_bounded_command_events, notify_command_done};
 pub use command_events::{poll_command_events_for_child_window, poll_command_events_for_tab_state};
 mod config_apply;
+mod echo_watch;
+pub use echo_watch::{
+    ArmOutcome, ArmToken, EchoAppearance, EchoDelivery, EchoDeliveryOutcome, EchoPublication,
+    EchoRowIdentity, EchoTrace, EchoWatchTarget, TakeOutcome,
+};
 mod effects;
 use effects::close_owner;
 mod event_loop;
@@ -645,6 +650,8 @@ pub struct App {
     pub(super) frame_counters: Option<frame_counters::AppFrameCounters>,
     /// Set by the first window or pane; the gate can no longer be forced on after it.
     pub(super) frame_counters_sealed: std::cell::Cell<bool>,
+    /// The token the next `arm_echo_watch` issues; starts at 1, so 0 never names an arming.
+    pub(super) next_echo_arm: u64,
     /// Id of the main window. Set in `do_resumed` once the main `Window` is
     /// created and its [`WindowState`] is inserted into [`Self::windows`].
     ///

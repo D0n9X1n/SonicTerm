@@ -135,7 +135,7 @@ class WindowsPolicy(str, Enum):
 
 
 _COMPILE_ONLY_STEPS = frozenset(("clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
-                                 "doc", "doc-resource-features",
+                                 "perf-scenarios-echo-trace-clippy", "doc", "doc-resource-features",
                                  "release-windows", "windows-perf-build"))
 
 
@@ -233,6 +233,12 @@ STEPS = (
          ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-frame-texture", "--", "-D", "warnings"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
+    # perf-echo-trace marks only that the App has the S2 echo watch (it implies perf-counters); the same example
+    # is its sole caller, so every host lints it with that feature too.
+    Step("perf-scenarios-echo-trace-clippy",
+         ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "--features", "perf-echo-trace", "--", "-D", "warnings"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc", ("cargo", "doc", "--workspace", "--no-deps"), HOSTS, 600, "local",
          ("rust", "native"), _CORE_CHECKS, env=_RUSTDOC_WARNINGS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc-resource-features",
@@ -275,6 +281,11 @@ STEPS = (
     Step("perf-scenarios-frame-texture-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-frame-texture"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
+    # The same unit tests with the echo watch's calls compiled in, wherever the plain ones run.
+    Step("perf-scenarios-echo-trace-tests",
+         ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "--features", "perf-echo-trace"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
     Step("pty-feasibility", ("bash", "scripts/pty-backend-feasibility.sh", "--check"), HOSTS, 300,
          "local", ("rust", "bash"), ("macos-core", "windows-tests"),
@@ -362,7 +373,7 @@ PERF_COUNTER_BUILDS = {step.id: step for step in (
     for side in ("head", "base") for example in ("perf_scenarios", "perf_scenarios_alloc"))}
 # Every perf feature a tree may declare, in the canonical order a build passes them; later hooks append.
 # perf-compare.py's PERF_FEATURES must equal this.
-PERF_FEATURES = ("perf-counters", "perf-frame-texture", "perf-hook-checkpoint-memory")
+PERF_FEATURES = ("perf-counters", "perf-frame-texture", "perf-hook-checkpoint-memory", "perf-echo-trace")
 
 
 def _feature_subsets(features: tuple[str, ...]) -> list[tuple[str, ...]]:

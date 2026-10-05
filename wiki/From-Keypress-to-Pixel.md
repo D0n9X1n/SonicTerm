@@ -303,6 +303,14 @@ outstanding. The winit thread acknowledges the pane in the window that holds it
 now and requests a frame only when that window shows new output or changed
 command chrome. An event for a pane no window holds is ignored.
 
+The perf harness splits S2/default's keystroke latency at this boundary. With the
+counter gate on, an armed echo watch records the parse section in which the typed
+character first appears in the grid, then the first flush published after it,
+before the outstanding-event decision, then that decision. Injection to that parse
+section, the parse to the publication, and the publication to the end of the
+credited frame are the three parts; [Logging](Logging#the-s2-echo-watch) defines
+them.
+
 This indirection lets a pane move between windows. Transfer changes the shared
 `WindowId`; the existing worker and child process continue unchanged. The
 receiving tab is activated before its visible grids and PTYs are resized to the

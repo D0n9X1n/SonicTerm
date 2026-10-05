@@ -51,6 +51,7 @@ fn worker_flush(app: &App, id: WindowId, pane_id: u64) -> Vec<WindowId> {
         &pane.redraw_target,
         &pane.output_outstanding,
         None,
+        Instant::now,
         |window| {
             queued.push(window);
             true
@@ -231,10 +232,16 @@ fn a_flush_between_acknowledgement_and_check_sends_a_fresh_event() {
             None,
             |_| {},
         );
-        crate::app::spawn_pane::send_output_redraw(&target, &outstanding, None, |window| {
-            hook_queued.borrow_mut().push(window);
-            true
-        });
+        crate::app::spawn_pane::send_output_redraw(
+            &target,
+            &outstanding,
+            None,
+            Instant::now,
+            |window| {
+                hook_queued.borrow_mut().push(window);
+                true
+            },
+        );
     });
     let event = OutputEvent::Pane { window_id: child, pane_id: pane };
 
