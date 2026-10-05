@@ -291,18 +291,18 @@ impl ResourceClass {
             // Rasterized before atlas insertion, then owned by the atlas.
             Self::GlyphRaster => ClassCoverage::TransientWithinCall,
 
-            // Upload staging is a field on `AtlasUpload`, cleared between
-            // copies and never shrunk, so it holds the largest dirty rect it
-            // has ever staged for as long as the renderer lives.
+            // Upload staging is a field on `AtlasUpload`, reused across the
+            // copies of one sync so the upload path does not allocate per rect;
+            // `copies_tightly_packed_subrect_and_reuses_capacity` pins that reuse.
             //
-            // **The reuse is deliberate and is not a defect to fix.** Copying
-            // a rect per frame into a fresh allocation would trade this memory
-            // for a per-frame allocation on the upload path;
-            // `copies_tightly_packed_subrect_and_reuses_capacity` asserts the
-            // capacity survives the call, and that assertion is the intended
-            // behaviour rather than an accident this row is reporting.
+            // After every wgpu sync the buffer follows the shared scratch
+            // release rule: once its capacity exceeds four times the sync's
+            // largest write and 1 MiB, it is cut to twice that write, so one
+            // full-atlas re-upload is held only until the next sync. A covered
+            // window's trim releases it, and both rect lists, entirely. The GDI
+            // presenter never syncs, so it releases staging only on that trim.
             //
-            // What is recorded here is only what the reuse costs. A dirty rect
+            // What is recorded here is the ceiling during a sync. A dirty rect
             // cannot exceed the atlas it is copied from, so the ceiling is one
             // whole atlas — `ATLAS_DIM x ATLAS_DIM x BYTES_PER_PIXEL`, 16 MiB —
             // and a renderer holds two, one for glyphs and one for images.

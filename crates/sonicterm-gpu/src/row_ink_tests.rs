@@ -267,3 +267,20 @@ fn an_emitted_rows_ink_unions_every_span_and_its_tofu() {
     assert_eq!(ink.to_rect(surface), rect(0, 5, 60, 35));
     assert!(emitted_row_ink(&[], []).to_rect(surface).is_empty());
 }
+
+/// Releasing the ink table frees its committed records and staging capacity, so it reports what a
+/// new table reports; the next frame stages and commits again.
+#[test]
+fn release_all_returns_to_a_new_tables_figures() {
+    let mut table = RowInkTable::default();
+    present_rows(&mut table, 7, 40);
+    table.begin_frame();
+    table.stage(7, 0, ink(rect(0, 0, 100, 20), 20, 3));
+    assert!(table.retained_amount().bytes > 0, "precondition: records are kept");
+    table.release_all();
+    assert_eq!(table.retained_amount(), RowInkTable::default().retained_amount());
+    table.begin_frame();
+    table.stage(7, 0, ink(rect(0, 0, 100, 20), 20, 3));
+    table.commit(&[(7, 4)]);
+    assert_eq!(table.valid_rect(7, 0, 20, Some(3)), Some(rect(0, 0, 100, 20)));
+}

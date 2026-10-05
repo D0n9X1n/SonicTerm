@@ -1113,3 +1113,15 @@ fn a_lowered_entry_cap_evicts_before_packing_runs_out() {
     }
     assert!(atlas.evictions() > 0, "the cap survives a reset in place");
 }
+
+/// The eviction getter reports the configured permission: on by default, and whatever
+/// `set_eviction_enabled` last set.
+#[test]
+fn eviction_enabled_reports_the_configured_permission() {
+    let mut atlas = GlyphAtlas::new(64, 64);
+    assert!(atlas.eviction_enabled(), "a new atlas may evict");
+    atlas.set_eviction_enabled(false);
+    assert!(!atlas.eviction_enabled());
+    atlas.set_eviction_enabled(true);
+    assert!(atlas.eviction_enabled());
+}

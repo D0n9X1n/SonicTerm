@@ -246,6 +246,9 @@ struct HomeState {
     /// Whether a restored scratch is kept for the next pass; off drops it, so every pass
     /// allocates afresh (a test compares the two).
     no_reuse: bool,
+    /// A release was requested while the scratch was lent: the next restore drops it, whatever
+    /// the reuse setting is then, and clears this.
+    release_on_restore: bool,
 }
 
 /// The renderer's frame scratch between passes, shared with the lease a pass holds.
@@ -276,10 +279,33 @@ impl ScratchHome {
         debug_assert!(state.lent, "only the one holder restores the frame scratch");
         debug_assert!(state.held.is_none(), "the home never holds a second scratch");
         state.lent = false;
-        if !state.no_reuse {
-            // Reuse is on, so the finished buffers wait for the next pass.
+        // The release request is consumed here exactly once, before reuse is consulted, so turning
+        // reuse on while the scratch is lent cannot undo it.
+        let release = std::mem::take(&mut state.release_on_restore);
+        if !release && !state.no_reuse {
+            // Reuse is on and no release is pending, so the finished buffers wait for the next pass.
             state.held = Some(scratch);
         }
+    }
+
+    /// Release the scratch for a covered window's trim: drop it if the home holds it, else ask
+    /// the lease's restore to drop it. Nothing is taken from a live lease, so exactly one holder
+    /// remains. Calling it again before the restore changes nothing more.
+    pub(crate) fn release_held(&self) {
+        let mut state = self.state.borrow_mut();
+        if state.lent {
+            // A lease holds the scratch, so its restore drops it instead of keeping it.
+            state.release_on_restore = true;
+        } else {
+            // When: `lent` is false, the home holds the scratch and drops it now.
+            state.held = None;
+        }
+    }
+
+    /// Whether a release waits for the lease's restore; tests check that it is consumed once.
+    #[cfg(test)]
+    pub(crate) fn release_pending(&self) -> bool {
+        self.state.borrow().release_on_restore
     }
 
     /// Whether a lease holds the scratch; tests check the one-holder rule with it.

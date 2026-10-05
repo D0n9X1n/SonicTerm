@@ -678,6 +678,15 @@ impl RowGlyphCache {
         self.debug_assert_budgets();
     }
 
+    /// Release every pane's rows, slots and tables, for a covered window's trim. The hasher, both
+    /// budgets and the frame clock are kept, so the same row keeps its key and the next
+    /// [`Self::begin_frame`] tracks the drawn panes again.
+    pub fn release_all(&mut self) {
+        self.panes = HashMap::new();
+        self.payload_bytes = 0;
+        self.debug_assert_budgets();
+    }
+
     /// Release one pane: its rows, its committed and staged slots and its pin list.
     pub fn invalidate_pane(&mut self, pane_id: PaneId) {
         self.untrack(pane_id);

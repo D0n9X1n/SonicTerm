@@ -281,6 +281,9 @@ impl GpuRenderer {
         self.present_pipeline = present_pipeline;
         self.frame_texture = frame_texture;
         self.frame_view = frame_view;
+        // The candidate texture is surface-sized, so a trim before the stop no longer applies.
+        self.frame_texture_trimmed = false;
+        self.frame_texture_installs += 1;
         self.frame_blitter = frame_blitter;
         self.glyph_upload = glyph_upload;
         self.image_upload = image_upload;

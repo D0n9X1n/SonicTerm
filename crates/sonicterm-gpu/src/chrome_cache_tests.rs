@@ -529,3 +529,33 @@ fn an_oversized_palette_is_derived_and_never_kept() {
         );
     }
 }
+
+/// Releasing the runs frees both tables and leaves only the palette's bytes; the palette and its
+/// derivation count are kept, and the next title and run prepare again. `clear_runs` keeps both
+/// tables allocated.
+#[test]
+fn release_runs_keeps_only_the_palette() {
+    let _lock = font_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let theme = Theme::default();
+    let fill = |caches: &mut ChromeCaches| {
+        let _ = caches.titles.prepare(0, &probe("shell", 400.0, 0), &stack, true);
+        let _ = caches.runs.prepare(&stack, "search: foo", body_key(), true);
+    };
+    let mut cleared = ChromeCaches::new(&theme);
+    fill(&mut cleared);
+    cleared.clear_runs();
+    let palette = palette_hex_bytes(&theme.colors);
+    assert!(cleared.retained_bytes() > palette, "clear_runs keeps both tables");
+
+    let mut caches = ChromeCaches::new(&theme);
+    fill(&mut caches);
+    let computes = caches.palette.computes();
+    caches.release_runs();
+    assert_eq!(caches.retained_bytes(), palette);
+    assert_eq!(caches.items(), 0);
+    assert_eq!(caches.palette.computes(), computes, "the palette is kept, not derived again");
+    assert_eq!(caches.palette.palette_for(&theme), UiPalette::from_theme(&theme));
+    fill(&mut caches);
+    assert_eq!(caches.items(), 2, "the next title and run prepare again");
+}

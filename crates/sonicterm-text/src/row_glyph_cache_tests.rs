@@ -491,3 +491,24 @@ fn retained_amount_counts_payload_and_tracking() {
         ResourceAmount { bytes: payload + cache.tracking_bytes(), items: 1 }
     );
 }
+
+/// Releasing everything leaves the figures of a new cache, keeps both budgets and the hasher (the
+/// same row keeps its key), and the next frame tracks and admits again.
+#[test]
+fn release_all_returns_to_a_new_caches_figures() {
+    let mut cache = RowGlyphCache::with_budgets(1 << 20, 1 << 16);
+    cache.begin_frame(&[(1, 4, 16), (2, 3, 16)]);
+    assert!(cache.insert(1, 99, 0, row_of(5)));
+    assert!(cache.insert(2, 7, 0, row_of(3)));
+    let key = cache.content_key(cells("hello"), 16, &inputs());
+    assert!(cache.retained_amount().bytes > 0, "precondition: rows are cached");
+    cache.release_all();
+    let fresh = RowGlyphCache::with_budgets(1 << 20, 1 << 16);
+    assert_eq!(cache.retained_amount(), fresh.retained_amount());
+    assert_eq!(cache.payload_bytes(), 0);
+    assert_eq!((cache.payload_budget(), cache.tracking_budget()), (1 << 20, 1 << 16));
+    assert_eq!(cache.content_key(cells("hello"), 16, &inputs()), key, "the hasher is kept");
+    cache.begin_frame(&[(1, 4, 16)]);
+    assert!(cache.insert(1, 99, 0, row_of(5)), "the next frame admits again");
+    assert!(cache.contains(1, 99));
+}

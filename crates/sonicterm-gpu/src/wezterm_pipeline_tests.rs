@@ -1217,3 +1217,80 @@ fn zero_vertex_frames_release_a_large_scratch() {
         );
     }
 }
+
+/// Feed `calls` draws of `quads` quads each to `window` against `capacity` quads; return the call
+/// number (1-based) and target of every shrink requested.
+fn feed(
+    window: &mut ShrinkWindow,
+    capacity: &mut u64,
+    calls: u32,
+    quads: u64,
+    offset: u32,
+) -> Vec<(u32, u64)> {
+    let mut shrinks = Vec::new();
+    for call in 1..=calls {
+        *capacity = (*capacity).max(quads.next_power_of_two());
+        if let Some(target) = window.observe(quads, *capacity, 4096) {
+            shrinks.push((offset + call, target));
+            *capacity = target;
+        }
+    }
+    shrinks
+}
+
+/// The 600-draw hysteresis: a steady 20,000-quad load never shrinks; a 30,000-quad window then a
+/// 2,000-quad window shrinks exactly once, at call 1,200, to `next_pow2(2 × 2,000)` floored at the
+/// initial 4,096; alternating windows of 30,000 and 20,000 never shrink.
+#[test]
+fn present_buffers_shrink_once_after_a_quiet_window() {
+    let mut window = ShrinkWindow::default();
+    let mut capacity = 4096;
+    assert!(feed(&mut window, &mut capacity, 600, 20_000, 0).is_empty(), "steady load");
+
+    let mut window = ShrinkWindow::default();
+    let mut capacity = 4096;
+    assert!(feed(&mut window, &mut capacity, 600, 30_000, 0).is_empty());
+    assert_eq!(feed(&mut window, &mut capacity, 600, 2_000, 600), [(1200, 4096)]);
+    assert!(feed(&mut window, &mut capacity, 600, 2_000, 1200).is_empty(), "already small");
+
+    let mut window = ShrinkWindow::default();
+    let mut capacity = 4096;
+    for (index, quads) in [30_000, 20_000, 30_000, 20_000].into_iter().enumerate() {
+        let offset = 600 * index as u32;
+        assert!(feed(&mut window, &mut capacity, 600, quads, offset).is_empty(), "{quads}");
+    }
+}
+
+/// A shrink and a reset both clear the index pattern, so the next draw writes the pattern for the
+/// new capacity and the index buffer reads back as `build_indices`.
+#[test]
+fn a_shrink_or_a_reset_rewrites_the_index_pattern() {
+    let mut harness = FrameHarness::new(1);
+    let wide: Vec<QuadInstance> = (0..64).map(|index| red_column(index % HARNESS_WIDTH)).collect();
+    let _grown = harness.draw(None, &wide, &[]);
+    assert!(harness.pipeline.index_capacity >= 64 * INDICES_PER_QUAD as u64, "precondition");
+    // The wide draw opened the first window, so that window's peak is 64 and it closes without a
+    // shrink; the next window of single-quad draws closes oversized and shrinks to twice its peak.
+    for _ in 0..2 * SHRINK_WINDOW_CALLS - 2 {
+        let _frame = harness.draw(None, &[red_column(0)], &[]);
+    }
+    assert!(harness.pipeline.index_capacity >= 64 * INDICES_PER_QUAD as u64, "no shrink yet");
+    let closing = harness.draw(None, &[red_column(1)], &[]);
+    assert_eq!(closing.red_columns, vec![1], "the closing frame still draws its quad");
+    assert_eq!(harness.pipeline.index_capacity, 2 * INDICES_PER_QUAD as u64, "shrunk to 2 quads");
+    // The shrink cleared the pattern before this draw's upload, so the closing draw rewrote it.
+    assert_eq!(closing.stats.index_bytes, pattern_bytes(harness.pipeline.index_capacity));
+    assert_eq!(harness.index_buffer(), build_indices(2));
+    let next = harness.draw(None, &[red_column(2), red_column(3)], &[]);
+    assert_eq!(next.red_columns, vec![2, 3]);
+    assert_eq!(next.stats.index_bytes, 0, "the rewritten pattern covers the new capacity");
+
+    let _grown = harness.draw(None, &wide, &[]);
+    let released = harness.pipeline.reset_to_initial(&harness.device);
+    assert!(released > 0, "the reset releases the grown buffers");
+    assert_eq!(harness.pipeline.index_pattern_quads, 0, "the reset cleared the pattern");
+    assert_eq!(harness.pipeline.vertex_scratch.capacity(), 0, "the scratch is emptied");
+    let after = harness.draw(None, &[red_column(5)], &[]);
+    assert_eq!(after.red_columns, vec![5]);
+    assert_eq!(harness.index_buffer(), build_indices(1));
+}

@@ -272,3 +272,125 @@ fn every_scratch_vector_is_held_within_its_own_cap() {
     assert!(reserved_bytes(&scratch.pane_rects) > 0, "a capped vector is kept warm, not dropped");
     assert!(reserved_bytes(&scratch.glyphs) > 0, "a capped vector is kept warm, not dropped");
 }
+
+/// A home whose held scratch has warm glyph and quad buffers.
+fn warm_home() -> ScratchHome {
+    let home = ScratchHome::new();
+    let mut lease = home.lease();
+    lease.get().glyphs.resize(1000, glyph());
+    lease.get().quads.resize(500, bytemuck::Zeroable::zeroed());
+    drop(lease);
+    assert!(home.retained_amount().bytes > 0, "precondition: the home holds warm buffers");
+    home
+}
+
+/// Lease `home`'s scratch and fill it, as an assembly pass does.
+fn populated_lease(home: &ScratchHome) -> ScratchLease {
+    let mut lease = home.lease();
+    lease.get().glyphs.resize(1000, glyph());
+    lease
+}
+
+/// A held scratch is dropped at once, and the next lease starts empty.
+#[test]
+fn release_held_drops_a_held_scratch() {
+    let home = warm_home();
+    home.release_held();
+    assert_eq!(home.retained_amount().bytes, 0);
+    assert!(!home.release_pending(), "nothing was lent, so nothing waits");
+    assert_eq!(home.lease().held().glyphs.capacity(), 0, "the next lease starts empty");
+}
+
+/// A lent scratch is never touched: two requests leave the lease and its contents as they were,
+/// and the restore drops the scratch and clears the request.
+#[test]
+fn release_held_on_a_lent_scratch_waits_for_its_restore() {
+    let home = warm_home();
+    let lease = populated_lease(&home);
+    home.release_held();
+    home.release_held();
+    assert!(home.is_lent(), "the lease still holds the scratch");
+    assert_eq!(lease.held().glyphs.len(), 1000, "its contents are untouched");
+    assert!(home.release_pending());
+    drop(lease);
+    assert_eq!(home.retained_amount().bytes, 0, "the restore dropped it");
+    assert!(!home.release_pending(), "the request is consumed");
+}
+
+/// Turning reuse back on before the restore does not undo a release, and the cycle after it keeps
+/// its scratch again.
+#[test]
+fn re_enabling_reuse_before_the_restore_keeps_the_release() {
+    let home = ScratchHome::new();
+    home.set_reuse(false);
+    let lease = populated_lease(&home);
+    home.release_held();
+    home.set_reuse(true);
+    drop(lease);
+    assert_eq!(home.retained_amount().bytes, 0, "released despite reuse being on at restore");
+    assert!(!home.release_pending());
+    drop(populated_lease(&home));
+    assert!(home.retained_amount().bytes > 0, "an ordinary cycle keeps its scratch");
+}
+
+/// With reuse off through the restore, the request is still consumed there, so a later ordinary
+/// cycle with reuse on keeps its scratch.
+#[test]
+fn a_release_is_consumed_even_when_reuse_stays_off_through_the_restore() {
+    let home = ScratchHome::new();
+    let lease = populated_lease(&home);
+    home.release_held();
+    home.set_reuse(false);
+    drop(lease);
+    assert_eq!(home.retained_amount().bytes, 0);
+    assert!(!home.release_pending(), "consumed although reuse was off");
+    home.set_reuse(true);
+    drop(populated_lease(&home));
+    assert!(home.retained_amount().bytes > 0, "the next ordinary restore keeps its scratch");
+}
+
+/// With reuse on, a release requested on a lent scratch drops it at the restore.
+#[test]
+fn a_release_on_a_lent_scratch_with_reuse_on_drops_it_at_restore() {
+    let home = warm_home();
+    let lease = populated_lease(&home);
+    home.release_held();
+    drop(lease);
+    assert_eq!(home.retained_amount().bytes, 0);
+    assert!(!home.release_pending());
+}
+
+/// Unwinding with a lease live still consumes a pending release.
+#[test]
+fn unwinding_with_a_pending_release_drops_the_scratch() {
+    let home = warm_home();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _lease = populated_lease(&home);
+        home.release_held();
+        panic!("the pass unwinds while it holds the scratch");
+    }));
+    assert!(unwound.is_err());
+    assert!(!home.is_lent());
+    assert_eq!(home.retained_amount().bytes, 0);
+    assert!(!home.release_pending());
+}
+
+/// After a release, an ordinary lease and restore keeps its scratch.
+#[test]
+fn an_ordinary_cycle_after_a_release_keeps_its_scratch() {
+    let home = warm_home();
+    home.release_held();
+    drop(populated_lease(&home));
+    assert!(home.retained_amount().bytes > 0);
+}
+
+/// With no lease outstanding and reuse off, nothing is held, so a release changes nothing.
+#[test]
+fn release_held_with_reuse_off_and_no_lease_is_a_no_op() {
+    let home = warm_home();
+    home.set_reuse(false);
+    home.release_held();
+    assert_eq!(home.retained_amount().bytes, 0);
+    assert!(!home.release_pending());
+    assert!(!home.is_lent());
+}

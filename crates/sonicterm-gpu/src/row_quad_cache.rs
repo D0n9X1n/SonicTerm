@@ -77,8 +77,15 @@ impl LineQuadCache {
         }
     }
 
+    /// Release every cached row and the table itself, for a covered window's trim; the next frame
+    /// inserts again.
+    pub fn release_all(&mut self) {
+        self.entries = HashMap::new();
+    }
+
     /// Drop every cache entry. Called on theme / font / scale / resize
     /// — anything that invalidates colors or geometry across the grid.
+    /// The table keeps its allocation.
     #[inline]
     pub fn invalidate_all(&mut self) {
         self.entries.clear();

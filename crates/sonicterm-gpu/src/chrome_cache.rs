@@ -241,6 +241,11 @@ impl TitleCache {
         }
     }
 
+    /// Release every kept title and the table itself; the next title allocates it again.
+    pub(crate) fn release(&mut self) {
+        self.slots = None;
+    }
+
     /// Drop every kept title; the table itself stays allocated.
     pub(crate) fn clear(&mut self) {
         if let Some(slots) = self.slots.as_mut() {
@@ -511,6 +516,11 @@ impl ChromeRunCache {
         }
     }
 
+    /// Release every kept run and the table itself; the next run allocates it again.
+    pub(crate) fn release(&mut self) {
+        self.slots = None;
+    }
+
     /// Drop every kept run; the table itself stays allocated.
     pub(crate) fn clear(&mut self) {
         if let Some(slots) = self.slots.as_mut() {
@@ -681,6 +691,13 @@ impl ChromeCaches {
     pub(crate) fn clear_runs(&mut self) {
         self.titles.clear();
         self.runs.clear();
+    }
+
+    /// Release both run tables, for a covered window's trim. The palette is kept, and nothing is
+    /// bumped, so a face is not treated as replaced.
+    pub(crate) fn release_runs(&mut self) {
+        self.titles.release();
+        self.runs.release();
     }
 
     /// Heap bytes held by all three caches.

@@ -38,6 +38,13 @@ pub(crate) struct RowInkTable {
 }
 
 impl RowInkTable {
+    /// Release every committed and staged record and both containers, for a covered window's
+    /// trim; the next full frame commits records again.
+    pub(crate) fn release_all(&mut self) {
+        self.committed = std::collections::HashMap::new();
+        self.staged = Vec::new();
+    }
+
     /// Discard whatever an unpresented frame staged, before a new frame stages its rows; the
     /// allocation is kept for the new frame.
     pub(crate) fn begin_frame(&mut self) {

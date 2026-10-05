@@ -158,3 +158,23 @@ fn quad_cache_churn_stays_inside_derived_high_water_envelope() {
 
     assert!(peak > envelope / 2, "fixture never approached its derived envelope");
 }
+
+/// Releasing the quad cache frees its table as well as its rows, unlike `invalidate_all`, which
+/// keeps the table; inserting afterwards works.
+#[test]
+fn release_all_frees_the_table_and_invalidate_all_keeps_it() {
+    let mut cache = LineQuadCache::new();
+    cache.resize(64);
+    for row in 0..40 {
+        cache.insert(7, row, 13, CachedRowQuads { quads: vec![QuadInstance::default(); 9] });
+    }
+    let mut kept = LineQuadCache::new();
+    kept.resize(64);
+    kept.insert(7, 1, 13, CachedRowQuads { quads: vec![QuadInstance::default(); 9] });
+    kept.invalidate_all();
+    assert!(kept.entries.capacity() > 0, "invalidate_all keeps the table");
+    cache.release_all();
+    assert_eq!(cache.retained_amount(), LineQuadCache::new().retained_amount());
+    cache.insert(7, 1, 13, CachedRowQuads { quads: vec![QuadInstance::default(); 2] });
+    assert_eq!(cache.retained_amount().items, 1, "the next frame inserts again");
+}

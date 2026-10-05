@@ -722,6 +722,14 @@ impl GlyphAtlas {
         self.eviction_enabled = enabled;
     }
 
+    /// The configured eviction permission for regular insertions, as last set by
+    /// [`Self::set_eviction_enabled`]. It says whether an insertion may evict, not whether a given
+    /// insertion fits; the renderer reads it rather than keeping its own copy.
+    #[must_use]
+    pub fn eviction_enabled(&self) -> bool {
+        self.eviction_enabled
+    }
+
     /// Reset atlas contents and packing state while retaining the pixel allocation.
     pub fn reset_in_place(&mut self) {
         self.map.clear();

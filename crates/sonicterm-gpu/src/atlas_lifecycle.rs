@@ -204,6 +204,18 @@ impl GpuRenderer {
         true
     }
 
+    /// Release the promoted image atlas for a covered window's trim when no renderable media is
+    /// visible; returns whether it released. Visible media keeps its atlas.
+    pub(super) fn release_image_atlas_for_trim(&mut self) -> bool {
+        if !image_atlas_promoted(&self.image_atlas) || self.inline_media_absent_since.is_none() {
+            // When: image_atlas_promoted is false or inline_media_absent_since is None, nothing idle is held.
+            return false;
+        }
+        self.release_image_atlas("occlusion_trim");
+        self.flush_image_upload_rebuild();
+        true
+    }
+
     /// The image atlas's CPU size and its GPU mirror's size, so a native test can check that a
     /// release shrinks both (or, on a stopped device, only the CPU atlas).
     #[doc(hidden)]
