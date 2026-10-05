@@ -9426,19 +9426,22 @@ class RowRunDecisionTests(unittest.TestCase):
         self.assertIn(["macos", "S4/default", "workload", "render_attempts", "n/a", "10 (2 runs)"],
                       perf.row_run_rows({("macos", "S4/default", "workload"): head_only}))
 
-    def test_the_table_lists_sums_metrics_and_the_decision(self):
-        # Per phase: each field's pooled sum, assembly sum and events, R and T (head only), O_asm and O_att; then
-        # one decision row with its step, outcome and reason. The document carries the section only with rows.
+    def test_the_table_lists_sums_metrics_and_no_decision(self):
+        # Per phase: each field's pooled sum, assembly sum and events, R and T (head only), O_asm and O_att. A
+        # shard is partial evidence, so no row decides, even when the evidence would build; the document carries
+        # the section, labelled partial shard evidence, only with rows.
         rows = perf.row_run_rows(healthy_row_run_evidence())
         self.assertIn(["macos", "S4/default", "stream", "assembly sum_us / events", "100000 / 100", "100000 / 100"],
                       rows)
         self.assertIn(["macos", "S4/default", "stream", "R", "n/a", "60.00%"], rows)
         self.assertIn(["windows", "S10/sync", "stream", "T", "n/a", "6.00%"], rows)
         self.assertIn(["macos", "S10/unique", "stream", "O_asm", "", "0.00%"], rows)
-        self.assertEqual(rows[-1][:5], ["", "", "", "decision", "step 4"])
-        self.assertTrue(rows[-1][5].startswith("BUILD: "))
+        self.assertFalse([row for row in rows if row[3] == "decision"], "a shard prints no decision")
+        self.assertEqual(rows[-1][:4], ["windows", "S10/unique", "stream", "O_att"])
         document = perf.comparison_document([], [], [], [], [], row_run_rows=rows)
-        self.assertIn("### Row-run shaping (S4 and S10 counters runs)", document)
+        self.assertIn("### Row-run shaping (partial shard evidence)", document)
+        for outcome in ("BUILD", "CLOSE", "PENDING"):
+            self.assertNotIn(outcome, document)
         self.assertIn("| macos | S4/default | stream | R | n/a | 60.00% |", document)
         self.assertNotIn("Row-run shaping", perf.comparison_document([], [], [], [], []))
         self.assertEqual([perf.row_run_platform(name) for name in ("darwin", "win32", "linux")],
@@ -9460,8 +9463,425 @@ class RowRunComparisonTests(CompareHarness, unittest.TestCase):
         for label in ("S10/default", "S10/sync"):
             self.assertIn(f"| {platform_key} | {label} | stream | row_run_shape_calls | n/a | n/a |", section)
         self.assertNotIn("| S4/default |", section)
-        self.assertIn("| decision | step 1 | PENDING (evidence): ", section)
-        self.assertIn(f"{platform_key} S4/default stream: not measured", section)
+        # S4 is owned by another shard: this shard says nothing about it and prints no decision.
+        self.assertNotIn("| decision |", section)
+        self.assertNotIn("PENDING", section)
+        self.assertNotIn("not measured", section)
+        evidence = json.loads((out / perf.ROW_RUN_EVIDENCE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual((evidence["schema_version"], evidence["dataset"], evidence["protocol_digest"]),
+                         (perf.ROW_RUN_EVIDENCE_SCHEMA, "counters", perf.row_run_protocol_digest()))
+        self.assertEqual([(entry["label"], entry["phase"]) for entry in evidence["phases"]],
+                         [("S10/default", "stream"), ("S10/sync", "stream")])
+        self.assertEqual(evidence["head_sha"], self.SHAS["HEAD"])
+
+
+ROW_RUN_HEAD_SHA = "a" * 40
+ROW_RUN_BASE_SHA = "b" * 40
+# The real shard placement: the existing S4 and S10 variants plus the three new ones, two or three on one shard.
+ROW_RUN_PLACEMENT = {
+    "macOS": {"S4-S5-S11": ("S4/default", "S10/powerline", "S10/cjk-tui"), "S9-S10": ("S10/default",),
+              "S2-S10sync": ("S10/sync", "S10/unique"), "S1-S3-S6-S8-S12": (), "S7": ()},
+    "Windows": {"S4-S5-S11": ("S4/default",), "S9-S10": ("S10/default",),
+                "S2-S10sync": ("S10/sync", "S10/powerline", "S10/cjk-tui"), "S1-S3-S6-S8-S12": ("S10/unique",),
+                "S7": ()},
+}
+ROW_RUN_CREATED_S = 1_800_000_000
+
+
+def github_time(epoch_s):
+    """A GitHub UTC timestamp."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch_s))
+
+
+class RowRunWorkflow:
+    """One recorded Performance comparison run (perf-critical-path.py's record) and its downloaded comparison
+    artifacts under `root`, every shard healthy: each decision phase it owns has `runs_per_side` accepted runs per
+    side, each with its kept outcome.json and result.json."""
+
+    def __init__(self, root, run_id=777, runs_per_side=2, elapsed_s=1500):
+        self.root, self.run_id, self.attempt = Path(root), run_id, 1
+        self.directories = {}
+        rows = [self.row("macOS perf binaries (base and head)", 60, 1)]
+        artifacts = []
+        for platform_name, shards in ROW_RUN_PLACEMENT.items():
+            for shard, labels in shards.items():
+                job = f"{platform_name} before/after comparison ({shard})"
+                rows.append(self.row(job, 600, len(rows) + 1))
+                name = f"perf-comparison-1604-{ROW_RUN_HEAD_SHA}-{platform_name}-{shard}-1"
+                artifacts.append({"name": name})
+                self.directories[(platform_name, shard)] = self.artifact(name, job, platform_name, shard, labels,
+                                                                         runs_per_side)
+        rows.append(self.row(perf.ROW_RUN_RESULT_JOB, elapsed_s - 20, len(rows) + 1))
+        self.record = {"run": {"id": run_id, "head_sha": ROW_RUN_HEAD_SHA,
+                               "created_at": github_time(ROW_RUN_CREATED_S),
+                               "repository": {"full_name": perf.ROW_RUN_DEFAULT_REPOSITORY}},
+                       "attempts": {"1": {"run_started_at": github_time(ROW_RUN_CREATED_S + 5),
+                                          "updated_at": github_time(ROW_RUN_CREATED_S + elapsed_s)}},
+                       "jobs": {"1": rows}, "artifacts": artifacts}
+
+    @staticmethod
+    def row(name, finish_offset_s, runner):
+        """A job row that ran successfully inside attempt 1."""
+        return {"name": name, "conclusion": "success", "created_at": github_time(ROW_RUN_CREATED_S + 10),
+                "started_at": github_time(ROW_RUN_CREATED_S + 20),
+                "completed_at": github_time(ROW_RUN_CREATED_S + finish_offset_s), "runner_id": runner}
+
+    def artifact(self, name, job, platform_name, shard, labels, runs_per_side):
+        """One shard's artifact directory: timing.json, row-run-evidence.json and every accepted run's files."""
+        directory = self.root / name
+        directory.mkdir(parents=True)
+        perf._write_json(directory / perf.TIMING_FILE, {"schema_version": 1, "run_id": str(self.run_id),
+                                                        "run_attempt": "1", "job": job, "shard": shard,
+                                                        "marks": {}})
+        phases = []
+        for label in labels:
+            entry = {"label": label, "phase": "stream"}
+            for side_name in perf.SIDES:
+                renderers = [row_run_base() if side_name == "base" else row_run_head(label)
+                             for _ in range(runs_per_side)]
+                records = []
+                for index, renderer in enumerate(renderers, 1):
+                    identity = f"runs/{label.replace('/', '-')}/counters/{index:02d}-{side_name}"
+                    self.write_run(directory / identity, side_name, label, renderer)
+                    records.append({"execution": identity, "renderer": renderer})
+                entry[side_name] = {"status": "", "accepted": records, "rejected": [],
+                                    "audit": perf.row_run_audit(renderers)}
+            phases.append(entry)
+        platform_key = perf.ROW_RUN_PLATFORM_KEYS[platform_name]
+        perf._write_json(directory / perf.ROW_RUN_EVIDENCE_FILE, {
+            "schema_version": perf.ROW_RUN_EVIDENCE_SCHEMA, "repository": perf.ROW_RUN_DEFAULT_REPOSITORY,
+            "run_id": str(self.run_id), "run_attempt": "1", "job": job, "shard": shard, "platform": platform_key,
+            "base_sha": ROW_RUN_BASE_SHA, "head_sha": ROW_RUN_HEAD_SHA, "harness_hash": f"harness-{platform_key}",
+            "dataset": "counters", "short": True,
+            "features": {"base": ["perf-counters"], "head": ["perf-counters"]},
+            "profile": {"lto": {"base": "off", "head": "off"}, "overrides": "none"},
+            "protocol_version": perf.ROW_RUN_PROTOCOL_VERSION, "protocol_digest": perf.row_run_protocol_digest(),
+            "phases": phases})
+        return directory
+
+    @staticmethod
+    def write_run(run_dir, side_name, label, renderer):
+        """An accepted run's outcome.json and kept result.json reporting `renderer` for the stream phase."""
+        scenario, _, variant = label.partition("/")
+        (run_dir / "scratch").mkdir(parents=True, exist_ok=True)
+        perf._write_json(run_dir / "outcome.json",
+                         {"kind": "valid", "side": side_name, "scenario": scenario, "variant": variant})
+        perf._write_json(run_dir / "scratch" / "result.json",
+                         {"phases": [{"name": "stream", "frame_counters": {"renderer": renderer}}]})
+
+    def edit(self, platform_name, shard, change):
+        """Apply `change` to one shard's row-run-evidence.json as written, nothing recomputed."""
+        path = self.directories[(platform_name, shard)] / perf.ROW_RUN_EVIDENCE_FILE
+        document = json.loads(path.read_text(encoding="utf-8"))
+        change(document)
+        perf._write_json(path, document)
+
+    def rewrite(self, platform_name, shard, label, side_name, index, change):
+        """Change one accepted record's renderer fields consistently: the record, its side's audit and its run's
+        result.json all agree afterwards."""
+        directory = self.directories[(platform_name, shard)]
+
+        def apply(document):
+            entry = next(item for item in document["phases"] if item["label"] == label)
+            record = entry[side_name]["accepted"][index]
+            change(record["renderer"])
+            entry[side_name]["audit"] = perf.row_run_audit([item["renderer"] for item in entry[side_name]["accepted"]])
+            self.write_run(directory / record["execution"], side_name, label, record["renderer"])
+        self.edit(platform_name, shard, apply)
+
+    def all_directories(self):
+        """Every shard's artifact directory."""
+        return list(self.directories.values())
+
+
+def decide(workflows, directories, restarts=0, head=ROW_RUN_HEAD_SHA, base=ROW_RUN_BASE_SHA):
+    """The decide mode's report for `workflows` (first, then the replacement) over `directories`."""
+    return perf.row_run_decide([(workflow.record, workflow.attempt) for workflow in workflows], directories, head,
+                               base, restarts, perf.ROW_RUN_DEFAULT_REPOSITORY)
+
+
+def overflow(renderer):
+    """Make a head record fail step 2."""
+    renderer["row_run_shape_overflows"] = 1
+
+
+class RowRunDecideTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def workflow(self, name, **options):
+        """A healthy recorded workflow run in its own directory."""
+        return RowRunWorkflow(self.root / name, **options)
+
+    def refused(self, workflows, directories, expected, **options):
+        """The evidence is a validation error naming `expected`, never a decision."""
+        with self.assertRaises(perf.RowRunEvidenceError) as raised:
+            decide(workflows, directories, **options)
+        self.assertIn(expected, str(raised.exception))
+
+    def test_six_phases_on_two_platforms_combine_from_separate_shards(self):
+        # Ten shards under the real placement (three variants on macOS S4-S5-S11 and on Windows S2-S10sync, none
+        # on S7) each own some decision phases; their union covers all six on both platforms and decides BUILD. The
+        # base reports no row-run counter (its audit sums read None) and still decides.
+        workflow = self.workflow("complete")
+        report = decide([workflow], workflow.all_directories())
+        for line in ("- first execution: run 777 attempt 1", "- replacement execution: none",
+                     "- selected execution: run 777 attempt 1", "- step 1 (evidence): passed",
+                     "- step 2 (classification): passed", "- step 3 (overhead): passed",
+                     "- step 4 (opportunity): BUILD: ", "- overhead gate (manual merge gate): passed",
+                     "- outcome: BUILD (step 4): "):
+            self.assertIn(line, report)
+        self.assertNotIn("missing shard artifact", report)
+        shard = json.loads((workflow.directories[("macOS", "S4-S5-S11")] / perf.ROW_RUN_EVIDENCE_FILE).read_text())
+        self.assertEqual([entry["label"] for entry in shard["phases"]], ["S4/default", "S10/powerline", "S10/cjk-tui"])
+        self.assertIsNone(shard["phases"][0]["base"]["audit"]["sums"]["row_run_shape_calls"])
+
+    def test_a_missing_shard_phase_or_field_is_pending_evidence(self):
+        # A shard whose artifact was not supplied, a phase its owner did not record, and a field one accepted record
+        # lacks each leave the decision PENDING (evidence) at step 1, with overhead not evaluated, never BUILD.
+        workflow = self.workflow("shard")
+        directories = [directory for key, directory in workflow.directories.items() if key != ("macOS", "S9-S10")]
+        report = decide([workflow], directories)
+        self.assertIn(f"- missing shard artifact of run 777 attempt 1: perf-comparison-1604-{ROW_RUN_HEAD_SHA}-"
+                      "macOS-S9-S10-1", report)
+        self.assertIn("- step 1 (evidence): PENDING (evidence): macos S10/default stream: not measured\n", report)
+        self.assertIn("- step 3 (overhead): not evaluated", report)
+        self.assertIn("- overhead gate (manual merge gate): not evaluated", report)
+        self.assertIn("- outcome: PENDING (rerun due) (step 1): ", report)
+        phase = self.workflow("phase")
+        phase.edit("Windows", "S2-S10sync", lambda document: document["phases"].pop(1))
+        self.assertIn("windows S10/powerline stream: not measured", decide([phase], phase.all_directories()))
+        field = self.workflow("field")
+        field.rewrite("macOS", "S4-S5-S11", "S4/default", "head", 0, lambda renderer: renderer.pop("row_run_shape_ok"))
+        self.assertIn("macos S4/default stream head: missing row_run_shape_ok", decide([field], field.all_directories()))
+
+    def test_duplicate_artifacts_executions_and_phase_owners_are_refused(self):
+        # One directory twice, two copies of one artifact, one accepted execution listed twice, one phase owned by
+        # two shards and a replacement that is the first execution again are refused, never counted twice.
+        workflow = self.workflow("artifact")
+        directories = workflow.all_directories()
+        self.refused([workflow], directories + directories[:1], "one directory was supplied twice")
+        copied = self.root / "copy" / directories[1].name
+        shutil.copytree(directories[1], copied)
+        self.refused([workflow], directories + [copied], "duplicate artifact perf-comparison-")
+        self.refused([workflow, workflow], directories, "the replacement is the first execution again")
+        twice = self.workflow("twice")
+
+        def duplicate(document):
+            side = document["phases"][0]["head"]
+            side["accepted"].append(dict(side["accepted"][0]))
+            side["audit"] = perf.row_run_audit([record["renderer"] for record in side["accepted"]])
+        twice.edit("macOS", "S9-S10", duplicate)
+        self.refused([twice], twice.all_directories(), "lists one accepted execution twice")
+        owners = self.workflow("owners")
+        source, target = owners.directories[("macOS", "S9-S10")], owners.directories[("macOS", "S7")]
+        shutil.copytree(source / "runs", target / "runs")
+        moved = json.loads((source / perf.ROW_RUN_EVIDENCE_FILE).read_text(encoding="utf-8"))["phases"]
+        owners.edit("macOS", "S7", lambda document: document["phases"].extend(moved))
+        self.refused([owners], owners.all_directories(), "macos S10/default stream is owned by two shards")
+
+    def test_wrong_run_attempt_head_base_job_harness_or_protocol_is_refused(self):
+        # Each provenance fault is a validation error naming it, never an opportunity decision.
+        def timing(change):
+            def apply(workflow):
+                path = workflow.directories[("Windows", "S9-S10")] / perf.TIMING_FILE
+                document = json.loads(path.read_text(encoding="utf-8"))
+                change(document)
+                perf._write_json(path, document)
+            return apply
+
+        def evidence(change):
+            return lambda workflow: workflow.edit("Windows", "S9-S10", change)
+
+        def job(conclusion):
+            def apply(workflow):
+                workflow.record["jobs"]["1"][-2]["conclusion"] = conclusion
+            return apply
+        cases = {
+            "wrong run": (lambda workflow: workflow.record["run"].update(id=778), {},
+                          "artifacts belong to no selected execution"),
+            "wrong attempt": (timing(lambda document: document.update(run_attempt="2")), {},
+                              "timing.json run_attempt '2' is not '1'"),
+            "wrong evidence run": (evidence(lambda document: document.update(run_id="999")), {},
+                                   "row-run-evidence.json run_id '999' is not '777'"),
+            "wrong job": (timing(lambda document: document.update(job="Windows before/after comparison (S7)")), {},
+                          "timing.json job 'Windows before/after comparison (S7)'"),
+            "wrong head": (None, {"head": "c" * 40}, f"run 777 measured head {ROW_RUN_HEAD_SHA}"),
+            "wrong base": (None, {"base": "c" * 40}, "evidence base_sha"),
+            "wrong harness": (evidence(lambda document: document.update(harness_hash="other")), {},
+                              "settings differ from another windows shard's"),
+            "wrong protocol": (evidence(lambda document: document.update(protocol_digest="0" * 64)), {},
+                               "evidence protocol_digest"),
+            "mixed profiles": (evidence(lambda document: document["profile"]["lto"].update(head="fat")), {},
+                               "base and head built with different profiles"),
+            "failed job": (job("failure"), {}, "required job 'Windows before/after comparison (S7)' is failure"),
+            "no result job": (lambda workflow: workflow.record["jobs"]["1"].pop(), {},
+                              "has no 'Performance comparison result' job"),
+            "wrong repository": (lambda workflow: workflow.record["run"]["repository"].update(full_name="other/repo"),
+                                 {}, "run 777 belongs to other/repo"),
+        }
+        for name, (change, options, expected) in cases.items():
+            with self.subTest(case=name):
+                workflow = self.workflow(name.replace(" ", "-"))
+                if change is not None:
+                    change(workflow)
+                self.refused([workflow], workflow.all_directories(), expected, **options)
+        late = self.workflow("late", elapsed_s=1801)
+        self.refused([late], late.all_directories(), "took 1801 s from creation, over 1800 s")
+        on_time = self.workflow("on-time", elapsed_s=1800)
+        self.assertIn("- outcome: BUILD (step 4)", decide([on_time], on_time.all_directories()))
+
+    def test_sums_and_counts_must_recompute_from_the_records(self):
+        # The individual records are authoritative: an audit count, sum or assembly figure that differs from their
+        # recomputation, or a record whose fields differ from its run's result.json, is refused.
+        cases = {"accepted count": lambda side: side["audit"].update(accepted_runs=3),
+                 "a sum": lambda side: side["audit"]["sums"].update(row_run_shape_first=801),
+                 "assembly": lambda side: side["audit"].update(assembly={"sum_us": 1, "events": 1})}
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                workflow = self.workflow(name.replace(" ", "-"))
+                workflow.edit("macOS", "S9-S10", lambda document, change=change: change(document["phases"][0]["head"]))
+                self.refused([workflow], workflow.all_directories(),
+                             "sums or counts disagree with its individual records")
+        record = self.workflow("record")
+
+        def inflate(document):
+            side = document["phases"][0]["head"]
+            side["accepted"][0]["renderer"]["row_run_shape_first"] = 5000
+            side["audit"] = perf.row_run_audit([item["renderer"] for item in side["accepted"]])
+        record.edit("macOS", "S9-S10", inflate)
+        self.refused([record], record.all_directories(), "result.json does not report the record's stream renderer")
+
+    def test_rejected_attempts_are_disclosed_and_contribute_nothing(self):
+        # A rejected attempt carrying counters that would fail step 2 is disclosed but never read; one listed as
+        # both accepted and rejected is refused.
+        workflow = self.workflow("rejected")
+        flood = dict(row_run_head(), row_run_shape_overflows=999)
+        workflow.edit("macOS", "S9-S10", lambda document: document["phases"][0]["head"]["rejected"].append(
+            {"execution": "runs/S10-default/counters/09-head", "kind": "occluded", "reasons": ["occlusion"],
+             "renderer": flood}))
+        self.assertIn("- outcome: BUILD (step 4)", decide([workflow], workflow.all_directories()))
+        both = self.workflow("both")
+        both.edit("macOS", "S9-S10", lambda document: document["phases"][0]["head"]["rejected"].append(
+            {"execution": document["phases"][0]["head"]["accepted"][0]["execution"], "kind": "occluded",
+             "reasons": []}))
+        self.refused([both], both.all_directories(), "execution both accepted and rejected")
+
+    def test_the_shard_exports_only_accepted_executions_and_discloses_the_rest(self):
+        # A real run set with an occluded (retried) attempt per side: the evidence lists only the valid runs that
+        # replaced it, with their attempt-directory identities and fields; the occluded attempt is disclosed with
+        # its kind and carries no value.
+        scenario = perf.Scenario("S4", ("default",), "Streaming", 120, 30)
+        plans = {side: perf.RunPlan(scenario, "default", side, Path(f"/{side}"), HARNESS_HASH) for side in perf.SIDES}
+
+        def counted(plan, first, rejected=False):
+            overrides = {"status": "invalid", "exit_code": 3, "notes": ["native occlusion change"]} if rejected else {}
+            result = counters_result({"renderer.row_run_shape_first": first}, **overrides)
+            for phase in result["phases"]:
+                phase["name"] = "stream"
+            return make_outcome(plan=plan, exit_code=3 if rejected else 0, result=result)
+        queues = {side: [lambda plan: counted(plan, 1_000_000, rejected=True), lambda plan: counted(plan, 7)]
+                  for side in perf.SIDES}
+
+        def run_case(plan, _evidence):
+            queue = queues[plan.side]
+            return (queue.pop(0) if len(queue) > 1 else queue[0])(plan)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = perf.run_set("S4/default", plans, None, 2, run_case, Path("/e"), "counters")
+        exported = perf.row_run_export_side(result, "head", "stream", Path("/e"))
+        self.assertEqual(len(exported["accepted"]), 2)
+        self.assertEqual([item["kind"] for item in exported["rejected"]], ["occluded"])
+        self.assertNotIn("renderer", exported["rejected"][0])
+        self.assertNotIn(exported["rejected"][0]["execution"],
+                         [record["execution"] for record in exported["accepted"]])
+        self.assertEqual(exported["audit"]["sums"]["row_run_shape_first"], 14)
+        self.assertEqual(exported["audit"]["accepted_runs"], 2)
+        document = perf.row_run_evidence_document([result], Path("/e"), {"base": ROW_RUN_BASE_SHA,
+                                                                         "head": ROW_RUN_HEAD_SHA},
+                                                  "hash", {"base": [], "head": []}, True, {}, True, {})
+        self.assertEqual([(entry["label"], entry["phase"]) for entry in document["phases"]], [("S4/default", "stream")])
+        self.assertEqual(document["phases"][0]["head"], exported)
+
+    def test_a_replacing_rerun_is_never_pooled_or_hole_filled(self):
+        # Two executions of one run per phase each would decide BUILD only if pooled; a complete first execution
+        # failing step 2 and a healthy rerun missing one shard would decide BUILD only if the rerun's hole were
+        # filled from the first. The replacement stands alone, so both are PENDING (evidence).
+        first, rerun = self.workflow("single-1", runs_per_side=1), self.workflow("single-2", run_id=778,
+                                                                                    runs_per_side=1)
+        report = decide([first, rerun], first.all_directories() + rerun.all_directories())
+        self.assertIn("- outcome: PENDING (evidence) (step 1): runs run 777 attempt 1 and run 778 attempt 1: ", report)
+        failing, holed = self.workflow("failing"), self.workflow("holed", run_id=778)
+        failing.rewrite("macOS", "S9-S10", "S10/default", "head", 0, overflow)
+        directories = failing.all_directories() + [directory for key, directory in holed.directories.items()
+                                                   if key != ("Windows", "S9-S10")]
+        report = decide([failing, holed], directories)
+        self.assertIn("- selected execution: run 778 attempt 1", report)
+        # The restart count is the one given, never inferred: a rerun failing step 2 again restarts at 0 and is
+        # posted PENDING at the limit.
+        again = self.workflow("again", run_id=778)
+        again.rewrite("macOS", "S9-S10", "S10/default", "head", 0, overflow)
+        both = failing.all_directories() + again.all_directories()
+        self.assertIn("- outcome: PENDING (diagnostic) (step 2)", decide([failing, again], both))
+        self.assertIn("- outcome: PENDING (step 2): ", decide([failing, again], both, restarts=2))
+        self.assertIn("- outcome: PENDING (evidence) (step 1): runs run 777 attempt 1 and run 778 attempt 1: "
+                      "windows S10/default stream: not measured\n", report)
+
+    def test_the_cli_reaches_row_run_final_once_and_reports_the_selected_execution(self):
+        # A first execution failing step 2 and a healthy same-head replacement: the CLI calls row_run_final once
+        # and prints both identities, the replacement as selected, and its BUILD. Invalid evidence prints the
+        # validation error with exit 2, and the mode refuses incomplete arguments.
+        first, rerun = self.workflow("cli-1"), self.workflow("cli-2", run_id=778)
+        first.rewrite("macOS", "S9-S10", "S10/default", "head", 0, overflow)
+        executions = []
+        for workflow in (first, rerun):
+            path = self.root / f"record-{workflow.run_id}.json"
+            path.write_text(json.dumps(workflow.record), encoding="utf-8")
+            executions += ["--row-run-execution", str(path), "1"]
+        directories = [str(directory) for directory in first.all_directories() + rerun.all_directories()]
+        argv = ["--row-run-decide", *directories, *executions, "--row-run-base", ROW_RUN_BASE_SHA]
+
+        def run(head):
+            printed = io.StringIO()
+            with mock.patch.object(perf, "row_run_final", wraps=perf.row_run_final) as final, \
+                    mock.patch.object(perf, "use_utf8_output"), contextlib.redirect_stdout(printed):
+                code = perf.main(argv + ["--row-run-head", head])
+            return code, final.call_count, printed.getvalue()
+        code, calls, output = run(ROW_RUN_HEAD_SHA)
+        self.assertEqual((code, calls), (0, 1))
+        for line in ("- first execution: run 777 attempt 1", "- replacement execution: run 778 attempt 1",
+                     "- selected execution: run 778 attempt 1", "- outcome: BUILD (step 4)"):
+            self.assertIn(line, output)
+        code, calls, output = run("c" * 40)
+        self.assertEqual((code, calls), (2, 0))
+        self.assertIn("row-run evidence is invalid, so no decision is made: run 777 measured head", output)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            perf.parse_args(["--row-run-decide", directories[0], "--row-run-head", ROW_RUN_HEAD_SHA,
+                             "--row-run-base", ROW_RUN_BASE_SHA])
+
+    def test_an_attempt_inheriting_its_comparisons_binds_their_executed_origins(self):
+        # Attempt 2 reruns only the result job and inherits every comparison: each inherited job claims its executed
+        # origin's attempt-1 artifact, and the execution decides as run 777 attempt 2.
+        workflow = self.workflow("inherit")
+        rows = []
+        for data in workflow.record["jobs"]["1"]:
+            inherited = dict(data, created_at=github_time(ROW_RUN_CREATED_S + 1700))
+            if data["name"] == perf.ROW_RUN_RESULT_JOB:
+                inherited.update(started_at=github_time(ROW_RUN_CREATED_S + 1710),
+                                 completed_at=github_time(ROW_RUN_CREATED_S + 1750), runner_id=99)
+            rows.append(inherited)
+        workflow.record["jobs"]["2"] = rows
+        workflow.record["attempts"]["2"] = {"run_started_at": github_time(ROW_RUN_CREATED_S + 1705),
+                                            "updated_at": github_time(ROW_RUN_CREATED_S + 1760)}
+        workflow.attempt = 2
+        try:
+            report = decide([workflow], workflow.all_directories())
+        except perf.RowRunEvidenceError as error:
+            # When: the inherited jobs were not bound to their origin's artifacts, the evidence did not validate.
+            self.fail(f"the inherited comparisons did not bind their origin artifacts: {error}")
+        self.assertIn("- selected execution: run 777 attempt 2", report)
+        self.assertIn("- outcome: BUILD (step 4)", report)
 
 
 if __name__ == "__main__":

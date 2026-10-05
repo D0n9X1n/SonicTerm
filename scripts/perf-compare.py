@@ -5595,8 +5595,9 @@ ROW_RUN_HEADER = ("| Platform | Scenario | Phase | Metric | Baseline | PR |\n"
 ROW_RUN_NOTE = ("Each figure sums the accepted counters runs of the phase before any division. R = repeats / "
                 "(first + repeats) and T = repeat_ns / (assembly sum_us x 1,000) are head only; O_asm and O_att "
                 "compare the head's pooled assembly and per-attempt means with the base's. The baseline reads n/a "
-                "for a counter the base does not report. The decision applies the frozen steps to this invocation's "
-                "evidence only; a phase or platform this invocation did not measure leaves it PENDING (evidence).")
+                "for a counter the base does not report. This is partial shard evidence: the shard measures only some "
+                "decision phases and makes no decision; `--row-run-decide` decides over every shard of one "
+                "workflow execution from row-run-evidence.json.")
 
 
 @dataclass(frozen=True)
@@ -5820,8 +5821,8 @@ def _row_run_sum_cell(runs: Sequence[Mapping], field_name: str) -> str:
 
 
 def row_run_rows(evidence: Mapping[tuple[str, str, str], RowRunPhase]) -> list[list[str]]:
-    """The Row-run shaping table: each measured decision phase's pooled sums and R, T, O_asm and O_att, then
-    the decision with its step and reason."""
+    """The Row-run shaping table: each measured decision phase's pooled sums and R, T, O_asm and O_att. A shard
+    measures only some phases, so it prints no decision; --row-run-decide decides over the whole execution."""
     rows = []
     for (platform_key, label, phase_name), phase in evidence.items():
         prefix = [platform_key, label, phase_name]
@@ -5836,9 +5837,369 @@ def row_run_rows(evidence: Mapping[tuple[str, str, str], RowRunPhase]) -> list[l
             rows.append(prefix + [name, "n/a", _percent(metrics[name])])
         for name in ("O_asm", "O_att"):
             rows.append(prefix + [name, "", _percent(metrics[name])])
-    decision = row_run_decision(evidence)
-    rows.append(["", "", "", "decision", f"step {decision.step}", f"{decision.outcome}: {decision.reason}"])
     return rows
+
+
+# Row-run evidence: each comparison shard's machine-readable record of the decision phases it measured. The
+# decision is never made per shard; --row-run-decide combines the shards of one workflow execution.
+ROW_RUN_EVIDENCE_FILE = "row-run-evidence.json"
+ROW_RUN_EVIDENCE_SCHEMA = 1
+ROW_RUN_PROTOCOL_VERSION = 1
+# The PR pipeline's budget: from the run's creation to the attempt's final update, queueing included.
+ROW_RUN_MAX_ELAPSED_S = 30 * 60
+ROW_RUN_ARTIFACT = re.compile(r"perf-comparison-(?P<ref>.+)-(?P<head>[0-9a-f]{40})-(?P<platform>macOS|Windows)-"
+                              r"(?P<shard>.+)-(?P<attempt>\d+)")
+ROW_RUN_COMPARISON_JOB = re.compile(r"(?P<platform>macOS|Windows) before/after comparison \((?P<shard>.+)\)")
+ROW_RUN_RESULT_JOB = "Performance comparison result"
+ROW_RUN_PLATFORM_KEYS = {"macOS": "macos", "Windows": "windows"}
+ROW_RUN_DEFAULT_REPOSITORY = "D0n9X1n/SonicTerm"
+
+
+def row_run_protocol_digest() -> str:
+    """The sha256 of the frozen decision protocol (phases, labels, bounds and limits); evidence measured under
+    another protocol cannot be decided by this one."""
+    protocol = {"version": ROW_RUN_PROTOCOL_VERSION, "phases": ROW_RUN_DECISION_PHASES,
+                "positive": ROW_RUN_POSITIVE_LABELS, "negative": ROW_RUN_NEGATIVE_LABEL,
+                "overhead": ROW_RUN_OVERHEAD_LABELS, "reference": ROW_RUN_REFERENCE_LABELS,
+                "platforms": ROW_RUN_PLATFORMS, "min_runs": ROW_RUN_MIN_RUNS, "min_classified": ROW_RUN_MIN_CLASSIFIED,
+                "bounds": [ROW_RUN_MAX_FAILED_SHARE, ROW_RUN_MAX_UNSTABLE_SHARE, ROW_RUN_MAX_NEGATIVE_REPEAT,
+                           ROW_RUN_MIN_POSITIVE_REPEAT, ROW_RUN_MAX_OVERHEAD, ROW_RUN_MIN_OPPORTUNITY],
+                "max_restarts": ROW_RUN_MAX_RESTARTS, "head_fields": ROW_RUN_HEAD_FIELDS,
+                "attempt_fields": ROW_RUN_ATTEMPT_FIELDS}
+    return hashlib.sha256(json.dumps(protocol, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _row_run_identity(evidence: object, out: Path) -> str:
+    """An attempt directory's identity: its path under the comparison's output, with forward slashes."""
+    try:
+        return Path(str(evidence)).resolve().relative_to(out.resolve()).as_posix()
+    except ValueError:
+        # When: the attempt directory lies outside `out` (a test's fixed path), its own path names it.
+        return Path(str(evidence)).as_posix()
+
+
+def _row_run_renderer(outcome: RunOutcome, phase_name: str) -> dict | None:
+    """The renderer section a run reported for `phase_name`, its fields as written (none filled in), or None
+    when the run reported no counters for that phase, as the shard table reads it."""
+    for phase in (outcome.result or {}).get("phases") or []:
+        if str(phase.get("name")) == phase_name and isinstance(phase.get("frame_counters"), dict):
+            renderer = phase["frame_counters"].get("renderer")
+            return dict(renderer) if isinstance(renderer, Mapping) else {}
+    return None
+
+
+def row_run_audit(renderers: Sequence[Mapping]) -> dict:
+    """Derived figures for audit only, recomputed from the records: each field's sum (None when a record lacks
+    it), the assembly sum_us and event count, and the accepted-run count."""
+    assembly = _assembly_totals(renderers)
+    return {"accepted_runs": len(renderers),
+            "sums": {name: _row_run_total(renderers, name) for name in ROW_RUN_TABLE_FIELDS},
+            "assembly": None if assembly is None else {"sum_us": assembly[0], "events": assembly[1]}}
+
+
+def row_run_export_side(result: SetResult, side_name: str, phase_name: str, out: Path) -> dict:
+    """One side's accepted execution records for one phase, and its attempts that were not accepted.
+
+    Only runs the final run-set classification kept (after the schema, focus, display and presenter checks) are
+    records, each with its attempt-directory identity and renderer fields; every other attempt is disclosed with
+    its kind and reasons and carries no value. A blocked or failed side has no accepted run."""
+    side = getattr(result, side_name)
+    accepted_runs = [] if side.blocked or side.failed else side.outcomes
+    valid = [evidence for name, evidence, kind, _why in result.attempts if name == side_name and kind == "valid"]
+    records, accepted_ids = [], set()
+    # run_set appends a side's outcome exactly when its attempt ends valid, so the two lists align in order.
+    for evidence, outcome in zip(valid, accepted_runs):
+        identity = _row_run_identity(evidence, out)
+        accepted_ids.add(identity)
+        renderer = _row_run_renderer(outcome, phase_name)
+        if renderer is not None:
+            records.append({"execution": identity, "renderer": renderer})
+    rejected = [{"execution": _row_run_identity(evidence, out), "kind": kind, "reasons": list(why)}
+                for name, evidence, kind, why in result.attempts
+                if name == side_name and _row_run_identity(evidence, out) not in accepted_ids]
+    return {"status": side.blocked or side.failed or "", "accepted": records, "rejected": rejected,
+            "audit": row_run_audit([record["renderer"] for record in records])}
+
+
+def row_run_evidence_document(results: Iterable[SetResult], out: Path, shas: Mapping[str, str], harness_hash: str,
+                              features: Mapping[str, Sequence[str]], short: bool, profile: Mapping,
+                              counters: bool, environ: Mapping[str, str]) -> dict:
+    """row-run-evidence.json: this shard's identity and settings, and per decision phase it measured, each side's
+    accepted execution records and disclosed rejected attempts."""
+    phases = []
+    for result in results:
+        if result.set_name != "counters":
+            # When: the set is not a counters set, it measured no row-run counters.
+            continue
+        for label, phase_name in ROW_RUN_DECISION_PHASES:
+            if label == result.label:
+                phases.append({"label": label, "phase": phase_name,
+                               **{side: row_run_export_side(result, side, phase_name, out) for side in SIDES}})
+    return {"schema_version": ROW_RUN_EVIDENCE_SCHEMA, "repository": environ.get("GITHUB_REPOSITORY", ""),
+            "run_id": environ.get("GITHUB_RUN_ID", ""), "run_attempt": environ.get("GITHUB_RUN_ATTEMPT", ""),
+            "job": environ.get("PERF_JOB_NAME", ""), "shard": environ.get("PERF_SHARD", ""),
+            "platform": row_run_platform(), "base_sha": shas["base"], "head_sha": shas["head"],
+            "harness_hash": harness_hash, "dataset": "counters" if counters else "none", "short": bool(short),
+            "features": {side: sorted(features[side]) for side in SIDES}, "profile": dict(profile),
+            "protocol_version": ROW_RUN_PROTOCOL_VERSION, "protocol_digest": row_run_protocol_digest(),
+            "phases": phases}
+
+
+class RowRunEvidenceError(Exception):
+    """The supplied evidence cannot be bound to the selected workflow execution: a validation error, never a
+    decision."""
+
+
+@dataclass
+class RowRunExecution:
+    """One validated workflow execution: its identity, evidence map, settings per platform and missing shards."""
+
+    identity: str
+    evidence: dict
+    settings: dict
+    missing: list
+    claimed: set
+
+
+def _critical_path_module():
+    """perf-critical-path.py, whose row resolution maps an inherited job to its one executed origin."""
+    spec = importlib.util.spec_from_file_location("perf_critical_path",
+                                                  Path(__file__).resolve().parent / "perf-critical-path.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _row_run_timing_run(directory: Path) -> str:
+    """The workflow run a directory's timing.json names, or '' when it names none."""
+    timing, _problem = _read_json_object(directory / TIMING_FILE)
+    return str(timing.get("run_id")) if isinstance(timing, dict) else ""
+
+
+def _row_run_check_record(directory: Path, identity: object, side_name: str, label: str, phase_name: str,
+                          renderer: Mapping) -> None:
+    """An accepted record must name an attempt directory whose outcome.json is this valid run and whose kept
+    result.json reported exactly these renderer fields for the phase."""
+    if not isinstance(identity, str) or not identity or Path(identity).is_absolute() or ".." in Path(identity).parts:
+        raise RowRunEvidenceError(f"{directory.name}: execution identity {identity!r} is not a directory under it")
+    run_dir = directory / identity
+    outcome, problem = _read_json_object(run_dir / "outcome.json")
+    scenario, _, variant = label.partition("/")
+    if problem is not None or not isinstance(outcome, dict):
+        raise RowRunEvidenceError(f"{directory.name}/{identity}: {problem or 'outcome.json is not an object'}")
+    if (outcome.get("kind"), outcome.get("side"), outcome.get("scenario"), outcome.get("variant")) != \
+            ("valid", side_name, scenario, variant):
+        raise RowRunEvidenceError(f"{directory.name}/{identity}: outcome.json is not an accepted {side_name} run "
+                                  f"of {label}")
+    result, problem = _read_json_object(run_dir / "scratch" / "result.json")
+    reported = [phase.get("frame_counters", {}).get("renderer") for phase in (result or {}).get("phases") or []
+                if isinstance(phase, dict) and str(phase.get("name")) == phase_name
+                and isinstance(phase.get("frame_counters"), dict)] if isinstance(result, dict) else []
+    if problem is not None or reported[:1] != [renderer]:
+        raise RowRunEvidenceError(f"{directory.name}/{identity}: result.json does not report the record's "
+                                  f"{phase_name} renderer fields ({problem or 'they differ'})")
+
+
+def _row_run_bind_phase(directory: Path, platform_key: str, entry: Mapping) -> tuple[tuple, RowRunPhase]:
+    """Validate one phase entry of a shard's evidence and rebuild its RowRunPhase from the accepted records."""
+    key = (platform_key, entry.get("label"), entry.get("phase"))
+    if key[1:] not in ROW_RUN_DECISION_PHASES:
+        raise RowRunEvidenceError(f"{directory.name}: {key[1]} {key[2]} is not a decision phase")
+    sides = []
+    for side_name in SIDES:
+        side = entry.get(side_name)
+        if not isinstance(side, dict) or not isinstance(side.get("accepted"), list):
+            raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} has no accepted records")
+        records = side["accepted"]
+        identities = [record.get("execution") if isinstance(record, dict) else None for record in records]
+        if len(set(identities)) != len(identities):
+            raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} lists one accepted execution twice")
+        rejected = {item.get("execution") for item in side.get("rejected") or [] if isinstance(item, dict)}
+        if rejected & set(identities):
+            raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} execution both accepted and rejected")
+        renderers = []
+        for identity, record in zip(identities, records):
+            renderer = record.get("renderer")
+            if not isinstance(renderer, dict):
+                raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} {identity}: no renderer fields")
+            _row_run_check_record(directory, identity, side_name, key[1], key[2], renderer)
+            renderers.append(renderer)
+        if side.get("audit") != row_run_audit(renderers):
+            raise RowRunEvidenceError(f"{directory.name}: {key[1]} {side_name} sums or counts disagree with its "
+                                      "individual records")
+        sides.append(tuple(renderers))
+    return key, RowRunPhase(sides[0], sides[1])
+
+
+def _row_run_bind_artifact(directory: Path, row_name: str, origin: int, run_id: str, repository: str,
+                           head_sha: str, base_sha: str) -> tuple[str, dict, list]:
+    """Check one claimed artifact's name, timing.json and evidence identity; return its platform key, settings
+    and phase entries."""
+    named = ROW_RUN_ARTIFACT.fullmatch(directory.name)
+    job = ROW_RUN_COMPARISON_JOB.fullmatch(row_name)
+    if named is None or (named["head"], named["platform"], named["shard"], named["attempt"]) != \
+            (head_sha, job["platform"], job["shard"], str(origin)):
+        raise RowRunEvidenceError(f"{directory.name}: the artifact name does not match {row_name} attempt {origin}")
+    timing, problem = _read_json_object(directory / TIMING_FILE)
+    evidence, evidence_problem = _read_json_object(directory / ROW_RUN_EVIDENCE_FILE)
+    if problem or evidence_problem or not isinstance(timing, dict) or not isinstance(evidence, dict):
+        raise RowRunEvidenceError(f"{directory.name}: {problem or evidence_problem or 'not a JSON object'}")
+    expected = {"run_id": run_id, "run_attempt": str(origin), "job": row_name, "shard": job["shard"]}
+    for document_name, document in (("timing.json", timing), (ROW_RUN_EVIDENCE_FILE, evidence)):
+        for field_name, value in expected.items():
+            if str(document.get(field_name)) != value:
+                raise RowRunEvidenceError(f"{directory.name}: {document_name} {field_name} "
+                                          f"{document.get(field_name)!r} is not {value!r}")
+    platform_key = ROW_RUN_PLATFORM_KEYS[job["platform"]]
+    identity = {"schema_version": ROW_RUN_EVIDENCE_SCHEMA, "repository": repository, "platform": platform_key,
+                "head_sha": head_sha, "base_sha": base_sha, "protocol_version": ROW_RUN_PROTOCOL_VERSION,
+                "protocol_digest": row_run_protocol_digest(), "dataset": "counters"}
+    for field_name, value in identity.items():
+        if evidence.get(field_name) != value:
+            raise RowRunEvidenceError(f"{directory.name}: evidence {field_name} {evidence.get(field_name)!r} "
+                                      f"is not {value!r}")
+    lto = (evidence.get("profile") or {}).get("lto") or {}
+    if lto.get("base") != lto.get("head"):
+        raise RowRunEvidenceError(f"{directory.name}: base and head built with different profiles {lto}")
+    settings = {name: evidence.get(name) for name in ("harness_hash", "short", "features", "profile")}
+    if not isinstance(evidence.get("phases"), list):
+        raise RowRunEvidenceError(f"{directory.name}: evidence has no phase list")
+    return platform_key, settings, evidence["phases"]
+
+
+def row_run_load_execution(record: Mapping, attempt: int, directories: Sequence[Path], head_sha: str,
+                           base_sha: str, repository: str) -> RowRunExecution:
+    """Bind supplied artifact directories to one workflow execution (run and attempt) and rebuild its evidence.
+
+    The run must be the reviewed head; every job of the attempt must have succeeded, the result job included;
+    creation to the attempt's final update must fit the budget. Each comparison job, executed or inherited from
+    its validated origin, claims the one artifact of its origin attempt; that artifact's name, timing.json and
+    evidence must agree with it. A shard whose artifact was not supplied is missing coverage. Each decision
+    phase may be owned once per platform; its records are rebuilt into RowRunPhase, never summed across owners."""
+    critical = _critical_path_module()
+    run = record.get("run") or {}
+    run_id = str(run.get("id"))
+    if run.get("head_sha") != head_sha:
+        raise RowRunEvidenceError(f"run {run_id} measured head {run.get('head_sha')}, expected {head_sha}")
+    if (run.get("repository") or {}).get("full_name") != repository:
+        raise RowRunEvidenceError(f"run {run_id} belongs to {(run.get('repository') or {}).get('full_name')}")
+    try:
+        rows = critical.resolve_rows(record)
+        elapsed_s = (critical.parse_time(record["attempts"][str(attempt)]["updated_at"])
+                     - critical.parse_time(run["created_at"]))
+    except critical.AccountingError as error:
+        raise RowRunEvidenceError(f"run {run_id}: {error}") from error
+    identity = f"run {run_id} attempt {attempt}"
+    if attempt not in rows:
+        raise RowRunEvidenceError(f"{identity} is not an attempt of the run")
+    if elapsed_s > ROW_RUN_MAX_ELAPSED_S:
+        raise RowRunEvidenceError(f"{identity} took {elapsed_s} s from creation, over {ROW_RUN_MAX_ELAPSED_S} s")
+    if not any(row.name == ROW_RUN_RESULT_JOB for row in rows[attempt]):
+        raise RowRunEvidenceError(f"{identity} has no {ROW_RUN_RESULT_JOB!r} job")
+    for row in rows[attempt]:
+        if row.data.get("conclusion") != "success":
+            raise RowRunEvidenceError(f"{identity}: required job {row.name!r} is {row.data.get('conclusion')}")
+    evidence, settings, missing, claimed = {}, {}, [], set()
+    for row in rows[attempt]:
+        if ROW_RUN_COMPARISON_JOB.fullmatch(row.name) is None:
+            # When: the job is the producer or the result job, it owns no comparison artifact.
+            continue
+        job = ROW_RUN_COMPARISON_JOB.fullmatch(row.name)
+        origin = row.origin.attempt
+        suffix = f"-{head_sha}-{job['platform']}-{job['shard']}-{origin}"
+        listed = [item["name"] for item in record.get("artifacts") or []
+                  if item["name"].startswith("perf-comparison-") and item["name"].endswith(suffix)]
+        if len(listed) != 1:
+            raise RowRunEvidenceError(f"{identity}: {len(listed)} listed artifacts end {suffix}")
+        candidates = [directory for directory in directories
+                      if directory.name == listed[0] and _row_run_timing_run(directory) == run_id]
+        if len(candidates) > 1:
+            raise RowRunEvidenceError(f"{identity}: duplicate artifact {listed[0]}")
+        if not candidates:
+            missing.append(listed[0])
+            continue
+        claimed.add(candidates[0])
+        platform_key, artifact_settings, phases = _row_run_bind_artifact(
+            candidates[0], row.name, origin, run_id, repository, head_sha, base_sha)
+        if settings.setdefault(platform_key, artifact_settings) != artifact_settings:
+            raise RowRunEvidenceError(f"{identity}: {candidates[0].name} settings differ from another "
+                                      f"{platform_key} shard's")
+        for entry in phases:
+            key, phase = _row_run_bind_phase(candidates[0], platform_key, entry)
+            if key in evidence:
+                raise RowRunEvidenceError(f"{identity}: {' '.join(key)} is owned by two shards")
+            evidence[key] = phase
+    return RowRunExecution(identity, evidence, settings, missing, claimed)
+
+
+def row_run_step_lines(decision: RowRunDecision) -> list[str]:
+    """Each decision step's status: passed before the deciding step, its outcome at it, not evaluated after it."""
+    lines = []
+    for number, name in enumerate(("evidence", "classification", "overhead", "opportunity"), 1):
+        if number < decision.step:
+            status = "passed"
+        elif number == decision.step:
+            status = f"{decision.outcome}: {decision.reason}"
+        else:
+            status = "not evaluated"
+        lines.append(f"- step {number} ({name}): {status}")
+    gate = "passed" if decision.step > 3 else "failed" if decision.step == 3 else "not evaluated"
+    lines.append(f"- overhead gate (manual merge gate): {gate}")
+    return lines
+
+
+def row_run_decide(executions: Sequence[tuple[Mapping, int]], directories: Sequence[Path], head_sha: str,
+                   base_sha: str, restarts: int, repository: str) -> str:
+    """Validate one eligible execution and its optional same-head replacement, call row_run_final once on their
+    separately rebuilt evidence maps, and return the report: both identities, the selected execution, every
+    step's status and reason, the overhead gate and the outcome."""
+    if len(set(directories)) != len(directories):
+        raise RowRunEvidenceError("duplicate artifact: one directory was supplied twice")
+    loaded = [row_run_load_execution(record, attempt, directories, head_sha, base_sha, repository)
+              for record, attempt in executions]
+    unclaimed = sorted(str(directory) for directory in directories
+                       if not any(directory in execution.claimed for execution in loaded))
+    if unclaimed:
+        raise RowRunEvidenceError(f"artifacts belong to no selected execution: {', '.join(unclaimed)}")
+    first, rerun = loaded[0], (loaded[1] if len(loaded) > 1 else None)
+    if rerun is not None:
+        if rerun.identity == first.identity:
+            raise RowRunEvidenceError(f"the replacement is the first execution again: {first.identity}")
+        for platform_key in set(first.settings) & set(rerun.settings):
+            if first.settings[platform_key] != rerun.settings[platform_key]:
+                raise RowRunEvidenceError(f"{platform_key} settings differ between {first.identity} and "
+                                          f"{rerun.identity}")
+    final = row_run_final(first.evidence, first.identity, None if rerun is None else rerun.evidence,
+                          "" if rerun is None else rerun.identity, restarts)
+    first_decision = row_run_decision(first.evidence)
+    selected = first if rerun is None or first_decision.step == 4 else rerun
+    lines = ["## Row-run shaping decision", "",
+             f"- protocol: version {ROW_RUN_PROTOCOL_VERSION}, digest `{row_run_protocol_digest()}`",
+             f"- head `{head_sha}`, base `{base_sha}`, restarts {restarts}",
+             f"- first execution: {first.identity}",
+             f"- replacement execution: {'none' if rerun is None else rerun.identity}",
+             f"- selected execution: {selected.identity}"]
+    lines += [f"- missing shard artifact of {selected.identity}: {name}" for name in selected.missing]
+    lines += row_run_step_lines(row_run_decision(selected.evidence))
+    lines.append(f"- outcome: {final.outcome} (step {final.step}): {final.reason}")
+    lines.append("- exit status 0 means the evidence validated, not that the diagnostic may merge: read the "
+                 "outcome and the overhead gate.")
+    return "\n".join(lines) + "\n"
+
+
+def row_run_decide_main(args: argparse.Namespace) -> int:
+    """Run --row-run-decide: print the decision and return 0, or print the validation error and return 2."""
+    try:
+        executions = [(json.loads(Path(path).read_text(encoding="utf-8")), int(attempt))
+                      for path, attempt in args.row_run_execution]
+        report = row_run_decide(executions, [Path(directory) for directory in args.row_run_decide],
+                                args.row_run_head, args.row_run_base, args.row_run_restarts, args.row_run_repo)
+    except (RowRunEvidenceError, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        print(f"row-run evidence is invalid, so no decision is made: {error}")
+        return EXIT_USAGE
+    print(report, end="")
+    return 0
 
 
 def render_table(rows: Iterable[Sequence[str]], header: str = TABLE_HEADER) -> str:
@@ -6582,7 +6943,7 @@ def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequen
             section += counters_note + "\n\n"
         parts.append(section + (render_table(counter_rows, COUNTERS_HEADER) if counter_rows else ""))
     if row_run_rows:
-        parts.append(f"### Row-run shaping (S4 and S10 counters runs)\n\n{ROW_RUN_NOTE}\n\n"
+        parts.append(f"### Row-run shaping (partial shard evidence)\n\n{ROW_RUN_NOTE}\n\n"
                      + render_table(row_run_rows, ROW_RUN_HEADER))
     if recovery_rows:
         parts.append(f"### Atlas retry recovery (S1/atlas-retry counters runs)\n\n{RECOVERY_NOTE}\n\n"
@@ -7163,6 +7524,10 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         # The first line says the table is partial, so nobody reads a head-only table as a comparison.
         document = f"**Incomplete comparison:** {'; '.join(problems)}\n\n" + document
     (out / "comparison.md").write_text(document, encoding="utf-8")
+    profile = {"lto": {side: release_lto(trees[side], os.environ) for side in SIDES},
+               "overrides": release_profile_overrides(os.environ)}
+    _write_json(out / ROW_RUN_EVIDENCE_FILE, row_run_evidence_document(
+        results, out, shas, digest, features, args.short, profile, args.counters, os.environ))
     marks["report_written"] = time.time()
     write_timing(out, marks, os.environ)
     print(document, flush=True)
@@ -7286,7 +7651,31 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out", type=Path,
                         help="an empty directory for the evidence and comparison.md "
                              "(default: target/perf-compare/out-<stamp>)")
+    parser.add_argument("--row-run-decide", nargs="+", metavar="ARTIFACT_DIR",
+                        help="analysis only: decide the row-run diagnostic from one workflow execution's downloaded "
+                             "perf-comparison artifacts; builds and runs nothing")
+    parser.add_argument("--row-run-execution", nargs=2, action="append", metavar=("RUN_RECORD", "ATTEMPT"),
+                        help="a recorded workflow run (perf-critical-path.py's record) and the attempt to decide; "
+                             "give it once, or twice for the one same-head replacement")
+    parser.add_argument("--row-run-head", help="the reviewed head SHA the executions measured")
+    parser.add_argument("--row-run-base", help="the resolved base SHA the executions measured")
+    parser.add_argument("--row-run-restarts", type=int, default=0,
+                        help="restarts on a changed diagnostic so far, from the recorded head sequence")
+    parser.add_argument("--row-run-repo", default=ROW_RUN_DEFAULT_REPOSITORY, help="owner/name of the run")
     args = parser.parse_args(argv)
+    if args.row_run_decide is not None:
+        if args.smoke or args.base is not None or args.head is not None or args.build_only is not None \
+                or args.prebuilt is not None:
+            parser.error("--row-run-decide is analysis only: it takes no comparison, build or smoke option")
+        if not args.row_run_execution or len(args.row_run_execution) > 2 \
+                or any(not attempt.isdigit() for _record, attempt in args.row_run_execution):
+            parser.error("--row-run-decide needs one or two --row-run-execution RUN_RECORD ATTEMPT")
+        if not all(sha and re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (args.row_run_head, args.row_run_base)):
+            parser.error("--row-run-decide needs --row-run-head and --row-run-base as 40-digit SHAs")
+        return args
+    if args.row_run_execution or args.row_run_head or args.row_run_base or args.row_run_restarts:
+        parser.error("--row-run-execution, --row-run-head, --row-run-base and --row-run-restarts need "
+                     "--row-run-decide")
     if args.smoke:
         options = (args.base, args.head, args.scenario, args.runs, args.out, args.counters_runs)
         binding = (args.build_only, args.prebuilt, args.prebuilt_run_id, args.prebuilt_attempt,
@@ -7340,6 +7729,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the smoke or a comparison and return its exit code."""
     use_utf8_output()
     args = parse_args(argv)
+    if args.row_run_decide is not None:
+        return row_run_decide_main(args)
     if args.smoke:
         return smoke_main(os.environ)
     return compare_main(args)
