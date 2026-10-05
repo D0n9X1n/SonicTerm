@@ -276,6 +276,8 @@ fn populated_snapshot() -> MemorySnapshot {
                     fit: "512".to_string(),
                     max_tile: [25, 16],
                 },
+                trimmed: false,
+                gpu_released_requested_bytes: 0,
             },
             RendererSummary {
                 label: "0".to_string(),
@@ -290,8 +292,12 @@ fn populated_snapshot() -> MemorySnapshot {
                 frame_scratch: ResourceAmount::default(),
                 chrome_cache: ResourceAmount::default(),
                 glyph_atlas_facts: Default::default(),
+                trimmed: false,
+                gpu_released_requested_bytes: 0,
             },
         ],
+        trim_seq: 0,
+        trim_source: None,
         allocator: Some(AllocatorReading {
             source: AllocatorSource::MainWindow,
             label: "WindowId(1)".to_string(),
@@ -311,6 +317,8 @@ fn empty_snapshot() -> MemorySnapshot {
         panes_sampled: 0,
         panes_contended: 0,
         renderers: Vec::new(),
+        trim_seq: 0,
+        trim_source: None,
         allocator: None,
         live_renderers: 0,
         live_fg_probe_workers: 0,
@@ -501,6 +509,8 @@ fn renderer_breakdown_order_is_stable_across_input_order() {
         frame_scratch: ResourceAmount::default(),
         chrome_cache: ResourceAmount::default(),
         glyph_atlas_facts: Default::default(),
+        trimmed: false,
+        gpu_released_requested_bytes: 0,
     };
     let mut first = empty_snapshot();
     first.renderers = vec![
@@ -821,9 +831,17 @@ fn sampling_repeats_on_the_shared_cadence() {
     );
 }
 
-/// The four fields a checkpoint sample adds to the periodic line.
-const CHECKPOINT_FIELDS: [&str; 4] =
-    ["checkpoint_index", "checkpoint_label", "checkpoint_attempt", "checkpoint_complete"];
+/// The fields a checkpoint sample adds to the periodic line in a build with the trim hook, as
+/// every unit-test build is: four checkpoint tags and three trim tags.
+const CHECKPOINT_FIELDS: [&str; 7] = [
+    "checkpoint_index",
+    "checkpoint_label",
+    "checkpoint_attempt",
+    "checkpoint_complete",
+    "trimmed",
+    "trim_source",
+    "trim_seq",
+];
 
 /// A one-pane app, for the checkpoint hook.
 fn app_with_one_pane() -> (super::super::App, winit::window::WindowId, u64) {
@@ -839,7 +857,7 @@ fn app_with_one_pane() -> (super::super::App, winit::window::WindowId, u64) {
 
 /// One checkpoint call emits exactly one INFO `memory` line: the periodic line's fields plus the
 /// four checkpoint tags, with the index, label and attempt it was given, complete when no pane is
-/// contended. A periodic line carries none of the tags.
+/// contended, and the three trim tags. A periodic line carries none of the tags.
 #[test]
 fn a_checkpoint_sample_is_the_periodic_line_plus_four_tags() {
     let (mut app, _window, _pane) = app_with_one_pane();
@@ -1016,4 +1034,73 @@ fn a_checkpoint_sample_leaves_the_retention_pass_untouched() {
     assert_eq!(pool.bytes(), pool_bytes, "nothing was discarded from the pool");
     assert_eq!(app.__test_pane_charge_total(window, pane_id), Some(0), "nothing was charged");
     drop(crowd);
+}
+
+/// A trimmed visible renderer reports `trimmed=true` and its released GPU request size inside the
+/// renderer breakdown, and that GPU figure never enters `renderer_total_bytes`, which counts CPU
+/// storage only.
+#[test]
+fn a_trimmed_renderer_reports_its_gpu_release_outside_the_renderer_total() {
+    let untrimmed = populated_snapshot();
+    let mut trimmed = populated_snapshot();
+    trimmed.renderers[0].trimmed = true;
+    trimmed.renderers[0].gpu_released_requested_bytes = 8_388_608;
+    assert_eq!(trimmed.renderer_bytes(), untrimmed.renderer_bytes());
+
+    let events = capture(|| emit_memory_snapshot(&trimmed, None));
+    let breakdown = events[0].text("renderers").expect("the breakdown is emitted").to_string();
+    assert!(breakdown.contains("trimmed=true gpu_released_requested_bytes=8388608"), "{breakdown}");
+    assert!(breakdown.contains("trimmed=false gpu_released_requested_bytes=0"), "{breakdown}");
+    assert_eq!(events[0].number("renderer_total_bytes"), Some(untrimmed.renderer_bytes() as u64));
+}
+
+/// A checkpoint line carries `trimmed`, `trim_source` and `trim_seq` from the App's trim state:
+/// before any trim they read false, `none` and 0; after a trim they read the trimmed window, the
+/// source that requested it and its number. A periodic line carries none of the three.
+#[test]
+fn a_checkpoint_line_carries_the_trim_state_and_a_periodic_line_does_not() {
+    let (mut app, window, _pane) = app_with_one_pane();
+    let before = capture(|| {
+        app.__perf_checkpoint_memory(0, "covered", 1);
+    });
+    assert_eq!(before[0].text("trimmed"), Some("false"));
+    assert_eq!(before[0].text("trim_source"), Some("none"));
+    assert_eq!(before[0].number("trim_seq"), Some(0));
+
+    // The test window has no renderer, so the App's trim state and the trimmed renderer's summary
+    // are set as a trim would set them.
+    app.trim_seq = 3;
+    app.last_trim_source = Some(super::super::retention::TrimSource::Hook);
+    let mut snapshot = app.build_memory_snapshot();
+    snapshot.renderers.push(RendererSummary {
+        label: format!("{window:?}"),
+        role: "visible",
+        glyph_atlas: ResourceAmount::default(),
+        image_atlas: ResourceAmount::default(),
+        row_glyph_cache: ResourceAmount::default(),
+        row_quad_cache: ResourceAmount::default(),
+        software_frame: ResourceAmount::default(),
+        vertex_scratch: ResourceAmount::default(),
+        row_ink: ResourceAmount::default(),
+        frame_scratch: ResourceAmount::default(),
+        chrome_cache: ResourceAmount::default(),
+        glyph_atlas_facts: Default::default(),
+        trimmed: true,
+        gpu_released_requested_bytes: 4_096,
+    });
+    let tagged = capture(|| {
+        emit_tagged_memory_snapshot(
+            &snapshot,
+            None,
+            Some(CheckpointTag { index: 1, label: "covered", attempt: 1 }),
+        );
+    });
+    assert_eq!(tagged[0].text("trimmed"), Some("true"));
+    assert_eq!(tagged[0].text("trim_source"), Some("hook"));
+    assert_eq!(tagged[0].number("trim_seq"), Some(3));
+
+    let periodic = capture(|| emit_memory_snapshot(&snapshot, None));
+    for name in ["trimmed", "trim_source", "trim_seq"] {
+        assert!(!periodic[0].field_names().contains(&name), "a periodic line has no {name}");
+    }
 }

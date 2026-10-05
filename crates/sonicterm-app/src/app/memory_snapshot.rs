@@ -91,6 +91,11 @@ pub struct RendererSummary {
     pub chrome_cache: sonicterm_types::ResourceAmount,
     /// Glyph atlas size, packed area, growths, evictions, fit and largest tile.
     pub glyph_atlas_facts: sonicterm_gpu::core::GlyphAtlasFacts,
+    /// The window was trimmed during its current covered stretch; always false for a warm one.
+    pub trimmed: bool,
+    /// Requested GPU bytes that trim gave back: a request size, not residency, and not part of
+    /// [`Self::total`], which counts CPU storage only.
+    pub gpu_released_requested_bytes: u64,
 }
 
 /// Renderer class selected as the authoritative shared-device reader.
@@ -252,6 +257,9 @@ impl RendererSummary {
             self.glyph_atlas_facts.fit,
             self.glyph_atlas_facts.max_tile[0],
             self.glyph_atlas_facts.max_tile[1],
+        ) + &format!(
+            " trimmed={} gpu_released_requested_bytes={}",
+            self.trimmed, self.gpu_released_requested_bytes
         )
     }
 }
@@ -275,6 +283,10 @@ pub struct MemorySnapshot {
     pub panes_contended: usize,
     /// Every renderer, visible and warm.
     pub renderers: Vec<RendererSummary>,
+    /// Covered-window trims performed since startup; zero before the first.
+    pub trim_seq: u64,
+    /// What requested the latest trim (`scheduler` or `hook`); `None` before the first.
+    pub trim_source: Option<&'static str>,
     /// Shared-device allocator state read from one authoritative renderer.
     pub allocator: Option<AllocatorReading>,
     /// `GpuRenderer` instances alive process-wide.
@@ -474,8 +486,17 @@ fn snapshot_complete(snapshot: &MemorySnapshot) -> bool {
     snapshot.panes_contended == 0 && snapshot.panes_sampled == snapshot.panes_total
 }
 
+/// Whether a tagged line carries the three trim fields: only a build that can trim on request.
+const TRIM_TAGS_SUPPORTED: bool = cfg!(any(test, feature = "perf-hook-trim"));
+
+/// Whether any visible renderer in the snapshot was trimmed during its covered stretch.
+fn snapshot_trimmed(snapshot: &MemorySnapshot) -> bool {
+    snapshot.renderers.iter().any(|renderer| renderer.trimmed)
+}
+
 /// Emit the aggregate snapshot, tagged with the perf checkpoint it was taken for when `checkpoint`
-/// is set. A periodic sample passes `None` and carries none of the four checkpoint fields.
+/// is set. A periodic sample passes `None` and carries none of the checkpoint or trim fields; a
+/// tagged one carries the trim fields only in a build with the trim hook.
 fn emit_tagged_memory_snapshot(
     snapshot: &MemorySnapshot,
     previous: Option<MemoryTotals>,
@@ -484,6 +505,7 @@ fn emit_tagged_memory_snapshot(
     let session = &snapshot.session;
     let session_bytes = snapshot.session_bytes();
     let renderer_bytes = snapshot.renderer_bytes();
+    let trim_tags = checkpoint.filter(|_| TRIM_TAGS_SUPPORTED);
 
     tracing::info!(
         target: "memory",
@@ -546,6 +568,10 @@ fn emit_tagged_memory_snapshot(
         checkpoint_label = checkpoint.map(|tag| tag.label),
         checkpoint_attempt = checkpoint.map(|tag| u64::from(tag.attempt)),
         checkpoint_complete = checkpoint.map(|_| snapshot_complete(snapshot)),
+        // The trim state a checkpoint saw; absent from a periodic sample and a build without the hook.
+        trimmed = trim_tags.map(|_| snapshot_trimmed(snapshot)),
+        trim_source = trim_tags.map(|_| snapshot.trim_source.unwrap_or("none")),
+        trim_seq = trim_tags.map(|_| snapshot.trim_seq),
         "memory snapshot"
     );
 }
@@ -586,12 +612,15 @@ impl super::App {
                 continue;
             };
             let label = format!("{window_id:?}");
-            renderers.push(summarize(
+            let mut summary = summarize(
                 label.clone(),
                 "visible",
                 &renderer.retained_amounts(),
                 renderer.glyph_atlas_facts(),
-            ));
+            );
+            summary.trimmed = window.redraw.trimmed;
+            summary.gpu_released_requested_bytes = window.redraw.trim_released_requested_bytes;
+            renderers.push(summary);
             visible_allocator_candidates.push((label, renderer));
         }
         let mut warm_allocator_candidates = Vec::new();
@@ -629,6 +658,8 @@ impl super::App {
             panes_sampled,
             panes_contended,
             renderers,
+            trim_seq: self.trim_seq,
+            trim_source: self.last_trim_source.map(super::retention::TrimSource::as_str),
             allocator,
             live_renderers: sonicterm_gpu::core::live_renderer_count(),
             live_fg_probe_workers: self.fg_probes.live_workers(),
@@ -638,7 +669,8 @@ impl super::App {
 
 impl super::App {
     /// Take one memory sample for perf checkpoint `index` (`label`), attempt `attempt`, and emit
-    /// it as the periodic line plus the four checkpoint fields.
+    /// it as the periodic line plus the four checkpoint fields and, with the trim hook, three trim
+    /// fields.
     ///
     /// The sample is only a measurement: it leaves the periodic cadence (`last_retention_sample`)
     /// and the previous-cycle totals alone, and runs no retention pass, reclamation or trim, so a
@@ -683,6 +715,8 @@ fn summarize(
         frame_scratch: retention.frame_scratch,
         chrome_cache: retention.chrome_cache,
         glyph_atlas_facts,
+        trimmed: false,
+        gpu_released_requested_bytes: 0,
     }
 }
 

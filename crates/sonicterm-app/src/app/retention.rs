@@ -41,6 +41,7 @@
 use std::time::{Duration, Instant};
 
 use sonicterm_types::{ResourceAmount, ResourceClass};
+use winit::window::WindowId;
 
 use super::memory_snapshot;
 use super::PaneState;
@@ -669,7 +670,7 @@ impl super::App {
     }
 
     fn charge_pane_owners(&mut self) {
-        let window_ids: Vec<super::WindowId> = self.windows.keys().copied().collect();
+        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
         for window_id in window_ids {
             let Some(window) = self.windows.get(&window_id) else {
                 // When: window_id came from a snapshot taken before this walk; a
@@ -793,6 +794,11 @@ impl super::App {
         // inline-media budget only while decoding, so the pane still holding
         // an early, generous share is precisely the one no other path visits.
         self.trim_over_ceiling_inline_media();
+
+        // Covered renderers give back what they can rebuild, also above the gate: a user at the
+        // default log level has the same memory to get back. It runs before the snapshot below,
+        // so that snapshot already reports the lower renderer figures.
+        self.trim_covered_renderers(now);
 
         // Owner reattribution and charging also run before the gate, for the
         // same reason.
@@ -948,14 +954,153 @@ pub enum TrimSkip {
     Warm,
 }
 
+/// How long a window must stay natively occluded before the retention pass trims it.
+pub(super) const COVERED_TRIM_AFTER: Duration = Duration::from_secs(30);
+
+/// Which age rule a trim request applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TrimRule {
+    /// The retention pass: the window must have been covered for [`COVERED_TRIM_AFTER`].
+    After30s,
+    /// The perf hook: every other rule applies, the age does not.
+    #[cfg(any(test, feature = "perf-hook-trim"))]
+    IgnoreAge,
+}
+
+impl TrimRule {
+    /// The source a trim under this rule is reported as.
+    fn source(self) -> TrimSource {
+        match self {
+            Self::After30s => TrimSource::Scheduler,
+            #[cfg(any(test, feature = "perf-hook-trim"))]
+            Self::IgnoreAge => {
+                // When: IgnoreAge exists only in builds with the hook, which alone requests it.
+                TrimSource::Hook
+            }
+        }
+    }
+}
+
+/// What requested a covered-window trim, as the tagged memory line names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrimSource {
+    /// The retention pass, after the window stayed covered for 30 s.
+    Scheduler,
+    /// The perf harness hook.
+    Hook,
+}
+
+impl TrimSource {
+    /// The log value for this source.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scheduler => "scheduler",
+            Self::Hook => "hook",
+        }
+    }
+}
+
+/// Every eligibility rule of a covered-window trim except the renderer itself, device-free.
+///
+/// `device_accepts` is `None` without a renderer, else whether its device accepts GPU work. The
+/// renderer is checked last, so a test without a device can prove every earlier rule passed.
+pub(super) fn trim_eligibility(
+    redraw: &super::redraw::WindowRedrawState,
+    device_accepts: Option<bool>,
+    now: Instant,
+    rule: TrimRule,
+) -> Result<(), TrimSkip> {
+    let Some(occluded_since) = redraw.occluded_since.filter(|_| redraw.native_occluded) else {
+        // When: native_occluded is false or occluded_since is None, the window is not covered.
+        return Err(TrimSkip::NotOccluded);
+    };
+    if rule == TrimRule::After30s
+        && now.saturating_duration_since(occluded_since) < COVERED_TRIM_AFTER
+    {
+        // When: rule is After30s and the covered stretch is shorter than COVERED_TRIM_AFTER.
+        return Err(TrimSkip::TooRecent);
+    }
+    if redraw.trimmed {
+        // When: trimmed is set, this covered stretch was already trimmed once.
+        return Err(TrimSkip::AlreadyTrimmed);
+    }
+    if redraw.parked {
+        // When: parked is set, the window's topology is invalid and its renderer must stay as is.
+        return Err(TrimSkip::Parked);
+    }
+    if redraw.stopped_generation.is_some() || device_accepts == Some(false) {
+        // When: stopped_generation is set or device_accepts is false, recovery owns the renderer.
+        return Err(TrimSkip::DeviceUnavailable);
+    }
+    if device_accepts.is_none() {
+        // When: device_accepts is None, the window has no renderer to trim.
+        return Err(TrimSkip::NoRenderer);
+    }
+    Ok(())
+}
+
 impl super::App {
-    /// Trim window `window_id`'s renderer now, as the covered-window retention rule would, for a
-    /// perf checkpoint. This build cannot trim yet: it returns [`TrimDecision::Unsupported`] and
-    /// reads and changes nothing, so a harness built with the hook measures an untrimmed baseline.
+    /// Trim window `window_id`'s renderer when every covered-window rule holds under `rule`.
+    ///
+    /// The one production body behind both the retention pass and the perf hook. A skipped or
+    /// refused trim changes nothing; a trim numbers itself in `trim_seq` and marks the stretch.
+    pub(super) fn trim_window_if_eligible(
+        &mut self,
+        window_id: WindowId,
+        now: Instant,
+        rule: TrimRule,
+    ) -> TrimDecision {
+        if self.is_warm_window_id(window_id) {
+            // When: is_warm_window_id names a warm spare, it was never shown and is never trimmed.
+            return TrimDecision::Skipped(TrimSkip::Warm);
+        }
+        let Some(window) = self.windows.get_mut(&window_id) else {
+            // When: window_id names no live window, there is nothing to trim.
+            return TrimDecision::Skipped(TrimSkip::NoWindow);
+        };
+        let device_accepts =
+            window.renderer.as_ref().map(|renderer| renderer.device_accepts_gpu_work());
+        if let Err(reason) = trim_eligibility(&window.redraw, device_accepts, now, rule) {
+            // When: trim_eligibility refuses, the reason is reported and nothing is released.
+            return TrimDecision::Skipped(reason);
+        }
+        let Some(renderer) = window.renderer.as_mut() else {
+            // When: renderer is None, which trim_eligibility already excluded.
+            return TrimDecision::Skipped(TrimSkip::NoRenderer);
+        };
+        let report = renderer.trim_for_occlusion();
+        if report.refused {
+            // When: report.refused, the device stopped between the check and the trim.
+            return TrimDecision::Skipped(TrimSkip::DeviceUnavailable);
+        }
+        window.redraw.trimmed = true;
+        window.redraw.trim_released_requested_bytes = report.gpu_released_requested_bytes;
+        self.trim_seq += 1;
+        self.last_trim_source = Some(rule.source());
+        TrimDecision::Trimmed { trim_seq: self.trim_seq }
+    }
+
+    /// The retention pass's trim: every live window covered for 30 s gives back what it can rebuild.
+    pub(super) fn trim_covered_renderers(&mut self, now: Instant) {
+        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        for window_id in window_ids {
+            let decision = self.trim_window_if_eligible(window_id, now, TrimRule::After30s);
+            #[cfg(test)]
+            self.test_scheduler_trims.push((window_id, decision));
+            #[cfg(not(test))]
+            let _ = decision;
+        }
+    }
+
+    /// Trim window `window_id`'s renderer now, as the covered-window retention rule would but
+    /// without its 30 s age, for a perf checkpoint. Every other rule applies; it runs no
+    /// retention pass, reclamation or charge and leaves the sample cadence alone.
     #[cfg(any(test, feature = "perf-hook-trim"))]
     #[doc(hidden)]
-    pub fn __trim_covered_now(&mut self, _window_id: winit::window::WindowId) -> TrimDecision {
-        TrimDecision::Unsupported
+    pub fn __trim_covered_now(&mut self, window_id: WindowId) -> TrimDecision {
+        let now = (self.dispatch_clock)();
+        self.trim_window_if_eligible(window_id, now, TrimRule::IgnoreAge)
     }
 }
 
