@@ -690,3 +690,40 @@ fn blocking_shape_still_retries_after_clear_shape_cache() {
         .unwrap();
     assert_ne!(shaped[0].glyph_pos, 0);
 }
+
+#[test]
+fn face_epoch_moves_only_on_face_replacement() {
+    // The style-face memo above this crate trusts `face_epoch`: it must move once for each writer
+    // that drops loaded faces (`config_changed`, `change_scaling`) and never for a fallback merge,
+    // which mutates a face in place and so keeps every memoized `Rc` valid.
+    let gate = Arc::new(Latch::default());
+    gate.open();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = fallback_configuration("face-epoch", locator(&gate, &calls));
+    let configuration = &fixture.configuration;
+    let start = configuration.face_epoch();
+    let font = configuration.default_font().unwrap();
+    assert_eq!(frame_glyph(&font, 'é'), 0, "notdef until the fallback face is published");
+    wait_for_generation(configuration, 1);
+    assert_ne!(frame_glyph(&font, 'é'), 0, "the merge reached the face");
+    assert_eq!(configuration.face_epoch(), start, "a fallback merge does not move the epoch");
+    configuration.change_scaling(configuration.get_font_scale(), 144);
+    assert_eq!(configuration.face_epoch(), start + 1, "change_scaling bumps it once");
+    configuration.config_changed(&configuration.config()).unwrap();
+    assert_eq!(configuration.face_epoch(), start + 2, "config_changed bumps it once");
+}
+
+#[test]
+fn config_changed_bumps_the_face_epoch_before_the_fallible_reload() {
+    // A reload that fails after `fonts.clear()` must still leave every memo stale, so the bump
+    // sits between the clear and the fallible font-directory rebuild. The reload cannot fail
+    // today, so the order is pinned on the source, CRLF-normalized.
+    let source = include_str!("lib.rs").replace("\r\n", "\n");
+    let body_start = source.find("fn config_changed(&self, config: &ConfigHandle)").unwrap();
+    let body = &source[body_start..];
+    let body = &body[..body.find("\n    }\n").unwrap()];
+    let clear = body.find("fonts.clear();").expect("config_changed clears the loaded faces");
+    let bump = body.find("bump_face_epoch()").expect("config_changed bumps the face epoch");
+    let reload = body.find("FontDatabase::with_font_dirs").expect("config_changed reloads");
+    assert!(clear < bump && bump < reload, "clear, then bump, then the fallible reload");
+}

@@ -3,7 +3,8 @@
 //!
 //! Selected faces become fixed-geometry atlas tiles; weight scales monochrome ink, never color artwork.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::Once;
 
@@ -67,6 +68,12 @@ pub struct FontStack {
     /// Memoized cell height in raster px, used to size outline growth.
     /// `0.0` means "not yet computed"; invalidated on scaling changes.
     cell_h_px: Cell<f64>,
+    /// This stack's resolved face per style, indexed `bold | italic << 1`. Clones and
+    /// `with_font_size` views keep their own memo; all of them check `faces_epoch` against the
+    /// shared configuration's `face_epoch`, so a replacement made through any sibling is seen.
+    faces: RefCell<[Option<Rc<sonicterm_font::LoadedFont>>; 4]>,
+    /// The configuration's `face_epoch` when `faces` was last filled.
+    faces_epoch: Cell<u64>,
 }
 
 impl FontStack {
@@ -140,6 +147,8 @@ impl FontStack {
             font_size_pt,
             weight_scale: sanitize_weight_scale(weight_scale),
             cell_h_px: Cell::new(0.0),
+            faces: RefCell::default(),
+            faces_epoch: Cell::new(0),
         })
     }
 
@@ -175,6 +184,8 @@ impl FontStack {
             font_size_pt,
             weight_scale: sanitize_weight_scale(weight_scale),
             cell_h_px: Cell::new(0.0),
+            faces: RefCell::default(),
+            faces_epoch: Cell::new(0),
         })
     }
 
@@ -204,6 +215,8 @@ impl FontStack {
             font_size_pt,
             weight_scale: 1.0,
             cell_h_px: Cell::new(0.0),
+            faces: RefCell::default(),
+            faces_epoch: Cell::new(0),
         })
     }
 
@@ -241,6 +254,8 @@ impl FontStack {
             font_size_pt,
             weight_scale: self.weight_scale,
             cell_h_px: Cell::new(0.0),
+            faces: RefCell::default(),
+            faces_epoch: Cell::new(0),
         }
     }
 
@@ -257,6 +272,9 @@ impl FontStack {
         // Cell height is derived from the rasterizer scale, so the memoized
         // value cannot survive a scaling change.
         self.cell_h_px.set(0.0);
+        // The configuration drops its faces below and bumps its epoch, which retires every
+        // sibling's memo; this stack's own memo is cleared at once as well.
+        *self.faces.borrow_mut() = Default::default();
         self.font_config.change_scaling(font_scale, dpi)
     }
 
@@ -306,11 +324,22 @@ impl FontStack {
         Ok(glyphs.iter().map(|glyph| glyph.x_advance.get() as f32).sum())
     }
 
-    fn font_for_style(
-        &self,
-        bold: bool,
-        italic: bool,
-    ) -> Result<std::rc::Rc<sonicterm_font::LoadedFont>> {
+    /// The face for `(bold, italic)` at this stack's size, memoized per style until the shared
+    /// configuration's `face_epoch` moves. A fallback merge mutates the shared face in place, so
+    /// the memoized `Rc` shapes with merged handles without being resolved again.
+    fn font_for_style(&self, bold: bool, italic: bool) -> Result<Rc<sonicterm_font::LoadedFont>> {
+        let slot = usize::from(bold) | (usize::from(italic) << 1);
+        let epoch = self.font_config.face_epoch();
+        if self.faces_epoch.get() != epoch {
+            // When: the configuration dropped its faces since this memo was filled, every
+            // memoized face is stale, so all four slots are cleared before the lookup.
+            *self.faces.borrow_mut() = Default::default();
+            self.faces_epoch.set(epoch);
+        }
+        if let Some(face) = &self.faces.borrow()[slot] {
+            // When: this style was resolved in the current epoch, the shared face is returned.
+            return Ok(Rc::clone(face));
+        }
         let mut style: TextStyle = self.font_config.config().font.clone();
         if bold {
             style = style.make_bold();
@@ -318,7 +347,9 @@ impl FontStack {
         if italic {
             style = style.make_italic();
         }
-        self.font_config.resolve_font_at_size(&style, self.font_size_pt)
+        let face = self.font_config.resolve_font_at_size(&style, self.font_size_pt)?;
+        self.faces.borrow_mut()[slot] = Some(Rc::clone(&face));
+        Ok(face)
     }
 
     /// Measure a left-to-right text run in raster pixels using the same

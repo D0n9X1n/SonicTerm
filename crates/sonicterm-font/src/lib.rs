@@ -752,6 +752,11 @@ struct FontConfigInner {
     fallback_worker: RefCell<Option<JoinHandle<()>>>,
     fallback_spawns: Cell<usize>,
     fallback_send_failures: Cell<usize>,
+    /// Calls to the public `resolve_font_at_size`, hit or miss; a test seam for the face memo.
+    resolve_calls: Cell<u64>,
+    /// Moves each time `fonts` is cleared, so a face memoized from this configuration knows it
+    /// may be stale. Any new writer that clears or replaces `fonts` must bump it too.
+    face_epoch: Cell<u64>,
 }
 
 /// Matches and loads fonts for a given input style
@@ -792,7 +797,14 @@ impl FontConfigInner {
             fallback_worker: RefCell::new(None),
             fallback_spawns: Cell::new(0),
             fallback_send_failures: Cell::new(0),
+            resolve_calls: Cell::new(0),
+            face_epoch: Cell::new(0),
         })
+    }
+
+    /// Mark every face memoized from this configuration stale; called beside each `fonts` clear.
+    fn bump_face_epoch(&self) {
+        self.face_epoch.set(self.face_epoch.get().wrapping_add(1));
     }
 
     /// Cancel every queued request and install a fresh flag for requests made from now on.
@@ -808,6 +820,8 @@ impl FontConfigInner {
         *self.config.borrow_mut() = config.clone();
         // Config was reloaded, invalidate our caches
         fonts.clear();
+        // Bumped before the fallible reload below, so no reload outcome leaves a memo valid.
+        self.bump_face_epoch();
         self.cancel_queued_fallback();
         self.title_font.borrow_mut().take();
         self.pane_select_font.borrow_mut().take();
@@ -1266,6 +1280,7 @@ impl FontConfigInner {
         *self.dpi.borrow_mut() = dpi;
         *self.font_scale.borrow_mut() = font_scale;
         self.fonts.borrow_mut().clear();
+        self.bump_face_epoch();
         // The notice stays; requests for the dropped faces are obsolete.
         self.cancel_queued_fallback();
         self.metrics.borrow_mut().clear();
@@ -1423,7 +1438,21 @@ impl FontConfiguration {
         style: &TextStyle,
         font_size: f64,
     ) -> anyhow::Result<Rc<LoadedFont>> {
+        self.inner.resolve_calls.set(self.inner.resolve_calls.get().wrapping_add(1));
         self.inner.resolve_font_at_size(&self.inner, style, font_size)
+    }
+
+    /// Identity of the loaded faces: it moves whenever `config_changed` or `change_scaling` drops
+    /// them, and never for a fallback merge, which extends a face in place. A caller that keeps a
+    /// resolved face compares this to know the face is still the one this configuration serves.
+    pub fn face_epoch(&self) -> u64 {
+        self.inner.face_epoch.get()
+    }
+
+    /// Test seam: how many times `resolve_font_at_size` was called, cache hits included.
+    #[doc(hidden)]
+    pub fn resolve_count_for_test(&self) -> u64 {
+        self.inner.resolve_calls.get()
     }
 
     /// Updates font scaling and DPI, invalidating caches and returning prior values.
