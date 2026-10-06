@@ -7178,8 +7178,8 @@ _HOST_PLATFORMS = {"darwin": "macos", "win32": "windows"}
 
 def completeness_rows(results: Sequence[SetResult], shas: Mapping[str, str], environ: Mapping[str, str],
                       platform_name: str = sys.platform) -> list[dict]:
-    """One row per S9/S12 run and side: its source, run id, measured SHA, side, platform, fixture, set and scale,
-    with the `end` checkpoint's reading. A run whose `end` has no reading (a harness that predates it) reads
+    """One row per S9/S12 run and side: its source, run id and attempt, the run's attempt directory, measured SHA,
+    side, platform, fixture, set and scale, with the `end` checkpoint's reading. A run whose `end` has no reading (a harness that predates it) reads
     `unavailable` with the reason `not recorded`, never certified."""
     platform = _HOST_PLATFORMS.get(platform_name, "linux" if platform_name.startswith("linux") else platform_name)
     rows = []
@@ -7196,7 +7196,8 @@ def completeness_rows(results: Sequence[SetResult], shas: Mapping[str, str], env
                 reading = reading if isinstance(reading, dict) else {"state": "unavailable",
                                                                      "reason": "not recorded", "scale": None}
                 rows.append({"source": source, "run_id": environ.get("GITHUB_RUN_ID") or "local",
-                             "measured_sha": shas[side], "side": side, "platform": platform,
+                             "run_attempt": environ.get("GITHUB_RUN_ATTEMPT") or "local",
+                             "attempt_dir": str(outcome.evidence), "measured_sha": shas[side], "side": side, "platform": platform,
                              "fixture": fixture, "set": result.set_name, "scale": reading.get("scale"),
                              "state": reading.get("state"), "reason": reading.get("reason"),
                              **{key: reading.get(key) for key in (*_COMPLETENESS_COUNTS, *_COMPLETENESS_DIMENSIONS)}})

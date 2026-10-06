@@ -516,6 +516,12 @@ class CustodyPolicyTests(unittest.TestCase):
                           "doc-resource-features", "release-windows", "windows-perf-build"})
         self.assertEqual(python_step("mixed", "pass").windows_policy, gate.WindowsPolicy.STRICT)
 
+    def test_every_compile_only_step_may_pass_after_a_forced_cleanup(self):
+        # A step declared compile-only is also on the allow list a cleaned run is judged by, so a forced Windows
+        # cleanup of its compiler tree after exit 0 reads as passed, never as failed.
+        compile_only = {step.id for step in gate.STEPS if step.windows_policy == gate.WindowsPolicy.COMPILE_ONLY}
+        self.assertLessEqual(compile_only, set(gate._COMPILE_ONLY_STEPS))
+
     def test_cleaned_status_stays_distinct_in_all_summaries(self):
         # A successful cleanup does not turn the original non-natural lifetime into PASS.
         step = next(step for step in gate.STEPS if step.id == "clippy")

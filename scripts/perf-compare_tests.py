@@ -10266,28 +10266,31 @@ class CompletenessCheckpointTests(unittest.TestCase):
                 self.assertFalse(perf._checkpoint_ok(end_point(reading)), name)
 
     def test_s9_and_s12_end_give_one_row_per_run_and_side(self):
-        # Each run of S9/default and S12/default gives one row naming its source, run id, measured SHA, side,
-        # platform, fixture, set and scale; other scenarios give none, and a run whose `end` has no reading (an
-        # older base harness) reads `not recorded`, never certified.
+        # Each run of S9/default and S12/default gives one row naming its source, run id and attempt, the run's
+        # attempt directory, measured SHA, side, platform, fixture, set and scale; other scenarios give none, and a
+        # run whose `end` has no reading (an older base harness) reads `not recorded`, never certified.
         shas = {"base": "b" * 40, "head": "h" * 40}
-        certified = make_outcome(result=valid_result(checkpoints=[end_point(CERTIFIED)]))
+        certified = make_outcome(result=valid_result(checkpoints=[end_point(CERTIFIED)]),
+                                 evidence=Path("/out/S9-default-head-timed-1"))
         older = make_outcome(result=valid_result(checkpoints=[end_point()]))
         results = [
             perf.SetResult("S9/default", "timed", base=perf.SideRuns([older]), head=perf.SideRuns([certified])),
             perf.SetResult("S12/default", "counters", base=perf.SideRuns([certified]), head=perf.SideRuns([])),
             perf.SetResult("S1/default", "timed", base=perf.SideRuns([certified]), head=perf.SideRuns([certified])),
         ]
-        rows = perf.completeness_rows(results, shas, {"GITHUB_RUN_ID": "77"}, "darwin")
+        rows = perf.completeness_rows(results, shas, {"GITHUB_RUN_ID": "77", "GITHUB_RUN_ATTEMPT": "2"}, "darwin")
         self.assertEqual([(row["source"], row["side"], row["state"]) for row in rows],
                          [("perf_s9_end", "base", "unavailable"), ("perf_s9_end", "head", "certified"),
                           ("perf_s12_end", "base", "certified")])
         self.assertEqual(rows[0]["reason"], "not recorded")
-        self.assertEqual(rows[1], {"source": "perf_s9_end", "run_id": "77", "measured_sha": "h" * 40,
+        self.assertEqual(rows[1], {"source": "perf_s9_end", "run_id": "77", "run_attempt": "2",
+                                   "attempt_dir": str(Path("/out/S9-default-head-timed-1")), "measured_sha": "h" * 40,
                                    "side": "head", "platform": "macos", "fixture": "S9", "set": "timed",
                                    "scale": 1.0, "state": "certified", "reason": None, "missing_terminal": 2,
                                    "missing_chrome": 0, "atlas_width": 512, "atlas_height": 512})
         self.assertEqual(rows[2]["measured_sha"], "b" * 40)
-        self.assertEqual(perf.completeness_rows(results, shas, {}, "win32")[0]["run_id"], "local")
+        local = perf.completeness_rows(results, shas, {}, "win32")[0]
+        self.assertEqual((local["run_id"], local["run_attempt"]), ("local", "local"))
         self.assertEqual(perf.completeness_rows(results, shas, {}, "win32")[0]["platform"], "windows")
 
     def test_perf_rows_never_claim_a_helper_or_real_renderer_source(self):
