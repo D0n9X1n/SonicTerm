@@ -9524,10 +9524,12 @@ class RowRunComparisonTests(CompareHarness, unittest.TestCase):
     def test_a_counters_comparison_reports_each_measured_decision_phase(self):
         # The comparison collects every counters set whose label is a decision phase on this host's platform:
         # S10/default and S10/sync here. Their fake runs report no stream phase, so the phases have no accepted
-        # run and the decision is PENDING (evidence); S4, never selected, is not measured.
-        _code, _gate, _calls, _plans, _work, out = self.compare(
-            options=("--counters", "--counters-runs", "2"), head_manifest=COUNTERS_MANIFEST,
-            base_manifest=BASE_COUNTERS_MANIFEST, scenarios=("S10", "S10/sync"))
+        # run and the decision is PENDING (evidence); S4, never selected, is not measured. Windows replays S10's
+        # delivery before its runs, which this harness's fake host cannot do, so the replay is switched off.
+        with mock.patch.object(perf, "delivery_replayed", return_value=False):
+            _code, _gate, _calls, _plans, _work, out = self.compare(
+                options=("--counters", "--counters-runs", "2"), head_manifest=COUNTERS_MANIFEST,
+                base_manifest=BASE_COUNTERS_MANIFEST, scenarios=("S10", "S10/sync"))
         document = (out / "comparison.md").read_text(encoding="utf-8")
         self.assertIn("### Row-run shaping", document)
         section = document.split("### Row-run shaping", 1)[1].split("\n### ", 1)[0]
