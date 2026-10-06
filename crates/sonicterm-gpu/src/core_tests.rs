@@ -4279,14 +4279,15 @@ fn successful_frame_counter_advances_only_after_native_presentation() {
 /// the preedit cache replays its tofu with its glyphs.
 #[test]
 fn chrome_tofu_is_published_only_by_a_presented_frame() {
-    const CORE_SRC: &str = include_str!("core.rs");
-    assert!(CORE_SRC.contains("pub fn last_missing_chrome(&self) -> &[char]"));
-    let assemble_start = CORE_SRC.find("    fn assemble_frame(").expect("assembly");
-    let assemble_end = CORE_SRC[assemble_start..]
+    let core_src = include_str!("core.rs").replace("\r\n", "\n");
+    let core_src = core_src.as_str();
+    assert!(core_src.contains("pub fn last_missing_chrome(&self) -> &[char]"));
+    let assemble_start = core_src.find("    fn assemble_frame(").expect("assembly");
+    let assemble_end = core_src[assemble_start..]
         .find("\n    /// Hand assembled batches to the presenter")
         .map(|offset| assemble_start + offset)
         .expect("bounded assembly");
-    let assemble = &CORE_SRC[assemble_start..assemble_end];
+    let assemble = &core_src[assemble_start..assemble_end];
     // One frame scope; the preedit cache opens a nested one to capture its own run.
     assert_eq!(
         assemble
@@ -4299,13 +4300,30 @@ fn chrome_tofu_is_published_only_by_a_presented_frame() {
         assemble.contains("cached.missing_chrome_chars"),
         "a preedit cache hit replays its tofu"
     );
-    let finish_start = CORE_SRC.find("    fn finish_successful_frame(").expect("present cleanup");
-    // The whole function, up to the next method at the same indentation, so later lines stay in range.
-    let finish_end = CORE_SRC[finish_start + 1..]
-        .find("\n    fn ")
-        .map_or(CORE_SRC.len(), |offset| finish_start + 1 + offset);
-    let finish = &CORE_SRC[finish_start..finish_end];
+    let finish = finish_successful_frame_source(include_str!("core.rs"));
     assert!(finish.contains("self.last_missing_chrome_chars = missing_chrome_chars"));
+}
+
+/// `finish_successful_frame` in `source`, up to the next method at the same indentation, so every
+/// later line of it stays in range.
+fn finish_successful_frame_source(source: &str) -> String {
+    // A CRLF checkout (Windows) is read as LF, so the `\n` search below finds the same boundary.
+    let source = source.replace("\r\n", "\n");
+    let start = source.find("    fn finish_successful_frame(").expect("present cleanup");
+    let end = source[start + 1..].find("\n    fn ").map(|offset| start + 1 + offset);
+    source[start..end.expect("the next method follows")].to_owned()
+}
+
+/// A Windows checkout with CRLF line endings reads the same as an LF one: the method slice ends at
+/// the next method, never at the end of the file.
+#[test]
+fn the_finish_slice_reads_a_crlf_checkout_as_an_lf_one() {
+    let lf_source = include_str!("core.rs").replace("\r\n", "\n");
+    let crlf_source = lf_source.replace('\n', "\r\n");
+    assert_eq!(
+        finish_successful_frame_source(&crlf_source).replace("\r\n", "\n"),
+        finish_successful_frame_source(&lf_source)
+    );
 }
 
 /// Source pin (the renderer path needs a device): every presented frame feeds the completeness
@@ -4313,12 +4331,7 @@ fn chrome_tofu_is_published_only_by_a_presented_frame() {
 /// at present, and before the missing lists move into the renderer's latest readout.
 #[test]
 fn every_presented_frame_feeds_the_completeness_certificate() {
-    const CORE_SRC: &str = include_str!("core.rs");
-    let finish_start = CORE_SRC.find("    fn finish_successful_frame(").expect("present cleanup");
-    let finish_end = CORE_SRC[finish_start + 1..]
-        .find("\n    fn ")
-        .map_or(CORE_SRC.len(), |offset| finish_start + 1 + offset);
-    let finish = &CORE_SRC[finish_start..finish_end];
+    let finish = finish_successful_frame_source(include_str!("core.rs"));
     let record = finish.find("crate::completeness::record_presented(").expect("records the frame");
     for field in [
         "full: render_mode == RenderMode::Full,",
