@@ -361,6 +361,7 @@ mod pane_state;
 use pane_state::pane_id_at_point;
 pub use pane_state::{next_pane_id, PaneCommandEvent, PaneState};
 mod path_target;
+mod perf_present;
 mod privilege;
 use privilege::refresh_window_tab_privileges;
 mod quit_hold;
