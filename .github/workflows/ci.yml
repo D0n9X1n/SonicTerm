@@ -28,6 +28,9 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # The previous-release check resolves the last release tag, so it needs every tag and commit.
+        with:
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
@@ -68,6 +71,10 @@ jobs:
       # example is its sole caller, so each host lints it with that feature too.
       - name: Lint perf scenarios with the echo trace
         run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings
+      # S1/atlas-retry's driver compiles only with perf_atlas_retry_api, which perf-compare sets when both refs
+      # have its App and renderer methods, so each host lints it with that cfg and the counters it needs.
+      - name: Lint perf scenarios with the atlas-retry cfg
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api
 
       - name: Validate workspace manifests
         shell: bash
@@ -101,6 +108,11 @@ jobs:
         shell: bash
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
+      # The head harness overlaid on the previous release tag must still compile; a comparison builds it there.
+      - name: Check the perf harness against the previous release
+        shell: bash
+        run: python3 scripts/perf-compare.py --check-previous-release
+
       - name: Run workspace unit and integration tests
         shell: bash
         run: bash scripts/check-workspace-crates.sh
@@ -122,6 +134,10 @@ jobs:
 
       - name: Run scenario harness unit tests with the echo trace
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace
+
+      - name: Run scenario harness unit tests with the atlas-retry cfg
+        shell: bash
+        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --cfg perf_atlas_retry_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
 
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
@@ -413,6 +429,9 @@ jobs:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # The previous-release check resolves the last release tag, so it needs every tag and commit.
+        with:
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
@@ -469,6 +488,10 @@ jobs:
       # example is its sole caller, so each host lints it with that feature too.
       - name: Lint perf scenarios with the echo trace
         run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings
+      # S1/atlas-retry's driver compiles only with perf_atlas_retry_api, which perf-compare sets when both refs
+      # have its App and renderer methods, so each host lints it with that cfg and the counters it needs.
+      - name: Lint perf scenarios with the atlas-retry cfg
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api
 
       - name: Validate workspace manifests
         shell: bash
@@ -501,6 +524,11 @@ jobs:
       - name: Check public Rustdoc
         shell: bash
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+      # The head harness overlaid on the previous release tag must still compile; a comparison builds it there.
+      - name: Check the perf harness against the previous release
+        shell: bash
+        run: python scripts/perf-compare.py --check-previous-release
 
   windows-tests:
     name: Windows test and runtime gates
@@ -570,6 +598,10 @@ jobs:
 
       - name: Run scenario harness unit tests with the echo trace
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace
+
+      - name: Run scenario harness unit tests with the atlas-retry cfg
+        shell: bash
+        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --cfg perf_atlas_retry_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
 
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
@@ -830,6 +862,10 @@ jobs:
       # example is its sole caller, so each host lints it with that feature too.
       - name: Lint perf scenarios with the echo trace
         run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings
+      # S1/atlas-retry's driver compiles only with perf_atlas_retry_api, which perf-compare sets when both refs
+      # have its App and renderer methods, so each host lints it with that cfg and the counters it needs.
+      - name: Lint perf scenarios with the atlas-retry cfg
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api
 
       - name: Check public Rustdoc
         run: |
@@ -853,6 +889,10 @@ jobs:
 
       - name: Run scenario harness unit tests with the echo trace
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace
+
+      - name: Run scenario harness unit tests with the atlas-retry cfg
+        shell: bash
+        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --cfg perf_atlas_retry_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
 
       - name: Run source and release tooling gates
         run: |

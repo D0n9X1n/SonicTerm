@@ -135,8 +135,9 @@ class WindowsPolicy(str, Enum):
 
 
 _COMPILE_ONLY_STEPS = frozenset(("clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
-                                 "perf-scenarios-echo-trace-clippy", "doc", "doc-resource-features",
-                                 "release-windows", "windows-perf-build"))
+                                 "perf-scenarios-echo-trace-clippy", "perf-scenarios-atlas-retry-clippy", "doc",
+                                 "doc-resource-features", "release-windows", "windows-perf-build",
+                                 "check-previous-release"))
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,77 @@ class Step:
     shell: str | None = None
     windows_policy: WindowsPolicy = WindowsPolicy.STRICT
     windows_preparations: tuple[Preparation, ...] = ()
+    # The harness API cfgs this step builds with; None for a step that composes no harness flags. When set,
+    # the runner composes the compiler flags at launch (`compose_harness_rustflags`): every table entry is
+    # declared and these are set, on top of the flags the step inherits.
+    harness_cfgs: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class HarnessApiCfg:
+    """One harness-only cfg: on for both refs of a comparison only when both trees define every method."""
+
+    name: str
+    # Each method as (owning crate source directory, method name); only that crate's source is searched.
+    methods: tuple[tuple[str, str], ...]
+
+
+# The canonical harness API cfg table. perf-compare decides each entry from both trees' code and builds both
+# refs with the same decision; every comparison build declares every entry through the compiler flags, so a
+# tree whose manifest predates an entry builds clean. None is a Cargo feature.
+HARNESS_API_CFGS = (
+    # S1/atlas-retry's driver: the renderer's atlas change and the scene it reads, absent before v1.3.9.
+    HarnessApiCfg("perf_atlas_retry_api", (
+        ("crates/sonicterm-gpu/src", "__change_glyph_atlas_during_next_assembly"),
+        ("crates/sonicterm-app/src", "__test_window_active_tab_title"),
+        ("crates/sonicterm-gpu/src", "last_missing_chrome"),
+        ("crates/sonicterm-gpu/src", "font_fallback_notice_id"),
+    )),
+)
+HARNESS_API_CFG_NAMES = tuple(entry.name for entry in HARNESS_API_CFGS)
+
+
+class HarnessFlagConflict(ValueError):
+    """An inherited compiler flag sets a harness API cfg against the comparison's decision."""
+
+
+def _inherited_rustflags(environ: Mapping[str, str]) -> list[str]:
+    """The compiler flags a Cargo build would take from `environ`: CARGO_ENCODED_RUSTFLAGS split on 0x1f when
+    set (an empty value means none), else RUSTFLAGS split on spaces with empty tokens dropped, as Cargo does.
+    The two sources are never combined: Cargo reads only the first."""
+    encoded = environ.get("CARGO_ENCODED_RUSTFLAGS")
+    if encoded is not None:
+        return encoded.split("\x1f") if encoded else []
+    return [token for token in (part.strip() for part in environ.get("RUSTFLAGS", "").split(" ")) if token]
+
+
+def _set_cfgs(tokens: Sequence[str]) -> list[str]:
+    """Each cfg the tokens set (`--cfg X` or `--cfg=X`), as written."""
+    found = []
+    for index, token in enumerate(tokens):
+        if token == "--cfg" and index + 1 < len(tokens):
+            found.append(tokens[index + 1])
+        elif token.startswith("--cfg="):
+            found.append(token[len("--cfg="):])
+    return found
+
+
+def compose_harness_rustflags(environ: Mapping[str, str], enabled: Sequence[str]) -> list[str]:
+    """The compiler flags a harness build runs with: the inherited flags, then `--check-cfg` for every table
+    entry and `--cfg` for each one in `enabled`. Appending cannot unset a cfg, so an inherited flag that sets a
+    table entry `enabled` leaves off, or sets one to a value, is refused."""
+    unknown = [name for name in enabled if name not in HARNESS_API_CFG_NAMES]
+    if unknown:
+        raise HarnessFlagConflict(f"unknown harness API cfg {unknown}")
+    inherited = _inherited_rustflags(environ)
+    for written in _set_cfgs(inherited):
+        name = written.split("=", 1)[0]
+        if name in HARNESS_API_CFG_NAMES and (written != name or name not in enabled):
+            raise HarnessFlagConflict(f"the inherited compiler flags set `{written}`, but the derived decision "
+                                      f"is {name}={'on' if name in enabled else 'off'}")
+    declared = [token for name in HARNESS_API_CFG_NAMES for token in ("--check-cfg", f"cfg({name})")]
+    return inherited + declared + [token for name in HARNESS_API_CFG_NAMES if name in enabled
+                                   for token in ("--cfg", name)]
 
 
 _PLAIN_WORD = re.compile(r"^[A-Za-z0-9_@%+=:,./\\-]+$")
@@ -184,8 +256,11 @@ def _display_word(word: str) -> str:
 
 
 def command_text(step: Step) -> str:
-    """Render a step as the single command line that ci.yml and the docs show."""
+    """Render a step as the single command line that ci.yml and the docs show. A step with harness cfgs shows
+    the flags it composes from an empty environment as `RUSTFLAGS=`, which is what CI, inheriting none, runs."""
     words = [f"{name}={_display_word(value)}" for name, value in step.env]
+    if step.harness_cfgs is not None:
+        words.append(f"RUSTFLAGS={_display_word(' '.join(compose_harness_rustflags({}, step.harness_cfgs)))}")
     words.extend(_display_word(word) for word in step.argv)
     return " ".join(words)
 
@@ -239,6 +314,13 @@ STEPS = (
          ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-echo-trace", "--", "-D", "warnings"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
+    # S1/atlas-retry's driver compiles only with `perf_atlas_retry_api`, which perf-compare sets when both refs have
+    # its App and renderer methods; every host lints it with that cfg on and the counters it needs.
+    Step("perf-scenarios-atlas-retry-clippy",
+         ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios", "--all-targets",
+          "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim", "--", "-D", "warnings",
+          "--cfg", "perf_atlas_retry_api"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc", ("cargo", "doc", "--workspace", "--no-deps"), HOSTS, 600, "local",
          ("rust", "native"), _CORE_CHECKS, env=_RUSTDOC_WARNINGS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc-resource-features",
@@ -287,6 +369,11 @@ STEPS = (
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-echo-trace"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
+    # The counters-enabled unit tests with S1/atlas-retry's driver compiled in, its harness cfg composed at launch.
+    Step("perf-scenarios-atlas-retry-tests",
+         ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS, harness_cfgs=("perf_atlas_retry_api",)),
     Step("pty-feasibility", ("bash", "scripts/pty-backend-feasibility.sh", "--check"), HOSTS, 300,
          "local", ("rust", "bash"), ("macos-core", "windows-tests"),
          windows_preparations=(Preparation(_FEASIBILITY_BUILD),)),
@@ -335,6 +422,13 @@ STEPS = (
     # allowance plus 100 s for each of up to 12 harness runs.
     Step("macos-perf-smoke", ("python3", "scripts/perf-compare.py", "--smoke"),
          ("macos",), 2700, "local", ("rust", "native"), ("macos-smoke",)),
+    # The head harness overlaid on the previous release tag, checked (not built) in an isolated target with
+    # the features and harness cfgs a comparison would derive: a cold check of the workspace (3600 s) plus
+    # the worktree and overlay. Ubuntu's example roots exclude the probe, so only macOS and Windows run it.
+    Step("perf-previous-release", ("python3", "scripts/perf-compare.py", "--check-previous-release"),
+         ("macos",), 4200, "local", ("rust", "native"), ("macos-core",)),
+    Step("windows-perf-previous-release", ("python", "scripts/perf-compare.py", "--check-previous-release"),
+         ("windows",), 4200, "local", ("rust", "native"), ("windows-checks",)),
     Step("release-macos", ("cargo", "build", "--release", "-p", "sonicterm-mac"), ("macos",), 1500,
          "release", ("rust", "native"), ("macos-smoke",)),
     Step("release-windows", ("cargo", "build", "--release", "-p", "sonicterm-windows"),
@@ -347,17 +441,24 @@ STEPS = (
 
 
 def _perf_build(step_id: str, example: str, *, release: bool, timeout_s: int, counters: bool = False,
-                features: tuple[str, ...] = ()) -> Step:
+                features: tuple[str, ...] = (), harness_cfgs: tuple[str, ...] | None = None) -> Step:
     """One build of a perf harness example: Cargo's JSON messages name the binary perf-compare.py runs.
 
-    `features` are the perf features a tree declares; `counters` is perf-counters alone.
+    `features` are the perf features a tree declares; `counters` is perf-counters alone. `harness_cfgs` are the
+    harness API cfgs both refs build with, composed at launch; None composes no harness flags.
     """
     profile = ("--release",) if release else ()
     chosen = features or (("perf-counters",) if counters else ())
     features = ("--features", ",".join(chosen)) if chosen else ()
     return Step(step_id, ("cargo", "build", "--locked", *profile, "-p", "sonicterm-app", "--example", example,
                           "--message-format=json-render-diagnostics", *features),
-                HOSTS, timeout_s, "local", ("rust", "native"), (), windows_policy=WindowsPolicy.COMPILE_ONLY)
+                HOSTS, timeout_s, "local", ("rust", "native"), (), windows_policy=WindowsPolicy.COMPILE_ONLY,
+                harness_cfgs=harness_cfgs)
+
+
+def _cfg_subsets() -> list[tuple[str, ...]]:
+    """Every subset of the harness API cfg table, each in table order, smallest first."""
+    return _feature_subsets(HARNESS_API_CFG_NAMES)
 
 
 # perf-compare.py's builds, outside the table: each only compiles, and on Windows MSVC's linker can leave
@@ -395,6 +496,29 @@ PERF_FEATURE_BUILDS = {
         for side in ("head", "base") for example in ("perf_scenarios", "perf_scenarios_alloc"))}
        for features in _feature_subsets(PERF_FEATURES) if features not in ((), ("perf-counters",))},
 }
+# The comparison builds perf-compare runs, keyed by `(enabled harness API cfgs, features)`: each perf feature
+# subset once per subset of the cfg table. Each cfg is an explicit reviewed configuration, not a feature.
+PERF_CFG_BUILDS = {
+    (cfgs, features): {step.id: step for step in (
+        _perf_build(f"build-{side}-{example}", example, release=True, timeout_s=3600, features=features,
+                    harness_cfgs=cfgs)
+        for side in ("head", "base") for example in ("perf_scenarios", "perf_scenarios_alloc"))}
+    for cfgs in _cfg_subsets() for features in _feature_subsets(PERF_FEATURES)
+}
+
+
+def _previous_release_check(cfgs: tuple[str, ...], features: tuple[str, ...]) -> Step:
+    """The compile-only check of both harness examples on the previous release tag's tree."""
+    chosen = ("--features", ",".join(features)) if features else ()
+    return Step("check-previous-release", ("cargo", "check", "--locked", "-p", "sonicterm-app", "--example",
+                                           "perf_scenarios", "--example", "perf_scenarios_alloc", *chosen),
+                HOSTS, 3600, "local", ("rust", "native"), (), windows_policy=WindowsPolicy.COMPILE_ONLY,
+                harness_cfgs=cfgs)
+
+
+# The previous-release check, keyed like PERF_CFG_BUILDS.
+PREVIOUS_RELEASE_CHECKS = {(cfgs, features): _previous_release_check(cfgs, features)
+                           for cfgs in _cfg_subsets() for features in _feature_subsets(PERF_FEATURES)}
 # The same catalog flattened to `(step id, features)`, for a lookup by both halves of a build's identity.
 PERF_BUILD_CATALOG = {(step_id, features): built
                       for features, catalog in PERF_FEATURE_BUILDS.items() for step_id, built in catalog.items()}
@@ -402,7 +526,8 @@ PERF_BUILD_CATALOG = {(step_id, features): built
 
 def _reviewed_step(step: Step) -> bool:
     """Whether `step` is one of the gate's own step objects, not a copy that could claim their authority."""
-    reviewed = (*STEPS, *PERF_BUILDS.values(), *PERF_BUILD_CATALOG.values())
+    reviewed = (*STEPS, *PERF_BUILDS.values(), *PERF_BUILD_CATALOG.values(), *PREVIOUS_RELEASE_CHECKS.values(),
+                *(step for catalog in PERF_CFG_BUILDS.values() for step in catalog.values()))
     return any(step is canonical for canonical in reviewed)
 
 
@@ -2023,9 +2148,19 @@ def run_step(step: Step, index: int, root: Path, log_dir: Path,
     env.update(step.env)
     argv = launch_argv(step)
     started = time.monotonic()
+    conflict = None
+    if step.harness_cfgs is not None:
+        # The flags are composed here, at launch, from what the step inherits: never replaced by a fixed value.
+        try:
+            env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(compose_harness_rustflags(env, step.harness_cfgs))
+        except HarnessFlagConflict as error:
+            conflict = str(error)
     # A new file renamed onto log_path, so a link an earlier step left there is replaced.
     with os.fdopen(_create_output(log_path), "wb") as log:
         _write_header(log, step, argv, root)
+        if conflict is not None:
+            # When: `conflict` names an inherited flag against the decision, the build would not match it.
+            return _finish(log, step, log_path, started, LAUNCH, None, f"compiler flags: {conflict}")
         if WINDOWS_JOB is not None:
             return _run_windows_step(step, root, env, log, log_path, started, output_limit_bytes)
         program = resolve_program(argv[0], root, env)

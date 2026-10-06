@@ -2186,6 +2186,9 @@ def frame_counter_problems(counters: object, partial: bool = False) -> list[str]
 # Variants measured only in the counters set: their evidence is the counter record of injected episodes,
 # so a timed, laps or alloc run of them would measure nothing comparable.
 COUNTERS_ONLY_VARIANTS = frozenset({("S1", "atlas-retry")})
+# Diagnostics that need a harness API cfg (local-gate.py HARNESS_API_CFGS): with it off, the variant is unavailable
+# on both sides and never measured. This is a declared availability rule, not a tolerance for a blocked run.
+HARNESS_CFG_VARIANTS = {("S1", "atlas-retry"): "perf_atlas_retry_api"}
 # S1/atlas-retry's recovery episodes: eight of frames A-D each.
 ATLAS_RECOVERY_EPISODES = 8
 ATLAS_RECOVERY_FRAMES = ("A", "B", "C", "D")
@@ -2927,6 +2930,42 @@ def tree_features(root: Path) -> tuple[str, ...]:
 def tree_harness_hash(root: Path) -> str:
     """Return the harness hash of one tree: its example directory and its two manifest entries."""
     return harness_hash(root / HARNESS_DIRECTORY, harness_entries(_read_manifest(root)))
+
+
+def tree_harness_cfgs(root: Path, table: Sequence) -> tuple[str, ...]:
+    """The harness API cfgs whose every method `root` defines in its owning crate's source, in table order.
+
+    A method counts only as `pub fn <name>` at a line start in code, with comments and strings blanked
+    (`rust_code_only`); a unit-test file (`*_tests.rs`) is not part of the harness build. Finding the source does
+    not prove the signature or the target."""
+    enabled = []
+    for entry in table:
+        if all(_crate_defines(root / crate, name) for crate, name in entry.methods):
+            enabled.append(entry.name)
+    return tuple(enabled)
+
+
+def _crate_defines(directory: Path, name: str) -> bool:
+    """Whether some source file under `directory`, outside unit-test files, defines `pub fn name` in code."""
+    pattern = re.compile(rf"^\s*pub fn {re.escape(name)}\b", re.M)
+    for source in sorted(directory.rglob("*.rs")):
+        if source.name.endswith("_tests.rs"):
+            continue
+        try:
+            code = rust_code_only(source.read_bytes().decode("utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue  # An unreadable file cannot define the method.
+        if pattern.search(code):
+            return True
+    return False
+
+
+def harness_cfg_decision(trees: Mapping[str, Path], table: Sequence) -> tuple[tuple[str, ...], dict[str, tuple]]:
+    """The comparison's one harness cfg decision and each tree's own: a cfg is on for both sides only when both
+    trees define all of its methods, else off for both, so a base never inherits the head's API."""
+    per_tree = {side: tree_harness_cfgs(trees[side], table) for side in trees}
+    decided = tuple(entry.name for entry in table if all(entry.name in found for found in per_tree.values()))
+    return decided, per_tree
 
 
 def overlay_harness(head_root: Path, base_root: Path) -> None:
@@ -6190,6 +6229,8 @@ class SetResult:
     target_runs: int = 0
     # The runs asked for before a short-mode cap; above target_runs only for a capped variant.
     requested_runs: int = 0
+    # Why a declared diagnostic is unavailable on both sides (its harness cfg is off); such a set never runs.
+    unavailable: str | None = None
 
 
 def grid_size(grid: object) -> tuple[int, int] | None:
@@ -6317,8 +6358,14 @@ def strict_problems(results: Iterable[SetResult]) -> list[str]:
     # When: no set ran, nothing was measured, so there is no comparison to pass.
     if not results:
         return ["no scenario set ran"]
+    runnable = [result for result in results if result.unavailable is None]
+    if not runnable:
+        # When: every selected set is a declared-unavailable diagnostic, nothing was measured either.
+        return ["no runnable scenario set: " + "; ".join(f"{result.label} {result.unavailable}"
+                                                         for result in results)]
     problems = []
-    for result in results:
+    # A declared-unavailable diagnostic is reported, never a strict problem; every other gap stays one.
+    for result in runnable:
         for side_name, side in (("base", result.base), ("head", result.head)):
             where = f"{result.label} {result.set_name} {side_name}"
             # When: the base has no counters feature, its counters cells are n/a by design, not missing runs.
@@ -6351,6 +6398,11 @@ def comparison_exit(results: Iterable[SetResult], require_base: bool = False) ->
     results = list(results)
     if require_base and strict_problems(results):
         return EXIT_FAIL
+    runnable = [result for result in results if result.unavailable is None]
+    if results and not runnable:
+        # When: only declared-unavailable diagnostics were selected, nothing ran, so the comparison is blocked.
+        return EXIT_BLOCKED
+    results = runnable
     if any(result.head.failed for result in results):
         return EXIT_FAIL
     if any(result.head.blocked for result in results):
@@ -6824,7 +6876,8 @@ def release_lto(root: Path, environ: Mapping[str, str]) -> str:
 
 
 def build_identity(trees: Mapping[str, Path], features: Mapping[str, Sequence[str]], host_run: Callable,
-                   environ: Mapping[str, str]) -> dict[str, object]:
+                   environ: Mapping[str, str], harness_cfgs: Sequence[str] = (),
+                   rustflags: Sequence[str] = ()) -> dict[str, object]:
     """What a build depends on beyond the SHAs: target, toolchain, profile, features and runner image.
 
     The producer records it in the manifest; each consumer derives its own from its own job and
@@ -6846,6 +6899,9 @@ def build_identity(trees: Mapping[str, Path], features: Mapping[str, Sequence[st
                     "overrides": release_profile_overrides(environ)},
         # Each side's cargo features, a list so a later feature joins without a schema change.
         "features": {side: list(features[side]) for side in SIDES},
+        # The harness API cfgs both sides build with, and the compiler flags their builds compose at launch.
+        "harness_cfgs": list(harness_cfgs),
+        "rustflags": list(rustflags),
         "runner_image": {"os": environ.get("ImageOS", ""), "version": environ.get("ImageVersion", "")},
     }
 
@@ -6889,7 +6945,7 @@ def load_prebuilt(args: argparse.Namespace, shas: Mapping[str, str], digest: str
 
     Refused, in order: a missing directory or manifest or another schema; a manifest whose sha256 is not
     the published one; another run or producer attempt; another base or head SHA; another harness hash;
-    other features; another target, toolchain or runner image; another profile; a binary that is missing,
+    other features, harness cfgs or compiler flags; another target, toolchain or runner image; another profile; a binary that is missing,
     a symlink, not executable or misdigested, or an example a selected set needs that was not built. The
     caller then checks that each copy lists and finds its tree's assets.
     """
@@ -6920,8 +6976,9 @@ def load_prebuilt(args: argparse.Namespace, shas: Mapping[str, str], digest: str
             raise _refuse(f"{side} SHA {manifest.get(f'{side}_sha')} is not this job's {shas[side]}")
     if manifest.get("harness_hash") != digest:
         raise _refuse(f"harness hash {manifest.get('harness_hash')} is not this job's {digest}")
-    checks = (("features", "features"), ("target", "target"), ("toolchain", "toolchain"),
-              ("runner_image", "runner image"), ("profile", "profile"))
+    checks = (("features", "features"), ("harness_cfgs", "harness cfgs"), ("rustflags", "compiler flags"),
+              ("target", "target"), ("toolchain", "toolchain"), ("runner_image", "runner image"),
+              ("profile", "profile"))
     for key, name in checks:
         if manifest.get(key) != identity[key]:
             raise _refuse(f"{name} {manifest.get(key)!r} is not this job's {identity[key]!r}")
@@ -6996,7 +7053,8 @@ def prepare_trees(args: argparse.Namespace, worktrees: Worktrees,
 
 
 def build_sides(args: argparse.Namespace, gate, trees: Mapping[str, Path], features: Mapping[str, Sequence[str]],
-                examples: Sequence[str], out: Path, work: Path) -> tuple[dict[str, dict[str, object]], int]:
+                examples: Sequence[str], out: Path, work: Path,
+                harness_cfgs: Sequence[str] = ()) -> tuple[dict[str, dict[str, object]], int]:
     """Build every example of both refs through the gate's reviewed steps; return the builds and the last log index.
 
     A build maps an example to its binary, or, for a lenient base, to the reason it cannot run.
@@ -7009,8 +7067,9 @@ def build_sides(args: argparse.Namespace, gate, trees: Mapping[str, Path], featu
         environ = dict(os.environ, CARGO_TARGET_DIR=str(work / f"target-{side}"))
         for example in examples:
             index += 1
-            # A tree builds with exactly the perf features it declares; each build is the gate's own reviewed step.
-            catalog = gate.PERF_FEATURE_BUILDS[tuple(features[side])]
+            # A tree builds with exactly the perf features it declares and the comparison's harness cfgs; each
+            # build is the gate's own reviewed step, whose flags the gate composes at launch.
+            catalog = gate.PERF_CFG_BUILDS[(tuple(harness_cfgs), tuple(features[side]))]
             step = catalog[f"build-{side}-{example}"]
             result = gate.run_step(step, index, trees[side], out, environ)
             text = read_log(result.log_path)
@@ -7058,10 +7117,14 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     # A tree builds every harness with the perf features it declares, and only with those.
     features = {side: tree_features(trees[side]) for side in SIDES}
     supports = {side: COUNTERS_FEATURE in features[side] for side in SIDES}
+    # One harness cfg decision for both sides, and the flags it composes; an inherited flag against it fails here.
+    harness_cfgs, tree_cfgs = harness_cfg_decision(trees, gate.HARNESS_API_CFGS)
+    rustflags = gate.compose_harness_rustflags(os.environ, harness_cfgs)
+    print(f"[perf-compare] harness cfgs (both sides): {', '.join(harness_cfgs) or 'none'}", flush=True)
     prebuilt = args.prebuilt is not None
     identity = None
     if prebuilt or args.build_only is not None:
-        identity = build_identity(trees, features, host_run, os.environ)
+        identity = build_identity(trees, features, host_run, os.environ, harness_cfgs, rustflags)
     index = 0
     if prebuilt:
         builds = load_prebuilt(args, shas, digest, identity, examples, work / PREBUILT_DIRECTORY)
@@ -7072,7 +7135,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                 if problem is not None:
                     raise ValueError(f"refusing the prebuilt binaries: the {side} cannot run {example}: {problem}")
     else:
-        builds, index = build_sides(args, gate, trees, features, examples, out, work)
+        builds, index = build_sides(args, gate, trees, features, examples, out, work, harness_cfgs)
     index += 1
     scenarios = _list_side(gate, builds["head"][HARNESS_EXAMPLE], out, index, "head", prebuilt)
     if args.require_base or prebuilt or args.build_only is not None:
@@ -7105,11 +7168,22 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     if refusal is not None:
         raise ValueError(refusal)
     results = []
+    # A diagnostic whose harness cfg is off is unavailable on both sides; it is excluded from the measured sets.
+    unavailable = {}
+    for (scenario_id, variant), cfg_name in HARNESS_CFG_VARIANTS.items():
+        if (scenario_id, variant) in selected and cfg_name not in harness_cfgs:
+            lacking = [side for side in SIDES if cfg_name not in tree_cfgs[side]]
+            unavailable[f"{scenario_id}/{variant}"] = (
+                f"unavailable on both sides: {cfg_name} is off because the {' and '.join(lacking)} "
+                f"tree{'s lack' if len(lacking) > 1 else ' lacks'} its App and renderer methods")
     marks["measure_start"] = time.time()
     # One untimed replay per delivered scenario, before any measured run; both sides share the overlaid harness.
     deliveries: dict[str, DeliveryOutcome] = {}
     replay_evidence = out / "delivery"
     for scenario_id, variant in selected:
+        if f"{scenario_id}/{variant}" in unavailable:
+            # When: the diagnostic is unavailable, it is not measured, so its delivery is not replayed either.
+            continue
         if delivery_replayed(scenario_id, sys.platform):
             replay_evidence.mkdir(parents=True, exist_ok=True)
             index += 1
@@ -7121,6 +7195,13 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     display = DisplayReference()
     for scenario_id, variant in selected:
         label = f"{scenario_id}/{variant}"
+        if label in unavailable:
+            # When: the label's harness cfg is off, each of its sets is recorded unavailable and none runs.
+            print(f"[perf-compare] {label} {unavailable[label]}", flush=True)
+            results.extend(SetResult(label, set_name, SideRuns(blocked=unavailable[label]),
+                                     SideRuns(blocked=unavailable[label]), unavailable=unavailable[label])
+                           for set_name, *_ in variant_sets(scenario_id, variant, sets))
+            continue
         delivery_problem = deliveries.get(label, (None, None))[1]
         if delivery_problem is not None:
             # When: the replay could not show how ConPTY delivered the scenario, no set of it is measured.
@@ -7164,6 +7245,9 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     for result in results:
         # Lookups stay keyed by the plain label; only the rows carry the cap.
         shown = capped_label(result)
+        if result.unavailable is not None:
+            timed_rows.append([shown, f"{result.set_name} set", "unavailable", "unavailable", result.unavailable])
+            continue
         if result.set_name == "timed":
             # An older harness's rows cannot be read by kind, so they leave the main table for their own block.
             destination = unclassified_rows if unclassified_result(result) else timed_rows
@@ -7236,6 +7320,9 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                f"{', '.join(side for side in SIDES if ECHO_TRACE_FEATURE in features[side]) or 'neither ref'}",
                f"- Built with `--features {TRIM_HOOK_FEATURE}`: "
                f"{', '.join(side for side in SIDES if TRIM_HOOK_FEATURE in features[side]) or 'neither ref'}",
+               f"- Harness API cfgs (both refs): {', '.join(harness_cfgs) or 'none'}; compiler flags "
+               f"`{' '.join(rustflags)}`",
+               *(f"- {label}: {reason}" for label, reason in unavailable.items()),
                f"- Evidence: `{out}`", "", "Raw logs:", ""]
     for result in results:
         for side, evidence, kind, _reasons in result.attempts:
@@ -7261,6 +7348,100 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     write_timing(out, marks, os.environ)
     print(document, flush=True)
     return comparison_exit(results, args.require_base)
+
+
+# --- The previous release tag must still build the head's harness --------------------------------------------
+
+PREVIOUS_RELEASE_TIMEOUT_S = GIT_TIMEOUT_S
+
+
+def previous_release(host_run: Callable, root: Path) -> tuple[str, str, str] | None:
+    """`(head SHA, previous tag, its commit)` by the release workflow's rule, applied to HEAD's parent: the nearest
+    `v[0-9]*` tag merged into it. None for a parentless HEAD or when no earlier tag exists. A shallow
+    clone is refused, because its missing history and tags could select the wrong tag."""
+    def git(*argv: str) -> str:
+        record = host_run(("git", "-C", str(root), *argv))
+        if _command_failure(record):
+            raise ValueError(f"git {' '.join(argv)} failed: {record.stderr.strip() or record.stdout.strip()}")
+        return record.stdout.strip()
+    if git("rev-parse", "--is-shallow-repository") != "false":
+        raise ValueError("the checkout is shallow; the previous release check needs every tag and commit")
+    head_sha = git("rev-parse", "--verify", "HEAD^{commit}")
+    parents = git("rev-list", "--parents", "-n", "1", head_sha).split()
+    if len(parents) < 2:
+        return None
+    if not git("tag", "--list", "v[0-9]*", "--merged", parents[1]):
+        return None
+    tag = git("describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", parents[1])
+    return head_sha, tag, git("rev-parse", "--verify", f"{tag}^{{commit}}")
+
+
+def check_previous_release(gate, host_run: Callable, out: Path, work: Path, environ: Mapping[str, str],
+                           head_root: Path = ROOT) -> int:
+    """Overlay the head's harness and example declarations on the previous release tag and check both harness
+    examples there, in an isolated target directory, with the features and harness cfgs a comparison would
+    derive. Removes only the worktree and target it created."""
+    found = previous_release(host_run, head_root)
+    if found is None:
+        print("[perf-compare] previous release: no earlier release tag, nothing to check", flush=True)
+        return EXIT_PASS
+    head_sha, tag, base_sha = found
+    worktrees = Worktrees(host_run, work)
+    try:
+        tree = worktrees.create("base", base_sha)
+        overlay_harness(head_root, tree)
+        if tree_harness_hash(tree) != tree_harness_hash(head_root):
+            raise ValueError("the overlaid harness differs from the head's")
+        harness_cfgs, tree_cfgs = harness_cfg_decision({"head": head_root, "base": tree}, gate.HARNESS_API_CFGS)
+        features = tree_features(tree)
+        step = gate.PREVIOUS_RELEASE_CHECKS[(harness_cfgs, features)]
+        # The flags a comparison would compose; an inherited flag against the decision fails before the check.
+        rustflags = gate.compose_harness_rustflags(environ, harness_cfgs)
+        print(f"[perf-compare] previous release: head={head_sha} base={tag}={base_sha} "
+              f"features={','.join(features) or 'none'} harness cfgs={','.join(harness_cfgs) or 'none'} "
+              f"(base defines {','.join(tree_cfgs['base']) or 'none'}) rustflags={' '.join(rustflags)}", flush=True)
+        out.mkdir(parents=True, exist_ok=True)
+        result = gate.run_step(step, 1, tree, out, dict(environ, CARGO_TARGET_DIR=str(work / "target")))
+        if not build_passed(result):
+            print(log_tail(read_log(result.log_path), 40), flush=True)
+            print(f"[perf-compare] FAIL: the head's harness does not build on {tag} ({result.status}; "
+                  f"log {result.log_path})", flush=True)
+            return EXIT_FAIL
+        print(f"[perf-compare] PASS: the head's harness builds on {tag}", flush=True)
+        return EXIT_PASS
+    finally:
+        for failure in worktrees.remove():
+            print(f"[perf-compare] worktree removal failed: {failure}", file=sys.stderr)
+        shutil.rmtree(work / "target", ignore_errors=True)
+        try:
+            work.rmdir()
+        except OSError:
+            pass  # A worktree git could not remove stays, and was reported above.
+
+
+def previous_release_main(args: argparse.Namespace) -> int:
+    """The `perf-previous-release` gate step: check the head's harness on the previous release tag."""
+    gate = load_gate()
+    problem = gate_problem(gate)
+    if problem:
+        print(f"[perf-compare] {problem}", file=sys.stderr)
+        return EXIT_FAIL
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
+    out = (args.out or ROOT / "target" / "perf-compare" / f"previous-release-{stamp}").resolve()
+    work = work_directory(f"previous-release-{stamp}")
+    if os.path.lexists(work):
+        print(f"[perf-compare] {work} already exists; the check only removes what it created", file=sys.stderr)
+        return EXIT_USAGE
+    runner = gate.SMOKE_RUNNER.run_command
+
+    def host_run(argv: Sequence[str], timeout_s: int = PREVIOUS_RELEASE_TIMEOUT_S) -> CommandRecord:
+        return bounded_command(runner, argv, timeout_s)
+
+    try:
+        return check_previous_release(gate, host_run, out, work, os.environ)
+    except (OSError, ValueError) as error:
+        print(f"[perf-compare] {error}", file=sys.stderr)
+        return EXIT_FAIL
 
 
 def compare_main(args: argparse.Namespace) -> int:
@@ -7337,6 +7518,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--smoke", action="store_true",
                         help="run the macos-perf-smoke gate step: a debug build of this tree, short S1 and S3 "
                              "runs and S1 ended as a step deadline ends it")
+    parser.add_argument("--check-previous-release", action="store_true",
+                        help="check that the head's harness, overlaid on the previous release tag, still builds "
+                             "(the perf-previous-release gate step); takes only --out")
     parser.add_argument("--base", help="the baseline ref, usually the merge-base")
     parser.add_argument("--head", help="the ref under test")
     parser.add_argument("--scenario", action="extend", nargs="+", metavar="ID[/VARIANT]",
@@ -7381,6 +7565,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                         help="an empty directory for the evidence and comparison.md "
                              "(default: target/perf-compare/out-<stamp>)")
     args = parser.parse_args(argv)
+    if args.check_previous_release:
+        options = (args.base, args.head, args.scenario, args.runs, args.counters_runs, args.build_only,
+                   args.prebuilt, args.prebuilt_run_id, args.prebuilt_attempt, args.prebuilt_manifest_sha256,
+                   args.laps_runs)
+        if any(value is not None for value in options) or args.smoke or args.short or args.laps or args.alloc \
+                or args.keep or args.counters or args.require_base or args.laps_scenario:
+            parser.error("--check-previous-release takes only --out")
+        return args
     if args.smoke:
         options = (args.base, args.head, args.scenario, args.runs, args.out, args.counters_runs)
         binding = (args.build_only, args.prebuilt, args.prebuilt_run_id, args.prebuilt_attempt,
@@ -7434,6 +7626,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the smoke or a comparison and return its exit code."""
     use_utf8_output()
     args = parse_args(argv)
+    if args.check_previous_release:
+        return previous_release_main(args)
     if args.smoke:
         return smoke_main(os.environ)
     return compare_main(args)

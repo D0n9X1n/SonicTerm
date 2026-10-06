@@ -134,7 +134,8 @@ incremental = true
 opt-level = 3
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+# The perf harness's API cfgs (local-gate.py HARNESS_API_CFGS); perf-compare sets each on both refs or neither.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))', 'cfg(perf_atlas_retry_api)'] }
 unsafe_op_in_unsafe_fn = "warn"
 unused_must_use = "deny"
 

@@ -341,6 +341,17 @@ const ECHO_TRACE_CALLS: &[&str] = &[
     "EchoDeliveryOutcome",
 ];
 
+/// The gate of S1/atlas-retry's App and renderer API: the harness-only cfg perf-compare sets on both refs or neither.
+const ATLAS_RETRY_GATE: &str = "#[cfg(perf_atlas_retry_api)]";
+
+/// The App and renderer API S1/atlas-retry's driver may name only behind its cfg; none exists in v1.3.8.
+const ATLAS_RETRY_CALLS: &[&str] = &[
+    "__change_glyph_atlas_during_next_assembly",
+    "__test_window_active_tab_title",
+    "last_missing_chrome",
+    "font_fallback_notice_id",
+];
+
 /// The trim hook's gate.
 const TRIM_HOOK_GATE: &str = "#[cfg(feature = \"perf-hook-trim\")]";
 
@@ -753,5 +764,33 @@ fn an_atlas_reading_without_the_counter_feature_has_no_counts() {
     assert_eq!(
         (reading.counted_glyph_atlas_growths, reading.closed_glyph_atlas_growths),
         (None, None)
+    );
+}
+
+/// Every call of S1/atlas-retry's driver into the App and renderer API it needs sits behind
+/// `perf_atlas_retry_api`, because perf-compare overlays this harness onto the previous release tag, which
+/// has none of it, and builds it there with the cfg off. A call outside the gated item is reported.
+#[test]
+fn every_atlas_retry_api_call_in_the_harness_is_behind_its_cfg() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/perf_scenarios");
+    let mut scanned = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let entry_path = entry.unwrap().path();
+        let name = entry_path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+            continue;
+        }
+        scanned += 1;
+        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let found = ungated_calls(&source, ATLAS_RETRY_GATE, ATLAS_RETRY_CALLS);
+        assert!(found.is_empty(), "{name}: {found:#?}");
+    }
+    assert!(scanned >= 10, "the harness sources were not found");
+    let fixture = format!(
+        "{ATLAS_RETRY_GATE}\nfn parts(app: &App) {{\n    app.__test_window_active_tab_title(id);\n}}\n\nfn off(renderer: &GpuRenderer) {{\n    renderer.font_fallback_notice_id();\n}}\n"
+    );
+    assert_eq!(
+        ungated_calls(&fixture, ATLAS_RETRY_GATE, ATLAS_RETRY_CALLS),
+        vec!["7: font_fallback_notice_id".to_owned()]
     );
 }

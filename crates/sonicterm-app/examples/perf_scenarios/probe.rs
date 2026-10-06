@@ -307,6 +307,37 @@ fn atlas_retry_counts(_app: &App) -> Option<Counts> {
     None
 }
 
+/// Why S1/atlas-retry is blocked in a build without `perf_atlas_retry_api`.
+const ATLAS_RETRY_UNAVAILABLE: &str =
+    "S1/atlas-retry is unavailable: this build lacks perf_atlas_retry_api, \
+     so its App cannot change the glyph atlas during assembly or read the scene";
+
+/// Change the glyph atlas during `renderer`'s next assembly, so that frame retries.
+#[cfg(perf_atlas_retry_api)]
+fn change_atlas_during_next_assembly(renderer: &mut GpuRenderer) {
+    renderer.__change_glyph_atlas_during_next_assembly();
+}
+
+/// Without `perf_atlas_retry_api` the driver never starts, so nothing is armed.
+#[cfg(not(perf_atlas_retry_api))]
+fn change_atlas_during_next_assembly(_renderer: &mut GpuRenderer) {}
+
+/// Window `window_id`'s active tab title, its renderer's fallback notice id and how many characters
+/// the last frame drew as missing, in the grid and in chrome; `None` when any cannot be read.
+#[cfg(perf_atlas_retry_api)]
+fn atlas_retry_scene_parts(app: &App, window_id: WindowId) -> Option<(String, u64, usize)> {
+    let title = app.__test_window_active_tab_title(window_id)?;
+    let renderer = app.main_renderer()?;
+    let missing = renderer.last_missing_tofu().len() + renderer.last_missing_chrome().len();
+    Some((title, renderer.font_fallback_notice_id()?, missing))
+}
+
+/// Without `perf_atlas_retry_api` the scene cannot be read.
+#[cfg(not(perf_atlas_retry_api))]
+fn atlas_retry_scene_parts(_app: &App, _window_id: WindowId) -> Option<(String, u64, usize)> {
+    None
+}
+
 /// Frames the main window's renderer applied a font fallback in, cumulative; `None` when the
 /// counter cannot be read.
 #[cfg(feature = "perf-counters")]
@@ -2814,6 +2845,11 @@ impl Probe {
     /// Start S1/atlas-retry's driver: settle the scene first. It measures only the counters set,
     /// so a run without counters is refused rather than measured without them.
     fn start_atlas_retry(&mut self, event_loop: &ActiveEventLoop) -> DriverState {
+        if !cfg!(perf_atlas_retry_api) {
+            // When: the build lacks `perf_atlas_retry_api`, its App cannot drive the episodes: blocked, not invalid.
+            self.finish(event_loop, Status::Blocked, Some(ATLAS_RETRY_UNAVAILABLE.to_owned()));
+            return DriverState::None;
+        }
         if self.counters_mode != CountersMode::On {
             // When: counters are off or unsupported, the episodes cannot be observed at all.
             self.invalidate(event_loop, "S1/atlas-retry runs only with --counters".to_owned());
@@ -2840,7 +2876,7 @@ impl Probe {
         };
         if arm == Arm::ChangeAtlas {
             // When: frame A is next, its assembly changes the atlas so the frame retries.
-            renderer.__change_glyph_atlas_during_next_assembly();
+            change_atlas_during_next_assembly(renderer);
         }
         renderer.invalidate_retained_frame();
         // B is redrawn by the retry's own request; every other frame asks for one.
@@ -2912,17 +2948,12 @@ impl Probe {
 
     /// What the main window shows for S1/atlas-retry: the active tab's title, the font fallback
     /// state, the active pane's grid size, cursor and visible rows (trailing blanks trimmed).
-    /// `None` when any part cannot be read. Every API it reads exists on the comparison base too.
+    /// `None` when any part cannot be read. The title, notice id and chrome reads exist only in a
+    /// tree with `perf_atlas_retry_api`; without it they read `None`, and the driver never starts.
     fn atlas_retry_scene(&self) -> Option<Scene> {
         let window_id = self.main_id?;
-        let title = self.app.__test_window_active_tab_title(window_id)?;
-        let renderer = self.app.main_renderer()?;
-        let missing = renderer.last_missing_tofu().len() + renderer.last_missing_chrome().len();
-        let fallback = (
-            renderer.font_fallback_notice_id()?,
-            atlas_retry_fallback_applies(&self.app)?,
-            missing,
-        );
+        let (title, notice_id, missing) = atlas_retry_scene_parts(&self.app, window_id)?;
+        let fallback = (notice_id, atlas_retry_fallback_applies(&self.app)?, missing);
         let pane = self.active_pane()?;
         let state = self.app.main_panes()?.get(&pane)?;
         let parser = state.parser.lock();
