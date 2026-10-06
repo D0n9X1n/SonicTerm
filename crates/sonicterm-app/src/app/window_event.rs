@@ -754,11 +754,9 @@ impl App {
         }
 
         // The callback is the scheduler generation snapshot slot, before either lock family.
-        let super::visible_frame::HeldVisibleFrame {
-            snapshot: frame_snapshot,
-            mut guards,
-            mut images,
-        } = {
+        // The collected frame stays one owning value, so an unwind drops its fields in declaration
+        // order: every parser guard, then the custody, the dispatch clock and the images.
+        let mut frame = {
             // End the Result's drop scope before later branches release its borrowed sources.
             let collected = sources.try_collect(|| self.snapshot_window_redraw(win_id));
             match collected {
@@ -773,25 +771,31 @@ impl App {
                 }
             }
         };
+        let frame_snapshot = frame.snapshot.take();
         // Recheck the synchronized-output hold under the guards; a held frame is abandoned unsettled.
-        let sync_states: Vec<_> =
-            guards.iter().map(|(id, parser, _)| (*id, parser.synchronized_output())).collect();
+        let sync_states: Vec<_> = frame
+            .guards
+            .iter()
+            .map(|(id, parser, _)| (*id, parser.synchronized_output()))
+            .collect();
         let now = self.dispatch_now();
         if self.abandon_synchronized_frame(win_id, &sync_states, now) {
             // When: `abandon_synchronized_frame` holds the frame, release the collection unsettled and unreceipted.
-            drop(guards);
-            drop(images);
+            drop(frame);
             drop(sources);
             return;
         }
         // Each watched pane's attribution record is copied here, under the guards the frame presents.
-        let s10_candidates =
-            self.s10_candidates(win_id, guards.iter().map(|(id, parser, _)| (*id, &**parser)), now);
+        let s10_candidates = self.s10_candidates(
+            win_id,
+            frame.guards.iter().map(|(id, parser, _)| (*id, &**parser)),
+            now,
+        );
         // One anchored viewport projection feeds both the per-pane and active-frame viewports.
         // Reconcile, then apply the previous frame's receipts under these guards, before planning.
         let frame_viewports = match self
             .main_mut()
-            .map(|window| sources.reconcile_and_apply_receipts(window, &mut guards))
+            .map(|window| sources.reconcile_and_apply_receipts(window, &mut frame.guards))
         {
             Some(Ok(viewports)) => viewports,
             result => {
@@ -799,8 +803,7 @@ impl App {
                 let why = result
                     .and_then(|result| result.err())
                     .unwrap_or(super::visible_frame::FrameUnavailable::NoLayout);
-                drop(guards);
-                drop(images);
+                drop(frame);
                 drop(sources);
                 let now = self.dispatch_now();
                 self.visible_frame_unavailable(win_id, why, was_dirty, now);
@@ -814,14 +817,15 @@ impl App {
 
         self.refresh_target_hover_from_parsers(
             win_id,
-            guards.iter().map(|(id, parser, _)| (*id, &**parser)),
+            frame.guards.iter().map(|(id, parser, _)| (*id, &**parser)),
         );
         if let Some(window) = self.main_mut() {
             window.coherent_frame_collected();
         }
         let marker_observed = self.runtime_smoke.as_ref().is_some_and(|smoke| {
             smoke.is_waiting_for_marker()
-                && guards
+                && frame
+                    .guards
                     .iter()
                     .any(|(_, parser, _)| grid_contains_marker(parser.grid(), smoke.marker()))
         });
@@ -861,12 +865,12 @@ impl App {
                 &mut main.selection,
                 &mut main.select_anchor,
                 active_id,
-                guards[active_pos].1.grid(),
+                frame.guards[active_pos].1.grid(),
             );
             if self.command_palette.is_open() && self.palette_attached_window.is_none() {
                 self.command_palette.set_context(super::overlays::command_palette_context(
                     main,
-                    Some(guards[active_pos].1.grid()),
+                    Some(frame.guards[active_pos].1.grid()),
                 ));
                 self.command_palette.set_tabs(&main.tabs, &self.i18n);
             }
@@ -979,13 +983,13 @@ impl App {
                 let _ = crate::app::refresh_active_tab_title(
                     tabs_mref,
                     pane,
-                    &guards[active_pos].1,
+                    &frame.guards[active_pos].1,
                     tab_idx,
                 );
                 if let Some(search) =
                     tab_states_mref.get_mut(tab_idx).and_then(|tab_state| tab_state.search.as_mut())
                 {
-                    let grid = guards[active_pos].1.grid();
+                    let grid = frame.guards[active_pos].1.grid();
                     let view_top =
                         GpuRenderer::resolved_view_top_abs_legacy(grid, frame_viewports.active);
                     super::search_handle::prepare_search(search, active_id, grid, view_top);
@@ -994,14 +998,15 @@ impl App {
                     tab_states_mref.get(tab_idx).and_then(|tab_state| tab_state.search.as_ref());
                 // Every reader after the render call takes its copy here: the call releases the guards.
                 let cursor_copy = {
-                    let grid = guards[active_pos].1.grid();
+                    let grid = frame.guards[active_pos].1.grid();
                     (grid.cursor.row, grid.cursor.col)
                 };
-                let cursor_rect_copy = guards[active_pos].2;
+                let cursor_rect_copy = frame.guards[active_pos].2;
                 let recovery_sample = self.runtime_smoke.as_ref().and_then(|smoke| {
                     smoke.recovery_marker_sample(
                         win_id,
-                        guards
+                        frame
+                            .guards
                             .iter()
                             .map(|(id, parser, _)| (*id, parser.grid(), frame_viewports.of(*id))),
                     )
@@ -1024,8 +1029,9 @@ impl App {
                 let sonicterm_gpu::core::FrameOutcome { outcome, receipts } = r.render_releasing(
                     &fonts,
                     super::visible_frame::HeldFrameSource {
-                        guards,
-                        images: std::mem::take(&mut images),
+                        guards: std::mem::take(&mut frame.guards),
+                        custody: frame.custody.take(),
+                        images: std::mem::take(&mut frame.images),
                         viewports: &frame_viewports,
                         active: active_id,
                         broadcast: &broadcast_participants,
@@ -1050,6 +1056,12 @@ impl App {
                     ws_hovered_url_cells,
                     ws_link_preview_ref,
                 );
+                // The dispatch interval ends at the render call's return, in the rendered population.
+                if let Some(dispatch) = frame.dispatch.take() {
+                    dispatch.rendered();
+                }
+                // The frame now holds no guard and no timing; release it before the sources it borrowed.
+                drop(frame);
                 // Keep the new widths only if this frame reached the screen, so hit-testing
                 // matches the bar the user sees.
                 super::tab_widths::settle_tab_widths(tabs_mref, drawn_tab_widths, &outcome);
@@ -1138,6 +1150,9 @@ impl App {
                     }
                 }
             }
+        } else {
+            // When: the main window has no renderer, nothing renders; release the guards, then close the timing.
+            drop(frame);
         }
         if let Some(window) = self.main_mut() {
             // A presented frame's receipts replace the pending set emptied at collection.

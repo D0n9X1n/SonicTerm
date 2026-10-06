@@ -907,6 +907,7 @@ fn the_held_source_releases_its_guards_when_lend_returns() {
         let (broadcast, alpha) = (BTreeSet::new(), HashMap::new());
         let source = HeldFrameSource {
             guards: held.guards,
+            custody: held.custody,
             images: held.images,
             viewports: &viewports,
             active: sources.active_id(),
@@ -944,16 +945,18 @@ fn both_adapters_release_their_guards_through_the_one_call() {
         let error_end = source[unavailable..].find("return;").unwrap() + unavailable;
         let arms = &source[reconcile..error_end];
         assert!(arms.contains(ok_arm), "{name} binds the reconciled viewports");
-        let cleanup = arms.find("drop(guards);").expect("error arm drops guards");
+        // The error arm drops the whole frame (guards first, by field order), then the sources.
+        let cleanup = arms.find("drop(frame);").expect("error arm drops the whole frame");
+        assert!(arms[cleanup..].contains("drop(sources);"));
         assert!(
-            arms[cleanup..].contains("drop(images);") && arms[cleanup..].contains("drop(sources);")
-        );
-        assert!(
-            !source[error_end..call].contains("drop(guards)"),
+            !source[error_end..call].contains("drop(frame)"),
             "{name} drops guards before the call"
         );
         let source_literal = &source[call..];
-        assert!(source_literal.contains("HeldFrameSource {") && source_literal.contains("guards,"));
+        assert!(
+            source_literal.contains("HeldFrameSource {")
+                && source_literal.contains("guards: std::mem::take(&mut frame.guards),")
+        );
         let after = &source[call..];
         assert!(!after.contains("guards["), "{name} reads a guard after the call");
         assert!(!after.contains("try_lock"), "{name} re-locks a parser after the call");
@@ -1242,5 +1245,221 @@ fn scrolled_view_row_receipts_clear_only_drawn_live_rows_at_the_next_collection(
                 peer_rows.into_iter().filter(|row| Some(*row) != peer_cleared).collect();
             assert_eq!(dirty(&app, window, peer), peer_kept, "child={child} {name}: the peer");
         }
+    }
+}
+
+/// Custody and dispatch totals as (custodies, rendered dispatches, failed dispatches).
+fn custody_counts(totals: &crate::app::guard_custody::CustodyTotals) -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering;
+    (
+        totals.custodies.load(Ordering::Relaxed),
+        totals.dispatches.load(Ordering::Relaxed),
+        totals.dispatches_failed.load(Ordering::Relaxed),
+    )
+}
+
+/// A counting collection starts its custody and dispatch at the first guard acquired. A frame that renders
+/// records one custody and one rendered dispatch; contention after a guard records one custody and one
+/// failed dispatch; contention before any guard records nothing; an App that does not count takes neither.
+#[test]
+fn a_counting_collection_times_custody_from_its_first_guard() {
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        let totals = Arc::new(crate::app::guard_custody::CustodyTotals::default());
+        let mut counted = sources(&mut app, window, child).ok().unwrap();
+        counted.counted = Some(Arc::clone(&totals));
+        let held = counted.try_collect(|| {}).ok().unwrap();
+        let (custody, dispatch) = (held.custody, held.dispatch);
+        assert!(custody.is_some() && dispatch.is_some(), "child={child}");
+        drop(held.guards);
+        drop(custody);
+        dispatch.unwrap().rendered();
+        assert_eq!(custody_counts(&totals), (1, 1, 0), "child={child}: a rendered frame");
+        let blocked = Arc::clone(&app.windows[&window].panes[&right].parser);
+        let guard = blocked.lock();
+        assert!(counted.try_collect(|| {}).is_err());
+        assert_eq!(
+            custody_counts(&totals),
+            (2, 1, 1),
+            "child={child}: contention after the first guard"
+        );
+        drop(guard);
+        let first = Arc::clone(&app.windows[&window].panes[&left].parser);
+        let guard = first.lock();
+        assert!(counted.try_collect(|| {}).is_err());
+        assert_eq!(custody_counts(&totals), (2, 1, 1), "child={child}: no guard, nothing recorded");
+        drop(guard);
+        let uncounted = sources(&mut app, window, child).ok().unwrap();
+        let held = uncounted.try_collect(|| {}).ok().unwrap();
+        assert!(held.custody.is_none() && held.dispatch.is_none(), "child={child}: not counting");
+    }
+}
+
+/// The held source closes the custody after its guards, and every early exit of a redraw
+/// releases the guards before the custody and dispatch timing close (read as LF on any checkout).
+#[test]
+fn every_collection_exit_releases_guards_before_closing_the_timing() {
+    let collector = include_str!("visible_frame.rs").replace("\r\n", "\n");
+    let collector: String = collector.lines().map(str::trim).collect::<Vec<_>>().join("\n");
+    assert!(
+        collector.contains("drop(panes);\ndrop(self.guards);\ndrop(self.custody);"),
+        "lend: the custody closes only after every guard is released"
+    );
+    for (name, source) in [
+        ("main", include_str!("window_event.rs")),
+        ("child", include_str!("child_window_redraw.rs")),
+    ] {
+        let source = source.replace("\r\n", "\n");
+        let compact: String = source.lines().map(str::trim).collect::<Vec<_>>().join("\n");
+        // The sync hold, the reconcile failure, the no-renderer exit and the post-render release.
+        assert!(
+            compact.matches("drop(frame);").count() >= 4,
+            "{name}: every exit drops the whole frame"
+        );
+        assert!(
+            compact.contains(
+                "guards: std::mem::take(&mut frame.guards),\ncustody: frame.custody.take(),"
+            ),
+            "{name}: the render source carries the guards, then the custody"
+        );
+        assert!(
+            compact
+                .contains("if let Some(dispatch) = frame.dispatch.take() {\ndispatch.rendered();"),
+            "{name}: a render closes the rendered population"
+        );
+    }
+}
+
+/// Both collectors hand the App's own custody totals to the sources when the App counts, and none when
+/// it does not, so production frames reach the exported totals.
+#[test]
+fn the_collectors_count_into_the_apps_custody_totals_only_when_counting() {
+    for child in [false, true] {
+        let (mut app, window, _, _, _) = fixture(child, false);
+        assert!(sources(&mut app, window, child).ok().unwrap().counted.is_none(), "child={child}");
+        app.frame_counters = Some(crate::app::frame_counters::AppFrameCounters::new());
+        let counted = sources(&mut app, window, child).ok().unwrap().counted;
+        let owned = &app.frame_counters.as_ref().unwrap().custody;
+        assert!(counted.is_some_and(|totals| Arc::ptr_eq(&totals, owned)), "child={child}");
+    }
+}
+
+/// A panic inside a counting collection, after every parser guard is taken, unwinds through the guards before
+/// the custody records, so `ui_guard_custody_ns` never ends while a guard is still held.
+#[test]
+fn an_unwinding_collection_records_custody_only_after_every_guard_is_released() {
+    use crate::app::guard_custody::{CustodyTotals, CUSTODY_DROP_PROBE};
+    use std::cell::RefCell;
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        let parsers: Vec<_> = [left, right]
+            .iter()
+            .map(|id| Arc::clone(&app.windows[&window].panes[id].parser))
+            .collect();
+        // Each entry is whether every visible parser could be locked when a custody recorded.
+        let guards_free_at_record = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let observed = std::rc::Rc::clone(&guards_free_at_record);
+        CUSTODY_DROP_PROBE.with(|probe| {
+            *probe.borrow_mut() = Some(Box::new(move || {
+                let free = parsers.iter().all(|parser| parser.try_lock().is_some());
+                observed.borrow_mut().push(free);
+            }));
+        });
+        let totals = Arc::new(CustodyTotals::default());
+        let mut counted = sources(&mut app, window, child).ok().unwrap();
+        counted.counted = Some(Arc::clone(&totals));
+        // Holding this borrow makes the image loop's test-only `borrow_mut` panic after every guard is held.
+        let visits = counted.image_visits.borrow();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = counted.try_collect(|| {});
+        }));
+        drop(visits);
+        CUSTODY_DROP_PROBE.with(|probe| probe.borrow_mut().take());
+        assert!(unwound.is_err(), "child={child}: the collection must unwind");
+        assert_eq!(*guards_free_at_record.borrow(), [true], "child={child}");
+        assert_eq!(custody_counts(&totals), (1, 0, 1), "child={child}: recorded once, as failed");
+    }
+}
+
+/// Both redraw adapters keep the collected frame as one owning binding and move only its snapshot out, so
+/// an unwind between collection and render drops every guard before the custody and dispatch clock.
+#[test]
+fn the_redraw_adapters_keep_the_collected_frame_whole() {
+    for (name, source) in [
+        ("main", include_str!("window_event.rs")),
+        ("child", include_str!("child_window_redraw.rs")),
+    ] {
+        let source = source.replace("\r\n", "\n");
+        let compact: String = source.lines().map(str::trim).collect::<Vec<_>>().join("\n");
+        assert!(
+            !compact.contains("let super::visible_frame::HeldVisibleFrame {"),
+            "{name}: never destructured"
+        );
+        assert!(compact.contains("let mut frame = {"), "{name}: one owning binding");
+        assert!(
+            compact.contains("let frame_snapshot = frame.snapshot.take();"),
+            "{name}: the snapshot is taken"
+        );
+        // Each timing field leaves the frame only by `take` (once, at render); an early exit drops the whole
+        // frame, so no field is ever a separate local that could drop out of order.
+        for field in ["frame.custody", "frame.dispatch"] {
+            let uses = compact.matches(field).count();
+            assert_eq!(
+                uses,
+                compact.matches(&format!("{field}.take()")).count(),
+                "{name}: {field}"
+            );
+        }
+        // The guards move out only into the render source; every other use borrows them.
+        for moved in
+            ["drop(frame.guards)", "= frame.guards;", "guards: frame.guards,", "drop(frame.images)"]
+        {
+            assert!(!compact.contains(moved), "{name}: {moved}");
+        }
+        assert_eq!(compact.matches("frame.custody.take()").count(), 1, "{name}: custody");
+        assert_eq!(compact.matches("frame.dispatch.take()").count(), 1, "{name}: dispatch");
+        assert_eq!(
+            compact.matches("std::mem::take(&mut frame.guards)").count(),
+            1,
+            "{name}: guards"
+        );
+    }
+}
+
+/// A frame held the way the adapters hold it (snapshot moved out, guards borrowed mutably) that unwinds
+/// before render drops its guards before the custody records: the field order is the drop order.
+#[test]
+fn an_unwind_after_collection_releases_the_held_frames_guards_first() {
+    use crate::app::guard_custody::{CustodyTotals, CUSTODY_DROP_PROBE};
+    use std::cell::RefCell;
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        let parsers: Vec<_> = [left, right]
+            .iter()
+            .map(|id| Arc::clone(&app.windows[&window].panes[id].parser))
+            .collect();
+        let guards_free_at_record = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let observed = std::rc::Rc::clone(&guards_free_at_record);
+        CUSTODY_DROP_PROBE.with(|probe| {
+            *probe.borrow_mut() = Some(Box::new(move || {
+                let free = parsers.iter().all(|parser| parser.try_lock().is_some());
+                observed.borrow_mut().push(free);
+            }));
+        });
+        let totals = Arc::new(CustodyTotals::default());
+        let mut counted = sources(&mut app, window, child).ok().unwrap();
+        counted.counted = Some(Arc::clone(&totals));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut frame = counted.try_collect(|| Some(())).ok().unwrap();
+            let _snapshot = frame.snapshot.take();
+            // The adapters borrow the guards mutably (receipts, viewports) while the frame still owns them.
+            let held = &mut frame.guards;
+            assert_eq!(held.len(), 2);
+            panic!("unwind between collection and render");
+        }));
+        CUSTODY_DROP_PROBE.with(|probe| probe.borrow_mut().take());
+        assert!(unwound.is_err(), "child={child}");
+        assert_eq!(*guards_free_at_record.borrow(), [true], "child={child}");
+        assert_eq!(custody_counts(&totals), (1, 0, 1), "child={child}: recorded once, as failed");
     }
 }

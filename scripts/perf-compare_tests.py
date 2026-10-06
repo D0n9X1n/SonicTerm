@@ -5235,11 +5235,12 @@ COUNTER_CONTRACT = {
                ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
     "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
              "fg_probe_calls", "fg_probe_panes", "fg_worker_probes", "fg_worker_panes", "fg_results_stale",
-             "native_request_redraw_unregistered"),
+             "native_request_redraw_unregistered", "ui_guard_custody_ns", "ui_guard_custodies",
+             "frame_dispatch_ns", "frame_dispatches", "frame_dispatch_failed_ns", "frame_dispatches_failed"),
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced",
-            "flushes_suppressed", "sync_timeouts"),
+            "flushes_suppressed", "sync_timeouts", "parser_lock_wait_ns", "parser_sections"),
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   "damage_waste_permille_sum", "software_frames",
@@ -5454,6 +5455,29 @@ class FrameCounterSchemaTests(unittest.TestCase):
         # A run that ended before its first phase still reports the gate it forced on.
         early = counters_result(status="invalid", exit_code=3, phases=[], grid=None)
         self.assertEqual(perf.validate_result(early, HARNESS_HASH, 3, counters=True), [])
+
+
+GUARD_COUNTERS = {"app": ("ui_guard_custody_ns", "ui_guard_custodies", "frame_dispatch_ns", "frame_dispatches",
+                           "frame_dispatch_failed_ns", "frame_dispatches_failed"),
+                  "vt": ("parser_lock_wait_ns", "parser_sections")}
+
+
+class GuardCounterTests(unittest.TestCase):
+    """The guard-custody, frame-dispatch and worker-wait totals are counter fields an older base lacks."""
+
+    def test_the_new_totals_are_counter_fields_a_base_may_lack(self):
+        # Each new total is a count field of its section; a head must carry it, and a base built before it
+        # passes as partial, so the comparison shows n/a for it and never a measured zero.
+        for section, names in GUARD_COUNTERS.items():
+            for name in names:
+                with self.subTest(field=f"{section}.{name}"):
+                    self.assertIn(name, perf.FRAME_COUNTER_FIELDS[section][0])
+        older = frame_counters()
+        for section, names in GUARD_COUNTERS.items():
+            for name in names:
+                del older[section][name]
+        self.assertTrue(perf.frame_counter_problems(older))
+        self.assertEqual(perf.frame_counter_problems(older, partial=True), [])
 
 
 class CounterBuildTests(unittest.TestCase):

@@ -320,6 +320,7 @@ mod fg_probe;
 mod field_input;
 mod field_pointer;
 mod frame_counters;
+mod guard_custody;
 pub use frame_counters::{
     CounterRecord, FrameCountersSnapshot, FrameCountersTooLate, HistogramBuckets,
 };

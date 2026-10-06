@@ -857,6 +857,19 @@ updates retained stores after unlocking. Main-born and child-born panes use the
 same host-event processor. Tear-out changes the shared redraw `WindowId`, so the
 worker follows the pane without retaining `Arc<Window>`.
 
+With frame counters on, the redraw measures how long it holds parser guards: one
+custody token starts at the first guard a collection acquires and records when it
+drops, which every exit, an unwind included, arranges right after the last guard is
+released: the redraw keeps the collected frame as one value whose guards drop before
+its timing. A collection that fails after a guard is measured too. A dispatch clock started at
+the same instant ends at the return of the renderer call, or, for a collection
+that never reached the renderer, at its release, in a separate population. The
+worker records each section's lock wait as a nanosecond total beside its
+histogram. With counters off, neither token is created; what remains is the
+`Option` and gate checks and the handling of the empty tokens, with no clock read
+and no allocation. These are totals per phase; they do not attribute a
+worker's wait to a particular frame.
+
 `PtyHandle::into_teardown` publishes closing and transfers the owned payload
 without native waits. Reserved panes enqueue to the App's single reaper driver;
 slotless retirement retries admission once, then uses explicit synchronous

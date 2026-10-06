@@ -115,7 +115,7 @@ fn switching_to_a_background_tab_shows_its_latest_output_and_title() {
     let rect = sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 480.0);
     let sources = app.child_visible_frame_sources(child, rect).expect("valid owner");
     assert_eq!((sources.tab_index, sources.active_id()), (1, pane));
-    let crate::app::visible_frame::HeldVisibleFrame { snapshot, mut guards, mut images } =
+    let crate::app::visible_frame::HeldVisibleFrame { snapshot, mut guards, mut images, .. } =
         sources.try_collect(|| app.snapshot_window_redraw(child)).expect("uncontended");
     let window = app.windows.get_mut(&child).unwrap();
     let viewports = sources.reconcile_viewports(&mut window.panes, &guards).expect("owner");

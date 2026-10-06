@@ -93,11 +93,9 @@ impl App {
         let active_pos = sources.active_pos;
         let pane_rects = sources.rects();
         // The scheduler captures generations before the first parser or image lock.
-        let super::visible_frame::HeldVisibleFrame {
-            snapshot: frame_snapshot,
-            mut guards,
-            mut images,
-        } = {
+        // The collected frame stays one owning value, so an unwind drops its fields in declaration
+        // order: every parser guard, then the custody, the dispatch clock and the images.
+        let mut frame = {
             // End the Result's drop scope before later branches release its borrowed sources.
             let collected = sources.try_collect(|| self.snapshot_window_redraw(win_id));
             match collected {
@@ -112,32 +110,34 @@ impl App {
                 }
             }
         };
+        let frame_snapshot = frame.snapshot.take();
         // Recheck the synchronized-output hold under the guards; a held frame is abandoned unsettled.
-        let sync_states: Vec<_> =
-            guards.iter().map(|(id, parser, _)| (*id, parser.synchronized_output())).collect();
+        let sync_states: Vec<_> = frame
+            .guards
+            .iter()
+            .map(|(id, parser, _)| (*id, parser.synchronized_output()))
+            .collect();
         let now = self.dispatch_now();
         if self.abandon_synchronized_frame(win_id, &sync_states, now) {
             // When: `abandon_synchronized_frame` holds the frame, release the collection unsettled and unreceipted.
-            drop(guards);
-            drop(images);
+            drop(frame);
             drop(sources);
             return;
         }
         self.refresh_target_hover_from_parsers(
             win_id,
-            guards.iter().map(|(id, parser, _)| (*id, &**parser)),
+            frame.guards.iter().map(|(id, parser, _)| (*id, &**parser)),
         );
         let Some(child) = self.windows.get_mut(&win_id) else {
             // When: windows no longer contains win_id, discard its collected frame instead of presenting retained hover.
             return;
         };
         // Reconcile, then apply the previous frame's receipts under these guards, before planning.
-        let frame_viewports = match sources.reconcile_and_apply_receipts(child, &mut guards) {
+        let frame_viewports = match sources.reconcile_and_apply_receipts(child, &mut frame.guards) {
             Ok(viewports) => viewports,
             Err(why) => {
                 // When: `why` rejects an owner, drop the entire collection before returning to the adapter.
-                drop(guards);
-                drop(images);
+                drop(frame);
                 drop(sources);
                 let _ = child;
                 let now = self.dispatch_now();
@@ -154,7 +154,7 @@ impl App {
         {
             palette.set_context(super::overlays::command_palette_context(
                 child,
-                Some(guards[active_pos].1.grid()),
+                Some(frame.guards[active_pos].1.grid()),
             ));
             palette.set_tabs(&child.tabs, &self.i18n);
         }
@@ -164,7 +164,7 @@ impl App {
                 &mut child.selection,
                 &mut child.select_anchor,
                 active_id,
-                guards[active_pos].1.grid(),
+                frame.guards[active_pos].1.grid(),
             );
             // Run the same title formatter the main window uses, so OSC 7
             // cwd and foreground-process probes flow into every window's
@@ -176,13 +176,13 @@ impl App {
             let _ = crate::app::refresh_active_tab_title(
                 &mut child.tabs,
                 pane,
-                &guards[active_pos].1,
+                &frame.guards[active_pos].1,
                 tab_idx,
             );
             if let Some(search) =
                 child.tab_states.get_mut(tab_idx).and_then(|tab_state| tab_state.search.as_mut())
             {
-                let grid = guards[active_pos].1.grid();
+                let grid = frame.guards[active_pos].1.grid();
                 let view_top =
                     GpuRenderer::resolved_view_top_abs_legacy(grid, frame_viewports.active);
                 super::search_handle::prepare_search(search, active_id, grid, view_top);
@@ -225,14 +225,15 @@ impl App {
             }
             // Every reader after the render call takes its copy here: the call releases the guards.
             let cursor_copy = {
-                let grid = guards[active_pos].1.grid();
+                let grid = frame.guards[active_pos].1.grid();
                 (grid.cursor.row, grid.cursor.col)
             };
-            let cursor_rect_copy = guards[active_pos].2;
+            let cursor_rect_copy = frame.guards[active_pos].2;
             let recovery_sample = self.runtime_smoke.as_ref().and_then(|smoke| {
                 smoke.recovery_marker_sample(
                     win_id,
-                    guards
+                    frame
+                        .guards
                         .iter()
                         .map(|(id, parser, _)| (*id, parser.grid(), frame_viewports.of(*id))),
                 )
@@ -274,8 +275,9 @@ impl App {
                 let sonicterm_gpu::core::FrameOutcome { outcome, receipts } = r.render_releasing(
                     &fonts,
                     super::visible_frame::HeldFrameSource {
-                        guards,
-                        images: std::mem::take(&mut images),
+                        guards: std::mem::take(&mut frame.guards),
+                        custody: frame.custody.take(),
+                        images: std::mem::take(&mut frame.images),
                         viewports: &frame_viewports,
                         active: active_id,
                         broadcast: broadcast_participants,
@@ -307,6 +309,12 @@ impl App {
                     child.hovered_url.as_ref().map(|hovered_url| hovered_url.to_cells()),
                     child.link_preview.as_ref(),
                 );
+                // The dispatch interval ends at the render call's return, in the rendered population.
+                if let Some(dispatch) = frame.dispatch.take() {
+                    dispatch.rendered();
+                }
+                // The frame now holds no guard and no timing; release it before the sources it borrowed.
+                drop(frame);
                 // Keep the new widths only if this frame reached the screen, so hit-testing
                 // matches the bar the user sees.
                 super::tab_widths::settle_tab_widths(&mut child.tabs, drawn_tab_widths, &outcome);
@@ -345,7 +353,7 @@ impl App {
                 }
             } else {
                 // When: the child has no renderer, nothing is drawn; release the frame's guards here too.
-                drop(guards);
+                drop(frame);
             }
             if let (Some(snapshot), Some(settlement)) = (frame_snapshot.as_ref(), frame_completion)
             {

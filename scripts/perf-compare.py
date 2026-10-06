@@ -2186,13 +2186,19 @@ FRAME_COUNTER_FIELDS = {
                ("present_interval_ms", "handler_ms", "flush_to_redraw_ms")),
     "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
              "fg_probe_calls", "fg_probe_panes", "fg_worker_probes", "fg_worker_panes", "fg_results_stale",
-             "native_request_redraw_unregistered"),
+             "native_request_redraw_unregistered",
+             # Guard custody (first parser guard to last release) and frame dispatch (first guard to the render
+             # call's return; failed collections apart), as sums in ns and counts; a base older than them shows n/a.
+             "ui_guard_custody_ns", "ui_guard_custodies", "frame_dispatch_ns", "frame_dispatches",
+             "frame_dispatch_failed_ns", "frame_dispatches_failed"),
             # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker.
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced", "flushes_suppressed",
             # sync_timeouts counts synchronized updates released at the 150 ms bound; a base older than it shows n/a.
-            "sync_timeouts"),
+            "sync_timeouts",
+            # The workers' parser-lock wait summed in ns, and the sections it sums over; a base older shows n/a.
+            "parser_lock_wait_ns", "parser_sections"),
            ("parser_lock_wait_us", "parser_lock_hold_us", "parse_us")),
     "renderer": (("vertex_bytes", "index_bytes", "damage_permille_sum", "damaged_frames",
                   # damage_waste_permille_sum is the union rect's share minus what its parts cover, over

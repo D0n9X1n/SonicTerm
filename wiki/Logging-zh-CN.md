@@ -348,6 +348,12 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `user_event` | 毫秒直方图 | 每次 `user_event` 分发 |
 | `new_events` | 毫秒直方图 | 每次 `new_events` 分发 |
 | `ui_parser_locks` | 次数 | 事件循环线程对窗格解析器加锁的次数 |
+| `ui_guard_custody_ns` | 次数（ns） | 一帧持有任一解析器守卫的累计时间，从获取第一个守卫到释放最后一个，覆盖所有取得过守卫的收集，包括提前失败的 |
+| `ui_guard_custodies` | 次数 | 至少取得一个解析器守卫的收集次数 |
+| `frame_dispatch_ns` | 次数（ns） | 从一帧的第一个解析器守卫到渲染器调用返回的累计时间，覆盖到达渲染器的帧 |
+| `frame_dispatches` | 次数 | 到达渲染器的帧数 |
+| `frame_dispatch_failed_ns` | 次数（ns） | 从第一个解析器守卫到释放的累计时间，覆盖取得守卫但未到达渲染器的收集（争用、同步输出保持、协调失败、无渲染器），自成一个总体 |
+| `frame_dispatches_failed` | 次数 | 这些失败的收集次数 |
 | `ui_parser_wait` | 微秒直方图 | 每次这类加锁的等待 |
 | `fg_probe_calls`、`fg_probe_panes` | 次数 | 已退役的事件循环探测；始终为 0，保留下来，使与旧 base 的对比显示这部分工作降到 0 |
 | `fg_probe` | 微秒直方图 | 已退役的事件循环探测耗时；始终为空，为同一对比保留 |
@@ -368,6 +374,8 @@ VT 字段输出在 `window=app` 行上。它们是 App 范围的单一汇总，�
 | 字段 | 单位 | 含义 |
 | --- | --- | --- |
 | `parser_lock_wait` | 微秒直方图 | VT 工作线程等待窗格解析器锁的时间 |
+| `parser_lock_wait_ns` | 次数（ns） | 同样的等待以纳秒累计，覆盖每个分段 |
+| `parser_sections` | 次数 | 记录的解析分段数，即 `parser_lock_wait_ns` 所累计的次数 |
 | `parser_lock_hold` | 微秒直方图 | 工作线程持有该锁的时间 |
 | `parse` | 微秒直方图 | 在锁内解析的时间 |
 | `parse_bytes` | 字节 | 解析的字节数 |
