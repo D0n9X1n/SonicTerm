@@ -23,6 +23,14 @@ impl super::App {
     pub fn disarm_s10_attribution(&mut self, _pane_id: u64) {}
 }
 
+// Pins both signatures in every build, test or not: a gate on either method, or a changed parameter or
+// return type, fails a plain library build, which is what an overlaid harness on any base compiles against.
+const _: () = {
+    let _: fn(&mut super::App, u64, &str, &str, u32) -> Option<u64> =
+        super::App::arm_s10_attribution;
+    let _: fn(&mut super::App, u64) = super::App::disarm_s10_attribution;
+};
+
 #[cfg(test)]
 #[path = "perf_present_tests.rs"]
 mod perf_present_tests;
