@@ -245,15 +245,13 @@ fn gates(attributes: &[impl AsRef<str>]) -> bool {
     attributes.iter().any(|attribute| attribute.as_ref().contains("cfg"))
 }
 
-/// The methods are ordinary doc-hidden methods, never behind a cfg or a Cargo feature, so a harness
-/// overlaid on any base that has them compiles and both sides build the same feature set. Every
-/// enclosing gate counts: the file's inner attributes, the impl's attributes, the methods inside it,
-/// and the `mod perf_present` declaration in `app/mod.rs`.
-#[test]
-fn the_attribution_watch_methods_are_never_cfg_gated() {
-    // A Windows checkout may use CRLF line endings; the brace search below needs plain LF.
-    let source = include_str!("perf_present.rs").replace("\r\n", "\n");
-    let source = source.as_str();
+/// Check that the watch methods in `source` (`perf_present.rs`) are never gated: not by the file's inner
+/// attributes, the impl's attributes or any attribute inside it, nor by `mod perf_present;` in
+/// `mod_source` (`app/mod.rs`).
+fn assert_watch_methods_ungated(source: &str, mod_source: &str) {
+    // A Windows checkout may use CRLF line endings; the `\n` searches below need plain LF.
+    let source = &source.replace("\r\n", "\n");
+    let mod_source = &mod_source.replace("\r\n", "\n");
     let inner: Vec<&str> =
         source.lines().map(str::trim).filter(|line| line.starts_with("#![")).collect();
     assert!(!gates(&inner), "the module is gated by an inner attribute: {inner:?}");
@@ -266,8 +264,28 @@ fn the_attribution_watch_methods_are_never_cfg_gated() {
         assert!(methods.contains(name), "{name} is defined in the impl");
     }
     assert!(!methods.contains("#[cfg"), "a method in the impl is cfg-gated");
-    let module_attributes = attributes_above(include_str!("mod.rs"), "mod perf_present;");
+    let module_attributes = attributes_above(mod_source, "mod perf_present;");
     assert!(!gates(&module_attributes), "the module declaration is gated: {module_attributes:?}");
+}
+
+/// The methods are ordinary doc-hidden methods, never behind a cfg or a Cargo feature, so a harness
+/// overlaid on any base that has them compiles and both sides build the same feature set. Every
+/// enclosing gate counts: the file's inner attributes, the impl's attributes, the methods inside it,
+/// and the `mod perf_present` declaration in `app/mod.rs`.
+#[test]
+fn the_attribution_watch_methods_are_never_cfg_gated() {
+    assert_watch_methods_ungated(include_str!("perf_present.rs"), include_str!("mod.rs"));
+}
+
+/// A Windows checkout with CRLF line endings reads the same as an LF one: the check finds the impl's
+/// end and the module declaration whatever the line endings, so CI on Windows runs the same check.
+#[test]
+fn the_gate_check_reads_a_crlf_checkout_as_an_lf_one() {
+    let crlf = |source: &str| source.replace("\r\n", "\n").replace('\n', "\r\n");
+    assert_watch_methods_ungated(
+        &crlf(include_str!("perf_present.rs")),
+        &crlf(include_str!("mod.rs")),
+    );
 }
 
 /// The attribute reader sees a gate however Rust lets it be written: across a blank line, behind a
