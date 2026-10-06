@@ -6991,8 +6991,9 @@ def attribution_run(outcome, synchronized: bool) -> AttributionRun:
         reasons.append(f"the phase's presented count is unknown ({seq_start}..{seq_end!r})")
         seq_end = seq_start
     run.fresh = seq_end - seq_start
-    # The sequence range, the phase's fresh presents and the counters' presented delta count the same main-window
-    # frames over the same span; any disagreement means the lines cannot be matched to the phase.
+    # The sequence range and the phase's fresh presents count the main window's presents; the counters' presented
+    # delta (`snapshot_totals` in counters.rs) sums every live and closed window. They agree only because S10 runs
+    # one window, so another window's presents break the equality and the run reads incomplete, never complete.
     for label, count in (("presented frames", phase.get("presented_frames")),
                          ("counters' presented delta", _window_count(phase, "presented"))):
         if count != run.fresh:

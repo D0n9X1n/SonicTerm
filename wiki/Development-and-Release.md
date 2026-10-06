@@ -169,8 +169,10 @@ harness predates the field reads `n/a` with no change shown, and a result whose
 
 The harness also calls App and renderer methods that older trees lack. Each
 such call sits behind a harness API cfg, one entry of `HARNESS_API_CFGS` in
-`scripts/local-gate.py`; the only entry is `perf_atlas_retry_api`, for the four
-methods S1/atlas-retry's driver needs. Before building, perf-compare looks for
+`scripts/local-gate.py`. There are two entries: `perf_atlas_retry_api`, for the
+four methods S1/atlas-retry's driver needs, and `perf_s10_attribution_api`, for
+the App's two S10 attribution watch methods (`arm_s10_attribution` and
+`disarm_s10_attribution`). Before building, perf-compare looks for
 each entry's methods in both trees: each must be a `pub fn` inside an inherent
 `impl` block of its declared owner type (`GpuRenderer` or `App`) in its owning
 crate. Comments, strings, trait impls, `*_tests.rs` files and code under

@@ -145,8 +145,9 @@ S10 的 `stream` 阶段在 `result.json` 中记录 `updates`：其工作负载�
 并像其他按运行统计的行一样汇总。harness 早于该字段的一侧显示 `n/a`，不显示变化；`updates` 不是正整数的结果无效。
 
 harness 还会调用较旧的树所没有的 App 与渲染器方法。每个这样的调用都位于一个 harness API cfg 之后，即
-`scripts/local-gate.py` 中 `HARNESS_API_CFGS` 的一项；目前唯一的一项是 `perf_atlas_retry_api`，对应 S1/atlas-retry
-驱动所需的四个方法。构建之前，perf-compare 在两棵树中查找该项的方法：每个方法都必须是其所属 crate 中、所声明的所有者类型（`GpuRenderer`
+`scripts/local-gate.py` 中 `HARNESS_API_CFGS` 的一项。共有两项：`perf_atlas_retry_api`，对应 S1/atlas-retry
+驱动所需的四个方法；以及 `perf_s10_attribution_api`，对应 App 的两个 S10 归属监视方法（`arm_s10_attribution` 与
+`disarm_s10_attribution`）。构建之前，perf-compare 在两棵树中查找每一项的方法：每个方法都必须是其所属 crate 中、所声明的所有者类型（`GpuRenderer`
 或 `App`）的固有 `impl` 块内的 `pub fn`。注释、字符串、trait impl、`*_tests.rs` 文件以及位于 `#[cfg(test)]` 或 `#![cfg(test)]`
 之下的代码都不计入。匹配只是源码证据，不能证明该方法的签名或构建的目标会编译它；随后的构建仍会失败关闭。只有两棵树都定义了某项的全部方法，该项才对两侧开启，否则对两侧都关闭，因此 base 永远不会继承 head
 的 API。这些 cfg 都不是 Cargo 特性，特性选择也不变。关卡在启动时根据每次比较构建所继承的内容组合编译器标志：设置了
