@@ -147,8 +147,10 @@ harness 还会调用较旧的树所没有的 App 与渲染器方法。每个这�
 `scripts/local-gate.py` 中 `HARNESS_API_CFGS` 的一项。共有两项：`perf_atlas_retry_api`，对应 S1/atlas-retry
 驱动所需的四个方法；以及 `perf_s10_attribution_api`，对应 App 的两个 S10 归属监视方法（`arm_s10_attribution` 与
 `disarm_s10_attribution`）。关卡在两个由该表生成的步骤 `perf-scenarios-harness-api-clippy` 与
-`perf-scenarios-harness-api-tests` 中，一次开启**全部**项来检查与测试 harness。编译器标志集合一旦改变就会重建整个依赖树，
-因此每项一个单独步骤会使这次重建成倍增加；若某项未出现在这两个步骤或 `Cargo.toml` 的 `check-cfg` 列表中，有一个测试会失败。构建之前，perf-compare 在两棵树中查找每一项的方法：每个方法都必须是其所属 crate 中、所声明的所有者类型（`GpuRenderer`
+`perf-scenarios-harness-api-tests` 中，一次开启**全部**项来检查与测试 harness。测试步骤通过 `RUSTFLAGS` 传入这些 cfg，
+而 `RUSTFLAGS` 一旦改变，所有依赖的构建都会失效，因此一个合并的测试步骤只让依赖重建一次，而不是每项一次。检查步骤把它们放在 `--`
+之后传入，只作用于被检查的 crate；合并它省下的是重复检查，而不是依赖重建。CI 只运行全部关闭与全部开启两种组合；与只定义了部分项的 base
+比较时，该比较自己会构建那个子集。若某项未出现在这两个步骤或 `Cargo.toml` 的 `check-cfg` 列表中，有一个测试会失败。构建之前，perf-compare 在两棵树中查找每一项的方法：每个方法都必须是其所属 crate 中、所声明的所有者类型（`GpuRenderer`
 或 `App`）的固有 `impl` 块内的 `pub fn`。注释、字符串、trait impl、`*_tests.rs` 文件以及位于 `#[cfg(test)]` 或 `#![cfg(test)]`
 之下的代码都不计入。匹配只是源码证据，不能证明该方法的签名或构建的目标会编译它；随后的构建仍会失败关闭。只有两棵树都定义了某项的全部方法，该项才对两侧开启，否则对两侧都关闭，因此 base 永远不会继承 head
 的 API。这些 cfg 都不是 Cargo 特性，特性选择也不变。关卡在启动时根据每次比较构建所继承的内容组合编译器标志：设置了

@@ -173,9 +173,13 @@ four methods S1/atlas-retry's driver needs, and `perf_s10_attribution_api`, for
 the App's two S10 attribution watch methods (`arm_s10_attribution` and
 `disarm_s10_attribution`). The gate lints and tests the harness with **every**
 entry on at once, in two steps built from the table, `perf-scenarios-harness-api-clippy`
-and `perf-scenarios-harness-api-tests`. A changed compiler-flag set rebuilds the
-whole dependency tree, so a separate step per entry would multiply that rebuild;
-a test fails if an entry is missing from those steps or from `Cargo.toml`'s
+and `perf-scenarios-harness-api-tests`. The test step passes the cfgs through
+`RUSTFLAGS`, and a changed `RUSTFLAGS` invalidates every dependency's build, so
+one combined test step costs one dependency rebuild for all entries instead of
+one per entry. The lint step passes them after `--`, which reaches only the
+linted crates; combining it saves repeated linting, not dependency rebuilds.
+CI runs only the all-off and all-on combinations; a comparison against a base
+that defines only some entries builds that subset itself. A test fails if an entry is missing from those steps or from `Cargo.toml`'s
 `check-cfg` list. Before building, perf-compare looks for
 each entry's methods in both trees: each must be a `pub fn` inside an inherent
 `impl` block of its declared owner type (`GpuRenderer` or `App`) in its owning
