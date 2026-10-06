@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from fractions import Fraction
 import errno
@@ -1395,6 +1396,78 @@ def read_memory_samples(log_dir: Path) -> list[MemorySample]:
     return sorted(samples, key=lambda sample: sample.unix_s)
 
 
+# The App's per-present attribution line: WARN on `sonic::perf_present`, fields after the message.
+PRESENT_MARKER = " sonic::perf_present: perf_present "
+
+
+@dataclass(frozen=True)
+class PresentLine:
+    """One `sonic::perf_present` line; a line with the marker whose fields do not parse keeps its `problem`."""
+
+    kind: str
+    arming: int = 0
+    seq: int = 0
+    pane: int = 0
+    resets: int = 0
+    epoch: int = 0
+    set: bool = False
+    sentinel: bool = False
+    prompt: bool = False
+    admission: str = ""
+    emitted: int = 0
+    problem: str | None = None
+
+
+# Each kind's integer, boolean and text fields, in the order the App writes them.
+_PRESENT_FIELDS = {
+    "present": (("arming", "seq", "pane", "resets", "epoch"), ("set", "sentinel", "prompt"), ("admission",)),
+    "overflow": (("arming", "seq", "pane", "emitted"), (), ()),
+}
+PRESENT_ADMISSIONS = ("closed", "forced-first", "forced-visibility", "forced-device", "forced-resize",
+                      "forced-surface", "timeout", "credit")
+
+
+def _unquoted(fields: str, name: str) -> str | None:
+    """`name`'s value with the formatter's quotes removed; None when absent."""
+    value = _field(fields, name)
+    return value[1:-1] if value and len(value) >= 2 and value[0] == value[-1] == '"' else value
+
+
+def parse_present_line(line: str) -> PresentLine | None:
+    """Parse one `sonic::perf_present` line; None for any other line. A line with the marker but a missing or
+    malformed field is kept with its problem, so the run reads incomplete rather than short."""
+    position = line.find(PRESENT_MARKER)
+    if position < 0:
+        return None
+    fields = line[position + len(PRESENT_MARKER):]
+    kind = _unquoted(fields, "kind")
+    if kind not in _PRESENT_FIELDS:
+        return PresentLine(kind=str(kind), problem=f"unknown kind {kind!r}")
+    counts, flags, texts = _PRESENT_FIELDS[kind]
+    values: dict[str, object] = {}
+    for name in counts:
+        raw = _field(fields, name)
+        if raw is None or not raw.isdigit():
+            return PresentLine(kind=kind, problem=f"{name} is {raw!r}")
+        values[name] = int(raw)
+    for name in flags:
+        raw = _field(fields, name)
+        if raw not in ("true", "false"):
+            return PresentLine(kind=kind, problem=f"{name} is {raw!r}")
+        values[name] = raw == "true"
+    for name in texts:
+        raw = _unquoted(fields, name)
+        if raw not in PRESENT_ADMISSIONS:
+            return PresentLine(kind=kind, problem=f"{name} is {raw!r}")
+        values[name] = raw
+    return PresentLine(kind=kind, **values)
+
+
+def read_present_lines(log_dir: Path) -> list[PresentLine]:
+    """Every attribution line of a run's logs, in the order written."""
+    return [line for line in map(parse_present_line, _log_lines(log_dir)) if line is not None]
+
+
 # The cell-layout decision: whether storing grid cells in 16 bytes instead of 24 is worth its cost. It reads S12's
 # `end` checkpoint on the head side of a CI comparison, and goes only when grid cells are a large enough share of
 # resident memory on one platform. Missing or partial evidence is inconclusive, never a no-go.
@@ -2350,7 +2423,8 @@ def phase_kind_problems(phases: Sequence[dict]) -> list[str]:
 def validate_result(data: object, harness_hash: str, process_exit_code: int | None, *,
                     counters: bool = False, partial_counters: bool = False,
                     platform_name: str = "darwin", latency_split_schema: int | None = None,
-                    phase_kinds: int | None = None) -> list[str]:
+                    phase_kinds: int | None = None, attribution_api: bool | None = None,
+                    attribution_schema: int | None = None) -> list[str]:
     """Check result.json against schema version 1; an empty list means it can be read.
 
     A result whose `managed` is not true, or whose harness hash differs from the one this
@@ -2470,9 +2544,58 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
     if platform_name == "win32" and data.get("synthetic_occlusion") is True and not trim_experiment_run(data):
         # When: Windows reports no occlusion, so only the short S12 trim experiment may deliver one there.
         problems.append("synthetic_occlusion is true, but Windows reports no occlusion")
+    problems.extend(attribution_problems(data, attribution_api, attribution_schema))
     notes = data.get("notes")
     if not isinstance(notes, list) or not all(isinstance(note, str) for note in notes):
         problems.append("notes is not a list of strings")
+    return problems
+
+
+# Why a counted phase has no attribution watch; the comparison reads each as unavailable, never as passed.
+ATTRIBUTION_UNAVAILABLE = ("api-disabled", "counters-off", "no-baseline", "not-armed")
+_SYNC_KEYS = {"set", "epoch", "resets"}
+
+
+def _sync_reading_ok(value: object) -> bool:
+    """Whether `value` is a pane's synchronized-output reading: a boolean `set` and integer counts."""
+    return (isinstance(value, dict) and set(value) == _SYNC_KEYS and isinstance(value["set"], bool)
+            and _is_int(value["epoch"]) and _is_int(value["resets"]))
+
+
+def attribution_problems(data: dict, attribution_api: bool | None, schema: int | None) -> list[str]:
+    """Every problem with a result's S10 attribution: the recorded cfg against the comparison's, and each counted
+    phase's record. A harness that declares no schema records none, so nothing is checked. A phase is armed
+    only in a build that calls the API: a side never inherits the other side's availability."""
+    if schema is None:
+        return []
+    problems = []
+    recorded = data.get("s10_attribution_api")
+    if not isinstance(recorded, bool):
+        problems.append(f"s10_attribution_api is {recorded!r}, not a boolean")
+    elif attribution_api is not None and recorded != attribution_api:
+        problems.append(f"s10_attribution_api is {recorded}, but the comparison built with the cfg "
+                        f"{'on' if attribution_api else 'off'}")
+    for phase in data.get("phases") or []:
+        if not isinstance(phase, dict) or "s10_attribution" not in phase:
+            continue
+        name, record = phase.get("name"), phase["s10_attribution"]
+        state = record.get("state") if isinstance(record, dict) else None
+        if state == "unavailable":
+            if record.get("reason") not in ATTRIBUTION_UNAVAILABLE or set(record) != {"state", "reason"}:
+                problems.append(f"phase {name!r} s10_attribution {record!r} names no known reason")
+        elif state == "armed":
+            counts_ok = all(_is_int(record.get(key)) for key in ("arming", "pane", "updates", "seq_start"))
+            end_ok = record.get("seq_end") is None or _is_int(record.get("seq_end"))
+            if not (counts_ok and end_ok and _sync_reading_ok(record.get("baseline"))
+                    and (record.get("end") is None or _sync_reading_ok(record.get("end")))):
+                problems.append(f"phase {name!r} s10_attribution is armed but malformed: {record!r}")
+            elif record["updates"] != phase.get("updates"):
+                problems.append(f"phase {name!r} s10_attribution updates {record['updates']} are not the "
+                                f"phase's {phase.get('updates')!r}")
+            if recorded is not True:
+                problems.append(f"phase {name!r} is armed, but this build does not call the attribution API")
+        else:
+            problems.append(f"phase {name!r} s10_attribution {record!r} is neither unavailable nor armed")
     return problems
 
 
@@ -3070,6 +3193,8 @@ class Scenario:
     latency_split_schema: int | None = None
     # The phase-kinds schema the harness declares; None for a harness that does not classify its phases.
     phase_kinds: int | None = None
+    # The S10 attribution record schema the harness declares in `capabilities`; None for one that predates it.
+    attribution_schema: int | None = None
 
     def cap(self, variant: str) -> int | None:
         """This variant's short-mode run cap, or None when it has none."""
@@ -3156,7 +3281,10 @@ LATENCY_SPLIT_SCHEMAS = (1,)
 # phase's presentation trace.
 PHASE_KINDS_SCHEMAS = (1,)
 # Every capability a harness may declare, with the values this script can validate; the split schema is required.
-HARNESS_CAPABILITIES = {"latency_split_schema": LATENCY_SPLIT_SCHEMAS, "phase_kinds": PHASE_KINDS_SCHEMAS}
+# The S10 attribution record schemas this script can validate.
+ATTRIBUTION_SCHEMAS = (1,)
+HARNESS_CAPABILITIES = {"latency_split_schema": LATENCY_SPLIT_SCHEMAS, "phase_kinds": PHASE_KINDS_SCHEMAS,
+                        "s10_attribution": ATTRIBUTION_SCHEMAS}
 
 
 def _harness_capabilities(data: dict) -> dict:
@@ -3212,7 +3340,7 @@ def parse_scenario_list(text: str) -> list[Scenario]:
             raise ValueError(f"malformed scenario entry {entry!r}")
         scenarios.append(Scenario(entry["id"], tuple(variants), entry["title"], entry["timeout_s"],
                                   entry["short_timeout_s"], caps, capabilities.get("latency_split_schema"),
-                                  capabilities.get("phase_kinds")))
+                                  capabilities.get("phase_kinds"), capabilities.get("s10_attribution")))
     if len({scenario.id for scenario in scenarios}) != len(scenarios):
         raise ValueError("the scenario list repeats an id")
     return scenarios
@@ -3799,6 +3927,10 @@ class RunPlan:
     latency_split_schema: int | None = None
     # The head harness's phase-kinds schema; both sides run that harness, so both are held to it.
     phase_kinds: int | None = None
+    # Whether the comparison built both sides with `perf_s10_attribution_api`; None when nothing decided it.
+    attribution_api: bool | None = None
+    # The head harness's attribution schema; None for a harness that predates it.
+    attribution_schema: int | None = None
 
 
 @dataclass
@@ -3855,6 +3987,8 @@ class RunOutcome:
     renderer: dict | None = None
     # A laps run's font operations; None for other runs or when the run left no logs directory.
     fallback_log: FallbackLog | None = None
+    # A counters run's `sonic::perf_present` lines; empty for other runs.
+    present_lines: list[PresentLine] = field(default_factory=list)
 
 
 UNSETTLED_TEARDOWN = "finish_session did not settle, so the run fails before any retry"
@@ -4225,7 +4359,9 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                 schema = validate_result(parsed, plan.harness_hash, exit_code, counters=plan.counters,
                                          partial_counters=plan.side == "base", platform_name=host.platform,
                                          latency_split_schema=plan.latency_split_schema,
-                                         phase_kinds=plan.phase_kinds)
+                                         phase_kinds=plan.phase_kinds,
+                                         attribution_api=plan.attribution_api,
+                                         attribution_schema=plan.attribution_schema)
             data = parsed if isinstance(parsed, dict) else None
     if host.platform == "win32":
         focus = judge_foreground(sampler.readings, user_session=has_user_session(host.environ))
@@ -4245,7 +4381,8 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                          custody=custody if host.platform == "win32" else None,
                          deadline_exit_code=deadline_exit_code(host.platform), platform=host.platform,
                          renderer=renderer,
-                         fallback_log=read_fallback_log(kept / "logs") if plan.laps else None)
+                         fallback_log=read_fallback_log(kept / "logs") if plan.laps else None,
+                         present_lines=read_present_lines(kept / "logs") if plan.counters else [])
     kind, reasons = classify_outcome(outcome)
     cleanup_record = {
         "settled": cleanup.settled, "signalled": cleanup.signalled, "problems": cleanup.problems,
@@ -6733,6 +6870,220 @@ def atlas_recovery_rows(label: str, base: SideRuns, head: SideRuns) -> list[list
     return rows
 
 
+# --- S10 attribution: each counters run's presents against the updates they show ----------------------------
+
+ATTRIBUTION_FILE = "attribution.json"
+# The harness API cfg (local-gate.py HARNESS_API_CFGS) whose decision lets the harness arm the App's watch.
+ATTRIBUTION_CFG = "perf_s10_attribution_api"
+ATTRIBUTION_HEADER = ("| Scenario | Side | Runs | State | Fresh − updates | Presents per update 0/1/2/≥3 | Max | "
+                      "Non-update (pre/sentinel/prompt/both) | Never shown | Open-update | Cached | Verdict |\n"
+                      "|---|---|---|---|---|---|---|---|---|---|---|---|")
+ATTRIBUTION_NOTE = (
+    "Each presented frame of an S10 counters run is attributed to the update its guarded parser state shows: "
+    "update k once k resets followed the baseline read before GO with the update closed. A run is complete only "
+    "when every presented frame of the phase has exactly one line, no line is malformed or overflowed, no frame "
+    "shows an open update, the fixture played exactly its updates and the identity fresh − updates = non-update − "
+    "never shown + Σ max(0, presents − 1) holds; any other run is incomplete, never passed. A build without the "
+    "attribution cfg, an App that armed nothing and a non-counting run are unavailable. A counters excess explains "
+    "the timed excess only as reproduction under instrumentation, never as its timed cause. S10/default has no "
+    "update identity, so it reports marker classes only.")
+
+
+@dataclass
+class AttributionRun:
+    """One counters run's S10 attribution: its state, the reasons it is not complete, and its counts."""
+
+    state: str
+    reasons: list[str] = field(default_factory=list)
+    updates: int = 0
+    fresh: int = 0
+    cached: int | None = None
+    buckets: tuple[int, int, int, int] = (0, 0, 0, 0)
+    max_presents: int = 0
+    non_update: dict[str, int] = field(default_factory=dict)
+    never_shown: int = 0
+    open_updates: int = 0
+    admissions: dict[str, int] = field(default_factory=dict)
+    identity_holds: bool | None = None
+
+
+def _counted_phase(result: dict | None) -> dict | None:
+    """The phase that plays counted updates, or None."""
+    for phase in (result or {}).get("phases") or []:
+        if isinstance(phase, dict) and _is_int(phase.get("updates")):
+            return phase
+    return None
+
+
+def _window_count(phase: dict, name: str) -> int | None:
+    """A window counter of the phase's frame-counter delta, or None when the run did not count it."""
+    counters = phase.get("frame_counters")
+    window = counters.get("window") if isinstance(counters, dict) else None
+    value = window.get(name) if isinstance(window, dict) else None
+    return value if _is_int(value) else None
+
+
+def _marker_class(line: PresentLine) -> str | None:
+    """A present's post-workload class from its guarded markers, or None when it shows neither."""
+    if line.sentinel and line.prompt:
+        return "sentinel+prompt"
+    if line.sentinel:
+        return "sentinel"
+    return "prompt" if line.prompt else None
+
+
+def attribution_run(outcome, synchronized: bool) -> AttributionRun:
+    """Classify one counters run. `synchronized` is S10/sync, whose updates carry an identity; S10/default reports
+    marker classes and admissions only and reads `unsupported`."""
+    phase = _counted_phase(outcome.result)
+    record = phase.get("s10_attribution") if phase else None
+    if not isinstance(record, dict) or record.get("state") != "armed":
+        reason = record.get("reason") if isinstance(record, dict) else "no-record"
+        return AttributionRun("unavailable", [str(reason)])
+    updates, arming, pane = record["updates"], record["arming"], record["pane"]
+    seq_start, seq_end = record["seq_start"], record.get("seq_end")
+    run = AttributionRun("incomplete", updates=updates, cached=_window_count(phase, "cached"))
+    reasons = run.reasons
+    if seq_end is None or seq_end < seq_start:
+        reasons.append(f"the phase's presented count is unknown ({seq_start}..{seq_end!r})")
+        seq_end = seq_start
+    run.fresh = seq_end - seq_start
+    lines = [line for line in outcome.present_lines if line.arming == arming]
+    if any(line.problem for line in lines) or any(line.problem for line in outcome.present_lines):
+        reasons.append("a malformed perf_present line")
+    if any(line.kind == "overflow" for line in lines):
+        reasons.append("the watch overflowed")
+    if any(line.pane != pane for line in lines if line.problem is None):
+        reasons.append("a line names another pane")
+    window = sorted((line for line in lines if line.kind == "present" and line.problem is None
+                     and line.pane == pane and seq_start < line.seq <= seq_end), key=lambda line: line.seq)
+    per_seq = Counter(line.seq for line in window)
+    gaps = sum(1 for seq in range(seq_start + 1, seq_end + 1) if seq not in per_seq)
+    repeats = sum(count - 1 for count in per_seq.values() if count > 1)
+    if gaps or repeats:
+        reasons.append(f"{gaps} presented frame(s) have no line and {repeats} have more than one")
+    run.admissions = dict(Counter(line.admission for line in window))
+    if not synchronized:
+        run.non_update = dict(Counter(_marker_class(line) or "stream" for line in window))
+        run.state = "unsupported"
+        return run
+    baseline, end = record["baseline"], record.get("end")
+    if end is None:
+        reasons.append("the pane's state at the phase end was not read")
+    elif end["resets"] - baseline["resets"] != updates:
+        reasons.append(f"the fixture played {end['resets'] - baseline['resets']} updates, not {updates}")
+    per_update: Counter = Counter()
+    non_update: Counter = Counter()
+    open_admissions: Counter = Counter()
+    epoch = baseline["epoch"]
+    for line in window:
+        if line.epoch < epoch:
+            reasons.append("the update epoch decreased")
+        epoch = max(epoch, line.epoch)
+        if line.set:
+            open_admissions[line.admission] += 1
+            continue
+        offset = line.resets - baseline["resets"]
+        if offset < 0 or offset > updates:
+            reasons.append(f"a line's resets {line.resets} lie outside the baseline's {updates} updates")
+        elif offset == 0:
+            non_update["pre-workload"] += 1
+        elif offset == updates and _marker_class(line) is not None:
+            non_update[_marker_class(line)] += 1
+        else:
+            per_update[offset] += 1
+    run.open_updates = sum(open_admissions.values())
+    if run.open_updates:
+        named = ", ".join(f"{name} {count}" for name, count in sorted(open_admissions.items()))
+        reasons.append(f"{run.open_updates} presented frame(s) showed an open update ({named})")
+    counts = [per_update.get(update, 0) for update in range(1, updates + 1)]
+    run.buckets = (counts.count(0), counts.count(1), counts.count(2), sum(1 for count in counts if count >= 3))
+    run.max_presents = max(counts, default=0)
+    run.never_shown = run.buckets[0]
+    run.non_update = dict(non_update)
+    excess = sum(max(0, count - 1) for count in counts)
+    run.identity_holds = run.fresh - updates == sum(non_update.values()) - run.never_shown + excess
+    if not run.identity_holds and not reasons:
+        reasons.append("fresh − updates does not equal non-update − never shown + repeats")
+    run.reasons = list(dict.fromkeys(reasons))[:5]
+    run.state = "complete" if not run.reasons else "incomplete"
+    return run
+
+
+def timed_excess(side: SideRuns) -> list[int]:
+    """Each timed run's presented frames minus updates in its counted phase."""
+    excess = []
+    for outcome in side.outcomes:
+        phase = _counted_phase(outcome.result)
+        if phase is not None and _is_int(phase.get("presented_frames")):
+            excess.append(phase["presented_frames"] - phase["updates"])
+    return excess
+
+
+def attribution_verdict(runs: Sequence[AttributionRun], synchronized: bool, timed: Sequence[int]) -> str:
+    """One side's #1598 verdict on this platform. Only complete runs decide; the evidence boundary needs the
+    counters runs' excess within ±1 of the same workflow's timed median, and even then it attributes the timed
+    excess under instrumentation only."""
+    if not runs:
+        return "pending: no counters run"
+    unavailable = [run for run in runs if run.state == "unavailable"]
+    if unavailable:
+        return f"unavailable: {unavailable[0].reasons[0] if unavailable[0].reasons else 'no record'}"
+    if not synchronized:
+        return "unsupported: S10/default has no update identity"
+    incomplete = [run for run in runs if run.state != "complete"]
+    if incomplete:
+        return f"pending: {len(incomplete)} of {len(runs)} run(s) incomplete ({incomplete[0].reasons[0]})"
+    if max(run.max_presents for run in runs) >= 2:
+        return ("repeat-presentation: an update was presented 2 or more times; reproduce it with the "
+                "windows_synchronized_output.rs pattern and fix it in a separate PR")
+    if not timed:
+        return "pending: no timed run to bound the evidence"
+    timed_median = median(timed)
+    excesses = [run.fresh - run.updates for run in runs]
+    if all(abs(excess - timed_median) <= 1 for excess in excesses):
+        return (f"ratio holds on this platform: every update presented at most once; the timed excess "
+                f"({_figure(timed_median)}) is attributed under instrumentation only")
+    return (f"pending: the counters excess {excesses} is not within ±1 of the timed median "
+            f"{_figure(timed_median)}, so the timed excess stays unresolved")
+
+
+def attribution_report(label: str, counters: SetResult, timed: SetResult | None,
+                       comparable: bool) -> tuple[list[list[str]], dict]:
+    """The S10 attribution rows and evidence of one counters set, per side. An unequal-feature comparison gives
+    rows but no verdict."""
+    synchronized = label.endswith("/sync")
+    rows: list[list[str]] = []
+    evidence: dict[str, dict] = {}
+    for side_name in ("base", "head"):
+        side = getattr(counters, side_name)
+        runs = [attribution_run(outcome, synchronized) for outcome in side.outcomes]
+        timed_runs = timed_excess(getattr(timed, side_name)) if timed is not None else []
+        verdict = (attribution_verdict(runs, synchronized, timed_runs) if comparable
+                   else "no verdict: the two refs build different perf features")
+        if side.blocked or side.failed:
+            verdict = f"unavailable: {side.blocked or side.failed}"
+        states = Counter(run.state for run in runs)
+        non_update = Counter()
+        for run in runs:
+            non_update.update(run.non_update)
+        rows.append([
+            label, side_name, str(len(runs)),
+            ", ".join(f"{state} {count}" for state, count in sorted(states.items())) or "n/a",
+            ", ".join(str(run.fresh - run.updates) for run in runs) or "n/a",
+            " · ".join("/".join(str(value) for value in run.buckets) for run in runs) or "n/a",
+            str(max((run.max_presents for run in runs), default=0)),
+            "/".join(str(non_update.get(name, 0)) for name in ("pre-workload", "sentinel", "prompt",
+                                                              "sentinel+prompt")),
+            ", ".join(str(run.never_shown) for run in runs) or "n/a",
+            ", ".join(str(run.open_updates) for run in runs) or "n/a",
+            ", ".join("n/a" if run.cached is None else str(run.cached) for run in runs) or "n/a",
+            verdict])
+        evidence[side_name] = {"runs": [asdict(run) for run in runs], "timed_excess": timed_runs,
+                               "verdict": verdict}
+    return rows, evidence
+
+
 def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequence[str]],
                         alloc_rows: Sequence[Sequence[str]], host_lines: Sequence[str],
                         detail_lines: Sequence[str], *, counter_rows: Sequence[Sequence[str]] = (),
@@ -6740,7 +7091,8 @@ def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequen
                         capped_note: str = "", recovery_rows: Sequence[Sequence[str]] = (),
                         flag_checks: Sequence[FlagCheck] | None = None,
                         unclassified_rows: Sequence[Sequence[str]] = (),
-                        counters_only_rows: Sequence[Sequence[str]] = ()) -> str:
+                        counters_only_rows: Sequence[Sequence[str]] = (),
+                        attribution_rows: Sequence[Sequence[str]] = ()) -> str:
     """Assemble comparison.md: the PR table, the laps, counters, overhead and allocation tables when run,
     the host block and details.
 
@@ -6770,6 +7122,9 @@ def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequen
     if recovery_rows:
         parts.append(f"### Atlas retry recovery (S1/atlas-retry counters runs)\n\n{RECOVERY_NOTE}\n\n"
                      + render_table(recovery_rows, RECOVERY_HEADER))
+    if attribution_rows:
+        parts.append(f"### S10 attribution (counters runs)\n\n{ATTRIBUTION_NOTE}\n\n"
+                     + render_table(attribution_rows, ATTRIBUTION_HEADER))
     if overhead_rows:
         parts.append(f"### Counters overhead (S2 and S3)\n\n{OVERHEAD_NOTE}.\n\n"
                      + render_table(overhead_rows, OVERHEAD_HEADER))
@@ -7272,7 +7627,9 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                                    built[side] if isinstance(built[side], Path) else Path("unbuilt"),
                                    digest, short=args.short, laps=laps, counters=counters, source_root=trees[side],
                                    latency_split_schema=by_id[scenario_id].latency_split_schema,
-                                   phase_kinds=by_id[scenario_id].phase_kinds)
+                                   phase_kinds=by_id[scenario_id].phase_kinds,
+                                   attribution_api=ATTRIBUTION_CFG in harness_cfgs,
+                                   attribution_schema=by_id[scenario_id].attribution_schema)
                      for side in SIDES}
             base_blocked = built["base"] if isinstance(built["base"], str) else None
             if counters and not supports["base"]:
@@ -7290,6 +7647,9 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
     recovery_rows: list[list[str]] = []
     split_details: list[str] = []
     timed_heads: dict[str, SideRuns] = {}
+    timed_results: dict[str, SetResult] = {}
+    attribution_rows: list[list[str]] = []
+    attribution_evidence: dict[str, dict] = {}
     omitted = 0
     presenter_notes: list[str] = []
     for result in results:
@@ -7303,6 +7663,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             destination = unclassified_rows if unclassified_result(result) else timed_rows
             destination.extend(comparison_rows(shown, result.base, result.head))
             timed_heads[result.label] = result.head
+            timed_results[result.label] = result
             if result.label in deliveries:
                 destination.extend(delivery_rows(result.label, *deliveries[result.label]))
         elif result.set_name == "laps":
@@ -7321,6 +7682,11 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             recovery_rows.extend(atlas_recovery_rows(result.label, result.base, result.head))
             counters_table.extend(glyph_atlas_reconciliation_rows(shown, result.base, result.head))
             split_details.extend(attempt_split_details(shown, result.base, result.head))
+            if result.label.startswith("S10/"):
+                rows, evidence = attribution_report(result.label, result, timed_results.get(result.label),
+                                                    tuple(features["base"]) == tuple(features["head"]))
+                attribution_rows.extend(rows)
+                attribution_evidence[result.label] = evidence
             counters_table.extend(split_rows(result.label, result.base, result.head,
                                              by_id[result.label.split("/")[0]].latency_split_schema))
             omitted += left_out
@@ -7383,7 +7749,11 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                                    counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead,
                                    capped_note=capped_note, recovery_rows=recovery_rows,
                                    flag_checks=flag_checks(results), unclassified_rows=unclassified_rows,
-                                   counters_only_rows=counters_only_rows)
+                                   counters_only_rows=counters_only_rows, attribution_rows=attribution_rows)
+    if attribution_evidence:
+        _write_json(out / ATTRIBUTION_FILE, {
+            "schema_version": SCHEMA_VERSION, "harness_cfgs": list(harness_cfgs),
+            "features": {side: list(features[side]) for side in SIDES}, "sets": attribution_evidence})
     problems = strict_problems(results) if args.require_base else []
     if problems:
         # The first line says the table is partial, so nobody reads a head-only table as a comparison.

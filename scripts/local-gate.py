@@ -135,7 +135,8 @@ class WindowsPolicy(str, Enum):
 
 
 _COMPILE_ONLY_STEPS = frozenset(("clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
-                                 "perf-scenarios-echo-trace-clippy", "perf-scenarios-atlas-retry-clippy", "doc",
+                                 "perf-scenarios-echo-trace-clippy", "perf-scenarios-atlas-retry-clippy",
+                                 "perf-scenarios-attribution-clippy", "doc",
                                  "doc-resource-features", "release-windows", "windows-perf-build",
                                  "check-previous-release"))
 
@@ -198,6 +199,11 @@ HARNESS_API_CFGS = (
         ("crates/sonicterm-app/src", "App", "__test_window_active_tab_title"),
         ("crates/sonicterm-gpu/src", "GpuRenderer", "last_missing_chrome"),
         ("crates/sonicterm-gpu/src", "GpuRenderer", "font_fallback_notice_id"),
+    )),
+    # S10's per-present attribution watch: the App's arm and disarm methods, absent before the prerequisite.
+    HarnessApiCfg("perf_s10_attribution_api", (
+        ("crates/sonicterm-app/src", "App", "arm_s10_attribution"),
+        ("crates/sonicterm-app/src", "App", "disarm_s10_attribution"),
     )),
 )
 HARNESS_API_CFG_NAMES = tuple(entry.name for entry in HARNESS_API_CFGS)
@@ -340,6 +346,12 @@ STEPS = (
          ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios", "--all-targets",
           "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim", "--", "-D", "warnings",
           "--cfg", "perf_atlas_retry_api"),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
+    # The S10 attribution adapter compiles only with `perf_s10_attribution_api`, which perf-compare sets when both
+    # refs have the App's attribution API; every host lints it with that cfg on too.
+    Step("perf-scenarios-attribution-clippy",
+         ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios", "--all-targets",
+          "--", "-D", "warnings", "--cfg", "perf_s10_attribution_api"),
          HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc", ("cargo", "doc", "--workspace", "--no-deps"), HOSTS, 600, "local",
          ("rust", "native"), _CORE_CHECKS, env=_RUSTDOC_WARNINGS, windows_policy=WindowsPolicy.COMPILE_ONLY),

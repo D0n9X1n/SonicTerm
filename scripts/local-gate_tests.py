@@ -512,7 +512,8 @@ class CustodyPolicyTests(unittest.TestCase):
         # Only these reviewed standalone compilation steps may accept forced owned cleanup.
         self.assertEqual({step.id for step in gate.STEPS if step.windows_policy == gate.WindowsPolicy.COMPILE_ONLY},
                          {"clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
-                          "perf-scenarios-echo-trace-clippy", "perf-scenarios-atlas-retry-clippy", "doc",
+                          "perf-scenarios-echo-trace-clippy", "perf-scenarios-atlas-retry-clippy",
+                          "perf-scenarios-attribution-clippy", "doc",
                           "doc-resource-features", "release-windows", "windows-perf-build"})
         self.assertEqual(python_step("mixed", "pass").windows_policy, gate.WindowsPolicy.STRICT)
 
@@ -2747,13 +2748,17 @@ class WindowsTargetCheckTests(unittest.TestCase):
             )
 
 
+# The `--check-cfg` tokens every composed build carries: one per entry of the harness API cfg table.
+DECLARED_HARNESS_CFGS = [token for name in gate.HARNESS_API_CFG_NAMES for token in ("--check-cfg", f"cfg({name})")]
+
+
 class HarnessFlagTests(unittest.TestCase):
     """Harness API cfg flags, composed once at launch from what a step inherits."""
 
     def test_encoded_flags_take_precedence_and_plain_flags_are_tokenized_as_cargo_does(self):
         # CARGO_ENCODED_RUSTFLAGS is kept token for token and RUSTFLAGS is then ignored, as Cargo ignores it; plain
         # RUSTFLAGS splits on spaces with empty tokens dropped; an empty encoded value means no inherited flags.
-        declared = ["--check-cfg", "cfg(perf_atlas_retry_api)"]
+        declared = DECLARED_HARNESS_CFGS
         encoded = {"CARGO_ENCODED_RUSTFLAGS": "-C\x1fdebuginfo=1 x", "RUSTFLAGS": "-D warnings"}
         self.assertEqual(gate.compose_harness_rustflags(encoded, ()), ["-C", "debuginfo=1 x", *declared])
         plain = {"RUSTFLAGS": "  -C  target-cpu=native "}
@@ -2812,8 +2817,7 @@ class HarnessFlagTests(unittest.TestCase):
         # flags conflict with its cfgs fails at launch and never runs.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            expected = "\x1f".join(["-C", "debuginfo=1", "--check-cfg", "cfg(perf_atlas_retry_api)", "--cfg",
-                                    "perf_atlas_retry_api"])
+            expected = "\x1f".join(["-C", "debuginfo=1", *DECLARED_HARNESS_CFGS, "--cfg", "perf_atlas_retry_api"])
             code = f"import os; assert os.environ['CARGO_ENCODED_RUSTFLAGS']=={expected!r}, os.environ"
             step = python_step("composed", code, harness_cfgs=("perf_atlas_retry_api",))
             result = gate.run_step(step, 1, root, root, dict(os.environ, RUSTFLAGS="-C debuginfo=1"))
