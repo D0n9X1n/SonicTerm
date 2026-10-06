@@ -6171,7 +6171,9 @@ def run_identity_document(shas: Mapping[str, str], harness_hash: str, features: 
             "settings": {"short": bool(short), "counters": bool(counters),
                          "features": {side: sorted(features[side]) for side in SIDES}, "profile": dict(profile)},
             "flag_metrics_version": FLAG_METRICS_VERSION, "sets": run_inventory(results),
-            "capabilities": dict(capabilities or {"latency_split_schema": None, "phase_kinds": None})}
+            # Every known capability is recorded, null when the head's list does not declare it, so perf-flags can
+            # require exactly the known keys whatever the head declared.
+            "capabilities": {name: (capabilities or {}).get(name) for name in HARNESS_CAPABILITIES}}
 
 
 def render_table(rows: Iterable[Sequence[str]], header: str = TABLE_HEADER) -> str:

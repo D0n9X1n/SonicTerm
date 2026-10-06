@@ -9556,7 +9556,8 @@ class RunIdentityTests(CompareHarness, unittest.TestCase):
                                          "head_sha", "harness_hash", "settings", "flag_metrics_version", "sets",
                                          "capabilities"})
         # The harness's declared capabilities, so perf-flags validates each result as perf-compare did.
-        self.assertEqual(identity["capabilities"], {"latency_split_schema": None, "phase_kinds": None})
+        self.assertEqual(identity["capabilities"],
+                         {"latency_split_schema": None, "phase_kinds": None, "s10_attribution": None})
         # Each set's final inventory: per side its blocked or failed status and the attempt directories it accepted,
         # so perf-flags binds results to accepted executions, never to whatever valid-looking files it finds.
         self.assertEqual(identity["sets"], [{"label": "S1/default", "dataset": "timed",
@@ -9564,10 +9565,12 @@ class RunIdentityTests(CompareHarness, unittest.TestCase):
                                              "head": {"status": "", "accepted": ["02-head"]}}])
 
     def test_a_phase_kinds_comparison_records_its_capabilities(self):
-        # A head whose list declares the split schema and phase kinds records both.
+        # A head whose list declares the split schema and phase kinds records both, and the attribution
+        # capability it does not declare as null: the identity always carries every known key.
         _code, _gate, _calls, _plans, _work, out = self.compare(listing=LIST_WITH_KINDS)
         identity = json.loads((out / "run-identity.json").read_text(encoding="utf-8"))
-        self.assertEqual(identity.get("capabilities"), {"latency_split_schema": 1, "phase_kinds": 1})
+        self.assertEqual(identity.get("capabilities"),
+                         {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": None})
 
     def test_a_failed_side_lists_no_accepted_attempt(self):
         # A side that ends blocked or failed discards its valid attempts, and the inventory says so.

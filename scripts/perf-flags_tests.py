@@ -28,7 +28,7 @@ except (FileNotFoundError, AttributeError) as error:
 HARNESS = "ab" * 32
 HEAD, OTHER_HEAD, BASE, OTHER_BASE = "1" * 40, "2" * 40, "3" * 40, "4" * 40
 SETTINGS = {"short": True, "counters": False, "features": {"base": [], "head": []}, "profile": {}}
-CAPABILITIES = {"latency_split_schema": 1, "phase_kinds": 1}
+CAPABILITIES = {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": None}
 MACOS_PRESENTER = {"software_render_mode": "auto", "software_rendering": False, "software_render_degraded": False,
                    "windows_gdi": False}
 
@@ -439,8 +439,28 @@ class PerfFlagsTests(unittest.TestCase):
         with self.subTest(evidence="kinds without the capability"):
             tree = self.fresh_tree()
             self.late_image(tree, tree.artifact("perf-macos",
-                                                capabilities={"latency_split_schema": 1, "phase_kinds": None}))
+                                                capabilities=dict(CAPABILITIES, phase_kinds=None)))
             self.assert_refused(tree, "kinded phases from a harness that declares none")
+        with self.subTest(evidence="attribution without the capability"):
+            tree = self.fresh_tree()
+            artifact = tree.artifact("perf-macos")
+            tree.run(artifact, "S11", "release", 1, "base", [transition(40.0)])
+            unavailable = {"state": "unavailable", "reason": "api-disabled"}
+            tree.run(artifact, "S11", "release", 2, "head", [dict(transition(90.0), s10_attribution=unavailable)])
+            self.assert_refused(tree, "an attribution record from a harness that declares none")
+        with self.subTest(evidence="attribution capability without the recorded build"):
+            # Under a declared schema the validator runs as perf-compare does: the result must say whether its
+            # build calls the attribution API.
+            tree = self.fresh_tree()
+            artifact = tree.artifact("perf-macos", capabilities=dict(CAPABILITIES, s10_attribution=1))
+            tree.run(artifact, "S11", "release", 1, "base", [transition(40.0)])
+            tree.run(artifact, "S11", "release", 2, "head", [transition(90.0)])
+            self.assert_refused(tree, "a result with no s10_attribution_api under the declared schema")
+        with self.subTest(evidence="a capability map missing a known key"):
+            tree = self.fresh_tree()
+            self.late_image(tree, tree.artifact("perf-macos",
+                                                capabilities={"latency_split_schema": 1, "phase_kinds": 1}))
+            self.assert_refused(tree, "capabilities without the attribution key")
         with self.subTest(evidence="untyped capabilities"):
             tree = self.fresh_tree()
             self.late_image(tree, tree.artifact("perf-macos", capabilities={"phase_kinds": "yes"}))
@@ -448,7 +468,7 @@ class PerfFlagsTests(unittest.TestCase):
         with self.subTest(evidence="an unsupported capability value"):
             tree = self.fresh_tree()
             self.late_image(tree, tree.artifact("perf-macos",
-                                                capabilities={"latency_split_schema": 1, "phase_kinds": 7}))
+                                                capabilities=dict(CAPABILITIES, phase_kinds=7)))
             self.assert_refused(tree, "a phase-kinds schema this script cannot validate")
 
     def test_a_result_the_validator_cannot_read_is_refused_not_raised(self):

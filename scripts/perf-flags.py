@@ -255,7 +255,8 @@ def _accepted_result(where: str, identity: dict, label: str, dataset: str, side_
             result, identity["harness_hash"], 0, counters=dataset == "counters",
             partial_counters=side_name == "base",
             platform_name=VALIDATOR_PLATFORMS.get(identity["platform"], identity["platform"]),
-            latency_split_schema=capabilities["latency_split_schema"], phase_kinds=capabilities["phase_kinds"])
+            latency_split_schema=capabilities["latency_split_schema"], phase_kinds=capabilities["phase_kinds"],
+            attribution_schema=capabilities["s10_attribution"])
     except (TypeError, AttributeError, ValueError, KeyError, OverflowError) as error:
         # When: the validator itself cannot read the result, the evidence is malformed, never a crash.
         raise NotComparable(f"{where} result cannot be validated: {type(error).__name__}: {error}") from error
@@ -270,6 +271,9 @@ def _accepted_result(where: str, identity: dict, label: str, dataset: str, side_
             raise NotComparable(f"{where} result {key} {found!r} is not {value!r}")
     if capabilities["phase_kinds"] is None and any("kind" in phase for phase in result["phases"]):
         raise NotComparable(f"{where} result records phase kinds its harness never declared")
+    # The validator checks attribution records only under a declared schema, so an undeclared one is refused here.
+    if capabilities["s10_attribution"] is None and any("s10_attribution" in phase for phase in result["phases"]):
+        raise NotComparable(f"{where} result records S10 attribution its harness never declared")
     return result
 
 
