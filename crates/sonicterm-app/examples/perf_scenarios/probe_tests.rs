@@ -394,6 +394,7 @@ impl CheckpointRun {
             unix_s: 1_000.0 + millis as f64 / 1_000.0,
             fresh_after_unix_s: None,
             frame_texture_bytes: None,
+            completeness: None,
         };
         let calls = &mut self.sampler_calls;
         let outcome = checkpoint_turn(
@@ -623,6 +624,7 @@ fn a_build_without_the_hook_advances_without_sampling() {
         unix_s: 1_000.0,
         fresh_after_unix_s: None,
         frame_texture_bytes: None,
+        completeness: None,
     };
     let (mut pending, mut records) = (None, Vec::new());
     let outcome = checkpoint_turn(&mut pending, &mut records, &site, &step, |_, _, _| {

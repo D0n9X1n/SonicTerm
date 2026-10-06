@@ -1427,3 +1427,71 @@ fn result_json_records_the_trim_hooks_outcome() {
     .collect();
     assert_eq!(names, ["not-reached", "unsupported", "skipped", "trimmed"]);
 }
+
+/// The completeness reading serializes as the comparison reads it: a certified reading carries its two
+/// distinct-character counts and atlas dimensions and no reason; an unavailable one carries only its
+/// reason; both carry the renderer's scale.
+#[test]
+fn a_completeness_reading_serializes_as_the_comparison_reads_it() {
+    let certified =
+        serde_json::to_value(CompletenessRecord::certified(2, 1, (512, 1024), 1.0)).unwrap();
+    assert_eq!(
+        certified,
+        json!({"state": "certified", "missing_terminal": 2, "missing_chrome": 1,
+               "atlas_width": 512, "atlas_height": 1024, "scale": 1.0})
+    );
+    let unavailable =
+        serde_json::to_value(CompletenessRecord::unavailable("scene changed", 2.0)).unwrap();
+    assert_eq!(
+        unavailable,
+        json!({"state": "unavailable", "reason": "scene changed", "scale": 2.0})
+    );
+}
+
+/// Only S9's and S12's `end` checkpoints take a completeness reading; every other checkpoint and
+/// scenario records none, so no other row can be mistaken for a perf-end census.
+#[test]
+fn only_s9_and_s12_end_take_a_completeness_reading() {
+    assert!(takes_completeness("S9", "end"));
+    assert!(takes_completeness("S12", "end"));
+    for (scenario, label) in [("S9", "start"), ("S12", "covered"), ("S11", "end"), ("S1", "end")] {
+        assert!(!takes_completeness(scenario, label), "{scenario} {label}");
+    }
+}
+
+/// A build without `perf_completeness_api` never calls the renderer's checkpoint and reports the
+/// reading unavailable, never certified, so an older base reads `unavailable`.
+#[test]
+fn a_build_without_the_completeness_api_reads_unavailable() {
+    assert_eq!(
+        completeness_api_disabled(1.0),
+        CompletenessRecord::unavailable(COMPLETENESS_API_DISABLED, 1.0)
+    );
+    assert_eq!(COMPLETENESS_API_DISABLED, "api-disabled");
+}
+
+/// With the cfg on, each renderer checkpoint maps to its record: counts and dimensions carried over,
+/// and each unavailable reason kept by the renderer's own name.
+#[cfg(perf_completeness_api)]
+#[test]
+fn a_renderer_checkpoint_maps_to_its_record() {
+    use sonicterm_gpu::completeness::{
+        CompletenessCheckpoint, CompletenessCounts, CompletenessUnavailable,
+    };
+    let counts =
+        CompletenessCounts { missing_terminal: 3, missing_chrome: 0, atlas_dims: (512, 512) };
+    assert_eq!(
+        completeness_from_checkpoint(CompletenessCheckpoint::Certified(counts), 1.0),
+        CompletenessRecord::certified(3, 0, (512, 512), 1.0)
+    );
+    for reason in [
+        CompletenessUnavailable::NoCertificate,
+        CompletenessUnavailable::SceneChanged,
+        CompletenessUnavailable::AtlasChanged,
+    ] {
+        assert_eq!(
+            completeness_from_checkpoint(CompletenessCheckpoint::Unavailable(reason), 2.0),
+            CompletenessRecord::unavailable(reason.reason(), 2.0)
+        );
+    }
+}

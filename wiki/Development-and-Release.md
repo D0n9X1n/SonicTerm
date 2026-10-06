@@ -34,7 +34,7 @@ python3 scripts/local-gate.py
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
-| `perf-scenarios-harness-api-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-harness-api-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
@@ -50,7 +50,7 @@ python3 scripts/local-gate.py
 | `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS, Windows | `local` | `rust`, `native` | `macos-core`, `windows-tests` |
 | `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
-| `perf-scenarios-harness-api-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
+| `perf-scenarios-harness-api-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
@@ -168,10 +168,11 @@ harness predates the field reads `n/a` with no change shown, and a result whose
 
 The harness also calls App and renderer methods that older trees lack. Each
 such call sits behind a harness API cfg, one entry of `HARNESS_API_CFGS` in
-`scripts/local-gate.py`. There are two entries: `perf_atlas_retry_api`, for the
-four methods S1/atlas-retry's driver needs, and `perf_s10_attribution_api`, for
+`scripts/local-gate.py`. There are three entries: `perf_atlas_retry_api`, for the
+four methods S1/atlas-retry's driver needs; `perf_s10_attribution_api`, for
 the App's two S10 attribution watch methods (`arm_s10_attribution` and
-`disarm_s10_attribution`). The gate lints and tests the harness with **every**
+`disarm_s10_attribution`); and `perf_completeness_api`, for the renderer's
+`completeness_checkpoint`, which S9's and S12's `end` checkpoints read. The gate lints and tests the harness with **every**
 entry on at once, in two steps built from the table, `perf-scenarios-harness-api-clippy`
 and `perf-scenarios-harness-api-tests`. The test step passes the cfgs through
 `RUSTFLAGS`, and a changed `RUSTFLAGS` invalidates every dependency's build, so
@@ -973,7 +974,25 @@ capped at 2 runs per side, `S11/release` at 1, and `S11/gdi`, `S11/wgpu` and
 `S1/atlas-retry` at 2. The `S2/flood` cap only keeps the pull-request comparison within 30 minutes:
 a release comparison runs it in full. With `perf-frame-texture`, S11's
 `end` checkpoint records `frame_texture_bytes`: 4 B under GDI on the head, `n/a`
-on a base without the feature. Each shard runs its sets' base and head runs
+on a base without the feature. S9's and S12's `end` checkpoints record the
+renderer's glyph completeness: at each presented `Full` frame the renderer stores
+a certificate of that frame's scene (its frame key without pane revisions and
+dirty generations), the glyph atlas's content stamp and dimensions, and the
+distinct missing terminal and chrome characters. A later frame of the same scene
+and atlas adds its missing characters and never removes one, so after partial
+updates the counts are a conservative upper bound, not an exact census. The
+reading is `certified` with the two counts only while the renderer still shows
+that scene with that atlas; otherwise it is `unavailable` with the reason `scene
+changed`, `atlas changed` or `no certificate`, and a build without
+`perf_completeness_api` reads `api-disabled`. The certificate is kept in every
+build: each successful presentation projects its frame key's scene, and each
+`Full` frame builds the two character sets. perf-compare writes one row per
+S9/S12 run and side to `completeness.json` (run id and `GITHUB_RUN_ATTEMPT`, the
+run's attempt directory, measured SHA, side, platform, fixture, set and scale)
+and lists them in `comparison.md`. These are perf-end rows only; helper and
+real-renderer rows come from the working-set test. The combined gate steps
+`perf-scenarios-harness-api-clippy` and `perf-scenarios-harness-api-tests` lint
+and test the harness with this cfg on, together with every other entry. Each shard runs its sets' base and head runs
 interleaved on its own runner, so a comparison never crosses runners or
 platforms. The macOS shard count, five today, is
 chosen from measured critical paths. Both modes add the counters set, on the

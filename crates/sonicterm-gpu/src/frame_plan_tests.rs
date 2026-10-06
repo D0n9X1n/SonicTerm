@@ -2007,3 +2007,42 @@ fn widened_damage_reaching_a_non_emitted_record_falls_back_to_full() {
     );
     assert!(tab_ink.partial_reaches_unemitted_ink());
 }
+
+/// The completeness certificate's scene is the frame key without the dirt fields: a pane revision or
+/// dirty-generation change leaves it equal, while a viewport, overlay or title-width change (the
+/// tab-strip hash) makes it differ, so those changes read `scene changed`.
+#[test]
+fn the_scene_ignores_only_dirt() {
+    let base = FramePlan::build(facts(false), [pane(7, 1)], None);
+    let dirtied = FramePlan::build(
+        facts(false),
+        [PaneMetadata { dirty_generation: 5, ..pane(7, 2) }],
+        Some(&base.key),
+    );
+    assert_ne!(dirtied.key, base.key, "the key itself records the dirt");
+    assert_eq!(dirtied.key.scene(), base.key.scene(), "the scene does not");
+    // Field by field: only the two dirt fields are cleared; every other pane and window field is kept.
+    let scene = dirtied.key.scene();
+    assert_eq!(scene.window, dirtied.key.window);
+    assert_eq!(
+        scene.panes,
+        vec![PaneIdentity { revision: 0, dirty_generation: 0, ..dirtied.key.panes[0] }]
+    );
+    let changes: Vec<fn(&mut FrameFacts)> = vec![
+        |input| input.window.viewport_top_abs = Some(9),
+        |input| input.window.overlay_active = true,
+        |input| input.window.tab_hash = 1,
+    ];
+    for change in changes {
+        let mut input = facts(false);
+        change(&mut input);
+        let changed = FramePlan::build(input, [pane(7, 1)], Some(&base.key));
+        assert_ne!(changed.key.scene(), base.key.scene());
+    }
+    let moved = FramePlan::build(
+        facts(false),
+        [PaneMetadata { viewport_top_abs: Some(11), ..pane(7, 1) }],
+        Some(&base.key),
+    );
+    assert_ne!(moved.key.scene(), base.key.scene(), "a pane viewport move is a new scene");
+}

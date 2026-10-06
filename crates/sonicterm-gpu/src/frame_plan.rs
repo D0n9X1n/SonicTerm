@@ -301,6 +301,20 @@ pub(crate) struct FrameKey {
     degraded: bool,
 }
 
+impl FrameKey {
+    /// The key without its dirt fields, each pane's revision and dirty generation, which only say
+    /// that rows changed. The completeness certificate compares scenes with it: a partial frame of the
+    /// same scene adds its missing characters, and any other field change is a new scene.
+    pub(crate) fn scene(&self) -> Self {
+        let mut scene = self.clone();
+        for pane in &mut scene.panes {
+            pane.revision = 0;
+            pane.dirty_generation = 0;
+        }
+        scene
+    }
+}
+
 /// Renderer policy and physical metrics captured before stateful frame assembly.
 #[derive(Debug, Clone)]
 pub(crate) struct FrameFacts {

@@ -360,6 +360,12 @@ const ATTRIBUTION_GATE: &str =
 /// read the baseline depends on, which a tree before the API does not have.
 const ATTRIBUTION_CALLS: &[&str] =
     &["arm_s10_attribution", "disarm_s10_attribution", "synchronized_output", "SyncState"];
+/// The gate of the renderer's perf-end completeness checkpoint.
+const COMPLETENESS_GATE: &str = "#[cfg(perf_completeness_api)]";
+
+/// The renderer and harness API the completeness reading may name only behind its cfg; v1.3.8's
+/// renderer has no checkpoint.
+const COMPLETENESS_CALLS: &[&str] = &["completeness_checkpoint", "completeness_from_checkpoint"];
 
 /// The trim hook's gate.
 const TRIM_HOOK_GATE: &str = "#[cfg(feature = \"perf-hook-trim\")]";
@@ -1002,5 +1008,34 @@ fn every_attribution_api_call_in_the_harness_is_behind_its_cfg() {
     assert_eq!(
         ungated_calls(&fixture, ATTRIBUTION_GATE, ATTRIBUTION_CALLS),
         vec!["9: synchronized_output".to_owned()]
+    );
+}
+
+/// Every call of the renderer's completeness checkpoint, and every use of the harness mapping that
+/// names its types, sits behind `perf_completeness_api`: perf-compare overlays this harness onto the
+/// previous release tag, whose renderer has no checkpoint, and builds it there with the cfg off. A
+/// call outside the gated item is reported.
+#[test]
+fn every_completeness_api_call_in_the_harness_is_behind_its_cfg() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/perf_scenarios");
+    let mut scanned = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let entry_path = entry.unwrap().path();
+        let name = entry_path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+            continue;
+        }
+        scanned += 1;
+        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let found = ungated_calls(&source, COMPLETENESS_GATE, COMPLETENESS_CALLS);
+        assert!(found.is_empty(), "{name}: {found:#?}");
+    }
+    assert!(scanned >= 10, "the harness sources were not found");
+    let fixture = format!(
+        "{COMPLETENESS_GATE}\nfn on(renderer: &GpuRenderer) {{\n    renderer.completeness_checkpoint();\n}}\n\nfn off(renderer: &GpuRenderer) {{\n    renderer.completeness_checkpoint();\n}}\n"
+    );
+    assert_eq!(
+        ungated_calls(&fixture, COMPLETENESS_GATE, COMPLETENESS_CALLS),
+        vec!["7: completeness_checkpoint".to_owned()]
     );
 }

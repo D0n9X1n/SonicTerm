@@ -2393,6 +2393,9 @@ pub struct GpuRenderer {
     /// frame drew as tofu or dropped, whitespace excluded. Test-only diagnostic surfaced through
     /// [`Self::last_missing_chrome`]; production code must not depend on it.
     last_missing_chrome_chars: Vec<char>,
+    /// What the last presented `Full` frame certified about missing characters, read by
+    /// [`Self::completeness_checkpoint`]; only presented frames change it.
+    completeness: Option<crate::completeness::Certificate<FrameKey, GlyphContentStamp>>,
     // Row-cache hits skip style-run shaping; misses shape through the font stack before atlas insertion.
     /// Sonicterm-font driven shaper. Owns
     /// the cell metrics (`cell_metrics_raster_px()`), the resolved
@@ -3387,6 +3390,7 @@ impl GpuRenderer {
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
             last_missing_chrome_chars: Vec::new(),
+            completeness: None,
             // `shape_cache` field deleted with the cosmic-text path.
             font_stack: font_stacks.body,
             tab_title_font: TabTitleFont::new(
@@ -4235,6 +4239,22 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn last_missing_chrome(&self) -> &[char] {
         &self.last_missing_chrome_chars
+    }
+
+    /// The perf-end completeness checkpoint: the distinct missing terminal and chrome characters the
+    /// last presented `Full` frame certified, only while the retained scene and the current glyph
+    /// atlas still match it; otherwise the reason it is unavailable.
+    ///
+    /// Test-only diagnostic, doc-hidden like `last_missing_tofu`.
+    #[doc(hidden)]
+    pub fn completeness_checkpoint(&self) -> crate::completeness::CompletenessCheckpoint {
+        let retained_scene = self.last_frame_key.as_ref().map(FrameKey::scene);
+        crate::completeness::read_checkpoint(
+            self.completeness.as_ref(),
+            retained_scene.as_ref(),
+            &self.glyph_atlas_stamp(),
+            (self.glyph_atlas.width(), self.glyph_atlas.height()),
+        )
     }
 
     /// Grid `(cols, rows)` from raster surface and cell dimensions; logical padding is scaled before subtraction.
@@ -8851,6 +8871,20 @@ impl GpuRenderer {
         // The successful-present seam both presenters share closes any pending growth timing.
         self.growth_episodes.present();
         self.finish_glyph_atlas_retry();
+        // The certificate reads the presented plan's scene and the atlas as it is at present.
+        let atlas_dims = (self.glyph_atlas.width(), self.glyph_atlas.height());
+        let stamp = self.glyph_atlas_stamp();
+        crate::completeness::record_presented(
+            &mut self.completeness,
+            crate::completeness::Presented {
+                full: render_mode == RenderMode::Full,
+                scene: plan.key.scene(),
+                stamp,
+                atlas_dims,
+                missing_terminal: &missing_chars_this_frame,
+                missing_chrome: &missing_chrome_chars,
+            },
+        );
         self.last_missing_chars = missing_chars_this_frame;
         self.last_missing_chrome_chars = missing_chrome_chars;
         self.presented_damage.record(|| PresentedDamage {

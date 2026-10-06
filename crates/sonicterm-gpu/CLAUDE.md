@@ -12,6 +12,7 @@ the production glyph path.
 - `device_errors.rs` - per-device wgpu error and loss state, the GPU-work gate,
   the frame-outcome decision, and the test fault kinds.
 - `frame_plan.rs` - owned metadata-only key, mode, damage, clips, viewport slots, and revision expectations; damage is classified per changed identity field; `Partial` mode and per-pane emitted rows.
+- `completeness.rs` - the perf-end glyph completeness certificate: stored at each presented `Full` frame with its scene (`FrameKey::scene`, the key without dirt fields) and atlas stamp, extended by same-scene frames (so the counts are an upper bound after partial updates), read by `GpuRenderer::completeness_checkpoint` only while scene and atlas still match.
 - `row_ink.rs` - per-row ink records of the presented frame, valid only for the absolute row and content stamp they were drawn from; a partial plan emits by them.
 - `present.rs` - the presentation seam: the wgpu and Windows GDI presenters and the typed `PresentOutcome`.
 - `software_frame.rs` - platform-neutral CPU composition and flat sibling pixel tests.
