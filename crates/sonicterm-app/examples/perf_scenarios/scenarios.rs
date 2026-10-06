@@ -88,7 +88,7 @@ pub(crate) fn list_json() -> String {
         .collect();
     // The capability is unconditional: every build of this harness writes the split fields, a build
     // without perf-echo-trace with every credited sample `unsupported`.
-    let capabilities = serde_json::json!({ "latency_split_schema": SPLIT_SCHEMA });
+    let capabilities = serde_json::json!({ "latency_split_schema": SPLIT_SCHEMA, "phase_kinds": PHASE_KINDS_SCHEMA });
     serde_json::json!({ "schema_version": 1, "capabilities": capabilities, "scenarios": scenarios })
         .to_string()
 }
@@ -96,6 +96,10 @@ pub(crate) fn list_json() -> String {
 /// The schema of the split fields in `latency`; a harness that writes them lists the same number
 /// in `--list` as `capabilities.latency_split_schema`.
 pub(crate) const SPLIT_SCHEMA: u32 = 1;
+
+/// The phase-kinds schema: every phase records its kind and presentation trace and a transition its endpoint;
+/// listed in `--list` as `capabilities.phase_kinds`.
+pub(crate) const PHASE_KINDS_SCHEMA: u32 = 1;
 
 /// The catalog entry for `id`, if the harness knows it.
 #[cfg(any(target_os = "macos", windows, test))]
@@ -271,12 +275,75 @@ pub(crate) struct FreshAfter {
     pub(crate) delay_ms: u64,
 }
 
+/// How a phase is reported: a sustained workload, a finite transition to an endpoint, or a hold.
+/// Set explicitly by each phase's scenario contract, never derived from how the phase ends.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PhaseKind {
+    /// A paced or driven workload, reported with rates and intervals.
+    Sustained,
+    /// A finite change that completes at an endpoint.
+    Transition,
+    /// Activity only: no rates, intervals or completion.
+    Hold,
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+impl PhaseKind {
+    /// The kind's name in `result.json`.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Sustained => "sustained",
+            Self::Transition => "transition",
+            Self::Hold => "hold",
+        }
+    }
+}
+
+/// The event a transition's completion is measured to.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Endpoint {
+    /// The latest first-observed completion sentinel among the required roles.
+    SentinelParsed,
+    /// The end of the first presenting dispatch after the image registration was observed.
+    ImageRegisteredThenPresented,
+    /// The first frame presented after the phase's entry act.
+    FirstPresentAfterEntry,
+    /// The first frame presented after the entry act with an image atlas item.
+    FirstPresentWithImage,
+    /// The end of the first App `about_to_wait` after a presentation: the warm-pool barrier.
+    FirstPresentThenAboutToWait,
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+impl Endpoint {
+    /// The endpoint's name in `result.json`.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::SentinelParsed => "sentinel-parsed",
+            Self::ImageRegisteredThenPresented => "image-registered-then-presented",
+            Self::FirstPresentAfterEntry => "first-present-after-entry",
+            Self::FirstPresentWithImage => "first-present-with-image",
+            Self::FirstPresentThenAboutToWait => "first-present-then-about-to-wait",
+        }
+    }
+}
+
+/// The startup phase, created by the probe rather than a plan: a transition to the warm-pool barrier.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const STARTUP_KIND: PhaseKind = PhaseKind::Transition;
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const STARTUP_ENDPOINT: Endpoint = Endpoint::FirstPresentThenAboutToWait;
+
 /// One measured phase.
 #[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PhaseSpec {
     /// Phase name in `result.json`.
     pub(crate) name: &'static str,
+    /// How the phase is reported, set by its scenario contract.
+    pub(crate) kind: PhaseKind,
     /// Actions run as the phase starts, inside its measurement.
     pub(crate) enter: Vec<Act>,
     /// Input injected during the phase.
@@ -288,6 +355,22 @@ pub(crate) struct PhaseSpec {
     /// The logical updates the selected workload plays in this phase, the denominator of a
     /// comparison's presented frames per update; `None` for a phase that plays no counted updates.
     pub(crate) updates: Option<u32>,
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+impl PhaseSpec {
+    /// A transition's endpoint, from how it ends; None for a hold or sustained phase.
+    pub(crate) fn endpoint(&self) -> Option<Endpoint> {
+        match (self.kind, &self.end) {
+            (PhaseKind::Transition, PhaseEnd::Sentinels(_)) => Some(Endpoint::SentinelParsed),
+            (PhaseKind::Transition, PhaseEnd::ImageRegistered(_)) => {
+                Some(Endpoint::ImageRegisteredThenPresented)
+            }
+            (PhaseKind::Transition, PhaseEnd::MediaFree) => Some(Endpoint::FirstPresentAfterEntry),
+            (PhaseKind::Transition, PhaseEnd::Reshow) => Some(Endpoint::FirstPresentWithImage),
+            _ => None,
+        }
+    }
 }
 
 /// One scenario variant's complete plan: each role's workload, setup before GO, and steps after.
@@ -321,11 +404,12 @@ pub(crate) struct Plan {
     pub(crate) trim_experiment: Option<&'static str>,
 }
 
-/// A phase with no driver, no entry actions and no throughput figure.
+/// A phase of `kind` with no driver, no entry actions and no throughput figure.
 #[cfg(any(target_os = "macos", windows, test))]
-fn timed(name: &'static str, end: PhaseEnd) -> PhaseSpec {
+fn timed(name: &'static str, kind: PhaseKind, end: PhaseEnd) -> PhaseSpec {
     PhaseSpec {
         name,
+        kind,
         enter: Vec::new(),
         driver: Driver::None,
         end,
@@ -336,14 +420,14 @@ fn timed(name: &'static str, end: PhaseEnd) -> PhaseSpec {
 
 /// A phase whose input comes from `driver`.
 #[cfg(any(target_os = "macos", windows, test))]
-fn driven(name: &'static str, driver: Driver, end: PhaseEnd) -> PhaseSpec {
-    PhaseSpec { driver, ..timed(name, end) }
+fn driven(name: &'static str, kind: PhaseKind, driver: Driver, end: PhaseEnd) -> PhaseSpec {
+    PhaseSpec { driver, ..timed(name, kind, end) }
 }
 
 /// A phase that runs `enter` as it starts.
 #[cfg(any(target_os = "macos", windows, test))]
-fn entered(name: &'static str, enter: Vec<Act>, end: PhaseEnd) -> PhaseSpec {
-    PhaseSpec { enter, ..timed(name, end) }
+fn entered(name: &'static str, kind: PhaseKind, enter: Vec<Act>, end: PhaseEnd) -> PhaseSpec {
+    PhaseSpec { enter, ..timed(name, kind, end) }
 }
 
 /// How long S7's `settle` phase runs with no input after `scroll`, in ms: the
@@ -368,12 +452,18 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
     let (flood_lines, bulk_bytes) = if short { (200_000, 5 << 20) } else { (2_000_000, 50 << 20) };
     let flood = Workload::Flood { lines: flood_lines, bulk_bytes };
     let typing = |role| Driver::Typing { role, chars: 200, per_second: 10, settle_ms: 2_000 };
-    let print = |roles: Vec<usize>| Step::Phase(timed("print", PhaseEnd::Sentinels(roles)));
+    let print = |roles: Vec<usize>| {
+        Step::Phase(timed("print", PhaseKind::Transition, PhaseEnd::Sentinels(roles)))
+    };
     // Plans that end before GO + 60 s (5 s short) idle up to it, so memory is read after 60 s.
-    let idle = Step::Phase(timed("idle", PhaseEnd::AfterGo(hold(60_000))));
+    let idle = Step::Phase(timed("idle", PhaseKind::Hold, PhaseEnd::AfterGo(hold(60_000))));
     let end = Step::Checkpoint("end");
-    let sweep =
-        Step::Phase(driven("sweep", Driver::Sweep { hertz: 120 }, PhaseEnd::Hold(hold(10_000))));
+    let sweep = Step::Phase(driven(
+        "sweep",
+        PhaseKind::Sustained,
+        Driver::Sweep { hertz: 120 },
+        PhaseEnd::Hold(hold(10_000)),
+    ));
     let (roles, setup, steps) = match (spec.id, variant) {
         // atlas-retry prints its rows, then drives the recovery episodes until they end.
         ("S1", "atlas-retry") => (
@@ -381,7 +471,12 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             vec![],
             vec![
                 print(vec![0]),
-                Step::Phase(driven("recovery", Driver::AtlasRetry, PhaseEnd::DriverDone)),
+                Step::Phase(driven(
+                    "recovery",
+                    PhaseKind::Hold,
+                    Driver::AtlasRetry,
+                    PhaseEnd::DriverDone,
+                )),
                 idle,
                 end,
             ],
@@ -390,34 +485,56 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         ("S1", _) => (
             vec![if variant == "role-exit" { Workload::ExitAfterGo } else { Workload::IdleShell }],
             vec![],
-            vec![Step::Phase(timed("idle", PhaseEnd::Hold(hold(60_000)))), end],
+            vec![Step::Phase(timed("idle", PhaseKind::Hold, PhaseEnd::Hold(hold(60_000)))), end],
         ),
         ("S2", "default") => (
             vec![Workload::IdleShell],
             vec![],
-            vec![Step::Phase(driven("typing", typing(0), PhaseEnd::DriverDone)), idle, end],
+            vec![
+                Step::Phase(driven(
+                    "typing",
+                    PhaseKind::Sustained,
+                    typing(0),
+                    PhaseEnd::DriverDone,
+                )),
+                idle,
+                end,
+            ],
         ),
         ("S2", _) => (
             vec![flood, Workload::IdleShell],
             vec![SetupAction::SplitRight],
-            vec![Step::Phase(driven("typing", typing(1), PhaseEnd::DriverDone)), idle, end],
+            vec![
+                Step::Phase(driven(
+                    "typing",
+                    PhaseKind::Sustained,
+                    typing(1),
+                    PhaseEnd::DriverDone,
+                )),
+                idle,
+                end,
+            ],
         ),
         ("S3", _) => {
-            let mut flood_phase = timed("flood", PhaseEnd::Sentinels(vec![0]));
+            let mut flood_phase =
+                timed("flood", PhaseKind::Sustained, PhaseEnd::Sentinels(vec![0]));
             // `yes` writes two bytes a line; `cat` writes the fixture as it is.
             flood_phase.throughput_bytes = Some(2 * u64::from(flood_lines) + bulk_bytes);
-            let rest = Step::Phase(timed("idle", PhaseEnd::Hold(hold(60_000))));
+            let rest = Step::Phase(timed("idle", PhaseKind::Hold, PhaseEnd::Hold(hold(60_000))));
             (vec![flood], vec![], vec![Step::Phase(flood_phase), rest, end])
         }
         ("S4", _) => (
             vec![Workload::DateLoop],
             vec![],
-            vec![Step::Phase(timed("stream", PhaseEnd::Hold(hold(60_000)))), end],
+            vec![
+                Step::Phase(timed("stream", PhaseKind::Sustained, PhaseEnd::Hold(hold(60_000)))),
+                end,
+            ],
         ),
         ("S5", _) => (
             vec![Workload::IdleShell, Workload::DateLoop],
             vec![SetupAction::NewTab, SetupAction::ActivateTab(0)],
-            vec![Step::Phase(timed("stream", PhaseEnd::Hold(hold(60_000)))), end],
+            vec![Step::Phase(timed("stream", PhaseKind::Hold, PhaseEnd::Hold(hold(60_000)))), end],
         ),
         ("S6", "default") => (
             vec![Workload::IdleShell; 3],
@@ -437,6 +554,7 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 print(vec![0]),
                 Step::Phase(driven(
                     "drag",
+                    PhaseKind::Sustained,
                     Driver::Drag { hertz: 120 },
                     PhaseEnd::Hold(hold(10_000)),
                 )),
@@ -451,18 +569,19 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 print(vec![0]),
                 Step::Phase(driven(
                     "scroll",
+                    PhaseKind::Sustained,
                     Driver::Wheel { hertz: 60, role: 0 },
                     PhaseEnd::DriverDone,
                 )),
                 // No input: the frames a scrollbar requests once scrolling stops.
-                Step::Phase(timed("settle", PhaseEnd::Hold(SETTLE_MS))),
+                Step::Phase(timed("settle", PhaseKind::Hold, PhaseEnd::Hold(SETTLE_MS))),
                 idle,
                 end,
             ],
         ),
         ("S8", _) => {
             let enter = vec![Act::OpenSearch, Act::Commit("e")];
-            let search = entered("search", enter, PhaseEnd::Hold(hold(10_000)));
+            let search = entered("search", PhaseKind::Hold, enter, PhaseEnd::Hold(hold(10_000)));
             (
                 vec![Workload::PrintThenShell(Fixture::SearchText)],
                 vec![],
@@ -474,7 +593,7 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             vec![],
             vec![
                 print(vec![0]),
-                Step::Phase(timed("hold", PhaseEnd::Hold(hold(10_000)))),
+                Step::Phase(timed("hold", PhaseKind::Hold, PhaseEnd::Hold(hold(10_000)))),
                 idle,
                 end,
             ],
@@ -484,8 +603,10 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             let count = if short { 300 } else { 1_200 };
             let frames = Workload::Frames { count, synchronized: variant == "sync" };
             // The stream phase records the count this run's workload plays, not a constant.
-            let stream =
-                PhaseSpec { updates: Some(count), ..timed("stream", PhaseEnd::Sentinels(vec![0])) };
+            let stream = PhaseSpec {
+                updates: Some(count),
+                ..timed("stream", PhaseKind::Sustained, PhaseEnd::Sentinels(vec![0]))
+            };
             (vec![frames], vec![], vec![Step::Phase(stream), idle, end])
         }
         ("S11", "release") => (
@@ -501,15 +622,26 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             ],
             vec![SetupAction::NewTab, SetupAction::ActivateTab(0)],
             vec![
-                Step::Phase(timed("image", PhaseEnd::ImageRegistered(0))),
-                Step::Phase(entered("media-free", vec![Act::ActivateTab(1)], PhaseEnd::MediaFree)),
+                Step::Phase(timed("image", PhaseKind::Transition, PhaseEnd::ImageRegistered(0))),
+                Step::Phase(entered(
+                    "media-free",
+                    PhaseKind::Transition,
+                    vec![Act::ActivateTab(1)],
+                    PhaseEnd::MediaFree,
+                )),
                 Step::Checkpoint("switched"),
                 Step::Phase(timed(
                     "released-hold",
+                    PhaseKind::Hold,
                     PhaseEnd::HoldFrom { anchor: "media-free", hold_ms: 65_000 },
                 )),
                 Step::Checkpoint("released"),
-                Step::Phase(entered("reshow", vec![Act::ActivateTab(0)], PhaseEnd::Reshow)),
+                Step::Phase(entered(
+                    "reshow",
+                    PhaseKind::Transition,
+                    vec![Act::ActivateTab(0)],
+                    PhaseEnd::Reshow,
+                )),
                 end,
             ],
         ),
@@ -525,10 +657,10 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             ],
             vec![SetupAction::NewTab, SetupAction::ActivateTab(0)],
             vec![
-                Step::Phase(timed("image", PhaseEnd::ImageRegistered(0))),
+                Step::Phase(timed("image", PhaseKind::Transition, PhaseEnd::ImageRegistered(0))),
                 Step::Act(Act::ActivateTab(1)),
                 Step::Checkpoint("switched"),
-                Step::Phase(timed("idle", PhaseEnd::Hold(hold(120_000)))),
+                Step::Phase(timed("idle", PhaseKind::Hold, PhaseEnd::Hold(hold(120_000)))),
                 end,
             ],
         ),
@@ -541,6 +673,7 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 // `--short` cannot reach the 30 s scheduler, so it asks for the trim once covered.
                 Step::Phase(entered(
                     "covered",
+                    PhaseKind::Hold,
                     if short {
                         vec![Act::Unfocus, Act::Cover, Act::TrimCovered]
                     } else {
@@ -549,7 +682,12 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                     PhaseEnd::Hold(hold(90_000)),
                 )),
                 Step::Checkpoint("covered"),
-                Step::Phase(entered("uncovered", vec![Act::Uncover], PhaseEnd::Hold(hold(10_000)))),
+                Step::Phase(entered(
+                    "uncovered",
+                    PhaseKind::Hold,
+                    vec![Act::Uncover],
+                    PhaseEnd::Hold(hold(10_000)),
+                )),
                 end,
             ],
         ),

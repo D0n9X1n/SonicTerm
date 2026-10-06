@@ -96,12 +96,12 @@ fn image_phase_ends_at_the_first_present_after_the_scan_saw_the_image() {
     // later one counts.
     let start = Instant::now();
     let mut image = ImagePresent::default();
-    image.observe_frames(5);
+    image.observe_frames(5, std::time::Instant::now());
     assert_eq!(image.progress(start), ImageProgress::Waiting, "nothing seen yet");
     image.saw_registration(start, 5);
-    image.observe_frames(5);
+    image.observe_frames(5, std::time::Instant::now());
     assert_eq!(image.progress(after(start, 10)), ImageProgress::Waiting);
-    image.observe_frames(6);
+    image.observe_frames(6, std::time::Instant::now());
     assert_eq!(image.progress(after(start, 20)), ImageProgress::Presented);
     // A present before the bound is decisive even when the phase is checked after it.
     assert_eq!(image.progress(after(start, 5_000)), ImageProgress::Presented);
@@ -114,7 +114,7 @@ fn image_phase_without_a_present_by_the_bound_expires() {
     let mut image = ImagePresent::default();
     image.saw_registration(start, 5);
     assert_eq!(image.deadline(), Some(start + IMAGE_PRESENT_WAIT));
-    image.observe_frames(5);
+    image.observe_frames(5, std::time::Instant::now());
     assert_eq!(image.progress(after(start, 999)), ImageProgress::Waiting);
     assert_eq!(image.progress(start + IMAGE_PRESENT_WAIT), ImageProgress::Expired);
 }
@@ -588,4 +588,22 @@ fn a_pending_checkpoint_wakes_for_its_poll_its_retry_or_its_deadline() {
     let done = CheckpointSampling { state: SamplingState::Complete, ..sampling };
     assert_eq!(checkpoint_wake(FootprintStatus::Answered, Some(&done), start, poll), None);
     assert_eq!(checkpoint_wake(FootprintStatus::Absent, None, start, poll), None);
+}
+
+/// The image endpoint is the end of the first presenting dispatch after the registration was
+/// seen: a dispatch before the sighting, or one that did not present, sets nothing, and a later
+/// presenting dispatch never moves it.
+#[test]
+fn the_image_endpoint_is_the_first_presenting_dispatch_after_registration() {
+    let start = std::time::Instant::now();
+    let at = |offset_ms: u64| start + std::time::Duration::from_millis(offset_ms);
+    let mut image = ImagePresent::default();
+    image.observe_frames(5, at(1));
+    assert_eq!(image.presented_at(), None, "nothing registered yet");
+    image.saw_registration(at(2), 5);
+    image.observe_frames(5, at(3));
+    assert_eq!(image.presented_at(), None, "no frame presented since the sighting");
+    image.observe_frames(6, at(4));
+    image.observe_frames(7, at(9));
+    assert_eq!(image.presented_at(), Some(at(4)));
 }

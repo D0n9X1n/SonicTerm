@@ -504,7 +504,10 @@ fn only_s10_stream_carries_its_workload_update_count() {
 #[test]
 fn list_json_declares_the_latency_split_capability() {
     let listed: serde_json::Value = serde_json::from_str(&list_json()).expect("valid JSON");
-    assert_eq!(listed["capabilities"], serde_json::json!({ "latency_split_schema": 1 }));
+    assert_eq!(
+        listed["capabilities"],
+        serde_json::json!({ "latency_split_schema": 1, "phase_kinds": 1 })
+    );
     assert_eq!(listed["schema_version"], 1, "the list's own schema is unchanged");
 }
 
@@ -525,4 +528,118 @@ fn the_atlas_retry_plan_prints_its_rows_then_drives_the_episodes() {
             .any(|step| matches!(step, Step::Phase(phase) if phase.driver == Driver::AtlasRetry));
         assert_eq!(drives, other.scenario == "S1" && other.variant == "atlas-retry");
     }
+}
+
+/// Every (scenario/variant, phase) the catalog plans, with its contract kind and a transition's endpoint:
+/// the spec's frozen matrix plus the addendum's S1/atlas-retry print, recovery and idle. Stated here,
+/// not derived from the plans.
+const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
+    ("S1/atlas-retry", "idle", "hold", None),
+    ("S1/atlas-retry", "print", "transition", Some("sentinel-parsed")),
+    ("S1/atlas-retry", "recovery", "hold", None),
+    ("S1/default", "idle", "hold", None),
+    ("S1/gdi", "idle", "hold", None),
+    ("S1/role-exit", "idle", "hold", None),
+    ("S1/wgpu", "idle", "hold", None),
+    ("S10/default", "idle", "hold", None),
+    ("S10/default", "stream", "sustained", None),
+    ("S10/sync", "idle", "hold", None),
+    ("S10/sync", "stream", "sustained", None),
+    ("S11/default", "idle", "hold", None),
+    ("S11/default", "image", "transition", Some("image-registered-then-presented")),
+    ("S11/gdi", "idle", "hold", None),
+    ("S11/gdi", "image", "transition", Some("image-registered-then-presented")),
+    ("S11/release", "image", "transition", Some("image-registered-then-presented")),
+    ("S11/release", "media-free", "transition", Some("first-present-after-entry")),
+    ("S11/release", "released-hold", "hold", None),
+    ("S11/release", "reshow", "transition", Some("first-present-with-image")),
+    ("S11/wgpu", "idle", "hold", None),
+    ("S11/wgpu", "image", "transition", Some("image-registered-then-presented")),
+    ("S12/default", "covered", "hold", None),
+    ("S12/default", "print", "transition", Some("sentinel-parsed")),
+    ("S12/default", "uncovered", "hold", None),
+    ("S2/default", "idle", "hold", None),
+    ("S2/default", "typing", "sustained", None),
+    ("S2/flood", "idle", "hold", None),
+    ("S2/flood", "typing", "sustained", None),
+    ("S3/default", "flood", "sustained", None),
+    ("S3/default", "idle", "hold", None),
+    ("S4/default", "stream", "sustained", None),
+    ("S5/default", "stream", "hold", None),
+    ("S5/gdi", "stream", "hold", None),
+    ("S5/wgpu", "stream", "hold", None),
+    ("S6/default", "idle", "hold", None),
+    ("S6/default", "sweep", "sustained", None),
+    ("S6/flood", "idle", "hold", None),
+    ("S6/flood", "sweep", "sustained", None),
+    ("S6/selection-drag", "drag", "sustained", None),
+    ("S6/selection-drag", "idle", "hold", None),
+    ("S6/selection-drag", "print", "transition", Some("sentinel-parsed")),
+    ("S7/default", "idle", "hold", None),
+    ("S7/default", "print", "transition", Some("sentinel-parsed")),
+    ("S7/default", "scroll", "sustained", None),
+    ("S7/default", "settle", "hold", None),
+    ("S8/default", "idle", "hold", None),
+    ("S8/default", "print", "transition", Some("sentinel-parsed")),
+    ("S8/default", "search", "hold", None),
+    ("S9/default", "hold", "hold", None),
+    ("S9/default", "idle", "hold", None),
+    ("S9/default", "print", "transition", Some("sentinel-parsed")),
+];
+
+/// Every catalog plan, on each host and at each length on its own, holds exactly its variant's contract phases,
+/// each once, with the contract's kind and, for a transition, its endpoint. A phase missing from one host or
+/// length fails even when another configuration has it, a duplicate fails, and so does a contract variant no
+/// plan has. Startup, created apart from the plans, is a transition ending at first-present-then-about-to-wait.
+#[test]
+fn every_planned_phase_has_its_contract_kind_and_endpoint() {
+    type PhaseRow<'row> = (&'row str, &'row str, Option<&'row str>);
+    let mut expected: std::collections::BTreeMap<String, std::collections::BTreeSet<PhaseRow>> =
+        std::collections::BTreeMap::new();
+    for (label, phase, kind, endpoint) in PHASE_KINDS {
+        expected.entry(label.to_string()).or_default().insert((*phase, *kind, *endpoint));
+    }
+    let mut planned_labels = std::collections::BTreeSet::new();
+    for host in [Host::Posix, Host::Windows] {
+        for scenario in SCENARIOS {
+            for variant in scenario.variants {
+                for short in [false, true] {
+                    let plan = plan_for(scenario.id, variant, short, host).expect("listed plan");
+                    let label = format!("{}/{}", plan.scenario, plan.variant);
+                    let configuration = format!("{label} on {host:?}, short {short}");
+                    let mut actual = std::collections::BTreeSet::new();
+                    for step in &plan.steps {
+                        if let Step::Phase(phase) = step {
+                            let endpoint = phase.endpoint();
+                            assert_eq!(
+                                endpoint.is_some(),
+                                phase.kind == PhaseKind::Transition,
+                                "{configuration} {}: an endpoint exactly for a transition",
+                                phase.name
+                            );
+                            let row = (phase.name, phase.kind.name(), endpoint.map(Endpoint::name));
+                            assert!(
+                                actual.insert(row),
+                                "{configuration}: phase {} twice",
+                                phase.name
+                            );
+                        }
+                    }
+                    let contract = expected.get(&label).cloned().unwrap_or_default();
+                    assert_eq!(
+                        actual, contract,
+                        "{configuration}: its phases against the contract"
+                    );
+                    planned_labels.insert(label);
+                }
+            }
+        }
+    }
+    let unplanned: Vec<_> =
+        expected.keys().filter(|label| !planned_labels.contains(*label)).collect();
+    assert!(unplanned.is_empty(), "contract variants no plan has: {unplanned:?}");
+    assert_eq!(
+        (STARTUP_KIND, STARTUP_ENDPOINT.name()),
+        (PhaseKind::Transition, "first-present-then-about-to-wait")
+    );
 }

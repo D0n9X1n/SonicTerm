@@ -130,6 +130,10 @@ enum Route {
 
 /// One measured phase's running totals.
 struct PhaseMeter {
+    /// The phase's kind, from its contract.
+    kind: scenarios::PhaseKind,
+    /// A transition's endpoint; None for other kinds.
+    endpoint: Option<scenarios::Endpoint>,
     name: &'static str,
     started: Instant,
     start_unix_s: f64,
@@ -144,6 +148,8 @@ struct PhaseMeter {
     /// The phase's counted updates, from its spec.
     updates: Option<u32>,
     last_present: Option<Instant>,
+    /// The phase's presentation trace from its main-window redraws.
+    present: crate::transition::PresentTrace,
     /// Counter totals when the phase started; `None` when the run does not count.
     counters_start: Option<CounterTotals>,
 }
@@ -557,6 +563,8 @@ struct Probe {
     occlusion: OcclusionState,
     frames: u64,
     first_present: bool,
+    /// When startup reached its warm-pool barrier: the startup transition's endpoint.
+    startup_endpoint: Option<Instant>,
     meter: Option<PhaseMeter>,
     phases: Vec<PhaseRecord>,
     role_panes: Vec<u64>,
@@ -786,7 +794,9 @@ impl ApplicationHandler<UserEvent> for Probe {
             return;
         }
         if self.stage == Stage::Startup && self.first_present {
-            // The end of the first about_to_wait after a present is the warm-pool barrier.
+            // The end of the first about_to_wait after a present is the warm-pool barrier; its instant
+            // is latched before the startup meter finishes and the progress file is written.
+            self.startup_endpoint.get_or_insert(Instant::now());
             self.end_startup(event_loop);
         }
         let flow =
@@ -1069,7 +1079,14 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     let roles = plan.roles.len();
     let sentinels = (0..roles).map(|role| workload::sentinel_line(role, &prepared.nonce)).collect();
     // Startup is measured from just before the App is built.
-    let meter = PhaseMeter::start("startup", allocation_counter.is_some(), None, None);
+    let meter = PhaseMeter::start(
+        "startup",
+        scenarios::STARTUP_KIND,
+        Some(scenarios::STARTUP_ENDPOINT),
+        allocation_counter.is_some(),
+        None,
+        None,
+    );
     // Read before the App takes the config, so the presenter record can name the configured mode.
     let software_render_mode = render_mode_text(prepared.config.appearance.software_render_mode);
     let app =
@@ -1262,12 +1279,16 @@ fn write_role_program(
 impl PhaseMeter {
     fn start(
         name: &'static str,
+        kind: scenarios::PhaseKind,
+        endpoint: Option<scenarios::Endpoint>,
         counting: bool,
         counters_start: Option<CounterTotals>,
         updates: Option<u32>,
     ) -> Self {
         Self {
             name,
+            kind,
+            endpoint,
             started: Instant::now(),
             start_unix_s: unix_now(),
             cpu_start: cpu_times(),
@@ -1279,12 +1300,57 @@ impl PhaseMeter {
             allocations: counting.then(Vec::new),
             updates,
             last_present: None,
+            present: crate::transition::PresentTrace::default(),
             counters_start,
         }
     }
 
+    /// Count one forwarded dispatch that ran from `started` to `ended` and moved the main renderer's presented
+    /// count from `frames.0` to `frames.1`: presented frames and intervals for any dispatch, and for a
+    /// main-window redraw its duration, span, allocations and presentation trace.
+    fn observe_dispatch(
+        &mut self,
+        kind: Dispatch,
+        started: Instant,
+        ended: Instant,
+        frames: (u64, u64),
+        allocations: Option<u64>,
+    ) {
+        let (frames_before, frames_after) = frames;
+        let advanced = frames_after > frames_before;
+        if advanced {
+            self.presented_frames += frames_after - frames_before;
+            if let Some(last) = self.last_present {
+                self.present_interval_ms.push(ms_between(last, ended));
+            }
+            self.last_present = Some(ended);
+        }
+        if kind == Dispatch::Redraw {
+            self.redraw_requested += 1;
+            let duration_ms = ms_between(started, ended);
+            self.dispatch_ms.push(duration_ms);
+            // The span in Unix seconds, from the phase's own start, so a log stamp can be matched to it.
+            let start_unix_s =
+                self.start_unix_s + started.saturating_duration_since(self.started).as_secs_f64();
+            self.slow_dispatches.push(SlowDispatch {
+                start_unix_s,
+                end_unix_s: start_unix_s + duration_ms / 1000.0,
+                duration_ms,
+            });
+            if let (Some(counts), Some(count)) = (self.allocations.as_mut(), allocations) {
+                counts.push(count);
+            }
+            self.present
+                .observe_redraw(ms_between(self.started, ended), advanced.then_some(frames_after));
+        }
+    }
+
     /// The phase's record; its counter delta is `counters_end` minus the totals at its start.
-    fn finish(self, counters_end: Option<CounterTotals>) -> PhaseRecord {
+    fn finish(
+        self,
+        counters_end: Option<CounterTotals>,
+        completion: crate::transition::Completion,
+    ) -> PhaseRecord {
         let (user_s, system_s) = cpu_times();
         let frame_counters = self
             .counters_start
@@ -1294,12 +1360,22 @@ impl PhaseMeter {
         let (slow_dispatches, dispatch_count) = self.slow_dispatches.finish();
         PhaseRecord {
             name: self.name,
+            kind: self.kind.name(),
+            endpoint: self.endpoint.map(scenarios::Endpoint::name),
+            completion_ms: completion.elapsed_ms,
+            completion_missing: completion.missing,
             start_unix_s: self.start_unix_s,
             end_unix_s: unix_now(),
             cpu_user_s: user_s - self.cpu_start.0,
             cpu_system_s: system_s - self.cpu_start.1,
             presented_frames: self.presented_frames,
             redraw_requested: self.redraw_requested,
+            first_present_ms: self.present.first.map(|(offset_ms, _)| offset_ms),
+            last_present_ms: self.present.last.map(|(offset_ms, _)| offset_ms),
+            first_present_seq: self.present.first.map(|(_, count)| count),
+            last_present_seq: self.present.last.map(|(_, count)| count),
+            present_missing: self.present.missing(),
+            nonpresenting_redraws: self.present.nonpresenting,
             dispatch_ms: self.dispatch_ms,
             slow_dispatches,
             dispatch_count,
@@ -1376,6 +1452,7 @@ impl Probe {
             occlusion: OcclusionState::default(),
             frames: 0,
             first_present: false,
+            startup_endpoint: None,
             meter: None,
             phases: Vec::new(),
             role_panes: Vec::new(),
@@ -1421,11 +1498,11 @@ impl Probe {
 
     /// Forward one dispatch to the App and account for it: frames, `RedrawRequested` time and
     /// allocations, present intervals, the uncover time and, while a sample is open, attribution.
-    fn forward(
+    fn forward<EventLoopRef: ?Sized>(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &EventLoopRef,
         kind: Dispatch,
-        dispatch: impl FnOnce(&mut App, &ActiveEventLoop),
+        dispatch: impl FnOnce(&mut App, &EventLoopRef),
     ) {
         let frames_before = self.frame_count();
         // S1/atlas-retry reads the main renderer's counts and the scene around every forwarded dispatch.
@@ -1455,33 +1532,18 @@ impl Probe {
             if let Some(from) = self.occlusion.uncover_from.take() {
                 self.uncover_ms = Some(ms_between(from, ended));
             }
-            self.image.present.observe_frames(frames_after);
+            self.image.present.observe_frames(frames_after, ended);
             self.observe_barrier_frame(ended);
         }
         if let Some(meter) = self.meter.as_mut() {
-            if advanced {
-                meter.presented_frames += frames_after - frames_before;
-                if let Some(last) = meter.last_present {
-                    meter.present_interval_ms.push(ms_between(last, ended));
-                }
-                meter.last_present = Some(ended);
-            }
-            if kind == Dispatch::Redraw {
-                meter.redraw_requested += 1;
-                let duration_ms = ms_between(started, ended);
-                meter.dispatch_ms.push(duration_ms);
-                // The span in Unix seconds, from the phase's own start, so a log stamp can be matched to it.
-                let start_unix_s = meter.start_unix_s
-                    + started.saturating_duration_since(meter.started).as_secs_f64();
-                meter.slow_dispatches.push(SlowDispatch {
-                    start_unix_s,
-                    end_unix_s: start_unix_s + duration_ms / 1000.0,
-                    duration_ms,
-                });
-                if let (Some(counts), Some(count)) = (meter.allocations.as_mut(), allocations) {
-                    counts.push(count);
-                }
-            }
+            // The adapter's own readings feed the phase's counts and presentation trace.
+            meter.observe_dispatch(
+                kind,
+                started,
+                ended,
+                (frames_before, frames_after),
+                allocations,
+            );
         }
         if let Some(before) = before {
             if self.open_sample.is_some() {
@@ -1700,8 +1762,36 @@ impl Probe {
             // When: `meter` is None, no phase is open and nothing ends.
             return;
         };
+        let completion = self.completion_of(&meter);
         let counters_end = self.counter_totals();
-        self.phases.push(meter.finish(counters_end));
+        self.phases.push(meter.finish(counters_end, completion));
+    }
+
+    /// A transition meter's completion: its endpoint's latched instant, eligible only before the
+    /// run's deadline, or why it has none. A hold or sustained meter has none.
+    fn completion_of(&self, meter: &PhaseMeter) -> crate::transition::Completion {
+        let Some(endpoint) = meter.endpoint else {
+            // When: `endpoint` is None, the phase is a hold or sustained one and has no completion.
+            return crate::transition::Completion::default();
+        };
+        let reached = match endpoint {
+            scenarios::Endpoint::SentinelParsed => {
+                crate::transition::latest_sentinel(&self.sentinel_seen, &self.sentinel_roles)
+            }
+            scenarios::Endpoint::ImageRegisteredThenPresented => self.image.present.presented_at(),
+            scenarios::Endpoint::FirstPresentAfterEntry
+            | scenarios::Endpoint::FirstPresentWithImage => {
+                self.barrier.as_ref().and_then(FrameBarrier::done_at)
+            }
+            scenarios::Endpoint::FirstPresentThenAboutToWait => self.startup_endpoint,
+        };
+        crate::transition::completion(
+            meter.started,
+            reached,
+            self.run_deadline,
+            Instant::now(),
+            crate::transition::INCOMPLETE,
+        )
     }
 
     /// Open the App's counter gate for a `--counters` run, before any window or pane exists.
@@ -2339,7 +2429,14 @@ impl Probe {
         tracing::info!(target: LOG_TARGET, phase = phase.name, "perf_scenarios phase started");
         let counters_start = self.counter_totals();
         let counting = self.allocation_counter.is_some();
-        self.meter = Some(PhaseMeter::start(phase.name, counting, counters_start, phase.updates));
+        self.meter = Some(PhaseMeter::start(
+            phase.name,
+            phase.kind,
+            phase.endpoint(),
+            counting,
+            counters_start,
+            phase.updates,
+        ));
         self.sentinel_roles = match &phase.end {
             PhaseEnd::Sentinels(roles) => roles.clone(),
             _ => Vec::new(),

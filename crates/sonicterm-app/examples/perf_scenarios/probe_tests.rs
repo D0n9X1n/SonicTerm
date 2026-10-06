@@ -35,10 +35,19 @@ fn a_publication_inside_a_phase_is_credited_to_that_phase() {
     // The meter snapshots at its start and its finish; what is published between them is the
     // phase's, however the counter stood before it began.
     let published = Cell::new(4_u64);
-    let meter =
-        PhaseMeter::start("typing", false, Some(totals_with_attempts(published.get())), None);
+    let meter = PhaseMeter::start(
+        "typing",
+        crate::scenarios::PhaseKind::Sustained,
+        None,
+        false,
+        Some(totals_with_attempts(published.get())),
+        None,
+    );
     published.set(published.get() + 3);
-    let record = meter.finish(Some(totals_with_attempts(published.get())));
+    let record = meter.finish(
+        Some(totals_with_attempts(published.get())),
+        crate::transition::Completion::default(),
+    );
     assert_eq!(credited(&record), 3);
 }
 
@@ -47,15 +56,33 @@ fn a_publication_in_the_gap_between_phases_is_credited_to_neither() {
     // Checkpoints and the progress write run between one phase's finish snapshot and the next
     // phase's start snapshot, so whatever they publish appears in no phase's delta.
     let published = Cell::new(0_u64);
-    let first =
-        PhaseMeter::start("first", false, Some(totals_with_attempts(published.get())), None);
+    let first = PhaseMeter::start(
+        "first",
+        crate::scenarios::PhaseKind::Sustained,
+        None,
+        false,
+        Some(totals_with_attempts(published.get())),
+        None,
+    );
     published.set(published.get() + 2);
-    let first = first.finish(Some(totals_with_attempts(published.get())));
+    let first = first.finish(
+        Some(totals_with_attempts(published.get())),
+        crate::transition::Completion::default(),
+    );
     published.set(published.get() + 5);
-    let second =
-        PhaseMeter::start("second", false, Some(totals_with_attempts(published.get())), None);
+    let second = PhaseMeter::start(
+        "second",
+        crate::scenarios::PhaseKind::Sustained,
+        None,
+        false,
+        Some(totals_with_attempts(published.get())),
+        None,
+    );
     published.set(published.get() + 1);
-    let second = second.finish(Some(totals_with_attempts(published.get())));
+    let second = second.finish(
+        Some(totals_with_attempts(published.get())),
+        crate::transition::Completion::default(),
+    );
     assert_eq!((credited(&first), credited(&second)), (2, 1));
     assert_eq!(published.get() - credited(&first) - credited(&second), 5, "the gap's work");
 }
@@ -64,7 +91,11 @@ fn a_publication_in_the_gap_between_phases_is_credited_to_neither() {
 fn method_in(source: &str, name: &str) -> String {
     // A CRLF checkout is read as LF, so method ends match either way.
     let source = source.replace("\r\n", "\n");
-    let start = source.find(&format!("    fn {name}(")).unwrap_or_else(|| panic!("{name}"));
+    // A generic method's name is followed by its parameters' `<`, an ordinary one's by `(`.
+    let start = ["(", "<"]
+        .iter()
+        .find_map(|opener| source.find(&format!("    fn {name}{opener}")))
+        .unwrap_or_else(|| panic!("{name}"));
     let rest = &source[start + 4..];
     rest[..rest.find("\n    fn ").unwrap_or(rest.len())].to_owned()
 }
@@ -87,12 +118,12 @@ fn checkpoint_and_progress_work_falls_between_phase_snapshots() {
     }
     let finish = method("finish_meter");
     let snapshot = finish.find("let counters_end = self.counter_totals();").expect("end snapshot");
-    assert!(snapshot < finish.find("meter.finish(counters_end)").expect("finish"));
+    assert!(snapshot < finish.find("meter.finish(counters_end, completion)").expect("finish"));
     let begin = method("begin_phase");
     let go_write = begin.find("go/{role}").expect("GO write");
     let snapshot =
         begin.find("let counters_start = self.counter_totals();").expect("start snapshot");
-    let opened = begin.find("PhaseMeter::start(phase.name").expect("meter opens");
+    let opened = begin.find("self.meter = Some(PhaseMeter::start(").expect("meter opens");
     assert!(go_write < snapshot && snapshot < opened);
     assert!(!begin[snapshot..opened].contains("record_progress"));
     let advance = method("advance_steps");
@@ -178,7 +209,14 @@ fn release_probe(name: &str, act: Instant, frames: u64) -> (Probe, PhaseSpec) {
         Probe::new(app, plan, request, PathBuf::from("unused"), act + Duration::from_secs(3600));
     probe.test_readings = Some((frames, ResourceAmount::default()));
     probe.stage = Stage::Steps(index);
-    probe.meter = Some(PhaseMeter::start(phase.name, false, None, None));
+    probe.meter = Some(PhaseMeter::start(
+        phase.name,
+        crate::scenarios::PhaseKind::Sustained,
+        None,
+        false,
+        None,
+        None,
+    ));
     probe.start_barrier(&phase.end, act);
     (probe, phase)
 }
@@ -842,12 +880,22 @@ fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
         presenter: None,
         phases: vec![PhaseRecord {
             name: "workload",
+            kind: "sustained",
+            endpoint: None,
+            completion_ms: None,
+            completion_missing: None,
             start_unix_s: 990.0,
             end_unix_s: 1_000.0,
             cpu_user_s: 1.5,
             cpu_system_s: 0.5,
             presented_frames: 120,
             redraw_requested: 130,
+            first_present_ms: Some(16.6),
+            last_present_ms: Some(9_990.0),
+            first_present_seq: Some(1),
+            last_present_seq: Some(120),
+            present_missing: None,
+            nonpresenting_redraws: 10,
             dispatch_ms: vec![1.0, 2.0],
             slow_dispatches: Vec::new(),
             dispatch_count: 2,
@@ -1111,8 +1159,25 @@ fn atlas_readings_join_the_latest_record_of_their_checkpoint_in_attempt_order() 
 /// A phase meter hands the update count it started with to the record it finishes.
 #[test]
 fn a_phase_meter_records_the_update_count_it_started_with() {
-    assert_eq!(PhaseMeter::start("stream", false, None, Some(300)).finish(None).updates, Some(300));
-    assert_eq!(PhaseMeter::start("idle", false, None, None).finish(None).updates, None);
+    assert_eq!(
+        PhaseMeter::start(
+            "stream",
+            crate::scenarios::PhaseKind::Sustained,
+            None,
+            false,
+            None,
+            Some(300)
+        )
+        .finish(None, crate::transition::Completion::default())
+        .updates,
+        Some(300)
+    );
+    assert_eq!(
+        PhaseMeter::start("idle", crate::scenarios::PhaseKind::Sustained, None, false, None, None)
+            .finish(None, crate::transition::Completion::default())
+            .updates,
+        None
+    );
 }
 
 /// A probe for `scenario`/`variant` whose App forces the counter gate on and holds one counting
@@ -1287,4 +1352,152 @@ fn the_trim_act_is_serviced_after_delivery_and_lapses_with_its_phase() {
     assert!(overdue < service, "the trim sees an occlusion delivered on the same turn");
     assert!(method("end_phase").contains("self.service_trim(true);"));
     assert!(!method("service_trim").contains("stage"), "the trim never changes the plan's steps");
+}
+
+/// Only a main-window redraw feeds a phase's presentation trace: a native dispatch that presents still
+/// counts as a presented frame, but neither starts the trace nor counts as a nonpresenting redraw.
+#[test]
+fn only_main_window_redraws_feed_the_presentation_trace() {
+    let mut meter =
+        PhaseMeter::start("open", crate::scenarios::PhaseKind::Transition, None, false, None, None);
+    let start = meter.started;
+    let at = |offset_ms: u64| start + std::time::Duration::from_millis(offset_ms);
+    meter.observe_dispatch(Dispatch::Native, at(1), at(2), (0, 1), None);
+    meter.observe_dispatch(Dispatch::Harness, at(2), at(3), (1, 1), None);
+    meter.observe_dispatch(Dispatch::Redraw, at(4), at(5), (1, 1), None);
+    meter.observe_dispatch(Dispatch::Redraw, at(6), at(8), (1, 2), None);
+    meter.observe_dispatch(Dispatch::Redraw, at(9), at(10), (2, 2), None);
+    meter.observe_dispatch(Dispatch::Redraw, at(11), at(12), (2, 4), None);
+    let record = meter.finish(None, crate::transition::Completion::default());
+    assert_eq!((record.presented_frames, record.redraw_requested), (4, 4));
+    assert_eq!((record.first_present_ms, record.last_present_ms), (Some(8.0), Some(12.0)));
+    assert_eq!((record.first_present_seq, record.last_present_seq), (Some(2), Some(4)));
+    assert_eq!((record.present_missing, record.nonpresenting_redraws), (None, 2));
+}
+
+/// A phase whose redraws never presented records `no-presentation` and every redraw as nonpresenting.
+#[test]
+fn a_phase_without_a_presenting_redraw_records_no_presentation() {
+    let mut meter =
+        PhaseMeter::start("hold", crate::scenarios::PhaseKind::Hold, None, false, None, None);
+    let start = meter.started;
+    meter.observe_dispatch(Dispatch::Redraw, start, start, (3, 3), None);
+    let record = meter.finish(None, crate::transition::Completion::default());
+    assert_eq!(record.present_missing, Some("no-presentation"));
+    assert_eq!((record.first_present_ms, record.first_present_seq), (None, None));
+    assert_eq!(record.nonpresenting_redraws, 1);
+    let written = serde_json::to_value(&record).expect("a phase record serializes");
+    assert!(written.get("first_present_ms").is_none(), "{written}");
+    assert_eq!(written["present_missing"], "no-presentation");
+}
+
+/// `forward` feeds the meter from its own readings around the dispatch: the dispatch kind, its span
+/// and the presented counts before and after it.
+#[test]
+fn forward_feeds_the_meter_from_its_dispatch_readings() {
+    let forward = method("forward");
+    // Compare without whitespace, so rustfmt's line wrapping does not decide the result.
+    let compact: String = forward.chars().filter(|glyph| !glyph.is_whitespace()).collect();
+    let adapter = compact.find("dispatch(&mutself.app,event_loop);").expect("forward dispatches");
+    let fed = compact
+        .find("meter.observe_dispatch(kind,started,ended,(frames_before,frames_after),allocations")
+        .expect("forward feeds the meter");
+    assert!(adapter < fed);
+}
+
+/// The real `forward` feeds its meter: a main-window redraw that presents nothing counts as a redraw and a
+/// nonpresenting redraw, so the phase records `no-presentation`. The loop is generic, so a unit stands in for it.
+#[test]
+fn a_forwarded_redraw_reaches_the_phases_presentation_trace() {
+    let act = Instant::now();
+    let (mut probe, _phase) = release_probe("media-free", act, 7);
+    probe.forward(&(), Dispatch::Redraw, |_app, _loop| {});
+    let record = probe
+        .meter
+        .take()
+        .expect("the phase is open")
+        .finish(None, crate::transition::Completion::default());
+    assert_eq!((record.redraw_requested, record.nonpresenting_redraws), (1, 1));
+    assert_eq!(record.present_missing, Some("no-presentation"));
+}
+
+/// A transition that presents exactly one frame records that frame as both its first and last presentation.
+#[test]
+fn a_one_frame_transition_records_one_presentation_as_first_and_last() {
+    let mut meter = PhaseMeter::start(
+        "image",
+        crate::scenarios::PhaseKind::Transition,
+        Some(crate::scenarios::Endpoint::ImageRegisteredThenPresented),
+        false,
+        None,
+        None,
+    );
+    let start = meter.started;
+    let at = |offset_ms: u64| start + std::time::Duration::from_millis(offset_ms);
+    meter.observe_dispatch(Dispatch::Redraw, at(30), at(40), (5, 6), None);
+    let completion = crate::transition::Completion { elapsed_ms: Some(40.0), missing: None };
+    let record = meter.finish(None, completion);
+    assert_eq!((record.first_present_ms, record.last_present_ms), (Some(40.0), Some(40.0)));
+    assert_eq!((record.first_present_seq, record.last_present_seq), (Some(6), Some(6)));
+    assert_eq!((record.presented_frames, record.nonpresenting_redraws), (1, 0));
+    assert_eq!(record.completion_ms, Some(40.0));
+}
+
+/// A sentinel transition completes on its parsed sentinel even when no redraw presented: completion and
+/// `no-presentation` are recorded together, so completion never implies a presented frame.
+#[test]
+fn a_sentinel_completion_without_a_presentation_records_both() {
+    let mut meter = PhaseMeter::start(
+        "print",
+        crate::scenarios::PhaseKind::Transition,
+        Some(crate::scenarios::Endpoint::SentinelParsed),
+        false,
+        None,
+        None,
+    );
+    let start = meter.started;
+    meter.observe_dispatch(Dispatch::Native, start, start, (2, 2), None);
+    let completion = crate::transition::Completion { elapsed_ms: Some(12.5), missing: None };
+    let record = meter.finish(None, completion);
+    assert_eq!((record.completion_ms, record.completion_missing), (Some(12.5), None));
+    assert_eq!((record.present_missing, record.presented_frames), (Some("no-presentation"), 0));
+}
+
+/// A hold with no dispatch at all records no presentation and no nonpresenting redraw.
+#[test]
+fn a_no_draw_hold_records_no_presentation_and_no_redraws() {
+    let meter =
+        PhaseMeter::start("idle", crate::scenarios::PhaseKind::Hold, None, false, None, None);
+    let record = meter.finish(None, crate::transition::Completion::default());
+    assert_eq!(
+        (record.present_missing, record.redraw_requested, record.nonpresenting_redraws),
+        (Some("no-presentation"), 0, 0)
+    );
+    assert_eq!((record.completion_ms, record.completion_missing), (None, None));
+}
+
+/// The presentation trace is kept directly, not derived from the bounded slow-dispatch list: with more redraws
+/// than SLOW_DISPATCH_LIMIT, the first and last presentations are still the phase's first and last.
+#[test]
+fn the_trace_outlives_the_slow_dispatch_limit() {
+    let mut meter = PhaseMeter::start(
+        "stream",
+        crate::scenarios::PhaseKind::Sustained,
+        None,
+        false,
+        None,
+        None,
+    );
+    let start = meter.started;
+    let redraw_count = crate::record::SLOW_DISPATCH_LIMIT as u64 * 3;
+    for index in 0..redraw_count {
+        let ended = start + std::time::Duration::from_millis(index * 10 + 5);
+        meter.observe_dispatch(Dispatch::Redraw, ended, ended, (index, index + 1), None);
+    }
+    let record = meter.finish(None, crate::transition::Completion::default());
+    assert_eq!(record.slow_dispatches.len(), crate::record::SLOW_DISPATCH_LIMIT);
+    assert_eq!(record.dispatch_count, redraw_count);
+    let last_ms = ((redraw_count - 1) * 10 + 5) as f64;
+    assert_eq!((record.first_present_ms, record.last_present_ms), (Some(5.0), Some(last_ms)));
+    assert_eq!((record.first_present_seq, record.last_present_seq), (Some(1), Some(redraw_count)));
 }

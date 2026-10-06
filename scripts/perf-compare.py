@@ -2256,9 +2256,98 @@ def atlas_recovery_problem(data: Mapping) -> str | None:
     return None
 
 
+# A phase's kinds, a transition's endpoints and the reasons a transition reached no endpoint, as the harness writes
+# them. An endpoint not reached is missing as expired (the deadline passed) or incomplete.
+PHASE_KINDS = ("sustained", "transition", "hold")
+TRANSITION_ENDPOINTS = ("sentinel-parsed", "image-registered-then-presented", "first-present-after-entry",
+                        "first-present-with-image", "first-present-then-about-to-wait")
+NO_PRESENTATION = "no-presentation"
+PRESENT_FIELDS = ("first_present_ms", "last_present_ms", "first_present_seq", "last_present_seq")
+
+
+def _phase_presentation_problems(phase: dict) -> list[str]:
+    """A phase's presentation trace: first and last presentation offsets and counts exactly when it presented a
+    frame (else present_missing no-presentation), first no later than last, and non-presenting redraws a count no
+    larger than its redraws."""
+    name, frames = phase.get("name"), phase.get("presented_frames")
+    present = [phase.get(key) for key in PRESENT_FIELDS]
+    problems = []
+    if _is_int(frames) and frames > 0:
+        if any(value is None for value in present) or "present_missing" in phase:
+            problems.append(f"phase {name!r} presented {frames} frames but does not record its first and last "
+                            "presentation")
+        elif not all(_finite_non_negative(value) for value in present) \
+                or not all(_is_int(value) for value in present[2:]):
+            problems.append(f"phase {name!r} presentation offsets and counts {present} are not finite non-negative "
+                            "numbers with integer counts")
+        elif present[0] > present[1] or present[2] > present[3]:
+            problems.append(f"phase {name!r} first presentation follows its last: {present}")
+    elif any(key in phase for key in PRESENT_FIELDS) or phase.get("present_missing") != NO_PRESENTATION:
+        problems.append(f"phase {name!r} presented no frame but does not record present_missing "
+                        f"{NO_PRESENTATION!r} alone")
+    skipped, redraws = phase.get("nonpresenting_redraws"), phase.get("redraw_requested")
+    if not _count_ok(skipped) or (_is_int(redraws) and skipped > redraws):
+        problems.append(f"phase {name!r} nonpresenting_redraws {skipped!r} is not a count of at most its "
+                        f"{redraws!r} redraws")
+    return problems
+
+
+def _phase_duration_problems(phase: dict) -> list[str]:
+    """A phase-kinds phase's durations: every dispatch and present interval and both CPU times finite and at least
+    zero, and its end no earlier than its start. A harness without the capability keeps its looser checks."""
+    name, problems = phase.get("name"), []
+    for key in ("dispatch_ms", "present_interval_ms"):
+        values = phase.get(key)
+        if isinstance(values, list) and not all(_finite_non_negative(value) for value in values):
+            problems.append(f"phase {name!r} {key} holds a value that is not finite and non-negative "
+                            "(phase-kinds harness)")
+    for key in ("cpu_user_s", "cpu_system_s"):
+        if key in phase and not _finite_non_negative(phase[key]):
+            problems.append(f"phase {name!r} {key} {phase[key]!r} is not finite and non-negative (phase-kinds harness)")
+    start, end = phase.get("start_unix_s"), phase.get("end_unix_s")
+    if _is_number(start) and _is_number(end) and not (math.isfinite(start) and math.isfinite(end) and end >= start):
+        problems.append(f"phase {name!r} ends before it starts: {start!r} to {end!r} (phase-kinds harness)")
+    return problems
+
+
+def phase_kind_problems(phases: Sequence[dict]) -> list[str]:
+    """Problems with a phase-kinds harness's phases: every phase has a known kind; a transition has a known
+    endpoint and exactly one of completion_ms (finite, at least 0) or a completion_missing reason valid for its
+    endpoint; a hold or sustained phase carries neither; and every phase records its presentation trace. Each
+    violation is a schema failure, never a fallback."""
+    problems = []
+    for phase in phases:
+        name, kind = phase.get("name"), phase.get("kind")
+        if kind not in PHASE_KINDS:
+            problems.append(f"phase {name!r} kind {kind!r} is not one of {PHASE_KINDS}")
+        elif kind == "transition":
+            endpoint = phase.get("endpoint")
+            has_ms, has_missing = "completion_ms" in phase, "completion_missing" in phase
+            if endpoint not in TRANSITION_ENDPOINTS:
+                problems.append(f"phase {name!r} endpoint {endpoint!r} is not a transition endpoint")
+            if has_ms == has_missing:
+                problems.append(f"phase {name!r} carries not exactly one of completion_ms and completion_missing")
+            elif has_ms and not _finite_non_negative(phase["completion_ms"]):
+                problems.append(f"phase {name!r} completion_ms {phase['completion_ms']!r} is not finite and "
+                                "non-negative")
+            elif has_missing:
+                allowed = ("expired", "incomplete")
+                if phase["completion_missing"] not in allowed:
+                    problems.append(f"phase {name!r} completion_missing {phase['completion_missing']!r} is not a "
+                                    f"reason for {endpoint}")
+        else:
+            for key in ("endpoint", "completion_ms", "completion_missing"):
+                if key in phase:
+                    problems.append(f"phase {name!r} is a {kind} phase but carries {key}")
+        problems.extend(_phase_presentation_problems(phase))
+        problems.extend(_phase_duration_problems(phase))
+    return problems
+
+
 def validate_result(data: object, harness_hash: str, process_exit_code: int | None, *,
                     counters: bool = False, partial_counters: bool = False,
-                    platform_name: str = "darwin", latency_split_schema: int | None = None) -> list[str]:
+                    platform_name: str = "darwin", latency_split_schema: int | None = None,
+                    phase_kinds: int | None = None) -> list[str]:
     """Check result.json against schema version 1; an empty list means it can be read.
 
     A result whose `managed` is not true, or whose harness hash differs from the one this
@@ -2313,6 +2402,9 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
                             for problem in frame_counter_problems(phase.get("frame_counters"), partial_counters))
         elif "frame_counters" in phase:
             problems.append(f"phase {name!r} carries frame_counters, but the gate is {state!r}")
+    if phase_kinds == 1:
+        # When: the harness classifies its phases, each phase's kind, endpoint and presentation trace is validated.
+        problems.extend(phase_kind_problems(phases))
     latency = data.get("latency")
     if latency is not None and not (isinstance(latency, dict) and latency_values(latency) is not None
                                     and _is_int(latency.get("attributed")) and _is_int(latency.get("total"))
@@ -2887,6 +2979,8 @@ class Scenario:
     run_caps: tuple[tuple[str, int], ...] = ()
     # The latency split schema the harness declares in `capabilities`; None for a harness that predates it.
     latency_split_schema: int | None = None
+    # The phase-kinds schema the harness declares; None for a harness that does not classify its phases.
+    phase_kinds: int | None = None
 
     def cap(self, variant: str) -> int | None:
         """This variant's short-mode run cap, or None when it has none."""
@@ -2969,21 +3063,28 @@ def log_tail(text: str, count: int = 12) -> str:
 
 # The latency split schemas this script can validate.
 LATENCY_SPLIT_SCHEMAS = (1,)
+# The phase-kind schemas this script can validate: every phase classified, transitions with endpoints, and each
+# phase's presentation trace.
+PHASE_KINDS_SCHEMAS = (1,)
+# Every capability a harness may declare, with the values this script can validate; the split schema is required.
+HARNESS_CAPABILITIES = {"latency_split_schema": LATENCY_SPLIT_SCHEMAS, "phase_kinds": PHASE_KINDS_SCHEMAS}
 
 
-def _latency_split_capability(data: dict) -> int | None:
-    """The list's `capabilities.latency_split_schema`: None when the list has no capabilities (a harness that
-    predates the split), else exactly a known schema; any other shape or value is refused, because a contract
-    this script does not know cannot be validated."""
+def _harness_capabilities(data: dict) -> dict:
+    """The list's capabilities: empty when the list has none (a harness that predates them), else a map of known
+    keys, the split schema among them, each with a known integer value; any other shape, key or value is
+    refused, because a contract this script does not know cannot be validated."""
     if "capabilities" not in data:
-        return None
+        return {}
     capabilities = data["capabilities"]
-    if not isinstance(capabilities, dict) or set(capabilities) != {"latency_split_schema"}:
-        raise ValueError(f"scenario list capabilities {capabilities!r} are not {{'latency_split_schema': 1}}")
-    schema = capabilities["latency_split_schema"]
-    if not _is_int(schema) or schema not in LATENCY_SPLIT_SCHEMAS:
-        raise ValueError(f"scenario list latency_split_schema is {schema!r}, not one of {LATENCY_SPLIT_SCHEMAS}")
-    return schema
+    if not isinstance(capabilities, dict) or "latency_split_schema" not in capabilities \
+            or not set(capabilities) <= set(HARNESS_CAPABILITIES):
+        raise ValueError(f"scenario list capabilities {capabilities!r} are not a map of "
+                         f"{sorted(HARNESS_CAPABILITIES)} with latency_split_schema")
+    for name, value in capabilities.items():
+        if not _is_int(value) or value not in HARNESS_CAPABILITIES[name]:
+            raise ValueError(f"scenario list {name} is {value!r}, not one of {HARNESS_CAPABILITIES[name]}")
+    return dict(capabilities)
 
 
 def parse_scenario_list(text: str) -> list[Scenario]:
@@ -3003,7 +3104,7 @@ def parse_scenario_list(text: str) -> list[Scenario]:
         raise ValueError("the harness printed no scenario list")
     if not _is_int(data.get("schema_version")) or data["schema_version"] != SCHEMA_VERSION:
         raise ValueError(f"scenario list schema_version is {data.get('schema_version')!r}")
-    split_schema = _latency_split_capability(data)
+    capabilities = _harness_capabilities(data)
     entries = data.get("scenarios")
     if not isinstance(entries, list) or not entries:
         raise ValueError("the scenario list is empty")
@@ -3021,7 +3122,8 @@ def parse_scenario_list(text: str) -> list[Scenario]:
         if caps is None:
             raise ValueError(f"malformed scenario entry {entry!r}")
         scenarios.append(Scenario(entry["id"], tuple(variants), entry["title"], entry["timeout_s"],
-                                  entry["short_timeout_s"], caps, split_schema))
+                                  entry["short_timeout_s"], caps, capabilities.get("latency_split_schema"),
+                                  capabilities.get("phase_kinds")))
     if len({scenario.id for scenario in scenarios}) != len(scenarios):
         raise ValueError("the scenario list repeats an id")
     return scenarios
@@ -3606,6 +3708,8 @@ class RunPlan:
     source_root: Path = ROOT
     # The head harness's latency split schema; both sides run that harness, so both are held to it.
     latency_split_schema: int | None = None
+    # The head harness's phase-kinds schema; both sides run that harness, so both are held to it.
+    phase_kinds: int | None = None
 
 
 @dataclass
@@ -4031,7 +4135,8 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                 # A base may predate a contract field; the head is the contract under test.
                 schema = validate_result(parsed, plan.harness_hash, exit_code, counters=plan.counters,
                                          partial_counters=plan.side == "base", platform_name=host.platform,
-                                         latency_split_schema=plan.latency_split_schema)
+                                         latency_split_schema=plan.latency_split_schema,
+                                         phase_kinds=plan.phase_kinds)
             data = parsed if isinstance(parsed, dict) else None
     if host.platform == "win32":
         focus = judge_foreground(sampler.readings, user_session=has_user_session(host.environ))
@@ -4198,6 +4303,30 @@ def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
                 metrics[(f"{name} presented frames", "count", "run")] = phase["presented_frames"]
             if _is_int(phase.get("redraw_requested")):
                 metrics[(f"{name} redraws requested", "count", "run")] = phase["redraw_requested"]
+            if _is_number(phase.get("cpu_user_s")) and _is_number(phase.get("cpu_system_s")):
+                metrics[(f"{name} CPU", "s", "run")] = phase["cpu_user_s"] + phase["cpu_system_s"]
+            continue
+        kind = phase.get("kind")
+        if kind == "hold":
+            # A hold is idle by design: its seconds and activity counts, never a rate, an interval or a completion.
+            if wall_s is not None:
+                del metrics[(f"{name} wall", "s", "run")]
+                metrics[(f"{name} hold", "s", "run")] = wall_s
+            for key, label in (("presented_frames", "presented frames"), ("redraw_requested", "redraws requested")):
+                if _is_int(phase.get(key)):
+                    metrics[(f"{name} {label}", "count", "run")] = phase[key]
+            if _is_number(phase.get("cpu_user_s")) and _is_number(phase.get("cpu_system_s")):
+                metrics[(f"{name} CPU", "s", "run")] = phase["cpu_user_s"] + phase["cpu_system_s"]
+            continue
+        if kind == "transition":
+            # A transition ends at its endpoint, so a rate or an interval percentile over it means nothing; its
+            # completion has its own per-run rows (transition_rows), and these are its presentation counts.
+            if _is_number(phase.get("first_present_ms")):
+                metrics[(f"{name} first present", "ms", "run")] = phase["first_present_ms"]
+            for key, label in (("presented_frames", "presented frames"),
+                               ("nonpresenting_redraws", "non-presenting redraws")):
+                if _is_int(phase.get(key)):
+                    metrics[(f"{name} {label}", "count", "run")] = phase[key]
             if _is_number(phase.get("cpu_user_s")) and _is_number(phase.get("cpu_system_s")):
                 metrics[(f"{name} CPU", "s", "run")] = phase["cpu_user_s"] + phase["cpu_system_s"]
             continue
@@ -4744,10 +4873,183 @@ def blocked_set_results(label: str, reason: str, set_names: Sequence[str]) -> li
     return [SetResult(label, set_name, SideRuns(blocked=reason), SideRuns(blocked=reason)) for set_name in set_names]
 
 
+def _transition_phase(outcome: RunOutcome, name: str) -> dict | None:
+    """The run's transition phase `name`, or None when the run has none."""
+    for phase in (outcome.result or {}).get("phases") or []:
+        if isinstance(phase, dict) and phase.get("name") == name and phase.get("kind") == "transition":
+            return phase
+    return None
+
+
+def _completion_cell(side: SideRuns, name: str) -> tuple[str, float | None]:
+    """A side's completion cell for transition `name`: the median and range of the runs that completed, how many
+    contributed, `single observation` when exactly one did, then every accepted run's value or missing reason
+    keyed by its run id; and the median for the change column."""
+    if side.blocked or side.failed or not side.outcomes:
+        return _missing_cell(side), None
+    entries, values = [], []
+    for outcome in side.outcomes:
+        run_id = Path(outcome.evidence).name
+        phase = _transition_phase(outcome, name)
+        if phase is not None and _finite_non_negative(phase.get("completion_ms")):
+            values.append(phase["completion_ms"])
+            entries.append(f"{run_id} {phase['completion_ms']:.2f}")
+        else:
+            reason = (phase or {}).get("completion_missing") or "not recorded"
+            entries.append(f"{run_id} n/a: {reason}")
+    summary = run_summary(values)
+    text = "n/a" if summary is None else f"{summary.median:.2f} ({summary.minimum:.2f}–{summary.maximum:.2f})"
+    text += f", {len(values)}/{len(side.outcomes)} runs" + (", single observation" if len(values) == 1 else "")
+    return f"{text}; {', '.join(entries)}", None if summary is None else summary.median
+
+
+def transition_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
+    """One completion row per transition phase either side ran, listing every accepted run."""
+    names: list[str] = []
+    for side in (base, head):
+        for outcome in side.outcomes:
+            for phase in (outcome.result or {}).get("phases") or []:
+                if isinstance(phase, dict) and phase.get("kind") == "transition" and phase.get("name") not in names:
+                    names.append(phase.get("name"))
+    rows = []
+    for name in names:
+        (base_cell, base_median), (head_cell, head_median) = (_completion_cell(base, name),
+                                                              _completion_cell(head, name))
+        rows.append([label, f"{name} completion (ms)", base_cell, head_cell, percent_change(base_median, head_median)])
+    return rows
+
+
+# --- Candidate flags ------------------------------------------------------------------------
+
+# Bumped whenever a flag metric, statistic or rule changes; perf-flags.py refuses runs whose versions differ.
+FLAG_METRICS_VERSION = 1
+# The direction in which each flag metric worsens. A metric absent here is never checked.
+FLAG_DIRECTIONS = {"latency": "higher", "completion": "higher", "present interval": "higher",
+                   "fps": "lower", "throughput": "lower"}
+# Sample metrics pool their samples; scalar metrics hold one value per run.
+FLAG_SAMPLE_METRICS = ("latency", "present interval")
+
+
+@dataclass(frozen=True)
+class FlagCheck:
+    """One candidate-flag check: the base's per-run range of a statistic, the head's value, and whether the head
+    lies beyond the range in the worsening direction. Samples count attributed keypresses for latency, intervals
+    for interval rows, and runs for scalar metrics."""
+
+    label: str
+    dataset: str
+    phase: str
+    metric: str
+    statistic: str
+    direction: str
+    base_low: float
+    base_high: float
+    head_value: float
+    base_samples: int
+    head_samples: int
+    flagged: bool
+
+
+def flag_values(result: Mapping | None) -> dict[tuple[str, str], object]:
+    """One accepted run's flag inputs keyed (phase, metric): sample lists or one scalar. A harness without phase
+    kinds contributes nothing, and a hold contributes nothing."""
+    phases = (result or {}).get("phases")
+    if not isinstance(phases, list) or not phases \
+            or not all(isinstance(phase, dict) and phase.get("kind") in PHASE_KINDS for phase in phases):
+        return {}
+    values: dict[tuple[str, str], object] = {}
+    for phase in phases:
+        name = phase.get("name")
+        if phase["kind"] == "sustained":
+            if _numbers(phase.get("present_interval_ms")) and phase["present_interval_ms"]:
+                values[(name, "present interval")] = list(phase["present_interval_ms"])
+            start, end = phase.get("start_unix_s"), phase.get("end_unix_s")
+            if _is_number(start) and _is_number(end) and end > start and _is_int(phase.get("presented_frames")):
+                values[(name, "fps")] = phase["presented_frames"] / (end - start)
+        elif phase["kind"] == "transition" and _finite_non_negative(phase.get("completion_ms")):
+            values[(name, "completion")] = phase["completion_ms"]
+    attributed = latency_values(result.get("latency"))
+    if attributed:
+        values[("", "latency")] = attributed
+    throughput = result.get("throughput")
+    if isinstance(throughput, dict) and _is_number(throughput.get("seconds")) and throughput["seconds"] > 0 \
+            and _is_int(throughput.get("bytes")):
+        values[("", "throughput")] = throughput["bytes"] / throughput["seconds"] / 1_000_000
+    return values
+
+
+def unclassified_result(result) -> bool:
+    """Whether an accepted run of either side comes from a harness without phase kinds: its rows then go to the
+    report's separate unclassified block, and it contributes no candidate flag."""
+    for side in (result.base, result.head):
+        for outcome in side.outcomes:
+            phases = (outcome.result or {}).get("phases")
+            if not isinstance(phases, list) or not all(isinstance(phase, dict) and phase.get("kind") in PHASE_KINDS
+                                                       for phase in phases):
+                return True
+    return False
+
+
+def flag_checks(results: Iterable) -> list[FlagCheck]:
+    """Every candidate-flag check of the accepted runs in `results`. A sample metric's pooled head statistic is
+    read against the base's per-run range of the same statistic; a scalar metric's head median against the base's
+    per-run range. A head beyond the range in the worsening direction is flagged; an improvement never is."""
+    checks = []
+    for result in results:
+        if unclassified_result(result):
+            # When: any run of the set is unkinded, the set is reported only as unclassified, never by kind.
+            continue
+        sides = [[flag_values(outcome.result) for outcome in side.outcomes] if not side.blocked else []
+                 for side in (result.base, result.head)]
+        keys: list[tuple[str, str]] = []
+        for per_run in sides[0] + sides[1]:
+            keys.extend(key for key in per_run if key not in keys)
+        for key in keys:
+            direction = FLAG_DIRECTIONS.get(key[1])
+            base_values, head_values = ([per_run[key] for per_run in side if key in per_run] for side in sides)
+            if direction is None or not base_values or not head_values:
+                # When: the metric has no direction or a side lacks it, there is no comparison to make.
+                continue
+            if key[1] in FLAG_SAMPLE_METRICS:
+                pooled = [value for samples in head_values for value in samples]
+                compared = [(statistic, [measure(samples) for samples in base_values], measure(pooled),
+                             sum(map(len, base_values)), len(pooled))
+                            for statistic, measure in (("median", median), ("p95", percentile_95))]
+            else:
+                compared = [("median", base_values, median(head_values), len(base_values), len(head_values))]
+            for statistic, base_stats, head_value, base_count, head_count in compared:
+                low, high = min(base_stats), max(base_stats)
+                flagged = head_value > high if direction == "higher" else head_value < low
+                checks.append(FlagCheck(result.label, result.set_name, key[0], key[1], statistic, direction, low,
+                                        high, head_value, base_count, head_count, flagged))
+    return checks
+
+
+COUNTERS_ONLY_NOTE = ("These variants run only in the counters set, so their phases are reported by kind from those "
+                      "runs, with the gate forced on; read them against each other, never against a timed row.")
+UNCLASSIFIED_NOTE = ("These scenarios ran a harness that records no phase kinds, so their phases cannot be read as "
+                     "sustained, transition or hold; their rows are kept here as recorded and never enter the "
+                     "candidate flags.")
+FLAG_HEADER = ("| Scenario | Dataset | Phase | Metric | Statistic | Baseline range | PR | Direction |\n"
+               "| --- | --- | --- | --- | --- | --- | --- | --- |\n")
+FLAG_NOTE = ("A check reads the PR against the baseline's per-run range of the same statistic, over accepted runs "
+             "only; a value beyond it in the worsening direction is a candidate, never a verdict. Holds are never "
+             "checked.")
+
+
+def flag_rows(checks: Iterable[FlagCheck]) -> list[list[str]]:
+    """The Candidate flags table: one row per flagged check."""
+    return [[check.label, check.dataset, check.phase, check.metric, check.statistic,
+             f"{check.base_low:.2f}–{check.base_high:.2f}", f"{check.head_value:.2f}", f"{check.direction} is worse"]
+            for check in checks if check.flagged]
+
+
 def comparison_rows(label: str, base: SideRuns, head: SideRuns,
                     include: Callable[[tuple[str, str, str]], bool] | None = None) -> list[list[str]]:
     """Rows of the PR table for one scenario, with the latency attribution row where latency was measured."""
     rows = _rows(label, base, head, run_metrics, include)
+    if include is None:
+        rows.extend(transition_rows(label, base, head))
     coverage = [latency_coverage(side) for side in (base, head)]
     if include is None and any(coverage):
         cells = [_missing_cell(side) if side.blocked or pair is None else
@@ -5551,6 +5853,61 @@ def attempt_split_details(label: str, base: SideRuns, head: SideRuns) -> list[st
     return lines
 
 
+# Each attempt directory's final classification, written once the set's checks have run: perf-flags binds a
+# set's accepted attempts to it.
+CLASSIFICATION_FILE = "classification.json"
+
+
+def host_platform(platform_name: str = sys.platform) -> str:
+    """A host's platform key for its sys.platform: `macos`, `windows`, or the name itself."""
+    return {"darwin": "macos", "win32": "windows"}.get(platform_name, platform_name)
+
+
+RUN_IDENTITY_FILE = "run-identity.json"
+RUN_IDENTITY_SCHEMA = 1
+
+
+def listed_capabilities(scenarios: Sequence[Scenario]) -> dict:
+    """The capabilities the head's list declared; every scenario of one list carries the same ones."""
+    first = scenarios[0] if scenarios else None
+    return {"latency_split_schema": getattr(first, "latency_split_schema", None),
+            "phase_kinds": getattr(first, "phase_kinds", None)}
+
+
+def run_inventory(results: Iterable[SetResult]) -> list[dict]:
+    """Each set's final inventory: per side its blocked or failed status and the attempt directories whose runs it
+    accepted. A side that ended blocked or failed accepts none, whatever valid attempts it had."""
+    inventory = []
+    for result in results:
+        entry = {"label": result.label, "dataset": result.set_name}
+        for side_name in SIDES:
+            side = getattr(result, side_name)
+            status = side.blocked or side.failed or ""
+            valid = [Path(evidence).name for name, evidence, kind, _why in result.attempts
+                     if name == side_name and kind == "valid"]
+            # run_set appends a side's outcome exactly when its attempt ends valid, so the two lists align in order.
+            accepted = [] if status else [name for name, _outcome in zip(valid, side.outcomes)]
+            entry[side_name] = {"status": status, "accepted": accepted}
+        inventory.append(entry)
+    return inventory
+
+
+def run_identity_document(shas: Mapping[str, str], harness_hash: str, features: Mapping[str, Sequence[str]],
+                          short: bool, profile: Mapping, counters: bool, environ: Mapping[str, str],
+                          results: Iterable[SetResult] = (), capabilities: Mapping | None = None) -> dict:
+    """run-identity.json: the run, refs, harness, settings and flag-metric definitions perf-flags.py binds each
+    artifact's accepted runs to, every set's final inventory of accepted attempts, and the capabilities the head's
+    list declared, which both sides were validated under."""
+    attempt = environ.get("GITHUB_RUN_ATTEMPT", "")
+    return {"schema_version": RUN_IDENTITY_SCHEMA, "run_id": environ.get("GITHUB_RUN_ID", ""),
+            "run_attempt": int(attempt) if attempt.isdigit() else 0, "platform": host_platform(),
+            "base_sha": shas["base"], "head_sha": shas["head"], "harness_hash": harness_hash,
+            "settings": {"short": bool(short), "counters": bool(counters),
+                         "features": {side: sorted(features[side]) for side in SIDES}, "profile": dict(profile)},
+            "flag_metrics_version": FLAG_METRICS_VERSION, "sets": run_inventory(results),
+            "capabilities": dict(capabilities or {"latency_split_schema": None, "phase_kinds": None})}
+
+
 def render_table(rows: Iterable[Sequence[str]], header: str = TABLE_HEADER) -> str:
     """Render rows as a Markdown table under `header`; a `|` or newline in a cell cannot break it."""
     def cell(text: str) -> str:
@@ -5649,7 +6006,8 @@ def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: s
         name = case.name
         plan = RunPlan(scenarios[case.scenario], case.variant, "smoke", binary, harness_hash, short=True,
                        smoke=True, kill_at_go=case.kill_at_go, source_root=ROOT,
-                       latency_split_schema=scenarios[case.scenario].latency_split_schema)
+                       latency_split_schema=scenarios[case.scenario].latency_split_schema,
+                       phase_kinds=scenarios[case.scenario].phase_kinds)
         reasons: list[str] = []
         for attempt in range(1, RETRY_LIMIT + 2):
             # A variant's `/` would make a subdirectory, so evidence names use `-`.
@@ -5915,6 +6273,10 @@ def run_set(label: str, plans: Mapping[str, RunPlan], base_blocked: str | None, 
                     reference_presenter = presenter
                 display.learn(measured)
         result.attempts.append((side, str(run_evidence), kind, why))
+        if run_evidence.is_dir():
+            # outcome.json is written before the set's grid, display, renderer and presenter checks; this is the
+            # attempt's final classification, which perf-flags binds a set's accepted attempts to.
+            _write_json(run_evidence / CLASSIFICATION_FILE, {"side": side, "kind": kind, "reasons": list(why)})
         print(f"[perf-compare] {label} {set_name} {side} run {attempt}: {kind}"
               + (f": {'; '.join(why)}" if why else ""), flush=True)
         verdict = compare_verdict(kind)
@@ -6273,7 +6635,10 @@ def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequen
                         alloc_rows: Sequence[Sequence[str]], host_lines: Sequence[str],
                         detail_lines: Sequence[str], *, counter_rows: Sequence[Sequence[str]] = (),
                         counters_note: str = "", overhead_rows: Sequence[Sequence[str]] = (),
-                        capped_note: str = "", recovery_rows: Sequence[Sequence[str]] = ()) -> str:
+                        capped_note: str = "", recovery_rows: Sequence[Sequence[str]] = (),
+                        flag_checks: Sequence[FlagCheck] | None = None,
+                        unclassified_rows: Sequence[Sequence[str]] = (),
+                        counters_only_rows: Sequence[Sequence[str]] = ()) -> str:
     """Assemble comparison.md: the PR table, the laps, counters, overhead and allocation tables when run,
     the host block and details.
 
@@ -6282,6 +6647,17 @@ def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequen
     """
     parts = ["## Performance comparison\n\n" + render_table(rows)
              + (f"\n{capped_note}\n" if capped_note else "")]
+    if counters_only_rows:
+        parts.append("### Counters-only workloads (`--counters` runs, never pooled with timed runs)\n\n"
+                     f"{COUNTERS_ONLY_NOTE}\n\n" + render_table(counters_only_rows))
+    if unclassified_rows:
+        parts.append(f"### Unclassified (older harness)\n\n{UNCLASSIFIED_NOTE}\n\n" + render_table(unclassified_rows))
+    if flag_checks:
+        # When: a phase-kinds harness was checked, the section lists its flags or says none was raised.
+        flagged = flag_rows(flag_checks)
+        parts.append(f"### Candidate flags\n\n{FLAG_NOTE}\n\n"
+                     + (render_table(flagged, FLAG_HEADER) if flagged
+                        else f"None of the {len(flag_checks)} checks is flagged.\n"))
     if lap_rows:
         parts.append("### Laps (`--laps` runs, never pooled with timed runs)\n\n" + render_table(lap_rows))
     if counter_rows or counters_note:
@@ -6764,7 +7140,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             plans = {side: RunPlan(by_id[scenario_id], variant, side,
                                    built[side] if isinstance(built[side], Path) else Path("unbuilt"),
                                    digest, short=args.short, laps=laps, counters=counters, source_root=trees[side],
-                                   latency_split_schema=by_id[scenario_id].latency_split_schema)
+                                   latency_split_schema=by_id[scenario_id].latency_split_schema,
+                                   phase_kinds=by_id[scenario_id].phase_kinds)
                      for side in SIDES}
             base_blocked = built["base"] if isinstance(built["base"], str) else None
             if counters and not supports["base"]:
@@ -6777,6 +7154,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             results.append(result)
     marks["measure_end"] = time.time()
     timed_rows, lap_rows, alloc_rows, counters_table, overhead = [], [], [], [], []
+    unclassified_rows: list[list[str]] = []
+    counters_only_rows: list[list[str]] = []
     recovery_rows: list[list[str]] = []
     split_details: list[str] = []
     timed_heads: dict[str, SideRuns] = {}
@@ -6786,14 +7165,23 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         # Lookups stay keyed by the plain label; only the rows carry the cap.
         shown = capped_label(result)
         if result.set_name == "timed":
-            timed_rows.extend(comparison_rows(shown, result.base, result.head))
+            # An older harness's rows cannot be read by kind, so they leave the main table for their own block.
+            destination = unclassified_rows if unclassified_result(result) else timed_rows
+            destination.extend(comparison_rows(shown, result.base, result.head))
             timed_heads[result.label] = result.head
             if result.label in deliveries:
-                timed_rows.extend(delivery_rows(result.label, *deliveries[result.label]))
+                destination.extend(delivery_rows(result.label, *deliveries[result.label]))
         elif result.set_name == "laps":
             lap_rows.extend(laps_rows(shown, result.base, result.head))
             lap_rows.extend(fallback_rows(shown, result.base, result.head))
         elif result.set_name == "counters":
+            if tuple(result.label.split("/", 1)) in COUNTERS_ONLY_VARIANTS:
+                # When: the variant runs only in the counters set, its kind-aware rows come from these runs, in
+                # their own section; an older harness's go to the unclassified block, labelled with the dataset.
+                if unclassified_result(result):
+                    unclassified_rows.extend(comparison_rows(f"{shown} [counters]", result.base, result.head))
+                else:
+                    counters_only_rows.extend(comparison_rows(shown, result.base, result.head))
             rows, left_out = counter_rows(shown, result.base, result.head)
             counters_table.extend(rows)
             recovery_rows.extend(atlas_recovery_rows(result.label, result.base, result.head))
@@ -6856,12 +7244,19 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         details += ["", "Per-run render-attempt splits (phases with a render attempt):", ""] + split_details
     document = comparison_document(timed_rows, lap_rows, alloc_rows, host_lines, details,
                                    counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead,
-                                   capped_note=capped_note, recovery_rows=recovery_rows)
+                                   capped_note=capped_note, recovery_rows=recovery_rows,
+                                   flag_checks=flag_checks(results), unclassified_rows=unclassified_rows,
+                                   counters_only_rows=counters_only_rows)
     problems = strict_problems(results) if args.require_base else []
     if problems:
         # The first line says the table is partial, so nobody reads a head-only table as a comparison.
         document = f"**Incomplete comparison:** {'; '.join(problems)}\n\n" + document
     (out / "comparison.md").write_text(document, encoding="utf-8")
+    profile = {"lto": {side: release_lto(trees[side], os.environ) for side in SIDES},
+               "overrides": release_profile_overrides(os.environ)}
+    _write_json(out / RUN_IDENTITY_FILE, run_identity_document(shas, digest, features, args.short, profile,
+                                                               args.counters, os.environ, results,
+                                                               listed_capabilities(scenarios)))
     marks["report_written"] = time.time()
     write_timing(out, marks, os.environ)
     print(document, flush=True)

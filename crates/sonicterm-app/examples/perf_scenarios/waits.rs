@@ -314,6 +314,8 @@ pub(crate) struct ImagePresent {
     redraw_owed: bool,
     /// A frame presented after the sighting.
     presented: bool,
+    /// The end of the first presenting dispatch after the sighting.
+    presented_at: Option<Instant>,
 }
 
 impl ImagePresent {
@@ -332,11 +334,18 @@ impl ImagePresent {
         self.seen.is_some()
     }
 
-    /// The presented-frame count after a dispatch; a count past the sighting's shows the image.
-    pub(crate) fn observe_frames(&mut self, frames: u64) {
+    /// The presented-frame count after a dispatch that ended at `ended`; a count past the
+    /// sighting's shows the image, and the first such dispatch's end is kept.
+    pub(crate) fn observe_frames(&mut self, frames: u64, ended: Instant) {
         if self.seen.is_some_and(|(_, frames_at_sighting)| frames > frames_at_sighting) {
             self.presented = true;
+            self.presented_at.get_or_insert(ended);
         }
+    }
+
+    /// The end of the first presenting dispatch after the sighting, if one presented.
+    pub(crate) fn presented_at(&self) -> Option<Instant> {
+        self.presented_at
     }
 
     /// Whether to request the owed redraw now; true at most once per sighting.

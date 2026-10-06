@@ -58,7 +58,13 @@
               2.0
             ],
             "end_unix_s": 1000.0,
+            "first_present_ms": 16.6,
+            "first_present_seq": 1,
+            "kind": "sustained",
+            "last_present_ms": 9990.0,
+            "last_present_seq": 120,
             "name": "workload",
+            "nonpresenting_redraws": 10,
             "present_interval_ms": [
               16.6
             ],
@@ -141,7 +147,13 @@
               2.0
             ],
             "end_unix_s": 1000.0,
+            "first_present_ms": 16.6,
+            "first_present_seq": 1,
+            "kind": "sustained",
+            "last_present_ms": 9990.0,
+            "last_present_seq": 120,
             "name": "workload",
+            "nonpresenting_redraws": 10,
             "present_interval_ms": [
               16.6
             ],
@@ -227,7 +239,13 @@
               2.0
             ],
             "end_unix_s": 1000.0,
+            "first_present_ms": 16.6,
+            "first_present_seq": 1,
+            "kind": "sustained",
+            "last_present_ms": 9990.0,
+            "last_present_seq": 120,
             "name": "workload",
+            "nonpresenting_redraws": 10,
             "present_interval_ms": [
               16.6
             ],
@@ -306,7 +324,13 @@
               2.0
             ],
             "end_unix_s": 1000.0,
+            "first_present_ms": 16.6,
+            "first_present_seq": 1,
+            "kind": "sustained",
+            "last_present_ms": 9990.0,
+            "last_present_seq": 120,
             "name": "workload",
+            "nonpresenting_redraws": 10,
             "present_interval_ms": [
               16.6
             ],
@@ -385,7 +409,13 @@
               2.0
             ],
             "end_unix_s": 1000.0,
+            "first_present_ms": 16.6,
+            "first_present_seq": 1,
+            "kind": "sustained",
+            "last_present_ms": 9990.0,
+            "last_present_seq": 120,
             "name": "workload",
+            "nonpresenting_redraws": 10,
             "present_interval_ms": [
               16.6
             ],
@@ -462,7 +492,13 @@
               2.0
             ],
             "end_unix_s": 1000.0,
+            "first_present_ms": 16.6,
+            "first_present_seq": 1,
+            "kind": "sustained",
+            "last_present_ms": 9990.0,
+            "last_present_seq": 120,
             "name": "workload",
+            "nonpresenting_redraws": 10,
             "present_interval_ms": [
               16.6
             ],
