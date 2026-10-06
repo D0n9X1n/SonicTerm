@@ -2933,21 +2933,59 @@ def tree_harness_hash(root: Path) -> str:
 
 
 def tree_harness_cfgs(root: Path, table: Sequence) -> tuple[str, ...]:
-    """The harness API cfgs whose every method `root` defines in its owning crate's source, in table order.
+    """The harness API cfgs whose every method `root` defines for its owner type in its owning crate, in table order.
 
-    A method counts only as `pub fn <name>` at a line start in code, with comments and strings blanked
-    (`rust_code_only`); a unit-test file (`*_tests.rs`) is not part of the harness build. Finding the source does
-    not prove the signature or the target."""
+    A method counts only as a `pub fn <name>` inside an inherent `impl <Owner>` block (a path-qualified owner
+    counts; a trait impl does not), in code with comments and strings blanked (`rust_code_only`). Test-only code
+    does not count: a `*_tests.rs` file, a file under `#![cfg(test)]`, and an impl or module under `#[cfg(test)]`.
+    Finding such a definition does not prove its signature or that the build's target compiles it."""
     enabled = []
     for entry in table:
-        if all(_crate_defines(root / crate, name) for crate, name in entry.methods):
+        if all(_crate_defines(root / crate, owner, name) for crate, owner, name in entry.methods):
             enabled.append(entry.name)
     return tuple(enabled)
 
 
-def _crate_defines(directory: Path, name: str) -> bool:
-    """Whether some source file under `directory`, outside unit-test files, defines `pub fn name` in code."""
-    pattern = re.compile(rf"^\s*pub fn {re.escape(name)}\b", re.M)
+_IMPL_HEADER = re.compile(r"^[ \t]*impl\b([^{;]*)\{", re.M)
+_MOD_HEADER = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{", re.M)
+_CFG_TEST = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+_FILE_CFG_TEST = re.compile(r"#\s*!\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+# The attributes directly above an item: `#[...]` groups (one level of nested brackets), separated by whitespace.
+_TRAILING_ATTRIBUTES = re.compile(r"(?:#\s*\[(?:[^\[\]]|\[[^\[\]]*\])*\]\s*)*$")
+
+
+def _block_end(code: str, open_brace: int) -> int:
+    """The index just past the brace that closes the one at `open_brace`, in comment- and string-free code."""
+    depth = 0
+    for index in range(open_brace, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return len(code)
+
+
+def _under_cfg_test(code: str, item_start: int) -> bool:
+    """Whether the attributes directly above the item at `item_start` include `#[cfg(test)]`."""
+    attributes = _TRAILING_ATTRIBUTES.search(code[:item_start].rstrip())
+    return attributes is not None and _CFG_TEST.search(attributes.group()) is not None
+
+
+def _impl_owner(header: str) -> str | None:
+    """The owner type an `impl` header names, its last path segment without generics; None for a trait impl."""
+    header = re.split(r"\bwhere\b", header, maxsplit=1)[0]
+    if re.search(r"\bfor\b", header):
+        return None
+    header = re.sub(r"^\s*<[^>]*>", "", header).strip()
+    return header.split("<", 1)[0].strip().split("::")[-1].strip() or None
+
+
+def _crate_defines(directory: Path, owner: str, name: str) -> bool:
+    """Whether some non-test source file under `directory` defines `pub fn name` in an inherent `impl owner` block
+    outside test-only modules and impls."""
+    method = re.compile(rf"^\s*pub\s+fn\s+{re.escape(name)}\b", re.M)
     for source in sorted(directory.rglob("*.rs")):
         if source.name.endswith("_tests.rs"):
             continue
@@ -2955,8 +2993,18 @@ def _crate_defines(directory: Path, name: str) -> bool:
             code = rust_code_only(source.read_bytes().decode("utf-8"))
         except (OSError, UnicodeDecodeError):
             continue  # An unreadable file cannot define the method.
-        if pattern.search(code):
-            return True
+        if _FILE_CFG_TEST.search(code):
+            continue
+        test_modules = [range(found.start(), _block_end(code, found.end() - 1))
+                        for found in _MOD_HEADER.finditer(code) if _under_cfg_test(code, found.start())]
+        for header in _IMPL_HEADER.finditer(code):
+            if _impl_owner(header.group(1)) != owner or _under_cfg_test(code, header.start()):
+                continue
+            if any(header.start() in span for span in test_modules):
+                continue
+            body = code[header.end() - 1:_block_end(code, header.end() - 1)]
+            if method.search(body):
+                return True
     return False
 
 

@@ -170,16 +170,22 @@ The harness also calls App and renderer methods that older trees lack. Each
 such call sits behind a harness API cfg, one entry of `HARNESS_API_CFGS` in
 `scripts/local-gate.py`; the only entry is `perf_atlas_retry_api`, for the four
 methods S1/atlas-retry's driver needs. Before building, perf-compare looks for
-each entry's methods in their owning crates' source of both trees, ignoring
-comments, strings and `*_tests.rs` files. An entry is on for both sides only
-when both trees define all its methods, and off for both otherwise, so a base
-never inherits the head's API. None is a Cargo feature, and the feature
+each entry's methods in both trees: each must be a `pub fn` inside an inherent
+`impl` block of its declared owner type (`GpuRenderer` or `App`) in its owning
+crate. Comments, strings, trait impls, `*_tests.rs` files and code under
+`#[cfg(test)]` or `#![cfg(test)]` do not count. A match is source evidence, not
+proof that the method's signature or the build's target compiles it; the build
+that follows still fails closed. An entry is on for both sides only when both
+trees define all its methods, and off for both otherwise, so a base never
+inherits the head's API. None is a Cargo feature, and the feature
 selection does not change. The gate composes each comparison build's compiler
 flags at launch from what the build inherits: `CARGO_ENCODED_RUSTFLAGS` when
 set, otherwise `RUSTFLAGS` split on spaces (never both), followed by
 `--check-cfg cfg(<name>)` for every entry and `--cfg <name>` for each entry that
 is on. An inherited flag that sets an entry the decision leaves off, or sets it
-to a value, refuses the build. The decision and the composed flags are in the
+to a value, refuses the build; the cfg spec is read as rustc reads it, so
+`--cfg X` and `--cfg=X`, whitespace around the spec, a raw identifier and a
+`X="v"` form are all recognized, in either source. The decision and the composed flags are in the
 details and the build identity, and a prebuilt manifest with others is refused.
 The local gate reviews every feature set's builds once for each subset of the
 table.

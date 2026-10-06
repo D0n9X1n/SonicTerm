@@ -2779,6 +2779,34 @@ class HarnessFlagTests(unittest.TestCase):
                                                               ("perf_atlas_retry_api",)))
         self.assertEqual(gate.compose_harness_rustflags({"RUSTFLAGS": "--cfg other"}, ())[:2], ["--cfg", "other"])
 
+    def test_every_spelling_of_an_owned_cfg_is_read_as_rustc_reads_it(self):
+        # rustc sets the cfg for `--cfg X` and `--cfg=X` whatever whitespace surrounds the spec, and for a raw
+        # identifier, so each spelling, encoded or plain, is refused when the decision is off; a value form is
+        # refused either way, and a spelling that only names the cfg is accepted when the decision is on.
+        owned = "perf_atlas_retry_api"
+        encoded = ["--cfg\x1f perf_atlas_retry_api", "--cfg\x1fperf_atlas_retry_api ", "--cfg\x1fperf_atlas_retry_api\t",
+                   "--cfg= perf_atlas_retry_api", "--cfg=perf_atlas_retry_api\t", "--cfg=\tperf_atlas_retry_api \t",
+                   "--cfg\x1fr#perf_atlas_retry_api", '--cfg\x1fperf_atlas_retry_api = "1"',
+                   '--cfg=perf_atlas_retry_api="1"']
+        plain = ["--cfg=perf_atlas_retry_api\t", "--cfg r#perf_atlas_retry_api", "--cfg\tperf_atlas_retry_api"]
+        # A spec rustc cannot parse but that names an owned cfg is read as setting it with a value: refused always.
+        unparsed = [{"CARGO_ENCODED_RUSTFLAGS": "--cfg=perf_atlas_retry_api!"}, {"RUSTFLAGS": "--cfg=(perf_atlas_retry_api)"}]
+        for environ in unparsed:
+            for enabled in ((), (owned,)):
+                with self.subTest(unparsed=environ, enabled=enabled), self.assertRaises(gate.HarnessFlagConflict):
+                    gate.compose_harness_rustflags(environ, enabled)
+        cases = [{"CARGO_ENCODED_RUSTFLAGS": flags} for flags in encoded] + [{"RUSTFLAGS": flags} for flags in plain]
+        for environ in cases:
+            with self.subTest(environ=environ), self.assertRaises(gate.HarnessFlagConflict):
+                gate.compose_harness_rustflags(environ, ())
+        for environ in cases[:7]:
+            with self.subTest(enabled=environ):
+                gate.compose_harness_rustflags(environ, (owned,))
+        for environ in cases[7:9]:
+            with self.subTest(value=environ), self.assertRaises(gate.HarnessFlagConflict):
+                gate.compose_harness_rustflags(environ, (owned,))
+        self.assertTrue(gate.compose_harness_rustflags({"CARGO_ENCODED_RUSTFLAGS": "--cfg\x1f perf_other_api "}, ()))
+
     def test_the_runner_composes_the_flags_at_launch_without_replacing_inherited_ones(self):
         # A step with harness cfgs runs with the inherited flags plus the composed ones; a step whose inherited
         # flags conflict with its cfgs fails at launch and never runs.

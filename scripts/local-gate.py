@@ -183,8 +183,9 @@ class HarnessApiCfg:
     """One harness-only cfg: on for both refs of a comparison only when both trees define every method."""
 
     name: str
-    # Each method as (owning crate source directory, method name); only that crate's source is searched.
-    methods: tuple[tuple[str, str], ...]
+    # Each method as (owning crate source directory, owner type, method name): it must be a `pub fn` in an
+    # inherent `impl <owner>` block of that crate, outside test-only code.
+    methods: tuple[tuple[str, str, str], ...]
 
 
 # The canonical harness API cfg table. perf-compare decides each entry from both trees' code and builds both
@@ -193,10 +194,10 @@ class HarnessApiCfg:
 HARNESS_API_CFGS = (
     # S1/atlas-retry's driver: the renderer's atlas change and the scene it reads, absent before v1.3.9.
     HarnessApiCfg("perf_atlas_retry_api", (
-        ("crates/sonicterm-gpu/src", "__change_glyph_atlas_during_next_assembly"),
-        ("crates/sonicterm-app/src", "__test_window_active_tab_title"),
-        ("crates/sonicterm-gpu/src", "last_missing_chrome"),
-        ("crates/sonicterm-gpu/src", "font_fallback_notice_id"),
+        ("crates/sonicterm-gpu/src", "GpuRenderer", "__change_glyph_atlas_during_next_assembly"),
+        ("crates/sonicterm-app/src", "App", "__test_window_active_tab_title"),
+        ("crates/sonicterm-gpu/src", "GpuRenderer", "last_missing_chrome"),
+        ("crates/sonicterm-gpu/src", "GpuRenderer", "font_fallback_notice_id"),
     )),
 )
 HARNESS_API_CFG_NAMES = tuple(entry.name for entry in HARNESS_API_CFGS)
@@ -217,14 +218,32 @@ def _inherited_rustflags(environ: Mapping[str, str]) -> list[str]:
 
 
 def _set_cfgs(tokens: Sequence[str]) -> list[str]:
-    """Each cfg the tokens set (`--cfg X` or `--cfg=X`), as written."""
+    """Each cfg spec the tokens set, as written: `--cfg X`, `--cfg=X`, and, conservatively, a single token that
+    joins `--cfg` and its spec with whitespace."""
     found = []
     for index, token in enumerate(tokens):
         if token == "--cfg" and index + 1 < len(tokens):
             found.append(tokens[index + 1])
         elif token.startswith("--cfg="):
             found.append(token[len("--cfg="):])
+        elif token.startswith("--cfg") and token[len("--cfg"):][:1].isspace():
+            found.append(token[len("--cfg"):])
     return found
+
+
+# A cfg spec as rustc reads it: surrounding whitespace ignored, an optional raw-identifier prefix, the name, and
+# an optional `= value`.
+_CFG_SPEC = re.compile(r"\s*(?:r#)?([A-Za-z_][A-Za-z0-9_]*)\s*(=.*)?\s*", re.S)
+
+
+def _owned_cfg(spec: str) -> tuple[str, bool] | None:
+    """`(owned name, has a value)` when `spec` sets a table entry; None when it sets another cfg. A spec that does
+    not parse but names an entry is read as setting it with a value, so it is always refused."""
+    match = _CFG_SPEC.fullmatch(spec)
+    if match is not None:
+        return (match[1], match[2] is not None) if match[1] in HARNESS_API_CFG_NAMES else None
+    named = [name for name in HARNESS_API_CFG_NAMES if re.search(rf"(?<![A-Za-z0-9_]){name}(?![A-Za-z0-9_])", spec)]
+    return (named[0], True) if named else None
 
 
 def compose_harness_rustflags(environ: Mapping[str, str], enabled: Sequence[str]) -> list[str]:
@@ -236,8 +255,9 @@ def compose_harness_rustflags(environ: Mapping[str, str], enabled: Sequence[str]
         raise HarnessFlagConflict(f"unknown harness API cfg {unknown}")
     inherited = _inherited_rustflags(environ)
     for written in _set_cfgs(inherited):
-        name = written.split("=", 1)[0]
-        if name in HARNESS_API_CFG_NAMES and (written != name or name not in enabled):
+        owned = _owned_cfg(written)
+        if owned is not None and (owned[1] or owned[0] not in enabled):
+            name = owned[0]
             raise HarnessFlagConflict(f"the inherited compiler flags set `{written}`, but the derived decision "
                                       f"is {name}={'on' if name in enabled else 'off'}")
     declared = [token for name in HARNESS_API_CFG_NAMES for token in ("--check-cfg", f"cfg({name})")]

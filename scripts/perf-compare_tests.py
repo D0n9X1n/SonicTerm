@@ -1255,13 +1255,13 @@ HARNESS_PID = 900
 def write_atlas_retry_api(tree: Path, skip: str | None = None) -> None:
     """Write the four methods `perf_atlas_retry_api` needs into their owning crates of `tree`, except `skip`."""
     for entry in REAL_GATE.HARNESS_API_CFGS:
-        for crate, name in entry.methods:
+        for crate, owner, name in entry.methods:
             if name == skip:
                 continue
             source = tree / crate / "atlas_retry_api.rs"
             source.parent.mkdir(parents=True, exist_ok=True)
             with source.open("a", encoding="utf-8") as stream:
-                stream.write(f"impl Api {{\n    pub fn {name}(&self) {{}}\n}}\n")
+                stream.write(f"impl {owner} {{\n    pub fn {name}(&self) {{}}\n}}\n")
 
 
 def harness_process(**overrides):
@@ -9694,6 +9694,32 @@ class HarnessCfgDetectionTests(unittest.TestCase):
                     "crates/sonicterm-gpu/src/core_tests.rs", "pub fn last_missing_chrome() {}\n")), ()),
                 "another crate": (full, tree("crate", "last_missing_chrome", (
                     "crates/sonicterm-app/src/other.rs", "pub fn last_missing_chrome() {}\n")), ()),
+                "another owner": (full, tree("owner", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs", "impl Api {\n    pub fn last_missing_chrome(&self) {}\n}\n")),
+                    ()),
+                "a free function": (full, tree("free", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs", "pub fn last_missing_chrome() {}\n")), ()),
+                "a test-only impl": (full, tree("test-impl", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "#[cfg(test)]\nimpl GpuRenderer {\n    pub fn last_missing_chrome(&self) {}\n}\n")), ()),
+                "a test-only module": (full, tree("test-mod", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "#[cfg(test)]\nmod tests {\n    impl GpuRenderer {\n        pub fn last_missing_chrome(&self) {}\n"
+                    "    }\n}\n")), ()),
+                "a test-only file": (full, tree("test-file", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "#![cfg(test)]\nimpl GpuRenderer {\n    pub fn last_missing_chrome(&self) {}\n}\n")), ()),
+                "a path-qualified owner": (full, tree("path", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "impl crate::core::GpuRenderer {\n    pub fn last_missing_chrome(&self) {}\n}\n")),
+                    ("perf_atlas_retry_api",)),
+                "a trait impl": (full, tree("trait", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "impl Chrome for GpuRenderer {\n    fn last_missing_chrome(&self) {}\n}\n")), ()),
+                # A trait impl defines no inherent method even when its trait shares the owner's name.
+                "a trait named like the owner": (full, tree("trait-named", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "impl GpuRenderer<Frame> for Painter {\n    pub fn last_missing_chrome(&self) {}\n}\n")), ()),
             }
             for name, (head, base, expected) in cases.items():
                 with self.subTest(name):
