@@ -2667,6 +2667,47 @@ class RunSetTests(unittest.TestCase):
         self.assertEqual(result.attempts[1][2], "grid")
         self.assertEqual(len(result.head.outcomes), 1)
 
+    def test_each_attempt_persists_its_final_classification(self):
+        # outcome.json is written before the set's grid check, so a run the set rejects after a valid outcome
+        # still reads valid there. The set writes each attempt's final kind and reasons beside it, which perf-flags
+        # binds a set's accepted attempts to; an attempt without a directory gets none.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        plans = {side: perf.RunPlan(IDLE_SCENARIO, "default", side, Path(f"/{side}"), HARNESS_HASH)
+                 for side in perf.SIDES}
+        answers = {"base": ["valid"], "head": ["grid", "valid"]}
+
+        def run_case(plan, evidence):
+            evidence.mkdir(parents=True)
+            queue = answers[plan.side]
+            kind = queue.pop(0) if len(queue) > 1 else queue[0]
+            if kind == "grid":
+                return make_outcome(plan=plan, result=valid_result(grid={"cols": 200, "rows": 50}))
+            return outcome_of(kind)(plan)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = perf.run_set("S1/default", plans, None, 1, run_case, root)
+        paths = {Path(evidence).name: Path(evidence) / perf.CLASSIFICATION_FILE
+                 for _side, evidence, _kind, _why in result.attempts}
+        self.assertTrue(all(path.is_file() for path in paths.values()), "every attempt's classification is written")
+        written = {name: json.loads(path.read_text()) for name, path in paths.items()}
+        self.assertEqual(written["01-base"], {"side": "base", "kind": "valid", "reasons": []})
+        self.assertEqual((written["02-head"]["kind"], written["02-head"]["side"]), ("grid", "head"))
+        self.assertEqual(written["02-head"]["reasons"], list(result.attempts[1][3]))
+        self.assertEqual(written["03-head"]["kind"], "valid")
+        with contextlib.redirect_stdout(io.StringIO()):
+            bare = perf.run_set("S1/default", plans, None, 1, lambda plan, _evidence: outcome_of("valid")(plan),
+                                root / "absent")
+        self.assertFalse(any((Path(evidence) / perf.CLASSIFICATION_FILE).exists()
+                             for _side, evidence, _kind, _why in bare.attempts))
+
+    def test_host_platform_names_macos_and_windows_and_keeps_other_hosts(self):
+        # perf-flags and run-identity.json key evidence by these names, so the two mapped hosts and the
+        # pass-through for any other host are pinned.
+        self.assertEqual(perf.host_platform("darwin"), "macos")
+        self.assertEqual(perf.host_platform("win32"), "windows")
+        self.assertEqual(perf.host_platform("linux"), "linux")
+
     def test_base_that_cannot_build_is_blocked_and_the_head_still_runs(self):
         # The base's build error is printed for the scenario; the head keeps its measured runs.
         result, calls = self.run_set({"base": ["valid"], "head": ["valid"]}, base_blocked="error[E0599]")
