@@ -1041,6 +1041,104 @@ pub(crate) struct CheckpointRecord {
     /// memory line; absent when no attempt was taken.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) atlas_readings: Vec<AtlasReading>,
+    /// The main renderer's glyph completeness at S9's and S12's `end`; absent elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) completeness: Option<CompletenessRecord>,
+}
+
+/// The reason a build without `perf_completeness_api` records, since it cannot read the renderer.
+#[cfg(any(test, not(perf_completeness_api)))]
+pub(crate) const COMPLETENESS_API_DISABLED: &str = "api-disabled";
+
+/// One perf-end glyph completeness reading: the distinct missing terminal and chrome characters the
+/// renderer's last `Full` frame certified, or why it has none, with the renderer's scale.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct CompletenessRecord {
+    /// `certified` or `unavailable`.
+    pub(crate) state: &'static str,
+    /// Why the reading is unavailable; absent when certified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<&'static str>,
+    /// Distinct missing terminal characters; absent when unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) missing_terminal: Option<usize>,
+    /// Distinct missing chrome characters; absent when unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) missing_chrome: Option<usize>,
+    /// The glyph atlas width at the certified frame, in pixels; absent when unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) atlas_width: Option<u32>,
+    /// The glyph atlas height at the certified frame, in pixels; absent when unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) atlas_height: Option<u32>,
+    /// The main renderer's display scale factor.
+    pub(crate) scale: f64,
+}
+
+impl CompletenessRecord {
+    /// A certified reading; only the cfg-on mapping and the tests build one.
+    #[cfg(any(test, perf_completeness_api))]
+    pub(crate) fn certified(
+        missing_terminal: usize,
+        missing_chrome: usize,
+        (atlas_width, atlas_height): (u32, u32),
+        scale: f64,
+    ) -> Self {
+        Self {
+            state: "certified",
+            reason: None,
+            missing_terminal: Some(missing_terminal),
+            missing_chrome: Some(missing_chrome),
+            atlas_width: Some(atlas_width),
+            atlas_height: Some(atlas_height),
+            scale,
+        }
+    }
+
+    /// An unavailable reading with its reason.
+    pub(crate) fn unavailable(reason: &'static str, scale: f64) -> Self {
+        Self {
+            state: "unavailable",
+            reason: Some(reason),
+            missing_terminal: None,
+            missing_chrome: None,
+            atlas_width: None,
+            atlas_height: None,
+            scale,
+        }
+    }
+}
+
+/// Whether a checkpoint takes a completeness reading: only S9's and S12's `end`, the fixtures the
+/// glyph atlas start size is chosen from.
+pub(crate) fn takes_completeness(scenario: &str, label: &str) -> bool {
+    label == "end" && matches!(scenario, "S9" | "S12")
+}
+
+/// The reading of a build without `perf_completeness_api`: it never calls the renderer.
+#[cfg(any(test, not(perf_completeness_api)))]
+pub(crate) fn completeness_api_disabled(scale: f64) -> CompletenessRecord {
+    CompletenessRecord::unavailable(COMPLETENESS_API_DISABLED, scale)
+}
+
+/// The record of one renderer checkpoint, its reason kept by the renderer's own name.
+#[cfg(perf_completeness_api)]
+pub(crate) fn completeness_from_checkpoint(
+    checkpoint: sonicterm_gpu::completeness::CompletenessCheckpoint,
+    scale: f64,
+) -> CompletenessRecord {
+    use sonicterm_gpu::completeness::CompletenessCheckpoint;
+    match checkpoint {
+        CompletenessCheckpoint::Certified(counts) => CompletenessRecord::certified(
+            counts.missing_terminal,
+            counts.missing_chrome,
+            counts.atlas_dims,
+            scale,
+        ),
+        CompletenessCheckpoint::Unavailable(reason) => {
+            CompletenessRecord::unavailable(reason.reason(), scale)
+        }
+    }
 }
 
 /// The window identities and counted glyph atlas growths at one memory sampling attempt, so a report

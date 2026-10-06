@@ -79,6 +79,11 @@ pub mod frame_stats;
 #[doc(hidden)]
 pub mod glyph_working_set;
 
+/// The perf-end glyph completeness checkpoint: what a presented `Full` frame certified, and whether it
+/// still describes the scene and atlas.
+#[doc(hidden)]
+pub mod completeness;
+
 mod frame_plan;
 /// Per-row ink records that decide which rows a partial frame must emit.
 mod row_ink;

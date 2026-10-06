@@ -204,6 +204,10 @@ HARNESS_API_CFGS = (
         ("crates/sonicterm-app/src", "App", "arm_s10_attribution"),
         ("crates/sonicterm-app/src", "App", "disarm_s10_attribution"),
     )),
+    # S9's and S12's perf-end glyph completeness reading: the renderer's checkpoint, absent before v1.3.9.
+    HarnessApiCfg("perf_completeness_api", (
+        ("crates/sonicterm-gpu/src", "GpuRenderer", "completeness_checkpoint"),
+    )),
 )
 HARNESS_API_CFG_NAMES = tuple(entry.name for entry in HARNESS_API_CFGS)
 # The combined harness-API steps enable every entry at once, so one rebuild covers them all and a new entry

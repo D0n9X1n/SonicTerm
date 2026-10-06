@@ -2111,7 +2111,28 @@ def _checkpoint_ok(point: object) -> bool:
             and ("last_attempt_complete" not in point or isinstance(point["last_attempt_complete"], bool))
             and ("atlas_readings" not in point
                  or (isinstance(point["atlas_readings"], list)
-                     and all(map(_atlas_reading_ok, point["atlas_readings"])))))
+                     and all(map(_atlas_reading_ok, point["atlas_readings"]))))
+            and ("completeness" not in point or _completeness_ok(point["completeness"])))
+
+
+# Why a perf-end completeness reading has no counts: the renderer's three reasons, and a build without the cfg.
+COMPLETENESS_REASONS = ("no certificate", "scene changed", "atlas changed", "api-disabled")
+_COMPLETENESS_COUNTS = ("missing_terminal", "missing_chrome")
+_COMPLETENESS_DIMENSIONS = ("atlas_width", "atlas_height")
+
+
+def _completeness_ok(reading: object) -> bool:
+    """A perf-end glyph completeness reading: `certified` with exactly its two non-negative distinct-character
+    counts, positive atlas dimensions and a scale, or `unavailable` with exactly a known reason and a scale."""
+    if not isinstance(reading, dict) or not (_is_number(reading.get("scale"))
+                                             and math.isfinite(reading["scale"]) and reading["scale"] > 0):
+        return False
+    if reading.get("state") == "certified":
+        return (set(reading) == {"state", "scale", *_COMPLETENESS_COUNTS, *_COMPLETENESS_DIMENSIONS}
+                and all(_is_int(reading[key]) and reading[key] >= 0 for key in _COMPLETENESS_COUNTS)
+                and all(_is_int(reading[key]) and reading[key] > 0 for key in _COMPLETENESS_DIMENSIONS))
+    return (reading.get("state") == "unavailable" and set(reading) == {"state", "reason", "scale"}
+            and reading["reason"] in COMPLETENESS_REASONS)
 
 
 def _atlas_reading_ok(reading: object) -> bool:
@@ -7148,6 +7169,55 @@ def attribution_report(label: str, counters: SetResult, timed: SetResult | None,
     return rows, evidence
 
 
+# The perf-end completeness rows: each scenario variant's source name, as `InputSource` names it in
+# `start_size_inputs.rs`, and its fixture. Helper and real-renderer rows come from test 17, never from here.
+COMPLETENESS_SOURCES = {"S9/default": ("perf_s9_end", "S9"), "S12/default": ("perf_s12_end", "S12")}
+COMPLETENESS_FILE = "completeness.json"
+_HOST_PLATFORMS = {"darwin": "macos", "win32": "windows"}
+
+
+def completeness_rows(results: Sequence[SetResult], shas: Mapping[str, str], environ: Mapping[str, str],
+                      platform_name: str = sys.platform) -> list[dict]:
+    """One row per S9/S12 run and side: its source, run id, measured SHA, side, platform, fixture, set and scale,
+    with the `end` checkpoint's reading. A run whose `end` has no reading (a harness that predates it) reads
+    `unavailable` with the reason `not recorded`, never certified."""
+    platform = _HOST_PLATFORMS.get(platform_name, "linux" if platform_name.startswith("linux") else platform_name)
+    rows = []
+    for result in results:
+        if result.label not in COMPLETENESS_SOURCES:
+            # When: the set is not S9/default or S12/default, its `end` is not a perf-end census.
+            continue
+        source, fixture = COMPLETENESS_SOURCES[result.label]
+        for side in SIDES:
+            for outcome in getattr(result, side).outcomes:
+                points = [point for point in (outcome.result or {}).get("checkpoints") or []
+                          if isinstance(point, dict) and point.get("label") == "end"]
+                reading = points[-1].get("completeness") if points else None
+                reading = reading if isinstance(reading, dict) else {"state": "unavailable",
+                                                                     "reason": "not recorded", "scale": None}
+                rows.append({"source": source, "run_id": environ.get("GITHUB_RUN_ID") or "local",
+                             "measured_sha": shas[side], "side": side, "platform": platform,
+                             "fixture": fixture, "set": result.set_name, "scale": reading.get("scale"),
+                             "state": reading.get("state"), "reason": reading.get("reason"),
+                             **{key: reading.get(key) for key in (*_COMPLETENESS_COUNTS, *_COMPLETENESS_DIMENSIONS)}})
+    return rows
+
+
+def completeness_lines(rows: Sequence[Mapping]) -> list[str]:
+    """comparison.md's lines for the completeness rows: each row's state with its counts or its reason."""
+    if not rows:
+        return []
+    lines = ["", "Glyph completeness at S9/S12 `end` (distinct missing characters, Full-frame certificate):", ""]
+    for row in rows:
+        where = f"- {row['fixture']} {row['set']} {row['side']} ({row['platform']}, scale {row['scale']})"
+        if row["state"] == "certified":
+            lines.append(f"{where}: certified, {row['missing_terminal']} terminal and {row['missing_chrome']} chrome "
+                         f"missing, atlas {row['atlas_width']}x{row['atlas_height']}")
+        else:
+            lines.append(f"{where}: unavailable ({row['reason']})")
+    return lines
+
+
 def comparison_document(rows: Sequence[Sequence[str]], lap_rows: Sequence[Sequence[str]],
                         alloc_rows: Sequence[Sequence[str]], host_lines: Sequence[str],
                         detail_lines: Sequence[str], *, counter_rows: Sequence[Sequence[str]] = (),
@@ -7815,6 +7885,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
             details.append(f"- {result.label} {result.set_name} {side} {kind}: `{evidence}/01-harness.log`")
     if split_details:
         details += ["", "Per-run render-attempt splits (phases with a render attempt):", ""] + split_details
+    completeness = completeness_rows(results, shas, os.environ)
+    details += completeness_lines(completeness)
     document = comparison_document(timed_rows, lap_rows, alloc_rows, host_lines, details,
                                    counter_rows=counters_table, counters_note=counters_note, overhead_rows=overhead,
                                    capped_note=capped_note, recovery_rows=recovery_rows,
@@ -7829,6 +7901,9 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
         # The first line says the table is partial, so nobody reads a head-only table as a comparison.
         document = f"**Incomplete comparison:** {'; '.join(problems)}\n\n" + document
     (out / "comparison.md").write_text(document, encoding="utf-8")
+    if completeness:
+        # When: S9 or S12 ran, their perf-end rows are kept for the start-size table.
+        _write_json(out / COMPLETENESS_FILE, {"schema_version": SCHEMA_VERSION, "rows": completeness})
     profile = {"lto": {side: release_lto(trees[side], os.environ) for side in SIDES},
                "overrides": release_profile_overrides(os.environ)}
     _write_json(out / RUN_IDENTITY_FILE, run_identity_document(shas, digest, features, args.short, profile,

@@ -4300,8 +4300,37 @@ fn chrome_tofu_is_published_only_by_a_presented_frame() {
         "a preedit cache hit replays its tofu"
     );
     let finish_start = CORE_SRC.find("    fn finish_successful_frame(").expect("present cleanup");
-    let finish = &CORE_SRC[finish_start..finish_start + 2000];
+    // The whole function, up to the next method at the same indentation, so later lines stay in range.
+    let finish_end = CORE_SRC[finish_start + 1..]
+        .find("\n    fn ")
+        .map_or(CORE_SRC.len(), |offset| finish_start + 1 + offset);
+    let finish = &CORE_SRC[finish_start..finish_end];
     assert!(finish.contains("self.last_missing_chrome_chars = missing_chrome_chars"));
+}
+
+/// Source pin (the renderer path needs a device): every presented frame feeds the completeness
+/// certificate, marked `Full` only by its plan's mode, with the plan's scene and the atlas stamp read
+/// at present, and before the missing lists move into the renderer's latest readout.
+#[test]
+fn every_presented_frame_feeds_the_completeness_certificate() {
+    const CORE_SRC: &str = include_str!("core.rs");
+    let finish_start = CORE_SRC.find("    fn finish_successful_frame(").expect("present cleanup");
+    let finish_end = CORE_SRC[finish_start + 1..]
+        .find("\n    fn ")
+        .map_or(CORE_SRC.len(), |offset| finish_start + 1 + offset);
+    let finish = &CORE_SRC[finish_start..finish_end];
+    let record = finish.find("crate::completeness::record_presented(").expect("records the frame");
+    for field in [
+        "full: render_mode == RenderMode::Full,",
+        "scene: plan.key.scene(),",
+        "missing_terminal: &missing_chars_this_frame,",
+        "missing_chrome: &missing_chrome_chars,",
+    ] {
+        assert!(finish[record..].contains(field), "{field}");
+    }
+    let publish =
+        finish.find("self.last_missing_chars = missing_chars_this_frame;").expect("publish");
+    assert!(record < publish, "the certificate reads the lists before they move");
 }
 
 fn selection_for_rows(start: u64, end: u64) -> Selection {

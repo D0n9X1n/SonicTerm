@@ -32,15 +32,18 @@ use crate::atlas_retry::{self, Arm, Counts, Progress, RecoveryEpisodes, Scene, S
 use crate::attribution::{self, Start};
 use crate::cli::{RunArgs, REFUSED};
 use crate::counters::{CounterTotals, CountersMode};
+#[cfg(perf_completeness_api)]
+use crate::record::completeness_from_checkpoint;
 use crate::record::{
     attribute_dispatch, bulk_tail_mismatch, echo_api, echo_outcome, echo_target,
     line_row_near_cursor, missing_wide_tokens, planned_rows, presenter_blocked,
     presenter_record_for, prompt_identity, prompt_origin, protocol_rows, retained_text,
-    row_count_mismatch, snapshot_echo, snapshot_identity_changed, split_in_scope, wide_tokens,
-    write_progress, ArmState, AtlasReading, Attribution, CheckpointRecord, DispatchObservation,
-    EchoSnapshot, EchoTarget, LatencySample, Measurements, MonitorInfo, PhaseRecord,
-    PresenterRecord, RowIdentity, RunResult, SlowDispatch, SlowDispatches, Status, Throughput,
-    TrimHookOutcome, UnattributedReason, CHECKPOINT_MEMORY,
+    row_count_mismatch, snapshot_echo, snapshot_identity_changed, split_in_scope,
+    takes_completeness, wide_tokens, write_progress, ArmState, AtlasReading, Attribution,
+    CheckpointRecord, CompletenessRecord, DispatchObservation, EchoSnapshot, EchoTarget,
+    LatencySample, Measurements, MonitorInfo, PhaseRecord, PresenterRecord, RowIdentity, RunResult,
+    SlowDispatch, SlowDispatches, Status, Throughput, TrimHookOutcome, UnattributedReason,
+    CHECKPOINT_MEMORY,
 };
 use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{
@@ -427,6 +430,8 @@ struct CheckpointStep {
     /// The record's optional fields; read only on first entry.
     fresh_after_unix_s: Option<f64>,
     frame_texture_bytes: Option<u64>,
+    /// The renderer's glyph completeness, for S9's and S12's `end` only.
+    completeness: Option<CompletenessRecord>,
 }
 
 /// What one turn at a checkpoint step decided.
@@ -568,6 +573,7 @@ fn open_checkpoint(
         footprint_file: None,
         fresh_after_unix_s: step.fresh_after_unix_s,
         frame_texture_bytes: step.frame_texture_bytes,
+        completeness: step.completeness.clone(),
         ..CheckpointRecord::default()
     });
     let footprint = site.managed.then(|| CheckpointWait {
@@ -2442,7 +2448,10 @@ impl Probe {
             .filter(|step| matches!(step, Step::Checkpoint(_)))
             .count();
         // The record's optional fields are read once, when the checkpoint is first reached.
-        let (fresh_after_unix_s, frame_texture_bytes) = if self.checkpoint_pending.is_none() {
+        let (fresh_after_unix_s, frame_texture_bytes, completeness) = if self
+            .checkpoint_pending
+            .is_none()
+        {
             let fresh_after_unix_s =
                 self.plan.fresh_after.filter(|rule| rule.checkpoint == label).and_then(|rule| {
                     self.phase_ends.iter().rev().find(|(name, ..)| *name == rule.anchor).map(
@@ -2454,10 +2463,17 @@ impl Probe {
                         },
                     )
                 });
-            (fresh_after_unix_s, checkpoint_frame_texture_bytes(label, self.frame_texture_extent()))
+            let completeness = takes_completeness(self.plan.scenario, label)
+                .then(|| self.app.main_renderer().map(renderer_completeness))
+                .flatten();
+            (
+                fresh_after_unix_s,
+                checkpoint_frame_texture_bytes(label, self.frame_texture_extent()),
+                completeness,
+            )
         } else {
             // When: the checkpoint is pending, its record already holds these fields.
-            (None, None)
+            (None, None, None)
         };
         let step = CheckpointStep {
             ordinal,
@@ -2465,6 +2481,7 @@ impl Probe {
             unix_s: unix_now(),
             fresh_after_unix_s,
             frame_texture_bytes,
+            completeness,
         };
         let clock = Instant::now;
         let exists = |path: &Path| path.exists();
@@ -3429,6 +3446,19 @@ fn barrier_phase_deadline(
         }
         _ => None,
     }
+}
+
+/// The main renderer's glyph completeness checkpoint, in a build with `perf_completeness_api`.
+#[cfg(perf_completeness_api)]
+fn renderer_completeness(renderer: &GpuRenderer) -> CompletenessRecord {
+    let scale = f64::from(renderer.scale_factor());
+    completeness_from_checkpoint(renderer.completeness_checkpoint(), scale)
+}
+
+/// Without `perf_completeness_api` the renderer may have no checkpoint, so none is read.
+#[cfg(not(perf_completeness_api))]
+fn renderer_completeness(renderer: &GpuRenderer) -> CompletenessRecord {
+    crate::record::completeness_api_disabled(f64::from(renderer.scale_factor()))
 }
 
 /// The frame texture's bytes for a checkpoint: width x height x 4 at `end`, only with

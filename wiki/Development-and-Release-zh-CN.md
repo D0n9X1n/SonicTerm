@@ -144,9 +144,9 @@ S10 的 `stream` 阶段在 `result.json` 中记录 `updates`：其工作负载�
 并像其他按运行统计的行一样汇总。harness 早于该字段的一侧显示 `n/a`，不显示变化；`updates` 不是正整数的结果无效。
 
 harness 还会调用较旧的树所没有的 App 与渲染器方法。每个这样的调用都位于一个 harness API cfg 之后，即
-`scripts/local-gate.py` 中 `HARNESS_API_CFGS` 的一项。共有两项：`perf_atlas_retry_api`，对应 S1/atlas-retry
-驱动所需的四个方法；以及 `perf_s10_attribution_api`，对应 App 的两个 S10 归属监视方法（`arm_s10_attribution` 与
-`disarm_s10_attribution`）。关卡在两个由该表生成的步骤 `perf-scenarios-harness-api-clippy` 与
+`scripts/local-gate.py` 中 `HARNESS_API_CFGS` 的一项。共有三项：`perf_atlas_retry_api`，对应 S1/atlas-retry
+驱动所需的四个方法；`perf_s10_attribution_api`，对应 App 的两个 S10 归属监视方法（`arm_s10_attribution` 与
+`disarm_s10_attribution`）；以及 `perf_completeness_api`，对应渲染器的 `completeness_checkpoint`，S9 与 S12 的 `end` 检查点读取它。关卡在两个由该表生成的步骤 `perf-scenarios-harness-api-clippy` 与
 `perf-scenarios-harness-api-tests` 中，一次开启**全部**项来检查与测试 harness。测试步骤通过 `RUSTFLAGS` 传入这些 cfg，
 而 `RUSTFLAGS` 一旦改变，所有依赖的构建都会失效，因此一个合并的测试步骤只让依赖重建一次，而不是每项一次。检查步骤把它们放在 `--`
 之后传入，只作用于被检查的 crate；合并它省下的是重复检查，而不是依赖重建。CI 只运行全部关闭与全部开启两种组合；与只定义了部分项的 base
@@ -654,7 +654,12 @@ lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结�
 裸场景 ID 只选择其默认变体，因此每个变体都按名称列出。在 `--short` 下，`S2/flood` 每侧上限 2 次，`S11/release` 上限 1 次，
 `S11/gdi`、`S11/wgpu` 与 `S1/atlas-retry` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 30 分钟内：release 对比完整运行它。
 带 `perf-frame-texture` 时，S11 的 `end` 检查点记录 `frame_texture_bytes`：head 在 GDI 下为 4 B，未声明该 feature 的 base
-为 `n/a`。每个分片在自己的 runner 上交错运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。macOS 分片数（目前为五个）
+为 `n/a`。S9 与 S12 的 `end` 检查点记录渲染器的字形完整性：每次呈现 `Full` 帧时，渲染器保存一份证书，包含该帧的场景
+（去掉窗格 revision 与 dirty generation 的帧键）、字形图集的内容戳与尺寸，以及终端与界面各自缺失的不同字符。之后同一场景、同一图集的帧会并入
+它的缺失字符。只有渲染器仍显示该场景、使用该图集时，读数才是带两项计数的 `certified`；否则为 `unavailable`，原因是 `scene changed`、
+`atlas changed` 或 `no certificate`，没有 `perf_completeness_api` 的构建读为 `api-disabled`。perf-compare 为每次 S9/S12 运行的每一侧
+在 `completeness.json` 中写一行（运行 ID、所测 SHA、侧、平台、fixture、组与缩放），并在 `comparison.md` 中列出。这些只是 perf 结束行；
+helper 行与真实渲染器行来自工作集测试。每个分片在自己的 runner 上交错运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。macOS 分片数（目前为五个）
 根据实测的关键路径选定。两种模式都会运行计数器组，在 head 上，以及在声明 `perf-counters` 的 base 上：pull request 为每个场景、
 每一侧运行两次计数器运行以保持在 30 分钟内，release 运行 `--runs` 次。Windows runner 没有 GPU，也没有用户会话：其对比表测量
 软件渲染路径，前台变化在那里只被记录，不被判定。
