@@ -302,6 +302,23 @@ mod command_events;
 use command_events::{append_bounded_command_events, notify_command_done};
 pub use command_events::{poll_command_events_for_child_window, poll_command_events_for_tab_state};
 mod config_apply;
+mod dispatch_timeline;
+pub use dispatch_timeline::{
+    AppearanceLossV1, AppearanceRecordV1, AppearanceTargetV1, AttemptId, AttemptIncompleteReasonV1,
+    AttemptOutcomeV1, AttemptPhasesV1, AttemptRecordV1, CallbackKindV1, DispatchEventKindV1,
+    DispatchEventV1, DispatchId, DispatchTimelineArmV1, DispatchTimelineTakeV1,
+    DispatchTimelineToken, DispatchTimelineV1, NotRenderedReasonV1, PhaseTransitionV1, PhaseV1,
+    PublicationDecisionV1, PublicationSeq, SkipReasonV1, TransitionTargetV1, UnscopedKindV1,
+    WitnessResolutionV1,
+};
+// Pins both dispatch-timeline signatures here, in the parent, in every build: a gate on a method, its
+// impl or its module, or a changed type, fails a plain library build.
+const _: () = {
+    let _: fn(&mut App, u64, Option<AppearanceTargetV1>) -> DispatchTimelineArmV1 =
+        App::arm_dispatch_timeline_v1;
+    let _: fn(&mut App, DispatchTimelineToken) -> DispatchTimelineTakeV1 =
+        App::take_dispatch_timeline_v1;
+};
 mod echo_timeline;
 pub use echo_timeline::{
     AdmissionDecisionV1, DeferReasonV1, EchoTimelineEventV1, EchoTimelineKindV1,

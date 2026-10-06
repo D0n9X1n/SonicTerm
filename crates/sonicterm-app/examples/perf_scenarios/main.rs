@@ -17,6 +17,8 @@ mod cli;
 mod counters;
 #[cfg(any(windows, test))]
 mod delivery;
+#[cfg(any(target_os = "macos", windows, test))]
+mod dispatch_timeline;
 #[cfg(any(target_os = "macos", windows))]
 mod probe;
 #[cfg(any(target_os = "macos", windows, test))]

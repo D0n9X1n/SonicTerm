@@ -208,6 +208,11 @@ HARNESS_API_CFGS = (
     HarnessApiCfg("perf_completeness_api", (
         ("crates/sonicterm-gpu/src", "GpuRenderer", "completeness_checkpoint"),
     )),
+    # The per-sample dispatch timeline: the App's arm and take methods, absent before the prerequisite.
+    HarnessApiCfg("perf_dispatch_timeline_api", (
+        ("crates/sonicterm-app/src", "App", "arm_dispatch_timeline_v1"),
+        ("crates/sonicterm-app/src", "App", "take_dispatch_timeline_v1"),
+    )),
 )
 HARNESS_API_CFG_NAMES = tuple(entry.name for entry in HARNESS_API_CFGS)
 # The combined harness-API steps enable every entry at once, so one rebuild covers them all and a new entry
