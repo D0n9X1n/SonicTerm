@@ -1527,3 +1527,152 @@ fn the_atlas_retry_failure_line_never_rereads_the_app() {
     }
     assert!(method("drive_atlas_retry").contains("failure_observation(&retry.machine)"));
 }
+
+/// A settling scene titled `title`: what the driver's tests feed, with no fixture rows, so only the
+/// barrier and the counts decide what each dispatch does.
+fn retry_scene(title: &str) -> Scene {
+    Scene {
+        title: title.to_owned(),
+        fallback: (1, 0, 0),
+        grid: (80, 24),
+        cursor: (23, 0),
+        rows: Vec::new(),
+    }
+}
+
+/// A reading of `retry_scene(title)` on both sides, with `cached` applied on each.
+fn retry_reading(title: &str, cached: Option<atlas_retry::AppliedSample>) -> SceneReading {
+    SceneReading {
+        before: Some(retry_scene(title)),
+        after: Some(retry_scene(title)),
+        cached_before: cached.clone(),
+        cached_after: cached,
+    }
+}
+
+/// An applied sample taken `offset_ms` after `start`, naming `process`.
+fn applied(start: Instant, offset_ms: u64, process: Option<&str>) -> atlas_retry::AppliedSample {
+    atlas_retry::AppliedSample {
+        sampled_at: start + Duration::from_millis(offset_ms),
+        process: process.map(str::to_owned),
+    }
+}
+
+/// A driver settling from `start`, its final process `sleep` observed at `start + 100 ms`, expecting
+/// the F489 title: the barrier the driver tests run against.
+fn barred_driver(start: Instant) -> AtlasRetryDriver {
+    let mut driver =
+        AtlasRetryDriver::new(start, atlas_retry::FinalLookup::new("sleep".to_owned()));
+    driver.machine.set_barrier(atlas_retry::Barrier {
+        final_at: Some(start + Duration::from_millis(100)),
+        final_name: "sleep".to_owned(),
+        expected_title: Some("#1 \u{F489} shell".to_owned()),
+        fixture_problem: None,
+    });
+    driver
+}
+
+/// The counts of a forwarded `RequestRedraw`, which attempts no frame.
+fn no_attempt() -> Counts {
+    Counts::default()
+}
+
+/// The counts of one steady settling frame.
+fn one_frame() -> Counts {
+    Counts { attempts: 1, presented: 1, ..Counts::default() }
+}
+
+/// The production demand sequence, through the `AtlasRetryDriver` methods `Probe` calls, repeated while
+/// the barrier is unmet: Arm, `take_request` consumes the request, the forwarded `RequestRedraw` is
+/// observed with zero attempts, then the `RedrawRequested` frame with one. The request callback never
+/// rearms itself, each settling frame asks for exactly one more redraw, so requests are settling frames
+/// plus the first, and the drive is due at the arm while a request waits and at the settle deadline
+/// otherwise. The fake 500 ms foreground schedule is fixture input, not App scheduling.
+#[test]
+fn the_request_callback_does_not_rearm_itself_and_settling_frames_keep_demand() {
+    let start = Instant::now();
+    let mut driver = barred_driver(start);
+    assert_eq!(driver.due(), Some(start), "the first settling redraw is requested at once");
+    let (mut requests, mut frames) = (0_u32, 0_u32);
+    for round in 0..40_u64 {
+        let now = start + Duration::from_millis(200 + 200 * round);
+        // The stale shell stays applied, resampled every 500 ms, so the barrier never meets.
+        let cached = applied(start, 100 + 500 * (round * 200 / 500 + 1), Some("bash"));
+        let reading = retry_reading("#1 \u{E760} shell", Some(cached));
+        assert!(driver.take_request(), "round {round}: one request is pending");
+        requests += 1;
+        assert!(!driver.take_request(), "a request is consumed once");
+        assert_eq!(driver.due(), Some(start + atlas_retry::SETTLE_BOUND));
+        assert_eq!(driver.observe(Some(no_attempt()), &reading, now), None);
+        assert!(!driver.take_request(), "round {round}: the request callback did not rearm");
+        assert_eq!(driver.observe(Some(one_frame()), &reading, now), Some(Arm::Redraw));
+        frames += 1;
+        assert_eq!(driver.due(), Some(now), "due from the arm while the request waits");
+    }
+    assert!(driver.take_request());
+    requests += 1;
+    assert_eq!(
+        requests,
+        frames + 1,
+        "no busy loop: one request per settling frame, plus the first"
+    );
+    assert!(!driver.machine.settled());
+}
+
+/// A zero-attempt dispatch still applies its foreground readings before it returns: a cleared sample
+/// between two qualifying results resets the history without rearming, so one later valid result is
+/// insufficient and nothing settles.
+#[test]
+fn a_zero_attempt_none_between_qualifying_results_resets_without_rearming() {
+    let start = Instant::now();
+    let mut driver = barred_driver(start);
+    assert!(driver.take_request());
+    let title = "#1 \u{F489} shell";
+    let first = retry_reading(title, Some(applied(start, 200, Some("sleep"))));
+    let now = start + Duration::from_millis(210);
+    assert_eq!(driver.observe(Some(one_frame()), &first, now), Some(Arm::Redraw));
+    assert!(driver.take_request());
+    let cleared = retry_reading(title, Some(applied(start, 300, None)));
+    let now = start + Duration::from_millis(310);
+    assert_eq!(driver.observe(Some(no_attempt()), &cleared, now), None);
+    assert!(!driver.take_request(), "the zero-attempt dispatch did not rearm");
+    let second = retry_reading(title, Some(applied(start, 700, Some("sleep"))));
+    for step in 0..5_u64 {
+        let now = start + Duration::from_millis(710 + 16 * step);
+        assert_eq!(driver.observe(Some(one_frame()), &second, now), Some(Arm::Redraw));
+        assert!(driver.take_request());
+    }
+    assert!(
+        !driver.machine.settled(),
+        "the None reset the history, so one valid result is too few"
+    );
+}
+
+/// The final-process lookup accepts only the expected name: `sleep` on macOS and the harness binary's
+/// normalized basename on Windows. The stale shell (`bash`), `sh`, `cat` and no process do not qualify,
+/// and a refused name sets no T.
+#[test]
+fn the_final_process_lookup_accepts_only_the_expected_name() {
+    assert_eq!(final_process_name(false, None), "sleep");
+    let harness = std::path::Path::new(r"C:\runner\target\release\examples\Perf_Scenarios.EXE");
+    assert_eq!(final_process_name(true, Some(harness)), "perf_scenarios");
+    assert_eq!(final_process_name(false, Some(harness)), "sleep");
+    for (expected, name, accepted) in [
+        ("sleep", Some("sleep"), true),
+        ("sleep", Some("bash"), false),
+        ("sleep", Some("sh"), false),
+        ("sleep", Some("cat"), false),
+        ("sleep", None, false),
+        ("perf_scenarios", Some("perf_scenarios"), true),
+        ("perf_scenarios", Some("sleep"), false),
+    ] {
+        let lookup = atlas_retry::FinalLookup::new(expected.to_owned());
+        assert_eq!(lookup.accepts(name), accepted, "{expected} against {name:?}");
+    }
+    let start = Instant::now();
+    let deadline = Some(start + atlas_retry::SETTLE_BOUND);
+    let mut lookup = atlas_retry::FinalLookup::new("sleep".to_owned());
+    assert!(lookup.begin(start, deadline));
+    assert!(!lookup.finish(Some("bash"), start, start, deadline));
+    assert_eq!(lookup.found_at(), None);
+}
