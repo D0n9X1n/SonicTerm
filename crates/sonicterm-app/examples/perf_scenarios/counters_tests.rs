@@ -484,8 +484,8 @@ fn blank_non_code(text: &str, strings: bool) -> String {
 }
 
 /// Each of `calls` in `text` outside an item gated by `gate`, by line. A gate counts only in code, never in a
-/// comment, and a gated body is balanced in code with comments and literals blanked, so neither a commented-out
-/// gate nor a brace in a comment or a string can hide a call.
+/// comment or a string literal, while a string argument inside a real gate is kept; a gated body is balanced in
+/// code with comments and literals blanked, so no gate's text and no brace in a comment or a string can hide a call.
 fn ungated_calls(text: &str, gate: &str, calls: &[&str]) -> Vec<String> {
     // A CRLF checkout is read as LF, so line numbers match either way.
     let text = &text.replace("\r\n", "\n");
@@ -493,6 +493,10 @@ fn ungated_calls(text: &str, gate: &str, calls: &[&str]) -> Vec<String> {
     let structure = blank_non_code(text, true);
     let mut gated = Vec::new();
     for (offset, _) in code.match_indices(gate) {
+        if structure.as_bytes()[offset] != b'#' {
+            // When: the gate's `#` is blanked with the literals, its text sits inside a string and guards nothing.
+            continue;
+        }
         let after = offset + gate.len();
         let open = after + structure[after..].find('{').expect("a gated item has a body");
         let mut depth = 0_usize;
@@ -922,9 +926,20 @@ fn every_atlas_retry_api_call_in_the_harness_is_behind_its_cfg() {
     );
 }
 
-/// A gate written in a comment guards nothing, so the scan reads attributes and balances bodies in code only:
-/// a commented-out gate above a call never guards it, and a brace inside a comment or a string never stretches a
-/// gated body over the ungated call after it (a later string's closing brace would otherwise close it there).
+/// A real gate's own string argument is code, not a literal to skip: `#[cfg(feature = "...")]` still guards the
+/// call in its body, even though the scan blanks string contents when it decides where a gate stands.
+#[test]
+fn a_gate_with_a_string_argument_still_guards_its_body() {
+    let fixture = format!(
+        "{COUNTERS_GATE}\nfn on(app: &mut App) {{\n    let _ = app.frame_counters_snapshot();\n}}\n"
+    );
+    assert_eq!(ungated_calls(&fixture, COUNTERS_GATE, GATED_CALLS), Vec::<String>::new());
+}
+
+/// A gate written in a comment or a string guards nothing, so the scan reads attributes and balances bodies in
+/// code only: a commented-out gate or a gate's text inside a string literal above a call never guards it, and a
+/// brace inside a comment or a string never stretches a gated body over the ungated call after it (a later
+/// string's closing brace would otherwise close it there).
 #[test]
 fn a_gate_in_a_comment_or_a_string_guards_nothing() {
     let cases = [
@@ -935,6 +950,12 @@ fn a_gate_in_a_comment_or_a_string_guards_nothing() {
         ),
         format!(
             "{ATLAS_RETRY_GATE}\nfn parts() {{\n    // {{\n}}\nfn off(app: &App) {{\n    app.__test_window_active_tab_title(id);\n}}\n"
+        ),
+        format!(
+            "const NOTE: &str = \"{ATLAS_RETRY_GATE}\";\nfn off(app: &App) {{\n    app.__test_window_active_tab_title(id);\n}}\n"
+        ),
+        format!(
+            "const NOTE: &str = r#\"{ATLAS_RETRY_GATE}\"#;\nfn off(app: &App) {{\n    app.__test_window_active_tab_title(id);\n}}\n"
         ),
     ];
     for fixture in cases {

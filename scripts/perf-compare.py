@@ -2937,7 +2937,8 @@ def tree_harness_cfgs(root: Path, table: Sequence) -> tuple[str, ...]:
 
     A method counts only as a `pub fn <name>` inside an inherent `impl <Owner>` block (a path-qualified owner
     counts; a trait impl does not), in code with comments and strings blanked (`rust_code_only`). Test-only code
-    does not count: a `*_tests.rs` file, a file under `#![cfg(test)]`, and an impl or module under `#[cfg(test)]`.
+    does not count: a `*_tests.rs` file, a file under `#![cfg(test)]`, and an impl, module or method under
+    `#[cfg(test)]`.
     Finding such a definition does not prove its signature or that the build's target compiles it."""
     enabled = []
     for entry in table:
@@ -2985,7 +2986,7 @@ def _impl_owner(header: str) -> str | None:
 def _crate_defines(directory: Path, owner: str, name: str) -> bool:
     """Whether some non-test source file under `directory` defines `pub fn name` in an inherent `impl owner` block
     outside test-only modules and impls."""
-    method = re.compile(rf"^\s*pub\s+fn\s+{re.escape(name)}\b", re.M)
+    method = re.compile(rf"^\s*(pub\s+fn\s+{re.escape(name)}\b)", re.M)
     for source in sorted(directory.rglob("*.rs")):
         if source.name.endswith("_tests.rs"):
             continue
@@ -3003,7 +3004,8 @@ def _crate_defines(directory: Path, owner: str, name: str) -> bool:
             if any(header.start() in span for span in test_modules):
                 continue
             body = code[header.end() - 1:_block_end(code, header.end() - 1)]
-            if method.search(body):
+            # The method's own attributes count too: a `#[cfg(test)]` method exists only in the unit-test build.
+            if any(not _under_cfg_test(body, found.start(1)) for found in method.finditer(body)):
                 return True
     return False
 

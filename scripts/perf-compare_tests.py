@@ -9667,7 +9667,8 @@ class HarnessCfgDetectionTests(unittest.TestCase):
 
     def test_a_cfg_is_on_only_when_both_trees_define_every_method_in_code(self):
         # Every method in both trees turns the cfg on; one missing from either tree, or present only in a comment,
-        # a string or a unit-test file, or in another crate than its owner, turns it off for both.
+        # a string, a unit-test file, test-only code (a file, module, impl or the method's own attributes), or in
+        # another crate than its owner, turns it off for both. Other attributes on the method leave it counted.
         table = REAL_GATE.HARNESS_API_CFGS
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
@@ -9709,6 +9710,17 @@ class HarnessCfgDetectionTests(unittest.TestCase):
                 "a test-only file": (full, tree("test-file", "last_missing_chrome", (
                     "crates/sonicterm-gpu/src/other.rs",
                     "#![cfg(test)]\nimpl GpuRenderer {\n    pub fn last_missing_chrome(&self) {}\n}\n")), ()),
+                "a test-only method": (full, tree("test-method", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "impl GpuRenderer {\n    #[cfg(test)]\n    pub fn last_missing_chrome(&self) {}\n}\n")), ()),
+                "a test-only method under other attributes": (full, tree("test-method-attrs", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "impl GpuRenderer {\n    #[doc(hidden)]\n    #[cfg(test)]\n    #[inline]\n"
+                    "    pub fn last_missing_chrome(&self) {}\n}\n")), ()),
+                "a method with other attributes": (full, tree("method-attrs", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "impl GpuRenderer {\n    #[doc(hidden)]\n    #[inline]\n"
+                    "    pub fn last_missing_chrome(&self) {}\n}\n")), ("perf_atlas_retry_api",)),
                 "a path-qualified owner": (full, tree("path", "last_missing_chrome", (
                     "crates/sonicterm-gpu/src/other.rs",
                     "impl crate::core::GpuRenderer {\n    pub fn last_missing_chrome(&self) {}\n}\n")),
