@@ -9123,6 +9123,17 @@ class AtlasRetryVariantTests(CompareHarness, unittest.TestCase):
         self.assertIsNone(perf.atlas_recovery_problem(recovery_result(None, status="timeout")))
         self.assertIsNone(perf.atlas_recovery_problem(counters_result(scenario="S1", variant="default")))
 
+    def test_the_row_run_variants_carry_no_recovery_block(self):
+        # The row-run S10 variants are counters-only too, but only S1/atlas-retry records recovery episodes: a
+        # valid S10/powerline counters run without the block is accepted, and one carrying it is refused.
+        for variant in ("powerline", "cjk-tui", "unique"):
+            with self.subTest(variant=variant):
+                valid = counters_result(scenario="S10", variant=variant)
+                self.assertIsNone(perf.atlas_recovery_problem(valid))
+                carrying = dict(valid, atlas_recovery=recovery_result()["atlas_recovery"])
+                self.assertIsNotNone(perf.atlas_recovery_problem(carrying))
+        self.assertEqual(perf.atlas_recovery_rows("S10/powerline", perf.SideRuns([]), perf.SideRuns([])), [])
+
     def test_each_malformed_recovery_block_is_refused(self):
         # Every way the block can misdescribe the episodes is a schema problem that keeps the run out of the
         # comparison, and validate_result reports it.

@@ -2195,6 +2195,8 @@ def frame_counter_problems(counters: object, partial: bool = False) -> list[str]
 # three S10 workloads. A selection naming one is refused when no counters set runs.
 COUNTERS_ONLY_VARIANTS = frozenset({("S1", "atlas-retry"), ("S10", "powerline"), ("S10", "cjk-tui"),
                                     ("S10", "unique")})
+# The one counters-only variant whose result carries `atlas_recovery`; the row-run S10 variants never do.
+ATLAS_RETRY_VARIANT = ("S1", "atlas-retry")
 # S1/atlas-retry's recovery episodes: eight of frames A-D each.
 ATLAS_RECOVERY_EPISODES = 8
 ATLAS_RECOVERY_FRAMES = ("A", "B", "C", "D")
@@ -2227,7 +2229,7 @@ def atlas_recovery_problem(data: Mapping) -> str | None:
     compares equal), every counter is nonnegative, and the distinct key count and the atlas dimension are
     positive. Any other result must not carry it.
     """
-    counters_only = (data.get("scenario"), data.get("variant")) in COUNTERS_ONLY_VARIANTS
+    counters_only = (data.get("scenario"), data.get("variant")) == ATLAS_RETRY_VARIANT
     recovery = data.get("atlas_recovery")
     if not counters_only or data.get("frame_counters") != "on":
         if counters_only and data.get("status") == "valid":
@@ -7183,7 +7185,7 @@ def atlas_recovery_rows(label: str, base: SideRuns, head: SideRuns) -> list[list
     """The atlas retry recovery table for S1/atlas-retry: one row per frame A-D and a sequence total, each
     cell summed over every episode of every accepted counters run, with the run and episode counts and each
     side's distinct row keys in the first row. Empty for any other label or when no run recorded episodes."""
-    if tuple(label.split("/", 1)) not in COUNTERS_ONLY_VARIANTS:
+    if tuple(label.split("/", 1)) != ATLAS_RETRY_VARIANT:
         return []
     per_side = []
     for side in (base, head):
