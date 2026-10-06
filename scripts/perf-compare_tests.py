@@ -9900,14 +9900,20 @@ def present_line(seq, resets, *, arming=1, pane=7, set_=False, sentinel=False, p
                             prompt=prompt, admission=admission)
 
 
-def armed_outcome(lines, *, updates=3, seq_start=10, seq_end=None, end_resets=None, cached=2, presented=None):
-    """A counters run of S10 armed from a closed baseline of 5 resets, with `lines` in its logs."""
+def armed_outcome(lines, *, updates=3, seq_start=10, seq_end=None, end_resets=None, cached=2, presented=None,
+                  counted=None, baseline_set=False, end_epoch=None):
+    """A counters run of S10 armed from a closed baseline of 5 resets, with `lines` in its logs. `presented` and
+    `counted` replace the phase's presented frames and its counters' presented delta, which otherwise equal the
+    sequence range; `baseline_set` and `end_epoch` replace the baseline's set bit and the final epoch."""
     seq_end = seq_start + len(lines) if seq_end is None else seq_end
+    fresh = seq_end - seq_start
     record = {"state": "armed", "arming": 1, "pane": 7, "updates": updates,
-              "baseline": {"set": False, "epoch": 5, "resets": 5}, "seq_start": seq_start, "seq_end": seq_end,
-              "end": {"set": False, "epoch": 5 + updates, "resets": 5 + updates if end_resets is None else end_resets}}
-    phase = {"name": "stream", "updates": updates, "presented_frames": presented or (seq_end - seq_start),
-             "frame_counters": {"window": {"cached": cached}}, "s10_attribution": record}
+              "baseline": {"set": baseline_set, "epoch": 5, "resets": 5}, "seq_start": seq_start, "seq_end": seq_end,
+              "end": {"set": False, "epoch": 5 + updates if end_epoch is None else end_epoch,
+                      "resets": 5 + updates if end_resets is None else end_resets}}
+    phase = {"name": "stream", "updates": updates, "presented_frames": fresh if presented is None else presented,
+             "frame_counters": {"window": {"cached": cached, "presented": fresh if counted is None else counted}},
+             "s10_attribution": record}
     return SimpleNamespace(result={"phases": [phase]}, present_lines=list(lines))
 
 
@@ -10122,6 +10128,91 @@ class S10AttributionAnalysisTests(unittest.TestCase):
         self.assertTrue(all(row[-1].startswith("ratio holds") for row in rows), rows)
         self.assertEqual(evidence["head"]["timed_excess"], [2])
 
+
+
+PRESENT_TEXT = ("2026-10-05T20:00:00.000001Z  WARN sonic::perf_present: perf_present kind=\"present\" arming=3 "
+                "seq=41 window=\"main\" pane=7 resets=3 epoch=4 set=true sentinel=true prompt=false "
+                "admission=\"credit\"")
+
+
+class S10AttributionConsistencyTests(unittest.TestCase):
+    """A record or lines that contradict themselves are never complete and never hold the ratio."""
+
+    def test_the_reviewers_contradictions_are_incomplete(self):
+        # An open baseline, a final epoch below the baseline, resets that decrease while epochs do not, and
+        # presented frames or a counter delta that disagree with the sequence range each leave the run incomplete;
+        # so does a final reading below a line's state.
+        lines = complete_lines()
+        decreasing = [present_line(11, 5), present_line(12, 6), present_line(13, 8, epoch=8),
+                      present_line(14, 7, epoch=8), present_line(15, 8, sentinel=True)]
+        cases = {
+            "an open baseline": armed_outcome(lines, baseline_set=True),
+            "a final epoch below the baseline": armed_outcome(lines, end_epoch=4),
+            "resets decreasing while epochs do not": armed_outcome(decreasing),
+            "presented frames beyond the sequence": armed_outcome(lines, presented=100),
+            "a counter delta beyond the sequence": armed_outcome(lines, counted=7),
+            "a final reading below a line": armed_outcome(lines, end_epoch=6),
+        }
+        for name, outcome in cases.items():
+            with self.subTest(name):
+                run = perf.attribution_run(outcome, synchronized=True)
+                self.assertEqual(run.state, "incomplete", name)
+                self.assertFalse(perf.attribution_verdict([run], True, [2]).startswith("ratio holds"), name)
+
+    def test_a_contradictory_record_is_a_schema_failure(self):
+        # Counts are unsigned 64-bit, the baseline is closed, the final reading is not below it and the sequence
+        # does not end before it starts; any other record is a schema problem.
+        self.assertEqual(perf.attribution_problems(attributed_result(ARMED_RECORD), True, 1), [])
+        cases = {
+            "an open baseline": {**ARMED_RECORD, "baseline": {"set": True, "epoch": 5, "resets": 5}},
+            "a final epoch below the baseline": {**ARMED_RECORD, "end": {"set": False, "epoch": 4, "resets": 8}},
+            "final resets below the baseline": {**ARMED_RECORD, "end": {"set": False, "epoch": 8, "resets": 4}},
+            "a negative count": {**ARMED_RECORD, "seq_start": -1},
+            "a count beyond 64 bits": {**ARMED_RECORD, "arming": 2 ** 64},
+            "an end before the start": {**ARMED_RECORD, "seq_end": 9},
+            "a negative reading": {**ARMED_RECORD, "baseline": {"set": False, "epoch": -1, "resets": 5}},
+        }
+        for name, record in cases.items():
+            with self.subTest(name):
+                self.assertTrue(perf.attribution_problems(attributed_result(record), True, 1), name)
+
+    def test_a_line_must_name_the_main_window_once_per_field(self):
+        # A line without the window, for another window, with a field written twice, conflicting or not, or with a
+        # count no `u64` holds keeps its problem, so the run reads incomplete.
+        self.assertIsNone(perf.parse_present_line(PRESENT_TEXT).problem)
+        changed = {"no window": PRESENT_TEXT.replace(' window="main"', ""),
+                   "a child window": PRESENT_TEXT.replace('window="main"', 'window="child-1"'),
+                   "a conflicting field": PRESENT_TEXT + " seq=999",
+                   "a repeated field": PRESENT_TEXT + " seq=41",
+                   "a count beyond 64 bits": PRESENT_TEXT.replace("seq=41", f"seq={2 ** 64}")}
+        for name, line in changed.items():
+            with self.subTest(name):
+                self.assertIsNotNone(perf.parse_present_line(line).problem, name)
+
+    def test_s10_default_keeps_its_transport_complete_or_incomplete(self):
+        # S10/default has no update identity, but a frame without its line still makes it incomplete, never a
+        # sound control; only complete transport reads unsupported.
+        lines = complete_lines()
+        gap = perf.attribution_run(armed_outcome(lines[:2] + lines[3:], seq_end=15), synchronized=False)
+        self.assertEqual(gap.state, "incomplete")
+        self.assertTrue(perf.attribution_verdict([gap], False, [2]).startswith("pending"))
+        sound = perf.attribution_run(armed_outcome(lines), synchronized=False)
+        self.assertEqual(sound.state, "unsupported")
+        self.assertTrue(perf.attribution_verdict([sound], False, [2]).startswith("unsupported"))
+
+
+class S10AttributionPrebuiltTests(PrebuiltHarness, unittest.TestCase):
+    """A prebuilt manifest's harness cfg decision is compared exactly."""
+
+    def test_a_manifest_cfg_value_must_be_a_list_of_names(self):
+        # A number, a boolean, a bare name, null or a per-side object is refused for its type, never compared
+        # loosely, so `0` can never stand for an absent cfg.
+        binaries, _digest = self.produce()
+        for value in ([0], [True], "perf_atlas_retry_api", None, {"base": True, "head": True}):
+            with self.subTest(value=value):
+                changed = self.rewrite(binaries, lambda data, value=value: data.update(harness_cfgs=value))
+                with self.assertRaisesRegex(ValueError, "harness_cfgs .* is not a list of strings"):
+                    self.consume(binaries, changed)
 
 
 if __name__ == "__main__":

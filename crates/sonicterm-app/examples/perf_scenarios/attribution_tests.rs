@@ -10,15 +10,31 @@ fn closed(resets: u64) -> SyncReading {
 /// open before GO refuses the run.
 #[test]
 fn the_step_before_go_arms_only_from_a_closed_baseline() {
-    assert_eq!(start(true, false, Some(closed(0))), Start::Skip("api-disabled"));
-    assert_eq!(start(false, true, Some(closed(0))), Start::Skip("counters-off"));
-    assert_eq!(start(true, true, None), Start::Skip("no-baseline"));
-    assert_eq!(start(true, true, Some(closed(3))), Start::Arm(closed(3)));
+    assert_eq!(start(true, false, || Some(closed(0))), Start::Skip("api-disabled"));
+    assert_eq!(start(false, true, || Some(closed(0))), Start::Skip("counters-off"));
+    assert_eq!(start(true, true, || None), Start::Skip("no-baseline"));
+    assert_eq!(start(true, true, || Some(closed(3))), Start::Arm(closed(3)));
     let open = SyncReading { set: true, epoch: 2, resets: 1 };
-    match start(true, true, Some(open)) {
+    match start(true, true, || Some(open)) {
         Start::Refuse(reason) => assert!(reason.contains("before GO"), "{reason}"),
         other => panic!("an open update before GO refuses the run: {other:?}"),
     }
+}
+
+/// The baseline is read only once the build calls the API and the run counts: a skipped step never
+/// takes the parser lock that reading the pane's state needs, and an armed step reads it exactly once.
+#[test]
+fn a_skipped_step_never_reads_the_baseline() {
+    let reads = std::cell::Cell::new(0_u32);
+    let read_baseline = || {
+        reads.set(reads.get() + 1);
+        Some(closed(0))
+    };
+    assert_eq!(start(true, false, read_baseline), Start::Skip("api-disabled"));
+    assert_eq!(start(false, true, read_baseline), Start::Skip("counters-off"));
+    assert_eq!(reads.get(), 0, "a skipped step read the pane's state");
+    assert_eq!(start(true, true, read_baseline), Start::Arm(closed(0)));
+    assert_eq!(reads.get(), 1, "an armed step reads the baseline once");
 }
 
 /// Only an arming id makes a phase armed: a disabled adapter and the prerequisite's stub returning

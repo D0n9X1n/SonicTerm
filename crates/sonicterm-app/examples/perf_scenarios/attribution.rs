@@ -77,8 +77,13 @@ pub(crate) enum Start {
 }
 
 /// The step before GO for a phase that plays counted updates: attribution runs only in a counting
-/// run of a build that calls the API, and only from a closed baseline.
-pub(crate) fn start(counting: bool, api_enabled: bool, baseline: Option<SyncReading>) -> Start {
+/// run of a build that calls the API, and only from a closed baseline. `read_baseline` reads the
+/// pane's state under the parser lock, so it runs only after both checks pass, and at most once.
+pub(crate) fn start(
+    counting: bool,
+    api_enabled: bool,
+    read_baseline: impl FnOnce() -> Option<SyncReading>,
+) -> Start {
     if !api_enabled {
         return Start::Skip("api-disabled");
     }
@@ -86,7 +91,7 @@ pub(crate) fn start(counting: bool, api_enabled: bool, baseline: Option<SyncRead
         // When: `counting` is false, the App's frame-counter gate is off and the watch records nothing.
         return Start::Skip("counters-off");
     }
-    match baseline {
+    match read_baseline() {
         None => Start::Skip("no-baseline"),
         Some(reading) if reading.set => Start::Refuse(format!(
             "S10's pane had an update open before GO (epoch {}, resets {}), so update 1 cannot be attributed",

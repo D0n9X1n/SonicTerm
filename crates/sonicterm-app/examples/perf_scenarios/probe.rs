@@ -1836,9 +1836,12 @@ impl Probe {
     /// the App's watch from a closed baseline. An update already open before GO voids the run.
     fn begin_attribution(&mut self, event_loop: &ActiveEventLoop, updates: u32) {
         let pane = self.role_panes.first().copied();
-        let baseline = pane.and_then(|pane_id| attribution::api::read_sync(&self.app, pane_id));
         let counting = self.counters_mode == CountersMode::On;
-        match (pane, attribution::start(counting, attribution::API_ENABLED, baseline)) {
+        // The pane's state is read only once `start` has checked the API and the counters gate.
+        let started = attribution::start(counting, attribution::API_ENABLED, || {
+            pane.and_then(|pane_id| attribution::api::read_sync(&self.app, pane_id))
+        });
+        match (pane, started) {
             (_, Start::Skip(reason)) => {
                 self.attribution = Some(attribution::Attribution::Unavailable { reason });
             }

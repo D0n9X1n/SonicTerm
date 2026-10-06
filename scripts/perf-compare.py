@@ -1418,11 +1418,13 @@ class PresentLine:
     problem: str | None = None
 
 
-# Each kind's integer, boolean and text fields, in the order the App writes them.
+# Each kind's integer, boolean and text fields, in the order the App writes them; every line names the main window.
 _PRESENT_FIELDS = {
     "present": (("arming", "seq", "pane", "resets", "epoch"), ("set", "sentinel", "prompt"), ("admission",)),
     "overflow": (("arming", "seq", "pane", "emitted"), (), ()),
 }
+PRESENT_WINDOW = "main"
+_FIELD_NAME = re.compile(r"(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=")
 PRESENT_ADMISSIONS = ("closed", "forced-first", "forced-visibility", "forced-device", "forced-resize",
                       "forced-surface", "timeout", "credit")
 
@@ -1440,14 +1442,21 @@ def parse_present_line(line: str) -> PresentLine | None:
     if position < 0:
         return None
     fields = line[position + len(PRESENT_MARKER):]
+    # A field written twice, equal or not, makes the line ambiguous, since `_field` would read only the first.
+    repeated = sorted(name for name, count in Counter(_FIELD_NAME.findall(fields)).items() if count > 1)
     kind = _unquoted(fields, "kind")
+    if repeated:
+        return PresentLine(kind=str(kind), problem=f"field(s) {', '.join(repeated)} written more than once")
     if kind not in _PRESENT_FIELDS:
         return PresentLine(kind=str(kind), problem=f"unknown kind {kind!r}")
+    window = _unquoted(fields, "window")
+    if window != PRESENT_WINDOW:
+        return PresentLine(kind=kind, problem=f"window is {window!r}, not {PRESENT_WINDOW!r}")
     counts, flags, texts = _PRESENT_FIELDS[kind]
     values: dict[str, object] = {}
     for name in counts:
         raw = _field(fields, name)
-        if raw is None or not raw.isdigit():
+        if raw is None or not raw.isdigit() or int(raw) > U64_MAX:
             return PresentLine(kind=kind, problem=f"{name} is {raw!r}")
         values[name] = int(raw)
     for name in flags:
@@ -2554,12 +2563,43 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
 # Why a counted phase has no attribution watch; the comparison reads each as unavailable, never as passed.
 ATTRIBUTION_UNAVAILABLE = ("api-disabled", "counters-off", "no-baseline", "not-armed")
 _SYNC_KEYS = {"set", "epoch", "resets"}
+# The App's counts are `u64`; a value outside that range cannot have come from it.
+U64_MAX = 2 ** 64 - 1
+
+
+def _is_count(value: object) -> bool:
+    """Whether `value` is an unsigned 64-bit count."""
+    return _is_int(value) and 0 <= value <= U64_MAX
 
 
 def _sync_reading_ok(value: object) -> bool:
-    """Whether `value` is a pane's synchronized-output reading: a boolean `set` and integer counts."""
+    """Whether `value` is a pane's synchronized-output reading: a boolean `set` and unsigned counts."""
     return (isinstance(value, dict) and set(value) == _SYNC_KEYS and isinstance(value["set"], bool)
-            and _is_int(value["epoch"]) and _is_int(value["resets"]))
+            and _is_count(value["epoch"]) and _is_count(value["resets"]))
+
+
+def _armed_record_shaped(record: dict) -> bool:
+    """Whether an armed record has every field with its type: unsigned counts and well-formed readings."""
+    return (all(_is_count(record.get(key)) for key in ("arming", "pane", "updates", "seq_start"))
+            and (record.get("seq_end") is None or _is_count(record.get("seq_end")))
+            and _sync_reading_ok(record.get("baseline"))
+            and (record.get("end") is None or _sync_reading_ok(record.get("end"))))
+
+
+def armed_record_contradictions(record: dict) -> list[str]:
+    """What a well-shaped armed record says against itself: arming needs a closed baseline, and the pane's resets
+    and epoch only grow, so the final reading is never below the baseline and the sequence never runs backwards."""
+    problems = []
+    baseline, end = record["baseline"], record.get("end")
+    if baseline["set"]:
+        problems.append("the baseline shows an open update, which arming refuses")
+    if end is not None:
+        for key in ("epoch", "resets"):
+            if end[key] < baseline[key]:
+                problems.append(f"the final {key} {end[key]} is below the baseline's {baseline[key]}")
+    if record.get("seq_end") is not None and record["seq_end"] < record["seq_start"]:
+        problems.append(f"the sequence ends at {record['seq_end']}, before its start {record['seq_start']}")
+    return problems
 
 
 def attribution_problems(data: dict, attribution_api: bool | None, schema: int | None) -> list[str]:
@@ -2584,14 +2624,14 @@ def attribution_problems(data: dict, attribution_api: bool | None, schema: int |
             if record.get("reason") not in ATTRIBUTION_UNAVAILABLE or set(record) != {"state", "reason"}:
                 problems.append(f"phase {name!r} s10_attribution {record!r} names no known reason")
         elif state == "armed":
-            counts_ok = all(_is_int(record.get(key)) for key in ("arming", "pane", "updates", "seq_start"))
-            end_ok = record.get("seq_end") is None or _is_int(record.get("seq_end"))
-            if not (counts_ok and end_ok and _sync_reading_ok(record.get("baseline"))
-                    and (record.get("end") is None or _sync_reading_ok(record.get("end")))):
+            if not _armed_record_shaped(record):
                 problems.append(f"phase {name!r} s10_attribution is armed but malformed: {record!r}")
             elif record["updates"] != phase.get("updates"):
                 problems.append(f"phase {name!r} s10_attribution updates {record['updates']} are not the "
                                 f"phase's {phase.get('updates')!r}")
+            else:
+                problems.extend(f"phase {name!r} s10_attribution: {problem}"
+                                for problem in armed_record_contradictions(record))
             if recorded is not True:
                 problems.append(f"phase {name!r} is armed, but this build does not call the attribution API")
         else:
@@ -6940,14 +6980,23 @@ def attribution_run(outcome, synchronized: bool) -> AttributionRun:
     if not isinstance(record, dict) or record.get("state") != "armed":
         reason = record.get("reason") if isinstance(record, dict) else "no-record"
         return AttributionRun("unavailable", [str(reason)])
+    if not _armed_record_shaped(record):
+        return AttributionRun("incomplete", ["the armed record is malformed"])
     updates, arming, pane = record["updates"], record["arming"], record["pane"]
     seq_start, seq_end = record["seq_start"], record.get("seq_end")
     run = AttributionRun("incomplete", updates=updates, cached=_window_count(phase, "cached"))
     reasons = run.reasons
+    reasons.extend(armed_record_contradictions(record))
     if seq_end is None or seq_end < seq_start:
         reasons.append(f"the phase's presented count is unknown ({seq_start}..{seq_end!r})")
         seq_end = seq_start
     run.fresh = seq_end - seq_start
+    # The sequence range, the phase's fresh presents and the counters' presented delta count the same main-window
+    # frames over the same span; any disagreement means the lines cannot be matched to the phase.
+    for label, count in (("presented frames", phase.get("presented_frames")),
+                         ("counters' presented delta", _window_count(phase, "presented"))):
+        if count != run.fresh:
+            reasons.append(f"the phase's {label} {count!r} are not its {run.fresh} sequenced frame(s)")
     lines = [line for line in outcome.present_lines if line.arming == arming]
     if any(line.problem for line in lines) or any(line.problem for line in outcome.present_lines):
         reasons.append("a malformed perf_present line")
@@ -6963,23 +7012,32 @@ def attribution_run(outcome, synchronized: bool) -> AttributionRun:
     if gaps or repeats:
         reasons.append(f"{gaps} presented frame(s) have no line and {repeats} have more than one")
     run.admissions = dict(Counter(line.admission for line in window))
-    if not synchronized:
-        run.non_update = dict(Counter(_marker_class(line) or "stream" for line in window))
-        run.state = "unsupported"
-        return run
     baseline, end = record["baseline"], record.get("end")
     if end is None:
         reasons.append("the pane's state at the phase end was not read")
-    elif end["resets"] - baseline["resets"] != updates:
+    # The pane's epoch and resets only grow: from the baseline, through every line in sequence order, to the
+    # final reading.
+    epoch, resets = baseline["epoch"], baseline["resets"]
+    for line in window:
+        if line.epoch < epoch:
+            reasons.append("the update epoch decreased")
+        if line.resets < resets:
+            reasons.append("the pane's resets decreased")
+        epoch, resets = max(epoch, line.epoch), max(resets, line.resets)
+    if end is not None and (end["epoch"] < epoch or end["resets"] < resets):
+        reasons.append("the final reading is below a presented line's state")
+    if not synchronized:
+        # S10/default has no update identity, but its transport is still complete or not.
+        run.non_update = dict(Counter(_marker_class(line) or "stream" for line in window))
+        run.reasons = list(dict.fromkeys(reasons))[:5]
+        run.state = "incomplete" if run.reasons else "unsupported"
+        return run
+    if end is not None and end["resets"] - baseline["resets"] != updates:
         reasons.append(f"the fixture played {end['resets'] - baseline['resets']} updates, not {updates}")
     per_update: Counter = Counter()
     non_update: Counter = Counter()
     open_admissions: Counter = Counter()
-    epoch = baseline["epoch"]
     for line in window:
-        if line.epoch < epoch:
-            reasons.append("the update epoch decreased")
-        epoch = max(epoch, line.epoch)
         if line.set:
             open_admissions[line.admission] += 1
             continue
@@ -7029,11 +7087,13 @@ def attribution_verdict(runs: Sequence[AttributionRun], synchronized: bool, time
     unavailable = [run for run in runs if run.state == "unavailable"]
     if unavailable:
         return f"unavailable: {unavailable[0].reasons[0] if unavailable[0].reasons else 'no record'}"
-    if not synchronized:
-        return "unsupported: S10/default has no update identity"
-    incomplete = [run for run in runs if run.state != "complete"]
+    incomplete = [run for run in runs if run.state == "incomplete"]
     if incomplete:
         return f"pending: {len(incomplete)} of {len(runs)} run(s) incomplete ({incomplete[0].reasons[0]})"
+    if not synchronized:
+        return "unsupported: S10/default has no update identity"
+    if any(run.state != "complete" for run in runs):
+        return "pending: a run is neither complete nor incomplete"
     if max(run.max_presents for run in runs) >= 2:
         return ("repeat-presentation: an update was presented 2 or more times; reproduce it with the "
                 "windows_synchronized_output.rs pattern and fix it in a separate PR")
@@ -7384,6 +7444,12 @@ def load_prebuilt(args: argparse.Namespace, shas: Mapping[str, str], digest: str
     checks = (("features", "features"), ("harness_cfgs", "harness cfgs"), ("rustflags", "compiler flags"),
               ("target", "target"), ("toolchain", "toolchain"), ("runner_image", "runner image"),
               ("profile", "profile"))
+    # Cfg names and compiler flags are lists of strings, checked by type before equality, so a number or boolean
+    # that Python would compare equal to another value is refused for its type.
+    for key in ("harness_cfgs", "rustflags"):
+        value = manifest.get(key)
+        if not (isinstance(value, list) and all(isinstance(item, str) for item in value)):
+            raise _refuse(f"{key} {value!r} is not a list of strings")
     for key, name in checks:
         if manifest.get(key) != identity[key]:
             raise _refuse(f"{name} {manifest.get(key)!r} is not this job's {identity[key]!r}")
