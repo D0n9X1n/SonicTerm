@@ -784,6 +784,9 @@ impl App {
             drop(sources);
             return;
         }
+        // Each watched pane's attribution record is copied here, under the guards the frame presents.
+        let s10_candidates =
+            self.s10_candidates(win_id, guards.iter().map(|(id, parser, _)| (*id, &**parser)), now);
         // One anchored viewport projection feeds both the per-pane and active-frame viewports.
         // Reconcile, then apply the previous frame's receipts under these guards, before planning.
         let frame_viewports = match self
@@ -1143,6 +1146,12 @@ impl App {
         if let (Some(snapshot), Some(outcome)) = (frame_snapshot.as_ref(), frame_completion) {
             self.complete_window_redraw(win_id, snapshot, outcome);
         }
+        // Only a presented attempt emits its records, numbered by the main renderer's presented count.
+        let presented_seq =
+            matches!(frame_completion, Some(super::redraw::FrameSettlement::Presented))
+                .then(|| self.main_renderer().map(GpuRenderer::successful_frame_count))
+                .flatten();
+        self.commit_s10_candidates(s10_candidates, presented_seq);
         if let Some(presented) = smoke_presented_count {
             // When: `smoke_presented_count` contains `presented`, classify the marker-bearing frame.
             match presented {

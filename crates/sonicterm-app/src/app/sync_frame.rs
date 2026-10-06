@@ -47,11 +47,51 @@ impl WindowState {
     /// Whether this frame must run whatever the hold: first frame, visibility, device recovery,
     /// resize or surface recovery. A cleared retained key alone does not force a frame.
     pub(super) fn sync_frame_forced(&self) -> bool {
-        self.redraw.last_present.is_none()
-            || self.redraw.cause_pending(RedrawCause::Visibility)
-            || self.redraw.cause_pending(RedrawCause::DeviceRecovered)
-            || self.redraw.resize_pending
-            || self.redraw.surface_recovery_pending
+        self.sync_forced_cause().is_some()
+    }
+
+    /// The first reason this frame must run whatever the hold, in the order `sync_frame_forced`
+    /// lists them; `None` when nothing forces it.
+    pub(super) fn sync_forced_cause(&self) -> Option<ForcedCause> {
+        [
+            (self.redraw.last_present.is_none(), ForcedCause::First),
+            (self.redraw.cause_pending(RedrawCause::Visibility), ForcedCause::Visibility),
+            (self.redraw.cause_pending(RedrawCause::DeviceRecovered), ForcedCause::Device),
+            (self.redraw.resize_pending, ForcedCause::Resize),
+            (self.redraw.surface_recovery_pending, ForcedCause::Surface),
+        ]
+        .into_iter()
+        .find_map(|(pending, cause)| pending.then_some(cause))
+    }
+
+    /// Why an attempt that proceeded past the guarded recheck at `now` was admitted for pane
+    /// `pane_id`, whose guarded state is `state`: `Closed` when its update is closed, otherwise the
+    /// reason an open update did not hold it. `None` when the window holds no such pane.
+    pub(super) fn sync_admission(
+        &self,
+        pane_id: u64,
+        state: SyncState,
+        now: Instant,
+    ) -> Option<SyncAdmission> {
+        let pane = self.panes.get(&pane_id)?;
+        if !state.set {
+            // When: `state.set` is false, the guarded update is closed and the frame shows a finished one.
+            return Some(SyncAdmission::Closed);
+        }
+        if let Some(cause) = self.sync_forced_cause() {
+            // When: `sync_forced_cause` names a `cause`, that must-run cause showed the open update.
+            return Some(SyncAdmission::Forced(cause));
+        }
+        if !self.sync_cap_open(now) {
+            // When: `sync_cap_open` is false at `now`, the stretch reached its cap and the window stopped holding.
+            return Some(SyncAdmission::Timeout);
+        }
+        if published_resets(state.resets) != published_resets(pane.presented_sync_resets) {
+            // When: `published_resets` of `state` and `presented_sync_resets` differ, an unpresented reset's credit admits it.
+            return Some(SyncAdmission::Credit);
+        }
+        // An open update that neither a forced cause, the cap nor a credit released has passed its deadline.
+        Some(SyncAdmission::Timeout)
     }
 
     /// The earliest instant a visible pane stops holding this window, or `None` when none holds.
@@ -114,6 +154,50 @@ impl WindowState {
             if let Some(pane) = self.panes.get_mut(&id) {
                 pane.presented_sync_resets = resets;
             }
+        }
+    }
+}
+
+/// A must-run cause that admits a frame through a hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ForcedCause {
+    /// The window has not presented yet.
+    First,
+    /// The window became visible.
+    Visibility,
+    /// The device recovered.
+    Device,
+    /// The surface changed size.
+    Resize,
+    /// The surface is being recovered.
+    Surface,
+}
+
+/// Why a frame was admitted while a pane's guarded state was read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SyncAdmission {
+    /// The pane's update was closed.
+    Closed,
+    /// An open update was shown because a must-run cause forced the frame.
+    Forced(ForcedCause),
+    /// An open update was shown because its deadline or the window's cap passed.
+    Timeout,
+    /// An open update was shown because a reset of the pane had not reached a frame.
+    Credit,
+}
+
+impl SyncAdmission {
+    /// The admission's name on a `sonic::perf_present` line.
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::Forced(ForcedCause::First) => "forced-first",
+            Self::Forced(ForcedCause::Visibility) => "forced-visibility",
+            Self::Forced(ForcedCause::Device) => "forced-device",
+            Self::Forced(ForcedCause::Resize) => "forced-resize",
+            Self::Forced(ForcedCause::Surface) => "forced-surface",
+            Self::Timeout => "timeout",
+            Self::Credit => "credit",
         }
     }
 }

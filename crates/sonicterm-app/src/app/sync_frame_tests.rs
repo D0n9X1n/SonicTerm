@@ -819,3 +819,66 @@ fn the_recheck_abandons_a_held_frame_on_both_roles_without_touching_state() {
         assert!(!branch.contains("coherent_frame_collected"), "{branch}");
     }
 }
+
+/// An attempt past the guarded recheck names why it was admitted for each pane: a closed update is
+/// `Closed`; an open one is `Forced` by the first must-run cause, `Timeout` once the window's cap or
+/// the pane's deadline passed, or `Credit` while one of its resets has not reached a frame. A pane
+/// the window does not hold has no admission.
+#[test]
+fn an_admitted_attempt_names_why_each_pane_was_shown() {
+    use crate::app::sync_frame::{ForcedCause, SyncAdmission};
+    let (mut app, main, _, base) = held_owners();
+    let pane = pane_of(&app, main, 0);
+    let open = SyncState { set: true, epoch: 1, resets: 0 };
+    let admission =
+        |app: &App, state: SyncState| app.windows[&main].sync_admission(pane, state, base);
+    assert_eq!(admission(&app, SyncState { set: false, ..open }), Some(SyncAdmission::Closed));
+    assert_eq!(admission(&app, open), Some(SyncAdmission::Timeout), "the deadline passed");
+    assert_eq!(
+        admission(&app, SyncState { resets: 1, ..open }),
+        Some(SyncAdmission::Credit),
+        "an unpresented reset"
+    );
+    app.windows.get_mut(&main).unwrap().redraw.sync_stretch_start =
+        Some(at_ms(base, 0) - Duration::from_millis(200));
+    assert_eq!(
+        admission(&app, SyncState { resets: 1, ..open }),
+        Some(SyncAdmission::Timeout),
+        "the cap passes before the credit is read"
+    );
+    app.windows.get_mut(&main).unwrap().redraw.resize_pending = true;
+    assert_eq!(admission(&app, open), Some(SyncAdmission::Forced(ForcedCause::Resize)));
+    app.windows.get_mut(&main).unwrap().redraw.last_present = None;
+    assert_eq!(
+        admission(&app, open),
+        Some(SyncAdmission::Forced(ForcedCause::First)),
+        "first wins"
+    );
+    assert_eq!(app.windows[&main].sync_admission(pane + 1_000, open, base), None);
+    let names: Vec<&str> = [
+        SyncAdmission::Closed,
+        SyncAdmission::Forced(ForcedCause::First),
+        SyncAdmission::Forced(ForcedCause::Visibility),
+        SyncAdmission::Forced(ForcedCause::Device),
+        SyncAdmission::Forced(ForcedCause::Resize),
+        SyncAdmission::Forced(ForcedCause::Surface),
+        SyncAdmission::Timeout,
+        SyncAdmission::Credit,
+    ]
+    .into_iter()
+    .map(SyncAdmission::name)
+    .collect();
+    assert_eq!(
+        names,
+        [
+            "closed",
+            "forced-first",
+            "forced-visibility",
+            "forced-device",
+            "forced-resize",
+            "forced-surface",
+            "timeout",
+            "credit"
+        ]
+    );
+}
