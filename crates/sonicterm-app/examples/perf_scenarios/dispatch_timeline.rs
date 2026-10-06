@@ -351,45 +351,44 @@ pub(crate) mod recorders {
     impl Frozen {
         /// Move every offset onto `app_armed_at`, the App timeline's own origin, so the harness records join
         /// the App's by time. The App arms before the recorder starts, so each offset grows by the gap
-        /// between them. A recorder that started before the App armed, or an offset that would leave the
-        /// `u64` range, makes the sample incomplete and leaves the offsets as they were.
+        /// between them. It allocates nothing: it checks every offset, then shifts them in place. A
+        /// recorder that started before the App armed, or any offset that would leave the `u64` range,
+        /// makes the sample incomplete and leaves every offset and the origin as they were.
         pub(crate) fn rebase_onto(&mut self, app_armed_at: Instant) {
             let Some(delta) = offset_ns(self.origin.checked_duration_since(app_armed_at)) else {
                 // When: the harness origin precedes the App's or the gap is unrepresentable, nothing joins.
                 self.incomplete = true;
                 return;
             };
-            let shift = |offset: u64| offset.checked_add(delta);
-            let outer_shifted: Option<Vec<(u64, u64)>> = self
+            // First pass: every offset must fit after the shift, so a failure changes nothing. An open
+            // outer callback's 0 return is a marker, not a time, and is never shifted.
+            let fits = |offset: u64| offset.checked_add(delta).is_some();
+            let outer_fit = self
                 .buffers
                 .outer
                 .iter()
-                .map(|record| Some((shift(record.enter_ns)?, shift(record.return_ns)?)))
-                .collect();
-            let invocations_shifted: Option<Vec<(u64, u64)>> = self
+                .all(|record| fits(record.enter_ns) && (record.open || fits(record.return_ns)));
+            let invocations_fit = self
                 .buffers
                 .invocations
                 .iter()
-                .map(|record| Some((shift(record.enter_ns)?, shift(record.return_ns)?)))
-                .collect();
-            let (Some(outer_shifted), Some(invocations_shifted)) =
-                (outer_shifted, invocations_shifted)
-            else {
-                // When: an offset would leave the `u64` range, the records stay on the harness origin.
+                .all(|record| fits(record.enter_ns) && fits(record.return_ns));
+            if !(outer_fit && invocations_fit) {
+                // When: an offset would leave the `u64` range, every record stays on the harness origin.
                 self.incomplete = true;
                 return;
-            };
-            for (record, (enter_ns, return_ns)) in self.buffers.outer.iter_mut().zip(outer_shifted)
-            {
-                record.enter_ns = enter_ns;
-                // An open outer callback keeps its 0 return, which marks it open, not a time.
-                record.return_ns = if record.open { 0 } else { return_ns };
             }
-            for (record, (enter_ns, return_ns)) in
-                self.buffers.invocations.iter_mut().zip(invocations_shifted)
-            {
-                record.enter_ns = enter_ns;
-                record.return_ns = return_ns;
+            // Second pass, in place: the first pass proved every sum fits.
+            for record in &mut self.buffers.outer {
+                record.enter_ns += delta;
+                if !record.open {
+                    // When: the callback returned, its return is a time and moves with the rest.
+                    record.return_ns += delta;
+                }
+            }
+            for record in &mut self.buffers.invocations {
+                record.enter_ns += delta;
+                record.return_ns += delta;
             }
             self.origin = app_armed_at;
         }

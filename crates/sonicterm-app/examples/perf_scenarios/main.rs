@@ -26,6 +26,8 @@ mod record;
 #[cfg(any(target_os = "macos", windows, test))]
 mod scan_throttle;
 mod scenarios;
+#[cfg(test)]
+mod test_allocator;
 #[cfg(any(target_os = "macos", windows, test))]
 mod transition;
 #[cfg(any(target_os = "macos", windows, test))]

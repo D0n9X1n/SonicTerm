@@ -476,6 +476,106 @@ mod recorder_tests {
         assert_eq!((frozen.origin, frozen.buffers.outer[0].enter_ns), (harness, 2_000_000));
     }
 
+    /// A frozen record on `origin` holding `outer` and `invocations`, as a recorder would leave it.
+    fn frozen_with(
+        origin: Instant,
+        outer: &[(u64, u64, bool)],
+        invocations: &[(u64, u64)],
+    ) -> super::recorders::Frozen {
+        let mut buffers = Buffers::new();
+        for (index, &(enter_ns, return_ns, open)) in outer.iter().enumerate() {
+            buffers.outer.push(OuterCallbackV1 {
+                enter_ns,
+                return_ns,
+                id: index as u32,
+                kind: OuterKind::UserEvent,
+                open,
+                clipped_at_arm: false,
+            });
+        }
+        for (index, &(enter_ns, return_ns)) in invocations.iter().enumerate() {
+            buffers.invocations.push(InvocationV1 {
+                enter_ns,
+                return_ns,
+                window: 0,
+                id: index as u32,
+                parent: 0,
+                kind: InvocationKind::UserEvent,
+                synthetic: false,
+            });
+        }
+        super::recorders::Frozen { buffers, origin, incomplete: false, overflow: false }
+    }
+
+    /// Every offset of a frozen record, in order, with its origin.
+    fn offsets(frozen: &super::recorders::Frozen) -> (Instant, Vec<u64>) {
+        let outer =
+            frozen.buffers.outer.iter().flat_map(|record| [record.enter_ns, record.return_ns]);
+        let calls = frozen
+            .buffers
+            .invocations
+            .iter()
+            .flat_map(|record| [record.enter_ns, record.return_ns]);
+        (frozen.origin, outer.chain(calls).collect())
+    }
+
+    /// One overflow case: its name, its outer records (enter, return, open) and its invocations (enter, return).
+    type OverflowCase = (&'static str, Vec<(u64, u64, bool)>, Vec<(u64, u64)>);
+
+    /// An offset that would overflow in either buffer, whether it comes first or last, fails the whole
+    /// rebase: the sample is incomplete and every offset and the origin are exactly as they were, so no
+    /// record is left half-moved. An open outer return's 0 is never shifted, so it cannot overflow.
+    #[test]
+    fn a_rebase_that_would_overflow_changes_nothing() {
+        let app = Instant::now();
+        let harness = at(app, 1);
+        let high = u64::MAX - 10;
+        let cases: [OverflowCase; 4] = [
+            ("the first outer record", vec![(high, high, false), (5, 6, false)], vec![(7, 8)]),
+            ("the last outer record", vec![(5, 6, false), (7, high, false)], vec![(7, 8)]),
+            ("the first invocation", vec![(5, 6, false)], vec![(high, high), (7, 8)]),
+            ("the last invocation", vec![(5, 6, false)], vec![(7, 8), (9, high)]),
+        ];
+        for (name, outer, invocations) in cases {
+            let mut frozen = frozen_with(harness, &outer, &invocations);
+            let before = offsets(&frozen);
+            frozen.rebase_onto(app);
+            assert!(frozen.incomplete, "{name}");
+            assert_eq!(offsets(&frozen), before, "{name}: nothing moves on failure");
+        }
+        let mut open = frozen_with(harness, &[(5, 0, true)], &[]);
+        open.rebase_onto(app);
+        assert!(!open.incomplete);
+        assert_eq!(offsets(&open), (app, vec![5 + 1_000_000, 0]));
+    }
+
+    /// The rebase allocates nothing, at full capacity and with a zero gap alike, and keeps both buffers'
+    /// allocations and capacities: the storage stays two vectors totaling 13,312 bytes of payload.
+    #[test]
+    fn a_rebase_allocates_nothing() {
+        let app = Instant::now();
+        for gap_ms in [0_u64, 4] {
+            let harness = at(app, gap_ms);
+            let outer: Vec<(u64, u64, bool)> =
+                (0..OUTER_CAPACITY as u64).map(|index| (index, index, false)).collect();
+            let invocations: Vec<(u64, u64)> =
+                (0..INVOCATION_CAPACITY as u64).map(|index| (index, index)).collect();
+            let mut frozen = frozen_with(harness, &outer, &invocations);
+            let pointers = (frozen.buffers.outer.as_ptr(), frozen.buffers.invocations.as_ptr());
+            let payload = frozen.buffers.payload_bytes();
+            let ((), allocations) =
+                crate::test_allocator::allocations_during(|| frozen.rebase_onto(app));
+            assert_eq!(allocations, 0, "gap {gap_ms} ms");
+            assert!(!frozen.incomplete);
+            assert_eq!(
+                (frozen.buffers.outer.as_ptr(), frozen.buffers.invocations.as_ptr()),
+                pointers
+            );
+            assert_eq!(frozen.buffers.payload_bytes(), payload);
+            assert_eq!(frozen.buffers.invocations[255].enter_ns, 255 + gap_ms * 1_000_000);
+        }
+    }
+
     /// One sample's storage is allocated at its full capacity once, never grows while recording, and is
     /// moved, not copied, into the frozen record and back for the next sample: the same allocation, the
     /// same capacity, and the live payload never more than one sample's 13,312 bytes.
