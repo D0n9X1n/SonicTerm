@@ -1729,10 +1729,16 @@ fn the_latch_read_waits_for_a_held_parser_and_the_recheck_does_not() {
     let guard = parser.lock();
     assert_eq!(parser_dims(&parser, false), None, "the recheck does not wait");
     let (sent, received) = mpsc::channel();
+    let (entered_tx, entered_rx) = mpsc::channel();
     let reader = {
         let parser = Arc::clone(&parser);
-        std::thread::spawn(move || sent.send(parser_dims(&parser, true)).expect("sent"))
+        std::thread::spawn(move || {
+            // The reader says it is about to read, so the wait below covers a read that really started.
+            entered_tx.send(()).expect("entered");
+            sent.send(parser_dims(&parser, true)).expect("sent")
+        })
     };
+    entered_rx.recv_timeout(Duration::from_secs(10)).expect("the reader started its read");
     assert!(
         received.recv_timeout(Duration::from_millis(200)).is_err(),
         "the blocking read is still waiting while the parser is held"
@@ -1742,4 +1748,43 @@ fn the_latch_read_waits_for_a_held_parser_and_the_recheck_does_not() {
         received.recv_timeout(Duration::from_secs(10)).expect("the read finishes once released");
     assert_eq!(read, Some((237, 43)));
     reader.join().expect("reader thread");
+}
+
+/// The real probe's grid read waits for a parser another thread holds: with a seeded pane as the row-run
+/// role and no test dimensions, a resizing dispatch observed while the parser is held is latched once the
+/// holder releases it, so contention never hides a resize.
+#[test]
+fn the_probes_grid_read_waits_out_contention_and_latches_the_resize() {
+    let scratch = warm_scratch("contention");
+    std::fs::create_dir_all(&scratch).expect("scratch");
+    let (mut probe, _) = warm_probe(scratch.clone(), 10);
+    let pane_id = probe.app.__test_seed_tab("row-run");
+    probe.role_panes = vec![pane_id];
+    let parser = probe.app.main_panes().expect("main panes")[&pane_id].parser.clone();
+    parser.lock().resize(237, 43);
+    probe.prepare_measured(237, 43).expect("prepared");
+    dispatch_then_observe(&mut probe, GridEffect::MayChange, |_: &mut Probe| ());
+    assert_eq!(probe.geometry_violation, None, "the unchanged grid latches nothing");
+    let (held_tx, held_rx) = mpsc::channel();
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let holder = {
+        let parser = Arc::clone(&parser);
+        std::thread::spawn(move || {
+            let mut guard = parser.lock();
+            guard.resize(238, 43);
+            held_tx.send(()).expect("held");
+            entered_rx.recv().expect("the probe is about to read");
+            // The probe reads within microseconds of saying so; the parser stays held well past that.
+            std::thread::sleep(Duration::from_millis(200));
+            drop(guard);
+        })
+    };
+    held_rx.recv_timeout(Duration::from_secs(10)).expect("the holder took the parser");
+    entered_tx.send(()).expect("entered");
+    dispatch_then_observe(&mut probe, GridEffect::MayChange, |_: &mut Probe| ());
+    holder.join().expect("holder thread");
+    let reason =
+        probe.geometry_violation.clone().expect("the resize is latched after contention clears");
+    assert!(reason.contains("237x43") && reason.contains("238x43"), "{reason}");
+    let _ = std::fs::remove_dir_all(&scratch);
 }
