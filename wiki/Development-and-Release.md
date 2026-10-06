@@ -204,6 +204,37 @@ cfgs a comparison would, and checks both harness examples there in its own
 target directory, which it removes with its worktree. Ubuntu's example roots
 exclude the probe, so Ubuntu does not run it.
 
+S10 counters runs also attribute each presented frame to the update it shows.
+The App's watch methods are the table entry `perf_s10_attribution_api`,
+decided and declared like every other entry above; the harness calls them, and
+the parser read it depends on, only with that cfg on. A harness lists
+`capabilities.s10_attribution: 1`; a list with any other key or value is
+refused. Each `result.json` records the build's cfg as `s10_attribution_api`,
+and it must match the comparison's decision.
+
+With the cfg on, before GO a counting run reads the S10 pane's
+synchronized-output state, refuses the run when an update is already open, and
+arms the App's watch; the `stream` phase then records `s10_attribution` with the
+arming, the baseline and the presented counts around the phase. A build without
+the cfg, a run without `--counters` and an App that armed nothing record it
+`unavailable`, never passed. The App writes one `sonic::perf_present` line per
+presented frame ([Logging](Logging)). A run is complete only when its record is
+consistent (unsigned counts, a closed baseline, epoch and resets never
+decreasing through every line to the final reading, and the phase's presented
+count, its `seq` range and its counters' `presented` delta all equal), every
+presented frame of the phase has exactly one well-formed line for the main
+window, no line is overflowed or shows an open update, the fixture played
+exactly its updates, and fresh − updates = non-update − never shown +
+Σ max(0, presents − 1). Every other run is incomplete. S10/default has no update
+identity: its lines must still be complete, and it then reports marker classes
+only. `comparison.md` adds an `S10 attribution (counters runs)` table and
+`attribution.json` keeps each run. A side's S10/sync verdict needs complete
+runs: an update presented twice asks for a reproduction and a separate fix;
+every update presented at most once, with the counters excess within ±1 of the
+same comparison's timed median, holds the ratio on that platform and attributes
+the timed excess under instrumentation only. A comparison whose two refs build
+different perf features gives no attribution verdict.
+
 Under `--short`, a variant whose harness `--list` entry declares a cap
 (`run_caps`) takes min(requested, cap) valid runs per side in every set (timed,
 laps, counters and alloc); its rows read `(runs N of M)`, and `comparison.md`

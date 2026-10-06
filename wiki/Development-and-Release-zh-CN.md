@@ -164,6 +164,21 @@ head 的 harness 必须仍能在上一个发布标签上构建，那正是发布
 规则对 HEAD 的父提交选出该标签，叠加 head 的 harness，推导比较会使用的特性与 cfg，并在自己的目标目录中检查两个 harness
 示例，结束时连同其工作树一起删除该目录。Ubuntu 的示例根排除了 probe，因此 Ubuntu 不运行它。
 
+S10 的计数器运行还会把每个呈现的帧归属到它显示的更新。App 的监视方法是表项 `perf_s10_attribution_api`，与上面的其他表项一样
+被判定和声明；只有该 cfg 开启时，harness 才调用它们以及它所依赖的解析器读取。harness 列出 `capabilities.s10_attribution: 1`；
+含其他键或值的列表会被拒绝。每个 `result.json` 以 `s10_attribution_api` 记录该构建的 cfg，它必须与比较的决定一致。
+
+开启该 cfg 时，计数运行在 GO 之前读取 S10 窗格的同步输出状态，若已有打开的更新则拒绝该次运行，然后布置 App 的监视；
+`stream` 阶段随后记录 `s10_attribution`，含布置编号、基线以及阶段前后的已呈现计数。未带该 cfg 的构建、未带 `--counters`
+的运行以及没有布置任何监视的 App 都记录为 `unavailable`，从不算作通过。App 为每个呈现的帧写一行 `sonic::perf_present`
+（见[日志](Logging-zh-CN)）。只有当记录自洽（计数为无符号、基线已关闭、epoch 与 resets 从基线经过每一行到最终读数都不减少，
+且阶段的已呈现计数、其 `seq` 区间与其计数器的 `presented` 增量三者相等）、阶段内每个呈现的帧恰好有一行主窗口的格式正确
+的行、没有行溢出或显示打开的更新、夹具恰好播放了它的更新数，并且 fresh − updates = non-update − never shown +
+Σ max(0, presents − 1) 成立时，该次运行才完整；其他运行都不完整。S10/default 没有更新身份：它的行仍必须完整，之后只报告
+标记类别。`comparison.md` 增加 `S10 attribution (counters runs)` 表，`attribution.json` 保留每次运行。一侧的 S10/sync
+结论需要完整的运行：某个更新呈现两次，要求复现并单独修复；每个更新至多呈现一次，且计数器超出量在同一次比较计时中位数的
+±1 以内，则该平台上比率成立，计时超出量只被视为在插桩下得到归属。两个 ref 构建不同性能特性的比较不给出归属结论。
+
 在 `--short` 下，harness 的 `--list` 条目声明了上限（`run_caps`）的变体在每个组（计时、lap、计数器与分配）中每侧取
 min(请求次数, 上限) 次有效运行；其行显示 `(runs N of M)`，`comparison.md` 列出被限制的变体。release 对比不受限制。
 每棵树在构建、`--build-only` 与 `--prebuilt` 对比中都恰好以它支持的 perf feature 构建，每次构建都是本地

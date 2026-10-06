@@ -671,6 +671,31 @@ excluded from `flush_to_redraw`, which starts at the publication. A window canno
 epoch, each stretch capped at 150 ms. `sync_open` is the parser's set bit after the
 appearance section, not proof of a hold.
 
+#### The S10 attribution watch
+
+While the gate is on, the perf harness may arm one S10 attribution watch per
+pane with the run's sentinel line, the prompt and the phase's update count; arming
+returns a nonzero arming id and re-arming a pane replaces its watch. With the gate
+off, or for an unknown pane, an empty or over-long marker (more than 128 bytes)
+or a phase of no updates, nothing is armed.
+
+Each main-window attempt that passes the guarded synchronized-output recheck
+copies, under the frame's parser guards, each watched pane's state: its
+`resets`, `epoch` and `set`, whether the sentinel and the prompt show from the
+cursor's row up to 8 rows above it, and why the frame was admitted. Only an
+attempt that presents writes them, one WARN line per watched pane on
+`sonic::perf_present`, which the default `sonic=warn` filter admits:
+
+```text
+perf_present kind="present" arming=<id> seq=<n> window="main" pane=<id> resets=<n> epoch=<n> set=<bool> sentinel=<bool> prompt=<bool> admission="<admission>"
+```
+
+`seq` is the main renderer's presented count after that frame. `admission` is
+`closed`, `forced-first`, `forced-visibility`, `forced-device`, `forced-resize`,
+`forced-surface`, `timeout` or `credit`. A failed or retried attempt writes
+nothing. A watch writes at most 4 × updates + 64 present lines, then one
+`kind="overflow"` line with `emitted=<n>`, then nothing. Disarming drains nothing.
+
 ### What the counters do not measure
 
 The counters themselves do not split keystroke latency at the flush; the S2 echo
