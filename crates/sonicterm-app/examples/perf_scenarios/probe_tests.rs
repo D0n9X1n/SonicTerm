@@ -1111,7 +1111,15 @@ fn the_checkpoint_fixture_matches_what_this_build_writes() {
     );
     let marker = memory_marker();
     for (name, run) in &produced {
-        assert_eq!(committed[name]["result"], run["result"], "{name}: result.json");
+        // The fixture is recorded with the attribution cfg off, as the comparison's fixture builds are; a build
+        // with the cfg on writes its own cfg, and every other field must still match.
+        let mut expected = committed[name]["result"].clone();
+        assert_eq!(
+            expected["s10_attribution_api"], false,
+            "{name}: the fixture is recorded with the cfg off"
+        );
+        expected["s10_attribution_api"] = serde_json::Value::Bool(crate::attribution::API_ENABLED);
+        assert_eq!(expected, run["result"], "{name}: result.json");
         let lines = |value: &serde_json::Value| -> Vec<Vec<String>> {
             value["logs"]
                 .as_array()
