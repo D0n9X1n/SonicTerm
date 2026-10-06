@@ -22,7 +22,7 @@ fn fixture_scene() -> Scene {
 
 /// A dispatch that leaves `scene` as it found it.
 fn around(scene: Scene) -> SceneReading {
-    SceneReading { before: Some(scene.clone()), after: Some(scene) }
+    SceneReading { before: Some(scene.clone()), after: Some(scene), ..SceneReading::default() }
 }
 
 /// A dispatch that leaves the planned scene unchanged.
@@ -291,7 +291,11 @@ fn a_fallback_applied_between_b_and_c_is_invalid() {
     machine.observe(Some(fitting(Frame::Retried)), &same(), now);
     machine.observe(Some(fitting(Frame::Recovered)), &same(), now);
     let applied = Scene { fallback: (1, 1, 0), ..fixture_scene() };
-    let reading = SceneReading { before: Some(fixture_scene()), after: Some(applied) };
+    let reading = SceneReading {
+        before: Some(fixture_scene()),
+        after: Some(applied),
+        ..SceneReading::default()
+    };
     let progress = machine.observe(Some(fitting(Frame::Reused)), &reading, now);
     assert!(
         matches!(&progress, Progress::Invalid(reason) if reason.contains("font fallback")),
@@ -334,14 +338,22 @@ fn a_transient_change_is_invalid_at_the_dispatch_that_shows_it() {
     let now = Instant::now();
     let changed = Scene { cursor: (0, 5), ..fixture_scene() };
     let mut machine = settled(now);
-    let reading = SceneReading { before: Some(fixture_scene()), after: Some(changed.clone()) };
+    let reading = SceneReading {
+        before: Some(fixture_scene()),
+        after: Some(changed.clone()),
+        ..SceneReading::default()
+    };
     let progress = machine.observe(Some(Counts::default()), &reading, now);
     assert!(
         matches!(&progress, Progress::Invalid(reason) if reason.contains("cursor")),
         "{progress:?}"
     );
     let mut machine = settled(now);
-    let reverting = SceneReading { before: Some(changed), after: Some(fixture_scene()) };
+    let reverting = SceneReading {
+        before: Some(changed),
+        after: Some(fixture_scene()),
+        ..SceneReading::default()
+    };
     let progress = machine.observe(Some(fitting(Frame::Retried)), &reverting, now);
     assert!(
         matches!(&progress, Progress::Invalid(reason) if reason.contains("cursor")),
@@ -385,7 +397,8 @@ fn settling_requires_one_applied_fixture_scene() {
         );
     }
     let mut machine = RecoveryEpisodes::new(now);
-    let unread = SceneReading { before: Some(fixture_scene()), after: None };
+    let unread =
+        SceneReading { before: Some(fixture_scene()), after: None, ..SceneReading::default() };
     let progress = machine.observe(Some(steady()), &unread, now);
     assert!(
         matches!(&progress, Progress::Invalid(reason) if reason.contains("cannot be read")),
@@ -403,6 +416,7 @@ fn a_missing_character_or_a_new_notice_after_settling_is_invalid() {
         let changed = SceneReading {
             before: Some(fixture_scene()),
             after: Some(Scene { fallback, ..fixture_scene() }),
+            ..SceneReading::default()
         };
         let progress = machine.observe(Some(fitting(Frame::Retried)), &changed, now);
         assert!(
@@ -458,6 +472,7 @@ fn relative_times_keep_their_sign() {
 fn the_settle_log_separates_the_apps_cached_sample_from_the_harness_lookup() {
     let evidence = Evidence {
         event: "failure",
+        observation: "before",
         settled_title: Some("#1 \u{E691} shell".to_owned()),
         read_title: Some("#1 \u{F489} shell".to_owned()),
         app_cached: Some(CachedForeground {
@@ -477,7 +492,7 @@ fn the_settle_log_separates_the_apps_cached_sample_from_the_harness_lookup() {
     assert_eq!(
         evidence.line(),
         concat!(
-            r##"event=failure settled_title="#1 \u{e691} shell" read_title="#1 \u{f489} shell" "##,
+            r##"event=failure observation=before settled_title="#1 \u{e691} shell" read_title="#1 \u{f489} shell" "##,
             r#"app_cached_process="sleep" app_cached_sampled_rel_ms=2310 leader_pid=501 anchor_pid=502 "#,
             "tab_title_prepares=3 fg_worker_probes=2 fg_results_stale=0 settle_ms=n/a ",
             r#"harness_lookup_process="sleep" harness_lookup_rel_ms=2400"#,
@@ -485,6 +500,7 @@ fn the_settle_log_separates_the_apps_cached_sample_from_the_harness_lookup() {
     );
     let sparse = Evidence {
         event: "settle",
+        observation: "none",
         settled_title: None,
         read_title: None,
         app_cached: Some(CachedForeground { process: None, sampled_rel_ms: -15 }),
@@ -498,7 +514,7 @@ fn the_settle_log_separates_the_apps_cached_sample_from_the_harness_lookup() {
     assert_eq!(
         sparse.line(),
         concat!(
-            "event=settle settled_title=n/a read_title=n/a app_cached_process=none ",
+            "event=settle observation=none settled_title=n/a read_title=n/a app_cached_process=none ",
             "app_cached_sampled_rel_ms=-15 leader_pid=n/a anchor_pid=n/a tab_title_prepares=n/a ",
             "fg_worker_probes=n/a fg_results_stale=n/a settle_ms=812 harness_lookup_process=n/a ",
             "harness_lookup_rel_ms=n/a",
@@ -530,4 +546,121 @@ fn the_leader_identity_is_read_from_the_role_session() {
     ] {
         assert_eq!(parse_session(refused), None, "{refused}");
     }
+}
+
+/// A foreground sample the App applied, `offset_ms` after `origin`, naming `process`.
+fn sample(origin: Instant, offset_ms: u64, process: Option<&str>) -> AppliedSample {
+    AppliedSample {
+        sampled_at: origin + Duration::from_millis(offset_ms),
+        process: process.map(str::to_owned),
+    }
+}
+
+/// A dispatch whose before reading shows a changed title that its after reading has reverted is refused
+/// for the before reading, and the machine keeps that reading: its title and the sample captured with it,
+/// not the reverted after side.
+#[test]
+fn a_reverted_title_is_kept_as_the_before_reading_that_showed_it() {
+    let now = Instant::now();
+    let mut machine = settled(now);
+    let reading = SceneReading {
+        before: Some(Scene { title: "T2".to_owned(), ..fixture_scene() }),
+        after: Some(fixture_scene()),
+        cached_before: Some(sample(now, 40, Some("sh"))),
+        cached_after: Some(sample(now, 900, Some("sleep"))),
+    };
+    let progress = machine.observe(Some(fitting(Frame::Retried)), &reading, now);
+    assert!(
+        matches!(&progress, Progress::Invalid(reason) if reason.contains("\"T2\"")),
+        "{progress:?}"
+    );
+    let observed = failure_observation(&machine);
+    assert_eq!(
+        observed,
+        Observed {
+            observation: "before",
+            settled_title: Some("sonicterm".to_owned()),
+            read_title: Some("T2".to_owned()),
+            cached: Some(sample(now, 40, Some("sh"))),
+        }
+    );
+}
+
+/// Once a reading is refused, later dispatches never change what the failure line reports: a foreground
+/// result applied after the refusal, and a reading that shows yet another title, leave the kept reading
+/// exactly as it was.
+#[test]
+fn a_cache_replaced_after_the_refusal_does_not_change_the_kept_reading() {
+    let now = Instant::now();
+    let mut machine = settled(now);
+    let refused = SceneReading {
+        cached_before: Some(sample(now, 40, Some("sh"))),
+        cached_after: Some(sample(now, 40, Some("sh"))),
+        ..around(Scene { title: "T2".to_owned(), ..fixture_scene() })
+    };
+    assert!(matches!(
+        machine.observe(Some(fitting(Frame::Retried)), &refused, now),
+        Progress::Invalid(_)
+    ));
+    let kept = failure_observation(&machine);
+    let later = SceneReading {
+        cached_before: Some(sample(now, 900, Some("sleep"))),
+        cached_after: Some(sample(now, 900, Some("sleep"))),
+        ..around(Scene { title: "T3".to_owned(), ..fixture_scene() })
+    };
+    assert_eq!(machine.observe(Some(fitting(Frame::Retried)), &later, now), Progress::Waiting);
+    assert_eq!(failure_observation(&machine), kept);
+    assert_eq!(kept.cached, Some(sample(now, 40, Some("sh"))));
+    // Both sides show T2, and the before reading is judged first, so it is the one kept.
+    assert_eq!(kept.observation, "before");
+}
+
+/// The settle line describes the after reading that settled the scene, with the sample captured alongside
+/// it; a failure no scene change caused reports no reading and no sample, only the settled title.
+#[test]
+fn settle_and_non_scene_failures_report_only_what_was_observed() {
+    let now = Instant::now();
+    let reading = SceneReading { cached_after: Some(sample(now, 12, Some("sleep"))), ..same() };
+    let observed = settle_observation(&fixture_scene(), &reading);
+    assert_eq!(observed.observation, "after");
+    assert_eq!(observed.read_title.as_deref(), Some("sonicterm"));
+    assert_eq!(observed.cached, Some(sample(now, 12, Some("sleep"))));
+    let mut machine = settled(now);
+    let extra = Counts { attempts: 2, ..fitting(Frame::Retried) };
+    assert!(matches!(machine.observe(Some(extra), &same(), now), Progress::Invalid(_)));
+    assert_eq!(
+        failure_observation(&machine),
+        Observed {
+            observation: "none",
+            settled_title: Some("sonicterm".to_owned()),
+            read_title: None,
+            cached: None,
+        }
+    );
+}
+
+/// The session record is read with a bound: a real record parses, a missing file gives nothing, and a
+/// file longer than the limit is refused rather than read whole.
+#[test]
+fn the_session_record_is_read_with_a_bound() {
+    let directory =
+        std::env::temp_dir().join(format!("atlas-retry-session-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("0.json");
+    std::fs::write(&path, r#"{"role":0,"leader_pid":501,"anchor_pid":502,"tty":"none"}"#).unwrap();
+    assert_eq!(
+        read_session(&path),
+        Some(SessionIdentity { leader_pid: 501, anchor_pid: Some(502) })
+    );
+    // Valid JSON exactly one byte over the limit: the bounded read takes it whole, so only the length
+    // check can refuse it.
+    let head = r#"{"role":0,"leader_pid":501,"pad":""#;
+    let pad = SESSION_RECORD_LIMIT as usize + 1 - head.len() - 2;
+    let padded = format!("{head}{}\"}}", "x".repeat(pad));
+    assert_eq!(padded.len() as u64, SESSION_RECORD_LIMIT + 1);
+    std::fs::write(&path, padded).unwrap();
+    assert_eq!(read_session(&path), None);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(read_session(&path), None);
+    std::fs::remove_dir(&directory).unwrap();
 }

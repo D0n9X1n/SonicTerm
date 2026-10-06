@@ -130,13 +130,42 @@ impl Scene {
     }
 }
 
-/// The scene read before and after one forwarded dispatch; a side is `None` when it could not be read.
+/// The scene read before and after one forwarded dispatch, each with the foreground sample the App had
+/// applied for the active pane at that same reading; a side is `None` when it could not be read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SceneReading {
     /// Read just before the dispatch.
     pub(crate) before: Option<Scene>,
     /// Read just after it.
     pub(crate) after: Option<Scene>,
+    /// The App's applied foreground sample, read with `before`; `None` when the pane has no cache entry.
+    pub(crate) cached_before: Option<AppliedSample>,
+    /// The App's applied foreground sample, read with `after`; `None` when the pane has no cache entry.
+    pub(crate) cached_after: Option<AppliedSample>,
+}
+
+/// The foreground sample the App had applied for the active pane: when its worker took it, and the
+/// process it named (`None` for a cleared sample).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AppliedSample {
+    /// When the App's worker took the sample.
+    pub(crate) sampled_at: Instant,
+    /// The process it named; `None` for a cleared sample (unavailable sampler or exited child).
+    pub(crate) process: Option<String>,
+}
+
+/// The reading that ended a settled run, kept as it was when the judge refused it, so the failure is
+/// logged from the observation that caused it, never from a later reread of the App.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Rejection {
+    /// Which reading of the dispatch differed: `before` or `after`.
+    pub(crate) side: &'static str,
+    /// The settled scene's title.
+    pub(crate) settled_title: String,
+    /// The refused reading's title.
+    pub(crate) read_title: String,
+    /// The App's applied foreground sample at that same reading.
+    pub(crate) cached: Option<AppliedSample>,
 }
 
 /// One frame of an episode.
@@ -238,6 +267,8 @@ pub(crate) struct RecoveryEpisodes {
     candidate: Option<Scene>,
     /// The scene settling recorded; every later reading must equal it.
     scene: Option<Scene>,
+    /// The reading that ended the run after settling, kept unchanged from the moment it was refused.
+    rejection: Option<Rejection>,
 }
 
 impl RecoveryEpisodes {
@@ -249,6 +280,7 @@ impl RecoveryEpisodes {
             recovered_dim: None,
             candidate: None,
             scene: None,
+            rejection: None,
         }
     }
 
@@ -278,12 +310,25 @@ impl RecoveryEpisodes {
             // When: the scene could not be read around the dispatch, nothing can be qualified.
             return self.fail(format!("{}: the scene cannot be read", self.label()));
         };
-        let changed = self
-            .scene
-            .as_ref()
-            .and_then(|settled| settled.difference(before).or_else(|| settled.difference(after)));
-        if let Some(change) = changed {
+        // The before reading is judged first, so a change that reverts inside the dispatch is refused,
+        // and recorded, as the before reading that showed it.
+        let refused = self.scene.as_ref().and_then(|settled| {
+            [("before", before, &reading.cached_before), ("after", after, &reading.cached_after)]
+                .into_iter()
+                .find_map(|(side, read, cached)| {
+                    let change = settled.difference(read)?;
+                    let rejection = Rejection {
+                        side,
+                        settled_title: settled.title.clone(),
+                        read_title: read.title.clone(),
+                        cached: cached.clone(),
+                    };
+                    Some((change, rejection))
+                })
+        });
+        if let Some((change, rejection)) = refused {
             // When: the settled scene differs on either side, C and D no longer redraw it.
+            self.rejection = Some(rejection);
             return self.fail(format!("{}: the scene's {change}", self.label()));
         }
         let Some(delta) = delta else {
@@ -407,6 +452,12 @@ impl RecoveryEpisodes {
         self.scene.as_ref()
     }
 
+    /// The reading that ended a settled run, as it was when refused; `None` when no scene change ended it
+    /// (an expired step, counts that do not fit, or no failure).
+    pub(crate) fn rejection(&self) -> Option<&Rejection> {
+        self.rejection.as_ref()
+    }
+
     /// The step the machine is on, for a reason.
     fn label(&self) -> String {
         match self.stage {
@@ -504,6 +555,67 @@ pub(crate) fn parse_session(text: &str) -> Option<SessionIdentity> {
     Some(SessionIdentity { leader_pid, anchor_pid: pid("anchor_pid") })
 }
 
+/// The longest role session record read: a real one is under 200 bytes, so anything longer is refused
+/// rather than read whole.
+pub(crate) const SESSION_RECORD_LIMIT: u64 = 4096;
+
+/// The role session identity in the file at `path`, reading at most `SESSION_RECORD_LIMIT` bytes; `None`
+/// when it cannot be read, is longer than that, is not UTF-8, or does not parse.
+pub(crate) fn read_session(path: &std::path::Path) -> Option<SessionIdentity> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(SESSION_RECORD_LIMIT + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    let within_limit = text.len() as u64 <= SESSION_RECORD_LIMIT;
+    within_limit.then(|| parse_session(&text)).flatten()
+}
+
+/// The reading an evidence line describes, taken when the judge saw it and never reread from the App.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Observed {
+    /// `after` (the settling or refused after reading), `before` (a refused before reading) or `none`.
+    pub(crate) observation: &'static str,
+    /// The settled scene's title; `None` before settling.
+    pub(crate) settled_title: Option<String>,
+    /// That reading's title; `None` when there is no reading.
+    pub(crate) read_title: Option<String>,
+    /// The App's applied foreground sample at that reading.
+    pub(crate) cached: Option<AppliedSample>,
+}
+
+/// What the settle line describes: the after reading of the dispatch that settled `settled`, with the
+/// sample captured alongside it.
+pub(crate) fn settle_observation(settled: &Scene, reading: &SceneReading) -> Observed {
+    Observed {
+        observation: "after",
+        settled_title: Some(settled.title.clone()),
+        read_title: reading.after.as_ref().map(|scene| scene.title.clone()),
+        cached: reading.cached_after.clone(),
+    }
+}
+
+/// What the failure line describes: the reading `machine` kept when it refused it, or, for a failure no
+/// scene change caused, the settled title alone. Nothing is read from the App here.
+pub(crate) fn failure_observation(machine: &RecoveryEpisodes) -> Observed {
+    match machine.rejection() {
+        Some(rejection) => Observed {
+            observation: rejection.side,
+            settled_title: Some(rejection.settled_title.clone()),
+            read_title: Some(rejection.read_title.clone()),
+            cached: rejection.cached.clone(),
+        },
+        None => Observed {
+            observation: "none",
+            settled_title: machine.scene().map(|scene| scene.title.clone()),
+            read_title: None,
+            cached: None,
+        },
+    }
+}
+
 /// The foreground sample the App had applied for the armed pane when the evidence was read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CachedForeground {
@@ -529,15 +641,18 @@ pub(crate) struct HarnessLookup {
 pub(crate) struct Evidence {
     /// `settle` or `failure`.
     pub(crate) event: &'static str,
+    /// The reading the titles and the App's sample come from: `after` (the settling or refused after
+    /// reading), `before` (a refused before reading) or `none` (a failure no scene change caused).
+    pub(crate) observation: &'static str,
     /// The settled scene's title; `None` before settling.
     pub(crate) settled_title: Option<String>,
-    /// The title read now; `None` when the scene cannot be read.
+    /// The title of that reading; `None` when there is none.
     pub(crate) read_title: Option<String>,
-    /// The App's applied sample; `None` when the pane has no cache entry or cannot be found.
+    /// The App's applied sample at that reading; `None` when the pane had no cache entry or no reading.
     pub(crate) app_cached: Option<CachedForeground>,
     /// The role session's identity; `None` when `sessions/0.json` is missing or malformed.
     pub(crate) session: Option<SessionIdentity>,
-    /// The main window's tab titles shaped on a title-cache miss.
+    /// The main window's tab titles shaped on a title-cache miss, cumulative, read when the line is logged.
     pub(crate) tab_title_prepares: Option<u64>,
     /// The App's completed foreground-worker batches.
     pub(crate) fg_worker_probes: Option<u64>,
@@ -567,6 +682,7 @@ impl Evidence {
         let lookup = self.harness_lookup.as_ref();
         [
             format!("event={}", self.event),
+            format!("observation={}", self.observation),
             format!("settled_title={}", quoted(self.settled_title.as_deref())),
             format!("read_title={}", quoted(self.read_title.as_deref())),
             format!(

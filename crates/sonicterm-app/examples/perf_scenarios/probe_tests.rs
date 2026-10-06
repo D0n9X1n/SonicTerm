@@ -1512,3 +1512,18 @@ fn the_trace_outlives_the_slow_dispatch_limit() {
     assert_eq!((record.first_present_ms, record.last_present_ms), (Some(5.0), Some(last_ms)));
     assert_eq!((record.first_present_seq, record.last_present_seq), (Some(1), Some(redraw_count)));
 }
+
+/// The atlas-retry failure line is built only from the reading the machine kept when it refused it: the
+/// failure path and the logger never reread the scene or the App's foreground cache, so a result applied
+/// after the refusal cannot reach the line.
+#[test]
+fn the_atlas_retry_failure_line_never_rereads_the_app() {
+    for name in ["drive_atlas_retry", "log_atlas_retry_evidence"] {
+        let body = method(name);
+        for reread in ["atlas_retry_scene(", "atlas_retry_cached(", "fg_proc_cache", "main_panes("]
+        {
+            assert!(!body.contains(reread), "{name} rereads `{reread}`");
+        }
+    }
+    assert!(method("drive_atlas_retry").contains("failure_observation(&retry.machine)"));
+}

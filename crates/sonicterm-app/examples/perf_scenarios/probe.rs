@@ -1572,8 +1572,9 @@ impl Probe {
     ) {
         let frames_before = self.frame_count();
         // S1/atlas-retry reads the main renderer's counts and the scene around every forwarded dispatch.
-        let retry_before = matches!(self.driver, DriverState::AtlasRetry(_))
-            .then(|| (atlas_retry_counts(&self.app), self.atlas_retry_scene()));
+        let retry_before = matches!(self.driver, DriverState::AtlasRetry(_)).then(|| {
+            (atlas_retry_counts(&self.app), self.atlas_retry_scene(), self.atlas_retry_cached())
+        });
         // The snapshot is released before the dispatch; whether it advanced is known only after.
         let before = self.open_sample.is_some().then(|| self.echo_snapshot());
         let allocations_before = match kind {
@@ -1587,9 +1588,9 @@ impl Probe {
             .map(|(before_count, counter)| counter().saturating_sub(before_count));
         let ended = Instant::now();
         let frames_after = self.frame_count();
-        if let Some((counts, scene)) = retry_before {
+        if let Some((counts, scene, cached)) = retry_before {
             // When: the atlas-retry driver runs, this dispatch's delta and scene feed its episode machine.
-            self.observe_atlas_retry(counts, scene, ended);
+            self.observe_atlas_retry(counts, scene, cached, ended);
         }
         let advanced = frames_after > frames_before;
         self.frames = frames_after;
@@ -2998,6 +2999,7 @@ impl Probe {
         &mut self,
         before: Option<Counts>,
         scene_before: Option<Scene>,
+        cached_before: Option<atlas_retry::AppliedSample>,
         now: Instant,
     ) {
         if !matches!(self.driver, DriverState::AtlasRetry(_)) {
@@ -3006,7 +3008,13 @@ impl Probe {
         }
         let after = atlas_retry_counts(&self.app);
         let delta = before.zip(after).map(|(earlier, later)| later.since(earlier));
-        let reading = SceneReading { before: scene_before, after: self.atlas_retry_scene() };
+        // Each side's applied foreground sample is read with that side's scene, at the same boundary.
+        let reading = SceneReading {
+            before: scene_before,
+            after: self.atlas_retry_scene(),
+            cached_before,
+            cached_after: self.atlas_retry_cached(),
+        };
         let DriverState::AtlasRetry(mut retry) =
             std::mem::replace(&mut self.driver, DriverState::None)
         else {
@@ -3018,8 +3026,8 @@ impl Probe {
             // When: this dispatch settled the scene, its identity is logged once, before the episodes.
             let settle_ms = u64::try_from(now.saturating_duration_since(retry.started).as_millis())
                 .unwrap_or(u64::MAX);
-            let title = settled.title.clone();
-            self.log_atlas_retry_evidence("settle", Some(title), retry.started, Some(settle_ms));
+            let observed = atlas_retry::settle_observation(settled, &reading);
+            self.log_atlas_retry_evidence("settle", observed, retry.started, Some(settle_ms));
         }
         match progress {
             Progress::Waiting => {}
@@ -3047,9 +3055,10 @@ impl Probe {
         };
         if let Some(reason) = retry.failure.take().or_else(|| retry.machine.expire(now)) {
             // When: the run failed or a step was not attempted in time, it cannot be read.
-            let settled_title = retry.machine.scene().map(|scene| scene.title.clone());
+            // The failure line comes from the reading the machine kept when it refused it, never a reread.
+            let observed = atlas_retry::failure_observation(&retry.machine);
             let started = retry.started;
-            self.log_atlas_retry_evidence("failure", settled_title, started, None);
+            self.log_atlas_retry_evidence("failure", observed, started, None);
             self.invalidate(event_loop, format!("S1/atlas-retry: {reason}"));
             return;
         }
@@ -3065,28 +3074,24 @@ impl Probe {
         });
     }
 
-    /// Log S1/atlas-retry's identity line for `event`: the titles compared, the App's applied foreground
-    /// sample for the active pane, the role session, the counters a title change moves, and one labelled
-    /// lookup the harness makes itself. It reads; it changes nothing the run measures, though its reads and
-    /// one process-table walk take event-loop time.
+    /// Log S1/atlas-retry's identity line for `event` from `observed`, the reading the judge saw, with its
+    /// titles and the App's applied foreground sample as they were then; nothing of either is reread here.
+    /// The line adds the role session (a bounded file read), the cumulative title and foreground counters
+    /// read now, and one foreground lookup the harness makes itself, labelled apart with its own time. The
+    /// judge's rules are unchanged, but this runs on the event loop: the lookup is a synchronous native
+    /// process-table walk with no latency bound, and a failed run makes two (settle and failure).
     fn log_atlas_retry_evidence(
         &self,
         event: &'static str,
-        settled_title: Option<String>,
+        observed: atlas_retry::Observed,
         started: Instant,
         settle_ms: Option<u64>,
     ) {
-        let read_title = self.atlas_retry_scene().map(|scene| scene.title);
-        let app_cached = self
-            .active_pane()
-            .and_then(|pane| self.app.main_panes()?.get(&pane)?.fg_proc_cache.clone())
-            .map(|(sampled_at, process)| atlas_retry::CachedForeground {
-                process: process.map(|found| found.name),
-                sampled_rel_ms: atlas_retry::relative_ms(sampled_at, started),
-            });
-        let session = std::fs::read_to_string(self.scratch.join("sessions/0.json"))
-            .ok()
-            .and_then(|text| atlas_retry::parse_session(&text));
+        let app_cached = observed.cached.map(|sample| atlas_retry::CachedForeground {
+            process: sample.process,
+            sampled_rel_ms: atlas_retry::relative_ms(sample.sampled_at, started),
+        });
+        let session = atlas_retry::read_session(&self.scratch.join("sessions/0.json"));
         let (tab_title_prepares, fg_worker_probes, fg_results_stale) =
             atlas_retry_title_counters(&self.app);
         let harness_lookup = session.map(|identity| {
@@ -3098,8 +3103,9 @@ impl Probe {
         });
         let evidence = atlas_retry::Evidence {
             event,
-            settled_title,
-            read_title,
+            observation: observed.observation,
+            settled_title: observed.settled_title,
+            read_title: observed.read_title,
             app_cached,
             session,
             tab_title_prepares,
@@ -3109,6 +3115,14 @@ impl Probe {
             harness_lookup,
         };
         tracing::info!(target: LOG_TARGET, "perf_scenarios atlas-retry evidence {}", evidence.line());
+    }
+
+    /// The foreground sample the App has applied for the active pane now, read alongside a scene reading;
+    /// `None` when the pane has no cache entry or cannot be found.
+    fn atlas_retry_cached(&self) -> Option<atlas_retry::AppliedSample> {
+        let pane = self.active_pane()?;
+        let (sampled_at, process) = self.app.main_panes()?.get(&pane)?.fg_proc_cache.clone()?;
+        Some(atlas_retry::AppliedSample { sampled_at, process: process.map(|found| found.name) })
     }
 
     /// What the main window shows for S1/atlas-retry: the active tab's title, the font fallback
