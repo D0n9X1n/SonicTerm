@@ -10065,6 +10065,15 @@ class S10AttributionAnalysisTests(unittest.TestCase):
                 self.assertEqual(run.state, "incomplete", name)
                 self.assertTrue(run.reasons, name)
 
+    def test_a_missing_line_is_named_even_when_the_identity_balances(self):
+        # Frame 14 has no line and update 2 is shown twice at frame 13: the counts balance the identity, so only
+        # the sequence check sees the frame without a line and the repeated one.
+        lines = [present_line(11, 5), present_line(12, 6), present_line(13, 7), present_line(13, 7),
+                 present_line(15, 8, sentinel=True)]
+        run = perf.attribution_run(armed_outcome(lines, seq_end=15), synchronized=True)
+        self.assertEqual(run.state, "incomplete")
+        self.assertIn("1 presented frame(s) have no line and 1 have more than one", run.reasons)
+
     def test_an_unarmed_phase_is_unavailable_and_default_is_unsupported(self):
         # A disabled adapter, an App that armed nothing (the stub) and a missing record are unavailable, never
         # complete; S10/default reports marker classes only.
