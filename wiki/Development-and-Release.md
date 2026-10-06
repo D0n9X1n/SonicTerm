@@ -34,7 +34,7 @@ python3 scripts/local-gate.py
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
-| `perf-scenarios-atlas-retry-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-harness-api-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
@@ -50,7 +50,7 @@ python3 scripts/local-gate.py
 | `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS, Windows | `local` | `rust`, `native` | `macos-core`, `windows-tests` |
 | `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
-| `perf-scenarios-atlas-retry-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --cfg perf_atlas_retry_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
+| `perf-scenarios-harness-api-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
@@ -168,8 +168,19 @@ harness predates the field reads `n/a` with no change shown, and a result whose
 
 The harness also calls App and renderer methods that older trees lack. Each
 such call sits behind a harness API cfg, one entry of `HARNESS_API_CFGS` in
-`scripts/local-gate.py`; the only entry is `perf_atlas_retry_api`, for the four
-methods S1/atlas-retry's driver needs. Before building, perf-compare looks for
+`scripts/local-gate.py`. There are two entries: `perf_atlas_retry_api`, for the
+four methods S1/atlas-retry's driver needs, and `perf_s10_attribution_api`, for
+the App's two S10 attribution watch methods (`arm_s10_attribution` and
+`disarm_s10_attribution`). The gate lints and tests the harness with **every**
+entry on at once, in two steps built from the table, `perf-scenarios-harness-api-clippy`
+and `perf-scenarios-harness-api-tests`. The test step passes the cfgs through
+`RUSTFLAGS`, and a changed `RUSTFLAGS` invalidates every dependency's build, so
+one combined test step costs one dependency rebuild for all entries instead of
+one per entry. The lint step passes them after `--`, which reaches only the
+linted crates; combining it saves repeated linting, not dependency rebuilds.
+CI runs only the all-off and all-on combinations; a comparison against a base
+that defines only some entries builds that subset itself. A test fails if an entry is missing from those steps or from `Cargo.toml`'s
+`check-cfg` list. Before building, perf-compare looks for
 each entry's methods in both trees: each must be a `pub fn` inside an inherent
 `impl` block of its declared owner type (`GpuRenderer` or `App`) in its owning
 crate. Comments, strings, trait impls, `*_tests.rs` files and code under
@@ -202,6 +213,37 @@ applied to HEAD's parent, overlays the head's harness, derives the features and
 cfgs a comparison would, and checks both harness examples there in its own
 target directory, which it removes with its worktree. Ubuntu's example roots
 exclude the probe, so Ubuntu does not run it.
+
+S10 counters runs also attribute each presented frame to the update it shows.
+The App's watch methods are the table entry `perf_s10_attribution_api`,
+decided and declared like every other entry above; the harness calls them, and
+the parser read it depends on, only with that cfg on. A harness lists
+`capabilities.s10_attribution: 1`; a list with any other key or value is
+refused. Each `result.json` records the build's cfg as `s10_attribution_api`,
+and it must match the comparison's decision.
+
+With the cfg on, before GO a counting run reads the S10 pane's
+synchronized-output state, refuses the run when an update is already open, and
+arms the App's watch; the `stream` phase then records `s10_attribution` with the
+arming, the baseline and the presented counts around the phase. A build without
+the cfg, a run without `--counters` and an App that armed nothing record it
+`unavailable`, never passed. The App writes one `sonic::perf_present` line per
+presented frame ([Logging](Logging)). A run is complete only when its record is
+consistent (unsigned counts, a closed baseline, epoch and resets never
+decreasing through every line to the final reading, and the phase's presented
+count, its `seq` range and its counters' `presented` delta all equal), every
+presented frame of the phase has exactly one well-formed line for the main
+window, no line is overflowed or shows an open update, the fixture played
+exactly its updates, and fresh − updates = non-update − never shown +
+Σ max(0, presents − 1). Every other run is incomplete. S10/default has no update
+identity: its lines must still be complete, and it then reports marker classes
+only. `comparison.md` adds an `S10 attribution (counters runs)` table and
+`attribution.json` keeps each run. A side's S10/sync verdict needs complete
+runs: an update presented twice asks for a reproduction and a separate fix;
+every update presented at most once, with the counters excess within ±1 of the
+same comparison's timed median, holds the ratio on that platform and attributes
+the timed excess under instrumentation only. A comparison whose two refs build
+different perf features gives no attribution verdict.
 
 Under `--short`, a variant whose harness `--list` entry declares a cap
 (`run_caps`) takes min(requested, cap) valid runs per side in every set (timed,

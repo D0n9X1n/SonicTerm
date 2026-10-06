@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(any(target_os = "macos", windows, test))]
 mod atlas_retry;
+#[cfg(any(target_os = "macos", windows, test))]
+mod attribution;
 mod cli;
 #[cfg(any(target_os = "macos", windows, test))]
 mod counters;

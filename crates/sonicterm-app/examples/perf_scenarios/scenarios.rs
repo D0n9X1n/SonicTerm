@@ -86,9 +86,14 @@ pub(crate) fn list_json() -> String {
             entry
         })
         .collect();
-    // The capability is unconditional: every build of this harness writes the split fields, a build
-    // without perf-echo-trace with every credited sample `unsupported`.
-    let capabilities = serde_json::json!({ "latency_split_schema": SPLIT_SCHEMA, "phase_kinds": PHASE_KINDS_SCHEMA });
+    // The capabilities are unconditional: every build of this harness writes the split fields, a build
+    // without perf-echo-trace with every credited sample `unsupported`; records every phase's kind; and
+    // records S10's attribution, a build without the API cfg as `unavailable`.
+    let capabilities = serde_json::json!({
+        "latency_split_schema": SPLIT_SCHEMA,
+        "phase_kinds": PHASE_KINDS_SCHEMA,
+        "s10_attribution": ATTRIBUTION_SCHEMA,
+    });
     serde_json::json!({ "schema_version": 1, "capabilities": capabilities, "scenarios": scenarios })
         .to_string()
 }
@@ -100,6 +105,11 @@ pub(crate) const SPLIT_SCHEMA: u32 = 1;
 /// The phase-kinds schema: every phase records its kind and presentation trace and a transition its endpoint;
 /// listed in `--list` as `capabilities.phase_kinds`.
 pub(crate) const PHASE_KINDS_SCHEMA: u32 = 1;
+
+/// The schema of S10's `s10_attribution` phase record; a harness that writes it lists the same number
+/// in `--list` as `capabilities.s10_attribution`. It says what the harness can record, never whether
+/// a side's App could arm a watch.
+pub(crate) const ATTRIBUTION_SCHEMA: u32 = 1;
 
 /// The catalog entry for `id`, if the harness knows it.
 #[cfg(any(target_os = "macos", windows, test))]

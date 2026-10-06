@@ -759,6 +759,10 @@ pub(crate) struct AppFrameCounters {
     dispatching: Option<winit::window::WindowId>,
     /// A window that dispatch closed, kept until its handler time is recorded.
     closing: Option<ClosingWindow>,
+    /// Each pane's armed S10 attribution watch, by pane id; at most one per pane.
+    pub(crate) s10_watches: std::collections::HashMap<u64, super::perf_present::S10Watch>,
+    /// The arming id the next S10 watch takes; starts at 1, so 0 never names an arming.
+    pub(crate) next_s10_arming: u64,
 }
 
 /// A retired window's counters, held until the dispatch that closed it has been timed.
@@ -800,6 +804,8 @@ impl AppFrameCounters {
             windows_registered: 0,
             dispatching: None,
             closing: None,
+            s10_watches: std::collections::HashMap::new(),
+            next_s10_arming: 1,
         }
     }
 

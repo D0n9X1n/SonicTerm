@@ -1003,6 +1003,9 @@ pub(crate) struct PhaseRecord {
     /// that plays counted updates (S10's `stream`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) updates: Option<u32>,
+    /// S10's per-present attribution for this phase; present only for a phase that plays counted updates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) s10_attribution: Option<crate::attribution::Attribution>,
 }
 
 /// One memory checkpoint at the end of a timed phase.
@@ -1220,6 +1223,8 @@ impl RunResult {
         put("finish_session_settled", json!(self.finish_session_settled));
         put("checkpoint_memory", json!(checkpoint_memory_support()));
         put("hooks", json!({ "trim": self.trim_hook.as_str() }));
+        // Whether this build calls the App's attribution API: the effective `perf_s10_attribution_api` cfg.
+        put("s10_attribution_api", json!(crate::attribution::API_ENABLED));
         put("trim_experiment", json!(self.trim_experiment));
         put("trim_seq_after_hook", json!(self.trim_seq_after_hook));
         if let Some(recovery) = &self.atlas_recovery {

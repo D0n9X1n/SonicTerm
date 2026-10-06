@@ -535,6 +535,24 @@ flowchart TD
 `publication_to_present_ms` 只会包含来自另一个可见窗格或之后 epoch 的持有，每段最长 150 ms。`sync_open`
 是出现段之后解析器的设置位，不能证明发生过持有。
 
+#### S10 归属监视
+
+门控开启时，性能 harness 可以为每个窗格布置一个 S10 归属监视，传入该次运行的哨兵行、提示符以及阶段的更新数；布置返回
+非零的布置编号，重新布置会替换该窗格的监视。门控关闭，或者窗格未知、标记为空或过长（超过 128 字节）、阶段没有更新时，
+不会布置任何监视。
+
+每次通过受保护的同步输出复查的主窗口尝试，都会在该帧的解析器保护下复制每个被监视窗格的状态：其 `resets`、`epoch`
+与 `set`，从光标所在行到其上方 8 行内是否显示哨兵与提示符，以及该帧被准入的原因。只有成功呈现的尝试才写出它们，
+每个被监视窗格一行 WARN，目标为 `sonic::perf_present`，默认的 `sonic=warn` 过滤器会放行：
+
+```text
+perf_present kind="present" arming=<id> seq=<n> window="main" pane=<id> resets=<n> epoch=<n> set=<bool> sentinel=<bool> prompt=<bool> admission="<admission>"
+```
+
+`seq` 是该帧之后主渲染器的已呈现计数。`admission` 为 `closed`、`forced-first`、`forced-visibility`、`forced-device`、
+`forced-resize`、`forced-surface`、`timeout` 或 `credit`。失败或重试的尝试不写任何内容。一个监视最多写 4 × updates + 64
+行 present，随后写一行带 `emitted=<n>` 的 `kind="overflow"`，之后不再写。解除布置不排空任何内容。
+
 ### 计数器不测量的内容
 
 计数器本身不会在 flush 处拆分按键延迟；上面的 S2 回显监视会拆分，但只针对 S2/default。

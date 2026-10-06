@@ -29,6 +29,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::atlas_retry::{self, Arm, Counts, Progress, RecoveryEpisodes, Scene, SceneReading};
+use crate::attribution::{self, Start};
 use crate::cli::{RunArgs, REFUSED};
 use crate::counters::{CounterTotals, CountersMode};
 use crate::record::{
@@ -598,6 +599,8 @@ struct Probe {
     startup_endpoint: Option<Instant>,
     meter: Option<PhaseMeter>,
     phases: Vec<PhaseRecord>,
+    /// S10's attribution while its counted phase runs, taken into that phase's record when it ends.
+    attribution: Option<attribution::Attribution>,
     role_panes: Vec<u64>,
     /// Windows: every pane exit before the run finished, so a pane that joins the roles later is judged.
     exited_panes: Vec<(u64, Option<bool>)>,
@@ -1414,6 +1417,7 @@ impl PhaseMeter {
             allocations_per_frame: self.allocations,
             frame_counters,
             updates: self.updates,
+            s10_attribution: None,
         }
     }
 }
@@ -1486,6 +1490,7 @@ impl Probe {
             startup_endpoint: None,
             meter: None,
             phases: Vec::new(),
+            attribution: None,
             role_panes: Vec::new(),
             exited_panes: Vec::new(),
             go_at: None,
@@ -1795,7 +1800,9 @@ impl Probe {
         };
         let completion = self.completion_of(&meter);
         let counters_end = self.counter_totals();
-        self.phases.push(meter.finish(counters_end, completion));
+        let mut record = meter.finish(counters_end, completion);
+        record.s10_attribution = self.attribution.take();
+        self.phases.push(record);
     }
 
     /// A transition meter's completion: its endpoint's latched instant, eligible only before the
@@ -1823,6 +1830,57 @@ impl Probe {
             Instant::now(),
             crate::transition::INCOMPLETE,
         )
+    }
+
+    /// Before GO of a phase that plays `updates` counted updates: read role 0's pane state, then arm
+    /// the App's watch from a closed baseline. An update already open before GO voids the run.
+    fn begin_attribution(&mut self, event_loop: &ActiveEventLoop, updates: u32) {
+        let pane = self.role_panes.first().copied();
+        let counting = self.counters_mode == CountersMode::On;
+        // The pane's state is read only once `start` has checked the API and the counters gate.
+        let started = attribution::start(counting, attribution::API_ENABLED, || {
+            pane.and_then(|pane_id| attribution::api::read_sync(&self.app, pane_id))
+        });
+        match (pane, started) {
+            (_, Start::Skip(reason)) => {
+                self.attribution = Some(attribution::Attribution::Unavailable { reason });
+            }
+            (_, Start::Refuse(reason)) => self.invalidate(event_loop, reason),
+            (Some(pane_id), Start::Arm(reading)) => {
+                let sentinel = self.sentinels.first().cloned().unwrap_or_default();
+                let outcome = attribution::api::arm(
+                    &mut self.app,
+                    pane_id,
+                    &sentinel,
+                    workload::PROMPT,
+                    updates,
+                );
+                let seq_start = self.frame_count();
+                self.attribution =
+                    Some(attribution::armed(outcome, pane_id, updates, reading, seq_start));
+            }
+            (None, Start::Arm(_)) => {
+                // When: `pane` is None, no role pane was read, so `start` cannot have armed; kept total.
+                self.attribution =
+                    Some(attribution::Attribution::Unavailable { reason: "no-baseline" });
+            }
+        }
+    }
+
+    /// At the end of the counted phase: record the presented count and the pane's state, then disarm.
+    fn end_attribution(&mut self) {
+        let Some(attribution::Attribution::Armed(record)) = self.attribution.as_ref() else {
+            // When: `attribution` holds no armed record, nothing was armed and nothing is read.
+            return;
+        };
+        let pane_id = record.pane;
+        let seq_end = self.frame_count();
+        let end = attribution::api::read_sync(&self.app, pane_id);
+        attribution::api::disarm(&mut self.app, pane_id);
+        if let Some(attribution::Attribution::Armed(record)) = self.attribution.as_mut() {
+            record.seq_end = Some(seq_end);
+            record.end = end;
+        }
     }
 
     /// Open the App's counter gate for a `--counters` run, before any window or pane exists.
@@ -2444,6 +2502,12 @@ impl Probe {
 impl Probe {
     /// Start a measured phase; the first one writes GO for every role just before it starts.
     fn begin_phase(&mut self, event_loop: &ActiveEventLoop, phase: &PhaseSpec) {
+        if let Some(updates) = phase.updates {
+            self.begin_attribution(event_loop, updates);
+            if self.stage == Stage::Done {
+                return;
+            }
+        }
         if self.go_at.is_none() {
             for role in 0..self.plan.roles.len() {
                 if let Err(error) = std::fs::write(self.scratch.join(format!("go/{role}")), b"") {
@@ -2502,6 +2566,7 @@ impl Probe {
         }
         self.close_sample(UnattributedReason::NoCandidate);
         self.driver = DriverState::None;
+        self.end_attribution();
         self.finish_meter();
         // A barrier phase ended when its qualifying frame presented, however late this runs.
         let now = Instant::now();

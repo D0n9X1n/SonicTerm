@@ -71,10 +71,10 @@ jobs:
       # example is its sole caller, so each host lints it with that feature too.
       - name: Lint perf scenarios with the echo trace
         run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings
-      # S1/atlas-retry's driver compiles only with perf_atlas_retry_api, which perf-compare sets when both refs
-      # have its App and renderer methods, so each host lints it with that cfg and the counters it needs.
-      - name: Lint perf scenarios with the atlas-retry cfg
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api
+      # Every harness API cfg's code compiles only with its cfg, which perf-compare sets when both refs
+      # have the entry's methods; each host lints all of them at once, with the counters they need.
+      - name: Lint perf scenarios with the harness API cfgs
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api
 
       - name: Validate workspace manifests
         shell: bash
@@ -135,9 +135,9 @@ jobs:
       - name: Run scenario harness unit tests with the echo trace
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace
 
-      - name: Run scenario harness unit tests with the atlas-retry cfg
+      - name: Run scenario harness unit tests with the harness API cfgs
         shell: bash
-        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --cfg perf_atlas_retry_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
 
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
@@ -488,10 +488,10 @@ jobs:
       # example is its sole caller, so each host lints it with that feature too.
       - name: Lint perf scenarios with the echo trace
         run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings
-      # S1/atlas-retry's driver compiles only with perf_atlas_retry_api, which perf-compare sets when both refs
-      # have its App and renderer methods, so each host lints it with that cfg and the counters it needs.
-      - name: Lint perf scenarios with the atlas-retry cfg
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api
+      # Every harness API cfg's code compiles only with its cfg, which perf-compare sets when both refs
+      # have the entry's methods; each host lints all of them at once, with the counters they need.
+      - name: Lint perf scenarios with the harness API cfgs
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api
 
       - name: Validate workspace manifests
         shell: bash
@@ -599,9 +599,9 @@ jobs:
       - name: Run scenario harness unit tests with the echo trace
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace
 
-      - name: Run scenario harness unit tests with the atlas-retry cfg
+      - name: Run scenario harness unit tests with the harness API cfgs
         shell: bash
-        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --cfg perf_atlas_retry_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
 
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
@@ -862,10 +862,10 @@ jobs:
       # example is its sole caller, so each host lints it with that feature too.
       - name: Lint perf scenarios with the echo trace
         run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings
-      # S1/atlas-retry's driver compiles only with perf_atlas_retry_api, which perf-compare sets when both refs
-      # have its App and renderer methods, so each host lints it with that cfg and the counters it needs.
-      - name: Lint perf scenarios with the atlas-retry cfg
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api
+      # Every harness API cfg's code compiles only with its cfg, which perf-compare sets when both refs
+      # have the entry's methods; each host lints all of them at once, with the counters they need.
+      - name: Lint perf scenarios with the harness API cfgs
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api
 
       - name: Check public Rustdoc
         run: |
@@ -890,9 +890,9 @@ jobs:
       - name: Run scenario harness unit tests with the echo trace
         run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace
 
-      - name: Run scenario harness unit tests with the atlas-retry cfg
+      - name: Run scenario harness unit tests with the harness API cfgs
         shell: bash
-        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --cfg perf_atlas_retry_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
 
       - name: Run source and release tooling gates
         run: |

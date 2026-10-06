@@ -352,6 +352,15 @@ const ATLAS_RETRY_CALLS: &[&str] = &[
     "font_fallback_notice_id",
 ];
 
+/// The gate of the App's S10 attribution API: the harness-only cfg perf-compare sets on both sides or neither.
+const ATTRIBUTION_GATE: &str =
+    "#[cfg(all(perf_s10_attribution_api, any(target_os = \"macos\", windows)))]";
+
+/// The App API the harness may name only behind the attribution cfg: the watch methods and the parser
+/// read the baseline depends on, which a tree before the API does not have.
+const ATTRIBUTION_CALLS: &[&str] =
+    &["arm_s10_attribution", "disarm_s10_attribution", "synchronized_output", "SyncState"];
+
 /// The trim hook's gate.
 const TRIM_HOOK_GATE: &str = "#[cfg(feature = \"perf-hook-trim\")]";
 
@@ -965,4 +974,33 @@ fn a_gate_in_a_comment_or_a_string_guards_nothing() {
             "the call is ungated in {fixture:?}"
         );
     }
+}
+
+/// Every call into the App's attribution API, and every read of the parser state it depends on, sits
+/// behind the attribution cfg, because perf-compare overlays this harness onto a tree that predates
+/// them and builds it there with the cfg off. A call outside the gated item is reported.
+#[test]
+fn every_attribution_api_call_in_the_harness_is_behind_its_cfg() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/perf_scenarios");
+    let mut scanned = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let entry_path = entry.unwrap().path();
+        let name = entry_path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+            continue;
+        }
+        scanned += 1;
+        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let found = ungated_calls(&source, ATTRIBUTION_GATE, ATTRIBUTION_CALLS);
+        assert!(found.is_empty(), "{name}: {found:#?}");
+    }
+    assert!(scanned >= 10, "the harness sources were not found");
+    let fixture = format!(
+        "{ATTRIBUTION_GATE}\nmod api {{\n    fn arm(app: &mut App) {{\n        app.arm_s10_attribution(1, \"s\", \"p\", 1);\n    }}\n}}\n\nfn off(parser: &Parser) {{\n    parser.synchronized_output();\n}}\n"
+    );
+    // The scan matches names as substrings, so the ungated line names a call no other name contains.
+    assert_eq!(
+        ungated_calls(&fixture, ATTRIBUTION_GATE, ATTRIBUTION_CALLS),
+        vec!["9: synchronized_output".to_owned()]
+    );
 }

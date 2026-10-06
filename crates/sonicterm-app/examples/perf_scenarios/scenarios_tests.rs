@@ -499,14 +499,15 @@ fn only_s10_stream_carries_its_workload_update_count() {
     }
 }
 
-/// `--list` declares the latency split schema this harness writes, whatever its features, so the
-/// comparison validates every result of this harness against the split contract.
+/// `--list` declares the latency split, phase-kinds and S10 attribution schemas this harness writes,
+/// whatever its features or cfg, so the comparison validates every result of this harness against
+/// each contract.
 #[test]
 fn list_json_declares_the_latency_split_capability() {
     let listed: serde_json::Value = serde_json::from_str(&list_json()).expect("valid JSON");
     assert_eq!(
         listed["capabilities"],
-        serde_json::json!({ "latency_split_schema": 1, "phase_kinds": 1 })
+        serde_json::json!({ "latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": 1 })
     );
     assert_eq!(listed["schema_version"], 1, "the list's own schema is unchanged");
 }

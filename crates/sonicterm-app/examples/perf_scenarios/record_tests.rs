@@ -244,6 +244,7 @@ fn partial_result(status: Status) -> RunResult {
             allocations_per_frame: None,
             frame_counters: None,
             updates: None,
+            s10_attribution: None,
         }],
         latency: Some(vec![LatencySample::uncredited(2.0, "no-candidate")]),
         throughput: None,
@@ -289,6 +290,7 @@ fn result_json_carries_every_contract_field_even_for_a_partial_run() {
             "notes",
             "phases",
             "presenter",
+            "s10_attribution_api",
             "scenario",
             "schema_version",
             "scrollback_rows_retained",
@@ -399,6 +401,7 @@ fn measured_result() -> RunResult {
         allocations_per_frame: Some(vec![950, 940]),
         frame_counters: None,
         updates: None,
+        s10_attribution: None,
     });
     result.latency = Some(vec![
         credited_sample(2.0, 12.5),

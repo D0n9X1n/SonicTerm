@@ -583,7 +583,7 @@ impl super::App {
     }
 
     /// The pane `pane_id` in whichever window holds it.
-    fn find_pane(&self, pane_id: u64) -> Option<&super::PaneState> {
+    pub(super) fn find_pane(&self, pane_id: u64) -> Option<&super::PaneState> {
         self.windows.values().find_map(|window| window.panes.get(&pane_id))
     }
 

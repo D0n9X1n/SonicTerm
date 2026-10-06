@@ -32,7 +32,7 @@ python3 scripts/local-gate.py
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
-| `perf-scenarios-atlas-retry-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
+| `perf-scenarios-harness-api-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS、Windows、Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
@@ -48,7 +48,7 @@ python3 scripts/local-gate.py
 | `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS、Windows | `local` | `rust`、`native` | `macos-core`、`windows-tests` |
 | `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
 | `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
-| `perf-scenarios-atlas-retry-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --cfg perf_atlas_retry_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
+| `perf-scenarios-harness-api-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
@@ -144,8 +144,13 @@ S10 的 `stream` 阶段在 `result.json` 中记录 `updates`：其工作负载�
 并像其他按运行统计的行一样汇总。harness 早于该字段的一侧显示 `n/a`，不显示变化；`updates` 不是正整数的结果无效。
 
 harness 还会调用较旧的树所没有的 App 与渲染器方法。每个这样的调用都位于一个 harness API cfg 之后，即
-`scripts/local-gate.py` 中 `HARNESS_API_CFGS` 的一项；目前唯一的一项是 `perf_atlas_retry_api`，对应 S1/atlas-retry
-驱动所需的四个方法。构建之前，perf-compare 在两棵树中查找该项的方法：每个方法都必须是其所属 crate 中、所声明的所有者类型（`GpuRenderer`
+`scripts/local-gate.py` 中 `HARNESS_API_CFGS` 的一项。共有两项：`perf_atlas_retry_api`，对应 S1/atlas-retry
+驱动所需的四个方法；以及 `perf_s10_attribution_api`，对应 App 的两个 S10 归属监视方法（`arm_s10_attribution` 与
+`disarm_s10_attribution`）。关卡在两个由该表生成的步骤 `perf-scenarios-harness-api-clippy` 与
+`perf-scenarios-harness-api-tests` 中，一次开启**全部**项来检查与测试 harness。测试步骤通过 `RUSTFLAGS` 传入这些 cfg，
+而 `RUSTFLAGS` 一旦改变，所有依赖的构建都会失效，因此一个合并的测试步骤只让依赖重建一次，而不是每项一次。检查步骤把它们放在 `--`
+之后传入，只作用于被检查的 crate；合并它省下的是重复检查，而不是依赖重建。CI 只运行全部关闭与全部开启两种组合；与只定义了部分项的 base
+比较时，该比较自己会构建那个子集。若某项未出现在这两个步骤或 `Cargo.toml` 的 `check-cfg` 列表中，有一个测试会失败。构建之前，perf-compare 在两棵树中查找每一项的方法：每个方法都必须是其所属 crate 中、所声明的所有者类型（`GpuRenderer`
 或 `App`）的固有 `impl` 块内的 `pub fn`。注释、字符串、trait impl、`*_tests.rs` 文件以及位于 `#[cfg(test)]` 或 `#![cfg(test)]`
 之下的代码都不计入。匹配只是源码证据，不能证明该方法的签名或构建的目标会编译它；随后的构建仍会失败关闭。只有两棵树都定义了某项的全部方法，该项才对两侧开启，否则对两侧都关闭，因此 base 永远不会继承 head
 的 API。这些 cfg 都不是 Cargo 特性，特性选择也不变。关卡在启动时根据每次比较构建所继承的内容组合编译器标志：设置了
@@ -162,6 +167,21 @@ head 的 harness 必须仍能在上一个发布标签上构建，那正是发布
 （关卡步骤 `perf-previous-release`，在 CI 的 `macos-core` 与 `windows-checks` 作业中运行）需要完整克隆。它按发布工作流的
 规则对 HEAD 的父提交选出该标签，叠加 head 的 harness，推导比较会使用的特性与 cfg，并在自己的目标目录中检查两个 harness
 示例，结束时连同其工作树一起删除该目录。Ubuntu 的示例根排除了 probe，因此 Ubuntu 不运行它。
+
+S10 的计数器运行还会把每个呈现的帧归属到它显示的更新。App 的监视方法是表项 `perf_s10_attribution_api`，与上面的其他表项一样
+被判定和声明；只有该 cfg 开启时，harness 才调用它们以及它所依赖的解析器读取。harness 列出 `capabilities.s10_attribution: 1`；
+含其他键或值的列表会被拒绝。每个 `result.json` 以 `s10_attribution_api` 记录该构建的 cfg，它必须与比较的决定一致。
+
+开启该 cfg 时，计数运行在 GO 之前读取 S10 窗格的同步输出状态，若已有打开的更新则拒绝该次运行，然后布置 App 的监视；
+`stream` 阶段随后记录 `s10_attribution`，含布置编号、基线以及阶段前后的已呈现计数。未带该 cfg 的构建、未带 `--counters`
+的运行以及没有布置任何监视的 App 都记录为 `unavailable`，从不算作通过。App 为每个呈现的帧写一行 `sonic::perf_present`
+（见[日志](Logging-zh-CN)）。只有当记录自洽（计数为无符号、基线已关闭、epoch 与 resets 从基线经过每一行到最终读数都不减少，
+且阶段的已呈现计数、其 `seq` 区间与其计数器的 `presented` 增量三者相等）、阶段内每个呈现的帧恰好有一行主窗口的格式正确
+的行、没有行溢出或显示打开的更新、夹具恰好播放了它的更新数，并且 fresh − updates = non-update − never shown +
+Σ max(0, presents − 1) 成立时，该次运行才完整；其他运行都不完整。S10/default 没有更新身份：它的行仍必须完整，之后只报告
+标记类别。`comparison.md` 增加 `S10 attribution (counters runs)` 表，`attribution.json` 保留每次运行。一侧的 S10/sync
+结论需要完整的运行：某个更新呈现两次，要求复现并单独修复；每个更新至多呈现一次，且计数器超出量在同一次比较计时中位数的
+±1 以内，则该平台上比率成立，计时超出量只被视为在插桩下得到归属。两个 ref 构建不同性能特性的比较不给出归属结论。
 
 在 `--short` 下，harness 的 `--list` 条目声明了上限（`run_caps`）的变体在每个组（计时、lap、计数器与分配）中每侧取
 min(请求次数, 上限) 次有效运行；其行显示 `(runs N of M)`，`comparison.md` 列出被限制的变体。release 对比不受限制。

@@ -1,0 +1,100 @@
+use super::*;
+
+/// A closed baseline of `resets` resets.
+fn closed(resets: u64) -> SyncReading {
+    SyncReading { set: false, epoch: resets, resets }
+}
+
+/// Attribution runs only in a counting run of a build that calls the API, from a closed baseline:
+/// a disabled build, a non-counting run and a pane with no reading skip it, and an update already
+/// open before GO refuses the run.
+#[test]
+fn the_step_before_go_arms_only_from_a_closed_baseline() {
+    assert_eq!(start(true, false, || Some(closed(0))), Start::Skip("api-disabled"));
+    assert_eq!(start(false, true, || Some(closed(0))), Start::Skip("counters-off"));
+    assert_eq!(start(true, true, || None), Start::Skip("no-baseline"));
+    assert_eq!(start(true, true, || Some(closed(3))), Start::Arm(closed(3)));
+    let open = SyncReading { set: true, epoch: 2, resets: 1 };
+    match start(true, true, || Some(open)) {
+        Start::Refuse(reason) => assert!(reason.contains("before GO"), "{reason}"),
+        other => panic!("an open update before GO refuses the run: {other:?}"),
+    }
+}
+
+/// The baseline is read only once the build calls the API and the run counts: a skipped step never
+/// takes the parser lock that reading the pane's state needs, and an armed step reads it exactly once.
+#[test]
+fn a_skipped_step_never_reads_the_baseline() {
+    let reads = std::cell::Cell::new(0_u32);
+    let read_baseline = || {
+        reads.set(reads.get() + 1);
+        Some(closed(0))
+    };
+    assert_eq!(start(true, false, read_baseline), Start::Skip("api-disabled"));
+    assert_eq!(start(false, true, read_baseline), Start::Skip("counters-off"));
+    assert_eq!(reads.get(), 0, "a skipped step read the pane's state");
+    assert_eq!(start(true, true, read_baseline), Start::Arm(closed(0)));
+    assert_eq!(reads.get(), 1, "an armed step reads the baseline once");
+}
+
+/// Only an arming id makes a phase armed: a disabled adapter and the prerequisite's stub returning
+/// `None` both record attribution unavailable, each with its own reason.
+#[test]
+fn only_an_arming_id_records_an_armed_phase() {
+    assert_eq!(
+        armed(ArmResult::Disabled, 7, 300, closed(0), 10),
+        Attribution::Unavailable { reason: "api-disabled" }
+    );
+    assert_eq!(
+        armed(ArmResult::NotArmed, 7, 300, closed(0), 10),
+        Attribution::Unavailable { reason: "not-armed" }
+    );
+    let Attribution::Armed(record) = armed(ArmResult::Armed(4), 7, 300, closed(2), 10) else {
+        panic!("an arming id arms the phase");
+    };
+    assert_eq!((record.arming, record.pane, record.updates, record.seq_start), (4, 7, 300, 10));
+    assert_eq!((record.baseline, record.seq_end, record.end), (closed(2), None, None));
+}
+
+/// The record's JSON is the contract perf-compare reads: a `state` tag, the reason of an unavailable
+/// phase, and the arming, baseline and presented counts of an armed one.
+#[test]
+fn the_record_serializes_as_the_comparison_reads_it() {
+    let unavailable =
+        serde_json::to_value(Attribution::Unavailable { reason: "not-armed" }).unwrap();
+    assert_eq!(unavailable, serde_json::json!({ "state": "unavailable", "reason": "not-armed" }));
+    let Attribution::Armed(mut record) = armed(ArmResult::Armed(4), 7, 300, closed(2), 10) else {
+        panic!("armed");
+    };
+    record.seq_end = Some(312);
+    record.end = Some(closed(302));
+    let value = serde_json::to_value(Attribution::Armed(record)).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "state": "armed", "arming": 4, "pane": 7, "updates": 300,
+            "baseline": { "set": false, "epoch": 2, "resets": 2 },
+            "seq_start": 10, "seq_end": 312,
+            "end": { "set": false, "epoch": 302, "resets": 302 },
+        })
+    );
+}
+
+/// The recorded cfg is this build's own: the adapter calls the API exactly when the cfg is set.
+#[test]
+fn the_recorded_cfg_is_the_builds_own() {
+    assert_eq!(API_ENABLED, cfg!(perf_s10_attribution_api));
+}
+
+/// With the cfg on, the adapter calls the App's real attribution API, which arms nothing for a pane it
+/// does not hold; the cfg-off stub would answer `Disabled` without calling the App.
+#[cfg(all(perf_s10_attribution_api, any(target_os = "macos", windows)))]
+#[test]
+fn the_cfg_on_adapter_calls_the_apps_attribution_api() {
+    use sonicterm_app::app::App;
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    assert_eq!(api::arm(&mut app, u64::MAX, "sentinel", "$ ", 1), ArmResult::NotArmed);
+    assert_eq!(api::read_sync(&app, u64::MAX), None);
+    api::disarm(&mut app, u64::MAX);
+}

@@ -720,8 +720,8 @@ class RepositoryTests(unittest.TestCase):
         # Each harness API cfg configuration is a run of its own: the gate renders it, and CI runs it once in
         # each of its jobs and nowhere else; the counters set is the one it compiles with.
         gate = load_local_gate()
-        cfg_steps = [step for step in gate.STEPS if step.id in ("perf-scenarios-atlas-retry-clippy",
-                                                                 "perf-scenarios-atlas-retry-tests")]
+        cfg_steps = [step for step in gate.STEPS if step.id in ("perf-scenarios-harness-api-clippy",
+                                                                 "perf-scenarios-harness-api-tests")]
         self.assertEqual(len(cfg_steps), 2)
         for step in cfg_steps:
             command = gate.command_text(step)
