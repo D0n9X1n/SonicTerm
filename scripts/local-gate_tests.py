@@ -512,8 +512,7 @@ class CustodyPolicyTests(unittest.TestCase):
         # Only these reviewed standalone compilation steps may accept forced owned cleanup.
         self.assertEqual({step.id for step in gate.STEPS if step.windows_policy == gate.WindowsPolicy.COMPILE_ONLY},
                          {"clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
-                          "perf-scenarios-echo-trace-clippy", "perf-scenarios-atlas-retry-clippy",
-                          "perf-scenarios-attribution-clippy", "doc",
+                          "perf-scenarios-echo-trace-clippy", "perf-scenarios-harness-api-clippy", "doc",
                           "doc-resource-features", "release-windows", "windows-perf-build"})
         self.assertEqual(python_step("mixed", "pass").windows_policy, gate.WindowsPolicy.STRICT)
 
@@ -2754,6 +2753,25 @@ DECLARED_HARNESS_CFGS = [token for name in gate.HARNESS_API_CFG_NAMES for token 
 
 class HarnessFlagTests(unittest.TestCase):
     """Harness API cfg flags, composed once at launch from what a step inherits."""
+
+    def test_the_combined_steps_enable_every_table_entry_and_no_api_has_its_own_step(self):
+        # One lint and one test step enable every HARNESS_API_CFGS entry at once, so a new entry is linted and
+        # tested with its cfg on without another dependency rebuild; Cargo.toml declares each entry for check-cfg.
+        steps = {step.id: step for step in gate.STEPS}
+        lint = steps["perf-scenarios-harness-api-clippy"]
+        enabled = [lint.argv[index + 1] for index, word in enumerate(lint.argv) if word == "--cfg"]
+        self.assertEqual(enabled, list(gate.HARNESS_API_CFG_NAMES))
+        self.assertEqual(steps["perf-scenarios-harness-api-tests"].harness_cfgs, gate.HARNESS_API_CFG_NAMES)
+        combined = {"perf-scenarios-harness-api-clippy", "perf-scenarios-harness-api-tests"}
+        for step in gate.STEPS:
+            if step.id.startswith("perf-scenarios-") and step.id not in combined:
+                with self.subTest(step=step.id):
+                    self.assertNotIn("--cfg", step.argv)
+                    self.assertIn(step.harness_cfgs, (None, ()))
+        manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        for name in gate.HARNESS_API_CFG_NAMES:
+            with self.subTest(cfg=name):
+                self.assertIn(f"'cfg({name})'", manifest)
 
     def test_encoded_flags_take_precedence_and_plain_flags_are_tokenized_as_cargo_does(self):
         # CARGO_ENCODED_RUSTFLAGS is kept token for token and RUSTFLAGS is then ignored, as Cargo ignores it; plain

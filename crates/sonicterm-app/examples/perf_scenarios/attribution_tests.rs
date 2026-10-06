@@ -85,3 +85,16 @@ fn the_record_serializes_as_the_comparison_reads_it() {
 fn the_recorded_cfg_is_the_builds_own() {
     assert_eq!(API_ENABLED, cfg!(perf_s10_attribution_api));
 }
+
+/// With the cfg on, the adapter calls the App's real attribution API, which arms nothing for a pane it
+/// does not hold; the cfg-off stub would answer `Disabled` without calling the App.
+#[cfg(all(perf_s10_attribution_api, any(target_os = "macos", windows)))]
+#[test]
+fn the_cfg_on_adapter_calls_the_apps_attribution_api() {
+    use sonicterm_app::app::App;
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    assert_eq!(api::arm(&mut app, u64::MAX, "sentinel", "$ ", 1), ArmResult::NotArmed);
+    assert_eq!(api::read_sync(&app, u64::MAX), None);
+    api::disarm(&mut app, u64::MAX);
+}
