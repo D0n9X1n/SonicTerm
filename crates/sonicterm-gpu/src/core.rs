@@ -9510,14 +9510,14 @@ fn glyph_draw_is_degenerate(info: &sonicterm_text::glyph_atlas::GlyphInfo) -> bo
 /// without becoming unreadable. See.
 const DIM_BLEND: f32 = 0.45;
 
-/// The terminal's atlas result for a fallback character: `None` draws tofu when the atlas refused
-/// the glyph, cached it as missing, or cached it as too large to place; an empty glyph is
-/// returned, so the caller skips it without a box.
+/// The terminal's atlas result for a fallback character: `None` draws tofu, both when the atlas
+/// refused the glyph and when it cached the glyph as missing; an empty glyph, and the zero-area
+/// sentinel of a tile too large to place, is returned, so the caller skips it without a box.
 #[must_use]
 fn drawable_or_tofu(
     info: Option<sonicterm_text::glyph_atlas::GlyphInfo>,
 ) -> Option<sonicterm_text::glyph_atlas::GlyphInfo> {
-    info.filter(|info| !info.missing && !info.oversize)
+    info.filter(|info| !info.missing)
 }
 
 fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {

@@ -260,12 +260,17 @@ fn rule_inputs(scale: u32, rows: &[StartSizeInput]) -> Vec<RuleInput> {
 #[path = "start_size_inputs_tests.rs"]
 mod start_size_inputs_tests;
 
-/// The face a failed raster was requested from, resolved while its stack was alive: the face file's
-/// name (not its host path), its index in a collection, the glyph id and the requested strike.
+/// The face a failed raster was requested from, resolved while its stack was alive: its content
+/// identity, its index in a collection, the glyph id and the requested strike, with the face file's
+/// name kept for reading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailedFace {
-    /// The face file's name, or a `builtin:`/`memory:` name for data not on disk.
+    /// The face file's name, or a `builtin:`/`memory:` name for data not on disk; for reading only,
+    /// since two different files can share a name.
     pub file: String,
+    /// The content identity of the bytes the face was loaded from
+    /// ([`face_content_id`](crate::face_content::face_content_id)); an exception matches on it.
+    pub content: String,
     /// Index of the face within its collection file.
     pub face_index: u32,
     /// The glyph id inside that face.
@@ -290,17 +295,18 @@ pub struct RasterFailure {
     pub face: Option<FailedFace>,
 }
 
-/// One reviewed raster failure that may be exempted: an exact platform, raster role, face file and
-/// index, glyph id, style and strike, never a family. Each entry carries the reason reviewed in the
-/// PR that added it.
+/// One reviewed raster failure that may be exempted: an exact platform, raster role, face content and
+/// index, glyph id, style and strike, never a family or a file name. Each entry carries the reason
+/// reviewed in the PR that added it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RasterException {
     /// `macos` or `windows`.
     pub platform: &'static str,
     /// The raster role that requested the glyph.
     pub role: GlyphRasterVariant,
-    /// The face file's name.
-    pub file: &'static str,
+    /// The face's content identity, `<namespace>:sha256:<hex>`, as
+    /// [`face_content_id`](crate::face_content::face_content_id) computes it.
+    pub content: &'static str,
     /// Index of the face within its collection file.
     pub face_index: u32,
     /// The glyph id; never 0.
@@ -328,7 +334,7 @@ impl RasterException {
             && self.role == failure.role
             && self.bold == failure.bold
             && self.italic == failure.italic
-            && self.file == face.file
+            && self.content == face.content
             && self.face_index == face.face_index
             && self.glyph_id == face.glyph_id
             && self.strike_px_milli == face.strike_px_milli
@@ -376,14 +382,14 @@ pub fn incomplete_glyphs(unresolved: usize, oversize: usize, raster: &Normalized
     unresolved + oversize + raster.unapproved.len()
 }
 
-/// Every problem with `exceptions`: an entry that names no glyph (glyph id 0 or no file), gives no
-/// reason, names an unknown platform, or repeats another entry.
+/// Every problem with `exceptions`: an entry that names no glyph (glyph id 0, or a content that is
+/// not a face content identity), gives no reason, names an unknown platform, or repeats another entry.
 #[must_use]
 pub fn exception_problems(exceptions: &[RasterException]) -> Vec<String> {
     let mut problems = Vec::new();
     for (index, entry) in exceptions.iter().enumerate() {
         let known_platform = matches!(entry.platform, "macos" | "windows");
-        if entry.glyph_id == 0 || entry.file.trim().is_empty() {
+        if entry.glyph_id == 0 || !crate::face_content::is_face_content_id(entry.content) {
             problems.push(format!("entry {index} names no glyph: {entry:?}"));
         } else if entry.reason.trim().is_empty() {
             // When: entry.reason is blank, the entry was never reviewed, so it cannot exempt anything.

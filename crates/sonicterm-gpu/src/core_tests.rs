@@ -5112,9 +5112,10 @@ fn a_missing_glyph_draws_tofu_and_an_empty_glyph_is_skipped() {
     };
     let missing = sonicterm_text::glyph_atlas::GlyphInfo { missing: true, ..empty };
     assert_eq!(drawable_or_tofu(Some(missing)), None, "missing draws tofu");
-    // A tile too large to place draws nothing either, so a fallback character shows tofu for it.
+    // The fallback paths keep their behaviour for a tile too large to place: its zero-area sentinel
+    // passes through, so the caller skips it like an empty glyph and draws no tofu.
     let oversize = sonicterm_text::glyph_atlas::GlyphInfo { oversize: true, ..empty };
-    assert_eq!(drawable_or_tofu(Some(oversize)), None, "an oversize glyph draws tofu");
+    assert_eq!(drawable_or_tofu(Some(oversize)), Some(oversize), "an oversize glyph is skipped");
     assert_eq!(drawable_or_tofu(None), None, "a refused glyph draws tofu");
     assert_eq!(drawable_or_tofu(Some(empty)), Some(empty), "an empty glyph is skipped, not tofu");
 }
@@ -8430,4 +8431,23 @@ fn an_intentionally_empty_glyph_records_nothing_and_its_row_is_cached() {
     let drawn = rig.emit(&grid, 0, 0);
     assert!(drawn.missing.is_empty(), "a blank is never missing: {:?}", drawn.missing);
     assert!(rig.cache.contains(7, drawn.key), "and its row is cached");
+}
+
+/// The ASCII fast path, one of the character-fallback paths, keeps its behaviour for a tile too
+/// large to place: the oversize sentinel draws nothing, records no missing character or tofu, and
+/// leaves the row complete, so the row is cached. Only the shaped nonzero-id path reports it.
+#[test]
+fn an_oversize_ascii_fallback_tile_draws_nothing_and_its_row_is_cached() {
+    let grid = text_grid(2, &["A"]);
+    let mut rig = GlyphRig::new(false);
+    // A fixed 4x4 atlas cannot place a 14 px Latin tile.
+    rig.atlas = GlyphAtlas::new(4, 4);
+    rig.begin(&grid);
+    let drawn = rig.emit(&grid, 0, 0);
+    let key = sonicterm_types::glyph_key::GlyphKey::new('A', false, false);
+    let cached = rig.atlas.get(key).expect("the fast path cached the glyph");
+    assert!(cached.oversize, "the tile is the oversize sentinel: {cached:?}");
+    assert!(drawn.missing.is_empty(), "no missing character is recorded: {:?}", drawn.missing);
+    assert!(drawn.glyphs.is_empty(), "the oversize tile draws no glyph");
+    assert!(rig.cache.contains(7, drawn.key), "the row stays complete and is cached");
 }

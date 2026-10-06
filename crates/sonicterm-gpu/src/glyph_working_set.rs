@@ -109,7 +109,7 @@ pub struct GlyphWorkingSet {
     pub variant_sizes: Vec<(GlyphRasterVariant, f32)>,
     /// Characters no face covers: measured as the renderer draws them, as tofu, and listed here.
     pub unresolved_chars: Vec<char>,
-    /// Resolved glyphs whose face rasterized nothing, each resolved to its face file, glyph and
+    /// Resolved glyphs whose face rasterized nothing, each resolved to its face content, glyph and
     /// strike while its stack was alive: the renderer draws them as tofu too.
     pub raster_failed: Vec<RasterFailure>,
     /// Required glyphs whose tile is larger than the atlas can ever place, so they draw nothing.
@@ -125,6 +125,9 @@ struct Accounted {
     raster_failed: HashMap<GlyphKey, RasterFailure>,
     /// Required glyphs cached as too large to place.
     oversize_required: HashSet<GlyphKey>,
+    /// Each failed face's content identity, read once per face: hashing a large face file once per
+    /// failed glyph would repeat the same work. `None` when its bytes could not be read.
+    face_contents: HashMap<sonicterm_engine::FaceIdentity, Option<String>>,
 }
 
 /// Why a working-set measurement is incomplete, so it is rejected rather than classified.
@@ -481,7 +484,8 @@ fn account_tile(
 ) -> Result<(), WorkingSetError> {
     match atlas.get(key) {
         Some(info) if info.missing && key.glyph_id != 0 => {
-            accounted.raster_failed.insert(key, raster_failure(stack, key));
+            let failure = raster_failure(stack, key, &mut accounted.face_contents);
+            accounted.raster_failed.insert(key, failure);
             Ok(())
         }
         Some(info) if info.missing => {
@@ -499,25 +503,38 @@ fn account_tile(
     }
 }
 
-/// `key`'s raster failure: its character, role and style, and the face file, index, glyph id and
-/// strike `stack` resolves it to, or no face when it resolves to none.
-fn raster_failure(stack: &sonicterm_engine::FontStack, key: GlyphKey) -> RasterFailure {
+/// `key`'s raster failure: its character, role and style, and the face content, index, glyph id and
+/// strike `stack` resolves it to, with the face file's name for reading. It has no face when the key
+/// resolves to none or the face's bytes cannot be read, so no exception can approve it.
+fn raster_failure(
+    stack: &sonicterm_engine::FontStack,
+    key: GlyphKey,
+    face_contents: &mut HashMap<sonicterm_engine::FaceIdentity, Option<String>>,
+) -> RasterFailure {
+    let face = stack.resolved_glyph_face(key).and_then(|resolved| {
+        let content = face_contents
+            .entry(resolved.face.clone())
+            .or_insert_with(|| stack.resolved_face_content(key))
+            .clone()?;
+        Some(FailedFace {
+            file: face_file_name(&resolved.face.source),
+            content,
+            face_index: resolved.face.face_index,
+            glyph_id: resolved.glyph_id,
+            strike_px_milli: resolved.strike_px_milli,
+        })
+    });
     RasterFailure {
         codepoint: key.ch,
         role: key.raster_variant,
         bold: key.weight_bold,
         italic: key.italic,
-        face: stack.resolved_glyph_face(key).map(|resolved| FailedFace {
-            file: face_file_name(&resolved.face.source),
-            face_index: resolved.face.face_index,
-            glyph_id: resolved.glyph_id,
-            strike_px_milli: resolved.strike_px_milli,
-        }),
+        face,
     }
 }
 
-/// A face source's file name, its last component on either host's path separators, so an exception
-/// names the same face on every checkout; a `builtin:` or `memory:` name has none and is kept whole.
+/// A face source's file name, its last component on either host's path separators, for reading a
+/// failure; a `builtin:` or `memory:` name has none and is kept whole. Matching uses the content.
 fn face_file_name(source: &str) -> String {
     source.rsplit(['/', '\\']).next().unwrap_or(source).to_owned()
 }

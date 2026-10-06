@@ -505,10 +505,15 @@ can never justify a smaller start. Each `glyph_atlas_working_set` row reports
 that count as `incomplete_glyphs`; the helper's S9 measurement currently
 reports emoji that fail to rasterize, so it selects 2048. A raster failure may
 be exempted only by an entry in `RASTER_EXCEPTIONS`, applied where each failure
-still names its face: the entry names the platform, raster role, face file
-name and index, glyph id, style and strike, never a family, and carries the
-reason reviewed in the PR that added it. A failure that resolves to no face,
-an unresolved character and an oversize required tile are never exempted. The
+still names its face: the entry names the platform, raster role, face content
+and index, glyph id, style and strike, never a family or a file name, and
+carries the reason reviewed in the PR that added it. A face's content is
+`<namespace>:sha256:<hex>`, the SHA-256 of the bytes it was loaded from, with
+separate `file`, `builtin` and `memory` namespaces, so an unrelated file that
+shares a reviewed file's name is never approved; the file name is kept in the
+report for reading only. A failure that resolves to no face or whose face bytes
+cannot be read, an unresolved character and an oversize required tile are never
+exempted. The
 step prints the raw failures, the approved ones with their reasons and the
 unapproved rest; only the unapproved count enters `incomplete_glyphs`. The
 list is empty, so every raster failure still selects 2048.

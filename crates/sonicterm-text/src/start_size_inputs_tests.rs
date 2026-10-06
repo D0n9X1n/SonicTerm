@@ -1,4 +1,7 @@
+use std::sync::LazyLock;
+
 use super::*;
+use crate::face_content::{face_content_id, FaceNamespace};
 use crate::glyph_atlas::{START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
 
 /// A complete rule input labelled `label` with `outcome` and a square largest tile of `tile` pixels.
@@ -199,8 +202,17 @@ fn start_constants_pass_the_table_validation() {
     }
 }
 
-/// A failure of `glyph_id` in `file`, drawn by the body at 14 px in the regular face.
-fn failure(file: &str, glyph_id: u32) -> RasterFailure {
+/// A stand-in content identity for a face file whose bytes are `bytes`.
+fn content_of(bytes: &str) -> String {
+    face_content_id(FaceNamespace::File, bytes.as_bytes())
+}
+
+/// The reviewed face's content identity, the one [`exception`] names: a static, as entries are.
+static REVIEWED_CONTENT: LazyLock<String> = LazyLock::new(|| content_of("seguiemj.ttf"));
+
+/// A failure of `glyph_id` in a face file named `file` whose bytes hash to `content`, drawn by the
+/// body at 14 px in the regular face.
+fn failure_in(file: &str, content: String, glyph_id: u32) -> RasterFailure {
     RasterFailure {
         codepoint: '😀',
         role: GlyphRasterVariant::Normal,
@@ -208,6 +220,7 @@ fn failure(file: &str, glyph_id: u32) -> RasterFailure {
         italic: false,
         face: Some(FailedFace {
             file: file.to_owned(),
+            content,
             face_index: 0,
             glyph_id,
             strike_px_milli: 14_000,
@@ -215,12 +228,18 @@ fn failure(file: &str, glyph_id: u32) -> RasterFailure {
     }
 }
 
+/// A failure of `glyph_id` in `file`, whose stand-in bytes are its name, so different names have
+/// different contents.
+fn failure(file: &str, glyph_id: u32) -> RasterFailure {
+    failure_in(file, content_of(file), glyph_id)
+}
+
 /// The exception naming exactly `failure("seguiemj.ttf", 42)` on Windows.
 fn exception() -> RasterException {
     RasterException {
         platform: "windows",
         role: GlyphRasterVariant::Normal,
-        file: "seguiemj.ttf",
+        content: REVIEWED_CONTENT.as_str(),
         face_index: 0,
         glyph_id: 42,
         bold: false,
@@ -231,8 +250,8 @@ fn exception() -> RasterException {
     }
 }
 
-/// An exception approves only the failure it names on every field: platform, raster role, face file
-/// and index, glyph id, style and strike. Changing any one leaves the failure unapproved.
+/// An exception approves only the failure it names on every field: platform, raster role, face
+/// content and index, glyph id, style and strike. Changing any one leaves the failure unapproved.
 #[test]
 fn an_exception_approves_only_its_exact_face_glyph_style_and_strike() {
     let listed = [exception()];
@@ -253,7 +272,7 @@ fn an_exception_approves_only_its_exact_face_glyph_style_and_strike() {
     title.role = GlyphRasterVariant::TabTitle;
     let unmatched = [
         ("another platform", "macos", failure("seguiemj.ttf", 42)),
-        ("another file", "windows", failure("seguisym.ttf", 42)),
+        ("another face file", "windows", failure("seguisym.ttf", 42)),
         ("another glyph", "windows", failure("seguiemj.ttf", 43)),
         ("another face", "windows", other_face(|face| face.face_index = 1)),
         ("another strike", "windows", other_face(|face| face.strike_px_milli = 28_000)),
@@ -298,8 +317,9 @@ fn only_approved_raster_failures_leave_the_incomplete_count() {
     assert_eq!(start_rule(&[counted]).map(|verdict| verdict.dim), Ok(ATLAS_DIM));
 }
 
-/// The reviewed list starts empty and well formed; an entry naming no glyph (glyph id 0 or no file),
-/// with no reason, for an unknown platform or listed twice is refused.
+/// The reviewed list starts empty and well formed; an entry naming no glyph (glyph id 0, or no face
+/// content identity: empty, a file name, a path or a bare digest), with no reason, for an unknown
+/// platform or listed twice is refused.
 #[test]
 fn the_reviewed_exception_list_is_well_formed_and_starts_empty() {
     assert!(RASTER_EXCEPTIONS.is_empty(), "every entry needs a reason reviewed in its PR");
@@ -307,7 +327,19 @@ fn the_reviewed_exception_list_is_well_formed_and_starts_empty() {
     assert!(exception_problems(&[exception()]).is_empty(), "a complete entry is accepted");
     let broken = [
         ("glyph id 0", RasterException { glyph_id: 0, ..exception() }),
-        ("no file", RasterException { file: "", ..exception() }),
+        ("no content", RasterException { content: "", ..exception() }),
+        ("a file name", RasterException { content: "seguiemj.ttf", ..exception() }),
+        (
+            "a path",
+            RasterException { content: "/System/Library/Fonts/ReviewedFace.ttf", ..exception() },
+        ),
+        (
+            "a bare digest",
+            RasterException {
+                content: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                ..exception()
+            },
+        ),
         ("no reason", RasterException { reason: " ", ..exception() }),
         ("unknown platform", RasterException { platform: "linux", ..exception() }),
     ];
@@ -315,4 +347,27 @@ fn the_reviewed_exception_list_is_well_formed_and_starts_empty() {
         assert_eq!(exception_problems(&[entry]).len(), 1, "{name}");
     }
     assert_eq!(exception_problems(&[exception(), exception()]).len(), 1, "a duplicate entry");
+}
+
+/// An exception names a face by its content, never by its file name: a failure from an unrelated
+/// file that shares the reviewed file's name (`/tmp/unrelated-fonts/ReviewedFace.ttf` against the
+/// reviewed `/System/Library/Fonts/ReviewedFace.ttf`) stays unapproved, while the reviewed bytes are
+/// approved under any name or path, since the name is kept for reading only.
+#[test]
+fn a_face_file_sharing_the_reviewed_name_is_not_approved() {
+    let reviewed = content_of("bytes of /System/Library/Fonts/ReviewedFace.ttf");
+    let entry =
+        RasterException { content: Box::leak(reviewed.clone().into_boxed_str()), ..exception() };
+    let impostor = failure_in(
+        "ReviewedFace.ttf",
+        content_of("bytes of /tmp/unrelated-fonts/ReviewedFace.ttf"),
+        42,
+    );
+    let normalized =
+        normalize_raster_failures("windows", std::slice::from_ref(&impostor), &[entry]);
+    assert!(normalized.matched.is_empty(), "a same-named file is not the reviewed face");
+    assert_eq!(normalized.unapproved, vec![impostor]);
+    let renamed = failure_in("Renamed.ttf", reviewed, 42);
+    let normalized = normalize_raster_failures("windows", std::slice::from_ref(&renamed), &[entry]);
+    assert_eq!(normalized.matched, vec![(renamed, entry.reason)], "the reviewed bytes match");
 }

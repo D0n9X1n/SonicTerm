@@ -31,6 +31,7 @@
 // `row_glyph_cache.rs` is rewritten to drop the cosmic-text `Color`
 // field type and keeps its data-shape interface; it ships in the
 // same edit as a stub the renderer can construct against.
+pub mod face_content;
 pub mod glyph_atlas;
 pub mod row_glyph_cache;
 pub mod shape;

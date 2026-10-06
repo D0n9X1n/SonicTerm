@@ -9,6 +9,7 @@ It holds no shape-result cache.
 - `shape.rs` - the ASCII fast-path predicate (generic over owned or borrowed cells), `RunStyle` and `ShapedGlyph`.
 - `glyph_atlas.rs` - atlas pages and glyph placement.
 - `row_glyph_cache.rs` - content-keyed row glyph cache: position-free records, pins, staged slots, quotas and budgets.
+- `face_content.rs` - a face's content identity: the namespaced SHA-256 of the bytes it was loaded from.
 - `lib.rs` - public exports.
 
 ## Local gate
@@ -50,8 +51,9 @@ cargo build -p sonicterm-text
   `GlyphInfo::oversize`) and tab titles that never shape as missing glyphs; the
   guard stays false until Windows CI passes the strengthened coverage test and
   the measured rows are recorded. `RASTER_EXCEPTIONS` (empty) exempts a raster
-  failure only by exact platform, role, face file and index, glyph id, style
-  and strike, with a reviewed reason; `incomplete_glyphs` counts unresolved
+  failure only by exact platform, role, face content (`face_content`: the
+  namespaced SHA-256 of the face's bytes, never its file name) and index, glyph
+  id, style and strike, with a reviewed reason; `incomplete_glyphs` counts unresolved
   characters, oversize required tiles and unapproved raster failures.
 - Eviction is what keeps the index bounded. With eviction disabled the index
   still stops growing, because a full atlas stops admitting — memory looks

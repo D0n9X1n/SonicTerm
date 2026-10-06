@@ -561,11 +561,12 @@ fn a_representative_codepoint_without_a_real_tile_resolves_to_nothing() {
     assert_eq!(codepoint_identity(&stack, &mut seeded, '中'), None, "a missing tile does not");
 }
 
-/// A raster failure is resolved while its stack is alive to the face file's name, its index, the
-/// glyph id and the requested strike, with the character, role and style kept for reading; a key
-/// that resolves to no face is recorded unresolved.
+/// A raster failure is resolved while its stack is alive to the face's content identity (the
+/// digest of the face file's bytes), its index, the glyph id and the requested strike, with the
+/// file's name, character, role and style kept for reading; a key that resolves to no face is
+/// recorded unresolved.
 #[test]
-fn a_raster_failure_resolves_to_its_face_file_glyph_and_strike() {
+fn a_raster_failure_resolves_to_its_face_content_glyph_and_strike() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -592,6 +593,16 @@ fn a_raster_failure_resolves_to_its_face_file_glyph_and_strike() {
     assert!(face.strike_px_milli > 0, "{face:?}");
     assert!(!face.file.contains('/') && !face.file.contains('\\'), "a file name: {face:?}");
     assert!(face.file.ends_with(".ttf") || face.file.ends_with(".otf"), "{face:?}");
+    let source = stack.resolved_glyph_face(key).expect("the key resolves").face.source;
+    let bytes = std::fs::read(source).expect("the face file reads");
+    assert_eq!(
+        face.content,
+        sonicterm_text::face_content::face_content_id(
+            sonicterm_text::face_content::FaceNamespace::File,
+            &bytes
+        ),
+        "the failure names its face by the file's content"
+    );
 
     let unknown = GlyphKey::shaped('中', 200, key.glyph_id, false, false);
     let _unknown_sentinel = atlas.get_or_insert(unknown, &mut NoRaster);
