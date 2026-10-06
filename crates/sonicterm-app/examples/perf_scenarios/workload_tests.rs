@@ -1201,6 +1201,27 @@ fn glyph_atlas_working_set() {
 /// formatter, so a single `key=value` parser reads both and the rows can become `START_SIZE_INPUTS`
 /// entries: the same keys in the same order, told apart only by `source`. Both kinds carry
 /// `incomplete_glyphs`, the count that makes a row ineligible to select a smaller start.
+
+/// Representative S9 emoji and CJK scalars, taken from the fixture's last line, which the real
+/// renderer's viewport shows at both scales (the cursor sits on the row below it). Test 17 checks
+/// that each resolves to a resident real tile.
+const S9_REPRESENTATIVE_CODEPOINTS: [char; 6] = ['😀', '🍣', '🌏', '漢', '字', 'あ'];
+
+/// Every representative codepoint is drawn by S9: each appears on the fixture's last line, so the
+/// frozen list cannot drift from the fixture it stands for.
+#[test]
+fn the_s9_representative_codepoints_are_on_the_fixtures_last_line() {
+    let bytes = fixture_bytes(crate::scenarios::Fixture::EmojiCjk);
+    let text = String::from_utf8(bytes).expect("the S9 fixture is UTF-8");
+    let last = text.lines().rev().find(|line| !line.trim().is_empty()).expect("a last line");
+    let absent: Vec<char> = S9_REPRESENTATIVE_CODEPOINTS
+        .iter()
+        .copied()
+        .filter(|codepoint| !last.contains(*codepoint))
+        .collect();
+    assert!(absent.is_empty(), "not on the last line {last:?}: {absent:?}");
+}
+
 #[test]
 fn working_set_rows_share_one_parseable_format() {
     use sonicterm_text::glyph_atlas::FitOutcome;
@@ -1342,12 +1363,14 @@ fn the_coverage_setup_opens_the_palette_on_the_main_frame() {
 /// window with the tab bar and three titles, the cursor and the command palette open with its
 /// footer and detail rows, at scale 1 and 2. It lives beside the fixtures it draws.
 ///
-/// Limitation: it checks the subset of tiles that became resident, and does not yet prove that the
-/// renderer drew the complete working set. Two failures leave no tile and no missing-glyph record:
-/// a shaped glyph with a nonzero id whose rasterization or atlas admission fails is skipped
-/// silently by the terminal row path, and a tab title whose fitting fails is drawn as an empty
-/// title before the chrome diagnostic sees it. Until both are reported as missing glyphs,
-/// `SIZING_ORACLE_COMPLETE` stays false and neither normal start constant may drop below 2048.
+/// What it proves: the completion wait needs a presented frame whose terminal rows and chrome
+/// report no missing glyph, and both reports now include a shaped glyph that drew nothing (refused,
+/// rasterized nothing, or too large to place) and a tab title that never shaped. Every resident
+/// tile is in the helper's set at the same raster size, and for S9 each representative emoji and
+/// CJK codepoint is a resident real tile. It does not prove that every glyph the helper measures was
+/// drawn, only the glyphs this frame requested. `SIZING_ORACLE_COMPLETE` stays false, so neither
+/// normal start constant may drop below 2048, until these checks pass on Windows CI and the
+/// measured rows are recorded.
 #[cfg(target_os = "windows")]
 mod real_renderer_coverage {
     use std::path::PathBuf;
@@ -1359,7 +1382,9 @@ mod real_renderer_coverage {
     use sonicterm_cfg::keymap::Keymap;
     use sonicterm_cfg::theme::Theme;
     use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
-    use sonicterm_gpu::glyph_working_set::{measure_glyph_working_set, TileIdentity};
+    use sonicterm_gpu::glyph_working_set::{
+        measure_glyph_working_set, representative_gaps, representative_identities, TileIdentity,
+    };
     use winit::application::ApplicationHandler;
     use winit::dpi::PhysicalSize;
     use winit::event::WindowEvent;
@@ -1514,9 +1539,8 @@ mod real_renderer_coverage {
     /// cursor and the open palette until a presented frame draws no tofu in its rows or chrome.
     /// It then holds every required footer symbol and title character as a real tile, prints its
     /// atlas as a `source=real_renderer` row, every resident tile resolves to an identity (face,
-    /// glyph, strike, variant and flags), and each identity is in the helper's set with the same
-    /// raster size. Tiles lost to the two unreported failures the module comment names are not
-    /// checked.
+    /// glyph, strike, variant and flags), each identity is in the helper's set with the same
+    /// raster size, and for S9 each representative codepoint resolves to a resident real tile.
     fn covered(
         active: &ActiveEventLoop,
         name: &str,
@@ -1551,7 +1575,7 @@ mod real_renderer_coverage {
         let absent = super::missing_required_chrome(&resident);
         check(absent.is_empty(), &format!("{case}: required chrome not resident: {absent:?}"))?;
         let facts = renderer.glyph_atlas_facts();
-        // The renderer's own tofu report; it misses the oracle gaps the module comment names.
+        // The renderer's own missing-glyph reports, which include shaped glyphs that drew nothing.
         let incomplete_glyphs =
             renderer.last_missing_tofu().len() + renderer.last_missing_chrome().len();
         print_row(&super::working_set_row(
@@ -1571,6 +1595,21 @@ mod real_renderer_coverage {
         )?;
         let lines: Vec<&str> = text.lines().collect();
         let dpi = (72.0 * scale).round() as usize;
+        if name == "S9" {
+            // When: the fixture is S9, its representative emoji and CJK must be real resident tiles.
+            let resolved = representative_identities(
+                &super::S9_REPRESENTATIVE_CODEPOINTS,
+                FONT_FAMILY,
+                size_pt,
+                dpi,
+                &font_dirs(),
+            );
+            let gaps = representative_gaps(&resolved, &identities);
+            check(
+                gaps.is_empty(),
+                &format!("{case}: representative codepoints not drawn: {gaps:?}"),
+            )?;
+        }
         let helper =
             measure_glyph_working_set(&lines, &TITLES, FONT_FAMILY, size_pt, dpi, &font_dirs())
                 .map_err(|error| {
@@ -1626,8 +1665,8 @@ mod real_renderer_coverage {
 
     /// Once fallback completes on a presented frame, the helper's identity set covers every tile
     /// the real renderer holds for S9 and S12 with the tab bar, titles, cursor and an open
-    /// palette, at scale 1 and 2, with the same raster sizes. It checks resident tiles only and
-    /// does not prove complete rendering; see the module comment for the two unreported failures.
+    /// palette, at scale 1 and 2, with the same raster sizes, and S9's representative emoji and CJK
+    /// are resident real tiles; the module comment states what this proves and what it does not.
     #[test]
     fn the_helper_covers_the_real_renderer() {
         let event_loop =

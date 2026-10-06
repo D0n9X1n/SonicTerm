@@ -45,9 +45,11 @@ cargo build -p sonicterm-text
   keep the full allocation, and only warm spares start at `MIN_ATLAS_DIM`.
   `start_size_inputs::validate_table_start` rejects any smaller start while
   `SIZING_ORACLE_COMPLETE` is false, whatever rows `START_SIZE_INPUTS` holds,
-  and a row with nonzero `incomplete_glyphs` always selects 2048. The guard
-  stays false until the real renderer reports silently skipped shaped-glyph
-  raster or admission failures and failed tab-title fitting as missing glyphs.
+  and a row with nonzero `incomplete_glyphs` always selects 2048. The real
+  renderer reports shaped glyphs that draw nothing (refused, not rasterized, or
+  `GlyphInfo::oversize`) and tab titles that never shape as missing glyphs; the
+  guard stays false until Windows CI passes the strengthened coverage test and
+  the measured rows are recorded.
 - Eviction is what keeps the index bounded. With eviction disabled the index
   still stops growing, because a full atlas stops admitting — memory looks
   flat while every later glyph goes missing. Assert that eviction ran, not

@@ -465,3 +465,82 @@ fn an_oversize_required_tile_is_listed_as_incomplete() {
     account_tile(&roomy, oversize, &mut placed).expect("a placed tile is resident");
     assert!(placed.oversize_required.is_empty(), "a placed tile is not oversize");
 }
+
+/// A codepoint resolves, through the stack the renderer builds, to the identity of the real tile it
+/// draws (a nonzero glyph id from a named face); a codepoint no face covers resolves to nothing.
+#[test]
+fn a_representative_codepoint_resolves_to_its_real_tile_identity() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let resolved = representative_identities(
+        &['中', '\u{F0000}'],
+        "Rec Mono St.Helens",
+        14.0,
+        72,
+        &packaged_fonts(),
+    );
+    assert_eq!(resolved.len(), 2);
+    let (character, identity) = &resolved[0];
+    let identity = identity.as_ref().unwrap_or_else(|| panic!("{character:?} resolves"));
+    assert_eq!(*character, '中');
+    assert!(identity.source.glyph_id != 0, "a real glyph: {identity:?}");
+    assert_eq!(identity.raster_variant, GlyphRasterVariant::Normal);
+    assert_eq!(resolved[1], ('\u{F0000}', None), "no face covers U+F0000");
+}
+
+/// Each representative codepoint must be resident in the renderer's atlas with a real raster: an
+/// unresolved codepoint, an identity the atlas does not hold, and a resident zero-size tile are each
+/// a named gap, and a resident real tile is not.
+#[test]
+fn a_representative_gap_names_each_unresolved_absent_or_empty_tile() {
+    let identity = |glyph_id: u32| TileIdentity {
+        source: sonicterm_engine::ResolvedGlyphFace {
+            face: sonicterm_engine::FaceIdentity { source: "face.ttf".into(), face_index: 0 },
+            glyph_id,
+            strike_px_milli: 14_000,
+        },
+        raster_variant: GlyphRasterVariant::Normal,
+        bold: false,
+        italic: false,
+        is_color: false,
+        is_subpixel: false,
+    };
+    let resident = HashMap::from([(identity(1), [8, 12]), (identity(3), [0, 12])]);
+    let resolved = vec![
+        ('a', Some(identity(1))),
+        ('b', None),
+        ('c', Some(identity(2))),
+        ('d', Some(identity(3))),
+    ];
+    assert_eq!(
+        representative_gaps(&resolved, &resident),
+        vec![('b', "no real glyph"), ('c', "not resident"), ('d', "no pixels")]
+    );
+}
+
+/// A codepoint whose shaped tile is missing or too large to place draws no real tile, so it resolves
+/// to no identity; the same codepoint in a roomy atlas resolves.
+#[test]
+fn a_representative_codepoint_without_a_real_tile_resolves_to_nothing() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stack = renderer_font_stacks("Rec Mono St.Helens", 14.0, 72, 1.0, &packaged_fonts())
+        .body
+        .expect("the packaged family loads");
+    let mut roomy = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);
+    assert!(codepoint_identity(&stack, &mut roomy, '中').is_some(), "a placed tile resolves");
+    let mut tiny = GlyphAtlas::new(8, 8);
+    assert_eq!(codepoint_identity(&stack, &mut tiny, '中'), None, "an oversize tile does not");
+    // The same shaped key, cached as a raster failure first, is a missing tile.
+    let mut seeded = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);
+    let (key, _) = shaped_tile(
+        &stack,
+        &mut GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM),
+        '中',
+        GlyphRasterVariant::Normal,
+    );
+    let _sentinel = seeded.get_or_insert(key, &mut NoRaster);
+    assert_eq!(codepoint_identity(&stack, &mut seeded, '中'), None, "a missing tile does not");
+}

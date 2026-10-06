@@ -499,18 +499,22 @@ every required input at that scale (the perf S9 and S12 end-of-run atlas on
 macOS and Windows at scale 1, the working-set helper on both platforms and the
 Windows real renderer for S9 and S12 at each scale); and the start rule over
 those rows selects exactly that size. A measurement that drew any required
-glyph as tofu, unresolved or resolved but not rasterized, selects 2048, so it
+glyph as tofu (unresolved, resolved but not rasterized, or too large to place)
+selects 2048, so it
 can never justify a smaller start. Each `glyph_atlas_working_set` row reports
 that count as `incomplete_glyphs`; the helper's S9 measurement currently
 reports emoji that fail to rasterize, so it selects 2048.
 
 `SIZING_ORACLE_COMPLETE` is false, and recorded rows alone cannot lower a start.
-The Windows real-renderer coverage test checks the subset of tiles that became
-resident against the helper; it does not yet prove complete rendering. Two
-failures leave no tile and no missing-glyph record: a shaped glyph with a
-nonzero id whose rasterization or atlas admission fails is skipped silently by
-the terminal row path, and a tab title whose fitting fails is drawn as an empty
-title before the chrome diagnostic sees it.
+The Windows real-renderer coverage test waits for a presented frame whose
+terminal rows and chrome report no missing glyph. Both reports include a shaped
+glyph that drew nothing (refused by the atlas, rasterized nothing, or too large
+to place) and a tab title that never shaped. The test then checks that every
+resident tile is in the helper's set at the same raster size and, for S9, that
+representative emoji and CJK codepoints from the fixture's last line are
+resident real tiles at both scales. It proves only the glyphs that frame
+requested, not every glyph the helper measures. The guard stays false until
+these checks pass on Windows CI and the measured rows are recorded.
 
 Insertion follows these rules:
 

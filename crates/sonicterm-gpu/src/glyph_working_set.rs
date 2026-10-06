@@ -393,6 +393,78 @@ fn measure_with_stacks(
     })
 }
 
+/// Each of `codepoints` resolved, through the body stack the renderer builds for `family`, `size`
+/// and `dpi`, to the identity of the real tile it draws: shaped alone (waiting for fallback), keyed
+/// as the shaped path keys it, and rasterized into a scratch atlas. `None` when no face draws it
+/// with a real glyph, or its tile is missing or too large to place.
+#[must_use]
+pub fn representative_identities(
+    codepoints: &[char],
+    family: &str,
+    size: f32,
+    dpi: usize,
+    font_dirs: &[PathBuf],
+) -> Vec<(char, Option<TileIdentity>)> {
+    let Some(body) = renderer_font_stacks(family, size, dpi, 1.0, font_dirs).body else {
+        // When: the body stack cannot be built, no codepoint resolves.
+        return codepoints.iter().map(|codepoint| (*codepoint, None)).collect();
+    };
+    let mut atlas = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);
+    codepoints
+        .iter()
+        .map(|codepoint| (*codepoint, codepoint_identity(&body, &mut atlas, *codepoint)))
+        .collect()
+}
+
+/// The identity of the real tile `stack` draws `codepoint` with, or `None`.
+fn codepoint_identity(
+    stack: &sonicterm_engine::FontStack,
+    atlas: &mut GlyphAtlas,
+    codepoint: char,
+) -> Option<TileIdentity> {
+    let shaped = stack.shape_text_with_style(&codepoint.to_string(), false, false).ok()?;
+    let glyph = shaped.iter().find(|glyph| glyph.glyph_pos != 0)?;
+    let key = GlyphKey::shaped(
+        codepoint,
+        u8::try_from(glyph.font_idx).ok()?,
+        glyph.glyph_pos,
+        false,
+        false,
+    );
+    let mut raster = stack.clone();
+    let info = atlas.get_or_insert(key, &mut raster)?;
+    if info.missing || info.oversize {
+        // When: info.missing or info.oversize, the tile drew nothing, so the codepoint has no real tile.
+        return None;
+    }
+    tile_identity(stack, key, &info)
+}
+
+/// Every representative codepoint the renderer's resident tiles do not hold as a real raster, with
+/// why: `no real glyph` (it resolved to no tile identity), `not resident`, or `no pixels`.
+#[must_use]
+pub fn representative_gaps(
+    resolved: &[(char, Option<TileIdentity>)],
+    resident: &HashMap<TileIdentity, [u32; 2]>,
+) -> Vec<(char, &'static str)> {
+    resolved
+        .iter()
+        .filter_map(|(codepoint, identity)| {
+            let Some(identity) = identity else {
+                // When: identity is None, the codepoint resolved to no real glyph, which is a gap.
+                return Some((*codepoint, "no real glyph"));
+            };
+            match resident.get(identity) {
+                None => Some((*codepoint, "not resident")),
+                Some([width_px, height_px]) if *width_px == 0 || *height_px == 0 => {
+                    Some((*codepoint, "no pixels"))
+                }
+                Some(_) => None,
+            }
+        })
+        .collect()
+}
+
 /// Check that `key`, which a layout or the fast path required, is resident. A missing tile is the
 /// renderer's tofu: a real glyph id that rasterized nothing is listed in `raster_failed`, a notdef
 /// key in `unresolved_chars`, and a tile too large to place in `oversize_required`; each is an
