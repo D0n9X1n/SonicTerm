@@ -946,6 +946,17 @@ impl SlowDispatches {
 pub(crate) struct PhaseRecord {
     /// Phase name.
     pub(crate) name: &'static str,
+    /// The phase's kind: `sustained`, `transition` or `hold`, from its scenario contract.
+    pub(crate) kind: &'static str,
+    /// A transition's endpoint, the event its completion is measured to; absent for other kinds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) endpoint: Option<&'static str>,
+    /// Milliseconds from the phase's start to its endpoint, reached before the run's deadline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) completion_ms: Option<f64>,
+    /// Why a transition has no completion: `expired` or `incomplete`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) completion_missing: Option<&'static str>,
     /// Start, in Unix seconds.
     pub(crate) start_unix_s: f64,
     /// End, in Unix seconds.
@@ -958,6 +969,23 @@ pub(crate) struct PhaseRecord {
     pub(crate) presented_frames: u64,
     /// `RedrawRequested` dispatches to the main window.
     pub(crate) redraw_requested: u64,
+    /// Ms from the phase's start to the end of its first main-window redraw that presented.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) first_present_ms: Option<f64>,
+    /// Ms from the phase's start to the end of its last main-window redraw that presented.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_present_ms: Option<f64>,
+    /// The main renderer's presented count after the first presenting redraw.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) first_present_seq: Option<u64>,
+    /// The main renderer's presented count after the last presenting redraw.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_present_seq: Option<u64>,
+    /// `no-presentation` when no main-window redraw of the phase presented; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) present_missing: Option<&'static str>,
+    /// Main-window redraws that did not advance the presented count.
+    pub(crate) nonpresenting_redraws: u64,
     /// Each `RedrawRequested` dispatch's duration, in ms.
     pub(crate) dispatch_ms: Vec<f64>,
     /// The phase's SLOW_DISPATCH_LIMIT longest dispatches with their spans, longest first.

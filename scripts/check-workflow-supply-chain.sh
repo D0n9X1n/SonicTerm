@@ -31,7 +31,9 @@ fi
   "$ROOT/scripts/perf-compare.py" \
   "$ROOT/scripts/perf-compare_tests.py" \
   "$ROOT/scripts/perf-critical-path.py" \
-  "$ROOT/scripts/perf-critical-path_tests.py"
+  "$ROOT/scripts/perf-critical-path_tests.py" \
+  "$ROOT/scripts/perf-flags.py" \
+  "$ROOT/scripts/perf-flags_tests.py"
 
 (
   cd "$ROOT/scripts"
@@ -40,6 +42,7 @@ fi
   "$PY" native-selection-smoke_tests.py
   "$PY" perf-compare_tests.py
   "$PY" perf-critical-path_tests.py
+  "$PY" perf-flags_tests.py
 )
 
 exec "$PY" "$ROOT/scripts/check-workflow-supply-chain.py" --root "$ROOT"

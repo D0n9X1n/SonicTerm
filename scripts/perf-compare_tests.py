@@ -13,6 +13,7 @@ import copy
 import dataclasses
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -3021,7 +3022,7 @@ class CompareHarness:
                 head_manifest=HEAD_MANIFEST, listing=None, scenarios=("S1",), base_manifest=BASE_MANIFEST,
                 logging_api=("base", "head"), build_status="PASS", list_fail=(), base_run=None,
                 head_build="PASS", real_binaries=False, toolchain=None, hook_trees=(), head_run=None,
-                trim_trees=()):
+                trim_trees=(), counters_run=None):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths.
 
         A counters run answers with the gate on; what the comparison printed is kept in `self.printed`.
@@ -3102,6 +3103,9 @@ class CompareHarness:
 
         def fake_run(plan, host, evidence):
             plans.append(plan)
+            # When: a test supplies counters runs, they answer every counters plan of either side.
+            if counters_run is not None and getattr(plan, "counters", False):
+                return counters_run(plan)
             if base_run is not None and plan.side == "base":
                 return base_run(plan)
             if head_run is not None and plan.side == "head" and not getattr(plan, "counters", False):
@@ -8401,6 +8405,113 @@ def split_side(*samples_per_run):
                                    for samples in samples_per_run])
 
 
+LIST_WITH_KINDS = {**LIST_JSON, "capabilities": {"latency_split_schema": 1, "phase_kinds": 1}}
+# Marks a field kind_phase drops.
+DROP = object()
+
+
+def kind_phase(kind="sustained", **fields):
+    """One result.json phase from a phase-kinds harness: valid_result's phase with its kind and presentation
+    fields (120 presented frames, the first 1 ms and the last 59 s into the phase, 10 of 130 redraws not
+    presenting); `fields` replace keys, and DROP removes one."""
+    phase = dict(valid_result()["phases"][0], kind=kind, first_present_ms=1.0, last_present_ms=59_000.0,
+                 first_present_seq=1, last_present_seq=120, nonpresenting_redraws=10)
+    phase.update(fields)
+    return {key: value for key, value in phase.items() if value is not DROP}
+
+
+class PhaseKindTests(CompareHarness, unittest.TestCase):
+    def kind_problems(self, phases, schema=1):
+        """What validate_result reports for a result carrying `phases`, under the harness's phase-kinds schema;
+        a validator that does not take the schema fails the test rather than erroring."""
+        try:
+            return perf.validate_result(valid_result(phases=phases), HARNESS_HASH, 0, phase_kinds=schema)
+        except TypeError as error:
+            # When: validate_result has no phase_kinds parameter, the capability is not validated at all.
+            self.fail(f"validate_result takes no phase_kinds: {error}")
+
+    def test_scenario_list_reads_the_phase_kinds_capability(self):
+        # A harness that classifies its phases lists phase_kinds 1 beside the split schema; every scenario carries
+        # it into its plans. A list with only the split schema is a harness that predates phase kinds.
+        try:
+            capable = perf.parse_scenario_list(json.dumps(LIST_WITH_KINDS))
+            legacy = perf.parse_scenario_list(json.dumps(LIST_WITH_SPLIT))
+            kinds = ([scenario.phase_kinds for scenario in capable], [scenario.phase_kinds for scenario in legacy])
+        except (ValueError, AttributeError) as error:
+            # When: the list was refused or carries no phase_kinds, the capability is not read.
+            self.fail(f"the phase_kinds capability is not read: {error}")
+        self.assertEqual(kinds, ([1, 1], [None, None]))
+        self.assertEqual([scenario.latency_split_schema for scenario in capable], [1, 1])
+
+    def test_an_unknown_or_incomplete_capability_map_is_refused(self):
+        # An unknown phase_kinds schema, a non-integer value, an unknown key or a map without the split schema
+        # cannot be validated, so the list is refused rather than read as legacy.
+        for capabilities in ({"latency_split_schema": 1, "phase_kinds": 2}, {"latency_split_schema": 1, "phase_kinds": True},
+                             {"latency_split_schema": 1, "phase_kinds": 1.0}, {"phase_kinds": 1},
+                             {"latency_split_schema": 1, "phase_kinds": 1, "other": 1}):
+            with self.subTest(capabilities=capabilities), self.assertRaises(ValueError):
+                perf.parse_scenario_list(json.dumps({**LIST_JSON, "capabilities": capabilities}))
+
+    def test_a_phase_kinds_harness_must_classify_and_trace_every_phase(self):
+        # Valid phases of each kind pass; each rule broken alone is a schema failure naming it, never a fallback.
+        valid = [kind_phase(), kind_phase("transition", endpoint="sentinel-parsed", completion_ms=40.0),
+                 kind_phase("transition", endpoint="sentinel-parsed", completion_missing="expired"),
+                 kind_phase("transition", endpoint="sentinel-parsed", completion_missing="incomplete"),
+                 kind_phase("hold"),
+                 kind_phase("hold", presented_frames=0, first_present_ms=DROP, last_present_ms=DROP,
+                            first_present_seq=DROP, last_present_seq=DROP, present_missing="no-presentation")]
+        self.assertEqual(self.kind_problems(valid), [])
+        transition = {"kind": "transition", "endpoint": "sentinel-parsed", "completion_ms": 40.0}
+        no_frames = {"presented_frames": 0, "first_present_ms": DROP, "last_present_ms": DROP,
+                     "first_present_seq": DROP, "last_present_seq": DROP}
+        cases = {
+            "unknown kind": ({"kind": "burst"}, "kind 'burst' is not one of"),
+            "no kind": ({"kind": DROP}, "kind None is not one of"),
+            "no endpoint": ({**transition, "endpoint": DROP}, "endpoint None is not a transition endpoint"),
+            "unknown endpoint": ({**transition, "endpoint": "soon"}, "endpoint 'soon' is not a transition endpoint"),
+            "both completions": ({**transition, "completion_missing": "expired"}, "exactly one of completion_ms"),
+            "no completion": ({**transition, "completion_ms": DROP}, "exactly one of completion_ms"),
+            "negative completion": ({**transition, "completion_ms": -1.0}, "completion_ms -1.0 is not"),
+            "infinite completion": ({**transition, "completion_ms": float("inf")}, "completion_ms inf is not"),
+            "reason of another endpoint": ({**transition, "completion_ms": DROP, "completion_missing": "not-presented"},
+                                           "'not-presented' is not a reason for sentinel-parsed"),
+            "hold with a completion": ({"kind": "hold", "completion_ms": 3.0}, "hold phase but carries completion_ms"),
+            "sustained with an endpoint": ({"endpoint": "sentinel-parsed"}, "sustained phase but carries endpoint"),
+            "frames without a first": ({"first_present_ms": DROP}, "does not record its first and last presentation"),
+            "frames with a missing reason": ({"present_missing": "no-presentation"},
+                                             "does not record its first and last presentation"),
+            "first after last": ({"first_present_ms": 60_000.0}, "first presentation follows its last"),
+            "first count after last": ({"first_present_seq": 121}, "first presentation follows its last"),
+            "negative offset": ({"first_present_ms": -1.0}, "are not finite non-negative"),
+            "fractional count": ({"last_present_seq": 120.5}, "are not finite non-negative"),
+            "no frames but a first": ({"presented_frames": 0}, "presented no frame"),
+            "no frames without the reason": (no_frames, "presented no frame"),
+            "no frames, another reason": ({**no_frames, "present_missing": "late"}, "presented no frame"),
+            "non-presenting above redraws": ({"nonpresenting_redraws": 131}, "nonpresenting_redraws 131"),
+            "no non-presenting count": ({"nonpresenting_redraws": DROP}, "nonpresenting_redraws None"),
+        }
+        for name, (fields, expected) in cases.items():
+            with self.subTest(case=name):
+                problems = self.kind_problems([kind_phase(**fields)])
+                self.assertTrue(any(expected in problem for problem in problems), problems)
+
+    def test_a_legacy_harness_keeps_the_old_phase_contract(self):
+        # Without the capability a phase carries no kind or presentation fields and none is required.
+        self.assertEqual(self.kind_problems(valid_result()["phases"], schema=None), [])
+
+    def test_plans_carry_the_head_lists_phase_kinds_into_validation(self):
+        # Both sides run the head's overlaid harness, so the head's list decides both plans' phase_kinds, and
+        # every result is validated under it.
+        try:
+            _code, _gate, _calls, plans, _work, _out = self.compare(listing=LIST_WITH_KINDS)
+        except ValueError as error:
+            # When: the head's list was refused, no plan carries its capability.
+            self.fail(f"the head's phase_kinds list was refused: {error}")
+        self.assertEqual({getattr(plan, "phase_kinds", None) for plan in plans}, {1})
+        # The harness fakes runs above validate_result, so the real run's call is checked in its source.
+        self.assertIn("phase_kinds=plan.phase_kinds", inspect.getsource(perf.execute_run))
+
+
 class LatencySplitTests(CompareHarness, unittest.TestCase):
     def test_scenario_list_reads_the_latency_split_capability(self):
         # A harness that writes the split fields lists the schema; every scenario carries it into its plans.
@@ -9132,6 +9243,357 @@ class AtlasRetryVariantTests(CompareHarness, unittest.TestCase):
         head_only = perf.atlas_recovery_rows("S1/atlas-retry", perf.SideRuns(blocked="exit 5"), runs)
         self.assertEqual(head_only[1][1], "n/a")
         self.assertNotIn("Atlas retry recovery", perf.comparison_document([], [], [], [], []))
+
+
+
+class PhaseDurationTests(unittest.TestCase):
+    def test_a_phase_kinds_harness_rejects_impossible_durations(self):
+        # Under the capability every duration is finite and at least zero and a phase never ends before it starts;
+        # each broken alone is a schema failure naming the field. A legacy harness keeps its old, looser checks.
+        cases = {
+            "dispatch_ms": {"dispatch_ms": [1.0, float("inf")]},
+            "present_interval_ms": {"present_interval_ms": [16.6, -1.0]},
+            "cpu_user_s": {"cpu_user_s": float("nan")},
+            "cpu_system_s": {"cpu_system_s": -10.0},
+            "ends before it starts": {"start_unix_s": 70.0, "end_unix_s": 10.0},
+        }
+        self.assertEqual(perf.validate_result(valid_result(phases=[kind_phase()]), HARNESS_HASH, 0, phase_kinds=1),
+                         [])
+        for expected, fields in cases.items():
+            with self.subTest(case=expected):
+                capable = perf.validate_result(valid_result(phases=[kind_phase(**fields)]), HARNESS_HASH, 0,
+                                               phase_kinds=1)
+                self.assertTrue(any(expected in problem for problem in capable), capable)
+                legacy_phase = dict(valid_result()["phases"][0], **fields)
+                legacy = perf.validate_result(valid_result(phases=[legacy_phase]), HARNESS_HASH, 0)
+                self.assertFalse(any(expected in problem and "phase-kinds" in problem for problem in legacy), legacy)
+
+
+class CountersOnlyKindTests(CompareHarness, unittest.TestCase):
+    def counters_only(self, listing, selected, phases, **overrides):
+        """comparison.md of a counters-only comparison whose every run carries `phases` with the gate on."""
+        def counters_run(plan):
+            result = counters_result(phases=[dict(phase) for phase in phases], **overrides)
+            return make_outcome(plan=plan, result=result)
+        code, _gate, _calls, _plans, _work, out = self.compare(
+            listing=listing, scenarios=(selected,), options=("--counters", "--counters-runs", "2"),
+            head_manifest=COUNTERS_MANIFEST, base_manifest=BASE_COUNTERS_MANIFEST, counters_run=counters_run)
+        self.assertEqual(code, 0, self.printed)
+        return (out / "comparison.md").read_text(encoding="utf-8")
+
+    def test_atlas_retry_reports_recovery_activity_beside_its_recovery_table(self):
+        # S1/atlas-retry's recovery hold reports its elapsed hold and CPU from the counters runs, and the recovery
+        # table stays.
+        recovery = {"episodes": 8, "distinct_keys": 70, "records": recovery_records()}
+        listing = {**ATLAS_RETRY_LIST, "capabilities": {"latency_split_schema": 1, "phase_kinds": 1}}
+        document = self.counters_only(listing, "S1/atlas-retry", [kind_phase("hold", name="recovery")],
+                                      scenario="S1", variant="atlas-retry", atlas_recovery=recovery)
+        section = document.partition("### Counters-only workloads")[2].partition("\n### ")[0]
+        self.assertIn("recovery hold (s)", section)
+        self.assertIn("recovery CPU (s)", section)
+        self.assertNotIn("recovery presented frames (fps)", section)
+        self.assertIn("### Atlas retry recovery", document)
+
+    def test_an_older_harness_counters_only_variant_goes_to_the_unclassified_block(self):
+        # Counters-only runs of a harness without phase kinds are kept as recorded in the unclassified block.
+        recovery = {"episodes": 8, "distinct_keys": 70, "records": recovery_records()}
+        document = self.counters_only(ATLAS_RETRY_LIST, "S1/atlas-retry", [valid_result()["phases"][0]],
+                                      scenario="S1", variant="atlas-retry", atlas_recovery=recovery)
+        unclassified = document.partition("### Unclassified (older harness)")[2]
+        self.assertIn("workload presented frames (fps)", unclassified)
+        self.assertNotIn("### Counters-only workloads", document)
+
+
+class EntryPointTests(unittest.TestCase):
+    def test_each_perf_test_file_ends_with_its_entry_point(self):
+        # The gate runs these files directly, so unittest.main() must come after every test class: a class
+        # defined below it never exists when the run starts.
+        import ast
+        for name in ("perf-compare_tests.py", "perf-flags_tests.py", "perf-critical-path_tests.py"):
+            with self.subTest(file=name):
+                tree = ast.parse(Path(__file__).with_name(name).read_text(encoding="utf-8"))
+                guards = [index for index, node in enumerate(tree.body) if isinstance(node, ast.If)
+                          and "__main__" in ast.unparse(node.test)]
+                self.assertEqual(guards, [len(tree.body) - 1], f"{name}: the entry point is not last")
+
+
+
+
+def kind_outcome(*phases, latency=None, throughput=None, evidence="/e/01-head"):
+    """A valid run outcome of a phase-kinds harness carrying `phases` (kind_phase bodies)."""
+    result = valid_result(phases=list(phases), latency=latency, throughput=throughput)
+    return make_outcome(result=result, evidence=Path(evidence))
+
+
+def transition_phase(completion=None, missing=None, **fields):
+    """A transition phase reaching its endpoint `completion` ms after its start, or missing it for `missing`."""
+    ending = {"completion_ms": completion} if missing is None else {"completion_missing": missing}
+    return kind_phase("transition", name="image", endpoint="image-registered-then-presented", **ending, **fields)
+
+
+def side_with(*outcomes):
+    return perf.SideRuns(list(outcomes))
+
+
+def require(module, name, test):
+    """`module.name`, or a test failure (never an error) when the module does not define it."""
+    found = getattr(module, name, None)
+    if found is None:
+        test.fail(f"{module.__name__} defines no {name}")
+    return found
+
+
+class PhaseKindReportTests(unittest.TestCase):
+    def test_a_transition_reports_its_completion_per_run_and_no_rates(self):
+        # A transition's rows are its completion per accepted run (a value or the missing reason), the median and
+        # range of those that completed, each side's contributing count, and its first present, presented frames
+        # and non-presenting redraws; never an FPS or an interval percentile.
+        base = side_with(kind_outcome(transition_phase(40.0), evidence="/e/01-base"),
+                         kind_outcome(transition_phase(missing="expired"), evidence="/e/04-base"))
+        head = side_with(kind_outcome(transition_phase(50.0), evidence="/e/02-head"),
+                         kind_outcome(transition_phase(60.0), evidence="/e/03-head"))
+        rows = perf.comparison_rows("S11/release", base, head)
+        completion = row_for(rows, "image completion (ms)")
+        self.assertEqual(completion[2:], [
+            "40.00 (40.00–40.00), 1/2 runs, single observation; 01-base 40.00, 04-base n/a: expired",
+            "55.00 (50.00–60.00), 2/2 runs; 02-head 50.00, 03-head 60.00", "+37.5%"])
+        self.assertEqual(row_for(rows, "image first present (ms)")[2], "1.00 (1.00–1.00)")
+        self.assertEqual(row_for(rows, "image presented frames (count)")[3], "120.00 (120.00–120.00)")
+        self.assertEqual(row_for(rows, "image non-presenting redraws (count)")[3], "10.00 (10.00–10.00)")
+        metrics = [row[1] for row in rows]
+        self.assertFalse([metric for metric in metrics if "fps" in metric or "interval" in metric], metrics)
+
+    def test_a_hold_reports_activity_counts_only(self):
+        # A hold is idle by design: its seconds, presented frames, redraws requested and CPU, no rate or interval.
+        hold = side_with(kind_outcome(kind_phase("hold", name="idle")))
+        metrics = [row[1] for row in perf.comparison_rows("S1/default", hold, hold)]
+        idle = [metric for metric in metrics if metric.startswith("idle ")]
+        self.assertEqual(idle, ["idle hold (s)", "idle presented frames (count)",
+                                "idle redraws requested (count)", "idle CPU (s)"])
+
+    def test_a_sustained_phase_and_a_legacy_phase_keep_their_rows(self):
+        # Sustained phases and phases of a harness that predates kinds report what they reported before.
+        for phase in (kind_phase("sustained"), valid_result()["phases"][0]):
+            with self.subTest(kind=phase.get("kind")):
+                side = side_with(kind_outcome(phase))
+                metrics = [row[1] for row in perf.comparison_rows("S2/default", side, side)]
+                self.assertIn("workload presented frames (fps)", metrics)
+                self.assertIn("workload present interval p95 (ms)", metrics)
+                self.assertNotIn("workload completion (ms)", metrics)
+
+
+def flag_result(label, base_outcomes, head_outcomes, set_name="timed"):
+    return perf.SetResult(label, set_name, side_with(*base_outcomes), side_with(*head_outcomes))
+
+
+def sustained_with(intervals=(16.6, 16.7), frames=120, wall_s=60.0):
+    return kind_phase("sustained", present_interval_ms=list(intervals), presented_frames=frames,
+                      start_unix_s=10.0, end_unix_s=10.0 + wall_s)
+
+
+class CandidateFlagTests(unittest.TestCase):
+    def checks(self, *results):
+        return require(perf, "flag_checks", self)(list(results))
+
+    def flagged(self, *results):
+        return {(check.phase, check.metric, check.statistic) for check in self.checks(*results) if check.flagged}
+
+    def test_a_worsening_beyond_the_base_range_is_flagged_and_an_improvement_never(self):
+        # Intervals: higher is worse, judged per statistic against the base's per-run range of that statistic;
+        # a sub-refresh increase is still flagged. FPS: lower is worse. Improvements beyond the range never are.
+        base = [kind_outcome(sustained_with((16.6, 16.7))), kind_outcome(sustained_with((16.6, 16.8)))]
+        slower = [kind_outcome(sustained_with((16.9, 17.0), frames=100))]
+        faster = [kind_outcome(sustained_with((10.0, 10.1), frames=200))]
+        self.assertEqual(self.flagged(flag_result("S2/default", base, slower)),
+                         {("workload", "present interval", "median"), ("workload", "present interval", "p95"),
+                          ("workload", "fps", "median")})
+        self.assertEqual(self.flagged(flag_result("S2/default", base, faster)), set())
+        within = [kind_outcome(sustained_with((16.6, 16.75)))]
+        self.assertEqual(self.flagged(flag_result("S2/default", base, within)), set())
+
+    def test_a_transition_is_flagged_when_its_head_median_exceeds_every_base_run(self):
+        # Completion: the head median against the base per-run maximum, with no refresh-period waiver.
+        base = [kind_outcome(transition_phase(40.0)), kind_outcome(transition_phase(42.0))]
+        late = [kind_outcome(transition_phase(42.5)), kind_outcome(transition_phase(43.0))]
+        early = [kind_outcome(transition_phase(20.0))]
+        self.assertEqual(self.flagged(flag_result("S11/release", base, late)), {("image", "completion", "median")})
+        self.assertEqual(self.flagged(flag_result("S11/release", base, early)), set())
+        check = next(check for check in self.checks(flag_result("S11/release", base, late))
+                     if check.metric == "completion")
+        self.assertEqual((check.base_low, check.base_high, check.head_value), (40.0, 42.0, 42.75))
+        self.assertEqual((check.base_samples, check.head_samples), (2, 2))
+
+    def test_holds_unknown_metrics_and_legacy_results_are_never_checked(self):
+        # A hold is never flagged however it moves; a metric absent from the direction map is never checked; a
+        # result of a harness without phase kinds contributes no check at all.
+        busy = [kind_outcome(kind_phase("hold", name="idle", presented_frames=5000))]
+        quiet = [kind_outcome(kind_phase("hold", name="idle", presented_frames=1))]
+        self.assertEqual(self.checks(flag_result("S1/default", quiet, busy)), [])
+        legacy = [make_outcome()]
+        self.assertEqual(self.checks(flag_result("S2/default", legacy, legacy)), [])
+        base = [kind_outcome(sustained_with(frames=120))]
+        head = [kind_outcome(sustained_with(frames=60))]
+        directions = dict(require(perf, "FLAG_DIRECTIONS", self))
+        del directions["fps"]
+        with mock.patch.object(perf, "FLAG_DIRECTIONS", directions):
+            metrics = {check.metric for check in self.checks(flag_result("S2/default", base, head))}
+        self.assertNotIn("fps", metrics)
+        self.assertIn("present interval", metrics)
+
+    def test_latency_counts_attributed_samples_and_compares_like_statistics(self):
+        # Latency samples are the attributed keypresses only; the pooled head p95 is read against the base's
+        # per-run p95s, never its per-run medians.
+        def latency(*values):
+            return {"samples": [{"latency_ms": value} for value in values], "attributed": 0, "total": 0,
+                    "coverage": 0.0}
+        base = [kind_outcome(sustained_with(), latency=latency(10.0, 10.0, 30.0)),
+                kind_outcome(sustained_with(), latency=latency(10.0, 10.0, 12.0))]
+        head = [kind_outcome(sustained_with(), latency=latency(10.0, None, None, 25.0))]
+        checks = {(check.metric, check.statistic): check for check in self.checks(flag_result("S2/default", base, head))}
+        tail_check = checks[("latency", "p95")]
+        self.assertEqual((tail_check.base_low, tail_check.base_high, tail_check.head_value, tail_check.flagged),
+                         (12.0, 30.0, 25.0, False))
+        self.assertEqual((tail_check.base_samples, tail_check.head_samples), (6, 2))
+        self.assertEqual(checks[("latency", "median")].flagged, True)
+
+    def test_the_report_prints_candidate_flags_only_when_kinds_were_checked(self):
+        # The section lists each flag; with checks but no flag it says so; with no check (legacy) it is absent.
+        base = [kind_outcome(transition_phase(40.0))]
+        head = [kind_outcome(transition_phase(90.0))]
+        checks = self.checks(flag_result("S11/release", base, head))
+        document = perf.comparison_document([], [], [], [], [], flag_checks=checks)
+        self.assertIn("### Candidate flags", document)
+        self.assertIn("| S11/release | timed | image | completion | median | 40.00–40.00 | 90.00 | higher is worse |",
+                      document)
+        unflagged = self.checks(flag_result("S11/release", base, base))
+        self.assertIn("None of the 1 checks", perf.comparison_document([], [], [], [], [], flag_checks=unflagged))
+        self.assertNotIn("Candidate flags", perf.comparison_document([], [], [], [], [], flag_checks=None))
+        self.assertNotIn("Candidate flags", perf.comparison_document([], [], [], [], [], flag_checks=[]))
+
+
+class RunIdentityTests(CompareHarness, unittest.TestCase):
+    def test_a_comparison_records_its_identity_for_perf_flags(self):
+        # perf-flags.py binds each artifact to its run, refs, harness, settings and metric definitions.
+        environ = {"GITHUB_RUN_ID": "77", "GITHUB_RUN_ATTEMPT": "2"}
+        code, _gate, _calls, _plans, _work, out = self.compare(environ=environ)
+        self.assertEqual(code, 0)
+        identity_path = out / "run-identity.json"
+        self.assertTrue(identity_path.is_file(), sorted(path.name for path in out.iterdir()))
+        identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        self.assertEqual((identity["run_id"], identity["run_attempt"]), ("77", 2))
+        self.assertEqual((identity["base_sha"], identity["head_sha"]), (self.SHAS["main"], self.SHAS["HEAD"]))
+        self.assertEqual(identity["flag_metrics_version"], require(perf, "FLAG_METRICS_VERSION", self))
+        self.assertEqual(set(identity), {"schema_version", "run_id", "run_attempt", "platform", "base_sha",
+                                         "head_sha", "harness_hash", "settings", "flag_metrics_version", "sets",
+                                         "capabilities"})
+        # The harness's declared capabilities, so perf-flags validates each result as perf-compare did.
+        self.assertEqual(identity["capabilities"], {"latency_split_schema": None, "phase_kinds": None})
+        # Each set's final inventory: per side its blocked or failed status and the attempt directories it accepted,
+        # so perf-flags binds results to accepted executions, never to whatever valid-looking files it finds.
+        self.assertEqual(identity["sets"], [{"label": "S1/default", "dataset": "timed",
+                                             "base": {"status": "", "accepted": ["01-base"]},
+                                             "head": {"status": "", "accepted": ["02-head"]}}])
+
+    def test_a_phase_kinds_comparison_records_its_capabilities(self):
+        # A head whose list declares the split schema and phase kinds records both.
+        _code, _gate, _calls, _plans, _work, out = self.compare(listing=LIST_WITH_KINDS)
+        identity = json.loads((out / "run-identity.json").read_text(encoding="utf-8"))
+        self.assertEqual(identity.get("capabilities"), {"latency_split_schema": 1, "phase_kinds": 1})
+
+    def test_a_failed_side_lists_no_accepted_attempt(self):
+        # A side that ends blocked or failed discards its valid attempts, and the inventory says so.
+        valid = make_outcome()
+        # The base kept an outcome object, but its blocked status alone decides: it accepts nothing.
+        result = perf.SetResult("S1/default", "timed", perf.SideRuns([valid], blocked="exit 5"),
+                                perf.SideRuns([valid]),
+                                attempts=[("base", "/e/01-base", "valid", []), ("head", "/e/02-head", "valid", []),
+                                          ("base", "/e/03-base", "launch", ["exit 5"])])
+        self.assertEqual(require(perf, "run_inventory", self)([result]),
+                         [{"label": "S1/default", "dataset": "timed", "base": {"status": "exit 5", "accepted": []},
+                           "head": {"status": "", "accepted": ["02-head"]}}])
+
+    def test_a_phase_kinds_comparison_prints_its_candidate_flags(self):
+        # The comparison computes the flags of its own accepted runs: a head transition slower than every base run
+        # is listed under Candidate flags in comparison.md.
+        monitor = {"name": "Built-in Display", "refresh_rate_millihertz": 60000, "scale_factor": 2.0}
+
+        def runs_with(completion_ms):
+            return lambda plan: make_outcome(plan=plan, result=valid_result(
+                monitor=monitor, phases=[transition_phase(completion_ms)]))
+        code, _gate, _calls, _plans, _work, out = self.compare(base_run=runs_with(40.0), head_run=runs_with(90.0))
+        self.assertEqual(code, 0)
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertIn("### Candidate flags", document)
+        self.assertIn("| S1/default | timed | image | completion | median | 40.00–40.00 | 90.00 |", document)
+
+
+class PhaseKindCoverageTests(CompareHarness, unittest.TestCase):
+    def test_an_image_whose_completion_improves_while_frames_fall_is_not_flagged(self):
+        # macOS S11/release image: completion improves 222.870 -> 142.500 ms while presented frames fall 2 -> 1.
+        # The completion falls, so nothing is flagged, and no frame rate is reported to suggest a regression.
+        base = [kind_outcome(transition_phase(222.870, presented_frames=2, last_present_seq=2))]
+        head = [kind_outcome(transition_phase(142.500, presented_frames=1, last_present_seq=1))]
+        result = flag_result("S11/release", base, head)
+        self.assertEqual([check.flagged for check in perf.flag_checks([result])], [False])
+        rows = perf.comparison_rows("S11/release", result.base, result.head)
+        self.assertEqual(row_for(rows, "image completion (ms)")[4], "-36.1%")
+        self.assertFalse([row[1] for row in rows if "fps" in row[1]])
+
+    def test_recovery_reports_activity_and_its_own_table_but_no_rates_or_flags(self):
+        # S1/atlas-retry's recovery is a hold: activity counts and the dedicated recovery table only, with no
+        # generic rate, interval, completion or candidate flag.
+        def recovery_run():
+            outcome = kind_outcome(kind_phase("hold", name="recovery"))
+            outcome.result["atlas_recovery"] = {"episodes": 8, "distinct_keys": 70, "records": recovery_records()}
+            return outcome
+        base, head = side_with(recovery_run()), side_with(recovery_run())
+        metrics = [row[1] for row in perf.comparison_rows("S1/atlas-retry", base, head)
+                   if row[1].startswith("recovery ")]
+        self.assertEqual(metrics, ["recovery hold (s)", "recovery presented frames (count)",
+                                   "recovery redraws requested (count)", "recovery CPU (s)"])
+        self.assertEqual(perf.flag_checks([perf.SetResult("S1/atlas-retry", "counters", base, head)]), [])
+        self.assertTrue(perf.atlas_recovery_rows("S1/atlas-retry", base, head))
+
+    def test_an_older_harness_is_printed_in_its_own_unclassified_block(self):
+        # A harness without phase kinds cannot be classified, so its rows leave the main table for a separate
+        # block and never enter the candidate flags; a phase-kinds run stays in the main table.
+        code, _gate, _calls, _plans, _work, out = self.compare()
+        self.assertEqual(code, 0)
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        heading = "### Unclassified (older harness)"
+        self.assertIn(heading, document)
+        main, _, unclassified = document.partition(heading)
+        self.assertIn("| S1/default | workload presented frames (fps) |", unclassified)
+        self.assertNotIn("workload presented frames (fps)", main)
+        self.assertNotIn("Candidate flags", document)
+        monitor = {"name": "Built-in Display", "refresh_rate_millihertz": 60000, "scale_factor": 2.0}
+
+        def runs_with(completion_ms):
+            return lambda plan: make_outcome(plan=plan, result=valid_result(
+                monitor=monitor, phases=[transition_phase(completion_ms)]))
+        code, _gate, _calls, _plans, _work, out = self.compare(base_run=runs_with(40.0), head_run=runs_with(41.0))
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertNotIn(heading, document)
+        self.assertIn("| S1/default | image completion (ms) |", document)
+
+    def test_an_unclassified_set_contributes_no_candidate_flag(self):
+        # A set with any unkinded run is reported only in the unclassified block, so none of its runs, kinded
+        # or not, is read by kind: no check, however far its kinded runs moved.
+        legacy = make_outcome()
+        base = [kind_outcome(transition_phase(40.0)), legacy]
+        head = [kind_outcome(transition_phase(900.0))]
+        result = flag_result("S11/release", base, head)
+        self.assertTrue(perf.unclassified_result(result))
+        self.assertEqual(perf.flag_checks([result]), [])
+
+    def test_a_run_with_any_unkinded_phase_is_unclassified(self):
+        # One phase without a kind makes the whole run unreadable by kind, even when its other phases have one;
+        # a run whose every phase has a known kind is classified.
+        legacy_phase = valid_result()["phases"][0]
+        mixed = flag_result("S2/default", [kind_outcome(kind_phase(), dict(legacy_phase, name="idle"))],
+                            [kind_outcome(kind_phase())])
+        kinded = flag_result("S2/default", [kind_outcome(kind_phase())], [kind_outcome(kind_phase())])
+        self.assertEqual((perf.unclassified_result(mixed), perf.unclassified_result(kinded)), (True, False))
 
 
 if __name__ == "__main__":

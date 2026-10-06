@@ -528,6 +528,75 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   coverage, and the reason counts with the suppressed, coalesced and `sync_open`
   counts. A base built without the feature reads `n/a (unsupported)`. The timed
   runs keep the gate off, so their samples read `arm-gate-off`.
+- The harness's `--list` also declares `capabilities.phase_kinds: 1`. Every
+  phase then records its `kind` (`sustained`, `transition` or `hold`); a
+  transition records its `endpoint` and exactly one of `completion_ms` or
+  `completion_missing`, and the other kinds carry neither. Every phase also
+  records its presentation trace from main-window `RedrawRequested` dispatches:
+  `first_present_ms`, `last_present_ms`, `first_present_seq` and
+  `last_present_seq` (ms from the phase's start, and the presented count) when it
+  presented a frame, else `present_missing: "no-presentation"`, plus
+  `nonpresenting_redraws`. Deferred redraws come only from the counters runs'
+  admission counters. Every duration (`dispatch_ms`, `present_interval_ms`,
+  `cpu_user_s`, `cpu_system_s`) must be finite and at least zero, and no phase
+  may end before it starts. The comparison refuses a list whose capabilities
+  hold an unknown key or value, and refuses a capable harness's result that
+  breaks any of these rules; a head without the capability keeps the old phase
+  contract.
+- The table reports each phase by its kind. A sustained phase keeps its rates,
+  intervals and dispatch rows. A scenario whose accepted runs include one from a
+  harness without phase kinds cannot be read by kind: its rows move to a
+  separate Unclassified (older harness) block after the table, unchanged, and
+  never enter the candidate flags. A
+  transition reports `<phase> completion (ms)`: the median and range of the runs
+  that reached the endpoint, how many of the accepted runs did, `single
+  observation` when exactly one did, then each accepted run's value or missing
+  reason keyed by its attempt directory; plus its first present, presented frames
+  and non-presenting redraws, and no FPS or interval percentile. A hold reports
+  its hold seconds, presented frames, redraws requested and CPU seconds only.
+  The counters-only variant S1/atlas-retry gets the same kind-aware rows from
+  its counters runs, in a separate Counters-only workloads section that is
+  never pooled with timed rows: the recovery hold's activity beside the Atlas
+  retry recovery table. Counters-only runs of a harness without kinds
+  go to the unclassified block, labelled `[counters]`.
+- When a phase-kinds harness ran, a Candidate flags section follows the table.
+  Each check reads the PR against the baseline's per-run range of the same
+  statistic over accepted runs: the pooled median and p95 of attributed
+  keypress latencies and of present intervals against the base's per-run
+  medians and p95s, and the head median of per-run FPS, throughput and
+  transition completion against the base's per-run values. Latency, completion
+  and intervals worsen upwards, FPS and throughput downwards; a value beyond the
+  range in the worsening direction is a candidate, an improvement never is, a
+  transition gets no refresh-period waiver, and holds and unlisted metrics are
+  never checked. Each comparison also writes `run-identity.json`: run and
+  attempt, platform, both SHAs, harness hash, settings, the flag-metrics version,
+  each set's final inventory (per side, its blocked or failed status and the
+  attempt directories it accepted; a blocked or failed side accepts none), and
+  the capabilities the head's list declared. A set with any unkinded run is
+  read only as unclassified: none of its runs enters the candidate flags.
+- `python3 scripts/perf-flags.py <run-dir> <run-dir>` compares two runs'
+  candidate flags from their downloaded `perf-comparison-*` artifacts. Before
+  computing any flag it validates every artifact's `run-identity.json`: typed
+  SHAs, harness hash, settings and inventory, a flag-metrics version it
+  implements, one identity per run and one setting per platform. Every
+  `runs/<scenario-variant>/<dataset>` directory needs its inventory entry (a set
+  blocked before any run may have none), and each set's inventory must match its
+  attempts on disk: every attempt is a real directory
+  with a final classification for its own side, no evidence file is reached
+  through a symbolic link, and a healthy side accepts exactly its attempts
+  classified valid. Each accepted attempt needs a valid, exit-0 outcome of its
+  scenario and variant and a `result.json` that passes perf-compare's own result
+  validator under the recorded capabilities; anything malformed is refused,
+  never skipped and never a traceback. The latest run attempt's inventory
+  replaces an earlier one's even when it accepted nothing, so its values are
+  missing, never the superseded ones. Two copies of one attempt count once only
+  when every evidence file agrees; otherwise they are refused. It never parses Markdown. It prints each run's
+  identity, then flags in both runs, flags in one run (the other checked them
+  unflagged), and evidence missing (the other has no such check). Same-head runs
+  must share their base and harness. Runs of different heads are refused unless
+  `--allow-different-heads` lists their flags side by side, which never waives
+  the flag-metrics version or the dataset settings. Anything not comparable
+  exits 2.
 
 With `--counters`, two more tables follow the timed table (and the laps table,
 when run). The Frame counters table shows the counters runs of the base and the

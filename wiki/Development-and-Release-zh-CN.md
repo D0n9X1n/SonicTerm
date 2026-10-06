@@ -370,6 +370,45 @@ PR 与 Change。
   三个部分的中位数与 p95、投递滞后的 p95、拆分覆盖率，以及原因计数与 suppressed、coalesced、
   `sync_open` 的计数。未启用该特性构建的 base 显示 `n/a (unsupported)`。计时运行保持计数器关闭，因此
   其样本记为 `arm-gate-off`。
+- 测试工具的 `--list` 还声明 `capabilities.phase_kinds: 1`。此时每个阶段记录其 `kind`（`sustained`、
+  `transition` 或 `hold`）；transition 阶段记录其 `endpoint`，并且恰好带有 `completion_ms` 与
+  `completion_missing` 之一，其他种类两者都不带。每个阶段还记录来自主窗口 `RedrawRequested` 派发的呈现
+  轨迹：呈现过帧时记录 `first_present_ms`、`last_present_ms`、`first_present_seq` 与
+  `last_present_seq`（自阶段开始的毫秒数，以及呈现计数），否则记录 `present_missing: "no-presentation"`；
+  另外记录 `nonpresenting_redraws`。延迟的重绘只来自计数器运行的准入计数器。列表的能力含有未知键或值时，
+  对比拒绝该列表；每个时长（`dispatch_ms`、`present_interval_ms`、`cpu_user_s`、`cpu_system_s`）都必须
+  有限且不小于零，且阶段不能在开始之前结束；具备该能力的测试工具的结果违反上述任一规则时，对比拒绝该
+  结果；不具备该能力的 head 沿用旧的阶段约定。
+- 表格按种类报告每个阶段。sustained 阶段保留其速率、间隔与派发行。若某场景的已接受运行中有一次来自不
+  具备阶段种类的测试工具，就无法按种类读取：其各行原样移到表格之后单独的 Unclassified (older harness)
+  一节，且从不进入候选标记。transition 阶段报告 `<phase> completion (ms)`：到达终点的运行的中位数与范围、已接受运行中有多少次
+  到达、恰好一次时标注 `single observation`，随后按尝试目录列出每次已接受运行的值或缺失原因；另外报告
+  首次呈现、呈现帧数与未呈现的重绘，不报告 FPS 或间隔百分位。hold 阶段只报告保持秒数、呈现帧数、请求的
+  重绘与 CPU 秒数。仅计数器的变体 S1/atlas-retry 从其计数器运行得到同样按种类的行，
+  位于单独的 Counters-only workloads 一节，从不与计时行合并：recovery 保持阶段的活动数据与 Atlas retry
+  recovery 表并列。不具备种类的测试工具的仅计数器运行进入
+  未分类一节，标注 `[counters]`。
+- 运行了具备阶段种类的测试工具时，表格之后有 Candidate flags 一节。每项检查以已接受运行为准，把 PR 与
+  base 同一统计量的逐次运行范围比较：已归属按键延迟与呈现间隔的合并中位数和 p95，分别对照 base 的逐次
+  运行中位数与 p95；逐次运行 FPS、吞吐量与 transition 完成时间的 head 中位数，对照 base 的逐次运行值。
+  延迟、完成时间与间隔越高越差，FPS 与吞吐量越低越差；在变差方向超出范围的值是候选，改进永远不是，
+  transition 没有刷新周期豁免，hold 与未列出的指标从不检查。每次对比还写出 `run-identity.json`（运行与
+  尝试、平台、两个 SHA、测试工具哈希、设置、标记指标版本，以及每组的最终清单：每一侧的 blocked 或
+  failed 状态与它接受的尝试目录；blocked 或 failed 的一侧不接受任何尝试），以及 head 的列表声明的能力。
+  含有任何未分类运行的组只作为未分类读取：其所有运行都不进入候选标记。
+- `python3 scripts/perf-flags.py <run-dir> <run-dir>` 从两次运行下载的 `perf-comparison-*` 产物比较其候选
+  标记。计算任何标记之前，它先校验每个产物的 `run-identity.json`：SHA、测试工具哈希、设置与清单的类型，
+  它实现的标记指标版本，每次运行只有一个身份，每个平台只有一种设置。每个 `runs/<scenario-variant>/<dataset>`
+  目录都需要其清单条目（在任何运行之前就被阻止的组可以没有目录），且每组的清单都必须与磁盘上的尝试一致：
+  每个尝试都是真实目录并带有本侧的最终分类，任何证据文件都不经由符号链接到达，健康的一侧恰好接受其分类为
+  valid 的尝试。每个已接受的尝试都需要其场景与变体的 valid、退出码为 0 的结果，以及在所记录能力下通过
+  perf-compare 自身结果校验的 `result.json`；任何格式错误都会被拒绝，从不跳过，也从不产生回溯。最新一次重跑
+  尝试的清单取代较早尝试的清单，即使它未接受任何运行：其值为缺失，从不沿用被取代的值。同一尝试的两份副本
+  只有在每个证据文件都一致时才计一次，否则被拒绝。它从不解析
+  Markdown。它先打印每次运行的身份，再列出两次运行都有的标记、只有一次运行有的标记（另一次检查过但未
+  标记），以及缺失证据（另一次没有该检查）。head 相同的运行必须有相同的 base 与测试工具。head 不同的运行
+  会被拒绝，除非 `--allow-different-heads` 把它们的标记并排列出，但这从不豁免标记指标版本或数据集设置。
+  任何不可比较的情况都以退出码 2 结束。
 
 使用 `--counters` 时，计时对比表（以及运行了 lap 组时的 lap 表）之后还有两张表。Frame counters 表
 给出 base 与 head 的计数器运行，每个场景、阶段与非零计数器一行；各字段的含义见[日志](Logging-zh-CN#帧与锁计数器)。
