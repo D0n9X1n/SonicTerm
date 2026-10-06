@@ -703,8 +703,12 @@ atlas refuses it, when it rasterized nothing (the missing sentinel), or when its
 tile is larger than the atlas can ever place (a zero-area sentinel marked
 `GlyphInfo::oversize`). A character-fallback glyph in any of those states draws
 tofu. Chrome layout notes an oversize glyph as missing chrome, as it does a
-missing one. An intentionally empty glyph, such as a space, records nothing,
-and its row stays complete. The glyph working-set helper lists an oversize
+missing one. A tab title is reported by its final drawn outcome alone: a title
+whose whole text never shaped is reported once at the title-draw boundary; a
+cut that did not shape while fitting is shaped again at draw time, and only that
+retry reports it if it fails; a title that drew, including one whose ellipsis
+failed to measure, and every kept title report nothing. An intentionally empty
+glyph, such as a space, records nothing, and its row stays complete. The glyph working-set helper lists an oversize
 required tile in `oversize_required`, beside `raster_failed` and
 `unresolved_chars`; all three count as incomplete required glyphs.
 

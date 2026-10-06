@@ -604,6 +604,13 @@ pub(crate) fn fail_chrome_shape_after_for_test(successes: usize) {
     FAIL_CHROME_SHAPE_AFTER.with(|armed| armed.set(Some(successes)));
 }
 
+/// Test seam: disarm a pending [`fail_chrome_shape_after_for_test`] on this thread, so a failure a
+/// test armed but never reached cannot fail a later test's shape.
+#[cfg(test)]
+pub(crate) fn disarm_chrome_shape_failure_for_test() {
+    FAIL_CHROME_SHAPE_AFTER.with(|armed| armed.set(None));
+}
+
 /// `shaped`, or an error in its place when the armed seam reaches this call, consuming it.
 #[cfg(test)]
 fn inject_chrome_shape_failure<T>(shaped: anyhow::Result<T>) -> anyhow::Result<T> {

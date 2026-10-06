@@ -7144,7 +7144,6 @@ impl GpuRenderer {
             // Center the title using tab_raster_px in the same raster-pixel space as bar_h and bar_y.
             let title_top = bar_y + ((bar_h - tab_raster_px * 1.2) / 2.0).max(0.0);
             let tab_baseline_y = title_top + tab_raster_px * 0.95;
-            let native_em = tab_raster_px;
             let mut tab_rasterizer = self.tab_title_font.stack().cloned();
             // Kept titles are keyed by tab position; a closed tab's slot is dropped.
             let title_font_key = self.tab_title_font.key();
@@ -7217,34 +7216,19 @@ impl GpuRenderer {
                         h: placement.text_clip.h,
                     });
                     let title_origin = (placement.text_x, tab_baseline_y);
-                    let final_layout = match title.view {
-                        // The fit kept or made its run, so it draws without shaping again.
-                        Some(view) => chrome_text::layout_view(
-                            view,
-                            rasterizer,
-                            &mut self.glyph_atlas,
+                    let final_layout = crate::chrome_cache::layout_title(
+                        stack,
+                        rasterizer,
+                        &mut self.glyph_atlas,
+                        &title,
+                        crate::chrome_cache::TitlePlacement {
                             color,
-                            title_origin,
-                            (sw, sh),
-                            title_clip,
-                            GlyphRasterVariant::TabTitle,
-                        ),
-                        // The final cut did not shape, so the text shapes at draw time as before.
-                        None => chrome_text::layout_with_raster_variant(
-                            stack,
-                            rasterizer,
-                            &mut self.glyph_atlas,
-                            title.text,
-                            color,
-                            ChromeAttrs::default(),
-                            tab_raster_px,
-                            native_em,
-                            title_origin,
-                            (sw, sh),
-                            title_clip,
-                            GlyphRasterVariant::TabTitle,
-                        ),
-                    };
+                            raster_px: tab_raster_px,
+                            origin: title_origin,
+                            screen: (sw, sh),
+                            clip: title_clip,
+                        },
+                    );
                     glyph_instances.extend(final_layout.glyphs);
                     quads.extend(final_layout.missing_boxes);
                 } else if show_privilege_badge {

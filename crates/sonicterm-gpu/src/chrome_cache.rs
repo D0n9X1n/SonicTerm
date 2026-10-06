@@ -15,6 +15,10 @@ use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
 #[cfg(test)]
 use crate::chrome_text::CHROME_SHAPED_GLYPH_BYTES;
 use crate::chrome_text::{ChromeAttrs, ChromeRunView, ChromeShapedRun, PreparedChromeRun};
+use crate::chrome_text::{ChromeClip, ChromeTextLayout};
+use crate::color::ChromeColor;
+use sonicterm_text::glyph_atlas::{GlyphAtlas, Rasterizer};
+use sonicterm_types::GlyphRasterVariant;
 
 #[cfg(test)]
 #[path = "chrome_cache_tests.rs"]
@@ -67,6 +71,22 @@ fn shape_title<'text>(
     ChromeShapedRun::shape(stack, text, ChromeAttrs::default(), font_size_px, font_size_px)
 }
 
+/// How a title's final drawn outcome is reported, decided only by what is finally drawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TitleOutcome {
+    /// The title draws from a shaped run, or draws nothing by design; nothing is reported.
+    Drawn,
+    /// The whole title could not be shaped, so nothing draws; the title-draw boundary reports its
+    /// visible characters once.
+    WholeTitleUnshaped(String),
+    /// The final cut did not shape while fitting; the draw-time retry shapes it and alone reports a
+    /// failure, so a failed cut is never reported twice.
+    CutRetryPending,
+}
+
+/// The outcome of every kept title: only complete fits are kept, so a cache hit always drew.
+static KEPT_TITLE_OUTCOME: TitleOutcome = TitleOutcome::Drawn;
+
 /// One title fitted into its tab, with the run it measured last when that run shaped.
 #[derive(Debug)]
 pub(crate) struct TitleFit {
@@ -78,6 +98,8 @@ pub(crate) struct TitleFit {
     pub(crate) width_px: f32,
     /// Whether every measure and the final shape succeeded, so the fit may be cached.
     pub(crate) complete: bool,
+    /// How the title's final drawn outcome is reported.
+    pub(crate) outcome: TitleOutcome,
 }
 
 /// Fit a tab's display `text` into `available_px` of the tab font at `font_size_px`.
@@ -96,8 +118,15 @@ pub(crate) fn fit_title_run(
     available_px: f32,
 ) -> TitleFit {
     let Some(whole) = shape_title(stack, text, font_size_px) else {
-        // When: the whole title cannot be shaped, nothing is drawn for it this frame.
-        return TitleFit { text: String::new(), run: None, width_px: 0.0, complete: false };
+        // When: the whole title cannot be shaped, nothing is drawn for it this frame, and the draw
+        // boundary reports the original text.
+        return TitleFit {
+            text: String::new(),
+            run: None,
+            width_px: 0.0,
+            complete: false,
+            outcome: TitleOutcome::WholeTitleUnshaped(text.to_string()),
+        };
     };
     let whole_px: f32 = whole.advances().map(|(_, advance)| advance).sum();
     if whole_px <= available_px + TITLE_FIT_TOLERANCE_PX {
@@ -107,6 +136,7 @@ pub(crate) fn fit_title_run(
             run: Some(PreparedChromeRun::from_run(whole)),
             width_px: whole_px,
             complete: true,
+            outcome: TitleOutcome::Drawn,
         };
     }
     let mut complete = true;
@@ -139,11 +169,23 @@ pub(crate) fn fit_title_run(
         if fitted.text.is_empty() || drawn_px <= available_px + TITLE_FIT_TOLERANCE_PX {
             // When: `fitted` is empty or its shaped `drawn_px` fits `available_px`, draw it.
             let complete = complete && run.is_some();
-            return TitleFit { text: fitted.text, run, width_px: drawn_px, complete };
+            // A cut without a run is shaped again at draw time, which decides whether it is missing;
+            // an ellipsis that failed to measure leaves a shaped cut, which drew.
+            let outcome =
+                if run.is_some() { TitleOutcome::Drawn } else { TitleOutcome::CutRetryPending };
+            return TitleFit { text: fitted.text, run, width_px: drawn_px, complete, outcome };
         }
         budget_px = fitted.width_px - TITLE_FIT_TOLERANCE_PX - 0.01;
     }
-    TitleFit { text: String::new(), run: None, width_px: 0.0, complete: false }
+    // Every pass keeps a strictly shorter prefix and an empty one returns above, so this is not
+    // reached; it draws nothing by design.
+    TitleFit {
+        text: String::new(),
+        run: None,
+        width_px: 0.0,
+        complete: false,
+        outcome: TitleOutcome::Drawn,
+    }
 }
 
 /// What a title's cached fit depends on besides color: its display text, the tab font's key and
@@ -220,6 +262,68 @@ pub(crate) struct DrawnTitle<'title> {
     pub(crate) view: Option<ChromeRunView<'title>>,
     /// Drawn width in raster pixels, which places the badge and the text.
     pub(crate) width_px: f32,
+    /// How the title's final drawn outcome is reported.
+    pub(crate) outcome: &'title TitleOutcome,
+}
+
+/// Where and how one tab title is drawn: its color, the tab font's raster size (also its native
+/// em), the baseline origin, the surface and the tab's text clip, all in raster pixels.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TitlePlacement {
+    /// Monochrome glyph color.
+    pub(crate) color: ChromeColor,
+    /// The tab font's raster size, which is also its native em.
+    pub(crate) raster_px: f32,
+    /// `(x, baseline_y)` of the text.
+    pub(crate) origin: (f32, f32),
+    /// Surface size.
+    pub(crate) screen: (f32, f32),
+    /// The tab's text clip.
+    pub(crate) clip: Option<ChromeClip>,
+}
+
+/// Draw `title` as the tab bar does: from its kept or fitted run without shaping, or, when the final
+/// cut did not shape, by shaping its text at draw time, where a failure is reported once. A title
+/// whose whole text never shaped draws nothing and is reported here, once.
+pub(crate) fn layout_title(
+    stack: &FontStack,
+    rasterizer: &mut impl Rasterizer,
+    atlas: &mut GlyphAtlas,
+    title: &DrawnTitle<'_>,
+    placement: TitlePlacement,
+) -> ChromeTextLayout {
+    if let TitleOutcome::WholeTitleUnshaped(text) = title.outcome {
+        // The whole title never shaped, so nothing draws and its visible characters are missing.
+        crate::chrome_text::note_unshaped_chrome(text);
+    }
+    match title.view {
+        // The fit kept or made its run, so it draws without shaping again.
+        Some(view) => crate::chrome_text::layout_view(
+            view,
+            rasterizer,
+            atlas,
+            placement.color,
+            placement.origin,
+            placement.screen,
+            placement.clip,
+            GlyphRasterVariant::TabTitle,
+        ),
+        // The final cut did not shape, so the text shapes at draw time as before.
+        None => crate::chrome_text::layout_with_raster_variant(
+            stack,
+            rasterizer,
+            atlas,
+            title.text,
+            placement.color,
+            ChromeAttrs::default(),
+            placement.raster_px,
+            placement.raster_px,
+            placement.origin,
+            placement.screen,
+            placement.clip,
+            GlyphRasterVariant::TabTitle,
+        ),
+    }
 }
 
 /// Tab titles kept by tab position: a fixed table of [`TITLE_SLOTS`] slots, allocated on the
@@ -308,12 +412,14 @@ impl TitleCache {
                     text: title.run.view().text(),
                     view: Some(title.run.view()),
                     width_px: title.width_px,
+                    outcome: &KEPT_TITLE_OUTCOME,
                 }
             }
             TitleDraw::Fresh(fit) => DrawnTitle {
                 text: &fit.text,
                 view: fit.run.as_ref().map(PreparedChromeRun::view),
                 width_px: fit.width_px,
+                outcome: &fit.outcome,
             },
         }
     }
