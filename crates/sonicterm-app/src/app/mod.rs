@@ -362,6 +362,12 @@ use pane_state::pane_id_at_point;
 pub use pane_state::{next_pane_id, PaneCommandEvent, PaneState};
 mod path_target;
 mod perf_present;
+// Pins both S10 attribution signatures here, in the parent, in every build: a gate on the methods, their
+// impl or the whole `perf_present` module, or a changed type, fails a plain library build.
+const _: () = {
+    let _: fn(&mut App, u64, &str, &str, u32) -> Option<u64> = App::arm_s10_attribution;
+    let _: fn(&mut App, u64) = App::disarm_s10_attribution;
+};
 mod privilege;
 use privilege::refresh_window_tab_privileges;
 mod quit_hold;
