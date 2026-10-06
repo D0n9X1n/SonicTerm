@@ -903,6 +903,7 @@ fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
             allocations_per_frame: None,
             frame_counters: None,
             updates: None,
+            s10_attribution: None,
         }],
         latency: None,
         throughput: None,
