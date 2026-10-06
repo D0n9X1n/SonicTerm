@@ -1210,11 +1210,6 @@ fn glyph_atlas_working_set() {
     }
 }
 
-/// The working-set step and the real-renderer coverage test print their measurements through one
-/// formatter, so a single `key=value` parser reads both and the rows can become `START_SIZE_INPUTS`
-/// entries: the same keys in the same order, told apart only by `source`. Both kinds carry
-/// `incomplete_glyphs`, the count that makes a row ineligible to select a smaller start.
-
 /// Representative S9 emoji and CJK scalars, taken from the fixture's last line, which the real
 /// renderer's viewport shows at both scales (the cursor sits on the row below it). Test 17 checks
 /// that each resolves to a resident real tile.
@@ -1235,6 +1230,10 @@ fn the_s9_representative_codepoints_are_on_the_fixtures_last_line() {
     assert!(absent.is_empty(), "not on the last line {last:?}: {absent:?}");
 }
 
+/// The working-set step and the real-renderer coverage test print their measurements through one
+/// formatter, so a single `key=value` parser reads both and the rows can become `START_SIZE_INPUTS`
+/// entries: the same keys in the same order, told apart only by `source`. Both kinds carry
+/// `incomplete_glyphs`, the count that makes a row ineligible to select a smaller start.
 #[test]
 fn working_set_rows_share_one_parseable_format() {
     use sonicterm_text::glyph_atlas::FitOutcome;
