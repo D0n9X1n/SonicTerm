@@ -337,6 +337,9 @@ pub(crate) mod recorders {
     pub(crate) struct Frozen {
         /// The records.
         pub(crate) buffers: Buffers,
+        /// The instant every offset in `buffers` is relative to: the recorder's own arm until
+        /// `rebase_onto` moves them onto the App timeline's `armed_at`.
+        pub(crate) origin: Instant,
         /// A callback or invocation could not be joined: an orphan, a nest, an unmatched or reversed
         /// return, an invocation outside its parent, an unreturned invocation, or a time before the arm
         /// or not representable.
@@ -346,6 +349,51 @@ pub(crate) mod recorders {
     }
 
     impl Frozen {
+        /// Move every offset onto `app_armed_at`, the App timeline's own origin, so the harness records join
+        /// the App's by time. The App arms before the recorder starts, so each offset grows by the gap
+        /// between them. A recorder that started before the App armed, or an offset that would leave the
+        /// `u64` range, makes the sample incomplete and leaves the offsets as they were.
+        pub(crate) fn rebase_onto(&mut self, app_armed_at: Instant) {
+            let Some(delta) = offset_ns(self.origin.checked_duration_since(app_armed_at)) else {
+                // When: the harness origin precedes the App's or the gap is unrepresentable, nothing joins.
+                self.incomplete = true;
+                return;
+            };
+            let shift = |offset: u64| offset.checked_add(delta);
+            let outer_shifted: Option<Vec<(u64, u64)>> = self
+                .buffers
+                .outer
+                .iter()
+                .map(|record| Some((shift(record.enter_ns)?, shift(record.return_ns)?)))
+                .collect();
+            let invocations_shifted: Option<Vec<(u64, u64)>> = self
+                .buffers
+                .invocations
+                .iter()
+                .map(|record| Some((shift(record.enter_ns)?, shift(record.return_ns)?)))
+                .collect();
+            let (Some(outer_shifted), Some(invocations_shifted)) =
+                (outer_shifted, invocations_shifted)
+            else {
+                // When: an offset would leave the `u64` range, the records stay on the harness origin.
+                self.incomplete = true;
+                return;
+            };
+            for (record, (enter_ns, return_ns)) in self.buffers.outer.iter_mut().zip(outer_shifted)
+            {
+                record.enter_ns = enter_ns;
+                // An open outer callback keeps its 0 return, which marks it open, not a time.
+                record.return_ns = if record.open { 0 } else { return_ns };
+            }
+            for (record, (enter_ns, return_ns)) in
+                self.buffers.invocations.iter_mut().zip(invocations_shifted)
+            {
+                record.enter_ns = enter_ns;
+                record.return_ns = return_ns;
+            }
+            self.origin = app_armed_at;
+        }
+
         /// Hand the storage back, emptied, for the next sample's recorder.
         pub(crate) fn recycle(mut self) -> Buffers {
             self.buffers.outer.clear();
@@ -449,8 +497,9 @@ pub(crate) mod recorders {
             self.push_outer(kind, enter_ns, false);
         }
 
-        /// The open outer callback returned at `at`. A return with none open, a return before its entry, or
-        /// a return while one of its invocations is still open is a defect.
+        /// The open outer callback returned at `at`. A return with none open, a return before its entry, a
+        /// return while one of its invocations is still open, or a return before one of its returned
+        /// invocations returned is a defect.
         pub(crate) fn exit_outer(&mut self, at: Instant) {
             let return_ns = self.offset(at);
             if self.open_invocation.is_some() {
@@ -459,11 +508,21 @@ pub(crate) mod recorders {
             }
             match self.open_outer.take() {
                 Some(Open::Recorded(index)) => {
+                    let id = self.buffers.outer[index].id;
+                    // Invocations are sequential, so the parent's last child returned last among its children.
+                    let last_child_return = self
+                        .buffers
+                        .invocations
+                        .iter()
+                        .rev()
+                        .find(|invocation| invocation.parent == id)
+                        .map(|invocation| invocation.return_ns);
                     let record = &mut self.buffers.outer[index];
                     record.return_ns = return_ns;
                     record.open = false;
                     let reversed = return_ns < record.enter_ns;
-                    self.incomplete |= reversed;
+                    let outlived = last_child_return.is_some_and(|child| return_ns < child);
+                    self.incomplete |= reversed || outlived;
                 }
                 Some(Open::Dropped) => {}
                 None => self.incomplete = true,
@@ -538,6 +597,7 @@ pub(crate) mod recorders {
             Frozen {
                 incomplete: self.incomplete || self.open_invocation.is_some(),
                 overflow: self.overflow,
+                origin: self.armed_at,
                 buffers: self.buffers,
             }
         }
@@ -551,6 +611,18 @@ pub(crate) mod lifecycle {
 
     use super::recorders::{Buffers, Recorder};
     use super::{Disposition, OuterKind, TimelineArm, TimelineTake};
+
+    /// A taken timeline's own origin: the instant the App armed it, which the harness records join to.
+    pub(crate) trait AppOrigin {
+        /// When the App armed the timeline.
+        fn app_armed_at(&self) -> Instant;
+    }
+
+    impl AppOrigin for super::api::Timeline {
+        fn app_armed_at(&self) -> Instant {
+            self.armed_at
+        }
+    }
 
     /// A sample's timeline: armed with a token and a recorder, or settled with a disposition.
     #[derive(Debug)]
@@ -590,9 +662,9 @@ pub(crate) mod lifecycle {
     }
 
     /// Close `lifecycle` at a sample's close: an armed one takes its token exactly once, freezes its
-    /// recorder and hands the storage back to `storage` for the next sample; an unarmed one keeps its
-    /// disposition and takes nothing.
-    pub(crate) fn close<Token, Timeline>(
+    /// recorder, moves a taken timeline's harness records onto the App's origin, and hands the storage back
+    /// to `storage` for the next sample; an unarmed one keeps its disposition and takes nothing.
+    pub(crate) fn close<Token, Timeline: AppOrigin>(
         lifecycle: Lifecycle<Token>,
         storage: &mut Option<Buffers>,
         take: impl FnOnce(Token) -> TimelineTake<Timeline>,
@@ -601,7 +673,11 @@ pub(crate) mod lifecycle {
             Lifecycle::Unarmed(disposition) => disposition,
             Lifecycle::Armed { token, recorder } => {
                 let outcome = take(token);
-                let frozen = recorder.freeze();
+                let mut frozen = recorder.freeze();
+                if let TimelineTake::Timeline(timeline) = &outcome {
+                    // When: a timeline was taken, the harness records move onto its origin before judging.
+                    frozen.rebase_onto(timeline.app_armed_at());
+                }
                 let complete = !frozen.incomplete && !frozen.overflow;
                 *storage = Some(frozen.recycle());
                 match outcome {

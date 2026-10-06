@@ -310,6 +310,19 @@ mod recorder_tests {
         assert!(recorder.freeze().incomplete);
     }
 
+    /// The re-review's trace: an invocation that has already returned still may not outlive its parent.
+    /// Outer 1–5 with a child 2–10 returns the parent before its child, so the sample is incomplete.
+    #[test]
+    fn a_returned_invocation_outliving_its_parent_is_incomplete() {
+        let start = Instant::now();
+        let mut recorder = armed(start);
+        recorder.enter_outer(OuterKind::AboutToWait, at(start, 1));
+        recorder.enter_invocation(call(InvocationKind::AboutToWait), at(start, 2));
+        recorder.exit_invocation(at(start, 10));
+        recorder.exit_outer(at(start, 5));
+        assert!(recorder.freeze().incomplete);
+    }
+
     /// An invocation that starts before its parent callback entered lies outside it: incomplete.
     #[test]
     fn an_invocation_starting_before_its_parent_is_incomplete() {
@@ -410,6 +423,59 @@ mod recorder_tests {
         assert_eq!(Buffers::new().payload_bytes(), 13_312);
     }
 
+    /// A recorder that starts after the App armed (the App arms first, then the harness allocates and
+    /// reads its own instant) records offsets from its own origin; `rebase_onto` moves every one onto
+    /// the App's, on first allocation and again on recycled storage, so both sides read one time base.
+    /// An open outer callback keeps its 0 return.
+    #[test]
+    fn a_delayed_recorder_start_is_rebased_onto_the_apps_origin() {
+        let app = Instant::now();
+        let nanos_per_ms = 1_000_000;
+        let mut storage = Buffers::new();
+        for delay_ms in [10_u64, 3] {
+            // The recorder starts `delay_ms` after the App armed.
+            let harness = at(app, delay_ms);
+            let mut recorder = Recorder::arm(harness, Some(OuterKind::AboutToWait), storage);
+            recorder.enter_invocation(call(InvocationKind::AboutToWait), at(harness, 10));
+            recorder.exit_invocation(at(harness, 15));
+            recorder.exit_outer(at(harness, 20));
+            recorder.enter_outer(OuterKind::UserEvent, at(harness, 30));
+            let mut frozen = recorder.freeze();
+            assert_eq!(frozen.origin, harness);
+            assert_eq!(frozen.buffers.invocations[0].enter_ns, 10 * nanos_per_ms);
+            frozen.rebase_onto(app);
+            assert_eq!(frozen.origin, app);
+            let shift = delay_ms * nanos_per_ms;
+            let invocation = frozen.buffers.invocations[0];
+            assert_eq!(
+                (invocation.enter_ns, invocation.return_ns),
+                (10 * nanos_per_ms + shift, 15 * nanos_per_ms + shift)
+            );
+            let outer = &frozen.buffers.outer;
+            assert_eq!((outer[0].enter_ns, outer[0].return_ns), (shift, 20 * nanos_per_ms + shift));
+            assert_eq!(
+                (outer[1].enter_ns, outer[1].return_ns, outer[1].open),
+                (30 * nanos_per_ms + shift, 0, true)
+            );
+            assert!(!frozen.incomplete, "delay {delay_ms} ms: {frozen:?}");
+            storage = frozen.recycle();
+        }
+    }
+
+    /// A recorder origin before the App's cannot be rebased: the sample is incomplete and its offsets
+    /// stay on the harness origin rather than being clamped.
+    #[test]
+    fn a_recorder_origin_before_the_apps_is_incomplete() {
+        let harness = Instant::now();
+        let mut recorder = Recorder::arm(harness, None, Buffers::new());
+        recorder.enter_outer(OuterKind::NewEvents, at(harness, 2));
+        recorder.exit_outer(at(harness, 4));
+        let mut frozen = recorder.freeze();
+        frozen.rebase_onto(at(harness, 1));
+        assert!(frozen.incomplete);
+        assert_eq!((frozen.origin, frozen.buffers.outer[0].enter_ns), (harness, 2_000_000));
+    }
+
     /// One sample's storage is allocated at its full capacity once, never grows while recording, and is
     /// moved, not copied, into the frozen record and back for the next sample: the same allocation, the
     /// same capacity, and the live payload never more than one sample's 13,312 bytes.
@@ -449,9 +515,21 @@ mod lifecycle_tests {
     use std::cell::Cell;
     use std::time::Instant;
 
-    use super::lifecycle::{arm, close, Lifecycle};
+    use std::time::Duration;
+
+    use super::lifecycle::{arm, close, AppOrigin, Lifecycle};
     use super::recorders::Buffers;
     use super::{Disposition, OuterKind, TimelineArm, TimelineTake};
+
+    /// A taken timeline that carries only the App's origin, standing in for the App's record.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct StandIn(Instant);
+
+    impl AppOrigin for StandIn {
+        fn app_armed_at(&self) -> Instant {
+            self.0
+        }
+    }
 
     /// A clock that must never be read.
     fn no_clock() -> Instant {
@@ -462,6 +540,8 @@ mod lifecycle_tests {
     /// storage back; the next armed sample reuses that same allocation.
     #[test]
     fn an_armed_sample_is_taken_once_and_its_storage_is_reused() {
+        // The App arms first, so its origin precedes the recorder's.
+        let app = Instant::now();
         let mut storage: Option<Buffers> = None;
         let lifecycle = arm(
             TimelineArm::Armed(7_u64),
@@ -475,13 +555,13 @@ mod lifecycle_tests {
         let disposition = close(lifecycle, &mut storage, |token| {
             takes.set(takes.get() + 1);
             assert_eq!(token, 7);
-            TimelineTake::Timeline(())
+            TimelineTake::Timeline(StandIn(app))
         });
         assert_eq!((disposition, takes.get()), (Disposition::Recorded, 1));
         let pointer = storage.as_ref().expect("recycled").outer.as_ptr();
         let lifecycle = arm(TimelineArm::Armed(8_u64), None, &mut storage, Instant::now);
         assert!(storage.is_none());
-        let disposition = close(lifecycle, &mut storage, |_| TimelineTake::<()>::NotRecorded);
+        let disposition = close(lifecycle, &mut storage, |_| TimelineTake::<StandIn>::NotRecorded);
         assert_eq!(disposition, Disposition::NotRecorded);
         assert_eq!(storage.as_ref().expect("recycled again").outer.as_ptr(), pointer);
     }
@@ -502,7 +582,7 @@ mod lifecycle_tests {
             let mut storage: Option<Buffers> = None;
             let lifecycle = arm(outcome, Some(OuterKind::AboutToWait), &mut storage, no_clock);
             assert!(storage.is_none(), "{expected:?} allocated storage");
-            let disposition = close(lifecycle, &mut storage, |_| -> TimelineTake<()> {
+            let disposition = close(lifecycle, &mut storage, |_| -> TimelineTake<StandIn> {
                 panic!("an unarmed sample was taken")
             });
             assert_eq!(disposition, expected);
@@ -514,8 +594,10 @@ mod lifecycle_tests {
     /// incomplete reads `recorded-incomplete`, never `recorded`.
     #[test]
     fn every_take_outcome_has_its_own_disposition() {
+        // The App arms first, so its origin precedes every recorder's.
+        let app = Instant::now();
         let cases = [
-            (TimelineTake::Timeline(()), Disposition::Recorded),
+            (TimelineTake::Timeline(StandIn(app)), Disposition::Recorded),
             (TimelineTake::Unavailable, Disposition::Unavailable),
             (TimelineTake::NotRecorded, Disposition::NotRecorded),
             (TimelineTake::GateOff, Disposition::GateOff),
@@ -534,7 +616,19 @@ mod lifecycle_tests {
             // An orphan return: nothing is open, so the harness record is incomplete.
             recorder.exit_invocation(Instant::now());
         }
-        let disposition = close(lifecycle, &mut storage, |_| TimelineTake::Timeline(()));
+        let disposition = close(lifecycle, &mut storage, |_| TimelineTake::Timeline(StandIn(app)));
+        assert_eq!(disposition, Disposition::RecordedIncomplete);
+    }
+
+    /// A recorder that started before the App armed cannot be joined to the App's origin: the taken
+    /// timeline reads `recorded-incomplete`, never `recorded`.
+    #[test]
+    fn a_recorder_started_before_the_app_armed_is_incomplete() {
+        let harness = Instant::now();
+        let app = harness + Duration::from_millis(5);
+        let mut storage: Option<Buffers> = None;
+        let lifecycle = arm(TimelineArm::Armed(1_u64), None, &mut storage, || harness);
+        let disposition = close(lifecycle, &mut storage, |_| TimelineTake::Timeline(StandIn(app)));
         assert_eq!(disposition, Disposition::RecordedIncomplete);
     }
 }
