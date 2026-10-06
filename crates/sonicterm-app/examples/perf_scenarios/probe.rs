@@ -32,6 +32,8 @@ use crate::atlas_retry::{self, Arm, Counts, Progress, RecoveryEpisodes, Scene, S
 use crate::attribution::{self, Start};
 use crate::cli::{RunArgs, REFUSED};
 use crate::counters::{CounterTotals, CountersMode};
+use crate::dispatch_timeline::sample::{SampleTimeline, Storage as TimelineStorage};
+use crate::dispatch_timeline::{Invocation, InvocationKind, OuterKind};
 #[cfg(perf_completeness_api)]
 use crate::record::completeness_from_checkpoint;
 use crate::record::{
@@ -346,6 +348,8 @@ struct OpenSample {
     arm: ArmState,
     /// The row identity the sample was armed with.
     identity: RowIdentity,
+    /// The sample's dispatch timeline, armed at injection and taken at every close.
+    timeline: SampleTimeline,
 }
 
 /// Native occlusion as delivered to the App, and the harness's own cover.
@@ -776,6 +780,10 @@ struct Probe {
     trim_seq_after_hook: Option<u64>,
     /// S1/atlas-retry's `atlas_recovery`, once every episode is recorded and validated.
     atlas_recovery: Option<serde_json::Value>,
+    /// Dispatch-timeline recorder storage, reused from sample to sample; empty until a sample is armed.
+    timeline_storage: TimelineStorage,
+    /// The `ApplicationHandler` callback running now, which a sample armed inside it starts clipped in.
+    running_outer: Option<OuterKind>,
     first_present_bound: FirstPresentBound,
     /// How the main window presents, recorded at the end of startup on Windows.
     presenter: Option<PresenterRecord>,
@@ -795,11 +803,78 @@ struct Probe {
 
 impl ApplicationHandler<UserEvent> for Probe {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.outer_enter(OuterKind::Resumed);
+        self.resumed_turn(event_loop);
+        self.outer_exit();
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        self.outer_enter(OuterKind::WindowEvent);
+        self.window_event_turn(event_loop, window_id, event);
+        self.outer_exit();
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        self.outer_enter(OuterKind::UserEvent);
+        self.user_event_turn(event_loop, event);
+        self.outer_exit();
+    }
+
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        self.outer_enter(OuterKind::NewEvents);
+        self.new_events_turn(event_loop, cause);
+        self.outer_exit();
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.outer_enter(OuterKind::AboutToWait);
+        self.about_to_wait_turn(event_loop);
+        self.outer_exit();
+    }
+
+    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+        self.app.exiting(event_loop);
+    }
+}
+
+/// The probe's callback bodies, each run inside its outer-callback record.
+impl Probe {
+    /// An `ApplicationHandler` callback of `kind` starts: it becomes the running outer callback, and an
+    /// open sample's armed timeline records its entry. An unarmed timeline reads no clock.
+    fn outer_enter(&mut self, kind: OuterKind) {
+        self.running_outer = Some(kind);
+        if let Some(sample) = self.open_sample.as_mut() {
+            // When: a sample is open, its timeline records the callback's entry if it is armed.
+            sample.timeline.enter_outer(kind);
+        }
+    }
+
+    /// The running callback returns: an open sample's armed timeline records its return.
+    fn outer_exit(&mut self) {
+        if let Some(sample) = self.open_sample.as_mut() {
+            // When: a sample is open, its timeline records the callback's return if it is armed.
+            sample.timeline.exit_outer();
+        }
+        self.running_outer = None;
+    }
+
+    /// The body of the `resumed` callback.
+    fn resumed_turn(&mut self, event_loop: &ActiveEventLoop) {
         if self.stage != Stage::Startup || self.main_id.is_some() {
             // When: the main window already exists, a later resume must not build a second one.
             return;
         }
-        self.forward(event_loop, Dispatch::Native, |app, active| app.resumed(active));
+        self.forward(
+            event_loop,
+            Dispatch::Native,
+            Invocation::of(InvocationKind::Resumed, None, false),
+            |app, active| app.resumed(active),
+        );
         let Some(window) = self.app.main_window().cloned() else {
             self.invalidate(event_loop, "the App opened no main window".to_owned());
             return;
@@ -812,7 +887,8 @@ impl ApplicationHandler<UserEvent> for Probe {
         self.first_present_bound.window_opened(Instant::now());
     }
 
-    fn window_event(
+    /// The body of the `window_event` callback.
+    fn window_event_turn(
         &mut self,
         event_loop: &ActiveEventLoop,
         window_id: WindowId,
@@ -845,9 +921,13 @@ impl ApplicationHandler<UserEvent> for Probe {
         match arrival {
             Arrival::Redraw => {
                 let kind = if is_main { Dispatch::Redraw } else { Dispatch::Native };
-                self.forward(event_loop, kind, |app, active| {
-                    app.window_event(active, window_id, event)
-                });
+                let redraw = InvocationKind::WindowEvent { redraw: true };
+                self.forward(
+                    event_loop,
+                    kind,
+                    Invocation::of(redraw, Some(window_id), false),
+                    |app, active| app.window_event(active, window_id, event),
+                );
             }
             Arrival::Focus => {
                 // When: native focus arrives, it is recorded and dropped; the App takes focus only
@@ -859,7 +939,9 @@ impl ApplicationHandler<UserEvent> for Probe {
             }
             Arrival::Occlusion(occluded) => self.native_occlusion(event_loop, occluded),
             Arrival::Routed(Route::Forward) => {
-                self.forward(event_loop, Dispatch::Native, |app, active| {
+                let native = InvocationKind::WindowEvent { redraw: false };
+                let invocation = Invocation::of(native, Some(window_id), false);
+                self.forward(event_loop, Dispatch::Native, invocation, |app, active| {
                     app.window_event(active, window_id, event)
                 });
             }
@@ -873,7 +955,8 @@ impl ApplicationHandler<UserEvent> for Probe {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+    /// The body of the `user_event` callback.
+    fn user_event_turn(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         if self.stage == Stage::Done {
             return;
         }
@@ -910,17 +993,25 @@ impl ApplicationHandler<UserEvent> for Probe {
                 }
             }
         }
-        self.forward(event_loop, Dispatch::Native, |app, active| app.user_event(active, event));
+        let invocation = Invocation::of(InvocationKind::UserEvent, None, false);
+        self.forward(event_loop, Dispatch::Native, invocation, |app, active| {
+            app.user_event(active, event)
+        });
     }
 
-    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+    /// The body of the `new_events` callback.
+    fn new_events_turn(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         if self.stage == Stage::Done {
             return;
         }
-        self.forward(event_loop, Dispatch::Harness, |app, active| app.new_events(active, cause));
+        let invocation = Invocation::of(InvocationKind::NewEvents, None, false);
+        self.forward(event_loop, Dispatch::Harness, invocation, |app, active| {
+            app.new_events(active, cause)
+        });
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    /// The body of the `about_to_wait` callback.
+    fn about_to_wait_turn(&mut self, event_loop: &ActiveEventLoop) {
         if self.stage == Stage::Done {
             return;
         }
@@ -956,7 +1047,10 @@ impl ApplicationHandler<UserEvent> for Probe {
         if self.stage == Stage::Done {
             return;
         }
-        self.forward(event_loop, Dispatch::Harness, |app, active| app.about_to_wait(active));
+        let invocation = Invocation::of(InvocationKind::AboutToWait, None, false);
+        self.forward(event_loop, Dispatch::Harness, invocation, |app, active| {
+            app.about_to_wait(active)
+        });
         if self.stage != Stage::Done && event_loop.exiting() {
             // When: the App asked to exit, for example after a last-window close, the run cannot complete.
             self.invalidate(event_loop, "the App requested exit".to_owned());
@@ -971,10 +1065,6 @@ impl ApplicationHandler<UserEvent> for Probe {
         let flow =
             merge_control_flow(event_loop.control_flow(), self.next_deadline(Instant::now()));
         event_loop.set_control_flow(flow);
-    }
-
-    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
-        self.app.exiting(event_loop);
     }
 }
 
@@ -1655,6 +1745,8 @@ impl Probe {
             trim_pending: false,
             trim_seq_after_hook: None,
             atlas_recovery: None,
+            timeline_storage: TimelineStorage::default(),
+            running_outer: None,
             first_present_bound: FirstPresentBound::default(),
             presenter: None,
             software_render_mode: "",
@@ -1673,6 +1765,7 @@ impl Probe {
         &mut self,
         event_loop: &EventLoopRef,
         kind: Dispatch,
+        invocation: Invocation,
         dispatch: impl FnOnce(&mut App, &EventLoopRef),
     ) {
         let frames_before = self.frame_count();
@@ -1687,11 +1780,19 @@ impl Probe {
             Dispatch::Native | Dispatch::Harness => None,
         };
         let started = Instant::now();
+        if let Some(sample) = self.open_sample.as_mut() {
+            // When: a sample is open, its timeline records this invocation from the forward's own readings.
+            sample.timeline.enter_invocation(invocation, started);
+        }
         dispatch(&mut self.app, event_loop);
         let allocations = allocations_before
             .zip(self.allocation_counter)
             .map(|(before_count, counter)| counter().saturating_sub(before_count));
         let ended = Instant::now();
+        if let Some(sample) = self.open_sample.as_mut() {
+            // When: a sample is open, the invocation's return is recorded before anything can close it.
+            sample.timeline.exit_invocation(ended);
+        }
         let frames_after = self.frame_count();
         if let Some((counts, scene, cached)) = retry_before {
             // When: the atlas-retry driver runs, this dispatch's delta and scene feed its episode machine.
@@ -1739,14 +1840,19 @@ impl Probe {
                     let outcome = echo_outcome(sample.arm, |token| {
                         echo_api::take(&mut self.app, sample.pane, token, main)
                     });
+                    // The credited close takes the sample's dispatch timeline too.
+                    let timeline = sample.timeline.close(&mut self.app, &mut self.timeline_storage);
                     let changed = snapshot_identity_changed(observation, sample.identity);
-                    self.samples.push(LatencySample::credited(
-                        sample.inject_unix_s,
-                        sample.injected,
-                        ended,
-                        &outcome,
-                        changed,
-                    ));
+                    self.samples.push(
+                        LatencySample::credited(
+                            sample.inject_unix_s,
+                            sample.injected,
+                            ended,
+                            &outcome,
+                            changed,
+                        )
+                        .with_dispatch_timeline(timeline.as_str()),
+                    );
                 }
             }
             Attribution::Unattributed(reason) => self.close_sample(reason),
@@ -1760,7 +1866,12 @@ impl Probe {
             if let ArmState::Armed(token) = sample.arm {
                 echo_api::discard(&mut self.app, sample.pane, token);
             }
-            self.samples.push(LatencySample::uncredited(sample.inject_unix_s, reason.as_str()));
+            // Every close takes the sample's dispatch timeline and records what it came to.
+            let timeline = sample.timeline.close(&mut self.app, &mut self.timeline_storage);
+            self.samples.push(
+                LatencySample::uncredited(sample.inject_unix_s, reason.as_str())
+                    .with_dispatch_timeline(timeline.as_str()),
+            );
         }
     }
 
@@ -1795,7 +1906,8 @@ impl Probe {
         if let Some(renderer) = self.app.main_renderer_mut() {
             renderer.invalidate_retained_frame();
         }
-        self.forward(event_loop, Dispatch::Harness, |app, active| {
+        let invocation = Invocation::of(InvocationKind::UserEvent, Some(window_id), true);
+        self.forward(event_loop, Dispatch::Harness, invocation, |app, active| {
             app.user_event(active, UserEvent::RequestRedraw(window_id))
         });
     }
@@ -2432,7 +2544,8 @@ impl Probe {
     /// Run an App action as a forwarded dispatch; whether the App accepted it.
     fn run_action(&mut self, event_loop: &ActiveEventLoop, action: &Action) -> bool {
         let mut accepted = false;
-        self.forward(event_loop, Dispatch::Harness, |app, _active| {
+        let invocation = Invocation::of(InvocationKind::RunAction, None, true);
+        self.forward(event_loop, Dispatch::Harness, invocation, |app, _active| {
             accepted = app.run_action(action)
         });
         accepted
@@ -3236,7 +3349,8 @@ impl Probe {
         let Some(window_id) = self.main_id else {
             return;
         };
-        self.forward(event_loop, Dispatch::Harness, |app, active| {
+        let invocation = Invocation::of(InvocationKind::UserEvent, Some(window_id), true);
+        self.forward(event_loop, Dispatch::Harness, invocation, |app, active| {
             app.user_event(active, UserEvent::RequestRedraw(window_id))
         });
     }
@@ -3411,15 +3525,15 @@ impl Probe {
 
     /// Type the next character: the previous sample closes and this character's sample opens.
     fn inject_typing(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(character) = self.open_typing_sample(Instant::now()) {
+        if let Some(character) = self.open_typing_sample(Instant::now) {
             self.window_input(event_loop, WindowEvent::Ime(Ime::Commit(character.to_string())));
         }
     }
 
-    /// Close the previous sample and open the next character's, injected at `injected`, arming its
-    /// echo watch only for S2/default; returns the character to type, or `None` when typing is done
-    /// or the prompt is not yet found. Needs no event loop.
-    fn open_typing_sample(&mut self, injected: Instant) -> Option<char> {
+    /// Close the previous sample and open the next character's: arm its dispatch timeline, then read the
+    /// injection instant from `clock`, then arm its echo watch (only for S2/default); returns the character
+    /// to type, or `None` when typing is done or the prompt is not yet found. Needs no event loop.
+    fn open_typing_sample(&mut self, clock: impl FnOnce() -> Instant) -> Option<char> {
         let DriverState::Typing(typing) = &mut self.driver else {
             return None;
         };
@@ -3430,11 +3544,21 @@ impl Probe {
         let target = echo_target(origin, typing.cols, typing.typed);
         let (pane, identity) = (typing.pane, typing.identity);
         typing.typed += 1;
-        if typing.typed == typing.chars {
-            typing.done_at = Some(injected);
-        }
+        let last = typing.typed == typing.chars;
         // A sample with no candidate by the next injection is unattributed.
         self.close_sample(UnattributedReason::NoCandidate);
+        // The timeline is armed before the injection instant is read, so the arm is outside the sample.
+        let timeline = SampleTimeline::arm(
+            &mut self.app,
+            pane,
+            self.running_outer,
+            &mut self.timeline_storage,
+        );
+        let injected = clock();
+        if let (true, DriverState::Typing(typing)) = (last, &mut self.driver) {
+            // When: this is the last character, typing is done once it is injected.
+            typing.done_at = Some(injected);
+        }
         // Every parser guard is released here, and the character is not yet injected.
         let arm = if split_in_scope(self.plan.scenario, self.plan.variant) {
             echo_api::arm(&mut self.app, pane, &target, identity)
@@ -3444,7 +3568,7 @@ impl Probe {
         };
         let inject_unix_s = unix_now();
         self.open_sample =
-            Some(OpenSample { pane, target, injected, inject_unix_s, arm, identity });
+            Some(OpenSample { pane, target, injected, inject_unix_s, arm, identity, timeline });
         Some(target.character)
     }
 
@@ -3515,7 +3639,9 @@ impl Probe {
         let Some(window_id) = self.main_id else {
             return;
         };
-        self.forward(event_loop, Dispatch::Harness, |app, active| {
+        let synthetic = InvocationKind::WindowEvent { redraw: false };
+        let invocation = Invocation::of(synthetic, Some(window_id), true);
+        self.forward(event_loop, Dispatch::Harness, invocation, |app, active| {
             app.window_event(active, window_id, event)
         });
     }

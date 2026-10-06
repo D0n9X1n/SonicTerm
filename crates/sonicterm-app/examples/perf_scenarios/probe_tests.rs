@@ -1250,7 +1250,7 @@ fn credit_now(probe: &mut Probe) {
 fn closing_an_unattributed_sample_disarms_its_watch() {
     use sonicterm_app::app::TakeOutcome;
     let (mut probe, pane) = typing_probe("S2", "default");
-    assert_eq!(probe.open_typing_sample(Instant::now()), Some('a'));
+    assert_eq!(probe.open_typing_sample(Instant::now), Some('a'));
     let ArmState::Armed(token) = probe.open_sample.as_ref().expect("open").arm else {
         panic!("precondition: S2/default arms its sample");
     };
@@ -1264,10 +1264,10 @@ fn closing_an_unattributed_sample_disarms_its_watch() {
 #[test]
 fn open_typing_sample_arms_only_for_s2_default() {
     let (mut default, _) = typing_probe("S2", "default");
-    default.open_typing_sample(Instant::now());
+    default.open_typing_sample(Instant::now);
     assert!(matches!(default.open_sample.as_ref().expect("open").arm, ArmState::Armed(_)));
     let (mut flood, _) = typing_probe("S2", "flood");
-    flood.open_typing_sample(Instant::now());
+    flood.open_typing_sample(Instant::now);
     assert_eq!(flood.open_sample.as_ref().expect("open").arm, ArmState::OutOfScope);
 }
 
@@ -1276,7 +1276,7 @@ fn open_typing_sample_arms_only_for_s2_default() {
 #[test]
 fn s2_flood_attributes_as_before_and_reads_unsupported() {
     let (mut probe, pane) = typing_probe("S2", "flood");
-    assert_eq!(probe.open_typing_sample(Instant::now()), Some('a'));
+    assert_eq!(probe.open_typing_sample(Instant::now), Some('a'));
     let main = sonicterm_app::app::synthetic_main_window_id();
     probe.app.__test_publish_pane_output(main, pane, b"a");
     credit_now(&mut probe);
@@ -1292,7 +1292,7 @@ fn s2_flood_attributes_as_before_and_reads_unsupported() {
 #[test]
 fn a_harness_snapshot_identity_change_reads_row_identity_changed() {
     let (mut probe, pane) = typing_probe("S2", "default");
-    probe.open_typing_sample(Instant::now());
+    probe.open_typing_sample(Instant::now);
     let main = sonicterm_app::app::synthetic_main_window_id();
     probe.app.__test_publish_pane_output(main, pane, b"a");
     let generation = |probe: &Probe| {
@@ -1357,7 +1357,7 @@ fn the_trim_act_is_serviced_after_delivery_and_lapses_with_its_phase() {
     let perform = method("perform");
     assert!(perform.contains("Act::Cover => self.cover(event_loop),"), "{perform}");
     assert!(perform.contains("Act::TrimCovered => self.request_trim(event_loop),"));
-    let turn = method("about_to_wait");
+    let turn = method("about_to_wait_turn");
     let overdue = turn.find("self.deliver_overdue_occlusion(").expect("overdue delivery");
     let service = turn.find("self.service_trim(false);").expect("trim service");
     assert!(overdue < service, "the trim sees an occlusion delivered on the same turn");
@@ -1422,7 +1422,8 @@ fn forward_feeds_the_meter_from_its_dispatch_readings() {
 fn a_forwarded_redraw_reaches_the_phases_presentation_trace() {
     let act = Instant::now();
     let (mut probe, _phase) = release_probe("media-free", act, 7);
-    probe.forward(&(), Dispatch::Redraw, |_app, _loop| {});
+    let redraw = Invocation::of(InvocationKind::WindowEvent { redraw: true }, None, false);
+    probe.forward(&(), Dispatch::Redraw, redraw, |_app, _loop| {});
     let record = probe
         .meter
         .take()
@@ -1748,4 +1749,91 @@ fn the_probe_barrier_expects_the_apps_title_and_refuses_a_custom_one() {
     let barrier = probe.atlas_retry_barrier("sleep", Some(now));
     assert_eq!(barrier.fixture_problem.as_deref(), Some(r#"the tab has a custom title "manual""#));
     assert_eq!(barrier.expected_title, None);
+}
+
+/// Every way an S2 sample closes records what its dispatch timeline came to: the next injection's
+/// close, a credited dispatch and an explicit close. A build with the cfg calls the App's stub, which
+/// answers `not-recorded` with the gate on; a build without it never calls the App and records
+/// `unavailable`. No close leaves `not-taken`, and an unarmed sample allocates no recorder storage.
+#[test]
+fn every_close_path_records_the_samples_dispatch_timeline() {
+    let expected = if cfg!(perf_dispatch_timeline_api) { "not-recorded" } else { "unavailable" };
+    let (mut probe, pane) = typing_probe("S2", "flood");
+    assert_eq!(probe.open_typing_sample(Instant::now), Some('a'));
+    assert_eq!(probe.open_typing_sample(Instant::now), Some('b'));
+    let main = sonicterm_app::app::synthetic_main_window_id();
+    probe.app.__test_publish_pane_output(main, pane, b"ab");
+    credit_now(&mut probe);
+    assert_eq!(probe.open_typing_sample(Instant::now), Some('c'));
+    probe.close_sample(UnattributedReason::NoCandidate);
+    let recorded: Vec<(&str, &str)> =
+        probe.samples.iter().map(|sample| (sample.reason, sample.dispatch_timeline)).collect();
+    assert_eq!(
+        recorded,
+        [
+            ("no-candidate", expected),
+            (crate::record::CREDITED, expected),
+            ("no-candidate", expected),
+        ]
+    );
+    assert!(probe.open_sample.is_none());
+    #[cfg(perf_dispatch_timeline_api)]
+    assert!(probe.timeline_storage.is_none(), "the stub never arms, so nothing is allocated");
+}
+
+/// The injection path arms the timeline after the previous sample closes and before the injection
+/// instant is read; every way out of an open sample (`close_sample` and the credited branch of
+/// `attribute`) closes its timeline, and no other method takes the open sample.
+#[test]
+fn the_timeline_is_armed_before_injection_and_taken_on_every_close() {
+    let open = method("open_typing_sample");
+    let close = open.find("self.close_sample(").expect("the previous sample closes");
+    let arm = open.find("SampleTimeline::arm(").expect("the timeline arms");
+    let read = open.find("let injected = clock();").expect("the injection instant is read");
+    assert!(close < arm && arm < read, "close, then arm, then read the injection instant");
+    let source = include_str!("probe.rs").replace("\r\n", "\n");
+    assert_eq!(
+        source.matches("self.open_sample.take()").count(),
+        2,
+        "only the two close paths take it"
+    );
+    for name in ["close_sample", "attribute"] {
+        let body = method(name);
+        assert!(body.contains("self.open_sample.take()"), "{name}");
+        assert!(
+            body.contains("sample.timeline.close(&mut self.app, &mut self.timeline_storage)"),
+            "{name}"
+        );
+    }
+}
+
+/// Every `ApplicationHandler` callback runs its body inside its outer-callback record, and `forward`
+/// records each invocation from its own readings around the dispatch, so App dispatches join to the
+/// callback and invocation that carried them.
+#[test]
+fn every_callback_and_forward_records_its_timeline_parenting() {
+    let source = include_str!("probe.rs").replace("\r\n", "\n");
+    let start =
+        source.find("impl ApplicationHandler<UserEvent> for Probe {").expect("the handler impl");
+    let handlers = &source[start..start + source[start..].find("\n}\n").expect("its end")];
+    for (name, kind) in [
+        ("resumed", "Resumed"),
+        ("window_event", "WindowEvent"),
+        ("user_event", "UserEvent"),
+        ("new_events", "NewEvents"),
+        ("about_to_wait", "AboutToWait"),
+    ] {
+        let body = method_in(handlers, name);
+        let enter = body.find(&format!("self.outer_enter(OuterKind::{kind});")).expect(name);
+        let turn = body.find(&format!("self.{name}_turn(")).expect(name);
+        let exit = body.find("self.outer_exit();").expect(name);
+        assert!(enter < turn && turn < exit, "{name}: enter, body, exit");
+    }
+    let forward: String =
+        method("forward").chars().filter(|glyph| !glyph.is_whitespace()).collect();
+    let entered =
+        forward.find("sample.timeline.enter_invocation(invocation,started);").expect("entry");
+    let dispatched = forward.find("dispatch(&mutself.app,event_loop);").expect("dispatch");
+    let returned = forward.find("sample.timeline.exit_invocation(ended);").expect("return");
+    assert!(entered < dispatched && dispatched < returned);
 }

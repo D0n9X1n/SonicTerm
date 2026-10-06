@@ -38,6 +38,7 @@ fn credited_sample(inject_unix_s: f64, latency_ms: f64) -> LatencySample {
         reason: CREDITED,
         split: None,
         split_reason: "unsupported",
+        dispatch_timeline: TIMELINE_NOT_TAKEN,
     }
 }
 
@@ -177,7 +178,7 @@ fn latency_summary_reports_attribution_coverage() {
     let summary = latency_json(&samples);
     assert_eq!((summary["attributed"].as_u64(), summary["total"].as_u64()), (Some(2), Some(4)));
     assert_eq!(summary["coverage"], 0.5);
-    let lock_busy = json!({"inject_unix_s": 1.25, "latency_ms": null, "attributed": false, "reason": "lock-busy", "split": null, "split_reason": "not-credited"});
+    let lock_busy = json!({"inject_unix_s": 1.25, "latency_ms": null, "attributed": false, "reason": "lock-busy", "split": null, "split_reason": "not-credited", "dispatch_timeline": "not-taken"});
     assert_eq!(summary["samples"][1], lock_busy);
     assert_eq!(summary["samples"][0]["attributed"], true);
     assert_eq!(summary["samples"][3]["reason"], "no-candidate");
@@ -475,9 +476,9 @@ fn result_json_records_every_measurement_in_its_pinned_shape() {
     let latency = json!({
         "samples": [
             {"inject_unix_s": 2.0, "latency_ms": 12.5, "attributed": true, "reason": "credited",
-             "split": null, "split_reason": "unsupported"},
+             "split": null, "split_reason": "unsupported", "dispatch_timeline": "not-taken"},
             {"inject_unix_s": 2.1, "latency_ms": null, "attributed": false, "reason": "lock-busy",
-             "split": null, "split_reason": "not-credited"},
+             "split": null, "split_reason": "not-credited", "dispatch_timeline": "not-taken"},
         ],
         "attributed": 1,
         "total": 2,

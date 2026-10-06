@@ -540,3 +540,24 @@ fn every_field_keeps_its_frozen_type() {
     assert_eq!((abs_row, col, character, identities), (120, 3, 'x', (9, 2, 5)));
     assert_eq!((loss_at_ns, loss_generation), (8, 4));
 }
+
+/// The public transfer records keep the sizes the contract's transfer peak counts, on the supported
+/// 64-bit targets: 32 bytes per event, 120 per attempt record and 16 per transition, each within the
+/// contract's bound (at most 40, at most 128, exactly 16). At full capacity the transferred `Vec`s hold
+/// 256 × 32 + 64 × 120 + 1,024 × 16 = 32,256 bytes, inside the contract's 34.6 KiB estimate.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn the_transfer_records_keep_their_budgeted_sizes() {
+    let (event, attempt, transition) = (
+        std::mem::size_of::<DispatchEventV1>(),
+        std::mem::size_of::<AttemptRecordV1>(),
+        std::mem::size_of::<PhaseTransitionV1>(),
+    );
+    assert_eq!((event, attempt, transition), (32, 120, 16));
+    assert!(event <= 40 && attempt <= 128 && transition == 16);
+    // The capacities the contract bounds each transferred buffer to.
+    let (events, attempts, transitions) = (256, 64, 1_024);
+    let payload = events * event + attempts * attempt + transitions * transition;
+    assert_eq!(payload, 32_256);
+    assert!(payload <= 34_600, "the transfer payload stays inside the contract's estimate");
+}

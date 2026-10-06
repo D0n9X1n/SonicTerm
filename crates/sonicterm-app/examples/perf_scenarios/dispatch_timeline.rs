@@ -1,12 +1,13 @@
-//! The per-sample dispatch timeline, harness side: the adapter over the App's arm and take methods, and
-//! the outer-callback and invocation recorders the App's records are joined against.
+//! The per-sample dispatch timeline, harness side: the adapter over the App's arm and take methods, the
+//! outer-callback and invocation recorders the App's records are joined against, and the sample lifecycle
+//! the probe drives (arm at injection, take at every close).
 //!
 //! Every call into the App's dispatch-timeline API, every type of it, and the recorders sit behind
 //! `#[cfg(perf_dispatch_timeline_api)]`. perf-compare passes that cfg to both sides only when both trees
 //! define the API, so the overlaid harness also builds on a tree that predates it; that build compiles the
-//! no-call fallback below, which reports the timeline unavailable. No probe path calls this module yet:
-//! the experiment's sample lifecycle wires it in, so timed runs are unchanged until then.
-// Nothing calls the adapter or the recorders until the experiment's sample lifecycle wires them in.
+//! no-call fallback below, whose samples record the timeline unavailable. Recorder buffers are allocated
+//! only when the App returns an armed token, and are then reused from sample to sample.
+// Each build constructs only its own adapter's outcomes and facade; the rest is exercised by tests alone.
 #![allow(dead_code)]
 
 /// Whether this build calls the App's dispatch-timeline API: the effective cfg.
@@ -29,14 +30,14 @@ pub(crate) struct WitnessTarget {
     pub(crate) size_generation: u64,
 }
 
-/// What arming returned. `Unavailable` is this build's own answer when it lacks the cfg; every other
-/// variant is the App's.
+/// What arming returned, over the token type: the App's own in the adapter, a stand-in in tests.
+/// `Unavailable` is this build's own answer when it lacks the cfg; every other variant is the App's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ArmResult {
+pub(crate) enum TimelineArm<Token> {
     /// This build does not call the API.
     Unavailable,
     /// Armed under this token.
-    Armed(api::Token),
+    Armed(Token),
     /// The App records no timeline.
     NotRecorded,
     /// The App's frame-counter gate is off.
@@ -44,19 +45,19 @@ pub(crate) enum ArmResult {
     /// No window holds the pane.
     NoPane,
     /// A timeline is already armed under this token.
-    StillArmed(api::Token),
+    StillArmed(Token),
     /// The App can issue no more tokens.
     Exhausted,
 }
 
-/// What take returned. `Unavailable` is this build's own answer when it lacks the cfg; every other
-/// variant is the App's.
+/// What take returned, over the timeline type. `Unavailable` is this build's own answer when it lacks the
+/// cfg; every other variant is the App's.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TakeResult {
+pub(crate) enum TimelineTake<Timeline> {
     /// This build does not call the API.
     Unavailable,
     /// The frozen timeline.
-    Timeline(api::Timeline),
+    Timeline(Timeline),
     /// The App recorded no timeline for this token.
     NotRecorded,
     /// The App's frame-counter gate is off.
@@ -65,6 +66,112 @@ pub(crate) enum TakeResult {
     Mismatch,
     /// This token's timeline was already transferred.
     AlreadyTaken,
+}
+
+/// The adapter's arm outcome over the App's token.
+pub(crate) type ArmResult = TimelineArm<api::Token>;
+/// The adapter's take outcome over the App's timeline.
+pub(crate) type TakeResult = TimelineTake<api::Timeline>;
+
+/// What one sample's timeline came to, recorded on the sample as `dispatch_timeline`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Disposition {
+    /// This build does not call the API.
+    Unavailable,
+    /// The App records no timeline (arm or take).
+    NotRecorded,
+    /// The App's frame-counter gate was off (arm or take).
+    GateOff,
+    /// No window held the pane at arm.
+    NoPane,
+    /// A timeline was already armed at arm: a harness defect, since every close takes it.
+    StillArmed,
+    /// The App could issue no more tokens.
+    Exhausted,
+    /// A timeline was taken and the harness record is complete.
+    Recorded,
+    /// A timeline was taken but the harness record is incomplete or overflowed.
+    RecordedIncomplete,
+    /// The App held another arming at take.
+    Mismatch,
+    /// The token's timeline had already been transferred.
+    AlreadyTaken,
+}
+
+impl Disposition {
+    /// The disposition's name in `result.json`.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::NotRecorded => "not-recorded",
+            Self::GateOff => "gate-off",
+            Self::NoPane => "no-pane",
+            Self::StillArmed => "still-armed",
+            Self::Exhausted => "exhausted",
+            Self::Recorded => "recorded",
+            Self::RecordedIncomplete => "recorded-incomplete",
+            Self::Mismatch => "mismatch",
+            Self::AlreadyTaken => "already-taken",
+        }
+    }
+}
+
+/// The probe's `ApplicationHandler` method an outer callback is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum OuterKind {
+    /// `window_event`.
+    WindowEvent,
+    /// `user_event`.
+    UserEvent,
+    /// `new_events`.
+    NewEvents,
+    /// `about_to_wait`.
+    AboutToWait,
+    /// `resumed`.
+    Resumed,
+}
+
+/// What a forwarded invocation was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InvocationKind {
+    /// A window event; `redraw` when it was `RedrawRequested`.
+    WindowEvent {
+        /// Whether the event was `RedrawRequested`.
+        redraw: bool,
+    },
+    /// A user event.
+    UserEvent,
+    /// `new_events`.
+    NewEvents,
+    /// `about_to_wait`.
+    AboutToWait,
+    /// `resumed`.
+    Resumed,
+    /// A direct `App::run_action` call, not an `ApplicationHandler` callback.
+    RunAction,
+}
+
+/// One forwarded call as the probe describes it: its kind, its window and whether the harness made it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Invocation {
+    /// What it was.
+    pub(crate) kind: InvocationKind,
+    /// The target window as `u64::from(WindowId)`; 0 for a kind that names no window.
+    pub(crate) window: u64,
+    /// Whether the harness generated it.
+    pub(crate) synthetic: bool,
+}
+
+impl Invocation {
+    /// An invocation of `kind` for `window`, or none, made by the harness when `synthetic`.
+    pub(crate) fn of(
+        kind: InvocationKind,
+        window: Option<winit::window::WindowId>,
+        synthetic: bool,
+    ) -> Self {
+        Self { kind, window: window.map_or(0, u64::from), synthetic }
+    }
 }
 
 /// The App's dispatch-timeline API, called only in a build with the cfg.
@@ -154,28 +261,14 @@ pub(crate) mod api {
 /// forwarded invocation inside it, so App dispatches can be joined to the callback that carried them.
 #[cfg(perf_dispatch_timeline_api)]
 pub(crate) mod recorders {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+
+    use super::{Invocation, InvocationKind, OuterKind};
 
     /// Outer callbacks one sample holds.
     pub(crate) const OUTER_CAPACITY: usize = 128;
     /// Invocations one sample holds.
     pub(crate) const INVOCATION_CAPACITY: usize = 256;
-
-    /// The probe's `ApplicationHandler` method an outer callback is.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    #[repr(u8)]
-    pub(crate) enum OuterKind {
-        /// `window_event`.
-        WindowEvent,
-        /// `user_event`.
-        UserEvent,
-        /// `new_events`.
-        NewEvents,
-        /// `about_to_wait`.
-        AboutToWait,
-        /// `resumed`.
-        Resumed,
-    }
 
     /// One outer callback, its times in nanoseconds after the arm.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,26 +285,6 @@ pub(crate) mod recorders {
         pub(crate) open: bool,
         /// Already running when the sample was armed, so its record starts at the arm.
         pub(crate) clipped_at_arm: bool,
-    }
-
-    /// What a forwarded invocation was.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) enum InvocationKind {
-        /// A window event; `redraw` when it was `RedrawRequested`.
-        WindowEvent {
-            /// Whether the event was `RedrawRequested`.
-            redraw: bool,
-        },
-        /// A user event.
-        UserEvent,
-        /// `new_events`.
-        NewEvents,
-        /// `about_to_wait`.
-        AboutToWait,
-        /// `resumed`.
-        Resumed,
-        /// A direct `App::run_action` call, not an `ApplicationHandler` callback.
-        RunAction,
     }
 
     /// One forwarded invocation, its times in nanoseconds after the arm.
@@ -233,33 +306,75 @@ pub(crate) mod recorders {
         pub(crate) synthetic: bool,
     }
 
-    /// What one sample recorded.
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub(crate) struct Frozen {
+    /// One sample's record storage: exactly `OUTER_CAPACITY` outer callbacks and `INVOCATION_CAPACITY`
+    /// invocations, allocated once and moved, never copied, from recorder to frozen record and back.
+    #[derive(Debug)]
+    pub(crate) struct Buffers {
         /// Outer callbacks, in order.
         pub(crate) outer: Vec<OuterCallbackV1>,
         /// Invocations, in order.
         pub(crate) invocations: Vec<InvocationV1>,
-        /// A callback or invocation could not be joined: an orphan, a nest, an unmatched return, an
-        /// unreturned invocation, or a time before the arm.
+    }
+
+    impl Buffers {
+        /// Empty storage at its full capacity; the only allocation a sample's recording makes.
+        pub(crate) fn new() -> Self {
+            Self {
+                outer: Vec::with_capacity(OUTER_CAPACITY),
+                invocations: Vec::with_capacity(INVOCATION_CAPACITY),
+            }
+        }
+
+        /// The bytes the storage holds: its capacity, whatever its length.
+        pub(crate) fn payload_bytes(&self) -> usize {
+            self.outer.capacity() * std::mem::size_of::<OuterCallbackV1>()
+                + self.invocations.capacity() * std::mem::size_of::<InvocationV1>()
+        }
+    }
+
+    /// What one sample recorded; it owns the storage the recorder used, until `recycle` hands it back.
+    #[derive(Debug)]
+    pub(crate) struct Frozen {
+        /// The records.
+        pub(crate) buffers: Buffers,
+        /// A callback or invocation could not be joined: an orphan, a nest, an unmatched or reversed
+        /// return, an invocation outside its parent, an unreturned invocation, or a time before the arm
+        /// or not representable.
         pub(crate) incomplete: bool,
         /// A buffer was full; the record is excluded, never trimmed to fit.
         pub(crate) overflow: bool,
     }
 
+    impl Frozen {
+        /// Hand the storage back, emptied, for the next sample's recorder.
+        pub(crate) fn recycle(mut self) -> Buffers {
+            self.buffers.outer.clear();
+            self.buffers.invocations.clear();
+            self.buffers
+        }
+    }
+
     /// An open record: its index, or `Dropped` when the buffer was full for it.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Open {
+        /// The record at this index.
         Recorded(usize),
+        /// Not stored: the buffer was full.
         Dropped,
     }
 
-    /// Records one sample's outer callbacks and invocations from its arm.
+    /// Nanoseconds after the arm for an instant `since` past it; `None` when the instant precedes the arm
+    /// (`since` is `None`) or the offset does not fit a `u64`, which is rejected, never saturated.
+    pub(crate) fn offset_ns(since: Option<Duration>) -> Option<u64> {
+        u64::try_from(since?.as_nanos()).ok()
+    }
+
+    /// Records one sample's outer callbacks and invocations from its arm. Any invalid order or containment
+    /// marks the sample incomplete, and the mark is never cleared.
     #[derive(Debug)]
     pub(crate) struct Recorder {
         armed_at: Instant,
-        outer: Vec<OuterCallbackV1>,
-        invocations: Vec<InvocationV1>,
+        buffers: Buffers,
         open_outer: Option<Open>,
         open_invocation: Option<Open>,
         incomplete: bool,
@@ -267,18 +382,20 @@ pub(crate) mod recorders {
     }
 
     impl Recorder {
-        /// A recorder armed at `armed_at`. `running` is the outer callback the arm runs inside: its record
-        /// starts at the arm, clipped, so the invocations it makes after the arm have a parent.
-        pub(crate) fn arm(armed_at: Instant, running: Option<OuterKind>) -> Self {
+        /// A recorder armed at `armed_at` on `buffers` (new, or recycled from a previous sample). `running`
+        /// is the outer callback the arm runs inside: its record starts at the arm, clipped, so the
+        /// invocations it makes after the arm have a parent.
+        pub(crate) fn arm(armed_at: Instant, running: Option<OuterKind>, buffers: Buffers) -> Self {
             let mut recorder = Self {
                 armed_at,
-                outer: Vec::with_capacity(OUTER_CAPACITY),
-                invocations: Vec::with_capacity(INVOCATION_CAPACITY),
+                buffers,
                 open_outer: None,
                 open_invocation: None,
                 incomplete: false,
                 overflow: false,
             };
+            recorder.buffers.outer.clear();
+            recorder.buffers.invocations.clear();
             if let Some(kind) = running {
                 // When: the arm runs inside a callback, that callback's record starts here.
                 recorder.push_outer(kind, 0, true);
@@ -286,10 +403,11 @@ pub(crate) mod recorders {
             recorder
         }
 
-        /// Nanoseconds from the arm to `at`; a time before the arm marks the sample incomplete.
+        /// Nanoseconds from the arm to `at`; a time before the arm or past the `u64` range marks the
+        /// sample incomplete.
         fn offset(&mut self, at: Instant) -> u64 {
-            match at.checked_duration_since(self.armed_at) {
-                Some(after) => u64::try_from(after.as_nanos()).unwrap_or(u64::MAX),
+            match offset_ns(at.checked_duration_since(self.armed_at)) {
+                Some(offset) => offset,
                 None => {
                     self.incomplete = true;
                     0
@@ -299,14 +417,14 @@ pub(crate) mod recorders {
 
         /// Open an outer callback record, or count the overflow when the buffer is full.
         fn push_outer(&mut self, kind: OuterKind, enter_ns: u64, clipped_at_arm: bool) {
-            if self.outer.len() == OUTER_CAPACITY {
-                // When: the buffer is full, the sample overflows and this callback is dropped.
+            if self.buffers.outer.len() == OUTER_CAPACITY {
+                // When: the outer buffer is full, the sample overflows and this callback is dropped.
                 self.overflow = true;
                 self.open_outer = Some(Open::Dropped);
                 return;
             }
-            let id = self.outer.len() as u32;
-            self.outer.push(OuterCallbackV1 {
+            let id = self.buffers.outer.len() as u32;
+            self.buffers.outer.push(OuterCallbackV1 {
                 enter_ns,
                 return_ns: 0,
                 id,
@@ -314,92 +432,311 @@ pub(crate) mod recorders {
                 open: true,
                 clipped_at_arm,
             });
-            self.open_outer = Some(Open::Recorded(self.outer.len() - 1));
+            self.open_outer = Some(Open::Recorded(self.buffers.outer.len() - 1));
         }
 
-        /// An outer callback entered at `at`. Outer callbacks never nest; one already open is a defect.
+        /// An outer callback entered at `at`. Outer callbacks never nest and never overlap the previous one.
         pub(crate) fn enter_outer(&mut self, kind: OuterKind, at: Instant) {
             let enter_ns = self.offset(at);
             if self.open_outer.is_some() {
                 // When: another outer callback is still open, the two cannot be joined.
                 self.incomplete = true;
             }
+            if self.buffers.outer.last().is_some_and(|previous| enter_ns < previous.return_ns) {
+                // When: this callback enters before the previous one returned, the order is invalid.
+                self.incomplete = true;
+            }
             self.push_outer(kind, enter_ns, false);
         }
 
-        /// The open outer callback returned at `at`; a return with none open is a defect.
+        /// The open outer callback returned at `at`. A return with none open, a return before its entry, or
+        /// a return while one of its invocations is still open is a defect.
         pub(crate) fn exit_outer(&mut self, at: Instant) {
             let return_ns = self.offset(at);
+            if self.open_invocation.is_some() {
+                // When: an invocation is still open, it would extend past its parent's return.
+                self.incomplete = true;
+            }
             match self.open_outer.take() {
                 Some(Open::Recorded(index)) => {
-                    self.outer[index].return_ns = return_ns;
-                    self.outer[index].open = false;
+                    let record = &mut self.buffers.outer[index];
+                    record.return_ns = return_ns;
+                    record.open = false;
+                    let reversed = return_ns < record.enter_ns;
+                    self.incomplete |= reversed;
                 }
                 Some(Open::Dropped) => {}
                 None => self.incomplete = true,
             }
         }
 
-        /// The probe forwarded `kind` to the App at `at`. Its parent is the open outer callback; with none
-        /// open it is an orphan, and invocations never nest.
-        pub(crate) fn enter_invocation(
-            &mut self,
-            kind: InvocationKind,
-            window: u64,
-            synthetic: bool,
-            at: Instant,
-        ) {
+        /// The probe forwarded `invocation` to the App at `at`. Its parent is the open outer callback; with
+        /// none open it is an orphan. Invocations never nest, never overlap the previous one, and never
+        /// start before their parent.
+        pub(crate) fn enter_invocation(&mut self, invocation: Invocation, at: Instant) {
             let enter_ns = self.offset(at);
             if self.open_invocation.is_some() {
                 // When: another invocation is still open, the two cannot be joined.
                 self.incomplete = true;
             }
+            if self.buffers.invocations.last().is_some_and(|previous| enter_ns < previous.return_ns)
+            {
+                // When: this invocation enters before the previous one returned, the order is invalid.
+                self.incomplete = true;
+            }
             let parent = match self.open_outer {
-                Some(Open::Recorded(index)) => self.outer[index].id,
+                Some(Open::Recorded(index)) => {
+                    let outer = self.buffers.outer[index];
+                    // An invocation must lie inside its parent callback.
+                    self.incomplete |= enter_ns < outer.enter_ns;
+                    outer.id
+                }
                 Some(Open::Dropped) => u32::MAX,
                 None => {
                     self.incomplete = true;
                     u32::MAX
                 }
             };
-            if self.invocations.len() == INVOCATION_CAPACITY {
-                // When: the buffer is full, the sample overflows and this invocation is dropped.
+            if self.buffers.invocations.len() == INVOCATION_CAPACITY {
+                // When: the invocation buffer is full, the sample overflows and this invocation is dropped.
                 self.overflow = true;
                 self.open_invocation = Some(Open::Dropped);
                 return;
             }
-            let id = self.invocations.len() as u32;
-            self.invocations.push(InvocationV1 {
+            let id = self.buffers.invocations.len() as u32;
+            self.buffers.invocations.push(InvocationV1 {
                 enter_ns,
                 return_ns: 0,
-                window,
+                window: invocation.window,
                 id,
                 parent,
-                kind,
-                synthetic,
+                kind: invocation.kind,
+                synthetic: invocation.synthetic,
             });
-            self.open_invocation = Some(Open::Recorded(self.invocations.len() - 1));
+            self.open_invocation = Some(Open::Recorded(self.buffers.invocations.len() - 1));
         }
 
-        /// The open invocation returned at `at`; a return with none open is a defect.
+        /// The open invocation returned at `at`; a return with none open, or before its entry, is a defect.
         pub(crate) fn exit_invocation(&mut self, at: Instant) {
             let return_ns = self.offset(at);
             match self.open_invocation.take() {
-                Some(Open::Recorded(index)) => self.invocations[index].return_ns = return_ns,
+                Some(Open::Recorded(index)) => {
+                    let record = &mut self.buffers.invocations[index];
+                    record.return_ns = return_ns;
+                    let reversed = return_ns < record.enter_ns;
+                    self.incomplete |= reversed;
+                }
                 Some(Open::Dropped) => {}
                 None => self.incomplete = true,
             }
         }
 
-        /// What the sample recorded at take. An outer callback still open stays `open` (`OpenAtTake`):
-        /// the window end clips it. An invocation still open is an unreturned call, so incomplete.
-        pub(crate) fn freeze(&self) -> Frozen {
+        /// Freeze the sample at take, moving the storage into the record: nothing is copied. An outer
+        /// callback still open stays `open` (`OpenAtTake`), which the window end clips. An invocation still
+        /// open is an unreturned call, so incomplete.
+        pub(crate) fn freeze(self) -> Frozen {
             Frozen {
-                outer: self.outer.clone(),
-                invocations: self.invocations.clone(),
                 incomplete: self.incomplete || self.open_invocation.is_some(),
                 overflow: self.overflow,
+                buffers: self.buffers,
             }
+        }
+    }
+}
+
+/// One sample's timeline lifecycle, over the token type so tests can inject every arm and take outcome.
+#[cfg(perf_dispatch_timeline_api)]
+pub(crate) mod lifecycle {
+    use std::time::Instant;
+
+    use super::recorders::{Buffers, Recorder};
+    use super::{Disposition, OuterKind, TimelineArm, TimelineTake};
+
+    /// A sample's timeline: armed with a token and a recorder, or settled with a disposition.
+    #[derive(Debug)]
+    pub(crate) enum Lifecycle<Token> {
+        /// Nothing was armed; the disposition is final.
+        Unarmed(Disposition),
+        /// Armed under `token`, recording from the arm.
+        Armed {
+            /// The App's token.
+            token: Token,
+            /// The harness's recorder.
+            recorder: Recorder,
+        },
+    }
+
+    /// The lifecycle `outcome` starts. Only an armed token reads `clock` and takes storage: it reuses the
+    /// recycled `storage` when there is some and allocates once otherwise. Any other outcome allocates
+    /// nothing and reads no clock.
+    pub(crate) fn arm<Token>(
+        outcome: TimelineArm<Token>,
+        running: Option<OuterKind>,
+        storage: &mut Option<Buffers>,
+        clock: impl FnOnce() -> Instant,
+    ) -> Lifecycle<Token> {
+        match outcome {
+            TimelineArm::Armed(token) => {
+                let buffers = storage.take().unwrap_or_else(Buffers::new);
+                Lifecycle::Armed { token, recorder: Recorder::arm(clock(), running, buffers) }
+            }
+            TimelineArm::Unavailable => Lifecycle::Unarmed(Disposition::Unavailable),
+            TimelineArm::NotRecorded => Lifecycle::Unarmed(Disposition::NotRecorded),
+            TimelineArm::GateOff => Lifecycle::Unarmed(Disposition::GateOff),
+            TimelineArm::NoPane => Lifecycle::Unarmed(Disposition::NoPane),
+            TimelineArm::StillArmed(_) => Lifecycle::Unarmed(Disposition::StillArmed),
+            TimelineArm::Exhausted => Lifecycle::Unarmed(Disposition::Exhausted),
+        }
+    }
+
+    /// Close `lifecycle` at a sample's close: an armed one takes its token exactly once, freezes its
+    /// recorder and hands the storage back to `storage` for the next sample; an unarmed one keeps its
+    /// disposition and takes nothing.
+    pub(crate) fn close<Token, Timeline>(
+        lifecycle: Lifecycle<Token>,
+        storage: &mut Option<Buffers>,
+        take: impl FnOnce(Token) -> TimelineTake<Timeline>,
+    ) -> Disposition {
+        match lifecycle {
+            Lifecycle::Unarmed(disposition) => disposition,
+            Lifecycle::Armed { token, recorder } => {
+                let outcome = take(token);
+                let frozen = recorder.freeze();
+                let complete = !frozen.incomplete && !frozen.overflow;
+                *storage = Some(frozen.recycle());
+                match outcome {
+                    TimelineTake::Timeline(_) if complete => Disposition::Recorded,
+                    TimelineTake::Timeline(_) => Disposition::RecordedIncomplete,
+                    TimelineTake::Unavailable => Disposition::Unavailable,
+                    TimelineTake::NotRecorded => Disposition::NotRecorded,
+                    TimelineTake::GateOff => Disposition::GateOff,
+                    TimelineTake::Mismatch => Disposition::Mismatch,
+                    TimelineTake::AlreadyTaken => Disposition::AlreadyTaken,
+                }
+            }
+        }
+    }
+}
+
+/// The probe's per-sample facade: arm at injection, record the callbacks and invocations while armed, and
+/// take at every close.
+#[cfg(perf_dispatch_timeline_api)]
+pub(crate) mod sample {
+    use std::time::Instant;
+
+    use sonicterm_app::app::App;
+
+    use super::lifecycle::{self, Lifecycle};
+    use super::recorders::Buffers;
+    use super::{api, Disposition, Invocation, OuterKind};
+
+    /// The probe's reused recorder storage between samples: `None` until a sample is first armed.
+    pub(crate) type Storage = Option<Buffers>;
+
+    /// One open sample's timeline.
+    #[derive(Debug)]
+    pub(crate) struct SampleTimeline(Lifecycle<api::Token>);
+
+    impl SampleTimeline {
+        /// Arm pane `pane_id`'s timeline at the sample's injection, inside the outer callback `running`.
+        pub(crate) fn arm(
+            app: &mut App,
+            pane_id: u64,
+            running: Option<OuterKind>,
+            storage: &mut Storage,
+        ) -> Self {
+            Self(lifecycle::arm(api::arm(app, pane_id, None), running, storage, Instant::now))
+        }
+
+        /// Whether a recorder is running; only then is any instant read.
+        pub(crate) fn is_armed(&self) -> bool {
+            matches!(self.0, Lifecycle::Armed { .. })
+        }
+
+        /// An outer callback of `kind` entered.
+        pub(crate) fn enter_outer(&mut self, kind: OuterKind) {
+            if let Lifecycle::Armed { recorder, .. } = &mut self.0 {
+                recorder.enter_outer(kind, Instant::now());
+            }
+        }
+
+        /// The open outer callback returned.
+        pub(crate) fn exit_outer(&mut self) {
+            if let Lifecycle::Armed { recorder, .. } = &mut self.0 {
+                recorder.exit_outer(Instant::now());
+            }
+        }
+
+        /// The probe forwarded `invocation` at `at`.
+        pub(crate) fn enter_invocation(&mut self, invocation: Invocation, at: Instant) {
+            if let Lifecycle::Armed { recorder, .. } = &mut self.0 {
+                recorder.enter_invocation(invocation, at);
+            }
+        }
+
+        /// The forwarded invocation returned at `at`.
+        pub(crate) fn exit_invocation(&mut self, at: Instant) {
+            if let Lifecycle::Armed { recorder, .. } = &mut self.0 {
+                recorder.exit_invocation(at);
+            }
+        }
+
+        /// Close the timeline at the sample's close: take an armed token once and recycle the storage.
+        pub(crate) fn close(self, app: &mut App, storage: &mut Storage) -> Disposition {
+            lifecycle::close(self.0, storage, |token| api::take(app, token))
+        }
+    }
+}
+
+/// Without the cfg a sample's timeline is never armed: nothing is called, stored or read, and every sample
+/// records the timeline unavailable.
+#[cfg(not(perf_dispatch_timeline_api))]
+pub(crate) mod sample {
+    use std::time::Instant;
+
+    use sonicterm_app::app::App;
+
+    use super::{api, ArmResult, Disposition, Invocation, OuterKind};
+
+    /// This build stores nothing between samples.
+    pub(crate) type Storage = ();
+
+    /// One open sample's timeline: never armed in this build.
+    #[derive(Debug)]
+    pub(crate) struct SampleTimeline;
+
+    impl SampleTimeline {
+        /// Nothing is armed in this build: the adapter answers `Unavailable` without calling the App.
+        pub(crate) fn arm(
+            app: &mut App,
+            pane_id: u64,
+            _running: Option<OuterKind>,
+            _storage: &mut Storage,
+        ) -> Self {
+            debug_assert_eq!(api::arm(app, pane_id, None), ArmResult::Unavailable);
+            Self
+        }
+
+        /// Never armed in this build.
+        pub(crate) fn is_armed(&self) -> bool {
+            false
+        }
+
+        /// Nothing is recorded in this build.
+        pub(crate) fn enter_outer(&mut self, _kind: OuterKind) {}
+
+        /// Nothing is recorded in this build.
+        pub(crate) fn exit_outer(&mut self) {}
+
+        /// Nothing is recorded in this build.
+        pub(crate) fn enter_invocation(&mut self, _invocation: Invocation, _at: Instant) {}
+
+        /// Nothing is recorded in this build.
+        pub(crate) fn exit_invocation(&mut self, _at: Instant) {}
+
+        /// The timeline is unavailable in this build.
+        pub(crate) fn close(self, _app: &mut App, _storage: &mut Storage) -> Disposition {
+            Disposition::Unavailable
         }
     }
 }

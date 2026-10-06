@@ -513,12 +513,31 @@ pub(crate) struct LatencySample {
     pub(crate) split: Option<Split>,
     /// [`NOT_CREDITED`] for an uncredited sample, else one of [`SPLIT_REASONS`].
     pub(crate) split_reason: &'static str,
+    /// What the sample's dispatch timeline came to at its close; [`TIMELINE_NOT_TAKEN`] until a close
+    /// records it.
+    pub(crate) dispatch_timeline: &'static str,
 }
+
+/// A sample whose close has not recorded its dispatch timeline: every probe close path records one, so
+/// this value in `result.json` means a close path was missed.
+pub(crate) const TIMELINE_NOT_TAKEN: &str = "not-taken";
 
 impl LatencySample {
     /// A sample no frame was credited with, for `reason`.
     pub(crate) fn uncredited(inject_unix_s: f64, reason: &'static str) -> Self {
-        Self { inject_unix_s, latency_ms: None, reason, split: None, split_reason: NOT_CREDITED }
+        Self {
+            inject_unix_s,
+            latency_ms: None,
+            reason,
+            split: None,
+            split_reason: NOT_CREDITED,
+            dispatch_timeline: TIMELINE_NOT_TAKEN,
+        }
+    }
+
+    /// This sample with its dispatch timeline's disposition, recorded at its close.
+    pub(crate) fn with_dispatch_timeline(self, dispatch_timeline: &'static str) -> Self {
+        Self { dispatch_timeline, ..self }
     }
 
     /// A sample injected at `injected` and credited to the dispatch that ended at `ended`, split
@@ -540,7 +559,14 @@ impl LatencySample {
             SPLIT_REASONS.contains(&split_reason),
             "{split_reason} is not a split reason"
         );
-        Self { inject_unix_s, latency_ms: Some(latency_ms), reason: CREDITED, split, split_reason }
+        Self {
+            inject_unix_s,
+            latency_ms: Some(latency_ms),
+            reason: CREDITED,
+            split,
+            split_reason,
+            dispatch_timeline: TIMELINE_NOT_TAKEN,
+        }
     }
 }
 
@@ -550,13 +576,14 @@ impl Serialize for LatencySample {
         serializer: Format,
     ) -> Result<Format::Ok, Format::Error> {
         // `attributed` is derived from `latency_ms`, so a reader need not infer it.
-        let mut fields = serializer.serialize_struct("LatencySample", 6)?;
+        let mut fields = serializer.serialize_struct("LatencySample", 7)?;
         fields.serialize_field("inject_unix_s", &self.inject_unix_s)?;
         fields.serialize_field("latency_ms", &self.latency_ms)?;
         fields.serialize_field("attributed", &self.latency_ms.is_some())?;
         fields.serialize_field("reason", self.reason)?;
         fields.serialize_field("split", &self.split)?;
         fields.serialize_field("split_reason", self.split_reason)?;
+        fields.serialize_field("dispatch_timeline", self.dispatch_timeline)?;
         fields.end()
     }
 }

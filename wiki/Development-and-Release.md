@@ -175,7 +175,11 @@ the App's two S10 attribution watch methods (`arm_s10_attribution` and
 `completeness_checkpoint`, which S9's and S12's `end` checkpoints read; and
 `perf_dispatch_timeline_api`, for the App's per-sample dispatch-timeline methods
 (`arm_dispatch_timeline_v1` and `take_dispatch_timeline_v1`). Their prerequisite
-bodies record nothing, and no probe path calls the harness adapter yet. The gate lints and tests the harness with **every**
+bodies record nothing. S2 arms the timeline at each typing injection, before the
+injection instant is read, and takes it at every close of a sample. Each S2 sample in
+`result.json` records what its timeline came to as `dispatch_timeline`:
+`unavailable` without the cfg, `gate-off` or `not-recorded` from the stubs. The
+harness's recorder buffers are allocated only for an armed sample and reused. The gate lints and tests the harness with **every**
 entry on at once, in two steps built from the table, `perf-scenarios-harness-api-clippy`
 and `perf-scenarios-harness-api-tests`. The test step passes the cfgs through
 `RUSTFLAGS`, and a changed `RUSTFLAGS` invalidates every dependency's build, so
