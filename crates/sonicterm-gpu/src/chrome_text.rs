@@ -803,6 +803,13 @@ pub fn layout_view(
             pen_x += advance;
             continue;
         }
+        if info.oversize {
+            // When: info.oversize marks a tile the atlas can never place, the glyph draws nothing
+            // although it should, so it is noted as missing chrome; the pen still advances.
+            note_missing_chrome(glyph.lead_ch);
+            pen_x += advance;
+            continue;
+        }
         if info.px_size[0] == 0 || info.px_size[1] == 0 {
             // When: px_size is zero the tile covers no pixels, yet it still carries the
             // shaper's advance, so the pen must move or the rest of the run shifts left.

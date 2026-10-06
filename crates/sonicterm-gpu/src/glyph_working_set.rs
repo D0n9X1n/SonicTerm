@@ -110,6 +110,8 @@ pub struct GlyphWorkingSet {
     pub unresolved_chars: Vec<char>,
     /// Resolved glyphs whose face rasterized nothing: the renderer draws them as tofu too.
     pub raster_failed: Vec<GlyphKey>,
+    /// Required glyphs whose tile is larger than the atlas can ever place, so they draw nothing.
+    pub oversize_required: Vec<GlyphKey>,
 }
 
 /// The required tiles a measurement drew as tofu, listed rather than rejected.
@@ -119,6 +121,8 @@ struct Accounted {
     unresolved_chars: BTreeSet<char>,
     /// Resolved glyphs that rasterized to nothing.
     raster_failed: HashSet<GlyphKey>,
+    /// Required glyphs cached as too large to place.
+    oversize_required: HashSet<GlyphKey>,
 }
 
 /// Why a working-set measurement is incomplete, so it is rejected rather than classified.
@@ -375,6 +379,7 @@ fn measure_with_stacks(
     Ok(GlyphWorkingSet {
         unresolved_chars: accounted.unresolved_chars.into_iter().collect(),
         raster_failed: accounted.raster_failed.into_iter().collect(),
+        oversize_required: accounted.oversize_required.into_iter().collect(),
         tile_identities,
         fit_outcome: atlas.fit_outcome(),
         max_tile_dims: atlas.max_tile_dims(),
@@ -390,7 +395,8 @@ fn measure_with_stacks(
 
 /// Check that `key`, which a layout or the fast path required, is resident. A missing tile is the
 /// renderer's tofu: a real glyph id that rasterized nothing is listed in `raster_failed`, a notdef
-/// key in `unresolved_chars`. An absent tile is only allowed once the atlas evicted.
+/// key in `unresolved_chars`, and a tile too large to place in `oversize_required`; each is an
+/// incomplete required tile. An absent tile is only allowed once the atlas evicted.
 fn account_tile(
     atlas: &GlyphAtlas,
     key: GlyphKey,
@@ -403,6 +409,10 @@ fn account_tile(
         }
         Some(info) if info.missing => {
             accounted.unresolved_chars.insert(key.ch);
+            Ok(())
+        }
+        Some(info) if info.oversize => {
+            accounted.oversize_required.insert(key);
             Ok(())
         }
         Some(_) => Ok(()),

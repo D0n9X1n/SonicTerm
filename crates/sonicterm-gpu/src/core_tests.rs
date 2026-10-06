@@ -4228,6 +4228,7 @@ fn a_zero_area_glyph_is_recognised_as_degenerate() {
         is_color: false,
         is_subpixel: false,
         missing: false,
+        oversize: false,
     };
 
     assert!(!glyph_draw_is_degenerate(&base), "an ordinary glyph must still draw");
@@ -5107,9 +5108,13 @@ fn a_missing_glyph_draws_tofu_and_an_empty_glyph_is_skipped() {
         is_color: false,
         is_subpixel: false,
         missing: false,
+        oversize: false,
     };
     let missing = sonicterm_text::glyph_atlas::GlyphInfo { missing: true, ..empty };
     assert_eq!(drawable_or_tofu(Some(missing)), None, "missing draws tofu");
+    // A tile too large to place draws nothing either, so a fallback character shows tofu for it.
+    let oversize = sonicterm_text::glyph_atlas::GlyphInfo { oversize: true, ..empty };
+    assert_eq!(drawable_or_tofu(Some(oversize)), None, "an oversize glyph draws tofu");
     assert_eq!(drawable_or_tofu(None), None, "a refused glyph draws tofu");
     assert_eq!(drawable_or_tofu(Some(empty)), Some(empty), "an empty glyph is skipped, not tofu");
 }
@@ -6732,6 +6737,7 @@ fn record_projection_matches_the_frozen_emission_geometry() {
         is_color,
         is_subpixel: !is_color,
         missing: false,
+        oversize: false,
     };
     let geometries = [
         ((0.0, 0.0), (10.0, 20.0), 16.0, (400.0, 200.0)),
@@ -8351,4 +8357,77 @@ fn later_runs_are_processed_after_an_incomplete_run() {
     let (emitted, _) = emit_counting_materialized(&mut rig, &grid);
     assert_eq!(emitted.glyphs.len(), 3, "the ASCII run after the incomplete one draws");
     assert!(!rig.cache.contains(7, emitted.key), "the row is not admitted");
+}
+
+/// The shaped atlas key a fresh packaged rig draws `character` with: a real (nonzero) glyph id from
+/// its face, so a test can seed that exact key before the row is drawn again.
+fn shaped_key_of(character: char) -> sonicterm_types::glyph_key::GlyphKey {
+    let grid = text_grid(2, &[&character.to_string()]);
+    let mut rig = GlyphRig::new(false);
+    rig.begin(&grid);
+    let drawn = rig.emit(&grid, 0, 0);
+    assert!(drawn.missing.is_empty() && !drawn.glyphs.is_empty(), "{character} draws a real tile");
+    rig.atlas
+        .resident_tile_keys()
+        .into_iter()
+        .find(|key| key.ch == character && key.glyph_id != 0)
+        .expect("the packaged stack shapes the character to a real glyph id")
+}
+
+/// A shaped glyph with a real id whose rasterization produced nothing is drawn as nothing, so it
+/// is reported missing and its row is not cached, instead of passing as an empty glyph.
+#[test]
+fn a_shaped_glyph_that_rasterizes_nothing_is_reported_missing() {
+    let key = shaped_key_of('用');
+    let grid = text_grid(2, &["用"]);
+    let mut rig = GlyphRig::new(false);
+    // The atlas caches the failed rasterization as its missing sentinel under the shaped key.
+    let _sentinel = rig.atlas.get_or_insert(key, &mut NoGlyphs);
+    rig.begin(&grid);
+    let drawn = rig.emit(&grid, 0, 0);
+    assert_eq!(drawn.missing, vec!['用'], "the missing glyph is reported");
+    assert!(!rig.cache.contains(7, drawn.key), "and its row is not cached");
+}
+
+/// A shaped glyph with a real id that the atlas refuses (its entry index full, eviction barred) is
+/// reported missing as well as keeping its row out of the cache.
+#[test]
+fn a_shaped_glyph_the_atlas_refuses_is_reported_missing() {
+    let grid = text_grid(2, &["用"]);
+    let mut rig = GlyphRig::new(false);
+    rig.atlas.__set_entry_cap_for_test(1);
+    rig.atlas.set_eviction_enabled(false);
+    // One unrelated entry fills the one-entry index, so the shaped glyph cannot be admitted.
+    let filler = sonicterm_types::glyph_key::GlyphKey::new('\u{E000}', false, false);
+    let _filler = rig.atlas.get_or_insert(filler, &mut NoGlyphs);
+    rig.begin(&grid);
+    let drawn = rig.emit(&grid, 0, 0);
+    assert_eq!(drawn.missing, vec!['用'], "the refused glyph is reported");
+    assert!(!rig.cache.contains(7, drawn.key), "and its row is not cached");
+}
+
+/// A shaped glyph whose tile is larger than the atlas can ever place is cached as a zero-area
+/// sentinel; it draws nothing, so it is reported missing and its row is not cached.
+#[test]
+fn a_shaped_glyph_too_large_for_the_atlas_is_reported_missing() {
+    let grid = text_grid(2, &["用"]);
+    let mut rig = GlyphRig::new(false);
+    // A fixed 8x8 atlas cannot place a 14 px CJK tile.
+    rig.atlas = GlyphAtlas::new(8, 8);
+    rig.begin(&grid);
+    let drawn = rig.emit(&grid, 0, 0);
+    assert_eq!(drawn.missing, vec!['用'], "the oversize glyph is reported");
+    assert!(!rig.cache.contains(7, drawn.key), "and its row is not cached");
+}
+
+/// An intentionally empty glyph (an ideographic space) records nothing and leaves its row complete:
+/// the strengthened diagnostics report only glyphs that should have drawn.
+#[test]
+fn an_intentionally_empty_glyph_records_nothing_and_its_row_is_cached() {
+    let grid = text_grid(2, &["\u{3000}"]);
+    let mut rig = GlyphRig::new(false);
+    rig.begin(&grid);
+    let drawn = rig.emit(&grid, 0, 0);
+    assert!(drawn.missing.is_empty(), "a blank is never missing: {:?}", drawn.missing);
+    assert!(rig.cache.contains(7, drawn.key), "and its row is cached");
 }

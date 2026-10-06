@@ -1142,7 +1142,8 @@ fn glyph_atlas_working_set() {
             let set =
                 measure_glyph_working_set(&lines, &titles, FONT_FAMILY, size, dpi, &font_dirs)
                     .expect("the packaged scenario family loads");
-            let incomplete_glyphs = set.unresolved_chars.len() + set.raster_failed.len();
+            let incomplete_glyphs =
+                set.unresolved_chars.len() + set.raster_failed.len() + set.oversize_required.len();
             println!(
                 "{}",
                 working_set_row(
@@ -1160,8 +1161,8 @@ fn glyph_atlas_working_set() {
                 // When: a required tile is tofu on this host, say which, apart from the row.
                 println!(
                     "glyph_atlas_working_set_tofu platform={platform} scale={scale} fixture={name} \
-                     unresolved={:?} raster_failed={:?}",
-                    set.unresolved_chars, set.raster_failed
+                     unresolved={:?} raster_failed={:?} oversize_required={:?}",
+                    set.unresolved_chars, set.raster_failed, set.oversize_required
                 );
             }
             let recorded = START_SIZE_INPUTS.iter().find(|row| {

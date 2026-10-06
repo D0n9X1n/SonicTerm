@@ -706,9 +706,11 @@ fn an_unresolved_glyph_is_cached_missing_and_an_empty_glyph_is_not() {
     let unresolved =
         atlas.get_or_insert(GlyphKey::new('x', false, false), &mut rasterizer).unwrap();
     assert!(unresolved.missing);
+    assert!(!unresolved.oversize, "a raster failure is missing, not oversize");
     assert_eq!(unresolved.px_size, [0, 0]);
     let space = atlas.get_or_insert(GlyphKey::new(' ', false, false), &mut rasterizer).unwrap();
     assert!(!space.missing);
+    assert!(!space.oversize, "an empty glyph is neither missing nor oversize");
     assert_eq!((space.px_size, space.px_offset), ([0, 0], [1, -2]));
 }
 
@@ -898,6 +900,9 @@ fn a_tile_up_to_the_maximum_grows_the_atlas_and_a_larger_one_is_a_sentinel() {
         .unwrap();
     assert_eq!(too_large.px_size, [0, 0], "beyond the maximum is a sentinel");
     assert!(!too_large.missing);
+    // Only the impossible tile is marked oversize, so callers report it instead of skipping it.
+    assert!(too_large.oversize, "the sentinel is marked oversize");
+    assert!(!large.oversize, "a placed tile is not oversize");
     assert_eq!((atlas.width(), atlas.growths()), (1024, 2), "an impossible tile grows nothing");
 }
 

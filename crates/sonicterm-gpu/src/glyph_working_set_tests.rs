@@ -428,3 +428,40 @@ fn the_tab_title_set_holds_every_program_icon_at_both_scales() {
         assert!(absent.is_empty(), "icons never measured at {dpi} dpi: {absent:?}");
     }
 }
+
+/// Answers every key with a 16x16 tile, larger than an 8x8 fixed atlas can ever place.
+struct LargeTiles;
+
+impl sonicterm_text::glyph_atlas::Rasterizer for LargeTiles {
+    fn rasterize(&mut self, _key: GlyphKey) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+        Some(sonicterm_text::glyph_atlas::RasterTile {
+            width: 16,
+            height: 16,
+            offset_x: 0,
+            offset_y: -16,
+            advance: 16.0,
+            coverage: vec![255; 256],
+            is_color: false,
+            is_subpixel: false,
+        })
+    }
+}
+
+/// A required tile too large for the atlas draws nothing in the renderer, so the helper lists it as
+/// an incomplete required tile instead of passing it as a resident empty glyph; a placed tile is
+/// not listed.
+#[test]
+fn an_oversize_required_tile_is_listed_as_incomplete() {
+    let mut atlas = GlyphAtlas::new(8, 8);
+    let oversize = GlyphKey::shaped('用', 1, 4242, false, false);
+    let _info = atlas.get_or_insert(oversize, &mut LargeTiles);
+    let mut accounted = Accounted::default();
+    account_tile(&atlas, oversize, &mut accounted).expect("an oversize tile is listed");
+    assert_eq!(accounted.oversize_required, HashSet::from([oversize]));
+    assert!(accounted.raster_failed.is_empty() && accounted.unresolved_chars.is_empty());
+    let mut roomy = GlyphAtlas::new(64, 64);
+    let _placed = roomy.get_or_insert(oversize, &mut LargeTiles);
+    let mut placed = Accounted::default();
+    account_tile(&roomy, oversize, &mut placed).expect("a placed tile is resident");
+    assert!(placed.oversize_required.is_empty(), "a placed tile is not oversize");
+}

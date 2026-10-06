@@ -8967,11 +8967,13 @@ impl GpuRenderer {
     ///
     /// Returns whether the run is complete. A run is incomplete when an attempted glyph was
     /// refused by the atlas (a `None` from `get_or_insert`, read before `drawable_or_tofu` folds
-    /// it with the stable missing sentinel), when a block glyph drew nothing, when shaping failed,
-    /// or when no shaper or rasterizer was available; such outcomes depend on atlas or font
-    /// state, not on content, so the row they belong to is drawn but never cached. Intentional
-    /// empty work is complete: an empty run, a run of wide continuations, whitespace and
-    /// zero-area non-block tiles, and a glyph the atlas caches as missing.
+    /// it with the stable missing sentinel), when a shaped glyph with a real id rasterized nothing
+    /// or is too large for the atlas (both also listed in `records.missing_chars`), when a block
+    /// glyph drew nothing, when shaping failed, or when no shaper or rasterizer was available; such
+    /// outcomes depend on atlas or font state, not on content, so the row they belong to is drawn
+    /// but never cached. Intentional empty work is complete: an empty run, a run of wide
+    /// continuations, whitespace and zero-area non-block tiles, and a character-fallback glyph the
+    /// atlas caches as missing, which draws tofu.
     ///
     /// Non-ASCII clusters are shaped through the font stack. Each cluster's lead cell dispatches
     /// on [`sonicterm_block_glyph::BlockKey::from_char`]: on `Some`, the atlas holds a
@@ -9422,13 +9424,21 @@ impl GpuRenderer {
             };
             let Some(info) = glyph_atlas.get_or_insert(key, &mut CountingRasterizer::new(wt))
             else {
-                // When: `glyph_atlas.get_or_insert` is None — the atlas refused
-                // this shaped glyph; the row is not cached.
+                // When: `glyph_atlas.get_or_insert` is None — the atlas refused this shaped
+                // glyph: it draws nothing, so it is reported missing and the row is not cached.
+                records.missing_chars.push(lead_cell.ch);
                 complete = false;
                 continue;
             };
+            if info.missing || info.oversize {
+                // When: a real glyph id rasterized nothing or its tile can never be placed, it draws
+                // nothing although it should, so it is reported missing and the row is not cached.
+                records.missing_chars.push(lead_cell.ch);
+                complete = false;
+                continue;
+            }
             if info.px_size[0] == 0 || info.px_size[1] == 0 {
-                // When: either axis of `info.px_size` is 0 — a zero-area tile,
+                // When: either axis of `info.px_size` is 0 — an intentionally empty glyph,
                 // which has no pixels to blit.
                 continue;
             }
@@ -9516,14 +9526,14 @@ fn glyph_draw_is_degenerate(info: &sonicterm_text::glyph_atlas::GlyphInfo) -> bo
 /// without becoming unreadable. See.
 const DIM_BLEND: f32 = 0.45;
 
-/// The terminal's atlas result for a fallback character: `None` draws tofu, both when the atlas
-/// refused the glyph and when it cached the glyph as missing; an empty glyph is returned, so the
-/// caller skips it without a box.
+/// The terminal's atlas result for a fallback character: `None` draws tofu when the atlas refused
+/// the glyph, cached it as missing, or cached it as too large to place; an empty glyph is
+/// returned, so the caller skips it without a box.
 #[must_use]
 fn drawable_or_tofu(
     info: Option<sonicterm_text::glyph_atlas::GlyphInfo>,
 ) -> Option<sonicterm_text::glyph_atlas::GlyphInfo> {
-    info.filter(|info| !info.missing)
+    info.filter(|info| !info.missing && !info.oversize)
 }
 
 fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {

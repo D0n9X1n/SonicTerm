@@ -696,6 +696,18 @@ slots first and its quad-cache entries second, preserves peer hits, then asks
 each table to shrink. No concurrent retention snapshot can observe only half
 that ordered eviction.
 
+Every glyph a row or a chrome layout should draw but cannot is reported. In a
+terminal row, a shaped glyph with a real id is listed in the frame's missing
+characters (`last_missing_tofu()`) and keeps its row out of the cache when the
+atlas refuses it, when it rasterized nothing (the missing sentinel), or when its
+tile is larger than the atlas can ever place (a zero-area sentinel marked
+`GlyphInfo::oversize`). A character-fallback glyph in any of those states draws
+tofu. Chrome layout notes an oversize glyph as missing chrome, as it does a
+missing one. An intentionally empty glyph, such as a space, records nothing,
+and its row stays complete. The glyph working-set helper lists an oversize
+required tile in `oversize_required`, beside `raster_failed` and
+`unresolved_chars`; all three count as incomplete required glyphs.
+
 The inline-image atlas starts as a 1 × 1 CPU/GPU placeholder. It promotes to a
 2,048 × 2,048 atlas when renderable media appears. After 240 rendered frames
 without inline media, it returns to the placeholder. It also returns to it
