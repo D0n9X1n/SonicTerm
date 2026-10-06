@@ -152,6 +152,9 @@ pub struct GlyphInfo {
     /// the renderer draws a tofu box for it, and [`GlyphAtlas::forget_missing`] drops it once a
     /// fallback face is published. An empty glyph, such as a space, is never missing.
     pub missing: bool,
+    /// True only for the sentinel cached when the rasterized tile is larger than the atlas can ever
+    /// place: it draws nothing, so callers report it as missing rather than skip it as empty.
+    pub oversize: bool,
 }
 
 /// A single rasterized glyph: alpha coverage mask + the metrics needed
@@ -920,6 +923,7 @@ impl GlyphAtlas {
                 is_color: false,
                 is_subpixel: false,
                 missing: true,
+                oversize: false,
             };
             self.map
                 .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
@@ -938,6 +942,7 @@ impl GlyphAtlas {
                 is_color: tile.is_color,
                 is_subpixel: tile.is_subpixel,
                 missing: false,
+                oversize: false,
             };
             self.map
                 .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
@@ -959,6 +964,7 @@ impl GlyphAtlas {
                 is_color: false,
                 is_subpixel: false,
                 missing: false,
+                oversize: true,
             };
             self.map
                 .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
@@ -1064,6 +1070,7 @@ impl GlyphAtlas {
             is_color: tile.is_color,
             is_subpixel: tile.is_subpixel,
             missing: false,
+            oversize: false,
         };
         self.map.insert(
             key,

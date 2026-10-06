@@ -559,3 +559,130 @@ fn release_runs_keeps_only_the_palette() {
     fill(&mut caches);
     assert_eq!(caches.items(), 2, "the next title and run prepare again");
 }
+
+/// Prepare `text` at tab 0 with `available_px` of room and draw it as the tab bar does, inside a
+/// missing-chrome scope. `fail_prepare` and `fail_draw` arm one shape failure after that many good
+/// shapes before each step. Returns the drawn text and every chrome character reported missing.
+fn draw_title(
+    cache: &mut TitleCache,
+    stack: &sonicterm_engine::FontStack,
+    text: &str,
+    available_px: f32,
+    fail_prepare: Option<usize>,
+    fail_draw: Option<usize>,
+) -> (String, Vec<char>) {
+    let mut raster = stack.clone();
+    let mut atlas = GlyphAtlas::new(256, 256);
+    let scope = crate::chrome_text::MissingChromeScope::enter();
+    if let Some(successes) = fail_prepare {
+        crate::chrome_text::fail_chrome_shape_after_for_test(successes);
+    }
+    let draw = cache.prepare(0, &probe(text, available_px, 0), stack, true);
+    let drawn = cache.drawn(&draw);
+    crate::chrome_text::disarm_chrome_shape_failure_for_test();
+    if let Some(successes) = fail_draw {
+        crate::chrome_text::fail_chrome_shape_after_for_test(successes);
+    }
+    let placement = TitlePlacement {
+        color: ChromeColor::WHITE,
+        raster_px: 15.0,
+        origin: (0.0, 20.0),
+        screen: (400.0, 100.0),
+        clip: None,
+    };
+    let _layout = layout_title(stack, &mut raster, &mut atlas, &drawn, placement);
+    crate::chrome_text::disarm_chrome_shape_failure_for_test();
+    (drawn.text.to_string(), scope.finish())
+}
+
+/// A title whose whole text cannot be shaped draws nothing, so its visible characters are reported
+/// missing exactly once, at the title-draw boundary.
+#[test]
+fn a_title_that_never_shapes_is_reported_once() {
+    let _lock = font_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let mut cache = TitleCache::default();
+    let (drawn, missing) = draw_title(&mut cache, &stack, "fits", 400.0, Some(0), None);
+    assert_eq!(drawn, "", "nothing is drawn");
+    assert_eq!(missing, vec!['f', 'i', 't', 's'], "the whole title is reported once");
+}
+
+/// A cut that did not shape while fitting is shaped again at draw time; when that succeeds the
+/// title drew, so nothing is reported.
+#[test]
+fn a_cut_whose_draw_time_retry_shapes_reports_nothing() {
+    let _lock = font_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let mut cache = TitleCache::default();
+    // Whole title and ellipsis shape; the first cut fails while fitting.
+    let (drawn, missing) = draw_title(&mut cache, &stack, LONG_TITLE, 120.0, Some(2), None);
+    assert!(!drawn.is_empty(), "a cut is drawn");
+    assert!(missing.is_empty(), "the retried cut drew: {missing:?}");
+}
+
+/// A cut that fails both while fitting and at draw time is reported once, by the draw-time retry,
+/// never a second time at the title-draw boundary.
+#[test]
+fn a_cut_whose_draw_time_retry_fails_is_reported_once() {
+    let _lock = font_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let mut cache = TitleCache::default();
+    let (drawn, missing) = draw_title(&mut cache, &stack, LONG_TITLE, 120.0, Some(2), Some(0));
+    let expected: Vec<char> =
+        drawn.chars().filter(|character| !character.is_whitespace()).collect();
+    assert!(!expected.is_empty(), "the cut has visible characters");
+    assert_eq!(missing, expected, "the failed cut is reported exactly once");
+}
+
+/// An ellipsis that fails to measure leaves a cut that still shapes, so the title draws and nothing
+/// is reported.
+#[test]
+fn a_failed_ellipsis_measure_with_a_shaped_cut_reports_nothing() {
+    let _lock = font_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let mut cache = TitleCache::default();
+    let (drawn, missing) = draw_title(&mut cache, &stack, LONG_TITLE, 120.0, Some(1), None);
+    assert!(!drawn.is_empty(), "a cut is drawn");
+    assert!(missing.is_empty(), "the shaped cut drew: {missing:?}");
+}
+
+/// A kept title draws from its run without shaping, so an armed failure never reports it; once its
+/// key changes it is fitted again, and a whole-title failure then is reported once.
+#[test]
+fn a_kept_title_whose_key_changes_and_then_fails_is_reported_once() {
+    let _lock = font_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let mut cache = TitleCache::default();
+    let (_, healthy) = draw_title(&mut cache, &stack, "fits", 400.0, None, None);
+    assert!(healthy.is_empty() && cache.is_stored(0), "the healthy title is kept");
+    let (_, hit) = draw_title(&mut cache, &stack, "fits", 400.0, Some(0), None);
+    assert!(hit.is_empty(), "a kept title never shapes, so it is never reported: {hit:?}");
+    let (drawn, changed) = draw_title(&mut cache, &stack, "fits", 390.0, Some(0), None);
+    assert_eq!(drawn, "", "the refitted title failed to shape");
+    assert_eq!(changed, vec!['f', 'i', 't', 's'], "and is reported once");
+}
+
+/// With reuse off every title draws from a fresh fit; a whole title that shaped and fits draws, so
+/// nothing is reported. This is the path a healthy fit's own outcome reaches the draw boundary on.
+#[test]
+fn a_fresh_title_that_shaped_reports_nothing() {
+    let _lock = font_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let mut cache = TitleCache::default();
+    let mut raster = stack.clone();
+    let mut atlas = GlyphAtlas::new(256, 256);
+    let scope = crate::chrome_text::MissingChromeScope::enter();
+    let draw = cache.prepare(0, &probe("fits", 400.0, 0), &stack, false);
+    assert!(matches!(draw, TitleDraw::Fresh(_)), "reuse off draws a fresh fit");
+    let drawn = cache.drawn(&draw);
+    let placement = TitlePlacement {
+        color: ChromeColor::WHITE,
+        raster_px: 15.0,
+        origin: (0.0, 20.0),
+        screen: (400.0, 100.0),
+        clip: None,
+    };
+    let layout = layout_title(&stack, &mut raster, &mut atlas, &drawn, placement);
+    assert!(!layout.glyphs.is_empty(), "the title draws");
+    assert!(scope.finish().is_empty(), "and nothing is reported");
+}

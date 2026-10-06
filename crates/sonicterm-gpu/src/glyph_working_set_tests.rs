@@ -5,6 +5,13 @@ fn packaged_fonts() -> Vec<PathBuf> {
     vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")]
 }
 
+/// The body stack the renderer builds for the packaged family at 14 pt and 72 dpi.
+fn packaged_body() -> sonicterm_engine::FontStack {
+    renderer_font_stacks("Rec Mono St.Helens", 14.0, 72, 1.0, &packaged_fonts())
+        .body
+        .expect("the packaged family loads")
+}
+
 /// An ASCII fixture's working set holds palette-footer keys drawn at max(body − 1, 1) and
 /// tab-title keys drawn at body + 1, so the footer is never measured at the tab-title size; the
 /// grid's fast-path character keys are present too, and the set fits below the maximum.
@@ -330,19 +337,24 @@ impl sonicterm_text::glyph_atlas::Rasterizer for NoRaster {
 /// explain it, is still a rejection.
 #[test]
 fn raster_failures_are_listed_and_unplaced_tiles_are_rejected() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stack = packaged_body();
     let mut atlas = GlyphAtlas::new(64, 64);
     let shaped = GlyphKey::shaped('\u{1F1EF}', 2, 2687, false, false);
     let notdef = GlyphKey::with_slot('\u{E000}', 0, false, false);
     let _shaped_info = atlas.get_or_insert(shaped, &mut NoRaster);
     let _notdef_info = atlas.get_or_insert(notdef, &mut NoRaster);
     let mut accounted = Accounted::default();
-    account_tile(&atlas, shaped, &mut accounted).expect("a raster failure is listed");
-    account_tile(&atlas, notdef, &mut accounted).expect("an uncovered character is listed");
-    assert_eq!(accounted.raster_failed, HashSet::from([shaped]));
+    account_tile(&atlas, &stack, shaped, &mut accounted).expect("a raster failure is listed");
+    account_tile(&atlas, &stack, notdef, &mut accounted).expect("an uncovered character is listed");
+    let failed: HashSet<GlyphKey> = accounted.raster_failed.keys().copied().collect();
+    assert_eq!(failed, HashSet::from([shaped]));
     assert_eq!(accounted.unresolved_chars, BTreeSet::from(['\u{E000}']));
     let never_inserted = GlyphKey::new('q', false, false);
     assert_eq!(
-        account_tile(&atlas, never_inserted, &mut accounted),
+        account_tile(&atlas, &stack, never_inserted, &mut accounted),
         Err(WorkingSetError::NotPlaced { key: never_inserted })
     );
 }
@@ -427,4 +439,182 @@ fn the_tab_title_set_holds_every_program_icon_at_both_scales() {
             .collect();
         assert!(absent.is_empty(), "icons never measured at {dpi} dpi: {absent:?}");
     }
+}
+
+/// Answers every key with a 16x16 tile, larger than an 8x8 fixed atlas can ever place.
+struct LargeTiles;
+
+impl sonicterm_text::glyph_atlas::Rasterizer for LargeTiles {
+    fn rasterize(&mut self, _key: GlyphKey) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+        Some(sonicterm_text::glyph_atlas::RasterTile {
+            width: 16,
+            height: 16,
+            offset_x: 0,
+            offset_y: -16,
+            advance: 16.0,
+            coverage: vec![255; 256],
+            is_color: false,
+            is_subpixel: false,
+        })
+    }
+}
+
+/// A required tile too large for the atlas draws nothing in the renderer, so the helper lists it as
+/// an incomplete required tile instead of passing it as a resident empty glyph; a placed tile is
+/// not listed.
+#[test]
+fn an_oversize_required_tile_is_listed_as_incomplete() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stack = packaged_body();
+    let mut atlas = GlyphAtlas::new(8, 8);
+    let oversize = GlyphKey::shaped('用', 1, 4242, false, false);
+    let _info = atlas.get_or_insert(oversize, &mut LargeTiles);
+    let mut accounted = Accounted::default();
+    account_tile(&atlas, &stack, oversize, &mut accounted).expect("an oversize tile is listed");
+    assert_eq!(accounted.oversize_required, HashSet::from([oversize]));
+    assert!(accounted.raster_failed.is_empty() && accounted.unresolved_chars.is_empty());
+    let mut roomy = GlyphAtlas::new(64, 64);
+    let _placed = roomy.get_or_insert(oversize, &mut LargeTiles);
+    let mut placed = Accounted::default();
+    account_tile(&roomy, &stack, oversize, &mut placed).expect("a placed tile is resident");
+    assert!(placed.oversize_required.is_empty(), "a placed tile is not oversize");
+}
+
+/// A codepoint resolves, through the stack the renderer builds, to the identity of the real tile it
+/// draws (a nonzero glyph id from a named face); a codepoint no face covers resolves to nothing.
+#[test]
+fn a_representative_codepoint_resolves_to_its_real_tile_identity() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let resolved = representative_identities(
+        &['中', '\u{F0000}'],
+        "Rec Mono St.Helens",
+        14.0,
+        72,
+        &packaged_fonts(),
+    );
+    assert_eq!(resolved.len(), 2);
+    let (character, identity) = &resolved[0];
+    let identity = identity.as_ref().unwrap_or_else(|| panic!("{character:?} resolves"));
+    assert_eq!(*character, '中');
+    assert!(identity.source.glyph_id != 0, "a real glyph: {identity:?}");
+    assert_eq!(identity.raster_variant, GlyphRasterVariant::Normal);
+    assert_eq!(resolved[1], ('\u{F0000}', None), "no face covers U+F0000");
+}
+
+/// Each representative codepoint must be resident in the renderer's atlas with a real raster: an
+/// unresolved codepoint, an identity the atlas does not hold, and a resident zero-size tile are each
+/// a named gap, and a resident real tile is not.
+#[test]
+fn a_representative_gap_names_each_unresolved_absent_or_empty_tile() {
+    let identity = |glyph_id: u32| TileIdentity {
+        source: sonicterm_engine::ResolvedGlyphFace {
+            face: sonicterm_engine::FaceIdentity { source: "face.ttf".into(), face_index: 0 },
+            glyph_id,
+            strike_px_milli: 14_000,
+        },
+        raster_variant: GlyphRasterVariant::Normal,
+        bold: false,
+        italic: false,
+        is_color: false,
+        is_subpixel: false,
+    };
+    let resident = HashMap::from([(identity(1), [8, 12]), (identity(3), [0, 12])]);
+    let resolved = vec![
+        ('a', Some(identity(1))),
+        ('b', None),
+        ('c', Some(identity(2))),
+        ('d', Some(identity(3))),
+    ];
+    assert_eq!(
+        representative_gaps(&resolved, &resident),
+        vec![('b', "no real glyph"), ('c', "not resident"), ('d', "no pixels")]
+    );
+}
+
+/// A codepoint whose shaped tile is missing or too large to place draws no real tile, so it resolves
+/// to no identity; the same codepoint in a roomy atlas resolves.
+#[test]
+fn a_representative_codepoint_without_a_real_tile_resolves_to_nothing() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stack = renderer_font_stacks("Rec Mono St.Helens", 14.0, 72, 1.0, &packaged_fonts())
+        .body
+        .expect("the packaged family loads");
+    let mut roomy = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);
+    assert!(codepoint_identity(&stack, &mut roomy, '中').is_some(), "a placed tile resolves");
+    let mut tiny = GlyphAtlas::new(8, 8);
+    assert_eq!(codepoint_identity(&stack, &mut tiny, '中'), None, "an oversize tile does not");
+    // The same shaped key, cached as a raster failure first, is a missing tile.
+    let mut seeded = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);
+    let (key, _) = shaped_tile(
+        &stack,
+        &mut GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM),
+        '中',
+        GlyphRasterVariant::Normal,
+    );
+    let _sentinel = seeded.get_or_insert(key, &mut NoRaster);
+    assert_eq!(codepoint_identity(&stack, &mut seeded, '中'), None, "a missing tile does not");
+}
+
+/// A raster failure is resolved while its stack is alive to the face's content identity (the
+/// digest of the face file's bytes), its index, the glyph id and the requested strike, with the
+/// file's name, character, role and style kept for reading; a key that resolves to no face is
+/// recorded unresolved.
+#[test]
+fn a_raster_failure_resolves_to_its_face_content_glyph_and_strike() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stack = renderer_font_stacks("Rec Mono St.Helens", 14.0, 72, 1.0, &packaged_fonts())
+        .body
+        .expect("the packaged family loads");
+    let (key, _) = shaped_tile(
+        &stack,
+        &mut GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM),
+        '中',
+        GlyphRasterVariant::Normal,
+    );
+    let mut atlas = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);
+    let _sentinel = atlas.get_or_insert(key, &mut NoRaster);
+    let mut accounted = Accounted::default();
+    account_tile(&atlas, &stack, key, &mut accounted).expect("a raster failure is listed");
+    let failure = accounted.raster_failed.get(&key).expect("the failure is recorded");
+    assert_eq!(
+        (failure.codepoint, failure.role, failure.bold, failure.italic),
+        ('中', GlyphRasterVariant::Normal, false, false)
+    );
+    let face = failure.face.as_ref().expect("the key resolves to a face");
+    assert_eq!(face.glyph_id, key.glyph_id);
+    assert!(face.strike_px_milli > 0, "{face:?}");
+    assert!(!face.file.contains('/') && !face.file.contains('\\'), "a file name: {face:?}");
+    assert!(face.file.ends_with(".ttf") || face.file.ends_with(".otf"), "{face:?}");
+    let source = stack.resolved_glyph_face(key).expect("the key resolves").face.source;
+    let bytes = std::fs::read(source).expect("the face file reads");
+    assert_eq!(
+        face.content,
+        sonicterm_text::face_content::face_content_id(
+            sonicterm_text::face_content::FaceNamespace::File,
+            &bytes
+        ),
+        "the failure names its face by the file's content"
+    );
+
+    let unknown = GlyphKey::shaped('中', 200, key.glyph_id, false, false);
+    let _unknown_sentinel = atlas.get_or_insert(unknown, &mut NoRaster);
+    account_tile(&atlas, &stack, unknown, &mut accounted).expect("listed");
+    assert_eq!(accounted.raster_failed[&unknown].face, None, "a slot no face holds is unresolved");
+}
+
+/// A face source names its file by its last path component on either host's separators; a built-in
+/// or in-memory name is kept whole.
+#[test]
+fn a_face_source_is_named_by_its_file() {
+    assert_eq!(face_file_name("/usr/share/fonts/Font-Regular.ttf"), "Font-Regular.ttf");
+    assert_eq!(face_file_name(r"C:\Windows\Fonts\seguiemj.ttf"), "seguiemj.ttf");
+    assert_eq!(face_file_name("builtin:last-resort"), "builtin:last-resort");
 }

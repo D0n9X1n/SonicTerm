@@ -996,6 +996,24 @@ fn a_character_key_and_its_shaped_key_resolve_to_one_face_and_strike() {
     assert_eq!(resolved.face.face_index, 0);
 }
 
+/// A face's content identity is the file namespace's SHA-256 of the exact bytes on disk that the
+/// key's face was loaded from, so it does not depend on the file's name or directory; a key that
+/// resolves to no face names no content.
+#[test]
+fn a_resolved_face_content_is_the_digest_of_its_file_bytes() {
+    use sonicterm_text::face_content::{face_content_id, FaceNamespace};
+    let stack = packaged_rec_mono_stack();
+    let key = GlyphKey::new('a', false, false);
+    let resolved = stack.resolved_glyph_face(key).expect("the character resolves");
+    let bytes = std::fs::read(&resolved.face.source).expect("the packaged face file reads");
+    assert_eq!(
+        stack.resolved_face_content(key),
+        Some(face_content_id(FaceNamespace::File, &bytes)),
+        "the content is the file's digest in the file namespace"
+    );
+    assert_eq!(stack.resolved_face_content(GlyphKey::shaped('a', 200, 1, false, false)), None);
+}
+
 /// A deterministic stack over the packaged Rec Mono faces, independent of host fonts.
 fn packaged_rec_mono_stack() -> FontStack {
     let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");

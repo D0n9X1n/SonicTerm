@@ -710,3 +710,32 @@ fn raw_width_is_the_measured_frame_width_bit_for_bit() {
         assert_eq!(run.view().raw_width_px().to_bits(), measured.to_bits(), "{text:?}");
     }
 }
+
+/// A chrome glyph whose tile is larger than the atlas can place is cached as a zero-area sentinel;
+/// it draws nothing, so it is noted as missing chrome rather than skipped as an empty glyph, and
+/// the pen still advances.
+#[test]
+fn an_oversize_chrome_glyph_is_noted_missing_and_advances() {
+    let _lock = font_fixture_lock();
+    let stack = crate::lib_tests::tracked_font_stack(15.0);
+    let mut raster = stack.clone();
+    // A fixed 4x4 atlas cannot place any 15 px letter.
+    let mut atlas = GlyphAtlas::new(4, 4);
+    let scope = MissingChromeScope::enter();
+    let run = layout(
+        &stack,
+        &mut raster,
+        &mut atlas,
+        "a",
+        ChromeColor::WHITE,
+        ChromeAttrs::default(),
+        15.0,
+        15.0,
+        (10.0, 30.0),
+        (400.0, 100.0),
+        None,
+    );
+    assert_eq!(scope.finish(), vec!['a'], "the oversize glyph is missing chrome");
+    assert!(run.glyphs.is_empty(), "it draws no tile");
+    assert!(run.width_px > 0.0, "the pen still advances");
+}

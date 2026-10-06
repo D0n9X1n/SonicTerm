@@ -496,6 +496,28 @@ impl FontStack {
     }
 }
 
+impl FontStack {
+    /// Diagnostic only: the content identity of the face `key` rasterizes from, the SHA-256 of the
+    /// bytes it was loaded from in the namespace of their source (file, built-in or memory data).
+    /// `None` when the key resolves to no face or its bytes cannot be read, so it names nothing.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn resolved_face_content(&self, key: GlyphKey) -> Option<String> {
+        use sonicterm_font::locator::FontDataSource;
+        use sonicterm_text::face_content::{face_content_id, FaceNamespace};
+        let (font, font_idx, _) = self.resolve_key(key)?;
+        let (handle, _) = font.face_raster_request(font_idx)?;
+        let namespace = match &handle.source {
+            FontDataSource::OnDisk(_) => FaceNamespace::File,
+            FontDataSource::BuiltIn { .. } => FaceNamespace::BuiltIn,
+            FontDataSource::Memory { .. } => FaceNamespace::Memory,
+        };
+        // An unreadable file names no content, so no exception can approve its failure.
+        let bytes = handle.source.load_data().ok()?;
+        Some(face_content_id(namespace, &bytes))
+    }
+}
+
 impl Rasterizer for FontStack {
     fn rasterize(&mut self, key: GlyphKey) -> Option<RasterTile> {
         let (font, font_idx, glyph_pos) = self.resolve_key(key)?;

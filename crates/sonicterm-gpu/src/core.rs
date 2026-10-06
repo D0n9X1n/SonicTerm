@@ -7144,7 +7144,6 @@ impl GpuRenderer {
             // Center the title using tab_raster_px in the same raster-pixel space as bar_h and bar_y.
             let title_top = bar_y + ((bar_h - tab_raster_px * 1.2) / 2.0).max(0.0);
             let tab_baseline_y = title_top + tab_raster_px * 0.95;
-            let native_em = tab_raster_px;
             let mut tab_rasterizer = self.tab_title_font.stack().cloned();
             // Kept titles are keyed by tab position; a closed tab's slot is dropped.
             let title_font_key = self.tab_title_font.key();
@@ -7217,34 +7216,19 @@ impl GpuRenderer {
                         h: placement.text_clip.h,
                     });
                     let title_origin = (placement.text_x, tab_baseline_y);
-                    let final_layout = match title.view {
-                        // The fit kept or made its run, so it draws without shaping again.
-                        Some(view) => chrome_text::layout_view(
-                            view,
-                            rasterizer,
-                            &mut self.glyph_atlas,
+                    let final_layout = crate::chrome_cache::layout_title(
+                        stack,
+                        rasterizer,
+                        &mut self.glyph_atlas,
+                        &title,
+                        crate::chrome_cache::TitlePlacement {
                             color,
-                            title_origin,
-                            (sw, sh),
-                            title_clip,
-                            GlyphRasterVariant::TabTitle,
-                        ),
-                        // The final cut did not shape, so the text shapes at draw time as before.
-                        None => chrome_text::layout_with_raster_variant(
-                            stack,
-                            rasterizer,
-                            &mut self.glyph_atlas,
-                            title.text,
-                            color,
-                            ChromeAttrs::default(),
-                            tab_raster_px,
-                            native_em,
-                            title_origin,
-                            (sw, sh),
-                            title_clip,
-                            GlyphRasterVariant::TabTitle,
-                        ),
-                    };
+                            raster_px: tab_raster_px,
+                            origin: title_origin,
+                            screen: (sw, sh),
+                            clip: title_clip,
+                        },
+                    );
                     glyph_instances.extend(final_layout.glyphs);
                     quads.extend(final_layout.missing_boxes);
                 } else if show_privilege_badge {
@@ -8967,11 +8951,13 @@ impl GpuRenderer {
     ///
     /// Returns whether the run is complete. A run is incomplete when an attempted glyph was
     /// refused by the atlas (a `None` from `get_or_insert`, read before `drawable_or_tofu` folds
-    /// it with the stable missing sentinel), when a block glyph drew nothing, when shaping failed,
-    /// or when no shaper or rasterizer was available; such outcomes depend on atlas or font
-    /// state, not on content, so the row they belong to is drawn but never cached. Intentional
-    /// empty work is complete: an empty run, a run of wide continuations, whitespace and
-    /// zero-area non-block tiles, and a glyph the atlas caches as missing.
+    /// it with the stable missing sentinel), when a shaped glyph with a real id rasterized nothing
+    /// or is too large for the atlas (both also listed in `records.missing_chars`), when a block
+    /// glyph drew nothing, when shaping failed, or when no shaper or rasterizer was available; such
+    /// outcomes depend on atlas or font state, not on content, so the row they belong to is drawn
+    /// but never cached. Intentional empty work is complete: an empty run, a run of wide
+    /// continuations, whitespace and zero-area non-block tiles, and a character-fallback glyph the
+    /// atlas caches as missing, which draws tofu.
     ///
     /// Non-ASCII clusters are shaped through the font stack. Each cluster's lead cell dispatches
     /// on [`sonicterm_block_glyph::BlockKey::from_char`]: on `Some`, the atlas holds a
@@ -9422,13 +9408,21 @@ impl GpuRenderer {
             };
             let Some(info) = glyph_atlas.get_or_insert(key, &mut CountingRasterizer::new(wt))
             else {
-                // When: `glyph_atlas.get_or_insert` is None — the atlas refused
-                // this shaped glyph; the row is not cached.
+                // When: `glyph_atlas.get_or_insert` is None — the atlas refused this shaped
+                // glyph: it draws nothing, so it is reported missing and the row is not cached.
+                records.missing_chars.push(lead_cell.ch);
                 complete = false;
                 continue;
             };
+            if info.missing || info.oversize {
+                // When: a real glyph id rasterized nothing or its tile can never be placed, it draws
+                // nothing although it should, so it is reported missing and the row is not cached.
+                records.missing_chars.push(lead_cell.ch);
+                complete = false;
+                continue;
+            }
             if info.px_size[0] == 0 || info.px_size[1] == 0 {
-                // When: either axis of `info.px_size` is 0 — a zero-area tile,
+                // When: either axis of `info.px_size` is 0 — an intentionally empty glyph,
                 // which has no pixels to blit.
                 continue;
             }
@@ -9517,8 +9511,8 @@ fn glyph_draw_is_degenerate(info: &sonicterm_text::glyph_atlas::GlyphInfo) -> bo
 const DIM_BLEND: f32 = 0.45;
 
 /// The terminal's atlas result for a fallback character: `None` draws tofu, both when the atlas
-/// refused the glyph and when it cached the glyph as missing; an empty glyph is returned, so the
-/// caller skips it without a box.
+/// refused the glyph and when it cached the glyph as missing; an empty glyph, and the zero-area
+/// sentinel of a tile too large to place, is returned, so the caller skips it without a box.
 #[must_use]
 fn drawable_or_tofu(
     info: Option<sonicterm_text::glyph_atlas::GlyphInfo>,
