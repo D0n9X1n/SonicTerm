@@ -512,8 +512,8 @@ class CustodyPolicyTests(unittest.TestCase):
         # Only these reviewed standalone compilation steps may accept forced owned cleanup.
         self.assertEqual({step.id for step in gate.STEPS if step.windows_policy == gate.WindowsPolicy.COMPILE_ONLY},
                          {"clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
-                          "perf-scenarios-echo-trace-clippy", "doc", "doc-resource-features",
-                          "release-windows", "windows-perf-build"})
+                          "perf-scenarios-echo-trace-clippy", "perf-scenarios-atlas-retry-clippy", "doc",
+                          "doc-resource-features", "release-windows", "windows-perf-build"})
         self.assertEqual(python_step("mixed", "pass").windows_policy, gate.WindowsPolicy.STRICT)
 
     def test_cleaned_status_stays_distinct_in_all_summaries(self):
@@ -2745,6 +2745,97 @@ class WindowsTargetCheckTests(unittest.TestCase):
             self.assertEqual(
                 [arguments[0] for _target_dir, arguments in calls], ["metadata", "clippy", "check"]
             )
+
+
+class HarnessFlagTests(unittest.TestCase):
+    """Harness API cfg flags, composed once at launch from what a step inherits."""
+
+    def test_encoded_flags_take_precedence_and_plain_flags_are_tokenized_as_cargo_does(self):
+        # CARGO_ENCODED_RUSTFLAGS is kept token for token and RUSTFLAGS is then ignored, as Cargo ignores it; plain
+        # RUSTFLAGS splits on spaces with empty tokens dropped; an empty encoded value means no inherited flags.
+        declared = ["--check-cfg", "cfg(perf_atlas_retry_api)"]
+        encoded = {"CARGO_ENCODED_RUSTFLAGS": "-C\x1fdebuginfo=1 x", "RUSTFLAGS": "-D warnings"}
+        self.assertEqual(gate.compose_harness_rustflags(encoded, ()), ["-C", "debuginfo=1 x", *declared])
+        plain = {"RUSTFLAGS": "  -C  target-cpu=native "}
+        self.assertEqual(gate.compose_harness_rustflags(plain, ("perf_atlas_retry_api",)),
+                         ["-C", "target-cpu=native", *declared, "--cfg", "perf_atlas_retry_api"])
+        self.assertEqual(gate.compose_harness_rustflags({"CARGO_ENCODED_RUSTFLAGS": "", "RUSTFLAGS": "-D x"}, ()),
+                         declared)
+
+    def test_an_inherited_flag_against_the_decision_is_refused(self):
+        # Appending cannot unset a cfg, so an inherited flag that sets an owned cfg the decision leaves off, or
+        # sets it to a value, is refused; one that agrees with an on decision, or names another cfg, is kept.
+        for environ in ({"RUSTFLAGS": "--cfg perf_atlas_retry_api"},
+                        {"CARGO_ENCODED_RUSTFLAGS": "--cfg=perf_atlas_retry_api"},
+                        {"RUSTFLAGS": '--cfg perf_atlas_retry_api="1"'}):
+            with self.subTest(environ=environ), self.assertRaises(gate.HarnessFlagConflict):
+                gate.compose_harness_rustflags(environ, ())
+        with self.assertRaises(gate.HarnessFlagConflict):
+            gate.compose_harness_rustflags({"RUSTFLAGS": '--cfg perf_atlas_retry_api="1"'},
+                                           ("perf_atlas_retry_api",))
+        with self.assertRaises(gate.HarnessFlagConflict):
+            gate.compose_harness_rustflags({}, ("perf_unknown_api",))
+        self.assertIn("--cfg", gate.compose_harness_rustflags({"RUSTFLAGS": "--cfg perf_atlas_retry_api"},
+                                                              ("perf_atlas_retry_api",)))
+        self.assertEqual(gate.compose_harness_rustflags({"RUSTFLAGS": "--cfg other"}, ())[:2], ["--cfg", "other"])
+
+    def test_every_spelling_of_an_owned_cfg_is_read_as_rustc_reads_it(self):
+        # rustc sets the cfg for `--cfg X` and `--cfg=X` whatever whitespace surrounds the spec, and for a raw
+        # identifier, so each spelling, encoded or plain, is refused when the decision is off; a value form is
+        # refused either way, and a spelling that only names the cfg is accepted when the decision is on.
+        owned = "perf_atlas_retry_api"
+        encoded = ["--cfg\x1f perf_atlas_retry_api", "--cfg\x1fperf_atlas_retry_api ", "--cfg\x1fperf_atlas_retry_api\t",
+                   "--cfg= perf_atlas_retry_api", "--cfg=perf_atlas_retry_api\t", "--cfg=\tperf_atlas_retry_api \t",
+                   "--cfg\x1fr#perf_atlas_retry_api", '--cfg\x1fperf_atlas_retry_api = "1"',
+                   '--cfg=perf_atlas_retry_api="1"']
+        plain = ["--cfg=perf_atlas_retry_api\t", "--cfg r#perf_atlas_retry_api", "--cfg\tperf_atlas_retry_api"]
+        # A spec rustc cannot parse but that names an owned cfg is read as setting it with a value: refused always.
+        unparsed = [{"CARGO_ENCODED_RUSTFLAGS": "--cfg=perf_atlas_retry_api!"}, {"RUSTFLAGS": "--cfg=(perf_atlas_retry_api)"}]
+        for environ in unparsed:
+            for enabled in ((), (owned,)):
+                with self.subTest(unparsed=environ, enabled=enabled), self.assertRaises(gate.HarnessFlagConflict):
+                    gate.compose_harness_rustflags(environ, enabled)
+        cases = [{"CARGO_ENCODED_RUSTFLAGS": flags} for flags in encoded] + [{"RUSTFLAGS": flags} for flags in plain]
+        for environ in cases:
+            with self.subTest(environ=environ), self.assertRaises(gate.HarnessFlagConflict):
+                gate.compose_harness_rustflags(environ, ())
+        for environ in cases[:7]:
+            with self.subTest(enabled=environ):
+                gate.compose_harness_rustflags(environ, (owned,))
+        for environ in cases[7:9]:
+            with self.subTest(value=environ), self.assertRaises(gate.HarnessFlagConflict):
+                gate.compose_harness_rustflags(environ, (owned,))
+        self.assertTrue(gate.compose_harness_rustflags({"CARGO_ENCODED_RUSTFLAGS": "--cfg\x1f perf_other_api "}, ()))
+
+    def test_the_runner_composes_the_flags_at_launch_without_replacing_inherited_ones(self):
+        # A step with harness cfgs runs with the inherited flags plus the composed ones; a step whose inherited
+        # flags conflict with its cfgs fails at launch and never runs.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = "\x1f".join(["-C", "debuginfo=1", "--check-cfg", "cfg(perf_atlas_retry_api)", "--cfg",
+                                    "perf_atlas_retry_api"])
+            code = f"import os; assert os.environ['CARGO_ENCODED_RUSTFLAGS']=={expected!r}, os.environ"
+            step = python_step("composed", code, harness_cfgs=("perf_atlas_retry_api",))
+            result = gate.run_step(step, 1, root, root, dict(os.environ, RUSTFLAGS="-C debuginfo=1"))
+            self.assertEqual(result.status, gate.PASS, result.log_path.read_text(errors="replace"))
+            refused = gate.run_step(python_step("conflict", "raise SystemExit(0)", harness_cfgs=()), 2, root, root,
+                                    dict(os.environ, RUSTFLAGS="--cfg perf_atlas_retry_api"))
+            self.assertEqual(refused.status, gate.LAUNCH)
+            self.assertIn("perf_atlas_retry_api", refused.detail)
+
+    def test_every_comparison_build_composes_its_cfgs_and_no_step_fixes_its_flags(self):
+        # Each comparison build and previous-release check carries its cfg subset for launch-time composition, the
+        # catalogs cover every cfg and feature subset, and no step replaces the inherited flags with a fixed env.
+        subsets = gate._feature_subsets(gate.HARNESS_API_CFG_NAMES)
+        self.assertEqual(len(gate.PERF_CFG_BUILDS), len(subsets) * 32)
+        for (cfgs, _features), steps in gate.PERF_CFG_BUILDS.items():
+            self.assertTrue(all(step.harness_cfgs == cfgs and gate._reviewed_step(step) for step in steps.values()))
+        for (cfgs, _features), step in gate.PREVIOUS_RELEASE_CHECKS.items():
+            self.assertEqual((step.harness_cfgs, step.argv[:3]), (cfgs, ("cargo", "check", "--locked")))
+        every = [*gate.STEPS, *gate.PREVIOUS_RELEASE_CHECKS.values(),
+                 *(step for steps in gate.PERF_CFG_BUILDS.values() for step in steps.values())]
+        for step in every:
+            self.assertFalse({"RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"} & {name for name, _ in step.env}, step.id)
 
 
 if __name__ == "__main__":

@@ -341,22 +341,166 @@ const ECHO_TRACE_CALLS: &[&str] = &[
     "EchoDeliveryOutcome",
 ];
 
+/// The gate of S1/atlas-retry's App and renderer API: the harness-only cfg perf-compare sets on both refs or neither.
+const ATLAS_RETRY_GATE: &str = "#[cfg(perf_atlas_retry_api)]";
+
+/// The App and renderer API S1/atlas-retry's driver may name only behind its cfg; none exists in v1.3.8.
+const ATLAS_RETRY_CALLS: &[&str] = &[
+    "__change_glyph_atlas_during_next_assembly",
+    "__test_window_active_tab_title",
+    "last_missing_chrome",
+    "font_fallback_notice_id",
+];
+
 /// The trim hook's gate.
 const TRIM_HOOK_GATE: &str = "#[cfg(feature = \"perf-hook-trim\")]";
 
 /// The trim hook API the harness may name only behind `perf-hook-trim`: the method and its result types.
 const TRIM_HOOK_CALLS: &[&str] = &["__trim_covered_now", "TrimDecision", "TrimSkip"];
 
-/// Each of `calls` in `text` outside an item gated by `gate`, by line.
+/// `text` with every comment, and with `strings` every string, raw string and character literal, replaced by
+/// spaces of the same byte length; line breaks are kept, so byte offsets and line numbers still match `text`.
+fn blank_non_code(text: &str, strings: bool) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let identifier = |character: char| character.is_alphanumeric() || character == '_';
+    let mut out = String::with_capacity(text.len());
+    let blank = |character: char, out: &mut String| {
+        if character == '\n' {
+            out.push('\n');
+        } else {
+            out.extend(std::iter::repeat_n(' ', character.len_utf8()));
+        }
+    };
+    let keep = |character: char, out: &mut String| {
+        if strings {
+            blank(character, out);
+        } else {
+            out.push(character);
+        }
+    };
+    let mut index = 0;
+    while index < chars.len() {
+        let current = chars[index];
+        let next = chars.get(index + 1).copied();
+        let raw_start = current == 'r'
+            && matches!(next, Some('#' | '"'))
+            && (index == 0 || !identifier(chars[index - 1]) || chars[index - 1] == 'b');
+        if current == '/' && next == Some('/') {
+            // When: a line comment starts, everything up to the line break is blanked.
+            while index < chars.len() && chars[index] != '\n' {
+                blank(chars[index], &mut out);
+                index += 1;
+            }
+        } else if current == '/' && next == Some('*') {
+            // When: a block comment starts, it is blanked through its matching close, nested ones included.
+            let mut depth = 0_usize;
+            while index < chars.len() {
+                let pair = (chars[index], chars.get(index + 1).copied());
+                if pair == ('/', Some('*')) || pair == ('*', Some('/')) {
+                    depth = if pair.0 == '/' { depth + 1 } else { depth - 1 };
+                    blank(chars[index], &mut out);
+                    blank(chars[index + 1], &mut out);
+                    index += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    blank(chars[index], &mut out);
+                    index += 1;
+                }
+            }
+        } else if raw_start {
+            // When: a raw string starts, its contents run to the quote followed by as many hashes as opened it.
+            out.push('r');
+            index += 1;
+            let hashes = chars[index..].iter().take_while(|character| **character == '#').count();
+            out.extend(std::iter::repeat_n('#', hashes));
+            index += hashes;
+            if chars.get(index) == Some(&'"') {
+                out.push('"');
+                index += 1;
+                while index < chars.len() {
+                    let closes = chars[index] == '"'
+                        && chars[index + 1..]
+                            .iter()
+                            .take(hashes)
+                            .filter(|character| **character == '#')
+                            .count()
+                            == hashes;
+                    if closes {
+                        out.push('"');
+                        out.extend(std::iter::repeat_n('#', hashes));
+                        index += 1 + hashes;
+                        break;
+                    }
+                    keep(chars[index], &mut out);
+                    index += 1;
+                }
+            }
+        } else if current == '"' {
+            // When: a string starts, its contents run to the next unescaped quote.
+            out.push('"');
+            index += 1;
+            while index < chars.len() {
+                if chars[index] == '\\' {
+                    keep(chars[index], &mut out);
+                    if let Some(escaped) = chars.get(index + 1) {
+                        keep(*escaped, &mut out);
+                    }
+                    index += 2;
+                    continue;
+                }
+                if chars[index] == '"' {
+                    out.push('"');
+                    index += 1;
+                    break;
+                }
+                keep(chars[index], &mut out);
+                index += 1;
+            }
+        } else if current == '\'' && (next == Some('\\') || chars.get(index + 2) == Some(&'\'')) {
+            // When: a character literal starts (not a lifetime), it runs to its closing quote.
+            out.push('\'');
+            index += 1;
+            while index < chars.len() && chars[index] != '\'' {
+                let escaped = chars[index] == '\\';
+                keep(chars[index], &mut out);
+                index += 1;
+                if escaped && index < chars.len() {
+                    keep(chars[index], &mut out);
+                    index += 1;
+                }
+            }
+            if index < chars.len() {
+                out.push('\'');
+                index += 1;
+            }
+        } else {
+            out.push(current);
+            index += 1;
+        }
+    }
+    out
+}
+
+/// Each of `calls` in `text` outside an item gated by `gate`, by line. A gate counts only in code, never in a
+/// comment or a string literal, while a string argument inside a real gate is kept; a gated body is balanced in
+/// code with comments and literals blanked, so no gate's text and no brace in a comment or a string can hide a call.
 fn ungated_calls(text: &str, gate: &str, calls: &[&str]) -> Vec<String> {
-    // A CRLF checkout is read as LF, so line numbers and comment starts match either way.
+    // A CRLF checkout is read as LF, so line numbers match either way.
     let text = &text.replace("\r\n", "\n");
+    let code = blank_non_code(text, false);
+    let structure = blank_non_code(text, true);
     let mut gated = Vec::new();
-    for (offset, _) in text.match_indices(gate) {
+    for (offset, _) in code.match_indices(gate) {
+        if structure.as_bytes()[offset] != b'#' {
+            // When: the gate's `#` is blanked with the literals, its text sits inside a string and guards nothing.
+            continue;
+        }
         let after = offset + gate.len();
-        let open = after + text[after..].find('{').expect("a gated item has a body");
+        let open = after + structure[after..].find('{').expect("a gated item has a body");
         let mut depth = 0_usize;
-        for (index, character) in text[open..].char_indices() {
+        for (index, character) in structure[open..].char_indices() {
             match character {
                 '{' => depth += 1,
                 '}' => {
@@ -372,11 +516,9 @@ fn ungated_calls(text: &str, gate: &str, calls: &[&str]) -> Vec<String> {
     }
     let mut found = Vec::new();
     for call in calls {
-        for (offset, _) in text.match_indices(call) {
-            let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
-            let comment = text[line_start..offset].trim_start().starts_with("//");
-            if !comment && !gated.iter().any(|range| range.contains(&offset)) {
-                found.push(format!("{}: {call}", text[..offset].matches('\n').count() + 1));
+        for (offset, _) in code.match_indices(call) {
+            if !gated.iter().any(|range| range.contains(&offset)) {
+                found.push(format!("{}: {call}", code[..offset].matches('\n').count() + 1));
             }
         }
     }
@@ -754,4 +896,73 @@ fn an_atlas_reading_without_the_counter_feature_has_no_counts() {
         (reading.counted_glyph_atlas_growths, reading.closed_glyph_atlas_growths),
         (None, None)
     );
+}
+
+/// Every call of S1/atlas-retry's driver into the App and renderer API it needs sits behind
+/// `perf_atlas_retry_api`, because perf-compare overlays this harness onto the previous release tag, which
+/// has none of it, and builds it there with the cfg off. A call outside the gated item is reported.
+#[test]
+fn every_atlas_retry_api_call_in_the_harness_is_behind_its_cfg() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/perf_scenarios");
+    let mut scanned = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let entry_path = entry.unwrap().path();
+        let name = entry_path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+            continue;
+        }
+        scanned += 1;
+        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let found = ungated_calls(&source, ATLAS_RETRY_GATE, ATLAS_RETRY_CALLS);
+        assert!(found.is_empty(), "{name}: {found:#?}");
+    }
+    assert!(scanned >= 10, "the harness sources were not found");
+    let fixture = format!(
+        "{ATLAS_RETRY_GATE}\nfn parts(app: &App) {{\n    app.__test_window_active_tab_title(id);\n}}\n\nfn off(renderer: &GpuRenderer) {{\n    renderer.font_fallback_notice_id();\n}}\n"
+    );
+    assert_eq!(
+        ungated_calls(&fixture, ATLAS_RETRY_GATE, ATLAS_RETRY_CALLS),
+        vec!["7: font_fallback_notice_id".to_owned()]
+    );
+}
+
+/// A real gate's own string argument is code, not a literal to skip: `#[cfg(feature = "...")]` still guards the
+/// call in its body, even though the scan blanks string contents when it decides where a gate stands.
+#[test]
+fn a_gate_with_a_string_argument_still_guards_its_body() {
+    let fixture = format!(
+        "{COUNTERS_GATE}\nfn on(app: &mut App) {{\n    let _ = app.frame_counters_snapshot();\n}}\n"
+    );
+    assert_eq!(ungated_calls(&fixture, COUNTERS_GATE, GATED_CALLS), Vec::<String>::new());
+}
+
+/// A gate written in a comment or a string guards nothing, so the scan reads attributes and balances bodies in
+/// code only: a commented-out gate or a gate's text inside a string literal above a call never guards it, and a
+/// brace inside a comment or a string never stretches a gated body over the ungated call after it (a later
+/// string's closing brace would otherwise close it there).
+#[test]
+fn a_gate_in_a_comment_or_a_string_guards_nothing() {
+    let cases = [
+        format!("// {ATLAS_RETRY_GATE}\nfn parts(app: &App) {{\n    app.__test_window_active_tab_title(id);\n}}\n"),
+        format!("/* {ATLAS_RETRY_GATE} */\nfn parts(app: &App) {{\n    app.__test_window_active_tab_title(id);\n}}\n"),
+        format!(
+            "{ATLAS_RETRY_GATE}\nfn parts() {{\n    let brace = \"{{\";\n}}\nfn off(app: &App) {{\n    app.__test_window_active_tab_title(id);\n}}\nfn tail() {{\n    let close = \"}}\";\n}}\n"
+        ),
+        format!(
+            "{ATLAS_RETRY_GATE}\nfn parts() {{\n    // {{\n}}\nfn off(app: &App) {{\n    app.__test_window_active_tab_title(id);\n}}\n"
+        ),
+        format!(
+            "const NOTE: &str = \"{ATLAS_RETRY_GATE}\";\nfn off(app: &App) {{\n    app.__test_window_active_tab_title(id);\n}}\n"
+        ),
+        format!(
+            "const NOTE: &str = r#\"{ATLAS_RETRY_GATE}\"#;\nfn off(app: &App) {{\n    app.__test_window_active_tab_title(id);\n}}\n"
+        ),
+    ];
+    for fixture in cases {
+        assert_eq!(
+            ungated_calls(&fixture, ATLAS_RETRY_GATE, ATLAS_RETRY_CALLS).len(),
+            1,
+            "the call is ungated in {fixture:?}"
+        );
+    }
 }

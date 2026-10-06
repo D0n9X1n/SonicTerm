@@ -34,6 +34,7 @@ python3 scripts/local-gate.py
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-atlas-retry-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
@@ -49,6 +50,7 @@ python3 scripts/local-gate.py
 | `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS, Windows | `local` | `rust`, `native` | `macos-core`, `windows-tests` |
 | `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
+| `perf-scenarios-atlas-retry-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --cfg perf_atlas_retry_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests`, `linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests` |
@@ -65,6 +67,8 @@ python3 scripts/local-gate.py
 | `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`, `native` | `macos-smoke` |
 | `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`, `native` | `macos-smoke` |
 | `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`, `native` | `macos-smoke` |
+| `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`, `native` | `macos-core` |
+| `windows-perf-previous-release` | `python scripts/perf-compare.py --check-previous-release` | Windows | `local` | `rust`, `native` | `windows-checks` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`, `native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`, `native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`, `native` | `linux-packages` |
@@ -161,6 +165,43 @@ S10/sync: each run's `presented_frames` divided by that run's own `updates`,
 never by a constant, summarized like the other per-run rows. A side whose
 harness predates the field reads `n/a` with no change shown, and a result whose
 `updates` is not a positive integer is invalid.
+
+The harness also calls App and renderer methods that older trees lack. Each
+such call sits behind a harness API cfg, one entry of `HARNESS_API_CFGS` in
+`scripts/local-gate.py`; the only entry is `perf_atlas_retry_api`, for the four
+methods S1/atlas-retry's driver needs. Before building, perf-compare looks for
+each entry's methods in both trees: each must be a `pub fn` inside an inherent
+`impl` block of its declared owner type (`GpuRenderer` or `App`) in its owning
+crate. Comments, strings, trait impls, `*_tests.rs` files and code under
+`#[cfg(test)]` or `#![cfg(test)]` do not count. A match is source evidence, not
+proof that the method's signature or the build's target compiles it; the build
+that follows still fails closed. An entry is on for both sides only when both
+trees define all its methods, and off for both otherwise, so a base never
+inherits the head's API. None is a Cargo feature, and the feature
+selection does not change. The gate composes each comparison build's compiler
+flags at launch from what the build inherits: `CARGO_ENCODED_RUSTFLAGS` when
+set, otherwise `RUSTFLAGS` split on spaces (never both), followed by
+`--check-cfg cfg(<name>)` for every entry and `--cfg <name>` for each entry that
+is on. An inherited flag that sets an entry the decision leaves off, or sets it
+to a value, refuses the build; the cfg spec is read as rustc reads it, so
+`--cfg X` and `--cfg=X`, whitespace around the spec, a raw identifier and a
+`X="v"` form are all recognized, in either source. The decision and the composed flags are in the
+details and the build identity, and a prebuilt manifest with others is refused.
+The local gate reviews every feature set's builds once for each subset of the
+table.
+
+A diagnostic whose cfg is off is unavailable on both sides: S1/atlas-retry
+then runs no set, and the table shows `unavailable` with the reason. Run
+directly without the cfg, its harness ends `blocked` (exit 5), never invalid.
+
+The head's harness must still build on the previous release tag, the base a
+release comparison uses. `perf-compare.py --check-previous-release` (the
+`perf-previous-release` gate step, in the `macos-core` and `windows-checks` CI
+jobs) needs a full clone. It picks that tag with the release workflow's rule
+applied to HEAD's parent, overlays the head's harness, derives the features and
+cfgs a comparison would, and checks both harness examples there in its own
+target directory, which it removes with its worktree. Ubuntu's example roots
+exclude the probe, so Ubuntu does not run it.
 
 Under `--short`, a variant whose harness `--list` entry declares a cap
 (`run_caps`) takes min(requested, cap) valid runs per side in every set (timed,
@@ -872,9 +913,11 @@ success.
 
 `--require-base` holds the base to the head's standard in every CI comparison:
 a base that cannot build, list or fill a set's valid runs fails the shard, and
-its `comparison.md` opens with `**Incomplete comparison:**`. The one allowed gap
-is a counters set on a base that does not declare `perf-counters`, which still
-reads `n/a`. The macOS shards run S7; S9, S10, S6/flood and S6/selection-drag;
+its `comparison.md` opens with `**Incomplete comparison:**`. Two gaps are
+allowed: a counters set on a base that does not declare `perf-counters`, which
+still reads `n/a`, and a diagnostic declared unavailable on both sides because
+its harness API cfg is off, which runs nothing. Any other blocked side still
+fails, and a selection with nothing runnable never passes. The macOS shards run S7; S9, S10, S6/flood and S6/selection-drag;
 S2 and S10/sync; S4, S5, S11, S11/release and S1/atlas-retry; and S1, S3, S6,
 S8, S12 and S2/flood. The Windows shards of the same names run S7; S9, S10, S6/flood,
 S6/selection-drag and S2/flood; S2 and S10/sync; S4, S5, S11, S11/release,

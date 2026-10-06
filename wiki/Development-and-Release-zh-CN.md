@@ -32,6 +32,7 @@ python3 scripts/local-gate.py
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
+| `perf-scenarios-atlas-retry-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS、Windows、Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
@@ -47,6 +48,7 @@ python3 scripts/local-gate.py
 | `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS、Windows | `local` | `rust`、`native` | `macos-core`、`windows-tests` |
 | `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
 | `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
+| `perf-scenarios-atlas-retry-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --cfg perf_atlas_retry_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
@@ -63,6 +65,8 @@ python3 scripts/local-gate.py
 | `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`、`native` | `macos-smoke` |
 | `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`、`native` | `macos-smoke` |
 | `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`、`native` | `macos-smoke` |
+| `perf-previous-release` | `python3 scripts/perf-compare.py --check-previous-release` | macOS | `local` | `rust`、`native` | `macos-core` |
+| `windows-perf-previous-release` | `python scripts/perf-compare.py --check-previous-release` | Windows | `local` | `rust`、`native` | `windows-checks` |
 | `release-macos` | `cargo build --release -p sonicterm-mac` | macOS | `release` | `rust`、`native` | `macos-smoke` |
 | `release-windows` | `cargo build --release -p sonicterm-windows` | Windows | `release` | `rust`、`native` | `windows-smoke` |
 | `release-linux` | `cargo build --release -p sonicterm-linux` | Linux | `release` | `rust`、`native` | `linux-packages` |
@@ -138,6 +142,26 @@ S10 的 `stream` 阶段在 `result.json` 中记录 `updates`：其工作负载�
 次数（`--short` 时 300，完整长度时 1,200）。其他阶段都不写这个键。计时表为 S10/default 与 S10/sync 增加
 `stream presented frames per update (ratio)` 行：每次运行的 `presented_frames` 除以该次运行自己的 `updates`，从不除以常数，
 并像其他按运行统计的行一样汇总。harness 早于该字段的一侧显示 `n/a`，不显示变化；`updates` 不是正整数的结果无效。
+
+harness 还会调用较旧的树所没有的 App 与渲染器方法。每个这样的调用都位于一个 harness API cfg 之后，即
+`scripts/local-gate.py` 中 `HARNESS_API_CFGS` 的一项；目前唯一的一项是 `perf_atlas_retry_api`，对应 S1/atlas-retry
+驱动所需的四个方法。构建之前，perf-compare 在两棵树中查找该项的方法：每个方法都必须是其所属 crate 中、所声明的所有者类型（`GpuRenderer`
+或 `App`）的固有 `impl` 块内的 `pub fn`。注释、字符串、trait impl、`*_tests.rs` 文件以及位于 `#[cfg(test)]` 或 `#![cfg(test)]`
+之下的代码都不计入。匹配只是源码证据，不能证明该方法的签名或构建的目标会编译它；随后的构建仍会失败关闭。只有两棵树都定义了某项的全部方法，该项才对两侧开启，否则对两侧都关闭，因此 base 永远不会继承 head
+的 API。这些 cfg 都不是 Cargo 特性，特性选择也不变。关卡在启动时根据每次比较构建所继承的内容组合编译器标志：设置了
+`CARGO_ENCODED_RUSTFLAGS` 时用它，否则按空格拆分 `RUSTFLAGS`（从不同时使用两者），随后为每一项加上
+`--check-cfg cfg(<name>)`，并为开启的每一项加上 `--cfg <name>`。若继承的标志设置了决定为关闭的项，或把某项设为某个值（cfg 规格按 rustc 的方式读取：`--cfg X` 与 `--cfg=X`、规格两侧的
+空白、原始标识符以及 `X="v"` 形式，在两种来源中都会被识别），
+该构建会被拒绝。该决定与组合后的标志记录在详情与构建身份中，带有其他决定或标志的预构建清单会被拒绝。本地关卡为每个
+特性组合、对该表的每个子集各审阅一次构建。
+
+cfg 关闭的诊断在两侧都不可用：此时 S1/atlas-retry 不运行任何组，表中显示 `unavailable` 及原因。不带该 cfg 直接运行时，
+其 harness 以 `blocked`（退出码 5）结束，而不是无效。
+
+head 的 harness 必须仍能在上一个发布标签上构建，那正是发布比较所用的 base。`perf-compare.py --check-previous-release`
+（关卡步骤 `perf-previous-release`，在 CI 的 `macos-core` 与 `windows-checks` 作业中运行）需要完整克隆。它按发布工作流的
+规则对 HEAD 的父提交选出该标签，叠加 head 的 harness，推导比较会使用的特性与 cfg，并在自己的目标目录中检查两个 harness
+示例，结束时连同其工作树一起删除该目录。Ubuntu 的示例根排除了 probe，因此 Ubuntu 不运行它。
 
 在 `--short` 下，harness 的 `--list` 条目声明了上限（`run_caps`）的变体在每个组（计时、lap、计数器与分配）中每侧取
 min(请求次数, 上限) 次有效运行；其行显示 `(runs N of M)`，`comparison.md` 列出被限制的变体。release 对比不受限制。
@@ -600,8 +624,9 @@ request 的确切 head，并按该运行的 id 读取（`gh run view <run-id> --
 job 完成。被取代、被取消或被跳过的运行从不算作成功。
 
 每个 CI 对比都通过 `--require-base` 让 base 与 head 适用同样的标准：base 无法构建、无法列出场景或无法凑满某组的有效运行时，
-该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。唯一允许的缺口是 base 未声明 `perf-counters` 时的计数器组，
-它仍显示 `n/a`。macOS 分片运行 S7；S9、S10、S6/flood 与 S6/selection-drag；S2 与 S10/sync；S4、S5、S11、S11/release 与 S1/atlas-retry；
+该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。允许两种缺口：base 未声明 `perf-counters` 时的计数器组，
+它仍显示 `n/a`；以及因 harness API cfg 关闭而被声明为两侧都不可用的诊断，它不运行任何内容。其他任何被阻止的一侧仍会失败，
+没有可运行内容的选择也永远不会通过。macOS 分片运行 S7；S9、S10、S6/flood 与 S6/selection-drag；S2 与 S10/sync；S4、S5、S11、S11/release 与 S1/atlas-retry；
 以及 S1、S3、S6、S8、S12 与 S2/flood。同名的 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
 S2 与 S10/sync；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8、S12 与 S1/atlas-retry，以均衡各平台分片的实测时长。
 两个平台的 S9-S10 分片还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传

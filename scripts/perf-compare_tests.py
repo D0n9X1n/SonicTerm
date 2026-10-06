@@ -1230,6 +1230,10 @@ class FakeGate:
         self.roots = []
         self.environs = []
 
+    def __getattr__(self, name):
+        """Every other gate fact (the harness cfg table, its catalogs and flag composition) is the real gate's."""
+        return getattr(REAL_GATE, name)
+
     def Step(self, step_id, argv, hosts, timeout_s, evidence, prerequisites, ci_jobs):
         return SimpleNamespace(id=step_id, argv=tuple(argv), hosts=tuple(hosts), timeout_s=timeout_s)
 
@@ -1246,6 +1250,18 @@ class FakeGate:
 
 
 HARNESS_PID = 900
+
+
+def write_atlas_retry_api(tree: Path, skip: str | None = None) -> None:
+    """Write the four methods `perf_atlas_retry_api` needs into their owning crates of `tree`, except `skip`."""
+    for entry in REAL_GATE.HARNESS_API_CFGS:
+        for crate, owner, name in entry.methods:
+            if name == skip:
+                continue
+            source = tree / crate / "atlas_retry_api.rs"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            with source.open("a", encoding="utf-8") as stream:
+                stream.write(f"impl {owner} {{\n    pub fn {name}(&self) {{}}\n}}\n")
 
 
 def harness_process(**overrides):
@@ -3063,7 +3079,7 @@ class CompareHarness:
                 head_manifest=HEAD_MANIFEST, listing=None, scenarios=("S1",), base_manifest=BASE_MANIFEST,
                 logging_api=("base", "head"), build_status="PASS", list_fail=(), base_run=None,
                 head_build="PASS", real_binaries=False, toolchain=None, hook_trees=(), head_run=None,
-                trim_trees=(), counters_run=None):
+                trim_trees=(), counters_run=None, api_trees=("base", "head")):
         """Drive the comparison with fake git, Cargo and runs; return the exit code, gate, git calls and paths.
 
         A counters run answers with the gate on; what the comparison printed is kept in `self.printed`.
@@ -3073,7 +3089,8 @@ class CompareHarness:
         it; `toolchain` replaces the `rustc -vV` text, and a `--build-only` or `--prebuilt` run takes no
         `--scenario` or `--runs`. `trim_trees` names the trees whose app source defines the trim hook method;
         `hook_trees` names the trees whose app source defines the
-        checkpoint-memory hook method.
+        checkpoint-memory hook method; `api_trees` the trees that define S1/atlas-retry's App and renderer
+        methods (by default both, as two current trees do).
         """
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -3103,6 +3120,8 @@ class CompareHarness:
                     hook = tree / perf.APP_SOURCE_DIRECTORY / "app" / "memory_snapshot.rs"
                     hook.parent.mkdir(parents=True, exist_ok=True)
                     hook.write_text(HOOK_SOURCE, encoding="utf-8")
+                if tree.name in api_trees:
+                    write_atlas_retry_api(tree)
                 if tree.name in trim_trees:
                     trim = tree / perf.APP_SOURCE_DIRECTORY / "app" / "retention.rs"
                     trim.parent.mkdir(parents=True, exist_ok=True)
@@ -3249,8 +3268,10 @@ class CompareDriverTests(CompareHarness, unittest.TestCase):
         # its binary is used, and each build is the gate's reviewed step.
         code, gate, _git_calls, plans, _work, _out = self.compare(build_status="CLEANED_NOT_NATURAL")
         self.assertEqual(code, 0)
-        self.assertIs(gate.steps[0], gate.PERF_BUILDS["build-head-perf_scenarios"])
-        self.assertIs(gate.steps[1], gate.PERF_BUILDS["build-base-perf_scenarios"])
+        # Both fixture trees define S1/atlas-retry's methods, so both build the plain set with that cfg on.
+        plain = gate.PERF_CFG_BUILDS[(("perf_atlas_retry_api",), ())]
+        self.assertIs(gate.steps[0], plain["build-head-perf_scenarios"])
+        self.assertIs(gate.steps[1], plain["build-base-perf_scenarios"])
         self.assertEqual({plan.binary for plan in plans}, {Path("/base/perf_scenarios"), Path("/head/perf_scenarios")})
 
     def test_comparison_builds_each_tree_with_its_own_target_and_writes_the_table(self):
@@ -7889,12 +7910,14 @@ class CheckpointMemoryFeatureTests(PrebuiltHarness, unittest.TestCase):
             base_run=lambda plan: fixture_outcome("unsupported", "unsupported", plan),
             head_run=lambda plan: fixture_outcome("supported", "deadline-610", plan))
         self.assertEqual(code, perf.EXIT_PASS)
-        catalog = REAL_GATE.PERF_FEATURE_BUILDS
+        # Both fixture trees define S1/atlas-retry's methods, so each side builds its features with that cfg on.
+        catalog = {features: steps for (cfgs, features), steps in REAL_GATE.PERF_CFG_BUILDS.items()
+                   if cfgs == ("perf_atlas_retry_api",)}
         hooked = ("perf-counters", perf.CHECKPOINT_MEMORY_FEATURE)
         self.assertIs(self.build_step(gate, "head"), catalog[hooked]["build-head-perf_scenarios"])
         self.assertIs(self.build_step(gate, "base"), catalog[()]["build-base-perf_scenarios"])
-        self.assertIs(REAL_GATE.PERF_BUILD_CATALOG[("build-head-perf_scenarios", hooked)],
-                      self.build_step(gate, "head"))
+        self.assertEqual(REAL_GATE.PERF_BUILD_CATALOG[("build-head-perf_scenarios", hooked)].argv,
+                         self.build_step(gate, "head").argv)
         document = (out / "comparison.md").read_text(encoding="utf-8")
         self.assertIn("- Built with `--features perf-hook-checkpoint-memory`: head", document)
         row = next(line for line in document.splitlines() if "end renderer_total_bytes (MiB)" in line)
@@ -8828,7 +8851,9 @@ class TrimHookFeatureTests(PrebuiltHarness, unittest.TestCase):
             head_manifest=FIVE_FEATURES_MANIFEST, base_manifest=FOUR_FEATURES_MANIFEST,
             hook_trees=("head", "base"), trim_trees=("head",))
         self.assertEqual(code, perf.EXIT_PASS)
-        catalog = REAL_GATE.PERF_FEATURE_BUILDS
+        # Both fixture trees define S1/atlas-retry's methods, so each side builds its features with that cfg on.
+        catalog = {features: steps for (cfgs, features), steps in REAL_GATE.PERF_CFG_BUILDS.items()
+                   if cfgs == ("perf_atlas_retry_api",)}
         five = perf.PERF_FEATURES
         four = tuple(feature for feature in five if feature != perf.TRIM_HOOK_FEATURE)
         self.assertIs(self.build_step(gate, "head"), catalog[five]["build-head-perf_scenarios"])
@@ -9635,6 +9660,233 @@ class PhaseKindCoverageTests(CompareHarness, unittest.TestCase):
                             [kind_outcome(kind_phase())])
         kinded = flag_result("S2/default", [kind_outcome(kind_phase())], [kind_outcome(kind_phase())])
         self.assertEqual((perf.unclassified_result(mixed), perf.unclassified_result(kinded)), (True, False))
+
+
+class HarnessCfgDetectionTests(unittest.TestCase):
+    """One harness cfg decision for both sides, from each tree's owning crates."""
+
+    def test_a_cfg_is_on_only_when_both_trees_define_every_method_in_code(self):
+        # Every method in both trees turns the cfg on; one missing from either tree, or present only in a comment,
+        # a string, a unit-test file, test-only code (a file, module, impl or the method's own attributes), or in
+        # another crate than its owner, turns it off for both. Other attributes on the method leave it counted.
+        table = REAL_GATE.HARNESS_API_CFGS
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+
+            def tree(name, skip=None, extra=None):
+                built = root / name
+                write_atlas_retry_api(built, skip=skip)
+                if extra is not None:
+                    relative, body = extra
+                    (built / relative).parent.mkdir(parents=True, exist_ok=True)
+                    (built / relative).write_text(body, encoding="utf-8")
+                return built
+            full = tree("full")
+            cases = {
+                "both": (full, tree("both"), ("perf_atlas_retry_api",)),
+                "base lacks one": (full, tree("lacks", skip="last_missing_chrome"), ()),
+                "head lacks one": (tree("head-lacks", skip="font_fallback_notice_id"), full, ()),
+                "a comment": (full, tree("comment", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/notes.rs", "// pub fn last_missing_chrome(\n")), ()),
+                "a string": (full, tree("string", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/notes.rs", 'const NAME: &str = "\npub fn last_missing_chrome(";\n')),
+                    ()),
+                "a unit-test file": (full, tree("tests", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/core_tests.rs", "pub fn last_missing_chrome() {}\n")), ()),
+                "another crate": (full, tree("crate", "last_missing_chrome", (
+                    "crates/sonicterm-app/src/other.rs", "pub fn last_missing_chrome() {}\n")), ()),
+                "another owner": (full, tree("owner", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs", "impl Api {\n    pub fn last_missing_chrome(&self) {}\n}\n")),
+                    ()),
+                "a free function": (full, tree("free", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs", "pub fn last_missing_chrome() {}\n")), ()),
+                "a test-only impl": (full, tree("test-impl", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "#[cfg(test)]\nimpl GpuRenderer {\n    pub fn last_missing_chrome(&self) {}\n}\n")), ()),
+                "a test-only module": (full, tree("test-mod", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "#[cfg(test)]\nmod tests {\n    impl GpuRenderer {\n        pub fn last_missing_chrome(&self) {}\n"
+                    "    }\n}\n")), ()),
+                "a test-only file": (full, tree("test-file", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "#![cfg(test)]\nimpl GpuRenderer {\n    pub fn last_missing_chrome(&self) {}\n}\n")), ()),
+                "a test-only method": (full, tree("test-method", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "impl GpuRenderer {\n    #[cfg(test)]\n    pub fn last_missing_chrome(&self) {}\n}\n")), ()),
+                "a test-only method under other attributes": (full, tree("test-method-attrs", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "impl GpuRenderer {\n    #[doc(hidden)]\n    #[cfg(test)]\n    #[inline]\n"
+                    "    pub fn last_missing_chrome(&self) {}\n}\n")), ()),
+                "a method with other attributes": (full, tree("method-attrs", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "impl GpuRenderer {\n    #[doc(hidden)]\n    #[inline]\n"
+                    "    pub fn last_missing_chrome(&self) {}\n}\n")), ("perf_atlas_retry_api",)),
+                "a path-qualified owner": (full, tree("path", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "impl crate::core::GpuRenderer {\n    pub fn last_missing_chrome(&self) {}\n}\n")),
+                    ("perf_atlas_retry_api",)),
+                "a trait impl": (full, tree("trait", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "impl Chrome for GpuRenderer {\n    fn last_missing_chrome(&self) {}\n}\n")), ()),
+                # A trait impl defines no inherent method even when its trait shares the owner's name.
+                "a trait named like the owner": (full, tree("trait-named", "last_missing_chrome", (
+                    "crates/sonicterm-gpu/src/other.rs",
+                    "impl GpuRenderer<Frame> for Painter {\n    pub fn last_missing_chrome(&self) {}\n}\n")), ()),
+            }
+            for name, (head, base, expected) in cases.items():
+                with self.subTest(name):
+                    decided, _per_tree = perf.harness_cfg_decision({"head": head, "base": base}, table)
+                    self.assertEqual(decided, expected)
+
+
+class AtlasRetryAvailabilityTests(CompareHarness, unittest.TestCase):
+    """S1/atlas-retry is a declared diagnostic: unavailable on both sides when its harness cfg is off."""
+
+    def test_a_previous_release_base_leaves_the_ordinary_sets_and_marks_atlas_retry_unavailable(self):
+        # A base without the methods (as v1.3.8) turns the cfg off for both sides: S1/default still runs both its
+        # sets strictly, and S1/atlas-retry runs nothing, with its reason in the table and the details.
+        code, gate, _calls, plans, _work, out = self.compare(
+            listing=ATLAS_RETRY_LIST, scenarios=("S1", "S1/atlas-retry"), api_trees=("head",),
+            options=("--counters", "--counters-runs", "1", "--require-base"),
+            head_manifest=COUNTERS_MANIFEST, base_manifest=BASE_COUNTERS_MANIFEST)
+        self.assertEqual(code, perf.EXIT_PASS, self.printed)
+        self.assertTrue(plans)
+        self.assertEqual({plan.variant for plan in plans}, {"default"}, "atlas-retry is never planned")
+        self.assertTrue(all(step.harness_cfgs == () for step in gate.steps if step.id.startswith("build-")))
+        document = (out / "comparison.md").read_text(encoding="utf-8")
+        self.assertIn("unavailable on both sides: perf_atlas_retry_api is off because the base tree lacks", document)
+        self.assertIn("| S1/atlas-retry | counters set | unavailable | unavailable |", document)
+
+    def test_two_current_trees_schedule_atlas_retry_and_need_its_runs(self):
+        # Both trees have the methods, so the cfg is on and S1/atlas-retry runs its counters plans, needing every
+        # valid run under --require-base.
+        code, gate, _calls, plans, _work, _out = self.compare(
+            listing=ATLAS_RETRY_LIST, scenarios=("S1/atlas-retry",),
+            options=("--counters", "--counters-runs", "2", "--require-base"),
+            head_manifest=COUNTERS_MANIFEST, base_manifest=BASE_COUNTERS_MANIFEST)
+        self.assertEqual(code, perf.EXIT_PASS, self.printed)
+        self.assertEqual(sorted(plan.side for plan in plans), ["base", "base", "head", "head"])
+        self.assertTrue(all(step.harness_cfgs == ("perf_atlas_retry_api",)
+                            for step in gate.steps if step.id.startswith("build-")))
+        short = [perf.SetResult("S1/atlas-retry", "counters", perf.SideRuns([make_outcome()]),
+                                perf.SideRuns([]), target_runs=1)]
+        self.assertTrue(perf.strict_problems(short), "a missing atlas-retry run is still a strict problem")
+
+    def test_a_selection_of_only_unavailable_diagnostics_does_not_pass(self):
+        # With the cfg off, selecting only S1/atlas-retry leaves nothing runnable: blocked without --require-base
+        # and failed with it, never passed.
+        for options, expected in ((("--counters",), perf.EXIT_BLOCKED),
+                                  (("--counters", "--require-base"), perf.EXIT_FAIL)):
+            with self.subTest(options=options):
+                code, *_rest = self.compare(listing=ATLAS_RETRY_LIST, scenarios=("S1/atlas-retry",),
+                                            api_trees=("head",), options=options,
+                                            head_manifest=COUNTERS_MANIFEST, base_manifest=BASE_COUNTERS_MANIFEST)
+                self.assertEqual(code, expected, self.printed)
+        unavailable = [perf.SetResult("S1/atlas-retry", "counters", perf.SideRuns(blocked="off"),
+                                      perf.SideRuns(blocked="off"), unavailable="off")]
+        self.assertEqual(perf.strict_problems(unavailable), ["no runnable scenario set: S1/atlas-retry off"])
+
+    def test_unexpected_blocking_stays_a_strict_problem(self):
+        # Only a set declared unavailable is excused; any other blocked side still fails --require-base.
+        blocked = [perf.SetResult("S1/default", "timed", perf.SideRuns(blocked="the base cannot build"),
+                                  perf.SideRuns([make_outcome()]), target_runs=1)]
+        self.assertEqual(perf.comparison_exit(blocked, require_base=True), perf.EXIT_FAIL)
+
+
+class HarnessCfgPrebuiltTests(PrebuiltHarness, unittest.TestCase):
+    """The harness cfg decision and the composed flags are part of the build identity a consumer checks."""
+
+    def test_load_prebuilt_refuses_another_cfg_decision_or_other_flags(self):
+        # The producer records the decision and the flags; a manifest naming other ones is refused.
+        binaries, digest = self.produce()
+        manifest = json.loads((binaries / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["harness_cfgs"], ["perf_atlas_retry_api"])
+        self.assertEqual(manifest["rustflags"], ["--check-cfg", "cfg(perf_atlas_retry_api)", "--cfg",
+                                                 "perf_atlas_retry_api"])
+        for key, value, message in (("harness_cfgs", [], "harness cfgs"),
+                                    ("rustflags", ["--check-cfg", "cfg(perf_atlas_retry_api)"], "compiler flags")):
+            with self.subTest(key=key):
+                changed = self.rewrite(binaries, lambda data, key=key, value=value: data.update({key: value}))
+                with self.assertRaisesRegex(ValueError, f"refusing the prebuilt binaries: {message}"):
+                    self.consume(binaries, changed)
+                self.rewrite(binaries, lambda data, key=key: data.update({key: manifest[key]}))
+
+
+class PreviousReleaseCheckTests(unittest.TestCase):
+    """The head's harness overlaid on the previous release tag must still build."""
+
+    HEAD, PARENT, BASE = "a" * 40, "b" * 40, "c" * 40
+
+    def check(self, *, shallow="false", tags="v1.3.8\n", status="PASS", base_api=False):
+        """Run the check against a fake repository; return its exit code, the gate and the git calls."""
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        head = root / "head"
+        (head / perf.APP_MANIFEST).parent.mkdir(parents=True)
+        (head / perf.APP_MANIFEST).write_text(HEAD_MANIFEST, encoding="utf-8")
+        (head / perf.HARNESS_DIRECTORY).mkdir(parents=True)
+        (head / perf.HARNESS_DIRECTORY / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+        write_atlas_retry_api(head)
+        calls = []
+
+        def host_run(argv, timeout_s=perf.GIT_TIMEOUT_S):
+            calls.append(tuple(argv))
+            words = tuple(argv[3:]) if tuple(argv[:2]) == ("git", "-C") else tuple(argv[1:])
+            answers = {("rev-parse", "--is-shallow-repository"): shallow,
+                       ("rev-parse", "--verify", "HEAD^{commit}"): self.HEAD,
+                       ("rev-list", "--parents", "-n", "1", self.HEAD): f"{self.HEAD} {self.PARENT}",
+                       ("tag", "--list", "v[0-9]*", "--merged", self.PARENT): tags,
+                       ("describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", self.PARENT): "v1.3.8",
+                       ("rev-parse", "--verify", "v1.3.8^{commit}"): self.BASE}
+            if words[:2] == ("worktree", "add"):
+                tree = Path(words[-2])
+                (tree / perf.APP_MANIFEST).parent.mkdir(parents=True)
+                (tree / perf.APP_MANIFEST).write_text(BASE_MANIFEST, encoding="utf-8")
+                if base_api:
+                    write_atlas_retry_api(tree)
+                return command(argv, "")
+            if words[:2] == ("worktree", "remove"):
+                shutil.rmtree(words[-1], ignore_errors=True)
+                return command(argv, "")
+            return command(argv, answers.get(words, "") + "\n")
+        gate = FakeGate(lambda step: (status, 0 if status == "PASS" else 101,
+                                      "" if status == "PASS" else "error[E0599]: no method named `x`\n"))
+        work = root / "work"
+        code = perf.check_previous_release(gate, host_run, root / "out", work, {}, head_root=head)
+        self.assertFalse(work.exists(), "the check removes only, and all, the scratch state it created")
+        return code, gate, calls
+
+    def test_the_previous_tag_is_checked_with_the_derived_cfgs_in_an_isolated_target(self):
+        # The previous tag of HEAD's parent is checked with the base's features and the decision (off for a base
+        # without the methods, on for one with them), in the check's own target directory.
+        code, gate, calls = self.check()
+        self.assertEqual(code, perf.EXIT_PASS)
+        self.assertIs(gate.steps[0], REAL_GATE.PREVIOUS_RELEASE_CHECKS[((), ())])
+        # Compared by components: a Windows host writes the path with backslashes.
+        self.assertEqual(Path(gate.environs[0]["CARGO_TARGET_DIR"]).parts[-2:], ("work", "target"))
+        self.assertIn(("git", "worktree", "add", "--detach", str(gate.roots[0]), self.BASE), calls)
+        code, gate, _calls = self.check(base_api=True)
+        self.assertIs(gate.steps[0], REAL_GATE.PREVIOUS_RELEASE_CHECKS[(("perf_atlas_retry_api",), ())])
+
+    def test_a_failed_check_fails_and_a_shallow_clone_is_refused(self):
+        # A harness that does not build on the tag fails the step; a shallow checkout cannot select the tag.
+        self.assertEqual(self.check(status="FAIL")[0], perf.EXIT_FAIL)
+        with self.assertRaisesRegex(ValueError, "shallow"):
+            self.check(shallow="true")
+
+    def test_no_earlier_tag_has_nothing_to_check(self):
+        # Before the first release there is no tag to build against, so nothing is built.
+        code, gate, _calls = self.check(tags="")
+        self.assertEqual((code, gate.steps), (perf.EXIT_PASS, []))
+
+    def test_the_mode_takes_only_out(self):
+        # The check is its own gate step; a comparison option with it is a usage error.
+        self.assertTrue(perf.parse_args(["--check-previous-release"]).check_previous_release)
+        for extra in (["--base", "main"], ["--smoke"], ["--counters"], ["--keep"]):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                perf.parse_args(["--check-previous-release", *extra])
 
 
 if __name__ == "__main__":

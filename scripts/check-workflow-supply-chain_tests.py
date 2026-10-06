@@ -23,6 +23,15 @@ import textwrap
 import unittest
 
 _HERE = Path(__file__).resolve().parent
+
+
+def load_local_gate():
+    """The local gate module, whose steps render the exact commands CI runs."""
+    spec = importlib.util.spec_from_file_location("local_gate_for_supply_chain", _HERE / "local-gate.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 _CHECKER_PATH = _HERE / "check-workflow-supply-chain.py"
 
 _spec = importlib.util.spec_from_file_location("check_workflow_supply_chain", _CHECKER_PATH)
@@ -704,6 +713,25 @@ class RepositoryTests(unittest.TestCase):
             body = workflow.split(f"  {name}:\n", 1)[1]
             return re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", body, maxsplit=1)[0]
 
+        def run_lines(body, command):
+            """How many steps of `body` run exactly `command`, so a longer command never counts as it."""
+            return len(re.findall(rf"(?m)^ +run: {re.escape(command)}$", body))
+
+        # Each harness API cfg configuration is a run of its own: the gate renders it, and CI runs it once in
+        # each of its jobs and nowhere else; the counters set is the one it compiles with.
+        gate = load_local_gate()
+        cfg_steps = [step for step in gate.STEPS if step.id in ("perf-scenarios-atlas-retry-clippy",
+                                                                 "perf-scenarios-atlas-retry-tests")]
+        self.assertEqual(len(cfg_steps), 2)
+        for step in cfg_steps:
+            command = gate.command_text(step)
+            self.assertIn(f"--features {feature_sets[0]}", command)
+            for job in step.ci_jobs:
+                with self.subTest(command=command, job=job):
+                    self.assertEqual(run_lines(job_body(job), command), 1)
+            self.assertEqual(run_lines(workflow, command), len(step.ci_jobs))
+            self.assertNotIn(command, job_body("macos-smoke"))
+
         # Each feature's tests run wherever the harness's plain tests run, on every host, and its lint
         # wherever the workspace lint runs; no job runs either twice, and macos-smoke runs neither.
         for feature in feature_sets:
@@ -719,11 +747,14 @@ class RepositoryTests(unittest.TestCase):
                 for job in jobs:
                     with self.subTest(command=command, job=job):
                         body = job_body(job)
-                        self.assertEqual(body.count(f"        run: {command}\n"), 1)
+                        self.assertEqual(run_lines(body, command), 1)
                         self.assertIn(f"        run: {plain}", body)
-                self.assertEqual(workflow.count(command), len(jobs))
+                self.assertEqual(run_lines(workflow, command), len(jobs))
             self.assertNotIn(feature, job_body("macos-smoke"))
-            self.assertEqual(workflow.count(f"--features {feature}"), 6)
+            # The plain lint and test in their three jobs each, plus the cfg runs that compile this set.
+            cfg_runs = sum(len(step.ci_jobs) for step in cfg_steps
+                           if f"--features {feature}" in gate.command_text(step))
+            self.assertEqual(workflow.count(f"--features {feature}"), 6 + cfg_runs)
 
     def test_workspace_tests_cover_unit_and_integration_targets_once(self):
         script = (_HERE.parent / "scripts" / "check-workspace-crates.sh").read_text(
