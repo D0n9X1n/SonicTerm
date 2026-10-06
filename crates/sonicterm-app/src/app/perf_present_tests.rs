@@ -97,7 +97,9 @@ fn gates(attributes: &[impl AsRef<str>]) -> bool {
 /// and the `mod perf_present` declaration in `app/mod.rs`.
 #[test]
 fn the_attribution_watch_methods_are_never_cfg_gated() {
-    let source = include_str!("perf_present.rs");
+    // A Windows checkout may use CRLF line endings; the brace search below needs plain LF.
+    let source = include_str!("perf_present.rs").replace("\r\n", "\n");
+    let source = source.as_str();
     let inner: Vec<&str> =
         source.lines().map(str::trim).filter(|line| line.starts_with("#![")).collect();
     assert!(!gates(&inner), "the module is gated by an inner attribute: {inner:?}");
