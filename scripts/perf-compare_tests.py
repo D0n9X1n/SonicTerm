@@ -9863,7 +9863,8 @@ class PreviousReleaseCheckTests(unittest.TestCase):
         code, gate, calls = self.check()
         self.assertEqual(code, perf.EXIT_PASS)
         self.assertIs(gate.steps[0], REAL_GATE.PREVIOUS_RELEASE_CHECKS[((), ())])
-        self.assertTrue(gate.environs[0]["CARGO_TARGET_DIR"].endswith("work/target"))
+        # Compared by components: a Windows host writes the path with backslashes.
+        self.assertEqual(Path(gate.environs[0]["CARGO_TARGET_DIR"]).parts[-2:], ("work", "target"))
         self.assertIn(("git", "worktree", "add", "--detach", str(gate.roots[0]), self.BASE), calls)
         code, gate, _calls = self.check(base_api=True)
         self.assertIs(gate.steps[0], REAL_GATE.PREVIOUS_RELEASE_CHECKS[(("perf_atlas_retry_api",), ())])
