@@ -59,13 +59,39 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
 
+/// This thread's counting state as it was before a counted call, put back when the call ends.
+struct Restore {
+    /// Whether the thread was counting.
+    counting: bool,
+    /// Its count then.
+    count: u64,
+}
+
+// Lifecycle: Restore puts this thread's COUNTING and COUNT back on every exit from the counted work, unwinding included.
+impl Drop for Restore {
+    fn drop(&mut self) {
+        COUNTING.with(|counting| counting.set(self.counting));
+        COUNT.with(|count| count.set(self.count));
+    }
+}
+
 /// Run `work` on this thread and return its result with the allocation calls it made.
+///
+/// # Panics
+///
+/// When called inside another `allocations_during` on the same thread: the outer count would then
+/// include the inner work, so a nested call is refused before any state changes. A panic in `work`
+/// propagates, and the thread's counting state is restored first.
 pub(crate) fn allocations_during<Output>(work: impl FnOnce() -> Output) -> (Output, u64) {
+    let counting = COUNTING.with(Cell::get);
+    assert!(!counting, "allocations_during cannot be nested");
+    let restore = Restore { counting, count: COUNT.with(Cell::get) };
     COUNT.with(|count| count.set(0));
     COUNTING.with(|counting| counting.set(true));
     let output = work();
-    COUNTING.with(|counting| counting.set(false));
-    (output, COUNT.with(Cell::get))
+    let count = COUNT.with(Cell::get);
+    drop(restore);
+    (output, count)
 }
 
 #[cfg(test)]

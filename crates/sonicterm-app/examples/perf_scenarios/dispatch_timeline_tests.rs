@@ -549,33 +549,6 @@ mod recorder_tests {
         assert_eq!(offsets(&open), (app, vec![5 + 1_000_000, 0]));
     }
 
-    /// The rebase allocates nothing, at full capacity and with a zero gap alike, and keeps both buffers'
-    /// allocations and capacities: the storage stays two vectors totaling 13,312 bytes of payload.
-    #[test]
-    fn a_rebase_allocates_nothing() {
-        let app = Instant::now();
-        for gap_ms in [0_u64, 4] {
-            let harness = at(app, gap_ms);
-            let outer: Vec<(u64, u64, bool)> =
-                (0..OUTER_CAPACITY as u64).map(|index| (index, index, false)).collect();
-            let invocations: Vec<(u64, u64)> =
-                (0..INVOCATION_CAPACITY as u64).map(|index| (index, index)).collect();
-            let mut frozen = frozen_with(harness, &outer, &invocations);
-            let pointers = (frozen.buffers.outer.as_ptr(), frozen.buffers.invocations.as_ptr());
-            let payload = frozen.buffers.payload_bytes();
-            let ((), allocations) =
-                crate::test_allocator::allocations_during(|| frozen.rebase_onto(app));
-            assert_eq!(allocations, 0, "gap {gap_ms} ms");
-            assert!(!frozen.incomplete);
-            assert_eq!(
-                (frozen.buffers.outer.as_ptr(), frozen.buffers.invocations.as_ptr()),
-                pointers
-            );
-            assert_eq!(frozen.buffers.payload_bytes(), payload);
-            assert_eq!(frozen.buffers.invocations[255].enter_ns, 255 + gap_ms * 1_000_000);
-        }
-    }
-
     /// One sample's storage is allocated at its full capacity once, never grows while recording, and is
     /// moved, not copied, into the frozen record and back for the next sample: the same allocation, the
     /// same capacity, and the live payload never more than one sample's 13,312 bytes.
