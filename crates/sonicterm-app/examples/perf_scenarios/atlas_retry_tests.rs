@@ -411,3 +411,123 @@ fn a_missing_character_or_a_new_notice_after_settling_is_invalid() {
         );
     }
 }
+
+/// A title change after settling names both titles, escaped to ASCII, so a failure records what the
+/// title was and what it became; a cursor change names both positions.
+#[test]
+fn a_title_change_reason_names_both_titles() {
+    let now = Instant::now();
+    let mut machine = settled(now);
+    let retitled = around(Scene { title: "#1 \u{F489} shell".to_owned(), ..fixture_scene() });
+    let progress = machine.observe(Some(fitting(Frame::Retried)), &retitled, now);
+    let Progress::Invalid(reason) = progress else { panic!("{progress:?}") };
+    assert!(
+        reason.ends_with(r##"the scene's title changed from "sonicterm" to "#1 \u{f489} shell""##),
+        "{reason}"
+    );
+    let mut machine = settled(now);
+    let moved = around(Scene { cursor: (0, 5), ..fixture_scene() });
+    let Progress::Invalid(reason) = machine.observe(Some(fitting(Frame::Retried)), &moved, now)
+    else {
+        panic!("a moved cursor must end the run")
+    };
+    assert!(reason.ends_with("the scene's cursor changed from (69, 0) to (0, 5)"), "{reason}");
+}
+
+/// Escaping keeps a log on one ASCII line: quotes and backslashes are escaped, and anything outside
+/// printable ASCII reads as its code point.
+#[test]
+fn escaped_text_is_one_ascii_line() {
+    assert_eq!(escape_text("#1 \u{E691} \"sh\"\\\n"), r#"#1 \u{e691} \"sh\"\\\u{a}"#);
+    assert_eq!(escape_text("plain shell"), "plain shell");
+}
+
+/// Relative times keep their sign: a sample taken before the driver started reads negative, so a
+/// stale sample is visible as one.
+#[test]
+fn relative_times_keep_their_sign() {
+    let origin = Instant::now() + Duration::from_secs(5);
+    assert_eq!(relative_ms(origin + Duration::from_millis(1_250), origin), 1_250);
+    assert_eq!(relative_ms(origin - Duration::from_millis(40), origin), -40);
+    assert_eq!(relative_ms(origin, origin), 0);
+}
+
+/// The settle and failure line keeps the App's applied sample and the harness's own lookup apart, each
+/// with its own time, and reads an absent value as `n/a` and a cleared sample as `none`.
+#[test]
+fn the_settle_log_separates_the_apps_cached_sample_from_the_harness_lookup() {
+    let evidence = Evidence {
+        event: "failure",
+        settled_title: Some("#1 \u{E691} shell".to_owned()),
+        read_title: Some("#1 \u{F489} shell".to_owned()),
+        app_cached: Some(CachedForeground {
+            process: Some("sleep".to_owned()),
+            sampled_rel_ms: 2_310,
+        }),
+        session: Some(SessionIdentity { leader_pid: 501, anchor_pid: Some(502) }),
+        tab_title_prepares: Some(3),
+        fg_worker_probes: Some(2),
+        fg_results_stale: Some(0),
+        settle_ms: None,
+        harness_lookup: Some(HarnessLookup {
+            process: Some("sleep".to_owned()),
+            observed_rel_ms: 2_400,
+        }),
+    };
+    assert_eq!(
+        evidence.line(),
+        concat!(
+            r##"event=failure settled_title="#1 \u{e691} shell" read_title="#1 \u{f489} shell" "##,
+            r#"app_cached_process="sleep" app_cached_sampled_rel_ms=2310 leader_pid=501 anchor_pid=502 "#,
+            "tab_title_prepares=3 fg_worker_probes=2 fg_results_stale=0 settle_ms=n/a ",
+            r#"harness_lookup_process="sleep" harness_lookup_rel_ms=2400"#,
+        )
+    );
+    let sparse = Evidence {
+        event: "settle",
+        settled_title: None,
+        read_title: None,
+        app_cached: Some(CachedForeground { process: None, sampled_rel_ms: -15 }),
+        session: None,
+        tab_title_prepares: None,
+        fg_worker_probes: None,
+        fg_results_stale: None,
+        settle_ms: Some(812),
+        harness_lookup: None,
+    };
+    assert_eq!(
+        sparse.line(),
+        concat!(
+            "event=settle settled_title=n/a read_title=n/a app_cached_process=none ",
+            "app_cached_sampled_rel_ms=-15 leader_pid=n/a anchor_pid=n/a tab_title_prepares=n/a ",
+            "fg_worker_probes=n/a fg_results_stale=n/a settle_ms=812 harness_lookup_process=n/a ",
+            "harness_lookup_rel_ms=n/a",
+        )
+    );
+}
+
+/// The leader identity comes from the role session on either host: the macOS script's `leader_pid` and
+/// `anchor_pid`, or the Windows program's `program_pid`. A missing, empty, zero, negative or
+/// non-numeric pid, or text that is not JSON, gives no identity rather than a guessed one.
+#[test]
+fn the_leader_identity_is_read_from_the_role_session() {
+    assert_eq!(
+        parse_session(r#"{"role":0,"leader_pid":501,"anchor_pid":502,"tty":"/dev/ttys004"}"#),
+        Some(SessionIdentity { leader_pid: 501, anchor_pid: Some(502) })
+    );
+    assert_eq!(
+        parse_session(r#"{"role":0,"program_pid":7716,"tty":"none"}"#),
+        Some(SessionIdentity { leader_pid: 7716, anchor_pid: None })
+    );
+    for refused in [
+        r#"{"role":0,"tty":"none"}"#,
+        r#"{"role":0,"leader_pid":"","anchor_pid":502}"#,
+        r#"{"role":0,"leader_pid":0}"#,
+        r#"{"role":0,"leader_pid":-4}"#,
+        r#"{"role":0,"leader_pid":"501"}"#,
+        r#"{"role":0,"leader_pid":4294967296}"#,
+        "not json",
+    ] {
+        assert_eq!(parse_session(refused), None, "{refused}");
+    }
+}

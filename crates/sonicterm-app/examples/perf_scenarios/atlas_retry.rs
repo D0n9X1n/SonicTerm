@@ -93,8 +93,9 @@ impl Scene {
         self.fallback.2 == 0
     }
 
-    /// The first field in which `other` differs from this scene, named for a reason.
-    pub(crate) fn difference(&self, other: &Scene) -> Option<&'static str> {
+    /// The first field in which `other` differs from this scene, for a reason: the field and its value
+    /// in both scenes, or for row text the first differing row, so a failure names what changed.
+    pub(crate) fn difference(&self, other: &Scene) -> Option<String> {
         [
             ("title", self.title != other.title),
             ("font fallback", self.fallback != other.fallback),
@@ -103,7 +104,29 @@ impl Scene {
             ("row text", self.rows != other.rows),
         ]
         .into_iter()
-        .find_map(|(field, differs)| differs.then_some(field))
+        .find_map(|(field, differs)| differs.then(|| self.describe(field, other)))
+    }
+
+    /// How `field` changed from this scene to `other`: both values, or the first differing row.
+    fn describe(&self, field: &str, other: &Scene) -> String {
+        let quoted = |title: &str| format!("\"{}\"", escape_text(title));
+        let values = match field {
+            "title" => format!("from {} to {}", quoted(&self.title), quoted(&other.title)),
+            "font fallback" => format!("from {:?} to {:?}", self.fallback, other.fallback),
+            "grid size" => format!("from {:?} to {:?}", self.grid, other.grid),
+            "cursor" => format!("from {:?} to {:?}", self.cursor, other.cursor),
+            _ => {
+                let shorter = self.rows.len().min(other.rows.len());
+                let row = self
+                    .rows
+                    .iter()
+                    .zip(&other.rows)
+                    .position(|(settled, read)| settled != read)
+                    .unwrap_or(shorter);
+                format!("at row {row}")
+            }
+        };
+        format!("{field} changed {values}")
     }
 }
 
@@ -259,9 +282,9 @@ impl RecoveryEpisodes {
             .scene
             .as_ref()
             .and_then(|settled| settled.difference(before).or_else(|| settled.difference(after)));
-        if let Some(field) = changed {
-            // When: the settled scene's `field` differs on either side, C and D no longer redraw it.
-            return self.fail(format!("{}: the scene's {field} changed", self.label()));
+        if let Some(change) = changed {
+            // When: the settled scene differs on either side, C and D no longer redraw it.
+            return self.fail(format!("{}: the scene's {change}", self.label()));
         }
         let Some(delta) = delta else {
             // When: a counter field is missing, nothing can be measured, never read as zero.
@@ -430,6 +453,166 @@ pub(crate) fn records_problem(records: &[Record]) -> Option<String> {
         }
     }
     None
+}
+
+/// `text` on one ASCII line for a log or a reason: quotes and backslashes escaped, and every other
+/// character outside printable ASCII written as `\u{…}`, so an icon glyph reads as its code point.
+pub(crate) fn escape_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '"' | '\\' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            ' '..='~' => escaped.push(character),
+            _ => escaped.extend(character.escape_unicode()),
+        }
+    }
+    escaped
+}
+
+/// Milliseconds from `origin` to `at`; negative when `at` is earlier, saturating at the `i64` range.
+pub(crate) fn relative_ms(at: Instant, origin: Instant) -> i64 {
+    match at.checked_duration_since(origin) {
+        Some(after) => i64::try_from(after.as_millis()).unwrap_or(i64::MAX),
+        None => {
+            i64::try_from(origin.duration_since(at).as_millis()).map_or(i64::MIN, |before| -before)
+        }
+    }
+}
+
+/// The role session's process identity, from `sessions/0.json`: the macOS script's leader and its
+/// cleanup anchor, or the Windows role program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SessionIdentity {
+    /// The pane's leader: the macOS script's `leader_pid`, or the Windows `program_pid`.
+    pub(crate) leader_pid: u32,
+    /// The macOS cleanup anchor; Windows has none.
+    pub(crate) anchor_pid: Option<u32>,
+}
+
+/// The session identity in `text`, a `sessions/<role>.json` record; `None` when it is not JSON or its
+/// leader pid is missing, not a positive integer, or out of range.
+pub(crate) fn parse_session(text: &str) -> Option<SessionIdentity> {
+    let record: Value = serde_json::from_str(text).ok()?;
+    let pid = |key: &str| {
+        let number = record.get(key)?.as_u64().filter(|number| *number > 0)?;
+        u32::try_from(number).ok()
+    };
+    let leader_pid = pid("leader_pid").or_else(|| pid("program_pid"))?;
+    Some(SessionIdentity { leader_pid, anchor_pid: pid("anchor_pid") })
+}
+
+/// The foreground sample the App had applied for the armed pane when the evidence was read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CachedForeground {
+    /// The cached process name; `None` for a cleared sample (unavailable sampler or exited child).
+    pub(crate) process: Option<String>,
+    /// When the App's worker took the sample, in ms relative to the driver's start.
+    pub(crate) sampled_rel_ms: i64,
+}
+
+/// One foreground lookup the harness made itself. It is never the App's sample.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HarnessLookup {
+    /// The deepest descendant's name the lookup returned.
+    pub(crate) process: Option<String>,
+    /// When the lookup completed, in ms relative to the driver's start.
+    pub(crate) observed_rel_ms: i64,
+}
+
+/// The identity S1/atlas-retry logs once when the scene settles and once when the run fails: the titles
+/// compared, the App's applied foreground sample, the role's process identity and the counters that
+/// move with a title change, kept apart from any lookup the harness made itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Evidence {
+    /// `settle` or `failure`.
+    pub(crate) event: &'static str,
+    /// The settled scene's title; `None` before settling.
+    pub(crate) settled_title: Option<String>,
+    /// The title read now; `None` when the scene cannot be read.
+    pub(crate) read_title: Option<String>,
+    /// The App's applied sample; `None` when the pane has no cache entry or cannot be found.
+    pub(crate) app_cached: Option<CachedForeground>,
+    /// The role session's identity; `None` when `sessions/0.json` is missing or malformed.
+    pub(crate) session: Option<SessionIdentity>,
+    /// The main window's tab titles shaped on a title-cache miss.
+    pub(crate) tab_title_prepares: Option<u64>,
+    /// The App's completed foreground-worker batches.
+    pub(crate) fg_worker_probes: Option<u64>,
+    /// Foreground results dropped as stale.
+    pub(crate) fg_results_stale: Option<u64>,
+    /// Milliseconds from the driver's start to settling; `None` for a failure.
+    pub(crate) settle_ms: Option<u64>,
+    /// The harness's own lookup, labelled apart from the App's sample.
+    pub(crate) harness_lookup: Option<HarnessLookup>,
+}
+
+impl Evidence {
+    /// The evidence as one `key=value` log line; an absent value reads `n/a`.
+    pub(crate) fn line(&self) -> String {
+        let absent = || "n/a".to_owned();
+        let quoted = |text: Option<&str>| {
+            text.map_or_else(absent, |text| format!("\"{}\"", escape_text(text)))
+        };
+        let number = |value: Option<String>| value.unwrap_or_else(absent);
+        // A sample that is present but names no process (cleared) reads `none`, apart from an absent one.
+        let process = |found: Option<Option<&str>>| {
+            found.map_or_else(absent, |name| {
+                name.map_or_else(|| "none".to_owned(), |name| quoted(Some(name)))
+            })
+        };
+        let cached = self.app_cached.as_ref();
+        let lookup = self.harness_lookup.as_ref();
+        [
+            format!("event={}", self.event),
+            format!("settled_title={}", quoted(self.settled_title.as_deref())),
+            format!("read_title={}", quoted(self.read_title.as_deref())),
+            format!(
+                "app_cached_process={}",
+                process(cached.map(|sample| sample.process.as_deref()))
+            ),
+            format!(
+                "app_cached_sampled_rel_ms={}",
+                number(cached.map(|sample| sample.sampled_rel_ms.to_string()))
+            ),
+            format!(
+                "leader_pid={}",
+                number(self.session.map(|identity| identity.leader_pid.to_string()))
+            ),
+            format!(
+                "anchor_pid={}",
+                number(
+                    self.session
+                        .and_then(|identity| identity.anchor_pid)
+                        .map(|pid| pid.to_string())
+                )
+            ),
+            format!(
+                "tab_title_prepares={}",
+                number(self.tab_title_prepares.map(|count| count.to_string()))
+            ),
+            format!(
+                "fg_worker_probes={}",
+                number(self.fg_worker_probes.map(|count| count.to_string()))
+            ),
+            format!(
+                "fg_results_stale={}",
+                number(self.fg_results_stale.map(|count| count.to_string()))
+            ),
+            format!("settle_ms={}", number(self.settle_ms.map(|elapsed| elapsed.to_string()))),
+            format!(
+                "harness_lookup_process={}",
+                process(lookup.map(|found| found.process.as_deref()))
+            ),
+            format!(
+                "harness_lookup_rel_ms={}",
+                number(lookup.map(|found| found.observed_rel_ms.to_string()))
+            ),
+        ]
+        .join(" ")
+    }
 }
 
 /// `result.json`'s `atlas_recovery`: the episode count, the scene's distinct row keys and every record.

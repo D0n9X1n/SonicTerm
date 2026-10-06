@@ -177,6 +177,8 @@ struct AtlasRetryDriver {
     armed_at: Instant,
     /// Why the run cannot be read; the next drive ends it as invalid.
     failure: Option<String>,
+    /// When the driver started; the evidence line's times are relative to it.
+    started: Instant,
 }
 
 /// S2 typing: one `Ime::Commit` per character once the prompt shows, then a settle.
@@ -309,6 +311,28 @@ fn atlas_retry_counts(app: &App) -> Option<Counts> {
 #[cfg(not(feature = "perf-counters"))]
 fn atlas_retry_counts(_app: &App) -> Option<Counts> {
     None
+}
+
+/// The counters a tab-title change moves: the main window's title-cache misses, and the App's completed
+/// foreground-worker batches and stale foreground results; each `None` when it cannot be read.
+#[cfg(feature = "perf-counters")]
+fn atlas_retry_title_counters(app: &App) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let Some(snapshot) = app.frame_counters_snapshot() else {
+        return (None, None, None);
+    };
+    let window = app.main_window().map(|window| window.id());
+    let prepares = snapshot
+        .windows
+        .iter()
+        .find(|(id, _)| Some(*id) == window)
+        .and_then(|(_, record)| record.count("tab_title_prepares"));
+    (prepares, snapshot.app.count("fg_worker_probes"), snapshot.app.count("fg_results_stale"))
+}
+
+/// This build has no counter API, so none of the title counters can be read.
+#[cfg(not(feature = "perf-counters"))]
+fn atlas_retry_title_counters(_app: &App) -> (Option<u64>, Option<u64>, Option<u64>) {
+    (None, None, None)
 }
 
 /// Why S1/atlas-retry is blocked in a build without `perf_atlas_retry_api`.
@@ -2943,6 +2967,7 @@ impl Probe {
             redraw_pending: false,
             armed_at: now,
             failure: None,
+            started: now,
         };
         self.arm_atlas_retry(&mut retry, Arm::Redraw);
         DriverState::AtlasRetry(Box::new(retry))
@@ -2987,7 +3012,16 @@ impl Probe {
         else {
             return;
         };
-        match retry.machine.observe(delta, &reading, now) {
+        let was_settled = retry.machine.scene().is_some();
+        let progress = retry.machine.observe(delta, &reading, now);
+        if let (false, Some(settled)) = (was_settled, retry.machine.scene()) {
+            // When: this dispatch settled the scene, its identity is logged once, before the episodes.
+            let settle_ms = u64::try_from(now.saturating_duration_since(retry.started).as_millis())
+                .unwrap_or(u64::MAX);
+            let title = settled.title.clone();
+            self.log_atlas_retry_evidence("settle", Some(title), retry.started, Some(settle_ms));
+        }
+        match progress {
             Progress::Waiting => {}
             Progress::Arm(arm) => self.arm_atlas_retry(&mut retry, arm),
             Progress::Done => match atlas_retry::records_problem(retry.machine.records()) {
@@ -3013,6 +3047,9 @@ impl Probe {
         };
         if let Some(reason) = retry.failure.take().or_else(|| retry.machine.expire(now)) {
             // When: the run failed or a step was not attempted in time, it cannot be read.
+            let settled_title = retry.machine.scene().map(|scene| scene.title.clone());
+            let started = retry.started;
+            self.log_atlas_retry_evidence("failure", settled_title, started, None);
             self.invalidate(event_loop, format!("S1/atlas-retry: {reason}"));
             return;
         }
@@ -3026,6 +3063,52 @@ impl Probe {
         self.forward(event_loop, Dispatch::Harness, |app, active| {
             app.user_event(active, UserEvent::RequestRedraw(window_id))
         });
+    }
+
+    /// Log S1/atlas-retry's identity line for `event`: the titles compared, the App's applied foreground
+    /// sample for the active pane, the role session, the counters a title change moves, and one labelled
+    /// lookup the harness makes itself. It reads; it changes nothing the run measures, though its reads and
+    /// one process-table walk take event-loop time.
+    fn log_atlas_retry_evidence(
+        &self,
+        event: &'static str,
+        settled_title: Option<String>,
+        started: Instant,
+        settle_ms: Option<u64>,
+    ) {
+        let read_title = self.atlas_retry_scene().map(|scene| scene.title);
+        let app_cached = self
+            .active_pane()
+            .and_then(|pane| self.app.main_panes()?.get(&pane)?.fg_proc_cache.clone())
+            .map(|(sampled_at, process)| atlas_retry::CachedForeground {
+                process: process.map(|found| found.name),
+                sampled_rel_ms: atlas_retry::relative_ms(sampled_at, started),
+            });
+        let session = std::fs::read_to_string(self.scratch.join("sessions/0.json"))
+            .ok()
+            .and_then(|text| atlas_retry::parse_session(&text));
+        let (tab_title_prepares, fg_worker_probes, fg_results_stale) =
+            atlas_retry_title_counters(&self.app);
+        let harness_lookup = session.map(|identity| {
+            let process = sonicterm_io::proc_info::foreground_process(identity.leader_pid);
+            atlas_retry::HarnessLookup {
+                process,
+                observed_rel_ms: atlas_retry::relative_ms(Instant::now(), started),
+            }
+        });
+        let evidence = atlas_retry::Evidence {
+            event,
+            settled_title,
+            read_title,
+            app_cached,
+            session,
+            tab_title_prepares,
+            fg_worker_probes,
+            fg_results_stale,
+            settle_ms,
+            harness_lookup,
+        };
+        tracing::info!(target: LOG_TARGET, "perf_scenarios atlas-retry evidence {}", evidence.line());
     }
 
     /// What the main window shows for S1/atlas-retry: the active tab's title, the font fallback

@@ -523,7 +523,7 @@ Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 
 | `S1/wgpu`、`S5/wgpu`、`S11/wgpu` | 仅 Windows：该场景使用 `software_render_mode = "off"`，通过 wgpu 呈现且不降级。 |
 | `S11/release` | 显示图像后切换到没有媒体的标签页，直到切换后第一帧呈现（上限 5 秒），从该帧起保持 65 秒（从不缩短），记录 `released` 检查点，其内存读数只采用该帧之后至少 30 秒的样本（`fresh_after_unix_s`），然后切换回来，直到呈现一个图像图集含有条目的帧（上限 10 秒）。 |
 | `S1/role-exit` | 仅 Windows：角色程序在 GO 之后立即以 1 退出，该次运行必须以无效结束；smoke 使用它。 |
-| `S1/atlas-retry` | 只在计数器组中运行；没有计数器组时被拒绝。70 行静态文本稳定后，运行 8 个恢复回合，每回合四个强制帧：A 重试一次注入的字形图集变更，B 是第一次呈现的恢复帧，C 与 D 重绘不变的画面。`result.json` 以 `atlas_recovery` 记录每帧的计数器增量，对比增加一张 "Atlas retry recovery" 表，在被接受的计数器运行上汇总每帧的行缓存未命中与命中、塑形请求和尝试次数。 |
+| `S1/atlas-retry` | 只在计数器组中运行；没有计数器组时被拒绝。70 行静态文本稳定后，运行 8 个恢复回合，每回合四个强制帧：A 重试一次注入的字形图集变更，B 是第一次呈现的恢复帧，C 与 D 重绘不变的画面。`result.json` 以 `atlas_recovery` 记录每帧的计数器增量，对比增加一张 "Atlas retry recovery" 表，在被接受的计数器运行上汇总每帧的行缓存未命中与命中、塑形请求和尝试次数。稳定后画面一旦变化，运行即判为无效，原因写明变化的字段及其前后两个值（标题转义为 ASCII）；harness 日志在稳定时和失败时各记一行 `atlas-retry evidence`：比较的两个标题、App 已应用的前台进程样本、角色的 leader pid，以及标题与前台进程相关的计数器，harness 自己的前台进程查询单独标注。 |
 
 pull request 性能流水线在 macOS 和 Windows 上按名称运行 `S2/flood`、`S6/flood`、
 `S6/selection-drag` 和 `S1/atlas-retry`；它们所在的分片见 [CI 能测量什么](#ci-能测量什么)。
