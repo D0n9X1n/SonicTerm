@@ -15,9 +15,9 @@ fn the_prerequisite_records_no_timeline() {
     }
 }
 
-/// The frozen record schema: every field and variant the contract names, built from public fields
-/// and matched exhaustively, so removing or reshaping one fails this test's build. A harness builds
-/// its own fixtures the same way.
+/// The frozen record schema: every field and variant the contract names, built from public fields,
+/// and every enum matched with no wildcard arm, so adding, removing or reshaping a variant fails this
+/// test's build. A harness builds its own fixtures the same way.
 #[test]
 fn the_timeline_schema_is_the_contracts() {
     let identity = TickIdentityV1 { tick_seq: 4, generation: 2 };
@@ -82,18 +82,63 @@ fn the_timeline_schema_is_the_contracts() {
         AdmissionDecisionV1::Deferred(DeferReasonV1::Streaming),
         AdmissionDecisionV1::Held,
     ];
-    assert_eq!(decisions.len(), 8);
+    // No wildcard arm: a new decision or defer reason leaves this match non-exhaustive and fails the build.
+    let decision_names: Vec<&str> = decisions
+        .iter()
+        .map(|decision| match decision {
+            AdmissionDecisionV1::Permit { .. } => "permit",
+            AdmissionDecisionV1::Fallback => "fallback",
+            AdmissionDecisionV1::Admitted => "admitted",
+            AdmissionDecisionV1::Deferred(DeferReasonV1::Timeout) => "deferred-timeout",
+            AdmissionDecisionV1::Deferred(DeferReasonV1::Contention) => "deferred-contention",
+            AdmissionDecisionV1::Deferred(DeferReasonV1::Sync) => "deferred-sync",
+            AdmissionDecisionV1::Deferred(DeferReasonV1::Streaming) => "deferred-streaming",
+            AdmissionDecisionV1::Held => "held",
+        })
+        .collect();
+    assert_eq!(
+        decision_names,
+        [
+            "permit",
+            "fallback",
+            "admitted",
+            "deferred-timeout",
+            "deferred-contention",
+            "deferred-sync",
+            "deferred-streaming",
+            "held",
+        ]
+    );
     let outcomes = [
         OutputCheckOutcomeV1::NativeRequest,
         OutputCheckOutcomeV1::MarkedInFlight,
         OutputCheckOutcomeV1::None,
     ];
+    // No wildcard arm: a new check outcome fails the build.
+    let outcome_names: Vec<&str> = outcomes
+        .iter()
+        .map(|outcome| match outcome {
+            OutputCheckOutcomeV1::NativeRequest => "native-request",
+            OutputCheckOutcomeV1::MarkedInFlight => "marked-in-flight",
+            OutputCheckOutcomeV1::None => "none",
+        })
+        .collect();
+    assert_eq!(outcome_names, ["native-request", "marked-in-flight", "none"]);
     let causes = [
         PermitClearCauseV1::AdmissionDiscard,
         PermitClearCauseV1::LinkReset,
         PermitClearCauseV1::LinkPaused,
     ];
-    assert_eq!((outcomes.len(), causes.len()), (3, 3));
+    // No wildcard arm: a new clear cause fails the build.
+    let cause_names: Vec<&str> = causes
+        .iter()
+        .map(|cause| match cause {
+            PermitClearCauseV1::AdmissionDiscard => "admission-discard",
+            PermitClearCauseV1::LinkReset => "link-reset",
+            PermitClearCauseV1::LinkPaused => "link-paused",
+        })
+        .collect();
+    assert_eq!(cause_names, ["admission-discard", "link-reset", "link-paused"]);
     let takes = [
         EchoTimelineTakeV1::Timeline(record),
         EchoTimelineTakeV1::NotRecorded,
@@ -103,5 +148,29 @@ fn the_timeline_schema_is_the_contracts() {
         EchoTimelineTakeV1::NotTaken,
         EchoTimelineTakeV1::AlreadyTaken,
     ];
-    assert_eq!(takes.len(), 7);
+    // No wildcard arm: a new take result fails the build.
+    let take_names: Vec<&str> = takes
+        .iter()
+        .map(|take| match take {
+            EchoTimelineTakeV1::Timeline(_) => "timeline",
+            EchoTimelineTakeV1::NotRecorded => "not-recorded",
+            EchoTimelineTakeV1::GateOff => "gate-off",
+            EchoTimelineTakeV1::NoPane => "no-pane",
+            EchoTimelineTakeV1::Mismatch => "mismatch",
+            EchoTimelineTakeV1::NotTaken => "not-taken",
+            EchoTimelineTakeV1::AlreadyTaken => "already-taken",
+        })
+        .collect();
+    assert_eq!(
+        take_names,
+        [
+            "timeline",
+            "not-recorded",
+            "gate-off",
+            "no-pane",
+            "mismatch",
+            "not-taken",
+            "already-taken",
+        ]
+    );
 }

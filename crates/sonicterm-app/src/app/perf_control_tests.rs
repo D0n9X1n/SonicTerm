@@ -20,6 +20,21 @@ fn every_phase_reads_no_control_and_keeps_no_state() {
     }
 }
 
+/// The frozen phase schema: both variants and the `Typing` field, built from public fields and matched
+/// with no wildcard arm, so adding, removing or reshaping a phase fails this test's build.
+#[test]
+fn the_control_phase_schema_is_the_contracts() {
+    let phases = [PerfControlPhaseV1::Typing { flood_pane: 7 }, PerfControlPhaseV1::Other];
+    let names: Vec<&str> = phases
+        .iter()
+        .map(|phase| match phase {
+            PerfControlPhaseV1::Typing { flood_pane: _ } => "typing",
+            PerfControlPhaseV1::Other => "other",
+        })
+        .collect();
+    assert_eq!(names, ["typing", "other"]);
+}
+
 /// The frozen outcome schema: every variant and field the contract names, built and matched
 /// exhaustively, so removing or reshaping one fails this test's build.
 #[test]
