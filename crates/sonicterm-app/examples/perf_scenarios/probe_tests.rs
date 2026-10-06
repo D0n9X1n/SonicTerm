@@ -1676,3 +1676,76 @@ fn the_final_process_lookup_accepts_only_the_expected_name() {
     assert!(!lookup.finish(Some("bash"), start, start, deadline));
     assert_eq!(lookup.found_at(), None);
 }
+
+/// At the production deadline wake, a zero-attempt dispatch completes at the settle bound before the drive
+/// can call `expire`. The failure it records must still name the unmet barrier condition after its
+/// "completed past its bound" prefix, and the dispatch neither rearms nor settles the scene.
+#[test]
+fn a_zero_attempt_dispatch_at_the_settle_deadline_names_the_unmet_barrier() {
+    let start = Instant::now();
+    let mut driver = barred_driver(start);
+    assert!(driver.take_request());
+    let stale = retry_reading("#1 \u{E760} shell", Some(applied(start, 200, Some("bash"))));
+    let now = start + Duration::from_millis(210);
+    assert_eq!(driver.observe(Some(one_frame()), &stale, now), Some(Arm::Redraw));
+    assert!(driver.take_request());
+    let deadline = start + atlas_retry::SETTLE_BOUND;
+    assert_eq!(driver.due(), Some(deadline), "the settle deadline is the next wake");
+    assert_eq!(driver.observe(Some(no_attempt()), &stale, deadline), None);
+    assert!(!driver.take_request(), "the late dispatch did not rearm");
+    // An ended machine is no longer settling, so the test reads the recorded scene, not `settled()`.
+    assert!(driver.machine.scene().is_none(), "no scene was settled");
+    assert_eq!(
+        driver.failure.as_deref(),
+        Some(
+            "settle (steady 0): completed past its bound; barrier unmet: 1 qualifying foreground \
+             observation after the final process (need 2), latest cached \"bash\""
+        )
+    );
+}
+
+/// Windows fixes S1/atlas-retry's T at the sentinel the print phase saw, expecting the harness binary's
+/// basename, and makes no lookup; macOS expects `sleep` and has no T until its own lookup finds it.
+#[test]
+fn the_final_process_search_is_fixed_at_the_sentinel_on_windows_only() {
+    let sentinel_at = Instant::now();
+    let harness = std::path::Path::new(r"C:\runner\target\release\examples\perf_scenarios.exe");
+    let windows = final_lookup_for(true, Some(harness), Some(sentinel_at));
+    assert_eq!((windows.expected(), windows.found_at()), ("perf_scenarios", Some(sentinel_at)));
+    let macos = final_lookup_for(false, Some(harness), Some(sentinel_at));
+    assert_eq!((macos.expected(), macos.found_at()), ("sleep", None));
+    let unseen = final_lookup_for(true, Some(harness), None);
+    assert_eq!(unseen.found_at(), None, "no sentinel seen leaves T unset");
+}
+
+/// The production `Probe::atlas_retry_barrier` reads the App's active tab: with no custom title it
+/// expects the title the App derives for the final process, and with one it reports a fixture problem
+/// instead of an expected title.
+#[test]
+fn the_probe_barrier_expects_the_apps_title_and_refuses_a_custom_one() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("atlas");
+    let plan = scenarios::plan_for("S1", "atlas-retry", false, Host::Posix).expect("listed plan");
+    let request = RunArgs {
+        scenario: "S1",
+        variant: "atlas-retry",
+        managed: false,
+        short: false,
+        laps: false,
+        counters: true,
+        harness_hash: None,
+        scratch: String::from("unused"),
+        capture_delivery: false,
+    };
+    let now = Instant::now();
+    let mut probe =
+        Probe::new(app, plan, request, PathBuf::from("unused"), now + Duration::from_secs(3600));
+    let barrier = probe.atlas_retry_barrier("sleep", Some(now));
+    assert_eq!(barrier.final_at, Some(now));
+    assert_eq!(barrier.expected_title.as_deref(), Some("#1 \u{F489} shell"));
+    assert_eq!(barrier.fixture_problem, None);
+    probe.app.main_mut().expect("seeded main").tabs.set_active_custom_title("manual");
+    let barrier = probe.atlas_retry_barrier("sleep", Some(now));
+    assert_eq!(barrier.fixture_problem.as_deref(), Some(r#"the tab has a custom title "manual""#));
+    assert_eq!(barrier.expected_title, None);
+}

@@ -1161,3 +1161,23 @@ fn the_independent_lookup_runs_at_most_every_100_ms_and_stops_once_final() {
     }
     assert_eq!(lookup.lookups(), 6);
 }
+
+/// Windows fixes T at the sentinel instead of looking the final process up: a search built already found
+/// keeps the expected name and the sentinel instant, has made no lookup, and starts none afterwards.
+#[test]
+fn a_search_found_at_the_sentinel_keeps_its_name_and_instant_and_makes_no_lookup() {
+    let sentinel_at = Instant::now();
+    let mut lookup = FinalLookup::found(FINAL_PROCESS.to_owned(), Some(sentinel_at));
+    assert_eq!(lookup.expected(), FINAL_PROCESS);
+    assert_eq!(lookup.found_at(), Some(sentinel_at));
+    assert_eq!((lookup.lookups(), lookup.spent()), (0, Duration::ZERO));
+    // A live deadline, so only the fixed T can refuse the lookup.
+    let deadline = Some(sentinel_at + SETTLE_BOUND);
+    assert!(
+        !lookup.begin(sentinel_at + LOOKUP_SPACING, deadline),
+        "a found search starts no lookup"
+    );
+    let mut unseen = FinalLookup::found(FINAL_PROCESS.to_owned(), None);
+    assert_eq!(unseen.found_at(), None, "no sentinel seen leaves T unset");
+    assert!(unseen.begin(sentinel_at, deadline), "with T unset a lookup may start");
+}

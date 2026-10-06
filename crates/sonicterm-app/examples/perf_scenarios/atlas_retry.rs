@@ -364,7 +364,8 @@ impl RecoveryEpisodes {
         }
         if self.deadline().is_some_and(|deadline| now >= deadline) {
             // When: the dispatch completed at or past the current deadline, its frame is late.
-            return self.fail(format!("{}: completed past its bound", self.label()));
+            let reason = self.timeout_reason("completed past its bound");
+            return self.fail(reason);
         }
         let (Some(before), Some(after)) = (&reading.before, &reading.after) else {
             // When: the scene could not be read around the dispatch, nothing can be qualified.
@@ -490,16 +491,23 @@ impl RecoveryEpisodes {
             // When: the deadline is still ahead, the step may yet be attempted.
             return None;
         }
-        let bound = format!("{}: not attempted within its bound", self.label());
+        let reason = self.timeout_reason("not attempted within its bound");
+        self.stage = Stage::Invalid;
+        Some(reason)
+    }
+
+    /// The reason a step ran out of time, `what` saying how: a late dispatch (`observe`) or none at all
+    /// (`expire`). While settling it adds the unmet barrier condition from the last in-time reading, so
+    /// either path names why the scene never settled.
+    fn timeout_reason(&self, what: &str) -> String {
+        let bound = format!("{}: {what}", self.label());
         let unmet = matches!(self.stage, Stage::Settling { .. })
             .then(|| self.barrier_unmet(self.last_title.as_deref()))
             .flatten();
-        let reason = match unmet {
+        match unmet {
             Some(unmet) => format!("{bound}; barrier unmet: {unmet}"),
             None => bound,
-        };
-        self.stage = Stage::Invalid;
-        Some(reason)
+        }
     }
 
     /// Count one applied foreground reading toward the barrier. A missing entry or a cleared sample resets

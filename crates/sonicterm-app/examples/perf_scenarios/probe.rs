@@ -261,6 +261,22 @@ impl AtlasRetryDriver {
     }
 }
 
+/// The search for S1/atlas-retry's final process. Windows fixes T at `sentinel_at`, the instant the print
+/// phase saw the sentinel, since its role program is the harness binary itself; macOS looks `sleep` up.
+fn final_lookup_for(
+    windows: bool,
+    current_exe: Option<&std::path::Path>,
+    sentinel_at: Option<Instant>,
+) -> atlas_retry::FinalLookup {
+    let expected = final_process_name(windows, current_exe);
+    if windows {
+        // When: `windows`, the sentinel already proves the role program is the final process.
+        atlas_retry::FinalLookup::found(expected, sentinel_at)
+    } else {
+        atlas_retry::FinalLookup::new(expected)
+    }
+}
+
 /// The final process's name as the App's sampler reports it: the harness binary's normalized basename on
 /// Windows, where it is every pane's program, and `sleep`, which the macOS role script execs, elsewhere.
 fn final_process_name(windows: bool, current_exe: Option<&std::path::Path>) -> String {
@@ -3053,14 +3069,8 @@ impl Probe {
         }
         let now = Instant::now();
         let current_exe = std::env::current_exe().ok();
-        let expected = final_process_name(cfg!(windows), current_exe.as_deref());
-        // Windows fixes T at the sentinel the print phase saw; macOS looks the final process up itself.
-        let final_lookup = if cfg!(windows) {
-            let sentinel_at = self.sentinel_seen.first().copied().flatten();
-            atlas_retry::FinalLookup::found(expected, sentinel_at)
-        } else {
-            atlas_retry::FinalLookup::new(expected)
-        };
+        let sentinel_at = self.sentinel_seen.first().copied().flatten();
+        let final_lookup = final_lookup_for(cfg!(windows), current_exe.as_deref(), sentinel_at);
         let mut retry = AtlasRetryDriver::new(now, final_lookup);
         self.apply_atlas_retry_arm(&mut retry, Arm::Redraw);
         DriverState::AtlasRetry(Box::new(retry))
