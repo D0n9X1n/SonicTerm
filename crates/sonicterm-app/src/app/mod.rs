@@ -302,6 +302,12 @@ mod command_events;
 use command_events::{append_bounded_command_events, notify_command_done};
 pub use command_events::{poll_command_events_for_child_window, poll_command_events_for_tab_state};
 mod config_apply;
+mod echo_timeline;
+pub use echo_timeline::{
+    AdmissionDecisionV1, DeferReasonV1, EchoTimelineEventV1, EchoTimelineKindV1,
+    EchoTimelineTakeV1, EchoTimelineV1, FloodServiceV1, OutputCheckOutcomeV1, PermitClearCauseV1,
+    PermitSnapshotV1, TickIdentityV1,
+};
 mod echo_watch;
 pub use echo_watch::{
     ArmOutcome, ArmToken, EchoAppearance, EchoDelivery, EchoDeliveryOutcome, EchoPublication,
@@ -358,6 +364,16 @@ pub use pane_refresh::{
     resize_panes_to_rects, seed_parser_theme_colors,
 };
 mod pane_state;
+mod perf_control;
+pub use perf_control::{
+    PerfControlOutcomeV1, PerfControlPauseV1, PerfControlPhaseV1, PerfControlStopV1,
+};
+// Pins the phase-control and echo-timeline signatures here, in the parent, in every build: a gate on
+// a method, its impl or its module, or a changed type, fails a plain library build.
+const _: () = {
+    let _: fn(&mut App, PerfControlPhaseV1) -> PerfControlOutcomeV1 = App::perf_control_phase;
+    let _: fn(&mut App, u64, ArmToken) -> EchoTimelineTakeV1 = App::take_echo_timeline_v1;
+};
 use pane_state::pane_id_at_point;
 pub use pane_state::{next_pane_id, PaneCommandEvent, PaneState};
 mod path_target;
