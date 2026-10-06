@@ -9572,6 +9572,15 @@ class RunIdentityTests(CompareHarness, unittest.TestCase):
         self.assertEqual(identity.get("capabilities"),
                          {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": None})
 
+    def test_an_attribution_comparison_records_its_capability(self):
+        # A head whose list declares the S10 attribution schema records it, so perf-flags validates attribution
+        # records under it instead of refusing them as undeclared.
+        listing = {**LIST_JSON, "capabilities": {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": 1}}
+        _code, _gate, _calls, _plans, _work, out = self.compare(listing=listing)
+        identity = json.loads((out / "run-identity.json").read_text(encoding="utf-8"))
+        self.assertEqual(identity.get("capabilities"),
+                         {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": 1})
+
     def test_a_failed_side_lists_no_accepted_attempt(self):
         # A side that ends blocked or failed discards its valid attempts, and the inventory says so.
         valid = make_outcome()

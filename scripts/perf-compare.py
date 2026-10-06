@@ -6137,7 +6137,8 @@ def listed_capabilities(scenarios: Sequence[Scenario]) -> dict:
     """The capabilities the head's list declared; every scenario of one list carries the same ones."""
     first = scenarios[0] if scenarios else None
     return {"latency_split_schema": getattr(first, "latency_split_schema", None),
-            "phase_kinds": getattr(first, "phase_kinds", None)}
+            "phase_kinds": getattr(first, "phase_kinds", None),
+            "s10_attribution": getattr(first, "attribution_schema", None)}
 
 
 def run_inventory(results: Iterable[SetResult]) -> list[dict]:
