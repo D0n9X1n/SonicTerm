@@ -49,7 +49,10 @@ cargo build -p sonicterm-text
   renderer reports shaped glyphs that draw nothing (refused, not rasterized, or
   `GlyphInfo::oversize`) and tab titles that never shape as missing glyphs; the
   guard stays false until Windows CI passes the strengthened coverage test and
-  the measured rows are recorded.
+  the measured rows are recorded. `RASTER_EXCEPTIONS` (empty) exempts a raster
+  failure only by exact platform, role, face file and index, glyph id, style
+  and strike, with a reviewed reason; `incomplete_glyphs` counts unresolved
+  characters, oversize required tiles and unapproved raster failures.
 - Eviction is what keeps the index bounded. With eviction disabled the index
   still stops growing, because a full atlas stops admitting — memory looks
   flat while every later glyph goes missing. Assert that eviction ran, not

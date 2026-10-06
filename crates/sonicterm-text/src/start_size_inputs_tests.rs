@@ -198,3 +198,121 @@ fn start_constants_pass_the_table_validation() {
         assert_eq!(verdict.dim, constant);
     }
 }
+
+/// A failure of `glyph_id` in `file`, drawn by the body at 14 px in the regular face.
+fn failure(file: &str, glyph_id: u32) -> RasterFailure {
+    RasterFailure {
+        codepoint: '😀',
+        role: GlyphRasterVariant::Normal,
+        bold: false,
+        italic: false,
+        face: Some(FailedFace {
+            file: file.to_owned(),
+            face_index: 0,
+            glyph_id,
+            strike_px_milli: 14_000,
+        }),
+    }
+}
+
+/// The exception naming exactly `failure("seguiemj.ttf", 42)` on Windows.
+fn exception() -> RasterException {
+    RasterException {
+        platform: "windows",
+        role: GlyphRasterVariant::Normal,
+        file: "seguiemj.ttf",
+        face_index: 0,
+        glyph_id: 42,
+        bold: false,
+        italic: false,
+        strike_px_milli: 14_000,
+        codepoint: "😀",
+        reason: "reviewed: the face has no outline for this glyph",
+    }
+}
+
+/// An exception approves only the failure it names on every field: platform, raster role, face file
+/// and index, glyph id, style and strike. Changing any one leaves the failure unapproved.
+#[test]
+fn an_exception_approves_only_its_exact_face_glyph_style_and_strike() {
+    let listed = [exception()];
+    let matched = normalize_raster_failures("windows", &[failure("seguiemj.ttf", 42)], &listed);
+    assert_eq!(matched.matched, vec![(failure("seguiemj.ttf", 42), exception().reason)]);
+    assert!(matched.unapproved.is_empty());
+    assert_eq!(matched.raw, vec![failure("seguiemj.ttf", 42)]);
+    let other_face = |change: fn(&mut FailedFace)| {
+        let mut changed = failure("seguiemj.ttf", 42);
+        change(changed.face.as_mut().expect("a resolved face"));
+        changed
+    };
+    let mut bold = failure("seguiemj.ttf", 42);
+    bold.bold = true;
+    let mut italic = failure("seguiemj.ttf", 42);
+    italic.italic = true;
+    let mut title = failure("seguiemj.ttf", 42);
+    title.role = GlyphRasterVariant::TabTitle;
+    let unmatched = [
+        ("another platform", "macos", failure("seguiemj.ttf", 42)),
+        ("another file", "windows", failure("seguisym.ttf", 42)),
+        ("another glyph", "windows", failure("seguiemj.ttf", 43)),
+        ("another face", "windows", other_face(|face| face.face_index = 1)),
+        ("another strike", "windows", other_face(|face| face.strike_px_milli = 28_000)),
+        ("bold", "windows", bold),
+        ("italic", "windows", italic),
+        ("another role", "windows", title),
+    ];
+    for (name, platform, candidate) in unmatched {
+        let normalized =
+            normalize_raster_failures(platform, std::slice::from_ref(&candidate), &listed);
+        assert!(normalized.matched.is_empty(), "{name}: not approved");
+        assert_eq!(normalized.unapproved, vec![candidate], "{name}: stays unapproved");
+    }
+}
+
+/// A failure whose key resolved to no face cannot be named by any exception, so it stays
+/// unapproved whatever the list holds.
+#[test]
+fn an_unresolved_failure_stays_unapproved() {
+    let unresolved = RasterFailure { face: None, ..failure("seguiemj.ttf", 42) };
+    let normalized =
+        normalize_raster_failures("windows", std::slice::from_ref(&unresolved), &[exception()]);
+    assert_eq!(normalized.unapproved, vec![unresolved]);
+}
+
+/// Only approved raster failures leave the incomplete count; unresolved characters and oversize
+/// required tiles always count, and any remaining count still selects the maximum.
+#[test]
+fn only_approved_raster_failures_leave_the_incomplete_count() {
+    let normalized = normalize_raster_failures(
+        "windows",
+        &[failure("seguiemj.ttf", 42), failure("seguiemj.ttf", 7)],
+        &[exception()],
+    );
+    assert_eq!(incomplete_glyphs(2, 1, &normalized), 4, "2 unresolved + 1 oversize + 1 unapproved");
+    assert_eq!(incomplete_glyphs(0, 0, &normalized), 1);
+    let approved =
+        normalize_raster_failures("windows", &[failure("seguiemj.ttf", 42)], &[exception()]);
+    assert_eq!(incomplete_glyphs(0, 0, &approved), 0, "an approved failure does not count");
+    let mut counted = input("windows 1x S9 helper", FitOutcome::Fits(256), 32);
+    counted.incomplete_glyphs = incomplete_glyphs(0, 0, &normalized);
+    assert_eq!(start_rule(&[counted]).map(|verdict| verdict.dim), Ok(ATLAS_DIM));
+}
+
+/// The reviewed list starts empty and well formed; an entry naming no glyph (glyph id 0 or no file),
+/// with no reason, for an unknown platform or listed twice is refused.
+#[test]
+fn the_reviewed_exception_list_is_well_formed_and_starts_empty() {
+    assert!(RASTER_EXCEPTIONS.is_empty(), "every entry needs a reason reviewed in its PR");
+    assert!(exception_problems(RASTER_EXCEPTIONS).is_empty());
+    assert!(exception_problems(&[exception()]).is_empty(), "a complete entry is accepted");
+    let broken = [
+        ("glyph id 0", RasterException { glyph_id: 0, ..exception() }),
+        ("no file", RasterException { file: "", ..exception() }),
+        ("no reason", RasterException { reason: " ", ..exception() }),
+        ("unknown platform", RasterException { platform: "linux", ..exception() }),
+    ];
+    for (name, entry) in broken {
+        assert_eq!(exception_problems(&[entry]).len(), 1, "{name}");
+    }
+    assert_eq!(exception_problems(&[exception(), exception()]).len(), 1, "a duplicate entry");
+}

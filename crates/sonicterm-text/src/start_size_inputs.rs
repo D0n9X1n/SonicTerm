@@ -9,13 +9,13 @@
 //! conservative contract: both normal start constants stay at the maximum.
 
 use crate::glyph_atlas::{FitOutcome, ATLAS_DIM, MIN_ATLAS_DIM};
+use sonicterm_types::GlyphRasterVariant;
 
 /// Whether the measurement oracle can prove that a renderer drew its whole working set, which a
-/// start below the maximum needs. It is false because two failures are still not reported as
-/// missing glyphs: a nonzero shaped glyph id whose raster or atlas admission fails is skipped
-/// silently, and a tab title whose fitting fails becomes an empty title before the chrome
-/// diagnostic sees it. Both must be recorded as missing, with regression tests, and the CI rows
-/// recorded in [`START_SIZE_INPUTS`], before this becomes true. Rows alone never lower a start.
+/// start below the maximum needs. The renderer now reports shaped glyphs that draw nothing and tab
+/// titles that never shape as missing glyphs; this stays false until the strengthened real-renderer
+/// coverage test passes on Windows CI and the CI rows are recorded in [`START_SIZE_INPUTS`]. Rows
+/// alone never lower a start.
 pub const SIZING_ORACLE_COMPLETE: bool = false;
 
 /// What produced one measured row.
@@ -259,3 +259,142 @@ fn rule_inputs(scale: u32, rows: &[StartSizeInput]) -> Vec<RuleInput> {
 #[cfg(test)]
 #[path = "start_size_inputs_tests.rs"]
 mod start_size_inputs_tests;
+
+/// The face a failed raster was requested from, resolved while its stack was alive: the face file's
+/// name (not its host path), its index in a collection, the glyph id and the requested strike.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedFace {
+    /// The face file's name, or a `builtin:`/`memory:` name for data not on disk.
+    pub file: String,
+    /// Index of the face within its collection file.
+    pub face_index: u32,
+    /// The glyph id inside that face.
+    pub glyph_id: u32,
+    /// The requested raster size, in thousandths of a pixel.
+    pub strike_px_milli: u64,
+}
+
+/// One required glyph a measurement resolved but could not rasterize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasterFailure {
+    /// The character or cluster lead it drew, kept for reading.
+    pub codepoint: char,
+    /// The raster role (body, tab title or palette footer) that requested it.
+    pub role: GlyphRasterVariant,
+    /// Whether the bold face was requested.
+    pub bold: bool,
+    /// Whether the italic face was requested.
+    pub italic: bool,
+    /// The resolved face, or `None` when the key resolved to no face; such a failure is never
+    /// approved.
+    pub face: Option<FailedFace>,
+}
+
+/// One reviewed raster failure that may be exempted: an exact platform, raster role, face file and
+/// index, glyph id, style and strike, never a family. Each entry carries the reason reviewed in the
+/// PR that added it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RasterException {
+    /// `macos` or `windows`.
+    pub platform: &'static str,
+    /// The raster role that requested the glyph.
+    pub role: GlyphRasterVariant,
+    /// The face file's name.
+    pub file: &'static str,
+    /// Index of the face within its collection file.
+    pub face_index: u32,
+    /// The glyph id; never 0.
+    pub glyph_id: u32,
+    /// Whether the bold face was requested.
+    pub bold: bool,
+    /// Whether the italic face was requested.
+    pub italic: bool,
+    /// The requested raster size, in thousandths of a pixel.
+    pub strike_px_milli: u64,
+    /// The codepoint or cluster, for reading only; it does not take part in matching.
+    pub codepoint: &'static str,
+    /// Why the failure is acceptable, as reviewed in the PR that added the entry.
+    pub reason: &'static str,
+}
+
+impl RasterException {
+    /// Whether this entry names `failure` on `platform`, field for field.
+    fn matches(&self, platform: &str, failure: &RasterFailure) -> bool {
+        let Some(face) = failure.face.as_ref() else {
+            // When: failure.face is None, the key resolved to no face, which no entry can name.
+            return false;
+        };
+        self.platform == platform
+            && self.role == failure.role
+            && self.bold == failure.bold
+            && self.italic == failure.italic
+            && self.file == face.file
+            && self.face_index == face.face_index
+            && self.glyph_id == face.glyph_id
+            && self.strike_px_milli == face.strike_px_milli
+    }
+}
+
+/// The reviewed raster-failure exceptions. Empty: an entry is added only with a reason reviewed in
+/// its PR, and an unknown failure keeps selecting the maximum.
+pub const RASTER_EXCEPTIONS: &[RasterException] = &[];
+
+/// A measurement's raster failures, normalized against the reviewed exceptions: the raw list, the
+/// failures an exception approved with its reason, and the unapproved rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedFailures {
+    /// Every raster failure the measurement recorded.
+    pub raw: Vec<RasterFailure>,
+    /// Each approved failure with the reason its exception gives.
+    pub matched: Vec<(RasterFailure, &'static str)>,
+    /// The failures no exception names; each still counts as incomplete.
+    pub unapproved: Vec<RasterFailure>,
+}
+
+/// Normalize `failures` measured on `platform` against `exceptions`.
+#[must_use]
+pub fn normalize_raster_failures(
+    platform: &str,
+    failures: &[RasterFailure],
+    exceptions: &[RasterException],
+) -> NormalizedFailures {
+    let mut normalized =
+        NormalizedFailures { raw: failures.to_vec(), matched: Vec::new(), unapproved: Vec::new() };
+    for failure in failures {
+        match exceptions.iter().find(|entry| entry.matches(platform, failure)) {
+            Some(entry) => normalized.matched.push((failure.clone(), entry.reason)),
+            None => normalized.unapproved.push(failure.clone()),
+        }
+    }
+    normalized
+}
+
+/// A measurement's incomplete count, the rule input's `incomplete_glyphs`: unresolved required
+/// characters and oversize required tiles always count, and only approved raster failures do not.
+#[must_use]
+pub fn incomplete_glyphs(unresolved: usize, oversize: usize, raster: &NormalizedFailures) -> usize {
+    unresolved + oversize + raster.unapproved.len()
+}
+
+/// Every problem with `exceptions`: an entry that names no glyph (glyph id 0 or no file), gives no
+/// reason, names an unknown platform, or repeats another entry.
+#[must_use]
+pub fn exception_problems(exceptions: &[RasterException]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (index, entry) in exceptions.iter().enumerate() {
+        let known_platform = matches!(entry.platform, "macos" | "windows");
+        if entry.glyph_id == 0 || entry.file.trim().is_empty() {
+            problems.push(format!("entry {index} names no glyph: {entry:?}"));
+        } else if entry.reason.trim().is_empty() {
+            // When: entry.reason is blank, the entry was never reviewed, so it cannot exempt anything.
+            problems.push(format!("entry {index} gives no reason: {entry:?}"));
+        } else if !known_platform {
+            // When: known_platform is false, entry.platform names no measured host, so nothing matches it.
+            problems.push(format!("entry {index} names an unknown platform: {entry:?}"));
+        } else if exceptions[..index].contains(entry) {
+            // When: an earlier entry equals this one, the list repeats a review.
+            problems.push(format!("entry {index} repeats an earlier entry: {entry:?}"));
+        }
+    }
+    problems
+}

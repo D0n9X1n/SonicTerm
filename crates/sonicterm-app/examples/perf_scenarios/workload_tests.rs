@@ -1122,7 +1122,8 @@ fn glyph_atlas_working_set() {
     use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
     use sonicterm_text::glyph_atlas::{START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
     use sonicterm_text::start_size_inputs::{
-        start_rule, validate_table_start, InputSource, RuleInput, START_SIZE_INPUTS,
+        normalize_raster_failures, start_rule, validate_table_start, InputSource, RuleInput,
+        RASTER_EXCEPTIONS, START_SIZE_INPUTS,
     };
     let font_dirs =
         vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
@@ -1142,8 +1143,14 @@ fn glyph_atlas_working_set() {
             let set =
                 measure_glyph_working_set(&lines, &titles, FONT_FAMILY, size, dpi, &font_dirs)
                     .expect("the packaged scenario family loads");
-            let incomplete_glyphs =
-                set.unresolved_chars.len() + set.raster_failed.len() + set.oversize_required.len();
+            // Reviewed exceptions apply here, where each failure still names its face; unresolved
+            // characters and oversize required tiles always count.
+            let raster = normalize_raster_failures(platform, &set.raster_failed, RASTER_EXCEPTIONS);
+            let incomplete_glyphs = sonicterm_text::start_size_inputs::incomplete_glyphs(
+                set.unresolved_chars.len(),
+                set.oversize_required.len(),
+                &raster,
+            );
             println!(
                 "{}",
                 working_set_row(
@@ -1157,12 +1164,18 @@ fn glyph_atlas_working_set() {
                     incomplete_glyphs
                 )
             );
-            if incomplete_glyphs > 0 {
-                // When: a required tile is tofu on this host, say which, apart from the row.
+            if incomplete_glyphs > 0 || !raster.raw.is_empty() {
+                // When: a required tile is tofu on this host, say which, apart from the row: the raw
+                // raster failures, those a reviewed exception approved with its reason, and the rest.
                 println!(
                     "glyph_atlas_working_set_tofu platform={platform} scale={scale} fixture={name} \
-                     unresolved={:?} raster_failed={:?} oversize_required={:?}",
-                    set.unresolved_chars, set.raster_failed, set.oversize_required
+                     unresolved={:?} oversize_required={:?} raster_failed={} matched={:?} \
+                     unapproved={:?}",
+                    set.unresolved_chars,
+                    set.oversize_required,
+                    raster.raw.len(),
+                    raster.matched,
+                    raster.unapproved
                 );
             }
             let recorded = START_SIZE_INPUTS.iter().find(|row| {

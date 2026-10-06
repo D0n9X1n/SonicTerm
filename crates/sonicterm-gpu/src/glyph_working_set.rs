@@ -20,6 +20,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use sonicterm_text::glyph_atlas::{FitOutcome, GlyphAtlas, GlyphInfo, ATLAS_DIM};
+use sonicterm_text::start_size_inputs::{FailedFace, RasterFailure};
 use sonicterm_types::{GlyphKey, GlyphRasterVariant};
 
 use crate::chrome_text::{self, ChromeAttrs};
@@ -108,8 +109,9 @@ pub struct GlyphWorkingSet {
     pub variant_sizes: Vec<(GlyphRasterVariant, f32)>,
     /// Characters no face covers: measured as the renderer draws them, as tofu, and listed here.
     pub unresolved_chars: Vec<char>,
-    /// Resolved glyphs whose face rasterized nothing: the renderer draws them as tofu too.
-    pub raster_failed: Vec<GlyphKey>,
+    /// Resolved glyphs whose face rasterized nothing, each resolved to its face file, glyph and
+    /// strike while its stack was alive: the renderer draws them as tofu too.
+    pub raster_failed: Vec<RasterFailure>,
     /// Required glyphs whose tile is larger than the atlas can ever place, so they draw nothing.
     pub oversize_required: Vec<GlyphKey>,
 }
@@ -119,8 +121,8 @@ pub struct GlyphWorkingSet {
 struct Accounted {
     /// Characters no face covers.
     unresolved_chars: BTreeSet<char>,
-    /// Resolved glyphs that rasterized to nothing.
-    raster_failed: HashSet<GlyphKey>,
+    /// Resolved glyphs that rasterized to nothing, by key, each with its resolved face.
+    raster_failed: HashMap<GlyphKey, RasterFailure>,
     /// Required glyphs cached as too large to place.
     oversize_required: HashSet<GlyphKey>,
 }
@@ -347,7 +349,7 @@ fn measure_with_stacks(
                         character,
                     });
                 }
-                account_tile(&atlas, key, &mut accounted)?;
+                account_tile(&atlas, stack, key, &mut accounted)?;
             }
         }
     }
@@ -358,7 +360,7 @@ fn measure_with_stacks(
             let key = GlyphKey::new(character, bold, italic);
             // Counted like every insertion; outside a frame's counting scope this records nothing.
             let _info = atlas.get_or_insert(key, &mut CountingRasterizer::new(&mut body_raster));
-            account_tile(&atlas, key, &mut accounted)?;
+            account_tile(&atlas, &body, key, &mut accounted)?;
         }
     }
     let tile_keys = atlas.resident_tile_keys();
@@ -378,7 +380,7 @@ fn measure_with_stacks(
     }
     Ok(GlyphWorkingSet {
         unresolved_chars: accounted.unresolved_chars.into_iter().collect(),
-        raster_failed: accounted.raster_failed.into_iter().collect(),
+        raster_failed: accounted.raster_failed.into_values().collect(),
         oversize_required: accounted.oversize_required.into_iter().collect(),
         tile_identities,
         fit_outcome: atlas.fit_outcome(),
@@ -432,7 +434,8 @@ fn codepoint_identity(
         false,
     );
     let mut raster = stack.clone();
-    let info = atlas.get_or_insert(key, &mut raster)?;
+    // Counted like every insertion; outside a frame's counting scope this records nothing.
+    let info = atlas.get_or_insert(key, &mut CountingRasterizer::new(&mut raster))?;
     if info.missing || info.oversize {
         // When: info.missing or info.oversize, the tile drew nothing, so the codepoint has no real tile.
         return None;
@@ -468,15 +471,17 @@ pub fn representative_gaps(
 /// Check that `key`, which a layout or the fast path required, is resident. A missing tile is the
 /// renderer's tofu: a real glyph id that rasterized nothing is listed in `raster_failed`, a notdef
 /// key in `unresolved_chars`, and a tile too large to place in `oversize_required`; each is an
-/// incomplete required tile. An absent tile is only allowed once the atlas evicted.
+/// incomplete required tile. A raster failure is resolved through `stack`, the stack that drew it,
+/// so a reviewed exception can name its face. An absent tile is only allowed once the atlas evicted.
 fn account_tile(
     atlas: &GlyphAtlas,
+    stack: &sonicterm_engine::FontStack,
     key: GlyphKey,
     accounted: &mut Accounted,
 ) -> Result<(), WorkingSetError> {
     match atlas.get(key) {
         Some(info) if info.missing && key.glyph_id != 0 => {
-            accounted.raster_failed.insert(key);
+            accounted.raster_failed.insert(key, raster_failure(stack, key));
             Ok(())
         }
         Some(info) if info.missing => {
@@ -492,6 +497,29 @@ fn account_tile(
         None if atlas.evictions() > 0 => Ok(()),
         None => Err(WorkingSetError::NotPlaced { key }),
     }
+}
+
+/// `key`'s raster failure: its character, role and style, and the face file, index, glyph id and
+/// strike `stack` resolves it to, or no face when it resolves to none.
+fn raster_failure(stack: &sonicterm_engine::FontStack, key: GlyphKey) -> RasterFailure {
+    RasterFailure {
+        codepoint: key.ch,
+        role: key.raster_variant,
+        bold: key.weight_bold,
+        italic: key.italic,
+        face: stack.resolved_glyph_face(key).map(|resolved| FailedFace {
+            file: face_file_name(&resolved.face.source),
+            face_index: resolved.face.face_index,
+            glyph_id: resolved.glyph_id,
+            strike_px_milli: resolved.strike_px_milli,
+        }),
+    }
+}
+
+/// A face source's file name, its last component on either host's path separators, so an exception
+/// names the same face on every checkout; a `builtin:` or `memory:` name has none and is kept whole.
+fn face_file_name(source: &str) -> String {
+    source.rsplit(['/', '\\']).next().unwrap_or(source).to_owned()
 }
 
 #[cfg(test)]
