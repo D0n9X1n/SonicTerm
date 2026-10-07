@@ -309,7 +309,16 @@ native proof of the first full presented frame.
 ### Lock-contention retry
 
 Each window keeps `retry_not_before` separate from its last-frame timestamp.
-Only a failed visible parser/image `try_lock` enters this path. Hidden-tab and
+Only a visible parser or image store the collector could not take enters this
+path. A collection probes each visible parser, then waits for a busy one with
+one 2 ms deadline shared by every visible pane; a parser still busy at the
+deadline, or one taken after it, is a miss. Scheduler preemption can overrun the
+deadline. Image stores are only probed. The PTY worker releases each parser
+section fairly, handing the lock to a selected waiter before it can relock; a
+waiting collection takes part in that selection with other blocking parser
+callers and is not guaranteed the next handoff. Without the wait, a flood's
+back-to-back sections left almost no gap for a nonwaiting probe, and most redraws
+fell to this retry floor. Hidden-tab and
 zoom-hidden stores are not visited by either role's frame collector. Both roles
 hold visible parsers before copying visible media; these are separate, not atomic,
 snapshots. Invalid topology skips the entire assembly without arming this floor,

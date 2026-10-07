@@ -40,7 +40,7 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
 - `src/app/redraw.rs` - owner-local causes, pre-lock output snapshots, outcome settlement,
   structural/device suppression, and typed due-owner service.
-- `src/app/visible_frame.rs` - validated visible-only frame handles, non-blocking guards,
+- `src/app/visible_frame.rs` - validated visible-only frame handles, deadline-bounded parser guards,
   media snapshots, and shared `PaneRender` assembly for both window roles.
 - `src/app/viewport_anchor.rs` - scrolled-back viewport anchor rebased across history eviction.
 - `src/app/selection_gesture.rs` - local selection gestures bound to their press pane and anchor, click counting, and
@@ -62,8 +62,15 @@ cargo build -p sonicterm-app
 - `finish_session` retires every window's panes, including hidden main, before
   shutdown control. The shared shell calls it on both run outcomes. Preserve the
   original result; only actual teardown settlement permits a clean-session marker.
-- Render paths use `try_lock`, not blocking `lock`; avoid AB-BA deadlocks
-  with PTY/parser work on the main thread.
+- Render paths never block without a bound. Frame collection probes each visible parser with
+  `try_lock`, then waits with `try_lock_until` against one 2 ms deadline per collection
+  (`COLLECTION_LOCK_BUDGET`); image stores are only probed. A miss, or a guard obtained after the
+  deadline, returns `Contended`. Parsers are taken in pane order before any image store, and no
+  path takes an image store then a parser, so the bounded wait adds no AB-BA order.
+- The VT worker ends each parser section with `MutexGuard::unlock_fair`, which hands the lock to
+  a selected parked waiter before the worker relocks. A frame collection takes part in that
+  selection with other blocking parser callers, so it is not guaranteed the next handoff. An
+  unwind still releases by RAII.
 - Parser guards end before presentation: both redraw adapters move them into
   `HeldFrameSource` and call `render_releasing`; every reader after the call copies from
   the held guards first. Presented receipts are applied only through

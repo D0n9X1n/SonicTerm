@@ -10,7 +10,7 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use parking_lot::{Mutex, MutexGuard};
@@ -42,8 +42,98 @@ pub(super) enum FrameUnavailable {
     NoLayout,
     /// Broken event-loop topology: skip all assembly, no contention deadline.
     StructuralInvalid(LayoutInvalid),
-    /// Only a failed visible try-lock can arm the existing contention floor.
+    /// Only a visible lock not obtained within the collection budget can arm the existing contention floor.
     Contended { pane_id: u64, images: bool },
+}
+
+/// The requested maximum a collection waits, in total across its visible panes, for busy parsers.
+///
+/// A PTY worker relocks its parser every few tens of microseconds during a flood, so a nonwaiting
+/// probe rarely lands between sections. A short timed wait queues the collection among the parser's
+/// waiters, and the worker's fair release hands the lock to a selected waiter, not necessarily this
+/// one. Scheduler preemption can still overrun this budget.
+pub(super) const COLLECTION_LOCK_BUDGET: Duration = Duration::from_millis(2);
+
+/// How a collection takes one visible parser: a nonwaiting probe, then a wait bounded by a deadline.
+///
+/// Production uses the parking_lot mutex and the monotonic clock. Tests substitute a scripted
+/// acquisition and clock to pin the shared-deadline and late-guard contracts deterministically.
+pub(super) trait ParserAcquire {
+    /// The current instant on the clock the deadline was taken from.
+    fn now(&self) -> Instant;
+    /// Take the parser only if it is free right now.
+    fn probe<'a>(&self, pane_id: u64, parser: &'a Mutex<Parser>) -> Option<MutexGuard<'a, Parser>>;
+    /// Runs only after a probe failed while the parser was busy; production does nothing here.
+    fn after_failed_probe(&self, pane_id: u64);
+    /// Wait for the parser until `deadline`, parking so a fair release can hand it over.
+    fn wait_until<'a>(
+        &self,
+        pane_id: u64,
+        parser: &'a Mutex<Parser>,
+        deadline: Instant,
+    ) -> Option<MutexGuard<'a, Parser>>;
+}
+
+/// The production acquisition: parking_lot's mutex and `Instant::now`.
+pub(super) struct TimedParserAcquire;
+
+impl ParserAcquire for TimedParserAcquire {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn probe<'a>(
+        &self,
+        _pane_id: u64,
+        parser: &'a Mutex<Parser>,
+    ) -> Option<MutexGuard<'a, Parser>> {
+        parser.try_lock()
+    }
+
+    fn after_failed_probe(&self, _pane_id: u64) {}
+
+    fn wait_until<'a>(
+        &self,
+        _pane_id: u64,
+        parser: &'a Mutex<Parser>,
+        deadline: Instant,
+    ) -> Option<MutexGuard<'a, Parser>> {
+        parser.try_lock_until(deadline)
+    }
+}
+
+/// Take one visible parser under the collection's single absolute `deadline`, or None for a miss.
+///
+/// The deadline is checked before the probe, again after a failed probe, and after either path
+/// succeeds; a guard obtained after the deadline is dropped and counts as a miss.
+fn acquire_parser<'a>(
+    acquire: &impl ParserAcquire,
+    pane_id: u64,
+    parser: &'a Mutex<Parser>,
+    deadline: Instant,
+) -> Option<MutexGuard<'a, Parser>> {
+    if acquire.now() >= deadline {
+        // When: the deadline passed on an earlier pane's wait, no further acquisition is attempted.
+        return None;
+    }
+    let guard = match acquire.probe(pane_id, parser) {
+        Some(guard) => guard,
+        None => {
+            // When: the probe found the parser busy, the collection queues on it until the deadline.
+            acquire.after_failed_probe(pane_id);
+            if acquire.now() >= deadline {
+                // When: the deadline passed after the failed probe, the timed wait is not entered.
+                return None;
+            }
+            acquire.wait_until(pane_id, parser, deadline)?
+        }
+    };
+    if acquire.now() >= deadline {
+        // When: the guard arrived after the deadline, it is released and reported as contention.
+        drop(guard);
+        return None;
+    }
+    Some(guard)
 }
 
 /// Validated layout order and the active pane's actual position within it.
@@ -194,17 +284,30 @@ impl VisibleFrameSources {
         self.entries.iter().map(|entry| (entry.id, entry.rect)).collect()
     }
 
-    /// Capture scheduling identity before the first lock, then try parsers followed by images.
+    /// Capture scheduling identity before the first lock, then take parsers followed by images.
     ///
-    /// `before_first_lock` is the generation-capture seam for owner-addressed scheduling.
+    /// `before_first_lock` is the generation-capture seam for owner-addressed scheduling. Parsers are
+    /// taken under one [`COLLECTION_LOCK_BUDGET`] deadline; image stores are only probed.
     /// Any miss drops all earlier guards and image clones before returning to the retry adapter.
-    // Lock order: parser then images; test observations borrow image_visits then image_clones briefly.
     pub(super) fn try_collect<S>(
         &self,
         before_first_lock: impl FnOnce() -> S,
     ) -> Result<HeldVisibleFrame<'_, S>, FrameUnavailable> {
+        self.try_collect_with(&TimedParserAcquire, COLLECTION_LOCK_BUDGET, before_first_lock)
+    }
+
+    /// [`Self::try_collect`] with an explicit parser acquisition and budget, the seam its tests drive.
+    // Lock order: parser then images; test observations borrow image_visits then image_clones briefly.
+    pub(super) fn try_collect_with<S>(
+        &self,
+        acquire: &impl ParserAcquire,
+        budget: Duration,
+        before_first_lock: impl FnOnce() -> S,
+    ) -> Result<HeldVisibleFrame<'_, S>, FrameUnavailable> {
         let snapshot = before_first_lock();
-        // The span collection's identity is issued before the first try_lock, with no lock taken; declared
+        // One absolute deadline for every visible parser: a later pane gets only what remains.
+        let deadline = acquire.now() + budget;
+        // The span collection's identity is issued before the first acquisition, with no lock taken; declared
         // first, so it drops last, after every guard and the custody that closes it.
         let mut collection =
             self.spans.as_ref().map(super::guard_correlation::SpanCollection::open);
@@ -216,7 +319,7 @@ impl VisibleFrameSources {
         )> = None;
         let mut guards = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
-            let Some(parser) = entry.parser.try_lock() else {
+            let Some(parser) = acquire_parser(acquire, entry.id, &entry.parser, deadline) else {
                 // When: a parser is contended, the earlier guards are released, then their custody closes.
                 drop(guards);
                 drop(timing);

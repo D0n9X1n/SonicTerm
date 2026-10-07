@@ -15,7 +15,7 @@ use std::{
 
 use anyhow::Context;
 use base64::Engine;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use sonicterm_cfg::{
     config::Config,
     keymap::{Action, Direction, Keymap, ScrollAction},
@@ -822,6 +822,9 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             publish_sync_output(handles, sync_state, &mut now);
             sync_latch.note_section(sync_state);
             let released_at = before_lock.map(|_| now());
+            // A fair release hands the parser to a selected parked waiter, such as a frame collection,
+            // before this worker can relock. On unwind the guard still drops through ordinary RAII release.
+            MutexGuard::unlock_fair(parser);
             (result, (locked_at, parsed_at, released_at))
         };
         let (consumed, events, replies) = result;
