@@ -1111,8 +1111,8 @@ fn missing_required_chrome(
 }
 
 /// 12c, run by CI on each platform: each start constant passes `validate_table_start`, the same
-/// validation the unit tests use, which admits only the maximum until the sizing oracle is complete
-/// and every required input is recorded. For S9's and S12's working sets at scale 1 and 2 the
+/// validation the unit tests use, and equals `ruled_start` over the recorded rows once the sizing
+/// oracle is complete. For S9's and S12's working sets at scale 1 and 2 the
 /// constant is at least this platform's need, where a measurement that drew any glyph as tofu
 /// needs the maximum, and the live helper measurement equals this platform's recorded `helper`
 /// row when one exists. Prints each figure so CI's output can become the table's rows.
@@ -1122,8 +1122,8 @@ fn glyph_atlas_working_set() {
     use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
     use sonicterm_text::glyph_atlas::{START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
     use sonicterm_text::start_size_inputs::{
-        normalize_raster_failures, start_rule, validate_table_start, InputSource, RuleInput,
-        RASTER_EXCEPTIONS, START_SIZE_INPUTS,
+        normalize_raster_failures, ruled_start, start_rule, validate_table_start, InputSource,
+        RuleInput, RASTER_EXCEPTIONS, SIZING_ORACLE_COMPLETE, START_SIZE_INPUTS,
     };
     let font_dirs =
         vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
@@ -1135,6 +1135,21 @@ fn glyph_atlas_working_set() {
         let table = validate_table_start(scale, constant)
             .unwrap_or_else(|error| panic!("{scale}x start {constant} fails validation: {error}"));
         println!("glyph_atlas_start scale={scale} constant={constant} verdict={}", table.verdict);
+        if SIZING_ORACLE_COMPLETE {
+            // When: SIZING_ORACLE_COMPLETE is set, the constant must equal the recorded rows' rule.
+            let ruled = ruled_start(scale, START_SIZE_INPUTS, SIZING_ORACLE_COMPLETE)
+                .unwrap_or_else(|error| panic!("{scale}x has no ruled start: {error}"));
+            println!(
+                "glyph_atlas_start scale={scale} constant={constant} ruled={} validated={}",
+                ruled.dim,
+                ruled.dim == constant
+            );
+            assert_eq!(
+                constant, ruled.dim,
+                "{scale}x constant against the rule: {}",
+                ruled.verdict
+            );
+        }
         let mut local = Vec::new();
         for (name, fixture) in fixtures {
             let bytes = fixture_bytes(fixture);
@@ -1190,7 +1205,7 @@ fn glyph_atlas_working_set() {
                     (row.outcome, row.max_tile, row.incomplete_glyphs),
                     (set.fit_outcome, set.max_tile_dims, incomplete_glyphs),
                     "{name} at {scale}x drifted from its recorded helper row ({})",
-                    row.run_url
+                    row.provenance.describe()
                 );
             }
             local.push(RuleInput {
@@ -1379,10 +1394,10 @@ fn the_coverage_setup_opens_the_palette_on_the_main_frame() {
 /// report no missing glyph, and both reports now include a shaped glyph that drew nothing (refused,
 /// rasterized nothing, or too large to place) and a tab title that never shaped. Every resident
 /// tile is in the helper's set at the same raster size, and for S9 each representative emoji and
-/// CJK codepoint is a resident real tile. It does not prove that every glyph the helper measures was
-/// drawn, only the glyphs this frame requested. `SIZING_ORACLE_COMPLETE` stays false, so neither
-/// normal start constant may drop below 2048, until these checks pass on Windows CI and the
-/// measured rows are recorded.
+/// CJK codepoint is a resident real tile. It does not prove that every glyph the helper measures
+/// was drawn, only the glyphs this frame requested. These checks passed on Windows CI and their
+/// rows are recorded, which is what completes the sizing oracle and lets a start constant drop
+/// below 2048.
 #[cfg(target_os = "windows")]
 mod real_renderer_coverage {
     use std::path::PathBuf;

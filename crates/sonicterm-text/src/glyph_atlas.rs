@@ -39,12 +39,14 @@ pub const MAX_ATLAS_ENTRIES: usize = 16 * 1024;
 /// Smallest square glyph atlas a renderer starts with. Warm-pool renderers start here
 /// and grow after adoption, so an idle pooled window holds 256 KiB rather than 16 MiB.
 pub const MIN_ATLAS_DIM: u32 = 256;
-/// Start dimension of a normal scale-1 renderer's glyph atlas. It must pass
-/// [`crate::start_size_inputs::validate_table_start`], which admits only the maximum until the
-/// sizing oracle is complete and every required scale-1 input is recorded; warm spares start at
-/// [`MIN_ATLAS_DIM`] instead.
-pub const START_ATLAS_DIM_1X: u32 = 2048;
-/// Start dimension of a normal scale-2 renderer's glyph atlas, validated the same way at scale 2.
+/// Start dimension of a normal scale-1 renderer's glyph atlas: what
+/// [`crate::start_size_inputs::ruled_start`] selects over the recorded scale-1 rows, which a unit
+/// test checks for equality. The largest scale-1 working set fits 1024, so a scale-1 renderer
+/// starts at 4 MiB and grows by doubling when it needs more; warm spares start at
+/// [`MIN_ATLAS_DIM`].
+pub const START_ATLAS_DIM_1X: u32 = 1024;
+/// Start dimension of a normal scale-2 renderer's glyph atlas, chosen the same way at scale 2. The
+/// largest scale-2 working set fits only 2048, so this is the maximum and saves nothing.
 pub const START_ATLAS_DIM_2X: u32 = 2048;
 /// Dirty-list capacity above which a drained list is shrunk, so one growth re-upload of
 /// thousands of tiles does not pin its capacity for the atlas's lifetime.

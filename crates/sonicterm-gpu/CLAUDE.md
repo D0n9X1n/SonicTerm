@@ -63,7 +63,8 @@ cargo build -p sonicterm-gpu
   the committed slots before the first admission, stage slot keys, and commit
   them only through `settle_retained_frame` on `Presented`; every `Err` exit
   discards the stage. Nothing drops a glyph row for dirt; only the quad cache does.
-- Only the glyph atlas is built growable (`start_dim`, then doubling to 2048);
+- Only the glyph atlas is built growable (`start_dim`: 1024 at scale 1, 2048
+  above 1.5, 256 for a warm spare; then doubling to 2048);
   the promoted image atlas stays fixed. A growth-only stamp change retries
   through `retry_after_glyph_atlas_growth`, reached only from the retry arm
   after `lend`, and never resets the atlas or disables eviction.

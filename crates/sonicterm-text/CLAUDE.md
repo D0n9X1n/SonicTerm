@@ -42,15 +42,17 @@ cargo build -p sonicterm-text
   capacity. Pixels move only with growth; the dirty list grows with inserts
   and a drain shrinks it to 64 rects once it exceeds 1,024, so even a fixed
   atlas's figure varies. A test bounding memory must assert the term it means.
-- `START_ATLAS_DIM_1X` and `START_ATLAS_DIM_2X` stay 2048: normal renderers
-  keep the full allocation, and only warm spares start at `MIN_ATLAS_DIM`.
-  `start_size_inputs::validate_table_start` rejects any smaller start while
-  `SIZING_ORACLE_COMPLETE` is false, whatever rows `START_SIZE_INPUTS` holds,
-  and a row with nonzero `incomplete_glyphs` always selects 2048. The real
-  renderer reports shaped glyphs that draw nothing (refused, not rasterized, or
-  `GlyphInfo::oversize`) and tab titles that never shape as missing glyphs; the
-  guard stays false until Windows CI passes the strengthened coverage test and
-  the measured rows are recorded. `RASTER_EXCEPTIONS` (empty) exempts a raster
+- `START_ATLAS_DIM_1X` is 1024 and `START_ATLAS_DIM_2X` is 2048, each equal to
+  `start_size_inputs::ruled_start` over `START_SIZE_INPUTS` at its scale; a unit
+  test checks the equality, because `validate_table_start` accepts the maximum
+  unconditionally. Warm spares start at `MIN_ATLAS_DIM`. The table holds 64 CI
+  rows, each with its `Provenance` (run, attempt, measured SHA, side, set and
+  origin): 32 perf-end rows from a Performance comparison's base side, 8 helper
+  rows and 24 Windows real-renderer rows from one push CI run, kept apart by
+  `source`. `SIZING_ORACLE_COMPLETE` is true; `ruled_start` still refuses a
+  scale missing any `required_inputs` row, and a row with nonzero
+  `incomplete_glyphs` always selects 2048. Changing a start constant means new
+  rows and the rule's new answer, never an edited constant alone. `RASTER_EXCEPTIONS` (empty) exempts a raster
   failure only by exact platform, role, face content (`face_content`: the
   namespaced SHA-256 of the face's bytes, never its file name) and index, glyph
   id, style and strike, with a reviewed reason; `incomplete_glyphs` counts unresolved
