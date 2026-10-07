@@ -706,8 +706,8 @@ impl<'a> Walker<'a> {
                     let grad = paint.u.sweep_gradient.as_ref();
                     log::trace!("{level:>3} {grad:?}");
                     let (center_x, center_y) = vector_x_y(&grad.center);
-                    let start_angle = grad.start_angle.to_num();
-                    let end_angle = grad.end_angle.to_num();
+                    let start_angle = sweep_angle_radians(grad.start_angle);
+                    let end_angle = sweep_angle_radians(grad.end_angle);
 
                     let paint = PaintOp::PaintSweepGradient {
                         center_x,
@@ -917,6 +917,12 @@ impl<'a> Walker<'a> {
             color_stops,
         })
     }
+}
+
+/// A COLR sweep angle in the shared sweep renderer's convention, HarfBuzz's: FreeType hands the stored value, half
+/// turns biased by minus one (so 0 degrees is -1), and the renderer takes radians of (angle + 1) * pi.
+fn sweep_angle_radians(angle: FT_Fixed) -> f32 {
+    ((angle.to_num::<f64>() + 1.0) * PI) as f32
 }
 
 /// A COLR PaintTransform's affine as a Cairo matrix: Cairo orders it (xx, yx, xy, yy, x0, y0), so the

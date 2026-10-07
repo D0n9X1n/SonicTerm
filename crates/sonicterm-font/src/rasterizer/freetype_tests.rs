@@ -478,6 +478,7 @@ const FIXTURE_UNITS_PER_EM: f64 = 2048.0;
 /// Fixture glyph ids, in the generator's glyph order.
 const GLYPH_LINEAR: u32 = 4;
 const GLYPH_RADIAL: u32 = 5;
+const GLYPH_SWEEP: u32 = 6;
 const GLYPH_SCALED: u32 = 7;
 const GLYPH_ROTATED: u32 = 8;
 const GLYPH_SKEWED: u32 = 9;
@@ -820,5 +821,57 @@ fn colr_pivoted_paint_lands_where_its_centre_puts_it() {
                 "{context}: HarfBuzz leaves the wrong pivot's square empty"
             );
         }
+    }
+}
+
+/// FreeType gives a sweep angle as the stored F2DOT14 value, which the format biases by minus one half-turn; the
+/// shared sweep renderer takes HarfBuzz's convention, radians of (angle + 1) * pi. The fixture's full turn,
+/// 0 to 360 degrees, is stored as -1 to 1 and reaches the renderer as 0 to 2 pi.
+#[test]
+fn colr_sweep_angles_use_the_harfbuzz_convention() {
+    let angles = fixture_walker_ops(GLYPH_SWEEP, 13.0)
+        .iter()
+        .find_map(|op| match op {
+            PaintOp::PaintSweepGradient { start_angle, end_angle, .. } => {
+                Some((*start_angle, *end_angle))
+            }
+            _ => None,
+        })
+        .expect("the fixture's sweep glyph records a sweep gradient");
+    let pi = std::f32::consts::PI;
+    assert!(angles.0.abs() < 1e-5 && (angles.1 - 2.0 * pi).abs() < 1e-5, "{angles:?}");
+}
+
+/// The fixture's sweep paints four hard bands (red, green, blue, yellow) over a full turn. At 13 and 26 px each
+/// quadrant, sampled mid-band, shows the band HarfBuzz paints there, and the four quadrants are four bands.
+#[test]
+fn colr_sweep_gradient_quadrants_match_harfbuzz() {
+    for size_px in [13.0, 26.0] {
+        let scale = size_px / FIXTURE_UNITS_PER_EM;
+        let glyph = fixture_colr_glyph(GLYPH_SWEEP, size_px, false);
+        let reference = fixture_harfbuzz_glyph(GLYPH_SWEEP, size_px);
+        let mut bands = Vec::new();
+        for (offset_x, offset_y) in
+            [(450.0, 450.0), (-450.0, 450.0), (-450.0, -450.0), (450.0, -450.0)]
+        {
+            let (x_px, y_px) = ((800.0 + offset_x) * scale, (800.0 + offset_y) * scale);
+            let context = format!("{size_px}px quadrant ({offset_x}, {offset_y})");
+            let (Some((rgba, _)), Some((reference_rgba, _))) =
+                (pixel_at(&glyph, x_px, y_px), pixel_at(&reference, x_px, y_px))
+            else {
+                panic!("{context}: no pixel");
+            };
+            let reference_rgb = reference_rgba.map(f64::from);
+            assert_rgb_near(
+                rgba,
+                [reference_rgb[0], reference_rgb[1], reference_rgb[2]],
+                24.0,
+                &context,
+            );
+            bands.push(reference_rgba.map(|channel| channel > 127));
+        }
+        bands.sort();
+        bands.dedup();
+        assert_eq!(bands.len(), 4, "{size_px}px: the four quadrants are four bands");
     }
 }
