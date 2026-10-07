@@ -244,7 +244,10 @@ macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次�
 不含这些数组，仍能正常渲染：缺少标签时名称为空，缺少标志时取 0。存在的标签是一个名称 ID：
 它解析为字体中具有该 ID 的名称记录，并按与字体名称相同的语言规则选择；没有对应记录的 ID 读作空名称。
 COLRv1 字形若带有 ClipBox，会以设备像素作为外层裁剪作用于整个绘制图（包括合成分组），因此 Cairo
-自身无法界定范围的绘制图（例如以 `In` 合成的渐变）仍会在其 ClipBox 内光栅化。位图向外取整到整像素。
+自身无法界定范围的绘制图（例如以 `In` 合成的渐变）仍会在其 ClipBox 内光栅化。ClipList 是可选的：没有 ClipBox 的字形不加裁剪地光栅化，
+由其自身绘制界定范围；没有 ClipBox 且无法界定范围的绘制图没有有限的渲染结果，因此会失败，错误会指出缺少 ClipBox。
+FreeType 对缺少 ClipBox 和读取 ClipBox 出错报告相同的状态，因此 SonicTerm 将两者都视为没有 ClipBox，
+并尝试不加裁剪的渲染，仍受同样的范围检查约束。位图向外取整到整像素。
 
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` 为生成的 FreeType、HarfBuzz、Fontconfig
 绑定中的原始句柄管理安全生命周期。每次原生分配都配对正确的销毁函数。内嵌位图字形

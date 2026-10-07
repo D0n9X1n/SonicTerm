@@ -308,7 +308,12 @@ face's name record with that ID, chosen by the same language rule as font names,
 and an ID with no record reads as an empty name. A COLRv1 glyph's ClipBox, when
 present, is applied as an outer clip in device pixels around its whole paint graph,
 composited groups included, so a graph Cairo cannot bound on its own, such as a
-gradient composited with `In`, still rasterizes inside its ClipBox. Its bitmap is
+gradient composited with `In`, still rasterizes inside its ClipBox. The ClipList is
+optional: a glyph without a ClipBox rasterizes unclipped, bounded by its own paint,
+and an unbounded graph without one has no finite rendering, so it fails with an
+error naming the missing ClipBox. FreeType reports a missing ClipBox and an error
+reading one with the same status, so SonicTerm treats both as no ClipBox and tries
+the unclipped rendering, still subject to the same bounds checks. Its bitmap is
 rounded outward to whole pixels.
 
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` owns safe lifetimes around raw handles

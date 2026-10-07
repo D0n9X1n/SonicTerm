@@ -503,14 +503,15 @@ impl FreeTypeRasterizer {
         log::trace!("Palette: {palette:#?}");
         face.select_palette(0)?;
 
-        let clip_box = face.get_color_glyph_clip_box(glyph_pos)?;
+        // A COLRv1 glyph's ClipBox is optional: without one the graph rasterizes unclipped.
+        let clip_box = face.get_color_glyph_clip_box(glyph_pos);
         log::trace!("got clip_box: {clip_box:?}");
         let mut walker = Walker { load_flags, face: &mut face, ops: vec![] };
         walker.walk_paint(paint, 0)?;
 
         log::trace!("ops: {:#?}", walker.ops);
 
-        rasterize_from_ops(walker.ops, scale_x, -scale_y, Some(clip_box_corners_px(&clip_box)))
+        rasterize_colr(walker.ops, scale_x, -scale_y, clip_box.as_ref())
     }
 }
 
@@ -568,6 +569,25 @@ fn pixel_bounds(left: f64, top: f64, width: f64, height: f64) -> anyhow::Result<
         top: min_y as i64,
         width: span_x as usize,
         height: span_y as usize,
+    })
+}
+
+/// Rasterizes a COLRv1 glyph's paint ops, clipped to its ClipBox when it has one and unclipped when it has
+/// none. Without a ClipBox a graph Cairo cannot bound has no finite rendering, so it fails with that reason.
+fn rasterize_colr(
+    ops: Vec<PaintOp>,
+    scale_x: f64,
+    scale_y: f64,
+    clip_box: Option<&FT_ClipBox_>,
+) -> anyhow::Result<RasterizedGlyph> {
+    let unclipped = clip_box.is_none();
+    rasterize_from_ops(ops, scale_x, scale_y, clip_box.map(clip_box_corners_px)).map_err(|error| {
+        let unbounded = unclipped && error.to_string().starts_with("invalid color glyph extents");
+        if !unbounded {
+            // When: `unbounded` is false, the failure is not a missing ClipBox's, so it passes through unchanged.
+            return error;
+        }
+        anyhow::anyhow!("COLRv1 glyph has no ClipBox to bound its paint: {error}")
     })
 }
 

@@ -1,5 +1,6 @@
 use super::*;
 use crate::rasterizer::colr::DrawOp;
+use crate::source_pin::item_body;
 
 fn bgra_fixture(width: u32, height: u32, data: &[u8]) -> RasterizedGlyph {
     let mut slot: FT_GlyphSlotRec_ =
@@ -256,4 +257,218 @@ fn clip_box_corners_stay_in_device_pixels_under_the_paint_scale() {
     .unwrap();
     assert_eq!((glyph.width, glyph.height), (6, 3));
     assert_eq!((glyph.bearing_x.get(), glyph.bearing_y.get()), (0.0, 4.0));
+}
+
+/// A ClipBox whose corners, in 26.6 device pixels y up, span `left..right` by `bottom..top` whole pixels.
+fn clip_box_px(left: i64, bottom: i64, right: i64, top: i64) -> FT_ClipBox_ {
+    let corner = |x_px: i64, y_px: i64| ::freetype::FT_Vector {
+        x: ::freetype::FT_Pos::from_font_units((x_px * 64) as _),
+        y: ::freetype::FT_Pos::from_font_units((y_px * 64) as _),
+    };
+    FT_ClipBox_ {
+        bottom_left: corner(left, bottom),
+        top_left: corner(left, top),
+        top_right: corner(right, top),
+        bottom_right: corner(right, bottom),
+    }
+}
+
+/// A COLRv1 glyph without a ClipBox rasterizes unclipped through the production entry point when its paint is
+/// bounded: the bitmap is exactly its ink, with the ink's bearings and colour.
+#[test]
+fn a_bounded_glyph_without_a_clip_box_renders_unclipped() {
+    let glyph = rasterize_colr(opaque_square(-3.0, -2.0, 1.0, 3.0), 1.0, 1.0, None)
+        .expect("a bounded glyph without a ClipBox renders");
+    assert_eq!((glyph.width, glyph.height), (4, 5));
+    assert_eq!((glyph.bearing_x.get(), glyph.bearing_y.get()), (-3.0, 2.0));
+    assert!(glyph.has_color);
+    let (pixels, rest) = glyph.data.as_chunks::<4>();
+    assert!(
+        rest.is_empty() && pixels.iter().all(|pixel| *pixel == [255, 0, 0, 255]),
+        "every pixel is opaque red"
+    );
+}
+
+/// Without a ClipBox nothing bounds a graph Cairo cannot bound, so there is no finite rendering: it fails, and
+/// the error names the missing ClipBox rather than only the extents.
+#[test]
+fn an_unbounded_glyph_without_a_clip_box_fails_with_a_named_reason() {
+    let error = rasterize_colr(unbounded_in_composite(), 1.0, 1.0, None)
+        .expect_err("an unbounded graph without a ClipBox has no finite rendering")
+        .to_string();
+    assert!(error.contains("has no ClipBox to bound"), "{error}");
+    assert!(error.contains("invalid color glyph extents"), "{error}");
+}
+
+/// The production entry point applies a ClipBox when the glyph has one: the unbounded composite renders inside
+/// it, so a path that dropped the box would fail here.
+#[test]
+fn a_glyph_with_a_clip_box_is_clipped_through_the_production_path() {
+    let clip_box = clip_box_px(0, -10, 10, 0);
+    let glyph = rasterize_colr(unbounded_in_composite(), 1.0, 1.0, Some(&clip_box))
+        .expect("a ClipBox bounds the composite");
+    assert_eq!((glyph.width, glyph.height), (10, 10));
+    assert_eq!(alpha_at(&glyph, 4, 4), 255);
+}
+
+/// FreeType's status 0 is "no ClipBox": nothing is read, so no uninitialized box is used; status 1 reads it.
+#[test]
+fn a_zero_clip_box_status_is_absent_and_reads_nothing() {
+    let reads = std::cell::Cell::new(0_u32);
+    let read = || {
+        reads.set(reads.get() + 1);
+        clip_box_px(1, -4, 7, -1)
+    };
+    assert!(crate::ftwrap::clip_box_from_status(0, read).is_none());
+    assert_eq!(reads.get(), 0, "status 0 reads no box");
+    let present = crate::ftwrap::clip_box_from_status(1, read).expect("status 1 is a ClipBox");
+    assert_eq!(reads.get(), 1);
+    assert_eq!(clip_box_corners_px(&present), clip_box_corners_px(&clip_box_px(1, -4, 7, -1)));
+}
+
+/// Why `rasterizer` and `ftwrap`, the sources of rasterizer/freetype.rs and ftwrap.rs, do not carry a missing
+/// ClipBox to the rasterizer as None, or empty: rasterize_outlines must hand the face's optional ClipBox straight
+/// to `rasterize_colr` and never turn its absence into an error, and the face must map FreeType's status through
+/// `clip_box_from_status` without failing. Both are read as code only and must be defined exactly once.
+fn clip_box_wiring_problems(rasterizer: &str, ftwrap: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    match item_body(rasterizer, "fn rasterize_outlines(") {
+        Ok(outlines) => {
+            if !outlines.contains("let clip_box = face.get_color_glyph_clip_box(glyph_pos);") {
+                problems.push("rasterize_outlines does not read the optional ClipBox".to_owned());
+            }
+            if !outlines
+                .contains("rasterize_colr(walker.ops, scale_x, -scale_y, clip_box.as_ref())")
+            {
+                problems
+                    .push("rasterize_outlines does not pass the optional ClipBox on".to_owned());
+            }
+            if outlines.contains("get_color_glyph_clip_box(glyph_pos)?") {
+                problems
+                    .push("rasterize_outlines turns a missing ClipBox into an error".to_owned());
+            }
+        }
+        Err(problem) => problems.push(problem),
+    }
+    match item_body(ftwrap, "pub fn get_color_glyph_clip_box(") {
+        Ok(query) => {
+            if !query.contains("clip_box_from_status(status,") {
+                problems.push("get_color_glyph_clip_box does not map the status".to_owned());
+            }
+            if query.contains("bail!") || query.contains("anyhow::Result") {
+                problems.push("get_color_glyph_clip_box can fail".to_owned());
+            }
+        }
+        Err(problem) => problems.push(problem),
+    }
+    problems
+}
+
+/// The production decision "no ClipBox → None": the real rasterizer and face carry a missing ClipBox to
+/// `rasterize_colr` as None, read as code only so no comment, literal or second copy can stand in.
+#[test]
+fn a_missing_clip_box_reaches_the_rasterizer_as_none() {
+    assert_eq!(
+        clip_box_wiring_problems(include_str!("freetype.rs"), include_str!("../ftwrap.rs")),
+        Vec::<String>::new()
+    );
+}
+
+/// A rasterize_outlines body that reads the ClipBox, correct (`good`) or turning absence into an error (`bad`).
+fn outlines_source(good: bool) -> String {
+    let read = if good {
+        "let clip_box = face.get_color_glyph_clip_box(glyph_pos);"
+    } else {
+        "let clip_box = Some(face.get_color_glyph_clip_box(glyph_pos)?);"
+    };
+    format!(
+        "impl FreeTypeRasterizer {{\n    fn rasterize_outlines(&self) -> anyhow::Result<RasterizedGlyph> {{\n        \
+         {read}\n        rasterize_colr(walker.ops, scale_x, -scale_y, clip_box.as_ref())\n    }}\n}}\n"
+    )
+}
+
+/// A get_color_glyph_clip_box body, mapping the status (`good`) or failing on it (`bad`).
+fn query_source(good: bool) -> String {
+    let (returns, body) = if good {
+        ("Option<FT_ClipBox_>", "clip_box_from_status(status, || unsafe { result.assume_init() })")
+    } else {
+        ("anyhow::Result<FT_ClipBox_>", "if status == 0 { bail!(\"no ClipBox\") }")
+    };
+    format!(
+        "impl Face {{\n    pub fn get_color_glyph_clip_box(&mut self, glyph_index: FT_UInt) -> {returns} {{\n        \
+         {body}\n    }}\n}}\n"
+    )
+}
+
+/// No decoy satisfies the ClipBox pin. With a broken rasterizer or face, a correct copy in an unused macro or a
+/// `#[cfg(any())]` impl, before or after it, makes the source ambiguous, and one inside a nested block comment, a
+/// hashed `r`, `br` or `cr` raw string or a C string is masked away; either way the pin still fails. With the
+/// correct source, the masked decoys leave it passing, so the masker hides them without hiding real code.
+#[test]
+fn a_macro_cfg_comment_or_raw_string_decoy_never_satisfies_the_clip_box_pin() {
+    for target in ["rasterizer", "ftwrap"] {
+        let item = |good: bool| {
+            if target == "rasterizer" {
+                outlines_source(good)
+            } else {
+                query_source(good)
+            }
+        };
+        let good_item = item(true);
+        let inner = good_item
+            .strip_prefix("impl FreeTypeRasterizer {\n")
+            .or_else(|| good_item.strip_prefix("impl Face {\n"))
+            .and_then(|rest| rest.strip_suffix("}\n"))
+            .expect("the item is one impl");
+        let code_decoys = [
+            ("macro", format!("macro_rules! decoy {{\n    () => {{\n{inner}    }};\n}}\n")),
+            ("cfg impl", format!("#[cfg(any())]\n{good_item}")),
+        ];
+        let masked_decoys = [
+            ("nested comment", format!("/* outer /* inner */\n{good_item}*/\n")),
+            ("r raw string", format!("const RAW: &str = r#\"say \"\n{good_item}\"#;\n")),
+            ("br raw string", format!("const BYTES: &[u8] = br##\"say \"#\n{good_item}\"##;\n")),
+            (
+                "cr raw string",
+                format!("const CRAW: &std::ffi::CStr = cr#\"say \"\n{good_item}\"#;\n"),
+            ),
+            ("C string", format!("const CSTR: &std::ffi::CStr = c\"\n{good_item}\";\n")),
+        ];
+        let sources = |real: &str, decoy: &str| {
+            [("before", format!("{decoy}{real}")), ("after", format!("{real}{decoy}"))]
+        };
+        let pin = |source: &str| {
+            if target == "rasterizer" {
+                clip_box_wiring_problems(source, &query_source(true))
+            } else {
+                clip_box_wiring_problems(&outlines_source(true), source)
+            }
+        };
+        assert_eq!(pin(&good_item), Vec::<String>::new(), "{target}: the correct source passes");
+        assert!(!pin(&item(false)).is_empty(), "{target}: the broken source fails");
+        for (label, decoy) in &code_decoys {
+            for (place, source) in sources(&item(false), decoy) {
+                let problems = pin(&source);
+                assert!(
+                    problems.iter().any(|problem| problem.starts_with("ambiguous source")),
+                    "{target} {label} {place}: {problems:?}"
+                );
+            }
+        }
+        for (label, decoy) in &masked_decoys {
+            for (place, source) in sources(&item(false), decoy) {
+                assert!(
+                    !pin(&source).is_empty(),
+                    "{target} {label} {place}: the decoy satisfied the pin"
+                );
+            }
+            for (place, source) in sources(&good_item, decoy) {
+                assert_eq!(
+                    pin(&source),
+                    Vec::<String>::new(),
+                    "{target} {label} {place}: the decoy was code"
+                );
+            }
+        }
+    }
 }

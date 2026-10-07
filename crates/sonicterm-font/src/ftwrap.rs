@@ -869,23 +869,18 @@ impl Face {
         }
     }
 
-    /// Retrieves the transformed COLR clip box for a glyph.
-    pub fn get_color_glyph_clip_box(
-        &mut self,
-        glyph_index: FT_UInt,
-    ) -> anyhow::Result<FT_ClipBox_> {
-        // SAFETY: `self.face` is live and `result` provides writable storage; FreeType fully
-        // initializes it exactly when the returned status is one.
-        unsafe {
-            let mut result = MaybeUninit::<FT_ClipBox_>::zeroed();
-            let status = FT_Get_Color_Glyph_ClipBox(self.face, glyph_index, result.as_mut_ptr());
-            if status == 1 {
-                Ok(result.assume_init())
-            } else {
-                // When: `status == 1` is false, FreeType did not initialize a clip box.
-                anyhow::bail!("FT_Get_Color_Glyph_ClipBox for glyph {glyph_index} failed");
-            }
-        }
+    /// Retrieves the transformed COLR clip box for a glyph, or `None` when the glyph has none. The ClipList and
+    /// its ClipBoxes are optional in COLRv1, so absence is not an error; see `clip_box_from_status`.
+    pub fn get_color_glyph_clip_box(&mut self, glyph_index: FT_UInt) -> Option<FT_ClipBox_> {
+        let mut result = MaybeUninit::<FT_ClipBox_>::zeroed();
+        let status =
+            // SAFETY: `self.face` is live and `result` provides writable storage for one clip box.
+            unsafe { FT_Get_Color_Glyph_ClipBox(self.face, glyph_index, result.as_mut_ptr()) };
+        clip_box_from_status(status, || {
+            // SAFETY: FreeType fully initialized `result` because the status was 1, the only status
+            // `clip_box_from_status` reads for.
+            unsafe { result.assume_init() }
+        })
     }
 
     /// Resolves a face-owned opaque COLR paint handle into its typed record.
@@ -1779,6 +1774,17 @@ pub struct NameRecord {
     pub language_id: u16,
     pub name_id: u16,
     pub name: String,
+}
+
+/// The ClipBox FreeType returned, or `None` when it returned 0. FreeType returns 0 for a glyph with no
+/// ClipList entry, and equally for a face with no COLR table, a missing or malformed ClipList, or a non-SFNT
+/// face; the status cannot tell these apart, so every 0 reads as "no ClipBox". `read` runs only for status 1,
+/// the only status for which FreeType initialized the box.
+pub(crate) fn clip_box_from_status(
+    status: FT_Bool,
+    read: impl FnOnce() -> FT_ClipBox_,
+) -> Option<FT_ClipBox_> {
+    (status == 1).then(read)
 }
 
 /// Converts a FreeType 16.16 vector into floating-point coordinates.
