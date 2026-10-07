@@ -1529,11 +1529,27 @@ RERUN_BACKING_JOBS = {_WINDOWS_RUNTIME: _WINDOWS_WORKSPACE}
 _WINDOWS_AGGREGATE = "windows"
 
 
-# The only verification body an aggregate may run: every listed result must be `success`, or the step fails.
-_AGGREGATE_LOOP = re.compile(
-    r'        run: \|\n          for result in ((?:"\$[A-Z_]+")(?: "\$[A-Z_]+")*); do\n'
-    r'            test "\$result" = "success"\n          done\n*\Z'
-)
+# The only verification script an aggregate may run, line for line: every listed result must be `success`.
+_AGGREGATE_HEADER = re.compile(r'for result in ((?:"\$[A-Z_]+")(?: "\$[A-Z_]+")*); do')
+
+
+def aggregate_loop_operands(step: str) -> list[str] | None:
+    """Return the variables an aggregate step's whole `run:` script tests, or None if it is not exactly the loop."""
+    keys = re.findall(r"(?m)^        run:(.*)$", step)
+    # When: the step has no or several run keys, or an inline one, its script is not the one block checked here.
+    if keys != [" |"]:
+        return None
+    block = step.split("\n        run: |\n", 1)[1]
+    lines = []
+    for line in block.split("\n"):
+        if line.strip() and not line.startswith("          "):
+            break
+        lines.append(line)
+    script = [line[10:] for line in lines if line.strip()]
+    if len(script) != 3 or script[1:] != ['  test "$result" = "success"', "done"]:
+        return None
+    header = _AGGREGATE_HEADER.fullmatch(script[0])
+    return None if header is None else [operand[2:-1] for operand in header[1].split(" ")]
 
 
 def aggregate_checks(workflow: str, aggregate: str, job: str) -> bool:
@@ -1554,12 +1570,11 @@ def aggregate_checks(workflow: str, aggregate: str, job: str) -> bool:
     # When: the verification step is skipped, advisory, or not Bash, its loop cannot fail the job.
     if re.search(r"(?m)^        (?:if|continue-on-error):", step) or "\n        shell: bash\n" not in step:
         return False
-    loop = _AGGREGATE_LOOP.search(step)
-    if loop is None:
+    operands = aggregate_loop_operands(step)
+    if operands is None:
         return False
     # The loop operands are only quoted variables, each bound to one needed job's result, and none other.
     bindings = dict(re.findall(r"(?m)^          ([A-Z_]+): \$\{\{ needs\.([A-Za-z0-9_-]+)\.result \}\}$", step))
-    operands = [operand[2:-1] for operand in loop[1].split(" ")]
     if sorted(operands) != sorted(bindings) or len(operands) != len(set(operands)):
         return False
     return job in bindings.values()

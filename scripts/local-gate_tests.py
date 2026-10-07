@@ -2025,6 +2025,9 @@ class CiParityTests(unittest.TestCase):
             "the aggregate's results consumed by a no-op loop": (
                 in_aggregate(loop_header, loop_header.replace("; do", ' ; do :; done; for result in "success"; do', 1)),
                 "aggregate must need and check windows-tests-workspace"),
+            "an early exit behind a commented run key": (
+                in_aggregate(loop_header, "          exit 0\n          #        run: |\n" + loop_header),
+                "aggregate must need and check windows-tests-workspace"),
             "an extra unbound loop operand": (
                 in_aggregate(loop_header, loop_header.replace("; do", ' "$UNBOUND"; do', 1)),
                 "aggregate must need and check windows-tests-workspace"),

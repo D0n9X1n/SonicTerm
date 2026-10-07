@@ -616,12 +616,15 @@ class RepositoryTests(unittest.TestCase):
             self.assertNotRegex(steps[0], r"(?m)^        (?:if|continue-on-error):")
             self.assertNotRegex(block, r"(?m)^    continue-on-error:")
             self.assertIn("\n        shell: bash\n", "\n" + steps[0])
-            body = re.search(r'        run: \|\n          for result in ((?:"\$[A-Z_]+")(?: "\$[A-Z_]+")*); do\n'
-                             r'            test "\$result" = "success"\n          done\n*\Z', steps[0])
-            self.assertIsNotNone(body)
-            # The loop runs over exactly the bound shard results: only quoted variables, each bound once.
+            # The step has one block `run:` key whose script is exactly the loop, line for line, so a comment, an
+            # early exit or a second loop cannot hide a fail-open script; it tests exactly the bound shard results.
+            self.assertEqual(re.findall(r"(?m)^        run:(.*)$", steps[0]), [" |"])
+            script = [line[10:] for line in steps[0].split("\n        run: |\n", 1)[1].split("\n") if line.strip()]
+            self.assertEqual(script[1:], ['  test "$result" = "success"', "done"])
+            header = re.fullmatch(r'for result in ((?:"\$[A-Z_]+")(?: "\$[A-Z_]+")*); do', script[0])
+            self.assertIsNotNone(header)
             bindings = re.findall(r"(?m)^          ([A-Z_]+): \$\{\{ needs\.[A-Za-z0-9_-]+\.result \}\}$", steps[0])
-            self.assertEqual(sorted(operand[2:-1] for operand in body[1].split(" ")), sorted(bindings))
+            self.assertEqual(sorted(operand[2:-1] for operand in header[1].split(" ")), sorted(bindings))
 
         for job, (name, shards) in contracts.items():
             with self.subTest(job=job):
@@ -646,6 +649,10 @@ class RepositoryTests(unittest.TestCase):
                 compound = header[0].replace("; do", ' ; do :; done; for result in "success"; do', 1)
                 with self.assertRaises(AssertionError):
                     assert_contract(job, block.replace(header[0], compound, 1), name, shards)
+                # An early exit behind a commented copy of the run key never reaches the loop.
+                decoy = "          exit 0\n          #        run: |\n" + header[0]
+                with self.assertRaises(AssertionError):
+                    assert_contract(job, block.replace(header[0], decoy, 1), name, shards)
                 with self.assertRaises(AssertionError):
                     assert_contract(
                         job,
