@@ -241,7 +241,13 @@ fn watched_owners() -> (App, WindowId, WindowId, Instant, u64) {
 
 /// Arm `pane_id` at the earlier of the real clock and the fake dispatch clock. The recorder's own
 /// hooks read the real clock and the tick handler the fake one, so every event of either clock that a
-/// test makes after this call is at or after the arm, however long the test process has run.
+/// test makes after this call is at or after the arm, however long the test process has run. This
+/// assumes the fake clock is nondecreasing after the call, as every caller sets it.
+///
+/// It is a lower bound, not one chronology: the tests that deliver fake-clock ticks among real-clock
+/// recorder events (the initial permit, unrepresentable permit, replacement tick, discard, link reset,
+/// link pause, held/deferred and tick-sequence tests) prove identities and states, not temporal order;
+/// `recorded_events_share_one_clock_in_record_order` is the chronology test.
 fn arm_on_both_clocks(app: &mut App, pane_id: u64) -> ArmOutcome {
     let armed_at = Instant::now().min(fake_now());
     app.arm_echo_watch_at(pane_id, target(), armed_at)

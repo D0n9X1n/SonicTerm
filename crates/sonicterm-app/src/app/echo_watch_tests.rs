@@ -218,3 +218,42 @@ fn the_echo_watch_size_bound_holds() {
     assert!(std::mem::size_of::<EchoWatch>() <= ECHO_WATCH_MAX_BYTES);
     assert!(std::mem::size_of::<EchoCache>() <= 64, "the worker's cache stays small");
 }
+
+/// The arm clock is read lazily: never on a `GateOff`, `NoPane` or `Exhausted` refusal, and once on a
+/// successful arm, after the timeline's admission allocated its buffers and released the previous
+/// owner's slot timeline, immediately before the slot is armed.
+#[test]
+fn the_arm_clock_is_read_once_after_admission_and_never_on_refusal() {
+    let reads = std::cell::Cell::new(0_u32);
+    let clock = || {
+        reads.set(reads.get() + 1);
+        Instant::now()
+    };
+    let mut off = app_under_filter("warn");
+    let off_pane = off.__test_seed_counting_tab("off");
+    assert_eq!(off.arm_echo_watch_with(off_pane, target(), clock), ArmOutcome::GateOff);
+    let (mut app, pane_id) = counting_app();
+    assert_eq!(app.arm_echo_watch_with(u64::MAX, target(), clock), ArmOutcome::NoPane);
+    let saved = app.next_echo_arm;
+    app.__test_set_next_echo_arm(u64::MAX);
+    assert_eq!(app.arm_echo_watch_with(pane_id, target(), clock), ArmOutcome::Exhausted);
+    assert_eq!(reads.get(), 0, "no refusal reads the clock");
+    app.__test_set_next_echo_arm(saved);
+    // A first arm makes this pane its window's timeline owner, recording.
+    armed(app.arm_echo_watch(pane_id, target()));
+    let watch = watch_of(&app, pane_id);
+    assert_eq!(watch.peek_timeline(), "recording");
+    let (_, allocations_before) = crate::app::echo_timeline::recorder_counts();
+    let seen = std::cell::Cell::new(None);
+    let observing_clock = || {
+        reads.set(reads.get() + 1);
+        // At the read, the rearm's admission has allocated its buffers and released the old timeline.
+        let (_, allocations) = crate::app::echo_timeline::recorder_counts();
+        seen.set(Some((allocations - allocations_before, watch.peek_timeline())));
+        Instant::now()
+    };
+    armed(app.arm_echo_watch_with(pane_id, target(), observing_clock));
+    assert_eq!(reads.get(), 1, "a successful arm reads the clock once");
+    assert_eq!(seen.get(), Some((2, "absent")), "after admission, before the slot is armed");
+    assert_eq!(watch.peek_timeline(), "recording");
+}
