@@ -2147,9 +2147,11 @@ fn a_later_section_of_one_chunk_carries_the_chunks_read_stamp() {
 /// replaced by zero or by the parse instant.
 #[test]
 fn an_unstamped_or_pre_arm_chunk_records_no_read() {
-    for read_at in [None, Some(Instant::now())] {
+    for pre_arm in [false, true] {
         let (_pane, handles, watch) = echo_worker(80, 24, 100);
         let base = test_base();
+        // The pre-arm read is an explicit offset before the arm, never the process's own `now()`.
+        let read_at = pre_arm.then(|| base - Duration::from_millis(1));
         echo_batch(&handles, b"z", base);
         arm_echo_timeline(&watch, &handles, 1, base);
         echo_batch_read(&handles, b"aX", read_at, base + Duration::from_millis(3));

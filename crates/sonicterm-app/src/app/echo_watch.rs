@@ -678,6 +678,16 @@ impl super::App {
     /// Arm pane `pane_id`'s echo watch for `target` with a new token. Takes no parser lock.
     #[doc(hidden)]
     pub fn arm_echo_watch(&mut self, pane_id: u64, target: EchoWatchTarget) -> ArmOutcome {
+        self.arm_echo_watch_at(pane_id, target, Instant::now())
+    }
+
+    /// `arm_echo_watch` with an explicit arm instant, so a test orders its events by offsets from it.
+    pub(super) fn arm_echo_watch_at(
+        &mut self,
+        pane_id: u64,
+        target: EchoWatchTarget,
+        armed_at: Instant,
+    ) -> ArmOutcome {
         if self.frame_counters.is_none() {
             // When: `frame_counters` is None, the gate is off; no pane has a watch and none is allocated.
             return ArmOutcome::GateOff;
@@ -710,7 +720,7 @@ impl super::App {
             chunk_timestamps,
             valid_permit,
         );
-        watch.arm_with(ArmToken(token), target, Instant::now(), timeline);
+        watch.arm_with(ArmToken(token), target, armed_at, timeline);
         self.next_echo_arm = next;
         ArmOutcome::Armed(ArmToken(token))
     }
