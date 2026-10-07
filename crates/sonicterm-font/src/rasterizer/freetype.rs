@@ -12,12 +12,13 @@ use crate::rasterizer::colr::{
 use crate::rasterizer::harfbuzz::{argb_to_rgba, HarfbuzzRasterizer};
 use crate::rasterizer::{
     checked_glyph_rgba_len, checked_raster_pixel_size, FontRasterizer, FAKE_ITALIC_SKEW,
-    MAX_RASTERIZED_GLYPH_BYTES,
+    MAX_RASTERIZED_GLYPH_BYTES, MAX_RASTERIZED_GLYPH_DIMENSION,
 };
 use crate::units::*;
 use crate::{ftwrap, FontRasterizerSelection, RasterizedGlyph};
 use ::freetype::{
-    FT_Color_Root_Transform, FT_GlyphSlotRec_, FT_Matrix, FT_Opaque_Paint_, FT_PaintFormat_,
+    FT_ClipBox_, FT_Color_Root_Transform, FT_GlyphSlotRec_, FT_Matrix, FT_Opaque_Paint_,
+    FT_PaintFormat_,
 };
 use anyhow::{bail, Context as _};
 use cairo::{Content, Context, Extend, Format, ImageSurface, Matrix, Operator, RecordingSurface};
@@ -509,7 +510,7 @@ impl FreeTypeRasterizer {
 
         log::trace!("ops: {:#?}", walker.ops);
 
-        rasterize_from_ops(walker.ops, scale_x, -scale_y)
+        rasterize_from_ops(walker.ops, scale_x, -scale_y, Some(clip_box_corners_px(&clip_box)))
     }
 }
 
@@ -517,20 +518,73 @@ impl FreeTypeRasterizer {
 #[path = "freetype_tests.rs"]
 mod freetype_tests;
 
+/// Device-pixel corners of a COLR ClipBox, in Cairo's y-down output space.
+///
+/// FreeType reports the corners in 26.6 device pixels, y up, with the face's size, transform and
+/// translation already applied, so they are only rescaled and flipped here, never transformed again.
+fn clip_box_corners_px(clip_box: &FT_ClipBox_) -> [(f64, f64); 4] {
+    [clip_box.bottom_left, clip_box.top_left, clip_box.top_right, clip_box.bottom_right]
+        .map(|corner| (corner.x.font_units() as f64 / 64.0, -(corner.y.font_units() as f64) / 64.0))
+}
+
+/// Integer pixel rectangle covering a recording's ink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PixelBounds {
+    left: i64,
+    top: i64,
+    width: usize,
+    height: usize,
+}
+
+/// Rounds Cairo ink extents outward to whole pixels, so a fractional edge keeps its pixel.
+///
+/// Cairo reports a recording it cannot bound as a negative size; that, a non-finite value or a span
+/// past the glyph limit is an error. Zero area is a valid empty glyph.
+fn pixel_bounds(left: f64, top: f64, width: f64, height: f64) -> anyhow::Result<PixelBounds> {
+    if ![left, top, width, height].iter().all(|value| value.is_finite())
+        || width < 0.0
+        || height < 0.0
+    {
+        // Non-finite or negative extents mean Cairo could not bound the ink.
+        bail!("invalid color glyph extents {width}x{height}");
+    }
+    if width == 0.0 || height == 0.0 {
+        // When: `width` or `height` is 0.0, the recording covers no area, so the glyph is empty.
+        return Ok(PixelBounds { left: 0, top: 0, width: 0, height: 0 });
+    }
+    let limit = MAX_RASTERIZED_GLYPH_DIMENSION as f64;
+    let (min_x, min_y) = (left.floor(), top.floor());
+    let (span_x, span_y) = ((left + width).ceil() - min_x, (top + height).ceil() - min_y);
+    if span_x > limit
+        || span_y > limit
+        || min_x.abs() > i64::MAX as f64
+        || min_y.abs() > i64::MAX as f64
+    {
+        // A span past the glyph limit, or an origin no i64 can hold, is rejected before allocation.
+        bail!("color glyph extents {span_x}x{span_y} exceed the {limit}px glyph limit");
+    }
+    Ok(PixelBounds {
+        left: min_x as i64,
+        top: min_y as i64,
+        width: span_x as usize,
+        height: span_y as usize,
+    })
+}
+
 fn rasterize_from_ops(
     ops: Vec<PaintOp>,
     scale_x: f64,
     scale_y: f64,
+    clip: Option<[(f64, f64); 4]>,
 ) -> anyhow::Result<RasterizedGlyph> {
-    let (surface, has_color) = record_to_cairo_surface(ops, scale_x, scale_y)?;
+    let (surface, has_color) = record_to_cairo_surface(ops, scale_x, scale_y, clip)?;
     let (left, top, width, height) = surface.ink_extents();
     log::trace!("extents: left={left} top={top} width={width} height={height}");
 
-    if !width.is_finite() || !height.is_finite() || width < 0.0 || height < 0.0 {
-        bail!("invalid color glyph extents {width}x{height}");
-    }
-    let width_px = width as usize;
-    let height_px = height as usize;
+    let bounds = pixel_bounds(left, top, width, height)?;
+    let (left, top) = (bounds.left as f64, bounds.top as f64);
+    let width_px = bounds.width;
+    let height_px = bounds.height;
     if width_px == 0 || height_px == 0 {
         // When: width_px or height_px collapsed to zero, so the paint ops
         // covered no pixels and an empty bitmap stands in.
@@ -880,10 +934,26 @@ fn record_to_cairo_surface(
     paint_ops: Vec<PaintOp>,
     scale_x: f64,
     scale_y: f64,
+    clip: Option<[(f64, f64); 4]>,
 ) -> anyhow::Result<(RecordingSurface, bool)> {
     let mut has_color = false;
     let surface = RecordingSurface::create(Content::ColorAlpha, None)?;
     let context = Context::new(&surface)?;
+    if let Some(corners) = clip {
+        // A ClipBox bounds every paint and group, including composites Cairo cannot bound
+        // itself, so it is set at identity, in device pixels, outside every save.
+        if !corners.iter().all(|(x_px, y_px)| x_px.is_finite() && y_px.is_finite()) {
+            // A non-finite corner cannot form a clip path.
+            bail!("invalid color glyph clip box {corners:?}");
+        }
+        let [first, rest @ ..] = corners;
+        context.move_to(first.0, first.1);
+        for (x_px, y_px) in rest {
+            context.line_to(x_px, y_px);
+        }
+        context.close_path();
+        context.clip();
+    }
     context.scale(scale_x, scale_y);
     context.set_antialias(cairo::Antialias::Best);
 
