@@ -249,6 +249,14 @@ COLRv1 字形若带有 ClipBox，会以设备像素作为外层裁剪作用于�
 FreeType 对缺少 ClipBox 和读取 ClipBox 出错报告相同的状态，因此 SonicTerm 将两者都视为没有 ClipBox，
 并尝试不加裁剪的渲染，仍受同样的范围检查约束。位图向外取整到整像素。
 
+FreeType COLRv1 路径让所有绘制操作数都保持字体单位。PaintGlyph 轮廓以不缩放、
+不变换的方式加载，渐变锚点保持字体给出的值，由 FreeType
+包含的根变换（依据字体的尺寸和变换构建）作为唯一的设备像素映射。因此在任何字号下，
+渐变都留在其轮廓内的正确位置，合成斜体对轮廓和渐变只剪切一次，与对 ClipBox 的剪切一致。
+这些轮廓从不做 hinting，合成粗体也不会加粗它们。不缩放加载有两个 FreeType 限制：
+可变字体的轮廓坐标会被取整为整数字体单位；“tricky”字体的轮廓依赖 hinting 指令，
+不缩放加载可能得到无意义的轮廓。
+
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` 为生成的 FreeType、HarfBuzz、Fontconfig
 绑定中的原始句柄管理安全生命周期。每次原生分配都配对正确的销毁函数。内嵌位图字形
 先只加载度量，并在解码像素前检查字形分配预算。

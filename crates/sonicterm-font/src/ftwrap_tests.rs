@@ -503,3 +503,80 @@ fn identity_scale_leaves_base_unchanged() {
     let axes = [axis(wght_tag(), 400., 400.), axis(wdth_tag(), 100., 100.)];
     assert_eq!(scaled_weight_and_width(400., 5., &axes), (400, 5));
 }
+
+/// Every coordinate of `ops` as `(x, y)` pairs, controls included, in the order the outline lists them.
+fn outline_points(ops: &[DrawOp]) -> Vec<(f32, f32)> {
+    ops.iter()
+        .flat_map(|op| match *op {
+            DrawOp::MoveTo { to_x, to_y } | DrawOp::LineTo { to_x, to_y } => vec![(to_x, to_y)],
+            DrawOp::QuadTo { control_x, control_y, to_x, to_y } => {
+                vec![(control_x, control_y), (to_x, to_y)]
+            }
+            DrawOp::CubicTo { control1_x, control1_y, control2_x, control2_y, to_x, to_y } => {
+                vec![(control1_x, control1_y), (control2_x, control2_y), (to_x, to_y)]
+            }
+            _ => vec![],
+        })
+        .collect()
+}
+
+/// The COLRv1 contour loader returns the outline in the face's own font units, whatever the face's size or
+/// transform: FreeType's included root transform is the only font-to-device mapping, so a contour scaled to the
+/// size or sheared by the synthetic-italic transform at load time would be mapped twice. A tracked text face
+/// stands in for a COLR face here, since PaintGlyph contours are ordinary outline glyphs.
+#[test]
+fn colr_contours_load_unscaled_and_untransformed_at_every_size_and_shear() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf");
+    let handle = FontDataHandle {
+        source: FontDataSource::OnDisk(path),
+        index: 0,
+        variation: 0,
+        origin: crate::locator::FontOrigin::FontDirs,
+        coverage: None,
+    };
+    let library = Library::new().unwrap();
+    let mut face = library.face_from_locator(&handle).unwrap();
+    let glyph_index =
+        // SAFETY: `face.face` is the live face this test owns; the lookup only reads its cmap.
+        unsafe { FT_Get_Char_Index(face.face, 'H' as FT_ULong) };
+    assert_ne!(glyph_index, 0, "the fixture maps 'H'");
+    let units_per_em =
+        // SAFETY: `face.face` is live; units_per_EM is a plain field of the face record.
+        unsafe { (*face.face).units_per_EM };
+    let units_per_em = f32::from(units_per_em);
+    // The walker's own flags: the configured load flags with hinting off.
+    let (load_flags, _) = compute_load_flags_from_config(None, None, None, Some(72));
+    let walker_flags = load_flags | FT_LOAD_NO_HINTING as i32;
+    let shear = FT_Matrix {
+        xx: FT_Fixed::from_num(1),
+        yy: FT_Fixed::from_num(1),
+        xy: FT_Fixed::from_num(0.2),
+        yx: FT_Fixed::from_num(0),
+    };
+    let mut loads = Vec::new();
+    for sheared in [false, true] {
+        face.set_transform(sheared.then_some(shear));
+        for size_px in [13.0, 16.0, 26.0] {
+            face.set_font_size(size_px, 72).unwrap();
+            let ops = face.load_glyph_outlines(glyph_index, walker_flags).unwrap();
+            loads.push((size_px, sheared, outline_points(&ops)));
+        }
+    }
+    let (_, _, reference) = &loads[0];
+    assert!(reference.len() > 4, "H has an outline");
+    let extent =
+        reference.iter().map(|(x_pos, y_pos)| x_pos.abs().max(y_pos.abs())).fold(0.0, f32::max);
+    // Font units: an H spans a sizeable part of the em, far beyond any pixel size tested.
+    assert!(
+        extent > units_per_em / 4.0 && extent <= units_per_em * 2.0,
+        "extent {extent} of {units_per_em}"
+    );
+    assert!(
+        reference.iter().all(|(x_pos, y_pos)| x_pos.fract() == 0.0 && y_pos.fract() == 0.0),
+        "unscaled TrueType points are whole font units"
+    );
+    for (size_px, sheared, points) in &loads {
+        assert_eq!(points, reference, "{size_px}px sheared={sheared} loads the font-unit outline");
+    }
+}

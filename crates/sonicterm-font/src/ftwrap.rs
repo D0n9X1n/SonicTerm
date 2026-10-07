@@ -1028,7 +1028,12 @@ impl Face {
         }
     }
 
-    /// Decomposes a glyph outline into renderer-independent drawing operations.
+    /// Decomposes a COLRv1 PaintGlyph outline into drawing operations in the face's own font units.
+    ///
+    /// The glyph is loaded with `FT_LOAD_NO_SCALE | FT_LOAD_IGNORE_TRANSFORM` on top of `load_flags`, so
+    /// neither the face's size nor its transform (synthetic italic) is applied here: the caller's included
+    /// root transform maps every paint operand, contours and gradients alike, from font units to device pixels
+    /// exactly once. The face's size and transform stay set, since that root transform is built from them.
     pub fn load_glyph_outlines(
         &mut self,
         glyph_index: FT_UInt,
@@ -1037,7 +1042,9 @@ impl Face {
         // SAFETY: `self.face` is live; a successful glyph load initializes its face-owned slot,
         // and decomposition invokes the callbacks synchronously while `ops` is alive.
         unsafe {
-            ft_result(FT_Load_Glyph(self.face, glyph_index, load_flags), ())
+            let unscaled_flags =
+                load_flags | FT_LOAD_NO_SCALE as FT_Int32 | FT_LOAD_IGNORE_TRANSFORM as FT_Int32;
+            ft_result(FT_Load_Glyph(self.face, glyph_index, unscaled_flags), ())
                 .with_context(|| format!("FT_Load_Glyph {glyph_index}"))?;
             let slot = &mut *(*self.face).glyph;
             if slot.format != FT_Glyph_Format_::FT_GLYPH_FORMAT_OUTLINE {
@@ -1052,7 +1059,9 @@ impl Face {
                 line_to: Some(line_to),
                 conic_to: Some(conic_to),
                 cubic_to: Some(cubic_to),
-                shift: 16, // match the same coordinate space as transforms
+                // Unscaled points are whole font units; a zero shift hands them over unchanged, so no
+                // multiplication can overflow a 32-bit FT_Pos.
+                shift: 0,
                 delta: FT_Pos::from_font_units(0),
             };
 
@@ -1065,7 +1074,7 @@ impl Face {
                 // live pointer to the output vector for the duration of this call.
                 unsafe {
                     let ops = user as *mut Vec<DrawOp>;
-                    let (to_x, to_y) = vector_x_y(&*to);
+                    let (to_x, to_y) = outline_point_font_units(&*to);
                     (*ops).push(DrawOp::MoveTo { to_x, to_y });
                 }
                 0
@@ -1077,7 +1086,7 @@ impl Face {
                 // live pointer to the output vector for the duration of this call.
                 unsafe {
                     let ops = user as *mut Vec<DrawOp>;
-                    let (to_x, to_y) = vector_x_y(&*to);
+                    let (to_x, to_y) = outline_point_font_units(&*to);
                     (*ops).push(DrawOp::LineTo { to_x, to_y });
                 }
                 0
@@ -1093,8 +1102,8 @@ impl Face {
                 // unique, live pointer to the output vector for this call.
                 unsafe {
                     let ops = user as *mut Vec<DrawOp>;
-                    let (control_x, control_y) = vector_x_y(&*control);
-                    let (to_x, to_y) = vector_x_y(&*to);
+                    let (control_x, control_y) = outline_point_font_units(&*control);
+                    let (to_x, to_y) = outline_point_font_units(&*to);
                     (*ops).push(DrawOp::QuadTo { control_x, control_y, to_x, to_y });
                 }
                 0
@@ -1111,9 +1120,9 @@ impl Face {
                 // unique, live pointer to the output vector for this call.
                 unsafe {
                     let ops = user as *mut Vec<DrawOp>;
-                    let (control1_x, control1_y) = vector_x_y(&*control1);
-                    let (control2_x, control2_y) = vector_x_y(&*control2);
-                    let (to_x, to_y) = vector_x_y(&*to);
+                    let (control1_x, control1_y) = outline_point_font_units(&*control1);
+                    let (control2_x, control2_y) = outline_point_font_units(&*control2);
+                    let (to_x, to_y) = outline_point_font_units(&*to);
                     (*ops).push(DrawOp::CubicTo {
                         control1_x,
                         control1_y,
@@ -1785,6 +1794,12 @@ pub(crate) fn clip_box_from_status(
     read: impl FnOnce() -> FT_ClipBox_,
 ) -> Option<FT_ClipBox_> {
     (status == 1).then(read)
+}
+
+/// An unscaled outline point as `(x, y)` in font units: `FT_LOAD_NO_SCALE` leaves each coordinate a whole number
+/// of font units, which the zero-shift decomposition passes through unchanged.
+fn outline_point_font_units(vector: &FT_Vector) -> (f32, f32) {
+    (vector.x.font_units() as f32, vector.y.font_units() as f32)
 }
 
 /// Converts a FreeType 16.16 vector into floating-point coordinates.

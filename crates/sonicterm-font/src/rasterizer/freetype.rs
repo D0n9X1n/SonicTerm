@@ -479,26 +479,6 @@ impl FreeTypeRasterizer {
             FT_Color_Root_Transform::FT_COLOR_INCLUDE_ROOT_TRANSFORM,
         )?;
 
-        // The root transform produces extents that are larger than
-        // our nominal pixel size. I'm not sure why that is, but the
-        // factor corresponds to the metrics.(x|y)_scale in the root
-        // transform.
-        // It is desirable to retain the root transform as it includes
-        // any skew that may have been applied to the font.
-        // So let's extract the offending scaling factors and we'll
-        // compensate when we rasterize the paths.
-        let (scale_x, scale_y) = {
-            // SAFETY: `rasterize_glyph` called `set_font_size` before this fallback,
-            // so the borrowed face has a live size slot with initialized scale metrics.
-            unsafe {
-                let upem = (*face.face).units_per_EM as f64;
-                let metrics = (*(*face.face).size).metrics;
-                log::trace!("upem={upem}, metrics: {metrics:#?}");
-
-                (1. / metrics.x_scale.to_num::<f64>(), 1. / metrics.y_scale.to_num::<f64>())
-            }
-        };
-
         let palette = face.get_palette_data()?;
         log::trace!("Palette: {palette:#?}");
         face.select_palette(0)?;
@@ -511,7 +491,9 @@ impl FreeTypeRasterizer {
 
         log::trace!("ops: {:#?}", walker.ops);
 
-        rasterize_colr(walker.ops, scale_x, -scale_y, clip_box.as_ref())
+        // Every operand is in font units and the included root transform maps them to device pixels, y up,
+        // so the only outer transform left is the flip to Cairo's y-down space.
+        rasterize_colr(walker.ops, 1.0, -1.0, clip_box.as_ref())
     }
 }
 
@@ -690,8 +672,7 @@ impl<'a> Walker<'a> {
                     let (start_x, start_y) = vector_x_y(&grad.p0);
                     let (end_x, end_y) = vector_x_y(&grad.p1);
                     let (rotation_x, rotation_y) = vector_x_y(&grad.p2);
-                    // FIXME: gradient vectors are expressed as font units,
-                    // do we need to adjust them here?
+                    // Anchors stay in font units, like the contours; the root transform maps both.
                     let paint = PaintOp::PaintLinearGradient {
                         start_x,
                         start_y,
@@ -737,10 +718,8 @@ impl<'a> Walker<'a> {
                     self.ops.push(paint);
                 }
                 FT_COLR_PAINTFORMAT_GLYPH => {
-                    // FIXME: harfbuzz, in COLR.hh, pushes the inverse of
-                    // the root transform before emitting the glyph
-                    // DrawOps, then pops it prior to recursing into
-                    // the child paint
+                    // The contour loads in font units, untransformed, so the enclosing root
+                    // transform maps it exactly as it maps the child paint's operands.
                     log::trace!("{level:>3} {:?}", paint.u.glyph.as_ref());
 
                     let glyph_index = paint.u.glyph.as_ref().glyphID;

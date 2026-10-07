@@ -337,9 +337,7 @@ fn clip_box_wiring_problems(rasterizer: &str, ftwrap: &str) -> Vec<String> {
             if !outlines.contains("let clip_box = face.get_color_glyph_clip_box(glyph_pos);") {
                 problems.push("rasterize_outlines does not read the optional ClipBox".to_owned());
             }
-            if !outlines
-                .contains("rasterize_colr(walker.ops, scale_x, -scale_y, clip_box.as_ref())")
-            {
+            if !outlines.contains("rasterize_colr(walker.ops, 1.0, -1.0, clip_box.as_ref())") {
                 problems
                     .push("rasterize_outlines does not pass the optional ClipBox on".to_owned());
             }
@@ -383,7 +381,7 @@ fn outlines_source(good: bool) -> String {
     };
     format!(
         "impl FreeTypeRasterizer {{\n    fn rasterize_outlines(&self) -> anyhow::Result<RasterizedGlyph> {{\n        \
-         {read}\n        rasterize_colr(walker.ops, scale_x, -scale_y, clip_box.as_ref())\n    }}\n}}\n"
+         {read}\n        rasterize_colr(walker.ops, 1.0, -1.0, clip_box.as_ref())\n    }}\n}}\n"
     )
 }
 
@@ -469,6 +467,154 @@ fn a_macro_cfg_comment_or_raw_string_decoy_never_satisfies_the_clip_box_pin() {
                     "{target} {label} {place}: the decoy was code"
                 );
             }
+        }
+    }
+}
+
+/// The COLRv1 paint fixture built by scripts/generate-colr-fixture.py: 2048 units per em, one colour glyph per
+/// walker conversion, every glyph with a ClipBox.
+const COLR_FIXTURE: &[u8] = include_bytes!("../../test-fonts/colr-paint-fixture.ttf");
+const FIXTURE_UNITS_PER_EM: f64 = 2048.0;
+/// Fixture glyph ids, in the generator's glyph order.
+const GLYPH_LINEAR: u32 = 4;
+const GLYPH_CLIPPED: u32 = 11;
+
+/// The fixture as a parsed font, with synthetic italic when `italic`.
+fn fixture_font(italic: bool) -> ParsedFont {
+    let handle = crate::locator::FontDataHandle {
+        source: crate::locator::FontDataSource::BuiltIn {
+            name: "colr-paint-fixture",
+            data: COLR_FIXTURE,
+        },
+        index: 0,
+        variation: 0,
+        origin: crate::locator::FontOrigin::BuiltIn,
+        coverage: None,
+    };
+    let mut parsed = ParsedFont::from_locator(&handle).expect("the fixture parses");
+    parsed.synthesize_italic = italic;
+    parsed
+}
+
+/// `glyph_id` of the fixture rasterized by the FreeType COLRv1 walker at `size_px` (dpi 72, so ppem = size),
+/// through the same `rasterize_outlines` call `rasterize_glyph` makes when FreeType is the COLR rasterizer.
+fn fixture_colr_glyph(glyph_id: u32, size_px: f64, italic: bool) -> RasterizedGlyph {
+    let rasterizer =
+        FreeTypeRasterizer::from_locator(&fixture_font(italic), DisplayPixelGeometry::RGB).unwrap();
+    rasterizer.face.borrow_mut().set_font_size(size_px, 72).unwrap();
+    let (load_flags, _) = ftwrap::compute_load_flags_from_config(
+        rasterizer.freetype_load_flags,
+        rasterizer.freetype_load_target,
+        rasterizer.freetype_render_target,
+        Some(72),
+    );
+    rasterizer
+        .rasterize_outlines(glyph_id, load_flags | FT_LOAD_NO_HINTING as i32)
+        .expect("the fixture glyph rasterizes")
+}
+
+/// The pixel of `glyph` covering the device point (`x_px`, `y_px`), y up from the baseline, with that pixel's
+/// centre in the same frame; None outside the bitmap. Row 0 is the bitmap's top, at `bearing_y`.
+fn pixel_at(glyph: &RasterizedGlyph, x_px: f64, y_px: f64) -> Option<([u8; 4], (f64, f64))> {
+    let column = (x_px - glyph.bearing_x.get()).floor();
+    let row = (glyph.bearing_y.get() - y_px).floor();
+    // When: the point lies outside the bitmap, there is no pixel to read.
+    if column < 0.0 || row < 0.0 || column >= glyph.width as f64 || row >= glyph.height as f64 {
+        return None;
+    }
+    let at = (row as usize * glyph.width + column as usize) * 4;
+    let rgba = glyph.data[at..at + 4].try_into().unwrap();
+    let centre = (glyph.bearing_x.get() + column + 0.5, glyph.bearing_y.get() - row - 0.5);
+    Some((rgba, centre))
+}
+
+/// The left and right ink edges of the bitmap row whose centre is nearest `y_px`, in device pixels: each edge
+/// is the first or last fully covered column, moved out by the coverage of the partial pixels beyond it.
+fn row_ink_edges(glyph: &RasterizedGlyph, y_px: f64) -> (f64, f64) {
+    let row = (glyph.bearing_y.get() - y_px).floor() as usize;
+    let alpha = |column: usize| f64::from(glyph.data[(row * glyph.width + column) * 4 + 3]) / 255.0;
+    let full: Vec<usize> =
+        (0..glyph.width).filter(|column| alpha(*column) >= 254.0 / 255.0).collect();
+    let (&first, &last) = (full.first().expect("a covered row"), full.last().unwrap());
+    let left = first as f64 - (0..first).map(alpha).sum::<f64>();
+    let right = (last + 1) as f64 + (last + 1..glyph.width).map(alpha).sum::<f64>();
+    (glyph.bearing_x.get() + left, glyph.bearing_x.get() + right)
+}
+
+/// Gradient anchors and contours share one font-unit space under the included root transform. The fixture's
+/// linear gradient runs red at y = 0 to blue at y = 1600 font units over a 1600-unit square, so at every size,
+/// plain or italic, a pixel's colour is the line's value at its own height: anchors scaled by ppem/upem, red
+/// at the bottom (y up). Sizes on both sides of 16 px, where the old 1/64 mapping happened to be exact.
+#[test]
+fn colr_linear_gradient_anchors_scale_with_the_contour_at_every_size() {
+    for size_px in [13.0, 26.0] {
+        for italic in [false, true] {
+            let glyph = fixture_colr_glyph(GLYPH_LINEAR, size_px, italic);
+            let scale = size_px / FIXTURE_UNITS_PER_EM;
+            for font_y in [400.0, 1200.0] {
+                // Mid-square, moved right by the italic shear of that height.
+                let font_x = 800.0 + if italic { FAKE_ITALIC_SKEW * font_y } else { 0.0 };
+                let Some((rgba, (_, centre_y))) = pixel_at(&glyph, font_x * scale, font_y * scale)
+                else {
+                    panic!("{size_px}px italic={italic}: no pixel at font ({font_x}, {font_y})");
+                };
+                let offset = (centre_y / scale / 1600.0).clamp(0.0, 1.0);
+                let expected = [255.0 * (1.0 - offset), 0.0, 255.0 * offset];
+                assert_eq!(
+                    rgba[3], 255,
+                    "{size_px}px italic={italic} y={font_y}: inside the square"
+                );
+                for (channel, want) in expected.iter().enumerate() {
+                    assert!(
+                        (f64::from(rgba[channel]) - want).abs() <= 8.0,
+                        "{size_px}px italic={italic} y={font_y}: {rgba:?}, expected {expected:?} at offset {offset:.3}"
+                    );
+                }
+            }
+            let (bottom, _) = pixel_at(&glyph, 800.0 * scale, 100.0 * scale).unwrap();
+            assert!(bottom[0] > bottom[2], "{size_px}px italic={italic}: red at the bottom, y up");
+        }
+    }
+}
+
+/// Synthetic italic shears a COLR contour exactly once: the left edge of the fixture's square sits at
+/// FAKE_ITALIC_SKEW times the height, as the face transform puts it, not twice that.
+#[test]
+fn colr_synthetic_italic_shears_contours_once() {
+    for size_px in [13.0, 26.0] {
+        let scale = size_px / FIXTURE_UNITS_PER_EM;
+        let glyph = fixture_colr_glyph(GLYPH_LINEAR, size_px, true);
+        let plain = fixture_colr_glyph(GLYPH_LINEAR, size_px, false);
+        for font_y in [500.0, 1100.0] {
+            let (_, (_, centre_y)) = pixel_at(&glyph, 1.0, font_y * scale).unwrap();
+            let (left, _) = row_ink_edges(&glyph, centre_y);
+            let (plain_left, _) = row_ink_edges(&plain, centre_y);
+            let want = FAKE_ITALIC_SKEW * centre_y;
+            assert!(
+                (left - want).abs() <= 0.25,
+                "{size_px}px at y={centre_y:.2}: left edge {left:.3}, one shear puts it at {want:.3}"
+            );
+            assert!(plain_left.abs() <= 0.1, "{size_px}px plain left edge {plain_left:.3}");
+        }
+    }
+}
+
+/// The device-space ClipBox clip is unchanged by the coordinate fix: the fixture's clipped square ends at its
+/// ClipBox's right side, 800 font units, plain, and under italic at that side sheared once by the face
+/// transform, as FreeType reports the box.
+#[test]
+fn colr_clip_box_still_bounds_the_contour_in_device_space() {
+    for size_px in [13.0, 26.0] {
+        let scale = size_px / FIXTURE_UNITS_PER_EM;
+        for italic in [false, true] {
+            let glyph = fixture_colr_glyph(GLYPH_CLIPPED, size_px, italic);
+            let (_, (_, centre_y)) = pixel_at(&glyph, 1.0, 800.0 * scale).unwrap();
+            let (_, right) = row_ink_edges(&glyph, centre_y);
+            let want = 800.0 * scale + if italic { FAKE_ITALIC_SKEW * centre_y } else { 0.0 };
+            assert!(
+                (right - want).abs() <= 0.25,
+                "{size_px}px italic={italic}: right edge {right:.3}, ClipBox side at {want:.3}"
+            );
         }
     }
 }
