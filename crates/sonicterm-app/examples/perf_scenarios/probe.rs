@@ -36,8 +36,9 @@ use crate::dispatch_timeline::sample::{SampleTimeline, Storage as TimelineStorag
 use crate::dispatch_timeline::{Invocation, InvocationKind, OuterKind};
 #[cfg(perf_completeness_api)]
 use crate::record::completeness_from_checkpoint;
+use crate::record::EchoOutcome;
 use crate::record::{
-    attribute_dispatch, bulk_tail_mismatch, echo_api, echo_outcome, echo_target,
+    armed_token, attribute_dispatch, bulk_tail_mismatch, echo_api, echo_outcome, echo_target,
     line_row_near_cursor, missing_wide_tokens, planned_rows, presenter_blocked,
     presenter_record_for, prompt_identity, prompt_origin, protocol_rows, retained_text,
     row_count_mismatch, snapshot_echo, snapshot_identity_changed, split_in_scope,
@@ -51,6 +52,7 @@ use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{
     self, Act, Driver, Fixture, Host, PhaseEnd, PhaseSpec, Plan, SetupAction, Step, Workload,
 };
+use crate::timeline::{analyze, unarmed_timeline, Credited, TimelineTake};
 use crate::waits::{
     self, BarrierProgress, CheckpointProgress, CheckpointSampling, FirstPresentBound,
     FootprintStatus, FrameBarrier, ImagePresent, ImageProgress, ImageVerdict, TrimDispatch,
@@ -719,6 +721,16 @@ fn open_checkpoint(
     PendingCheckpoint { index, label, footprint, footprint_answered: false, sampling: None }
 }
 
+/// Test-only: one transport a finalization route performed, with the instants it latched and read.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GuardTransportCall {
+    phase_index: usize,
+    started: Instant,
+    counters_end_at: Instant,
+    transport_started: Instant,
+}
+
 /// The probe around one run's `App`.
 struct Probe {
     app: App,
@@ -738,6 +750,17 @@ struct Probe {
     startup_endpoint: Option<Instant>,
     meter: Option<PhaseMeter>,
     phases: Vec<PhaseRecord>,
+    /// The just-finished phase's latched start and counter-end instants, until its transport takes them.
+    guard_window: Option<(Instant, Instant)>,
+    /// Test-only: replaces the take and the sidecar write, recording each transport the routes perform.
+    #[cfg(test)]
+    guard_transport_override: Option<Box<dyn FnMut(GuardTransportCall)>>,
+    /// Test-only: the clock the finalization reads (window end, phase end, transport start) instead of now.
+    #[cfg(test)]
+    guard_clock_override: Option<Box<dyn FnMut() -> Instant>>,
+    /// Test-only: a delivery problem a phase end reports on any host, to drive the early end_phase → finish path.
+    #[cfg(test)]
+    forced_delivery_problem: Option<String>,
     /// S10's attribution while its counted phase runs, taken into that phase's record when it ends.
     attribution: Option<attribution::Attribution>,
     role_panes: Vec<u64>,
@@ -799,6 +822,9 @@ struct Probe {
     /// Tests: the presented-frame count and image atlas reading that stand in for the main renderer.
     #[cfg(test)]
     test_readings: Option<(u64, ResourceAmount)>,
+    /// Tests: the echo outcome and timeline the next credited sample's takes return, in place of the App's.
+    #[cfg(test)]
+    test_take: Option<(EchoOutcome, TimelineTake)>,
 }
 
 impl ApplicationHandler<UserEvent> for Probe {
@@ -1337,6 +1363,8 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     let proxy = event_loop.create_proxy();
     let roles = plan.roles.len();
     let sentinels = (0..roles).map(|role| workload::sentinel_line(role, &prepared.nonce)).collect();
+    // The shared clock epoch is set first, so startup's start converts; the boundary does not move.
+    crate::guard_transport::api::bootstrap_epoch();
     // Startup is measured from just before the App is built.
     let meter = PhaseMeter::start(
         "startup",
@@ -1643,6 +1671,8 @@ impl PhaseMeter {
             frame_counters,
             updates: self.updates,
             s10_attribution: None,
+            guard_correlation: None,
+            guard_correlation_transport_ns: None,
         }
     }
 }
@@ -1715,6 +1745,13 @@ impl Probe {
             startup_endpoint: None,
             meter: None,
             phases: Vec::new(),
+            guard_window: None,
+            #[cfg(test)]
+            guard_transport_override: None,
+            #[cfg(test)]
+            guard_clock_override: None,
+            #[cfg(test)]
+            forced_delivery_problem: None,
             attribution: None,
             role_panes: Vec::new(),
             exited_panes: Vec::new(),
@@ -1756,6 +1793,8 @@ impl Probe {
             counter_error: None,
             #[cfg(test)]
             test_readings: None,
+            #[cfg(test)]
+            test_take: None,
         }
     }
 
@@ -1821,7 +1860,7 @@ impl Probe {
         if let Some(before) = before {
             if self.open_sample.is_some() {
                 let after = self.echo_snapshot();
-                self.attribute(&DispatchObservation { before, after, advanced }, ended);
+                self.attribute(&DispatchObservation { before, after, advanced }, started, ended);
             }
         }
         if matches!(self.stage, Stage::Steps(_)) {
@@ -1829,34 +1868,66 @@ impl Probe {
         }
     }
 
-    /// Settle the open sample from one observed dispatch that ended at `ended`.
-    fn attribute(&mut self, observation: &DispatchObservation, ended: Instant) {
+    /// Settle the open sample from one observed dispatch, the forward that ran `started..ended`.
+    fn attribute(&mut self, observation: &DispatchObservation, started: Instant, ended: Instant) {
         match attribute_dispatch(observation) {
             Attribution::Pending => {}
             Attribution::Credited => {
                 if let Some(sample) = self.open_sample.take() {
-                    // The take runs after both snapshots have released the parser lock.
+                    // The takes run after both snapshots have released the parser lock.
                     let main = self.measurement_window();
+                    let mut timeline = unarmed_timeline(sample.arm);
                     let outcome = echo_outcome(sample.arm, |token| {
-                        echo_api::take(&mut self.app, sample.pane, token, main)
+                        let (outcome, drained) =
+                            echo_api::take(&mut self.app, sample.pane, token, main);
+                        timeline = Some(drained);
+                        outcome
                     });
-                    // The credited close takes the sample's dispatch timeline too.
-                    let timeline = sample.timeline.close(&mut self.app, &mut self.timeline_storage);
+                    let (outcome, timeline) = self.credited_take(outcome, timeline);
+                    // The credited close takes the sample's dispatch timeline too, after the echo take; neither
+                    // reads a clock the other's evidence uses, and both keep this forward's `started`/`ended`.
+                    let dispatch_timeline =
+                        sample.timeline.close(&mut self.app, &mut self.timeline_storage);
                     let changed = snapshot_identity_changed(observation, sample.identity);
-                    self.samples.push(
-                        LatencySample::credited(
-                            sample.inject_unix_s,
-                            sample.injected,
-                            ended,
-                            &outcome,
-                            changed,
-                        )
-                        .with_dispatch_timeline(timeline.as_str()),
-                    );
+                    let credited = LatencySample::credited(
+                        sample.inject_unix_s,
+                        sample.injected,
+                        ended,
+                        &outcome,
+                        changed,
+                    )
+                    .with_dispatch_timeline(dispatch_timeline.as_str());
+                    // The credited forward bounds the dispatch pair the timeline binds.
+                    let context = Credited {
+                        injected: sample.injected,
+                        forward_started: started,
+                        ended,
+                        split: credited.split,
+                        split_reason: credited.split_reason,
+                        token: armed_token(sample.arm),
+                        window: main.map(u64::from),
+                        pane: sample.pane,
+                    };
+                    let echo_timeline = timeline.map(|take| analyze(&take, &context));
+                    self.samples.push(credited.with_timeline(echo_timeline));
                 }
             }
             Attribution::Unattributed(reason) => self.close_sample(reason),
         }
+    }
+
+    /// The credited sample's takes: the App's, or in a test the controlled pair it set.
+    fn credited_take(
+        &mut self,
+        outcome: EchoOutcome,
+        timeline: Option<TimelineTake>,
+    ) -> (EchoOutcome, Option<TimelineTake>) {
+        #[cfg(test)]
+        if let Some((outcome, timeline)) = self.test_take.take() {
+            // When: `test_take` is set, a test supplies this sample's evidence through the production handoff.
+            return (outcome, Some(timeline));
+        }
+        (outcome, timeline)
     }
 
     /// Close the open sample, if any, as unattributed; an armed watch is disarmed and its record
@@ -2047,10 +2118,66 @@ impl Probe {
             return;
         };
         let completion = self.completion_of(&meter);
+        let started = meter.started;
         let counters_end = self.counter_totals();
+        // The window's end edge: the instant the counter end was observed, latched before any transport.
+        let counters_end_at = self.guard_now();
         let mut record = meter.finish(counters_end, completion);
         record.s10_attribution = self.attribution.take();
         self.phases.push(record);
+        self.guard_window = Some((started, counters_end_at));
+    }
+
+    /// The finalization clock: now, or a test's injected clock.
+    fn guard_now(&mut self) -> Instant {
+        #[cfg(test)]
+        if let Some(clock) = self.guard_clock_override.as_mut() {
+            // When: a test injected a clock, every finalization read comes from it, in call order.
+            return clock();
+        }
+        Instant::now()
+    }
+
+    /// Transport the guard-correlation records of the phase `finish_meter` just pushed, after every endpoint
+    /// of its route is read; a route that finalized no phase transports nothing.
+    fn transport_guard_correlation(&mut self) {
+        let Some((started, counters_end_at)) = self.guard_window.take() else {
+            // When: guard_window is None, no phase was finalized since the last transport.
+            return;
+        };
+        let Some(phase_index) = self.phases.len().checked_sub(1) else {
+            // When: phases is empty, there is no record to carry the field.
+            return;
+        };
+        let transport_started = self.guard_now();
+        #[cfg(test)]
+        if let Some(record) = self.guard_transport_override.as_mut() {
+            // When: a test injected the transport, it records this call in place of the take and the write.
+            record(GuardTransportCall { phase_index, started, counters_end_at, transport_started });
+            return;
+        }
+        let outcome = crate::guard_transport::api::take(&mut self.app);
+        let window = crate::guard_transport::Window {
+            start_ns: crate::guard_transport::api::epoch_ns(started),
+            end_ns: crate::guard_transport::api::epoch_ns(counters_end_at),
+        };
+        let binding = crate::guard_transport::Binding {
+            run_nonce: crate::guard_transport::run_nonce(),
+            harness_hash: self.request.harness_hash.as_deref(),
+            pid: std::process::id(),
+            phase_index,
+            phase_name: self.phases[phase_index].name,
+            window,
+        };
+        let field =
+            crate::guard_transport::transport(&self.scratch, &binding, &outcome, |from, to| {
+                std::fs::rename(from, to)
+            });
+        let transport_ns =
+            u64::try_from(transport_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let record = &mut self.phases[phase_index];
+        record.guard_correlation = Some(field);
+        record.guard_correlation_transport_ns = Some(transport_ns);
     }
 
     /// A transition meter's completion: its endpoint's latched instant, eligible only before the
@@ -2277,8 +2404,7 @@ impl Probe {
 impl Probe {
     /// End startup at the warm-pool barrier, record the grid and the display, then focus.
     fn end_startup(&mut self, event_loop: &ActiveEventLoop) {
-        self.finish_meter();
-        self.record_progress();
+        self.finalize_startup();
         let Some(pane) = self.active_pane() else {
             self.invalidate(event_loop, "no active pane after startup".to_owned());
             return;
@@ -2824,12 +2950,29 @@ impl Probe {
         if matches!(&self.driver, DriverState::Drag(drag) if drag.pressed) {
             self.button(event_loop, ElementState::Released);
         }
+        if let Some(reason) = self.finalize_phase(phase) {
+            // When: ConPTY did not deliver what the role printed, the phase measured something else.
+            self.finish(event_loop, Status::Blocked, Some(reason));
+        }
+    }
+
+    /// The finalization of startup: its meter, its transport, then progress.
+    fn finalize_startup(&mut self) {
+        self.finish_meter();
+        self.transport_guard_correlation();
+        self.record_progress();
+    }
+
+    /// The finalization of a measured phase after its input is released: close the sample, latch its end and
+    /// per-phase results, then transport it and write progress. A delivery problem returns before the
+    /// transport, so the caller's finish transports the phase exactly once.
+    fn finalize_phase(&mut self, phase: &PhaseSpec) -> Option<String> {
         self.close_sample(UnattributedReason::NoCandidate);
         self.driver = DriverState::None;
         self.end_attribution();
         self.finish_meter();
         // A barrier phase ended when its qualifying frame presented, however late this runs.
-        let now = Instant::now();
+        let now = self.guard_now();
         let ended_at = self.barrier.and_then(|barrier| barrier.done_at()).unwrap_or(now);
         let ended_unix_s = unix_now() - now.saturating_duration_since(ended_at).as_secs_f64();
         self.phase_ends.push((phase.name, ended_at, ended_unix_s));
@@ -2843,18 +2986,32 @@ impl Probe {
                 self.throughput = Some(Throughput { bytes, seconds });
             }
         }
-        if scenarios::BUILD_HOST == Host::Windows {
-            if let Some(reason) = self.delivery_problem() {
-                // When: ConPTY did not deliver what the role printed, the phase measured something else.
-                self.finish(event_loop, Status::Blocked, Some(reason));
-                return;
-            }
+        if let Some(reason) = self.delivery_blocked() {
+            // When: delivery_blocked names a reason, the caller finishes the run, which transports this phase.
+            return Some(reason);
         }
         self.sentinel_roles.clear();
         self.image = ImageState::default();
         self.scan = ScanThrottle::new(SCAN_INTERVAL);
+        // After every endpoint and the per-phase work; its time is reported apart from every measurement.
+        self.transport_guard_correlation();
         // Outside every measured window: this phase's meter is finished and the next not started.
         self.record_progress();
+        None
+    }
+
+    /// Why the phase's delivery invalidates it: ConPTY's on Windows, or a test's forced problem.
+    fn delivery_blocked(&self) -> Option<String> {
+        #[cfg(test)]
+        if let Some(reason) = &self.forced_delivery_problem {
+            // When: a test forced a delivery problem, it stands in for ConPTY's on any host.
+            return Some(reason.clone());
+        }
+        if scenarios::BUILD_HOST == Host::Windows {
+            // When: the host is Windows, ConPTY's delivery is checked against what the roles printed.
+            return self.delivery_problem();
+        }
+        None
     }
 
     /// Whether `phase` has reached its end.
@@ -3053,8 +3210,16 @@ impl Probe {
 
     /// End the run with `status`; the partial phase and an open sample are kept for the result.
     fn finish(&mut self, event_loop: &ActiveEventLoop, status: Status, reason: Option<String>) {
+        if self.finalize_run(status, reason) {
+            event_loop.exit();
+        }
+    }
+
+    /// The finalization of the run: the partial phase, its transport if none ran yet, and the outcome. False
+    /// when the run had already finished, which changes nothing.
+    fn finalize_run(&mut self, status: Status, reason: Option<String>) -> bool {
         if self.outcome.is_some() {
-            return;
+            return false;
         }
         match &reason {
             Some(reason) => {
@@ -3065,11 +3230,13 @@ impl Probe {
         self.close_sample(UnattributedReason::NoCandidate);
         self.driver = DriverState::None;
         self.finish_meter();
+        // A phase finalized by end_phase and not yet transported (an early finish inside it) is transported here.
+        self.transport_guard_correlation();
         self.cover = None;
         self.checkpoint_pending = None;
         self.outcome = Some((status, reason));
         self.stage = Stage::Done;
-        event_loop.exit();
+        true
     }
 
     fn invalidate(&mut self, event_loop: &ActiveEventLoop, reason: String) {
@@ -3531,8 +3698,9 @@ impl Probe {
     }
 
     /// Close the previous sample and open the next character's: arm its dispatch timeline, then read the
-    /// injection instant from `clock`, then arm its echo watch (only for S2/default); returns the character
-    /// to type, or `None` when typing is done or the prompt is not yet found. Needs no event loop.
+    /// injection instant from `clock`, then arm its echo watch, only for the variants `split_in_scope`
+    /// names (S2/default and S2/flood); returns the character to type, or `None` when typing is done or
+    /// the prompt is not yet found. Needs no event loop.
     fn open_typing_sample(&mut self, clock: impl FnOnce() -> Instant) -> Option<char> {
         let DriverState::Typing(typing) = &mut self.driver else {
             return None;
@@ -3563,7 +3731,7 @@ impl Probe {
         let arm = if split_in_scope(self.plan.scenario, self.plan.variant) {
             echo_api::arm(&mut self.app, pane, &target, identity)
         } else {
-            // When: the plan is not S2/default, its samples are never armed and read unsupported.
+            // When: the plan is outside `split_in_scope`, its samples are never armed and read unsupported.
             ArmState::OutOfScope
         };
         let inject_unix_s = unix_now();

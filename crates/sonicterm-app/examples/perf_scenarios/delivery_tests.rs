@@ -198,19 +198,6 @@ fn delivery_json_has_the_schema_the_comparison_reads() {
 }
 
 #[test]
-fn sha256_matches_published_vectors() {
-    // The S11 payload check is only as good as this hasher, so it is checked against FIPS 180-4.
-    let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    assert_eq!(sha256_hex(b""), empty);
-    let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-    assert_eq!(sha256_hex(b"abc"), abc);
-    let two_blocks = "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1";
-    assert_eq!(sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"), two_blocks);
-    let million_a = "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0";
-    assert_eq!(sha256_hex(&vec![b'a'; 1_000_000]), million_a);
-}
-
-#[test]
 fn a_sync_replay_with_mixed_placements_and_every_frame_seen_passes() {
     // Enclosed, an empty pair ahead and absent are the placements ConPTY was measured making, so a
     // sync replay states them and passes once every frame arrived, whichever placements it saw.

@@ -132,6 +132,8 @@ impl App {
             // When: windows no longer contains win_id, discard its collected frame instead of presenting retained hover.
             return;
         };
+        // An owned handle for the watched dispatch's render pair; it holds no lock or borrow.
+        let render_marker = child.redraw.timeline.render_marker();
         // Reconcile, then apply the previous frame's receipts under these guards, before planning.
         let frame_viewports = match sources.reconcile_and_apply_receipts(child, &mut frame.guards) {
             Ok(viewports) => viewports,
@@ -271,6 +273,11 @@ impl App {
                     Instant::now(),
                 );
                 r.set_render_timing_label("child");
+                // Acquisition order here is parser guards, then the echo slot: the marker takes the slot only
+                // inside enter and exit_at and releases it before the renderer runs, never across presentation.
+                if let Some(marker) = render_marker.as_ref() {
+                    marker.enter();
+                }
                 // The source owns the guards and media; they are released before presentation.
                 let sonicterm_gpu::core::FrameOutcome { outcome, receipts } = r.render_releasing(
                     &fonts,
@@ -309,9 +316,17 @@ impl App {
                     child.hovered_url.as_ref().map(|hovered_url| hovered_url.to_cells()),
                     child.link_preview.as_ref(),
                 );
+                // The renderer's return is read once, before either recorder works, and closes both.
+                let dispatch = frame.dispatch.take();
+                let returned_at =
+                    (render_marker.is_some() || dispatch.is_some()).then(Instant::now);
+                // An unwind skips the exit, leaving an unpaired enter that the analysis rejects.
+                if let (Some(marker), Some(returned_at)) = (render_marker.as_ref(), returned_at) {
+                    marker.exit_at(returned_at);
+                }
                 // The dispatch interval ends at the render call's return, in the rendered population.
-                if let Some(dispatch) = frame.dispatch.take() {
-                    dispatch.rendered();
+                if let (Some(dispatch), Some(returned_at)) = (dispatch, returned_at) {
+                    dispatch.rendered_at(returned_at);
                 }
                 // The frame now holds no guard and no timing; release it before the sources it borrowed.
                 drop(frame);

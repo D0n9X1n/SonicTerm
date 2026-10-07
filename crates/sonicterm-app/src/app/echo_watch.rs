@@ -17,6 +17,8 @@ use parking_lot::{Mutex, MutexGuard};
 use sonicterm_grid::grid::Grid;
 use winit::window::WindowId;
 
+use super::echo_timeline::{EchoTimelineKindV1, EchoTimelineTakeV1, FrozenFlood, SlotTimeline};
+
 /// The grid state a scrollback-absolute row index is valid under: rows evicted, screen
 /// incarnation and resize generation. Any change means the index may name another row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -199,23 +201,44 @@ enum SlotState {
     Taken,
 }
 
-/// The slot behind the lock: the token, its state and its record.
+/// The token's timeline, when its arming owned its window's timeline.
+#[derive(Debug)]
+enum TimelineSlot {
+    /// No timeline: not an owner arming, or its timeline ended or was released.
+    Absent,
+    /// The owner arming's timeline, recording while armed and frozen by its take.
+    Recording(Box<SlotTimeline>),
+    /// The frozen timeline was transferred.
+    Transferred,
+}
+
+/// The slot behind the lock: the token, its state, its record and its timeline.
 #[derive(Debug)]
 struct EchoSlot {
     token: u64,
     state: SlotState,
     trace: Option<EchoTrace>,
     next_seq: u64,
+    timeline: TimelineSlot,
 }
 
 impl EchoSlot {
     /// The record writers may change: only for `token`, only while armed.
     fn armed_trace(&mut self, token: u64) -> Option<&mut EchoTrace> {
+        self.armed_parts(token).map(|(trace, _)| trace)
+    }
+
+    /// The record and the recording timeline writers may change: only for `token`, only while armed.
+    fn armed_parts(&mut self, token: u64) -> Option<(&mut EchoTrace, Option<&mut SlotTimeline>)> {
         if self.token != token || self.state != SlotState::Armed {
             // When: the slot holds another token or is not armed, a writer's change is discarded.
             return None;
         }
-        self.trace.as_mut()
+        let timeline = match &mut self.timeline {
+            TimelineSlot::Recording(timeline) => Some(&mut **timeline),
+            TimelineSlot::Absent | TimelineSlot::Transferred => None,
+        };
+        self.trace.as_mut().map(|trace| (trace, timeline))
     }
 }
 
@@ -265,6 +288,7 @@ impl EchoWatch {
                 state: SlotState::Idle,
                 trace: None,
                 next_seq: 1,
+                timeline: TimelineSlot::Absent,
             }),
         }
     }
@@ -276,22 +300,43 @@ impl EchoWatch {
         self.slot.lock()
     }
 
-    /// Replace the whole slot with a fresh record for `token`, then publish `token` to writers.
+    /// Replace the whole slot with a fresh record for `token`, without a timeline.
+    #[cfg(test)]
+    pub(crate) fn arm(&self, token: ArmToken, target: EchoWatchTarget, armed_at: Instant) {
+        self.arm_with(token, target, armed_at, None);
+    }
+
+    /// Replace the whole slot with a fresh record for `token` and its owner `timeline`, if any,
+    /// then publish `token` to writers. A previous token's timeline is freed.
     // Ordering: armed stores Release after the slot is replaced, so a writer that Acquire-loads
     // the token finds its slot under the lock.
-    pub(crate) fn arm(&self, token: ArmToken, target: EchoWatchTarget, armed_at: Instant) {
+    pub(super) fn arm_with(
+        &self,
+        token: ArmToken,
+        target: EchoWatchTarget,
+        armed_at: Instant,
+        timeline: Option<Box<SlotTimeline>>,
+    ) {
         let mut slot = self.lock_slot();
         slot.token = token.0;
         slot.state = SlotState::Armed;
         slot.trace = Some(EchoTrace::new(target, armed_at));
         slot.next_seq = 1;
+        slot.timeline = timeline.map_or(TimelineSlot::Absent, TimelineSlot::Recording);
         self.armed.store(token.0, Ordering::Release);
     }
 
     /// Take `token`'s record, leaving the slot taken and the watch disarmed.
+    #[cfg(test)]
+    pub(crate) fn take(&self, token: ArmToken) -> SlotTake {
+        self.take_with(token, None)
+    }
+
+    /// Take `token`'s record, leaving the slot taken and the watch disarmed. The owner's take passes
+    /// its window's `flood` entries, which freeze its recording timeline under the same lock.
     // Ordering: armed stores Release under the slot lock; a writer that still loads the old
     // token is rejected by the slot's state.
-    pub(crate) fn take(&self, token: ArmToken) -> SlotTake {
+    pub(super) fn take_with(&self, token: ArmToken, flood: Option<FrozenFlood>) -> SlotTake {
         let mut slot = self.lock_slot();
         if slot.token != token.0 {
             // When: the slot holds another token, or is idle with token 0, it is left untouched.
@@ -303,10 +348,94 @@ impl EchoWatch {
         }
         slot.state = SlotState::Taken;
         self.armed.store(0, Ordering::Release);
+        if let (TimelineSlot::Recording(timeline), Some(flood)) = (&mut slot.timeline, flood) {
+            // The owner's take freezes its recording timeline; no writer can append after this.
+            timeline.freeze(flood);
+        }
         match slot.trace {
             Some(trace) => SlotTake::Trace(trace),
             None => SlotTake::Mismatch,
         }
+    }
+
+    /// Transfer `token`'s frozen timeline once. A timeline that never recorded, ended before its
+    /// take, or was never frozen answers `NotRecorded`; the slot keeps no copy after a transfer.
+    pub(crate) fn transfer_timeline(&self, token: ArmToken) -> EchoTimelineTakeV1 {
+        let mut slot = self.lock_slot();
+        if slot.token != token.0 || token.0 == 0 {
+            // When: the slot holds another token, or none, it is left untouched.
+            return EchoTimelineTakeV1::Mismatch;
+        }
+        let frozen = match &slot.timeline {
+            TimelineSlot::Transferred => {
+                // When: `Transferred`, this token's timeline already left the slot.
+                return EchoTimelineTakeV1::AlreadyTaken;
+            }
+            TimelineSlot::Absent => {
+                // When: `Absent`, this arming owned no timeline, or it ended before its take.
+                return EchoTimelineTakeV1::NotRecorded;
+            }
+            TimelineSlot::Recording(timeline) => timeline.frozen(),
+        };
+        if slot.state != SlotState::Taken {
+            // When: `state` is not `Taken`, `take_echo_watch` has not frozen the record.
+            return EchoTimelineTakeV1::NotTaken;
+        }
+        if !frozen {
+            // When: `frozen` is false, the record was taken without its owner's freeze: not complete evidence.
+            return EchoTimelineTakeV1::NotRecorded;
+        }
+        let TimelineSlot::Recording(timeline) =
+            std::mem::replace(&mut slot.timeline, TimelineSlot::Transferred)
+        else {
+            unreachable!("the timeline was matched as recording under this lock");
+        };
+        timeline.transfer().map_or(EchoTimelineTakeV1::NotRecorded, EchoTimelineTakeV1::Timeline)
+    }
+
+    /// Free `token`'s recording timeline unless its take froze it: its owner ended (rearm, pane
+    /// transfer, window close) before complete evidence existed. The ordinary watch is unchanged.
+    pub(crate) fn end_timeline(&self, token: ArmToken) {
+        let mut slot = self.lock_slot();
+        let unfrozen =
+            matches!(&slot.timeline, TimelineSlot::Recording(timeline) if !timeline.frozen());
+        if slot.token == token.0 && unfrozen {
+            slot.timeline = TimelineSlot::Absent;
+        }
+    }
+
+    /// The pane is retired: disarm the watch and free its timeline under the slot lock, whatever
+    /// worker handles survive, so a later writer changes nothing.
+    // Ordering: armed stores Release under the slot lock, as at take; a stale writer's token is
+    // rejected by the slot's state.
+    pub(crate) fn retire(&self) {
+        let mut slot = self.lock_slot();
+        if slot.state == SlotState::Armed {
+            slot.state = SlotState::Taken;
+        }
+        slot.timeline = TimelineSlot::Absent;
+        self.armed.store(0, Ordering::Release);
+    }
+
+    /// Apply `change` to `token`'s recording timeline at `at`, with the appearance generation and
+    /// the time since arm, when the slot is still armed with it and `at` is no earlier than its arm.
+    pub(super) fn write_timeline(
+        &self,
+        token: ArmToken,
+        at: Instant,
+        change: impl FnOnce(&mut SlotTimeline, Option<u64>, std::time::Duration),
+    ) {
+        run_timeline_pause();
+        let mut slot = self.lock_slot();
+        let Some((trace, Some(timeline))) = slot.armed_parts(token.0) else {
+            // When: the slot holds another token, is not armed, or records no timeline, nothing changes.
+            return;
+        };
+        let Some(elapsed) = at.checked_duration_since(trace.armed_at) else {
+            // When: `at` precedes `armed_at`, the event belongs to no sample and is never recorded.
+            return;
+        };
+        change(timeline, trace.appearance.map(|appeared| appeared.generation), elapsed);
     }
 
     /// The armed token, or 0; the only cost an unarmed writer pays.
@@ -334,17 +463,28 @@ impl EchoWatch {
 
     /// Apply `change` to `token`'s record when the slot is still armed with it and `at` is no
     /// earlier than its arm instant; otherwise the change is discarded. Returns whether it applied.
+    #[cfg(test)]
     pub(crate) fn record(
         &self,
         token: u64,
         at: Instant,
         change: impl FnOnce(&mut EchoTrace),
     ) -> bool {
+        self.record_with_timeline(token, at, |trace, _| change(trace))
+    }
+
+    /// `record`, with the recording timeline, if any, under the same lock.
+    fn record_with_timeline(
+        &self,
+        token: u64,
+        at: Instant,
+        change: impl FnOnce(&mut EchoTrace, Option<&mut SlotTimeline>),
+    ) -> bool {
         run_writer_pause();
         let mut slot = self.lock_slot();
-        match slot.armed_trace(token) {
-            Some(trace) if at >= trace.armed_at => {
-                change(trace);
+        match slot.armed_parts(token) {
+            Some((trace, timeline)) if at >= trace.armed_at => {
+                change(trace, timeline);
                 true
             }
             _ => false,
@@ -453,7 +593,7 @@ impl EchoWatch {
         }
         cached.recorded |= new_facts;
         cache.set(cached);
-        self.record(before.token, section.parsed_at, |trace| {
+        self.record_with_timeline(before.token, section.parsed_at, |trace, timeline| {
             if new_facts & FACT_IDENTITY_CHANGED != 0 {
                 trace.identity_changed = true;
             }
@@ -466,6 +606,13 @@ impl EchoWatch {
                     parsed_at: section.parsed_at,
                     sync_open: section.sync_open,
                 });
+                // The appearing section's latest chunk read; an unstamped or pre-arm read records nothing.
+                let read = section
+                    .latest_read_at
+                    .and_then(|read_at| read_at.checked_duration_since(trace.armed_at));
+                if let (Some(timeline), Some(elapsed)) = (timeline, read) {
+                    timeline.record(elapsed, Some(EchoTimelineKindV1::LatestChunkRead));
+                }
             }
             if new_facts & FACT_LOST != 0 {
                 trace.lost = true;
@@ -523,30 +670,70 @@ pub(crate) struct SectionFacts {
     pub(crate) generation: u64,
     /// Whether a synchronized update is set after it.
     pub(crate) sync_open: bool,
+    /// The read stamp of the chunk this section consumed; `None` for an unstamped chunk.
+    pub(crate) latest_read_at: Option<Instant>,
 }
 
 impl super::App {
     /// Arm pane `pane_id`'s echo watch for `target` with a new token. Takes no parser lock.
     #[doc(hidden)]
     pub fn arm_echo_watch(&mut self, pane_id: u64, target: EchoWatchTarget) -> ArmOutcome {
+        self.arm_echo_watch_with(pane_id, target, Instant::now)
+    }
+
+    /// `arm_echo_watch` with an explicit arm instant, so a test orders its events by offsets from it.
+    #[cfg(test)]
+    pub(super) fn arm_echo_watch_at(
+        &mut self,
+        pane_id: u64,
+        target: EchoWatchTarget,
+        armed_at: Instant,
+    ) -> ArmOutcome {
+        self.arm_echo_watch_with(pane_id, target, move || armed_at)
+    }
+
+    /// Arm with `clock`, which is read once, only after every refusal check, the timeline's admission
+    /// and the previous owner's release, immediately before the slot is armed: a refusal reads no clock,
+    /// and the arm epoch excludes the setup.
+    fn arm_echo_watch_with(
+        &mut self,
+        pane_id: u64,
+        target: EchoWatchTarget,
+        clock: impl FnOnce() -> Instant,
+    ) -> ArmOutcome {
         if self.frame_counters.is_none() {
             // When: `frame_counters` is None, the gate is off; no pane has a watch and none is allocated.
             return ArmOutcome::GateOff;
         }
-        let Some(pane) = self.find_pane(pane_id) else {
+        let next_token = self.next_echo_arm;
+        let Some(window) =
+            self.windows.values_mut().find(|window| window.panes.contains_key(&pane_id))
+        else {
             // When: no window holds pane_id, there is no watch to arm.
             return ArmOutcome::NoPane;
         };
+        let pane = &window.panes[&pane_id];
         let Some(counters) = pane.frame_counters.as_ref() else {
             // When: the pane was created without counter handles, it has no watch.
             return ArmOutcome::GateOff;
         };
-        let token = self.next_echo_arm;
+        let token = next_token;
         let Some(next) = token.checked_add(1).filter(|_| token != 0) else {
             // When: the counter cannot advance, every token has been issued.
             return ArmOutcome::Exhausted;
         };
-        counters.echo.arm(ArmToken(token), target, Instant::now());
+        let watch = std::sync::Arc::clone(&counters.echo);
+        // The PTY stamps reads exactly when it was created with the gate on, as every pane here was.
+        let chunk_timestamps = pane.pty.is_some();
+        let valid_permit = window.redraw.link_permit.filter(|_| window.redraw.link_permit_valid());
+        let timeline = window.redraw.timeline.admit(
+            pane_id,
+            ArmToken(token),
+            &watch,
+            chunk_timestamps,
+            valid_permit,
+        );
+        watch.arm_with(ArmToken(token), target, clock(), timeline);
         self.next_echo_arm = next;
         ArmOutcome::Armed(ArmToken(token))
     }
@@ -558,15 +745,25 @@ impl super::App {
             // When: `frame_counters` is None, the gate is off and no pane has a watch.
             return TakeOutcome::GateOff;
         }
-        let Some(pane) = self.find_pane(pane_id) else {
-            // When: no window holds pane_id, its record is unreachable.
+        let Some(window) =
+            self.windows.values_mut().find(|window| window.panes.contains_key(&pane_id))
+        else {
+            // When: no `window` has pane_id in its `panes`, its record is unreachable.
             return TakeOutcome::NoPane;
         };
-        let Some(counters) = pane.frame_counters.as_ref() else {
-            // When: the pane has no counter handles, it has no watch.
+        let Some(counters) = window.panes[&pane_id].frame_counters.as_ref() else {
+            // When: the pane's `frame_counters` is None, it was created without a watch.
             return TakeOutcome::GateOff;
         };
-        match counters.echo.take(token) {
+        // Only this window's owner, for this pane and token, freezes and copies its ring.
+        let flood = window.redraw.timeline.frozen_flood_for(pane_id, token);
+        let owner = flood.is_some();
+        let taken = counters.echo.take_with(token, flood);
+        if owner && matches!(taken, SlotTake::Trace(_)) {
+            // The owner's successful take ends the owner; its frozen timeline stays in the slot.
+            window.redraw.timeline.end_for_pane(pane_id);
+        }
+        match taken {
             SlotTake::Trace(mut trace) => {
                 trace.shown = self.pane_shown_in_main(pane_id);
                 TakeOutcome::Trace(trace)
@@ -612,6 +809,9 @@ thread_local! {
     /// Test-only: run once at the next writer's pause point on this thread.
     static WRITER_PAUSE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    /// Test-only: run once before the next timeline write takes the slot lock on this thread.
+    static TIMELINE_PAUSE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
     /// Test-only: run once between the next publication and its delivery record on this thread.
     static DELIVERY_PAUSE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
@@ -631,6 +831,16 @@ impl EchoWatch {
     pub(crate) fn peek(&self) -> Option<EchoTrace> {
         self.lock_slot().trace
     }
+
+    /// Test-only: the timeline slot's state: `absent`, `recording`, `frozen` or `transferred`.
+    pub(crate) fn peek_timeline(&self) -> &'static str {
+        match &self.lock_slot().timeline {
+            TimelineSlot::Absent => "absent",
+            TimelineSlot::Recording(timeline) if timeline.frozen() => "frozen",
+            TimelineSlot::Recording(_) => "recording",
+            TimelineSlot::Transferred => "transferred",
+        }
+    }
 }
 
 /// Test-only: run `pause` once, on this thread, after the next flush's publication is recorded
@@ -645,6 +855,24 @@ fn run_delivery_pause() {
     #[cfg(test)]
     {
         let pause = DELIVERY_PAUSE.with(|slot| slot.borrow_mut().take());
+        if let Some(pause) = pause {
+            pause();
+        }
+    }
+}
+
+/// Test-only: run `pause` once, on this thread, where the next timeline write has its instant and
+/// has not yet taken the slot lock.
+#[cfg(test)]
+pub(crate) fn pause_next_timeline_write(pause: impl FnOnce() + 'static) {
+    TIMELINE_PAUSE.with(|slot| *slot.borrow_mut() = Some(Box::new(pause)));
+}
+
+/// Run and clear this thread's timeline-write pause, if a test set one.
+fn run_timeline_pause() {
+    #[cfg(test)]
+    {
+        let pause = TIMELINE_PAUSE.with(|slot| slot.borrow_mut().take());
         if let Some(pause) = pause {
             pause();
         }

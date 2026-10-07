@@ -870,6 +870,25 @@ histogram. With counters off, neither token is created; what remains is the
 and no allocation. These are totals per phase; they do not attribute a
 worker's wait to a particular frame.
 
+With counters on, the App also keeps raw guard-correlation records for an offline
+join, in `guard_correlation.rs`. Each pane's VT worker registers its section in
+that pane's log before the `before_lock` read, outside the parser-guard scope,
+and publishes it with the section counters' own `before_lock` and `locked_at`
+reads. A section that unwinds is abandoned after its parser guard drops, so the
+log mutex is never taken while a parser guard is held. Each counting collection
+issues a collection identity before its first `try_lock` and notes each guard as
+it is acquired. The custody's single release read ends both the custody total and
+every span of that collection; past 16 guards one hull covers the rest. Every
+buffer is allocated before recording and again before each take, so recording
+never allocates. A record that does not fit is counted, a located one adds a loss
+interval, and nothing is overwritten. Section, collection and take sequences stop
+at `u64::MAX`, and a refusal issues no identity. Every time counts from one
+process-wide clock epoch, set on first use; a time that cannot be converted is
+counted as unlocated. `App::take_guard_correlation_v1` swaps each log under its
+own mutex and never takes a parser lock. It returns `GateOff` without counters,
+and prunes a closed log once it is drained with nothing pending. The App
+correlates nothing itself.
+
 `PtyHandle::into_teardown` publishes closing and transfers the owned payload
 without native waits. Reserved panes enqueue to the App's single reaper driver;
 slotless retirement retries admission once, then uses explicit synchronous

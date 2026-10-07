@@ -26,13 +26,14 @@ python3 scripts/local-gate.py
 
 | 步骤 | 命令 | 本地主机 | 类别 | 前置条件 | CI job |
 | --- | --- | --- | --- | --- | --- |
-| `pty-close-baseline` | `cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
+| `pty-close-baseline` | `cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-runtime`、`linux-core` |
 | `fmt` | `cargo fmt --all --check` | macOS、Windows、Linux | `local` | `rust` | `macos-core`、`windows-checks`、`linux-core` |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
-| `perf-scenarios-harness-api-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
+| `perf-scenarios-harness-api-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
+| `perf-scenarios-harness-api-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-checks`、`linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS、Windows、Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
@@ -41,27 +42,28 @@ python3 scripts/local-gate.py
 | `rust-version` | `bash scripts/check-rust-version.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-checks`、`linux-core` |
 | `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-checks`、`linux-core` |
 | `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-checks`、`linux-core` |
-| `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS、Windows、Linux | `local` | `rust`、`native`、`bash` | `macos-core`、`windows-tests`、`linux-core` |
-| `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
-| `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
-| `perf-scenarios-counters-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
-| `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS、Windows | `local` | `rust`、`native` | `macos-core`、`windows-tests` |
-| `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
-| `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
-| `perf-scenarios-harness-api-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests`、`linux-core` |
-| `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests` |
-| `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
-| `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
-| `soak-harness` | `bash scripts/test-soak-harness.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests` |
+| `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS、Windows、Linux | `local` | `rust`、`native`、`bash` | `macos-core`、`windows-tests-workspace`、`linux-core` |
+| `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-workspace`、`linux-core` |
+| `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness`、`linux-core` |
+| `perf-scenarios-counters-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness`、`linux-core` |
+| `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS、Windows | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness-features` |
+| `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness-features`、`linux-core` |
+| `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness-features`、`linux-core` |
+| `perf-scenarios-harness-api-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness-api`、`linux-core` |
+| `perf-scenarios-harness-api-echo-trace-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace` | macOS、Windows、Linux | `local` | `rust`、`native` | `macos-core`、`windows-tests-harness-api`、`linux-core` |
+| `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests-workspace` |
+| `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests-workspace` |
+| `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests-workspace` |
+| `soak-harness` | `bash scripts/test-soak-harness.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests-workspace` |
 | `linux-packages-tests` | `bash scripts/test-linux-packages.sh` | macOS、Windows、Linux | `local` | `bash` | `linux-core` |
 | `release-assets-tests` | `bash scripts/test-release-assets.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `linux-core` |
-| `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests`、`linux-core` |
-| `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests`、`linux-core` |
+| `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS、Windows、Linux | `local` | `bash` | `macos-core`、`windows-tests-workspace`、`linux-core` |
+| `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `macos-core`、`windows-tests-workspace`、`linux-core` |
 | `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS、Linux | `local` | `rust`、`native`、`llvm-cov` | `macos-coverage` |
-| `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`、`native`、`warp` | `windows-tests` |
-| `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests` |
-| `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`、`native` | `windows-tests` |
-| `windows-perf-smoke` | `python scripts/perf-compare.py --smoke` | Windows | `local` | `rust`、`native` | `windows-tests` |
+| `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`、`native`、`warp` | `windows-tests-runtime` |
+| `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests-workspace` |
+| `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`、`native` | `windows-tests-runtime` |
+| `windows-perf-smoke` | `python scripts/perf-compare.py --smoke` | Windows | `local` | `rust`、`native` | `windows-tests-runtime` |
 | `macos-selection-build` | `cargo build --locked -p sonicterm-app --example native_split_selection` | macOS | `local` | `rust`、`native` | `macos-smoke` |
 | `macos-selection-smoke` | `python3 scripts/native-selection-smoke.py` | macOS | `local` | `rust`、`native` | `macos-smoke` |
 | `macos-perf-smoke` | `python3 scripts/perf-compare.py --smoke` | macOS | `local` | `rust`、`native` | `macos-smoke` |
@@ -143,11 +145,34 @@ S10 的 `stream` 阶段在 `result.json` 中记录 `updates`：其工作负载�
 `stream presented frames per update (ratio)` 行：每次运行的 `presented_frames` 除以该次运行自己的 `updates`，从不除以常数，
 并像其他按运行统计的行一样汇总。harness 早于该字段的一侧显示 `n/a`，不显示变化；`updates` 不是正整数的结果无效。
 
+每个阶段的端点锁定之后（启动、每个测量阶段以及提前结束），harness 提取一次 App 的原始守卫关联记录，
+并把它流式写入 scratch 中的 `guard-correlation/<phase_index>-<phase_name>.json`：先写入 `.tmp`、fsync，再重命名，
+写入时经由同一个 64 KiB 缓冲区计算 SHA-256。头部把这次提取绑定到其运行与阶段：每个进程只生成一次的 32 位十六进制
+`run_nonce`（与工作负载哨兵的 nonce 相互独立）；`harness_hash`，非托管运行时为 `null`；阶段序号与名称；`take_seq`；
+进程 id；以共享时钟纪元为起点的纳秒窗口 “phase start to counter-end observation”，harness 在启动计量开始前设定该纪元；
+以及 `taken_at_ns`。App 转移出的缓冲区通过借用适配器原地序列化，因此传输的峰值只在提取自身的缓冲区之外增加
+64 KiB 缓冲区与摘要。阶段记录新增 `guard_correlation: {status, file, take_seq, bytes, sha256, window}`，其状态为
+`written`、`unavailable`（无该 cfg）、`gate_off`、`take_exhausted` 或 `write_failed`。只有 `written` 给出文件、大小与摘要，
+只有确实发出了提取时才给出 take_seq；`window` 在每种状态下都是锁定的窗口。记录还新增 `guard_correlation_transport_ns`，
+即传输本身的耗时，从不计入任何完成、计时、CPU 或计数器字段。`--list` 声明 `guard_correlation_schema: 1`，在其约束下
+每个已结束的阶段都必须带有这两个字段。perf-compare 在每次运行的证据中保留 `guard-correlation/`，并按阶段顺序把各次提取
+作为一条链来验证。旁路文件的每个冻结字段都必须存在，整数类型必须精确。旁路文件的窗口必须等于其阶段记录的窗口，并满足
+start ≤ end ≤ `taken_at_ns`；提取时间必须已知且递增；被延续的待定分段保持其登记时间；任何分段或跨度都不得复用更早提取
+的时钟。缺失、截断、摘要不符、绑定错误、格式错误、`write_failed`、`take_exhausted` 或缺少状态的提取会使其自身及之后的
+每次提取都不完整。有两条规则作用于整个运行：任一次提取的 harness 哈希为 `null` 时，每次提取都不完整（`harness_unbound`）；
+各阶段的可用性必须属于同一类，即构建与门控所决定的那一类（无该 cfg 时为 `unavailable`，门控关闭时为 `gate_off`，否则为
+提取），其他任何组合都使每个阶段不完整。真正关闭 cfg 或门控的运行读作 `n/a`，不消耗提取。已验证的窗口中只要有未定位、
+待定、放弃、丢失、拒绝、耗尽、未关闭或跨越边界的内容（包括跨度），就不完整。完整的窗口报告每个窗格的工作线程等待与其 UI 守卫跨度的
+观测重叠（纳秒、分段数与跨度数）；不完整的窗口打印原因而不给出数字，不可用的窗口打印 `n/a`。每次运行的判定保存为
+`guard-correlation-join.json`。
+
 harness 还会调用较旧的树所没有的 App 与渲染器方法。每个这样的调用都位于一个 harness API cfg 之后，即
-`scripts/local-gate.py` 中 `HARNESS_API_CFGS` 的一项。共有四项：`perf_atlas_retry_api`，对应 S1/atlas-retry
+`scripts/local-gate.py` 中 `HARNESS_API_CFGS` 的一项。共有六项：`perf_atlas_retry_api`，对应 S1/atlas-retry
 驱动所需的四个方法；`perf_s10_attribution_api`，对应 App 的两个 S10 归属监视方法（`arm_s10_attribution` 与
-`disarm_s10_attribution`）；`perf_completeness_api`，对应渲染器的 `completeness_checkpoint`，S9 与 S12 的 `end` 检查点读取它；以及 `perf_dispatch_timeline_api`，对应 App 的逐样本调度时间线方法（`arm_dispatch_timeline_v1` 与 `take_dispatch_timeline_v1`）。它们在前置 PR 中的实现不记录任何内容。S2 在每次输入注入时、读取注入时刻之前装备时间线，并在样本的每一种关闭路径上取回。`result.json` 中每个 S2 样本以 `dispatch_timeline` 记录其时间线的结果：没有该 cfg 时为 `unavailable`，存根返回 `gate-off` 或 `not-recorded`。harness 的记录缓冲区只为已装备的样本分配，并在样本之间复用。关卡在两个由该表生成的步骤 `perf-scenarios-harness-api-clippy` 与
-`perf-scenarios-harness-api-tests` 中，一次开启**全部**项来检查与测试 harness。测试步骤通过 `RUSTFLAGS` 传入这些 cfg，
+`disarm_s10_attribution`）；`perf_completeness_api`，对应渲染器的 `completeness_checkpoint`，S9 与 S12 的 `end` 检查点读取它；`perf_dispatch_timeline_api`，对应 App 的逐样本调度时间线方法（`arm_dispatch_timeline_v1` 与 `take_dispatch_timeline_v1`）；`perf_echo_timeline_api`，对应 App 的一次性 `take_echo_timeline_v1`，harness 只在同时以 `perf-echo-trace` 构建时才调用它；以及 `perf_guard_spans_api`，对应 App 的原始守卫关联提取（`take_guard_correlation_v1`）、其记录类型与共享的 `clock_epoch`。调度时间线在前置 PR 中的实现不记录任何内容。S2 在每次输入注入时、读取注入时刻之前装备时间线，并在样本的每一种关闭路径上取回。`result.json` 中每个 S2 样本以 `dispatch_timeline` 记录其时间线的结果：没有该 cfg 时为 `unavailable`，存根返回 `gate-off` 或 `not-recorded`。harness 的记录缓冲区只为已装备的样本分配，并在样本之间复用。关卡在两个由该表生成的步骤 `perf-scenarios-harness-api-clippy` 与
+`perf-scenarios-harness-api-tests` 中，一次开启**全部**项来检查与测试 harness；
+`perf-scenarios-harness-api-echo-trace-clippy` 与 `perf-scenarios-harness-api-echo-trace-tests` 在此之上再加
+`perf-echo-trace` 做同样的事，是仅有的编译 S2 回显时间线适配器的步骤（见[本地 gate](Local-Gate-zh-CN)）。测试步骤通过 `RUSTFLAGS` 传入这些 cfg，
 而 `RUSTFLAGS` 一旦改变，所有依赖的构建都会失效，因此一个合并的测试步骤只让依赖重建一次，而不是每项一次。检查步骤把它们放在 `--`
 之后传入，只作用于被检查的 crate；合并它省下的是重复检查，而不是依赖重建。CI 只运行全部关闭与全部开启两种组合；与只定义了部分项的 base
 比较时，该比较自己会构建那个子集。若某项未出现在这两个步骤或 `Cargo.toml` 的 `check-cfg` 列表中，有一个测试会失败。构建之前，perf-compare 在两棵树中查找每一项的方法：每个方法都必须是其所属 crate 中、所声明的所有者类型（`GpuRenderer`
@@ -405,15 +430,31 @@ PR 与 Change。
   早于这些事实构建的 base 显示 `n/a`。
 - S2 只在能把样本无歧义地归属到某一帧时才计入按键到呈现的延迟，并报告归属覆盖率；阅读延迟时
   要同时看覆盖率。
-- 当测试工具以 `perf-echo-trace` 构建且计数器开启时，S2/default 被记功的样本还会在 flush 发布处拆分
+- 当测试工具以 `perf-echo-trace` 构建且计数器开启时，S2/default 与 S2/flood 被记功的样本还会在 flush 发布处拆分
   （各部分的定义见[日志](Logging-zh-CN#s2-回显监视)）。测试工具的 `--list` 在每种构建中都声明
   `capabilities.latency_split_schema: 1`，其 `latency` 对象随之带有 `split_schema: 1`、`split_count`、
   `split_reasons` 与 `split_coverage`。对比从 head 的列表读取这一能力，并以它约束两侧，因为两侧运行的
   都是 head 的测试工具；早于该能力的 head 沿用旧的延迟约定。无法拆分的样本给出 22 种原因之一；
-  `unsupported` 表示未启用该特性的构建，或 S2/default 之外的变体。计数器表增加 S2/default `typing` 行：
+  `unsupported` 表示未启用该特性的构建，或 S2/default 与 S2/flood 之外的变体。计数器表增加 S2/default `typing` 行：
   三个部分的中位数与 p95、投递滞后的 p95、拆分覆盖率，以及原因计数与 suppressed、coalesced、
   `sync_open` 的计数。未启用该特性构建的 base 显示 `n/a (unsupported)`。计时运行保持计数器关闭，因此
   其样本记为 `arm-gate-off`。
+- 测试工具的 `--list` 在每种构建中还声明 `capabilities.echo_timeline_schema: 1`。此时每个延迟样本都带有
+  `echo_timeline`：被记功的 S2/default 或 S2/flood 样本为 schema 1 对象，其他样本为 null（记录的说明见
+  [日志](Logging-zh-CN#s2-回显时间线)）。该对象为 `recorded`、带原因的 `unavailable`（`cfg-off`、`not-recorded`、
+  `gate-off`、`no-pane` 或 `exhausted`），或带原因的 `rejected`（`malformed-initial-permit`、`mismatch`、
+  `not-taken`、`already-taken` 或 `no-arm-instant`）。已记录的对象带有 `ordering`：`ordered`、
+  `published_during_dispatch`，或带具名原因的 `split_only` 或 `clock-order`；格式错误的原始记录仍记为已记录的
+  `clock-order`，保留其身份、溢出与读取信息，并清空每个依赖事件的分析字段。`ordered` 样本把其延迟拆成七个整数纳秒部分，其和等于延迟，最后一部分在 App
+  的分发返回处再次拆分，并附有其就绪检查、准入、许可占用、tick 身份与洪流计数。`latency` 对象增加
+  `echo_timeline_coverage`，每个总体都给出具名的分子与分母：`recorded`、`ordered`、`b2`、`m4`、`m3`、
+  `read_stamped`、`b2_of_credited` 与 `m3_of_credited`；什么都未记录时为 `unavailable`，`recorded` 仍为 `0/被记功数`，各分析总体为 null。
+  对比以 head 的声明约束两侧，从样本重新计算每个总体，并拒绝字段相互矛盾的样本、没有时间线的被记功范围内样本，
+  以及来自未声明该 schema、或未声明拆分 schema 就声明它的测试工具的时间线。计数器表增加 S2/default 与 S2/flood
+  `typing` 行：每侧的可用性、每个总体的分子、分母与百分比、以百分点表示的变化，以及一行关卡：当两侧 `ordered`
+  都至少占被记功样本的 80% 且两侧相差不超过 10 个百分点时通过，否则失败，并给出两侧数值；两项比较都是精确的
+  整数交叉相乘。什么都未记录的一侧显示 `unavailable`，绝不是测得的零，此时关卡也为 `unavailable`；测试工具早于
+  该能力的一侧显示 `n/a (no timeline)`。计时运行保持计数器关闭，因此构建带有 `perf-echo-trace` 时其时间线记为带 `gate-off` 的 `unavailable`，不带时记为带 `cfg-off` 的 `unavailable`。
 - 测试工具的 `--list` 还声明 `capabilities.phase_kinds: 1`。此时每个阶段记录其 `kind`（`sustained`、
   `transition` 或 `hold`）；transition 阶段记录其 `endpoint`，并且恰好带有 `completion_ms` 与
   `completion_missing` 之一，其他种类两者都不带。每个阶段还记录来自主窗口 `RedrawRequested` 派发的呈现
@@ -438,7 +479,8 @@ PR 与 Change。
   延迟、完成时间与间隔越高越差，FPS 与吞吐量越低越差；在变差方向超出范围的值是候选，改进永远不是，
   transition 没有刷新周期豁免，hold 与未列出的指标从不检查。每次对比还写出 `run-identity.json`（运行与
   尝试、平台、两个 SHA、测试工具哈希、设置、标记指标版本，以及每组的最终清单：每一侧的 blocked 或
-  failed 状态与它接受的尝试目录；blocked 或 failed 的一侧不接受任何尝试），以及 head 的列表声明的能力。
+  failed 状态与它接受的尝试目录；blocked 或 failed 的一侧不接受任何尝试）、head 的列表声明的能力，以及
+  `guard_api`，即两侧是否都以守卫关联提取的 cfg 构建。
   含有任何未分类运行的组只作为未分类读取：其所有运行都不进入候选标记。
 - `python3 scripts/perf-flags.py <run-dir> <run-dir>` 从两次运行下载的 `perf-comparison-*` 产物比较其候选
   标记。计算任何标记之前，它先校验每个产物的 `run-identity.json`：SHA、测试工具哈希、设置与清单的类型，
@@ -446,7 +488,11 @@ PR 与 Change。
   目录都需要其清单条目（在任何运行之前就被阻止的组可以没有目录），且每组的清单都必须与磁盘上的尝试一致：
   每个尝试都是真实目录并带有本侧的最终分类，任何证据文件都不经由符号链接到达，健康的一侧恰好接受其分类为
   valid 的尝试。每个已接受的尝试都需要其场景与变体的 valid、退出码为 0 的结果，以及在所记录能力下通过
-  perf-compare 自身结果校验的 `result.json`；任何格式错误都会被拒绝，从不跳过，也从不产生回溯。最新一次重跑
+  perf-compare 自身结果校验的 `result.json`。在 `guard_correlation_schema` 出现之前写出的身份照常解码，只有该能力与
+  `guard_api` 读作 null；未知或格式错误的能力仍被拒绝。在声明了守卫契约时，身份必须记录 `guard_api`，且每个已接受
+  结果的阶段状态必须属于该 cfg 决定与结果计数器门控所允许的同一可用性类别，规则与实时连接相同；真正关闭 cfg 的运行
+  读作 `unavailable` 时会被接受。同一次运行的每个产物都必须记录相同的 `guard_api`，在解码之后、合并重复尝试之前比较，
+  因此不一致的副本会被拒绝，而不是未经读取就被丢弃。任何格式错误都会被拒绝，从不跳过，也从不产生回溯。最新一次重跑
   尝试的清单取代较早尝试的清单，即使它未接受任何运行：其值为缺失，从不沿用被取代的值。同一尝试的两份副本
   只有在每个证据文件都一致时才计一次，否则被拒绝。它从不解析
   Markdown。它先打印每次运行的身份，再列出两次运行都有的标记、只有一次运行有的标记（另一次检查过但未
@@ -646,10 +692,10 @@ job 完成。被取代、被取消或被跳过的运行从不算作成功。
 每个 CI 对比都通过 `--require-base` 让 base 与 head 适用同样的标准：base 无法构建、无法列出场景或无法凑满某组的有效运行时，
 该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。允许两种缺口：base 未声明 `perf-counters` 时的计数器组，
 它仍显示 `n/a`；以及因 harness API cfg 关闭而被声明为两侧都不可用的诊断，它不运行任何内容。其他任何被阻止的一侧仍会失败，
-没有可运行内容的选择也永远不会通过。macOS 分片运行 S7；S9、S10、S6/flood 与 S6/selection-drag；S2 与 S10/sync；S4、S5、S11、S11/release 与 S1/atlas-retry；
-以及 S1、S3、S6、S8、S12 与 S2/flood。同名的 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
+没有可运行内容的选择也永远不会通过。四个 macOS 分片运行 S7、S4 与 S1/atlas-retry；S10/sync、S9、S11、S6、S1 与 S5；S10、S11/release 与 S2/flood；
+以及 S2、S12、S3、S8、S6/selection-drag 与 S6/flood。五个 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
 S2 与 S10/sync；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8、S12 与 S1/atlas-retry，以均衡各平台分片的实测时长。
-两个平台的 S9-S10 分片还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传
+各平台包含 S9 的分片（macOS 的 S9-S10sync，Windows 的 S9-S10）还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传
 lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结论。
 裸场景 ID 只选择其默认变体，因此每个变体都按名称列出。在 `--short` 下，`S2/flood` 每侧上限 2 次，`S11/release` 上限 1 次，
 `S11/gdi`、`S11/wgpu` 与 `S1/atlas-retry` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 30 分钟内：release 对比完整运行它。
@@ -661,7 +707,7 @@ lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结�
 `api-disabled`。证书在每个构建中都会保存：每次成功呈现都会投影其帧键的场景，每个 `Full` 帧都会构建两个字符集合。perf-compare 为每次 S9/S12
 运行的每一侧在 `completeness.json` 中写一行（运行 ID 与 `GITHUB_RUN_ATTEMPT`、该运行的尝试目录、所测 SHA、侧、平台、fixture、组与缩放），
 并在 `comparison.md` 中列出。这些只是 perf 结束行；helper 行与真实渲染器行来自工作集测试。合并的关卡步骤 `perf-scenarios-harness-api-clippy` 与
-`perf-scenarios-harness-api-tests` 在开启该 cfg（以及其他每一项）时对 harness 做 lint 与测试。每个分片在自己的 runner 上交错运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。macOS 分片数（目前为五个）
+`perf-scenarios-harness-api-tests` 在开启该 cfg（以及其他每一项）时对 harness 做 lint 与测试。每个分片在自己的 runner 上交错运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。macOS 分片数（目前为四个，与实测试验中 CI 的 macOS job 运行期间分给 perf 的 macOS runner 数一致）
 根据实测的关键路径选定。两种模式都会运行计数器组，在 head 上，以及在声明 `perf-counters` 的 base 上：pull request 为每个场景、
 每一侧运行两次计数器运行以保持在 30 分钟内，release 运行 `--runs` 次。Windows runner 没有 GPU，也没有用户会话：其对比表测量
 软件渲染路径，前台变化在那里只被记录，不被判定。
@@ -690,7 +736,7 @@ report。没有它的旧运行按历史模式读取：每个 job 的证据是在
 步骤在两个 `macos-smoke` 分支中运行 `python3 scripts/perf-compare.py --smoke`。它以 debug 构建
 当前树的 harness，以 `--short` 运行三个简短用例（S1、S3，以及会话一启动就像到达截止时间的运行那样被终止的 S1），只检查
 该树的资源能否解析、结果 schema、焦点安全、`~/.sonicterm` 快照、App 是否加载了配置的主字体，以及清理后没有进程残留。它不断言任何耗时数值，
-因此通过只说明工具可用，从不说明某项改动更快。在 Windows 上，`windows-tests` job 构建 harness 并运行
+因此通过只说明工具可用，从不说明某项改动更快。在 Windows 上，`windows-tests-runtime` job 构建 harness 并运行
 `python scripts/perf-compare.py --smoke`：同样的三个用例、S1 `wgpu`、S1 `role-exit`，以及一次 S10/sync
 交付回放（见[Windows](Local-Gate-zh-CN#windows)）。托管 runner 使用软件适配器渲染，因此这只检查工具、
 wgpu 呈现器与角色退出处理，从不检查计时。Linux CI 只构建 harness 而不运行场景，每个平台都通过 `check-workflow-supply-chain.sh` 运行 `scripts/perf-compare_tests.py` 与

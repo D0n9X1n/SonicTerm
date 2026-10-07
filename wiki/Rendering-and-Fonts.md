@@ -300,7 +300,33 @@ COLR/SVG handoff. HarfBuzz/COLR paint paths use Cairo-backed drawing for layered
 color glyphs and linear, radial, and sweep gradients. A gradient whose color
 line carries no usable stop paints nothing, and sweep tiling is bounded, so a
 malformed or extreme color line degrades to a coarse approximation rather than
-unbounded work.
+unbounded work. A COLR face needs valid CPAL color entries; its palette labels,
+entry labels and flags are optional. A version-0 CPAL table, such as Noto Color
+Emoji's, has none of them and still renders: an absent label reads as an empty
+name and absent flags as 0. A present label is a name ID: it resolves to the
+face's name record with that ID, chosen by the same language rule as font names,
+and an ID with no record reads as an empty name. A COLRv1 glyph's ClipBox, when
+present, is applied as an outer clip in device pixels around its whole paint graph,
+composited groups included, so a graph Cairo cannot bound on its own, such as a
+gradient composited with `In`, still rasterizes inside its ClipBox. The ClipList is
+optional: a glyph without a ClipBox rasterizes unclipped, bounded by its own paint,
+and an unbounded graph without one has no finite rendering, so it fails with an
+error naming the missing ClipBox. FreeType reports a missing ClipBox and an error
+reading one with the same status, so SonicTerm treats both as no ClipBox and tries
+the unclipped rendering, still subject to the same bounds checks. Its bitmap is
+rounded outward to whole pixels.
+
+The FreeType COLRv1 path keeps every paint operand in font units. PaintGlyph
+contours load unscaled and untransformed, gradient anchors and radii stay as
+the font gives them, and FreeType's included root
+transform, built from the face's size and transform, is the only mapping to
+device pixels. So a gradient stays in place inside its contour at every size,
+and synthetic italic shears contours and gradients once, as it shears the
+ClipBox. These contours are never hinted, and synthetic bold does not embolden
+them. Unscaled loading has two FreeType limits: a variable font's outline
+coordinates come back rounded to whole font units, and a "tricky" font, whose
+outlines depend on hinting instructions, can load meaningless unscaled
+contours.
 
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` owns safe lifetimes around raw handles
 from the generated FreeType, HarfBuzz, and Fontconfig binding crates. Each

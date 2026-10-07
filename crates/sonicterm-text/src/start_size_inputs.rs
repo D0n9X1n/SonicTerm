@@ -6,17 +6,18 @@
 //! because it claims no savings, and a smaller start is valid only when [`SIZING_ORACLE_COMPLETE`]
 //! is true, every input [`required_inputs`] names is recorded at that scale, and [`start_rule`]
 //! over the scale's rows selects exactly that start. An empty or incomplete table is therefore the
-//! conservative contract: both normal start constants stay at the maximum.
+//! conservative contract: both normal start constants stay at the maximum. Once the oracle is
+//! complete, [`ruled_start`] is what each shipped start constant must equal.
 
 use crate::glyph_atlas::{FitOutcome, ATLAS_DIM, MIN_ATLAS_DIM};
 use sonicterm_types::GlyphRasterVariant;
 
 /// Whether the measurement oracle can prove that a renderer drew its whole working set, which a
-/// start below the maximum needs. The renderer now reports shaped glyphs that draw nothing and tab
-/// titles that never shape as missing glyphs; this stays false until the strengthened real-renderer
-/// coverage test passes on Windows CI and the CI rows are recorded in [`START_SIZE_INPUTS`]. Rows
-/// alone never lower a start.
-pub const SIZING_ORACLE_COMPLETE: bool = false;
+/// start below the maximum needs. The renderer reports shaped glyphs that draw nothing and tab
+/// titles that never shape as missing glyphs, the strengthened real-renderer coverage test passed
+/// on Windows CI, and every required row is recorded in [`START_SIZE_INPUTS`], so the guard is set.
+/// Rows alone never lower a start: [`ruled_start`] still needs every required input at the scale.
+pub const SIZING_ORACLE_COMPLETE: bool = true;
 
 /// What produced one measured row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +30,36 @@ pub enum InputSource {
     Helper,
     /// A real renderer that drew the fixture with its chrome.
     RealRenderer,
+}
+
+/// Where one recorded row was measured: the CI run, the commit it measured and the exact output it
+/// came from, so a row can be traced back to its evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Provenance {
+    /// The GitHub Actions run id.
+    pub run_id: u64,
+    /// The run attempt.
+    pub attempt: u32,
+    /// The commit the measurement ran on, full SHA.
+    pub measured_sha: &'static str,
+    /// `base` for a Performance comparison's base side, `push` for a push CI run.
+    pub side: &'static str,
+    /// The observation set: `timed`, `laps` or `counters` for a perf row, `working-set-step` for a
+    /// helper row, and the gate step whose test run printed it for a real-renderer row.
+    pub set: &'static str,
+    /// The perf attempt directory with its `end` checkpoint, or the CI job and log line.
+    pub origin: &'static str,
+}
+
+impl Provenance {
+    /// One line naming the run, attempt, commit, side, set and origin, for a failure message.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!(
+            "run {} attempt {} at {} ({} {}) {}",
+            self.run_id, self.attempt, self.measured_sha, self.side, self.set, self.origin
+        )
+    }
 }
 
 /// One measured start-size input from a CI run.
@@ -49,13 +80,569 @@ pub struct StartSizeInput {
     /// Required glyphs the measurement drew as tofu: unresolved, or resolved but not rasterized.
     /// Any nonzero count makes the row select the maximum.
     pub incomplete_glyphs: usize,
-    /// The CI run that produced the row.
-    pub run_url: &'static str,
+    /// Pixels the measured working set packed, kept for reading; the rule does not use it.
+    pub packed_pixels: u64,
+    /// Where the row was measured.
+    pub provenance: Provenance,
 }
 
-/// Every measured input. Empty: no CI row is recorded, so both normal start constants must be the
-/// maximum, which [`validate_table_start`] enforces.
-pub const START_SIZE_INPUTS: &[StartSizeInput] = &[];
+/// The Performance comparison whose base side measured the perf-end rows.
+pub const PERF_END_RUN_ID: u64 = 37_525_311_953;
+/// The push CI run that measured the helper and real-renderer rows.
+pub const PUSH_RUN_ID: u64 = 37_517_293_271;
+/// The commit both runs measured: the perf comparison's base side and the push CI's head.
+pub const MEASURED_SHA: &str = "865acccd18a6e09cf7126dfc6f65830729fd71b7";
+
+/// A perf-end row: the visible renderer's atlas at a certified `end` checkpoint of an accepted
+/// base-side attempt, at scale 1, which fit the 256 floor with every required glyph drawn.
+const fn perf_row(
+    platform: &'static str,
+    fixture: &'static str,
+    source: InputSource,
+    set: &'static str,
+    max_tile: [u32; 2],
+    packed_pixels: u64,
+    origin: &'static str,
+) -> StartSizeInput {
+    StartSizeInput {
+        platform,
+        scale: 1,
+        fixture,
+        source,
+        outcome: FitOutcome::Fits(256),
+        max_tile,
+        incomplete_glyphs: 0,
+        packed_pixels,
+        provenance: Provenance {
+            run_id: PERF_END_RUN_ID,
+            attempt: 1,
+            measured_sha: MEASURED_SHA,
+            side: "base",
+            set,
+            origin,
+        },
+    }
+}
+
+/// A helper row from the glyph-atlas-working-set step, with every required glyph drawn.
+const fn helper_row(
+    platform: &'static str,
+    scale: u32,
+    fixture: &'static str,
+    fit: u32,
+    max_tile: [u32; 2],
+    packed_pixels: u64,
+    origin: &'static str,
+) -> StartSizeInput {
+    StartSizeInput {
+        platform,
+        scale,
+        fixture,
+        source: InputSource::Helper,
+        outcome: FitOutcome::Fits(fit),
+        max_tile,
+        incomplete_glyphs: 0,
+        packed_pixels,
+        provenance: Provenance {
+            run_id: PUSH_RUN_ID,
+            attempt: 1,
+            measured_sha: MEASURED_SHA,
+            side: "push",
+            set: "working-set-step",
+            origin,
+        },
+    }
+}
+
+/// A Windows real-renderer row from the coverage test, printed by the test run `set` names, with
+/// every required glyph drawn.
+const fn real_row(
+    scale: u32,
+    fixture: &'static str,
+    fit: u32,
+    max_tile: [u32; 2],
+    packed_pixels: u64,
+    set: &'static str,
+    origin: &'static str,
+) -> StartSizeInput {
+    StartSizeInput {
+        platform: "windows",
+        scale,
+        fixture,
+        source: InputSource::RealRenderer,
+        outcome: FitOutcome::Fits(fit),
+        max_tile,
+        incomplete_glyphs: 0,
+        packed_pixels,
+        provenance: Provenance {
+            run_id: PUSH_RUN_ID,
+            attempt: 1,
+            measured_sha: MEASURED_SHA,
+            side: "push",
+            set,
+            origin,
+        },
+    }
+}
+
+/// Every measured input: 32 perf-end rows (macOS and Windows, S9 and S12, every accepted base-side
+/// timed, laps and counters attempt), 8 helper rows (both platforms, both fixtures, scales 1 and 2)
+/// and 24 Windows real-renderer rows (both fixtures and scales, from each of the six test runs that
+/// executed the coverage test). Helper, real-renderer and perf-end rows stay distinct by `source`.
+pub const START_SIZE_INPUTS: &[StartSizeInput] = &[
+    // Perf end: base side of the eligible Performance comparison, each joined to its attempt's
+    // complete `end` checkpoint and read from the visible renderer.
+    perf_row(
+        "macos",
+        "S12",
+        InputSource::PerfS12End,
+        "counters",
+        [14, 14],
+        4492,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S12-default/counters/01-base checkpoint 2 end",
+    ),
+    perf_row(
+        "macos",
+        "S12",
+        InputSource::PerfS12End,
+        "counters",
+        [14, 14],
+        4645,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S12-default/counters/04-base checkpoint 2 end",
+    ),
+    perf_row(
+        "macos",
+        "S12",
+        InputSource::PerfS12End,
+        "timed",
+        [14, 14],
+        4340,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S12-default/timed/01-base checkpoint 2 end",
+    ),
+    perf_row(
+        "macos",
+        "S12",
+        InputSource::PerfS12End,
+        "timed",
+        [14, 14],
+        4341,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S12-default/timed/04-base checkpoint 2 end",
+    ),
+    perf_row(
+        "macos",
+        "S12",
+        InputSource::PerfS12End,
+        "timed",
+        [14, 14],
+        4452,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S12-default/timed/05-base checkpoint 2 end",
+    ),
+    perf_row(
+        "macos",
+        "S12",
+        InputSource::PerfS12End,
+        "timed",
+        [14, 14],
+        4492,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S12-default/timed/08-base checkpoint 2 end",
+    ),
+    perf_row(
+        "macos",
+        "S12",
+        InputSource::PerfS12End,
+        "timed",
+        [14, 14],
+        4578,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S12-default/timed/09-base checkpoint 2 end",
+    ),
+    perf_row(
+        "macos",
+        "S9",
+        InputSource::PerfS9End,
+        "counters",
+        [20, 20],
+        11193,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S9-default/counters/01-base checkpoint 0 end",
+    ),
+    perf_row(
+        "macos",
+        "S9",
+        InputSource::PerfS9End,
+        "counters",
+        [20, 20],
+        11130,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S9-default/counters/04-base checkpoint 0 end",
+    ),
+    perf_row(
+        "macos",
+        "S9",
+        InputSource::PerfS9End,
+        "laps",
+        [20, 20],
+        11130,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S9-default/laps/01-base checkpoint 0 end",
+    ),
+    perf_row(
+        "macos",
+        "S9",
+        InputSource::PerfS9End,
+        "laps",
+        [20, 20],
+        11154,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S9-default/laps/04-base checkpoint 0 end",
+    ),
+    perf_row(
+        "macos",
+        "S9",
+        InputSource::PerfS9End,
+        "timed",
+        [20, 20],
+        11010,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S9-default/timed/01-base checkpoint 0 end",
+    ),
+    perf_row(
+        "macos",
+        "S9",
+        InputSource::PerfS9End,
+        "timed",
+        [20, 20],
+        11058,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S9-default/timed/04-base checkpoint 0 end",
+    ),
+    perf_row(
+        "macos",
+        "S9",
+        InputSource::PerfS9End,
+        "timed",
+        [20, 20],
+        11157,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S9-default/timed/05-base checkpoint 0 end",
+    ),
+    perf_row(
+        "macos",
+        "S9",
+        InputSource::PerfS9End,
+        "timed",
+        [20, 20],
+        10965,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S9-default/timed/08-base checkpoint 0 end",
+    ),
+    perf_row(
+        "macos",
+        "S9",
+        InputSource::PerfS9End,
+        "timed",
+        [20, 20],
+        11010,
+        r"/Users/runner/work/_temp/perf-comparison/runs/S9-default/timed/09-base checkpoint 0 end",
+    ),
+    perf_row(
+        "windows",
+        "S12",
+        InputSource::PerfS12End,
+        "counters",
+        [16, 15],
+        7479,
+        r"D:\a\_temp\perf-comparison\runs\S12-default\counters\01-base checkpoint 2 end",
+    ),
+    perf_row(
+        "windows",
+        "S12",
+        InputSource::PerfS12End,
+        "counters",
+        [16, 15],
+        7623,
+        r"D:\a\_temp\perf-comparison\runs\S12-default\counters\04-base checkpoint 2 end",
+    ),
+    perf_row(
+        "windows",
+        "S12",
+        InputSource::PerfS12End,
+        "timed",
+        [16, 15],
+        7711,
+        r"D:\a\_temp\perf-comparison\runs\S12-default\timed\01-base checkpoint 2 end",
+    ),
+    perf_row(
+        "windows",
+        "S12",
+        InputSource::PerfS12End,
+        "timed",
+        [16, 15],
+        7487,
+        r"D:\a\_temp\perf-comparison\runs\S12-default\timed\04-base checkpoint 2 end",
+    ),
+    perf_row(
+        "windows",
+        "S12",
+        InputSource::PerfS12End,
+        "timed",
+        [16, 15],
+        7631,
+        r"D:\a\_temp\perf-comparison\runs\S12-default\timed\05-base checkpoint 2 end",
+    ),
+    perf_row(
+        "windows",
+        "S12",
+        InputSource::PerfS12End,
+        "timed",
+        [16, 15],
+        7463,
+        r"D:\a\_temp\perf-comparison\runs\S12-default\timed\08-base checkpoint 2 end",
+    ),
+    perf_row(
+        "windows",
+        "S12",
+        InputSource::PerfS12End,
+        "timed",
+        [16, 15],
+        7463,
+        r"D:\a\_temp\perf-comparison\runs\S12-default\timed\09-base checkpoint 2 end",
+    ),
+    perf_row(
+        "windows",
+        "S9",
+        InputSource::PerfS9End,
+        "counters",
+        [16, 15],
+        14036,
+        r"D:\a\_temp\perf-comparison\runs\S9-default\counters\01-base checkpoint 0 end",
+    ),
+    perf_row(
+        "windows",
+        "S9",
+        InputSource::PerfS9End,
+        "counters",
+        [16, 15],
+        13984,
+        r"D:\a\_temp\perf-comparison\runs\S9-default\counters\04-base checkpoint 0 end",
+    ),
+    perf_row(
+        "windows",
+        "S9",
+        InputSource::PerfS9End,
+        "laps",
+        [16, 15],
+        13648,
+        r"D:\a\_temp\perf-comparison\runs\S9-default\laps\01-base checkpoint 0 end",
+    ),
+    perf_row(
+        "windows",
+        "S9",
+        InputSource::PerfS9End,
+        "laps",
+        [16, 15],
+        13972,
+        r"D:\a\_temp\perf-comparison\runs\S9-default\laps\04-base checkpoint 0 end",
+    ),
+    perf_row(
+        "windows",
+        "S9",
+        InputSource::PerfS9End,
+        "timed",
+        [16, 15],
+        14036,
+        r"D:\a\_temp\perf-comparison\runs\S9-default\timed\01-base checkpoint 0 end",
+    ),
+    perf_row(
+        "windows",
+        "S9",
+        InputSource::PerfS9End,
+        "timed",
+        [16, 15],
+        14044,
+        r"D:\a\_temp\perf-comparison\runs\S9-default\timed\04-base checkpoint 0 end",
+    ),
+    perf_row(
+        "windows",
+        "S9",
+        InputSource::PerfS9End,
+        "timed",
+        [16, 15],
+        14036,
+        r"D:\a\_temp\perf-comparison\runs\S9-default\timed\05-base checkpoint 0 end",
+    ),
+    perf_row(
+        "windows",
+        "S9",
+        InputSource::PerfS9End,
+        "timed",
+        [16, 15],
+        14212,
+        r"D:\a\_temp\perf-comparison\runs\S9-default\timed\08-base checkpoint 0 end",
+    ),
+    perf_row(
+        "windows",
+        "S9",
+        InputSource::PerfS9End,
+        "timed",
+        [16, 15],
+        14212,
+        r"D:\a\_temp\perf-comparison\runs\S9-default\timed\09-base checkpoint 0 end",
+    ),
+    // Helper: the glyph-atlas-working-set step on each platform.
+    helper_row("macos", 1, "S9", 1024, [23, 20], 172851, "job 112453387360 line 8841"),
+    helper_row("macos", 1, "S12", 1024, [23, 16], 136073, "job 112453387360 line 8842"),
+    helper_row("macos", 2, "S9", 2048, [45, 31], 617572, "job 112453387360 line 8845"),
+    helper_row("macos", 2, "S12", 1024, [45, 31], 521016, "job 112453387360 line 8846"),
+    helper_row("windows", 1, "S9", 1024, [24, 16], 181969, "job 112454017976 line 15228"),
+    helper_row("windows", 1, "S12", 1024, [24, 16], 154061, "job 112454017976 line 15229"),
+    helper_row("windows", 2, "S9", 2048, [46, 31], 639557, "job 112454017976 line 15232"),
+    helper_row("windows", 2, "S12", 1024, [46, 31], 537991, "job 112454017976 line 15233"),
+    // Real renderer: Windows test 17, once per test invocation that ran it.
+    real_row(1, "S9", 256, [16, 15], 13847, "workspace-crates", "job 112454017976 line 11453"),
+    real_row(2, "S9", 512, [30, 29], 48156, "workspace-crates", "job 112454017976 line 11458"),
+    real_row(1, "S12", 256, [16, 13], 8111, "workspace-crates", "job 112454017976 line 11459"),
+    real_row(2, "S12", 256, [30, 26], 24340, "workspace-crates", "job 112454017976 line 11460"),
+    real_row(1, "S9", 256, [16, 15], 13665, "perf-scenarios-tests", "job 112454017976 line 14903"),
+    real_row(2, "S9", 512, [30, 29], 48156, "perf-scenarios-tests", "job 112454017976 line 14908"),
+    real_row(1, "S12", 256, [16, 13], 8111, "perf-scenarios-tests", "job 112454017976 line 14909"),
+    real_row(2, "S12", 256, [30, 26], 24340, "perf-scenarios-tests", "job 112454017976 line 14910"),
+    real_row(
+        1,
+        "S9",
+        256,
+        [16, 15],
+        14557,
+        "perf-scenarios-counters-tests",
+        "job 112454017976 line 15189",
+    ),
+    real_row(
+        2,
+        "S9",
+        512,
+        [30, 29],
+        48156,
+        "perf-scenarios-counters-tests",
+        "job 112454017976 line 15194",
+    ),
+    real_row(
+        1,
+        "S12",
+        256,
+        [16, 13],
+        8111,
+        "perf-scenarios-counters-tests",
+        "job 112454017976 line 15195",
+    ),
+    real_row(
+        2,
+        "S12",
+        256,
+        [30, 26],
+        24340,
+        "perf-scenarios-counters-tests",
+        "job 112454017976 line 15196",
+    ),
+    real_row(
+        1,
+        "S9",
+        256,
+        [16, 15],
+        14193,
+        "perf-scenarios-frame-texture-tests",
+        "job 112454017976 line 15511",
+    ),
+    real_row(
+        2,
+        "S9",
+        512,
+        [30, 29],
+        48156,
+        "perf-scenarios-frame-texture-tests",
+        "job 112454017976 line 15516",
+    ),
+    real_row(
+        1,
+        "S12",
+        256,
+        [16, 13],
+        8111,
+        "perf-scenarios-frame-texture-tests",
+        "job 112454017976 line 15517",
+    ),
+    real_row(
+        2,
+        "S12",
+        256,
+        [30, 26],
+        24340,
+        "perf-scenarios-frame-texture-tests",
+        "job 112454017976 line 15518",
+    ),
+    real_row(
+        1,
+        "S9",
+        256,
+        [16, 15],
+        14557,
+        "perf-scenarios-echo-trace-tests",
+        "job 112454017976 line 15801",
+    ),
+    real_row(
+        2,
+        "S9",
+        512,
+        [30, 29],
+        48156,
+        "perf-scenarios-echo-trace-tests",
+        "job 112454017976 line 15806",
+    ),
+    real_row(
+        1,
+        "S12",
+        256,
+        [16, 13],
+        8111,
+        "perf-scenarios-echo-trace-tests",
+        "job 112454017976 line 15807",
+    ),
+    real_row(
+        2,
+        "S12",
+        256,
+        [30, 26],
+        24340,
+        "perf-scenarios-echo-trace-tests",
+        "job 112454017976 line 15808",
+    ),
+    real_row(
+        1,
+        "S9",
+        256,
+        [16, 15],
+        14157,
+        "perf-scenarios-harness-api-tests",
+        "job 112454017976 line 16396",
+    ),
+    real_row(
+        2,
+        "S9",
+        512,
+        [30, 29],
+        48156,
+        "perf-scenarios-harness-api-tests",
+        "job 112454017976 line 16410",
+    ),
+    real_row(
+        1,
+        "S12",
+        256,
+        [16, 13],
+        8111,
+        "perf-scenarios-harness-api-tests",
+        "job 112454017976 line 16411",
+    ),
+    real_row(
+        2,
+        "S12",
+        256,
+        [30, 26],
+        24340,
+        "perf-scenarios-harness-api-tests",
+        "job 112454017976 line 16412",
+    ),
+];
 
 /// A start dimension and the reason the rule chose it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,18 +790,7 @@ pub fn validate_start_dim(
             "{scale}x start {start} is below the maximum while the sizing oracle is incomplete"
         ));
     }
-    let missing: Vec<String> = required_inputs(scale)
-        .into_iter()
-        .filter(|required| {
-            !rows.iter().any(|row| {
-                row.scale == scale
-                    && row.platform == required.platform
-                    && row.fixture == required.fixture
-                    && row.source == required.source
-            })
-        })
-        .map(|required| format!("{} {} {:?}", required.platform, required.fixture, required.source))
-        .collect();
+    let missing = missing_inputs(scale, rows);
     if !missing.is_empty() {
         // When: missing names an unrecorded input, the rows cannot justify a smaller start.
         return Err(format!(
@@ -231,6 +807,46 @@ pub fn validate_start_dim(
         ));
     }
     Ok(rule)
+}
+
+/// The start [`start_rule`] selects at `scale` over `rows` once the oracle is complete: what a
+/// shipped start constant must equal, the maximum included.
+///
+/// # Errors
+///
+/// When `oracle_complete` is false, when any [`required_inputs`] entry has no row at `scale`, or
+/// when the scale has no row at all; the message names the condition.
+pub fn ruled_start(
+    scale: u32,
+    rows: &[StartSizeInput],
+    oracle_complete: bool,
+) -> Result<StartVerdict, String> {
+    if !oracle_complete {
+        // When: oracle_complete is false the rows cannot rule a start, so none is claimed.
+        return Err(format!("{scale}x has no ruled start while the sizing oracle is incomplete"));
+    }
+    let missing = missing_inputs(scale, rows);
+    if !missing.is_empty() {
+        // When: missing names an unrecorded input, the rule over the other rows is incomplete.
+        return Err(format!("{scale}x lacks required inputs: {}", missing.join(", ")));
+    }
+    start_rule(&rule_inputs(scale, rows))
+}
+
+/// Each [`required_inputs`] entry at `scale` with no row in `rows`, named for a message.
+fn missing_inputs(scale: u32, rows: &[StartSizeInput]) -> Vec<String> {
+    required_inputs(scale)
+        .into_iter()
+        .filter(|required| {
+            !rows.iter().any(|row| {
+                row.scale == scale
+                    && row.platform == required.platform
+                    && row.fixture == required.fixture
+                    && row.source == required.source
+            })
+        })
+        .map(|required| format!("{} {} {:?}", required.platform, required.fixture, required.source))
+        .collect()
 }
 
 /// Validate `start`, a normal start constant at `scale`, against [`START_SIZE_INPUTS`] and

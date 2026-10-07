@@ -233,7 +233,13 @@ such as `cargo $SUB`, `bash "$SCRIPT"`, or `cargo $(echo test)`; a workflow edit
 is reviewed like any other change. Each CI-only entry
 carries a reason: dependency setup, an evidence rerun of an integration test
 that the same job's workspace step already runs, or runtime and package evidence
-that needs hosted runners, release binaries, or built packages. A first-party
+that needs hosted runners, release binaries, or built packages. One reviewed
+exception backs reruns from another job: `windows-tests-runtime`'s reruns are
+backed by `windows-tests-workspace`, and the check requires both to run on
+`windows-latest`, neither to be conditional or advisory, the workspace step to be
+mandatory in `windows-tests-workspace`, and the Windows aggregate to need both and
+test both in its one mandatory, fail-closed verification loop. Every other job
+still needs its own workspace step. A first-party
 test, or a `cargo fmt|clippy|doc` run, that only CI runs cannot be CI-only, so a
 missing local test or gate fails parity.
 
@@ -401,13 +407,27 @@ macOS execution, and a direct example invocation without `--run` is not acceptan
 
 `perf-scenarios-tests` runs the harness's own unit tests,
 `cargo test --locked -p sonicterm-app --example perf_scenarios`, on every host and in `macos-core`,
-`windows-tests` and `linux-core`, because the `cargo test --workspace --lib --bins --tests` that
+`windows-tests-harness` and `linux-core`, because the `cargo test --workspace --lib --bins --tests` that
 `workspace-crates` runs skips examples. `perf-scenarios-counters-tests` runs the same tests with
 `--features perf-counters` in the same jobs, and `perf-scenarios-counters-clippy` lints the example
 with the feature wherever `clippy` runs (`macos-core`, `windows-checks` and `linux-core`), so the
 counter code is built, tested and linted on every host. `perf-scenarios-frame-texture-tests` and
 `perf-scenarios-frame-texture-clippy` do the same with `--features perf-frame-texture`, which compiles
-in the harness's frame-texture reading.
+in the harness's frame-texture reading. On Windows the feature tests run in the
+`windows-tests-harness-features` shard instead, beside the glyph working-set measurement, so CI runs each
+feature's tests exactly once per platform rather than in the plain tests' job.
+
+The S2 echo timeline's App accessor is named only with both `perf-echo-trace` and
+`perf_echo_timeline_api`, and every other build compiles the side that reports
+`cfg-off`. Each of the four combinations has a maintained lint and test step: neither
+(`perf-scenarios-counters-clippy`, `perf-scenarios-tests`), the feature alone
+(`perf-scenarios-echo-trace-clippy` and `-tests`), the cfg alone
+(`perf-scenarios-harness-api-clippy` and `-tests`, with every `HARNESS_API_CFGS` entry),
+and both (`perf-scenarios-harness-api-echo-trace-clippy` and `-tests`, the same cfgs with
+`perf-echo-trace` added). The last pair alone builds and tests the real adapter. Its lint
+runs in `macos-core`, `windows-checks` and `linux-core`, and its tests in `macos-core`
+and `linux-core` and, on Windows, in `windows-tests-harness-api` after the harness-API
+tests, whose compiler flags they share, so no Windows job is added.
 
 `macos-perf-smoke` checks the comparison tooling, not performance. It runs
 `python3 scripts/perf-compare.py --smoke`, which builds the current tree's
@@ -605,7 +625,7 @@ The local budget is 70 minutes (4200 s): the 25-minute cold-build allowance
 (1500 s), up to 4 runs of 100 s for each of the five Windows cases (2000 s), and
 up to 3 attempts of 100 s for the S10/sync delivery replay (300 s), which makes a
 3800 s worst case, plus 400 s of headroom. The
-required `windows-tests` CI job runs the build and then the smoke, after
+required `windows-tests-runtime` CI job runs the build and then the smoke, after
 "Verify Windows selection presentation", and uploads the evidence directory when
 the smoke fails or passes after a retried delivery replay. The CI parity check fails when either step gains an `if:` or
 `continue-on-error:`, or when the smoke comes before the build. A hosted Windows

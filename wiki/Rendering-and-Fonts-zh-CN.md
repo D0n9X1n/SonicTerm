@@ -239,7 +239,23 @@ Windows 默认使用 DirectWrite 的 natural-symmetric ClearType 光栅化并禁
 macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次像素、BGRA 彩色
 位图字形，以及 COLR/SVG 交接。HarfBuzz/COLR 绘制路径通过 Cairo 支持分层彩色字形和
 线性、径向、扫描渐变。颜色线没有可用色标时不绘制任何内容；扫描渐变的平铺有上限，
-因此畸形或极端颜色线会退化为粗略近似，而不会产生无界工作量。
+因此畸形或极端颜色线会退化为粗略近似，而不会产生无界工作量。COLR 字体需要有效的 CPAL
+颜色条目；调色板标签、条目标签和标志都是可选的。版本 0 的 CPAL 表（例如 Noto Color Emoji）
+不含这些数组，仍能正常渲染：缺少标签时名称为空，缺少标志时取 0。存在的标签是一个名称 ID：
+它解析为字体中具有该 ID 的名称记录，并按与字体名称相同的语言规则选择；没有对应记录的 ID 读作空名称。
+COLRv1 字形若带有 ClipBox，会以设备像素作为外层裁剪作用于整个绘制图（包括合成分组），因此 Cairo
+自身无法界定范围的绘制图（例如以 `In` 合成的渐变）仍会在其 ClipBox 内光栅化。ClipList 是可选的：没有 ClipBox 的字形不加裁剪地光栅化，
+由其自身绘制界定范围；没有 ClipBox 且无法界定范围的绘制图没有有限的渲染结果，因此会失败，错误会指出缺少 ClipBox。
+FreeType 对缺少 ClipBox 和读取 ClipBox 出错报告相同的状态，因此 SonicTerm 将两者都视为没有 ClipBox，
+并尝试不加裁剪的渲染，仍受同样的范围检查约束。位图向外取整到整像素。
+
+FreeType COLRv1 路径让所有绘制操作数都保持字体单位。PaintGlyph 轮廓以不缩放、
+不变换的方式加载，渐变锚点和半径保持字体给出的值，由 FreeType
+包含的根变换（依据字体的尺寸和变换构建）作为唯一的设备像素映射。因此在任何字号下，
+渐变都留在其轮廓内的正确位置，合成斜体对轮廓和渐变只剪切一次，与对 ClipBox 的剪切一致。
+这些轮廓从不做 hinting，合成粗体也不会加粗它们。不缩放加载有两个 FreeType 限制：
+可变字体的轮廓坐标会被取整为整数字体单位；“tricky”字体的轮廓依赖 hinting 指令，
+不缩放加载可能得到无意义的轮廓。
 
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` 为生成的 FreeType、HarfBuzz、Fontconfig
 绑定中的原始句柄管理安全生命周期。每次原生分配都配对正确的销毁函数。内嵌位图字形

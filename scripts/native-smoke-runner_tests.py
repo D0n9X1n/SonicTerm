@@ -8,6 +8,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 from pathlib import Path
 import queue
 import shutil
@@ -461,7 +462,8 @@ class WorkflowShapeTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
-            "needs: [windows-native, windows-checks, windows-tests, windows-smoke]",
+            "needs: [windows-native, windows-checks, windows-tests-workspace, windows-tests-harness, "
+            "windows-tests-harness-features, windows-tests-harness-api, windows-tests-runtime, windows-smoke]",
             workflow,
         )
         self.assertIn("Require macOS native runtime smoke", workflow)
@@ -469,7 +471,7 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertEqual(workflow.count("Require Windows GDI capability=EXERCISED"), 1)
         self.assertEqual(workflow.count("windows_software_present_capability"), 1)
         self.assertIn("--require-capability EXERCISED", workflow)
-        windows_tests = workflow.split("  windows-tests:\n", 1)[1].split("  windows-smoke:\n", 1)[0]
+        windows_tests = workflow.split("  windows-tests-runtime:\n", 1)[1].split("  windows-smoke:\n", 1)[0]
         windows_smoke = workflow.split("  windows-smoke:\n", 1)[1].split("  windows:\n", 1)[0]
         self.assertIn("Require Windows GDI capability=EXERCISED", windows_tests)
         self.assertNotIn("windows_software_present_capability", windows_smoke)
@@ -478,7 +480,11 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertIn("--log-file", workflow)
         self.assertIn("target/release/sonicterm-mac", workflow)
         self.assertIn("target/release/sonicterm-windows.exe", workflow)
-        self.assertGreaterEqual(workflow.count("save-if: false"), 4)
+        # The smoke jobs restore the cache their core job wrote and never write one of their own.
+        for smoke in ("macos-coverage", "windows-smoke", "linux-packages"):
+            after = workflow.split(f"  {smoke}:\n", 1)[1]
+            body = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", after, maxsplit=1)[0]
+            self.assertIn("save-if: false", body, smoke)
         self.assertIn("Upload macOS native smoke logs", workflow)
         self.assertIn("Upload Windows native smoke logs", workflow)
 

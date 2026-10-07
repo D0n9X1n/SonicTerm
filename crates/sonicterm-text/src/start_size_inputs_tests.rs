@@ -22,7 +22,15 @@ fn complete_rows(scale: u32, fit_dim: u32) -> Vec<StartSizeInput> {
             outcome: FitOutcome::Fits(fit_dim),
             max_tile: [24, 24],
             incomplete_glyphs: 0,
-            run_url: "https://ci.invalid/run",
+            packed_pixels: 0,
+            provenance: Provenance {
+                run_id: 1,
+                attempt: 1,
+                measured_sha: "0000000000000000000000000000000000000000",
+                side: "push",
+                set: "test",
+                origin: "test",
+            },
         })
         .collect()
 }
@@ -192,7 +200,7 @@ fn a_start_below_the_maximum_must_equal_the_rule() {
 }
 
 /// The shipped start constants pass the same validation as every case above, over the recorded
-/// table and the shipped oracle guard; while the guard is false that admits only the maximum.
+/// table and the shipped oracle guard.
 #[test]
 fn start_constants_pass_the_table_validation() {
     for (scale, constant) in [(1, START_ATLAS_DIM_1X), (2, START_ATLAS_DIM_2X)] {
@@ -200,6 +208,113 @@ fn start_constants_pass_the_table_validation() {
             .unwrap_or_else(|error| panic!("{scale}x start {constant} rejected: {error}"));
         assert_eq!(verdict.dim, constant);
     }
+}
+
+/// The real check on the shipped constants: once the oracle is complete, each normal start constant
+/// **equals** what the rule selects over the recorded rows at its scale. Validation accepts the
+/// maximum unconditionally, so a constant left at 2048 where the rows rule smaller passes it; this
+/// test closes that escape. A constant lowered below the rule is already rejected by validation,
+/// and this test pins that case independently.
+#[test]
+fn each_start_constant_equals_the_rule_over_the_recorded_rows() {
+    for (scale, constant) in [(1, START_ATLAS_DIM_1X), (2, START_ATLAS_DIM_2X)] {
+        let ruled = ruled_start(scale, START_SIZE_INPUTS, SIZING_ORACLE_COMPLETE)
+            .unwrap_or_else(|error| panic!("{scale}x has no ruled start: {error}"));
+        assert_eq!(constant, ruled.dim, "{scale}x constant against the rule: {}", ruled.verdict);
+    }
+}
+
+/// The rule's result depends on the rows that set each scale's largest fit: dropping any one of
+/// them either loses a required input or lowers the ruled start, so the equality above stops
+/// holding. The test finds those rows itself, so it covers whichever rows set the maximum.
+#[test]
+fn dropping_a_row_that_sets_the_largest_fit_breaks_the_equality() {
+    for (scale, constant) in [(1, START_ATLAS_DIM_1X), (2, START_ATLAS_DIM_2X)] {
+        let largest = START_SIZE_INPUTS
+            .iter()
+            .filter(|row| row.scale == scale)
+            .filter_map(|row| match row.outcome {
+                FitOutcome::Fits(dim) => Some(dim),
+                _ => None,
+            })
+            .max()
+            .expect("rows at the scale");
+        let deciding: Vec<usize> = START_SIZE_INPUTS
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.scale == scale && row.outcome == FitOutcome::Fits(largest))
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!deciding.is_empty(), "{scale}x has a row setting its largest fit");
+        for dropped in deciding {
+            let mut rows = START_SIZE_INPUTS.to_vec();
+            let removed = rows.remove(dropped);
+            let ruled = ruled_start(scale, &rows, true);
+            assert!(
+                ruled.as_ref().map_or(true, |verdict| verdict.dim != constant),
+                "{scale}x still rules {constant} without {:?}: {ruled:?}",
+                removed.provenance
+            );
+        }
+    }
+}
+
+/// The local-gate steps whose Windows test run executed the real-renderer coverage test and printed
+/// its rows, in the order CI ran them.
+const REAL_RENDERER_RUNS: [&str; 6] = [
+    "workspace-crates",
+    "perf-scenarios-tests",
+    "perf-scenarios-counters-tests",
+    "perf-scenarios-frame-texture-tests",
+    "perf-scenarios-echo-trace-tests",
+    "perf-scenarios-harness-api-tests",
+];
+
+/// Every recorded row keeps its provenance: perf-end rows come from the comparison's base side at
+/// scale 1 with a timed, laps or counters set and an attempt directory naming its `end` checkpoint;
+/// helper and real-renderer rows come from the push run, the helper from the working-set step and
+/// the real renderer from one of the six named test runs, each of which appears. All measure one
+/// commit, and no two rows share an identity.
+#[test]
+fn every_recorded_row_keeps_its_provenance() {
+    let mut identities = std::collections::HashSet::new();
+    for row in START_SIZE_INPUTS {
+        let provenance = &row.provenance;
+        assert_eq!((provenance.attempt, provenance.measured_sha), (1, MEASURED_SHA), "{row:?}");
+        match row.source {
+            InputSource::PerfS9End | InputSource::PerfS12End => {
+                assert_eq!((provenance.run_id, provenance.side), (PERF_END_RUN_ID, "base"));
+                assert!(matches!(provenance.set, "timed" | "laps" | "counters"), "{row:?}");
+                assert!(provenance.origin.ends_with(" end"), "{row:?}");
+                assert_eq!(row.scale, 1, "{row:?}");
+            }
+            InputSource::Helper => {
+                assert_eq!((provenance.run_id, provenance.side), (PUSH_RUN_ID, "push"));
+                assert_eq!(provenance.set, "working-set-step");
+            }
+            InputSource::RealRenderer => {
+                assert_eq!((provenance.run_id, provenance.side), (PUSH_RUN_ID, "push"));
+                assert_eq!(row.platform, "windows");
+                assert!(REAL_RENDERER_RUNS.contains(&provenance.set), "{row:?}");
+            }
+        }
+        // The source enters the identity by name, since `InputSource` is not hashable.
+        let source = format!("{:?}", row.source);
+        let identity =
+            (row.platform, row.scale, row.fixture, provenance.set, provenance.origin, source);
+        assert!(identities.insert(identity), "a repeated row: {row:?}");
+    }
+    let count =
+        |source: InputSource| START_SIZE_INPUTS.iter().filter(|row| row.source == source).count();
+    let perf = count(InputSource::PerfS9End) + count(InputSource::PerfS12End);
+    assert_eq!((perf, count(InputSource::Helper), count(InputSource::RealRenderer)), (32, 8, 24));
+    let real_runs: std::collections::HashSet<&str> = START_SIZE_INPUTS
+        .iter()
+        .filter(|row| row.source == InputSource::RealRenderer)
+        .map(|row| row.provenance.set)
+        .collect();
+    let expected: std::collections::HashSet<&str> = REAL_RENDERER_RUNS.into_iter().collect();
+    assert_eq!(real_runs, expected, "each of the six test runs printed its real-renderer rows");
 }
 
 /// A stand-in content identity for a face file whose bytes are `bytes`.

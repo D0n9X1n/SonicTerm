@@ -12,12 +12,13 @@ use crate::rasterizer::colr::{
 use crate::rasterizer::harfbuzz::{argb_to_rgba, HarfbuzzRasterizer};
 use crate::rasterizer::{
     checked_glyph_rgba_len, checked_raster_pixel_size, FontRasterizer, FAKE_ITALIC_SKEW,
-    MAX_RASTERIZED_GLYPH_BYTES,
+    MAX_RASTERIZED_GLYPH_BYTES, MAX_RASTERIZED_GLYPH_DIMENSION,
 };
 use crate::units::*;
 use crate::{ftwrap, FontRasterizerSelection, RasterizedGlyph};
 use ::freetype::{
-    FT_Color_Root_Transform, FT_GlyphSlotRec_, FT_Matrix, FT_Opaque_Paint_, FT_PaintFormat_,
+    FT_ClipBox_, FT_Color_Root_Transform, FT_GlyphSlotRec_, FT_Matrix, FT_Opaque_Paint_,
+    FT_PaintFormat_,
 };
 use anyhow::{bail, Context as _};
 use cairo::{Content, Context, Extend, Format, ImageSurface, Matrix, Operator, RecordingSurface};
@@ -478,38 +479,21 @@ impl FreeTypeRasterizer {
             FT_Color_Root_Transform::FT_COLOR_INCLUDE_ROOT_TRANSFORM,
         )?;
 
-        // The root transform produces extents that are larger than
-        // our nominal pixel size. I'm not sure why that is, but the
-        // factor corresponds to the metrics.(x|y)_scale in the root
-        // transform.
-        // It is desirable to retain the root transform as it includes
-        // any skew that may have been applied to the font.
-        // So let's extract the offending scaling factors and we'll
-        // compensate when we rasterize the paths.
-        let (scale_x, scale_y) = {
-            // SAFETY: `rasterize_glyph` called `set_font_size` before this fallback,
-            // so the borrowed face has a live size slot with initialized scale metrics.
-            unsafe {
-                let upem = (*face.face).units_per_EM as f64;
-                let metrics = (*(*face.face).size).metrics;
-                log::trace!("upem={upem}, metrics: {metrics:#?}");
-
-                (1. / metrics.x_scale.to_num::<f64>(), 1. / metrics.y_scale.to_num::<f64>())
-            }
-        };
-
         let palette = face.get_palette_data()?;
         log::trace!("Palette: {palette:#?}");
         face.select_palette(0)?;
 
-        let clip_box = face.get_color_glyph_clip_box(glyph_pos)?;
+        // A COLRv1 glyph's ClipBox is optional: without one the graph rasterizes unclipped.
+        let clip_box = face.get_color_glyph_clip_box(glyph_pos);
         log::trace!("got clip_box: {clip_box:?}");
         let mut walker = Walker { load_flags, face: &mut face, ops: vec![] };
         walker.walk_paint(paint, 0)?;
 
         log::trace!("ops: {:#?}", walker.ops);
 
-        rasterize_from_ops(walker.ops, scale_x, -scale_y)
+        // Every operand is in font units and the included root transform maps them to device pixels, y up,
+        // so the only outer transform left is the flip to Cairo's y-down space.
+        rasterize_colr(walker.ops, 1.0, -1.0, clip_box.as_ref())
     }
 }
 
@@ -517,20 +501,92 @@ impl FreeTypeRasterizer {
 #[path = "freetype_tests.rs"]
 mod freetype_tests;
 
+/// Device-pixel corners of a COLR ClipBox, in Cairo's y-down output space.
+///
+/// FreeType reports the corners in 26.6 device pixels, y up, with the face's size, transform and
+/// translation already applied, so they are only rescaled and flipped here, never transformed again.
+fn clip_box_corners_px(clip_box: &FT_ClipBox_) -> [(f64, f64); 4] {
+    [clip_box.bottom_left, clip_box.top_left, clip_box.top_right, clip_box.bottom_right]
+        .map(|corner| (corner.x.font_units() as f64 / 64.0, -(corner.y.font_units() as f64) / 64.0))
+}
+
+/// Integer pixel rectangle covering a recording's ink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PixelBounds {
+    left: i64,
+    top: i64,
+    width: usize,
+    height: usize,
+}
+
+/// Rounds Cairo ink extents outward to whole pixels, so a fractional edge keeps its pixel.
+///
+/// Cairo reports a recording it cannot bound as a negative size; that, a non-finite value or a span
+/// past the glyph limit is an error. Zero area is a valid empty glyph.
+fn pixel_bounds(left: f64, top: f64, width: f64, height: f64) -> anyhow::Result<PixelBounds> {
+    if ![left, top, width, height].iter().all(|value| value.is_finite())
+        || width < 0.0
+        || height < 0.0
+    {
+        // Non-finite or negative extents mean Cairo could not bound the ink.
+        bail!("invalid color glyph extents {width}x{height}");
+    }
+    if width == 0.0 || height == 0.0 {
+        // When: `width` or `height` is 0.0, the recording covers no area, so the glyph is empty.
+        return Ok(PixelBounds { left: 0, top: 0, width: 0, height: 0 });
+    }
+    let limit = MAX_RASTERIZED_GLYPH_DIMENSION as f64;
+    let (min_x, min_y) = (left.floor(), top.floor());
+    let (span_x, span_y) = ((left + width).ceil() - min_x, (top + height).ceil() - min_y);
+    if span_x > limit
+        || span_y > limit
+        || min_x.abs() > i64::MAX as f64
+        || min_y.abs() > i64::MAX as f64
+    {
+        // A span past the glyph limit, or an origin no i64 can hold, is rejected before allocation.
+        bail!("color glyph extents {span_x}x{span_y} exceed the {limit}px glyph limit");
+    }
+    Ok(PixelBounds {
+        left: min_x as i64,
+        top: min_y as i64,
+        width: span_x as usize,
+        height: span_y as usize,
+    })
+}
+
+/// Rasterizes a COLRv1 glyph's paint ops, clipped to its ClipBox when it has one and unclipped when it has
+/// none. Without a ClipBox a graph Cairo cannot bound has no finite rendering, so it fails with that reason.
+fn rasterize_colr(
+    ops: Vec<PaintOp>,
+    scale_x: f64,
+    scale_y: f64,
+    clip_box: Option<&FT_ClipBox_>,
+) -> anyhow::Result<RasterizedGlyph> {
+    let unclipped = clip_box.is_none();
+    rasterize_from_ops(ops, scale_x, scale_y, clip_box.map(clip_box_corners_px)).map_err(|error| {
+        let unbounded = unclipped && error.to_string().starts_with("invalid color glyph extents");
+        if !unbounded {
+            // When: `unbounded` is false, the failure is not a missing ClipBox's, so it passes through unchanged.
+            return error;
+        }
+        anyhow::anyhow!("COLRv1 glyph has no ClipBox to bound its paint: {error}")
+    })
+}
+
 fn rasterize_from_ops(
     ops: Vec<PaintOp>,
     scale_x: f64,
     scale_y: f64,
+    clip: Option<[(f64, f64); 4]>,
 ) -> anyhow::Result<RasterizedGlyph> {
-    let (surface, has_color) = record_to_cairo_surface(ops, scale_x, scale_y)?;
+    let (surface, has_color) = record_to_cairo_surface(ops, scale_x, scale_y, clip)?;
     let (left, top, width, height) = surface.ink_extents();
     log::trace!("extents: left={left} top={top} width={width} height={height}");
 
-    if !width.is_finite() || !height.is_finite() || width < 0.0 || height < 0.0 {
-        bail!("invalid color glyph extents {width}x{height}");
-    }
-    let width_px = width as usize;
-    let height_px = height as usize;
+    let bounds = pixel_bounds(left, top, width, height)?;
+    let (left, top) = (bounds.left as f64, bounds.top as f64);
+    let width_px = bounds.width;
+    let height_px = bounds.height;
     if width_px == 0 || height_px == 0 {
         // When: width_px or height_px collapsed to zero, so the paint ops
         // covered no pixels and an empty bitmap stands in.
@@ -616,8 +672,7 @@ impl<'a> Walker<'a> {
                     let (start_x, start_y) = vector_x_y(&grad.p0);
                     let (end_x, end_y) = vector_x_y(&grad.p1);
                     let (rotation_x, rotation_y) = vector_x_y(&grad.p2);
-                    // FIXME: gradient vectors are expressed as font units,
-                    // do we need to adjust them here?
+                    // Anchors stay in font units, like the contours; the root transform maps both.
                     let paint = PaintOp::PaintLinearGradient {
                         start_x,
                         start_y,
@@ -640,8 +695,9 @@ impl<'a> Walker<'a> {
                         start_y,
                         end_x,
                         end_y,
-                        start_radius: grad.r0.font_units() as f32,
-                        end_radius: grad.r1.font_units() as f32,
+                        // FreeType gives r0 and r1 as 16.16 font units, like the centres.
+                        start_radius: grad.r0.f16d16().to_num(),
+                        end_radius: grad.r1.f16d16().to_num(),
                         color_line: self.decode_color_line(&grad.colorline)?,
                     };
                     self.ops.push(paint);
@@ -650,8 +706,8 @@ impl<'a> Walker<'a> {
                     let grad = paint.u.sweep_gradient.as_ref();
                     log::trace!("{level:>3} {grad:?}");
                     let (center_x, center_y) = vector_x_y(&grad.center);
-                    let start_angle = grad.start_angle.to_num();
-                    let end_angle = grad.end_angle.to_num();
+                    let start_angle = sweep_angle_radians(grad.start_angle);
+                    let end_angle = sweep_angle_radians(grad.end_angle);
 
                     let paint = PaintOp::PaintSweepGradient {
                         center_x,
@@ -663,10 +719,8 @@ impl<'a> Walker<'a> {
                     self.ops.push(paint);
                 }
                 FT_COLR_PAINTFORMAT_GLYPH => {
-                    // FIXME: harfbuzz, in COLR.hh, pushes the inverse of
-                    // the root transform before emitting the glyph
-                    // DrawOps, then pops it prior to recursing into
-                    // the child paint
+                    // The contour loads in font units, untransformed, so the enclosing root
+                    // transform maps it exactly as it maps the child paint's operands.
                     log::trace!("{level:>3} {:?}", paint.u.glyph.as_ref());
 
                     let glyph_index = paint.u.glyph.as_ref().glyphID;
@@ -715,7 +769,7 @@ impl<'a> Walker<'a> {
 
                     // Scaling around a center coordinate
                     let center_x = scale.center_x.to_num();
-                    let center_y = scale.center_x.to_num();
+                    let center_y = scale.center_y.to_num();
 
                     let mut to_center = Matrix::identity();
                     to_center.translate(center_x, center_y);
@@ -740,7 +794,7 @@ impl<'a> Walker<'a> {
 
                     // Rotating around a center coordinate
                     let center_x = rot.center_x.to_num();
-                    let center_y = rot.center_x.to_num();
+                    let center_y = rot.center_y.to_num();
 
                     let mut to_center = Matrix::identity();
                     to_center.translate(center_x, center_y);
@@ -765,7 +819,7 @@ impl<'a> Walker<'a> {
 
                     // Skewing around a center coordinate
                     let center_x = skew.center_x.to_num();
-                    let center_y = skew.center_x.to_num();
+                    let center_y = skew.center_y.to_num();
 
                     let mut to_center = Matrix::identity();
                     to_center.translate(center_x, center_y);
@@ -865,14 +919,22 @@ impl<'a> Walker<'a> {
     }
 }
 
+/// A COLR sweep angle in the shared sweep renderer's convention, HarfBuzz's: FreeType hands the stored value, half
+/// turns biased by minus one (so 0 degrees is -1), and the renderer takes radians of (angle + 1) * pi.
+fn sweep_angle_radians(angle: FT_Fixed) -> f32 {
+    ((angle.to_num::<f64>() + 1.0) * PI) as f32
+}
+
+/// A COLR PaintTransform's affine as a Cairo matrix: Cairo orders it (xx, yx, xy, yy, x0, y0), so the
+/// translation is (dx, dy).
 fn affine2x3_to_matrix(affine: FT_Affine23) -> Matrix {
     Matrix::new(
         affine.xx.to_num(),
         affine.yx.to_num(),
         affine.xy.to_num(),
         affine.yy.to_num(),
-        affine.dy.to_num(),
         affine.dx.to_num(),
+        affine.dy.to_num(),
     )
 }
 
@@ -880,10 +942,26 @@ fn record_to_cairo_surface(
     paint_ops: Vec<PaintOp>,
     scale_x: f64,
     scale_y: f64,
+    clip: Option<[(f64, f64); 4]>,
 ) -> anyhow::Result<(RecordingSurface, bool)> {
     let mut has_color = false;
     let surface = RecordingSurface::create(Content::ColorAlpha, None)?;
     let context = Context::new(&surface)?;
+    if let Some(corners) = clip {
+        // A ClipBox bounds every paint and group, including composites Cairo cannot bound
+        // itself, so it is set at identity, in device pixels, outside every save.
+        if !corners.iter().all(|(x_px, y_px)| x_px.is_finite() && y_px.is_finite()) {
+            // A non-finite corner cannot form a clip path.
+            bail!("invalid color glyph clip box {corners:?}");
+        }
+        let [first, rest @ ..] = corners;
+        context.move_to(first.0, first.1);
+        for (x_px, y_px) in rest {
+            context.line_to(x_px, y_px);
+        }
+        context.close_path();
+        context.clip();
+    }
     context.scale(scale_x, scale_y);
     context.set_antialias(cairo::Antialias::Best);
 

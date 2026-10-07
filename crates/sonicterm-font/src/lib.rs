@@ -45,6 +45,8 @@ pub mod parser;
 mod rangeset;
 pub mod rasterizer;
 pub mod shaper;
+#[cfg(test)]
+mod source_pin;
 pub mod units;
 
 #[cfg(all(unix, not(target_os = "macos")))]

@@ -39,6 +39,7 @@ fn credited_sample(inject_unix_s: f64, latency_ms: f64) -> LatencySample {
         split: None,
         split_reason: "unsupported",
         dispatch_timeline: TIMELINE_NOT_TAKEN,
+        echo_timeline: None,
     }
 }
 
@@ -178,7 +179,7 @@ fn latency_summary_reports_attribution_coverage() {
     let summary = latency_json(&samples);
     assert_eq!((summary["attributed"].as_u64(), summary["total"].as_u64()), (Some(2), Some(4)));
     assert_eq!(summary["coverage"], 0.5);
-    let lock_busy = json!({"inject_unix_s": 1.25, "latency_ms": null, "attributed": false, "reason": "lock-busy", "split": null, "split_reason": "not-credited", "dispatch_timeline": "not-taken"});
+    let lock_busy = json!({"inject_unix_s": 1.25, "latency_ms": null, "attributed": false, "reason": "lock-busy", "split": null, "split_reason": "not-credited", "dispatch_timeline": "not-taken", "echo_timeline": null});
     assert_eq!(summary["samples"][1], lock_busy);
     assert_eq!(summary["samples"][0]["attributed"], true);
     assert_eq!(summary["samples"][3]["reason"], "no-candidate");
@@ -246,6 +247,8 @@ fn partial_result(status: Status) -> RunResult {
             frame_counters: None,
             updates: None,
             s10_attribution: None,
+            guard_correlation: None,
+            guard_correlation_transport_ns: None,
         }],
         latency: Some(vec![LatencySample::uncredited(2.0, "no-candidate")]),
         throughput: None,
@@ -403,6 +406,8 @@ fn measured_result() -> RunResult {
         frame_counters: None,
         updates: None,
         s10_attribution: None,
+        guard_correlation: None,
+        guard_correlation_transport_ns: None,
     });
     result.latency = Some(vec![
         credited_sample(2.0, 12.5),
@@ -476,9 +481,9 @@ fn result_json_records_every_measurement_in_its_pinned_shape() {
     let latency = json!({
         "samples": [
             {"inject_unix_s": 2.0, "latency_ms": 12.5, "attributed": true, "reason": "credited",
-             "split": null, "split_reason": "unsupported", "dispatch_timeline": "not-taken"},
+             "split": null, "split_reason": "unsupported", "dispatch_timeline": "not-taken", "echo_timeline": null},
             {"inject_unix_s": 2.1, "latency_ms": null, "attributed": false, "reason": "lock-busy",
-             "split": null, "split_reason": "not-credited", "dispatch_timeline": "not-taken"},
+             "split": null, "split_reason": "not-credited", "dispatch_timeline": "not-taken", "echo_timeline": null},
         ],
         "attributed": 1,
         "total": 2,
@@ -487,6 +492,7 @@ fn result_json_records_every_measurement_in_its_pinned_shape() {
         "split_count": 0,
         "split_reasons": {"unsupported": 1},
         "split_coverage": 0.0,
+        "echo_timeline_coverage": null,
     });
     assert_eq!(value["latency"], latency);
     assert_eq!(value["throughput"], json!({"bytes": 5_642_880, "seconds": 0.25}));
@@ -1275,7 +1281,7 @@ fn credited_samples_read_unsupported_without_the_feature() {
     let target = echo_target((0, 6), 80, 0);
     let arm = echo_api::arm(&mut app, 1, &target, RowIdentity::default());
     assert_eq!(arm, ArmState::Unsupported);
-    let outcome = echo_outcome(arm, |token| echo_api::take(&mut app, 1, token, None));
+    let outcome = echo_outcome(arm, |token| echo_api::take(&mut app, 1, token, None).0);
     let injected = Instant::now();
     let sample = LatencySample::credited(
         1.0,
@@ -1326,7 +1332,7 @@ fn app_reason(
         _ => None,
     };
     between(app, token);
-    let outcome = echo_outcome(arm, |token| echo_api::take(app, pane, token, Some(main)));
+    let outcome = echo_outcome(arm, |token| echo_api::take(app, pane, token, Some(main)).0);
     LatencySample::credited(1.0, injected, ended(Instant::now()), &outcome, false).split_reason
 }
 

@@ -28,11 +28,13 @@ pub(crate) struct CustodyTotals {
 }
 
 /// One frame's guard custody; it records when it drops, which its owner arranges right after the last guard.
-// A seam for span correlation: a per-pane record of this interval, with a sequence id, would be taken here.
+/// With the guard correlation on it also carries the frame's span collection, closed at the same release.
 #[derive(Debug)]
 pub(crate) struct GuardCustody {
     totals: Arc<CustodyTotals>,
     first_guard: Instant,
+    /// The frame's UI guard spans, recorded at the release this custody reads.
+    spans: Option<super::guard_correlation::SpanCollection>,
 }
 
 /// One frame's dispatch interval; `rendered` closes it in the rendered population, a drop in the failed one.
@@ -42,6 +44,8 @@ pub(crate) struct DispatchClock {
     first_guard: Instant,
     /// Set by `rendered`, so the drop records the rendered population instead of the failed one.
     rendered: bool,
+    /// The renderer's return, when the caller read it once for every recorder; else the drop reads now.
+    ended: Option<Instant>,
 }
 
 /// Start a counting frame's custody and dispatch at its first guard, now.
@@ -55,22 +59,55 @@ pub(crate) fn start_at(
     first_guard: Instant,
 ) -> (GuardCustody, DispatchClock) {
     (
-        GuardCustody { totals: Arc::clone(totals), first_guard },
-        DispatchClock { totals: Arc::clone(totals), first_guard, rendered: false },
+        GuardCustody { totals: Arc::clone(totals), first_guard, spans: None },
+        DispatchClock { totals: Arc::clone(totals), first_guard, rendered: false, ended: None },
     )
 }
 
-impl DispatchClock {
-    /// Close the interval at the return of `render_releasing`, in the rendered population.
-    pub(crate) fn rendered(mut self) {
-        self.rendered = true;
+impl GuardCustody {
+    /// Carry `spans`, so this custody's single release read closes them too.
+    pub(crate) fn with_spans(
+        mut self,
+        spans: Option<super::guard_correlation::SpanCollection>,
+    ) -> Self {
+        self.spans = spans;
+        self
+    }
+
+    /// Note one parser guard acquired on `pane_id` in the carried span collection, if any.
+    pub(crate) fn note_guard(&mut self, pane_id: u64) {
+        if let Some(spans) = self.spans.as_mut() {
+            spans.note_guard(pane_id);
+        }
     }
 }
 
-/// Add one interval from `first_guard` to now into `sum_ns`, and one to `count`.
+impl DispatchClock {
+    /// Close the interval at the return of `render_releasing`, read now, in the rendered population.
+    #[cfg(test)]
+    pub(crate) fn rendered(mut self) {
+        self.rendered = true;
+    }
+
+    /// Close the interval at `returned_at`, the renderer's return as read once by the adapter, so a
+    /// diagnostic recorder working after that read never extends the interval.
+    pub(crate) fn rendered_at(mut self, returned_at: Instant) {
+        self.rendered = true;
+        self.ended = Some(returned_at);
+    }
+}
+
+/// Add one interval from `first_guard` to `ended`, or to now, into `sum_ns`, and one to `count`.
 // Ordering: sum_ns and count use Relaxed; they are statistics a later snapshot reads, ordering nothing.
-fn add_interval(sum_ns: &AtomicU64, count: &AtomicU64, first_guard: Instant) {
-    let elapsed_ns = u64::try_from(first_guard.elapsed().as_nanos()).unwrap_or(u64::MAX);
+fn add_interval(
+    sum_ns: &AtomicU64,
+    count: &AtomicU64,
+    first_guard: Instant,
+    ended: Option<Instant>,
+) {
+    let ended = ended.unwrap_or_else(Instant::now);
+    let elapsed = ended.saturating_duration_since(first_guard);
+    let elapsed_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
     sum_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
     count.fetch_add(1, Ordering::Relaxed);
 }
@@ -82,7 +119,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-// Lifecycle: dropping GuardCustody, after the frame's last parser guard, calls add_interval once for its custody.
+// Lifecycle: dropping GuardCustody after the last parser guard reads correlation_clock once; add_interval
+// and the span collection's close both end at that released_at.
 impl Drop for GuardCustody {
     fn drop(&mut self) {
         #[cfg(test)]
@@ -91,7 +129,17 @@ impl Drop for GuardCustody {
                 probe();
             }
         });
-        add_interval(&self.totals.custody_ns, &self.totals.custodies, self.first_guard);
+        let released_at = super::guard_correlation::correlation_clock();
+        add_interval(
+            &self.totals.custody_ns,
+            &self.totals.custodies,
+            self.first_guard,
+            Some(released_at),
+        );
+        if let Some(spans) = self.spans.as_mut() {
+            // A failed conversion leaves the custody total as recorded and makes these spans unlocated.
+            spans.close(super::guard_correlation::epoch_ns(released_at));
+        }
     }
 }
 
@@ -100,10 +148,11 @@ impl Drop for DispatchClock {
     fn drop(&mut self) {
         let totals = &self.totals;
         if self.rendered {
-            add_interval(&totals.dispatch_ns, &totals.dispatches, self.first_guard);
+            add_interval(&totals.dispatch_ns, &totals.dispatches, self.first_guard, self.ended);
         } else {
             // When: `rendered` is false, the frame held a guard but never reached the renderer.
-            add_interval(&totals.dispatch_failed_ns, &totals.dispatches_failed, self.first_guard);
+            let first_guard = self.first_guard;
+            add_interval(&totals.dispatch_failed_ns, &totals.dispatches_failed, first_guard, None);
         }
     }
 }

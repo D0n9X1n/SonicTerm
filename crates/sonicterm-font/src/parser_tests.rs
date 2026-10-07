@@ -1,4 +1,6 @@
-use super::{best_name, name_from_table, names_from_table, FontPaletteInfo, Names, ParsedFont};
+use super::{
+    best_name, name_from_table, names_from_table, FontPaletteInfo, NameIdLabels, Names, ParsedFont,
+};
 use crate::ftwrap::NameRecord;
 use crate::locator::{FontDataHandle, FontDataSource, FontOrigin};
 use crate::rangeset::RangeSet;
@@ -522,4 +524,77 @@ fn computing_coverage_never_holds_the_lock_a_clone_needs() {
         !font.coverage_intersection(&wanted).unwrap().is_empty(),
         "the computed set was stored"
     );
+}
+
+/// A name record with an explicit name ID, as FreeType returns it from the face's name table.
+fn labelled(name_id: u16, platform_id: u32, language_id: u16, name: &str) -> NameRecord {
+    NameRecord { name_id, ..name_record(platform_id, language_id, name) }
+}
+
+/// CPAL labels resolve by name ID: in this table every record's position differs from its name ID, so a label
+/// read by position names the wrong record (name ID 1 sits at position 0; position 1 holds name ID 2).
+#[test]
+fn palette_labels_resolve_by_name_id_not_record_index() {
+    let english = freetype::TT_PLATFORM_MICROSOFT;
+    let labels = NameIdLabels::lazy(|| {
+        vec![
+            labelled(1, english, 0x409, "Family"),
+            labelled(2, english, 0x409, "Regular"),
+            labelled(256, english, 0x409, "Light"),
+            labelled(257, english, 0x409, "Dark"),
+        ]
+    });
+    assert_eq!(labels.label(256), "Light");
+    assert_eq!(labels.label(257), "Dark");
+    assert_eq!(labels.label(1), "Family", "position 1 holds name ID 2, not 1");
+}
+
+/// A label whose name ID has no record is an empty name, never a panic or another record: here position 3
+/// exists, but no record has name ID 3. The CPAL "no label" value 0xFFFF is empty even though a record
+/// carries that ID.
+#[test]
+fn a_palette_label_without_a_record_is_empty() {
+    let english = freetype::TT_PLATFORM_MICROSOFT;
+    let labels = NameIdLabels::lazy(|| {
+        vec![
+            labelled(1, english, 0x409, "Family"),
+            labelled(2, english, 0x409, "Regular"),
+            labelled(256, english, 0x409, "Light"),
+            labelled(257, english, 0x409, "Dark"),
+            labelled(0xFFFF, english, 0x409, "Sentinel"),
+        ]
+    });
+    let resolved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        [labels.label(3), labels.label(300), labels.label(0xFFFF)]
+    }));
+    assert_eq!(resolved.ok(), Some([String::new(), String::new(), String::new()]));
+}
+
+/// Two records with one name ID resolve with the font-name rule (`best_name`): the English Microsoft record
+/// wins over a Japanese Microsoft record before it and a Macintosh record after it.
+#[test]
+fn a_palette_label_prefers_the_font_name_language_rule() {
+    let labels = NameIdLabels::lazy(|| {
+        vec![
+            labelled(256, freetype::TT_PLATFORM_MICROSOFT, 0x411, "Light (Japanese)"),
+            labelled(256, freetype::TT_PLATFORM_MICROSOFT, 0x409, "Light"),
+            labelled(256, freetype::TT_PLATFORM_MACINTOSH, 0, "Light (Mac)"),
+        ]
+    });
+    assert_eq!(labels.label(256), "Light");
+}
+
+/// 0xFFFF never reads the name table: a query whose only labels are 0xFFFF leaves the source unread, and the
+/// first real label reads it exactly once, however many labels follow.
+#[test]
+fn the_no_label_sentinel_never_reads_the_name_table() {
+    let reads = std::cell::Cell::new(0_u32);
+    let labels = NameIdLabels::lazy(|| {
+        reads.set(reads.get() + 1);
+        vec![labelled(256, freetype::TT_PLATFORM_MICROSOFT, 0x409, "Light")]
+    });
+    assert_eq!((labels.label(0xFFFF), reads.get()), (String::new(), 0));
+    let looked_up = [labels.label(256), labels.label(256), labels.label(9)];
+    assert_eq!(looked_up, ["Light".to_owned(), "Light".to_owned(), String::new()]);
+    assert_eq!(reads.get(), 1, "one read for every label after the first");
 }

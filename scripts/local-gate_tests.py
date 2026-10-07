@@ -512,7 +512,8 @@ class CustodyPolicyTests(unittest.TestCase):
         # Only these reviewed standalone compilation steps may accept forced owned cleanup.
         self.assertEqual({step.id for step in gate.STEPS if step.windows_policy == gate.WindowsPolicy.COMPILE_ONLY},
                          {"clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
-                          "perf-scenarios-echo-trace-clippy", "perf-scenarios-harness-api-clippy", "doc",
+                          "perf-scenarios-echo-trace-clippy", "perf-scenarios-harness-api-clippy",
+                          "perf-scenarios-harness-api-echo-trace-clippy", "doc",
                           "doc-resource-features", "release-windows", "windows-perf-build"})
         self.assertEqual(python_step("mixed", "pass").windows_policy, gate.WindowsPolicy.STRICT)
 
@@ -1579,7 +1580,7 @@ class TableTests(unittest.TestCase):
         step = next(step for step in gate.STEPS if step.id == "doctests")
         self.assertEqual(gate.command_text(step), "cargo test --workspace --doc --no-fail-fast")
         self.assertEqual(step.evidence, "local")
-        self.assertEqual(set(step.ci_jobs), {"macos-core", "windows-tests", "linux-core"})
+        self.assertEqual(set(step.ci_jobs), {"macos-core", "windows-tests-workspace", "linux-core"})
         logging = (ROOT / "crates" / "sonicterm-logging" / "src" / "lib.rs").read_text(encoding="utf-8")
         self.assertIn("//! ```no_run", logging)
         for manifest in sorted((ROOT / "crates").glob("*/Cargo.toml")):
@@ -1600,7 +1601,7 @@ class TableTests(unittest.TestCase):
         self.assertEqual(step.hosts, gate.HOSTS)
         self.assertEqual(step.evidence, "local")
         self.assertEqual(step.prerequisites, ("rust", "native"))
-        self.assertEqual(step.ci_jobs, ("macos-core", "windows-tests", "linux-core"))
+        self.assertEqual(step.ci_jobs, ("macos-core", "windows-tests-runtime", "linux-core"))
         self.assertEqual(step.timeout_s, 1200)
         for host in gate.HOSTS:
             self.assertIn(step, gate.select_steps(host))
@@ -1615,15 +1616,22 @@ class TableTests(unittest.TestCase):
         self.assertEqual(step.evidence, "local")
         self.assertEqual(step.prerequisites, ("rust", "native"))
         self.assertEqual(step.timeout_s, 900)
-        self.assertEqual(step.ci_jobs, ("macos-core", "windows-tests", "linux-core"))
+        self.assertEqual(step.ci_jobs, ("macos-core", "windows-tests-harness", "linux-core"))
         for host in gate.HOSTS:
             chosen = [selected.id for selected in gate.select_steps(host)]
             self.assertEqual(chosen.index("perf-scenarios-tests"), chosen.index("doctests") + 1, host)
         jobs = gate.ci_job_commands(WORKFLOW)
         for job in step.ci_jobs:
             commands = [command for _label, command in jobs[job]]
-            doctests = commands.index("cargo test --workspace --doc --no-fail-fast")
-            self.assertEqual(commands[doctests + 1], gate.command_text(step), job)
+            # When: the job also runs the doctests, the harness tests follow them and reuse their build;
+            # the Windows harness shard runs no doctests, so the harness tests are its first cargo command.
+            if "cargo test --workspace --doc --no-fail-fast" in commands:
+                doctests = commands.index("cargo test --workspace --doc --no-fail-fast")
+                self.assertEqual(commands[doctests + 1], gate.command_text(step), job)
+            else:
+                self.assertEqual(job, "windows-tests-harness")
+                cargo = [command for command in commands if command.startswith("cargo ")]
+                self.assertEqual(cargo[0], gate.command_text(step), job)
 
     def test_native_selection_is_required_locally_on_macos(self):
         # The opt-in example must actually run; compilation and Windows execution are insufficient.
@@ -1697,7 +1705,9 @@ class CiParityTests(unittest.TestCase):
             set(jobs),
             {
                 "macos-core", "macos-coverage", "macos-smoke", "macos",
-                "windows-native", "windows-checks", "windows-tests", "windows-smoke", "windows",
+                "windows-native", "windows-checks", "windows-tests-workspace", "windows-tests-harness",
+                "windows-tests-harness-features", "windows-tests-harness-api", "windows-tests-runtime",
+                "windows-smoke", "windows",
                 "linux-core", "linux-packages", "linux",
             },
         )
@@ -1713,7 +1723,7 @@ class CiParityTests(unittest.TestCase):
         self.assertTrue(any(
             command.startswith("python scripts/native-smoke-runner.py --timeout-seconds 120 ")
             and command.endswith("-- --nocapture")
-            for command in commands["windows-tests"]
+            for command in commands["windows-tests-runtime"]
         ))
 
     def test_the_shipped_workflow_matches_the_table(self):
@@ -1788,7 +1798,7 @@ class CiParityTests(unittest.TestCase):
 
     def test_windows_perf_smoke_is_required_locally_on_windows(self):
         # The scenario harness must build and run on Windows: the compile-only build first, then the smoke,
-        # both local Windows steps that windows-tests runs.
+        # both local Windows steps that the windows-tests-runtime shard runs.
         by_id = {step.id: step for step in gate.STEPS}
         for name, command, timeout, policy in (
             ("windows-perf-build", "cargo build --locked -p sonicterm-app --example perf_scenarios", 1500,
@@ -1800,7 +1810,7 @@ class CiParityTests(unittest.TestCase):
             self.assertEqual(step.hosts, ("windows",))
             self.assertEqual(step.evidence, "local")
             self.assertEqual(step.prerequisites, ("rust", "native"))
-            self.assertEqual(step.ci_jobs, ("windows-tests",))
+            self.assertEqual(step.ci_jobs, ("windows-tests-runtime",))
             self.assertEqual(step.timeout_s, timeout)
             self.assertEqual(step.windows_policy, policy)
             self.assertIn(step, gate.select_steps("windows"))
@@ -1809,22 +1819,23 @@ class CiParityTests(unittest.TestCase):
         self.assertEqual(selected.index("windows-perf-smoke"), selected.index("windows-perf-build") + 1)
 
     def test_windows_perf_gates_cannot_be_skipped_or_made_advisory(self):
-        # windows-tests runs the harness build and the perf smoke unconditionally; a step-level `if:` or
+        # windows-tests-runtime runs the harness build and the perf smoke unconditionally; a step-level `if:` or
         # `continue-on-error:` on either is named by the guard and fails parity.
-        self.assertEqual(gate.windows_tests_ci_problems(WORKFLOW), [])
+        self.assertEqual(gate.windows_runtime_ci_problems(WORKFLOW), [])
         for command in ("cargo build --locked -p sonicterm-app --example perf_scenarios",
                         "python scripts/perf-compare.py --smoke"):
             line = "        run: " + command + "\n"
             self.assertEqual(WORKFLOW.count(line), 1)
             for bypass in ("if: false", "continue-on-error: true"):
                 mutated = WORKFLOW.replace(line, "        " + bypass + "\n" + line, 1)
-                self.assertIn(f"windows-tests step `{command}` must not be conditional or advisory",
-                              gate.windows_tests_ci_problems(mutated))
+                self.assertIn(f"windows-tests-runtime step `{command}` must not be conditional or advisory",
+                              gate.windows_runtime_ci_problems(mutated))
                 self.assertTrue(gate.ci_parity_problems(mutated))
             self.assertTrue(gate.ci_parity_problems(WORKFLOW.replace(line, "        run: echo omitted\n", 1)))
         for bypass in ("if: false", "continue-on-error: true"):
-            mutated = WORKFLOW.replace("  windows-tests:\n", "  windows-tests:\n    " + bypass + "\n", 1)
-            self.assertIn("windows-tests must not be conditional or advisory", gate.windows_tests_ci_problems(mutated))
+            mutated = WORKFLOW.replace("  windows-tests-runtime:\n", "  windows-tests-runtime:\n    " + bypass + "\n", 1)
+            self.assertIn("windows-tests-runtime must not be conditional or advisory",
+                          gate.windows_runtime_ci_problems(mutated))
 
     def test_windows_perf_build_precedes_the_smoke(self):
         # The smoke's own build must find the harness already built by the compile-only step, so the
@@ -1836,7 +1847,7 @@ class CiParityTests(unittest.TestCase):
         self.assertIn(build + smoke, WORKFLOW)
         reversed_steps = WORKFLOW.replace(build + smoke, smoke + build, 1)
         self.assertIn("the Windows perf scenario harness must build before its smoke runs",
-                      gate.windows_tests_ci_problems(reversed_steps))
+                      gate.windows_runtime_ci_problems(reversed_steps))
         self.assertTrue(gate.ci_parity_problems(reversed_steps))
 
     def test_editing_a_ci_gate_step_alone_fails_parity(self):
@@ -1868,8 +1879,8 @@ class CiParityTests(unittest.TestCase):
         # omitting one that does.
         fmt = next(step for step in gate.STEPS if step.id == "fmt")
         for replacement, expected in (
-            (dataclasses.replace(fmt, ci_jobs=fmt.ci_jobs + ("windows-tests",)),
-             "`cargo fmt --all --check` is missing from CI job windows-tests"),
+            (dataclasses.replace(fmt, ci_jobs=fmt.ci_jobs + ("windows-tests-workspace",)),
+             "`cargo fmt --all --check` is missing from CI job windows-tests-workspace"),
             (dataclasses.replace(fmt, ci_jobs=("macos-core", "windows-checks")),
              "runs table step fmt, but the table does not name linux-core"),
         ):
@@ -1897,7 +1908,7 @@ class CiParityTests(unittest.TestCase):
         # Protect the MSI-validator class of gap: a script's own tests must be a table step.
         without = tuple(step for step in gate.STEPS if step.id != "msi-validator-tests")
         entry = gate.CiOnly(
-            "runtime-evidence", ".\\scripts\\validate-windows-msi_tests.ps1", ("windows-tests",), "fixture"
+            "runtime-evidence", ".\\scripts\\validate-windows-msi_tests.ps1", ("windows-tests-workspace",), "fixture"
         )
         entries = gate.CI_ONLY + (entry,)
         # Parity alone would accept the entry, so only the self-test rule catches it.
@@ -1952,22 +1963,98 @@ class CiParityTests(unittest.TestCase):
         line = "run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture"
         self.assertEqual(WORKFLOW.count(line), 2)
         problems = gate.ci_parity_problems(WORKFLOW.replace(line, "run: echo removed"))
-        for job in ("macos-core", "windows-tests"):
+        for job in ("macos-core", "windows-tests-runtime"):
             self.assertTrue(any(f"no longer runs in CI job {job}" in problem
                                 for problem in problems), problems)
+
+    def test_runtime_evidence_reruns_are_backed_by_the_windows_workspace_shard(self):
+        # The runtime shard reruns integration tests only to print their reports; the workspace shard must run
+        # those tests, and both must be mandatory Windows jobs that the fail-closed aggregate checks.
+        workspace = "bash scripts/check-workspace-crates.sh"
+        jobs = gate.ci_job_commands(WORKFLOW)
+        self.assertEqual(gate.rerun_backing_problems(WORKFLOW, jobs, workspace, ["windows-tests-runtime"]), [])
+        self.assertEqual(gate.ci_only_problems(ROOT, WORKFLOW), [])
+        head, tail = WORKFLOW.split("  windows-tests-workspace:\n", 1)
+        body, rest = tail.split("  windows-tests-harness:\n", 1)
+        line = "        run: bash scripts/check-workspace-crates.sh\n"
+        self.assertEqual(body.count(line), 1)
+
+        before_aggregate, after_aggregate = WORKFLOW.split("  windows:\n", 1)
+        aggregate, after_linux = after_aggregate.split("  linux-core:\n", 1)
+        verify = "      - name: Verify Windows shards\n        shell: bash\n"
+        compare = '            test "$result" = "success"\n'
+        loop_header = re.search(r"(?m)^          for result in .+; do$", aggregate)[0]
+
+        def in_aggregate(old: str, new: str) -> str:
+            """Mutate only the Windows aggregate's body; the macOS and Linux aggregates carry the same lines."""
+            self.assertEqual(aggregate.count(old), 1, old)
+            return before_aggregate + "  windows:\n" + aggregate.replace(old, new, 1) + "  linux-core:\n" + after_linux
+
+        def in_workspace(old: str, new: str) -> str:
+            """Mutate only the workspace shard's body."""
+            self.assertIn(old, body)
+            return head + "  windows-tests-workspace:\n" + body.replace(old, new, 1) + "  windows-tests-harness:\n" + rest
+
+        mutations = {
+            "the backing workspace gate removed": (in_workspace(line, "        run: echo removed\n"),
+                                                   "does not run `bash scripts/check-workspace-crates.sh`"),
+            "the backing workspace gate made advisory": (
+                in_workspace(line, "        continue-on-error: true\n" + line), "must not be conditional or advisory"),
+            "the backing shard made conditional": (
+                in_workspace("    runs-on: windows-latest\n", "    runs-on: windows-latest\n    if: false\n"),
+                "must not be conditional or advisory"),
+            "the backing shard moved off Windows": (
+                in_workspace("    runs-on: windows-latest\n", "    runs-on: ubuntu-latest\n"),
+                "must run on windows-latest"),
+            "the backing shard left out of the aggregate": (
+                WORKFLOW.replace('"$TESTS_WORKSPACE" ', "", 1), "aggregate must need and check windows-tests-workspace"),
+            "the rerun shard left out of the aggregate": (
+                WORKFLOW.replace("windows-tests-runtime, windows-smoke]", "windows-smoke]", 1),
+                "aggregate must need and check windows-tests-runtime"),
+            "the aggregate's verification step skipped": (
+                in_aggregate(verify, verify + "        if: false\n"),
+                "aggregate must need and check windows-tests-workspace"),
+            "the aggregate's verification step made advisory": (
+                in_aggregate(verify, verify + "        continue-on-error: true\n"),
+                "aggregate must need and check windows-tests-workspace"),
+            "the aggregate's comparison bypassed": (
+                in_aggregate(compare, compare.rstrip("\n") + " || true\n"),
+                "aggregate must need and check windows-tests-workspace"),
+            "the aggregate made conditional on success": (
+                in_aggregate("    if: always()\n", "    if: success()\n"),
+                "aggregate must need and check windows-tests-workspace"),
+            "the aggregate's results consumed by a no-op loop": (
+                in_aggregate(loop_header, loop_header.replace("; do", ' ; do :; done; for result in "success"; do', 1)),
+                "aggregate must need and check windows-tests-workspace"),
+            "an early exit behind a commented run key": (
+                in_aggregate(loop_header, "          exit 0\n          #        run: |\n" + loop_header),
+                "aggregate must need and check windows-tests-workspace"),
+            "an extra unbound loop operand": (
+                in_aggregate(loop_header, loop_header.replace("; do", ' "$UNBOUND"; do', 1)),
+                "aggregate must need and check windows-tests-workspace"),
+        }
+        for label, (mutated, expected) in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertTrue(mutated != WORKFLOW, "the mutation did not apply")
+                problems = gate.rerun_backing_problems(
+                    mutated, gate.ci_job_commands(mutated), workspace, ["windows-tests-runtime"])
+                self.assertTrue(any(expected in problem for problem in problems), problems)
+                self.assertTrue(gate.ci_only_problems(ROOT, mutated))
+        # A job with no reviewed backing pair still needs the workspace step in the same job.
+        self.assertEqual(gate.rerun_backing_problems(WORKFLOW, jobs, workspace, ["macos-core"]), [])
 
     def test_msi_validator_tests_join_the_windows_table(self):
         # Protect the Windows gate from omitting a test that CI runs.
         step = next(step for step in gate.STEPS if step.id == "msi-validator-tests")
         self.assertEqual(step.hosts, ("windows",))
-        self.assertEqual(step.ci_jobs, ("windows-tests",))
+        self.assertEqual(step.ci_jobs, ("windows-tests-workspace",))
         self.assertEqual(step.evidence, "local")
         self.assertNotIn(gate.command_text(step), [entry.command for entry in gate.CI_ONLY])
 
     def test_doctests_follow_each_shards_workspace_tests(self):
         # Protect the doctest step's reuse of the libraries the workspace step just built.
         jobs = gate.ci_job_commands(WORKFLOW)
-        for job in ("macos-core", "windows-tests", "linux-core"):
+        for job in ("macos-core", "windows-tests-workspace", "linux-core"):
             with self.subTest(job=job):
                 commands = [command for _label, command in jobs[job]]
                 index = commands.index("bash scripts/check-workspace-crates.sh")
@@ -2190,7 +2277,7 @@ class CommandClassificationTests(unittest.TestCase):
             '".\\scripts\\validate-windows-msi_tests.ps1"',
         ):
             with self.subTest(command=command):
-                entry = gate.CiOnly("runtime-evidence", command, ("windows-tests",), "fixture")
+                entry = gate.CiOnly("runtime-evidence", command, ("windows-tests-workspace",), "fixture")
                 problems = gate.ci_only_problems(ROOT, WORKFLOW, entries=(entry,))
                 self.assertTrue(any("first-party self-test" in problem for problem in problems), problems)
         workflow = _with_step(
@@ -2784,11 +2871,14 @@ class HarnessFlagTests(unittest.TestCase):
         self.assertTrue(expected, "the harness API cfg table is empty")
         self.assertEqual(len(expected), len(set(expected)), expected)
         steps = {step.id: step for step in gate.STEPS}
-        lint = steps["perf-scenarios-harness-api-clippy"]
-        enabled = [lint.argv[index + 1] for index, word in enumerate(lint.argv) if word == "--cfg"]
-        self.assertEqual(enabled, expected)
-        self.assertEqual(list(steps["perf-scenarios-harness-api-tests"].harness_cfgs), expected)
-        combined = {"perf-scenarios-harness-api-clippy", "perf-scenarios-harness-api-tests"}
+        for lint_id in ("perf-scenarios-harness-api-clippy", "perf-scenarios-harness-api-echo-trace-clippy"):
+            lint = steps[lint_id]
+            enabled = [lint.argv[index + 1] for index, word in enumerate(lint.argv) if word == "--cfg"]
+            self.assertEqual(enabled, expected, lint_id)
+        for test_id in ("perf-scenarios-harness-api-tests", "perf-scenarios-harness-api-echo-trace-tests"):
+            self.assertEqual(list(steps[test_id].harness_cfgs), expected, test_id)
+        combined = {"perf-scenarios-harness-api-clippy", "perf-scenarios-harness-api-tests",
+                    "perf-scenarios-harness-api-echo-trace-clippy", "perf-scenarios-harness-api-echo-trace-tests"}
         for step in gate.STEPS:
             if step.id.startswith("perf-scenarios-") and step.id not in combined:
                 with self.subTest(step=step.id):
@@ -2798,6 +2888,37 @@ class HarnessFlagTests(unittest.TestCase):
         for name in expected:
             with self.subTest(cfg=name):
                 self.assertIn(f"cfg({name})", declared)
+
+    def test_every_echo_timeline_combination_is_a_maintained_lint_and_test(self):
+        # The echo timeline's adapter needs perf-echo-trace and perf_echo_timeline_api together, and its
+        # complement compiles with either missing, so each of the four feature/cfg combinations has a maintained
+        # lint and a maintained test step: run locally on every host and in CI.
+        def features(step):
+            words = list(step.argv)
+            return set(words[words.index("--features") + 1].split(",")) if "--features" in words else set()
+
+        def cfgs(step):
+            words = list(step.argv)
+            return {words[index + 1] for index, word in enumerate(words) if word == "--cfg"} | set(
+                step.harness_cfgs or ())
+
+        found = {}
+        for step in gate.STEPS:
+            if "perf_scenarios" not in step.argv or step.evidence != "local" or not step.ci_jobs:
+                continue
+            if step.hosts != gate.HOSTS:
+                continue
+            kind = "clippy" if "clippy" in step.argv else "test" if "test" in step.argv else None
+            if kind is None or "--ignored" in step.argv:
+                continue
+            combination = ("perf-echo-trace" in features(step), "perf_echo_timeline_api" in cfgs(step))
+            found.setdefault(combination, {}).setdefault(kind, []).append(step.id)
+        for combination in ((False, False), (True, False), (False, True), (True, True)):
+            for kind in ("clippy", "test"):
+                with self.subTest(feature=combination[0], cfg=combination[1], kind=kind):
+                    self.assertTrue(found.get(combination, {}).get(kind), found)
+        self.assertEqual(found.get((True, True)), {"clippy": ["perf-scenarios-harness-api-echo-trace-clippy"],
+                                               "test": ["perf-scenarios-harness-api-echo-trace-tests"]})
 
     def test_workspace_check_cfgs_reads_only_the_live_lint_array(self):
         # A declaration surviving only in a comment, or outside [workspace.lints.rust], is not a declaration.

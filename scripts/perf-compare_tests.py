@@ -1961,6 +1961,79 @@ class ExecuteRunTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_a_smoke_carries_the_guard_capability_and_its_cfg_decision(self):
+        # Finding 1 (round 2): a smoke built from a listing that declares guard_correlation_schema plans each case
+        # with it and with the smoke build's cfg decision, so a realistic finalized result of a cfg-off build,
+        # every phase `unavailable`, passes the schema and reads n/a; the same output under a cfg-on decision is
+        # an impossible availability.
+        scenario = dataclasses.replace(IDLE_SCENARIO, guard_correlation_schema=1)
+        body = valid_result()
+        body["phases"] = [dict(body["phases"][0], guard_correlation={
+            "status": "unavailable", "file": None, "take_seq": None, "bytes": None, "sha256": None,
+            "window": {"label": perf.GUARD_WINDOW_LABEL, "start_ns": None, "end_ns": None}},
+            guard_correlation_transport_ns=7)]
+        self.result_body = body
+        plans = []
+
+        def run_case(plan, case_evidence):
+            plans.append(plan)
+            # Each run gets a fresh process table and host, as each smoke attempt meets a fresh harness process.
+            self.table = FakeTable(leader(), anchor(), harness_process(), FakeProcess(510, 510, 500, start="11"))
+            host = perf.Host(FakeGate(lambda step: self.fake_harness(step, False)), self.table, self.front_run,
+                             self.home, self.temp_root, set(), {"HOME": "/h"}, clock=lambda: LAUNCH_UNIX_S)
+            return perf.execute_run(plan, host, case_evidence)
+        for cfgs, expected in (((), "n/a"), ((perf.GUARD_SPANS_CFG,), "incomplete")):
+            evidence = Path(self.temporary.name) / "smoke" / (cfgs[0] if cfgs else "off")
+            with contextlib.redirect_stdout(io.StringIO()):
+                perf.smoke_cases({"S1": scenario}, Path("/b/perf_scenarios"), HARNESS_HASH, run_case, evidence,
+                                 cases=[perf.SmokeCase("S1")], harness_cfgs=cfgs)
+            plan = plans[-1]
+            self.assertEqual((plan.guard_correlation_schema, plan.guard_api), (1, bool(cfgs)))
+            joined = json.loads((evidence / "S1-1" / "guard-correlation-join.json").read_text(encoding="utf-8"))
+            self.assertEqual([verdict["verdict"] for verdict in joined], [expected], cfgs)
+        self.assertEqual(perf.validate_result(body, HARNESS_HASH, 0, guard_correlation_schema=plans[0]
+                                              .guard_correlation_schema), [])
+
+    def test_the_run_identity_records_the_guard_cfg_decision(self):
+        # Finding 2 (round 2): run-identity.json records guard_api, the effective cfg decision perf-flags binds
+        # each phase's availability to; null when nothing decided it.
+        identity = perf.run_identity_document({"base": "1" * 40, "head": "2" * 40}, "ab" * 32,
+                                              {"base": [], "head": []}, True, {}, False, {}, guard_api=True)
+        self.assertIs(identity["guard_api"], True)
+        self.assertIsNone(perf.run_identity_document({"base": "1" * 40, "head": "2" * 40}, "ab" * 32,
+                                                     {"base": [], "head": []}, True, {}, False, {})["guard_api"])
+        self.assertIn("GUARD_SPANS_CFG in harness_cfgs))", inspect.getsource(perf._compare))
+
+    def test_a_malformed_middle_take_is_incomplete_through_execute_run(self):
+        # Finding 3 through the production path: execute_run joins a run whose middle take is malformed into
+        # named, incomplete verdicts kept as evidence, without raising.
+        staging = Path(self.temporary.name) / "staging"
+        sidecars = guard_run(3)
+        sidecars[1]["panes"][0].pop("pending")
+        phases = guard_phases(staging, sidecars)
+        self.scratch_files = {phase["guard_correlation"]["file"]: (staging / phase["guard_correlation"]["file"]).read_bytes()
+                              for phase in phases}
+        body = valid_result()
+        template = body["phases"][0]
+        body["phases"] = [dict(template, name=phase["name"], guard_correlation=phase["guard_correlation"],
+                               guard_correlation_transport_ns=10) for phase in phases]
+        self.result_body = body
+        gate = FakeGate(lambda step: self.fake_harness(step, False))
+        host = perf.Host(gate, self.table, self.front_run, self.home, self.temp_root, set(), {"HOME": "/h"},
+                         clock=lambda: LAUNCH_UNIX_S)
+        plan = perf.RunPlan(IDLE_SCENARIO, "default", "smoke", Path("/b/perf_scenarios"), GUARD_HASH, short=True,
+                            smoke=True, source_root=self.source_root, guard_correlation_schema=1, guard_api=True)
+        evidence = Path(self.temporary.name) / "evidence" / "guard"
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            try:
+                perf.execute_run(plan, host, evidence)
+            except Exception as error:  # noqa: BLE001 - any raise is the defect under test
+                self.fail(f"execute_run raised on a malformed take: {type(error).__name__}: {error}")
+        verdicts = json.loads((evidence / "guard-correlation-join.json").read_text(encoding="utf-8"))
+        self.assertEqual([verdict["verdict"] for verdict in verdicts], ["incomplete"] * 3)
+        self.assertTrue(any("lacks ['pending']" in reason for reason in verdicts[1]["reasons"]), verdicts[1])
+        self.assertIn("guard correlation flood: incomplete", printed.getvalue())
+
     def front_run(self, argv, timeout_s):
         """Answer lsappinfo: no front application, or each sample's front pid in turn; None fails the lookup."""
         if not self.front_pids:
@@ -2006,6 +2079,10 @@ class ExecuteRunTests(unittest.TestCase):
             default = valid_result(presenter=WGPU_PRESENTER) if getattr(self, "windows_run", False) else valid_result()
             body = self.result_body if self.result_body is not None else default
             (scratch / "result.json").write_text(json.dumps(body), encoding="utf-8")
+            # Extra scratch files a test names, such as guard-correlation sidecars, written beside the result.
+            for relative, raw in getattr(self, "scratch_files", {}).items():
+                (scratch / relative).parent.mkdir(parents=True, exist_ok=True)
+                (scratch / relative).write_bytes(raw)
         output = "harness finished\n"
         if self.font_error:
             output = ('E config: Unable to load the configured primary font "Rec Mono St.Helens" (weight=Regular, '
@@ -5163,9 +5240,9 @@ class WindowsComparisonLegTests(unittest.TestCase):
         return load_perf_workflow()["jobs"][job_id]["strategy"]["matrix"]["include"]
 
     def test_every_scenario_runs_once_per_platform(self):
-        # Each platform's shards partition the common scenario sets plus its own S11 variants; Windows keeps five
-        # shards.
-        for job_id, platform_name, runner, counts in (("compare-macos", "macOS", "macos-14", (3, 4, 5)),
+        # Each platform's shards partition the common scenario sets plus its own S11 variants. macOS runs four
+        # shards, one per macOS slot that reaches perf; Windows keeps five.
+        for job_id, platform_name, runner, counts in (("compare-macos", "macOS", "macos-14", (4,)),
                                                        ("compare-windows", "Windows", "windows-latest", (5,))):
             with self.subTest(job=job_id):
                 entries = self.matrix(job_id)
@@ -5174,31 +5251,40 @@ class WindowsComparisonLegTests(unittest.TestCase):
                                  {(platform_name, runner)})
                 scenarios = [scenario for entry in entries for scenario in entry["scenarios"].split()]
                 self.assertEqual(sorted(scenarios), sorted(ALL_SCENARIOS + PLATFORM_SCENARIOS[platform_name]))
-                # The S11 variants join the existing S4-S5-S11 shard; no shard is renamed.
-                shard = next(entry for entry in entries if entry["shard"] == "S4-S5-S11")
-                platform_variants = PLATFORM_SCENARIOS[platform_name]
-                self.assertEqual(shard["scenarios"].split()[:3], ["S4", "S5", "S11"])
-                self.assertEqual(shard["scenarios"].split()[3:3 + len(platform_variants)], platform_variants)
                 self.assertEqual(len({entry["shard"] for entry in entries}), len(entries))
+        # Windows keeps its S11 variants in S4-S5-S11, after S4, S5 and S11.
+        shard = next(entry for entry in self.matrix("compare-windows") if entry["shard"] == "S4-S5-S11")
+        self.assertEqual(shard["scenarios"].split()[:6], ["S4", "S5", "S11"] + PLATFORM_SCENARIOS["Windows"])
+
+    def test_the_macos_shards_are_the_reviewed_four_set_partition(self):
+        # The partition balanced from trial-2 costs (about 830 s each); a change here needs remeasuring.
+        self.assertEqual({entry["shard"]: entry["scenarios"].split() for entry in self.matrix("compare-macos")}, {
+            "S7-S4": ["S7", "S4", "S1/atlas-retry"],
+            "S9-S10sync": ["S10/sync", "S9", "S11", "S6", "S1", "S5"],
+            "S10-S11release": ["S10", "S11/release", "S2/flood"],
+            "S2-S3-S8-S12": ["S2", "S12", "S3", "S8", "S6/selection-drag", "S6/flood"],
+        })
 
     def test_the_atlas_retry_variant_runs_in_the_shard_its_projection_names(self):
-        # The projection in perf.yml places S1/atlas-retry where measured slack absorbs it: macOS S4-S5-S11, since
-        # macOS S1-S3-S6-S8-S12 was the zero-slack critical path, and Windows S1-S3-S6-S8-S12, since Windows
-        # S4-S5-S11 was critical once.
-        for job_id, shard_name in (("compare-macos", "S4-S5-S11"), ("compare-windows", "S1-S3-S6-S8-S12")):
+        # S1/atlas-retry runs where its shard has room: macOS S7-S4 in the four-set partition, and Windows
+        # S1-S3-S6-S8-S12, since Windows S4-S5-S11 was critical once.
+        for job_id, shard_name in (("compare-macos", "S7-S4"), ("compare-windows", "S1-S3-S6-S8-S12")):
             with self.subTest(job=job_id):
                 holders = [entry["shard"] for entry in self.matrix(job_id)
                            if "S1/atlas-retry" in entry["scenarios"].split()]
                 self.assertEqual(holders, [shard_name])
 
     def test_only_the_s9_s10_shards_run_s9_laps(self):
-        # Every matrix entry carries a laps field: S9 on the S9-S10 shard of each platform, empty elsewhere; each
-        # comparison step passes the laps flags only when the field is set, and no step sets timeout-minutes.
-        for job_id in ("compare-macos", "compare-windows"):
+        # Every matrix entry carries a laps field: S9 on the shard holding S9 (macOS S9-S10sync, Windows S9-S10),
+        # empty elsewhere; each comparison step passes the laps flags only when the field is set, and no step sets
+        # timeout-minutes.
+        for job_id, laps_shard in (("compare-macos", "S9-S10sync"), ("compare-windows", "S9-S10")):
             with self.subTest(job=job_id):
                 entries = self.matrix(job_id)
                 self.assertEqual({entry["shard"]: entry["laps"] for entry in entries if entry["laps"]},
-                                 {"S9-S10": "S9"})
+                                 {laps_shard: "S9"})
+                holder = next(entry for entry in entries if entry["shard"] == laps_shard)
+                self.assertIn("S9", holder["scenarios"].split())
                 self.assertTrue(all("laps" in entry for entry in entries))
                 step = next(step for step in load_perf_workflow()["jobs"][job_id]["steps"]
                             if step.get("name") == "Compare the base and the head")
@@ -8214,8 +8300,26 @@ HEAD_OUTCOME = {"kind": "valid", "side": "head", "scenario": "S12", "variant": "
 
 
 class CellLayoutArtifactTests(unittest.TestCase):
-    """The reader takes only the requested workflow run's S1-S3-S6-S8-S12 head runs, names evidence from anything
-    else, and turns unreadable files into named invalid runs instead of failing."""
+    """The reader takes only the requested workflow run's S12-shard head runs, names evidence from anything else, and
+    turns unreadable files into named invalid runs instead of failing."""
+
+    def test_each_platform_reads_only_its_own_s12_shard(self):
+        # macOS reads its four-shard S2-S3-S8-S12 and its earlier S1-S3-S6-S8-S12; Windows reads only its own
+        # S1-S3-S6-S8-S12, never the macOS name; a timing.json naming another shard is a named problem.
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            write_cell_artifact(root, "macOS", [("01-head", HEAD_OUTCOME)], shard="S2-S3-S8-S12")
+            write_cell_artifact(root, "Windows", [("01-head", HEAD_OUTCOME)], shard="S2-S3-S8-S12")
+            runs = perf.read_cell_layout_runs(root, "1", CELL_HEAD)
+            self.assertEqual([run.problem for run in runs["macOS"]], [None])
+            self.assertEqual(runs["Windows"], [])
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            artifact = write_cell_artifact(root, "macOS", [("01-head", HEAD_OUTCOME)], shard="S2-S3-S8-S12")
+            (artifact / "timing.json").write_text(json.dumps({"run_id": "1", "shard": "S7-S4"}), encoding="utf-8")
+            runs = perf.read_cell_layout_runs(root, "1", CELL_HEAD)
+            # A run read without its shard check has no problem; that must fail as an assertion, not a TypeError.
+            self.assertIn("artifact shard S7-S4, expected S2-S3-S8-S12", runs["macOS"][0].problem or "")
 
     def test_the_reader_keeps_provenance_and_names_foreign_evidence(self):
         with tempfile.TemporaryDirectory() as scratch:
@@ -9578,10 +9682,11 @@ class RunIdentityTests(CompareHarness, unittest.TestCase):
         self.assertEqual(identity["flag_metrics_version"], require(perf, "FLAG_METRICS_VERSION", self))
         self.assertEqual(set(identity), {"schema_version", "run_id", "run_attempt", "platform", "base_sha",
                                          "head_sha", "harness_hash", "settings", "flag_metrics_version", "sets",
-                                         "capabilities"})
+                                         "capabilities", "guard_api"})
         # The harness's declared capabilities, so perf-flags validates each result as perf-compare did.
         self.assertEqual(identity["capabilities"],
-                         {"latency_split_schema": None, "phase_kinds": None, "s10_attribution": None})
+                         {"latency_split_schema": None, "phase_kinds": None, "s10_attribution": None,
+                          "echo_timeline_schema": None, "guard_correlation_schema": None})
         # Each set's final inventory: per side its blocked or failed status and the attempt directories it accepted,
         # so perf-flags binds results to accepted executions, never to whatever valid-looking files it finds.
         self.assertEqual(identity["sets"], [{"label": "S1/default", "dataset": "timed",
@@ -9594,7 +9699,8 @@ class RunIdentityTests(CompareHarness, unittest.TestCase):
         _code, _gate, _calls, _plans, _work, out = self.compare(listing=LIST_WITH_KINDS)
         identity = json.loads((out / "run-identity.json").read_text(encoding="utf-8"))
         self.assertEqual(identity.get("capabilities"),
-                         {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": None})
+                         {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": None,
+                          "echo_timeline_schema": None, "guard_correlation_schema": None})
 
     def test_an_attribution_comparison_records_its_capability(self):
         # A head whose list declares the S10 attribution schema records it, so perf-flags validates attribution
@@ -9603,7 +9709,47 @@ class RunIdentityTests(CompareHarness, unittest.TestCase):
         _code, _gate, _calls, _plans, _work, out = self.compare(listing=listing)
         identity = json.loads((out / "run-identity.json").read_text(encoding="utf-8"))
         self.assertEqual(identity.get("capabilities"),
-                         {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": 1})
+                         {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": 1,
+                          "echo_timeline_schema": None, "guard_correlation_schema": None})
+
+    def test_an_echo_timeline_comparison_records_its_capability_and_plans_carry_it(self):
+        # A head whose list declares the echo-timeline schema records it for perf-flags, and every plan carries it
+        # with the plan's own scenario and variant, so each result is validated under it.
+        capabilities = {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": 1, "echo_timeline_schema": 1}
+        _code, _gate, _calls, plans, _work, out = self.compare(listing={**LIST_JSON, "capabilities": capabilities})
+        identity = json.loads((out / "run-identity.json").read_text(encoding="utf-8"))
+        self.assertEqual(identity.get("capabilities"), {**capabilities, "guard_correlation_schema": None})
+        self.assertEqual({plan.echo_timeline_schema for plan in plans}, {1})
+        self.assertIn("echo_timeline_schema=plan.echo_timeline_schema", inspect.getsource(perf.execute_run))
+        self.assertIn("scope=(plan.scenario.id, plan.variant)", inspect.getsource(perf.execute_run))
+
+    def test_a_guard_correlation_comparison_records_its_capability_and_plans_carry_it(self):
+        # A head whose list declares the guard-correlation contract records it for perf-flags, every plan carries
+        # it, and each plan knows whether both sides were built with the take's cfg; execute_run validates under it.
+        capabilities = {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": 1,
+                        "echo_timeline_schema": 1, "guard_correlation_schema": 1}
+        _code, _gate, _calls, plans, _work, out = self.compare(listing={**LIST_JSON, "capabilities": capabilities})
+        identity = json.loads((out / "run-identity.json").read_text(encoding="utf-8"))
+        self.assertEqual(identity.get("capabilities"), capabilities)
+        self.assertEqual({plan.guard_correlation_schema for plan in plans}, {1})
+        self.assertTrue(all(isinstance(plan.guard_api, bool) for plan in plans))
+        self.assertIn("guard_correlation_schema=plan.guard_correlation_schema", inspect.getsource(perf.execute_run))
+        for value in (True, 1.0, 2):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                perf.parse_scenario_list(json.dumps(
+                    {**LIST_JSON, "capabilities": {"latency_split_schema": 1, "guard_correlation_schema": value}}))
+
+    def test_a_list_declares_the_echo_timeline_schema_strictly(self):
+        # Only a known integer schema is read; a bool, a float or an unknown schema is refused, never legacy.
+        listed = perf.parse_scenario_list(json.dumps(
+            {**LIST_JSON, "capabilities": {"latency_split_schema": 1, "echo_timeline_schema": 1}}))
+        self.assertEqual([scenario.echo_timeline_schema for scenario in listed], [1, 1])
+        self.assertEqual([scenario.echo_timeline_schema
+                          for scenario in perf.parse_scenario_list(json.dumps(LIST_WITH_SPLIT))], [None, None])
+        for value in (True, 1.0, 2, "1"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                perf.parse_scenario_list(json.dumps(
+                    {**LIST_JSON, "capabilities": {"latency_split_schema": 1, "echo_timeline_schema": value}}))
 
     def test_a_failed_side_lists_no_accepted_attempt(self):
         # A side that ends blocked or failed discards its valid attempts, and the inventory says so.
@@ -10332,6 +10478,959 @@ class CompletenessCheckpointTests(unittest.TestCase):
         self.assertEqual(perf.completeness_lines(rows)[-1],
                          "- S9 timed head (macos, scale 1.0): certified, 2 terminal and 0 chrome missing, atlas 512x512")
         self.assertEqual(perf.completeness_lines([]), [])
+
+
+
+# The seven integer-ns parts of a 10 ms credited sample, and the two tail sub-parts of the seventh.
+TIMELINE_PARTS = {"input_to_parse": 2_000_000, "parse_to_publication": 3_000_000,
+                  "publication_to_frame_request": 1_000_000, "frame_request_to_entry": 1_000_000,
+                  "entry_to_render": 500_000, "render": 1_500_000, "render_exit_to_credited_end": 1_000_000}
+# Every schema-1 field null, the shape of a timeline that derived nothing.
+TIMELINE_NULLS = {key: None for key in perf.TIMELINE_KEYS}
+# Readiness found by an output check before the credited entry.
+TIMELINE_READINESS = {"outcome": "native_request", "loop_seq": 4, "site": "output_service"}
+# A bound pair that fell back: no permit consumed, so no identity and no tick.
+TIMELINE_FALLBACK_PAIR = {"credited_dispatch_seq": 3, "admission": "fallback", "permit_identity": "none",
+                          "tick_qualified": False}
+# A sample whose own split reason is set, so it has no split.
+OWN_REASON = {"split_reason": "unsupported", "split": None}
+
+
+def timeline(variant="ordered", **overrides):
+    """One credited sample's schema-1 `echo_timeline` as the harness writes it for `variant`; overrides replace
+    keys and DROP removes one."""
+    identity = {"schema": 1, "token": 7, "window": 1, "pane": 2}
+    ordered = {**TIMELINE_NULLS, **identity, "availability": "recorded", "ordering": "ordered",
+               "ready_before_publication": False, "overflow": False, "parts_ns": dict(TIMELINE_PARTS),
+               "render_exit_to_dispatch_return_ns": 600_000, "dispatch_return_to_credited_end_ns": 400_000,
+               "latest_read_to_parse_ns": 50_000, "read_stamp": "stamped", "readiness": dict(TIMELINE_READINESS),
+               "admission": "permit", "permit_present_ns": 700_000, "permit_absent_ns": 300_000,
+               "permit_identity": "known", "tick_qualified": True, "tick_to_entry_ns": 900_000,
+               "flood_services": 0, "m3_complete": True, "credited_dispatch_seq": 3}
+    recorded = {**TIMELINE_NULLS, **identity, "availability": "recorded", "overflow": False,
+                "read_stamp": "stamped", "latest_read_to_parse_ns": 50_000}
+    # A chain interval reversed against the harness's credited end: bound, read, but not ordered.
+    event_order = {**recorded, "ordering": "clock-order", "ordering_reason": "event-order",
+                   "ready_before_publication": False, "readiness": dict(TIMELINE_READINESS), **TIMELINE_FALLBACK_PAIR}
+    variants = {
+        "ordered": ordered,
+        # Ordered through the fallback: no permit was consumed, so no occupancy, no tick and no B2.
+        "ordered-fallback": {**ordered, "admission": "fallback", "permit_present_ns": None, "permit_absent_ns": None,
+                             "permit_identity": "none", "tick_qualified": False, "tick_to_entry_ns": None,
+                             "flood_services": 3, "m3_complete": False, "read_stamp": "missing-or-unrepresentable",
+                             "latest_read_to_parse_ns": None},
+        "during-dispatch": {**event_order, "ordering": "published_during_dispatch", "ordering_reason": None},
+        "split-only": {**recorded, "ordering": "split_only", "ordering_reason": "no-credited-pair"},
+        # Bound, but readiness came after the entry: the pair's fields with no occupancy and no flood interval.
+        "after-entry": {**recorded, "ordering": "split_only", "ordering_reason": "readiness-after-entry",
+                        "ready_before_publication": False, "credited_dispatch_seq": 3, "admission": "admitted",
+                        "permit_identity": "none", "tick_qualified": False,
+                        "readiness": {"outcome": "marked_in_flight", "loop_seq": 9, "site": None}},
+        "overflow": {**recorded, "overflow": True, "ordering": "split_only", "ordering_reason": "overflow"},
+        "malformed": {**recorded, "ordering": "clock-order", "ordering_reason": "tick-sequence"},
+        "event-order": event_order,
+        # An unrepresentable instant before binding derives nothing; one in the chain keeps the pair and readiness.
+        "unrepresentable-early": {**recorded, "ordering": "clock-order", "ordering_reason": "unrepresentable-instant"},
+        "unrepresentable-late": {**event_order, "ordering_reason": "unrepresentable-instant",
+                                 "ready_before_publication": None},
+        # The sample's own split reason, kept as the timeline's.
+        "own-reason": {**recorded, "ordering": "split_only", "ordering_reason": "unsupported",
+                       "latest_read_to_parse_ns": None},
+        "unavailable": {**TIMELINE_NULLS, **identity, "availability": "unavailable", "unavailable_reason": "cfg-off"},
+        "rejected": {**TIMELINE_NULLS, **identity, "availability": "rejected", "rejection_reason": "mismatch"},
+    }
+    body = {**variants[variant], **overrides}
+    return {key: value for key, value in body.items() if value is not DROP}
+
+
+def timeline_sample(echo_timeline, **overrides):
+    """A credited 10 ms split sample carrying `echo_timeline`; overrides replace sample keys."""
+    return split_sample((2.0, 3.0, 5.0), echo_timeline=echo_timeline, **overrides)
+
+
+# A split whose publication-to-present part disagrees with the timeline's last five parts.
+LAST_FIVE_SPLIT = dict(split_sample()["split"], publication_to_present_ms=4.0)
+
+
+def timeline_latency(samples, coverage=DROP):
+    """A schema-1 latency object carrying `samples` and the coverage the harness writes over its credited samples,
+    one without a timeline object counted as empty; `coverage` supplies another."""
+    latency = split_latency(samples)
+    credited = [sample["echo_timeline"] if isinstance(sample.get("echo_timeline"), dict) else {}
+                for sample in samples if sample["latency_ms"] is not None]
+    latency["echo_timeline_coverage"] = perf.timeline_coverage(credited) if coverage is DROP else coverage
+    return latency
+
+
+def timeline_problems(latency, schema=1, scope=("S2", "default"), split=1, **result_fields):
+    """What validate_result reports for a result carrying `latency`, under the split schema, the declared
+    echo-timeline schema and the run's scope."""
+    return perf.validate_result(valid_result(latency=latency, **result_fields), HARNESS_HASH, 0,
+                                latency_split_schema=split, echo_timeline_schema=schema, scope=scope)
+
+
+def timeline_side(*timelines_per_run, coverage=True):
+    """A side's valid counters runs, each with one credited sample per timeline (None for a sample without one);
+    `coverage=False` is a legacy harness that writes neither the coverage nor any timeline."""
+    runs = []
+    for timelines in timelines_per_run:
+        if coverage:
+            latency = timeline_latency([timeline_sample(entry) for entry in timelines])
+        else:
+            latency = split_latency([split_sample() for _ in timelines])
+        runs.append(make_outcome(result=counters_result(latency=latency)))
+    return perf.SideRuns(outcomes=runs)
+
+
+def producer_split_reason(reason, bound=True):
+    """The JSON timeline.rs writes for a credited sample whose own split reason is `reason`: the pair is bound and
+    its admission, permit and tick read, while readiness, the read-to-parse duration, occupancy and the flood
+    interval stay null; `bound=False` is the same record with no render inside the forward."""
+    entry = {**TIMELINE_NULLS, "schema": 1, "availability": "recorded", "overflow": False, "read_stamp": "stamped",
+             "ordering": "clock-order" if reason == "clock-order" else "split_only", "ordering_reason": reason,
+             "token": 11, "window": 7, "pane": 3}
+    if bound:
+        entry.update(credited_dispatch_seq=1, admission="permit", permit_identity="known", tick_qualified=True,
+                     tick_to_entry_ns=350)
+    return entry
+
+
+# Each timeline rule as one case breaking it alone: (rule, the timeline, sample overrides). Every earlier rule
+# holds, so the named rule is the first the reader reports.
+TIMELINE_RULE_CASES = (
+    ("keys", timeline(token=DROP), {}),
+    ("keys", timeline(extra=1), {}),
+    ("schema", timeline(schema=2), {}),
+    ("field-types", timeline(flood_services=-1), {}),
+    ("field-types", timeline(token=True), {}),
+    ("field-types", timeline(token=2 ** 64), {}),
+    ("field-types", timeline(credited_dispatch_seq=2 ** 32), {}),
+    ("field-types", timeline(readiness=dict(TIMELINE_READINESS, loop_seq=2 ** 32)), {}),
+    ("field-types", timeline(readiness=dict(TIMELINE_READINESS, site="paint")), {}),
+    ("field-types", timeline(parts_ns={**TIMELINE_PARTS, "render": 1.5}), {}),
+    ("field-types", timeline(parts_ns={**TIMELINE_PARTS, "render": 10 ** 400}), {}),
+    ("field-types", timeline(ordering="sideways"), {}),
+    ("availability-reason", timeline(unavailable_reason="cfg-off"), {}),
+    ("availability-reason", timeline("rejected", rejection_reason=None), {}),
+    ("rejection-reason", timeline("rejected", rejection_reason="loop-sequence"), {}),
+    ("unavailable-reason", timeline("unavailable", unavailable_reason="later"), {}),
+    ("unrecorded-carries-diagnostics", timeline("rejected", m3_complete=True, flood_services=0), {}),
+    ("unrecorded-carries-diagnostics", timeline("unavailable", ordering="ordered"), {}),
+    ("recorded-fields", timeline(read_stamp=None, latest_read_to_parse_ns=None), {}),
+    ("parts-without-ordered", timeline("split-only", parts_ns=dict(TIMELINE_PARTS)), {}),
+    ("parts-without-ordered", timeline(parts_ns=None), {}),
+    ("ordered-with-overflow", timeline(overflow=True), {}),
+    ("ordered-split", timeline(), {"split_reason": "unsupported"}),
+    ("ordered-split", timeline(credited_dispatch_seq=None, admission=None, permit_identity=None,
+                               tick_qualified=None, tick_to_entry_ns=None), {}),
+    ("overflow-event-fields", timeline("overflow", admission="fallback"), {}),
+    ("malformed-derives-nothing", timeline("malformed", flood_services=2, m3_complete=True), {}),
+    ("malformed-derives-nothing", timeline("malformed", ordering="split_only"), {}),
+    ("malformed-derives-nothing", timeline("malformed", **TIMELINE_FALLBACK_PAIR), {}),
+    ("reason-known", timeline("split-only", ordering_reason="fiction"), {}),
+    ("reason-status", timeline(ordering_reason="sum"), {}),
+    ("reason-status", timeline("split-only", ordering_reason=None), {}),
+    ("reason-status", timeline("event-order", ordering="split_only"), {}),
+    ("reason-precedence", timeline("split-only"), OWN_REASON),
+    ("reason-precedence", timeline("own-reason"), {}),
+    ("reason-overflow", timeline("split-only", overflow=True), {}),
+    ("reason-overflow", timeline("overflow", overflow=False), {}),
+    ("bound-pair", timeline("split-only", credited_dispatch_seq=3), {}),
+    ("bound-pair", timeline("ordered-fallback", permit_identity="known"), {}),
+    ("bound-pair", timeline(permit_identity=None), {}),
+    ("reason-binding", timeline("split-only", **TIMELINE_FALLBACK_PAIR), {}),
+    ("reason-binding", timeline("split-only", ordering_reason="missing-event:output-check"), {}),
+    ("reason-readiness", timeline("after-entry", ordering_reason="missing-event:output-check",
+                                  ready_before_publication=None), {}),
+    ("reason-readiness", timeline(readiness=None, ready_before_publication=None), {}),
+    ("readiness-split", timeline("unrepresentable-late", latest_read_to_parse_ns=None), OWN_REASON),
+    ("readiness-split", timeline("unrepresentable-late", latest_read_to_parse_ns=None, flood_services=4,
+                                 m3_complete=True), OWN_REASON),
+    ("readiness-split", timeline("split-only", readiness=dict(TIMELINE_READINESS)), {"split": None}),
+    ("unrepresentable-pair", timeline("unrepresentable-late", readiness=None), {}),
+    ("after-entry-intervals", timeline("after-entry", flood_services=1, m3_complete=True), {}),
+    ("after-entry-intervals", timeline("after-entry", permit_present_ns=1, permit_absent_ns=1), {}),
+    ("ready-before-reason", timeline("after-entry", ordering_reason="ready-before-publication"), {}),
+    ("ready-before-reason", timeline("split-only", ready_before_publication=True), {}),
+    ("ready-before-reason", timeline("event-order", ready_before_publication=True), {}),
+    ("unrepresentable-publication", timeline("unrepresentable-late", ready_before_publication=True), {}),
+    ("unrepresentable-publication", timeline("unrepresentable-late", ready_before_publication=False), {}),
+    ("ordered-prerequisites", timeline(ready_before_publication=None), {}),
+    ("ordered-prerequisites", timeline(flood_services=None, m3_complete=None), {}),
+    ("ordered-prerequisites", timeline(permit_present_ns=None, permit_absent_ns=None), {}),
+    ("sub-parts", timeline(render_exit_to_dispatch_return_ns=999), {}),
+    ("sub-parts", timeline(dispatch_return_to_credited_end_ns=None), {}),
+    ("parts-sum", timeline(parts_ns={**TIMELINE_PARTS, "render": 2_000_000}), {}),
+    ("split-parts", timeline(parts_ns={**TIMELINE_PARTS, "input_to_parse": 0, "parse_to_publication": 5_000_000}),
+     {}),
+    ("split-parts", timeline(), {"split": LAST_FIVE_SPLIT}),
+    ("occupancy-sum", timeline(permit_present_ns=700_000_000, permit_absent_ns=300_000_000), {}),
+    ("tick-to-entry-without-qualified", timeline(tick_qualified=False), {}),
+    ("tick-qualified-identity", timeline(permit_identity="unknown"), {}),
+    ("permit-durations", timeline(permit_absent_ns=None), {}),
+    ("permit-durations", timeline("ordered-fallback", permit_present_ns=500_000, permit_absent_ns=500_000), {}),
+    ("read-to-parse-stamp", timeline(read_stamp="not-configured"), {}),
+    ("context-prerequisites", timeline("after-entry", ordering_reason="missing-event:output-check", readiness=None,
+                                       ready_before_publication=None, flood_services=1, m3_complete=True), {}),
+    ("context-prerequisites", timeline("after-entry", ordering_reason="missing-event:output-check", readiness=None,
+                                       ready_before_publication=None, permit_present_ns=1, permit_absent_ns=1), {}),
+    ("context-prerequisites", timeline("split-only", flood_services=1, m3_complete=True), {}),
+    ("context-prerequisites", timeline("unrepresentable-early", flood_services=1, m3_complete=True), {}),
+    ("context-prerequisites", dict(producer_split_reason("pane-not-shown"), permit_present_ns=1, permit_absent_ns=1),
+     {"split_reason": "pane-not-shown", "split": None}),
+    ("read-to-parse-split", timeline("own-reason", latest_read_to_parse_ns=50_000), OWN_REASON),
+    ("read-to-parse-split", dict(producer_split_reason("clock-order"), latest_read_to_parse_ns=1),
+     {"split_reason": "clock-order", "split": None}),
+    ("flood-pair", timeline("event-order", flood_services=1), {}),
+    ("ready-before-publication-ordered", timeline(ready_before_publication=True), {}),
+)
+
+
+def population(numerator, denominator):
+    """One coverage population as the harness writes it."""
+    return {"numerator": numerator, "denominator": denominator}
+
+
+class EchoTimelineTests(CompareHarness, unittest.TestCase):
+    def test_every_disposition_the_producer_writes_is_accepted(self):
+        # Each disposition the harness can write passes every rule: ordered, fallback-ordered, published during the
+        # dispatch, named split-only, readiness after the entry, overflowed, malformed and still recorded, chain
+        # clock-order, an unrepresentable instant before or after binding, unavailable and rejected.
+        for variant in ("ordered", "ordered-fallback", "during-dispatch", "split-only", "after-entry", "overflow",
+                        "malformed", "event-order", "unrepresentable-early", "unrepresentable-late", "unavailable",
+                        "rejected"):
+            with self.subTest(variant=variant):
+                self.assertIsNone(perf._timeline_problem(timeline(variant), timeline_sample(None)))
+        legitimate = (
+            (timeline(read_stamp="missing-or-unrepresentable", latest_read_to_parse_ns=None), {}),
+            (timeline(permit_identity="unknown", tick_qualified=False, tick_to_entry_ns=None), {}),
+            (timeline(admission="admitted", permit_identity="none", tick_qualified=False, tick_to_entry_ns=None), {}),
+            (timeline("malformed", read_stamp="not-configured", latest_read_to_parse_ns=None), {}),
+            (timeline("after-entry", ready_before_publication=True), {}),
+            (timeline("rejected", rejection_reason="malformed-initial-permit"), {}),
+            (timeline("unavailable", unavailable_reason="exhausted", token=None, window=None), {}),
+            # A sample's own split reason stays the timeline's, overflowed or not, below only an unrepresentable
+            # instant and a malformed record; a sample whose own reason is clock-order keeps its status.
+            (timeline("own-reason"), OWN_REASON),
+            (timeline("own-reason", overflow=True), OWN_REASON),
+            (timeline("unrepresentable-early", latest_read_to_parse_ns=None), OWN_REASON),
+            (timeline("malformed", latest_read_to_parse_ns=None), OWN_REASON),
+            (timeline("own-reason", ordering="clock-order", ordering_reason="clock-order"),
+             {"split_reason": "clock-order", "split": None}),
+        )
+        for entry, overrides in legitimate:
+            with self.subTest(entry=entry, overrides=overrides):
+                self.assertIsNone(perf._timeline_problem(entry, timeline_sample(None, **overrides)))
+
+    def test_an_unrepresentable_instant_carries_only_what_its_sources_allow(self):
+        # Before binding (timeline.rs:1009-1012) it derives nothing; in the chain (875-881) it keeps the pair and the
+        # readiness of a valid split but has no publication instant, so no publication flag (1069-1073). Readiness
+        # comes only from the sample's split (981, 1054), whatever reason wins. Each holds through validate_result.
+        for name, entry, overrides in (
+                ("early", timeline("unrepresentable-early"), {}),
+                ("early, own reason", timeline("unrepresentable-early", latest_read_to_parse_ns=None), OWN_REASON),
+                ("late", timeline("unrepresentable-late"), {})):
+            with self.subTest(accepted=name):
+                self.assertEqual(timeline_problems(timeline_latency([timeline_sample(entry, **overrides)])), [])
+        for name, entry, overrides, rule in (
+                ("pair and readiness without a split",
+                 timeline("unrepresentable-late", latest_read_to_parse_ns=None), OWN_REASON, "readiness-split"),
+                ("and a flood interval",
+                 timeline("unrepresentable-late", latest_read_to_parse_ns=None, flood_services=4, m3_complete=True),
+                 OWN_REASON, "readiness-split"),
+                ("a publication flag", timeline("unrepresentable-late", ready_before_publication=True), {},
+                 "unrepresentable-publication")):
+            with self.subTest(refused=name):
+                problems = timeline_problems(timeline_latency([timeline_sample(entry, **overrides)]))
+                self.assertTrue(any(f"echo_timeline {rule}:" in problem for problem in problems), problems)
+
+    def test_a_samples_own_split_reason_keeps_its_bound_context(self):
+        # The producer binds the pair and reads its admission, permit and tick before the sample's own split reason
+        # suppresses readiness and the parts (timeline.rs:1026-1052), so these exact records are accepted, a known
+        # consumed tick outside M4 included, with or without a pair; any readiness or parts are still refused.
+        for reason in ("pane-not-shown", "clock-order", "row-identity-changed"):
+            for bound in (True, False):
+                with self.subTest(reason=reason, bound=bound):
+                    entry = producer_split_reason(reason, bound)
+                    sample = timeline_sample(entry, split_reason=reason, split=None)
+                    self.assertIsNone(perf._timeline_problem(entry, sample))
+                    self.assertFalse(perf._timeline_in_m4(entry))
+        sample = timeline_sample(None, split_reason="pane-not-shown", split=None)
+        with_readiness = dict(producer_split_reason("pane-not-shown"), readiness=dict(TIMELINE_READINESS))
+        self.assertEqual((perf._timeline_problem(with_readiness, sample) or "").split(":")[0], "reason-readiness")
+
+    def test_each_rule_names_the_inconsistency_it_rejects(self):
+        # Every inconsistent combination is a named problem, never a fallback, and every rule has a case.
+        for rule, entry, overrides in TIMELINE_RULE_CASES:
+            with self.subTest(rule=rule, entry=entry, overrides=overrides):
+                problem = perf._timeline_problem(entry, timeline_sample(None, **overrides))
+                self.assertEqual((problem or "").split(":")[0], rule, problem)
+        self.assertEqual({rule for rule, _entry, _overrides in TIMELINE_RULE_CASES},
+                         {name for name, _broken, _requirement in perf.TIMELINE_RULES})
+
+    def test_validation_reports_each_broken_sample_by_position(self):
+        # A result with a broken timeline fails validation, naming the sample and the rule.
+        samples = [timeline_sample(timeline()), timeline_sample(timeline(overflow=True))]
+        self.assertEqual(timeline_problems(timeline_latency(samples)),
+                         ["latency sample 1 echo_timeline ordered-with-overflow: an overflowed record is never ordered"])
+
+    def test_impossible_numbers_are_named_problems_never_exceptions(self):
+        # Values beyond the producer's integer widths, huge integers and booleans in a count are named schema
+        # problems from validate_result, before any float conversion can overflow.
+        entries = {"u64 identity": timeline(token=2 ** 80), "u32 dispatch": timeline(credited_dispatch_seq=2 ** 80),
+                   "u32 loop": timeline(readiness=dict(TIMELINE_READINESS, loop_seq=2 ** 80)),
+                   "huge part": timeline(parts_ns={**TIMELINE_PARTS, "render": 10 ** 400}),
+                   "boolean count": timeline(flood_services=True)}
+        for name, entry in entries.items():
+            with self.subTest(case=name):
+                problems = timeline_problems(timeline_latency([timeline_sample(entry)]))
+                self.assertTrue(any("echo_timeline field-types" in problem for problem in problems), problems)
+
+    def test_coverage_is_recomputed_from_the_per_sample_fields(self):
+        # Ordered, fallback-ordered, split-only, overflowed, malformed, unavailable and rejected credited samples:
+        # the ordered denominator and the credited one differ, and an uncredited sample counts in neither.
+        entries = [timeline(), timeline("ordered-fallback"), timeline("split-only"), timeline("overflow"),
+                   timeline("malformed"), timeline("unavailable"), timeline("rejected")]
+        self.assertEqual(perf.timeline_coverage(entries), {
+            "schema": 1, "availability": "available", "credited": 7, "recorded": population(5, 7),
+            "ordered": population(2, 7), "b2": population(1, 2), "m4": population(1, 2), "m3": population(1, 2),
+            "read_stamped": population(1, 2), "b2_of_credited": population(1, 7),
+            "m3_of_credited": population(1, 7)})
+        samples = [timeline_sample(entry) for entry in entries] + [
+            reason_sample("not-credited", None) | {"echo_timeline": None}]
+        self.assertEqual(timeline_problems(timeline_latency(samples)), [])
+
+    def test_every_credited_in_scope_sample_needs_a_timeline_and_counts(self):
+        # Under the declared schema a credited S2 sample carries an object, unavailable included: nine null
+        # timelines beside one ordered one are nine problems, and the credited denominator is ten, never one.
+        samples = [timeline_sample(timeline())] + [timeline_sample(None) for _ in range(9)]
+        shrunk = perf.timeline_coverage([timeline()])
+        problems = timeline_problems(timeline_latency(samples, coverage=shrunk))
+        self.assertEqual(sum("timeline-missing" in problem for problem in problems), 9, problems)
+        self.assertTrue(any("echo_timeline_coverage is" in problem for problem in problems), problems)
+        counted = timeline_latency(samples)["echo_timeline_coverage"]
+        self.assertEqual((counted["credited"], counted["ordered"]), (10, population(1, 10)))
+        unavailable = [timeline_sample(timeline("unavailable", unavailable_reason="not-recorded"))] * 2
+        self.assertEqual(timeline_problems(timeline_latency(unavailable)), [])
+        # A declared harness that drops every timeline field is not read as one that predates the schema.
+        stripped = timeline_problems(split_latency([split_sample()]))
+        self.assertIn("latency echo_timeline_coverage is missing", stripped)
+        self.assertIn("latency sample 0 is missing echo_timeline", stripped)
+
+    def test_the_scope_decides_which_samples_carry_a_timeline(self):
+        # Only a credited S2/default or S2/flood sample has one: an uncredited or out-of-scope sample carries null
+        # and its run reports null coverage. The run's scope wins; without one the result's own names decide.
+        in_scope = timeline_latency([timeline_sample(timeline())])
+        self.assertEqual(timeline_problems(in_scope, scope=("S2", "flood")), [])
+        out_of_scope = timeline_latency([timeline_sample(None)], coverage=None)
+        self.assertEqual(timeline_problems(out_of_scope, scope=("S1", "default")), [])
+        problems = timeline_problems(timeline_latency([timeline_sample(timeline())], coverage=None),
+                                     scope=("S1", "default"))
+        self.assertTrue(any("timeline-out-of-scope" in problem for problem in problems), problems)
+        problems = timeline_problems(in_scope, scope=("S1", "default"))
+        self.assertTrue(any("echo_timeline_coverage is" in problem for problem in problems), problems)
+        missing = timeline_latency([timeline_sample(None)])
+        self.assertEqual(timeline_problems(out_of_scope, scope=None, scenario="S1", variant="default"), [])
+        problems = timeline_problems(missing, scope=None, scenario="S2", variant="flood")
+        self.assertTrue(any("timeline-missing" in problem for problem in problems), problems)
+        self.assertEqual(timeline_problems(out_of_scope, scope=("S1", "default"), scenario="S2", variant="flood"),
+                         [])
+
+    def test_an_unavailable_side_has_null_populations_never_zero(self):
+        # Nothing recorded is unavailable with null populations; nothing credited is no coverage at all.
+        coverage = perf.timeline_coverage([timeline("unavailable"), timeline("rejected")])
+        self.assertEqual(coverage["availability"], "unavailable")
+        self.assertEqual(coverage["recorded"], population(0, 2))
+        self.assertTrue(all(coverage[name] is None for name in perf.TIMELINE_POPULATIONS), coverage)
+        self.assertIsNone(perf.timeline_coverage([]))
+        zero = perf.timeline_coverage([timeline("split-only"), timeline("malformed")])
+        self.assertEqual((zero["availability"], zero["ordered"], zero["b2"]),
+                         ("available", population(0, 2), population(0, 0)))
+
+    def test_supplied_coverage_that_disagrees_with_the_samples_fails(self):
+        # The supplied coverage is compared with the recomputation, never trusted; a zero for an unavailable
+        # side, a missing coverage, a missing timeline key and a timeline on an uncredited sample all fail.
+        samples = [timeline_sample(timeline()), timeline_sample(timeline("split-only"))]
+        honest = timeline_latency(samples)
+        inflated = copy.deepcopy(honest["echo_timeline_coverage"])
+        inflated["ordered"]["numerator"] = 2
+        unavailable = [timeline_sample(timeline("unavailable"))]
+        zeroed = copy.deepcopy(timeline_latency(unavailable)["echo_timeline_coverage"])
+        zeroed["ordered"] = population(0, 1)
+        cases = {
+            "inflated": (timeline_latency(samples, coverage=inflated), "echo_timeline_coverage is"),
+            "zero for unavailable": (timeline_latency(unavailable, coverage=zeroed), "echo_timeline_coverage is"),
+            "no coverage": ({key: value for key, value in honest.items() if key != "echo_timeline_coverage"},
+                            "echo_timeline_coverage is missing"),
+            "no timeline key": (timeline_latency([*samples, split_sample()]), "sample 2 is missing echo_timeline"),
+            "uncredited": (timeline_latency([*samples, reason_sample("not-credited", None)
+                                             | {"echo_timeline": timeline()}]), "timeline-out-of-scope"),
+            "not an object": (timeline_latency([timeline_sample("ordered")]), "object: is neither null"),
+        }
+        self.assertEqual(timeline_problems(honest), [])
+        for name, (latency, expected) in cases.items():
+            with self.subTest(case=name):
+                problems = timeline_problems(latency)
+                self.assertTrue(any(expected in problem for problem in problems), problems)
+
+    def test_the_coverage_shape_is_strict_before_any_equality(self):
+        # A bool or a float equals an integer in Python, so the shape is checked first: each of these equals the
+        # honest coverage under `==`, or breaks its shape, and is a named problem either way.
+        honest = timeline_latency([timeline_sample(timeline())])
+        coverage = honest["echo_timeline_coverage"]
+        self.assertEqual({**coverage, "schema": True}, coverage)
+        broken = {
+            "schema bool": {**coverage, "schema": True},
+            "credited bool": {**coverage, "credited": True},
+            "numerator bool": {**coverage, "ordered": {"numerator": True, "denominator": 1}},
+            "denominator float": {**coverage, "recorded": {"numerator": 1, "denominator": 1.0}},
+            "huge count": {**coverage, "credited": 10 ** 400},
+            "extra key": {**coverage, "extra": 1},
+            "missing key": {key: value for key, value in coverage.items() if key != "m4"},
+            "unknown availability": {**coverage, "availability": "partly"},
+            "null recorded": {**coverage, "recorded": None},
+            "half a population": {**coverage, "b2": {"numerator": 1}},
+        }
+        for name, supplied in broken.items():
+            with self.subTest(case=name):
+                problems = timeline_problems({**honest, "echo_timeline_coverage": supplied})
+                self.assertTrue(any(problem.startswith("latency echo_timeline_coverage") for problem in problems),
+                                problems)
+
+    def test_a_harness_that_declares_no_timeline_keeps_the_split_contract(self):
+        # A harness without the declaration predates the timeline: nothing is checked when it writes none, and a
+        # timeline or a coverage it writes anyway is a problem. Nothing is checked without the split schema.
+        self.assertEqual(timeline_problems(split_latency([split_sample()]), schema=None), [])
+        problems = timeline_problems(timeline_latency([timeline_sample(timeline())]), schema=None)
+        self.assertEqual(problems, ["latency echo_timeline is written, but the harness declares no "
+                                    "echo_timeline_schema"])
+        broken = timeline_latency([timeline_sample(timeline(overflow=True))])
+        self.assertEqual(split_problems(broken, schema=None),
+                         ["latency echo_timeline is written, but the harness declares no echo_timeline_schema"])
+
+    def test_the_timeline_does_not_hide_behind_a_null_split_capability(self):
+        # The echo-timeline schema depends on the split schema: declared without it is a problem, and its checks
+        # still run. With neither declared, a harness that writes a timeline is still refused.
+        legacy = {"inject_unix_s": 1.0, "latency_ms": 10.0, "attributed": True, "reason": "credited"}
+        overflowed = timeline(overflow=True)
+        latency = {"samples": [dict(legacy, echo_timeline=overflowed)], "attributed": 1, "total": 1,
+                   "coverage": 1.0, "echo_timeline_coverage": perf.timeline_coverage([overflowed])}
+        problems = timeline_problems(latency, split=None)
+        self.assertIn("echo_timeline_schema is declared without latency_split_schema 1", problems)
+        self.assertTrue(any("ordered-with-overflow" in problem for problem in problems), problems)
+        stripped = {"samples": [legacy], "attributed": 1, "total": 1, "coverage": 1.0}
+        problems = timeline_problems(stripped, split=None)
+        self.assertIn("latency echo_timeline_coverage is missing", problems)
+        self.assertIn("latency sample 0 is missing echo_timeline", problems)
+        self.assertEqual(timeline_problems(latency, split=None, schema=None),
+                         ["latency echo_timeline is written, but the harness declares no echo_timeline_schema"])
+        self.assertEqual(timeline_problems(stripped, split=None, schema=None), [])
+        with self.assertRaises(ValueError):
+            perf.parse_scenario_list(json.dumps({**LIST_JSON, "capabilities": {"echo_timeline_schema": 1}}))
+
+    def test_rows_print_each_population_per_side_with_points_and_the_verdict(self):
+        # Both sides recorded: every population's named numerator and denominator per side, the change in
+        # points, and the two-sided gate passing; only S2's two variants get rows.
+        side = timeline_side([timeline(), timeline("ordered-fallback")])
+        rows = perf.timeline_rows("S2/default", side, side)
+        self.assertEqual([row[2] for row in rows],
+                         ["echo timeline availability", *[label for label, _ in perf.TIMELINE_ROWS],
+                          "echo timeline coverage gate (ordered >= 80%, gap <= 10 points)"])
+        by_label = {row[2]: row[3:] for row in rows}
+        self.assertEqual(by_label["echo timeline availability"], ["available", "available", "n/a"])
+        self.assertEqual(by_label["echo timeline ordered / credited"], ["2/2 (100.0%)", "2/2 (100.0%)", "+0.0 pts"])
+        self.assertEqual(by_label["echo timeline B2 / ordered"], ["1/2 (50.0%)", "1/2 (50.0%)", "+0.0 pts"])
+        self.assertEqual(rows[-1][5], "pass (base 100.0%, head 100.0%)")
+        self.assertEqual(len(perf.timeline_rows("S2/flood", side, side)), len(rows))
+        self.assertEqual(perf.timeline_rows("S1/default", side, side), [])
+        self.assertIn("timeline_rows(result.label, result.base, result.head)", inspect.getsource(perf._compare))
+        # A credited sample without a timeline object stays in its side's credited denominator.
+        gapped = {row[2]: row[3:] for row in perf.timeline_rows("S2/default", timeline_side([timeline(), None]), side)}
+        self.assertEqual(gapped["echo timeline ordered / credited"][0], "1/2 (50.0%)")
+
+    def test_the_verdict_is_unavailable_against_a_legacy_harness_base(self):
+        # A legacy harness writes no timeline: its cells say so, nothing is compared, and the two-sided verdict is
+        # unavailable rather than a pass or a fail; neither side writing one prints no rows.
+        legacy = timeline_side([timeline(), timeline()], coverage=False)
+        head = timeline_side([timeline(), timeline()])
+        rows = perf.timeline_rows("S2/default", legacy, head)
+        self.assertTrue(all(row[3] == "n/a (no timeline)" for row in rows), rows)
+        self.assertTrue(all(row[5] == "n/a" for row in rows[:-1]), rows)
+        self.assertEqual(rows[-1][5], "unavailable (base recorded no timeline)")
+        self.assertEqual(perf.timeline_rows("S2/default", legacy, legacy), [])
+        head_only = perf.timeline_rows("S2/default", perf.SideRuns(blocked=perf.COUNTERS_HEAD_ONLY), head)
+        self.assertEqual(head_only[-1][3:], ["n/a", "2/2 (100.0%)", "unavailable (base recorded no timeline)"])
+
+    def test_the_verdict_is_unavailable_against_the_stub_base(self):
+        # The overlaid harness on the stub App writes an unavailable/not-recorded timeline for every credited
+        # sample: the side is unavailable with recorded 0/2, never a measured zero, and the verdict is unavailable.
+        stub = timeline_side([timeline("unavailable", unavailable_reason="not-recorded")] * 2)
+        rows = {row[2]: row[3:] for row in perf.timeline_rows("S2/default", stub, timeline_side([timeline()] * 2))}
+        self.assertEqual(rows["echo timeline availability"][0], "unavailable")
+        self.assertEqual(rows["echo timeline recorded / credited"][0], "0/2 (0.0%)")
+        self.assertEqual(rows["echo timeline ordered / credited"], ["unavailable", "2/2 (100.0%)", "n/a"])
+        self.assertEqual(rows["echo timeline coverage gate (ordered >= 80%, gap <= 10 points)"][2],
+                         "unavailable (base recorded no timeline)")
+
+    def test_an_unavailable_side_is_told_apart_from_a_measured_zero(self):
+        # A cfg-off base recorded nothing: unavailable, recorded 0/2, verdict unavailable. A base that recorded
+        # but ordered nothing is a measured 0.0% and fails the gate.
+        head = timeline_side([timeline(), timeline()])
+        off = {row[2]: row[3:] for row in perf.timeline_rows(
+            "S2/default", timeline_side([timeline("unavailable"), timeline("unavailable")]), head)}
+        self.assertEqual(off["echo timeline availability"][0], "unavailable")
+        self.assertEqual(off["echo timeline recorded / credited"][0], "0/2 (0.0%)")
+        self.assertEqual(off["echo timeline ordered / credited"], ["unavailable", "2/2 (100.0%)", "n/a"])
+        self.assertEqual(off["echo timeline coverage gate (ordered >= 80%, gap <= 10 points)"][2],
+                         "unavailable (base recorded no timeline)")
+        zero = {row[2]: row[3:] for row in perf.timeline_rows(
+            "S2/default", timeline_side([timeline("split-only"), timeline("malformed")]), head)}
+        self.assertEqual(zero["echo timeline ordered / credited"], ["0/2 (0.0%)", "2/2 (100.0%)", "+100.0 pts"])
+        self.assertEqual(zero["echo timeline B2 / ordered"], ["0/0 (n/a)", "2/2 (100.0%)", "n/a"])
+        self.assertEqual(zero["echo timeline coverage gate (ordered >= 80%, gap <= 10 points)"][2],
+                         "fail (base 0.0%, head 100.0%)")
+
+    def test_the_gate_is_exact_at_both_boundaries(self):
+        # Each side at least 80% and at most ten points apart, by integer cross-products: 82/100 against 92/100
+        # is exactly ten points and passes in both directions, with equal or unequal denominators; one more
+        # point fails; 80% exactly passes and 79% fails.
+        def coverage(ordered, credited):
+            return perf.timeline_coverage([timeline()] * ordered + [timeline("split-only")] * (credited - ordered))
+        cases = (((82, 100), (92, 100), "pass"), ((92, 100), (82, 100), "pass"), ((41, 50), (92, 100), "pass"),
+                 ((92, 100), (41, 50), "pass"), ((4, 5), (9, 10), "pass"), ((80, 100), (4, 5), "pass"),
+                 ((82, 100), (93, 100), "fail"), ((93, 100), (82, 100), "fail"), ((41, 50), (93, 100), "fail"),
+                 ((4, 5), (91, 100), "fail"), ((79, 100), (80, 100), "fail"), ((8, 10), (19, 20), "fail"))
+        for base, head, verdict in cases:
+            with self.subTest(base=base, head=head):
+                result = perf.timeline_coverage_verdict(coverage(*base), coverage(*head))
+                self.assertEqual(result.split(" ")[0], verdict, result)
+        self.assertEqual(perf.timeline_coverage_verdict(coverage(82, 100), coverage(92, 100)),
+                         "pass (base 82.0%, head 92.0%)")
+        self.assertTrue(perf.timeline_coverage_verdict(None, coverage(5, 5)).startswith("unavailable (base"))
+        unavailable = perf.timeline_coverage([timeline("unavailable")])
+        self.assertEqual(perf.timeline_coverage_verdict(coverage(5, 5), unavailable),
+                         "unavailable (head recorded no timeline)")
+
+
+GUARD_NONCE = "0123456789abcdef0123456789abcdef"
+GUARD_HASH = "ab" * 32
+
+
+def guard_pane(pane_id: int, prev_next: int, next_seq: int, **overrides: object) -> dict:
+    """One pane transfer with every §3.2 field, zeroed, then `overrides`."""
+    pane = {"pane_id": pane_id, "closed": False, "identities_exhausted": False,
+            "prev_next_section_seq": prev_next, "next_section_seq": next_seq, "carried_pending": None,
+            "records": [], "pending": None, "abandoned": [], "abandoned_overflow": 0, "abandoned_unlocated": 0,
+            "issued_dropped_located": 0, "issued_dropped_unlocated": 0, "losses": [], "loss_events": 0,
+            "losses_merged": False, "refused_closed": 0, "refused_exhausted": 0, "refused_unlocated": 0,
+            "first_refusal_ns": None}
+    pane.update(overrides)
+    return pane
+
+
+def guard_batch(prev_next: int, next_seq: int, **overrides: object) -> dict:
+    """One span batch with every §3.2 field, zeroed, then `overrides`."""
+    batch = {"spans": [], "spans_issued": 0, "spans_dropped_located": 0, "spans_dropped_unlocated": 0,
+             "losses": [], "loss_events": 0, "losses_merged": False, "collections_issued": 0,
+             "collections_refused_exhausted": 0, "prev_next_collection_seq": prev_next,
+             "next_collection_seq": next_seq, "identities_exhausted": False, "open_collections": 0}
+    batch.update(overrides)
+    return batch
+
+
+def guard_run(count: int) -> list[dict]:
+    """A valid run of `count` takes, startup first: take k's window starts at k*1000+100; pane 7 publishes section k
+    at [+10, +20] and one span holds [+15, +30], so each complete window overlaps by 5 ns."""
+    names = ["startup", "flood", "idle", "tail"]
+    sidecars = []
+    for take in range(1, count + 1):
+        start = take * 1000 + 100
+        record = {"section_seq": take, "before_lock_ns": start + 10, "locked_at_ns": start + 20}
+        span = {"pane_id": 7, "collection_seq": take, "acquired_ns": start + 15, "released_ns": start + 30}
+        sidecars.append({
+            "schema": 1, "run_nonce": GUARD_NONCE, "harness_hash": GUARD_HASH, "phase_index": take - 1,
+            "phase_name": names[take - 1], "take_seq": take, "clock": {"pid": 4242, "run_nonce": GUARD_NONCE},
+            "window": {"label": perf.GUARD_WINDOW_LABEL, "start_ns": start, "end_ns": start + 800},
+            "taken_at_ns": start + 850,
+            "panes": [guard_pane(7, take, take + 1, records=[record])],
+            "spans": guard_batch(take, take + 1, spans=[span], spans_issued=1, collections_issued=1),
+        })
+    return sidecars
+
+
+def guard_phases(root: Path, sidecars: list[dict]) -> list[dict]:
+    """Write each sidecar under `root` as the harness does and return the phase records naming them."""
+    (root / perf.GUARD_SIDECAR_DIR).mkdir(parents=True, exist_ok=True)
+    phases = []
+    for sidecar in sidecars:
+        file_name = f"{perf.GUARD_SIDECAR_DIR}/{sidecar['phase_index']}-{sidecar['phase_name']}.json"
+        raw = json.dumps(sidecar, separators=(",", ":")).encode()
+        (root / file_name).write_bytes(raw)
+        phases.append({"name": sidecar["phase_name"], "guard_correlation": {
+            "status": "written", "file": file_name, "take_seq": sidecar["take_seq"], "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(), "window": dict(sidecar["window"])}})
+    return phases
+
+
+def guard_rewrite(root: Path, phase: dict, mutate) -> None:
+    """Change a written phase's sidecar with `mutate` and re-record its size and digest, leaving the phase's own
+    window as it was."""
+    target = root / phase["guard_correlation"]["file"]
+    sidecar = json.loads(target.read_bytes())
+    mutate(sidecar)
+    raw = json.dumps(sidecar, separators=(",", ":")).encode()
+    target.write_bytes(raw)
+    phase["guard_correlation"].update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+
+
+def guard_status(name: str, take_seq: int | None = None) -> dict:
+    """A no-sidecar phase field of status `name`, with an unchanged window."""
+    return {"status": name, "file": None, "take_seq": take_seq, "bytes": None, "sha256": None,
+            "window": {"label": perf.GUARD_WINDOW_LABEL, "start_ns": 100, "end_ns": 900}}
+
+
+class GuardCorrelationTests(unittest.TestCase):
+    """#1584 D2.1b: the chained validation, window completeness and two-pointer join of raw guard takes."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="guard-join-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def verdicts(self, sidecars: list[dict], expected_hash: str | None = GUARD_HASH) -> list[dict]:
+        # Malformed or inconsistent evidence must come back as named reasons; an exception is a test failure.
+        try:
+            return perf.guard_correlation_verdicts(guard_phases(self.root, sidecars), self.root, expected_hash)
+        except Exception as error:  # noqa: BLE001 - any raise is the defect under test
+            self.fail(f"the join raised instead of naming a problem: {type(error).__name__}: {error}")
+
+    def kinds(self, verdicts: list[dict]) -> list[str]:
+        return [verdict["verdict"] for verdict in verdicts]
+
+    def test_overlap_at_each_end_containment_and_touching(self) -> None:
+        # J1: partial overlap at either end, a span inside the wait and the wait inside a span; touching is 0.
+        self.assertEqual(perf.guard_overlap([(10, 20)], [(5, 12)]), (2, 1, 1))
+        self.assertEqual(perf.guard_overlap([(10, 20)], [(18, 30)]), (2, 1, 1))
+        self.assertEqual(perf.guard_overlap([(10, 20)], [(12, 15)]), (3, 1, 1))
+        self.assertEqual(perf.guard_overlap([(10, 20)], [(0, 40)]), (10, 1, 1))
+        self.assertEqual(perf.guard_overlap([(10, 20)], [(0, 10), (20, 30)]), (0, 0, 0))
+        # A zero-length span strictly inside a wait shares no time, so it is neither a section nor a span.
+        self.assertEqual(perf.guard_overlap([(10, 20)], [(15, 15)]), (0, 0, 0))
+
+    def test_several_spans_in_one_wait_count_their_union_once(self) -> None:
+        # J2: disjoint spans inside one wait sum to their union; the section counts once, each span once.
+        self.assertEqual(perf.guard_overlap([(0, 100)], [(10, 20), (30, 50), (60, 61)]), (31, 1, 3))
+
+    def test_overlapping_spans_of_one_pane_fail_validation(self) -> None:
+        # J3: two spans of one pane cannot overlap; the take does not validate.
+        sidecars = guard_run(1)
+        batch = sidecars[0]["spans"]
+        batch["spans"].append(dict(batch["spans"][0], collection_seq=2, acquired_ns=1120))
+        batch.update(spans_issued=2, next_collection_seq=3)
+        verdict = self.verdicts(sidecars)[0]
+        self.assertEqual(verdict["verdict"], "incomplete")
+        self.assertTrue(any("overlap" in reason for reason in verdict["reasons"]), verdict)
+
+    def test_panes_are_isolated_and_a_span_needs_its_pane(self) -> None:
+        # J4: another pane's span never counts against pane 7's waits; a span whose pane has no container fails.
+        sidecars = guard_run(1)
+        sidecars[0]["panes"].append(guard_pane(8, 1, 1))
+        sidecars[0]["spans"]["spans"][0]["pane_id"] = 8
+        verdict = self.verdicts(sidecars)[0]
+        self.assertEqual((verdict["verdict"], verdict["observed_overlap_ns"]), ("complete", 0))
+        sidecars = guard_run(1)
+        sidecars[0]["spans"]["spans"][0]["pane_id"] = 9
+        verdict = self.verdicts(sidecars)[0]
+        self.assertIn("spans: a span's pane has no container", verdict["reasons"])
+
+    def test_identity_ranges_carries_and_sticky_flags(self) -> None:
+        # J5: a carry completing with an unchanged next validates; a carried identity twice, MAX without the
+        # flag, and a sticky flag turning false do not; abandoned_unlocated counts in the identity.
+        sidecars = guard_run(2)
+        first, second = sidecars[0]["panes"][0], sidecars[1]["panes"][0]
+        first.update(next_section_seq=3, pending={"section_seq": 2, "registered_ns": 1150})
+        second.update(prev_next_section_seq=3, next_section_seq=3, carried_pending=2,
+                      records=[{"section_seq": 2, "before_lock_ns": 2110, "locked_at_ns": 2120}])
+        verdicts = self.verdicts(sidecars)
+        self.assertEqual(self.kinds(verdicts), ["incomplete", "complete"], verdicts)
+        self.assertIn("pane 7: section 2 is pending", verdicts[0]["reasons"])
+        twice = copy.deepcopy(sidecars)
+        twice[1]["panes"][0]["abandoned"] = [{"section_seq": 2, "registered_ns": 2101, "abandoned_ns": 2102}]
+        self.assertEqual(self.kinds(self.verdicts(twice))[1], "incomplete")
+        sentinel = guard_run(1)
+        sentinel[0]["panes"][0].update(next_section_seq=perf.GUARD_U64_MAX)
+        self.assertTrue(any("u64::MAX" in reason for reason in self.verdicts(sentinel)[0]["reasons"]))
+        sticky = guard_run(2)
+        sticky[0]["panes"][0]["identities_exhausted"] = True
+        self.assertTrue(any("sticky" in reason for reason in self.verdicts(sticky)[1]["reasons"]))
+        # Two identities issued with one disposition fails only the accounting identity.
+        undisposed = guard_run(1)
+        undisposed[0]["panes"][0].update(next_section_seq=3)
+        reasons = self.verdicts(undisposed)[0]["reasons"]
+        self.assertIn("pane 7: 1 dispositions for 2 issued identities", reasons)
+        unlocated = guard_run(1)
+        unlocated[0]["panes"][0].update(records=[], abandoned_unlocated=1)
+        verdict = self.verdicts(unlocated)[0]
+        self.assertEqual(verdict["reasons"], ["pane 7: unlocated abandoned_unlocated"], verdict)
+
+    def test_binding_mismatches_fail(self) -> None:
+        # J6: a different pid, a substituted nonce, a clock nonce that differs, a reversed window and a
+        # non-increasing take time each fail, and every later take with them.
+        for mutate in (lambda sidecar: sidecar["clock"].update(pid=1),
+                       lambda sidecar: sidecar.update(run_nonce="f" * 32) or sidecar["clock"].update(run_nonce="f" * 32),
+                       lambda sidecar: sidecar["clock"].update(run_nonce="e" * 32),
+                       lambda sidecar: sidecar["window"].update(start_ns=sidecar["window"]["end_ns"] + 1),
+                       lambda sidecar: sidecar.update(taken_at_ns=1)):
+            sidecars = guard_run(3)
+            mutate(sidecars[1])
+            self.assertEqual(self.kinds(self.verdicts(sidecars)), ["complete", "incomplete", "incomplete"])
+
+    def test_a_null_harness_hash_unbinds_every_take(self) -> None:
+        # J6b: a null hash at the first, middle or last take makes every take incomplete, the earlier ones too.
+        for position in range(3):
+            sidecars = guard_run(3)
+            sidecars[position]["harness_hash"] = None
+            verdicts = self.verdicts(sidecars)
+            self.assertEqual(self.kinds(verdicts), ["incomplete"] * 3, position)
+            self.assertTrue(all(verdict["reasons"][0] == "harness_unbound" for verdict in verdicts))
+            self.assertTrue(all("observed_overlap_ns" not in verdict for verdict in verdicts))
+        sidecars = guard_run(2)
+        self.assertEqual(self.kinds(self.verdicts(sidecars, expected_hash="cd" * 32)), ["incomplete"] * 2)
+
+    def test_unsorted_input_gives_the_same_result(self) -> None:
+        # J7: records and spans in reverse order are sorted, validated and joined deterministically.
+        self.assertEqual(perf.guard_overlap([(50, 60), (0, 20)], [(55, 70), (10, 15)]),
+                         perf.guard_overlap([(0, 20), (50, 60)], [(10, 15), (55, 70)]))
+
+    def test_distinct_sections_and_spans(self) -> None:
+        # J8: two waits overlapping one span count two sections and one span.
+        self.assertEqual(perf.guard_overlap([(0, 10), (20, 30)], [(5, 25)]), (10, 2, 1))
+
+    def test_each_completeness_rule(self) -> None:
+        # J9: each §5.2 rule makes the window incomplete; losses_merged alone does not.
+        rules = {
+            "unknown registered_ns": lambda pane, batch: pane.update(
+                next_section_seq=3, pending={"section_seq": 2, "registered_ns": None}),
+            "refused_unlocated": lambda pane, batch: pane.update(refused_closed=1, refused_unlocated=1),
+            "refusal with no other issue": lambda pane, batch: pane.update(refused_closed=1, first_refusal_ns=1500),
+            "open collection": lambda pane, batch: batch.update(open_collections=1),
+            "loss meets window": lambda pane, batch: pane.update(
+                next_section_seq=3, issued_dropped_located=1, loss_events=1,
+                losses=[{"from_ns": 1200, "to_ns": 1300}]),
+            "loss_events without losses": lambda pane, batch: pane.update(
+                next_section_seq=3, issued_dropped_located=1, loss_events=1),
+            "crossing record": lambda pane, batch: pane["records"][0].update(before_lock_ns=1050),
+        }
+        for rule, mutate in rules.items():
+            sidecars = guard_run(1)
+            mutate(sidecars[0]["panes"][0], sidecars[0]["spans"])
+            verdict = self.verdicts(sidecars)[0]
+            self.assertEqual(verdict["verdict"], "incomplete", rule)
+            self.assertNotIn("observed_overlap_ns", verdict, rule)
+        merged = guard_run(1)
+        merged[0]["panes"][0]["losses_merged"] = True
+        self.assertEqual(self.verdicts(merged)[0]["verdict"], "complete")
+
+    def test_report_lines_never_print_a_number_when_not_complete(self) -> None:
+        # J10: an incomplete phase prints its reasons and no number; an unavailable one prints n/a.
+        incomplete = {"phase": "flood", "verdict": "incomplete", "status": "written", "reasons": ["harness_unbound"]}
+        self.assertEqual(perf.format_guard_verdict(incomplete),
+                         "[perf-compare] guard correlation flood: incomplete: harness_unbound")
+        unavailable = {"phase": "flood", "verdict": "n/a", "status": "unavailable", "reasons": []}
+        self.assertTrue(perf.format_guard_verdict(unavailable).endswith("n/a (unavailable)"))
+        complete = dict(guard_run(1)[0])
+        verdict = self.verdicts([complete])[0]
+        self.assertIn("observed overlap 5 ns, 1 sections, 1 spans", perf.format_guard_verdict(verdict))
+
+    def test_a_late_record_is_counted_in_neither_window(self) -> None:
+        # J11: a section pending at take 1 and published in take 2 inside window 1 is excluded from window 2,
+        # and window 1 stays incomplete.
+        sidecars = guard_run(2)
+        sidecars[0]["panes"][0].update(next_section_seq=3, pending={"section_seq": 2, "registered_ns": 1140})
+        late = {"section_seq": 2, "before_lock_ns": 1140, "locked_at_ns": 1180}
+        sidecars[1]["panes"][0].update(prev_next_section_seq=3, next_section_seq=4, carried_pending=2,
+                                       records=[late, {"section_seq": 3, "before_lock_ns": 2110, "locked_at_ns": 2120}])
+        verdicts = self.verdicts(sidecars)
+        self.assertEqual(self.kinds(verdicts), ["incomplete", "complete"], verdicts)
+        self.assertEqual(verdicts[1]["observed_overlap_ns"], 5)
+
+    def test_the_chain_rejects_gaps_and_misnamed_takes(self) -> None:
+        # J12: a take_seq gap invalidates it and every later take; distinct phase names validate; a sidecar
+        # naming another phase than its own record is rejected.
+        self.assertEqual(self.kinds(self.verdicts(guard_run(3))), ["complete"] * 3)
+        gapped = guard_run(3)
+        gapped[1]["take_seq"] = 5
+        self.assertEqual(self.kinds(self.verdicts(gapped)), ["complete", "incomplete", "incomplete"])
+        misnamed = guard_run(2)
+        phases = guard_phases(self.root, misnamed)
+        phases[1]["name"] = "other"
+        verdicts = perf.guard_correlation_verdicts(phases, self.root, GUARD_HASH)
+        self.assertEqual(self.kinds(verdicts), ["complete", "incomplete"])
+
+    def test_a_bad_second_take_invalidates_it_and_every_later_one(self) -> None:
+        # H5: three distinct phases, startup first, all validate; deleting, truncating or mismatching take 2,
+        # or recording it write_failed, take_exhausted or with no status, leaves phase 1 complete and makes
+        # phases 2 and 3 incomplete.
+        def deleted(root: Path, phases: list[dict]) -> None:
+            (root / phases[1]["guard_correlation"]["file"]).unlink()
+
+        def truncated(root: Path, phases: list[dict]) -> None:
+            target = root / phases[1]["guard_correlation"]["file"]
+            target.write_bytes(target.read_bytes()[:-5])
+
+        def mismatched(root: Path, phases: list[dict]) -> None:
+            phases[1]["guard_correlation"]["sha256"] = "0" * 64
+
+        def status(name: str):
+            phases_take = None
+            return lambda root, phases: phases[1]["guard_correlation"].update(
+                status=name, file=None, bytes=None, sha256=None,
+                take_seq=phases[1]["guard_correlation"]["take_seq"] if name == "write_failed" else phases_take)
+
+        def missing(root: Path, phases: list[dict]) -> None:
+            del phases[1]["guard_correlation"]
+
+        for label, damage in (("deleted", deleted), ("truncated", truncated), ("mismatched", mismatched),
+                              ("write_failed", status("write_failed")), ("take_exhausted", status("take_exhausted")),
+                              ("missing", missing)):
+            root = self.root / label
+            phases = guard_phases(root, guard_run(3))
+            damage(root, phases)
+            verdicts = perf.guard_correlation_verdicts(phases, root, GUARD_HASH)
+            self.assertEqual(self.kinds(verdicts), ["complete", "incomplete", "incomplete"], label)
+        # take_exhausted issues no take_seq, so the next take is consecutive and only the chain rule fails it.
+        exhausted_run = guard_run(3)
+        exhausted_run[2].update(take_seq=2)
+        phases = guard_phases(self.root / "exhausted", exhausted_run)
+        status("take_exhausted")(self.root / "exhausted", phases)
+        verdicts = perf.guard_correlation_verdicts(phases, self.root / "exhausted", GUARD_HASH)
+        self.assertEqual(self.kinds(verdicts), ["complete", "incomplete", "incomplete"])
+        self.assertTrue(any("broke the chain" in reason for reason in verdicts[2]["reasons"]), verdicts[2])
+        gate_off = [{"name": name, "guard_correlation": guard_status("gate_off")} for name in ("startup", "flood")]
+        verdicts = perf.guard_correlation_verdicts(gate_off, self.root, GUARD_HASH, "gate_off")
+        self.assertEqual(self.kinds(verdicts), ["n/a", "n/a"], "a genuine gate-off run consumes no take")
+
+    def test_the_sidecar_window_is_bound_to_its_phase_record(self) -> None:
+        # Finding 1: a header window changed with its digest while the phase keeps its own is rejected; a window
+        # ending after its take, or one with a null end, is not complete; the next take still validates.
+        for label, mutate in (("moved", lambda sidecar: sidecar["window"].update(start_ns=1500, end_ns=1800)),
+                              ("after the take", lambda sidecar: sidecar.update(taken_at_ns=1050))):
+            root = self.root / label.replace(" ", "-")
+            phases = guard_phases(root, guard_run(2))
+            guard_rewrite(root, phases[0], mutate)
+            verdicts = perf.guard_correlation_verdicts(phases, root, GUARD_HASH)
+            self.assertEqual(self.kinds(verdicts), ["incomplete", "incomplete"], label)
+        unknown = guard_run(2)
+        unknown[0]["window"]["end_ns"] = None
+        verdicts = self.verdicts(unknown)
+        self.assertEqual(self.kinds(verdicts), ["incomplete", "complete"], verdicts)
+        self.assertEqual(verdicts[0]["reasons"], ["the window is unknown"])
+
+    def test_the_chain_keeps_clocks_and_registrations_across_takes(self) -> None:
+        # Finding 2: an unknown take time breaks the chain; a carried pending section keeps its registration,
+        # null included; an earlier take's interval reused under a later section or collection is rejected.
+        unknown = guard_run(3)
+        unknown[0]["taken_at_ns"] = None
+        self.assertEqual(self.kinds(self.verdicts(unknown)), ["incomplete"] * 3)
+        for label, registered, later in (("null to number", None, 99999), ("number to null", 1150, None),
+                                         ("number changed", 1150, 1160)):
+            carried = guard_run(2)
+            carried[0]["panes"][0].update(next_section_seq=3, pending={"section_seq": 2, "registered_ns": registered})
+            carried[1]["panes"][0].update(prev_next_section_seq=3, carried_pending=2,
+                                          pending={"section_seq": 2, "registered_ns": later})
+            carried[1]["panes"][0]["records"][0]["section_seq"] = 3
+            carried[1]["panes"][0]["next_section_seq"] = 4
+            verdicts = self.verdicts(carried)
+            self.assertIn("pane 7: carried section 2 changed its registration time", verdicts[1]["reasons"], label)
+        reused = guard_run(2)
+        reused[1]["panes"][0]["records"][0].update(before_lock_ns=1110, locked_at_ns=1120)
+        self.assertIn("pane 7: section 2 predates the previous take", self.verdicts(reused)[1]["reasons"])
+        reused_span = guard_run(2)
+        reused_span[1]["spans"]["spans"][0].update(acquired_ns=1115, released_ns=1130)
+        self.assertIn("spans: a span predates the previous take", self.verdicts(reused_span)[1]["reasons"])
+
+    def test_malformed_fields_are_named_never_raised(self) -> None:
+        # Finding 3: a missing frozen field is distinct from null, and a bool or float schema is not 1; each is a
+        # named problem, and the take and every later one are incomplete.
+        cases = {
+            "pending": lambda sidecar: sidecar["panes"][0].pop("pending"),
+            "carried_pending": lambda sidecar: sidecar["panes"][0].pop("carried_pending"),
+            "first_refusal_ns": lambda sidecar: sidecar["panes"][0].pop("first_refusal_ns"),
+            "schema true": lambda sidecar: sidecar.update(schema=True),
+            "schema float": lambda sidecar: sidecar.update(schema=1.0),
+            "float count": lambda sidecar: sidecar["spans"].update(spans_issued=1.0),
+        }
+        for label, mutate in cases.items():
+            sidecars = guard_run(3)
+            mutate(sidecars[1])
+            verdicts = self.verdicts(sidecars)
+            self.assertEqual(self.kinds(verdicts), ["complete", "incomplete", "incomplete"], label)
+            self.assertTrue(verdicts[1]["reasons"], label)
+
+    def test_contradictory_counts_and_crossing_spans_are_not_complete(self) -> None:
+        # Finding 4: a refusal with no time and none unlocated, a reversed span loss, a recorded collection with
+        # collections_issued 0, and a span crossing the window's start each keep the window from being complete.
+        cases = {
+            "refusal": lambda sidecar: sidecar["panes"][0].update(refused_closed=1),
+            "reversed loss": lambda sidecar: sidecar["spans"].update(
+                spans_issued=2, spans_dropped_located=1, loss_events=1, losses=[{"from_ns": 3000, "to_ns": 1}]),
+            "no collection": lambda sidecar: sidecar["spans"].update(collections_issued=0),
+            "crossing span": lambda sidecar: sidecar["spans"]["spans"][0].update(acquired_ns=1050),
+        }
+        for label, mutate in cases.items():
+            sidecars = guard_run(1)
+            mutate(sidecars[0])
+            verdict = self.verdicts(sidecars)[0]
+            self.assertEqual(verdict["verdict"], "incomplete", label)
+            self.assertNotIn("observed_overlap_ns", verdict, label)
+
+    def test_availability_is_bound_to_the_run(self) -> None:
+        # Finding 5: a no-take status naming a file or take is malformed; a written run with one middle gate_off
+        # is an impossible availability change; a status the build rules out is impossible; a declared contract
+        # with every field missing is incomplete; a genuine cfg-off run is n/a and consumes nothing.
+        check = perf.guard_field_problems
+        self.assertTrue(check(dict(guard_status("gate_off"), file="guard-correlation/1-flood.json")))
+        self.assertTrue(check(dict(guard_status("unavailable"), take_seq=2)))
+        self.assertTrue(check(dict(guard_status("take_exhausted"), take_seq=2)))
+        self.assertFalse(check(guard_status("write_failed", take_seq=2)))
+        for middle in ("gate_off", "unavailable"):
+            phases = guard_phases(self.root / middle, guard_run(3))
+            phases[1]["guard_correlation"] = guard_status(middle)
+            verdicts = perf.guard_correlation_verdicts(phases, self.root / middle, GUARD_HASH)
+            self.assertEqual(self.kinds(verdicts), ["incomplete"] * 3, middle)
+            self.assertTrue(verdicts[1]["reasons"][0].startswith("availability changes"), verdicts[1])
+        phases = guard_phases(self.root / "ruled-out", guard_run(2))
+        verdicts = perf.guard_correlation_verdicts(phases, self.root / "ruled-out", GUARD_HASH, "unavailable")
+        self.assertEqual(self.kinds(verdicts), ["incomplete"] * 2)
+        missing = perf.guard_correlation_verdicts([{"name": "startup"}, {"name": "flood"}], self.root, GUARD_HASH,
+                                                  "take")
+        self.assertEqual(self.kinds(missing), ["incomplete"] * 2)
+        unavailable = [{"name": name, "guard_correlation": guard_status("unavailable")} for name in ("startup", "flood")]
+        self.assertEqual(self.kinds(perf.guard_correlation_verdicts(unavailable, self.root, GUARD_HASH, "unavailable")),
+                         ["n/a", "n/a"])
+        self.assertEqual(perf.guard_availability(None, "on"), None)
+        self.assertEqual(perf.guard_availability(False, "on"), "unavailable")
+        self.assertEqual(perf.guard_availability(True, "off"), "gate_off")
+        self.assertEqual(perf.guard_availability(True, "on"), "take")
+        result = valid_result()
+        problems = perf.validate_result(result, HARNESS_HASH, 0, guard_correlation_schema=1)
+        self.assertIn("phase 'workload' lacks guard_correlation", problems)
+        result["phases"][0]["guard_correlation"] = guard_status("unavailable")
+        self.assertIn("phase 'workload' records guard_correlation its harness never declared",
+                      perf.validate_result(result, HARNESS_HASH, 0))
+
+    def test_evidence_keeps_the_sidecars_and_the_phase_fields_are_typed(self) -> None:
+        # H5 retention: the scratch's guard-correlation directory is copied into the evidence; a malformed
+        # guard_correlation field is a schema problem.
+        scratch, kept = self.root / "scratch", self.root / "kept"
+        guard_phases(scratch, guard_run(1))
+        perf._keep_scratch(scratch, kept)
+        self.assertTrue((kept / perf.GUARD_SIDECAR_DIR / "0-startup.json").is_file())
+        check = perf._PHASE_FIELDS["guard_correlation"]
+        self.assertTrue(check(guard_status("unavailable")))
+        self.assertFalse(check({"status": "written"}))
+        self.assertFalse(check(dict(guard_status("unavailable"), status="zero")))
+        self.assertFalse(check({key: value for key, value in guard_status("gate_off").items() if key != "window"}))
+        self.assertFalse(perf._PHASE_FIELDS["guard_correlation_transport_ns"](-1))
 
 
 if __name__ == "__main__":

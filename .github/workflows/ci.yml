@@ -20,6 +20,8 @@ env:
   RUST_BACKTRACE: short
   CARGO_INCREMENTAL: 0
   CARGO_LLVM_COV_VERSION: "0.9.0"
+  # SHA-256 of that release's cargo-llvm-cov-aarch64-apple-darwin.tar.gz, checked before it is unpacked.
+  CARGO_LLVM_COV_SHA256: "1bbf5dc8ad82e0f6ff0eb923aa6a691c760adb60f797cdcb454e204b9399c4f0"
   CI_CACHE_NAMESPACE: ci-v3
 
 jobs:
@@ -74,7 +76,11 @@ jobs:
       # Every harness API cfg's code compiles only with its cfg, which perf-compare sets when both refs
       # have the entry's methods; each host lints all of them at once, with the counters they need.
       - name: Lint perf scenarios with the harness API cfgs
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api
+      # The same lint with perf-echo-trace as well: only this step compiles the S2 echo timeline's
+      # adapter, which needs both the feature and its cfg.
+      - name: Lint perf scenarios with the harness API cfgs and the echo trace
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api
 
       - name: Validate workspace manifests
         shell: bash
@@ -137,7 +143,11 @@ jobs:
 
       - name: Run scenario harness unit tests with the harness API cfgs
         shell: bash
-        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+
+      - name: Run scenario harness unit tests with the harness API cfgs and the echo trace
+        shell: bash
+        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
 
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
@@ -207,8 +217,19 @@ jobs:
           cache-workspace-crates: false
           save-if: false
 
+      # The pinned release's prebuilt arm64 binary, verified by its SHA-256 before it is unpacked, is expected to
+      # save the minute a source build takes; any download, digest, architecture or version mismatch fails the job.
       - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --version "${{ env.CARGO_LLVM_COV_VERSION }}" --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          asset=cargo-llvm-cov-aarch64-apple-darwin.tar.gz
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --output "$RUNNER_TEMP/$asset" \
+            "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${CARGO_LLVM_COV_VERSION}/$asset"
+          echo "${CARGO_LLVM_COV_SHA256}  $RUNNER_TEMP/$asset" | shasum -a 256 --check --strict
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$HOME/.cargo/bin" cargo-llvm-cov
+          test "$(cargo llvm-cov --version)" = "cargo-llvm-cov ${CARGO_LLVM_COV_VERSION}"
 
       # The pull-request head reaches provenance through env; the runner supplies other run metadata.
       - name: Run Rust logic coverage gate
@@ -491,7 +512,11 @@ jobs:
       # Every harness API cfg's code compiles only with its cfg, which perf-compare sets when both refs
       # have the entry's methods; each host lints all of them at once, with the counters they need.
       - name: Lint perf scenarios with the harness API cfgs
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api
+      # The same lint with perf-echo-trace as well: only this step compiles the S2 echo timeline's
+      # adapter, which needs both the feature and its cfg.
+      - name: Lint perf scenarios with the harness API cfgs and the echo trace
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api
 
       - name: Validate workspace manifests
         shell: bash
@@ -530,10 +555,9 @@ jobs:
         shell: bash
         run: python scripts/perf-compare.py --check-previous-release
 
-  windows-tests:
-    name: Windows test and runtime gates
+  windows-tests-workspace:
+    name: Windows workspace tests
     runs-on: windows-latest
-    # The early app-only test build can be rebuilt when workspace dev features are unified later.
     needs: [windows-native]
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
@@ -573,81 +597,12 @@ jobs:
           cache-workspace-crates: false
           save-if: false
 
-      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
-      - name: Measure PTY close baseline
-        run: cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture
-
       - name: Run workspace unit and integration tests
         shell: bash
         run: bash scripts/check-workspace-crates.sh
 
       - name: Run workspace documentation tests
         run: cargo test --workspace --doc --no-fail-fast
-
-      - name: Run scenario harness unit tests
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios
-
-      - name: Run scenario harness unit tests with frame counters
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
-
-      - name: Measure the glyph atlas working set
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture
-
-      - name: Run scenario harness unit tests with the frame texture reading
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
-
-      - name: Run scenario harness unit tests with the echo trace
-        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace
-
-      - name: Run scenario harness unit tests with the harness API cfgs
-        shell: bash
-        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
-
-      - name: Report host window capability
-        run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
-
-      - name: Report host adapter classification
-        run: cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture
-
-      - name: Report renderer churn baseline
-        run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture
-
-      - name: Require Windows GDI capability=EXERCISED
-        shell: pwsh
-        run: |
-          python scripts/native-smoke-runner.py `
-            --timeout-seconds 120 `
-            --log-file "$env:RUNNER_TEMP\sonicterm-windows-gdi.log" `
-            --require-capability EXERCISED `
-            -- cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
-
-      - name: Upload Windows GDI probe log
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: sonicterm-windows-gdi-log-${{ github.sha }}
-          path: ${{ runner.temp }}/sonicterm-windows-gdi.log
-          if-no-files-found: ignore
-
-      - name: Verify Windows WARP allocator baseline
-        run: cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
-
-      - name: Verify Windows selection presentation
-        run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
-
-      - name: Build Windows perf scenario harness
-        run: cargo build --locked -p sonicterm-app --example perf_scenarios
-
-      - name: Require Windows perf scenario smoke
-        run: python scripts/perf-compare.py --smoke
-
-      - name: Upload Windows perf scenario smoke evidence
-        if: ${{ (failure() || env.SONICTERM_PERF_REPLAY_RETRIED == '1') && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: sonicterm-windows-perf-smoke-${{ github.sha }}
-          path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}
-          if-no-files-found: error
 
       - name: Test MSI validator
         shell: pwsh
@@ -695,6 +650,247 @@ jobs:
         with:
           name: resource-baseline-evidence-windows-latest
           path: target/v1.2.0-baseline/evidence-windows-latest
+          if-no-files-found: error
+
+  windows-tests-harness:
+    name: Windows scenario harness tests
+    runs-on: windows-latest
+    needs: [windows-native]
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+
+      - name: Resolve vcpkg commit
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore vcpkg binaries (Cairo)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
+          restore-keys: |
+            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
+
+      - name: Install Cairo for Windows
+        shell: pwsh
+        run: .\scripts\setup-windows-cairo.ps1
+
+      - name: Restore Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: false
+
+      - name: Run scenario harness unit tests
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios
+
+      - name: Run scenario harness unit tests with frame counters
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+
+  windows-tests-harness-features:
+    name: Windows scenario harness feature tests
+    runs-on: windows-latest
+    needs: [windows-native]
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+
+      - name: Resolve vcpkg commit
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore vcpkg binaries (Cairo)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
+          restore-keys: |
+            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
+
+      - name: Install Cairo for Windows
+        shell: pwsh
+        run: .\scripts\setup-windows-cairo.ps1
+
+      - name: Restore Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: false
+
+      - name: Measure the glyph atlas working set
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture
+
+      - name: Run scenario harness unit tests with the frame texture reading
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture
+
+      - name: Run scenario harness unit tests with the echo trace
+        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace
+
+  windows-tests-harness-api:
+    name: Windows scenario harness API cfg tests
+    runs-on: windows-latest
+    needs: [windows-native]
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+
+      - name: Resolve vcpkg commit
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore vcpkg binaries (Cairo)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
+          restore-keys: |
+            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
+
+      - name: Install Cairo for Windows
+        shell: pwsh
+        run: .\scripts\setup-windows-cairo.ps1
+
+      - name: Restore Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: false
+
+      - name: Run scenario harness unit tests with the harness API cfgs
+        shell: bash
+        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+
+      - name: Run scenario harness unit tests with the harness API cfgs and the echo trace
+        shell: bash
+        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
+
+  windows-tests-runtime:
+    name: Windows runtime gates
+    runs-on: windows-latest
+    needs: [windows-native]
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+
+      - name: Resolve vcpkg commit
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore vcpkg binaries (Cairo)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
+          restore-keys: |
+            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
+
+      - name: Install Cairo for Windows
+        shell: pwsh
+        run: .\scripts\setup-windows-cairo.ps1
+
+      - name: Restore Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: false
+
+      - name: Measure PTY close baseline
+        # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
+        run: cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture
+
+      - name: Report host window capability
+        run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
+
+      - name: Report host adapter classification
+        run: cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture
+
+      - name: Report renderer churn baseline
+        run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture
+
+      - name: Require Windows GDI capability=EXERCISED
+        shell: pwsh
+        run: |
+          python scripts/native-smoke-runner.py `
+            --timeout-seconds 120 `
+            --log-file "$env:RUNNER_TEMP\sonicterm-windows-gdi.log" `
+            --require-capability EXERCISED `
+            -- cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
+
+      - name: Upload Windows GDI probe log
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonicterm-windows-gdi-log-${{ github.sha }}
+          path: ${{ runner.temp }}/sonicterm-windows-gdi.log
+          if-no-files-found: ignore
+
+      - name: Verify Windows WARP allocator baseline
+        run: cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
+
+      - name: Verify Windows selection presentation
+        run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
+
+      - name: Build Windows perf scenario harness
+        run: cargo build --locked -p sonicterm-app --example perf_scenarios
+
+      - name: Require Windows perf scenario smoke
+        run: python scripts/perf-compare.py --smoke
+
+      - name: Upload Windows perf scenario smoke evidence
+        if: ${{ (failure() || env.SONICTERM_PERF_REPLAY_RETRIED == '1') && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonicterm-windows-perf-smoke-${{ github.sha }}
+          path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}
           if-no-files-found: error
 
   windows-smoke:
@@ -786,7 +982,7 @@ jobs:
   windows:
     name: windows-latest / unit tests
     runs-on: ubuntu-latest
-    needs: [windows-native, windows-checks, windows-tests, windows-smoke]
+    needs: [windows-native, windows-checks, windows-tests-workspace, windows-tests-harness, windows-tests-harness-features, windows-tests-harness-api, windows-tests-runtime, windows-smoke]
     if: always()
     steps:
       - name: Verify Windows shards
@@ -794,10 +990,14 @@ jobs:
         env:
           NATIVE: ${{ needs.windows-native.result }}
           CHECKS: ${{ needs.windows-checks.result }}
-          TESTS: ${{ needs.windows-tests.result }}
+          TESTS_WORKSPACE: ${{ needs.windows-tests-workspace.result }}
+          TESTS_HARNESS: ${{ needs.windows-tests-harness.result }}
+          TESTS_HARNESS_FEATURES: ${{ needs.windows-tests-harness-features.result }}
+          TESTS_HARNESS_API: ${{ needs.windows-tests-harness-api.result }}
+          TESTS_RUNTIME: ${{ needs.windows-tests-runtime.result }}
           SMOKE: ${{ needs.windows-smoke.result }}
         run: |
-          for result in "$NATIVE" "$CHECKS" "$TESTS" "$SMOKE"; do
+          for result in "$NATIVE" "$CHECKS" "$TESTS_WORKSPACE" "$TESTS_HARNESS" "$TESTS_HARNESS_FEATURES" "$TESTS_HARNESS_API" "$TESTS_RUNTIME" "$SMOKE"; do
             test "$result" = "success"
           done
 
@@ -865,7 +1065,11 @@ jobs:
       # Every harness API cfg's code compiles only with its cfg, which perf-compare sets when both refs
       # have the entry's methods; each host lints all of them at once, with the counters they need.
       - name: Lint perf scenarios with the harness API cfgs
-        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api
+      # The same lint with perf-echo-trace as well: only this step compiles the S2 echo timeline's
+      # adapter, which needs both the feature and its cfg.
+      - name: Lint perf scenarios with the harness API cfgs and the echo trace
+        run: cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api
 
       - name: Check public Rustdoc
         run: |
@@ -892,7 +1096,11 @@ jobs:
 
       - name: Run scenario harness unit tests with the harness API cfgs
         shell: bash
-        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
+
+      - name: Run scenario harness unit tests with the harness API cfgs and the echo trace
+        shell: bash
+        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace
 
       - name: Run source and release tooling gates
         run: |

@@ -350,10 +350,13 @@ pub(super) fn spawn_pane_workers(
                 match out_rx.recv_timeout(flush.wait(Instant::now())) {
                     Ok(bytes) => {
                         // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
+                        // The chunk's read stamp is read before the chunk moves into the batch.
+                        let read_at = bytes.read_at();
                         flush.receive(bytes.len(), Instant::now());
                         process_pane_vt_batch_and_publish(
                             &worker_handles,
                             bytes,
+                            read_at,
                             &mut command_started,
                             &mut flush.sync_latch,
                             redraw_proxy.as_ref(),
@@ -690,6 +693,7 @@ fn publish_sync_output(handles: &PaneVtHandles, state: SyncState, now: impl FnOn
 pub(in crate::app) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
     handles: &PaneVtHandles,
     bytes: Bytes,
+    read_at: Option<Instant>,
     command_started: &mut Option<Instant>,
     sync_latch: &mut SyncLatch,
     proxy: Option<&EventLoopProxy<UserEvent>>,
@@ -698,6 +702,7 @@ pub(in crate::app) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
     publish_pane_vt_batch_with(
         handles,
         bytes,
+        read_at,
         command_started,
         sync_latch,
         super::media::decode_inline_image,
@@ -718,6 +723,7 @@ pub(in crate::app) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
 pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
     bytes: Bytes,
+    read_at: Option<Instant>,
     command_started: &mut Option<Instant>,
     sync_latch: &mut SyncLatch,
     decode_media: Decode,
@@ -735,6 +741,7 @@ pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>
     process_pane_vt_batch_with(
         handles,
         bytes,
+        read_at,
         command_started,
         sync_latch,
         decode_media,
@@ -755,6 +762,7 @@ pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
     bytes: Bytes,
+    read_at: Option<Instant>,
     command_started: &mut Option<Instant>,
     sync_latch: &mut SyncLatch,
     mut decode_media: Decode,
@@ -778,6 +786,11 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         }
     }
     loop {
+        // Registered before before_lock and outside the parser-guard scope: a section that unwinds is
+        // abandoned after its guard drops. Lock order: a parser guard is never held while a log mutex is taken.
+        let registration = counters
+            .and_then(|counters| counters.sections.as_deref())
+            .and_then(|log| log.register());
         // Gate on: one clock read before lock(), three under the guard (four when a new sync epoch opens);
         // an armed echo watch reads the target cell around the parse and may lock its slot, all before the guard drops.
         let before_lock = counters.map(|_| now());
@@ -798,6 +811,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                     parsed_at,
                     generation: handles.output_generation.load(Ordering::Relaxed) + 1,
                     sync_open: parser.synchronized_output().set,
+                    // Every section of this batch consumed the same chunk, so each carries its stamp.
+                    latest_read_at: read_at,
                 };
                 counters.echo.post_read(&handles.echo_cache, before, parser.grid(), section);
             }
@@ -824,6 +839,10 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 released_at,
             };
             counters.vt.record_section(&times, consumed as u64);
+            if let Some(registration) = registration {
+                // The section is published with D2.1a's own before_lock and locked_at reads.
+                registration.publish(before_lock, locked_at);
+            }
         }
         remaining = &remaining[consumed..];
 
@@ -906,6 +925,24 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
 }
 
 impl App {
+    /// The shell spawn options for a new pane, main or child: the launch's own options, clean
+    /// startup under the runtime smoke, and output read timestamps exactly when the pane's frame
+    /// counters are on. The gate is fixed by then, so the reader's flag is fixed for its life.
+    pub(super) fn pane_spawn_opts(
+        &self,
+        launch: &super::pane_launch::PaneLaunch,
+        frame_counters_on: bool,
+    ) -> sonicterm_io::pty::ShellSpawnOpts {
+        sonicterm_io::pty::ShellSpawnOpts {
+            clean_e2e: self.runtime_smoke.is_some(),
+            diagnostic_timestamps: frame_counters_on,
+            ..launch.shell_spawn_opts(
+                self.config.terminal.term_program.clone(),
+                self.config.terminal.shell.clone(),
+            )
+        }
+    }
+
     // Lock order: test_pane_launches releases before parser; neither guard survives PTY or worker creation.
     pub(super) fn spawn_pane(
         &self,
@@ -935,11 +972,9 @@ impl App {
             super::seed_parser_theme_colors(&mut parser_guard, &self.theme);
         }
         let redraw_target = Arc::new(Mutex::new(self.main_window_id));
-        let mut shell_opts = launch.shell_spawn_opts(
-            self.config.terminal.term_program.clone(),
-            self.config.terminal.shell.clone(),
-        );
-        shell_opts.clean_e2e = self.runtime_smoke.is_some();
+        // The gate is read before the PTY exists, so its reader stamps reads from the first one.
+        let frame_counters = self.pane_frame_counters();
+        let shell_opts = self.pane_spawn_opts(launch, frame_counters.is_some());
         let pty = match PtyHandle::spawn_default_shell(cols, rows, shell_opts) {
             Ok(pty) => {
                 // When: spawn_default_shell returns Ok(pty), stage any launch draft before the worker starts.
@@ -975,7 +1010,9 @@ impl App {
         };
         let mut state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
         self.reserve_pane_teardown(&mut state);
-        state.frame_counters = self.pane_frame_counters();
+        let mut frame_counters = frame_counters;
+        state.guard_correlation = self.attach_guard_correlation(pane_id, &mut frame_counters);
+        state.frame_counters = frame_counters;
         state.redraw_target = redraw_target;
         if state.pty.is_some() {
             spawn_pane_workers(pane_id, &state, self.event_loop_proxy.clone(), "sonicterm-vt-loop");

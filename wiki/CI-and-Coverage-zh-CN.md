@@ -48,13 +48,15 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 
 稳定的必需检查是 fail-closed 汇总 job：`macos-14 / unit tests` 同时依赖 `macos-core`、
 `macos-coverage` 与 `macos-smoke`，而 `windows-latest / unit tests` 同时依赖
-`windows-native`、`windows-checks`、`windows-tests` 与 `windows-smoke`。每个汇总 job
+`windows-native`、`windows-checks`、五个 Windows 测试 shard（`windows-tests-workspace`、
+`windows-tests-harness`、`windows-tests-harness-features`、`windows-tests-harness-api` 与
+`windows-tests-runtime`）以及 `windows-smoke`，其结果循环逐一检查它们。每个汇总 job
 都使用 `if: always()`，且只接受显式 `success`，因此任一 shard 失败、取消或跳过都不会变成
 成功的必需检查。
 
 macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、workspace doctest、host probe、
-工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本的
-`cargo-llvm-cov`，运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
+工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本
+`cargo-llvm-cov` 发布的 Apple Silicon 预编译二进制，解包前先校验其 SHA-256（预计可省去源码构建所需的约一分钟），再运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
 artifact。
 `macos-smoke` 矩阵分别在 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release
 二进制，使用不同依赖缓存键。Intel lane 仅在推送到 `main` 时可保存依赖；Apple Silicon
@@ -69,19 +71,30 @@ lane 只恢复缓存。
 macOS 汇总 gate 要求两个 lane 都成功。Release job 同样在对应架构打包，最终 macOS
 产物 job 只汇集已经验证的 DMG。
 
-Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在三个依赖
-shard 启动前立即保存结果。托管镜像或 vcpkg 版本变化后，恢复的回退归档可能不含任何 ABI
+Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在七个依赖
+job 启动前立即保存结果。托管镜像或 vcpkg 版本变化后，恢复的回退归档可能不含任何 ABI
 兼容的包，因此消费方仍执行 Cairo 安装，必要时进行冷构建。CI 不设置 job 或步骤的超时覆盖项。
-前置的 App-only 基线构建可能在 workspace 统一 dev-dependency feature 后重新编译。
+runtime 与 workspace shard 各有独立的可写 target 目录，因此基线的构建产物不会预热 workspace shard。
 checks shard 运行 format、Clippy、源码策略、注释、脚本标识符与 Rustdoc gate；
-tests shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行一次性 workspace 测试、doctest、host probe、fail-closed GDI 呈现验证、WARP allocator、
-software-selection presentation、性能场景 harness 的构建及其 smoke（在软件适配器上检查对比工具，不检查计时，见 [Windows](Local-Gate-zh-CN#windows)）、工具测试与真实 resource baseline 采集；性能 smoke 失败时，该 job 上传其证据。GDI wrapper 只接受
+Windows 测试分为五个并行 shard，每个都重复 checkout、Rust、Cairo 与 Cargo 缓存准备，因此 CI 的总时长取决于最长的 shard，而不是它们之和：
+
+- `windows-tests-workspace` 运行一次性 workspace 测试、doctest、
+  MSI validator 与工具测试，并采集、上传真实 resource baseline 证据。
+- `windows-tests-harness` 运行场景 harness 的单元测试，再运行启用帧计数器的同一组测试。
+- `windows-tests-harness-features` 测量 glyph atlas 工作集，再运行启用帧纹理读取和 echo trace 的 harness 测试。
+- `windows-tests-harness-api` 运行启用全部 harness API cfg 的 harness 测试；这些编译器标志只在该 shard 中重建依赖树。
+- `windows-tests-runtime` 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，使其测试二进制仍是冷构建，然后运行 host probe、fail-closed GDI 呈现验证、WARP allocator、software-selection presentation，
+  以及性能场景 harness 的构建及其 smoke（在软件适配器上检查对比工具，不检查计时，见 [Windows](Local-Gate-zh-CN#windows)）；
+  GDI probe 或性能 smoke 失败时，该 shard 上传其证据。它的 probe 重跑只为打印报告，对应的集成测试已由
+  `windows-tests-workspace` 运行。GDI wrapper 只接受
 唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
 只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功；
 另有带原生进程期限的独立步骤，要求其 `frame-validation` 与 `device-recovery` 场景 smoke 成功。
 
 同一平台及架构中使用 Rust 的 shard 共用依赖 cache key，不缓存 workspace crate artifact。
-Apple Silicon core、Windows checks 和 Linux core 分别是各自 key 的唯一写入者。Intel
+Apple Silicon core、Windows checks 和 Linux core 分别是各自 key 的唯一写入者；五个 Windows 测试 shard
+恢复 Windows checks shard 的 key，且从不保存。恢复的归档只能复用兼容的依赖、构建脚本、proc-macro 与原生
+输出，因此测试 shard 仍可能编译大部分依赖树，而 harness API shard 的编译器标志可能使恢复的依赖无法复用。Intel
 macOS 没有 core shard，因此其 smoke lane 是该架构的唯一写入者。所有写入都仅限推送到
 `main`；其它 shard 和全部 pull-request lane 只恢复缓存。Release 构建既不恢复也不保存
 Rust 缓存。这样既限制条目，也避免同一次工作流内出现重复写入者；相互重叠的 `main`

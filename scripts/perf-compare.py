@@ -1487,7 +1487,9 @@ CELL_LAYOUT_CHECKPOINT = "end"
 CELL_LAYOUT_MIN_SHARE = Fraction(3, 10)
 CELL_LAYOUT_MIN_SAVING_BYTES = 8 * 1024 * 1024
 CELL_LAYOUT_GRID_FIELDS = ("grid_visible_bytes", "grid_history_bytes", "grid_alternate_bytes")
-CELL_LAYOUT_SHARD = "S1-S3-S6-S8-S12"
+# The shard holding S12 on each platform. macOS moved S12 to S2-S3-S8-S12 when it went to four shards; its earlier
+# S1-S3-S6-S8-S12 artifacts still read.
+CELL_LAYOUT_SHARDS = {"macOS": ("S2-S3-S8-S12", "S1-S3-S6-S8-S12"), "Windows": ("S1-S3-S6-S8-S12",)}
 # `perf-comparison-<pr>-<head sha>-<platform>-<shard>-<attempt>`, as perf.yml names each comparison artifact.
 CELL_LAYOUT_ARTIFACT = re.compile(r"perf-comparison-\d+-(?P<head>[0-9a-f]{40})-(?P<platform>macOS|Windows)-"
                                   r"(?P<shard>.+)-(?P<attempt>\d+)")
@@ -1654,7 +1656,7 @@ def _read_json_object(path: Path) -> tuple[object, str | None]:
 
 
 def _cell_layout_artifact_problem(artifact: Path, head_sha: str, workflow_run: str) -> str | None:
-    """Why an S1-S3-S6-S8-S12 artifact is not evidence of the requested workflow run and head, or None."""
+    """Why an S12-holding artifact is not evidence of the requested workflow run and head, or None."""
     named = CELL_LAYOUT_ARTIFACT.fullmatch(artifact.name)
     if named["head"] != head_sha:
         return f"artifact measured head {named['head']}, expected {head_sha}"
@@ -1665,8 +1667,8 @@ def _cell_layout_artifact_problem(artifact: Path, head_sha: str, workflow_run: s
         return "timing.json is not an object"
     if str(timing.get("run_id")) != workflow_run:
         return f"artifact from workflow run {timing.get('run_id')}, expected {workflow_run}"
-    if timing.get("shard") != CELL_LAYOUT_SHARD:
-        return f"artifact shard {timing.get('shard')}, expected {CELL_LAYOUT_SHARD}"
+    if timing.get("shard") != named["shard"]:
+        return f"artifact shard {timing.get('shard')}, expected {named['shard']}"
     return None
 
 
@@ -1691,7 +1693,7 @@ def _cell_layout_memory(run_dir: Path) -> tuple[list[MemorySample], str | None]:
 def read_cell_layout_runs(artifact_root: Path, workflow_run: str, head_sha: str) -> dict[str, list[CellLayoutRun]]:
     """Read every head S12 timed run of one workflow run and head from downloaded `perf-comparison-*` artifacts.
 
-    Only the S1-S3-S6-S8-S12 shard's artifacts are read. Each run carries the workflow run and head its artifact
+    Only each platform's S12-holding shard (`CELL_LAYOUT_SHARDS`) is read. Each run carries the workflow run and head its artifact
     records, so evidence from another run or head is named as such rather than counted; a file that cannot be read
     or that describes another side, scenario or variant makes that run invalid with the reason.
     """
@@ -1703,7 +1705,8 @@ def read_cell_layout_runs(artifact_root: Path, workflow_run: str, head_sha: str)
         return runs
     for artifact in artifacts:
         named = CELL_LAYOUT_ARTIFACT.fullmatch(artifact.name)
-        if named is None or named["shard"] != CELL_LAYOUT_SHARD or not artifact.is_dir():
+        if (named is None or named["shard"] not in CELL_LAYOUT_SHARDS.get(named["platform"], ())
+                or not artifact.is_dir()):
             continue
         artifact_problem = _cell_layout_artifact_problem(artifact, head_sha, workflow_run)
         timing, _ = _read_json_object(artifact / "timing.json")
@@ -2068,6 +2071,480 @@ def latency_split_problems(latency: dict) -> list[str]:
     return problems
 
 
+# The harness's per-sample echo timeline, `echo_timeline` schema 1 (timeline.rs). Every population is recomputed
+# from these per-sample fields; supplied coverage is compared with the recomputation, never trusted.
+TIMELINE_SCHEMA = 1
+# The echo-timeline schemas this script can validate, as a harness declares them in `--list`.
+ECHO_TIMELINE_SCHEMAS = (1,)
+# The variants whose credited samples carry an echo timeline under the declared schema: split_in_scope's.
+TIMELINE_SCOPE = (("S2", "default"), ("S2", "flood"))
+TIMELINE_PART_NAMES = ("input_to_parse", "parse_to_publication", "publication_to_frame_request",
+                       "frame_request_to_entry", "entry_to_render", "render", "render_exit_to_credited_end")
+TIMELINE_AVAILABILITIES = ("recorded", "unavailable", "rejected")
+TIMELINE_ENUMS = {
+    "ordering": ("ordered", "published_during_dispatch", "split_only", "clock-order"),
+    "read_stamp": ("stamped", "not-configured", "missing-or-unrepresentable"),
+    "admission": ("permit", "fallback", "admitted"),
+    "permit_identity": ("known", "unknown", "none"),
+}
+TIMELINE_READINESS_OUTCOMES = ("native_request", "marked_in_flight", "none")
+TIMELINE_SITES = ("output_service", "admission")
+# The producer's integer widths: `u64` durations, counts and identities, and `u32` event-loop and dispatch sequences.
+U32_MAX = 2 ** 32 - 1
+TIMELINE_U64_KEYS = ("render_exit_to_dispatch_return_ns", "dispatch_return_to_credited_end_ns",
+                     "latest_read_to_parse_ns", "permit_present_ns", "permit_absent_ns", "tick_to_entry_ns",
+                     "flood_services", "token", "window", "pane")
+TIMELINE_U32_KEYS = ("credited_dispatch_seq",)
+TIMELINE_BOOL_KEYS = ("ready_before_publication", "overflow", "tick_qualified", "m3_complete")
+TIMELINE_STR_KEYS = ("unavailable_reason", "rejection_reason", "ordering_reason")
+TIMELINE_KEYS = ("schema", "availability", "unavailable_reason", "rejection_reason", "ordering", "ordering_reason",
+                 "ready_before_publication", "overflow", "parts_ns", "render_exit_to_dispatch_return_ns",
+                 "dispatch_return_to_credited_end_ns", "latest_read_to_parse_ns", "read_stamp", "readiness",
+                 "admission", "permit_present_ns", "permit_absent_ns", "permit_identity", "tick_qualified",
+                 "tick_to_entry_ns", "flood_services", "m3_complete", "token", "window", "pane",
+                 "credited_dispatch_seq")
+# Identities the harness keeps whenever it knows them independently, whatever the availability.
+TIMELINE_IDENTITY_KEYS = ("token", "window", "pane")
+# Every classification derived from a record; all null unless the timeline was recorded.
+TIMELINE_DIAGNOSTIC_KEYS = tuple(key for key in TIMELINE_KEYS if key not in (
+    "schema", "availability", "unavailable_reason", "rejection_reason") + TIMELINE_IDENTITY_KEYS)
+# The fields derived from the record's events; all null once an event was dropped.
+TIMELINE_EVENT_KEYS = ("readiness", "admission", "permit_present_ns", "permit_absent_ns", "permit_identity",
+                       "tick_qualified", "tick_to_entry_ns", "flood_services", "m3_complete", "credited_dispatch_seq",
+                       "ready_before_publication", "parts_ns", "render_exit_to_dispatch_return_ns",
+                       "dispatch_return_to_credited_end_ns")
+# The accessor's and the protocol's rejections, and why a timeline was unavailable; any other reason is malformed.
+TIMELINE_REJECTION_REASONS = ("malformed-initial-permit", "mismatch", "not-taken", "already-taken", "no-arm-instant")
+TIMELINE_UNAVAILABLE_REASONS = ("cfg-off", "not-recorded", "gate-off", "no-pane", "exhausted")
+# The raw-record validator's reasons: a recorded execution it finds malformed is clock-order and derives nothing.
+TIMELINE_VALIDATION_REASONS = ("loop-sequence", "loop-time-order", "dispatch-pair", "admission-orphan",
+                               "admission-count", "admission-order", "render-pair", "flood-sequence",
+                               "initial-permit", "tick-identity", "tick-sequence", "permit-transition")
+# A credited sample's own split reasons other than `split`: when one is set, the timeline keeps it as its reason.
+TIMELINE_SPLIT_REASONS = tuple(reason for reason in SPLIT_REASONS if reason != "split")
+# What each ordering reason the producer writes implies, as (statuses, bound pair, readiness, ready before
+# publication). `True` requires the field, `False` forbids it, `None` leaves it free; the readiness flag's entry
+# is the value it must take when present. The `None` key is an ordered or published-during-dispatch sample.
+# timeline.rs analyze: overflow returns before binding (1001), an unrepresentable instant (1011) and a malformed
+# record (1021) return before it or keep it, binding sets the pair whatever the sample's own reason (1025-1031), and
+# readiness needs the split (981, 1054-1064); a sample's own split reason then wins the disposition (1074-1075).
+TIMELINE_REASON_SHAPES = {
+    None: (("ordered", "published_during_dispatch"), True, True, None),
+    "overflow": (("split_only",), False, False, None),
+    "no-credited-pair": (("split_only",), False, None, None),
+    "ambiguous-credited-pair": (("split_only",), False, None, None),
+    "missing-event:output-check": (("split_only",), True, False, None),
+    "readiness-after-entry": (("split_only",), True, True, None),
+    "ready-before-publication": (("split_only",), True, True, True),
+    "event-order": (("clock-order",), True, True, False),
+    "sum": (("clock-order",), True, True, False),
+    "unrepresentable-instant": (("clock-order",), None, None, None),
+    **{reason: (("clock-order",), False, False, None) for reason in TIMELINE_VALIDATION_REASONS},
+    # A sample's own split reason: the pair may be bound (1025-1031), but no split means no readiness (981, 1054).
+    **{reason: (("clock-order" if reason == "clock-order" else "split_only",), None, False, None)
+       for reason in TIMELINE_SPLIT_REASONS},
+}
+# The fields only a uniquely bound credited pair supplies, all present together or all null.
+TIMELINE_BOUND_KEYS = ("credited_dispatch_seq", "admission", "permit_identity", "tick_qualified")
+TIMELINE_POPULATIONS = ("ordered", "b2", "m4", "m3", "read_stamped", "b2_of_credited", "m3_of_credited")
+TIMELINE_COVERAGE_KEYS = ("schema", "availability", "credited", "recorded", *TIMELINE_POPULATIONS)
+# The frozen two-sided gate as exact fractions: each side's ordered population at least 4/5 of its credited
+# samples, and the sides at most 1/10 (ten percentage points) apart. Compared by integer cross-products.
+TIMELINE_COVERAGE_GATE = (4, 5)
+TIMELINE_COVERAGE_GAP = (1, 10)
+
+
+def _nonnegative_int(value: object) -> bool:
+    return _is_int(value) and value >= 0
+
+
+def _within(value: object, limit: int) -> bool:
+    """A strict integer (never a bool or a float) in `0..=limit`."""
+    return _is_int(value) and 0 <= value <= limit
+
+
+def _bounded_number(value: object) -> bool:
+    """A finite non-negative number that converts to a float without overflow."""
+    if _is_int(value):
+        return 0 <= value <= U64_MAX
+    return _finite_nonnegative(value)
+
+
+def _timeline_types_broken(timeline: dict) -> bool:
+    """Whether a field has a type, value or width the producer cannot write."""
+    if timeline.get("availability") not in TIMELINE_AVAILABILITIES:
+        return True
+    if any(timeline.get(key) is not None and not _within(timeline.get(key), U64_MAX) for key in TIMELINE_U64_KEYS):
+        return True
+    if any(timeline.get(key) is not None and not _within(timeline.get(key), U32_MAX) for key in TIMELINE_U32_KEYS):
+        return True
+    if any(timeline.get(key) is not None and not isinstance(timeline.get(key), bool) for key in TIMELINE_BOOL_KEYS):
+        return True
+    if any(timeline.get(key) is not None and not isinstance(timeline.get(key), str) for key in TIMELINE_STR_KEYS):
+        return True
+    for key, allowed in TIMELINE_ENUMS.items():
+        value = timeline.get(key)
+        if value is not None and not (isinstance(value, str) and value in allowed):
+            return True
+    parts = timeline.get("parts_ns")
+    if parts is not None and not (isinstance(parts, dict) and set(parts) == set(TIMELINE_PART_NAMES)
+                                  and all(_within(value, U64_MAX) for value in parts.values())):
+        return True
+    readiness = timeline.get("readiness")
+    return readiness is not None and not (
+        isinstance(readiness, dict) and set(readiness) == {"outcome", "loop_seq", "site"}
+        and readiness["outcome"] in TIMELINE_READINESS_OUTCOMES and _within(readiness["loop_seq"], U32_MAX)
+        and (readiness["site"] is None or readiness["site"] in TIMELINE_SITES))
+
+
+def _timeline_parts_total(timeline: dict) -> int | None:
+    """The seven parts' sum, or None when they are absent or malformed."""
+    parts = timeline.get("parts_ns")
+    if not (isinstance(parts, dict) and all(_within(parts.get(name), U64_MAX) for name in TIMELINE_PART_NAMES)):
+        return None
+    return sum(parts[name] for name in TIMELINE_PART_NAMES)
+
+
+def _timeline_sub_parts_broken(timeline: dict) -> bool:
+    """The two tail sub-parts are present exactly with the parts and sum to the seventh."""
+    parts = timeline.get("parts_ns")
+    tail = (timeline.get("render_exit_to_dispatch_return_ns"), timeline.get("dispatch_return_to_credited_end_ns"))
+    if any((value is None) != (parts is None) for value in tail):
+        return True
+    seventh = parts.get("render_exit_to_credited_end") if isinstance(parts, dict) else None
+    return all(_nonnegative_int(value) for value in (*tail, seventh)) and tail[0] + tail[1] != seventh
+
+
+def _timeline_parts_sum_broken(timeline: dict, sample: dict) -> bool:
+    """The seven integer-ns parts sum to the sample's credited latency, within the serialized rounding."""
+    total, latency_ms = _timeline_parts_total(timeline), sample.get("latency_ms")
+    return total is not None and _bounded_number(latency_ms) and abs(total / 1e6 - latency_ms) > SPLIT_SUM_TOLERANCE_MS
+
+
+def _timeline_split_parts_broken(timeline: dict, sample: dict) -> bool:
+    """An ordered timeline's first two parts are the split's first two, and its last five the split's third, each
+    within the serialized rounding; a redistribution between parts that keeps the total is caught here."""
+    parts, split = timeline.get("parts_ns"), sample.get("split")
+    if timeline.get("ordering") != "ordered" or _timeline_parts_total(timeline) is None:
+        return False
+    if not isinstance(split, dict):
+        return True
+    figures = (parts["input_to_parse"], parts["parse_to_publication"],
+               sum(parts[name] for name in TIMELINE_PART_NAMES[2:]))
+    for nanoseconds, name in zip(figures, SPLIT_PARTS):
+        milliseconds = split.get(name)
+        if not _bounded_number(milliseconds) or abs(nanoseconds / 1e6 - milliseconds) > SPLIT_SUM_TOLERANCE_MS:
+            return True
+    return False
+
+
+def _timeline_occupancy_broken(timeline: dict) -> bool:
+    """On an ordered timeline, the permit's present and absent time cover readiness to entry exactly."""
+    present, absent, parts = (timeline.get("permit_present_ns"), timeline.get("permit_absent_ns"),
+                              timeline.get("parts_ns"))
+    if timeline.get("ordering") != "ordered" or not isinstance(parts, dict) or None in (present, absent):
+        return False
+    return present + absent != parts.get("frame_request_to_entry")
+
+
+def _timeline_shape(timeline: dict, index: int) -> bool | tuple | None:
+    """Entry `index` of the timeline's reason shape; None for an unknown reason or an unrecorded timeline."""
+    shape = TIMELINE_REASON_SHAPES.get(timeline.get("ordering_reason"))
+    return shape[index] if shape is not None and timeline.get("ordering") is not None else None
+
+
+def _timeline_requirement_broken(present: bool, requirement: bool | None) -> bool:
+    """A field `present` or not, against its shape's requirement: required, forbidden or free."""
+    return requirement is not None and present != requirement
+
+
+def _timeline_precedence_broken(timeline: dict, sample: dict) -> bool:
+    """A sample's own split reason other than `split` is the timeline's reason, unless the timeline could not be
+    read (an unrepresentable instant) or its raw record is malformed, which take precedence over it; a split sample
+    never carries another sample's split reason, and an overflow is named only on a split sample."""
+    reason, own = timeline.get("ordering_reason"), sample.get("split_reason")
+    if timeline.get("ordering") is None:
+        return False
+    if own != "split":
+        return reason not in (own, "unrepresentable-instant", *TIMELINE_VALIDATION_REASONS)
+    return reason in TIMELINE_SPLIT_REASONS
+
+
+def _timeline_overflow_reason_broken(timeline: dict, sample: dict) -> bool:
+    """An overflowed record keeps the sample's own split reason, else names the overflow; only it names one."""
+    reason, overflow = timeline.get("ordering_reason"), timeline.get("overflow")
+    if overflow is True:
+        return reason not in ("overflow", sample.get("split_reason"))
+    return reason == "overflow"
+
+
+# Each rule as (name, broken(timeline, sample), what it requires); the first broken rule names the problem.
+TIMELINE_RULES = (
+    ("keys", lambda timeline, sample: set(timeline) != set(TIMELINE_KEYS),
+     f"carries exactly the schema's {len(TIMELINE_KEYS)} keys"),
+    ("schema", lambda timeline, sample: not (_is_int(timeline.get("schema"))
+                                             and timeline["schema"] == TIMELINE_SCHEMA),
+     f"schema is {TIMELINE_SCHEMA}"),
+    ("field-types", lambda timeline, sample: _timeline_types_broken(timeline),
+     "every field has its schema type, value and the producer's integer width"),
+    ("availability-reason", lambda timeline, sample: (
+        timeline.get("unavailable_reason") is None, timeline.get("rejection_reason") is None) != {
+        "recorded": (True, True), "unavailable": (False, True), "rejected": (True, False),
+    }.get(timeline.get("availability")),
+     "a recorded timeline has no reason; an unavailable or rejected one has its own reason only"),
+    ("rejection-reason", lambda timeline, sample: timeline.get("availability") == "rejected"
+     and timeline.get("rejection_reason") not in TIMELINE_REJECTION_REASONS,
+     f"a rejection is one of {', '.join(TIMELINE_REJECTION_REASONS)}"),
+    ("unavailable-reason", lambda timeline, sample: timeline.get("availability") == "unavailable"
+     and timeline.get("unavailable_reason") not in TIMELINE_UNAVAILABLE_REASONS,
+     f"an unavailable timeline names one of {', '.join(TIMELINE_UNAVAILABLE_REASONS)}"),
+    ("unrecorded-carries-diagnostics", lambda timeline, sample: timeline.get("availability") != "recorded"
+     and any(timeline.get(key) is not None for key in TIMELINE_DIAGNOSTIC_KEYS),
+     "an unavailable or rejected timeline carries no classification and no population"),
+    ("recorded-fields", lambda timeline, sample: timeline.get("availability") == "recorded"
+     and None in (timeline.get("overflow"), timeline.get("ordering"), timeline.get("read_stamp")),
+     "a recorded timeline has overflow, ordering and read_stamp"),
+    ("parts-without-ordered", lambda timeline, sample: (timeline.get("parts_ns") is not None)
+     != (timeline.get("ordering") == "ordered"),
+     "parts_ns is present exactly when ordering is ordered"),
+    ("ordered-with-overflow", lambda timeline, sample: timeline.get("ordering") == "ordered"
+     and timeline.get("overflow") is True,
+     "an overflowed record is never ordered"),
+    ("ordered-split", lambda timeline, sample: timeline.get("ordering") == "ordered"
+     and not (sample.get("split_reason") == "split" and timeline.get("credited_dispatch_seq") is not None),
+     "an ordered sample has a split and a credited dispatch pair"),
+    ("overflow-event-fields", lambda timeline, sample: timeline.get("overflow") is True
+     and any(timeline.get(key) is not None for key in TIMELINE_EVENT_KEYS),
+     "an overflowed record derives nothing from its events"),
+    ("malformed-derives-nothing", lambda timeline, sample: timeline.get("ordering") is not None
+     and timeline.get("ordering_reason") in TIMELINE_VALIDATION_REASONS
+     and (timeline.get("ordering") != "clock-order" or timeline.get("overflow") is not False
+          or any(timeline.get(key) is not None for key in TIMELINE_EVENT_KEYS)),
+     "a raw-validation reason is a recorded, unoverflowed clock-order that derives nothing, whatever its status"),
+    ("reason-known", lambda timeline, sample: timeline.get("ordering") is not None
+     and timeline.get("ordering_reason") not in TIMELINE_REASON_SHAPES,
+     "the ordering reason is one the producer writes"),
+    ("reason-status", lambda timeline, sample: timeline.get("ordering") is not None
+     and timeline.get("ordering") not in (_timeline_shape(timeline, 0) or ()),
+     "each ordering reason has its status: none for ordered and published_during_dispatch, split_only or "
+     "clock-order as the producer decides it"),
+    ("reason-precedence", _timeline_precedence_broken,
+     "a sample's own split reason stays the timeline's reason, below only an unrepresentable instant and a "
+     "malformed record"),
+    ("reason-overflow", _timeline_overflow_reason_broken,
+     "an overflow keeps the sample's own split reason, else is named overflow, and only an overflow is"),
+    ("bound-pair", lambda timeline, sample: len({timeline.get(key) is None for key in TIMELINE_BOUND_KEYS}) != 1
+     or (timeline.get("admission") == "permit") != (timeline.get("permit_identity") in ("known", "unknown")),
+     "a bound pair supplies its admission, permit identity and tick qualification together, and only a permit "
+     "admission consumed a permit"),
+    ("reason-binding", lambda timeline, sample: _timeline_requirement_broken(
+        timeline.get("credited_dispatch_seq") is not None, _timeline_shape(timeline, 1)),
+     "a binding reason agrees with the bound pair: none for no or an ambiguous pair, an overflow or a malformed "
+     "record, one for every reason decided after binding"),
+    ("reason-readiness", lambda timeline, sample: _timeline_requirement_broken(
+        timeline.get("readiness") is not None, _timeline_shape(timeline, 2)),
+     "the readiness check is present for every reason decided from it and absent when it was never found"),
+    # timeline.rs:981 and 1054-1068: readiness is read only through the sample's split, whatever reason wins.
+    ("readiness-split", lambda timeline, sample: timeline.get("readiness") is not None
+     and not (sample.get("split_reason") == "split" and isinstance(sample.get("split"), dict)),
+     "a readiness check needs the sample's split, through which it is read"),
+    ("unrepresentable-pair", lambda timeline, sample: timeline.get("ordering_reason") == "unrepresentable-instant"
+     and (timeline.get("credited_dispatch_seq") is None) != (timeline.get("readiness") is None),
+     "an unrepresentable instant derives nothing before binding, or both the pair and its readiness after it"),
+    ("after-entry-intervals", lambda timeline, sample: timeline.get("ordering_reason") == "readiness-after-entry"
+     and any(timeline.get(key) is not None for key in ("permit_present_ns", "permit_absent_ns", "flood_services",
+                                                         "m3_complete")),
+     "readiness after the entry supplies no permit occupancy and no flood interval"),
+    # timeline.rs:1091-1110: occupancy and the flood interval are read only with a bound pair and readiness.
+    ("context-prerequisites", lambda timeline, sample: any(
+        timeline.get(key) is not None for key in ("permit_present_ns", "permit_absent_ns", "flood_services",
+                                                  "m3_complete"))
+     and (timeline.get("credited_dispatch_seq") is None or timeline.get("readiness") is None),
+     "permit occupancy and the flood interval need a bound pair and its readiness check"),
+    ("ready-before-reason", lambda timeline, sample: (
+        timeline.get("ready_before_publication") is not None and timeline.get("readiness") is None)
+     or (_timeline_shape(timeline, 3) is not None
+         and timeline.get("ready_before_publication") is not _timeline_shape(timeline, 3)),
+     "readiness before publication is read only with a readiness check, and agrees with its reason"),
+    # timeline.rs:875-881 and 1069-1073: an unrepresentable instant has no publication instant, and the early
+    # return (1009-1012) sets nothing, so neither has a readiness-before-publication flag.
+    ("unrepresentable-publication", lambda timeline, sample:
+     timeline.get("ordering_reason") == "unrepresentable-instant"
+     and timeline.get("ready_before_publication") is not None,
+     "an unrepresentable instant has no publication instant, so no readiness-before-publication flag"),
+    ("ordered-prerequisites", lambda timeline, sample: timeline.get("ordering") == "ordered"
+     and (timeline.get("ready_before_publication") is None or timeline.get("flood_services") is None
+          or timeline.get("m3_complete") is None
+          or (timeline.get("admission") != "fallback" and timeline.get("permit_present_ns") is None)),
+     "an ordered sample read its readiness against the publication, its flood interval and, unless it fell back, "
+     "its permit occupancy"),
+    ("sub-parts", lambda timeline, sample: _timeline_sub_parts_broken(timeline),
+     "the two tail sub-parts are present with the parts and sum to render_exit_to_credited_end"),
+    ("parts-sum", _timeline_parts_sum_broken,
+     f"the seven parts sum to latency_ms within {SPLIT_SUM_TOLERANCE_MS} ms"),
+    ("split-parts", _timeline_split_parts_broken,
+     f"an ordered timeline's first two parts are the split's first two, and its last five the split's "
+     f"publication_to_present_ms, within {SPLIT_SUM_TOLERANCE_MS} ms"),
+    ("occupancy-sum", lambda timeline, sample: _timeline_occupancy_broken(timeline),
+     "an ordered sample's permit present and absent time sum exactly to frame_request_to_entry"),
+    ("tick-to-entry-without-qualified", lambda timeline, sample: (timeline.get("tick_to_entry_ns") is not None)
+     != (timeline.get("tick_qualified") is True),
+     "tick_to_entry_ns is present exactly when tick_qualified is true"),
+    ("tick-qualified-identity", lambda timeline, sample: timeline.get("tick_qualified") is True
+     and (timeline.get("permit_identity"), timeline.get("admission")) != ("known", "permit"),
+     "a tick-qualified sample consumed a known permit"),
+    ("permit-durations", lambda timeline, sample: (timeline.get("permit_present_ns") is None)
+     != (timeline.get("permit_absent_ns") is None)
+     or (timeline.get("permit_present_ns") is not None and timeline.get("admission") in (None, "fallback")),
+     "permit durations come as a pair, never for a fallback or an unknown admission"),
+    # timeline.rs:981-989: the read-to-parse duration ends at the split's parse instant, so it needs a split.
+    ("read-to-parse-split", lambda timeline, sample: timeline.get("latest_read_to_parse_ns") is not None
+     and sample.get("split_reason") != "split",
+     "latest_read_to_parse_ns needs the sample's split, whose parse instant it ends at"),
+    ("read-to-parse-stamp", lambda timeline, sample: timeline.get("latest_read_to_parse_ns") is not None
+     and timeline.get("read_stamp") != "stamped",
+     "latest_read_to_parse_ns needs a retained chunk read"),
+    ("flood-pair", lambda timeline, sample: (timeline.get("flood_services") is None)
+     != (timeline.get("m3_complete") is None),
+     "flood_services and m3_complete come as a pair"),
+    ("ready-before-publication-ordered", lambda timeline, sample: timeline.get("ready_before_publication") is True
+     and timeline.get("ordering") == "ordered",
+     "readiness before publication is never forced into the order"),
+)
+
+
+def _timeline_problem(timeline: object, sample: dict) -> str | None:
+    """The first rule one credited sample's timeline breaks, named, or None."""
+    if not isinstance(timeline, dict):
+        return "object: is neither null nor an object"
+    for name, broken, requirement in TIMELINE_RULES:
+        if broken(timeline, sample):
+            return f"{name}: {requirement}"
+    return None
+
+
+def _timeline_ordered(timeline: dict) -> bool:
+    return timeline.get("availability") == "recorded" and timeline.get("ordering") == "ordered"
+
+
+def _timeline_in_b2(timeline: dict) -> bool:
+    return (_timeline_ordered(timeline) and timeline.get("admission") != "fallback"
+            and timeline.get("permit_present_ns") is not None and timeline.get("permit_absent_ns") is not None)
+
+
+def _timeline_in_m4(timeline: dict) -> bool:
+    return _timeline_ordered(timeline) and timeline.get("tick_qualified") is True
+
+
+def _timeline_in_m3(timeline: dict) -> bool:
+    return _timeline_ordered(timeline) and timeline.get("m3_complete") is True
+
+
+def _timeline_read_stamped(timeline: dict) -> bool:
+    return _timeline_ordered(timeline) and timeline.get("read_stamp") == "stamped"
+
+
+def timeline_coverage(timelines: Sequence[dict]) -> dict | None:
+    """Every population recomputed from credited in-scope samples' timeline fields, each a named numerator and
+    denominator. A missing or malformed timeline is passed in as an empty object: it stays in the credited
+    denominator and joins no population.
+
+    None when no credited sample was in scope; `unavailable`, with null populations, when none was recorded,
+    which is never a measured zero."""
+    credited = len(timelines)
+    if credited == 0:
+        return None
+
+    def count(member) -> int:
+        return sum(1 for timeline in timelines if member(timeline))
+
+    def population(numerator: int, denominator: int) -> dict:
+        return {"numerator": numerator, "denominator": denominator}
+
+    recorded = count(lambda timeline: timeline.get("availability") == "recorded")
+    common = {"schema": TIMELINE_SCHEMA, "credited": credited, "recorded": population(recorded, credited)}
+    if recorded == 0:
+        return {**common, "availability": "unavailable", **{name: None for name in TIMELINE_POPULATIONS}}
+    ordered = count(_timeline_ordered)
+    return {**common, "availability": "available",
+            "ordered": population(ordered, credited),
+            "b2": population(count(_timeline_in_b2), ordered),
+            "m4": population(count(_timeline_in_m4), ordered),
+            "m3": population(count(_timeline_in_m3), ordered),
+            "read_stamped": population(count(_timeline_read_stamped), ordered),
+            "b2_of_credited": population(count(_timeline_in_b2), credited),
+            "m3_of_credited": population(count(_timeline_in_m3), credited)}
+
+
+def _timeline_coverage_shape_problem(coverage: object) -> str | None:
+    """Why a supplied coverage object has the wrong shape, or None: exactly its keys, strict integers (never a bool
+    or a float, which compare equal to integers) and each population null or a numerator and a denominator."""
+    if coverage is None:
+        return None
+    if not isinstance(coverage, dict) or set(coverage) != set(TIMELINE_COVERAGE_KEYS):
+        return f"echo_timeline_coverage is not exactly {list(TIMELINE_COVERAGE_KEYS)}"
+    if not (_is_int(coverage["schema"]) and coverage["schema"] == TIMELINE_SCHEMA):
+        return f"echo_timeline_coverage schema {coverage['schema']!r} is not {TIMELINE_SCHEMA}"
+    if coverage["availability"] not in ("available", "unavailable"):
+        return f"echo_timeline_coverage availability {coverage['availability']!r} is not available or unavailable"
+    if not _within(coverage["credited"], U64_MAX):
+        return f"echo_timeline_coverage credited {coverage['credited']!r} is not a u64 count"
+    for name in ("recorded", *TIMELINE_POPULATIONS):
+        fraction = coverage[name]
+        if fraction is None and name != "recorded":
+            continue
+        if not (isinstance(fraction, dict) and set(fraction) == {"numerator", "denominator"}
+                and all(_within(fraction[key], U64_MAX) for key in fraction)):
+            return f"echo_timeline_coverage {name} {fraction!r} is not a numerator and a denominator of u64 counts"
+    return None
+
+
+def echo_timeline_problems(latency: dict, echo_timeline_schema: int | None, in_scope: bool) -> list[str]:
+    """Every way a latency object breaks the echo-timeline contract the harness declared.
+
+    Without the declaration (a harness that predates it) nothing is checked, but a timeline or a coverage is then
+    a problem. Under it, every sample carries the key; a credited in-scope sample carries an object, unavailable
+    or rejected included; any other sample carries null; the coverage counts every credited in-scope sample and
+    must equal the recomputation."""
+    samples = latency.get("samples")
+    samples = list(enumerate(samples)) if isinstance(samples, list) else []
+    samples = [(position, sample) for position, sample in samples if isinstance(sample, dict)]
+    written = "echo_timeline_coverage" in latency or any("echo_timeline" in sample for _, sample in samples)
+    if echo_timeline_schema is None:
+        # When: the harness declares no timeline schema, it predates the timeline and may write none of it.
+        return ["echo_timeline is written, but the harness declares no echo_timeline_schema"] if written else []
+    problems = [] if "echo_timeline_coverage" in latency else ["echo_timeline_coverage is missing"]
+    timelines = []
+    for position, sample in samples:
+        if "echo_timeline" not in sample:
+            problems.append(f"sample {position} is missing echo_timeline")
+        timeline = sample.get("echo_timeline")
+        credited = sample.get("latency_ms") is not None
+        if not (credited and in_scope):
+            if timeline is not None:
+                # When: the sample is uncredited or out of scope, no credited pair was bound, so it has no timeline.
+                problems.append(f"sample {position} echo_timeline timeline-out-of-scope: only a credited "
+                                f"{' or '.join('/'.join(label) for label in TIMELINE_SCOPE)} sample has one")
+            continue
+        if timeline is None:
+            problems.append(f"sample {position} echo_timeline timeline-missing: a credited in-scope sample carries "
+                            f"an object, unavailable or rejected included")
+        else:
+            problem = _timeline_problem(timeline, sample)
+            if problem:
+                problems.append(f"sample {position} echo_timeline {problem}")
+        timelines.append(timeline if isinstance(timeline, dict) else {})
+    if "echo_timeline_coverage" in latency:
+        supplied = latency["echo_timeline_coverage"]
+        shape = _timeline_coverage_shape_problem(supplied)
+        recomputed = timeline_coverage(timelines)
+        if shape is not None:
+            problems.append(shape)
+        elif supplied != recomputed:
+            problems.append(f"echo_timeline_coverage is {supplied!r}, but the samples give {recomputed!r}")
+    return problems
+
+
 def _monitor_ok(monitor: object) -> bool:
     """A measurement display gives its name or null, its refresh in millihertz or null, and its scale factor."""
     return (isinstance(monitor, dict)
@@ -2163,6 +2640,9 @@ _PHASE_FIELDS = {
     "dispatch_count": lambda value: _is_int(value) and value >= 0,
     # The logical updates S10's stream phase played; a harness older than the field leaves it out.
     "updates": lambda value: _is_int(value) and value > 0,
+    # The guard-correlation transport and its own time; a harness older than them leaves both out.
+    "guard_correlation": lambda value: _guard_field_ok(value),
+    "guard_correlation_transport_ns": lambda value: _is_int(value) and value >= 0,
 }
 
 # result.json's `frame_counters`: whether the binary has the perf-counters feature and the run forced the gate on.
@@ -2460,7 +2940,9 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
                     counters: bool = False, partial_counters: bool = False,
                     platform_name: str = "darwin", latency_split_schema: int | None = None,
                     phase_kinds: int | None = None, attribution_api: bool | None = None,
-                    attribution_schema: int | None = None) -> list[str]:
+                    attribution_schema: int | None = None, echo_timeline_schema: int | None = None,
+                    guard_correlation_schema: int | None = None,
+                    scope: tuple[str, str] | None = None) -> list[str]:
     """Check result.json against schema version 1; an empty list means it can be read.
 
     A result whose `managed` is not true, or whose harness hash differs from the one this
@@ -2509,6 +2991,12 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
             problems.append(f"phase {name!r} lacks a name or its start and end times")
         problems.extend(f"phase {name!r} field {key} has the wrong type"
                         for key, check in _PHASE_FIELDS.items() if key in phase and not check(phase[key]))
+        # When: the harness declares the guard-correlation contract, every finalized phase records its transport.
+        if guard_correlation_schema is not None:
+            problems.extend(f"phase {name!r} lacks {key}" for key in ("guard_correlation",
+                            "guard_correlation_transport_ns") if key not in phase)
+        elif "guard_correlation" in phase:
+            problems.append(f"phase {name!r} records guard_correlation its harness never declared")
         # When: the gate was on, a phase's counters must be whole; otherwise a phase carries none.
         if state == "on":
             problems.extend(f"phase {name!r} frame_counters {problem}"
@@ -2524,8 +3012,17 @@ def validate_result(data: object, harness_hash: str, process_exit_code: int | No
                                     and "coverage" in latency
                                     and (latency["coverage"] is None or _is_number(latency["coverage"]))):
         problems.append("latency needs samples, attributed, total and coverage")
-    elif latency is not None and latency_split_schema == 1:
-        problems.extend(f"latency {problem}" for problem in latency_split_problems(latency))
+    elif latency is not None:
+        if latency_split_schema == 1:
+            problems.extend(f"latency {problem}" for problem in latency_split_problems(latency))
+        # The timeline is checked whatever the split schema says, so a null split capability hides nothing. The
+        # run's own scenario and variant decide its scope; the result's are read only without one.
+        label = scope if scope is not None else (data.get("scenario"), data.get("variant"))
+        problems.extend(f"latency {problem}" for problem in
+                        echo_timeline_problems(latency, echo_timeline_schema, label in TIMELINE_SCOPE))
+    if echo_timeline_schema is not None and latency_split_schema != 1:
+        # When: the timeline schema is declared without the split schema its parts and reasons extend.
+        problems.append("echo_timeline_schema is declared without latency_split_schema 1")
     throughput = data.get("throughput")
     if throughput is not None and not (isinstance(throughput, dict) and _is_int(throughput.get("bytes"))
                                        and _is_number(throughput.get("seconds"))):
@@ -3262,6 +3759,10 @@ class Scenario:
     phase_kinds: int | None = None
     # The S10 attribution record schema the harness declares in `capabilities`; None for one that predates it.
     attribution_schema: int | None = None
+    # The echo-timeline schema the harness declares in `capabilities`; None for one that predates it.
+    echo_timeline_schema: int | None = None
+    # The guard-correlation contract the harness declares in `capabilities`; None for one that predates it.
+    guard_correlation_schema: int | None = None
 
     def cap(self, variant: str) -> int | None:
         """This variant's short-mode run cap, or None when it has none."""
@@ -3350,8 +3851,11 @@ PHASE_KINDS_SCHEMAS = (1,)
 # Every capability a harness may declare, with the values this script can validate; the split schema is required.
 # The S10 attribution record schemas this script can validate.
 ATTRIBUTION_SCHEMAS = (1,)
+# The guard-correlation contract schemas this script can validate.
+GUARD_CORRELATION_SCHEMAS = (1,)
 HARNESS_CAPABILITIES = {"latency_split_schema": LATENCY_SPLIT_SCHEMAS, "phase_kinds": PHASE_KINDS_SCHEMAS,
-                        "s10_attribution": ATTRIBUTION_SCHEMAS}
+                        "s10_attribution": ATTRIBUTION_SCHEMAS, "echo_timeline_schema": ECHO_TIMELINE_SCHEMAS,
+                        "guard_correlation_schema": GUARD_CORRELATION_SCHEMAS}
 
 
 def _harness_capabilities(data: dict) -> dict:
@@ -3407,7 +3911,9 @@ def parse_scenario_list(text: str) -> list[Scenario]:
             raise ValueError(f"malformed scenario entry {entry!r}")
         scenarios.append(Scenario(entry["id"], tuple(variants), entry["title"], entry["timeout_s"],
                                   entry["short_timeout_s"], caps, capabilities.get("latency_split_schema"),
-                                  capabilities.get("phase_kinds"), capabilities.get("s10_attribution")))
+                                  capabilities.get("phase_kinds"), capabilities.get("s10_attribution"),
+                                  capabilities.get("echo_timeline_schema"),
+                                  capabilities.get("guard_correlation_schema")))
     if len({scenario.id for scenario in scenarios}) != len(scenarios):
         raise ValueError("the scenario list repeats an id")
     return scenarios
@@ -3998,6 +4504,12 @@ class RunPlan:
     attribution_api: bool | None = None
     # The head harness's attribution schema; None for a harness that predates it.
     attribution_schema: int | None = None
+    # The head harness's echo-timeline schema; both sides run that harness, so both are held to it.
+    echo_timeline_schema: int | None = None
+    # The head harness's guard-correlation contract; both sides run that harness, so both are held to it.
+    guard_correlation_schema: int | None = None
+    # Whether the comparison built both sides with `perf_guard_spans_api`; None when nothing decided it.
+    guard_api: bool | None = None
 
 
 @dataclass
@@ -4319,6 +4831,597 @@ def _write_json(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=2, default=str) + "\n", encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Guard correlation: each phase's raw take, validated as one chain and joined offline.
+# ---------------------------------------------------------------------------------------------------------------
+
+# The phase record's `guard_correlation.status` values; a phase record without the field is incomplete.
+GUARD_STATUSES = ("written", "unavailable", "gate_off", "take_exhausted", "write_failed")
+# Statuses with no take: the App was not called or counted nothing, so no take_seq is consumed.
+GUARD_NO_TAKE = ("unavailable", "gate_off")
+# Each status's availability class; one run's phases share one class, the one its build and gate decide.
+GUARD_CLASS = {"unavailable": "unavailable", "gate_off": "gate_off", "written": "take",
+               "take_exhausted": "take", "write_failed": "take"}
+GUARD_FIELD_KEYS = ("status", "file", "take_seq", "bytes", "sha256", "window")
+GUARD_WINDOW_KEYS = ("label", "start_ns", "end_ns")
+GUARD_SIDECAR_DIR = "guard-correlation"
+GUARD_WINDOW_LABEL = "phase start to counter-end observation"
+GUARD_U64_MAX = 2**64 - 1
+# Recording capacities, frozen with the App's records.
+GUARD_SECTION_CAPACITY = 32_768
+GUARD_ABANDONED_CAPACITY = 64
+GUARD_LOSS_CAPACITY = 64
+GUARD_SPAN_CAPACITY = 16_384
+_GUARD_NONCE = re.compile(r"[0-9a-f]{32}")
+_GUARD_HASH = re.compile(r"[0-9a-f]{64}")
+_GUARD_HEADER = ("schema", "run_nonce", "harness_hash", "phase_index", "phase_name", "take_seq", "clock", "window",
+                 "taken_at_ns", "panes", "spans")
+_GUARD_PANE_KEYS = ("pane_id", "closed", "identities_exhausted", "prev_next_section_seq", "next_section_seq",
+                    "carried_pending", "records", "pending", "abandoned", "abandoned_overflow", "abandoned_unlocated",
+                    "issued_dropped_located", "issued_dropped_unlocated", "losses", "loss_events", "losses_merged",
+                    "refused_closed", "refused_exhausted", "refused_unlocated", "first_refusal_ns")
+_GUARD_PANE_U64 = ("pane_id", "prev_next_section_seq", "next_section_seq", "abandoned_overflow", "abandoned_unlocated",
+                   "issued_dropped_located", "issued_dropped_unlocated", "loss_events", "refused_closed",
+                   "refused_exhausted", "refused_unlocated")
+_GUARD_BATCH_KEYS = ("spans", "spans_issued", "spans_dropped_located", "spans_dropped_unlocated", "losses",
+                     "loss_events", "losses_merged", "collections_issued", "collections_refused_exhausted",
+                     "prev_next_collection_seq", "next_collection_seq", "identities_exhausted", "open_collections")
+_GUARD_BATCH_U64 = ("spans_issued", "spans_dropped_located", "spans_dropped_unlocated", "loss_events",
+                    "collections_issued", "collections_refused_exhausted", "prev_next_collection_seq",
+                    "next_collection_seq", "open_collections")
+
+
+def _is_u64(value: object) -> bool:
+    return _is_int(value) and 0 <= value <= GUARD_U64_MAX
+
+
+def _is_opt_u64(value: object) -> bool:
+    return value is None or _is_u64(value)
+
+
+def _same_opt_u64(left: object, right: object) -> bool:
+    """Type-strict equality of two optional integers: a bool or a float never equals an integer here."""
+    if left is None or right is None:
+        return left is None and right is None
+    return _is_int(left) and _is_int(right) and left == right
+
+
+def _guard_window_ok(window: object) -> bool:
+    return (isinstance(window, dict) and set(window) == set(GUARD_WINDOW_KEYS)
+            and window["label"] == GUARD_WINDOW_LABEL and isinstance(window["label"], str)
+            and _is_opt_u64(window["start_ns"]) and _is_opt_u64(window["end_ns"]))
+
+
+def guard_field_problems(value: object) -> list[str]:
+    """Why a phase record's `guard_correlation` is malformed: every key present, the window well-formed, and the
+    other keys shaped by the status. Only `written` names a file, size and digest; a take_seq is named only when
+    a take was issued (`written`, `write_failed`)."""
+    if not isinstance(value, dict):
+        return ["guard_correlation is not an object"]
+    if set(value) != set(GUARD_FIELD_KEYS):
+        return [f"guard_correlation keys are {sorted(value)}, not {sorted(GUARD_FIELD_KEYS)}"]
+    status = value["status"]
+    if not isinstance(status, str) or status not in GUARD_STATUSES:
+        return [f"guard_correlation status {status!r} is not one of {GUARD_STATUSES}"]
+    problems = []
+    if not _guard_window_ok(value["window"]):
+        problems.append("guard_correlation window is malformed")
+    if status == "written":
+        if not (isinstance(value["file"], str) and _is_u64(value["take_seq"]) and _is_u64(value["bytes"])
+                and isinstance(value["sha256"], str) and _GUARD_HASH.fullmatch(value["sha256"])):
+            problems.append("a written guard_correlation lacks its file, take_seq, bytes or sha256")
+        return problems
+    if any(value[key] is not None for key in ("file", "bytes", "sha256")):
+        problems.append(f"a {status} guard_correlation names a file, size or digest")
+    if not (_is_u64(value["take_seq"]) if status == "write_failed" else value["take_seq"] is None):
+        problems.append(f"a {status} guard_correlation has the wrong take_seq")
+    return problems
+
+
+def _guard_field_ok(value: object) -> bool:
+    return not guard_field_problems(value)
+
+
+def guard_availability(guard_api: bool | None, frame_counters: object) -> str | None:
+    """The availability class the run's build and gate decide: `unavailable` without the cfg, `take` with it and
+    the gate on, `gate_off` with it and the gate off; None when nothing decided the cfg."""
+    if guard_api is None:
+        return None
+    if not guard_api:
+        return "unavailable"
+    return "take" if frame_counters == "on" else "gate_off"
+
+
+def guard_availability_problem(fields: Iterable[object], availability: str | None) -> str | None:
+    """Why the phases' guard-correlation statuses cannot belong to one run, or None. One run's statuses share one
+    availability class, the one its build and gate decide (`availability`, None when nothing decided it). The live
+    join and perf-flags' artifact reader both call this, so neither accepts what the other rejects."""
+    classes = {GUARD_CLASS[value["status"]] for value in fields
+               if isinstance(value, dict) and value.get("status") in GUARD_CLASS}
+    if len(classes) > 1:
+        return f"availability changes within the run: {sorted(classes)}"
+    if availability is not None and classes and classes != {availability}:
+        return f"status class {sorted(classes)} is impossible for a run whose availability is {availability}"
+    return None
+
+
+def guard_overlap(records: Sequence[tuple[int, int]], spans: Sequence[tuple[int, int]]) -> tuple[int, int, int]:
+    """The observed overlap of one pane's worker waits with its UI spans: (overlap ns, sections with a positive
+    overlap, distinct spans overlapping any wait). `spans` must be disjoint; both are sorted here, so input order
+    never changes the result. Touching intervals overlap by 0."""
+    waits = sorted(records)
+    held = sorted(spans)
+    overlap_ns, sections, touched = 0, 0, set()
+    first_open = 0
+    for wait_from, wait_to in waits:
+        while first_open < len(held) and held[first_open][1] <= wait_from:
+            first_open += 1
+        wait_overlap = 0
+        cursor = first_open
+        while cursor < len(held) and held[cursor][0] < wait_to:
+            span_from, span_to = held[cursor]
+            shared = min(wait_to, span_to) - max(wait_from, span_from)
+            if shared > 0:
+                wait_overlap += shared
+                touched.add(cursor)
+            cursor += 1
+        overlap_ns += wait_overlap
+        sections += wait_overlap > 0
+    return overlap_ns, sections, len(touched)
+
+
+def _guard_intervals(items: object, keys: tuple[str, ...]) -> bool:
+    return isinstance(items, list) and all(isinstance(item, dict) and set(item) == set(keys)
+                                           and all(_is_u64(item[key]) for key in keys) for item in items)
+
+
+def _guard_shape(sidecar: object) -> list[str]:
+    """Named type problems in a sidecar; an empty list means every later check can index it safely. Every frozen
+    field is required, so a missing one is never read as null."""
+    if not isinstance(sidecar, dict):
+        return ["the sidecar is not an object"]
+    if list(sidecar) != list(_GUARD_HEADER):
+        return [f"the sidecar's keys are {list(sidecar)}, not the frozen header"]
+    problems = []
+    if not (_is_int(sidecar["schema"]) and sidecar["schema"] == 1):
+        problems.append(f"schema {sidecar['schema']!r} is not the integer 1")
+    clock = sidecar["clock"]
+    if not (isinstance(clock, dict) and set(clock) == {"pid", "run_nonce"} and _is_u64(clock["pid"])
+            and isinstance(clock["run_nonce"], str)):
+        problems.append("clock is malformed")
+    if not _guard_window_ok(sidecar["window"]):
+        problems.append("window is malformed")
+    if not (_is_u64(sidecar["take_seq"]) and _is_opt_u64(sidecar["taken_at_ns"]) and _is_u64(sidecar["phase_index"])
+            and isinstance(sidecar["phase_name"], str) and isinstance(sidecar["run_nonce"], str)
+            and (sidecar["harness_hash"] is None or isinstance(sidecar["harness_hash"], str))):
+        problems.append("a header field has the wrong type")
+    panes = sidecar["panes"]
+    if not isinstance(panes, list) or not all(isinstance(pane, dict) for pane in panes):
+        return problems + ["panes is not a list of objects"]
+    for position, pane in enumerate(panes):
+        if set(pane) != set(_GUARD_PANE_KEYS):
+            missing = sorted(set(_GUARD_PANE_KEYS) - set(pane))
+            extra = sorted(set(pane) - set(_GUARD_PANE_KEYS))
+            problems.append(f"pane {position} lacks {missing} or adds {extra}")
+            continue
+        pending = pane["pending"]
+        if not (all(_is_u64(pane[key]) for key in _GUARD_PANE_U64)
+                and all(isinstance(pane[key], bool) for key in ("closed", "identities_exhausted", "losses_merged"))
+                and _is_opt_u64(pane["carried_pending"]) and _is_opt_u64(pane["first_refusal_ns"])
+                and _guard_intervals(pane["records"], ("section_seq", "before_lock_ns", "locked_at_ns"))
+                and _guard_intervals(pane["abandoned"], ("section_seq", "registered_ns", "abandoned_ns"))
+                and _guard_intervals(pane["losses"], ("from_ns", "to_ns"))
+                and (pending is None or (isinstance(pending, dict) and set(pending) == {"section_seq", "registered_ns"}
+                                         and _is_u64(pending["section_seq"])
+                                         and _is_opt_u64(pending["registered_ns"])))):
+            problems.append(f"pane {position} has a field of the wrong type")
+    batch = sidecar["spans"]
+    if not isinstance(batch, dict) or set(batch) != set(_GUARD_BATCH_KEYS):
+        return problems + ["spans lacks a frozen field or adds one"]
+    if not (all(_is_u64(batch[key]) for key in _GUARD_BATCH_U64)
+            and isinstance(batch["losses_merged"], bool) and isinstance(batch["identities_exhausted"], bool)
+            and _guard_intervals(batch["spans"], ("pane_id", "collection_seq", "acquired_ns", "released_ns"))
+            and _guard_intervals(batch["losses"], ("from_ns", "to_ns"))):
+        problems.append("spans has a field of the wrong type")
+    return problems
+
+
+@dataclass
+class GuardPaneState:
+    """One pane's evidence after its last validated take."""
+
+    next_section_seq: int
+    # The pending identity with its original registration time (None when it was unreadable).
+    pending: tuple[int, int | None] | None
+    closed: bool
+    exhausted: bool
+    prunable: bool
+    # The latest `locked_at_ns` of any published section, -1 before the first.
+    last_locked_ns: int
+
+
+@dataclass
+class GuardChain:
+    """What take k−1 left for take k: identities, clocks, sticky flags and each pane's last state."""
+
+    take_seq: int = 0
+    taken_at_ns: int = -1
+    run_nonce: str | None = None
+    pid: int | None = None
+    harness_hash: str | None = None
+    next_collection_seq: int = 1
+    spans_exhausted: bool = False
+    panes: dict[int, GuardPaneState] = field(default_factory=dict)
+    # Each pane's latest released span, -1 before the first.
+    span_released: dict[int, int] = field(default_factory=dict)
+
+
+def _guard_pane_problems(pane: dict, chain: GuardChain) -> list[str]:
+    """§5.1's pane rules for one transfer, against the chain: identities, accounting, consistency, and clock
+    continuity with the previous take."""
+    pane_id = pane["pane_id"]
+    before = chain.panes.get(pane_id)
+    problems = []
+    prev_next, next_seq = pane["prev_next_section_seq"], pane["next_section_seq"]
+    expected_prev = 1 if before is None else before.next_section_seq
+    if prev_next != expected_prev:
+        problems.append(f"pane {pane_id}: prev_next_section_seq {prev_next}, expected {expected_prev}")
+    if next_seq < prev_next:
+        problems.append(f"pane {pane_id}: next_section_seq {next_seq} is below prev_next {prev_next}")
+    if next_seq == GUARD_U64_MAX and not pane["identities_exhausted"]:
+        problems.append(f"pane {pane_id}: next_section_seq is u64::MAX without identities_exhausted")
+    if before is not None and ((before.closed and not pane["closed"])
+                               or (before.exhausted and not pane["identities_exhausted"])):
+        problems.append(f"pane {pane_id}: a sticky flag went from true to false")
+    carried = pane["carried_pending"]
+    carried_before = before.pending if before is not None else None
+    if carried != (carried_before[0] if carried_before is not None else None):
+        problems.append(f"pane {pane_id}: carried_pending {carried} is not the previous take's pending identity")
+    identities = [record["section_seq"] for record in pane["records"]]
+    identities += [entry["section_seq"] for entry in pane["abandoned"]]
+    if pane["pending"] is not None:
+        identities.append(pane["pending"]["section_seq"])
+    for identity in identities:
+        if not (prev_next <= identity < next_seq or identity == carried):
+            problems.append(f"pane {pane_id}: identity {identity} is outside [{prev_next}, {next_seq}) and not carried")
+    if len(identities) != len(set(identities)):
+        problems.append(f"pane {pane_id}: an identity appears more than once")
+    resolved = (len(pane["records"]) + len(pane["abandoned"]) + pane["abandoned_overflow"]
+                + pane["abandoned_unlocated"] + pane["issued_dropped_located"] + pane["issued_dropped_unlocated"]
+                + (pane["pending"] is not None))
+    issued = next_seq - prev_next + (carried is not None)
+    if resolved != issued:
+        problems.append(f"pane {pane_id}: {resolved} dispositions for {issued} issued identities")
+    if pane["loss_events"] != pane["issued_dropped_located"] + pane["abandoned_overflow"]:
+        problems.append(f"pane {pane_id}: loss_events is not issued_dropped_located + abandoned_overflow")
+    if pane["loss_events"] > 0 and not pane["losses"]:
+        problems.append(f"pane {pane_id}: loss_events without losses")
+    located_refusals = pane["refused_closed"] + pane["refused_exhausted"] - pane["refused_unlocated"]
+    if located_refusals < 0 or (located_refusals > 0) != (pane["first_refusal_ns"] is not None):
+        problems.append(f"pane {pane_id}: refusal counts disagree with first_refusal_ns and refused_unlocated")
+    if (len(pane["records"]) > GUARD_SECTION_CAPACITY or len(pane["abandoned"]) > GUARD_ABANDONED_CAPACITY
+            or len(pane["losses"]) > GUARD_LOSS_CAPACITY):
+        problems.append(f"pane {pane_id}: a list exceeds its capacity")
+    if any(entry["registered_ns"] > entry["abandoned_ns"] for entry in pane["abandoned"]) \
+            or any(loss["from_ns"] > loss["to_ns"] for loss in pane["losses"]):
+        problems.append(f"pane {pane_id}: an interval ends before it starts")
+    # Clock continuity: a worker's sections are sequential, so each starts after the previous one locked,
+    # including the previous take's; a section issued after the previous take registered after its clock read.
+    previous_locked = before.last_locked_ns if before is not None else -1
+    for record in sorted(pane["records"], key=lambda record: record["section_seq"]):
+        if record["before_lock_ns"] > record["locked_at_ns"] or record["before_lock_ns"] < previous_locked:
+            problems.append(f"pane {pane_id}: section {record['section_seq']} is out of clock order")
+        if record["section_seq"] != carried and record["before_lock_ns"] < chain.taken_at_ns:
+            problems.append(f"pane {pane_id}: section {record['section_seq']} predates the previous take")
+        previous_locked = record["locked_at_ns"]
+    for entry in pane["abandoned"]:
+        if entry["section_seq"] != carried and entry["registered_ns"] < chain.taken_at_ns:
+            problems.append(f"pane {pane_id}: abandoned section {entry['section_seq']} predates the previous take")
+    pending = pane["pending"]
+    if pending is not None and pending["section_seq"] != carried and pending["registered_ns"] is not None \
+            and pending["registered_ns"] < chain.taken_at_ns:
+        problems.append(f"pane {pane_id}: pending section {pending['section_seq']} predates the previous take")
+    if carried is not None and carried_before is not None:
+        registered = carried_before[1]
+        if pending is not None and pending["section_seq"] == carried \
+                and not _same_opt_u64(pending["registered_ns"], registered):
+            problems.append(f"pane {pane_id}: carried section {carried} changed its registration time")
+        for entry in pane["abandoned"]:
+            if entry["section_seq"] == carried and not _same_opt_u64(entry["registered_ns"], registered):
+                problems.append(f"pane {pane_id}: carried section {carried} changed its registration time")
+        for record in pane["records"]:
+            if record["section_seq"] == carried and registered is not None and record["before_lock_ns"] < registered:
+                problems.append(f"pane {pane_id}: carried section {carried} locked before it registered")
+    return problems
+
+
+def _guard_span_problems(batch: dict, chain: GuardChain, pane_ids: set[int]) -> list[str]:
+    """§5.1's span rules for the batch against the chain, with clock continuity across takes."""
+    problems = []
+    prev_next, next_seq = batch["prev_next_collection_seq"], batch["next_collection_seq"]
+    if prev_next != chain.next_collection_seq:
+        problems.append(f"spans: prev_next_collection_seq {prev_next}, expected {chain.next_collection_seq}")
+    if next_seq < prev_next or (next_seq == GUARD_U64_MAX and not batch["identities_exhausted"]):
+        problems.append("spans: next_collection_seq is out of range")
+    if chain.spans_exhausted and not batch["identities_exhausted"]:
+        problems.append("spans: a sticky flag went from true to false")
+    keys = [(span["pane_id"], span["collection_seq"]) for span in batch["spans"]]
+    if len(keys) != len(set(keys)):
+        problems.append("spans: (pane_id, collection_seq) is not unique")
+    if any(not prev_next <= seq < next_seq for _, seq in keys):
+        problems.append("spans: a collection_seq is outside the issued range")
+    collections = {seq for _, seq in keys}
+    if len(collections) > batch["collections_issued"] or batch["collections_issued"] > next_seq - prev_next:
+        problems.append("spans: recorded collections disagree with collections_issued")
+    if batch["spans_issued"] != len(batch["spans"]) + batch["spans_dropped_located"] + batch["spans_dropped_unlocated"]:
+        problems.append("spans: spans_issued does not equal its dispositions")
+    if (batch["loss_events"] > 0) != bool(batch["losses"]):
+        problems.append("spans: loss_events and losses disagree")
+    if batch["spans_dropped_located"] > 0 and batch["loss_events"] == 0:
+        problems.append("spans: located drops without a loss event")
+    if any(loss["from_ns"] > loss["to_ns"] for loss in batch["losses"]):
+        problems.append("spans: a loss interval ends before it starts")
+    if any(pane_id not in pane_ids for pane_id, _ in keys):
+        problems.append("spans: a span's pane has no container")
+    if len(batch["spans"]) > GUARD_SPAN_CAPACITY or len(batch["losses"]) > GUARD_LOSS_CAPACITY:
+        problems.append("spans: a list exceeds its capacity")
+    by_pane: dict[int, list[tuple[int, int]]] = {}
+    for span in batch["spans"]:
+        if span["acquired_ns"] > span["released_ns"]:
+            problems.append("spans: a span is released before it is acquired")
+        if span["acquired_ns"] < chain.taken_at_ns:
+            problems.append("spans: a span predates the previous take")
+        by_pane.setdefault(span["pane_id"], []).append((span["acquired_ns"], span["released_ns"]))
+    for pane_id, intervals in by_pane.items():
+        intervals.sort()
+        if any(later[0] < earlier[1] for earlier, later in zip(intervals, intervals[1:])) \
+                or intervals[0][0] < chain.span_released.get(pane_id, -1):
+            problems.append(f"spans: pane {pane_id}'s spans overlap")
+    return problems
+
+
+def guard_take_problems(sidecar: dict, phase_index: int, phase_name: str, phase_window: dict, chain: GuardChain,
+                        expected_hash: str | None) -> list[str]:
+    """§5.1: why take k does not validate against the chain and its own phase record; empty when it does. The
+    chain is not advanced."""
+    problems = _guard_shape(sidecar)
+    if problems:
+        return problems
+    window = sidecar["window"]
+    if not all(_same_opt_u64(window[key], phase_window[key]) for key in ("start_ns", "end_ns")):
+        problems.append("the sidecar's window differs from its phase record's latched window")
+    taken_at = sidecar["taken_at_ns"]
+    if taken_at is None:
+        problems.append("taken_at_ns is unknown")
+    elif taken_at <= chain.taken_at_ns:
+        problems.append("taken_at_ns does not increase")
+    edges = [value for value in (window["start_ns"], window["end_ns"], taken_at) if value is not None]
+    if any(earlier > later for earlier, later in zip(edges, edges[1:])):
+        problems.append("the window is not ordered start ≤ end ≤ taken_at_ns")
+    if sidecar["phase_index"] != phase_index or sidecar["phase_name"] != phase_name:
+        problems.append(f"the sidecar names phase {sidecar['phase_index']} {sidecar['phase_name']!r}, "
+                        f"not its own record's {phase_index} {phase_name!r}")
+    if sidecar["take_seq"] != chain.take_seq + 1:
+        problems.append(f"take_seq {sidecar['take_seq']} does not follow {chain.take_seq}")
+    nonce = sidecar["run_nonce"]
+    if not _GUARD_NONCE.fullmatch(nonce) or sidecar["clock"]["run_nonce"] != nonce \
+            or (chain.run_nonce is not None and nonce != chain.run_nonce):
+        problems.append("the run nonce is malformed or differs within the run")
+    if chain.pid is not None and sidecar["clock"]["pid"] != chain.pid:
+        problems.append("the clock's pid differs within the run")
+    harness = sidecar["harness_hash"]
+    if harness is not None and ((chain.harness_hash is not None and harness != chain.harness_hash)
+                                or (expected_hash is not None and harness != expected_hash)):
+        problems.append("the harness hash differs from the run's")
+    pane_ids = [pane["pane_id"] for pane in sidecar["panes"]]
+    if len(pane_ids) != len(set(pane_ids)):
+        problems.append("pane_id is not unique")
+    for pane_id, before in chain.panes.items():
+        if not before.prunable and pane_id not in pane_ids:
+            problems.append(f"pane {pane_id} vanished without being closed and drained")
+    for pane in sidecar["panes"]:
+        problems.extend(_guard_pane_problems(pane, chain))
+    problems.extend(_guard_span_problems(sidecar["spans"], chain, set(pane_ids)))
+    return problems
+
+
+def _guard_advance(chain: GuardChain, sidecar: dict) -> None:
+    """Advance the chain past a validated take."""
+    chain.take_seq = sidecar["take_seq"]
+    chain.taken_at_ns = sidecar["taken_at_ns"]
+    chain.run_nonce, chain.pid = sidecar["run_nonce"], sidecar["clock"]["pid"]
+    chain.harness_hash = sidecar["harness_hash"] or chain.harness_hash
+    chain.next_collection_seq = sidecar["spans"]["next_collection_seq"]
+    chain.spans_exhausted = sidecar["spans"]["identities_exhausted"]
+    present = set()
+    for pane in sidecar["panes"]:
+        present.add(pane["pane_id"])
+        before = chain.panes.get(pane["pane_id"])
+        pending = pane["pending"]
+        last_locked = max([record["locked_at_ns"] for record in pane["records"]]
+                          + [before.last_locked_ns if before is not None else -1])
+        chain.panes[pane["pane_id"]] = GuardPaneState(
+            pane["next_section_seq"], (pending["section_seq"], pending["registered_ns"]) if pending else None,
+            pane["closed"], pane["identities_exhausted"], pane["closed"] and pending is None, last_locked)
+    chain.panes = {pane_id: state for pane_id, state in chain.panes.items()
+                   if not state.prunable or pane_id in present}
+    for span in sidecar["spans"]["spans"]:
+        chain.span_released[span["pane_id"]] = max(chain.span_released.get(span["pane_id"], -1), span["released_ns"])
+
+
+def guard_window_reasons(sidecar: dict) -> list[str]:
+    """§5.2: why a validated take's window is incomplete; empty when it is complete. Nothing is clipped: a
+    section or span crossing an edge makes the window incomplete."""
+    window = sidecar["window"]
+    start_ns, end_ns = window["start_ns"], window["end_ns"]
+    if start_ns is None or end_ns is None:
+        return ["the window is unknown"]
+    reasons = []
+    batch = sidecar["spans"]
+    for pane in sidecar["panes"]:
+        pane_id = pane["pane_id"]
+        for key in ("issued_dropped_unlocated", "abandoned_unlocated", "refused_unlocated"):
+            if pane[key]:
+                reasons.append(f"pane {pane_id}: unlocated {key}")
+        pending = pane["pending"]
+        if pending is not None and (pending["registered_ns"] is None or pending["registered_ns"] <= end_ns):
+            reasons.append(f"pane {pane_id}: section {pending['section_seq']} is pending")
+        if any(entry["registered_ns"] <= end_ns and entry["abandoned_ns"] >= start_ns for entry in pane["abandoned"]):
+            reasons.append(f"pane {pane_id}: an abandoned section meets the window")
+        if any(loss["from_ns"] <= end_ns and loss["to_ns"] >= start_ns for loss in pane["losses"]):
+            reasons.append(f"pane {pane_id}: a loss interval meets the window")
+        if pane["first_refusal_ns"] is not None and pane["first_refusal_ns"] <= end_ns:
+            reasons.append(f"pane {pane_id}: a refused section's wait was not recorded")
+        if pane["identities_exhausted"]:
+            reasons.append(f"pane {pane_id}: identities exhausted")
+        for record in pane["records"]:
+            before, locked = record["before_lock_ns"], record["locked_at_ns"]
+            if before < start_ns < locked or before < end_ns < locked:
+                reasons.append(f"pane {pane_id}: section {record['section_seq']} crosses the window's edge")
+    for span in batch["spans"]:
+        acquired, released = span["acquired_ns"], span["released_ns"]
+        if acquired < start_ns < released or acquired < end_ns < released:
+            reasons.append(f"spans: pane {span['pane_id']}'s collection {span['collection_seq']} crosses the edge")
+    if batch["spans_dropped_unlocated"]:
+        reasons.append("spans: unlocated spans_dropped_unlocated")
+    if batch["identities_exhausted"] or batch["collections_refused_exhausted"]:
+        reasons.append("spans: collection identities exhausted")
+    if batch["open_collections"]:
+        reasons.append("spans: a collection was open at the take")
+    if any(loss["from_ns"] <= end_ns and loss["to_ns"] >= start_ns for loss in batch["losses"]):
+        reasons.append("spans: a loss interval meets the window")
+    return reasons
+
+
+def guard_window_join(sidecar: dict) -> dict[str, int]:
+    """§5.3 for a complete window: per pane, its records inside the window against its spans in it."""
+    start_ns, end_ns = sidecar["window"]["start_ns"], sidecar["window"]["end_ns"]
+    totals = {"observed_overlap_ns": 0, "observed_overlap_sections": 0, "observed_overlapping_spans": 0}
+    for pane in sidecar["panes"]:
+        records = [(record["before_lock_ns"], record["locked_at_ns"]) for record in pane["records"]
+                   if start_ns <= record["before_lock_ns"] and record["locked_at_ns"] <= end_ns]
+        spans = [(span["acquired_ns"], span["released_ns"]) for span in sidecar["spans"]["spans"]
+                 if span["pane_id"] == pane["pane_id"] and start_ns <= span["acquired_ns"]
+                 and span["released_ns"] <= end_ns]
+        overlap_ns, sections, touched = guard_overlap(records, spans)
+        totals["observed_overlap_ns"] += overlap_ns
+        totals["observed_overlap_sections"] += sections
+        totals["observed_overlapping_spans"] += touched
+    return totals
+
+
+def _guard_load(root: Path, field_value: dict) -> tuple[dict | None, str | None]:
+    """A written phase's sidecar, read and checked against its record's size and digest; else why not."""
+    file_name = field_value["file"]
+    if not re.fullmatch(rf"{GUARD_SIDECAR_DIR}/[0-9]+-[a-z0-9-]+\.json", file_name):
+        return None, f"the sidecar path {file_name!r} is not a guard-correlation file"
+    try:
+        raw = (root / file_name).read_bytes()
+    except OSError as error:
+        return None, f"the sidecar is missing: {error.strerror or error}"
+    if len(raw) != field_value["bytes"]:
+        return None, f"the sidecar is {len(raw)} bytes, not the recorded {field_value['bytes']}"
+    if hashlib.sha256(raw).hexdigest() != field_value["sha256"]:
+        return None, "the sidecar's digest does not match its record"
+    try:
+        sidecar = json.loads(raw)
+    except ValueError as error:
+        return None, f"the sidecar cannot be parsed: {error}"
+    if not isinstance(sidecar, dict):
+        return None, "the sidecar is not an object"
+    if not _same_opt_u64(sidecar.get("take_seq"), field_value["take_seq"]):
+        return None, "the sidecar's take_seq differs from its record"
+    return sidecar, None
+
+
+def guard_correlation_verdicts(phases: Sequence[object], root: Path, expected_hash: str | None,
+                               availability: str | None = None) -> list[dict]:
+    """Each phase's guard-correlation verdict: `complete` with its overlap, `incomplete` with reasons, or `n/a`.
+
+    Takes are validated in phase order as one chain (§5.1): a missing, truncated, mismatched, misbound,
+    write_failed, take_exhausted or malformed take makes itself and every later take incomplete. Two run-wide
+    rules are decided before any verdict is final: a null harness hash in any take makes every take incomplete
+    (`harness_unbound`), and statuses of more than one availability class, or of a class the run's build and
+    gate (`availability`) rule out, make every phase incomplete. An incomplete or unavailable verdict never
+    carries a number.
+    """
+    raws = [phase.get("guard_correlation") if isinstance(phase, dict) else None for phase in phases]
+    fields = [raw if raw is not None and not guard_field_problems(raw) else None for raw in raws]
+    run_problem = guard_availability_problem(fields, availability)
+    loaded: dict[int, tuple[dict | None, str | None]] = {}
+    unbound = False
+    for index, value in enumerate(fields):
+        if value is not None and value["status"] == "written":
+            loaded[index] = _guard_load(root, value)
+            sidecar = loaded[index][0]
+            if sidecar is not None and "harness_hash" in sidecar and sidecar["harness_hash"] is None:
+                unbound = True
+    chain = GuardChain()
+    broken: str | None = None
+    verdicts = []
+    for index, phase in enumerate(phases):
+        name = phase.get("name") if isinstance(phase, dict) else None
+        value = fields[index]
+        verdict = {"phase_index": index, "phase": name, "status": None, "verdict": "incomplete", "reasons": []}
+        verdicts.append(verdict)
+        if value is None:
+            reason = ("the phase record has no guard_correlation" if raws[index] is None
+                      else "guard_correlation: " + "; ".join(guard_field_problems(raws[index])))
+            verdict["reasons"].append(reason)
+            broken = broken or f"phase {index}: {reason}"
+            continue
+        status = value["status"]
+        verdict["status"] = status
+        if status in GUARD_NO_TAKE:
+            verdict["verdict"] = "n/a"
+            continue
+        if broken is not None:
+            verdict["reasons"].append(f"an earlier take broke the chain: {broken}")
+        if status != "written":
+            verdict["reasons"].append(f"the take is {status}")
+            broken = broken or f"phase {index} is {status}"
+            continue
+        sidecar, problem = loaded[index]
+        if sidecar is None:
+            verdict["reasons"].append(problem)
+            broken = broken or f"phase {index}: {problem}"
+            continue
+        if broken is not None:
+            continue
+        problems = guard_take_problems(sidecar, index, name, value["window"], chain, expected_hash)
+        if problems:
+            verdict["reasons"].extend(problems)
+            broken = f"phase {index} did not validate"
+            continue
+        _guard_advance(chain, sidecar)
+        reasons = guard_window_reasons(sidecar)
+        if reasons:
+            verdict["reasons"].extend(reasons)
+            continue
+        verdict["verdict"] = "complete"
+        verdict.update(guard_window_join(sidecar))
+    for verdict in verdicts:
+        override = run_problem if run_problem is not None else ("harness_unbound" if unbound else None)
+        if override is None or (run_problem is None and verdict["verdict"] == "n/a"):
+            continue
+        verdict["verdict"] = "incomplete"
+        verdict["reasons"].insert(0, override)
+        for key in ("observed_overlap_ns", "observed_overlap_sections", "observed_overlapping_spans"):
+            verdict.pop(key, None)
+    return verdicts
+
+
+def format_guard_verdict(verdict: Mapping[str, object]) -> str:
+    """One report line: the overlap of a complete phase, `incomplete` with its reasons, or `n/a`."""
+    head = f"[perf-compare] guard correlation {verdict['phase']}:"
+    if verdict["verdict"] == "n/a":
+        return f"{head} n/a ({verdict['status']})"
+    if verdict["verdict"] != "complete":
+        return f"{head} incomplete: {'; '.join(verdict['reasons'])}"
+    return (f"{head} observed overlap {verdict['observed_overlap_ns']} ns, "
+            f"{verdict['observed_overlap_sections']} sections, {verdict['observed_overlapping_spans']} spans")
+
+
 def _keep_scratch(scratch: Path, kept: Path) -> None:
     """Copy a run's result, logs and records into its evidence; the scratch's fixtures are left out.
 
@@ -4326,7 +5429,8 @@ def _keep_scratch(scratch: Path, kept: Path) -> None:
     still shows its earlier phases; it is evidence only, never read as a result or for the table.
     """
     kept.mkdir()
-    for name in ("result.json", "progress.json", "harness.pid", "logs", "sessions", "acks", "checkpoints", "go"):
+    for name in ("result.json", "progress.json", "harness.pid", "logs", "sessions", "acks", "checkpoints", "go",
+                 GUARD_SIDECAR_DIR):
         source = scratch / name
         if source.is_symlink():
             continue
@@ -4428,8 +5532,20 @@ def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
                                          latency_split_schema=plan.latency_split_schema,
                                          phase_kinds=plan.phase_kinds,
                                          attribution_api=plan.attribution_api,
-                                         attribution_schema=plan.attribution_schema)
+                                         attribution_schema=plan.attribution_schema,
+                                         echo_timeline_schema=plan.echo_timeline_schema,
+                                         guard_correlation_schema=plan.guard_correlation_schema,
+                                         scope=(plan.scenario.id, plan.variant))
             data = parsed if isinstance(parsed, dict) else None
+    phases = data.get("phases") if data is not None else None
+    if isinstance(phases, list) and (plan.guard_correlation_schema is not None or any(
+            isinstance(phase, dict) and "guard_correlation" in phase for phase in phases)):
+        # When: the harness declares the contract or wrote a field, every finalized phase gets a verdict.
+        availability = guard_availability(plan.guard_api, frame_counter_state(data))
+        verdicts = guard_correlation_verdicts(phases, kept, plan.harness_hash, availability)
+        _write_json(evidence / "guard-correlation-join.json", verdicts)
+        for verdict in verdicts:
+            print(format_guard_verdict(verdict), flush=True)
     if host.platform == "win32":
         focus = judge_foreground(sampler.readings, user_session=has_user_session(host.environ))
     else:
@@ -6006,6 +7122,101 @@ def split_rows(label: str, base: SideRuns, head: SideRuns, latency_split_schema:
     return rows
 
 
+# The scenarios whose credited samples carry an echo timeline: split_in_scope's variants.
+TIMELINE_LABELS = ("S2/default", "S2/flood")
+# The timeline rows' labels, in order, and each row's population.
+TIMELINE_ROWS = (
+    ("echo timeline recorded / credited", "recorded"),
+    ("echo timeline ordered / credited", "ordered"),
+    ("echo timeline B2 / ordered", "b2"),
+    ("echo timeline B2 / credited", "b2_of_credited"),
+    ("echo timeline M4 / ordered", "m4"),
+    ("echo timeline M3 / ordered", "m3"),
+    ("echo timeline M3 / credited", "m3_of_credited"),
+    ("echo timeline read-stamped / ordered", "read_stamped"),
+)
+
+
+def _side_timeline(side: SideRuns) -> tuple[str | None, dict | None]:
+    """A side's recomputed timeline coverage over all its valid runs, or the cell that says why it has none."""
+    if side.blocked or side.failed or not side.outcomes:
+        return ("n/a" if side.blocked == COUNTERS_HEAD_ONLY else _missing_cell(side)), None
+    latencies = [(outcome.result or {}).get("latency") for outcome in side.outcomes]
+    latencies = [latency for latency in latencies if isinstance(latency, dict)]
+    if not any("echo_timeline_coverage" in latency for latency in latencies):
+        return "n/a (no timeline)", None
+    # Every credited sample counts: one without a timeline object joins the denominator and no population.
+    timelines = [sample["echo_timeline"] if isinstance(sample.get("echo_timeline"), dict) else {}
+                 for latency in latencies for sample in latency.get("samples") or []
+                 if isinstance(sample, dict) and sample.get("latency_ms") is not None]
+    coverage = timeline_coverage(timelines)
+    if coverage is None:
+        return "n/a (nothing credited)", None
+    return None, coverage
+
+
+def _timeline_cell(cell: str | None, coverage: dict | None, name: str) -> tuple[str, float | None]:
+    """One population's cell, `numerator/denominator (percent)`, and its percentage; an unavailable side reads
+    `unavailable`, which is not a measured zero."""
+    if coverage is None:
+        return cell or "n/a", None
+    fraction = coverage.get(name)
+    if fraction is None:
+        return "unavailable", None
+    numerator, denominator = fraction["numerator"], fraction["denominator"]
+    if denominator == 0:
+        return f"{numerator}/0 (n/a)", None
+    percent = numerator / denominator * 100
+    return f"{numerator}/{denominator} ({percent:.1f}%)", percent
+
+
+def points_change(base_percent: float | None, head_percent: float | None) -> str:
+    """The head's coverage less the base's, in percentage points, or `n/a` when either side has no figure."""
+    if base_percent is None or head_percent is None:
+        return "n/a"
+    return f"{head_percent - base_percent:+.1f} pts"
+
+
+def timeline_coverage_verdict(base: dict | None, head: dict | None) -> str:
+    """The frozen two-sided coverage/gap gate on the ordered population: unavailable when either side recorded no
+    timeline (a stub base, a cfg-off build), else pass or fail with both figures. Both thresholds compare integer
+    cross-products, so a boundary such as 82/100 against 92/100 is exact."""
+    unavailable = [name for name, coverage in (("base", base), ("head", head))
+                   if not (isinstance(coverage, dict) and coverage.get("availability") == "available")]
+    if unavailable:
+        return f"unavailable ({', '.join(unavailable)} recorded no timeline)"
+    (base_n, base_d), (head_n, head_d) = [(coverage["ordered"]["numerator"], coverage["ordered"]["denominator"])
+                                          for coverage in (base, head)]
+    gate_n, gate_d = TIMELINE_COVERAGE_GATE
+    gap_n, gap_d = TIMELINE_COVERAGE_GAP
+    # numerator/denominator >= gate_n/gate_d, and |base - head| <= gap_n/gap_d, with no division.
+    above = all(numerator * gate_d >= denominator * gate_n for numerator, denominator in ((base_n, base_d),
+                                                                                         (head_n, head_d)))
+    within = gap_d * abs(base_n * head_d - head_n * base_d) <= gap_n * base_d * head_d
+    passed = above and within
+    figures = f"base {base_n / base_d * 100:.1f}%, head {head_n / head_d * 100:.1f}%"
+    return f"{'pass' if passed else 'fail'} ({figures})"
+
+
+def timeline_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
+    """The counters table's echo-timeline rows for S2's typing phase, when either side's harness wrote a timeline:
+    each side's availability, every population's named numerator and denominator, and the two-sided verdict."""
+    if label not in TIMELINE_LABELS:
+        return []
+    sides = [_side_timeline(side) for side in (base, head)]
+    if all(coverage is None and cell == "n/a (no timeline)" for cell, coverage in sides):
+        return []
+    rows = [[label, "typing", "echo timeline availability",
+             *[cell if coverage is None else coverage["availability"] for cell, coverage in sides], "n/a"]]
+    for row_label, name in TIMELINE_ROWS:
+        cells = [_timeline_cell(cell, coverage, name) for cell, coverage in sides]
+        rows.append([label, "typing", row_label, cells[0][0], cells[1][0], points_change(cells[0][1], cells[1][1])])
+    ordered = [_timeline_cell(cell, coverage, "ordered")[0] for cell, coverage in sides]
+    verdict = timeline_coverage_verdict(sides[0][1], sides[1][1])
+    rows.append([label, "typing", "echo timeline coverage gate (ordered >= 80%, gap <= 10 points)", *ordered, verdict])
+    return rows
+
+
 def _renderer_runs(per_run: Sequence[dict], fields: Sequence[str]) -> list[dict]:
     """The renderer sections of the runs that carry every integer field in `fields`."""
     return [sections["renderer"] for sections in per_run
@@ -6165,7 +7376,9 @@ def listed_capabilities(scenarios: Sequence[Scenario]) -> dict:
     first = scenarios[0] if scenarios else None
     return {"latency_split_schema": getattr(first, "latency_split_schema", None),
             "phase_kinds": getattr(first, "phase_kinds", None),
-            "s10_attribution": getattr(first, "attribution_schema", None)}
+            "s10_attribution": getattr(first, "attribution_schema", None),
+            "echo_timeline_schema": getattr(first, "echo_timeline_schema", None),
+            "guard_correlation_schema": getattr(first, "guard_correlation_schema", None)}
 
 
 def run_inventory(results: Iterable[SetResult]) -> list[dict]:
@@ -6188,10 +7401,12 @@ def run_inventory(results: Iterable[SetResult]) -> list[dict]:
 
 def run_identity_document(shas: Mapping[str, str], harness_hash: str, features: Mapping[str, Sequence[str]],
                           short: bool, profile: Mapping, counters: bool, environ: Mapping[str, str],
-                          results: Iterable[SetResult] = (), capabilities: Mapping | None = None) -> dict:
+                          results: Iterable[SetResult] = (), capabilities: Mapping | None = None,
+                          guard_api: bool | None = None) -> dict:
     """run-identity.json: the run, refs, harness, settings and flag-metric definitions perf-flags.py binds each
     artifact's accepted runs to, every set's final inventory of accepted attempts, and the capabilities the head's
-    list declared, which both sides were validated under."""
+    list declared, which both sides were validated under. `guard_api` is whether both sides were built with the
+    guard-correlation take's cfg, so the artifact reader binds each phase's availability to the build."""
     attempt = environ.get("GITHUB_RUN_ATTEMPT", "")
     return {"schema_version": RUN_IDENTITY_SCHEMA, "run_id": environ.get("GITHUB_RUN_ID", ""),
             "run_attempt": int(attempt) if attempt.isdigit() else 0, "platform": host_platform(),
@@ -6201,7 +7416,8 @@ def run_identity_document(shas: Mapping[str, str], harness_hash: str, features: 
             "flag_metrics_version": FLAG_METRICS_VERSION, "sets": run_inventory(results),
             # Every known capability is recorded, null when the head's list does not declare it, so perf-flags can
             # require exactly the known keys whatever the head declared.
-            "capabilities": {name: (capabilities or {}).get(name) for name in HARNESS_CAPABILITIES}}
+            "capabilities": {name: (capabilities or {}).get(name) for name in HARNESS_CAPABILITIES},
+            "guard_api": guard_api}
 
 
 def render_table(rows: Iterable[Sequence[str]], header: str = TABLE_HEADER) -> str:
@@ -6267,13 +7483,15 @@ def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: s
                 host_platform: str | None = None,
                 cases: Sequence[SmokeCase] | None = None,
                 replay: Callable[[Scenario, str, Path], DeliveryOutcome] | None = None,
+                harness_cfgs: Sequence[str] = (),
                 ) -> tuple[int, list[str]]:
     """Run the smoke's cases: exit 1 at once on a failure, 3 when a case has no valid exercised run, else 0.
 
     Each case's variant must be one the harness lists. Only an occlusion is retried, at most
     RETRY_LIMIT times; no timing is asserted. On Windows each attempt also prints its job's members,
     since a passing smoke deletes the evidence that holds them. With `replay` on Windows, S10/sync's
-    delivery is replayed first, and a blocked replay makes the smoke exit 3.
+    delivery is replayed first, and a blocked replay makes the smoke exit 3. `harness_cfgs` are the harness API
+    cfgs the smoke binary was built with; each plan carries the listed capabilities and that cfg decision.
     """
     host_platform = host_platform or sys.platform
     cases = smoke_case_list(host_platform) if cases is None else cases
@@ -6303,7 +7521,10 @@ def smoke_cases(scenarios: Mapping[str, Scenario], binary: Path, harness_hash: s
         plan = RunPlan(scenarios[case.scenario], case.variant, "smoke", binary, harness_hash, short=True,
                        smoke=True, kill_at_go=case.kill_at_go, source_root=ROOT,
                        latency_split_schema=scenarios[case.scenario].latency_split_schema,
-                       phase_kinds=scenarios[case.scenario].phase_kinds)
+                       phase_kinds=scenarios[case.scenario].phase_kinds,
+                       echo_timeline_schema=scenarios[case.scenario].echo_timeline_schema,
+                       guard_correlation_schema=scenarios[case.scenario].guard_correlation_schema,
+                       guard_api=GUARD_SPANS_CFG in harness_cfgs)
         reasons: list[str] = []
         for attempt in range(1, RETRY_LIMIT + 2):
             # A variant's `/` would make a subdirectory, so evidence names use `-`.
@@ -6376,7 +7597,9 @@ def run_smoke(evidence: Path) -> tuple[int, list[str]]:
                                    environ=host.environ)
     return smoke_cases({scenario.id: scenario for scenario in scenarios}, binary, digest,
                        lambda plan, case_evidence: execute_run(plan, host, case_evidence), evidence,
-                       replay=replay if sys.platform == "win32" else None)
+                       replay=replay if sys.platform == "win32" else None,
+                       # The smoke's debug build composes no harness API cfg, so its App is never taken.
+                       harness_cfgs=tuple(step.harness_cfgs or ()))
 
 
 def replay_retried(evidence: Path) -> bool:
@@ -6945,6 +8168,8 @@ def atlas_recovery_rows(label: str, base: SideRuns, head: SideRuns) -> list[list
 ATTRIBUTION_FILE = "attribution.json"
 # The harness API cfg (local-gate.py HARNESS_API_CFGS) whose decision lets the harness arm the App's watch.
 ATTRIBUTION_CFG = "perf_s10_attribution_api"
+# The harness-only cfg that lets the harness take the App's guard-correlation records.
+GUARD_SPANS_CFG = "perf_guard_spans_api"
 ATTRIBUTION_HEADER = ("| Scenario | Side | Runs | State | Fresh − updates | Presents per update 0/1/2/≥3 | Max | "
                       "Non-update (pre/sentinel/prompt/both) | Never shown | Open-update | Cached | Verdict |\n"
                       "|---|---|---|---|---|---|---|---|---|---|---|---|")
@@ -7776,7 +9001,10 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                                    latency_split_schema=by_id[scenario_id].latency_split_schema,
                                    phase_kinds=by_id[scenario_id].phase_kinds,
                                    attribution_api=ATTRIBUTION_CFG in harness_cfgs,
-                                   attribution_schema=by_id[scenario_id].attribution_schema)
+                                   attribution_schema=by_id[scenario_id].attribution_schema,
+                                   echo_timeline_schema=by_id[scenario_id].echo_timeline_schema,
+                                   guard_correlation_schema=by_id[scenario_id].guard_correlation_schema,
+                                   guard_api=GUARD_SPANS_CFG in harness_cfgs)
                      for side in SIDES}
             base_blocked = built["base"] if isinstance(built["base"], str) else None
             if counters and not supports["base"]:
@@ -7836,6 +9064,7 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                 attribution_evidence[result.label] = evidence
             counters_table.extend(split_rows(result.label, result.base, result.head,
                                              by_id[result.label.split("/")[0]].latency_split_schema))
+            counters_table.extend(timeline_rows(result.label, result.base, result.head))
             omitted += left_out
             for side_name, side in (("base", result.base), ("head", result.head)):
                 presenter_notes.extend(presenter_counter_notes(result.label, side_name, side))
@@ -7915,7 +9144,8 @@ def _compare(args: argparse.Namespace, gate, out: Path, work: Path, worktrees: W
                "overrides": release_profile_overrides(os.environ)}
     _write_json(out / RUN_IDENTITY_FILE, run_identity_document(shas, digest, features, args.short, profile,
                                                                args.counters, os.environ, results,
-                                                               listed_capabilities(scenarios)))
+                                                               listed_capabilities(scenarios),
+                                                               GUARD_SPANS_CFG in harness_cfgs))
     marks["report_written"] = time.time()
     write_timing(out, marks, os.environ)
     print(document, flush=True)

@@ -24,8 +24,10 @@ This page explains what those figures count; protocol and atlas details are in
 | Rendered image dimensions | width/height ≤ 1,024; BGRA8 ≤ 4 MiB | resize iTerm2/kitty images; Sixel decodes into the bounded buffer |
 | PTY input | one fixed 64-byte pending pointer-motion slot per pane; four queued UI messages, 16 MiB each; reply FIFO uses 64 KiB RAM including framing, ≤32 KiB writer output, ≤32 KiB + 4 B read scratch, ≤32 KiB app reply-batch payload, and <32 KiB parser-dispatch payload (growable vectors may retain spare capacity) | UI refuses with bytes intact; replies spill to private temporary storage without waiting for native input capacity |
 | Reply spill disk | no fixed disk quota; consumed prefixes remain until the FIFO file drains | delete on drain, writer exit, or pane teardown; storage errors explicitly fail reply delivery while output/exit observation continues |
-| PTY output | 64 queued chunks plus one blocked sender chunk, each backed by a 64 KiB reader ring; structural worst case 4.0625 MiB | block the reader and apply OS backpressure |
-| Glyph atlas | one BGRA8 CPU atlas per renderer that grows by doubling up to 2048×2048, 16 MiB and 16,384 entries | grow first; at 2048 or the entry cap, evict the coldest quarter and retry |
+| PTY output | 64 queued chunks plus one blocked sender chunk, each backed by a 64 KiB reader ring; structural worst case 4.0625 MiB. Each chunk is 64 B on 64-bit targets (const-asserted), 16 B of it the optional read stamp. Chunk timestamp-storage subtotal: 1,024 B per PTY in the 64 reserved channel slots, stamped or not, plus 16 B each for the blocked sender's chunk and the chunk the VT worker holds, 1,056 B; freed with the PTY. Whether a PTY stamps its reads is chosen at its creation (while the pane's counter gate is on) and fixed for the reader's lifetime, as an immutable boolean the reader owns; its layout contribution is not covered by that subtotal | block the reader and apply OS backpressure |
+| S2 echo watch | one per pane while the counter gate is on: 232 B measured on 64-bit macOS, const-asserted ≤ 256 B (`ECHO_WATCH_MAX_BYTES`), not charged to the pane ledger; freed with the pane and its worker's handles | fixed size; a re-arm replaces the record |
+| S2 echo timeline | per window, inline in its redraw state: 104 B, of which 40 B are accepted-tick metadata and 64 B the owner slot. Per window owner, from its arm: a 1,640 B slot record, whose 64 events of 24 B are 1,536 B (const-asserted) plus 104 B of metadata, and a 4,120 B flood ring, whose 256 entries of 16 B are 4,096 B (const-asserted) plus 24 B. The owner's take copies at most 4,096 B of flood entries (256 × 16 B) into the record, whose 32 B `FrozenFlood` metadata, comprising the 24 B vector header and eviction metadata, sits in its metadata, and frees the ring; the transfer builds at most 2,048 B of events (64 × 32 B), moves them, the copied entries and an 88 B `EchoTimelineV1` to the caller, and frees the record, so the App keeps nothing. Sizes other than the const-asserted arrays are measured on 64-bit macOS, not guaranteed. An owner that ends early, by a re-arm, the pane leaving the window or retiring, or the window closing, frees its ring and an unfrozen record; a frozen record not yet transferred lasts until the pane is re-armed or retired | the 65th event sets `overflow` and is dropped; the 257th flood entry evicts the oldest and records its `loop_seq`; a non-owner arming records nothing |
+| Glyph atlas | one BGRA8 CPU atlas per renderer that starts at 1024×1024 (4 MiB) at scale 1, 2048×2048 (16 MiB) at scale 2 and 256×256 (256 KiB) for a warm spare, then grows by doubling up to 2048×2048, 16 MiB and 16,384 entries; a GPU-presented renderer's glyph texture has the same size | grow first; at 2048 or the entry cap, evict the coldest quarter and retry |
 | Image atlas | 1×1 placeholder; 2048×2048 BGRA8 only while media is active | skip older images when full; release to placeholder after 240 media-free frames, or without a frame 30 s after renderable media was last visible |
 | Windows software frame | axis ≤ 16,384; total ≤ 160 MiB | reject construction or resize and preserve the old valid allocation |
 | Pane command events | 1,024 events | drop the oldest and shrink retained vector capacity |
@@ -281,6 +283,24 @@ Outside the pane seams, the App's foreground-probe map holds at most one entry a
 one stored result per live pane, released with the pane, and at most one worker
 thread, reported as `live_fg_probe_workers`.
 
+With frame counters on, guard correlation holds an estimated 789,248 B per pane
+log: 32,768 section records (768 KiB), 64 abandoned entries and 64 loss
+intervals, plus 256 B for the log itself inside its `Arc` (pane id, mutex and
+state, measured on 64-bit macOS). Each App holds an estimated 525,464 B span
+store: 16,384 spans (512 KiB), 64 loss intervals and 152 B for the store inside
+its `Rc` (`RefCell` borrow state included). The estimates exclude the registry
+vector's capacity, the handles each pane keeps, and allocator overhead. A take
+allocates a replacement set before it swaps, so the taken buffers and their
+replacements coexist until the caller drops the transfer. A closed pane's log is
+freed once a take has pruned it and its worker has dropped its handle. A counting
+collection keeps its 440 B of span bookkeeping on the stack. None of it is charged
+to a ledger owner or reported in a memory sample. With counters off, no recording
+buffer is allocated and no correlation clock or lock is taken, but the `Option`
+fields and the larger custody and source types still cost their layout. The
+harness transport serializes a take's buffers in place, so while a sidecar is
+written the process holds the take's buffers, the App's replacements and one
+64 KiB write buffer, with no copy of the records.
+
 Renderer retention is charged to no ledger owner. When the idle image atlas is
 released, the renderer's `retained_amounts().image_atlas` drops from 16 MiB to
 4 B at once; the aggregate `renderer_total_bytes` shows the drop at the next
@@ -432,3 +452,4 @@ aggregate understates the session.
 | Parser capture limits | `crates/sonicterm-vt/src/vt.rs`, `crates/sonicterm-vt/src/vt/staging.rs` |
 | PTY queue limits | `crates/sonicterm-io/src/pty.rs` |
 | Renderer retention and allocator report | `crates/sonicterm-gpu/src/core.rs` |
+| Guard-correlation records (frame counters only) | `crates/sonicterm-app/src/app/guard_correlation.rs` |

@@ -35,6 +35,7 @@ fn worker_batch(app: &App, id: WindowId, pane_id: u64, bytes: &[u8]) -> Vec<Vec<
     crate::app::spawn_pane::process_pane_vt_batch_and_publish(
         &handles,
         bytes,
+        None,
         &mut None,
         &mut crate::app::spawn_pane::SyncLatch::default(),
         None,
@@ -227,6 +228,7 @@ fn a_flush_between_acknowledgement_and_check_sends_a_fresh_event() {
         crate::app::spawn_pane::process_pane_vt_batch_and_publish(
             &handles,
             b"second",
+            None,
             &mut None,
             &mut crate::app::spawn_pane::SyncLatch::default(),
             None,

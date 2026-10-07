@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "run_id": "37598270276",
+  "run_attempt": 1,
+  "platform": "macos",
+  "base_sha": "cac36ca47273db36ffb5e068c56c6c12027531e9",
+  "head_sha": "cce90be874f3e4896e234a731f3348b47f87847c",
+  "harness_hash": "c97cd72786aa22263c66d9519538cd3642a0e5602f9efcc972fdce79f5f6f3e5",
+  "settings": {
+    "short": true,
+    "counters": true,
+    "features": {
+      "base": [
+        "perf-counters",
+        "perf-echo-trace",
+        "perf-frame-texture",
+        "perf-hook-checkpoint-memory",
+        "perf-hook-trim"
+      ],
+      "head": [
+        "perf-counters",
+        "perf-echo-trace",
+        "perf-frame-texture",
+        "perf-hook-checkpoint-memory",
+        "perf-hook-trim"
+      ]
+    },
+    "profile": {
+      "lto": {
+        "base": "off",
+        "head": "off"
+      },
+      "overrides": "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_LTO=off"
+    }
+  },
+  "flag_metrics_version": 1,
+  "sets": [
+    {
+      "label": "S7/default",
+      "dataset": "timed",
+      "base": {
+        "status": "",
+        "accepted": [
+          "01-base",
+          "04-base",
+          "05-base",
+          "08-base",
+          "09-base"
+        ]
+      },
+      "head": {
+        "status": "",
+        "accepted": [
+          "02-head",
+          "03-head",
+          "06-head",
+          "07-head",
+          "10-head"
+        ]
+      }
+    }
+  ],
+  "capabilities": {
+    "latency_split_schema": 1,
+    "phase_kinds": 1,
+    "s10_attribution": 1,
+    "echo_timeline_schema": 1
+  }
+}

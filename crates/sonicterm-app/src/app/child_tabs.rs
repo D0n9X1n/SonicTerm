@@ -149,13 +149,9 @@ impl App {
         let redraw_target = Arc::new(Mutex::new(Some(child_window.id())));
         #[cfg(test)]
         self.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
-        let shell_opts = sonicterm_io::pty::ShellSpawnOpts {
-            clean_e2e: self.runtime_smoke.is_some(),
-            ..launch.shell_spawn_opts(
-                self.config.terminal.term_program.clone(),
-                self.config.terminal.shell.clone(),
-            )
-        };
+        // The gate is read before the PTY exists, so its reader stamps reads from the first one.
+        let frame_counters = self.pane_frame_counters();
+        let shell_opts = self.pane_spawn_opts(launch, frame_counters.is_some());
         let pty = match PtyHandle::spawn_default_shell(cols, rows, shell_opts) {
             Ok(pty) => Some(pty),
             Err(error) => {
@@ -168,7 +164,9 @@ impl App {
         };
         let mut pane_state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
         self.reserve_pane_teardown(&mut pane_state);
-        pane_state.frame_counters = self.pane_frame_counters();
+        let mut frame_counters = frame_counters;
+        pane_state.guard_correlation = self.attach_guard_correlation(pane_id, &mut frame_counters);
+        pane_state.frame_counters = frame_counters;
         pane_state.redraw_target = redraw_target;
         if pane_state.pty.is_some() {
             super::spawn_pane::spawn_pane_workers(

@@ -18,8 +18,11 @@ mod cli;
 mod counters;
 #[cfg(any(windows, test))]
 mod delivery;
+mod digest;
 #[cfg(any(target_os = "macos", windows, test))]
 mod dispatch_timeline;
+#[cfg(any(target_os = "macos", windows, test))]
+mod guard_transport;
 #[cfg(any(target_os = "macos", windows))]
 mod probe;
 #[cfg(any(target_os = "macos", windows, test))]
@@ -27,6 +30,8 @@ mod record;
 #[cfg(any(target_os = "macos", windows, test))]
 mod scan_throttle;
 mod scenarios;
+#[cfg(any(target_os = "macos", windows, test))]
+mod timeline;
 #[cfg(any(target_os = "macos", windows, test))]
 mod transition;
 #[cfg(any(target_os = "macos", windows, test))]

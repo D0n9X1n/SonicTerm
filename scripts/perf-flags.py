@@ -28,8 +28,11 @@ FLAG_METRICS_VERSION = compare.FLAG_METRICS_VERSION
 # The flag-metric definitions this script implements; a run declaring any other version cannot be read by its rules.
 SUPPORTED_FLAG_METRICS = (FLAG_METRICS_VERSION,)
 EXIT_NOT_COMPARABLE = 2
-# The identity fields every artifact of one run must share.
-SHARED_IDENTITY = ("run_id", "head_sha", "base_sha", "harness_hash", "flag_metrics_version", "capabilities")
+# The identity fields every artifact of one run must share, compared after decoding: `guard_api` is the run's one
+# effective cfg decision (null for an identity older than it), so two artifacts recording different decisions are
+# refused before any duplicate attempt is dropped.
+SHARED_IDENTITY = ("run_id", "head_sha", "base_sha", "harness_hash", "flag_metrics_version", "capabilities",
+                   "guard_api")
 # result.json's validator names hosts by sys.platform; run identities name them as the decision does.
 VALIDATOR_PLATFORMS = {"macos": "darwin", "windows": "win32"}
 # The files that make up one attempt's evidence; duplicates must agree on every one of them.
@@ -108,6 +111,24 @@ def _inventory_problem(sets: object) -> str | None:
     return None
 
 
+# Capabilities added after a recorded identity shape existed: an identity written before one was added lacks
+# exactly that key, which decodes as null (not declared). Every other key is required.
+ADDED_CAPABILITIES = ("guard_correlation_schema",)
+
+
+def decode_capabilities(capabilities: object) -> tuple[dict | None, str | None]:
+    """A run's recorded capabilities, decoded backward-compatibly: the current key set, or the previous one that
+    lacks only the keys added since, each missing key normalized to null. Unknown keys, any other missing key and
+    malformed values are refused. Returns the normalized map, or None with why it cannot be read."""
+    known = compare.HARNESS_CAPABILITIES
+    previous = set(known) - set(ADDED_CAPABILITIES)
+    if not isinstance(capabilities, dict) or set(capabilities) not in (set(known), previous):
+        return None, f"capabilities {capabilities!r} are not exactly {sorted(known)} (or the earlier {sorted(previous)})"
+    normalized = {name: capabilities.get(name) for name in known}
+    problem = _capabilities_problem(normalized)
+    return (None, problem) if problem else (normalized, None)
+
+
 def _capabilities_problem(capabilities: object) -> str | None:
     """Why a run's recorded capabilities cannot be read, or None: exactly the known keys, each null (the head did
     not declare it) or a value this script validates."""
@@ -117,6 +138,9 @@ def _capabilities_problem(capabilities: object) -> str | None:
     for name, value in capabilities.items():
         if value is not None and not (compare._is_int(value) and value in known[name]):
             return f"capability {name} {value!r} is not null or one of {known[name]}"
+    if capabilities["echo_timeline_schema"] is not None and capabilities["latency_split_schema"] is None:
+        # When: the timeline schema is declared without the split schema its parts and reasons extend.
+        return "capability echo_timeline_schema is declared without latency_split_schema"
     return None
 
 
@@ -140,12 +164,20 @@ def _identity(path: Path) -> dict:
         else f"flag metrics v{identity.get('flag_metrics_version')!r} is not one of {SUPPORTED_FLAG_METRICS}",
         _settings_problem(identity.get("settings")),
         _inventory_problem(identity.get("sets")),
-        _capabilities_problem(identity.get("capabilities")),
     ]
+    capabilities, capability_problem = decode_capabilities(identity.get("capabilities"))
+    problems.append(capability_problem)
+    # guard_api is the effective guard-correlation cfg decision; an identity older than it has none (null). A
+    # head that declares the guard contract records it, so availability is bound to the build, never inferred.
+    guard_api = identity.get("guard_api")
+    if guard_api is not None and not isinstance(guard_api, bool):
+        problems.append(f"guard_api {guard_api!r} is not a boolean")
+    elif capabilities is not None and capabilities["guard_correlation_schema"] is not None and guard_api is None:
+        problems.append("guard_api is not recorded, but the head declares guard_correlation_schema")
     found = [problem for problem in problems if problem]
     if found:
         raise NotComparable(f"{path}: {'; '.join(found)}")
-    return identity
+    return {**identity, "capabilities": capabilities, "guard_api": guard_api}
 
 
 def _contained_file(artifact: Path, path: Path) -> Path:
@@ -256,12 +288,22 @@ def _accepted_result(where: str, identity: dict, label: str, dataset: str, side_
             partial_counters=side_name == "base",
             platform_name=VALIDATOR_PLATFORMS.get(identity["platform"], identity["platform"]),
             latency_split_schema=capabilities["latency_split_schema"], phase_kinds=capabilities["phase_kinds"],
-            attribution_schema=capabilities["s10_attribution"])
+            attribution_schema=capabilities["s10_attribution"],
+            echo_timeline_schema=capabilities["echo_timeline_schema"],
+            guard_correlation_schema=capabilities["guard_correlation_schema"], scope=(scenario, variant))
     except (TypeError, AttributeError, ValueError, KeyError, OverflowError) as error:
         # When: the validator itself cannot read the result, the evidence is malformed, never a crash.
         raise NotComparable(f"{where} result cannot be validated: {type(error).__name__}: {error}") from error
     if problems:
         raise NotComparable(f"{where} result breaks the result schema: {problems[0]}")
+    if capabilities["guard_correlation_schema"] is not None:
+        # When: the head declares the guard contract, the phases' availability must be the one the build's cfg and
+        # the counter gate decide, by the same rule the live join applies; unavailable is valid, a mix is not.
+        availability = compare.guard_availability(identity["guard_api"], compare.frame_counter_state(result))
+        fields = [phase.get("guard_correlation") for phase in result["phases"] if isinstance(phase, dict)]
+        problem = compare.guard_availability_problem(fields, availability)
+        if problem:
+            raise NotComparable(f"{where} result's guard correlation is inconsistent: {problem}")
     expected = {"status": "valid", "scenario": scenario, "variant": variant,
                 "short": identity["settings"]["short"]}
     for key, value in expected.items():

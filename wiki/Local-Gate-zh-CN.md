@@ -154,7 +154,10 @@ PowerShell 的最后退出码，而一致性检查不对此建模。一致性检
 `cargo $SUB`、`bash "$SCRIPT"` 或 `cargo $(echo test)`；workflow 的修改与其它修改一样经过审查。每个仅 CI 条目都附带理由：依赖安装；
 对同一 job 的 workspace 步骤已运行的
 integration test 做证据重跑；或需要托管 runner、release 二进制或已构建 package 的运行时与 package
-证据。只在 CI 中运行的第一方测试或 `cargo fmt|clippy|doc` 不能列为仅 CI，因此缺失的本地测试或
+证据。唯一经过审查的例外允许由另一个 job 支撑重跑：`windows-tests-runtime` 的重跑由
+`windows-tests-workspace` 支撑，检查要求两者都在 `windows-latest` 上运行、都不是条件或 advisory job、
+workspace 步骤在 `windows-tests-workspace` 中是必需步骤，且 Windows 汇总 job 依赖两者，并在其唯一必需、
+fail-closed 的验证循环中检查两者。其它 job 仍需要自己的 workspace 步骤。只在 CI 中运行的第一方测试或 `cargo fmt|clippy|doc` 不能列为仅 CI，因此缺失的本地测试或
 gate 会使一致性检查失败。
 
 ## 步骤说明
@@ -278,14 +281,25 @@ python3 scripts/native-selection-smoke.py
 
 ## 性能场景 smoke
 
-`perf-scenarios-tests` 在每个主机上，以及在 `macos-core`、`windows-tests` 与 `linux-core` 中，运行
+`perf-scenarios-tests` 在每个主机上，以及在 `macos-core`、`windows-tests-harness` 与 `linux-core` 中，运行
 harness 自身的单元测试 `cargo test --locked -p sonicterm-app --example perf_scenarios`，因为
 `workspace-crates` 运行的 `cargo test --workspace --lib --bins --tests` 不包含 example。
 `perf-scenarios-counters-tests` 在相同的 job 中以 `--features perf-counters` 运行同一组测试；
 `perf-scenarios-counters-clippy` 在运行 `clippy` 的每个 job（`macos-core`、`windows-checks` 与
 `linux-core`）中带该 feature 检查此 example，因此计数器代码在每个主机上都会被构建、测试和检查。
 `perf-scenarios-frame-texture-tests` 与 `perf-scenarios-frame-texture-clippy` 以 `--features perf-frame-texture`
-做同样的事，从而编译进 harness 的帧纹理读取。
+做同样的事，从而编译进 harness 的帧纹理读取。在 Windows 上，这些 feature 测试改在
+`windows-tests-harness-features` shard 中与 glyph 工作集测量一起运行，因此 CI 在每个平台上对每个 feature 的测试
+恰好运行一次，而不是放在普通测试所在的 job 中。
+
+S2 回显时间线的 App 访问器只在同时具备 `perf-echo-trace` 与 `perf_echo_timeline_api` 时才被调用，其他构建
+编译的都是报告 `cfg-off` 的一侧。四种组合各有一个持续维护的检查步骤与测试步骤：两者皆无
+（`perf-scenarios-counters-clippy`、`perf-scenarios-tests`），只有该 feature（`perf-scenarios-echo-trace-clippy`
+与 `-tests`），只有该 cfg（`perf-scenarios-harness-api-clippy` 与 `-tests`，开启 `HARNESS_API_CFGS` 的每一项），
+以及两者皆有（`perf-scenarios-harness-api-echo-trace-clippy` 与 `-tests`，在同样的 cfg 上再加 `perf-echo-trace`）。
+只有最后这一对会构建并测试真正的适配器。其检查在 `macos-core`、`windows-checks` 与 `linux-core` 中运行，其测试在
+`macos-core` 与 `linux-core` 中运行；在 Windows 上则在 `windows-tests-harness-api` 中、紧接 harness API 测试之后运行，
+与之共用编译器标志，因此不新增 Windows job。
 
 `macos-perf-smoke` 检查的是对比工具本身，而不是性能。它运行
 `python3 scripts/perf-compare.py --smoke`：以 debug 构建当前树的 `perf_scenarios` example，不使用
@@ -420,7 +434,7 @@ harness 退出后 job 中仍有存活成员时失败。通过的 smoke 会删除
 
 本地预算为 70 分钟（4200 秒）：25 分钟的冷构建余量（1500 秒），五个 Windows 用例每个最多 4 次、每次 100 秒
 的运行（2000 秒），以及 S10/sync 交付回放最多 3 次、每次 100 秒的尝试（300 秒），最坏情况共 3800 秒，另留
-400 秒余量。必需的 `windows-tests` CI job 在 "Verify Windows selection presentation" 之后先运行构建、
+400 秒余量。必需的 `windows-tests-runtime` CI job 在 "Verify Windows selection presentation" 之后先运行构建、
 再运行 smoke，smoke 失败或在交付回放重试后通过时上传证据目录。任一步骤加上 `if:` 或 `continue-on-error:`，或 smoke 排在构建
 之前时，CI 一致性检查失败。托管的 Windows runner 使用软件适配器渲染，因此在那里 smoke 检查结果 schema、
 回收、wgpu 呈现器与角色退出，从不检查计时。

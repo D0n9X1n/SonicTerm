@@ -397,6 +397,7 @@ impl App {
         super::spawn_pane::process_pane_vt_batch_and_publish(
             &handles,
             bytes,
+            None,
             &mut None,
             &mut super::spawn_pane::SyncLatch::default(),
             None,
@@ -521,9 +522,11 @@ impl App {
     #[doc(hidden)]
     pub fn __test_seed_counting_tab(&mut self, title: &str) -> u64 {
         let pane_id = self.__test_seed_tab(title);
-        let frame_counters = self.pane_frame_counters();
+        let mut frame_counters = self.pane_frame_counters();
+        let owner = self.attach_guard_correlation(pane_id, &mut frame_counters);
         if let Some(pane) = self.main_mut().and_then(|main| main.panes.get_mut(&pane_id)) {
             pane.frame_counters = frame_counters;
+            pane.guard_correlation = owner;
         }
         pane_id
     }
@@ -729,6 +732,7 @@ impl TestPaneWorker {
         super::spawn_pane::publish_pane_vt_batch_with(
             &self.handles,
             bytes,
+            None,
             &mut None,
             &mut self.flush.sync_latch,
             super::media::decode_inline_image,

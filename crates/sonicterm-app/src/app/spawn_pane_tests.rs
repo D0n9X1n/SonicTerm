@@ -31,6 +31,7 @@ fn real_pty_readonly_parser_reply_uses_production_spool() {
         process_pane_vt_batch_and_publish(
             &handles,
             b"\x1b[6n",
+            None,
             &mut None,
             &mut SyncLatch::default(),
             None,
@@ -78,6 +79,7 @@ fn reply_bursts_preserve_every_byte_and_release_parser_before_delivery() {
     process_pane_vt_batch_with(
         &handles,
         &input,
+        None,
         &mut None,
         &mut SyncLatch::default(),
         |_| None,
@@ -107,6 +109,7 @@ fn reply_spool_admission_leaves_parser_available_with_visible_output_applied() {
         process_pane_vt_batch_with(
             &handles,
             b"\x1b[6nX",
+            None,
             &mut None,
             &mut SyncLatch::default(),
             |_| None,
@@ -135,6 +138,7 @@ fn reply_delivery_failure_does_not_abandon_visible_output() {
     process_pane_vt_batch_with(
         &handles,
         b"\x1b[6nX",
+        None,
         &mut None,
         &mut SyncLatch::default(),
         |_| None,
@@ -305,6 +309,7 @@ fn prompt_end_does_not_start_command_timer() {
     process_pane_vt_batch_with(
         &handles,
         b"\x1b]133;B\x07",
+        None,
         &mut started,
         &mut SyncLatch::default(),
         |_| None,
@@ -326,6 +331,7 @@ fn command_duration_excludes_prompt_editing_time() {
     process_pane_vt_batch_with(
         &handles,
         b"\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;B\x07\x1b]133;D;0\x07",
+        None,
         &mut started,
         &mut SyncLatch::default(),
         |_| None,
@@ -372,6 +378,7 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
     process_pane_vt_batch_with(
         &handles,
         bytes.as_bytes(),
+        None,
         &mut command_started,
         &mut SyncLatch::default(),
         |media| {
@@ -451,6 +458,7 @@ fn pane_vt_batch_publishes_pointer_modes_after_each_parse() {
     process_pane_vt_batch_with(
         &handles,
         b"\x1b[?1002h\x1b[?1006h\x1b[?1049h\x1b[?1h",
+        None,
         &mut command_started,
         &mut SyncLatch::default(),
         |_| None,
@@ -468,6 +476,7 @@ fn pane_vt_batch_publishes_pointer_modes_after_each_parse() {
     process_pane_vt_batch_with(
         &handles,
         b"\x1b[?1002l\x1b[?1049l",
+        None,
         &mut command_started,
         &mut SyncLatch::default(),
         |_| None,
@@ -562,6 +571,7 @@ fn worker_output_generation_is_published_after_complete_nonempty_batches() {
     process_pane_vt_batch_and_publish(
         &handles,
         b"x\x1b[6n",
+        None,
         &mut None,
         &mut SyncLatch::default(),
         None,
@@ -583,6 +593,7 @@ fn worker_output_generation_is_published_after_complete_nonempty_batches() {
     process_pane_vt_batch_and_publish(
         &handles,
         b"",
+        None,
         &mut None,
         &mut SyncLatch::default(),
         None,
@@ -592,6 +603,7 @@ fn worker_output_generation_is_published_after_complete_nonempty_batches() {
     process_pane_vt_batch_and_publish(
         &handles,
         b"y",
+        None,
         &mut None,
         &mut SyncLatch::default(),
         None,
@@ -656,6 +668,7 @@ fn counting_worker_times_each_parser_section_from_four_clock_reads() {
     process_pane_vt_batch_with(
         &handles,
         b"hello",
+        None,
         &mut None,
         &mut SyncLatch::default(),
         |_| None,
@@ -686,6 +699,7 @@ fn worker_without_counters_reads_no_clock() {
     process_pane_vt_batch_with(
         &handles,
         b"hello",
+        None,
         &mut None,
         &mut SyncLatch::default(),
         |_| None,
@@ -870,6 +884,7 @@ fn sync_word_matches_the_parser_under_its_guard() {
         process_pane_vt_batch_with(
             &handles,
             bytes,
+            None,
             &mut None,
             latch,
             |_| None,
@@ -923,6 +938,7 @@ fn sync_word_never_disagrees_with_a_held_parser_across_threads() {
                 process_pane_vt_batch_and_publish(
                     &worker_handles,
                     bytes,
+                    None,
                     &mut None,
                     &mut latch,
                     None,
@@ -957,6 +973,7 @@ fn worker_step(
     publish_pane_vt_batch_with(
         handles,
         bytes,
+        None,
         &mut None,
         &mut flush.sync_latch,
         |_| None,
@@ -1235,6 +1252,7 @@ fn release_is_sent_after_the_batch_generation_is_published() {
     publish_pane_vt_batch_with(
         &handles,
         b"first",
+        None,
         &mut None,
         &mut flush.sync_latch,
         decode,
@@ -1254,6 +1272,7 @@ fn release_is_sent_after_the_batch_generation_is_published() {
     publish_pane_vt_batch_with(
         &handles,
         update,
+        None,
         &mut None,
         &mut flush.sync_latch,
         decode,
@@ -1369,6 +1388,7 @@ fn a_lock_free_reader_never_pairs_a_word_with_another_epochs_deadline() {
     publish_pane_vt_batch_with(
         &handles,
         open,
+        None,
         &mut None,
         &mut SyncLatch::default(),
         |_| None,
@@ -1393,6 +1413,7 @@ fn a_lock_free_reader_never_pairs_a_word_with_another_epochs_deadline() {
         publish_pane_vt_batch_with(
             &worker_handles,
             renew,
+            None,
             &mut None,
             &mut SyncLatch::default(),
             |_| None,
@@ -1521,6 +1542,7 @@ fn echo_batch(handles: &PaneVtHandles, bytes: &[u8], at: Instant) {
     publish_pane_vt_batch_with(
         handles,
         bytes,
+        None,
         &mut None,
         &mut SyncLatch::default(),
         |_| None,
@@ -1901,6 +1923,7 @@ fn echo_worker_step(
     publish_pane_vt_batch_with(
         handles,
         bytes,
+        None,
         &mut None,
         &mut flush.sync_latch,
         |_| None,
@@ -1991,4 +2014,235 @@ fn a_new_worker_handle_resumes_from_the_recorded_facts() {
     let trace = echo_trace(&watch);
     assert!(trace.lost, "the overwrite after the appearance is lost");
     assert!(!trace.pre_present, "the recorded appearance is not re-read as pre-present");
+}
+
+/// A new pane's reader stamps output reads exactly when its frame counters are on, and the other
+/// spawn options are the launch's own: the shell, `TERM_PROGRAM` and working directory pass
+/// through.
+#[test]
+fn pane_spawn_options_stamp_reads_only_with_the_frame_counter_gate() {
+    let app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let launch = super::super::pane_launch::PaneLaunch {
+        cwd: Some(std::path::PathBuf::from("/work")),
+        ..Default::default()
+    };
+    for gate in [false, true] {
+        let opts = app.pane_spawn_opts(&launch, gate);
+        assert_eq!(opts.diagnostic_timestamps, gate, "gate {gate}");
+        assert_eq!(opts.cwd, Some(std::path::PathBuf::from("/work")));
+        assert_eq!(opts.term_program, app.config.terminal.term_program);
+        assert!(!opts.clean_e2e, "no runtime smoke");
+    }
+}
+
+/// Both pane creation paths, main and child, read the gate before spawning and pass it to the PTY
+/// through the one helper, then store the same counters on the pane, so no path starts a reader
+/// that disagrees with its pane. A child pane needs a native window, so this pins the source.
+#[test]
+fn main_and_child_panes_take_the_read_stamp_flag_from_the_gate_before_spawning() {
+    for (name, source) in [
+        ("spawn_pane.rs", include_str!("spawn_pane.rs")),
+        ("child_tabs.rs", include_str!("child_tabs.rs")),
+    ] {
+        let gate = source
+            .find("let frame_counters = self.pane_frame_counters();")
+            .unwrap_or_else(|| panic!("{name} reads the gate"));
+        let opts = source
+            .find("self.pane_spawn_opts(launch, frame_counters.is_some())")
+            .unwrap_or_else(|| panic!("{name} passes the gate to the spawn options"));
+        let spawn = source[opts..]
+            .find("PtyHandle::spawn_default_shell(cols, rows, shell_opts)")
+            .map(|offset| opts + offset)
+            .unwrap_or_else(|| panic!("{name} spawns with those options"));
+        assert!(
+            gate < opts && opts < spawn,
+            "{name} reads the gate, builds the options, then spawns"
+        );
+        assert!(
+            source[spawn..].contains("frame_counters = frame_counters;"),
+            "{name} stores the same counters"
+        );
+    }
+}
+
+/// Arm `watch` as a timeline owner would, with token `token`, for `X` at row 0, column 2.
+fn arm_echo_timeline(
+    watch: &crate::app::echo_watch::EchoWatch,
+    handles: &PaneVtHandles,
+    token: u64,
+    armed_at: Instant,
+) {
+    let identity = crate::app::echo_watch::EchoRowIdentity::of(handles.parser.lock().grid());
+    let target =
+        crate::app::echo_watch::EchoWatchTarget { abs_row: 0, col: 2, character: 'X', identity };
+    let timeline = crate::app::echo_timeline::SlotTimeline::new(
+        true,
+        crate::app::echo_timeline::InitialPermit::Absent,
+    );
+    watch.arm_with(
+        crate::app::echo_watch::ArmToken::for_test(token),
+        target,
+        armed_at,
+        Some(timeline),
+    );
+}
+
+/// Parse and publish one batch whose chunk was read at `read_at`, every parse clock read at `at`.
+fn echo_batch_read(handles: &PaneVtHandles, bytes: &[u8], read_at: Option<Instant>, at: Instant) {
+    publish_pane_vt_batch_with(
+        handles,
+        bytes,
+        read_at,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| {},
+        || at,
+        |_| {},
+    );
+}
+
+/// Freeze and transfer token `token`'s timeline from `watch` as the owner's take would.
+fn echo_timeline_of(
+    watch: &crate::app::echo_watch::EchoWatch,
+    token: u64,
+) -> crate::app::EchoTimelineV1 {
+    let token = crate::app::echo_watch::ArmToken::for_test(token);
+    watch.take_with(token, Some(crate::app::echo_timeline::FrozenFlood::empty()));
+    match watch.transfer_timeline(token) {
+        crate::app::EchoTimelineTakeV1::Timeline(timeline) => timeline,
+        other => panic!("timeline transfer returned {other:?}"),
+    }
+}
+
+/// The recorded `LatestChunkRead` times, in record order.
+fn chunk_reads(timeline: &crate::app::EchoTimelineV1) -> Vec<u64> {
+    timeline
+        .events
+        .iter()
+        .filter(|event| event.kind == crate::app::EchoTimelineKindV1::LatestChunkRead)
+        .map(|event| event.at_ns)
+        .collect()
+}
+
+/// Every section of a reply-split batch consumes the same chunk, so the section where the echo
+/// appears, here a later one, carries that chunk's read stamp, not its own parse instant.
+#[test]
+fn a_later_section_of_one_chunk_carries_the_chunks_read_stamp() {
+    let (_pane, handles, watch) = echo_worker(80, 24, 100);
+    let base = test_base();
+    echo_batch(&handles, b"z", base);
+    arm_echo_timeline(&watch, &handles, 1, base);
+    let stats = Arc::clone(&handles.frame_counters.as_ref().expect("counting").vt);
+    let sections_before = sections_parsed(&stats);
+    let read_at = base + Duration::from_millis(1);
+    echo_batch_read(&handles, b"a\x1b[?2026$pX", Some(read_at), base + Duration::from_millis(3));
+    assert!(sections_parsed(&stats) - sections_before >= 2, "the batch took several sections");
+    let timeline = echo_timeline_of(&watch, 1);
+    assert!(timeline.chunk_timestamps);
+    assert_eq!(chunk_reads(&timeline), [1_000_000], "the chunk's read, 1 ms after arm");
+}
+
+/// An unstamped chunk, and a chunk read before arm, record no `LatestChunkRead`; neither is ever
+/// replaced by zero or by the parse instant.
+#[test]
+fn an_unstamped_or_pre_arm_chunk_records_no_read() {
+    for pre_arm in [false, true] {
+        let (_pane, handles, watch) = echo_worker(80, 24, 100);
+        let base = test_base();
+        // The pre-arm read is an explicit offset before the arm, never the process's own `now()`.
+        let read_at = pre_arm.then(|| base - Duration::from_millis(1));
+        echo_batch(&handles, b"z", base);
+        arm_echo_timeline(&watch, &handles, 1, base);
+        echo_batch_read(&handles, b"aX", read_at, base + Duration::from_millis(3));
+        assert!(echo_trace(&watch).appearance.is_some(), "the echo appeared ({read_at:?})");
+        assert!(chunk_reads(&echo_timeline_of(&watch, 1)).is_empty(), "{read_at:?}");
+    }
+}
+
+/// Worker handles whose counters carry a section log, and that log.
+fn counting_worker_with_log(
+) -> (PaneState, PaneVtHandles, Arc<crate::app::guard_correlation::PaneSectionLog>) {
+    let (mut pane, _) = pane_and_worker_handles();
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let mut counters = crate::app::frame_counters::PaneFrameCounters::new(stats);
+    let log = Arc::new(crate::app::guard_correlation::PaneSectionLog::new(11));
+    counters.sections = Some(Arc::clone(&log));
+    pane.frame_counters = Some(counters);
+    let handles = PaneVtHandles::from_pane_state(&pane);
+    (pane, handles, log)
+}
+
+/// A counting worker publishes each parser section with D2.1a's own `before_lock` and `locked_at`
+/// reads, so a record's endpoints are exactly the instants the section counters recorded.
+#[test]
+fn a_counting_worker_publishes_its_section_with_the_section_reads() {
+    let epoch = crate::app::frame_counters::clock_epoch();
+    let (_pane, handles, log) = counting_worker_with_log();
+    let mut tick_ns = 1_000_u64;
+    process_pane_vt_batch_with(
+        &handles,
+        b"abc",
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| {},
+        || {
+            tick_ns += 1_000;
+            epoch + Duration::from_nanos(tick_ns)
+        },
+        |_| {},
+    );
+    let pane = log.take(crate::app::guard_correlation::LogBuffers::new()).0;
+    let expected = crate::app::guard_correlation::SectionRecordV1 {
+        section_seq: 1,
+        before_lock_ns: 2_000,
+        locked_at_ns: 3_000,
+    };
+    assert_eq!(pane.records, vec![expected], "the first read is before_lock, the second locked_at");
+    assert!(pane.pending.is_none() && pane.abandoned.is_empty());
+}
+
+/// T4: a worker section that unwinds after `locked_at` abandons its registration only after the parser
+/// guard is released, so the log mutex is never taken under a parser guard; nothing stays pending.
+#[test]
+fn a_worker_section_unwinding_after_its_lock_is_abandoned_after_the_guard() {
+    let epoch = crate::app::frame_counters::clock_epoch();
+    let (_pane, handles, log) = counting_worker_with_log();
+    let parser = Arc::clone(&handles.parser);
+    let parser_free = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&parser_free);
+    crate::app::guard_correlation::ABANDON_PROBE.with(|probe| {
+        *probe.borrow_mut() =
+            Some(Box::new(move || seen.store(parser.try_lock().is_some(), Ordering::SeqCst)));
+    });
+    let mut reads = 0_u64;
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        process_pane_vt_batch_with(
+            &handles,
+            b"abc",
+            None,
+            &mut None,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            || {
+                reads += 1;
+                // The third read is parsed_at, under the parser guard and after locked_at.
+                assert!(reads < 3, "the section unwinds after locked_at");
+                epoch + Duration::from_nanos(reads * 1_000)
+            },
+            |_| {},
+        );
+    }));
+    crate::app::guard_correlation::ABANDON_PROBE.with(|probe| *probe.borrow_mut() = None);
+    assert!(unwound.is_err());
+    assert!(
+        parser_free.load(Ordering::SeqCst),
+        "the parser guard was released before the log mutex"
+    );
+    let pane = log.take(crate::app::guard_correlation::LogBuffers::new()).0;
+    assert_eq!(pane.abandoned.iter().map(|entry| entry.section_seq).collect::<Vec<_>>(), vec![1]);
+    assert!(pane.pending.is_none() && pane.records.is_empty());
 }

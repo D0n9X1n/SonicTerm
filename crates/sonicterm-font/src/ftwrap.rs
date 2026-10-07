@@ -80,6 +80,56 @@ fn checked_palette_storage<T>(ptr: *const T, count: FT_UShort) -> anyhow::Result
     Ok(count as usize)
 }
 
+/// Converts `data` with labels resolved by name ID from the records `records` reads. `records` is called at
+/// most once, and only when a palette or entry label other than 0xFFFF is present, so a CPAL table without
+/// labels never decodes the name table.
+// SAFETY: each non-null array in `data` must hold its count of initialized elements and stay
+// valid and unmutated for the call: `num_palettes` for names and flags, entries for entry labels.
+unsafe fn palette_info_from(
+    data: &FT_Palette_Data,
+    records: impl FnOnce() -> Vec<NameRecord>,
+) -> PaletteInfo {
+    let labels = crate::parser::NameIdLabels::lazy(records);
+    // SAFETY: the caller's guarantee for `data` is exactly `palettes_from_data`'s.
+    unsafe { palettes_from_data(data, |name_id| labels.label(name_id)) }
+}
+
+/// Builds one [`Palette`] per CPAL palette from FreeType's palette data, resolving labels with
+/// `name_of`.
+///
+/// FreeType documents `palette_name_ids`, `palette_flags` and `palette_entry_name_ids` as optional:
+/// a version-0 CPAL table, or a version-1 table without a given offset, leaves that array null.
+/// An absent label reads as an empty name, absent flags as 0, and absent entry labels as no entry
+/// names; none of them stops the face's color glyphs from rendering.
+// SAFETY: each non-null array in `data` must hold its count of initialized elements and stay
+// valid and unmutated for the call: `num_palettes` for names and flags, entries for entry labels.
+unsafe fn palettes_from_data(
+    data: &FT_Palette_Data,
+    mut name_of: impl FnMut(FT_UShort) -> String,
+) -> PaletteInfo {
+    let palette_count = usize::from(data.num_palettes);
+    let (name_ids, flags, entry_name_ids) =
+        // SAFETY: the caller guarantees each non-null array's extent; `from_raw_parts` maps null to empty.
+        unsafe {
+            (
+                from_raw_parts(data.palette_name_ids, palette_count),
+                from_raw_parts(data.palette_flags, palette_count),
+                from_raw_parts(data.palette_entry_name_ids, usize::from(data.num_palette_entries)),
+            )
+        };
+    let entry_names: Vec<String> = entry_name_ids.iter().map(|&id| name_of(id)).collect();
+    let palettes = (0..palette_count)
+        .map(|palette_index| Palette {
+            palette_index,
+            flags: flags.get(palette_index).copied().unwrap_or(0),
+            // An absent label array has no name ID, so nothing is looked up (never name ID 0).
+            name: name_ids.get(palette_index).map(|&id| name_of(id)).unwrap_or_default(),
+            entry_names: entry_names.clone(),
+        })
+        .collect();
+    PaletteInfo { num_palettes: palette_count, palettes }
+}
+
 struct MmVarGuard {
     library: FT_Library,
     ptr: *mut FT_MM_Var,
@@ -302,11 +352,30 @@ impl Face {
 
     /// Collects supported SFNT naming records grouped by their name identifier.
     pub fn get_sfnt_names(&self) -> HashMap<u32, Vec<NameRecord>> {
+        let mut names = HashMap::new();
+        let font_names = self.sfnt_name_records(|name_id| {
+            matches!(
+                name_id,
+                TT_NAME_ID_TYPOGRAPHIC_FAMILY
+                    | TT_NAME_ID_TYPOGRAPHIC_SUBFAMILY
+                    | TT_NAME_ID_FONT_FAMILY
+                    | TT_NAME_ID_FONT_SUBFAMILY
+                    | TT_NAME_ID_PS_NAME
+            )
+        });
+        for record in font_names {
+            names.entry(u32::from(record.name_id)).or_insert_with(Vec::new).push(record);
+        }
+        names
+    }
+
+    /// Decodes the supported SFNT naming records whose name ID `keep` accepts, in name-table order.
+    fn sfnt_name_records(&self, keep: impl Fn(u32) -> bool) -> Vec<NameRecord> {
         let num_names =
             // SAFETY: `self.face` is a live FreeType face, the only query input.
             unsafe { FT_Get_Sfnt_Name_Count(self.face) };
 
-        let mut names = HashMap::new();
+        let mut records = Vec::new();
 
         let mut sfnt_name = FT_SfntName {
             platform_id: 0,
@@ -330,15 +399,8 @@ impl Face {
                 continue;
             }
 
-            if !matches!(
-                sfnt_name.name_id as u32,
-                TT_NAME_ID_TYPOGRAPHIC_FAMILY
-                    | TT_NAME_ID_TYPOGRAPHIC_SUBFAMILY
-                    | TT_NAME_ID_FONT_FAMILY
-                    | TT_NAME_ID_FONT_SUBFAMILY
-                    | TT_NAME_ID_PS_NAME
-            ) {
-                // When: `matches!(sfnt_name.name_id, ...)` is false, skip unrelated names.
+            if !keep(u32::from(sfnt_name.name_id)) {
+                // When: `keep(name_id)` is false, the caller does not want this record.
                 continue;
             }
 
@@ -376,7 +438,7 @@ impl Face {
 
             let (name, _) = encoding.decode_with_bom_removal(bytes);
 
-            names.entry(sfnt_name.name_id as u32).or_insert_with(Vec::new).push(NameRecord {
+            records.push(NameRecord {
                 platform_id: sfnt_name.platform_id,
                 encoding_id: sfnt_name.encoding_id,
                 name_id: sfnt_name.name_id,
@@ -384,7 +446,7 @@ impl Face {
                 name: name.to_string(),
             });
         }
-        names
+        records
     }
 
     /// Returns the face-owned OpenType `OS/2` table when the font contains one.
@@ -807,23 +869,18 @@ impl Face {
         }
     }
 
-    /// Retrieves the transformed COLR clip box for a glyph.
-    pub fn get_color_glyph_clip_box(
-        &mut self,
-        glyph_index: FT_UInt,
-    ) -> anyhow::Result<FT_ClipBox_> {
-        // SAFETY: `self.face` is live and `result` provides writable storage; FreeType fully
-        // initializes it exactly when the returned status is one.
-        unsafe {
-            let mut result = MaybeUninit::<FT_ClipBox_>::zeroed();
-            let status = FT_Get_Color_Glyph_ClipBox(self.face, glyph_index, result.as_mut_ptr());
-            if status == 1 {
-                Ok(result.assume_init())
-            } else {
-                // When: `status == 1` is false, FreeType did not initialize a clip box.
-                anyhow::bail!("FT_Get_Color_Glyph_ClipBox for glyph {glyph_index} failed");
-            }
-        }
+    /// Retrieves the transformed COLR clip box for a glyph, or `None` when the glyph has none. The ClipList and
+    /// its ClipBoxes are optional in COLRv1, so absence is not an error; see `clip_box_from_status`.
+    pub fn get_color_glyph_clip_box(&mut self, glyph_index: FT_UInt) -> Option<FT_ClipBox_> {
+        let mut result = MaybeUninit::<FT_ClipBox_>::zeroed();
+        let status =
+            // SAFETY: `self.face` is live and `result` provides writable storage for one clip box.
+            unsafe { FT_Get_Color_Glyph_ClipBox(self.face, glyph_index, result.as_mut_ptr()) };
+        clip_box_from_status(status, || {
+            // SAFETY: FreeType fully initialized `result` because the status was 1, the only status
+            // `clip_box_from_status` reads for.
+            unsafe { result.assume_init() }
+        })
     }
 
     /// Resolves a face-owned opaque COLR paint handle into its typed record.
@@ -887,56 +944,15 @@ impl Face {
 
     /// Collects palette metadata and localized entry names for this face.
     pub fn get_palette_data(&self) -> anyhow::Result<PaletteInfo> {
-        // SAFETY: `self.face` is live; `FT_Palette_Data_Get` initializes `result` on success,
-        // and every non-empty child array is checked before constructing a borrowed slice.
+        // SAFETY: `self.face` is live; `FT_Palette_Data_Get` initializes `result` on success, and
+        // its arrays are face-owned for `num_palettes`/`num_palette_entries` elements or null.
         unsafe {
             let mut result = MaybeUninit::<FT_Palette_Data>::zeroed();
             ft_result(FT_Palette_Data_Get(self.face, result.as_mut_ptr()), ())
                 .context("FT_Palette_Data_Get")?;
-
             let data = result.assume_init();
-            if data.num_palettes == 0 {
-                // When: `data.num_palettes == 0`, FreeType exposes no palette arrays to read.
-                return Ok(PaletteInfo { num_palettes: 0, palettes: Vec::new() });
-            }
-
-            let palette_len = checked_palette_storage(data.palette_name_ids, data.num_palettes)?;
-            checked_palette_storage(data.palette_flags, data.num_palettes)?;
-            let name_ids = from_raw_parts(data.palette_name_ids, palette_len);
-            let flagses = from_raw_parts(data.palette_flags, palette_len);
-            // When: `data.num_palette_entries` selects either no array or checked storage.
-            let entry_name_ids = if data.num_palette_entries == 0 {
-                &[]
-            } else {
-                let entry_len =
-                    checked_palette_storage(data.palette_entry_name_ids, data.num_palette_entries)?;
-                from_raw_parts(data.palette_entry_name_ids, entry_len)
-            };
-
-            let entry_names: Vec<String> = entry_name_ids
-                .iter()
-                .map(|&id| {
-                    self.get_sfnt_name(id as _)
-                        .map(|rec| rec.name)
-                        .unwrap_or_else(|_| String::new())
-                })
-                .collect();
-            let mut palettes = Vec::with_capacity(palette_len);
-
-            for (palette_index, (&name_id, &flags)) in
-                name_ids.iter().zip(flagses.iter()).enumerate()
-            {
-                palettes.push(Palette {
-                    palette_index,
-                    flags,
-                    name: self
-                        .get_sfnt_name(name_id as _)
-                        .map(|rec| rec.name)
-                        .unwrap_or_else(|_| String::new()),
-                    entry_names: entry_names.clone(),
-                });
-            }
-            Ok(PaletteInfo { num_palettes: palette_len, palettes })
+            // CPAL labels are name IDs, not name-table positions: every record, grouped by name ID.
+            Ok(palette_info_from(&data, || self.sfnt_name_records(|_| true)))
         }
     }
 
@@ -1012,7 +1028,12 @@ impl Face {
         }
     }
 
-    /// Decomposes a glyph outline into renderer-independent drawing operations.
+    /// Decomposes a COLRv1 PaintGlyph outline into drawing operations in the face's own font units.
+    ///
+    /// The glyph is loaded with `FT_LOAD_NO_SCALE | FT_LOAD_IGNORE_TRANSFORM` on top of `load_flags`, so
+    /// neither the face's size nor its transform (synthetic italic) is applied here: the caller's included
+    /// root transform maps every paint operand, contours and gradients alike, from font units to device pixels
+    /// exactly once. The face's size and transform stay set, since that root transform is built from them.
     pub fn load_glyph_outlines(
         &mut self,
         glyph_index: FT_UInt,
@@ -1021,7 +1042,9 @@ impl Face {
         // SAFETY: `self.face` is live; a successful glyph load initializes its face-owned slot,
         // and decomposition invokes the callbacks synchronously while `ops` is alive.
         unsafe {
-            ft_result(FT_Load_Glyph(self.face, glyph_index, load_flags), ())
+            let unscaled_flags =
+                load_flags | FT_LOAD_NO_SCALE as FT_Int32 | FT_LOAD_IGNORE_TRANSFORM as FT_Int32;
+            ft_result(FT_Load_Glyph(self.face, glyph_index, unscaled_flags), ())
                 .with_context(|| format!("FT_Load_Glyph {glyph_index}"))?;
             let slot = &mut *(*self.face).glyph;
             if slot.format != FT_Glyph_Format_::FT_GLYPH_FORMAT_OUTLINE {
@@ -1036,7 +1059,9 @@ impl Face {
                 line_to: Some(line_to),
                 conic_to: Some(conic_to),
                 cubic_to: Some(cubic_to),
-                shift: 16, // match the same coordinate space as transforms
+                // Unscaled points are whole font units; a zero shift hands them over unchanged, so no
+                // multiplication can overflow a 32-bit FT_Pos.
+                shift: 0,
                 delta: FT_Pos::from_font_units(0),
             };
 
@@ -1049,7 +1074,7 @@ impl Face {
                 // live pointer to the output vector for the duration of this call.
                 unsafe {
                     let ops = user as *mut Vec<DrawOp>;
-                    let (to_x, to_y) = vector_x_y(&*to);
+                    let (to_x, to_y) = outline_point_font_units(&*to);
                     (*ops).push(DrawOp::MoveTo { to_x, to_y });
                 }
                 0
@@ -1061,7 +1086,7 @@ impl Face {
                 // live pointer to the output vector for the duration of this call.
                 unsafe {
                     let ops = user as *mut Vec<DrawOp>;
-                    let (to_x, to_y) = vector_x_y(&*to);
+                    let (to_x, to_y) = outline_point_font_units(&*to);
                     (*ops).push(DrawOp::LineTo { to_x, to_y });
                 }
                 0
@@ -1077,8 +1102,8 @@ impl Face {
                 // unique, live pointer to the output vector for this call.
                 unsafe {
                     let ops = user as *mut Vec<DrawOp>;
-                    let (control_x, control_y) = vector_x_y(&*control);
-                    let (to_x, to_y) = vector_x_y(&*to);
+                    let (control_x, control_y) = outline_point_font_units(&*control);
+                    let (to_x, to_y) = outline_point_font_units(&*to);
                     (*ops).push(DrawOp::QuadTo { control_x, control_y, to_x, to_y });
                 }
                 0
@@ -1095,9 +1120,9 @@ impl Face {
                 // unique, live pointer to the output vector for this call.
                 unsafe {
                     let ops = user as *mut Vec<DrawOp>;
-                    let (control1_x, control1_y) = vector_x_y(&*control1);
-                    let (control2_x, control2_y) = vector_x_y(&*control2);
-                    let (to_x, to_y) = vector_x_y(&*to);
+                    let (control1_x, control1_y) = outline_point_font_units(&*control1);
+                    let (control2_x, control2_y) = outline_point_font_units(&*control2);
+                    let (to_x, to_y) = outline_point_font_units(&*to);
                     (*ops).push(DrawOp::CubicTo {
                         control1_x,
                         control1_y,
@@ -1739,7 +1764,7 @@ pub(crate) unsafe fn from_raw_parts<'a, T>(ptr: *const T, size: usize) -> &'a [T
 #[derive(Debug)]
 pub struct PaletteInfo {
     pub num_palettes: usize,
-    /// Note that this may be empty even when num_palettes is non-zero
+    /// One entry per palette; an absent CPAL label or flag array leaves that field empty or 0.
     pub palettes: Vec<Palette>,
 }
 
@@ -1758,6 +1783,23 @@ pub struct NameRecord {
     pub language_id: u16,
     pub name_id: u16,
     pub name: String,
+}
+
+/// The ClipBox FreeType returned, or `None` when it returned 0. FreeType returns 0 for a glyph with no
+/// ClipList entry, and equally for a face with no COLR table, a missing or malformed ClipList, or a non-SFNT
+/// face; the status cannot tell these apart, so every 0 reads as "no ClipBox". `read` runs only for status 1,
+/// the only status for which FreeType initialized the box.
+pub(crate) fn clip_box_from_status(
+    status: FT_Bool,
+    read: impl FnOnce() -> FT_ClipBox_,
+) -> Option<FT_ClipBox_> {
+    (status == 1).then(read)
+}
+
+/// An unscaled outline point as `(x, y)` in font units: `FT_LOAD_NO_SCALE` leaves each coordinate a whole number
+/// of font units, which the zero-shift decomposition passes through unchanged.
+fn outline_point_font_units(vector: &FT_Vector) -> (f32, f32) {
+    (vector.x.font_units() as f32, vector.y.font_units() as f32)
 }
 
 /// Converts a FreeType 16.16 vector into floating-point coordinates.

@@ -157,6 +157,8 @@ pub struct PaneState {
     pub(crate) inline_media_charge: media::SharedInlineMediaCharge,
     /// Counter handles shared with this pane's VT worker; `Some` only when the App's gate is on.
     pub(crate) frame_counters: Option<super::frame_counters::PaneFrameCounters>,
+    /// The unique owner of this pane's guard-correlation log; dropping it with the pane closes the log.
+    pub(crate) guard_correlation: Option<super::guard_correlation::CorrelationOwner>,
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +233,7 @@ impl PaneState {
             inline_images: Arc::new(Mutex::new(Vec::new())),
             inline_media_charge: media_pool.new_charge(),
             frame_counters: None,
+            guard_correlation: None,
         }
     }
 
