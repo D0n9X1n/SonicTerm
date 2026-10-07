@@ -20,6 +20,8 @@ env:
   RUST_BACKTRACE: short
   CARGO_INCREMENTAL: 0
   CARGO_LLVM_COV_VERSION: "0.9.0"
+  # SHA-256 of that release's cargo-llvm-cov-aarch64-apple-darwin.tar.gz, checked before it is unpacked.
+  CARGO_LLVM_COV_SHA256: "1bbf5dc8ad82e0f6ff0eb923aa6a691c760adb60f797cdcb454e204b9399c4f0"
   CI_CACHE_NAMESPACE: ci-v3
 
 jobs:
@@ -215,8 +217,19 @@ jobs:
           cache-workspace-crates: false
           save-if: false
 
+      # The pinned release's prebuilt arm64 binary, verified by its SHA-256 before it is unpacked, is expected to
+      # save the minute a source build takes; any download, digest, architecture or version mismatch fails the job.
       - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --version "${{ env.CARGO_LLVM_COV_VERSION }}" --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          asset=cargo-llvm-cov-aarch64-apple-darwin.tar.gz
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --output "$RUNNER_TEMP/$asset" \
+            "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${CARGO_LLVM_COV_VERSION}/$asset"
+          echo "${CARGO_LLVM_COV_SHA256}  $RUNNER_TEMP/$asset" | shasum -a 256 --check --strict
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$HOME/.cargo/bin" cargo-llvm-cov
+          test "$(cargo llvm-cov --version)" = "cargo-llvm-cov ${CARGO_LLVM_COV_VERSION}"
 
       # The pull-request head reaches provenance through env; the runner supplies other run metadata.
       - name: Run Rust logic coverage gate

@@ -91,7 +91,8 @@ The macOS core shard first measures the real PTY close baseline after Cargo
 restore, then runs source-policy checks, strict Rustdoc, the one-pass workspace
 test gate, workspace doctests, host probes, tooling tests, and real resource-baseline
 capture. Its independent coverage shard installs the pinned
-`cargo-llvm-cov`, runs the deterministic logic coverage gate, and uploads its
+`cargo-llvm-cov` release's prebuilt Apple Silicon binary, checking its SHA-256
+before unpacking it (expected to save the minute a source build takes), then runs the deterministic logic coverage gate, and uploads its
 evidence artifact after success and after failure once the coverage step has started. The
 `macos-smoke` matrix builds shipping release binaries on macOS 14 Apple Silicon
 and macOS 15 Intel with distinct dependency-cache keys. Its Intel lane may save

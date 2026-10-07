@@ -16,6 +16,8 @@ PINS = {
     "WIX_TOOLSET_VERSION": "3.14.1.20250415",
     "CARGO_LLVM_COV_VERSION": "0.9.0",
 }
+# SHA-256 of cargo-llvm-cov 0.9.0's aarch64-apple-darwin release archive.
+COVERAGE_TOOL_SHA256 = "1bbf5dc8ad82e0f6ff0eb923aa6a691c760adb60f797cdcb454e204b9399c4f0"
 
 
 def require(text: str, needle: str, subject: str) -> None:
@@ -98,11 +100,22 @@ def main() -> None:
         "Install WiX Toolset",
         'choco install wixtoolset --version "${{ env.WIX_TOOLSET_VERSION }}" --no-progress -y',
     )
-    require_in_step(
-        CI_WORKFLOW,
-        "Install cargo-llvm-cov",
-        'cargo install cargo-llvm-cov --version "${{ env.CARGO_LLVM_COV_VERSION }}" --locked',
-    )
+    # Coverage installs the pinned release's prebuilt arm64 binary, verified by digest before unpacking.
+    require_top_level_env(CI_WORKFLOW, "CARGO_LLVM_COV_SHA256", COVERAGE_TOOL_SHA256)
+    for needle in (
+        'test "$(uname -m)" = arm64',
+        "asset=cargo-llvm-cov-aarch64-apple-darwin.tar.gz",
+        "--proto '=https' --tlsv1.2",
+        "releases/download/v${CARGO_LLVM_COV_VERSION}/$asset",
+        'echo "${CARGO_LLVM_COV_SHA256}  $RUNNER_TEMP/$asset" | shasum -a 256 --check --strict',
+        'test "$(cargo llvm-cov --version)" = "cargo-llvm-cov ${CARGO_LLVM_COV_VERSION}"',
+    ):
+        require_in_step(CI_WORKFLOW, "Install cargo-llvm-cov", needle)
+    # The digest check must run before the archive is unpacked.
+    install = step_block(CI_WORKFLOW, "Install cargo-llvm-cov")
+    if install.index("shasum -a 256 --check") > install.index("tar -xzf"):
+        raise AssertionError("cargo-llvm-cov is unpacked before its digest is checked")
+    forbid(CI_WORKFLOW, "cargo install cargo-llvm-cov", "CI workflow")
     require_in_step(RELEASE, "Build and register msi asset", "--target x86_64-pc-windows-msvc")
     require_in_step(RELEASE, "Build and register msi asset", "--install-version $numericVersion")
     require_in_step(RELEASE, "Validate MSI metadata", "scripts\\validate-windows-msi.ps1")

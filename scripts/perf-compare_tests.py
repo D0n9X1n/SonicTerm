@@ -5240,9 +5240,9 @@ class WindowsComparisonLegTests(unittest.TestCase):
         return load_perf_workflow()["jobs"][job_id]["strategy"]["matrix"]["include"]
 
     def test_every_scenario_runs_once_per_platform(self):
-        # Each platform's shards partition the common scenario sets plus its own S11 variants; Windows keeps five
-        # shards.
-        for job_id, platform_name, runner, counts in (("compare-macos", "macOS", "macos-14", (3, 4, 5)),
+        # Each platform's shards partition the common scenario sets plus its own S11 variants. macOS runs four
+        # shards, one per macOS slot that reaches perf; Windows keeps five.
+        for job_id, platform_name, runner, counts in (("compare-macos", "macOS", "macos-14", (4,)),
                                                        ("compare-windows", "Windows", "windows-latest", (5,))):
             with self.subTest(job=job_id):
                 entries = self.matrix(job_id)
@@ -5251,31 +5251,40 @@ class WindowsComparisonLegTests(unittest.TestCase):
                                  {(platform_name, runner)})
                 scenarios = [scenario for entry in entries for scenario in entry["scenarios"].split()]
                 self.assertEqual(sorted(scenarios), sorted(ALL_SCENARIOS + PLATFORM_SCENARIOS[platform_name]))
-                # The S11 variants join the existing S4-S5-S11 shard; no shard is renamed.
-                shard = next(entry for entry in entries if entry["shard"] == "S4-S5-S11")
-                platform_variants = PLATFORM_SCENARIOS[platform_name]
-                self.assertEqual(shard["scenarios"].split()[:3], ["S4", "S5", "S11"])
-                self.assertEqual(shard["scenarios"].split()[3:3 + len(platform_variants)], platform_variants)
                 self.assertEqual(len({entry["shard"] for entry in entries}), len(entries))
+        # Windows keeps its S11 variants in S4-S5-S11, after S4, S5 and S11.
+        shard = next(entry for entry in self.matrix("compare-windows") if entry["shard"] == "S4-S5-S11")
+        self.assertEqual(shard["scenarios"].split()[:6], ["S4", "S5", "S11"] + PLATFORM_SCENARIOS["Windows"])
+
+    def test_the_macos_shards_are_the_reviewed_four_set_partition(self):
+        # The partition balanced from trial-2 costs (about 830 s each); a change here needs remeasuring.
+        self.assertEqual({entry["shard"]: entry["scenarios"].split() for entry in self.matrix("compare-macos")}, {
+            "S7-S4": ["S7", "S4", "S1/atlas-retry"],
+            "S9-S10sync": ["S10/sync", "S9", "S11", "S6", "S1", "S5"],
+            "S10-S11release": ["S10", "S11/release", "S2/flood"],
+            "S2-S3-S8-S12": ["S2", "S12", "S3", "S8", "S6/selection-drag", "S6/flood"],
+        })
 
     def test_the_atlas_retry_variant_runs_in_the_shard_its_projection_names(self):
-        # The projection in perf.yml places S1/atlas-retry where measured slack absorbs it: macOS S4-S5-S11, since
-        # macOS S1-S3-S6-S8-S12 was the zero-slack critical path, and Windows S1-S3-S6-S8-S12, since Windows
-        # S4-S5-S11 was critical once.
-        for job_id, shard_name in (("compare-macos", "S4-S5-S11"), ("compare-windows", "S1-S3-S6-S8-S12")):
+        # S1/atlas-retry runs where its shard has room: macOS S7-S4 in the four-set partition, and Windows
+        # S1-S3-S6-S8-S12, since Windows S4-S5-S11 was critical once.
+        for job_id, shard_name in (("compare-macos", "S7-S4"), ("compare-windows", "S1-S3-S6-S8-S12")):
             with self.subTest(job=job_id):
                 holders = [entry["shard"] for entry in self.matrix(job_id)
                            if "S1/atlas-retry" in entry["scenarios"].split()]
                 self.assertEqual(holders, [shard_name])
 
     def test_only_the_s9_s10_shards_run_s9_laps(self):
-        # Every matrix entry carries a laps field: S9 on the S9-S10 shard of each platform, empty elsewhere; each
-        # comparison step passes the laps flags only when the field is set, and no step sets timeout-minutes.
-        for job_id in ("compare-macos", "compare-windows"):
+        # Every matrix entry carries a laps field: S9 on the shard holding S9 (macOS S9-S10sync, Windows S9-S10),
+        # empty elsewhere; each comparison step passes the laps flags only when the field is set, and no step sets
+        # timeout-minutes.
+        for job_id, laps_shard in (("compare-macos", "S9-S10sync"), ("compare-windows", "S9-S10")):
             with self.subTest(job=job_id):
                 entries = self.matrix(job_id)
                 self.assertEqual({entry["shard"]: entry["laps"] for entry in entries if entry["laps"]},
-                                 {"S9-S10": "S9"})
+                                 {laps_shard: "S9"})
+                holder = next(entry for entry in entries if entry["shard"] == laps_shard)
+                self.assertIn("S9", holder["scenarios"].split())
                 self.assertTrue(all("laps" in entry for entry in entries))
                 step = next(step for step in load_perf_workflow()["jobs"][job_id]["steps"]
                             if step.get("name") == "Compare the base and the head")
@@ -8291,8 +8300,26 @@ HEAD_OUTCOME = {"kind": "valid", "side": "head", "scenario": "S12", "variant": "
 
 
 class CellLayoutArtifactTests(unittest.TestCase):
-    """The reader takes only the requested workflow run's S1-S3-S6-S8-S12 head runs, names evidence from anything
-    else, and turns unreadable files into named invalid runs instead of failing."""
+    """The reader takes only the requested workflow run's S12-shard head runs, names evidence from anything else, and
+    turns unreadable files into named invalid runs instead of failing."""
+
+    def test_each_platform_reads_only_its_own_s12_shard(self):
+        # macOS reads its four-shard S2-S3-S8-S12 and its earlier S1-S3-S6-S8-S12; Windows reads only its own
+        # S1-S3-S6-S8-S12, never the macOS name; a timing.json naming another shard is a named problem.
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            write_cell_artifact(root, "macOS", [("01-head", HEAD_OUTCOME)], shard="S2-S3-S8-S12")
+            write_cell_artifact(root, "Windows", [("01-head", HEAD_OUTCOME)], shard="S2-S3-S8-S12")
+            runs = perf.read_cell_layout_runs(root, "1", CELL_HEAD)
+            self.assertEqual([run.problem for run in runs["macOS"]], [None])
+            self.assertEqual(runs["Windows"], [])
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            artifact = write_cell_artifact(root, "macOS", [("01-head", HEAD_OUTCOME)], shard="S2-S3-S8-S12")
+            (artifact / "timing.json").write_text(json.dumps({"run_id": "1", "shard": "S7-S4"}), encoding="utf-8")
+            runs = perf.read_cell_layout_runs(root, "1", CELL_HEAD)
+            # A run read without its shard check has no problem; that must fail as an assertion, not a TypeError.
+            self.assertIn("artifact shard S7-S4, expected S2-S3-S8-S12", runs["macOS"][0].problem or "")
 
     def test_the_reader_keeps_provenance_and_names_foreign_evidence(self):
         with tempfile.TemporaryDirectory() as scratch:

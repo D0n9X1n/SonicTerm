@@ -55,8 +55,8 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 成功的必需检查。
 
 macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、workspace doctest、host probe、
-工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本的
-`cargo-llvm-cov`，运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
+工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本
+`cargo-llvm-cov` 发布的 Apple Silicon 预编译二进制，解包前先校验其 SHA-256（预计可省去源码构建所需的约一分钟），再运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
 artifact。
 `macos-smoke` 矩阵分别在 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release
 二进制，使用不同依赖缓存键。Intel lane 仅在推送到 `main` 时可保存依赖；Apple Silicon

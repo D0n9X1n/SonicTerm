@@ -1053,13 +1053,13 @@ its `comparison.md` opens with `**Incomplete comparison:**`. Two gaps are
 allowed: a counters set on a base that does not declare `perf-counters`, which
 still reads `n/a`, and a diagnostic declared unavailable on both sides because
 its harness API cfg is off, which runs nothing. Any other blocked side still
-fails, and a selection with nothing runnable never passes. The macOS shards run S7; S9, S10, S6/flood and S6/selection-drag;
-S2 and S10/sync; S4, S5, S11, S11/release and S1/atlas-retry; and S1, S3, S6,
-S8, S12 and S2/flood. The Windows shards of the same names run S7; S9, S10, S6/flood,
+fails, and a selection with nothing runnable never passes. The four macOS shards run S7, S4 and S1/atlas-retry;
+S10/sync, S9, S11, S6, S1 and S5; S10, S11/release and S2/flood; and S2, S12, S3,
+S8, S6/selection-drag and S6/flood. The five Windows shards run S7; S9, S10, S6/flood,
 S6/selection-drag and S2/flood; S2 and S10/sync; S4, S5, S11, S11/release,
 S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12 and S1/atlas-retry, which balances each
-platform's measured shard times. On both platforms the S9-S10 shard also runs
-S9's laps set (`--laps-scenario S9 --laps-runs 2`, set by that matrix entry's
+platform's measured shard times. On each platform the shard holding S9 (macOS
+S9-S10sync, Windows S9-S10) also runs S9's laps set (`--laps-scenario S9 --laps-runs 2`, set by that matrix entry's
 `laps` field; the other entries pass no laps flags), and each platform's table
 gives its own `fallback_receive` verdict. A bare scenario ID selects only its default
 variant, so every variant is named explicitly. Under `--short`, `S2/flood` is
@@ -1087,8 +1087,8 @@ real-renderer rows come from the working-set test. The combined gate steps
 `perf-scenarios-harness-api-clippy` and `perf-scenarios-harness-api-tests` lint
 and test the harness with this cfg on, together with every other entry. Each shard runs its sets' base and head runs
 interleaved on its own runner, so a comparison never crosses runners or
-platforms. The macOS shard count, five today, is
-chosen from measured critical paths. Both modes add the counters set, on the
+platforms. The macOS shard count, four today, matches the macOS
+runner slots that reached perf while CI's macOS jobs ran in the measured trials; it is chosen from measured critical paths. Both modes add the counters set, on the
 head and on a base that declares `perf-counters`: a pull request takes two
 counters runs per scenario and side to stay within 30 minutes, a release takes
 `--runs`. The Windows runner has no GPU and no user session: its table measures

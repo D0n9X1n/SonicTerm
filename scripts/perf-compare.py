@@ -1487,7 +1487,9 @@ CELL_LAYOUT_CHECKPOINT = "end"
 CELL_LAYOUT_MIN_SHARE = Fraction(3, 10)
 CELL_LAYOUT_MIN_SAVING_BYTES = 8 * 1024 * 1024
 CELL_LAYOUT_GRID_FIELDS = ("grid_visible_bytes", "grid_history_bytes", "grid_alternate_bytes")
-CELL_LAYOUT_SHARD = "S1-S3-S6-S8-S12"
+# The shard holding S12 on each platform. macOS moved S12 to S2-S3-S8-S12 when it went to four shards; its earlier
+# S1-S3-S6-S8-S12 artifacts still read.
+CELL_LAYOUT_SHARDS = {"macOS": ("S2-S3-S8-S12", "S1-S3-S6-S8-S12"), "Windows": ("S1-S3-S6-S8-S12",)}
 # `perf-comparison-<pr>-<head sha>-<platform>-<shard>-<attempt>`, as perf.yml names each comparison artifact.
 CELL_LAYOUT_ARTIFACT = re.compile(r"perf-comparison-\d+-(?P<head>[0-9a-f]{40})-(?P<platform>macOS|Windows)-"
                                   r"(?P<shard>.+)-(?P<attempt>\d+)")
@@ -1654,7 +1656,7 @@ def _read_json_object(path: Path) -> tuple[object, str | None]:
 
 
 def _cell_layout_artifact_problem(artifact: Path, head_sha: str, workflow_run: str) -> str | None:
-    """Why an S1-S3-S6-S8-S12 artifact is not evidence of the requested workflow run and head, or None."""
+    """Why an S12-holding artifact is not evidence of the requested workflow run and head, or None."""
     named = CELL_LAYOUT_ARTIFACT.fullmatch(artifact.name)
     if named["head"] != head_sha:
         return f"artifact measured head {named['head']}, expected {head_sha}"
@@ -1665,8 +1667,8 @@ def _cell_layout_artifact_problem(artifact: Path, head_sha: str, workflow_run: s
         return "timing.json is not an object"
     if str(timing.get("run_id")) != workflow_run:
         return f"artifact from workflow run {timing.get('run_id')}, expected {workflow_run}"
-    if timing.get("shard") != CELL_LAYOUT_SHARD:
-        return f"artifact shard {timing.get('shard')}, expected {CELL_LAYOUT_SHARD}"
+    if timing.get("shard") != named["shard"]:
+        return f"artifact shard {timing.get('shard')}, expected {named['shard']}"
     return None
 
 
@@ -1691,7 +1693,7 @@ def _cell_layout_memory(run_dir: Path) -> tuple[list[MemorySample], str | None]:
 def read_cell_layout_runs(artifact_root: Path, workflow_run: str, head_sha: str) -> dict[str, list[CellLayoutRun]]:
     """Read every head S12 timed run of one workflow run and head from downloaded `perf-comparison-*` artifacts.
 
-    Only the S1-S3-S6-S8-S12 shard's artifacts are read. Each run carries the workflow run and head its artifact
+    Only each platform's S12-holding shard (`CELL_LAYOUT_SHARDS`) is read. Each run carries the workflow run and head its artifact
     records, so evidence from another run or head is named as such rather than counted; a file that cannot be read
     or that describes another side, scenario or variant makes that run invalid with the reason.
     """
@@ -1703,7 +1705,8 @@ def read_cell_layout_runs(artifact_root: Path, workflow_run: str, head_sha: str)
         return runs
     for artifact in artifacts:
         named = CELL_LAYOUT_ARTIFACT.fullmatch(artifact.name)
-        if named is None or named["shard"] != CELL_LAYOUT_SHARD or not artifact.is_dir():
+        if (named is None or named["shard"] not in CELL_LAYOUT_SHARDS.get(named["platform"], ())
+                or not artifact.is_dir()):
             continue
         artifact_problem = _cell_layout_artifact_problem(artifact, head_sha, workflow_run)
         timing, _ = _read_json_object(artifact / "timing.json")

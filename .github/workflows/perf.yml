@@ -202,52 +202,37 @@ jobs:
     strategy:
       # Every shard reports: one shard's failure must not hide the other sets' tables.
       fail-fast: false
-      # The macOS shards no longer build, so each is about its scenarios' runs plus setup and the binaries'
-      # download. The shard count is chosen from measured critical paths (perf-critical-path.py); every
-      # scenario stays in exactly one shard. A shard starts about 7.5 min after the run and may wait 5-9 min for
-      # a runner, so each keeps its runs at or under about 12.5-13 min. Measured (runs 37130949068 and
-      # 37134583629): S7 12.6, S2-S10sync 12.6, S9-S10 with S6/flood and S6/selection-drag 11.4 (11.7 in
-      # 37147065934; S9's laps set, two runs a side, adds about 0.5, about 12.2),
-      # S1-S3-S6-S8-S12 9.1, S4-S5-S11 with S2/flood 10.2-11.2. S11/release (+7.3 at cap 1) cannot join
-      # S2/flood, so S2/flood moves to S1-S3-S6-S8-S12, capped at 2 short runs to fit (about 12.2); the
-      # cap rebalances the 30-minute budget, and a release comparison runs S2/flood uncapped.
+      # The macOS shards do not build: each is its scenarios' runs plus about 31 s of setup, download, listing and
+      # report. In the measured trials at most five macOS jobs ran at once and CI's macOS core held one throughout,
+      # so four slots reached these shards; a fifth shard queued behind another and set the critical path (in runs
+      # 37603251975 and 37610393219 the last comparison ended at +1,895 s and +1,880 s, the workflows at +1,902 s
+      # and +1,888 s). Four shards remove that second wave. Each set
+      # is about 830 s of measured runs (trial-2 phase envelopes scaled to each shard's measured window): S7 with
+      # S4 and S1/atlas-retry; S10/sync with S9 (and its laps set), S11, S6, S1 and S5; S10 with S11/release and
+      # S2/flood; S2 with S12, S3, S8, S6/selection-drag and S6/flood. Every scenario stays in exactly one shard.
+      # S11/release holds 65 s after its media-free frame, so --short caps it at one run per side; S2/flood and
+      # S1/atlas-retry run twice per side (--list run_caps). A release comparison runs them uncapped.
       matrix:
         include:
           - platform: macOS
             runner: macos-14
-            shard: S7
-            scenarios: S7
+            shard: S7-S4
+            scenarios: S7 S4 S1/atlas-retry
             laps: ""
           - platform: macOS
             runner: macos-14
-            shard: S9-S10
-            scenarios: S9 S10 S6/flood S6/selection-drag
+            shard: S9-S10sync
+            scenarios: S10/sync S9 S11 S6 S1 S5
             laps: S9
           - platform: macOS
             runner: macos-14
-            shard: S2-S10sync
-            scenarios: S2 S10/sync
+            shard: S10-S11release
+            scenarios: S10 S11/release S2/flood
             laps: ""
           - platform: macOS
             runner: macos-14
-            shard: S4-S5-S11
-            # S11/release holds 65 s after its media-free frame, so --short caps it at one run per side
-            # (--list run_caps). S1/atlas-retry runs only in the counters set, twice per side. Nominal cost,
-            # not measured: four runs at S1's measured 5.8 s plus 0.34 s between runs, about 25 s, assuming
-            # its recovery ends inside the 5 s --short hold (0.58 s in one local debug run). A slow or
-            # invalid run is longer: it can fail late in its eighth episode, up to the 10 s settle plus 32
-            # steps of 2 s (about 74 s, inside the 80 s short timeout), and perf-compare retries an
-            # invalid run up to 3 times a side. Measured compare steps 526-558 s (runs 37318119545,
-            # 37325514262, 37333587004) with 489-1385 s of slack to the critical path, so about 551-583 s
-            # nominally. It is not in S1-S3-S6-S8-S12, which had 0 s of slack in two of those runs. The
-            # exact-head CI run is the measurement.
-            scenarios: S4 S5 S11 S11/release S1/atlas-retry
-            laps: ""
-          - platform: macOS
-            runner: macos-14
-            shard: S1-S3-S6-S8-S12
-            # S2/flood runs twice per side under --short (--list run_caps).
-            scenarios: S1 S3 S6 S8 S12 S2/flood
+            shard: S2-S3-S8-S12
+            scenarios: S2 S12 S3 S8 S6/selection-drag S6/flood
             laps: ""
     steps:
       # The full history and tags, so the merge base and the previous release tag resolve; the commit

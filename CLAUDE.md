@@ -361,7 +361,7 @@ a reproduction.
     (`S2/flood` 2, `S1/atlas-retry` 2 and `S11/release` 1 on both platforms,
     `S11/gdi` and `S11/wgpu` 2 on Windows),
     its rows read `(runs N of M)`, and release runs are uncapped. One macOS job
-    builds both refs once; five macOS
+    builds both refs once; four macOS
     shards measure its binaries, bound to the run, attempt and manifest digest;
     five Windows shards each build; every comparison passes `--require-base`; and
     the `Performance comparison result` job passes only when all of them did.
@@ -372,8 +372,8 @@ a reproduction.
     alone as `gh pr checks` reads it; a superseded run never counts. The
     counters set runs with the frame counters forced on, on the head and on the
     base when it declares `perf-counters`, giving a counters table and a head
-    counters-on vs counters-off overhead table. The two S9-S10 matrix entries (macOS
-    and Windows) pass `--laps-scenario S9 --laps-runs 2` through a per-entry `laps`
+    counters-on vs counters-off overhead table. The two matrix entries holding S9 (macOS
+    S9-S10sync, Windows S9-S10) pass `--laps-scenario S9 --laps-runs 2` through a per-entry `laps`
     field, adding S9's laps set and its `fallback_receive` verdict; the other
     entries pass no laps flags. Its table is the PR's before/after
     evidence. Keep it
