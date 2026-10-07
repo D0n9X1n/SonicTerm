@@ -337,9 +337,18 @@ mod fg_probe;
 mod field_input;
 mod field_pointer;
 mod frame_counters;
+mod guard_correlation;
+pub use guard_correlation::{
+    AbandonedSectionV1, GuardCorrelationTakeV1, GuardCorrelationV1, LossIntervalV1, PaneSectionsV1,
+    PendingSectionV1, SectionRecordV1, SpanBatchV1, SpanRecordV1,
+};
+// Pins the take's signature here, in the parent, in every build: a gate on it fails a plain library build.
+const _: () = {
+    let _: fn(&mut App) -> GuardCorrelationTakeV1 = App::take_guard_correlation_v1;
+};
 mod guard_custody;
 pub use frame_counters::{
-    CounterRecord, FrameCountersSnapshot, FrameCountersTooLate, HistogramBuckets,
+    clock_epoch, CounterRecord, FrameCountersSnapshot, FrameCountersTooLate, HistogramBuckets,
 };
 mod frame_pacing;
 pub use frame_pacing::{

@@ -786,6 +786,11 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         }
     }
     loop {
+        // Registered before before_lock and outside the parser-guard scope: a section that unwinds is
+        // abandoned after its guard drops. Lock order: a parser guard is never held while a log mutex is taken.
+        let registration = counters
+            .and_then(|counters| counters.sections.as_deref())
+            .and_then(|log| log.register());
         // Gate on: one clock read before lock(), three under the guard (four when a new sync epoch opens);
         // an armed echo watch reads the target cell around the parse and may lock its slot, all before the guard drops.
         let before_lock = counters.map(|_| now());
@@ -834,6 +839,10 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                 released_at,
             };
             counters.vt.record_section(&times, consumed as u64);
+            if let Some(registration) = registration {
+                // The section is published with D2.1a's own before_lock and locked_at reads.
+                registration.publish(before_lock, locked_at);
+            }
         }
         remaining = &remaining[consumed..];
 
@@ -1001,6 +1010,8 @@ impl App {
         };
         let mut state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
         self.reserve_pane_teardown(&mut state);
+        let mut frame_counters = frame_counters;
+        state.guard_correlation = self.attach_guard_correlation(pane_id, &mut frame_counters);
         state.frame_counters = frame_counters;
         state.redraw_target = redraw_target;
         if state.pty.is_some() {

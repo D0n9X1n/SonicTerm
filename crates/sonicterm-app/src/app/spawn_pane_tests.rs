@@ -2159,3 +2159,90 @@ fn an_unstamped_or_pre_arm_chunk_records_no_read() {
         assert!(chunk_reads(&echo_timeline_of(&watch, 1)).is_empty(), "{read_at:?}");
     }
 }
+
+/// Worker handles whose counters carry a section log, and that log.
+fn counting_worker_with_log(
+) -> (PaneState, PaneVtHandles, Arc<crate::app::guard_correlation::PaneSectionLog>) {
+    let (mut pane, _) = pane_and_worker_handles();
+    let stats = Arc::new(crate::app::frame_counters::VtFrameStats::default());
+    let mut counters = crate::app::frame_counters::PaneFrameCounters::new(stats);
+    let log = Arc::new(crate::app::guard_correlation::PaneSectionLog::new(11));
+    counters.sections = Some(Arc::clone(&log));
+    pane.frame_counters = Some(counters);
+    let handles = PaneVtHandles::from_pane_state(&pane);
+    (pane, handles, log)
+}
+
+/// A counting worker publishes each parser section with D2.1a's own `before_lock` and `locked_at`
+/// reads, so a record's endpoints are exactly the instants the section counters recorded.
+#[test]
+fn a_counting_worker_publishes_its_section_with_the_section_reads() {
+    let epoch = crate::app::frame_counters::clock_epoch();
+    let (_pane, handles, log) = counting_worker_with_log();
+    let mut tick_ns = 1_000_u64;
+    process_pane_vt_batch_with(
+        &handles,
+        b"abc",
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |_| {},
+        || {
+            tick_ns += 1_000;
+            epoch + Duration::from_nanos(tick_ns)
+        },
+        |_| {},
+    );
+    let pane = log.take(crate::app::guard_correlation::LogBuffers::new()).0;
+    let expected = crate::app::guard_correlation::SectionRecordV1 {
+        section_seq: 1,
+        before_lock_ns: 2_000,
+        locked_at_ns: 3_000,
+    };
+    assert_eq!(pane.records, vec![expected], "the first read is before_lock, the second locked_at");
+    assert!(pane.pending.is_none() && pane.abandoned.is_empty());
+}
+
+/// T4: a worker section that unwinds after `locked_at` abandons its registration only after the parser
+/// guard is released, so the log mutex is never taken under a parser guard; nothing stays pending.
+#[test]
+fn a_worker_section_unwinding_after_its_lock_is_abandoned_after_the_guard() {
+    let epoch = crate::app::frame_counters::clock_epoch();
+    let (_pane, handles, log) = counting_worker_with_log();
+    let parser = Arc::clone(&handles.parser);
+    let parser_free = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&parser_free);
+    crate::app::guard_correlation::ABANDON_PROBE.with(|probe| {
+        *probe.borrow_mut() =
+            Some(Box::new(move || seen.store(parser.try_lock().is_some(), Ordering::SeqCst)));
+    });
+    let mut reads = 0_u64;
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        process_pane_vt_batch_with(
+            &handles,
+            b"abc",
+            None,
+            &mut None,
+            &mut SyncLatch::default(),
+            |_| None,
+            |_| {},
+            || {
+                reads += 1;
+                // The third read is parsed_at, under the parser guard and after locked_at.
+                assert!(reads < 3, "the section unwinds after locked_at");
+                epoch + Duration::from_nanos(reads * 1_000)
+            },
+            |_| {},
+        );
+    }));
+    crate::app::guard_correlation::ABANDON_PROBE.with(|probe| *probe.borrow_mut() = None);
+    assert!(unwound.is_err());
+    assert!(
+        parser_free.load(Ordering::SeqCst),
+        "the parser guard was released before the log mutex"
+    );
+    let pane = log.take(crate::app::guard_correlation::LogBuffers::new()).0;
+    assert_eq!(pane.abandoned.iter().map(|entry| entry.section_seq).collect::<Vec<_>>(), vec![1]);
+    assert!(pane.pending.is_none() && pane.records.is_empty());
+}

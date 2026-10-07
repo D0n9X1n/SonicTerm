@@ -283,6 +283,21 @@ Outside the pane seams, the App's foreground-probe map holds at most one entry a
 one stored result per live pane, released with the pane, and at most one worker
 thread, reported as `live_fg_probe_workers`.
 
+With frame counters on, guard correlation holds an estimated 789,248 B per pane
+log: 32,768 section records (768 KiB), 64 abandoned entries and 64 loss
+intervals, plus 256 B for the log itself inside its `Arc` (pane id, mutex and
+state, measured on 64-bit macOS). Each App holds an estimated 525,464 B span
+store: 16,384 spans (512 KiB), 64 loss intervals and 152 B for the store inside
+its `Rc` (`RefCell` borrow state included). The estimates exclude the registry
+vector's capacity, the handles each pane keeps, and allocator overhead. A take
+allocates a replacement set before it swaps, so the taken buffers and their
+replacements coexist until the caller drops the transfer. A closed pane's log is
+freed once a take has pruned it and its worker has dropped its handle. A counting
+collection keeps its 440 B of span bookkeeping on the stack. None of it is charged
+to a ledger owner or reported in a memory sample. With counters off, no recording
+buffer is allocated and no correlation clock or lock is taken, but the `Option`
+fields and the larger custody and source types still cost their layout.
+
 Renderer retention is charged to no ledger owner. When the idle image atlas is
 released, the renderer's `retained_amounts().image_atlas` drops from 16 MiB to
 4 B at once; the aggregate `renderer_total_bytes` shows the drop at the next
@@ -434,3 +449,4 @@ aggregate understates the session.
 | Parser capture limits | `crates/sonicterm-vt/src/vt.rs`, `crates/sonicterm-vt/src/vt/staging.rs` |
 | PTY queue limits | `crates/sonicterm-io/src/pty.rs` |
 | Renderer retention and allocator report | `crates/sonicterm-gpu/src/core.rs` |
+| Guard-correlation records (frame counters only) | `crates/sonicterm-app/src/app/guard_correlation.rs` |

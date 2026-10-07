@@ -216,6 +216,15 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 在窗格接缝之外，App 的前台探测映射对每个存活窗格最多保存一个条目和一个结果，随窗格一起释放；
 worker 线程最多一个，以 `live_fg_probe_workers` 报告。
 
+开启帧计数器时，守卫关联每个窗格日志估计占用 789,248 B：32,768 条分段记录（768 KiB）、64 个放弃条目和
+64 个丢失区间，另加日志本身在其 `Arc` 中的 256 B（窗格 id、互斥锁与状态，在 64 位 macOS 上测得）。
+每个 App 持有一个估计 525,464 B 的跨度存储：16,384 个跨度（512 KiB）、64 个丢失区间，以及存储在其 `Rc`
+中的 152 B（含 `RefCell` 借用状态）。估计值不含注册表向量的容量、每个窗格保留的句柄以及分配器开销。
+提取会在交换之前分配一套替换缓冲区，因此被提取的缓冲区与替换缓冲区会同时存在，直到调用方丢弃该次转移。
+已关闭窗格的日志在某次提取将其剪除、且其工作线程丢弃自己的句柄之后释放。每次计数收集把 440 B 的跨度记录放在栈上。
+这些都不计入任何账本所有者，也不出现在内存采样中。关闭计数器时不分配任何记录缓冲区，也不读取关联时钟、
+不获取关联锁，但 `Option` 字段以及更大的保管与来源类型仍占用其布局。
+
 渲染器的保留量不计入任何账本所有者。空闲图像图集被释放时，渲染器的
 `retained_amounts().image_atlas` 立即从 16 MiB 降到 4 B；聚合的 `renderer_total_bytes` 在下一次
 内存采样（每 30 秒一次）时显示这一下降，每个窗格的 `InlineMediaRetained` 计费保持不变。
@@ -341,3 +350,4 @@ grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log*
 | 解析器捕获上限 | `crates/sonicterm-vt/src/vt.rs`、`crates/sonicterm-vt/src/vt/staging.rs` |
 | PTY 队列上限 | `crates/sonicterm-io/src/pty.rs` |
 | 渲染器保留量与分配器报告 | `crates/sonicterm-gpu/src/core.rs` |
+| 守卫关联记录（仅帧计数器） | `crates/sonicterm-app/src/app/guard_correlation.rs` |

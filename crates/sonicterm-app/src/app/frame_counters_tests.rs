@@ -520,6 +520,7 @@ const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/input_dispatch.rs", "test_pty_writes", 1),
     ("app/frame_counters.rs", "native", 8),
     ("app/echo_watch.rs", "slot", 1),
+    ("app/guard_correlation.rs", "state", 5),
     ("bin/pty_multi_round_helper.rs", "stdin", 1),
     ("bin/pty_multi_round_helper.rs", "stdout", 1),
 ];
@@ -1816,4 +1817,31 @@ fn the_app_record_names_the_guard_and_wait_totals() {
         (record.count("frame_dispatches_failed"), record.count("parser_sections")),
         (Some(4), Some(7))
     );
+}
+
+/// D′: both activation paths initialize the run clock's epoch through the counters' constructor. A fresh,
+/// injected cell is checked without initializing it: an App built with the gate off leaves it unset, the
+/// tracing-enabled App sets it while it is built, and forcing counters on sets it at that call.
+#[test]
+fn both_activation_paths_set_the_epoch_cell_at_construction() {
+    let check = |activate: &dyn Fn() -> bool| {
+        let cell: &'static OnceLock<Instant> = Box::leak(Box::new(OnceLock::new()));
+        CONSTRUCTOR_EPOCH_CELL.with(|held| held.set(Some(cell)));
+        let counting = activate();
+        CONSTRUCTOR_EPOCH_CELL.with(|held| held.set(None));
+        (counting, cell.get().is_some())
+    };
+    assert_eq!(check(&|| app_under_filter("warn").frame_counters.is_some()), (false, false));
+    assert_eq!(
+        check(&|| app_under_filter("warn,frame_counters=debug").frame_counters.is_some()),
+        (true, true)
+    );
+    let forced = check(&|| {
+        let mut app = app_under_filter("warn");
+        let before =
+            CONSTRUCTOR_EPOCH_CELL.with(|held| held.get().is_some_and(|cell| cell.get().is_some()));
+        app.force_frame_counters_on().expect("no window yet");
+        !before && app.frame_counters.is_some()
+    });
+    assert_eq!(forced, (true, true), "forcing counters on sets the cell at that call, not before");
 }

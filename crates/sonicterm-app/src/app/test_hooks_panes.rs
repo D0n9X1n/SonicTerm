@@ -522,9 +522,11 @@ impl App {
     #[doc(hidden)]
     pub fn __test_seed_counting_tab(&mut self, title: &str) -> u64 {
         let pane_id = self.__test_seed_tab(title);
-        let frame_counters = self.pane_frame_counters();
+        let mut frame_counters = self.pane_frame_counters();
+        let owner = self.attach_guard_correlation(pane_id, &mut frame_counters);
         if let Some(pane) = self.main_mut().and_then(|main| main.panes.get_mut(&pane_id)) {
             pane.frame_counters = frame_counters;
+            pane.guard_correlation = owner;
         }
         pane_id
     }

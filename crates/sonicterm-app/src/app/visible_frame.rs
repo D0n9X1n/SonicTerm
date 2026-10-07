@@ -111,6 +111,8 @@ pub(super) struct VisibleFrameSources {
     entries: Vec<VisibleSource>,
     /// The App's custody totals when it counts; then a collection times its guard custody and dispatch.
     counted: Option<Arc<super::guard_custody::CustodyTotals>>,
+    /// The App's UI span store when it counts; then a collection records each parser guard it holds.
+    spans: Option<super::guard_correlation::SharedSpanStore>,
     pub(super) tab_index: usize,
     pub(super) active_pos: usize,
     #[cfg(test)]
@@ -172,6 +174,7 @@ impl VisibleFrameSources {
         Ok(Self {
             entries,
             counted: None,
+            spans: None,
             tab_index,
             active_pos: layout.active_pos,
             #[cfg(test)]
@@ -201,9 +204,16 @@ impl VisibleFrameSources {
         before_first_lock: impl FnOnce() -> S,
     ) -> Result<HeldVisibleFrame<'_, S>, FrameUnavailable> {
         let snapshot = before_first_lock();
+        // The span collection's identity is issued before the first try_lock, with no lock taken; declared
+        // first, so it drops last, after every guard and the custody that closes it.
+        let mut collection =
+            self.spans.as_ref().map(super::guard_correlation::SpanCollection::open);
         // Custody and dispatch start at the first guard acquired, and only when the App counts. Declared
         // before `guards`, so an unwind drops every guard before the timing records.
-        let mut timing = None;
+        let mut timing: Option<(
+            super::guard_custody::GuardCustody,
+            super::guard_custody::DispatchClock,
+        )> = None;
         let mut guards = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             let Some(parser) = entry.parser.try_lock() else {
@@ -213,7 +223,13 @@ impl VisibleFrameSources {
                 return Err(FrameUnavailable::Contended { pane_id: entry.id, images: false });
             };
             if timing.is_none() {
-                timing = self.counted.as_ref().map(super::guard_custody::start);
+                timing = self.counted.as_ref().map(|totals| {
+                    let (custody, dispatch) = super::guard_custody::start(totals);
+                    (custody.with_spans(collection.take()), dispatch)
+                });
+            }
+            if let Some((custody, _)) = timing.as_mut() {
+                custody.note_guard(entry.id);
             }
             guards.push((entry.id, parser, entry.rect));
         }
@@ -439,6 +455,10 @@ impl App {
         // A counting App times each frame's guard custody; otherwise no handle is cloned.
         sources.counted =
             self.frame_counters.as_ref().map(|counters| Arc::clone(&counters.custody));
+        sources.spans = self
+            .frame_counters
+            .as_ref()
+            .map(|counters| std::rc::Rc::clone(&counters.correlation.spans));
         Ok(sources)
     }
 

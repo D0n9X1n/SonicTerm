@@ -671,15 +671,19 @@ pub(crate) struct PaneFrameCounters {
     pub(crate) pending_flush: Arc<AtomicU64>,
     /// The pane's echo watch; it lives as long as the pane or its worker's handles.
     pub(crate) echo: Arc<super::echo_watch::EchoWatch>,
+    /// The pane's guard-correlation section log, which its worker records into; `None` until the App
+    /// attaches one, and the pane's owner token, not this handle, closes it.
+    pub(crate) sections: Option<Arc<super::guard_correlation::PaneSectionLog>>,
 }
 
 impl PaneFrameCounters {
-    /// A pane's handles over its App's VT statistics, with no pending flush and an idle watch.
+    /// A pane's handles over its App's VT statistics, with no pending flush, an idle watch and no log.
     pub(crate) fn new(vt: Arc<VtFrameStats>) -> Self {
         Self {
             vt,
             pending_flush: Arc::new(AtomicU64::new(0)),
             echo: Arc::new(super::echo_watch::EchoWatch::new()),
+            sections: None,
         }
     }
 }
@@ -696,13 +700,44 @@ pub(crate) fn flush_clock_reads() -> u64 {
     FLUSH_CLOCK_READS.with(std::cell::Cell::get)
 }
 
+/// The run clock's process-wide epoch: set once, at its first use, and never reset.
+static CLOCK_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+/// The process-wide epoch every frame-counter and guard-correlation nanosecond counts from. The
+/// first call sets it; the perf harness calls it before its startup phase so every phase converts.
+#[doc(hidden)]
+pub fn clock_epoch() -> Instant {
+    epoch_in(&CLOCK_EPOCH)
+}
+
+/// The epoch held by `cell`, set to now by the first caller; concurrent first callers agree.
+pub(crate) fn epoch_in(cell: &OnceLock<Instant>) -> Instant {
+    *cell.get_or_init(Instant::now)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: the epoch cell `AppFrameCounters::new` initializes on this thread instead of the process's,
+    /// so a test can observe the constructor setting a cell nothing else has touched.
+    pub(crate) static CONSTRUCTOR_EPOCH_CELL: std::cell::Cell<Option<&'static OnceLock<Instant>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The epoch cell the counters' constructor initializes: the process's, or a test's injected one.
+fn constructor_epoch_cell() -> &'static OnceLock<Instant> {
+    #[cfg(test)]
+    if let Some(cell) = CONSTRUCTOR_EPOCH_CELL.with(std::cell::Cell::get) {
+        // When: a test injected a cell on this thread, the constructor initializes that one.
+        return cell;
+    }
+    &CLOCK_EPOCH
+}
+
 /// Nanoseconds since a process-wide epoch, never 0, which a flush slot reserves for "none".
 pub(crate) fn flush_clock_ns() -> u64 {
     #[cfg(test)]
     FLUSH_CLOCK_READS.with(|reads| reads.set(reads.get() + 1));
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
-    let epoch = *EPOCH.get_or_init(Instant::now);
-    u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX).max(1)
+    u64::try_from(clock_epoch().elapsed().as_nanos()).unwrap_or(u64::MAX).max(1)
 }
 
 /// Publish a targeted flush before its redraw request is sent. The oldest pending flush stays;
@@ -777,6 +812,8 @@ pub(crate) struct AppFrameCounters {
     pub(crate) s10_watches: std::collections::HashMap<u64, super::perf_present::S10Watch>,
     /// The arming id the next S10 watch takes; starts at 1, so 0 never names an arming.
     pub(crate) next_s10_arming: u64,
+    /// Raw guard-correlation records: every pane's section log, the UI span store and the take sequence.
+    pub(crate) correlation: super::guard_correlation::GuardCorrelation,
 }
 
 /// A retired window's counters, held until the dispatch that closed it has been timed.
@@ -802,6 +839,8 @@ pub(crate) enum DispatchKind {
 impl AppFrameCounters {
     /// Builds zeroed counters, as the gate does when it is on; app-module tests enable counting with it.
     pub(super) fn new() -> Self {
+        // Both activation paths build the counters here, so the run clock's epoch is set no later than now.
+        epoch_in(constructor_epoch_cell());
         Self {
             vt: Arc::new(VtFrameStats::default()),
             dispatch: Arc::new(DispatchTotals::default()),
@@ -822,6 +861,7 @@ impl AppFrameCounters {
             closing: None,
             s10_watches: std::collections::HashMap::new(),
             next_s10_arming: 1,
+            correlation: super::guard_correlation::GuardCorrelation::new(),
         }
     }
 

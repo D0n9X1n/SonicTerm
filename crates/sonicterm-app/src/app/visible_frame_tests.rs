@@ -1464,3 +1464,144 @@ fn an_unwind_after_collection_releases_the_held_frames_guards_first() {
         assert_eq!(custody_counts(&totals), (1, 0, 1), "child={child}: recorded once, as failed");
     }
 }
+
+/// C′ through the collector: a counting collection records one span per guard, and the custody's single
+/// release read ends the scalar and every span at the same instant; contention after the first guard
+/// still closes that guard's span after it is released.
+#[test]
+fn a_counting_collection_records_spans_ending_at_the_custody_release() {
+    use crate::app::guard_correlation::{GuardCorrelation, GuardCorrelationTakeV1, CLOCK_OVERRIDE};
+    let epoch = crate::app::frame_counters::clock_epoch();
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        let totals = Arc::new(crate::app::guard_custody::CustodyTotals::default());
+        let mut correlation = GuardCorrelation::new();
+        let mut counted = sources(&mut app, window, child).ok().unwrap();
+        counted.counted = Some(Arc::clone(&totals));
+        counted.spans = Some(std::rc::Rc::clone(&correlation.spans));
+        let mut tick_ns = 0_u64;
+        CLOCK_OVERRIDE.with(|clock| {
+            *clock.borrow_mut() = Some(Box::new(move || {
+                tick_ns += 1_000;
+                epoch + Duration::from_nanos(tick_ns)
+            }));
+        });
+        let held = counted.try_collect(|| {}).ok().unwrap();
+        drop(held.guards);
+        drop(held.custody);
+        held.dispatch.unwrap().rendered();
+        let blocked = Arc::clone(&app.windows[&window].panes[&right].parser);
+        let guard = blocked.lock();
+        assert!(counted.try_collect(|| {}).is_err());
+        drop(guard);
+        CLOCK_OVERRIDE.with(|clock| *clock.borrow_mut() = None);
+        let GuardCorrelationTakeV1::Taken(taken) = correlation.take() else {
+            panic!("child={child}: taken")
+        };
+        let spans = taken.spans.spans;
+        let summary: Vec<(u64, u64, u64, u64)> = spans
+            .iter()
+            .map(|span| (span.pane_id, span.collection_seq, span.acquired_ns, span.released_ns))
+            .collect();
+        // Reads: two acquisitions and the release of the first collection, then one acquisition and the
+        // release of the contended one.
+        let mut panes = [left, right];
+        panes.sort_unstable();
+        assert_eq!(summary.len(), 3, "child={child}: {summary:?}");
+        assert!(
+            summary[..2].iter().all(|span| span.1 == 1 && span.3 == 3_000),
+            "child={child}: {summary:?}"
+        );
+        assert_eq!(summary[2].1, 2, "child={child}: the contended collection");
+        assert_eq!(
+            (summary[2].2, summary[2].3),
+            (4_000, 5_000),
+            "child={child}: closed after its release"
+        );
+        let mut seen: Vec<u64> = summary[..2].iter().map(|span| span.0).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, panes, "child={child}: one span per guarded pane");
+        assert_eq!(
+            (taken.spans.spans_issued, taken.spans.collections_issued),
+            (3, 2),
+            "child={child}"
+        );
+        assert_eq!(taken.spans.open_collections, 0, "child={child}");
+        assert_eq!(custody_counts(&totals), (2, 1, 1), "child={child}");
+    }
+}
+
+/// The production connection: with the App's own counters, the main and child collectors' sources carry the
+/// App's span store, so a collection's guards reach `App::take_guard_correlation_v1` as one span per pane,
+/// with no store installed by hand.
+#[test]
+fn production_sources_record_spans_into_the_apps_take() {
+    use crate::app::guard_correlation::GuardCorrelationTakeV1;
+    for child in [false, true] {
+        let (mut app, window, left, right, _) = fixture(child, false);
+        app.frame_counters = Some(crate::app::frame_counters::AppFrameCounters::new());
+        {
+            // The production sources, collected and released as a redraw does; they end with this block.
+            let collected = sources(&mut app, window, child).ok().unwrap();
+            let held = collected.try_collect(|| {}).ok().unwrap();
+            drop(held.guards);
+            drop(held.custody);
+            held.dispatch.unwrap().rendered();
+        }
+        let GuardCorrelationTakeV1::Taken(taken) = app.take_guard_correlation_v1() else {
+            panic!("child={child}: a counting App takes");
+        };
+        let mut pane_ids: Vec<u64> = taken.spans.spans.iter().map(|span| span.pane_id).collect();
+        pane_ids.sort_unstable();
+        let mut expected = vec![left, right];
+        expected.sort_unstable();
+        assert_eq!(pane_ids, expected, "child={child}: one span per guarded pane");
+        let first = taken.spans.spans[0];
+        assert!(
+            taken.spans.spans.iter().all(|span| span.collection_seq == 1
+                && span.released_ns == first.released_ns
+                && span.acquired_ns <= span.released_ns),
+            "child={child}: {:?}",
+            taken.spans.spans
+        );
+        assert_eq!(
+            (taken.take_seq, taken.spans.spans_issued, taken.spans.collections_issued),
+            (1, 2, 1),
+            "child={child}"
+        );
+        assert_eq!(taken.spans.open_collections, 0, "child={child}");
+    }
+}
+
+/// The gate-off counterpart: an App without counters gives its sources no span store, and building, collecting
+/// and taking read no correlation clock and allocate no recording buffer; the take answers GateOff.
+#[test]
+fn gate_off_sources_take_no_correlation_clock_or_recorder() {
+    use crate::app::guard_correlation::{
+        GuardCorrelationTakeV1, CLOCK_READS, RECORDER_ALLOCATIONS,
+    };
+    for child in [false, true] {
+        let reads_before = CLOCK_READS.with(std::cell::Cell::get);
+        let recorders_before = RECORDER_ALLOCATIONS.with(std::cell::Cell::get);
+        let (mut app, window, _, _, _) = fixture(child, false);
+        let collected = sources(&mut app, window, child).ok().unwrap();
+        assert!(collected.spans.is_none(), "child={child}: no span store without counters");
+        let held = collected.try_collect(|| {}).ok().unwrap();
+        drop(held);
+        drop(collected);
+        assert!(
+            matches!(app.take_guard_correlation_v1(), GuardCorrelationTakeV1::GateOff),
+            "child={child}"
+        );
+        assert_eq!(
+            CLOCK_READS.with(std::cell::Cell::get),
+            reads_before,
+            "child={child}: a clock was read"
+        );
+        assert_eq!(
+            RECORDER_ALLOCATIONS.with(std::cell::Cell::get),
+            recorders_before,
+            "child={child}: a recording buffer was allocated"
+        );
+    }
+}
