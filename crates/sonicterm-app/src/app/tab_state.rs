@@ -362,3 +362,7 @@ impl App {
         self.activate_main_tab(last)
     }
 }
+
+#[cfg(test)]
+#[path = "tab_state_tests.rs"]
+mod tab_state_tests;

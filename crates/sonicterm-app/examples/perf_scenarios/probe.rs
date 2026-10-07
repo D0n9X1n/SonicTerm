@@ -177,6 +177,113 @@ struct AtlasRetryDriver {
     armed_at: Instant,
     /// Why the run cannot be read; the next drive ends it as invalid.
     failure: Option<String>,
+    /// When the driver started; the evidence line's times are relative to it.
+    started: Instant,
+    /// The search for the final process, whose instant is the settle barrier's T.
+    final_lookup: atlas_retry::FinalLookup,
+    /// `atlas_recovery` once every episode is recorded and validated; the probe moves it out.
+    recovery: Option<serde_json::Value>,
+}
+
+impl AtlasRetryDriver {
+    /// A driver settling from `now`, with the first settling redraw already requested.
+    fn new(now: Instant, final_lookup: atlas_retry::FinalLookup) -> Self {
+        let mut driver = Self {
+            machine: RecoveryEpisodes::new(now),
+            redraw_pending: false,
+            armed_at: now,
+            failure: None,
+            started: now,
+            final_lookup,
+            recovery: None,
+        };
+        driver.arm(Arm::Redraw, now);
+        driver
+    }
+
+    /// Record the demand `arm` makes at `now`: every frame but B asks for one redraw.
+    fn arm(&mut self, arm: Arm, now: Instant) {
+        // B is redrawn by the retry's own request; every other frame asks for one.
+        self.redraw_pending = arm != Arm::InvalidateOnly;
+        self.armed_at = now;
+    }
+
+    /// Feed one forwarded dispatch to the machine and record the demand it makes. Returns the arm whose
+    /// renderer side (atlas change, retained-frame invalidation) the probe applies, if any.
+    fn observe(
+        &mut self,
+        delta: Option<Counts>,
+        reading: &SceneReading,
+        now: Instant,
+    ) -> Option<Arm> {
+        match self.machine.observe(delta, reading, now) {
+            // A zero-attempt dispatch, the forwarded request's own included, never rearms.
+            Progress::Waiting => None,
+            Progress::Arm(arm) => {
+                self.arm(arm, now);
+                Some(arm)
+            }
+            Progress::Done => {
+                match atlas_retry::records_problem(self.machine.records()) {
+                    Some(problem) => self.failure = Some(problem),
+                    None => {
+                        let distinct = self
+                            .machine
+                            .scene()
+                            .map_or(0, |scene| atlas_retry::distinct_keys(&scene.rows));
+                        self.recovery =
+                            Some(atlas_retry::recovery_json(self.machine.records(), distinct));
+                    }
+                }
+                None
+            }
+            Progress::Invalid(reason) => {
+                self.failure = Some(reason);
+                None
+            }
+        }
+    }
+
+    /// Consume a pending redraw request: true at most once per arm.
+    fn take_request(&mut self) -> bool {
+        std::mem::take(&mut self.redraw_pending)
+    }
+
+    /// When the drive is next due: from the arm while a failure or a request waits, else the machine's
+    /// deadline, so the settle deadline's wake is kept while nothing is pending.
+    fn due(&self) -> Option<Instant> {
+        if self.failure.is_some() || self.redraw_pending {
+            // When: a failure or a redraw waits, the drive is due from when it was armed.
+            Some(self.armed_at)
+        } else {
+            self.machine.deadline()
+        }
+    }
+}
+
+/// The search for S1/atlas-retry's final process. Windows fixes T at `sentinel_at`, the instant the print
+/// phase saw the sentinel, since its role program is the harness binary itself; macOS looks `sleep` up.
+fn final_lookup_for(
+    windows: bool,
+    current_exe: Option<&std::path::Path>,
+    sentinel_at: Option<Instant>,
+) -> atlas_retry::FinalLookup {
+    let expected = final_process_name(windows, current_exe);
+    if windows {
+        // When: `windows`, the sentinel already proves the role program is the final process.
+        atlas_retry::FinalLookup::found(expected, sentinel_at)
+    } else {
+        atlas_retry::FinalLookup::new(expected)
+    }
+}
+
+/// The final process's name as the App's sampler reports it: the harness binary's normalized basename on
+/// Windows, where it is every pane's program, and `sleep`, which the macOS role script execs, elsewhere.
+fn final_process_name(windows: bool, current_exe: Option<&std::path::Path>) -> String {
+    match current_exe.filter(|_| windows) {
+        Some(path) => sonicterm_io::proc_info::normalize_proc_name(&path.to_string_lossy()),
+        None => "sleep".to_owned(),
+    }
 }
 
 /// S2 typing: one `Ime::Commit` per character once the prompt shows, then a settle.
@@ -309,6 +416,28 @@ fn atlas_retry_counts(app: &App) -> Option<Counts> {
 #[cfg(not(feature = "perf-counters"))]
 fn atlas_retry_counts(_app: &App) -> Option<Counts> {
     None
+}
+
+/// The counters a tab-title change moves: the main window's title-cache misses, and the App's completed
+/// foreground-worker batches and stale foreground results; each `None` when it cannot be read.
+#[cfg(feature = "perf-counters")]
+fn atlas_retry_title_counters(app: &App) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let Some(snapshot) = app.frame_counters_snapshot() else {
+        return (None, None, None);
+    };
+    let window = app.main_window().map(|window| window.id());
+    let prepares = snapshot
+        .windows
+        .iter()
+        .find(|(id, _)| Some(*id) == window)
+        .and_then(|(_, record)| record.count("tab_title_prepares"));
+    (prepares, snapshot.app.count("fg_worker_probes"), snapshot.app.count("fg_results_stale"))
+}
+
+/// This build has no counter API, so none of the title counters can be read.
+#[cfg(not(feature = "perf-counters"))]
+fn atlas_retry_title_counters(_app: &App) -> (Option<u64>, Option<u64>, Option<u64>) {
+    (None, None, None)
 }
 
 /// Why S1/atlas-retry is blocked in a build without `perf_atlas_retry_api`.
@@ -1548,8 +1677,9 @@ impl Probe {
     ) {
         let frames_before = self.frame_count();
         // S1/atlas-retry reads the main renderer's counts and the scene around every forwarded dispatch.
-        let retry_before = matches!(self.driver, DriverState::AtlasRetry(_))
-            .then(|| (atlas_retry_counts(&self.app), self.atlas_retry_scene()));
+        let retry_before = matches!(self.driver, DriverState::AtlasRetry(_)).then(|| {
+            (atlas_retry_counts(&self.app), self.atlas_retry_scene(), self.atlas_retry_cached())
+        });
         // The snapshot is released before the dispatch; whether it advanced is known only after.
         let before = self.open_sample.is_some().then(|| self.echo_snapshot());
         let allocations_before = match kind {
@@ -1563,9 +1693,9 @@ impl Probe {
             .map(|(before_count, counter)| counter().saturating_sub(before_count));
         let ended = Instant::now();
         let frames_after = self.frame_count();
-        if let Some((counts, scene)) = retry_before {
+        if let Some((counts, scene, cached)) = retry_before {
             // When: the atlas-retry driver runs, this dispatch's delta and scene feed its episode machine.
-            self.observe_atlas_retry(counts, scene, ended);
+            self.observe_atlas_retry(counts, scene, cached, ended);
         }
         let advanced = frames_after > frames_before;
         self.frames = frames_after;
@@ -2938,19 +3068,17 @@ impl Probe {
             return DriverState::None;
         }
         let now = Instant::now();
-        let mut retry = AtlasRetryDriver {
-            machine: RecoveryEpisodes::new(now),
-            redraw_pending: false,
-            armed_at: now,
-            failure: None,
-        };
-        self.arm_atlas_retry(&mut retry, Arm::Redraw);
+        let current_exe = std::env::current_exe().ok();
+        let sentinel_at = self.sentinel_seen.first().copied().flatten();
+        let final_lookup = final_lookup_for(cfg!(windows), current_exe.as_deref(), sentinel_at);
+        let mut retry = AtlasRetryDriver::new(now, final_lookup);
+        self.apply_atlas_retry_arm(&mut retry, Arm::Redraw);
         DriverState::AtlasRetry(Box::new(retry))
     }
 
-    /// Arm the main renderer for the next frame of `retry`'s machine, at once, before another
-    /// dispatch is forwarded.
-    fn arm_atlas_retry(&mut self, retry: &mut AtlasRetryDriver, arm: Arm) {
+    /// Apply the renderer side of `arm` for the next frame of `retry`'s machine, at once, before another
+    /// dispatch is forwarded; the driver has already recorded the redraw demand.
+    fn apply_atlas_retry_arm(&mut self, retry: &mut AtlasRetryDriver, arm: Arm) {
         let Some(renderer) = self.app.main_renderer_mut() else {
             // When: there is no main renderer, nothing can be armed or measured.
             retry.failure = Some("no main renderer to arm".to_owned());
@@ -2961,9 +3089,6 @@ impl Probe {
             change_atlas_during_next_assembly(renderer);
         }
         renderer.invalidate_retained_frame();
-        // B is redrawn by the retry's own request; every other frame asks for one.
-        retry.redraw_pending = arm != Arm::InvalidateOnly;
-        retry.armed_at = Instant::now();
     }
 
     /// Feed one forwarded dispatch to the episode machine: the counts it moved from `before`, the
@@ -2973,6 +3098,7 @@ impl Probe {
         &mut self,
         before: Option<Counts>,
         scene_before: Option<Scene>,
+        cached_before: Option<atlas_retry::AppliedSample>,
         now: Instant,
     ) {
         if !matches!(self.driver, DriverState::AtlasRetry(_)) {
@@ -2981,29 +3107,111 @@ impl Probe {
         }
         let after = atlas_retry_counts(&self.app);
         let delta = before.zip(after).map(|(earlier, later)| later.since(earlier));
-        let reading = SceneReading { before: scene_before, after: self.atlas_retry_scene() };
+        // Each side's applied foreground sample is read with that side's scene, at the same boundary.
+        let reading = SceneReading {
+            before: scene_before,
+            after: self.atlas_retry_scene(),
+            cached_before,
+            cached_after: self.atlas_retry_cached(),
+        };
         let DriverState::AtlasRetry(mut retry) =
             std::mem::replace(&mut self.driver, DriverState::None)
         else {
             return;
         };
-        match retry.machine.observe(delta, &reading, now) {
-            Progress::Waiting => {}
-            Progress::Arm(arm) => self.arm_atlas_retry(&mut retry, arm),
-            Progress::Done => match atlas_retry::records_problem(retry.machine.records()) {
-                Some(problem) => retry.failure = Some(problem),
-                None => {
-                    let distinct = retry
-                        .machine
-                        .scene()
-                        .map_or(0, |scene| atlas_retry::distinct_keys(&scene.rows));
-                    self.atlas_recovery =
-                        Some(atlas_retry::recovery_json(retry.machine.records(), distinct));
-                }
-            },
-            Progress::Invalid(reason) => retry.failure = Some(reason),
+        let was_settled = retry.machine.scene().is_some();
+        if !was_settled {
+            // When: still settling, the barrier's inputs are refreshed before the machine sees the dispatch.
+            self.resolve_final_process(&mut retry);
+            let barrier = self
+                .atlas_retry_barrier(retry.final_lookup.expected(), retry.final_lookup.found_at());
+            retry.machine.set_barrier(barrier);
+        }
+        let arm = retry.observe(delta, &reading, now);
+        if let (false, Some(settled)) = (was_settled, retry.machine.scene()) {
+            // When: this dispatch settled the scene, its identity is logged once, before the episodes.
+            let settle_ms = u64::try_from(now.saturating_duration_since(retry.started).as_millis())
+                .unwrap_or(u64::MAX);
+            let observed = atlas_retry::settle_observation(settled, &reading);
+            let started = retry.started;
+            self.log_atlas_retry_evidence(
+                "settle",
+                observed,
+                started,
+                Some(settle_ms),
+                &retry.final_lookup,
+            );
+        }
+        if let Some(arm) = arm {
+            // When: the machine armed the next frame, its renderer side is applied before another dispatch.
+            self.apply_atlas_retry_arm(&mut retry, arm);
+        }
+        if let Some(recovery) = retry.recovery.take() {
+            // When: the episodes completed and validated, their records become `atlas_recovery`.
+            self.atlas_recovery = Some(recovery);
         }
         self.driver = DriverState::AtlasRetry(retry);
+    }
+
+    /// macOS: look the final process up once, throttled, while T is unset. The settle deadline is checked
+    /// before the synchronous lookup, which is skipped past it, and again with its completion instant, so a
+    /// lookup completing at or past the deadline never sets T. Windows fixed T at the sentinel.
+    fn resolve_final_process(&self, retry: &mut AtlasRetryDriver) {
+        if cfg!(windows) {
+            // When: `cfg!(windows)`, the sentinel already fixed T and no lookup is made.
+            return;
+        }
+        let deadline = retry.machine.deadline();
+        let started = Instant::now();
+        if !retry.final_lookup.begin(started, deadline) {
+            // When: found, past the deadline, or within the spacing of the last lookup, none is made now.
+            return;
+        }
+        let Some(identity) = atlas_retry::read_session(&self.scratch.join("sessions/0.json"))
+        else {
+            // When: the role session is missing or malformed, the leader is unknown and T stays unset.
+            return;
+        };
+        let process = sonicterm_io::proc_info::foreground_process(identity.leader_pid);
+        let completed = Instant::now();
+        retry.final_lookup.finish(process.as_deref(), started, completed, deadline);
+    }
+
+    /// The settle barrier's inputs for the final process `final_name`, observed at `final_at`: the active
+    /// tab's expected title, computed as the App derives it (zero-based tab index, the pane's cwd and raw
+    /// title), or the fixture problem a custom tab title makes.
+    fn atlas_retry_barrier(
+        &self,
+        final_name: &str,
+        final_at: Option<Instant>,
+    ) -> atlas_retry::Barrier {
+        let mut barrier = atlas_retry::Barrier {
+            final_at,
+            final_name: final_name.to_owned(),
+            ..atlas_retry::Barrier::default()
+        };
+        let Some(main) = self.app.main() else {
+            // When: no main window, no title can be expected and the barrier stays unmet.
+            return barrier;
+        };
+        let index = main.tabs.active_index();
+        if let Some(custom) = main.tabs.active().and_then(|tab| tab.custom_title.as_deref()) {
+            // When: the tab has a custom title, the App would show it instead: a fixture problem.
+            barrier.fixture_problem = Some(atlas_retry::custom_title_problem(custom));
+            return barrier;
+        }
+        let Some(state) = self.active_pane().and_then(|pane| main.panes.get(&pane)) else {
+            // When: the active pane cannot be found, no title can be expected.
+            return barrier;
+        };
+        let parser = state.parser.lock();
+        barrier.expected_title = Some(sonicterm_ui::tab_title::format_tab_title(
+            index,
+            parser.cwd(),
+            Some(final_name),
+            parser.title(),
+        ));
+        barrier
     }
 
     /// End the run on a failure or an expired step, else forward a pending redraw request.
@@ -3013,10 +3221,15 @@ impl Probe {
         };
         if let Some(reason) = retry.failure.take().or_else(|| retry.machine.expire(now)) {
             // When: the run failed or a step was not attempted in time, it cannot be read.
+            // The failure line comes from the reading the machine kept when it refused it, never a reread.
+            let observed = atlas_retry::failure_observation(&retry.machine);
+            let started = retry.started;
+            let final_lookup = retry.final_lookup.clone();
+            self.log_atlas_retry_evidence("failure", observed, started, None, &final_lookup);
             self.invalidate(event_loop, format!("S1/atlas-retry: {reason}"));
             return;
         }
-        if !std::mem::take(&mut retry.redraw_pending) {
+        if !retry.take_request() {
             // When: no redraw is pending, the drive waits for the step's attempt.
             return;
         }
@@ -3026,6 +3239,65 @@ impl Probe {
         self.forward(event_loop, Dispatch::Harness, |app, active| {
             app.user_event(active, UserEvent::RequestRedraw(window_id))
         });
+    }
+
+    /// Log S1/atlas-retry's identity line for `event` from `observed`, the reading the judge saw, with its
+    /// titles and the App's applied foreground sample as they were then; nothing of either is reread here.
+    /// The line adds the role session (a bounded file read), the cumulative title and foreground counters
+    /// read now, and one foreground lookup the harness makes itself, labelled apart with its own time. The
+    /// judge's rules are unchanged, but this runs on the event loop: the lookup is a synchronous native
+    /// process-table walk with no latency bound, and a failed run makes two (settle and failure).
+    fn log_atlas_retry_evidence(
+        &self,
+        event: &'static str,
+        observed: atlas_retry::Observed,
+        started: Instant,
+        settle_ms: Option<u64>,
+        final_lookup: &atlas_retry::FinalLookup,
+    ) {
+        let app_cached = observed.cached.map(|sample| atlas_retry::CachedForeground {
+            process: sample.process,
+            sampled_rel_ms: atlas_retry::relative_ms(sample.sampled_at, started),
+        });
+        let session = atlas_retry::read_session(&self.scratch.join("sessions/0.json"));
+        let (tab_title_prepares, fg_worker_probes, fg_results_stale) =
+            atlas_retry_title_counters(&self.app);
+        let harness_lookup = session.map(|identity| {
+            let process = sonicterm_io::proc_info::foreground_process(identity.leader_pid);
+            atlas_retry::HarnessLookup {
+                process,
+                observed_rel_ms: atlas_retry::relative_ms(Instant::now(), started),
+            }
+        });
+        let evidence = atlas_retry::Evidence {
+            event,
+            observation: observed.observation,
+            settled_title: observed.settled_title,
+            read_title: observed.read_title,
+            app_cached,
+            session,
+            tab_title_prepares,
+            fg_worker_probes,
+            fg_results_stale,
+            settle_ms,
+            harness_lookup,
+            // Windows makes no lookup; T comes from the sentinel there.
+            final_lookups: (!cfg!(windows)).then(|| final_lookup.lookups()),
+            final_lookup_us: (!cfg!(windows))
+                .then(|| u64::try_from(final_lookup.spent().as_micros()).unwrap_or(u64::MAX)),
+            final_at_rel_ms: final_lookup
+                .found_at()
+                .map(|found_at| atlas_retry::relative_ms(found_at, started)),
+        };
+        tracing::info!(target: LOG_TARGET, "perf_scenarios atlas-retry evidence {}", evidence.line());
+    }
+
+    /// The foreground sample the App has applied for the active pane now, read alongside a scene reading;
+    /// `None` when the pane has no cache entry or cannot be found.
+    fn atlas_retry_cached(&self) -> Option<atlas_retry::AppliedSample> {
+        let pane = self.active_pane()?;
+        let (sampled_at, process) = self.app.main_panes()?.get(&pane)?.fg_proc_cache.clone()?;
+        Some(atlas_retry::AppliedSample { sampled_at, process: process.map(|found| found.name) })
     }
 
     /// What the main window shows for S1/atlas-retry: the active tab's title, the font fallback
@@ -3118,14 +3390,7 @@ impl Probe {
             DriverState::Wheel(wheel) => {
                 Some(wheel.started + wheel.interval * wheel.sent.min(wheel.total))
             }
-            DriverState::AtlasRetry(retry) => {
-                if retry.failure.is_some() || retry.redraw_pending {
-                    // When: a failure or a redraw waits, the drive is due from when it was armed.
-                    Some(retry.armed_at)
-                } else {
-                    retry.machine.deadline()
-                }
-            }
+            DriverState::AtlasRetry(retry) => retry.due(),
         }
     }
 

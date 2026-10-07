@@ -848,3 +848,52 @@ fn no_event_loop_path_probes_the_foreground_process() {
     let frame_counters = include_str!("frame_counters.rs");
     assert!(!frame_counters.contains("fn time_probe"), "the event-loop probe timer is deleted");
 }
+
+/// The App's real foreground demand progression, through the injectable sampler, spawner and clock:
+/// with frames demanding every 16 ms, a new sample is taken and applied once per
+/// `FOREGROUND_PROCESS_TTL`, each with a later `sampled_at`, and never sooner. The perf harness's settle
+/// barrier relies on this cadence to see two applied samples after the final process.
+#[test]
+fn frame_demand_keeps_sampling_the_foreground_every_ttl_while_frames_continue() {
+    let observed = Observed::default();
+    let virtual_now = Arc::new(Mutex::new(Instant::now()));
+    let clock_now = Arc::clone(&virtual_now);
+    let answers: Vec<Option<ForegroundProcess>> =
+        (0..64).map(|_| process("sleep", false)).collect();
+    let probes = ForegroundProbes::from_parts(ProbeParts {
+        notify: Box::new(|| true),
+        sampler: scripted(answers, &observed),
+        spawner: idle_spawner(),
+        clock: Arc::new(move || *clock_now.lock()),
+        live_workers: Arc::clone(&observed.live),
+    });
+    let (mut app, main, pane_id, _) = app_with(probes, identity(10, 1));
+    let start = *virtual_now.lock();
+    let mut applied: Vec<Instant> = Vec::new();
+    for frame in 0..200_u64 {
+        let now = start + Duration::from_millis(16 * frame);
+        *virtual_now.lock() = now;
+        let probes = Arc::clone(&app.fg_probes);
+        let pane = app.windows.get_mut(&main).unwrap().panes.get_mut(&pane_id).unwrap();
+        if probes.request(pane_id, pane, WantOrigin::Frame, now, false) == Demand::Queued {
+            // When: the frame's demand is queued, the worker batch runs and the event loop applies it.
+            assert!(drive(&app.fg_probes));
+            app.drain_foreground_probe_results(now);
+        }
+        let sampled_at =
+            app.windows[&main].panes[&pane_id].fg_proc_cache.as_ref().map(|entry| entry.0);
+        if let Some(sampled_at) = sampled_at.filter(|at| applied.last() != Some(at)) {
+            // When: a new `sampled_at` is applied, this frame's demand produced a sample.
+            applied.push(sampled_at);
+        }
+    }
+    assert!(applied.len() >= 6, "{} samples in 3.2 s", applied.len());
+    for pair in applied.windows(2) {
+        let gap = pair[1].saturating_duration_since(pair[0]);
+        assert!(gap >= FOREGROUND_PROCESS_TTL, "a sample came sooner than the TTL: {gap:?}");
+        assert!(
+            gap < FOREGROUND_PROCESS_TTL + Duration::from_millis(16),
+            "sampling stalled: {gap:?}"
+        );
+    }
+}
