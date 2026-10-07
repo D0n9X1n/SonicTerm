@@ -1082,6 +1082,54 @@ fn working_set_row(
     )
 }
 
+/// A helper measurement's sizing figures: its fit outcome, its largest tile and how many required
+/// glyphs it drew as tofu after reviewed exceptions.
+type HelperFigures = (sonicterm_text::glyph_atlas::FitOutcome, [u32; 2], usize);
+
+/// How the working-set step judges one live helper measurement against its recorded row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HelperCheck {
+    /// Complete, and equal to its recorded row (or no row is recorded).
+    Matches,
+    /// Complete, but its sizing figures differ from the recorded row; the message names both.
+    Drifted(String),
+    /// Some required glyph was not drawn, so the measurement cannot validate the recorded rows or a
+    /// start below the maximum; the message names the refusal and the missing evidence.
+    Refused(String),
+    /// Some required glyph was not drawn, but there is no recorded row and the start is already the
+    /// maximum, which the conservative rule selects for an incomplete measurement anyway.
+    MaximumOnly,
+}
+
+/// Judge `live` against `recorded`, the helper row recorded for the same platform, scale and
+/// fixture. `start_below_maximum` says whether the shipped start at this scale is below the maximum;
+/// `evidence` describes the measurement's missing glyphs for a refusal.
+fn check_helper(
+    recorded: Option<HelperFigures>,
+    live: HelperFigures,
+    start_below_maximum: bool,
+    evidence: &str,
+) -> HelperCheck {
+    let incomplete_glyphs = live.2;
+    if incomplete_glyphs > 0 {
+        // When: incomplete_glyphs is nonzero the figures describe less than the working set.
+        if recorded.is_some() || start_below_maximum {
+            // When: a recorded row or a smaller start depends on this measurement, it is refused.
+            return HelperCheck::Refused(format!(
+                "incomplete measurement: {incomplete_glyphs} required glyphs were not drawn, so it \
+                 cannot validate the recorded helper row or a start below the maximum; {evidence}"
+            ));
+        }
+        return HelperCheck::MaximumOnly;
+    }
+    match recorded {
+        Some(row) if row != live => {
+            HelperCheck::Drifted(format!("recorded {row:?}, live {live:?}"))
+        }
+        _ => HelperCheck::Matches,
+    }
+}
+
 /// Whether fallback is complete: the frame presented, and neither its terminal rows nor its
 /// chrome (tab titles, palette, footer) drew a character as tofu.
 fn fallback_settled(presented: bool, terminal_missing: &[char], chrome_missing: &[char]) -> bool {
@@ -1120,7 +1168,7 @@ fn missing_required_chrome(
 #[ignore = "measures with the real font stack; CI runs it in its own step"]
 fn glyph_atlas_working_set() {
     use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
-    use sonicterm_text::glyph_atlas::{START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
+    use sonicterm_text::glyph_atlas::{ATLAS_DIM, START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
     use sonicterm_text::start_size_inputs::{
         normalize_raster_failures, ruled_start, start_rule, validate_table_start, InputSource,
         RuleInput, RASTER_EXCEPTIONS, SIZING_ORACLE_COMPLETE, START_SIZE_INPUTS,
@@ -1199,14 +1247,29 @@ fn glyph_atlas_working_set() {
                     && row.fixture == name
                     && row.source == InputSource::Helper
             });
-            if let Some(row) = recorded {
-                // When: a helper row is recorded, the live measurement must not drift from it.
-                assert_eq!(
-                    (row.outcome, row.max_tile, row.incomplete_glyphs),
-                    (set.fit_outcome, set.max_tile_dims, incomplete_glyphs),
-                    "{name} at {scale}x drifted from its recorded helper row ({})",
-                    row.provenance.describe()
-                );
+            // An incomplete measurement is refused before the drift check, with the failed face,
+            // glyph, style and strike of every unapproved raster failure; it never passes.
+            let evidence = format!(
+                "unresolved={:?} oversize_required={:?} unapproved={:?}",
+                set.unresolved_chars, set.oversize_required, raster.unapproved
+            );
+            let check = check_helper(
+                recorded.map(|row| (row.outcome, row.max_tile, row.incomplete_glyphs)),
+                (set.fit_outcome, set.max_tile_dims, incomplete_glyphs),
+                constant < ATLAS_DIM,
+                &evidence,
+            );
+            let provenance =
+                recorded.map_or_else(|| "none".to_owned(), |row| row.provenance.describe());
+            match check {
+                HelperCheck::Matches | HelperCheck::MaximumOnly => {}
+                HelperCheck::Drifted(reason) => panic!(
+                    "{name} at {scale}x drifted from its recorded helper row ({provenance}): {reason}"
+                ),
+                HelperCheck::Refused(reason) => panic!(
+                    "glyph_atlas_working_set refused: {platform} {name} at {scale}x (recorded row: \
+                     {provenance}): {reason}"
+                ),
             }
             local.push(RuleInput {
                 label: format!("{platform} {scale}x {name} helper"),
@@ -1223,6 +1286,33 @@ fn glyph_atlas_working_set() {
         );
         assert!(constant >= need.dim, "{scale}x needs {} but starts at {constant}", need.dim);
     }
+}
+
+/// The working-set step tells an incomplete live measurement apart from sizing drift. A complete
+/// measurement equal to its row matches, and one whose figures changed is drift. A measurement that
+/// drew a required glyph as tofu is refused before any comparison, because its fit and largest tile
+/// describe a smaller set than the working set; it is never reported as drift and never passes.
+#[test]
+fn an_incomplete_helper_measurement_is_refused_before_the_drift_check() {
+    use sonicterm_text::glyph_atlas::FitOutcome;
+    let row = (FitOutcome::Fits(1024), [23, 20], 0);
+    assert_eq!(check_helper(Some(row), row, true, "none"), HelperCheck::Matches);
+    let drifted = (FitOutcome::Fits(2048), [23, 20], 0);
+    let HelperCheck::Drifted(reason) = check_helper(Some(row), drifted, true, "none") else {
+        panic!("a complete measurement with other figures is drift");
+    };
+    assert!(reason.contains("Fits(2048)"), "{reason}");
+    // The figures also differ here, but the missing glyphs decide: refusal, not drift.
+    let incomplete = (FitOutcome::Fits(1024), [23, 16], 60);
+    for (recorded, below) in [(Some(row), true), (Some(row), false), (None, true)] {
+        let HelperCheck::Refused(reason) = check_helper(recorded, incomplete, below, "U+1F600")
+        else {
+            panic!("an incomplete measurement was not refused ({recorded:?}, below {below})");
+        };
+        assert!(reason.contains("60 required glyphs") && reason.contains("U+1F600"), "{reason}");
+    }
+    // With no recorded row and the start already the maximum, the conservative rule decides.
+    assert_eq!(check_helper(None, incomplete, false, "U+1F600"), HelperCheck::MaximumOnly);
 }
 
 /// Representative S9 emoji and CJK scalars, taken from the fixture's last line, which the real

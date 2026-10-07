@@ -211,9 +211,10 @@ fn start_constants_pass_the_table_validation() {
 }
 
 /// The real check on the shipped constants: once the oracle is complete, each normal start constant
-/// **equals** what the rule selects over the recorded rows at its scale. Validation alone accepts
-/// the maximum unconditionally, so a constant left at 2048 where the rows rule smaller, or lowered
-/// below what they rule, would pass it; this test fails both.
+/// **equals** what the rule selects over the recorded rows at its scale. Validation accepts the
+/// maximum unconditionally, so a constant left at 2048 where the rows rule smaller passes it; this
+/// test closes that escape. A constant lowered below the rule is already rejected by validation,
+/// and this test pins that case independently.
 #[test]
 fn each_start_constant_equals_the_rule_over_the_recorded_rows() {
     for (scale, constant) in [(1, START_ATLAS_DIM_1X), (2, START_ATLAS_DIM_2X)] {
