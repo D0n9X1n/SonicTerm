@@ -1992,3 +1992,52 @@ fn a_new_worker_handle_resumes_from_the_recorded_facts() {
     assert!(trace.lost, "the overwrite after the appearance is lost");
     assert!(!trace.pre_present, "the recorded appearance is not re-read as pre-present");
 }
+
+/// A new pane's reader stamps output reads exactly when its frame counters are on, and the other
+/// spawn options are the launch's own: the shell, `TERM_PROGRAM` and working directory pass
+/// through.
+#[test]
+fn pane_spawn_options_stamp_reads_only_with_the_frame_counter_gate() {
+    let app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let launch = super::super::pane_launch::PaneLaunch {
+        cwd: Some(std::path::PathBuf::from("/work")),
+        ..Default::default()
+    };
+    for gate in [false, true] {
+        let opts = app.pane_spawn_opts(&launch, gate);
+        assert_eq!(opts.diagnostic_timestamps, gate, "gate {gate}");
+        assert_eq!(opts.cwd, Some(std::path::PathBuf::from("/work")));
+        assert_eq!(opts.term_program, app.config.terminal.term_program);
+        assert!(!opts.clean_e2e, "no runtime smoke");
+    }
+}
+
+/// Both pane creation paths, main and child, read the gate before spawning and pass it to the PTY
+/// through the one helper, then store the same counters on the pane, so no path starts a reader
+/// that disagrees with its pane. A child pane needs a native window, so this pins the source.
+#[test]
+fn main_and_child_panes_take_the_read_stamp_flag_from_the_gate_before_spawning() {
+    for (name, source) in [
+        ("spawn_pane.rs", include_str!("spawn_pane.rs")),
+        ("child_tabs.rs", include_str!("child_tabs.rs")),
+    ] {
+        let gate = source
+            .find("let frame_counters = self.pane_frame_counters();")
+            .unwrap_or_else(|| panic!("{name} reads the gate"));
+        let opts = source
+            .find("self.pane_spawn_opts(launch, frame_counters.is_some())")
+            .unwrap_or_else(|| panic!("{name} passes the gate to the spawn options"));
+        let spawn = source[opts..]
+            .find("PtyHandle::spawn_default_shell(cols, rows, shell_opts)")
+            .map(|offset| opts + offset)
+            .unwrap_or_else(|| panic!("{name} spawns with those options"));
+        assert!(
+            gate < opts && opts < spawn,
+            "{name} reads the gate, builds the options, then spawns"
+        );
+        assert!(
+            source[spawn..].contains("frame_counters = frame_counters;"),
+            "{name} stores the same counters"
+        );
+    }
+}

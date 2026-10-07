@@ -285,13 +285,36 @@ pub struct PtyOutputChunk {
     /// Kept for its `Drop`. The ring stays charged while this clone lives.
     _ring: Arc<RingCharge>,
     meter: Arc<QueuedOutputMeter>,
+    /// When the native read that produced these bytes returned; `None` unless the PTY was spawned
+    /// with diagnostic timestamps.
+    read_at: Option<Instant>,
 }
+
+// The diagnostic stamp adds one `Option<Instant>` to every chunk, so each of the 64 reserved
+// channel slots grows by 16 bytes on the supported 64-bit targets, from 48 to 64.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(std::mem::size_of::<Option<Instant>>() == 16);
+    assert!(std::mem::size_of::<PtyOutputChunk>() == 64);
+};
 
 impl PtyOutputChunk {
     // Ordering: `payload_bytes` uses `AcqRel` for atomic payload accounting; it does not guard chunk data.
-    fn new(bytes: Bytes, ring: Arc<RingCharge>, meter: &Arc<QueuedOutputMeter>) -> Self {
+    fn new(
+        bytes: Bytes,
+        ring: Arc<RingCharge>,
+        meter: &Arc<QueuedOutputMeter>,
+        read_at: Option<Instant>,
+    ) -> Self {
         meter.payload_bytes.fetch_add(bytes.len(), Ordering::AcqRel);
-        Self { bytes, _ring: ring, meter: meter.clone() }
+        Self { bytes, _ring: ring, meter: meter.clone(), read_at }
+    }
+
+    /// When the native read that produced this chunk returned, sampled before the chunk was split
+    /// or charged; `None` unless the PTY was spawned with `ShellSpawnOpts::diagnostic_timestamps`.
+    #[must_use]
+    pub fn read_at(&self) -> Option<Instant> {
+        self.read_at
     }
 
     /// The output bytes, as a refcounted slice.
@@ -308,7 +331,7 @@ impl PtyOutputChunk {
     /// ring, for tests that drive the queue without a child process.
     #[cfg(test)]
     fn for_test(bytes: &'static [u8], ring_bytes: usize, meter: &Arc<QueuedOutputMeter>) -> Self {
-        Self::new(Bytes::from_static(bytes), RingCharge::new(ring_bytes, meter), meter)
+        Self::new(Bytes::from_static(bytes), RingCharge::new(ring_bytes, meter), meter, None)
     }
 }
 
@@ -1455,6 +1478,11 @@ pub struct ShellSpawnOpts {
     pub shell: Option<String>,
     /// Working-directory override. `None` preserves the existing `$HOME` fallback.
     pub cwd: Option<PathBuf>,
+    /// Stamp each output chunk with the instant its native read returned
+    /// ([`PtyOutputChunk::read_at`]). Diagnostic only: it changes nothing about the shell, its
+    /// arguments, environment, working directory, geometry or teardown. Fixed for the reader's
+    /// life; defaults to `false`.
+    pub diagnostic_timestamps: bool,
 }
 
 impl ShellSpawnOpts {
@@ -1469,6 +1497,7 @@ impl Default for ShellSpawnOpts {
             term_program: Self::DEFAULT_TERM_PROGRAM.to_string(),
             shell: None,
             cwd: None,
+            diagnostic_timestamps: false,
         }
     }
 }
@@ -2467,8 +2496,13 @@ impl PtyHandle {
 
         // Reader thread: pty -> out_rx.
         let output_meter = Arc::new(QueuedOutputMeter::default());
-        let reader_thread =
-            spawn_reader_thread(Box::new(reader), out_tx, reader_cancel_rx, output_meter.clone());
+        let reader_thread = spawn_reader_thread(
+            Box::new(reader),
+            out_tx,
+            reader_cancel_rx,
+            output_meter.clone(),
+            opts.diagnostic_timestamps,
+        );
         // Writer thread: in_rx -> pty.
         let queued_input_bytes = Arc::new(AtomicUsize::new(0));
         let writer_progress = Arc::new(PtyWriterProgress::new());
@@ -2583,11 +2617,27 @@ fn send_pty_output(tx: &Sender<Incoming>, cancel: &Receiver<()>, chunk: Incoming
     }
 }
 
+/// Pump `reader` into `tx` on a dedicated thread. With `stamp_reads`, each chunk carries the
+/// instant its native read returned; the flag is fixed for the reader's life.
 fn spawn_reader_thread(
+    reader: Box<dyn Read + Send>,
+    tx: Sender<Incoming>,
+    cancel: Receiver<()>,
+    meter: Arc<QueuedOutputMeter>,
+    stamp_reads: bool,
+) -> PtyIoThread {
+    spawn_reader_thread_with(reader, tx, cancel, meter, stamp_reads, || {})
+}
+
+/// As [`spawn_reader_thread`], with `after_read` run right after each successful nonempty read is
+/// stamped and before the bytes are split, charged or sent; tests delay construction through it.
+fn spawn_reader_thread_with(
     mut reader: Box<dyn Read + Send>,
     tx: Sender<Incoming>,
     cancel: Receiver<()>,
     meter: Arc<QueuedOutputMeter>,
+    stamp_reads: bool,
+    mut after_read: impl FnMut() + Send + 'static,
 ) -> PtyIoThread {
     let (done_tx, done) = crossbeam_channel::bounded(1);
     let handle = thread::Builder::new()
@@ -2645,6 +2695,9 @@ fn spawn_reader_thread(
                 match reader.read(&mut buf[initial_len..]) {
                     Ok(0) => break,
                     Ok(n) => {
+                        // The stamp is the read's return: taken before any split, charge or send.
+                        let read_at = stamp_reads.then(Instant::now);
+                        after_read();
                         buf.truncate(initial_len + n);
                         let chunk = buf.split().freeze();
                         // Reuse this ring's charge if any queued view still
@@ -2658,7 +2711,7 @@ fn spawn_reader_thread(
                                 fresh
                             }
                         };
-                        let chunk = PtyOutputChunk::new(chunk, charge, &meter);
+                        let chunk = PtyOutputChunk::new(chunk, charge, &meter, read_at);
                         if !send_pty_output(&tx, &cancel, chunk) {
                             // When: `send_pty_output` reports cancellation or disconnection, stop the reader pump.
                             break;

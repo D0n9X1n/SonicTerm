@@ -135,8 +135,13 @@ fn runtime_smoke_uses_clean_shell_startup_without_replacing_home() {
         include_str!("app/child_window_pointer.rs"),
         include_str!("app/child_window_redraw.rs")
     );
-    assert!(MAIN.contains("shell_opts.clean_e2e = self.runtime_smoke.is_some()"));
-    assert!(CHILD.contains("clean_e2e: self.runtime_smoke.is_some()"));
+    // Both creation paths build their options through the one helper, which sets clean startup.
+    let helper = MAIN.find("fn pane_spawn_opts(").expect("the shared spawn-option helper");
+    let helper_body =
+        &MAIN[helper..MAIN[helper..].find("\n    }\n").map_or(MAIN.len(), |end| helper + end)];
+    assert!(helper_body.contains("clean_e2e: self.runtime_smoke.is_some()"));
+    assert!(MAIN.contains("self.pane_spawn_opts(launch, frame_counters.is_some())"));
+    assert!(CHILD.contains("self.pane_spawn_opts(launch, frame_counters.is_some())"));
     assert!(!MAIN.contains("set_var(\"HOME\""));
     assert!(!CHILD.contains("set_var(\"HOME\""));
 }

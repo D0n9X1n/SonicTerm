@@ -906,6 +906,24 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
 }
 
 impl App {
+    /// The shell spawn options for a new pane, main or child: the launch's own options, clean
+    /// startup under the runtime smoke, and output read timestamps exactly when the pane's frame
+    /// counters are on. The gate is fixed by then, so the reader's flag is fixed for its life.
+    pub(super) fn pane_spawn_opts(
+        &self,
+        launch: &super::pane_launch::PaneLaunch,
+        frame_counters_on: bool,
+    ) -> sonicterm_io::pty::ShellSpawnOpts {
+        sonicterm_io::pty::ShellSpawnOpts {
+            clean_e2e: self.runtime_smoke.is_some(),
+            diagnostic_timestamps: frame_counters_on,
+            ..launch.shell_spawn_opts(
+                self.config.terminal.term_program.clone(),
+                self.config.terminal.shell.clone(),
+            )
+        }
+    }
+
     // Lock order: test_pane_launches releases before parser; neither guard survives PTY or worker creation.
     pub(super) fn spawn_pane(
         &self,
@@ -935,11 +953,9 @@ impl App {
             super::seed_parser_theme_colors(&mut parser_guard, &self.theme);
         }
         let redraw_target = Arc::new(Mutex::new(self.main_window_id));
-        let mut shell_opts = launch.shell_spawn_opts(
-            self.config.terminal.term_program.clone(),
-            self.config.terminal.shell.clone(),
-        );
-        shell_opts.clean_e2e = self.runtime_smoke.is_some();
+        // The gate is read before the PTY exists, so its reader stamps reads from the first one.
+        let frame_counters = self.pane_frame_counters();
+        let shell_opts = self.pane_spawn_opts(launch, frame_counters.is_some());
         let pty = match PtyHandle::spawn_default_shell(cols, rows, shell_opts) {
             Ok(pty) => {
                 // When: spawn_default_shell returns Ok(pty), stage any launch draft before the worker starts.
@@ -975,7 +991,7 @@ impl App {
         };
         let mut state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
         self.reserve_pane_teardown(&mut state);
-        state.frame_counters = self.pane_frame_counters();
+        state.frame_counters = frame_counters;
         state.redraw_target = redraw_target;
         if state.pty.is_some() {
             spawn_pane_workers(pane_id, &state, self.event_loop_proxy.clone(), "sonicterm-vt-loop");
