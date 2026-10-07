@@ -94,7 +94,8 @@ pub(super) struct AttemptClocks<'clocks> {
 }
 
 /// Per-window scheduling state, separate from public compatibility clocks and native redraw requests.
-#[derive(Debug, Clone)]
+/// Not `Clone`: its timeline owner releases a slot's diagnostic buffers when it drops.
+#[derive(Debug)]
 pub(crate) struct WindowRedrawState {
     pending: [u64; CAUSES],
     observed: [u64; CAUSES],
@@ -135,6 +136,8 @@ pub(crate) struct WindowRedrawState {
     pub(super) attempt_sync_resets: Vec<(u64, u64)>,
     /// This window's frame counters; `Some` only when its App's gate is on.
     pub(super) frame_counters: Option<Box<super::frame_counters::WindowFrameCounters>>,
+    /// The echo timeline's accepted-tick metadata and owner; inert while the gate is off.
+    pub(super) timeline: super::echo_timeline::WindowTimeline,
     #[cfg(target_os = "macos")]
     pub(super) surface_probe_at: Option<Instant>,
     /// Test-only monitor source: `Some(rate)` replaces the native refresh-rate read.
@@ -170,6 +173,7 @@ impl Default for WindowRedrawState {
             resize_pending: false,
             surface_recovery_pending: false,
             attempt_sync_resets: Vec::new(),
+            timeline: super::echo_timeline::WindowTimeline::default(),
             #[cfg(target_os = "macos")]
             surface_probe_at: None,
             #[cfg(test)]
@@ -826,14 +830,28 @@ impl App {
     }
 
     /// Queue at most one native request per owner; parked output cannot unpark or schedule a heartbeat.
-    pub(super) fn request_owner_redraw(&mut self, id: WindowId, cause: RedrawCause) {
-        if let Some(window) = self.windows.get_mut(&id) {
-            window.mark_redraw(cause);
-            if window.frame_deadlines_allowed() && !window.redraw.request_in_flight {
-                window.redraw.request_in_flight = true;
-                window.request_window_redraw();
-            }
+    /// Returns what the request did: a new native request, a mark onto one in flight, or nothing.
+    pub(super) fn request_owner_redraw(
+        &mut self,
+        id: WindowId,
+        cause: RedrawCause,
+    ) -> super::OutputCheckOutcomeV1 {
+        let Some(window) = self.windows.get_mut(&id) else {
+            // When: `id` names no live window, nothing is marked or requested.
+            return super::OutputCheckOutcomeV1::None;
+        };
+        window.mark_redraw(cause);
+        if !window.frame_deadlines_allowed() {
+            // When: `frame_deadlines_allowed` is false, the window is held back and no request is made.
+            return super::OutputCheckOutcomeV1::None;
         }
+        if window.redraw.request_in_flight {
+            // When: `request_in_flight`, the cause is marked onto the request already in flight.
+            return super::OutputCheckOutcomeV1::MarkedInFlight;
+        }
+        window.redraw.request_in_flight = true;
+        window.request_window_redraw();
+        super::OutputCheckOutcomeV1::NativeRequest
     }
 
     /// Command maintenance runs even for hidden, structurally parked, or device-stopped windows;
@@ -921,11 +939,14 @@ impl App {
                     }
                 }
                 window.redraw.deferred = false;
+                // The refusal is `Held`; the reset that follows clears a held permit as its own event.
+                window.redraw.timeline.note_admission(super::AdmissionDecisionV1::Held, None, None);
                 window.redraw.invalidate_link_pacing();
                 return false;
             }
             if window.redraw.native_occluded || window.redraw.backend_occluded {
                 // When: `native_occluded` or `backend_occluded` suppresses this owner, even recovery dirt waits without pane locks.
+                window.redraw.timeline.note_admission(super::AdmissionDecisionV1::Held, None, None);
                 return false;
             }
             if window.redraw.stopped_generation.is_some() {
@@ -933,12 +954,18 @@ impl App {
                 let snapshot = renderer.device_error_snapshot();
                 if !window.accept_device_recovery(&snapshot) {
                     // When: `accept_device_recovery` refuses the live snapshot, no cause may bypass the stopped generation.
+                    window.redraw.timeline.note_admission(
+                        super::AdmissionDecisionV1::Held,
+                        None,
+                        None,
+                    );
                     return false;
                 }
             }
         }
         if !window.frame_deadlines_allowed() {
             // When: `window` is hidden, occluded, parked, or stopped, it contributes no frame attempt or deadline.
+            window.redraw.timeline.note_admission(super::AdmissionDecisionV1::Held, None, None);
             return false;
         }
         if !window.redraw.has_pending() {
@@ -960,12 +987,15 @@ impl App {
             });
         // The streaming check's inputs, kept so a link-paced admission is classified from the same values.
         let mut streaming_inputs = None;
+        // The watched pane's generation, loaded beside the streaming check only when that check runs.
+        let mut admission_check = None;
         let rule = super::frame_counters::defer_rule(
             || window.redraw.timeout_pending && now < window.last_render + period,
             || window.contention_blocks_redraw(now, period, software),
             || window.sync_defers(now),
             || {
                 let input_pending = window.redraw.input_pending();
+                admission_check = window.watched_observation();
                 let output_advanced = window.visible_output_advanced();
                 streaming_inputs = Some((input_pending, output_advanced));
                 match mode {
@@ -996,6 +1026,12 @@ impl App {
             }
         }
         window.redraw.deferred_rule = rule;
+        if let Some(rule) = rule {
+            // A winning rule's decision is `Deferred`; the permit is untouched.
+            let decision =
+                super::AdmissionDecisionV1::Deferred(super::echo_timeline::defer_reason(rule));
+            window.redraw.timeline.note_admission(decision, None, admission_check);
+        }
         match rule {
             Some(super::frame_counters::DeferRule::Streaming) => window.redraw.store_pacing(mode),
             Some(super::frame_counters::DeferRule::Sync) => {
@@ -1005,6 +1041,7 @@ impl App {
             Some(_) => window.redraw.store_pacing(super::display_link::PacingMode::Timer),
             None => {
                 window.record_attempt_sync_resets();
+                let mut decision = super::AdmissionDecisionV1::Admitted;
                 if window.redraw.pacing == Some(super::display_link::PacingMode::Link) {
                     // A link-paced admission is classified once, from the inputs the streaming check read.
                     let streaming =
@@ -1016,6 +1053,17 @@ impl App {
                             )
                         });
                     let ticked = window.redraw.link_permit_valid();
+                    if streaming {
+                        // A streaming link-paced admission was made by a tick's permit or the ceiling.
+                        decision = if ticked {
+                            let tick_seq =
+                                window.redraw.timeline.permit_tick_seq(window.redraw.link_permit);
+                            super::AdmissionDecisionV1::Permit { tick_seq }
+                        } else {
+                            // When: `ticked` is false, the fallback ceiling admitted the frame.
+                            super::AdmissionDecisionV1::Fallback
+                        };
+                    }
                     if let (true, Some(counters)) =
                         (streaming, window.redraw.frame_counters.as_deref_mut())
                     {
@@ -1029,7 +1077,11 @@ impl App {
                     }
                 }
                 window.redraw.pacing = None;
-                window.redraw.link_permit = None;
+                let held = window.redraw.link_permit.take();
+                // A `Permit` admission consumes the permit; any other admission discards a held one.
+                let consumed = matches!(decision, super::AdmissionDecisionV1::Permit { .. });
+                let discarded = held.filter(|_| !consumed);
+                window.redraw.timeline.note_admission(decision, discarded, admission_check);
             }
         }
         window.redraw.deferred = defer;

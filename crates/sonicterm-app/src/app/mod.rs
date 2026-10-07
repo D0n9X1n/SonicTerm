@@ -1009,6 +1009,10 @@ impl ApplicationHandler<UserEvent> for App {
         let _dispatch = self.frame_dispatch_scope();
         let started = self.frame_clock_start();
         let redraw = started.is_some() && matches!(event, WindowEvent::RedrawRequested);
+        if redraw {
+            // the gate is on, a watched window's dispatch entry is recorded first.
+            self.note_dispatch_entry(win_id);
+        }
         // The dispatch may close the window, so whether it counts is read before it runs.
         let counted = started.is_some() && self.begin_window_handler(win_id);
         if redraw {
@@ -1020,6 +1024,10 @@ impl ApplicationHandler<UserEvent> for App {
             // the gate is on, the window's handler time is recorded.
             self.note_window_handler(win_id, started, counted);
             self.emit_frame_lines(Some((win_id, redraw)));
+            if redraw {
+                // A watched dispatch's return is recorded after its bookkeeping.
+                self.note_dispatch_return(win_id);
+            }
         }
     }
 

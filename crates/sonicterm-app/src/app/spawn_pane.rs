@@ -350,10 +350,13 @@ pub(super) fn spawn_pane_workers(
                 match out_rx.recv_timeout(flush.wait(Instant::now())) {
                     Ok(bytes) => {
                         // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
+                        // The chunk's read stamp is read before the chunk moves into the batch.
+                        let read_at = bytes.read_at();
                         flush.receive(bytes.len(), Instant::now());
                         process_pane_vt_batch_and_publish(
                             &worker_handles,
                             bytes,
+                            read_at,
                             &mut command_started,
                             &mut flush.sync_latch,
                             redraw_proxy.as_ref(),
@@ -690,6 +693,7 @@ fn publish_sync_output(handles: &PaneVtHandles, state: SyncState, now: impl FnOn
 pub(in crate::app) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
     handles: &PaneVtHandles,
     bytes: Bytes,
+    read_at: Option<Instant>,
     command_started: &mut Option<Instant>,
     sync_latch: &mut SyncLatch,
     proxy: Option<&EventLoopProxy<UserEvent>>,
@@ -698,6 +702,7 @@ pub(in crate::app) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
     publish_pane_vt_batch_with(
         handles,
         bytes,
+        read_at,
         command_started,
         sync_latch,
         super::media::decode_inline_image,
@@ -718,6 +723,7 @@ pub(in crate::app) fn process_pane_vt_batch_and_publish<Bytes: AsRef<[u8]>>(
 pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
     bytes: Bytes,
+    read_at: Option<Instant>,
     command_started: &mut Option<Instant>,
     sync_latch: &mut SyncLatch,
     decode_media: Decode,
@@ -735,6 +741,7 @@ pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>
     process_pane_vt_batch_with(
         handles,
         bytes,
+        read_at,
         command_started,
         sync_latch,
         decode_media,
@@ -755,6 +762,7 @@ pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
     bytes: Bytes,
+    read_at: Option<Instant>,
     command_started: &mut Option<Instant>,
     sync_latch: &mut SyncLatch,
     mut decode_media: Decode,
@@ -798,6 +806,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                     parsed_at,
                     generation: handles.output_generation.load(Ordering::Relaxed) + 1,
                     sync_open: parser.synchronized_output().set,
+                    // Every section of this batch consumed the same chunk, so each carries its stamp.
+                    latest_read_at: read_at,
                 };
                 counters.echo.post_read(&handles.echo_cache, before, parser.grid(), section);
             }

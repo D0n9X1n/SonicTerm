@@ -480,6 +480,8 @@ impl WindowState {
     /// half of the removal.
     pub(crate) fn remove_pane(&mut self, pane_id: u64) -> Option<PaneState> {
         let pane = self.panes.remove(&pane_id)?;
+        // A pane leaving this window ends a timeline it owned here, without complete evidence.
+        self.redraw.timeline.end_for_pane(pane_id);
         // A removed pane's receipts would fail revalidation anyway; drop them now.
         self.pending_receipts.retain(|ticket| ticket.receipt.pane_id != pane_id);
         if let Some(renderer) = self.renderer.as_mut() {

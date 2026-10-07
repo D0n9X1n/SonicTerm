@@ -1323,8 +1323,9 @@ fn every_collection_exit_releases_guards_before_closing_the_timing() {
             "{name}: the render source carries the guards, then the custody"
         );
         assert!(
-            compact
-                .contains("if let Some(dispatch) = frame.dispatch.take() {\ndispatch.rendered();"),
+            compact.contains(
+                "let dispatch = frame.dispatch.take();\nlet returned_at =\n(render_marker.is_some() || dispatch.is_some()).then(Instant::now);"
+            ),
             "{name}: a render closes the rendered population"
         );
     }

@@ -397,6 +397,7 @@ impl App {
         super::spawn_pane::process_pane_vt_batch_and_publish(
             &handles,
             bytes,
+            None,
             &mut None,
             &mut super::spawn_pane::SyncLatch::default(),
             None,
@@ -729,6 +730,7 @@ impl TestPaneWorker {
         super::spawn_pane::publish_pane_vt_batch_with(
             &self.handles,
             bytes,
+            None,
             &mut None,
             &mut self.flush.sync_latch,
             super::media::decode_inline_image,

@@ -13,7 +13,7 @@ use std::{
 
 use winit::window::WindowId;
 
-use super::{redraw::WindowRedrawState, App, WindowState};
+use super::{redraw::WindowRedrawState, App, PermitClearCauseV1, WindowState};
 
 /// A per-window frame-timing source the App starts and stops.
 pub(crate) trait DisplayLinkSource {
@@ -55,7 +55,10 @@ impl WindowRedrawState {
     pub(super) fn invalidate_link_pacing(&mut self) {
         self.link_generation.fetch_add(1, Ordering::Release);
         self.link_live = None;
-        self.link_permit = None;
+        if let Some(generation) = self.link_permit.take() {
+            // A held permit's clear is recorded for a timeline owner.
+            self.timeline.note_permit_cleared(generation, PermitClearCauseV1::LinkReset);
+        }
         if self.pacing == Some(PacingMode::Link) {
             self.pacing = None;
         }
@@ -119,7 +122,12 @@ impl WindowState {
                     // The paused interval is the live one, so its readiness ends with it.
                     self.redraw.link_generation.fetch_add(1, Ordering::Release);
                     self.redraw.link_live = None;
-                    self.redraw.link_permit = None;
+                    if let Some(generation) = self.redraw.link_permit.take() {
+                        // A held permit's clear is recorded for a timeline owner.
+                        self.redraw
+                            .timeline
+                            .note_permit_cleared(generation, PermitClearCauseV1::LinkPaused);
+                    }
                 }
             }
         }
@@ -227,8 +235,9 @@ impl App {
         }
         window.redraw.link_permit = Some(generation);
         if let Some(counters) = window.redraw.frame_counters.as_deref_mut() {
-            // the App's gate is on, each accepted tick is counted.
+            // the App's gate is on, each accepted tick is counted and its metadata kept at `now`.
             counters.display_link_ticks += 1;
+            window.redraw.timeline.accept_tick(generation, now);
         }
         if !window.redraw.request_in_flight {
             window.redraw.request_in_flight = true;

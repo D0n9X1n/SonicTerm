@@ -42,6 +42,8 @@ pub(crate) struct DispatchClock {
     first_guard: Instant,
     /// Set by `rendered`, so the drop records the rendered population instead of the failed one.
     rendered: bool,
+    /// The renderer's return, when the caller read it once for every recorder; else the drop reads now.
+    ended: Option<Instant>,
 }
 
 /// Start a counting frame's custody and dispatch at its first guard, now.
@@ -56,21 +58,36 @@ pub(crate) fn start_at(
 ) -> (GuardCustody, DispatchClock) {
     (
         GuardCustody { totals: Arc::clone(totals), first_guard },
-        DispatchClock { totals: Arc::clone(totals), first_guard, rendered: false },
+        DispatchClock { totals: Arc::clone(totals), first_guard, rendered: false, ended: None },
     )
 }
 
 impl DispatchClock {
-    /// Close the interval at the return of `render_releasing`, in the rendered population.
+    /// Close the interval at the return of `render_releasing`, read now, in the rendered population.
+    #[cfg(test)]
     pub(crate) fn rendered(mut self) {
         self.rendered = true;
     }
+
+    /// Close the interval at `returned_at`, the renderer's return as read once by the adapter, so a
+    /// diagnostic recorder working after that read never extends the interval.
+    pub(crate) fn rendered_at(mut self, returned_at: Instant) {
+        self.rendered = true;
+        self.ended = Some(returned_at);
+    }
 }
 
-/// Add one interval from `first_guard` to now into `sum_ns`, and one to `count`.
+/// Add one interval from `first_guard` to `ended`, or to now, into `sum_ns`, and one to `count`.
 // Ordering: sum_ns and count use Relaxed; they are statistics a later snapshot reads, ordering nothing.
-fn add_interval(sum_ns: &AtomicU64, count: &AtomicU64, first_guard: Instant) {
-    let elapsed_ns = u64::try_from(first_guard.elapsed().as_nanos()).unwrap_or(u64::MAX);
+fn add_interval(
+    sum_ns: &AtomicU64,
+    count: &AtomicU64,
+    first_guard: Instant,
+    ended: Option<Instant>,
+) {
+    let ended = ended.unwrap_or_else(Instant::now);
+    let elapsed = ended.saturating_duration_since(first_guard);
+    let elapsed_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
     sum_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
     count.fetch_add(1, Ordering::Relaxed);
 }
@@ -91,7 +108,7 @@ impl Drop for GuardCustody {
                 probe();
             }
         });
-        add_interval(&self.totals.custody_ns, &self.totals.custodies, self.first_guard);
+        add_interval(&self.totals.custody_ns, &self.totals.custodies, self.first_guard, None);
     }
 }
 
@@ -100,10 +117,11 @@ impl Drop for DispatchClock {
     fn drop(&mut self) {
         let totals = &self.totals;
         if self.rendered {
-            add_interval(&totals.dispatch_ns, &totals.dispatches, self.first_guard);
+            add_interval(&totals.dispatch_ns, &totals.dispatches, self.first_guard, self.ended);
         } else {
             // When: `rendered` is false, the frame held a guard but never reached the renderer.
-            add_interval(&totals.dispatch_failed_ns, &totals.dispatches_failed, self.first_guard);
+            let first_guard = self.first_guard;
+            add_interval(&totals.dispatch_failed_ns, &totals.dispatches_failed, first_guard, None);
         }
     }
 }

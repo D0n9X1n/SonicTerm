@@ -289,6 +289,14 @@ impl App {
 
     pub(super) fn retire_pane(&mut self, mut pane: PaneState) {
         *pane.redraw_target.lock() = None;
+        if let Some(counters) = pane.frame_counters.as_ref() {
+            // A watched pane's retirement disarms it and frees its diagnostic buffers now, whatever
+            // worker handles survive, and ends a window timeline it owned.
+            counters.echo.retire();
+            for window in self.windows.values_mut() {
+                window.redraw.timeline.end_for_watch(&counters.echo);
+            }
+        }
         if let Some(pty) = pane.pty.take() {
             self.pty_reaper.retire(pty, pane.reap_slot.take());
         }

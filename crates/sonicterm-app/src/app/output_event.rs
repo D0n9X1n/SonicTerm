@@ -56,13 +56,21 @@ impl App {
                 #[cfg(windows)]
                 self.arm_foreground_probe_after_output(now);
                 let chrome = self.command_maintenance(owner, now);
+                // The watched pane is loaded explicitly first, so `any` below sees at least its generation.
+                let watched =
+                    self.windows.get(&owner).and_then(|window| window.watched_observation());
                 let visible =
                     self.windows.get(&owner).is_some_and(|window| window.visible_output_advanced());
+                // Only the Output request is the check's outcome; a chrome-only request leaves it `None`.
+                let mut outcome = OutputCheckOutcomeV1::None;
                 if visible {
-                    self.request_owner_redraw(owner, RedrawCause::Output);
+                    outcome = self.request_owner_redraw(owner, RedrawCause::Output);
                 } else if chrome {
                     // When: only tab-bar command chrome changed, the frame repaints chrome, not output.
                     self.request_owner_redraw(owner, RedrawCause::Chrome);
+                }
+                if let Some(window) = self.windows.get_mut(&owner) {
+                    window.redraw.timeline.note_output_service(pane_id, watched, outcome);
                 }
             }
         }
