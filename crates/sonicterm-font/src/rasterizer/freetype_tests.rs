@@ -478,6 +478,9 @@ const FIXTURE_UNITS_PER_EM: f64 = 2048.0;
 /// Fixture glyph ids, in the generator's glyph order.
 const GLYPH_LINEAR: u32 = 4;
 const GLYPH_RADIAL: u32 = 5;
+const GLYPH_SCALED: u32 = 7;
+const GLYPH_ROTATED: u32 = 8;
+const GLYPH_SKEWED: u32 = 9;
 const GLYPH_MOVED: u32 = 10;
 const GLYPH_CLIPPED: u32 = 11;
 
@@ -752,5 +755,70 @@ fn colr_translated_paint_lands_on_its_axes_in_pixels() {
             !has_ink_at(&reference, swapped_x, swapped_y),
             "{size_px}px: HarfBuzz leaves the swap empty"
         );
+    }
+}
+
+/// The fixture's pivoted glyphs, each with its pivot in font units: scale and rotate around (400, 1200) and skew
+/// around (0, 800), pivots whose x and y differ.
+const PIVOTED_GLYPHS: [(&str, u32, (f64, f64)); 3] = [
+    ("scaled", GLYPH_SCALED, (400.0, 1200.0)),
+    ("rotated", GLYPH_ROTATED, (400.0, 1200.0)),
+    ("skewed", GLYPH_SKEWED, (0.0, 800.0)),
+];
+
+/// Scale, rotate and skew around a centre move to that centre's own x and y and back: the walker records the
+/// pure translations (cx, cy) and (-cx, -cy) around each operation, never cx for both axes.
+#[test]
+fn colr_scale_rotate_and_skew_pivot_on_their_own_centre() {
+    for (name, glyph_id, (centre_x, centre_y)) in PIVOTED_GLYPHS {
+        let translations: Vec<(f64, f64)> = fixture_walker_ops(glyph_id, 13.0)
+            .iter()
+            .filter_map(|op| match op {
+                PaintOp::PushTransform(matrix)
+                    if (matrix.xx(), matrix.yx(), matrix.xy(), matrix.yy())
+                        == (1.0, 0.0, 0.0, 1.0) =>
+                {
+                    Some((matrix.x0(), matrix.y0()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(translations, [(centre_x, centre_y), (-centre_x, -centre_y)], "{name}");
+    }
+}
+
+/// Each pivoted glyph renders where its own pivot puts it, at 13 and 26 px, as HarfBuzz paints it: red ink at a
+/// point only the true pivot covers, and none at a point only a pivot of (cx, cx) would cover.
+#[test]
+fn colr_pivoted_paint_lands_where_its_centre_puts_it() {
+    // Per glyph: a point only the true pivot covers, then one only (cx, cx) covers, in font units.
+    let probes = [
+        (GLYPH_SCALED, (600.0, 1250.0), (600.0, 350.0)),
+        (GLYPH_ROTATED, (-400.0, 1600.0), (-400.0, 400.0)),
+        (GLYPH_SKEWED, (1700.0, 200.0), (-700.0, 1450.0)),
+    ];
+    for size_px in [13.0, 26.0] {
+        let scale = size_px / FIXTURE_UNITS_PER_EM;
+        for (glyph_id, (inside_x, inside_y), (outside_x, outside_y)) in probes {
+            let context = format!("{size_px}px glyph {glyph_id}");
+            let glyph = fixture_colr_glyph(glyph_id, size_px, false);
+            let reference = fixture_harfbuzz_glyph(glyph_id, size_px);
+            let Some((rgba, _)) = pixel_at(&glyph, inside_x * scale, inside_y * scale) else {
+                panic!("{context}: no pixel where the true pivot puts the square");
+            };
+            assert_rgb_near(rgba, [255.0, 0.0, 0.0], 8.0, &context);
+            assert!(
+                has_ink_at(&reference, inside_x * scale, inside_y * scale),
+                "{context}: HarfBuzz ink"
+            );
+            assert!(
+                !has_ink_at(&glyph, outside_x * scale, outside_y * scale),
+                "{context}: ink where a pivot of (cx, cx) puts the square"
+            );
+            assert!(
+                !has_ink_at(&reference, outside_x * scale, outside_y * scale),
+                "{context}: HarfBuzz leaves the wrong pivot's square empty"
+            );
+        }
     }
 }

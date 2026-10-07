@@ -769,7 +769,7 @@ impl<'a> Walker<'a> {
 
                     // Scaling around a center coordinate
                     let center_x = scale.center_x.to_num();
-                    let center_y = scale.center_x.to_num();
+                    let center_y = scale.center_y.to_num();
 
                     let mut to_center = Matrix::identity();
                     to_center.translate(center_x, center_y);
@@ -794,7 +794,7 @@ impl<'a> Walker<'a> {
 
                     // Rotating around a center coordinate
                     let center_x = rot.center_x.to_num();
-                    let center_y = rot.center_x.to_num();
+                    let center_y = rot.center_y.to_num();
 
                     let mut to_center = Matrix::identity();
                     to_center.translate(center_x, center_y);
@@ -819,7 +819,7 @@ impl<'a> Walker<'a> {
 
                     // Skewing around a center coordinate
                     let center_x = skew.center_x.to_num();
-                    let center_y = skew.center_x.to_num();
+                    let center_y = skew.center_y.to_num();
 
                     let mut to_center = Matrix::identity();
                     to_center.translate(center_x, center_y);
