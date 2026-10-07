@@ -417,6 +417,18 @@ in the harness's frame-texture reading. On Windows the feature tests run in the
 `windows-tests-harness-features` shard instead, beside the glyph working-set measurement, so CI runs each
 feature's tests exactly once per platform rather than in the plain tests' job.
 
+The S2 echo timeline's App accessor is named only with both `perf-echo-trace` and
+`perf_echo_timeline_api`, and every other build compiles the side that reports
+`cfg-off`. Each of the four combinations has a maintained lint and test step: neither
+(`perf-scenarios-counters-clippy`, `perf-scenarios-tests`), the feature alone
+(`perf-scenarios-echo-trace-clippy` and `-tests`), the cfg alone
+(`perf-scenarios-harness-api-clippy` and `-tests`, with every `HARNESS_API_CFGS` entry),
+and both (`perf-scenarios-harness-api-echo-trace-clippy` and `-tests`, the same cfgs with
+`perf-echo-trace` added). The last pair alone builds and tests the real adapter. Its lint
+runs in `macos-core`, `windows-checks` and `linux-core`, and its tests in `macos-core`
+and `linux-core` and, on Windows, in `windows-tests-harness-api` after the harness-API
+tests, whose compiler flags they share, so no Windows job is added.
+
 `macos-perf-smoke` checks the comparison tooling, not performance. It runs
 `python3 scripts/perf-compare.py --smoke`, which builds the current tree's
 `perf_scenarios` example in debug, with no base ref, worktree, or release build,

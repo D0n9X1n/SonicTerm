@@ -34,7 +34,8 @@ python3 scripts/local-gate.py
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
-| `perf-scenarios-harness-api-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-harness-api-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-harness-api-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
@@ -50,7 +51,8 @@ python3 scripts/local-gate.py
 | `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS, Windows | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-features` |
 | `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-features`, `linux-core` |
 | `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-features`, `linux-core` |
-| `perf-scenarios-harness-api-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
+| `perf-scenarios-harness-api-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
+| `perf-scenarios-harness-api-echo-trace-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests-workspace` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests-workspace` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests-workspace` |
@@ -168,20 +170,24 @@ harness predates the field reads `n/a` with no change shown, and a result whose
 
 The harness also calls App and renderer methods that older trees lack. Each
 such call sits behind a harness API cfg, one entry of `HARNESS_API_CFGS` in
-`scripts/local-gate.py`. There are four entries: `perf_atlas_retry_api`, for the
+`scripts/local-gate.py`. There are five entries: `perf_atlas_retry_api`, for the
 four methods S1/atlas-retry's driver needs; `perf_s10_attribution_api`, for
 the App's two S10 attribution watch methods (`arm_s10_attribution` and
 `disarm_s10_attribution`); `perf_completeness_api`, for the renderer's
-`completeness_checkpoint`, which S9's and S12's `end` checkpoints read; and
+`completeness_checkpoint`, which S9's and S12's `end` checkpoints read;
 `perf_dispatch_timeline_api`, for the App's per-sample dispatch-timeline methods
-(`arm_dispatch_timeline_v1` and `take_dispatch_timeline_v1`). Their prerequisite
-bodies record nothing. S2 arms the timeline at each typing injection, before the
+(`arm_dispatch_timeline_v1` and `take_dispatch_timeline_v1`); and
+`perf_echo_timeline_api`, for the App's one-shot `take_echo_timeline_v1`, which the
+harness names only when it is also built with `perf-echo-trace`. The dispatch-timeline
+prerequisite bodies record nothing. S2 arms the timeline at each typing injection, before the
 injection instant is read, and takes it at every close of a sample. Each S2 sample in
 `result.json` records what its timeline came to as `dispatch_timeline`:
 `unavailable` without the cfg, `gate-off` or `not-recorded` from the stubs. The
 harness's recorder buffers are allocated only for an armed sample and reused. The gate lints and tests the harness with **every**
 entry on at once, in two steps built from the table, `perf-scenarios-harness-api-clippy`
-and `perf-scenarios-harness-api-tests`. The test step passes the cfgs through
+and `perf-scenarios-harness-api-tests`; `perf-scenarios-harness-api-echo-trace-clippy` and
+`perf-scenarios-harness-api-echo-trace-tests` do the same with `perf-echo-trace` as well,
+the only steps that compile the S2 echo timeline's adapter ([Local gate](Local-Gate)). The test step passes the cfgs through
 `RUSTFLAGS`, and a changed `RUSTFLAGS` invalidates every dependency's build, so
 one combined test step costs one dependency rebuild for all entries instead of
 one per entry. The lint step passes them after `--`, which reaches only the
@@ -605,7 +611,7 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
 - S2 credits a keypress-to-present latency only when it can attribute the
   sample to one frame unambiguously, and reports the attribution coverage; read
   the latency together with its coverage.
-- S2/default's credited samples are also split at the flush publication when the
+- S2/default's and S2/flood's credited samples are also split at the flush publication when the
   harness is built with `perf-echo-trace` and the counter gate is on
   ([Logging](Logging#the-s2-echo-watch) defines the parts). The harness's `--list`
   declares `capabilities.latency_split_schema: 1` in every build, and its
@@ -614,11 +620,40 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   the head's list and holds both sides to it, because both run the head's
   harness; a head that predates it keeps the old latency contract. A sample that
   cannot be split names one of 22 reasons; `unsupported` means a build without
-  the feature or a variant outside S2/default. The counters table adds S2/default
+  the feature or a variant outside S2/default and S2/flood. The counters table adds S2/default
   `typing` rows: the three parts' median and p95, delivery lag p95, split
   coverage, and the reason counts with the suppressed, coalesced and `sync_open`
   counts. A base built without the feature reads `n/a (unsupported)`. The timed
   runs keep the gate off, so their samples read `arm-gate-off`.
+- The harness's `--list` also declares `capabilities.echo_timeline_schema: 1` in every
+  build. Every latency sample then carries `echo_timeline`: a schema-1 object for a
+  credited S2/default or S2/flood sample, null for any other
+  ([Logging](Logging#the-s2-echo-timeline) describes the record). The object is
+  `recorded`, `unavailable` with its reason (`cfg-off`, `not-recorded`, `gate-off`,
+  `no-pane` or `exhausted`) or `rejected` with its reason (`malformed-initial-permit`,
+  `mismatch`, `not-taken`, `already-taken` or `no-arm-instant`). A recorded one has its
+  `ordering`: `ordered`, `published_during_dispatch`, or `split_only` or `clock-order`
+  with a named reason; a malformed raw record stays recorded as `clock-order`, keeps its
+  identity, overflow and read information, and clears every event-dependent analysis field. An `ordered` sample splits its latency into seven integer-nanosecond parts that
+  sum to it, the last split again at the App's dispatch return, with its readiness check,
+  admission, permit occupancy, tick identity and flood count. The `latency` object adds
+  `echo_timeline_coverage`, each population a named numerator and denominator:
+  `recorded`, `ordered`, `b2`, `m4`, `m3`, `read_stamped`, `b2_of_credited` and
+  `m3_of_credited`; with nothing recorded it is `unavailable`, `recorded` stays
+  `0/credited`, and the analysis populations are null.
+  The comparison holds both sides to the head's declaration, recomputes every population
+  from the samples, and refuses a sample whose fields contradict each other, a credited
+  in-scope sample with no timeline, and a timeline from a harness that does not declare
+  the schema or declares it without the split schema. The counters table adds S2/default
+  and S2/flood `typing` rows: each side's availability, each population's numerator,
+  denominator and percentage, the change in points, and a gate row that passes when
+  `ordered` is at least 80% of credited samples on each side and the sides are at most
+  10 points apart, else fails, with both figures; both comparisons are exact integer
+  cross-products. A side that recorded nothing reads `unavailable`, never a measured
+  zero, and the gate then reads `unavailable`; a side whose harness predates the
+  capability reads `n/a (no timeline)`. The timed runs keep the gate off, so their
+  timelines read `unavailable` with `gate-off` when the build has `perf-echo-trace`, and
+  with `cfg-off` when it does not.
 - The harness's `--list` also declares `capabilities.phase_kinds: 1`. Every
   phase then records its `kind` (`sustained`, `transition` or `hold`); a
   transition records its `endpoint` and exactly one of `completion_ms` or

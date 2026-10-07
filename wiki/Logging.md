@@ -627,8 +627,8 @@ published; several batches may publish between two field reads.
 #### The S2 echo watch
 
 Each pane also has an echo watch while the gate is on. The perf harness arms it
-only for S2/default samples, and only when it is built with `perf-echo-trace`; S2/flood
-types beside a flood and is never armed. Arming issues a nonzero token that an App
+for S2/default and S2/flood samples, and only when it is built with `perf-echo-trace`.
+Arming issues a nonzero token that an App
 never reuses; the harness takes the record once, when a frame is credited, and every
 other close of the sample takes and discards it. A writer changes the record only for
 the armed token, while it is not yet taken, and only with an instant no earlier than
@@ -679,6 +679,47 @@ excluded from `flush_to_redraw`, which starts at the publication. A window canno
 epoch, each stretch capped at 150 ms. `sync_open` is the parser's set bit after the
 appearance section, not proof of a hold.
 
+#### The S2 echo timeline
+
+An armed echo watch can also own its window's echo timeline, a per-sample record of
+the event loop from the arm to the credited frame. The first pane armed in a window
+owns it while that owner lasts; another pane armed in the same window records no
+timeline, and re-arming the owning pane replaces it. The owner's successful take ends
+the owner, as do the pane leaving the window or being retired and the window closing.
+
+The owner's record keeps at most 64 events, each stamped in nanoseconds from the arm;
+the 65th sets `overflow` and is dropped. It records:
+
+- the latest PTY read stamp among the chunks of the section where the echo appeared;
+- each output check that evaluated the watched pane, except a repeat of the previous
+  check; recording stops only once the appearance is known and a kept check has reached it;
+- each accepted display-link tick, by the window's accepted-tick count (never reset at
+  the arm) and its link generation;
+- each redraw admission decision for the watched window, and each clearing of a held
+  permit other than its own consumption;
+- the entry and return of each watched `RedrawRequested` dispatch, and the enter and
+  exit of its renderer call.
+
+A ring of 256 entries keeps every completed output service in the owner's window, the
+watched pane's included; the 257th evicts the oldest and records its `loop_seq`. The
+comparison's flood count leaves the watched pane out.
+
+`take_echo_timeline_v1` transfers the record exactly once. The owner's take of the echo
+watch freezes it with a copy of the window's ring, and the transfer moves it out of the
+App. The answers, in the order they are decided: the gate off `GateOff`; an unknown pane
+`NoPane`; another token `Mismatch`; a second transfer `AlreadyTaken`; an arming that owned
+no timeline `NotRecorded`, before any check of the take; a watch not yet taken
+`NotTaken`; and a take that did not freeze the record, because its timeline ended before
+it, `NotRecorded`. A pane created
+while the gate is on has its PTY reader stamp each chunk with the instant its native read
+returned; that stamp is the record's read.
+
+The harness binds each credited sample to the one watched dispatch whose entry and
+return lie inside the credited forward, validates the raw record, and writes the
+sample's `echo_timeline` and the run's `echo_timeline_coverage` to `result.json`;
+nothing is logged ([Comparing performance](Development-and-Release#comparing-performance)
+describes the fields).
+
 #### The S10 attribution watch
 
 While the gate is on, the perf harness may arm one S10 attribution watch per
@@ -707,7 +748,7 @@ nothing. A watch writes at most 4 × updates + 64 present lines, then one
 ### What the counters do not measure
 
 The counters themselves do not split keystroke latency at the flush; the S2 echo
-watch above does, for S2/default only. `flush_to_redraw` measures delivery and
+watch above does, for S2/default and S2/flood. `flush_to_redraw` measures delivery and
 scheduling delay to the first redraw, and does not credit a presented frame. Maxima and p95s are bucket bounds, sums include the
 instrumentation's own cost, and shaping counts are requests, not HarfBuzz work.
 

@@ -292,6 +292,15 @@ harness 自身的单元测试 `cargo test --locked -p sonicterm-app --example pe
 `windows-tests-harness-features` shard 中与 glyph 工作集测量一起运行，因此 CI 在每个平台上对每个 feature 的测试
 恰好运行一次，而不是放在普通测试所在的 job 中。
 
+S2 回显时间线的 App 访问器只在同时具备 `perf-echo-trace` 与 `perf_echo_timeline_api` 时才被调用，其他构建
+编译的都是报告 `cfg-off` 的一侧。四种组合各有一个持续维护的检查步骤与测试步骤：两者皆无
+（`perf-scenarios-counters-clippy`、`perf-scenarios-tests`），只有该 feature（`perf-scenarios-echo-trace-clippy`
+与 `-tests`），只有该 cfg（`perf-scenarios-harness-api-clippy` 与 `-tests`，开启 `HARNESS_API_CFGS` 的每一项），
+以及两者皆有（`perf-scenarios-harness-api-echo-trace-clippy` 与 `-tests`，在同样的 cfg 上再加 `perf-echo-trace`）。
+只有最后这一对会构建并测试真正的适配器。其检查在 `macos-core`、`windows-checks` 与 `linux-core` 中运行，其测试在
+`macos-core` 与 `linux-core` 中运行；在 Windows 上则在 `windows-tests-harness-api` 中、紧接 harness API 测试之后运行，
+与之共用编译器标志，因此不新增 Windows job。
+
 `macos-perf-smoke` 检查的是对比工具本身，而不是性能。它运行
 `python3 scripts/perf-compare.py --smoke`：以 debug 构建当前树的 `perf_scenarios` example，不使用
 base ref、worktree 或 release 构建，并以 harness 的 `--short` 运行三个简短用例，每个用例都使用新进程

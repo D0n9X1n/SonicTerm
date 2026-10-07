@@ -107,8 +107,9 @@ WINDOWS_TEST_SHARDS = (
 
 
 # The non-setup steps of the single Windows test job at cac36ca4, main's tip when the split was rebased,
-# verbatim. Each must appear exactly once across the parallel Windows test shards, unchanged, in this
-# relative order within its shard.
+# verbatim, except that the harness API step carries every local-gate.py HARNESS_API_CFGS entry and is
+# followed by the same tests with the echo trace. Each must appear exactly once across the parallel Windows
+# test shards, unchanged, in this relative order within its shard.
 WINDOWS_TEST_WORK = (
     '      - name: Measure PTY close baseline\n        run: cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture\n',
     '      - name: Run workspace unit and integration tests\n        shell: bash\n        run: bash scripts/check-workspace-crates.sh\n',
@@ -118,7 +119,8 @@ WINDOWS_TEST_WORK = (
     '      - name: Measure the glyph atlas working set\n        run: cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture\n',
     '      - name: Run scenario harness unit tests with the frame texture reading\n        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture\n',
     '      - name: Run scenario harness unit tests with the echo trace\n        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace\n',
-    '      - name: Run scenario harness unit tests with the harness API cfgs\n        shell: bash\n        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim\n',
+    '      - name: Run scenario harness unit tests with the harness API cfgs\n        shell: bash\n        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim\n',
+    '      - name: Run scenario harness unit tests with the harness API cfgs and the echo trace\n        shell: bash\n        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace\n',
     '      - name: Report host window capability\n        run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture\n',
     '      - name: Report host adapter classification\n        run: cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture\n',
     '      - name: Report renderer churn baseline\n        run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture\n',
@@ -165,7 +167,10 @@ WINDOWS_SHARD_WORK = {
         "Measure the glyph atlas working set", "Run scenario harness unit tests with the frame texture reading",
         "Run scenario harness unit tests with the echo trace",
     ),
-    "windows-tests-harness-api": ("Run scenario harness unit tests with the harness API cfgs",),
+    "windows-tests-harness-api": (
+        "Run scenario harness unit tests with the harness API cfgs",
+        "Run scenario harness unit tests with the harness API cfgs and the echo trace",
+    ),
     "windows-tests-runtime": (
         "Report host window capability", "Report host adapter classification", "Report renderer churn baseline",
         "Require Windows GDI capability=EXERCISED", "Upload Windows GDI probe log",
@@ -934,14 +939,17 @@ class RepositoryTests(unittest.TestCase):
             return len(re.findall(rf"(?m)^ +run: {re.escape(command)}$", body))
 
         # Each harness API cfg configuration is a run of its own: the gate renders it, and CI runs it once in
-        # each of its jobs and nowhere else; the counters set is the one it compiles with.
+        # each of its jobs and nowhere else; the counters set is the one it compiles with, and the echo-trace
+        # pair adds perf-echo-trace so the echo timeline's adapter, which needs the feature and its cfg, compiles.
         gate = load_local_gate()
+        echo_cfg_ids = ("perf-scenarios-harness-api-echo-trace-clippy", "perf-scenarios-harness-api-echo-trace-tests")
         cfg_steps = [step for step in gate.STEPS if step.id in ("perf-scenarios-harness-api-clippy",
-                                                                 "perf-scenarios-harness-api-tests")]
-        self.assertEqual(len(cfg_steps), 2)
+                                                                 "perf-scenarios-harness-api-tests", *echo_cfg_ids)]
+        self.assertEqual(len(cfg_steps), 4)
         for step in cfg_steps:
             command = gate.command_text(step)
             self.assertIn(f"--features {feature_sets[0]}", command)
+            self.assertEqual(f"--features {feature_sets[0]},perf-echo-trace" in command, step.id in echo_cfg_ids)
             for job in step.ci_jobs:
                 with self.subTest(command=command, job=job):
                     self.assertEqual(run_lines(job_body(job), command), 1)

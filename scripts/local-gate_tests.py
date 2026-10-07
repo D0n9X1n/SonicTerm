@@ -512,7 +512,8 @@ class CustodyPolicyTests(unittest.TestCase):
         # Only these reviewed standalone compilation steps may accept forced owned cleanup.
         self.assertEqual({step.id for step in gate.STEPS if step.windows_policy == gate.WindowsPolicy.COMPILE_ONLY},
                          {"clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
-                          "perf-scenarios-echo-trace-clippy", "perf-scenarios-harness-api-clippy", "doc",
+                          "perf-scenarios-echo-trace-clippy", "perf-scenarios-harness-api-clippy",
+                          "perf-scenarios-harness-api-echo-trace-clippy", "doc",
                           "doc-resource-features", "release-windows", "windows-perf-build"})
         self.assertEqual(python_step("mixed", "pass").windows_policy, gate.WindowsPolicy.STRICT)
 
@@ -2870,11 +2871,14 @@ class HarnessFlagTests(unittest.TestCase):
         self.assertTrue(expected, "the harness API cfg table is empty")
         self.assertEqual(len(expected), len(set(expected)), expected)
         steps = {step.id: step for step in gate.STEPS}
-        lint = steps["perf-scenarios-harness-api-clippy"]
-        enabled = [lint.argv[index + 1] for index, word in enumerate(lint.argv) if word == "--cfg"]
-        self.assertEqual(enabled, expected)
-        self.assertEqual(list(steps["perf-scenarios-harness-api-tests"].harness_cfgs), expected)
-        combined = {"perf-scenarios-harness-api-clippy", "perf-scenarios-harness-api-tests"}
+        for lint_id in ("perf-scenarios-harness-api-clippy", "perf-scenarios-harness-api-echo-trace-clippy"):
+            lint = steps[lint_id]
+            enabled = [lint.argv[index + 1] for index, word in enumerate(lint.argv) if word == "--cfg"]
+            self.assertEqual(enabled, expected, lint_id)
+        for test_id in ("perf-scenarios-harness-api-tests", "perf-scenarios-harness-api-echo-trace-tests"):
+            self.assertEqual(list(steps[test_id].harness_cfgs), expected, test_id)
+        combined = {"perf-scenarios-harness-api-clippy", "perf-scenarios-harness-api-tests",
+                    "perf-scenarios-harness-api-echo-trace-clippy", "perf-scenarios-harness-api-echo-trace-tests"}
         for step in gate.STEPS:
             if step.id.startswith("perf-scenarios-") and step.id not in combined:
                 with self.subTest(step=step.id):
@@ -2884,6 +2888,37 @@ class HarnessFlagTests(unittest.TestCase):
         for name in expected:
             with self.subTest(cfg=name):
                 self.assertIn(f"cfg({name})", declared)
+
+    def test_every_echo_timeline_combination_is_a_maintained_lint_and_test(self):
+        # The echo timeline's adapter needs perf-echo-trace and perf_echo_timeline_api together, and its
+        # complement compiles with either missing, so each of the four feature/cfg combinations has a maintained
+        # lint and a maintained test step: run locally on every host and in CI.
+        def features(step):
+            words = list(step.argv)
+            return set(words[words.index("--features") + 1].split(",")) if "--features" in words else set()
+
+        def cfgs(step):
+            words = list(step.argv)
+            return {words[index + 1] for index, word in enumerate(words) if word == "--cfg"} | set(
+                step.harness_cfgs or ())
+
+        found = {}
+        for step in gate.STEPS:
+            if "perf_scenarios" not in step.argv or step.evidence != "local" or not step.ci_jobs:
+                continue
+            if step.hosts != gate.HOSTS:
+                continue
+            kind = "clippy" if "clippy" in step.argv else "test" if "test" in step.argv else None
+            if kind is None or "--ignored" in step.argv:
+                continue
+            combination = ("perf-echo-trace" in features(step), "perf_echo_timeline_api" in cfgs(step))
+            found.setdefault(combination, {}).setdefault(kind, []).append(step.id)
+        for combination in ((False, False), (True, False), (False, True), (True, True)):
+            for kind in ("clippy", "test"):
+                with self.subTest(feature=combination[0], cfg=combination[1], kind=kind):
+                    self.assertTrue(found.get(combination, {}).get(kind), found)
+        self.assertEqual(found.get((True, True)), {"clippy": ["perf-scenarios-harness-api-echo-trace-clippy"],
+                                               "test": ["perf-scenarios-harness-api-echo-trace-tests"]})
 
     def test_workspace_check_cfgs_reads_only_the_live_lint_array(self):
         # A declaration surviving only in a comment, or outside [workspace.lints.rust], is not a declaration.

@@ -135,7 +135,8 @@ class WindowsPolicy(str, Enum):
 
 
 _COMPILE_ONLY_STEPS = frozenset(("clippy", "perf-scenarios-counters-clippy", "perf-scenarios-frame-texture-clippy",
-                                 "perf-scenarios-echo-trace-clippy", "perf-scenarios-harness-api-clippy", "doc",
+                                 "perf-scenarios-echo-trace-clippy", "perf-scenarios-harness-api-clippy",
+                                 "perf-scenarios-harness-api-echo-trace-clippy", "doc",
                                  "doc-resource-features", "release-windows", "windows-perf-build",
                                  "check-previous-release"))
 
@@ -212,6 +213,11 @@ HARNESS_API_CFGS = (
     HarnessApiCfg("perf_dispatch_timeline_api", (
         ("crates/sonicterm-app/src", "App", "arm_dispatch_timeline_v1"),
         ("crates/sonicterm-app/src", "App", "take_dispatch_timeline_v1"),
+    )),
+    # S2's echo timeline: the App's one-shot V1 transfer of a taken watch's timeline, absent before v1.3.9.
+    # The harness names it only with perf-echo-trace as well, so the combined steps compile its cfg-off side.
+    HarnessApiCfg("perf_echo_timeline_api", (
+        ("crates/sonicterm-app/src", "App", "take_echo_timeline_v1"),
     )),
 )
 HARNESS_API_CFG_NAMES = tuple(entry.name for entry in HARNESS_API_CFGS)
@@ -367,6 +373,13 @@ STEPS = (
           "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim", "--", "-D", "warnings",
           *_HARNESS_API_CFG_FLAGS),
          HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
+    # The same lint with perf-echo-trace as well: the S2 echo timeline's adapter needs both the feature and its
+    # cfg, so only this step compiles it; the two steps above compile its cfg-off sides.
+    Step("perf-scenarios-harness-api-echo-trace-clippy",
+         ("cargo", "clippy", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios", "--all-targets",
+          "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace", "--", "-D",
+          "warnings", *_HARNESS_API_CFG_FLAGS),
+         HOSTS, 900, "local", ("rust", "native"), _CORE_CHECKS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc", ("cargo", "doc", "--workspace", "--no-deps"), HOSTS, 600, "local",
          ("rust", "native"), _CORE_CHECKS, env=_RUSTDOC_WARNINGS, windows_policy=WindowsPolicy.COMPILE_ONLY),
     Step("doc-resource-features",
@@ -420,6 +433,12 @@ STEPS = (
     Step("perf-scenarios-harness-api-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim"),
+         HOSTS, 900, "local", ("rust", "native"), _HARNESS_API_TESTS, harness_cfgs=HARNESS_API_CFG_NAMES),
+    # The same tests with perf-echo-trace as well, so the echo timeline's real adapter is built and tested; it
+    # shares the step above's compiler flags, so it adds a rebuild of this crate only.
+    Step("perf-scenarios-harness-api-echo-trace-tests",
+         ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
+          "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace"),
          HOSTS, 900, "local", ("rust", "native"), _HARNESS_API_TESTS, harness_cfgs=HARNESS_API_CFG_NAMES),
     Step("pty-feasibility", ("bash", "scripts/pty-backend-feasibility.sh", "--check"), HOSTS, 300,
          "local", ("rust", "bash"), ("macos-core", _WINDOWS_WORKSPACE),
