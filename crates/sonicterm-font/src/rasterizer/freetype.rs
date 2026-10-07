@@ -919,14 +919,16 @@ impl<'a> Walker<'a> {
     }
 }
 
+/// A COLR PaintTransform's affine as a Cairo matrix: Cairo orders it (xx, yx, xy, yy, x0, y0), so the
+/// translation is (dx, dy).
 fn affine2x3_to_matrix(affine: FT_Affine23) -> Matrix {
     Matrix::new(
         affine.xx.to_num(),
         affine.yx.to_num(),
         affine.xy.to_num(),
         affine.yy.to_num(),
-        affine.dy.to_num(),
         affine.dx.to_num(),
+        affine.dy.to_num(),
     )
 }
 

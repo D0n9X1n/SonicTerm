@@ -478,6 +478,7 @@ const FIXTURE_UNITS_PER_EM: f64 = 2048.0;
 /// Fixture glyph ids, in the generator's glyph order.
 const GLYPH_LINEAR: u32 = 4;
 const GLYPH_RADIAL: u32 = 5;
+const GLYPH_MOVED: u32 = 10;
 const GLYPH_CLIPPED: u32 = 11;
 
 /// The fixture as a parsed font, with synthetic italic when `italic`.
@@ -702,5 +703,54 @@ fn colr_radial_gradient_renders_its_ramp_at_every_size() {
                 &context,
             );
         }
+    }
+}
+
+/// Whether `glyph` has visible ink at the device point (`x_px`, `y_px`), y up; a point outside the bitmap has none.
+fn has_ink_at(glyph: &RasterizedGlyph, x_px: f64, y_px: f64) -> bool {
+    pixel_at(glyph, x_px, y_px).is_some_and(|(rgba, _)| rgba[3] > 0)
+}
+
+/// A PaintTransform's translation lands on its own axes: the fixture's `moved` glyph translates by dx = 800,
+/// dy = 200 font units, and the walker records exactly that as the matrix's (x0, y0).
+#[test]
+fn colr_affine_translation_keeps_its_axes() {
+    let translations: Vec<(f64, f64)> = fixture_walker_ops(GLYPH_MOVED, 13.0)
+        .iter()
+        .filter_map(|op| match op {
+            PaintOp::PushTransform(matrix) => Some((matrix.x0(), matrix.y0())),
+            _ => None,
+        })
+        .filter(|(x0, y0)| *x0 != 0.0 || *y0 != 0.0)
+        .collect();
+    assert_eq!(translations, [(800.0, 200.0)]);
+}
+
+/// The fixture's `moved` glyph renders its 400-unit red square translated by (800, 200), at 13 and 26 px: ink at
+/// that square's centre, none where swapped axes would put it, as HarfBuzz paints it.
+#[test]
+fn colr_translated_paint_lands_on_its_axes_in_pixels() {
+    for size_px in [13.0, 26.0] {
+        let scale = size_px / FIXTURE_UNITS_PER_EM;
+        let glyph = fixture_colr_glyph(GLYPH_MOVED, size_px, false);
+        let reference = fixture_harfbuzz_glyph(GLYPH_MOVED, size_px);
+        let (right_x, right_y) = (1000.0 * scale, 400.0 * scale);
+        let (swapped_x, swapped_y) = (400.0 * scale, 1000.0 * scale);
+        let Some((rgba, _)) = pixel_at(&glyph, right_x, right_y) else {
+            panic!("{size_px}px: no pixel at the translated square's centre");
+        };
+        assert_rgb_near(rgba, [255.0, 0.0, 0.0], 8.0, &format!("{size_px}px translated square"));
+        assert!(
+            !has_ink_at(&glyph, swapped_x, swapped_y),
+            "{size_px}px: ink where swapped axes put it"
+        );
+        assert!(
+            has_ink_at(&reference, right_x, right_y),
+            "{size_px}px: HarfBuzz paints the same square"
+        );
+        assert!(
+            !has_ink_at(&reference, swapped_x, swapped_y),
+            "{size_px}px: HarfBuzz leaves the swap empty"
+        );
     }
 }
