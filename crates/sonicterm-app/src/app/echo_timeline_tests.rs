@@ -1001,12 +1001,22 @@ fn held_and_deferred_leave_the_permit_untouched() {
 /// separate `LinkReset` follows it. Pinned by source: a refusing device needs a GPU renderer.
 #[test]
 fn a_device_refused_held_precedes_its_separate_link_reset() {
-    let source = include_str!("redraw.rs");
-    let start = source.find("if !renderer.device_accepts_gpu_work() {").expect("device branch");
-    let branch = &source[start..start + source[start..].find("return false;").expect("refusal")];
-    let held = branch.find("AdmissionDecisionV1::Held").expect("the refusal is Held");
-    let reset = branch.find("invalidate_link_pacing()").expect("then the link resets");
-    assert!(held < reset, "{branch}");
+    for source in line_ending_variants(include_str!("redraw.rs")) {
+        let source = source.replace("\r\n", "\n");
+        let start = source.find("if !renderer.device_accepts_gpu_work() {").expect("device branch");
+        let branch =
+            &source[start..start + source[start..].find("return false;").expect("refusal")];
+        let held = branch.find("AdmissionDecisionV1::Held").expect("the refusal is Held");
+        let reset = branch.find("invalidate_link_pacing()").expect("then the link resets");
+        assert!(held < reset, "{branch}");
+    }
+}
+
+/// A source as an LF checkout and as a CRLF one (Windows), so each source pin is shown to read both.
+fn line_ending_variants(source: &str) -> [String; 2] {
+    let lf_text = source.replace("\r\n", "\n");
+    let crlf_text = lf_text.replace('\n', "\r\n");
+    [lf_text, crlf_text]
 }
 
 /// The flood ring keeps the last 256 services oldest first; the 257th evicts the first, recorded
@@ -1118,10 +1128,13 @@ fn a_watched_dispatch_records_one_render_pair() {
 }
 
 /// Both render adapters wrap the renderer call itself with the marker, and the outer handler
-/// records the entry before dispatching and the return after its frame bookkeeping.
+/// records the entry before dispatching and the return after its frame bookkeeping. Each source
+/// is read as LF on any checkout, so a CRLF (Windows) checkout pins the same anchors.
 #[test]
 fn the_boundaries_sit_at_their_anchors() {
-    for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
+    let adapters = [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")];
+    for source in adapters.into_iter().flat_map(line_ending_variants) {
+        let source = source.replace("\r\n", "\n");
         let enter = source.find("marker.enter();").expect("render enter");
         let call = source.find("r.render_releasing(").expect("render call");
         let returned = source.find("let returned_at =").expect("one renderer-return read");
@@ -1138,14 +1151,20 @@ fn the_boundaries_sit_at_their_anchors() {
             "the order is documented at the enter anchor"
         );
     }
-    let source = include_str!("mod.rs");
-    let handler = &source[source.find("fn window_event(&mut self").expect("outer handler")..];
-    let handler = &handler[..handler.find("\n    }\n").expect("handler end")];
-    let entry = handler.find("self.note_dispatch_entry(win_id);").expect("entry");
-    let dispatch = handler.find("self.do_window_event(").expect("dispatch");
-    let lines = handler.find("self.emit_frame_lines(").expect("frame lines");
-    let returned = handler.find("self.note_dispatch_return(win_id);").expect("return");
-    assert!(entry < dispatch && dispatch < lines && lines < returned, "{handler}");
+    for (checkout, source) in
+        ["LF", "CRLF"].into_iter().zip(line_ending_variants(include_str!("mod.rs")))
+    {
+        let source = source.replace("\r\n", "\n");
+        let handler = &source[source.find("fn window_event(&mut self").expect("outer handler")..];
+        let end = handler.find("\n    }\n");
+        assert!(end.is_some(), "the outer handler's end is found on a {checkout} checkout");
+        let handler = &handler[..end.unwrap_or(handler.len())];
+        let entry = handler.find("self.note_dispatch_entry(win_id);").expect("entry");
+        let dispatch = handler.find("self.do_window_event(").expect("dispatch");
+        let lines = handler.find("self.emit_frame_lines(").expect("frame lines");
+        let returned = handler.find("self.note_dispatch_return(win_id);").expect("return");
+        assert!(entry < dispatch && dispatch < lines && lines < returned, "{handler}");
+    }
 }
 
 /// `tick_seq` is the window's accepted-tick count and is not reset at arm: a tick accepted after

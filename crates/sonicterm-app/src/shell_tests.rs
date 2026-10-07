@@ -136,10 +136,16 @@ fn runtime_smoke_uses_clean_shell_startup_without_replacing_home() {
         include_str!("app/child_window_redraw.rs")
     );
     // Both creation paths build their options through the one helper, which sets clean startup.
-    let helper = MAIN.find("fn pane_spawn_opts(").expect("the shared spawn-option helper");
-    let helper_body =
-        &MAIN[helper..MAIN[helper..].find("\n    }\n").map_or(MAIN.len(), |end| helper + end)];
-    assert!(helper_body.contains("clean_e2e: self.runtime_smoke.is_some()"));
+    // The helper is bounded on an LF and a CRLF (Windows) checkout alike; a missed end fails.
+    let lf_main = MAIN.replace("\r\n", "\n");
+    for (checkout, main) in [("LF", lf_main.clone()), ("CRLF", lf_main.replace('\n', "\r\n"))] {
+        let main = main.replace("\r\n", "\n");
+        let helper = main.find("fn pane_spawn_opts(").expect("the shared spawn-option helper");
+        let end = main[helper..].find("\n    }\n");
+        assert!(end.is_some(), "the spawn-option helper's end is found on a {checkout} checkout");
+        let helper_body = &main[helper..helper + end.unwrap_or(main.len() - helper)];
+        assert!(helper_body.contains("clean_e2e: self.runtime_smoke.is_some()"), "{checkout}");
+    }
     assert!(MAIN.contains("self.pane_spawn_opts(launch, frame_counters.is_some())"));
     assert!(CHILD.contains("self.pane_spawn_opts(launch, frame_counters.is_some())"));
     assert!(!MAIN.contains("set_var(\"HOME\""));
