@@ -29,6 +29,8 @@ mod scenarios;
 #[cfg(test)]
 mod test_allocator;
 #[cfg(any(target_os = "macos", windows, test))]
+mod timeline;
+#[cfg(any(target_os = "macos", windows, test))]
 mod transition;
 #[cfg(any(target_os = "macos", windows, test))]
 mod waits;

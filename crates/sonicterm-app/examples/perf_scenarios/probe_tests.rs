@@ -1236,9 +1236,11 @@ fn typing_probe(scenario: &'static str, variant: &'static str) -> (Probe, u64) {
 
 /// Settle the open sample from a presenting dispatch observed now, with snapshots read now.
 fn credit_now(probe: &mut Probe) {
+    let started = Instant::now();
     let snapshot = probe.echo_snapshot();
     probe.attribute(
         &DispatchObservation { before: snapshot, after: probe.echo_snapshot(), advanced: true },
+        started,
         Instant::now(),
     );
 }
@@ -1259,22 +1261,26 @@ fn closing_an_unattributed_sample_disarms_its_watch() {
     assert_eq!(probe.samples.last().map(|sample| sample.split_reason), Some("not-credited"));
 }
 
-/// With the feature, only S2/default arms its samples; S2/flood's are out of scope and never armed.
+/// With the feature, S2/default and S2/flood both arm their samples, so both sides of a comparison pay
+/// the same watch cost; no other scenario is in scope.
 #[cfg(feature = "perf-echo-trace")]
 #[test]
-fn open_typing_sample_arms_only_for_s2_default() {
-    let (mut default, _) = typing_probe("S2", "default");
-    default.open_typing_sample(Instant::now);
-    assert!(matches!(default.open_sample.as_ref().expect("open").arm, ArmState::Armed(_)));
-    let (mut flood, _) = typing_probe("S2", "flood");
-    flood.open_typing_sample(Instant::now);
-    assert_eq!(flood.open_sample.as_ref().expect("open").arm, ArmState::OutOfScope);
+fn open_typing_sample_arms_for_s2_default_and_flood() {
+    for variant in ["default", "flood"] {
+        let (mut probe, _) = typing_probe("S2", variant);
+        probe.open_typing_sample(Instant::now);
+        let arm = probe.open_sample.as_ref().expect("open").arm;
+        assert!(matches!(arm, ArmState::Armed(_)), "{variant}");
+    }
+    assert!(!crate::record::split_in_scope("S3", "default"));
+    assert!(!crate::record::split_in_scope("S1", "flood"));
 }
 
-/// S2/flood still credits its samples exactly as before, and every credited one reads
-/// `unsupported` because it is outside the split's scope, in every build.
+/// S2/flood still credits its samples exactly as before and is now in the timeline's scope: without
+/// the feature its split reads `unsupported` and its timeline `unavailable` (`cfg-off`); with it the
+/// sample is armed and carries a timeline.
 #[test]
-fn s2_flood_attributes_as_before_and_reads_unsupported() {
+fn s2_flood_attributes_as_before_and_carries_a_timeline() {
     let (mut probe, pane) = typing_probe("S2", "flood");
     assert_eq!(probe.open_typing_sample(Instant::now), Some('a'));
     let main = sonicterm_app::app::synthetic_main_window_id();
@@ -1283,7 +1289,14 @@ fn s2_flood_attributes_as_before_and_reads_unsupported() {
     let sample = probe.samples.last().expect("a credited sample");
     assert_eq!(sample.reason, crate::record::CREDITED);
     assert!(sample.latency_ms.is_some());
-    assert_eq!((sample.split, sample.split_reason), (None, "unsupported"));
+    let timeline = sample.echo_timeline.expect("an in-scope credited sample has a timeline");
+    if cfg!(feature = "perf-echo-trace") {
+        assert_ne!(sample.split_reason, "unsupported", "the sample was armed");
+    } else {
+        // When: the build has no echo trace, nothing is armed and the timeline is cfg-off.
+        assert_eq!((sample.split, sample.split_reason), (None, "unsupported"));
+        assert_eq!(timeline.reason, Some("cfg-off"));
+    }
 }
 
 /// A resize on the event loop after the echo appeared, which the worker never sees, changes the
@@ -1836,4 +1849,54 @@ fn every_callback_and_forward_records_its_timeline_parenting() {
     let dispatched = forward.find("dispatch(&mutself.app,event_loop);").expect("dispatch");
     let returned = forward.find("sample.timeline.exit_invocation(ended);").expect("return");
     assert!(entered < dispatched && dispatched < returned);
+}
+
+/// The production handoff, through `attribute`: a controlled record whose App return precedes the
+/// credited forward's end binds its unique pair, keeps the original latency, and decomposes into the
+/// seven parts and both tail sub-parts, with a nonzero App-return-to-credited-end gap. It enters at
+/// `attribute` with the forward's `started` and `ended`; it is not a run of `Probe::forward` or of a
+/// native presenting dispatch, which has no headless source.
+#[test]
+fn the_production_handoff_credits_the_forward_and_its_end() {
+    use crate::record::{
+        AppearanceFacts, Delivery, DeliveryFacts, PublicationFacts, PublicationWindow, TraceFacts,
+    };
+    let (mut probe, pane) = typing_probe("S2", "default");
+    let base = Instant::now();
+    let (record, credited) = crate::timeline::fixture_at(base);
+    assert_eq!(probe.open_typing_sample(|| credited.injected), Some('a'));
+    let at = |offset_ns: u64| base + Duration::from_nanos(offset_ns);
+    let facts = TraceFacts {
+        shown: true,
+        identity_changed: false,
+        pre_present: false,
+        lost: false,
+        appearance: Some(AppearanceFacts { generation: 5, parsed_at: at(200), sync_open: false }),
+        publication: Some(PublicationFacts {
+            published_at: at(500),
+            window: PublicationWindow::Main,
+            coalesced: false,
+        }),
+        delivery: Some(DeliveryFacts { outcome: Delivery::Sent, decided_at: at(510) }),
+    };
+    probe.test_take = Some((EchoOutcome::Taken(facts), TimelineTake::Recorded(record)));
+    let main = sonicterm_app::app::synthetic_main_window_id();
+    probe.app.__test_publish_pane_output(main, pane, b"a");
+    let snapshot = probe.echo_snapshot();
+    let observation =
+        DispatchObservation { before: snapshot, after: probe.echo_snapshot(), advanced: true };
+    probe.attribute(&observation, credited.forward_started, credited.ended);
+    let sample = probe.samples.last().expect("a credited sample");
+    assert_eq!(sample.latency_ms, Some(0.0014), "injection to the credited end, 1400 ns");
+    assert_eq!(sample.split_reason, crate::record::SPLIT);
+    let timeline = sample.echo_timeline.expect("an in-scope credited sample has a timeline");
+    assert_eq!(timeline.ordering, Some(crate::timeline::OrderingStatus::Ordered));
+    assert_eq!(timeline.credited_dispatch_seq, Some(1), "the unique pair inside the forward");
+    let parts = timeline.parts.expect("ordered");
+    assert_eq!(parts.additive_ns.iter().sum::<u64>(), 1400);
+    assert_eq!(
+        parts.render_exit_to_dispatch_return_ns + parts.dispatch_return_to_credited_end_ns,
+        parts.additive_ns[6]
+    );
+    assert_eq!(parts.dispatch_return_to_credited_end_ns, 100, "App return 1400, credited end 1500");
 }

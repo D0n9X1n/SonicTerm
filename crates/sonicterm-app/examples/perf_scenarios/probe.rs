@@ -36,8 +36,9 @@ use crate::dispatch_timeline::sample::{SampleTimeline, Storage as TimelineStorag
 use crate::dispatch_timeline::{Invocation, InvocationKind, OuterKind};
 #[cfg(perf_completeness_api)]
 use crate::record::completeness_from_checkpoint;
+use crate::record::EchoOutcome;
 use crate::record::{
-    attribute_dispatch, bulk_tail_mismatch, echo_api, echo_outcome, echo_target,
+    armed_token, attribute_dispatch, bulk_tail_mismatch, echo_api, echo_outcome, echo_target,
     line_row_near_cursor, missing_wide_tokens, planned_rows, presenter_blocked,
     presenter_record_for, prompt_identity, prompt_origin, protocol_rows, retained_text,
     row_count_mismatch, snapshot_echo, snapshot_identity_changed, split_in_scope,
@@ -51,6 +52,7 @@ use crate::scan_throttle::{ScanThrottle, ScanTrigger};
 use crate::scenarios::{
     self, Act, Driver, Fixture, Host, PhaseEnd, PhaseSpec, Plan, SetupAction, Step, Workload,
 };
+use crate::timeline::{analyze, unarmed_timeline, Credited, TimelineTake};
 use crate::waits::{
     self, BarrierProgress, CheckpointProgress, CheckpointSampling, FirstPresentBound,
     FootprintStatus, FrameBarrier, ImagePresent, ImageProgress, ImageVerdict, TrimDispatch,
@@ -799,6 +801,9 @@ struct Probe {
     /// Tests: the presented-frame count and image atlas reading that stand in for the main renderer.
     #[cfg(test)]
     test_readings: Option<(u64, ResourceAmount)>,
+    /// Tests: the echo outcome and timeline the next credited sample's takes return, in place of the App's.
+    #[cfg(test)]
+    test_take: Option<(EchoOutcome, TimelineTake)>,
 }
 
 impl ApplicationHandler<UserEvent> for Probe {
@@ -1756,6 +1761,8 @@ impl Probe {
             counter_error: None,
             #[cfg(test)]
             test_readings: None,
+            #[cfg(test)]
+            test_take: None,
         }
     }
 
@@ -1821,7 +1828,7 @@ impl Probe {
         if let Some(before) = before {
             if self.open_sample.is_some() {
                 let after = self.echo_snapshot();
-                self.attribute(&DispatchObservation { before, after, advanced }, ended);
+                self.attribute(&DispatchObservation { before, after, advanced }, started, ended);
             }
         }
         if matches!(self.stage, Stage::Steps(_)) {
@@ -1829,34 +1836,66 @@ impl Probe {
         }
     }
 
-    /// Settle the open sample from one observed dispatch that ended at `ended`.
-    fn attribute(&mut self, observation: &DispatchObservation, ended: Instant) {
+    /// Settle the open sample from one observed dispatch, the forward that ran `started..ended`.
+    fn attribute(&mut self, observation: &DispatchObservation, started: Instant, ended: Instant) {
         match attribute_dispatch(observation) {
             Attribution::Pending => {}
             Attribution::Credited => {
                 if let Some(sample) = self.open_sample.take() {
-                    // The take runs after both snapshots have released the parser lock.
+                    // The takes run after both snapshots have released the parser lock.
                     let main = self.measurement_window();
+                    let mut timeline = unarmed_timeline(sample.arm);
                     let outcome = echo_outcome(sample.arm, |token| {
-                        echo_api::take(&mut self.app, sample.pane, token, main)
+                        let (outcome, drained) =
+                            echo_api::take(&mut self.app, sample.pane, token, main);
+                        timeline = Some(drained);
+                        outcome
                     });
-                    // The credited close takes the sample's dispatch timeline too.
-                    let timeline = sample.timeline.close(&mut self.app, &mut self.timeline_storage);
+                    let (outcome, timeline) = self.credited_take(outcome, timeline);
+                    // The credited close takes the sample's dispatch timeline too, after the echo take; neither
+                    // reads a clock the other's evidence uses, and both keep this forward's `started`/`ended`.
+                    let dispatch_timeline =
+                        sample.timeline.close(&mut self.app, &mut self.timeline_storage);
                     let changed = snapshot_identity_changed(observation, sample.identity);
-                    self.samples.push(
-                        LatencySample::credited(
-                            sample.inject_unix_s,
-                            sample.injected,
-                            ended,
-                            &outcome,
-                            changed,
-                        )
-                        .with_dispatch_timeline(timeline.as_str()),
-                    );
+                    let credited = LatencySample::credited(
+                        sample.inject_unix_s,
+                        sample.injected,
+                        ended,
+                        &outcome,
+                        changed,
+                    )
+                    .with_dispatch_timeline(dispatch_timeline.as_str());
+                    // The credited forward bounds the dispatch pair the timeline binds.
+                    let context = Credited {
+                        injected: sample.injected,
+                        forward_started: started,
+                        ended,
+                        split: credited.split,
+                        split_reason: credited.split_reason,
+                        token: armed_token(sample.arm),
+                        window: main.map(u64::from),
+                        pane: sample.pane,
+                    };
+                    let echo_timeline = timeline.map(|take| analyze(&take, &context));
+                    self.samples.push(credited.with_timeline(echo_timeline));
                 }
             }
             Attribution::Unattributed(reason) => self.close_sample(reason),
         }
+    }
+
+    /// The credited sample's takes: the App's, or in a test the controlled pair it set.
+    fn credited_take(
+        &mut self,
+        outcome: EchoOutcome,
+        timeline: Option<TimelineTake>,
+    ) -> (EchoOutcome, Option<TimelineTake>) {
+        #[cfg(test)]
+        if let Some((outcome, timeline)) = self.test_take.take() {
+            // When: `test_take` is set, a test supplies this sample's evidence through the production handoff.
+            return (outcome, Some(timeline));
+        }
+        (outcome, timeline)
     }
 
     /// Close the open sample, if any, as unattributed; an armed watch is disarmed and its record
@@ -3531,8 +3570,9 @@ impl Probe {
     }
 
     /// Close the previous sample and open the next character's: arm its dispatch timeline, then read the
-    /// injection instant from `clock`, then arm its echo watch (only for S2/default); returns the character
-    /// to type, or `None` when typing is done or the prompt is not yet found. Needs no event loop.
+    /// injection instant from `clock`, then arm its echo watch, only for the variants `split_in_scope`
+    /// names (S2/default and S2/flood); returns the character to type, or `None` when typing is done or
+    /// the prompt is not yet found. Needs no event loop.
     fn open_typing_sample(&mut self, clock: impl FnOnce() -> Instant) -> Option<char> {
         let DriverState::Typing(typing) = &mut self.driver else {
             return None;
@@ -3563,7 +3603,7 @@ impl Probe {
         let arm = if split_in_scope(self.plan.scenario, self.plan.variant) {
             echo_api::arm(&mut self.app, pane, &target, identity)
         } else {
-            // When: the plan is not S2/default, its samples are never armed and read unsupported.
+            // When: the plan is outside `split_in_scope`, its samples are never armed and read unsupported.
             ArmState::OutOfScope
         };
         let inject_unix_s = unix_now();

@@ -390,6 +390,20 @@ const DISPATCH_TIMELINE_CALLS: &[&str] = &[
     "AppearanceTargetV1",
 ];
 
+/// The gate of the App's V1 echo-timeline accessor: the echo trace feature and the harness-only cfg.
+const TIMELINE_GATE: &str = "#[cfg(all(feature = \"perf-echo-trace\", perf_echo_timeline_api))]";
+
+/// The App API the harness may name only behind the timeline gate; v1.3.8 has none of it.
+const TIMELINE_CALLS: &[&str] = &[
+    "take_echo_timeline_v1",
+    "EchoTimelineTakeV1",
+    "EchoTimelineKindV1",
+    "EchoTimelineV1",
+    "AdmissionDecisionV1",
+    "OutputCheckOutcomeV1",
+    "TickIdentityV1",
+];
+
 /// The trim hook's gate.
 const TRIM_HOOK_GATE: &str = "#[cfg(feature = \"perf-hook-trim\")]";
 
@@ -658,7 +672,7 @@ fn gate_off_run_reads_arm_gate_off_for_every_credited_sample() {
         .map(|index| {
             let target = echo_target((0, 6), 80, index);
             let arm = echo_api::arm(&mut app, pane, &target, RowIdentity::default());
-            let outcome = echo_outcome(arm, |token| echo_api::take(&mut app, pane, token, None));
+            let outcome = echo_outcome(arm, |token| echo_api::take(&mut app, pane, token, None).0);
             let ended = injected + std::time::Duration::from_millis(u64::from(index) + 1);
             LatencySample::credited(f64::from(index), injected, ended, &outcome, false)
         })
@@ -1088,5 +1102,33 @@ fn every_dispatch_timeline_api_call_in_the_harness_is_behind_its_cfg() {
     assert_eq!(
         ungated_calls(&fixture, DISPATCH_TIMELINE_GATE, DISPATCH_TIMELINE_CALLS),
         vec!["9: take_dispatch_timeline_v1".to_owned(), "8: DispatchTimelineToken".to_owned()]
+    );
+}
+
+/// Every name of the App's V1 echo-timeline accessor in the harness sits behind its gate:
+/// perf-compare overlays this harness onto trees whose App has no such accessor and builds it there
+/// with the cfg off. A name outside the gated item is reported.
+#[test]
+fn every_echo_timeline_api_call_in_the_harness_is_behind_its_cfg() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/perf_scenarios");
+    let mut scanned = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let entry_path = entry.unwrap().path();
+        let name = entry_path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+            continue;
+        }
+        scanned += 1;
+        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let found = ungated_calls(&source, TIMELINE_GATE, TIMELINE_CALLS);
+        assert!(found.is_empty(), "{name}: {found:#?}");
+    }
+    assert!(scanned >= 10, "the harness sources were not found");
+    let fixture = format!(
+        "{TIMELINE_GATE}\nmod on {{\n    fn take(app: &mut App) {{ app.take_echo_timeline_v1(1, token); }}\n}}\n\nfn off(app: &mut App) {{\n    app.take_echo_timeline_v1(1, token);\n}}\n"
+    );
+    assert_eq!(
+        ungated_calls(&fixture, TIMELINE_GATE, TIMELINE_CALLS),
+        vec!["7: take_echo_timeline_v1".to_owned()]
     );
 }

@@ -28,6 +28,8 @@ mod record;
 mod scan_throttle;
 mod scenarios;
 #[cfg(any(target_os = "macos", windows, test))]
+mod timeline;
+#[cfg(any(target_os = "macos", windows, test))]
 mod transition;
 #[cfg(any(target_os = "macos", windows, test))]
 mod waits;

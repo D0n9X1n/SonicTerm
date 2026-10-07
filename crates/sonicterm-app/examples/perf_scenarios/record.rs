@@ -201,11 +201,12 @@ pub(crate) fn attribute_dispatch(observation: &DispatchObservation) -> Attributi
     }
 }
 
-/// Whether a sample of `scenario`/`variant` is split at the flush: only S2's single idle pane.
-/// S2/flood types into a pane beside a flood, so its samples are never armed.
+/// Whether a sample of `scenario`/`variant` is split at the flush and armed for its echo timeline: S2's
+/// single idle pane and S2/flood's typing pane beside the flood. Both sides of a comparison arm the same
+/// variants with the same overlaid harness, so the watch's cost is symmetric within a run.
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub(crate) fn split_in_scope(scenario: &str, variant: &str) -> bool {
-    (scenario, variant) == ("S2", "default")
+    scenario == "S2" && matches!(variant, "default" | "flood")
 }
 
 // The split schema lives in `scenarios`, which every build compiles, because `--list` declares it
@@ -244,7 +245,7 @@ pub(crate) const SPLIT_REASONS: [&str; 22] = [
 /// How an open sample's echo watch was armed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ArmState {
-    /// The sample is outside the split's scope (not S2/default); nothing was armed.
+    /// The sample is outside `split_in_scope` (neither S2/default nor S2/flood); nothing was armed.
     #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     OutOfScope,
     /// This build has no `perf-echo-trace`; nothing was armed.
@@ -516,6 +517,8 @@ pub(crate) struct LatencySample {
     /// What the sample's dispatch timeline came to at its close; [`TIMELINE_NOT_TAKEN`] until a close
     /// records it.
     pub(crate) dispatch_timeline: &'static str,
+    /// The credited sample's echo timeline; `None` when uncredited or out of the timeline's scope.
+    pub(crate) echo_timeline: Option<crate::timeline::TimelineSample>,
 }
 
 /// A sample whose close has not recorded its dispatch timeline: every probe close path records one, so
@@ -532,12 +535,22 @@ impl LatencySample {
             split: None,
             split_reason: NOT_CREDITED,
             dispatch_timeline: TIMELINE_NOT_TAKEN,
+            echo_timeline: None,
         }
     }
 
     /// This sample with its dispatch timeline's disposition, recorded at its close.
     pub(crate) fn with_dispatch_timeline(self, dispatch_timeline: &'static str) -> Self {
         Self { dispatch_timeline, ..self }
+    }
+
+    /// This sample with its credited echo timeline.
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+    pub(crate) fn with_timeline(
+        self,
+        echo_timeline: Option<crate::timeline::TimelineSample>,
+    ) -> Self {
+        Self { echo_timeline, ..self }
     }
 
     /// A sample injected at `injected` and credited to the dispatch that ended at `ended`, split
@@ -566,6 +579,7 @@ impl LatencySample {
             split,
             split_reason,
             dispatch_timeline: TIMELINE_NOT_TAKEN,
+            echo_timeline: None,
         }
     }
 }
@@ -576,7 +590,7 @@ impl Serialize for LatencySample {
         serializer: Format,
     ) -> Result<Format::Ok, Format::Error> {
         // `attributed` is derived from `latency_ms`, so a reader need not infer it.
-        let mut fields = serializer.serialize_struct("LatencySample", 7)?;
+        let mut fields = serializer.serialize_struct("LatencySample", 8)?;
         fields.serialize_field("inject_unix_s", &self.inject_unix_s)?;
         fields.serialize_field("latency_ms", &self.latency_ms)?;
         fields.serialize_field("attributed", &self.latency_ms.is_some())?;
@@ -584,6 +598,8 @@ impl Serialize for LatencySample {
         fields.serialize_field("split", &self.split)?;
         fields.serialize_field("split_reason", self.split_reason)?;
         fields.serialize_field("dispatch_timeline", self.dispatch_timeline)?;
+        let timeline = self.echo_timeline.map(crate::timeline::TimelineSample::to_json);
+        fields.serialize_field("echo_timeline", &timeline)?;
         fields.end()
     }
 }
@@ -610,7 +626,13 @@ impl Serialize for LatencyReport<'_> {
         }
         let split_count = reasons.get(SPLIT).copied().unwrap_or(0);
         let split_coverage = (attributed > 0).then(|| split_count as f64 / attributed as f64);
-        let mut fields = serializer.serialize_struct("LatencyReport", 8)?;
+        // Only credited samples carry a timeline; its coverage is recomputed from their fields.
+        let timelines = samples
+            .iter()
+            .filter(|sample| sample.latency_ms.is_some())
+            .filter_map(|sample| sample.echo_timeline.as_ref());
+        let timeline_coverage = crate::timeline::coverage(timelines);
+        let mut fields = serializer.serialize_struct("LatencyReport", 9)?;
         fields.serialize_field("samples", samples)?;
         fields.serialize_field("attributed", &attributed)?;
         fields.serialize_field("total", &samples.len())?;
@@ -619,6 +641,7 @@ impl Serialize for LatencyReport<'_> {
         fields.serialize_field("split_count", &split_count)?;
         fields.serialize_field("split_reasons", &reasons)?;
         fields.serialize_field("split_coverage", &split_coverage)?;
+        fields.serialize_field("echo_timeline_coverage", &timeline_coverage)?;
         fields.end()
     }
 }
@@ -636,6 +659,7 @@ pub(crate) mod echo_api {
         AppearanceFacts, ArmState, Delivery, DeliveryFacts, EchoOutcome, EchoTarget,
         PublicationFacts, PublicationWindow, RowIdentity, TraceFacts,
     };
+    use crate::timeline::TimelineTake;
 
     /// The App's arm token.
     pub(crate) type EchoToken = ArmToken;
@@ -666,26 +690,39 @@ pub(crate) mod echo_api {
         }
     }
 
-    /// Take `pane`'s record for `token`, reading publications against the measurement window `main`.
+    /// Take `pane`'s record for `token`, reading publications against the measurement window `main`,
+    /// then drain its timeline, so no transfer is left behind on any take.
     pub(crate) fn take(
         app: &mut App,
         pane: u64,
         token: EchoToken,
         main: Option<WindowId>,
-    ) -> EchoOutcome {
-        match app.take_echo_watch(pane, token) {
+    ) -> (EchoOutcome, TimelineTake) {
+        let taken = app.take_echo_watch(pane, token);
+        let armed_at = match &taken {
+            TakeOutcome::Trace(trace) => Some(trace.armed_at),
+            _ => None,
+        };
+        let outcome = match taken {
             TakeOutcome::Trace(trace) => EchoOutcome::Taken(facts_of(&trace, main)),
             TakeOutcome::GateOff => EchoOutcome::Failed("take-gate-off"),
             TakeOutcome::NoPane => EchoOutcome::Failed("take-no-pane"),
             TakeOutcome::Mismatch => EchoOutcome::Failed("take-mismatch"),
             TakeOutcome::AlreadyTaken => EchoOutcome::Failed("take-already-taken"),
-        }
+        };
+        (outcome, crate::timeline::adapter::drain(app, pane, token, armed_at))
     }
 
-    /// Disarm `pane`'s watch for `token`, discarding its record.
+    /// Disarm `pane`'s watch for `token` and drain its timeline, discarding both records.
     pub(crate) fn discard(app: &mut App, pane: u64, token: EchoToken) {
-        // The record of an uncredited sample is not used; the take only disarms the watch.
+        // The records of an uncredited sample are not used; the takes only disarm and drain.
         let _ = app.take_echo_watch(pane, token);
+        let _ = crate::timeline::adapter::drain(app, pane, token, None);
+    }
+
+    /// The token's number, an identity a timeline sample records.
+    pub(crate) fn token_number(token: EchoToken) -> u64 {
+        token.get()
     }
 
     /// The App's record in the harness's types.
@@ -749,7 +786,13 @@ pub(crate) mod echo_api {
         _pane: u64,
         token: EchoToken,
         _main: Option<WindowId>,
-    ) -> EchoOutcome {
+    ) -> (EchoOutcome, crate::timeline::TimelineTake) {
+        match token {}
+    }
+
+    /// Unreachable: no token exists.
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+    pub(crate) fn token_number(token: EchoToken) -> u64 {
         match token {}
     }
 
@@ -761,6 +804,15 @@ pub(crate) mod echo_api {
 }
 
 pub(crate) use echo_api::EchoToken;
+
+/// The arm token's number when the sample was armed; never invented otherwise.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+pub(crate) fn armed_token(arm: ArmState) -> Option<u64> {
+    match arm {
+        ArmState::Armed(token) => Some(echo_api::token_number(token)),
+        ArmState::OutOfScope | ArmState::Unsupported | ArmState::Failed(_) => None,
+    }
+}
 
 /// Whether a visible row from the cursor's row up to `rows_above` rows above it starts with `text`.
 #[cfg_attr(not(test), allow(dead_code))]
