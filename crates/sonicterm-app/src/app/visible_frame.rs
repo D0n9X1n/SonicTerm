@@ -109,6 +109,8 @@ struct VisibleSource {
 /// Source handles own the mutexes for the entire lifetime of the borrowed guards.
 pub(super) struct VisibleFrameSources {
     entries: Vec<VisibleSource>,
+    /// The App's custody totals when it counts; then a collection times its guard custody and dispatch.
+    counted: Option<Arc<super::guard_custody::CustodyTotals>>,
     pub(super) tab_index: usize,
     pub(super) active_pos: usize,
     #[cfg(test)]
@@ -124,6 +126,10 @@ pub(super) type ParserGuards<'a> = Vec<(u64, MutexGuard<'a, Parser>, Rect)>;
 pub(super) struct HeldVisibleFrame<'a, S = ()> {
     pub(super) snapshot: S,
     pub(super) guards: ParserGuards<'a>,
+    /// The frame's guard custody when its App counts; declared after `guards`, so it records after them.
+    pub(super) custody: Option<super::guard_custody::GuardCustody>,
+    /// The frame's dispatch interval when its App counts.
+    pub(super) dispatch: Option<super::guard_custody::DispatchClock>,
     pub(super) images: Vec<Vec<InlineImage>>,
 }
 
@@ -165,6 +171,7 @@ impl VisibleFrameSources {
         }
         Ok(Self {
             entries,
+            counted: None,
             tab_index,
             active_pos: layout.active_pos,
             #[cfg(test)]
@@ -194,27 +201,39 @@ impl VisibleFrameSources {
         before_first_lock: impl FnOnce() -> S,
     ) -> Result<HeldVisibleFrame<'_, S>, FrameUnavailable> {
         let snapshot = before_first_lock();
+        // Custody and dispatch start at the first guard acquired, and only when the App counts. Declared
+        // before `guards`, so an unwind drops every guard before the timing records.
+        let mut timing = None;
         let mut guards = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
-            let parser = entry
-                .parser
-                .try_lock()
-                .ok_or(FrameUnavailable::Contended { pane_id: entry.id, images: false })?;
+            let Some(parser) = entry.parser.try_lock() else {
+                // When: a parser is contended, the earlier guards are released, then their custody closes.
+                drop(guards);
+                drop(timing);
+                return Err(FrameUnavailable::Contended { pane_id: entry.id, images: false });
+            };
+            if timing.is_none() {
+                timing = self.counted.as_ref().map(super::guard_custody::start);
+            }
             guards.push((entry.id, parser, entry.rect));
         }
         let mut images = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             #[cfg(test)]
             self.image_visits.borrow_mut().push(entry.id);
-            let store = entry
-                .images
-                .try_lock()
-                .ok_or(FrameUnavailable::Contended { pane_id: entry.id, images: true })?;
+            let Some(store) = entry.images.try_lock() else {
+                // When: an image store is contended, the guards are released, then their custody closes.
+                drop(images);
+                drop(guards);
+                drop(timing);
+                return Err(FrameUnavailable::Contended { pane_id: entry.id, images: true });
+            };
             images.push(store.clone());
             #[cfg(test)]
             self.image_clones.borrow_mut().push((entry.id, store.len()));
         }
-        Ok(HeldVisibleFrame { snapshot, guards, images })
+        let (custody, dispatch) = timing.unzip();
+        Ok(HeldVisibleFrame { snapshot, guards, custody, dispatch, images })
     }
 
     /// Resolve the captured viewport anchors against the held grids and commit the same projections.
@@ -328,6 +347,8 @@ pub(super) fn apply_ticket(ticket: &AckTicket, guards: &mut ParserGuards<'_>) ->
 /// snapshots, so they are released when `lend` returns, before the frame is presented.
 pub(super) struct HeldFrameSource<'guard, 'window> {
     pub(super) guards: ParserGuards<'guard>,
+    /// The frame's guard custody; declared after `guards`, so it records right after the last release.
+    pub(super) custody: Option<super::guard_custody::GuardCustody>,
     pub(super) images: Vec<Vec<InlineImage>>,
     pub(super) viewports: &'window FrameViewports,
     pub(super) active: u64,
@@ -348,8 +369,13 @@ impl FrameSource for HeldFrameSource<'_, '_> {
             self.broadcast,
             self.scrollbar_alpha,
         );
-        // `panes`, then `self.guards`, drop when this returns, before the caller presents.
-        assemble(&mut panes)
+        let assembled = assemble(&mut panes);
+        // Release in order before the caller presents: the borrows, every guard, then the custody,
+        // which records the interval to the last release.
+        drop(panes);
+        drop(self.guards);
+        drop(self.custody);
+        assembled
     }
 }
 
@@ -409,7 +435,11 @@ impl App {
         outer: Rect,
     ) -> Result<VisibleFrameSources, FrameUnavailable> {
         let window = self.windows.get(&id).ok_or(FrameUnavailable::NoLayout)?;
-        VisibleFrameSources::capture(window, outer)
+        let mut sources = VisibleFrameSources::capture(window, outer)?;
+        // A counting App times each frame's guard custody; otherwise no handle is cloned.
+        sources.counted =
+            self.frame_counters.as_ref().map(|counters| Arc::clone(&counters.custody));
+        Ok(sources)
     }
 
     /// Only genuine visible contention enters the existing retry-floor adapter.

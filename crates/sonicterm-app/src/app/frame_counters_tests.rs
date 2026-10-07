@@ -1770,3 +1770,50 @@ fn title_and_chrome_run_counters_leave_the_renderer_under_their_own_names() {
         assert_eq!(record.count(name), Some(value), "{name}");
     }
 }
+
+/// Each section also adds its lock wait to a nanosecond total and counts once, so a phase reads the
+/// workers' summed wait and the sections it covers as differences of two snapshots.
+#[test]
+fn a_section_adds_its_wait_to_the_nanosecond_total_and_counts_once() {
+    let stats = VtFrameStats::default();
+    let start = Instant::now();
+    for wait_us in [20, 5] {
+        let locked_at = after_us(start, wait_us);
+        let times = VtSectionTimes {
+            before_lock: start,
+            locked_at,
+            parsed_at: locked_at,
+            released_at: locked_at,
+        };
+        stats.record_section(&times, 1);
+    }
+    assert_eq!(stats.parser_lock_wait_ns.load(Ordering::Relaxed), 25_000);
+    assert_eq!(stats.parser_sections.load(Ordering::Relaxed), 2);
+}
+
+/// The App record carries the worker-wait totals and the guard-custody and frame-dispatch totals by
+/// name, each a supported zero before any frame, so a head always reports them.
+#[test]
+fn the_app_record_names_the_guard_and_wait_totals() {
+    let counters = AppFrameCounters::new();
+    let names = [
+        "parser_lock_wait_ns",
+        "parser_sections",
+        "ui_guard_custody_ns",
+        "ui_guard_custodies",
+        "frame_dispatch_ns",
+        "frame_dispatches",
+        "frame_dispatch_failed_ns",
+        "frame_dispatches_failed",
+    ];
+    for name in names {
+        assert_eq!(counters.record().count(name), Some(0), "{name}");
+    }
+    counters.custody.dispatches_failed.fetch_add(4, Ordering::Relaxed);
+    counters.vt.parser_sections.fetch_add(7, Ordering::Relaxed);
+    let record = counters.record();
+    assert_eq!(
+        (record.count("frame_dispatches_failed"), record.count("parser_sections")),
+        (Some(4), Some(7))
+    );
+}

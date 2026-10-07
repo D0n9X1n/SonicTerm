@@ -613,6 +613,10 @@ pub(crate) struct VtFrameStats {
     pub(crate) flushes_suppressed: AtomicU64,
     /// Synchronized updates (DEC 2026) a worker released at the 150 ms bound, not at their reset.
     pub(crate) sync_timeouts: AtomicU64,
+    /// Nanoseconds the workers waited for a parser lock, summed over every section.
+    pub(crate) parser_lock_wait_ns: AtomicU64,
+    /// Parser sections recorded; the count `parser_lock_wait_ns` sums over.
+    pub(crate) parser_sections: AtomicU64,
 }
 
 impl Default for VtFrameStats {
@@ -628,15 +632,23 @@ impl Default for VtFrameStats {
             flushes_coalesced: AtomicU64::new(0),
             flushes_suppressed: AtomicU64::new(0),
             sync_timeouts: AtomicU64::new(0),
+            parser_lock_wait_ns: AtomicU64::new(0),
+            parser_sections: AtomicU64::new(0),
         }
     }
 }
 
 impl VtFrameStats {
-    /// Record one parser section after its guard dropped: wait, parse and hold, and its bytes.
-    // Ordering: parse_bytes uses Relaxed; the counts are statistics and order nothing.
+    /// Record one parser section after its guard dropped: wait, parse and hold, its bytes, and the wait's
+    /// nanosecond total and section count.
+    // A seam for span correlation: this section's lock-acquisition interval would be kept here, per pane.
+    // Ordering: parse_bytes, parser_lock_wait_ns and parser_sections use Relaxed; statistics, ordering nothing.
     pub(crate) fn record_section(&self, times: &VtSectionTimes, parsed_bytes: u64) {
         self.parser_lock_wait.record_us(micros_between(times.before_lock, times.locked_at));
+        let wait = times.locked_at.saturating_duration_since(times.before_lock);
+        let wait_ns = u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX);
+        self.parser_lock_wait_ns.fetch_add(wait_ns, Ordering::Relaxed);
+        self.parser_sections.fetch_add(1, Ordering::Relaxed);
         self.parse.record_us(micros_between(times.locked_at, times.parsed_at));
         self.parser_lock_hold.record_us(micros_between(times.locked_at, times.released_at));
         self.parse_bytes.fetch_add(parsed_bytes, Ordering::Relaxed);
@@ -730,6 +742,8 @@ pub(crate) struct AppFrameCounters {
     pub(crate) vt: Arc<VtFrameStats>,
     /// Event-loop-thread parser waits, drained at each dispatch end.
     pub(crate) dispatch: Arc<DispatchTotals>,
+    /// Every counting frame's parser-guard custody and dispatch interval.
+    pub(crate) custody: Arc<super::guard_custody::CustodyTotals>,
     /// Foreground-probe worker statistics, shared with the App's worker when it starts.
     pub(crate) fg_worker: Arc<super::fg_probe::ForegroundWorkerStats>,
     /// `new_events` wakes by `StartCause::Init`.
@@ -786,10 +800,12 @@ pub(crate) enum DispatchKind {
 }
 
 impl AppFrameCounters {
-    fn new() -> Self {
+    /// Builds zeroed counters, as the gate does when it is on; app-module tests enable counting with it.
+    pub(super) fn new() -> Self {
         Self {
             vt: Arc::new(VtFrameStats::default()),
             dispatch: Arc::new(DispatchTotals::default()),
+            custody: Arc::default(),
             fg_worker: Arc::new(super::fg_probe::ForegroundWorkerStats::default()),
             wake_init: 0,
             wake_poll: 0,
@@ -1502,6 +1518,14 @@ impl AppFrameCounters {
             ("flushes_suppressed", &vt.flushes_suppressed),
             ("sync_timeouts", &vt.sync_timeouts),
             ("ui_parser_locks", &dispatch.locks),
+            ("parser_lock_wait_ns", &vt.parser_lock_wait_ns),
+            ("parser_sections", &vt.parser_sections),
+            ("ui_guard_custody_ns", &self.custody.custody_ns),
+            ("ui_guard_custodies", &self.custody.custodies),
+            ("frame_dispatch_ns", &self.custody.dispatch_ns),
+            ("frame_dispatches", &self.custody.dispatches),
+            ("frame_dispatch_failed_ns", &self.custody.dispatch_failed_ns),
+            ("frame_dispatches_failed", &self.custody.dispatches_failed),
             ("fg_worker_probes", &self.fg_worker.probes),
             ("fg_worker_panes", &self.fg_worker.panes),
             ("fg_results_stale", &self.fg_worker.stale),

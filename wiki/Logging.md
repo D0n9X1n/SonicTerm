@@ -443,6 +443,12 @@ coalesced flushes.
 | `user_event` | ms histogram | each `user_event` dispatch |
 | `new_events` | ms histogram | each `new_events` dispatch |
 | `ui_parser_locks` | count | event-loop-thread locks of a pane's parser |
+| `ui_guard_custody_ns` | count (ns) | summed time a frame held any parser guard, from the first guard acquired to the last released, over every collection that took a guard, early failures included |
+| `ui_guard_custodies` | count | collections that took at least one parser guard |
+| `frame_dispatch_ns` | count (ns) | summed time from a frame's first parser guard to the return of the renderer call, over frames that reached the renderer |
+| `frame_dispatches` | count | frames that reached the renderer |
+| `frame_dispatch_failed_ns` | count (ns) | summed time from the first parser guard to the release, over collections that took a guard but never reached the renderer (contention, a synchronized-output hold, a reconcile failure, no renderer); their own population |
+| `frame_dispatches_failed` | count | those failed collections |
 | `ui_parser_wait` | µs histogram | the wait for each of those locks |
 | `fg_probe_calls`, `fg_probe_panes` | count | retired event-loop probes; always 0, kept so a comparison against an older base shows that work falling to 0 |
 | `fg_probe` | µs histogram | retired event-loop probe durations; always empty, kept for the same comparison |
@@ -466,6 +472,8 @@ or whose worker finishes after it, still adds to it.
 | Field | Unit | Meaning |
 | --- | --- | --- |
 | `parser_lock_wait` | µs histogram | the VT worker's wait for a pane's parser lock |
+| `parser_lock_wait_ns` | count (ns) | the same waits summed in nanoseconds, over every section |
+| `parser_sections` | count | parser sections recorded, the count `parser_lock_wait_ns` sums over |
 | `parser_lock_hold` | µs histogram | how long the worker held that lock |
 | `parse` | µs histogram | parsing under the lock |
 | `parse_bytes` | bytes | bytes parsed |
