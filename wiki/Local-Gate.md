@@ -401,13 +401,15 @@ macOS execution, and a direct example invocation without `--run` is not acceptan
 
 `perf-scenarios-tests` runs the harness's own unit tests,
 `cargo test --locked -p sonicterm-app --example perf_scenarios`, on every host and in `macos-core`,
-`windows-tests` and `linux-core`, because the `cargo test --workspace --lib --bins --tests` that
+`windows-tests-harness` and `linux-core`, because the `cargo test --workspace --lib --bins --tests` that
 `workspace-crates` runs skips examples. `perf-scenarios-counters-tests` runs the same tests with
 `--features perf-counters` in the same jobs, and `perf-scenarios-counters-clippy` lints the example
 with the feature wherever `clippy` runs (`macos-core`, `windows-checks` and `linux-core`), so the
 counter code is built, tested and linted on every host. `perf-scenarios-frame-texture-tests` and
 `perf-scenarios-frame-texture-clippy` do the same with `--features perf-frame-texture`, which compiles
-in the harness's frame-texture reading.
+in the harness's frame-texture reading. On Windows the feature tests run in the
+`windows-tests-harness-features` shard instead, beside the glyph working-set measurement, so CI runs each
+feature's tests exactly once per platform rather than in the plain tests' job.
 
 `macos-perf-smoke` checks the comparison tooling, not performance. It runs
 `python3 scripts/perf-compare.py --smoke`, which builds the current tree's
@@ -605,7 +607,7 @@ The local budget is 70 minutes (4200 s): the 25-minute cold-build allowance
 (1500 s), up to 4 runs of 100 s for each of the five Windows cases (2000 s), and
 up to 3 attempts of 100 s for the S10/sync delivery replay (300 s), which makes a
 3800 s worst case, plus 400 s of headroom. The
-required `windows-tests` CI job runs the build and then the smoke, after
+required `windows-tests-runtime` CI job runs the build and then the smoke, after
 "Verify Windows selection presentation", and uploads the evidence directory when
 the smoke fails or passes after a retried delivery replay. The CI parity check fails when either step gains an `if:` or
 `continue-on-error:`, or when the smoke comes before the build. A hosted Windows

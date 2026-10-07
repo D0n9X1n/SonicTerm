@@ -96,6 +96,101 @@ def findings_for(document: str, name: str = "ci.yml"):
         return checker.check(root)
 
 
+# The parallel Windows jobs that replaced the single Windows test job, in ci.yml order.
+WINDOWS_TEST_SHARDS = (
+    "windows-tests-workspace",
+    "windows-tests-harness",
+    "windows-tests-harness-features",
+    "windows-tests-harness-api",
+    "windows-tests-runtime",
+)
+
+
+# The non-setup steps of the single Windows test job at cac36ca4, main's tip when the split was rebased,
+# verbatim. Each must appear exactly once across the parallel Windows test shards, unchanged, in this
+# relative order within its shard.
+WINDOWS_TEST_WORK = (
+    '      - name: Measure PTY close baseline\n        run: cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture\n',
+    '      - name: Run workspace unit and integration tests\n        shell: bash\n        run: bash scripts/check-workspace-crates.sh\n',
+    '      - name: Run workspace documentation tests\n        run: cargo test --workspace --doc --no-fail-fast\n',
+    '      - name: Run scenario harness unit tests\n        run: cargo test --locked -p sonicterm-app --example perf_scenarios\n',
+    '      - name: Run scenario harness unit tests with frame counters\n        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim\n',
+    '      - name: Measure the glyph atlas working set\n        run: cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture\n',
+    '      - name: Run scenario harness unit tests with the frame texture reading\n        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture\n',
+    '      - name: Run scenario harness unit tests with the echo trace\n        run: cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace\n',
+    '      - name: Run scenario harness unit tests with the harness API cfgs\n        shell: bash\n        run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim\n',
+    '      - name: Report host window capability\n        run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture\n',
+    '      - name: Report host adapter classification\n        run: cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture\n',
+    '      - name: Report renderer churn baseline\n        run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture\n',
+    '      - name: Require Windows GDI capability=EXERCISED\n        shell: pwsh\n        run: |\n          python scripts/native-smoke-runner.py `\n            --timeout-seconds 120 `\n            --log-file "$env:RUNNER_TEMP\\sonicterm-windows-gdi.log" `\n            --require-capability EXERCISED `\n            -- cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture\n',
+    '      - name: Upload Windows GDI probe log\n        if: ${{ failure() }}\n        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n        with:\n          name: sonicterm-windows-gdi-log-${{ github.sha }}\n          path: ${{ runner.temp }}/sonicterm-windows-gdi.log\n          if-no-files-found: ignore\n',
+    '      - name: Verify Windows WARP allocator baseline\n        run: cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture\n',
+    '      - name: Verify Windows selection presentation\n        run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture\n',
+    '      - name: Build Windows perf scenario harness\n        run: cargo build --locked -p sonicterm-app --example perf_scenarios\n',
+    '      - name: Require Windows perf scenario smoke\n        run: python scripts/perf-compare.py --smoke\n',
+    "      - name: Upload Windows perf scenario smoke evidence\n        if: ${{ (failure() || env.SONICTERM_PERF_REPLAY_RETRIED == '1') && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}\n        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n        with:\n          name: sonicterm-windows-perf-smoke-${{ github.sha }}\n          path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}\n          if-no-files-found: error\n",
+    '      - name: Test MSI validator\n        shell: pwsh\n        run: .\\scripts\\validate-windows-msi_tests.ps1\n',
+    '      - name: Run release-note unit test\n        shell: bash\n        run: bash scripts/test-release-notes.sh\n',
+    '      - name: Test wiki publisher\n        shell: bash\n        run: bash scripts/test-wiki-publish.sh\n',
+    '      - name: Verify frozen PTY feasibility evidence\n        shell: bash\n        run: bash scripts/pty-backend-feasibility.sh --check\n',
+    '      - name: Verify resource inventory\n        shell: bash\n        run: bash scripts/test-resource-inventory.sh\n',
+    '      - name: Run deterministic soak control gate\n        shell: bash\n        run: bash scripts/test-soak-harness.sh\n',
+    '      - name: Test resource baseline evidence collector\n        shell: bash\n        run: bash scripts/test-resource-baseline-evidence.sh\n',
+    '      - name: Capture real resource baseline evidence\n        id: capture_resource_baseline\n        shell: bash\n        run: |\n          python_cmd=python3\n          if ! command -v "$python_cmd" >/dev/null 2>&1; then\n            python_cmd=python\n          fi\n          "$python_cmd" scripts/resource-baseline-evidence.py \\\n            --runner-label windows-latest \\\n            --output-dir target/v1.2.0-baseline/evidence-windows-latest\n',
+    "      - name: Upload resource baseline evidence\n        if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}\n        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n        with:\n          name: resource-baseline-evidence-windows-latest\n          path: target/v1.2.0-baseline/evidence-windows-latest\n          if-no-files-found: error\n",
+)
+
+# Setup that every Windows test shard repeats on purpose; it gates nothing, so it is outside the inventory.
+WINDOWS_SHARD_SETUP = (
+    "uses: actions/checkout@",
+    "name: Install Rust",
+    "name: Resolve vcpkg commit",
+    "name: Restore vcpkg binaries (Cairo)",
+    "name: Install Cairo for Windows",
+    "name: Restore Cargo dependencies",
+)
+
+
+def windows_shard_problems(workflow: str) -> list[str]:
+    """Check that the Windows test shards keep every inventoried step exactly once, unchanged and in order."""
+    problems: list[str] = []
+    placements: dict[str, list[tuple[str, int]]] = {step: [] for step in WINDOWS_TEST_WORK}
+    keys: dict[str, str] = {}
+    for shard in WINDOWS_TEST_SHARDS:
+        if f"\n  {shard}:\n" not in workflow:
+            problems.append(f"ci.yml has no {shard} job")
+            continue
+        block = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", workflow.split(f"\n  {shard}:\n", 1)[1], maxsplit=1)[0]
+        if "    runs-on: windows-latest\n" not in block or "    needs: [windows-native]\n" not in block:
+            problems.append(f"{shard} must run on windows-latest after windows-native")
+        if re.search(r"(?m)^    (?:if|continue-on-error):", block):
+            problems.append(f"{shard} must not be conditional or advisory")
+        key = re.findall(r"(?m)^          shared-key: (.+)$", block)
+        if len(key) != 1:
+            problems.append(f"{shard} needs one Cargo cache key")
+        elif key[0] in keys.values():
+            problems.append(f"{shard} shares its Cargo cache key")
+        else:
+            keys[shard] = key[0]
+        steps = [step.rstrip("\n") + "\n" for step in re.split(r"(?m)^(?=      - )", block.split("    steps:\n", 1)[-1])
+                 if step.startswith("      - ")]
+        order = []
+        for step in steps:
+            if any(step.startswith("      - " + marker) for marker in WINDOWS_SHARD_SETUP):
+                continue
+            if step not in placements:
+                problems.append(f"{shard} runs a step outside the inventory: {step.splitlines()[0].strip()}")
+                continue
+            placements[step].append((shard, len(order)))
+            order.append(WINDOWS_TEST_WORK.index(step))
+        if order != sorted(order):
+            problems.append(f"{shard} reorders its inventoried steps")
+    for step, places in placements.items():
+        if len(places) != 1:
+            problems.append(f"`{step.splitlines()[0].strip()}` runs {len(places)} times across the Windows shards")
+    return problems
+
+
 def job_block(workflow_name: str, job_name: str) -> str:
     """Return one repository job's text, bounded by the next job key."""
     text = (_HERE.parent / ".github" / "workflows" / workflow_name).read_text(
@@ -412,7 +507,7 @@ class RepositoryTests(unittest.TestCase):
     def test_pty_close_baseline_follows_cargo_restore_on_every_desktop(self):
         # Capture the before/after measurement before later gates, including compilation in the same step.
         command = "cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture"
-        for job in ("macos-core", "windows-tests", "linux-core"):
+        for job in ("macos-core", "windows-tests-workspace", "linux-core"):
             with self.subTest(job=job):
                 block = job_block("ci.yml", job)
                 steps = re.split(r"(?m)^      - ", block)[1:]
@@ -479,12 +574,7 @@ class RepositoryTests(unittest.TestCase):
             ),
             "windows": (
                 "windows-latest / unit tests",
-                (
-                    "windows-native",
-                    "windows-checks",
-                    "windows-tests",
-                    "windows-smoke",
-                ),
+                ("windows-native", "windows-checks", *WINDOWS_TEST_SHARDS, "windows-smoke"),
             ),
             "linux": (
                 "ubuntu 22.04 / workspace, packages, X11, Wayland",
@@ -496,8 +586,14 @@ class RepositoryTests(unittest.TestCase):
             self.assertIn(f"name: {name}", block)
             self.assertIn(f"needs: [{', '.join(shards)}]", block)
             self.assertIn("if: always()", block)
+            loop = re.search(r"(?m)^          for result in (.*); do$", block)
+            self.assertIsNotNone(loop)
             for shard in shards:
-                self.assertIn(f"${{{{ needs.{shard}.result }}}}", block)
+                # Each shard's result is bound to a variable, and the loop tests that variable.
+                variable = re.search(rf"(?m)^          ([A-Z_]+): \$\{{{{ needs\.{re.escape(shard)}\.result \}}}}$",
+                                     block)
+                self.assertIsNotNone(variable, shard)
+                self.assertIn(f'"${variable[1]}"', loop[1].split(), shard)
             self.assertIn('test "$result" = "success"', block)
 
         for job, (name, shards) in contracts.items():
@@ -507,6 +603,10 @@ class RepositoryTests(unittest.TestCase):
                 assert_contract(job, block, name, shards)
                 with self.assertRaises(AssertionError):
                     assert_contract(job, block.replace("if: always()", "if: success()"), name, shards)
+                # Dropping one operand from the result loop leaves a shard unchecked even though it is needed.
+                operand = re.search(r'for result in ("\$[A-Z_]+") ', block)[1]
+                with self.assertRaises(AssertionError):
+                    assert_contract(job, block.replace(operand + " ", "", 1), name, shards)
                 with self.assertRaises(AssertionError):
                     assert_contract(
                         job,
@@ -552,22 +652,50 @@ class RepositoryTests(unittest.TestCase):
                 ).read_text(encoding="utf-8")
                 self.assertIn(f"-- {executable} --runtime-smoke", text)
 
+    def test_windows_shards_keep_every_test_job_step_exactly_once(self):
+        # The split must not drop, duplicate, edit or reorder any step of the former single Windows test job,
+        # including its uploads and their conditions; setup is repeated per shard and outside the inventory.
+        workflow = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertEqual(windows_shard_problems(workflow), [])
+        smoke_upload = next(step for step in WINDOWS_TEST_WORK if "name: Upload Windows perf scenario smoke" in step)
+        gdi_upload = next(step for step in WINDOWS_TEST_WORK if "name: Upload Windows GDI probe log" in step)
+        build = next(step for step in WINDOWS_TEST_WORK if "name: Build Windows perf scenario harness" in step)
+        smoke = next(step for step in WINDOWS_TEST_WORK if "name: Require Windows perf scenario smoke" in step)
+        workspace_key = "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-workspace\n"
+        harness_key = "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-harness\n"
+        mutations = {
+            "dropped step": workflow.replace(gdi_upload, "", 1),
+            "duplicated step": workflow.replace(build, build + "\n" + build, 1),
+            "lost upload condition": workflow.replace(smoke_upload, smoke_upload.replace("failure() || ", "", 1), 1),
+            # Steps are separated by one blank line in the file; the inventory strips it.
+            "reordered steps": workflow.replace(build + "\n" + smoke, smoke + "\n" + build, 1),
+            "advisory shard": workflow.replace("  windows-tests-harness:\n", "  windows-tests-harness:\n"
+                                               "    continue-on-error: true\n", 1),
+            "shared cache key": workflow.replace(harness_key, workspace_key, 1),
+        }
+        for label, mutated in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertTrue(mutated != workflow, "the mutation did not apply")
+                self.assertTrue(windows_shard_problems(mutated))
+
     def test_ci_caches_are_bounded_and_cairo_is_published_immediately(self):
         text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
         self.assertIn("CI_CACHE_NAMESPACE: ci-v3", text)
-        self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 8)
-        self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 8)
-        self.assertEqual(text.count("add-job-id-key: false"), 8)
-        self.assertEqual(text.count("cache-workspace-crates: false"), 8)
+        # Twelve restores: three macOS, the Windows checks and five Windows test shards, the Windows smoke,
+        # and two Linux; eight of them write on a main push (each Windows test shard owns its key).
+        self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 12)
+        self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 12)
+        self.assertEqual(text.count("add-job-id-key: false"), 12)
+        self.assertEqual(text.count("cache-workspace-crates: false"), 12)
         self.assertEqual(
             text.count(
                 "save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
             ),
-            3,
+            8,
         )
-        self.assertEqual(text.count("save-if: false"), 4)
+        self.assertEqual(text.count("save-if: false"), 3)
 
         native = text.split("  windows-native:\n", 1)[1]
         native = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", native, maxsplit=1)[0]
@@ -594,7 +722,11 @@ class RepositoryTests(unittest.TestCase):
             "macos-coverage": ("unit-macos-14", "false"),
             "macos-smoke": ("unit-${{ matrix.runner }}", intel),
             "windows-checks": ("unit-windows-latest", main),
-            "windows-tests": ("unit-windows-latest", "false"),
+            "windows-tests-workspace": ("unit-windows-latest-workspace", main),
+            "windows-tests-harness": ("unit-windows-latest-harness", main),
+            "windows-tests-harness-features": ("unit-windows-latest-harness-features", main),
+            "windows-tests-harness-api": ("unit-windows-latest-harness-api", main),
+            "windows-tests-runtime": ("unit-windows-latest-runtime", main),
             "windows-smoke": ("unit-windows-latest", "false"),
             "linux-core": ("linux-ubuntu-22.04", main),
             "linux-packages": ("linux-ubuntu-22.04", "false"),
@@ -631,7 +763,7 @@ class RepositoryTests(unittest.TestCase):
             encoding="utf-8"
         )
         for job_name in (
-            "windows-native", "windows-checks", "windows-tests", "windows-smoke",
+            "windows-native", "windows-checks", *WINDOWS_TEST_SHARDS, "windows-smoke",
         ):
             with self.subTest(job=job_name):
                 job = text.split(f"  {job_name}:\n", 1)[1]
@@ -732,24 +864,27 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(run_lines(workflow, command), len(step.ci_jobs))
             self.assertNotIn(command, job_body("macos-smoke"))
 
-        # Each feature's tests run wherever the harness's plain tests run, on every host, and its lint
-        # wherever the workspace lint runs; no job runs either twice, and macos-smoke runs neither.
+        # Each feature's tests run exactly once on each platform that runs the harness's plain tests, and its
+        # lint wherever the workspace lint runs; no job runs either twice, and macos-smoke runs neither. On
+        # Windows the plain and feature tests sit in different parallel shards, so they are counted per platform.
+        plain_test = "cargo test --locked -p sonicterm-app --example perf_scenarios"
+        test_platforms = (("macos-core",), WINDOWS_TEST_SHARDS, ("linux-core",))
         for feature in feature_sets:
-            feature_test = f"cargo test --locked -p sonicterm-app --example perf_scenarios --features {feature}"
+            feature_test = f"{plain_test} --features {feature}"
             feature_lint = (f"cargo clippy --locked -p sonicterm-app --example perf_scenarios --features {feature}"
                             " -- -D warnings")
-            for command, plain, jobs in (
-                (feature_test, "cargo test --locked -p sonicterm-app --example perf_scenarios\n",
-                 ("macos-core", "windows-tests", "linux-core")),
-                (feature_lint, "cargo clippy --workspace --all-targets -- -D warnings\n",
-                 ("macos-core", "windows-checks", "linux-core")),
-            ):
-                for job in jobs:
-                    with self.subTest(command=command, job=job):
-                        body = job_body(job)
-                        self.assertEqual(run_lines(body, command), 1)
-                        self.assertIn(f"        run: {plain}", body)
-                self.assertEqual(run_lines(workflow, command), len(jobs))
+            for platform_jobs in test_platforms:
+                with self.subTest(command=feature_test, platform=platform_jobs[0]):
+                    self.assertEqual(sum(run_lines(job_body(job), feature_test) for job in platform_jobs), 1)
+                    self.assertEqual(sum(run_lines(job_body(job), plain_test) for job in platform_jobs), 1)
+            self.assertEqual(run_lines(workflow, feature_test), len(test_platforms))
+            lint_jobs = ("macos-core", "windows-checks", "linux-core")
+            for job in lint_jobs:
+                with self.subTest(command=feature_lint, job=job):
+                    body = job_body(job)
+                    self.assertEqual(run_lines(body, feature_lint), 1)
+                    self.assertIn("        run: cargo clippy --workspace --all-targets -- -D warnings\n", body)
+            self.assertEqual(run_lines(workflow, feature_lint), len(lint_jobs))
             self.assertNotIn(feature, job_body("macos-smoke"))
             # The plain lint and test in their three jobs each, plus the cfg runs that compile this set.
             cfg_runs = sum(len(step.ci_jobs) for step in cfg_steps

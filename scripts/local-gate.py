@@ -314,7 +314,16 @@ _RUSTDOC_WARNINGS = (("RUSTDOCFLAGS", "-D warnings"),)
 # Rust 1.99 reads one `<kbd>*</kbd>` list as nested emphasis, so its doc phase allows only that lint.
 _WINIT_RUSTDOC_FLAGS = (("RUSTDOCFLAGS", "-D warnings -A rustdoc::invalid_html_tags"),)
 _CORE_CHECKS = ("macos-core", "windows-checks", "linux-core")
-_CORE_TESTS = ("macos-core", "windows-tests", "linux-core")
+# Windows splits its tests across parallel shards, so each test step names the shard that runs it there.
+_WINDOWS_WORKSPACE = "windows-tests-workspace"
+_WINDOWS_HARNESS = "windows-tests-harness"
+_WINDOWS_HARNESS_FEATURES = "windows-tests-harness-features"
+_WINDOWS_HARNESS_API = "windows-tests-harness-api"
+_WINDOWS_RUNTIME = "windows-tests-runtime"
+_WORKSPACE_TESTS = ("macos-core", _WINDOWS_WORKSPACE, "linux-core")
+_HARNESS_TESTS = ("macos-core", _WINDOWS_HARNESS, "linux-core")
+_HARNESS_FEATURE_TESTS = ("macos-core", _WINDOWS_HARNESS_FEATURES, "linux-core")
+_HARNESS_API_TESTS = ("macos-core", _WINDOWS_HARNESS_API, "linux-core")
 
 # Local timeouts are explicit command budgets independent of CI timeout policy.
 # They allow cold-cache runtime; commands grouped in CI retain their local
@@ -326,7 +335,7 @@ STEPS = (
     # CI runs this immediately after the dependency restore, so its budget includes the test binary's cold build.
     Step("pty-close-baseline",
          ("cargo", "test", "-p", "sonicterm-app", "--lib", "pty_close_baseline", "--", "--ignored", "--nocapture"),
-         HOSTS, 1200, "local", ("rust", "native"), _CORE_TESTS,
+         HOSTS, 1200, "local", ("rust", "native"), _WORKSPACE_TESTS,
          windows_preparations=(Preparation(),)),
     Step("fmt", ("cargo", "fmt", "--all", "--check"), HOSTS, 300, "local",
          ("rust",), _CORE_CHECKS),
@@ -376,80 +385,80 @@ STEPS = (
     Step("workflow-supply-chain", ("bash", "scripts/check-workflow-supply-chain.sh"), HOSTS, 120,
          "local", ("rust", "bash"), _CORE_CHECKS),
     Step("workspace-crates", ("bash", "scripts/check-workspace-crates.sh"), HOSTS, 2100, "local",
-         ("rust", "native", "bash"), _CORE_TESTS,
+         ("rust", "native", "bash"), _WORKSPACE_TESTS,
          windows_preparations=(Preparation(_WINIT_TEST), Preparation(_WINIT_DOC, _WINIT_RUSTDOC_FLAGS),
                                Preparation(_WORKSPACE_TEST))),
     # After workspace-crates, so the libraries the doctests link are already built.
     Step("doctests", ("cargo", "test", "--workspace", "--doc", "--no-fail-fast"), HOSTS, 900,
-         "local", ("rust", "native"), _CORE_TESTS),
+         "local", ("rust", "native"), _WORKSPACE_TESTS),
     # workspace-crates' `--lib --bins --tests` skips examples, so the scenario harness's unit tests run here.
     Step("perf-scenarios-tests", ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
-         HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
+         HOSTS, 900, "local", ("rust", "native"), _HARNESS_TESTS),
     # The same unit tests with the counter API and the checkpoint memory and trim hooks compiled in, wherever
     # the plain ones run.
     Step("perf-scenarios-counters-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim"),
-         HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
+         HOSTS, 900, "local", ("rust", "native"), _HARNESS_TESTS),
     # The ignored working-set check: each start constant covers this host's measured glyph atlas need.
     Step("glyph-atlas-working-set",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "glyph_atlas_working_set", "--", "--ignored", "--nocapture"),
-         ("macos", "windows"), 900, "local", ("rust", "native"), ("macos-core", "windows-tests")),
+         ("macos", "windows"), 900, "local", ("rust", "native"), ("macos-core", _WINDOWS_HARNESS_FEATURES)),
     # The same unit tests with the frame-texture reading compiled in, wherever the plain ones run.
     Step("perf-scenarios-frame-texture-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-frame-texture"),
-         HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
+         HOSTS, 900, "local", ("rust", "native"), _HARNESS_FEATURE_TESTS),
     # The same unit tests with the echo watch's calls compiled in, wherever the plain ones run.
     Step("perf-scenarios-echo-trace-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-echo-trace"),
-         HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS),
+         HOSTS, 900, "local", ("rust", "native"), _HARNESS_FEATURE_TESTS),
     # The counters-enabled unit tests with every harness API cfg compiled in, composed at launch: one changed
     # compiler-flag set, so one dependency rebuild covers all of them.
     Step("perf-scenarios-harness-api-tests",
          ("cargo", "test", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios",
           "--features", "perf-counters,perf-hook-checkpoint-memory,perf-hook-trim"),
-         HOSTS, 900, "local", ("rust", "native"), _CORE_TESTS, harness_cfgs=HARNESS_API_CFG_NAMES),
+         HOSTS, 900, "local", ("rust", "native"), _HARNESS_API_TESTS, harness_cfgs=HARNESS_API_CFG_NAMES),
     Step("pty-feasibility", ("bash", "scripts/pty-backend-feasibility.sh", "--check"), HOSTS, 300,
-         "local", ("rust", "bash"), ("macos-core", "windows-tests"),
+         "local", ("rust", "bash"), ("macos-core", _WINDOWS_WORKSPACE),
          windows_preparations=(Preparation(_FEASIBILITY_BUILD),)),
     Step("resource-inventory", ("bash", "scripts/test-resource-inventory.sh"), HOSTS, 300, "local",
-         ("bash",), ("macos-core", "windows-tests")),
+         ("bash",), ("macos-core", _WINDOWS_WORKSPACE)),
     Step("resource-baseline-tests", ("bash", "scripts/test-resource-baseline-evidence.sh"), HOSTS,
-         300, "local", ("bash",), ("macos-core", "windows-tests")),
+         300, "local", ("bash",), ("macos-core", _WINDOWS_WORKSPACE)),
     Step("soak-harness", ("bash", "scripts/test-soak-harness.sh"), HOSTS, 300, "local",
-         ("bash",), ("macos-core", "windows-tests")),
+         ("bash",), ("macos-core", _WINDOWS_WORKSPACE)),
     Step("linux-packages-tests", ("bash", "scripts/test-linux-packages.sh"), HOSTS, 300, "local",
          ("bash",), ("linux-core",)),
     Step("release-assets-tests", ("bash", "scripts/test-release-assets.sh"), HOSTS, 300, "local",
          ("rust", "bash"), ("linux-core",)),
     Step("release-notes-tests", ("bash", "scripts/test-release-notes.sh"), HOSTS, 300, "local",
-         ("bash",), _CORE_TESTS),
+         ("bash",), _WORKSPACE_TESTS),
     Step("wiki-publish-tests", ("bash", "scripts/test-wiki-publish.sh"), HOSTS, 300, "local",
-         ("rust", "bash"), _CORE_TESTS),
+         ("rust", "bash"), _WORKSPACE_TESTS),
     # Executed directly, as ci.yml does, so it needs a POSIX host.
     Step("logic-coverage", ("scripts/rust-logic-coverage.sh",), ("macos", "linux"), 1200,
          "local", ("rust", "native", "llvm-cov"), ("macos-coverage",)),
     Step("windows-warp-allocator",
          ("cargo", "test", "-p", "sonicterm-gpu", "--test", "windows_warp_allocator_baseline",
           "--", "--nocapture"),
-         ("windows",), 300, "local", ("rust", "native", "warp"), ("windows-tests",),
+         ("windows",), 300, "local", ("rust", "native", "warp"), (_WINDOWS_RUNTIME,),
          windows_preparations=(Preparation(),)),
     Step("msi-validator-tests", (".\\scripts\\validate-windows-msi_tests.ps1",), ("windows",), 300,
-         "local", ("pwsh",), ("windows-tests",), shell="pwsh"),
+         "local", ("pwsh",), (_WINDOWS_WORKSPACE,), shell="pwsh"),
     # A compiler can need forced cleanup on Windows, which only a compile-only step may accept; the harness
     # builds here, and the smoke's own compile-only build of the same example finds it fresh.
     Step("windows-perf-build",
          ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "perf_scenarios"),
-         ("windows",), 1500, "local", ("rust", "native"), ("windows-tests",),
+         ("windows",), 1500, "local", ("rust", "native"), (_WINDOWS_RUNTIME,),
          windows_policy=WindowsPolicy.COMPILE_ONLY),
     # The smoke's cold-build allowance (1500 s), at most 4 bounded runs (100 s each) of each of the five
     # Windows cases (2000 s), and up to 3 attempts (100 s each) of its one delivery replay, S10/sync
     # (300 s): 3800 s worst case, plus 400 s of headroom.
     Step("windows-perf-smoke", ("python", "scripts/perf-compare.py", "--smoke"),
-         ("windows",), 4200, "local", ("rust", "native"), ("windows-tests",)),
+         ("windows",), 4200, "local", ("rust", "native"), (_WINDOWS_RUNTIME,)),
     Step("macos-selection-build",
          ("cargo", "build", "--locked", "-p", "sonicterm-app", "--example", "native_split_selection"),
          ("macos",), 1500, "local", ("rust", "native"), ("macos-smoke",)),
@@ -674,38 +683,39 @@ class CiOnly:
 
 
 # `setup` installs dependencies and gates nothing. `evidence-rerun` reruns an
-# integration test that the same job's workspace step already runs, only to
-# print its report. `runtime-evidence` and `package-evidence` need hosted
+# integration test that the same job's workspace step, or the reviewed shard in
+# `RERUN_BACKING_JOBS`, already runs, only to print its report. `runtime-evidence` and `package-evidence` need hosted
 # runners, release binaries, or built packages; their scripts' own tests are
 # table steps. A self-test can never be listed here.
 CI_ONLY_KINDS = ("setup", "evidence-rerun", "runtime-evidence", "package-evidence")
 
 CI_ONLY = (
     CiOnly("setup", ".\\scripts\\setup-windows-cairo.ps1",
-           ("windows-native", "windows-checks", "windows-tests", "windows-smoke"),
+           ("windows-native", "windows-checks", _WINDOWS_WORKSPACE, _WINDOWS_HARNESS, _WINDOWS_HARNESS_FEATURES,
+            _WINDOWS_HARNESS_API, _WINDOWS_RUNTIME, "windows-smoke"),
            "installs the vcpkg Cairo that the native prerequisite names; it checks nothing"),
     CiOnly("evidence-rerun",
            "cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture",
-           ("macos-core", "windows-tests"),
+           ("macos-core", _WINDOWS_RUNTIME),
            "prints the hosted window-capability report; workspace-crates already runs the test"),
     CiOnly("evidence-rerun",
            "cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture",
-           ("macos-core", "windows-tests"),
+           ("macos-core", _WINDOWS_RUNTIME),
            "prints the hosted adapter classification; workspace-crates already runs the test"),
     CiOnly("evidence-rerun",
            "cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture",
-           ("macos-core", "windows-tests"),
+           ("macos-core", _WINDOWS_RUNTIME),
            "prints the renderer churn baseline on Windows; the target compiles only for Windows, "
            "so on macOS this step and workspace-crates both run no tests"),
     CiOnly("evidence-rerun",
            "cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture",
-           ("windows-tests",),
+           (_WINDOWS_RUNTIME,),
            "prints the selection-presentation report; workspace-crates already runs the test"),
     CiOnly("runtime-evidence",
            "python scripts/native-smoke-runner.py --timeout-seconds 120 "
            "--log-file \"$env:RUNNER_TEMP\\sonicterm-windows-gdi.log\" --require-capability EXERCISED "
            "-- cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture",
-           ("windows-tests",),
+           (_WINDOWS_RUNTIME,),
            "requires the hosted runner's unique capability=EXERCISED verdict; workspace-crates "
            "runs the same test, which accepts HOST_INCAPABLE"),
     CiOnly("runtime-evidence",
@@ -717,7 +727,7 @@ CI_ONLY = (
     CiOnly("runtime-evidence",
            "\"$python_cmd\" scripts/resource-baseline-evidence.py --runner-label windows-latest "
            "--output-dir target/v1.2.0-baseline/evidence-windows-latest",
-           ("windows-tests",),
+           (_WINDOWS_WORKSPACE,),
            "captures real resource evidence under the hosted runner label for upload; "
            "resource-baseline-tests covers the collector"),
     CiOnly("runtime-evidence",
@@ -1413,26 +1423,37 @@ _WINDOWS_PERF_GATES = (
 )
 
 
-def windows_tests_ci_problems(workflow: str) -> list[str]:
-    """Keep the Windows perf harness build and its smoke mandatory, and the build first, in windows-tests."""
-    match = re.search(r"(?ms)^  windows-tests:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
-    if match is None:
-        return ["the Windows perf gates require the windows-tests job"]
-    body = match[1]
+def _job_body(workflow: str, job: str) -> str | None:
+    """Return one ci.yml job's body, from the line after its id to the next job id."""
+    match = re.search(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow)
+    return None if match is None else match[1]
+
+
+def _mandatory_step_index(body: str, job: str, command: str, problems: list[str]) -> int | None:
+    """Find the one unconditional step running `command` in a job body, reporting a missing or advisory one."""
+    step_bodies = re.split(r"(?m)^      - ", body)[1:]
+    matches = [index for index, step in enumerate(step_bodies) if "        run: " + command + "\n" in step]
+    if len(matches) != 1:
+        problems.append(f"{job} needs one mandatory `{command}` step")
+        return None
+    if re.search(r"(?m)^(?:        )?(?:if|continue-on-error):", step_bodies[matches[0]]):
+        problems.append(f"{job} step `{command}` must not be conditional or advisory")
+    return matches[0]
+
+
+def windows_runtime_ci_problems(workflow: str) -> list[str]:
+    """Keep the Windows perf harness build and its smoke mandatory, and the build first, in the runtime shard."""
+    body = _job_body(workflow, _WINDOWS_RUNTIME)
+    if body is None:
+        return [f"the Windows perf gates require the {_WINDOWS_RUNTIME} job"]
     problems = []
     if re.search(r"(?m)^    (?:if|continue-on-error):", body):
-        problems.append("windows-tests must not be conditional or advisory")
-    step_bodies = re.split(r"(?m)^      - ", body)[1:]
+        problems.append(f"{_WINDOWS_RUNTIME} must not be conditional or advisory")
     positions: dict[str, int] = {}
     for command in _WINDOWS_PERF_GATES:
-        matches = [index for index, step in enumerate(step_bodies)
-                   if "        run: " + command + "\n" in step]
-        if len(matches) != 1:
-            problems.append(f"windows-tests needs one mandatory `{command}` step")
-            continue
-        positions[command] = matches[0]
-        if re.search(r"(?m)^(?:        )?(?:if|continue-on-error):", step_bodies[matches[0]]):
-            problems.append(f"windows-tests step `{command}` must not be conditional or advisory")
+        index = _mandatory_step_index(body, _WINDOWS_RUNTIME, command, problems)
+        if index is not None:
+            positions[command] = index
     build, smoke = _WINDOWS_PERF_GATES
     # When: both steps exist once, the smoke must follow the build whose output it reuses.
     if build in positions and smoke in positions and positions[build] > positions[smoke]:
@@ -1449,7 +1470,7 @@ def ci_parity_problems(
     problems = (macos_smoke_ci_problems(workflow)
                 if any(step.id in ("macos-selection-smoke", "macos-perf-smoke") for step in steps) else [])
     if any(step.id == "windows-perf-smoke" for step in steps):
-        problems += windows_tests_ci_problems(workflow)
+        problems += windows_runtime_ci_problems(workflow)
     for step in steps:
         text = command_text(step)
         for job in step.ci_jobs:
@@ -1502,6 +1523,51 @@ def _test_section_disables(manifest: str, target: str) -> bool:
     return False
 
 
+# A shard whose CI-only evidence reruns are backed by another shard's workspace step. Both must be mandatory
+# Windows jobs that the fail-closed Windows aggregate checks, so moving the reruns never leaves them unbacked.
+RERUN_BACKING_JOBS = {_WINDOWS_RUNTIME: _WINDOWS_WORKSPACE}
+_WINDOWS_AGGREGATE = "windows"
+
+
+def aggregate_checks(workflow: str, aggregate: str, job: str) -> bool:
+    """Whether an aggregate job needs `job` and its result loop tests that job's result."""
+    body = _job_body(workflow, aggregate)
+    if body is None:
+        return False
+    needs = re.search(r"(?m)^    needs: \[(.*)\]$", body)
+    if needs is None or job not in [name.strip() for name in needs[1].split(",")]:
+        return False
+    variable = re.search(rf"(?m)^          ([A-Z_]+): \$\{{\{{ needs\.{re.escape(job)}\.result \}}\}}$", body)
+    loop = re.search(r"(?m)^          for result in (.*); do$", body)
+    return variable is not None and loop is not None and f'"${variable[1]}"' in loop[1].split()
+
+
+def rerun_backing_problems(
+    workflow: str, jobs: Mapping[str, list[tuple[str, str]]], workspace: str, targets: Iterable[str]
+) -> list[str]:
+    """Check that each reviewed rerun-backing pair in use keeps a mandatory, aggregated Windows workspace gate."""
+    problems: list[str] = []
+    for target in sorted(set(targets) & set(RERUN_BACKING_JOBS)):
+        source = RERUN_BACKING_JOBS[target]
+        label = f"evidence reruns in {target}, backed by {source}"
+        if workspace not in [command for _label, command in jobs.get(source, [])]:
+            problems.append(f"{label}: {source} does not run `{workspace}`")
+        for job in (target, source):
+            body = _job_body(workflow, job)
+            if body is None:
+                problems.append(f"{label}: ci.yml has no {job} job")
+                continue
+            if not re.search(r"(?m)^    runs-on: windows-latest$", body):
+                problems.append(f"{label}: {job} must run on windows-latest")
+            if re.search(r"(?m)^    (?:if|continue-on-error):", body):
+                problems.append(f"{label}: {job} must not be conditional or advisory")
+            if not aggregate_checks(workflow, _WINDOWS_AGGREGATE, job):
+                problems.append(f"{label}: the {_WINDOWS_AGGREGATE} aggregate must need and check {job}")
+            if job == source:
+                _mandatory_step_index(body, f"{label}: {job}", workspace, problems)
+    return problems
+
+
 def _rerun_problems(
     root: Path, entry: CiOnly, invocation: Invocation,
     jobs: Mapping[str, list[tuple[str, str]]], workspace: str,
@@ -1533,8 +1599,10 @@ def _rerun_problems(
     if re.search(r"(?m)^autotests\s*=\s*false", manifest) or _test_section_disables(manifest, target):
         problems.append(f"{label}: the manifest keeps the target out of the workspace pass")
     for job in entry.jobs:
-        if workspace not in [command for _label, command in jobs.get(job, [])]:
-            problems.append(f"{label}: {job} does not run `{workspace}`, so nothing runs it locally")
+        # When: a reviewed shard backs this job's reruns, that shard must run the workspace step instead.
+        source = RERUN_BACKING_JOBS.get(job, job)
+        if workspace not in [command for _label, command in jobs.get(source, [])]:
+            problems.append(f"{label}: {source} does not run `{workspace}`, so nothing runs it locally")
     return problems
 
 
@@ -1554,6 +1622,11 @@ def ci_only_problems(
     script = root / "scripts" / "check-workspace-crates.sh"
     if not script.is_file() or not WORKSPACE_TEST_COMMAND.search(script.read_text(encoding="utf-8")):
         problems.append("check-workspace-crates.sh no longer runs every workspace test target once")
+    # When: a CI-only cargo test runs in a backed shard, that pair's workspace gate must be mandatory and aggregated.
+    if workspace:
+        rerun_jobs = [job for entry in entries if entry.kind in ("evidence-rerun", "runtime-evidence")
+                      for job in entry.jobs]
+        problems.extend(rerun_backing_problems(workflow, jobs, workspace, rerun_jobs))
     for entry in entries:
         label = f"CI-only `{entry.command}`"
         if entry.kind not in CI_ONLY_KINDS:

@@ -79,8 +79,10 @@ any stash.
 
 The stable required checks are fail-closed aggregate jobs: `macos-14 / unit
 tests` requires `macos-core`, `macos-coverage`, and `macos-smoke`, while
-`windows-latest / unit tests` requires `windows-native`, `windows-checks`,
-`windows-tests`, and `windows-smoke`.
+`windows-latest / unit tests` requires `windows-native`, `windows-checks`, the
+five Windows test shards (`windows-tests-workspace`, `windows-tests-harness`,
+`windows-tests-harness-features`, `windows-tests-harness-api` and
+`windows-tests-runtime`), and `windows-smoke`; its result loop tests every one.
 Each aggregate runs with `if: always()` and accepts only explicit `success`
 results, so a failed, cancelled, or skipped shard cannot turn into a successful
 required check.
@@ -110,28 +112,38 @@ aggregate requires both matrix lanes. Release jobs also package on their matchin
 architecture; the final macOS artifact job collects already-validated DMGs.
 
 Windows first prepares static Cairo through vcpkg. It restores the binary cache,
-builds a cold miss, and saves that result immediately before the three dependent
-shards start. A restored fallback archive may contain no compatible packages
+builds a cold miss, and saves that result immediately before the seven dependent
+jobs start. A restored fallback archive may contain no compatible packages
 after a hosted-image or vcpkg revision change, so consumers still run Cairo
 installation and may perform a cold build. CI does not override job or step
 timeouts. The early app-only baseline build can be rebuilt under the workspace's
 unified dev-dependency features.
 The checks shard runs format, Clippy, source-policy, comment,
-script-identifier, and Rustdoc gates. The test shard measures the real PTY close baseline after Cargo
-restore, then runs the one-pass workspace tests, doctests, host probes,
-fail-closed GDI presentation verification, WARP allocator,
-software-selection presentation, the perf scenario harness build and its
-smoke, which checks the comparison tooling on a software adapter without timing
-([Windows](Local-Gate#windows)), tooling tests, and real resource-baseline
-capture; when the perf smoke fails, the job uploads its evidence. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
+script-identifier, and Rustdoc gates. The Windows tests run as five parallel shards, each repeating
+checkout, Rust, Cairo and Cargo-cache setup, so CI's wall time follows the longest shard instead of their sum:
+
+- `windows-tests-workspace` measures the real PTY close baseline after Cargo restore, then runs the one-pass
+  workspace tests, doctests, the MSI validator and the tooling tests, and captures and uploads real
+  resource-baseline evidence.
+- `windows-tests-harness` runs the scenario harness's unit tests, then the same tests with frame counters.
+- `windows-tests-harness-features` measures the glyph atlas working set, then runs the harness tests with the
+  frame-texture reading and with the echo trace.
+- `windows-tests-harness-api` runs the harness tests with every harness API cfg, whose compiler flags rebuild
+  the dependency tree in that shard only.
+- `windows-tests-runtime` runs the host probes, fail-closed GDI presentation verification, the WARP allocator,
+  software-selection presentation, and the perf scenario harness build and its smoke, which checks the
+  comparison tooling on a software adapter without timing ([Windows](Local-Gate#windows)); when the GDI probe or
+  the perf smoke fails, the shard uploads its evidence. Its probe reruns print reports for integration tests that
+  `windows-tests-workspace` already runs. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
 `HOST_INCAPABLE` remains informational and cannot satisfy the gate. The
 restore-only `windows-smoke` shard builds the shipping release binary and
 requires its bounded native smoke plus `frame-validation` and `device-recovery`
 scenario smokes in separate steps with native process deadlines.
 
 Rust-consuming shards share a dependency cache key within each platform and
-architecture, excluding workspace-crate artifacts. The Apple Silicon core,
-Windows checks, and Linux core shards are their keys' only writers. The Intel
+architecture, excluding workspace-crate artifacts; each Windows test shard has a key of its own, because its
+feature set and compiler flags differ. The Apple Silicon core, Windows checks, each Windows test shard, and
+Linux core shards are their keys' only writers. The Intel
 macOS smoke lane is its architecture's only writer because it has no core shard.
 Every writer saves only on a push to `main`; other shards and every pull-request
 lane restore only. Release builds neither restore nor save Rust caches. This
