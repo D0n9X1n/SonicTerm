@@ -629,7 +629,12 @@ impl FloodRing {
     fn freeze(&self) -> FrozenFlood {
         let (older, newer) = self.entries.split_at(self.next);
         // Before the ring wraps, the slots from `next` on were never written.
-        let oldest_first: &[FloodEntry] = Some(newer).filter(|_| self.wrapped).unwrap_or(&[]);
+        let oldest_first: &[FloodEntry] = if self.wrapped {
+            newer
+        } else {
+            // When: `wrapped` is false, the ring has not filled, so it holds no slot older than `next`.
+            &[]
+        };
         let services = oldest_first
             .iter()
             .chain(older)
