@@ -231,6 +231,44 @@ fn name_from_table(
     None
 }
 
+/// A face's SFNT name records grouped by name ID, for resolving CPAL palette and palette-entry labels.
+/// A CPAL label is a name ID (normally 256 or above), never a position in the name table.
+/// The name table is read lazily, on the first label that needs it, so a palette query whose CPAL table
+/// carries no labels never decodes it.
+pub(crate) struct NameIdLabels<Source> {
+    /// Reads the face's records in name-table order; taken by the first real lookup.
+    source: std::cell::Cell<Option<Source>>,
+    /// Records keyed by their own name ID, each list in name-table order, once read.
+    by_id: std::cell::OnceCell<std::collections::HashMap<u32, Vec<crate::ftwrap::NameRecord>>>,
+}
+
+/// CPAL's "no label" value: never a name ID, whatever the name table holds.
+pub(crate) const CPAL_NO_LABEL: u16 = 0xFFFF;
+
+impl<Source: FnOnce() -> Vec<crate::ftwrap::NameRecord>> NameIdLabels<Source> {
+    /// Labels resolved from the records `source` reads, at most once and only when a label needs them.
+    pub(crate) fn lazy(source: Source) -> Self {
+        Self { source: std::cell::Cell::new(Some(source)), by_id: std::cell::OnceCell::new() }
+    }
+
+    /// The label for `name_id`, chosen among its records by the font-name language rule (`best_name`). The
+    /// CPAL "no label" value 0xFFFF and an ID with no record are an empty name.
+    pub(crate) fn label(&self, name_id: u16) -> String {
+        if name_id == CPAL_NO_LABEL {
+            // When: `name_id` is CPAL_NO_LABEL, there is no label, and the name table is not read for it.
+            return String::new();
+        }
+        let by_id = self.by_id.get_or_init(|| {
+            let mut by_id = std::collections::HashMap::<u32, Vec<_>>::new();
+            for record in self.source.take().map(|source| source()).unwrap_or_default() {
+                by_id.entry(u32::from(record.name_id)).or_default().push(record);
+            }
+            by_id
+        });
+        name_from_table(by_id, &[u32::from(name_id)]).unwrap_or_default()
+    }
+}
+
 /// Returns the sorted, deduplicated set of names across the list of ids
 fn names_from_table(
     names: &std::collections::HashMap<u32, Vec<crate::ftwrap::NameRecord>>,

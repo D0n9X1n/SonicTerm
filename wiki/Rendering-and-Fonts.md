@@ -303,10 +303,13 @@ malformed or extreme color line degrades to a coarse approximation rather than
 unbounded work. A COLR face needs valid CPAL color entries; its palette labels,
 entry labels and flags are optional. A version-0 CPAL table, such as Noto Color
 Emoji's, has none of them and still renders: an absent label reads as an empty
-name and absent flags as 0. A COLRv1 glyph's ClipBox, when present, is applied as an
-outer clip in device pixels around its whole paint graph, composited groups included,
-so a graph Cairo cannot bound on its own, such as a gradient composited with `In`,
-still rasterizes inside its ClipBox. Its bitmap is rounded outward to whole pixels.
+name and absent flags as 0. A present label is a name ID: it resolves to the
+face's name record with that ID, chosen by the same language rule as font names,
+and an ID with no record reads as an empty name. A COLRv1 glyph's ClipBox, when
+present, is applied as an outer clip in device pixels around its whole paint graph,
+composited groups included, so a graph Cairo cannot bound on its own, such as a
+gradient composited with `In`, still rasterizes inside its ClipBox. Its bitmap is
+rounded outward to whole pixels.
 
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` owns safe lifetimes around raw handles
 from the generated FreeType, HarfBuzz, and Fontconfig binding crates. Each

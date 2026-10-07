@@ -80,6 +80,20 @@ fn checked_palette_storage<T>(ptr: *const T, count: FT_UShort) -> anyhow::Result
     Ok(count as usize)
 }
 
+/// Converts `data` with labels resolved by name ID from the records `records` reads. `records` is called at
+/// most once, and only when a palette or entry label other than 0xFFFF is present, so a CPAL table without
+/// labels never decodes the name table.
+// SAFETY: each non-null array in `data` must hold its count of initialized elements and stay
+// valid and unmutated for the call: `num_palettes` for names and flags, entries for entry labels.
+unsafe fn palette_info_from(
+    data: &FT_Palette_Data,
+    records: impl FnOnce() -> Vec<NameRecord>,
+) -> PaletteInfo {
+    let labels = crate::parser::NameIdLabels::lazy(records);
+    // SAFETY: the caller's guarantee for `data` is exactly `palettes_from_data`'s.
+    unsafe { palettes_from_data(data, |name_id| labels.label(name_id)) }
+}
+
 /// Builds one [`Palette`] per CPAL palette from FreeType's palette data, resolving labels with
 /// `name_of`.
 ///
@@ -338,11 +352,30 @@ impl Face {
 
     /// Collects supported SFNT naming records grouped by their name identifier.
     pub fn get_sfnt_names(&self) -> HashMap<u32, Vec<NameRecord>> {
+        let mut names = HashMap::new();
+        let font_names = self.sfnt_name_records(|name_id| {
+            matches!(
+                name_id,
+                TT_NAME_ID_TYPOGRAPHIC_FAMILY
+                    | TT_NAME_ID_TYPOGRAPHIC_SUBFAMILY
+                    | TT_NAME_ID_FONT_FAMILY
+                    | TT_NAME_ID_FONT_SUBFAMILY
+                    | TT_NAME_ID_PS_NAME
+            )
+        });
+        for record in font_names {
+            names.entry(u32::from(record.name_id)).or_insert_with(Vec::new).push(record);
+        }
+        names
+    }
+
+    /// Decodes the supported SFNT naming records whose name ID `keep` accepts, in name-table order.
+    fn sfnt_name_records(&self, keep: impl Fn(u32) -> bool) -> Vec<NameRecord> {
         let num_names =
             // SAFETY: `self.face` is a live FreeType face, the only query input.
             unsafe { FT_Get_Sfnt_Name_Count(self.face) };
 
-        let mut names = HashMap::new();
+        let mut records = Vec::new();
 
         let mut sfnt_name = FT_SfntName {
             platform_id: 0,
@@ -366,15 +399,8 @@ impl Face {
                 continue;
             }
 
-            if !matches!(
-                sfnt_name.name_id as u32,
-                TT_NAME_ID_TYPOGRAPHIC_FAMILY
-                    | TT_NAME_ID_TYPOGRAPHIC_SUBFAMILY
-                    | TT_NAME_ID_FONT_FAMILY
-                    | TT_NAME_ID_FONT_SUBFAMILY
-                    | TT_NAME_ID_PS_NAME
-            ) {
-                // When: `matches!(sfnt_name.name_id, ...)` is false, skip unrelated names.
+            if !keep(u32::from(sfnt_name.name_id)) {
+                // When: `keep(name_id)` is false, the caller does not want this record.
                 continue;
             }
 
@@ -412,7 +438,7 @@ impl Face {
 
             let (name, _) = encoding.decode_with_bom_removal(bytes);
 
-            names.entry(sfnt_name.name_id as u32).or_insert_with(Vec::new).push(NameRecord {
+            records.push(NameRecord {
                 platform_id: sfnt_name.platform_id,
                 encoding_id: sfnt_name.encoding_id,
                 name_id: sfnt_name.name_id,
@@ -420,7 +446,7 @@ impl Face {
                 name: name.to_string(),
             });
         }
-        names
+        records
     }
 
     /// Returns the face-owned OpenType `OS/2` table when the font contains one.
@@ -930,9 +956,8 @@ impl Face {
             ft_result(FT_Palette_Data_Get(self.face, result.as_mut_ptr()), ())
                 .context("FT_Palette_Data_Get")?;
             let data = result.assume_init();
-            Ok(palettes_from_data(&data, |name_id| {
-                self.get_sfnt_name(name_id as _).map(|rec| rec.name).unwrap_or_default()
-            }))
+            // CPAL labels are name IDs, not name-table positions: every record, grouped by name ID.
+            Ok(palette_info_from(&data, || self.sfnt_name_records(|_| true)))
         }
     }
 
