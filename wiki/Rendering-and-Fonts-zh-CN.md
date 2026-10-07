@@ -239,7 +239,9 @@ Windows 默认使用 DirectWrite 的 natural-symmetric ClearType 光栅化并禁
 macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次像素、BGRA 彩色
 位图字形，以及 COLR/SVG 交接。HarfBuzz/COLR 绘制路径通过 Cairo 支持分层彩色字形和
 线性、径向、扫描渐变。颜色线没有可用色标时不绘制任何内容；扫描渐变的平铺有上限，
-因此畸形或极端颜色线会退化为粗略近似，而不会产生无界工作量。
+因此畸形或极端颜色线会退化为粗略近似，而不会产生无界工作量。COLR 字体需要有效的 CPAL
+颜色条目；调色板标签、条目标签和标志都是可选的。版本 0 的 CPAL 表（例如 Noto Color Emoji）
+不含这些数组，仍能正常渲染：缺少标签时名称为空，缺少标志时取 0。
 
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` 为生成的 FreeType、HarfBuzz、Fontconfig
 绑定中的原始句柄管理安全生命周期。每次原生分配都配对正确的销毁函数。内嵌位图字形

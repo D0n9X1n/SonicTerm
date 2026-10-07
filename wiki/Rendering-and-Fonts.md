@@ -300,7 +300,10 @@ COLR/SVG handoff. HarfBuzz/COLR paint paths use Cairo-backed drawing for layered
 color glyphs and linear, radial, and sweep gradients. A gradient whose color
 line carries no usable stop paints nothing, and sweep tiling is bounded, so a
 malformed or extreme color line degrades to a coarse approximation rather than
-unbounded work.
+unbounded work. A COLR face needs valid CPAL color entries; its palette labels,
+entry labels and flags are optional. A version-0 CPAL table, such as Noto Color
+Emoji's, has none of them and still renders: an absent label reads as an empty
+name and absent flags as 0.
 
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` owns safe lifetimes around raw handles
 from the generated FreeType, HarfBuzz, and Fontconfig binding crates. Each

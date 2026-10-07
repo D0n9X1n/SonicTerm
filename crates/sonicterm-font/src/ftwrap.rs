@@ -80,6 +80,42 @@ fn checked_palette_storage<T>(ptr: *const T, count: FT_UShort) -> anyhow::Result
     Ok(count as usize)
 }
 
+/// Builds one [`Palette`] per CPAL palette from FreeType's palette data, resolving labels with
+/// `name_of`.
+///
+/// FreeType documents `palette_name_ids`, `palette_flags` and `palette_entry_name_ids` as optional:
+/// a version-0 CPAL table, or a version-1 table without a given offset, leaves that array null.
+/// An absent label reads as an empty name, absent flags as 0, and absent entry labels as no entry
+/// names; none of them stops the face's color glyphs from rendering.
+// SAFETY: each non-null array in `data` must hold its count of initialized elements and stay
+// valid and unmutated for the call: `num_palettes` for names and flags, entries for entry labels.
+unsafe fn palettes_from_data(
+    data: &FT_Palette_Data,
+    mut name_of: impl FnMut(FT_UShort) -> String,
+) -> PaletteInfo {
+    let palette_count = usize::from(data.num_palettes);
+    let (name_ids, flags, entry_name_ids) =
+        // SAFETY: the caller guarantees each non-null array's extent; `from_raw_parts` maps null to empty.
+        unsafe {
+            (
+                from_raw_parts(data.palette_name_ids, palette_count),
+                from_raw_parts(data.palette_flags, palette_count),
+                from_raw_parts(data.palette_entry_name_ids, usize::from(data.num_palette_entries)),
+            )
+        };
+    let entry_names: Vec<String> = entry_name_ids.iter().map(|&id| name_of(id)).collect();
+    let palettes = (0..palette_count)
+        .map(|palette_index| Palette {
+            palette_index,
+            flags: flags.get(palette_index).copied().unwrap_or(0),
+            // An absent label array has no name ID, so nothing is looked up (never name ID 0).
+            name: name_ids.get(palette_index).map(|&id| name_of(id)).unwrap_or_default(),
+            entry_names: entry_names.clone(),
+        })
+        .collect();
+    PaletteInfo { num_palettes: palette_count, palettes }
+}
+
 struct MmVarGuard {
     library: FT_Library,
     ptr: *mut FT_MM_Var,
@@ -887,56 +923,16 @@ impl Face {
 
     /// Collects palette metadata and localized entry names for this face.
     pub fn get_palette_data(&self) -> anyhow::Result<PaletteInfo> {
-        // SAFETY: `self.face` is live; `FT_Palette_Data_Get` initializes `result` on success,
-        // and every non-empty child array is checked before constructing a borrowed slice.
+        // SAFETY: `self.face` is live; `FT_Palette_Data_Get` initializes `result` on success, and
+        // its arrays are face-owned for `num_palettes`/`num_palette_entries` elements or null.
         unsafe {
             let mut result = MaybeUninit::<FT_Palette_Data>::zeroed();
             ft_result(FT_Palette_Data_Get(self.face, result.as_mut_ptr()), ())
                 .context("FT_Palette_Data_Get")?;
-
             let data = result.assume_init();
-            if data.num_palettes == 0 {
-                // When: `data.num_palettes == 0`, FreeType exposes no palette arrays to read.
-                return Ok(PaletteInfo { num_palettes: 0, palettes: Vec::new() });
-            }
-
-            let palette_len = checked_palette_storage(data.palette_name_ids, data.num_palettes)?;
-            checked_palette_storage(data.palette_flags, data.num_palettes)?;
-            let name_ids = from_raw_parts(data.palette_name_ids, palette_len);
-            let flagses = from_raw_parts(data.palette_flags, palette_len);
-            // When: `data.num_palette_entries` selects either no array or checked storage.
-            let entry_name_ids = if data.num_palette_entries == 0 {
-                &[]
-            } else {
-                let entry_len =
-                    checked_palette_storage(data.palette_entry_name_ids, data.num_palette_entries)?;
-                from_raw_parts(data.palette_entry_name_ids, entry_len)
-            };
-
-            let entry_names: Vec<String> = entry_name_ids
-                .iter()
-                .map(|&id| {
-                    self.get_sfnt_name(id as _)
-                        .map(|rec| rec.name)
-                        .unwrap_or_else(|_| String::new())
-                })
-                .collect();
-            let mut palettes = Vec::with_capacity(palette_len);
-
-            for (palette_index, (&name_id, &flags)) in
-                name_ids.iter().zip(flagses.iter()).enumerate()
-            {
-                palettes.push(Palette {
-                    palette_index,
-                    flags,
-                    name: self
-                        .get_sfnt_name(name_id as _)
-                        .map(|rec| rec.name)
-                        .unwrap_or_else(|_| String::new()),
-                    entry_names: entry_names.clone(),
-                });
-            }
-            Ok(PaletteInfo { num_palettes: palette_len, palettes })
+            Ok(palettes_from_data(&data, |name_id| {
+                self.get_sfnt_name(name_id as _).map(|rec| rec.name).unwrap_or_default()
+            }))
         }
     }
 
@@ -1739,7 +1735,7 @@ pub(crate) unsafe fn from_raw_parts<'a, T>(ptr: *const T, size: usize) -> &'a [T
 #[derive(Debug)]
 pub struct PaletteInfo {
     pub num_palettes: usize,
-    /// Note that this may be empty even when num_palettes is non-zero
+    /// One entry per palette; an absent CPAL label or flag array leaves that field empty or 0.
     pub palettes: Vec<Palette>,
 }
 

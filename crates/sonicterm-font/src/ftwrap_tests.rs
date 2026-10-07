@@ -125,9 +125,110 @@ fn palette_storage_checks_reject_empty_and_null_buffers() {
     let mut color = MaybeUninit::<FT_Color>::uninit();
     assert_eq!(checked_palette_storage(color.as_mut_ptr(), 1).unwrap(), 1);
 
+    // Required colour storage also rejects a non-null pointer with no entries.
+    assert!(checked_palette_storage(color.as_mut_ptr(), 0).is_err());
+}
+
+/// Palette data over `names`, `flags` and `entry_names`, any of which may be absent (null).
+fn palette_data(
+    palette_count: FT_UShort,
+    names: Option<&[FT_UShort]>,
+    flags: Option<&[FT_UShort]>,
+    entry_count: FT_UShort,
+    entry_names: Option<&[FT_UShort]>,
+) -> FT_Palette_Data {
+    FT_Palette_Data {
+        num_palettes: palette_count,
+        palette_name_ids: names.map_or(std::ptr::null(), <[FT_UShort]>::as_ptr),
+        palette_flags: flags.map_or(std::ptr::null(), <[FT_UShort]>::as_ptr),
+        num_palette_entries: entry_count,
+        palette_entry_name_ids: entry_names.map_or(std::ptr::null(), <[FT_UShort]>::as_ptr),
+    }
+}
+
+/// Converts `data` with a name lookup that records every ID it is asked for.
+fn convert(data: &FT_Palette_Data) -> (PaletteInfo, Vec<FT_UShort>) {
+    let mut asked = Vec::new();
+    let info =
+        // SAFETY: every non-null array in `data` is a live test slice of exactly its count.
+        unsafe {
+            palettes_from_data(data, |name_id| {
+                asked.push(name_id);
+                format!("name-{name_id}")
+            })
+        };
+    (info, asked)
+}
+
+#[test]
+fn a_version_0_cpal_table_yields_one_palette_per_count() {
+    // CPAL version 0 carries palettes but no label, flag or entry-label arrays, so FreeType leaves
+    // all three null. Conversion must succeed, or every COLRv1 glyph of the face draws as tofu.
+    let (info, asked) = convert(&palette_data(2, None, None, 5921, None));
+    assert_eq!(info.num_palettes, 2);
+    let summary: Vec<_> = info
+        .palettes
+        .iter()
+        .map(|palette| (palette.palette_index, palette.flags, palette.name.as_str()))
+        .collect();
+    assert_eq!(summary, [(0, 0, ""), (1, 0, "")]);
+    assert!(info.palettes.iter().all(|palette| palette.entry_names.is_empty()));
+    // No name ID exists, so none is looked up; in particular, never name ID 0.
+    assert!(asked.is_empty());
+}
+
+#[test]
+fn each_optional_cpal_array_may_be_absent_on_its_own() {
+    // Version 1 offsets are independent, so each array can be missing while the others are present.
+    // Unequal, distinct values catch a swap of names and flags.
+    let names: [FT_UShort; 2] = [256, 257];
+    let flags: [FT_UShort; 2] = [1, 2];
+    let entries: [FT_UShort; 3] = [300, 301, 302];
+    let cases = [
+        ("all present", Some(&names[..]), Some(&flags[..]), Some(&entries[..])),
+        ("no names", None, Some(&flags[..]), Some(&entries[..])),
+        ("no flags", Some(&names[..]), None, Some(&entries[..])),
+        ("no entry labels", Some(&names[..]), Some(&flags[..]), None),
+    ];
+    for (label, name_ids, flag_values, entry_ids) in cases {
+        let (info, _) = convert(&palette_data(2, name_ids, flag_values, 3, entry_ids));
+        let expect_names = if name_ids.is_some() { ["name-256", "name-257"] } else { ["", ""] };
+        let expect_flags = if flag_values.is_some() { [1, 2] } else { [0, 0] };
+        let expect_entries: Vec<String> =
+            entry_ids.map_or(Vec::new(), |ids| ids.iter().map(|id| format!("name-{id}")).collect());
+        assert_eq!(info.palettes.len(), 2, "{label}");
+        for (palette_index, palette) in info.palettes.iter().enumerate() {
+            assert_eq!(palette.palette_index, palette_index, "{label}");
+            assert_eq!(palette.name, expect_names[palette_index], "{label}");
+            assert_eq!(palette.flags, expect_flags[palette_index], "{label}");
+            assert_eq!(palette.entry_names, expect_entries, "{label}");
+        }
+    }
+}
+
+#[test]
+fn zero_palettes_or_entries_read_as_empty() {
+    // Zero counts expose no elements and trigger no name lookup, even with non-null pointers.
+    let names: [FT_UShort; 1] = [256];
+    let (info, asked) =
+        convert(&palette_data(0, Some(&names[..]), Some(&names[..]), 0, Some(&names[..])));
+    assert_eq!(info.num_palettes, 0);
+    assert!(info.palettes.is_empty());
+    assert!(asked.is_empty());
+}
+
+#[test]
+fn palette_data_reads_its_optional_metadata_without_requiring_it() {
+    // The required-storage check guards the selected palette's colours only; get_palette_data must
+    // convert through `palettes_from_data` and never apply that check to the optional arrays.
     const SOURCE: &str = include_str!("ftwrap.rs");
-    assert!(SOURCE.contains("if data.num_palettes == 0"));
-    assert!(SOURCE.contains("if data.num_palette_entries == 0"));
+    let body = SOURCE
+        .split("pub fn get_palette_data(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    pub fn ").next())
+        .expect("get_palette_data is defined");
+    assert!(body.contains("palettes_from_data(&data,"));
+    assert!(!body.contains("checked_palette_storage"));
 }
 
 #[test]
