@@ -694,6 +694,72 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   capability reads `n/a (no timeline)`. The timed runs keep the gate off, so their
   timelines read `unavailable` with `gate-off` when the build has `perf-echo-trace`, and
   with `cfg-off` when it does not.
+- `perf-compare.py --echo-attribution DIR DIR [--echo-control NAME DIR]... [--echo-platform macos|windows]`
+  applies #1607's frozen attribution procedure to S2/flood echo timelines. It is analysis
+  only: it builds and runs nothing, and takes no comparison, smoke or `--out` option. Each
+  directory holds one workflow execution's downloaded perf-comparison artifacts. They are
+  read through `perf-flags.py`'s validated path, the same one its flag comparison uses:
+  - each artifact's `run-identity.json` (run, refs, harness, settings, capabilities) is
+    validated;
+  - the final set inventory is reconciled with the attempts on disk, so a side that ended
+    blocked or failed accepts no run, even a valid one;
+  - each accepted attempt's outcome and `result.json` are validated under the head's
+    declared capabilities, and the timeline is required only when the harness declares
+    `echo_timeline_schema`;
+  - every classification kind must be one perf-compare writes, and each result's
+    `attributed` and `total` must equal its samples' own counts;
+  - every latency sample, whatever the harness declares, must be an object whose
+    `latency_ms` is null or a finite number at least 0, and an integer at most 2^64 − 1, so
+    NaN, infinity, a negative latency, an oversized integer or a bare number is refused
+    rather than read.
+  Malformed evidence is refused with exit 1. So is an identity that names no workflow
+  execution: the run id must be a positive decimal GitHub Actions run id, the attempt
+  positive, and `guard_api` null or a boolean. `perf-flags.py` itself still loads local
+  artifacts without these. Executions that are not distinct (two directories of one
+  workflow run, found by run id) or not paired are refused too: replay executions must
+  share refs, harness, settings, capabilities, `guard_api` and platform, a null `guard_api`
+  matching only another null. Each control, `C1` to `C5`, is given twice, paired in order
+  with the replay executions. It must share the replay's base, harness, settings,
+  capabilities, `guard_api` and platform, and run on its own head, different from the
+  replay's and from every other control's.
+  The verdict is printed as Markdown and comes from these steps in order. Timeline figures
+  are exact over integer nanoseconds; step 1 reads the serialized `latency_ms`:
+  - Evidence: two replay executions with identities, each side with accepted runs and
+    credited samples; otherwise `inconclusive (evidence unavailable)`, naming a blocked or
+    failed side.
+  - Reproduction: every head run's credited-latency median above every base run's, in
+    both executions; otherwise `inconclusive (not reproduced under instrumentation)`.
+  - A side whose timeline recorded nothing is `inconclusive (evidence unavailable)`,
+    never a zero, and an undeclared `echo_timeline_schema` is named. Keypress attribution
+    and the `ordered` population must each be at least 80% per side with at most 10 points
+    between the sides, else `inconclusive (population coverage)`. A
+    `published_during_dispatch` share that moves by more than 10 points is named as a
+    candidate.
+  - Mean screen on `ordered`: Δ_total is the head's mean less the base's over the seven
+    parts; zero or less is `inconclusive (mean and median disagree)`. A part is primary
+    when its share of Δ_total is at least 0.5 in both executions and its median shift has
+    the same sign; with none, the verdict is `distributed / inconclusive`.
+  - Screens: a primary `render` is M1 (renderer work), `publication_to_frame_request` M2
+    (upstream readiness). For `frame_request_to_entry`, M3 (flood competition) needs the
+    mean flood services per sample to rise by at least 1.0 on `ordered ∩ m3_complete` in
+    both executions. M4 (pacing) is judged in each execution on its own, on the
+    tick-qualified population: the mean integrated `permit_absent_ns` must carry at least
+    half of that part's Δ, and M3's condition must be false in that execution.
+    `tick_to_entry_ns` is reported, but only as a description. A population below its 80%
+    gate is unavailable, and where M3 is unavailable, M4 is not evaluated. Several screens
+    read `combined`, each named; none reads `inconclusive (no mechanism screened)`.
+  - Control confirmation: with no control runs, as on main, each mechanism reads
+    `screened, unconfirmed (no control runs)`. A control's evidence and both §2 gates are
+    checked before any of its figures; an empty side or an ungated one cannot confirm. C1
+    to C3 confirm M1 and M2, and C4 confirms M4: a control attributes when
+    R_C = 1 − Δ(control)/Δ(replay) is at least 0.5 for the part and for the total median
+    shift, in both executions. M3 is at most `supporting evidence only`, because C5 is a
+    broad control; support also needs every head run's samples with no flood service to
+    have a lower `frame_request_to_entry` median than those with one or more.
+  - Control identity is not verified: v5 V3's `sonic::perf_control` check stays in the
+    experimental stack (ruling D1). A control named on the command line is trusted to be
+    that control, so every attribution and support reads `control identity unverified`.
+  Exit 0 means the evidence was read, not that a mechanism is confirmed.
 - The harness's `--list` also declares `capabilities.phase_kinds: 1`. Every
   phase then records its `kind` (`sustained`, `transition` or `hold`); a
   transition records its `endpoint` and exactly one of `completion_ms` or
