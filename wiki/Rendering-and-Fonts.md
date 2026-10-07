@@ -317,8 +317,8 @@ the unclipped rendering, still subject to the same bounds checks. Its bitmap is
 rounded outward to whole pixels.
 
 The FreeType COLRv1 path keeps every paint operand in font units. PaintGlyph
-contours load unscaled and untransformed, gradient anchors stay as the font
-gives them, and FreeType's included root
+contours load unscaled and untransformed, gradient anchors and radii stay as
+the font gives them, and FreeType's included root
 transform, built from the face's size and transform, is the only mapping to
 device pixels. So a gradient stays in place inside its contour at every size,
 and synthetic italic shears contours and gradients once, as it shears the

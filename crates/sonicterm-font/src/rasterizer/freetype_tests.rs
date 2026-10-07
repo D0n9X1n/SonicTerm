@@ -477,6 +477,7 @@ const COLR_FIXTURE: &[u8] = include_bytes!("../../test-fonts/colr-paint-fixture.
 const FIXTURE_UNITS_PER_EM: f64 = 2048.0;
 /// Fixture glyph ids, in the generator's glyph order.
 const GLYPH_LINEAR: u32 = 4;
+const GLYPH_RADIAL: u32 = 5;
 const GLYPH_CLIPPED: u32 = 11;
 
 /// The fixture as a parsed font, with synthetic italic when `italic`.
@@ -614,6 +615,91 @@ fn colr_clip_box_still_bounds_the_contour_in_device_space() {
             assert!(
                 (right - want).abs() <= 0.25,
                 "{size_px}px italic={italic}: right edge {right:.3}, ClipBox side at {want:.3}"
+            );
+        }
+    }
+}
+
+/// The paint ops the production walker records for the fixture's `glyph_id` at `size_px`: the same root
+/// paint, palette and walk `rasterize_outlines` performs, before any Cairo replay.
+fn fixture_walker_ops(glyph_id: u32, size_px: f64) -> Vec<PaintOp> {
+    let rasterizer =
+        FreeTypeRasterizer::from_locator(&fixture_font(false), DisplayPixelGeometry::RGB).unwrap();
+    let mut face = rasterizer.face.borrow_mut();
+    face.set_font_size(size_px, 72).unwrap();
+    let paint = face
+        .get_color_glyph_paint(glyph_id, FT_Color_Root_Transform::FT_COLOR_INCLUDE_ROOT_TRANSFORM)
+        .unwrap();
+    face.get_palette_data().unwrap();
+    face.select_palette(0).unwrap();
+    let mut walker = Walker { load_flags: FT_LOAD_NO_HINTING as i32, face: &mut face, ops: vec![] };
+    walker.walk_paint(paint, 0).unwrap();
+    walker.ops
+}
+
+/// The fixture's `glyph_id` painted by HarfBuzz's COLR painter, the reference the FreeType walker must agree
+/// with, at `size_px` and dpi 72.
+fn fixture_harfbuzz_glyph(glyph_id: u32, size_px: f64) -> RasterizedGlyph {
+    HarfbuzzRasterizer::from_locator(&fixture_font(false))
+        .unwrap()
+        .rasterize_glyph(glyph_id, size_px, 72)
+        .unwrap()
+}
+
+/// Asserts `rgba`'s colour channels are within `tolerance` of `expected`, naming `context` on failure.
+fn assert_rgb_near(rgba: [u8; 4], expected: [f64; 3], tolerance: f64, context: &str) {
+    for (channel, want) in expected.iter().enumerate() {
+        assert!(
+            (f64::from(rgba[channel]) - want).abs() <= tolerance,
+            "{context}: {rgba:?}, expected {expected:?}"
+        );
+    }
+}
+
+/// FreeType hands a radial gradient's radii as 16.16 font units, like its centres: the walker records the
+/// fixture's r0 = 200 and r1 = 800 as font units, not their raw 16.16 bits.
+#[test]
+fn colr_radial_radii_are_read_as_font_units() {
+    let ops = fixture_walker_ops(GLYPH_RADIAL, 13.0);
+    let radii = ops
+        .iter()
+        .find_map(|op| match op {
+            PaintOp::PaintRadialGradient { start_radius, end_radius, .. } => {
+                Some((*start_radius, *end_radius))
+            }
+            _ => None,
+        })
+        .expect("the fixture's radial glyph records a radial gradient");
+    assert_eq!(radii, (200.0, 800.0));
+}
+
+/// The fixture's radial gradient (centre 800, 800; r0 = 200; r1 = 800; red to blue) renders its analytic ramp at
+/// 13 and 26 px: red inside r0, the mixed colour at each pixel's own distance, matching HarfBuzz.
+#[test]
+fn colr_radial_gradient_renders_its_ramp_at_every_size() {
+    for size_px in [13.0, 26.0] {
+        let scale = size_px / FIXTURE_UNITS_PER_EM;
+        let glyph = fixture_colr_glyph(GLYPH_RADIAL, size_px, false);
+        let reference = fixture_harfbuzz_glyph(GLYPH_RADIAL, size_px);
+        for (font_x, font_y) in [(800.0, 800.0), (1300.0, 800.0), (800.0, 1400.0)] {
+            let context = format!("{size_px}px at font ({font_x}, {font_y})");
+            let Some((rgba, (centre_x, centre_y))) =
+                pixel_at(&glyph, font_x * scale, font_y * scale)
+            else {
+                panic!("{context}: no pixel");
+            };
+            let distance = (centre_x / scale - 800.0).hypot(centre_y / scale - 800.0);
+            let offset = ((distance - 200.0) / 600.0).clamp(0.0, 1.0);
+            assert_rgb_near(rgba, [255.0 * (1.0 - offset), 0.0, 255.0 * offset], 8.0, &context);
+            let Some((reference_rgba, _)) = pixel_at(&reference, centre_x, centre_y) else {
+                panic!("{context}: no HarfBuzz pixel");
+            };
+            let reference_rgb = reference_rgba.map(f64::from);
+            assert_rgb_near(
+                rgba,
+                [reference_rgb[0], reference_rgb[1], reference_rgb[2]],
+                12.0,
+                &context,
             );
         }
     }

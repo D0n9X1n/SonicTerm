@@ -695,8 +695,9 @@ impl<'a> Walker<'a> {
                         start_y,
                         end_x,
                         end_y,
-                        start_radius: grad.r0.font_units() as f32,
-                        end_radius: grad.r1.font_units() as f32,
+                        // FreeType gives r0 and r1 as 16.16 font units, like the centres.
+                        start_radius: grad.r0.f16d16().to_num(),
+                        end_radius: grad.r1.f16d16().to_num(),
                         color_line: self.decode_color_line(&grad.colorline)?,
                     };
                     self.ops.push(paint);
