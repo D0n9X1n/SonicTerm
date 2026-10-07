@@ -116,13 +116,13 @@ builds a cold miss, and saves that result immediately before the seven dependent
 jobs start. A restored fallback archive may contain no compatible packages
 after a hosted-image or vcpkg revision change, so consumers still run Cairo
 installation and may perform a cold build. CI does not override job or step
-timeouts. The early app-only baseline build can be rebuilt under the workspace's
-unified dev-dependency features.
+timeouts. The runtime and workspace shards have separate writable target
+directories, so the baseline's build products do not warm the workspace shard.
 The checks shard runs format, Clippy, source-policy, comment,
 script-identifier, and Rustdoc gates. The Windows tests run as five parallel shards, each repeating
 checkout, Rust, Cairo and Cargo-cache setup, so CI's wall time follows the longest shard instead of their sum:
 
-- `windows-tests-workspace` measures the real PTY close baseline after Cargo restore, then runs the one-pass
+- `windows-tests-workspace` runs the one-pass
   workspace tests, doctests, the MSI validator and the tooling tests, and captures and uploads real
   resource-baseline evidence.
 - `windows-tests-harness` runs the scenario harness's unit tests, then the same tests with frame counters.
@@ -130,7 +130,8 @@ checkout, Rust, Cairo and Cargo-cache setup, so CI's wall time follows the longe
   frame-texture reading and with the echo trace.
 - `windows-tests-harness-api` runs the harness tests with every harness API cfg, whose compiler flags rebuild
   the dependency tree in that shard only.
-- `windows-tests-runtime` runs the host probes, fail-closed GDI presentation verification, the WARP allocator,
+- `windows-tests-runtime` first measures the real PTY close baseline after Cargo restore, so its test-binary
+  build stays cold, then runs the host probes, fail-closed GDI presentation verification, the WARP allocator,
   software-selection presentation, and the perf scenario harness build and its smoke, which checks the
   comparison tooling on a software adapter without timing ([Windows](Local-Gate#windows)); when the GDI probe or
   the perf smoke fails, the shard uploads its evidence. Its probe reruns print reports for integration tests that

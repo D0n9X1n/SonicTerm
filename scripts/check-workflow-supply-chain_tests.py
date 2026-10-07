@@ -111,7 +111,7 @@ WINDOWS_TEST_SHARDS = (
 # followed by the same tests with the echo trace. Each must appear exactly once across the parallel Windows
 # test shards, unchanged, in this relative order within its shard.
 WINDOWS_TEST_WORK = (
-    '      - name: Measure PTY close baseline\n        run: cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture\n',
+    '      - name: Measure PTY close baseline\n        # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.\n        run: cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture\n',
     '      - name: Run workspace unit and integration tests\n        shell: bash\n        run: bash scripts/check-workspace-crates.sh\n',
     '      - name: Run workspace documentation tests\n        run: cargo test --workspace --doc --no-fail-fast\n',
     '      - name: Run scenario harness unit tests\n        run: cargo test --locked -p sonicterm-app --example perf_scenarios\n',
@@ -150,13 +150,13 @@ WINDOWS_SHARD_SETUP = (
     '      - name: Resolve vcpkg commit\n        id: vcpkg\n        shell: pwsh\n        run: |\n          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\\vcpkg" }\n          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8\n          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8\n',
     "      - name: Restore vcpkg binaries (Cairo)\n        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}\n          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}\n          restore-keys: |\n            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-\n",
     '      - name: Install Cairo for Windows\n        shell: pwsh\n        run: .\\scripts\\setup-windows-cairo.ps1\n',
-    "      - name: Restore Cargo dependencies\n        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n        with:\n          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest\n          add-job-id-key: false\n          cache-workspace-crates: false\n          save-if: false\n\n      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.\n",
+    "      - name: Restore Cargo dependencies\n        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n        with:\n          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest\n          add-job-id-key: false\n          cache-workspace-crates: false\n          save-if: false\n",
 )
 
 # Each shard's preserved work, in order, by step name; together they are the former job's work exactly once.
 WINDOWS_SHARD_WORK = {
     "windows-tests-workspace": (
-        "Measure PTY close baseline", "Run workspace unit and integration tests", "Run workspace documentation tests",
+        "Run workspace unit and integration tests", "Run workspace documentation tests",
         "Test MSI validator", "Run release-note unit test", "Test wiki publisher",
         "Verify frozen PTY feasibility evidence", "Verify resource inventory", "Run deterministic soak control gate",
         "Test resource baseline evidence collector", "Capture real resource baseline evidence",
@@ -172,7 +172,7 @@ WINDOWS_SHARD_WORK = {
         "Run scenario harness unit tests with the harness API cfgs and the echo trace",
     ),
     "windows-tests-runtime": (
-        "Report host window capability", "Report host adapter classification", "Report renderer churn baseline",
+        "Measure PTY close baseline", "Report host window capability", "Report host adapter classification", "Report renderer churn baseline",
         "Require Windows GDI capability=EXERCISED", "Upload Windows GDI probe log",
         "Verify Windows WARP allocator baseline", "Verify Windows selection presentation",
         "Build Windows perf scenario harness", "Require Windows perf scenario smoke",
@@ -526,7 +526,7 @@ class RepositoryTests(unittest.TestCase):
     def test_pty_close_baseline_follows_cargo_restore_on_every_desktop(self):
         # Capture the before/after measurement before later gates, including compilation in the same step.
         command = "cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture"
-        for job in ("macos-core", "windows-tests-workspace", "linux-core"):
+        for job in ("macos-core", "windows-tests-runtime", "linux-core"):
             with self.subTest(job=job):
                 block = job_block("ci.yml", job)
                 steps = re.split(r"(?m)^      - ", block)[1:]
@@ -723,6 +723,8 @@ class RepositoryTests(unittest.TestCase):
         build = windows_work_step("Build Windows perf scenario harness")
         smoke = windows_work_step("Require Windows perf scenario smoke")
         msi = windows_work_step("Test MSI validator")
+        baseline = windows_work_step("Measure PTY close baseline")
+        probe = windows_work_step("Report host window capability")
         checkout = WINDOWS_SHARD_SETUP[0]
         rust = WINDOWS_SHARD_SETUP[1]
         disguised = ("      - name: Install Rust evidence copy\n"
@@ -732,6 +734,9 @@ class RepositoryTests(unittest.TestCase):
         restore_only = "save-if: false\n"
         relocated = in_shard("windows-tests-runtime", gdi_upload + "\n", "")
         relocated_head, relocated_tail = relocated.split("  windows-tests-workspace:\n", 1)
+        workspace_tests = windows_work_step("Run workspace unit and integration tests")
+        baseline_moved = in_shard("windows-tests-runtime", baseline + "\n", "")
+        baseline_head, baseline_tail = baseline_moved.split("  windows-tests-workspace:\n", 1)
         mutations = {
             "dropped step": in_shard("windows-tests-runtime", gdi_upload, ""),
             "duplicated step": in_shard("windows-tests-runtime", build, build + "\n" + build),
@@ -741,6 +746,14 @@ class RepositoryTests(unittest.TestCase):
             "reordered steps": in_shard("windows-tests-runtime", build + "\n" + smoke, smoke + "\n" + build),
             "upload moved away from its producer": relocated_head + "  windows-tests-workspace:\n"
                 + relocated_tail.replace(msi, gdi_upload + "\n" + msi, 1),
+            # The baseline is runtime's first work step, straight after the Cargo restore, so its build stays cold.
+            "baseline missing": in_shard("windows-tests-runtime", baseline + "\n", ""),
+            "baseline duplicated": in_shard("windows-tests-runtime", baseline, baseline + "\n" + baseline),
+            "a probe built before the baseline": in_shard(
+                "windows-tests-runtime", baseline + "\n" + probe, probe + "\n" + baseline),
+            # A true relocation keeps the inventory exactly-once, so only the shard assignment can catch it.
+            "baseline returned to the workspace shard": baseline_head + "  windows-tests-workspace:\n"
+                + baseline_tail.replace(workspace_tests, baseline + "\n" + workspace_tests, 1),
             "work disguised as setup": in_shard("windows-tests-harness", rust, rust + "\n" + disguised),
             "missing checkout": in_shard("windows-tests-harness", checkout + "\n", ""),
             "altered setup": in_shard("windows-tests-harness", "toolchain: stable", "toolchain: nightly"),

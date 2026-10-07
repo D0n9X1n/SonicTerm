@@ -74,16 +74,16 @@ macOS 汇总 gate 要求两个 lane 都成功。Release job 同样在对应架�
 Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在七个依赖
 job 启动前立即保存结果。托管镜像或 vcpkg 版本变化后，恢复的回退归档可能不含任何 ABI
 兼容的包，因此消费方仍执行 Cairo 安装，必要时进行冷构建。CI 不设置 job 或步骤的超时覆盖项。
-前置的 App-only 基线构建可能在 workspace 统一 dev-dependency feature 后重新编译。
+runtime 与 workspace shard 各有独立的可写 target 目录，因此基线的构建产物不会预热 workspace shard。
 checks shard 运行 format、Clippy、源码策略、注释、脚本标识符与 Rustdoc gate；
 Windows 测试分为五个并行 shard，每个都重复 checkout、Rust、Cairo 与 Cargo 缓存准备，因此 CI 的总时长取决于最长的 shard，而不是它们之和：
 
-- `windows-tests-workspace` 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行一次性 workspace 测试、doctest、
+- `windows-tests-workspace` 运行一次性 workspace 测试、doctest、
   MSI validator 与工具测试，并采集、上传真实 resource baseline 证据。
 - `windows-tests-harness` 运行场景 harness 的单元测试，再运行启用帧计数器的同一组测试。
 - `windows-tests-harness-features` 测量 glyph atlas 工作集，再运行启用帧纹理读取和 echo trace 的 harness 测试。
 - `windows-tests-harness-api` 运行启用全部 harness API cfg 的 harness 测试；这些编译器标志只在该 shard 中重建依赖树。
-- `windows-tests-runtime` 运行 host probe、fail-closed GDI 呈现验证、WARP allocator、software-selection presentation，
+- `windows-tests-runtime` 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，使其测试二进制仍是冷构建，然后运行 host probe、fail-closed GDI 呈现验证、WARP allocator、software-selection presentation，
   以及性能场景 harness 的构建及其 smoke（在软件适配器上检查对比工具，不检查计时，见 [Windows](Local-Gate-zh-CN#windows)）；
   GDI probe 或性能 smoke 失败时，该 shard 上传其证据。它的 probe 重跑只为打印报告，对应的集成测试已由
   `windows-tests-workspace` 运行。GDI wrapper 只接受

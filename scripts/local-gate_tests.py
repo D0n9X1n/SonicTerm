@@ -1601,7 +1601,7 @@ class TableTests(unittest.TestCase):
         self.assertEqual(step.hosts, gate.HOSTS)
         self.assertEqual(step.evidence, "local")
         self.assertEqual(step.prerequisites, ("rust", "native"))
-        self.assertEqual(step.ci_jobs, ("macos-core", "windows-tests-workspace", "linux-core"))
+        self.assertEqual(step.ci_jobs, ("macos-core", "windows-tests-runtime", "linux-core"))
         self.assertEqual(step.timeout_s, 1200)
         for host in gate.HOSTS:
             self.assertIn(step, gate.select_steps(host))

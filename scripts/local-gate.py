@@ -341,7 +341,7 @@ STEPS = (
     # CI runs this immediately after the dependency restore, so its budget includes the test binary's cold build.
     Step("pty-close-baseline",
          ("cargo", "test", "-p", "sonicterm-app", "--lib", "pty_close_baseline", "--", "--ignored", "--nocapture"),
-         HOSTS, 1200, "local", ("rust", "native"), _WORKSPACE_TESTS,
+         HOSTS, 1200, "local", ("rust", "native"), ("macos-core", _WINDOWS_RUNTIME, "linux-core"),
          windows_preparations=(Preparation(),)),
     Step("fmt", ("cargo", "fmt", "--all", "--check"), HOSTS, 300, "local",
          ("rust",), _CORE_CHECKS),

@@ -545,7 +545,6 @@ jobs:
   windows-tests-workspace:
     name: Windows workspace tests
     runs-on: windows-latest
-    # The early app-only test build can be rebuilt when workspace dev features are unified later.
     needs: [windows-native]
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
@@ -584,10 +583,6 @@ jobs:
           add-job-id-key: false
           cache-workspace-crates: false
           save-if: false
-
-      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
-      - name: Measure PTY close baseline
-        run: cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture
 
       - name: Run workspace unit and integration tests
         shell: bash
@@ -686,7 +681,6 @@ jobs:
           cache-workspace-crates: false
           save-if: false
 
-      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
       - name: Run scenario harness unit tests
         run: cargo test --locked -p sonicterm-app --example perf_scenarios
 
@@ -735,7 +729,6 @@ jobs:
           cache-workspace-crates: false
           save-if: false
 
-      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
       - name: Measure the glyph atlas working set
         run: cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture
 
@@ -787,7 +780,6 @@ jobs:
           cache-workspace-crates: false
           save-if: false
 
-      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
       - name: Run scenario harness unit tests with the harness API cfgs
         shell: bash
         run: RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim
@@ -838,7 +830,10 @@ jobs:
           cache-workspace-crates: false
           save-if: false
 
-      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
+      - name: Measure PTY close baseline
+        # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
+        run: cargo test -p sonicterm-app --lib pty_close_baseline -- --ignored --nocapture
+
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
 
