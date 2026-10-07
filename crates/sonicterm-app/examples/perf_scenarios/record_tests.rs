@@ -1223,6 +1223,18 @@ fn uncredited_samples_read_not_credited() {
     assert_eq!(report["split_coverage"], json!(null));
 }
 
+/// A sample's dispatch timeline reads `not-taken` until its close records one, and the recorded
+/// disposition is what the result's `dispatch_timeline` key reports.
+#[test]
+fn a_closed_samples_dispatch_timeline_is_what_the_result_reports() {
+    let open = LatencySample::uncredited(3.0, UnattributedReason::NoCandidate.as_str());
+    assert_eq!(open.dispatch_timeline, TIMELINE_NOT_TAKEN);
+    let closed = open.with_dispatch_timeline("not-recorded");
+    assert_eq!(closed.dispatch_timeline, "not-recorded");
+    let json = serde_json::to_value(closed).expect("a sample converts");
+    assert_eq!(json["dispatch_timeline"], json!("not-recorded"));
+}
+
 /// A report of no samples still carries the split schema, with zero counts, no reasons and null
 /// coverage, so a reader never mistakes it for an older harness's report.
 #[test]
