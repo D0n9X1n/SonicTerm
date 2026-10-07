@@ -6,6 +6,7 @@
 //! hollow unit test.
 
 use super::*;
+use crate::source_pin::{code_only, item_body};
 
 fn wght_tag() -> FT_ULong {
     ft_make_tag(b'w', b'g', b'h', b't')
@@ -217,117 +218,6 @@ fn zero_palettes_or_entries_read_as_empty() {
     assert!(asked.is_empty());
 }
 
-/// `source` with every comment (line, block, nested block and doc) and every string, raw string and character
-/// literal replaced by spaces of the same byte length; line breaks are kept, so offsets and lines still match
-/// and a search over it sees only code. A lifetime such as `'a` is code and is kept.
-fn code_only(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut masked = bytes.to_vec();
-    let blank = |masked: &mut Vec<u8>, from: usize, to: usize| {
-        for byte in &mut masked[from..to.min(bytes.len())] {
-            if *byte != b'\n' {
-                *byte = b' ';
-            }
-        }
-    };
-    let identifier = |at: usize| bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_';
-    let mut index = 0;
-    while index < bytes.len() {
-        let next = bytes.get(index + 1).copied();
-        let end = match bytes[index] {
-            b'/' if next == Some(b'/') => {
-                source[index..].find('\n').map_or(bytes.len(), |at| index + at)
-            }
-            b'/' if next == Some(b'*') => {
-                // Block comments nest in Rust, so the comment ends where its depth returns to zero.
-                let (mut depth, mut cursor) = (0_usize, index);
-                while cursor < bytes.len() {
-                    if bytes[cursor..].starts_with(b"/*") {
-                        depth += 1;
-                        cursor += 2;
-                    } else if bytes[cursor..].starts_with(b"*/") {
-                        depth -= 1;
-                        cursor += 2;
-                        if depth == 0 {
-                            break;
-                        }
-                    } else {
-                        cursor += 1;
-                    }
-                }
-                cursor
-            }
-            // A raw string, raw byte string (`br`) or raw C string (`cr`), the prefix letter standing alone.
-            b'r' if (index == 0
-                || !identifier(index - 1)
-                || (matches!(bytes[index - 1], b'b' | b'c')
-                    && (index < 2 || !identifier(index - 2))))
-                && matches!(next, Some(b'"' | b'#')) =>
-            {
-                let hashes = bytes[index + 1..].iter().take_while(|byte| **byte == b'#').count();
-                if bytes.get(index + 1 + hashes) != Some(&b'"') {
-                    // When: `r#` is not followed by a quote, it is a raw identifier, which is code.
-                    index += 1;
-                    continue;
-                }
-                let closing = format!("\"{}", "#".repeat(hashes));
-                let body = index + 2 + hashes;
-                source[body..].find(&closing).map_or(bytes.len(), |at| body + at + closing.len())
-            }
-            b'"' => {
-                let mut cursor = index + 1;
-                while cursor < bytes.len() && bytes[cursor] != b'"' {
-                    cursor += if bytes[cursor] == b'\\' { 2 } else { 1 };
-                }
-                cursor + 1
-            }
-            b'\'' if next == Some(b'\\') => {
-                // An escaped character literal: the escape's own character is skipped, then the closing quote.
-                source[index + 3..].find('\'').map_or(bytes.len(), |at| index + 3 + at + 1)
-            }
-            b'\'' => {
-                let width = source[index + 1..].chars().next().map_or(0, char::len_utf8);
-                if width > 0 && bytes.get(index + 1 + width) == Some(&b'\'') {
-                    index + 2 + width
-                } else {
-                    // When: no closing quote follows one character, this is a lifetime, which is code.
-                    index += 1;
-                    continue;
-                }
-            }
-            _ => {
-                index += 1;
-                continue;
-            }
-        };
-        blank(&mut masked, index, end);
-        index = end.max(index + 1);
-    }
-    String::from_utf8(masked).expect("blanking whole characters keeps UTF-8")
-}
-
-/// The body of the item starting at `head` in `source`, searched and returned as code only (`code_only`, read
-/// as LF) and ending at its first closing brace at the item's own indentation, so neither a comment nor a
-/// string counts. The signature must occur exactly once in code: a second copy, in an unused macro or a
-/// cfg-disabled impl, makes the source ambiguous, and the pin fails closed rather than guess which one compiles.
-fn item_body(source: &str, head: &str) -> Result<String, String> {
-    let code = code_only(&source.replace("\r\n", "\n"));
-    let starts: Vec<usize> = code.match_indices(head).map(|(at, _)| at).collect();
-    let &[start] = starts.as_slice() else {
-        return Err(if starts.is_empty() {
-            format!("{head} is not defined")
-        } else {
-            format!("ambiguous source: {head} occurs {} times", starts.len())
-        });
-    };
-    let line_start = code[..start].rfind('\n').map_or(0, |at| at + 1);
-    let indent = &code[line_start..start];
-    let rest = &code[start..];
-    let end =
-        rest.find(&format!("\n{indent}}}\n")).ok_or_else(|| format!("{head} does not end"))?;
-    Ok(rest[..end].to_owned())
-}
-
 /// The bodies of `source`'s get_palette_data and palette_info_from, or why either cannot be read unambiguously.
 fn palette_bodies(source: &str) -> Result<(String, String), Vec<String>> {
     match (
@@ -420,10 +310,6 @@ fn a_commented_or_quoted_decoy_never_satisfies_the_palette_pin() {
     assert_eq!(
         palette_wiring_problems(&format!("{decoy}{}{wiring}", query(new_call))),
         Vec::<String>::new()
-    );
-    assert_eq!(
-        code_only("let lifetime: &'static str = \"x\"; let quote = '\\''; let raw = r#\"//\"#;"),
-        "let lifetime: &'static str =    ; let quote =     ; let raw =        ;"
     );
 }
 
