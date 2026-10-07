@@ -1529,16 +1529,32 @@ RERUN_BACKING_JOBS = {_WINDOWS_RUNTIME: _WINDOWS_WORKSPACE}
 _WINDOWS_AGGREGATE = "windows"
 
 
+# The only verification body an aggregate may run: every listed result must be `success`, or the step fails.
+_AGGREGATE_LOOP = re.compile(
+    r'        run: \|\n          for result in (.+); do\n            test "\$result" = "success"\n          done\n*\Z'
+)
+
+
 def aggregate_checks(workflow: str, aggregate: str, job: str) -> bool:
-    """Whether an aggregate job needs `job` and its result loop tests that job's result."""
+    """Whether an aggregate job always runs one mandatory step whose fail-closed loop tests `job`'s result."""
     body = _job_body(workflow, aggregate)
     if body is None:
+        return False
+    # When: the aggregate itself could be skipped or advisory, a failed shard would not fail the required check.
+    if "\n    if: always()\n" not in "\n" + body or re.search(r"(?m)^    continue-on-error:", body):
         return False
     needs = re.search(r"(?m)^    needs: \[(.*)\]$", body)
     if needs is None or job not in [name.strip() for name in needs[1].split(",")]:
         return False
-    variable = re.search(rf"(?m)^          ([A-Z_]+): \$\{{\{{ needs\.{re.escape(job)}\.result \}}\}}$", body)
-    loop = re.search(r"(?m)^          for result in (.*); do$", body)
+    steps = re.split(r"(?m)^      - ", body.split("    steps:\n", 1)[-1])[1:]
+    if len(steps) != 1:
+        return False
+    step = "      - " + steps[0]
+    # When: the verification step is skipped, advisory, or not Bash, its loop cannot fail the job.
+    if re.search(r"(?m)^        (?:if|continue-on-error):", step) or "\n        shell: bash\n" not in step:
+        return False
+    loop = _AGGREGATE_LOOP.search(step)
+    variable = re.search(rf"(?m)^          ([A-Z_]+): \$\{{\{{ needs\.{re.escape(job)}\.result \}}\}}$", step)
     return variable is not None and loop is not None and f'"${variable[1]}"' in loop[1].split()
 
 

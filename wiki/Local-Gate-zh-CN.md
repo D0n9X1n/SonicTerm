@@ -154,7 +154,10 @@ PowerShell 的最后退出码，而一致性检查不对此建模。一致性检
 `cargo $SUB`、`bash "$SCRIPT"` 或 `cargo $(echo test)`；workflow 的修改与其它修改一样经过审查。每个仅 CI 条目都附带理由：依赖安装；
 对同一 job 的 workspace 步骤已运行的
 integration test 做证据重跑；或需要托管 runner、release 二进制或已构建 package 的运行时与 package
-证据。只在 CI 中运行的第一方测试或 `cargo fmt|clippy|doc` 不能列为仅 CI，因此缺失的本地测试或
+证据。唯一经过审查的例外允许由另一个 job 支撑重跑：`windows-tests-runtime` 的重跑由
+`windows-tests-workspace` 支撑，检查要求两者都在 `windows-latest` 上运行、都不是条件或 advisory job、
+workspace 步骤在 `windows-tests-workspace` 中是必需步骤，且 Windows 汇总 job 依赖两者，并在其唯一必需、
+fail-closed 的验证循环中检查两者。其它 job 仍需要自己的 workspace 步骤。只在 CI 中运行的第一方测试或 `cargo fmt|clippy|doc` 不能列为仅 CI，因此缺失的本地测试或
 gate 会使一致性检查失败。
 
 ## 步骤说明

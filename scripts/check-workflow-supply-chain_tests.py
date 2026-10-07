@@ -140,54 +140,69 @@ WINDOWS_TEST_WORK = (
     "      - name: Upload resource baseline evidence\n        if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}\n        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n        with:\n          name: resource-baseline-evidence-windows-latest\n          path: target/v1.2.0-baseline/evidence-windows-latest\n          if-no-files-found: error\n",
 )
 
-# Setup that every Windows test shard repeats on purpose; it gates nothing, so it is outside the inventory.
+# The six setup steps every Windows test shard repeats, verbatim from the former job except the Cargo cache:
+# each shard writes its own key, `unit-windows-latest-<SHARD>`, only on a push to main.
 WINDOWS_SHARD_SETUP = (
-    "uses: actions/checkout@",
-    "name: Install Rust",
-    "name: Resolve vcpkg commit",
-    "name: Restore vcpkg binaries (Cairo)",
-    "name: Install Cairo for Windows",
-    "name: Restore Cargo dependencies",
+    '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n',
+    '      - name: Install Rust\n        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1\n        with:\n          toolchain: stable\n',
+    '      - name: Resolve vcpkg commit\n        id: vcpkg\n        shell: pwsh\n        run: |\n          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\\vcpkg" }\n          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8\n          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8\n',
+    "      - name: Restore vcpkg binaries (Cairo)\n        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}\n          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}\n          restore-keys: |\n            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-\n",
+    '      - name: Install Cairo for Windows\n        shell: pwsh\n        run: .\\scripts\\setup-windows-cairo.ps1\n',
+    "      - name: Restore Cargo dependencies\n        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n        with:\n          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-<SHARD>\n          add-job-id-key: false\n          cache-workspace-crates: false\n          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n\n      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.\n",
 )
+
+# Each shard's preserved work, in order, by step name; together they are the former job's work exactly once.
+WINDOWS_SHARD_WORK = {
+    "windows-tests-workspace": (
+        "Measure PTY close baseline", "Run workspace unit and integration tests", "Run workspace documentation tests",
+        "Test MSI validator", "Run release-note unit test", "Test wiki publisher",
+        "Verify frozen PTY feasibility evidence", "Verify resource inventory", "Run deterministic soak control gate",
+        "Test resource baseline evidence collector", "Capture real resource baseline evidence",
+        "Upload resource baseline evidence",
+    ),
+    "windows-tests-harness": ("Run scenario harness unit tests", "Run scenario harness unit tests with frame counters"),
+    "windows-tests-harness-features": (
+        "Measure the glyph atlas working set", "Run scenario harness unit tests with the frame texture reading",
+        "Run scenario harness unit tests with the echo trace",
+    ),
+    "windows-tests-harness-api": ("Run scenario harness unit tests with the harness API cfgs",),
+    "windows-tests-runtime": (
+        "Report host window capability", "Report host adapter classification", "Report renderer churn baseline",
+        "Require Windows GDI capability=EXERCISED", "Upload Windows GDI probe log",
+        "Verify Windows WARP allocator baseline", "Verify Windows selection presentation",
+        "Build Windows perf scenario harness", "Require Windows perf scenario smoke",
+        "Upload Windows perf scenario smoke evidence",
+    ),
+}
+
+
+def windows_work_step(name: str) -> str:
+    """Return one inventoried step's verbatim text by its name."""
+    return next(step for step in WINDOWS_TEST_WORK if step.startswith(f"      - name: {name}\n"))
 
 
 def windows_shard_problems(workflow: str) -> list[str]:
-    """Check that the Windows test shards keep every inventoried step exactly once, unchanged and in order."""
+    """Check each Windows test shard runs its pinned setup, then exactly its pinned work, unchanged and in order."""
     problems: list[str] = []
-    placements: dict[str, list[tuple[str, int]]] = {step: [] for step in WINDOWS_TEST_WORK}
-    keys: dict[str, str] = {}
-    for shard in WINDOWS_TEST_SHARDS:
+    for shard, names in WINDOWS_SHARD_WORK.items():
         if f"\n  {shard}:\n" not in workflow:
             problems.append(f"ci.yml has no {shard} job")
             continue
         block = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", workflow.split(f"\n  {shard}:\n", 1)[1], maxsplit=1)[0]
-        if "    runs-on: windows-latest\n" not in block or "    needs: [windows-native]\n" not in block:
+        head, _, body = block.partition("    steps:\n")
+        if "    runs-on: windows-latest\n" not in head or "    needs: [windows-native]\n" not in head:
             problems.append(f"{shard} must run on windows-latest after windows-native")
-        if re.search(r"(?m)^    (?:if|continue-on-error):", block):
+        if re.search(r"(?m)^    (?:if|continue-on-error):", head):
             problems.append(f"{shard} must not be conditional or advisory")
-        key = re.findall(r"(?m)^          shared-key: (.+)$", block)
-        if len(key) != 1:
-            problems.append(f"{shard} needs one Cargo cache key")
-        elif key[0] in keys.values():
-            problems.append(f"{shard} shares its Cargo cache key")
-        else:
-            keys[shard] = key[0]
-        steps = [step.rstrip("\n") + "\n" for step in re.split(r"(?m)^(?=      - )", block.split("    steps:\n", 1)[-1])
-                 if step.startswith("      - ")]
-        order = []
-        for step in steps:
-            if any(step.startswith("      - " + marker) for marker in WINDOWS_SHARD_SETUP):
-                continue
-            if step not in placements:
-                problems.append(f"{shard} runs a step outside the inventory: {step.splitlines()[0].strip()}")
-                continue
-            placements[step].append((shard, len(order)))
-            order.append(WINDOWS_TEST_WORK.index(step))
-        if order != sorted(order):
-            problems.append(f"{shard} reorders its inventoried steps")
-    for step, places in placements.items():
-        if len(places) != 1:
-            problems.append(f"`{step.splitlines()[0].strip()}` runs {len(places)} times across the Windows shards")
+        steps = [step.rstrip("\n") + "\n" for step in re.split(r"(?m)^(?=      - )", body) if step.startswith("      - ")]
+        suffix = shard.removeprefix("windows-tests-")
+        setup = [step.replace("<SHARD>", suffix) for step in WINDOWS_SHARD_SETUP]
+        # When: the first six steps differ from the pinned setup, a step was dropped, edited or disguised as setup.
+        if steps[:len(setup)] != setup:
+            problems.append(f"{shard} does not begin with the six pinned setup steps")
+        expected = [windows_work_step(name) for name in names]
+        if steps[len(setup):] != expected:
+            problems.append(f"{shard} does not run exactly its pinned work steps in order")
     return problems
 
 
@@ -595,6 +610,14 @@ class RepositoryTests(unittest.TestCase):
                 self.assertIsNotNone(variable, shard)
                 self.assertIn(f'"${variable[1]}"', loop[1].split(), shard)
             self.assertIn('test "$result" = "success"', block)
+            # The one verification step must run, fail on any non-success, and stay mandatory.
+            steps = re.split(r"(?m)^      - ", block.split("    steps:\n", 1)[1])[1:]
+            self.assertEqual(len(steps), 1)
+            self.assertNotRegex(steps[0], r"(?m)^        (?:if|continue-on-error):")
+            self.assertNotRegex(block, r"(?m)^    continue-on-error:")
+            self.assertIn("\n        shell: bash\n", "\n" + steps[0])
+            self.assertRegex(steps[0], r'        run: \|\n          for result in .+; do\n'
+                                       r'            test "\$result" = "success"\n          done\n*\Z')
 
         for job, (name, shards) in contracts.items():
             with self.subTest(job=job):
@@ -607,6 +630,13 @@ class RepositoryTests(unittest.TestCase):
                 operand = re.search(r'for result in ("\$[A-Z_]+") ', block)[1]
                 with self.assertRaises(AssertionError):
                     assert_contract(job, block.replace(operand + " ", "", 1), name, shards)
+                # A skipped, advisory or bypassed verification step would let a failed shard pass.
+                verify = re.search(r"(?m)^      - name: .+\n        shell: bash\n", block)[0]
+                for bypass in (verify + "        if: false\n", verify + "        continue-on-error: true\n"):
+                    with self.assertRaises(AssertionError):
+                        assert_contract(job, block.replace(verify, bypass, 1), name, shards)
+                with self.assertRaises(AssertionError):
+                    assert_contract(job, block.replace('= "success"', '= "success" || true', 1), name, shards)
                 with self.assertRaises(AssertionError):
                     assert_contract(
                         job,
@@ -653,25 +683,50 @@ class RepositoryTests(unittest.TestCase):
                 self.assertIn(f"-- {executable} --runtime-smoke", text)
 
     def test_windows_shards_keep_every_test_job_step_exactly_once(self):
-        # The split must not drop, duplicate, edit or reorder any step of the former single Windows test job,
-        # including its uploads and their conditions; setup is repeated per shard and outside the inventory.
+        # The split must not drop, duplicate, edit, move or reorder any step of the former single Windows test job,
+        # including its uploads beside the steps that produce their files, nor any shard's setup.
+        assigned = [name for names in WINDOWS_SHARD_WORK.values() for name in names]
+        self.assertEqual(sorted(windows_work_step(name) for name in assigned), sorted(WINDOWS_TEST_WORK))
+        self.assertEqual(len(assigned), len(set(assigned)))
         workflow = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertEqual(windows_shard_problems(workflow), [])
-        smoke_upload = next(step for step in WINDOWS_TEST_WORK if "name: Upload Windows perf scenario smoke" in step)
-        gdi_upload = next(step for step in WINDOWS_TEST_WORK if "name: Upload Windows GDI probe log" in step)
-        build = next(step for step in WINDOWS_TEST_WORK if "name: Build Windows perf scenario harness" in step)
-        smoke = next(step for step in WINDOWS_TEST_WORK if "name: Require Windows perf scenario smoke" in step)
-        workspace_key = "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-workspace\n"
+
+        def in_shard(shard: str, old: str, new: str) -> str:
+            """Mutate one shard's body only."""
+            head, tail = workflow.split(f"  {shard}:\n", 1)
+            body, rest = re.split(r"(?=\n  [a-z][a-z0-9_-]*:\n)", tail, maxsplit=1)
+            self.assertEqual(body.count(old), 1, old)
+            return head + f"  {shard}:\n" + body.replace(old, new, 1) + rest
+
+        gdi_upload = windows_work_step("Upload Windows GDI probe log")
+        smoke_upload = windows_work_step("Upload Windows perf scenario smoke evidence")
+        build = windows_work_step("Build Windows perf scenario harness")
+        smoke = windows_work_step("Require Windows perf scenario smoke")
+        msi = windows_work_step("Test MSI validator")
+        checkout = WINDOWS_SHARD_SETUP[0]
+        rust = WINDOWS_SHARD_SETUP[1]
+        disguised = ("      - name: Install Rust evidence copy\n"
+                     "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+                     "        with:\n          name: copy\n          path: target\n")
         harness_key = "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-harness\n"
+        workspace_key = "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-workspace\n"
+        relocated = in_shard("windows-tests-runtime", gdi_upload + "\n", "")
+        relocated_head, relocated_tail = relocated.split("  windows-tests-workspace:\n", 1)
         mutations = {
-            "dropped step": workflow.replace(gdi_upload, "", 1),
-            "duplicated step": workflow.replace(build, build + "\n" + build, 1),
-            "lost upload condition": workflow.replace(smoke_upload, smoke_upload.replace("failure() || ", "", 1), 1),
+            "dropped step": in_shard("windows-tests-runtime", gdi_upload, ""),
+            "duplicated step": in_shard("windows-tests-runtime", build, build + "\n" + build),
+            "lost upload condition": in_shard("windows-tests-runtime", smoke_upload,
+                                              smoke_upload.replace("failure() || ", "", 1)),
             # Steps are separated by one blank line in the file; the inventory strips it.
-            "reordered steps": workflow.replace(build + "\n" + smoke, smoke + "\n" + build, 1),
-            "advisory shard": workflow.replace("  windows-tests-harness:\n", "  windows-tests-harness:\n"
-                                               "    continue-on-error: true\n", 1),
-            "shared cache key": workflow.replace(harness_key, workspace_key, 1),
+            "reordered steps": in_shard("windows-tests-runtime", build + "\n" + smoke, smoke + "\n" + build),
+            "upload moved away from its producer": relocated_head + "  windows-tests-workspace:\n"
+                + relocated_tail.replace(msi, gdi_upload + "\n" + msi, 1),
+            "work disguised as setup": in_shard("windows-tests-harness", rust, rust + "\n" + disguised),
+            "missing checkout": in_shard("windows-tests-harness", checkout + "\n", ""),
+            "altered setup": in_shard("windows-tests-harness", "toolchain: stable", "toolchain: nightly"),
+            "advisory shard": in_shard("windows-tests-harness", "    runs-on: windows-latest\n",
+                                       "    runs-on: windows-latest\n    continue-on-error: true\n"),
+            "shared cache key": in_shard("windows-tests-harness", harness_key, workspace_key),
         }
         for label, mutated in mutations.items():
             with self.subTest(mutation=label):

@@ -1978,6 +1978,16 @@ class CiParityTests(unittest.TestCase):
         line = "        run: bash scripts/check-workspace-crates.sh\n"
         self.assertEqual(body.count(line), 1)
 
+        before_aggregate, after_aggregate = WORKFLOW.split("  windows:\n", 1)
+        aggregate, after_linux = after_aggregate.split("  linux-core:\n", 1)
+        verify = "      - name: Verify Windows shards\n        shell: bash\n"
+        compare = '            test "$result" = "success"\n'
+
+        def in_aggregate(old: str, new: str) -> str:
+            """Mutate only the Windows aggregate's body; the macOS and Linux aggregates carry the same lines."""
+            self.assertEqual(aggregate.count(old), 1, old)
+            return before_aggregate + "  windows:\n" + aggregate.replace(old, new, 1) + "  linux-core:\n" + after_linux
+
         def in_workspace(old: str, new: str) -> str:
             """Mutate only the workspace shard's body."""
             self.assertIn(old, body)
@@ -1999,6 +2009,18 @@ class CiParityTests(unittest.TestCase):
             "the rerun shard left out of the aggregate": (
                 WORKFLOW.replace("windows-tests-runtime, windows-smoke]", "windows-smoke]", 1),
                 "aggregate must need and check windows-tests-runtime"),
+            "the aggregate's verification step skipped": (
+                in_aggregate(verify, verify + "        if: false\n"),
+                "aggregate must need and check windows-tests-workspace"),
+            "the aggregate's verification step made advisory": (
+                in_aggregate(verify, verify + "        continue-on-error: true\n"),
+                "aggregate must need and check windows-tests-workspace"),
+            "the aggregate's comparison bypassed": (
+                in_aggregate(compare, compare.rstrip("\n") + " || true\n"),
+                "aggregate must need and check windows-tests-workspace"),
+            "the aggregate made conditional on success": (
+                in_aggregate("    if: always()\n", "    if: success()\n"),
+                "aggregate must need and check windows-tests-workspace"),
         }
         for label, (mutated, expected) in mutations.items():
             with self.subTest(mutation=label):

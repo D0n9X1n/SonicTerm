@@ -233,7 +233,13 @@ such as `cargo $SUB`, `bash "$SCRIPT"`, or `cargo $(echo test)`; a workflow edit
 is reviewed like any other change. Each CI-only entry
 carries a reason: dependency setup, an evidence rerun of an integration test
 that the same job's workspace step already runs, or runtime and package evidence
-that needs hosted runners, release binaries, or built packages. A first-party
+that needs hosted runners, release binaries, or built packages. One reviewed
+exception backs reruns from another job: `windows-tests-runtime`'s reruns are
+backed by `windows-tests-workspace`, and the check requires both to run on
+`windows-latest`, neither to be conditional or advisory, the workspace step to be
+mandatory in `windows-tests-workspace`, and the Windows aggregate to need both and
+test both in its one mandatory, fail-closed verification loop. Every other job
+still needs its own workspace step. A first-party
 test, or a `cargo fmt|clippy|doc` run, that only CI runs cannot be CI-only, so a
 missing local test or gate fails parity.
 
