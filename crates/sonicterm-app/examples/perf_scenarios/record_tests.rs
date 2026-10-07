@@ -38,6 +38,7 @@ fn credited_sample(inject_unix_s: f64, latency_ms: f64) -> LatencySample {
         reason: CREDITED,
         split: None,
         split_reason: "unsupported",
+        dispatch_timeline: TIMELINE_NOT_TAKEN,
     }
 }
 
@@ -177,7 +178,7 @@ fn latency_summary_reports_attribution_coverage() {
     let summary = latency_json(&samples);
     assert_eq!((summary["attributed"].as_u64(), summary["total"].as_u64()), (Some(2), Some(4)));
     assert_eq!(summary["coverage"], 0.5);
-    let lock_busy = json!({"inject_unix_s": 1.25, "latency_ms": null, "attributed": false, "reason": "lock-busy", "split": null, "split_reason": "not-credited"});
+    let lock_busy = json!({"inject_unix_s": 1.25, "latency_ms": null, "attributed": false, "reason": "lock-busy", "split": null, "split_reason": "not-credited", "dispatch_timeline": "not-taken"});
     assert_eq!(summary["samples"][1], lock_busy);
     assert_eq!(summary["samples"][0]["attributed"], true);
     assert_eq!(summary["samples"][3]["reason"], "no-candidate");
@@ -475,9 +476,9 @@ fn result_json_records_every_measurement_in_its_pinned_shape() {
     let latency = json!({
         "samples": [
             {"inject_unix_s": 2.0, "latency_ms": 12.5, "attributed": true, "reason": "credited",
-             "split": null, "split_reason": "unsupported"},
+             "split": null, "split_reason": "unsupported", "dispatch_timeline": "not-taken"},
             {"inject_unix_s": 2.1, "latency_ms": null, "attributed": false, "reason": "lock-busy",
-             "split": null, "split_reason": "not-credited"},
+             "split": null, "split_reason": "not-credited", "dispatch_timeline": "not-taken"},
         ],
         "attributed": 1,
         "total": 2,
@@ -1220,6 +1221,18 @@ fn uncredited_samples_read_not_credited() {
     let report = latency_json(&[sample]);
     assert_eq!(report["split_reasons"], json!({}), "an uncredited sample is not a split reason");
     assert_eq!(report["split_coverage"], json!(null));
+}
+
+/// A sample's dispatch timeline reads `not-taken` until its close records one, and the recorded
+/// disposition is what the result's `dispatch_timeline` key reports.
+#[test]
+fn a_closed_samples_dispatch_timeline_is_what_the_result_reports() {
+    let open = LatencySample::uncredited(3.0, UnattributedReason::NoCandidate.as_str());
+    assert_eq!(open.dispatch_timeline, TIMELINE_NOT_TAKEN);
+    let closed = open.with_dispatch_timeline("not-recorded");
+    assert_eq!(closed.dispatch_timeline, "not-recorded");
+    let json = serde_json::to_value(closed).expect("a sample converts");
+    assert_eq!(json["dispatch_timeline"], json!("not-recorded"));
 }
 
 /// A report of no samples still carries the split schema, with zero counts, no reasons and null

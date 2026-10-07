@@ -145,9 +145,9 @@ fn assert_never_gated(source: &str, method: &str, module_line: &str, mod_source:
     assert!(!gates(&module_attributes), "{module_line} is gated: {module_attributes:?}");
 }
 
-/// Both prerequisite methods are ordinary doc-hidden methods, never behind a cfg or a Cargo
-/// feature, so a harness overlaid on any base that has them compiles and both sides build the same
-/// feature set. Every enclosing gate counts.
+/// Every prerequisite method (phase control, echo timeline, and the dispatch timeline's arm and take) is
+/// an ordinary doc-hidden method, never behind a cfg or a Cargo feature, so a harness overlaid on any base
+/// that has them compiles and both sides build the same feature set. Every enclosing gate counts.
 #[test]
 fn the_prerequisite_methods_are_never_cfg_gated() {
     let mod_source = include_str!("mod.rs");
@@ -163,6 +163,14 @@ fn the_prerequisite_methods_are_never_cfg_gated() {
         "mod echo_timeline;",
         mod_source,
     );
+    for method in ["pub fn arm_dispatch_timeline_v1(", "pub fn take_dispatch_timeline_v1("] {
+        assert_never_gated(
+            include_str!("dispatch_timeline.rs"),
+            method,
+            "mod dispatch_timeline;",
+            mod_source,
+        );
+    }
 }
 
 /// A Windows checkout with CRLF line endings reads the same as an LF one: the scan finds the impl's
@@ -183,6 +191,14 @@ fn the_gate_check_reads_a_crlf_checkout_as_an_lf_one() {
         "mod echo_timeline;",
         &mod_source,
     );
+    for method in ["pub fn arm_dispatch_timeline_v1(", "pub fn take_dispatch_timeline_v1("] {
+        assert_never_gated(
+            &crlf(include_str!("dispatch_timeline.rs")),
+            method,
+            "mod dispatch_timeline;",
+            &mod_source,
+        );
+    }
 }
 
 /// The attribute reader sees a gate however Rust lets it be written: across a blank line, behind a

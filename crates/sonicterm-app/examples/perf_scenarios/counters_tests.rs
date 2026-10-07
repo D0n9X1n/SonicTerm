@@ -375,6 +375,21 @@ const COMPLETENESS_GATE: &str = "#[cfg(perf_completeness_api)]";
 /// renderer has no checkpoint.
 const COMPLETENESS_CALLS: &[&str] = &["completeness_checkpoint", "completeness_from_checkpoint"];
 
+/// The gate of the App's dispatch-timeline API: the harness-only cfg perf-compare sets on both sides or neither.
+const DISPATCH_TIMELINE_GATE: &str = "#[cfg(perf_dispatch_timeline_api)]";
+
+/// The App API the harness may name only behind the dispatch-timeline cfg: the arm and take methods and
+/// their types, none of which exists in a tree before the prerequisite.
+const DISPATCH_TIMELINE_CALLS: &[&str] = &[
+    "arm_dispatch_timeline_v1",
+    "take_dispatch_timeline_v1",
+    "DispatchTimelineToken",
+    "DispatchTimelineV1",
+    "DispatchTimelineArmV1",
+    "DispatchTimelineTakeV1",
+    "AppearanceTargetV1",
+];
+
 /// The trim hook's gate.
 const TRIM_HOOK_GATE: &str = "#[cfg(feature = \"perf-hook-trim\")]";
 
@@ -1045,5 +1060,33 @@ fn every_completeness_api_call_in_the_harness_is_behind_its_cfg() {
     assert_eq!(
         ungated_calls(&fixture, COMPLETENESS_GATE, COMPLETENESS_CALLS),
         vec!["7: completeness_checkpoint".to_owned()]
+    );
+}
+
+/// Every call into the App's dispatch-timeline API, and every name of its types, sits behind
+/// `perf_dispatch_timeline_api`: perf-compare overlays this harness onto trees that predate the
+/// prerequisite and builds it there with the cfg off. A call outside the gated item is reported.
+#[test]
+fn every_dispatch_timeline_api_call_in_the_harness_is_behind_its_cfg() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/perf_scenarios");
+    let mut scanned = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let entry_path = entry.unwrap().path();
+        let name = entry_path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+            continue;
+        }
+        scanned += 1;
+        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let found = ungated_calls(&source, DISPATCH_TIMELINE_GATE, DISPATCH_TIMELINE_CALLS);
+        assert!(found.is_empty(), "{name}: {found:#?}");
+    }
+    assert!(scanned >= 10, "the harness sources were not found");
+    let fixture = format!(
+        "{DISPATCH_TIMELINE_GATE}\nmod api {{\n    fn arm(app: &mut App) {{\n        app.arm_dispatch_timeline_v1(1, None);\n    }}\n}}\n\nfn off(app: &mut App, token: DispatchTimelineToken) {{\n    app.take_dispatch_timeline_v1(token);\n}}\n"
+    );
+    assert_eq!(
+        ungated_calls(&fixture, DISPATCH_TIMELINE_GATE, DISPATCH_TIMELINE_CALLS),
+        vec!["9: take_dispatch_timeline_v1".to_owned(), "8: DispatchTimelineToken".to_owned()]
     );
 }
