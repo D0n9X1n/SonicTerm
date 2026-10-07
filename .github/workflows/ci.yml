@@ -568,10 +568,10 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-workspace
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
           add-job-id-key: false
           cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          save-if: false
 
       # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
       - name: Measure PTY close baseline
@@ -669,10 +669,10 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-harness
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
           add-job-id-key: false
           cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          save-if: false
 
       # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
       - name: Run scenario harness unit tests
@@ -718,10 +718,10 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-harness-features
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
           add-job-id-key: false
           cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          save-if: false
 
       # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
       - name: Measure the glyph atlas working set
@@ -770,10 +770,10 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-harness-api
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
           add-job-id-key: false
           cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          save-if: false
 
       # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
       - name: Run scenario harness unit tests with the harness API cfgs
@@ -817,10 +817,10 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-runtime
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
           add-job-id-key: false
           cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          save-if: false
 
       # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.
       - name: Report host window capability

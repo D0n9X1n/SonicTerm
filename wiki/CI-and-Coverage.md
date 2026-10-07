@@ -141,9 +141,13 @@ requires its bounded native smoke plus `frame-validation` and `device-recovery`
 scenario smokes in separate steps with native process deadlines.
 
 Rust-consuming shards share a dependency cache key within each platform and
-architecture, excluding workspace-crate artifacts; each Windows test shard has a key of its own, because its
-feature set and compiler flags differ. The Apple Silicon core, Windows checks, each Windows test shard, and
-Linux core shards are their keys' only writers. The Intel
+architecture, excluding workspace-crate artifacts. The Apple Silicon core,
+Windows checks, and Linux core shards are their keys' only writers; the five
+Windows test shards restore the Windows checks shard's key and never save. A
+restored archive reuses only compatible dependencies, build scripts,
+proc-macros and native outputs, so a test shard can still compile much of its
+tree, and the harness API shard's compiler flags can make restored
+dependencies unusable. The Intel
 macOS smoke lane is its architecture's only writer because it has no core shard.
 Every writer saves only on a push to `main`; other shards and every pull-request
 lane restore only. Release builds neither restore nor save Rust caches. This

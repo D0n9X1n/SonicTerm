@@ -91,9 +91,10 @@ Windows 测试分为五个并行 shard，每个都重复 checkout、Rust、Cairo
 只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功；
 另有带原生进程期限的独立步骤，要求其 `frame-validation` 与 `device-recovery` 场景 smoke 成功。
 
-同一平台及架构中使用 Rust 的 shard 共用依赖 cache key，不缓存 workspace crate artifact；每个 Windows
-测试 shard 使用自己的 key，因为其 feature 组合与编译器标志不同。Apple Silicon core、Windows checks、每个
-Windows 测试 shard 和 Linux core 分别是各自 key 的唯一写入者。Intel
+同一平台及架构中使用 Rust 的 shard 共用依赖 cache key，不缓存 workspace crate artifact。
+Apple Silicon core、Windows checks 和 Linux core 分别是各自 key 的唯一写入者；五个 Windows 测试 shard
+恢复 Windows checks shard 的 key，且从不保存。恢复的归档只能复用兼容的依赖、构建脚本、proc-macro 与原生
+输出，因此测试 shard 仍可能编译大部分依赖树，而 harness API shard 的编译器标志可能使恢复的依赖无法复用。Intel
 macOS 没有 core shard，因此其 smoke lane 是该架构的唯一写入者。所有写入都仅限推送到
 `main`；其它 shard 和全部 pull-request lane 只恢复缓存。Release 构建既不恢复也不保存
 Rust 缓存。这样既限制条目，也避免同一次工作流内出现重复写入者；相互重叠的 `main`

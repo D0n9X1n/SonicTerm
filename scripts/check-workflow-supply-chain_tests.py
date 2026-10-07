@@ -140,15 +140,15 @@ WINDOWS_TEST_WORK = (
     "      - name: Upload resource baseline evidence\n        if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}\n        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n        with:\n          name: resource-baseline-evidence-windows-latest\n          path: target/v1.2.0-baseline/evidence-windows-latest\n          if-no-files-found: error\n",
 )
 
-# The six setup steps every Windows test shard repeats, verbatim from the former job except the Cargo cache:
-# each shard writes its own key, `unit-windows-latest-<SHARD>`, only on a push to main.
+# The six setup steps every Windows test shard repeats, verbatim from the former job: each shard restores the
+# Cargo cache that windows-checks writes on main, `unit-windows-latest`, and never saves one.
 WINDOWS_SHARD_SETUP = (
     '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n',
     '      - name: Install Rust\n        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1\n        with:\n          toolchain: stable\n',
     '      - name: Resolve vcpkg commit\n        id: vcpkg\n        shell: pwsh\n        run: |\n          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\\vcpkg" }\n          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8\n          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8\n',
     "      - name: Restore vcpkg binaries (Cairo)\n        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}\n          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}\n          restore-keys: |\n            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-\n",
     '      - name: Install Cairo for Windows\n        shell: pwsh\n        run: .\\scripts\\setup-windows-cairo.ps1\n',
-    "      - name: Restore Cargo dependencies\n        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n        with:\n          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-<SHARD>\n          add-job-id-key: false\n          cache-workspace-crates: false\n          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n\n      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.\n",
+    "      - name: Restore Cargo dependencies\n        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n        with:\n          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest\n          add-job-id-key: false\n          cache-workspace-crates: false\n          save-if: false\n\n      # Includes the cold test-binary build; the baseline-only observation envelope is 640 seconds.\n",
 )
 
 # Each shard's preserved work, in order, by step name; together they are the former job's work exactly once.
@@ -195,8 +195,7 @@ def windows_shard_problems(workflow: str) -> list[str]:
         if re.search(r"(?m)^    (?:if|continue-on-error):", head):
             problems.append(f"{shard} must not be conditional or advisory")
         steps = [step.rstrip("\n") + "\n" for step in re.split(r"(?m)^(?=      - )", body) if step.startswith("      - ")]
-        suffix = shard.removeprefix("windows-tests-")
-        setup = [step.replace("<SHARD>", suffix) for step in WINDOWS_SHARD_SETUP]
+        setup = list(WINDOWS_SHARD_SETUP)
         # When: the first six steps differ from the pinned setup, a step was dropped, edited or disguised as setup.
         if steps[:len(setup)] != setup:
             problems.append(f"{shard} does not begin with the six pinned setup steps")
@@ -724,8 +723,8 @@ class RepositoryTests(unittest.TestCase):
         disguised = ("      - name: Install Rust evidence copy\n"
                      "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
                      "        with:\n          name: copy\n          path: target\n")
-        harness_key = "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-harness\n"
-        workspace_key = "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest-workspace\n"
+        shared_key = "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest\n"
+        restore_only = "save-if: false\n"
         relocated = in_shard("windows-tests-runtime", gdi_upload + "\n", "")
         relocated_head, relocated_tail = relocated.split("  windows-tests-workspace:\n", 1)
         mutations = {
@@ -742,7 +741,19 @@ class RepositoryTests(unittest.TestCase):
             "altered setup": in_shard("windows-tests-harness", "toolchain: stable", "toolchain: nightly"),
             "advisory shard": in_shard("windows-tests-harness", "    runs-on: windows-latest\n",
                                        "    runs-on: windows-latest\n    continue-on-error: true\n"),
-            "shared cache key": in_shard("windows-tests-harness", harness_key, workspace_key),
+            # Each shard restores the main-written family and never writes, so no new family or writer appears.
+            "an unintended new cache family": in_shard(
+                "windows-tests-harness", shared_key, shared_key.replace("windows-latest", "windows-latest-harness")),
+            "a test shard becoming a main writer": in_shard(
+                "windows-tests-harness", restore_only,
+                "save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n"),
+            "a pull-request writer": in_shard("windows-tests-harness", restore_only, "save-if: true\n"),
+            "cache namespace removed": in_shard(
+                "windows-tests-harness", shared_key, "shared-key: unit-windows-latest\n"),
+            # The action hashes the Rust toolchain and environment into the key by default; disabling it would let
+            # a shard restore artifacts built under other compiler settings.
+            "environment hashing disabled": in_shard(
+                "windows-tests-harness", restore_only, restore_only + "          add-rust-environment-hash-key: false\n"),
         }
         for label, mutated in mutations.items():
             with self.subTest(mutation=label):
@@ -755,7 +766,9 @@ class RepositoryTests(unittest.TestCase):
         )
         self.assertIn("CI_CACHE_NAMESPACE: ci-v3", text)
         # Twelve restores: three macOS, the Windows checks and five Windows test shards, the Windows smoke,
-        # and two Linux; eight of them write on a main push (each Windows test shard owns its key).
+        # and two Linux. Three use the ordinary main-push writer condition: macOS core, the Windows checks and Linux
+        # core; the macOS smoke matrix's Intel lane is a fourth, Intel-only writer. The Windows test shards and smoke
+        # restore the checks shard's key.
         self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 12)
         self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 12)
         self.assertEqual(text.count("add-job-id-key: false"), 12)
@@ -764,9 +777,9 @@ class RepositoryTests(unittest.TestCase):
             text.count(
                 "save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
             ),
-            8,
+            3,
         )
-        self.assertEqual(text.count("save-if: false"), 3)
+        self.assertEqual(text.count("save-if: false"), 8)
 
         native = text.split("  windows-native:\n", 1)[1]
         native = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", native, maxsplit=1)[0]
@@ -793,11 +806,11 @@ class RepositoryTests(unittest.TestCase):
             "macos-coverage": ("unit-macos-14", "false"),
             "macos-smoke": ("unit-${{ matrix.runner }}", intel),
             "windows-checks": ("unit-windows-latest", main),
-            "windows-tests-workspace": ("unit-windows-latest-workspace", main),
-            "windows-tests-harness": ("unit-windows-latest-harness", main),
-            "windows-tests-harness-features": ("unit-windows-latest-harness-features", main),
-            "windows-tests-harness-api": ("unit-windows-latest-harness-api", main),
-            "windows-tests-runtime": ("unit-windows-latest-runtime", main),
+            "windows-tests-workspace": ("unit-windows-latest", "false"),
+            "windows-tests-harness": ("unit-windows-latest", "false"),
+            "windows-tests-harness-features": ("unit-windows-latest", "false"),
+            "windows-tests-harness-api": ("unit-windows-latest", "false"),
+            "windows-tests-runtime": ("unit-windows-latest", "false"),
             "windows-smoke": ("unit-windows-latest", "false"),
             "linux-core": ("linux-ubuntu-22.04", main),
             "linux-packages": ("linux-ubuntu-22.04", "false"),
