@@ -12,18 +12,33 @@
 #![warn(clippy::min_ident_chars)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell as ByteCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sonicterm_grid::hyperlink::{HyperlinkRegistry, MAX_HYPERLINKS, MAX_HYPERLINK_METADATA_BYTES};
 
-static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Net heap bytes this thread has allocated less those it has freed.
+    ///
+    /// Per thread, because the harness's own threads (result reporting, a finished test's
+    /// teardown) allocate and free while a test measures, and the `MEASURE` lock cannot serialize
+    /// them. Signed, because a thread can free an allocation another thread made.
+    /// A const-initialized `Cell` has no destructor, so reaching it never allocates or re-enters.
+    static NET_BYTES: ByteCell<isize> = const { ByteCell::new(0) };
+}
+
+/// Add `delta` bytes to the calling thread's net figure; a thread already tearing down its locals is skipped.
+fn note_bytes(delta: isize) {
+    let _ = NET_BYTES.try_with(|net| net.set(net.get().wrapping_add(delta)));
+}
 
 /// Serialises every test in this file.
 ///
-/// The counting allocator is process-global, so two tests measuring
-/// concurrently attribute each other's allocations to whichever one is
-/// reading. Measured: all three pass serially and all three fail in parallel,
-/// reporting a 5.80x "undercount" that was entirely sibling noise.
+/// Each thread counts only its own bytes, so concurrent tests no longer move
+/// each other's figures; the lock keeps the tests measuring one at a time. A
+/// process-global counter attributed concurrent tests' allocations to whichever
+/// one was reading, and reported a 5.80x "undercount" that was entirely
+/// sibling noise.
 ///
 /// A lock rather than `--test-threads=1`, because the gate cannot be told to
 /// serialise one file and a suite that only works under a flag is a suite that
@@ -32,24 +47,25 @@ static MEASURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct Counting;
 
-// SAFETY: Operations forward exact pointers, layouts, and sizes to `System`; atomic bookkeeping allocates nothing and cannot re-enter.
+// SAFETY: Operations forward exact pointers, layouts, and sizes to `System`; const thread-local byte counts allocate nothing and cannot re-enter.
 unsafe impl GlobalAlloc for Counting {
-    // SAFETY: `layout` must be valid; the atomic byte update is allocation-free before forwarding it unchanged.
+    // SAFETY: `layout` must be valid; the thread-local byte count is allocation-free before forwarding it unchanged.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        // A `Layout` size never exceeds `isize::MAX`, so the cast is lossless.
+        note_bytes(layout.size() as isize);
         // SAFETY: `layout` is the exact valid layout received under `GlobalAlloc::alloc`.
         unsafe { System.alloc(layout) }
     }
     // SAFETY: `ptr` and its original `layout` must match; allocation-free bookkeeping cannot re-enter deallocation.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+        note_bytes(-(layout.size() as isize));
         // SAFETY: `ptr` and original `layout` are forwarded unchanged from the valid deallocation call.
         unsafe { System.dealloc(ptr, layout) }
     }
-    // SAFETY: `ptr`, original `layout`, and `new_size` must be valid; atomic bookkeeping allocates nothing and cannot re-enter.
+    // SAFETY: `ptr`, original `layout`, and `new_size` must be valid; the thread-local byte count allocates nothing and cannot re-enter.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        LIVE_BYTES.fetch_add(new_size.saturating_sub(layout.size()), Ordering::Relaxed);
-        LIVE_BYTES.fetch_sub(layout.size().saturating_sub(new_size), Ordering::Relaxed);
+        // Both sizes are at most `isize::MAX`, so their difference fits in `isize`.
+        note_bytes((new_size as isize).wrapping_sub(layout.size() as isize));
         // SAFETY: `ptr`, original `layout`, and `new_size` are forwarded unchanged under `GlobalAlloc::realloc`.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -58,8 +74,14 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-fn held() -> usize {
-    LIVE_BYTES.load(Ordering::Relaxed)
+/// Net heap bytes the calling thread holds: those it allocated less those it freed.
+fn held() -> isize {
+    NET_BYTES.with(ByteCell::get)
+}
+
+/// Bytes the calling thread holds beyond an earlier `held()` reading, or zero if it holds fewer.
+fn held_since(before: isize) -> usize {
+    usize::try_from(held().saturating_sub(before)).unwrap_or(0)
 }
 
 /// The reported figure must track real heap across sizes.
@@ -84,7 +106,7 @@ fn reported_bytes_track_real_heap() {
         for uri in &uris {
             registry.intern(None, uri);
         }
-        let truth = held().saturating_sub(before);
+        let truth = held_since(before);
         let reported = registry.retained_bytes();
 
         assert!(truth > 0, "precondition: interning must allocate");
@@ -131,7 +153,7 @@ fn real_heap_stops_below_the_cap() {
             break;
         }
     }
-    let truth = held().saturating_sub(before);
+    let truth = held_since(before);
 
     assert!(!registry.is_empty(), "precondition: the registry admitted something");
     assert!(
@@ -161,12 +183,12 @@ fn clearing_returns_the_heap_it_charged() {
     for uri in &uris {
         registry.intern(None, uri);
     }
-    let peak = held().saturating_sub(before);
+    let peak = held_since(before);
     assert!(peak > 0, "precondition: interning allocated");
 
     registry.clear();
 
-    let after = held().saturating_sub(before);
+    let after = held_since(before);
     assert_eq!(registry.retained_bytes(), 0, "a cleared registry must report zero");
     assert!(
         after < peak / 4,
@@ -175,16 +197,14 @@ fn clearing_returns_the_heap_it_charged() {
     );
 }
 
-/// Bytes other test threads can allocate inside a measurement window. `MEASURE` serialises the
-/// measurements, but the harness still records and prints sibling results while one runs: measured
-/// as 515 to 584 B on a 9 KB figure in 6 of 40 parallel runs, and 0 of 40 with one test thread.
-const SIBLING_NOISE_BYTES: usize = 4096;
-
 /// Assert `reported` is within this file's tolerance of the real heap `truth`: it may not
-/// understate by more than 1% plus `SIBLING_NOISE_BYTES`, or overstate by more than 10% plus 4 KiB.
+/// understate by more than 1%, or overstate by more than 10% plus 4 KiB.
+///
+/// The understatement side has no allowance for other threads: `held()` counts only the measuring
+/// thread, so another thread's allocations never reach `truth`.
 fn assert_tracks(label: &str, reported: usize, truth: usize) {
     assert!(
-        reported + truth / 100 + SIBLING_NOISE_BYTES >= truth,
+        reported + truth / 100 >= truth,
         "{label}: reported {reported} understates real heap {truth}"
     );
     assert!(
@@ -212,7 +232,7 @@ fn many_client_ids_on_one_long_uri_hold_one_copy_of_it() {
         .iter()
         .filter(|client_id| registry.try_intern(Some(client_id), &uri).is_some())
         .count();
-    let truth = held().saturating_sub(before);
+    let truth = held_since(before);
     let reported = registry.retained_bytes();
 
     assert_eq!(admitted, client_ids.len(), "every client id on the shared URI must be admitted");
@@ -233,7 +253,7 @@ fn an_inner_table_growing_to_the_count_cap_is_charged_as_it_grows() {
     for (index, client_id) in client_ids.iter().enumerate() {
         assert!(registry.try_intern(Some(client_id), &uri).is_some(), "{client_id} admitted");
         if [999, 3_999, MAX_HYPERLINKS - 1].contains(&index) {
-            let truth = held().saturating_sub(before);
+            let truth = held_since(before);
             assert_tracks(&format!("{} ids", index + 1), registry.retained_bytes(), truth);
         }
     }
@@ -256,13 +276,13 @@ fn reclaiming_a_shared_uri_tracks_the_heap_down_to_empty() {
     assert_eq!(registry.retain_live(&keep), 999);
     drop(keep);
     drop(ids);
-    let truth = held().saturating_sub(before);
+    let truth = held_since(before);
     let reported = registry.retained_bytes();
     assert!(reported > uri.len(), "the surviving link keeps its URI charged ({reported})");
     assert_tracks("1 of 1,000 kept", reported, truth);
 
     assert_eq!(registry.retain_live(&std::collections::HashSet::new()), 1);
-    let truth = held().saturating_sub(before);
+    let truth = held_since(before);
     assert_eq!(registry.retained_bytes(), HyperlinkRegistry::default().retained_bytes());
     assert!(truth <= 4096, "an emptied registry still holds {truth} bytes");
     drop(registry);
@@ -279,13 +299,16 @@ fn the_same_client_id_under_two_uris_is_held_and_charged_twice() {
     let before = held();
     let mut registry = HyperlinkRegistry::default();
     registry.intern(Some(&client_id), &first_uri);
-    let truth_first = held().saturating_sub(before);
+    let truth_first = held_since(before);
     let reported_first = registry.retained_bytes();
     registry.intern(Some(&client_id), &second_uri);
-    let truth_second = held().saturating_sub(before);
+    let truth_second = held_since(before);
     let reported_second = registry.retained_bytes();
 
-    assert!(truth_second - truth_first >= client_id.len(), "the id text is held twice");
+    assert!(
+        truth_second.saturating_sub(truth_first) >= client_id.len(),
+        "the id text is held twice"
+    );
     assert_tracks("one id", reported_first, truth_first);
     assert_tracks("the id under two URIs", reported_second, truth_second);
     drop(registry);
@@ -315,7 +338,7 @@ fn a_refused_table_growth_keeps_the_heap_within_the_cap() {
     }
     assert!(admitted < uris.len(), "precondition: the anonymous URIs reach the cap");
     let refused = registry.try_intern(Some(&client_ids[14_336]), "shared");
-    let truth = held().saturating_sub(before);
+    let truth = held_since(before);
     let reported = registry.retained_bytes();
 
     assert!(refused.is_none(), "the client id whose table growth passes the cap is refused");
@@ -326,4 +349,57 @@ fn a_refused_table_growth_keeps_the_heap_within_the_cap() {
     );
     assert_tracks("at the growth boundary", reported, truth);
     drop(registry);
+}
+
+/// Another thread's allocations inside a measurement window leave the measuring thread's figure
+/// unchanged, so the harness's main thread and finished sibling tests cannot move a `truth`.
+///
+/// The helper is spawned before the window opens and hands off through an atomic stage, never a
+/// lock or channel, so the measuring thread itself allocates nothing between its readings.
+#[test]
+fn another_threads_allocations_leave_the_measuring_threads_figure_unchanged() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    const FOREIGN_BYTES: usize = 1024 * 1024;
+    let stage = AtomicUsize::new(0);
+    let wait_for = |wanted: usize| {
+        while stage.load(Ordering::Acquire) != wanted {
+            std::thread::yield_now();
+        }
+    };
+
+    std::thread::scope(|scope| {
+        let helper = scope.spawn(|| {
+            wait_for(1);
+            let start = held();
+            let buffer = vec![1u8; FOREIGN_BYTES];
+            let helper_held = held_since(start);
+            stage.store(2, Ordering::Release);
+            wait_for(3);
+            drop(buffer);
+            stage.store(4, Ordering::Release);
+            helper_held
+        });
+
+        let before = held();
+        stage.store(1, Ordering::Release);
+        wait_for(2);
+        let while_foreign_held = held();
+        stage.store(3, Ordering::Release);
+        wait_for(4);
+        let after_foreign_freed = held();
+        let helper_held = helper.join().expect("helper thread");
+
+        assert!(helper_held >= FOREIGN_BYTES, "precondition: the helper held {helper_held}");
+        assert_eq!(while_foreign_held, before, "another thread's allocation moved this figure");
+        assert_eq!(after_foreign_freed, before, "another thread's free moved this figure");
+    });
+}
+
+/// A reported figure understating the real heap by more than 1% fails `assert_tracks`: the
+/// tolerance has no allowance beyond that, so the smallest such understatement is refused.
+#[test]
+#[should_panic(expected = "understates real heap")]
+fn assert_tracks_refuses_a_figure_understating_the_heap_by_more_than_one_percent() {
+    let truth = 100_000;
+    assert_tracks("fabricated", truth - truth / 100 - 1, truth);
 }
