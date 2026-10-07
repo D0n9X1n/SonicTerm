@@ -117,6 +117,9 @@ def _capabilities_problem(capabilities: object) -> str | None:
     for name, value in capabilities.items():
         if value is not None and not (compare._is_int(value) and value in known[name]):
             return f"capability {name} {value!r} is not null or one of {known[name]}"
+    if capabilities["echo_timeline_schema"] is not None and capabilities["latency_split_schema"] is None:
+        # When: the timeline schema is declared without the split schema its parts and reasons extend.
+        return "capability echo_timeline_schema is declared without latency_split_schema"
     return None
 
 
@@ -256,7 +259,8 @@ def _accepted_result(where: str, identity: dict, label: str, dataset: str, side_
             partial_counters=side_name == "base",
             platform_name=VALIDATOR_PLATFORMS.get(identity["platform"], identity["platform"]),
             latency_split_schema=capabilities["latency_split_schema"], phase_kinds=capabilities["phase_kinds"],
-            attribution_schema=capabilities["s10_attribution"])
+            attribution_schema=capabilities["s10_attribution"],
+            echo_timeline_schema=capabilities["echo_timeline_schema"], scope=(scenario, variant))
     except (TypeError, AttributeError, ValueError, KeyError, OverflowError) as error:
         # When: the validator itself cannot read the result, the evidence is malformed, never a crash.
         raise NotComparable(f"{where} result cannot be validated: {type(error).__name__}: {error}") from error

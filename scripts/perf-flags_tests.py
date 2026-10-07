@@ -28,7 +28,8 @@ except (FileNotFoundError, AttributeError) as error:
 HARNESS = "ab" * 32
 HEAD, OTHER_HEAD, BASE, OTHER_BASE = "1" * 40, "2" * 40, "3" * 40, "4" * 40
 SETTINGS = {"short": True, "counters": False, "features": {"base": [], "head": []}, "profile": {}}
-CAPABILITIES = {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": None}
+CAPABILITIES = {"latency_split_schema": 1, "phase_kinds": 1, "s10_attribution": None,
+                "echo_timeline_schema": None}
 MACOS_PRESENTER = {"software_render_mode": "auto", "software_rendering": False, "software_render_degraded": False,
                    "windows_gdi": False}
 
@@ -456,6 +457,95 @@ class PerfFlagsTests(unittest.TestCase):
             tree.run(artifact, "S11", "release", 1, "base", [transition(40.0)])
             tree.run(artifact, "S11", "release", 2, "head", [transition(90.0)])
             self.assert_refused(tree, "a result with no s10_attribution_api under the declared schema")
+        # An S2/default result under the declared echo-timeline schema: a credited sample whose timeline is an
+        # unavailable object is accepted; the same sample with a null timeline, or a timeline from a harness that
+        # declares none, is refused.
+        unavailable = {key: None for key in flags.compare.TIMELINE_KEYS}
+        unavailable.update(schema=1, availability="unavailable", unavailable_reason="cfg-off")
+
+        def timeline_latency(echo_timeline, coverage):
+            sample = {"inject_unix_s": 1.0, "latency_ms": 8.0, "attributed": True, "reason": "credited",
+                      "split": None, "split_reason": "unsupported", "echo_timeline": echo_timeline}
+            return {"samples": [sample], "attributed": 1, "total": 1, "coverage": 1.0, "split_schema": 1,
+                    "split_count": 0, "split_reasons": {"unsupported": 1}, "split_coverage": 0.0,
+                    "echo_timeline_coverage": coverage}
+
+        declared = dict(CAPABILITIES, echo_timeline_schema=1)
+        honest = timeline_latency(unavailable, flags.compare.timeline_coverage([unavailable]))
+        for name, capabilities, latency, refused in (
+                ("an unavailable timeline under the declared schema", declared, honest, False),
+                ("a credited S2 sample with no timeline object", declared, timeline_latency(None, None), True),
+                ("a timeline from a harness that declares none", CAPABILITIES, honest, True)):
+            with self.subTest(evidence=name):
+                tree = self.fresh_tree()
+                artifact = tree.artifact("perf-macos", capabilities=capabilities)
+                for index, side in ((1, "base"), (2, "head")):
+                    tree.run(artifact, "S2", "default", index, side, [sustained(120)],
+                             result_fields={"latency": latency})
+                if refused:
+                    self.assert_refused(tree, name)
+                else:
+                    flags.load_run(tree.root)
+        # Without the split schema the latency is the legacy shape; a timeline then needs its own declaration, and
+        # that declaration needs the split schema it depends on.
+        legacy_sample = {"inject_unix_s": 1.0, "latency_ms": 8.0, "attributed": True, "reason": "credited",
+                         "echo_timeline": unavailable}
+        legacy_latency = {"samples": [legacy_sample], "attributed": 1, "total": 1, "coverage": 1.0,
+                          "echo_timeline_coverage": flags.compare.timeline_coverage([unavailable])}
+        undeclared = dict(CAPABILITIES, latency_split_schema=None, phase_kinds=None)
+        # The identity alone is refused: the timeline schema extends the split schema it is declared without.
+        self.assertEqual(flags._capabilities_problem(dict(undeclared, echo_timeline_schema=1)),
+                         "capability echo_timeline_schema is declared without latency_split_schema")
+        self.assertIsNone(flags._capabilities_problem(dict(CAPABILITIES, echo_timeline_schema=1)))
+        for name, capabilities in (
+                ("a timeline declared without the split schema", dict(undeclared, echo_timeline_schema=1)),
+                ("a timeline from a harness that declares neither", undeclared)):
+            with self.subTest(evidence=name):
+                tree = self.fresh_tree()
+                artifact = tree.artifact("perf-macos", capabilities=capabilities)
+                for index, side in ((1, "base"), (2, "head")):
+                    phase = {key: value for key, value in sustained(120).items()
+                             if key not in ("kind", "first_present_ms", "last_present_ms", "first_present_seq",
+                                            "last_present_seq", "nonpresenting_redraws")}
+                    tree.run(artifact, "S2", "default", index, side, [phase], result_fields={"latency": legacy_latency})
+                self.assert_refused(tree, name)
+        # An unrepresentable instant through the artifact reader: the chain form with a valid split is accepted;
+        # readiness without the split, with or without a flood interval, and a publication flag are refused.
+        readiness = {"outcome": "native_request", "loop_seq": 4, "site": "output_service"}
+        late = {key: None for key in flags.compare.TIMELINE_KEYS}
+        late.update(schema=1, availability="recorded", overflow=False, read_stamp="stamped", ordering="clock-order",
+                    ordering_reason="unrepresentable-instant", readiness=readiness, credited_dispatch_seq=3,
+                    admission="fallback", permit_identity="none", tick_qualified=False, token=7, window=1, pane=2)
+        split = {"input_to_parse_ms": 2.0, "parse_to_publication_ms": 3.0, "publication_to_present_ms": 5.0,
+                 "delivery_lag_us": 40.0, "delivery": "sent", "coalesced": False, "sync_open": False,
+                 "echo_generation": 3}
+
+        def split_timeline_latency(entry, split_reason):
+            sample = {"inject_unix_s": 1.0, "latency_ms": 10.0, "attributed": True, "reason": "credited",
+                      "split": split if split_reason == "split" else None, "split_reason": split_reason,
+                      "echo_timeline": entry}
+            return {"samples": [sample], "attributed": 1, "total": 1, "coverage": 1.0, "split_schema": 1,
+                    "split_count": int(split_reason == "split"), "split_reasons": {split_reason: 1},
+                    "split_coverage": float(split_reason == "split"),
+                    "echo_timeline_coverage": flags.compare.timeline_coverage([entry])}
+
+        for name, entry, split_reason, refused in (
+                ("a late unrepresentable instant with its split", late, "split", False),
+                ("readiness without the split", late, "pane-not-shown", True),
+                ("readiness and a flood interval without the split", dict(late, flood_services=4, m3_complete=True),
+                 "pane-not-shown", True),
+                ("a publication flag on an unrepresentable instant", dict(late, ready_before_publication=True),
+                 "split", True)):
+            with self.subTest(evidence=name):
+                tree = self.fresh_tree()
+                artifact = tree.artifact("perf-macos", capabilities=declared)
+                for index, side in ((1, "base"), (2, "head")):
+                    tree.run(artifact, "S2", "default", index, side, [sustained(120)],
+                             result_fields={"latency": split_timeline_latency(entry, split_reason)})
+                if refused:
+                    self.assert_refused(tree, name)
+                else:
+                    flags.load_run(tree.root)
         with self.subTest(evidence="a capability map missing a known key"):
             tree = self.fresh_tree()
             self.late_image(tree, tree.artifact("perf-macos",
