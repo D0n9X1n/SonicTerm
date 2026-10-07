@@ -95,6 +95,7 @@ pub(crate) fn list_json() -> String {
         "phase_kinds": PHASE_KINDS_SCHEMA,
         "s10_attribution": ATTRIBUTION_SCHEMA,
         "echo_timeline_schema": ECHO_TIMELINE_SCHEMA,
+        "guard_correlation_schema": GUARD_CORRELATION_SCHEMA,
     });
     serde_json::json!({ "schema_version": 1, "capabilities": capabilities, "scenarios": scenarios })
         .to_string()
@@ -117,6 +118,12 @@ pub(crate) const ATTRIBUTION_SCHEMA: u32 = 1;
 /// `capabilities.echo_timeline_schema`. It says what the harness writes, never whether a side's App
 /// could record a timeline: a side that could not writes an `unavailable` object.
 pub(crate) const ECHO_TIMELINE_SCHEMA: u32 = 1;
+
+/// The guard-correlation contract: every finalized phase records `guard_correlation` with its window, and a
+/// written one names its sidecar; listed in `--list` as `capabilities.guard_correlation_schema`. It says what
+/// the harness writes, never whether a side's App could take records: such a side writes `unavailable` or
+/// `gate_off`.
+pub(crate) const GUARD_CORRELATION_SCHEMA: u32 = 1;
 
 /// The catalog entry for `id`, if the harness knows it.
 #[cfg(any(target_os = "macos", windows, test))]

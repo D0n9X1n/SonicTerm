@@ -247,6 +247,8 @@ fn partial_result(status: Status) -> RunResult {
             frame_counters: None,
             updates: None,
             s10_attribution: None,
+            guard_correlation: None,
+            guard_correlation_transport_ns: None,
         }],
         latency: Some(vec![LatencySample::uncredited(2.0, "no-candidate")]),
         throughput: None,
@@ -404,6 +406,8 @@ fn measured_result() -> RunResult {
         frame_counters: None,
         updates: None,
         s10_attribution: None,
+        guard_correlation: None,
+        guard_correlation_transport_ns: None,
     });
     result.latency = Some(vec![
         credited_sample(2.0, 12.5),

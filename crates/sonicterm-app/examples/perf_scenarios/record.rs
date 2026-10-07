@@ -1085,6 +1085,14 @@ pub(crate) struct PhaseRecord {
     /// S10's per-present attribution for this phase; present only for a phase that plays counted updates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) s10_attribution: Option<crate::attribution::Attribution>,
+    /// The phase's guard-correlation transport, written once its endpoints are latched; absent when no
+    /// transport ran (a killed run), which perf-compare reads as incomplete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) guard_correlation: Option<crate::guard_transport::GuardCorrelationField>,
+    /// Nanoseconds the transport took: the take, serialization, digest and write. Never added to any
+    /// completion, timing, CPU, wall or counter field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) guard_correlation_transport_ns: Option<u64>,
 }
 
 /// One memory checkpoint at the end of a timed phase.

@@ -34,8 +34,8 @@ python3 scripts/local-gate.py
 | `perf-scenarios-counters-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-frame-texture-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `perf-scenarios-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace -- -D warnings` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
-| `perf-scenarios-harness-api-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
-| `perf-scenarios-harness-api-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-harness-api-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
+| `perf-scenarios-harness-api-echo-trace-clippy` | `cargo clippy --locked -p sonicterm-app --example perf_scenarios --all-targets --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace -- -D warnings --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-checks`, `linux-core` |
 | `doc-resource-features` | `RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-resource --all-features --no-deps` | macOS, Windows, Linux | `local` | `rust` | `linux-core` |
 | `authored-comments` | `bash scripts/check-authored-rust-comments.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
@@ -51,8 +51,8 @@ python3 scripts/local-gate.py
 | `glyph-atlas-working-set` | `cargo test --locked -p sonicterm-app --example perf_scenarios glyph_atlas_working_set -- --ignored --nocapture` | macOS, Windows | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-features` |
 | `perf-scenarios-frame-texture-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-frame-texture` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-features`, `linux-core` |
 | `perf-scenarios-echo-trace-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-features`, `linux-core` |
-| `perf-scenarios-harness-api-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
-| `perf-scenarios-harness-api-echo-trace-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
+| `perf-scenarios-harness-api-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
+| `perf-scenarios-harness-api-echo-trace-tests` | `RUSTFLAGS="--check-cfg cfg(perf_atlas_retry_api) --check-cfg cfg(perf_s10_attribution_api) --check-cfg cfg(perf_completeness_api) --check-cfg cfg(perf_dispatch_timeline_api) --check-cfg cfg(perf_echo_timeline_api) --check-cfg cfg(perf_guard_spans_api) --cfg perf_atlas_retry_api --cfg perf_s10_attribution_api --cfg perf_completeness_api --cfg perf_dispatch_timeline_api --cfg perf_echo_timeline_api --cfg perf_guard_spans_api" cargo test --locked -p sonicterm-app --example perf_scenarios --features perf-counters,perf-hook-checkpoint-memory,perf-hook-trim,perf-echo-trace` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness-api`, `linux-core` |
 | `pty-feasibility` | `bash scripts/pty-backend-feasibility.sh --check` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-tests-workspace` |
 | `resource-inventory` | `bash scripts/test-resource-inventory.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests-workspace` |
 | `resource-baseline-tests` | `bash scripts/test-resource-baseline-evidence.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-tests-workspace` |
@@ -168,17 +168,57 @@ never by a constant, summarized like the other per-run rows. A side whose
 harness predates the field reads `n/a` with no change shown, and a result whose
 `updates` is not a positive integer is invalid.
 
+After each phase's endpoints are latched (startup, every measured phase, and an
+early finish), the harness takes the App's raw guard-correlation records once and
+streams them to `guard-correlation/<phase_index>-<phase_name>.json` in the scratch:
+written to `.tmp`, fsynced, then renamed, and hashed with SHA-256 as it is written
+through one 64 KiB buffer. The header binds the take to its run and phase: a 32-hex
+`run_nonce` minted once per process, separate from the workload sentinel's nonce;
+`harness_hash`, `null` in an unmanaged run; the phase index and name; `take_seq`;
+the process id; the window "phase start to counter-end observation" in nanoseconds
+from the shared clock epoch, which the harness sets before the startup meter; and
+`taken_at_ns`. The App's transferred buffers are serialized in place through
+borrowed adapters, so the transport's peak adds only the 64 KiB buffer and the
+digest to the take's own buffers. The phase record gains `guard_correlation:
+{status, file, take_seq, bytes, sha256, window}`, whose status is `written`,
+`unavailable` (no cfg), `gate_off`, `take_exhausted` or `write_failed`. Only
+`written` names a file, size and digest, and a take_seq is named only when a take
+was issued. `window` is the latched window for every status. The record also gains
+`guard_correlation_transport_ns`, the transport's own time, never added to any
+completion, timing, CPU or counter field. `--list` declares
+`guard_correlation_schema: 1`; under it every finalized phase must carry both
+fields. perf-compare keeps `guard-correlation/` in each run's evidence and
+validates the takes in phase order as one chain. Every frozen sidecar field is
+required, with exact integer types. The sidecar's window must equal its phase
+record's window, ordered start ≤ end ≤ `taken_at_ns`; the take time must be known
+and increasing; a carried pending section keeps its registration time; and no
+section or span may reuse an earlier take's clock. A missing, truncated,
+digest-mismatched, misbound, malformed, `write_failed`, `take_exhausted` or
+status-less take makes itself and every later take incomplete. Two rules apply to
+the whole run: a `null` harness hash in any take makes every take incomplete
+(`harness_unbound`), and the phases' availability must be one class, the one the
+build and gate decide (`unavailable` without the cfg, `gate_off` with the gate off,
+a take otherwise); any other mix makes every phase incomplete. A genuine cfg-off or
+gate-off run reads `n/a` and consumes no take. A validated window is incomplete
+when anything in it is unlocated, pending, abandoned, lost, refused, exhausted,
+open, or crosses its edge, spans included. A complete window reports the observed overlap of each pane's
+worker waits with its UI guard spans (nanoseconds, sections and spans); an
+incomplete one prints its reasons and no number, and an unavailable one `n/a`.
+Each run's verdicts are kept as `guard-correlation-join.json`.
+
 The harness also calls App and renderer methods that older trees lack. Each
 such call sits behind a harness API cfg, one entry of `HARNESS_API_CFGS` in
-`scripts/local-gate.py`. There are five entries: `perf_atlas_retry_api`, for the
+`scripts/local-gate.py`. There are six entries: `perf_atlas_retry_api`, for the
 four methods S1/atlas-retry's driver needs; `perf_s10_attribution_api`, for
 the App's two S10 attribution watch methods (`arm_s10_attribution` and
 `disarm_s10_attribution`); `perf_completeness_api`, for the renderer's
 `completeness_checkpoint`, which S9's and S12's `end` checkpoints read;
 `perf_dispatch_timeline_api`, for the App's per-sample dispatch-timeline methods
-(`arm_dispatch_timeline_v1` and `take_dispatch_timeline_v1`); and
+(`arm_dispatch_timeline_v1` and `take_dispatch_timeline_v1`);
 `perf_echo_timeline_api`, for the App's one-shot `take_echo_timeline_v1`, which the
-harness names only when it is also built with `perf-echo-trace`. The dispatch-timeline
+harness names only when it is also built with `perf-echo-trace`; and
+`perf_guard_spans_api`, for the App's raw guard-correlation take
+(`take_guard_correlation_v1`), its record types and the shared `clock_epoch`. The dispatch-timeline
 prerequisite bodies record nothing. S2 arms the timeline at each typing injection, before the
 injection instant is read, and takes it at every close of a sample. Each S2 sample in
 `result.json` records what its timeline came to as `dispatch_timeline`:
@@ -698,7 +738,8 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   attempt, platform, both SHAs, harness hash, settings, the flag-metrics version,
   each set's final inventory (per side, its blocked or failed status and the
   attempt directories it accepted; a blocked or failed side accepts none), and
-  the capabilities the head's list declared. A set with any unkinded run is
+  the capabilities the head's list declared, and `guard_api`, whether both sides
+  were built with the guard-correlation take's cfg. A set with any unkinded run is
   read only as unclassified: none of its runs enters the candidate flags.
 - `python3 scripts/perf-flags.py <run-dir> <run-dir>` compares two runs'
   candidate flags from their downloaded `perf-comparison-*` artifacts. Before
@@ -712,7 +753,17 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   through a symbolic link, and a healthy side accepts exactly its attempts
   classified valid. Each accepted attempt needs a valid, exit-0 outcome of its
   scenario and variant and a `result.json` that passes perf-compare's own result
-  validator under the recorded capabilities; anything malformed is refused,
+  validator under the recorded capabilities. An identity written before
+  `guard_correlation_schema` existed decodes with only that capability, and
+  `guard_api`, read as null; an unknown or malformed capability is still refused.
+  Under a declared guard contract, the identity must record `guard_api`, and each
+  accepted result's phase statuses must be the one availability class that cfg
+  decision and the result's counter gate allow, by the same rule the live join
+  applies; a genuine cfg-off run reading `unavailable` is accepted. Every
+  artifact of one run must record the same `guard_api`, compared after decoding
+  and before duplicate attempts are merged, so a conflicting copy is refused
+  rather than dropped unread. Anything
+  malformed is refused,
   never skipped and never a traceback. The latest run attempt's inventory
   replaces an earlier one's even when it accepted nothing, so its values are
   missing, never the superseded ones. Two copies of one attempt count once only

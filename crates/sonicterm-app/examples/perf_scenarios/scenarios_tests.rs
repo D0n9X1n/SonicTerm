@@ -499,7 +499,8 @@ fn only_s10_stream_carries_its_workload_update_count() {
     }
 }
 
-/// `--list` declares the latency split, phase-kinds, S10 attribution and echo-timeline schemas this
+/// `--list` declares the latency split, phase-kinds, S10 attribution, echo-timeline and guard-correlation
+/// schemas this
 /// harness writes, whatever its features or cfg, so the comparison validates every result of this
 /// harness against each contract. The listed echo-timeline schema is the one each timeline carries.
 #[test]
@@ -512,6 +513,7 @@ fn list_json_declares_the_latency_split_capability() {
             "phase_kinds": 1,
             "s10_attribution": 1,
             "echo_timeline_schema": 1,
+            "guard_correlation_schema": 1,
         })
     );
     assert_eq!(super::ECHO_TIMELINE_SCHEMA, crate::timeline::TIMELINE_SCHEMA);

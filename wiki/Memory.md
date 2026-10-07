@@ -296,7 +296,10 @@ freed once a take has pruned it and its worker has dropped its handle. A countin
 collection keeps its 440 B of span bookkeeping on the stack. None of it is charged
 to a ledger owner or reported in a memory sample. With counters off, no recording
 buffer is allocated and no correlation clock or lock is taken, but the `Option`
-fields and the larger custody and source types still cost their layout.
+fields and the larger custody and source types still cost their layout. The
+harness transport serializes a take's buffers in place, so while a sidecar is
+written the process holds the take's buffers, the App's replacements and one
+64 KiB write buffer, with no copy of the records.
 
 Renderer retention is charged to no ledger owner. When the idle image atlas is
 released, the renderer's `retained_amounts().image_atlas` drops from 16 MiB to

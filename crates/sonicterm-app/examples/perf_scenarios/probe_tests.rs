@@ -109,8 +109,8 @@ fn method(name: &str) -> String {
 fn checkpoint_and_progress_work_falls_between_phase_snapshots() {
     // A phase's finish snapshot is taken before its progress write, a checkpoint records
     // progress with no phase open, and a phase's start snapshot is the last thing before its
-    // meter opens, after the GO writes.
-    for ending in ["end_phase", "end_startup"] {
+    // meter opens, after the GO writes. The routes' finalization lives in their finalize_* functions.
+    for ending in ["finalize_phase", "finalize_startup"] {
         let body = method(ending);
         let finish = body.find("self.finish_meter();").unwrap_or_else(|| panic!("{ending}"));
         let progress = body.find("self.record_progress();").unwrap_or_else(|| panic!("{ending}"));
@@ -906,6 +906,8 @@ fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
             frame_counters: None,
             updates: None,
             s10_attribution: None,
+            guard_correlation: None,
+            guard_correlation_transport_ns: None,
         }],
         latency: None,
         throughput: None,
@@ -1899,4 +1901,121 @@ fn the_production_handoff_credits_the_forward_and_its_end() {
         parts.additive_ns[6]
     );
     assert_eq!(parts.dispatch_return_to_credited_end_ns, 100, "App return 1400, credited end 1500");
+}
+
+/// A headless probe whose finalization clock steps one second a read from `act`, whose transport is recorded,
+/// and whose scratch is a fresh directory; the recorded calls are shared with the test.
+fn guard_probe(
+    name: &str,
+    act: Instant,
+) -> (Probe, PhaseSpec, std::rc::Rc<std::cell::RefCell<Vec<GuardTransportCall>>>, ScratchDir) {
+    let (mut probe, phase) = release_probe(name, act, 0);
+    let scratch = ScratchDir::new(name);
+    probe.scratch = scratch.path.clone();
+    let mut reads = 0_u32;
+    probe.guard_clock_override = Some(Box::new(move || {
+        reads += 1;
+        act + Duration::from_secs(u64::from(reads))
+    }));
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let recorded = std::rc::Rc::clone(&calls);
+    probe.guard_transport_override = Some(Box::new(move |call| recorded.borrow_mut().push(call)));
+    (probe, phase, calls, scratch)
+}
+
+/// A test's own scratch directory: unique to this process and this fixture, whatever the label, and removed
+/// when dropped, an unwinding test included.
+struct ScratchDir {
+    path: PathBuf,
+}
+
+impl ScratchDir {
+    /// A fresh directory named for `label`, this process and a per-process counter.
+    fn new(label: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        // Ordering: Relaxed suffices; NEXT only hands out distinct numbers and orders no other memory.
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir()
+            .join(format!("sonicterm-guard-probe-{label}-{}-{serial}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+}
+
+// Lifecycle: dropping ScratchDir calls remove_dir_all on its path; a directory already gone is ignored.
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Two fixtures with one label get distinct directories, and each is removed when dropped, also on unwind.
+#[test]
+fn guard_probe_scratch_is_unique_and_removed_even_on_unwind() {
+    let first = ScratchDir::new("media-free");
+    let second = ScratchDir::new("media-free");
+    assert_ne!(first.path, second.path, "two fixtures with one label share no directory");
+    let (first_path, second_path) = (first.path.clone(), second.path.clone());
+    drop(first);
+    assert!(!first_path.exists(), "removed when dropped");
+    let unwound = std::panic::catch_unwind(move || {
+        let held = second;
+        std::fs::write(held.path.join("progress.json"), b"{}").unwrap();
+        panic!("the test unwinds while it holds the directory");
+    });
+    assert!(unwound.is_err());
+    assert!(!second_path.exists(), "removed while unwinding");
+}
+
+/// H1b at runtime: startup's finalization transports phase 0 exactly once, after its counter end was latched,
+/// and a later run finalization with no open meter transports nothing more.
+#[test]
+fn startup_finalization_transports_once_after_its_endpoints() {
+    let act = Instant::now();
+    let (mut probe, _phase, calls, _scratch) = guard_probe("media-free", act);
+    probe.finalize_startup();
+    {
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        let call = calls[0];
+        assert_eq!(call.phase_index, 0);
+        assert!(
+            call.started <= call.counters_end_at && call.counters_end_at < call.transport_started,
+            "{call:?}"
+        );
+    }
+    assert!(probe.finalize_run(Status::Valid, None));
+    assert_eq!(calls.borrow().len(), 1, "a run end with no open phase claims no transport");
+}
+
+/// H1 at runtime: a normal phase end latches the counter end and the phase end before its one transport.
+#[test]
+fn a_normal_phase_end_transports_once_after_its_endpoints() {
+    let act = Instant::now();
+    let (mut probe, phase, calls, _scratch) = guard_probe("media-free", act);
+    assert_eq!(probe.finalize_phase(&phase), None);
+    let calls = calls.borrow();
+    assert_eq!(calls.len(), 1);
+    let ended_at = probe.phase_ends.last().unwrap().1;
+    let call = calls[0];
+    assert!(
+        call.counters_end_at < ended_at && ended_at < call.transport_started,
+        "{call:?} ended {ended_at:?}"
+    );
+}
+
+/// H1c at runtime: a phase end that finds a delivery problem returns before its transport, and the finish it
+/// hands off to transports that phase exactly once; a second finish changes nothing.
+#[test]
+fn an_early_phase_end_hands_its_one_transport_to_finish() {
+    let act = Instant::now();
+    let (mut probe, phase, calls, _scratch) = guard_probe("reshow", act);
+    probe.forced_delivery_problem = Some("ConPTY dropped a line".to_owned());
+    assert_eq!(probe.finalize_phase(&phase).as_deref(), Some("ConPTY dropped a line"));
+    assert!(calls.borrow().is_empty(), "the phase end itself does not transport");
+    assert!(probe.finalize_run(Status::Blocked, Some("ConPTY dropped a line".to_owned())));
+    assert_eq!(calls.borrow().len(), 1);
+    assert_eq!(calls.borrow()[0].phase_index, 0);
+    assert!(!probe.finalize_run(Status::Blocked, None));
+    assert_eq!(calls.borrow().len(), 1, "exactly one transport");
 }

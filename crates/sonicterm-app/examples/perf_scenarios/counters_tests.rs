@@ -404,6 +404,25 @@ const TIMELINE_CALLS: &[&str] = &[
     "TickIdentityV1",
 ];
 
+/// The gate of the App's guard-correlation take: the harness-only cfg perf-compare sets on both sides or neither.
+const GUARD_SPANS_GATE: &str = "#[cfg(perf_guard_spans_api)]";
+
+/// The App API the harness may name only behind the guard-correlation cfg: the take, the shared clock epoch
+/// and every V1 type, none of which a tree before the prerequisite has.
+const GUARD_SPANS_CALLS: &[&str] = &[
+    "take_guard_correlation_v1",
+    "clock_epoch",
+    "GuardCorrelationTakeV1",
+    "GuardCorrelationV1",
+    "PaneSectionsV1",
+    "SpanBatchV1",
+    "SectionRecordV1",
+    "SpanRecordV1",
+    "PendingSectionV1",
+    "AbandonedSectionV1",
+    "LossIntervalV1",
+];
+
 /// The trim hook's gate.
 const TRIM_HOOK_GATE: &str = "#[cfg(feature = \"perf-hook-trim\")]";
 
@@ -1130,5 +1149,33 @@ fn every_echo_timeline_api_call_in_the_harness_is_behind_its_cfg() {
     assert_eq!(
         ungated_calls(&fixture, TIMELINE_GATE, TIMELINE_CALLS),
         vec!["7: take_echo_timeline_v1".to_owned()]
+    );
+}
+
+/// Every call into the App's guard-correlation take, the shared clock epoch and every V1 type sit behind
+/// `perf_guard_spans_api`: perf-compare overlays this harness onto trees that predate the take and builds it
+/// there with the cfg off. A call outside the gated item is reported.
+#[test]
+fn every_guard_spans_api_call_in_the_harness_is_behind_its_cfg() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/perf_scenarios");
+    let mut scanned = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let entry_path = entry.unwrap().path();
+        let name = entry_path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+            continue;
+        }
+        scanned += 1;
+        let source = std::fs::read_to_string(&entry_path).unwrap();
+        let found = ungated_calls(&source, GUARD_SPANS_GATE, GUARD_SPANS_CALLS);
+        assert!(found.is_empty(), "{name}: {found:#?}");
+    }
+    assert!(scanned >= 10, "the harness sources were not found");
+    let fixture = format!(
+        "{GUARD_SPANS_GATE}\nmod api {{\n    fn take(app: &mut App) {{\n        app.take_guard_correlation_v1();\n    }}\n}}\n\nfn off() {{\n    clock_epoch();\n}}\n"
+    );
+    assert_eq!(
+        ungated_calls(&fixture, GUARD_SPANS_GATE, GUARD_SPANS_CALLS),
+        vec!["9: clock_epoch".to_owned()]
     );
 }

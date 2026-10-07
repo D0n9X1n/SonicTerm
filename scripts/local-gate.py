@@ -219,6 +219,10 @@ HARNESS_API_CFGS = (
     HarnessApiCfg("perf_echo_timeline_api", (
         ("crates/sonicterm-app/src", "App", "take_echo_timeline_v1"),
     )),
+    # The guard-correlation transport: the App's raw record take, absent before v1.3.9.
+    HarnessApiCfg("perf_guard_spans_api", (
+        ("crates/sonicterm-app/src", "App", "take_guard_correlation_v1"),
+    )),
 )
 HARNESS_API_CFG_NAMES = tuple(entry.name for entry in HARNESS_API_CFGS)
 # The combined harness-API steps enable every entry at once, so one rebuild covers them all and a new entry
