@@ -1531,7 +1531,8 @@ _WINDOWS_AGGREGATE = "windows"
 
 # The only verification body an aggregate may run: every listed result must be `success`, or the step fails.
 _AGGREGATE_LOOP = re.compile(
-    r'        run: \|\n          for result in (.+); do\n            test "\$result" = "success"\n          done\n*\Z'
+    r'        run: \|\n          for result in ((?:"\$[A-Z_]+")(?: "\$[A-Z_]+")*); do\n'
+    r'            test "\$result" = "success"\n          done\n*\Z'
 )
 
 
@@ -1554,8 +1555,14 @@ def aggregate_checks(workflow: str, aggregate: str, job: str) -> bool:
     if re.search(r"(?m)^        (?:if|continue-on-error):", step) or "\n        shell: bash\n" not in step:
         return False
     loop = _AGGREGATE_LOOP.search(step)
-    variable = re.search(rf"(?m)^          ([A-Z_]+): \$\{{\{{ needs\.{re.escape(job)}\.result \}}\}}$", step)
-    return variable is not None and loop is not None and f'"${variable[1]}"' in loop[1].split()
+    if loop is None:
+        return False
+    # The loop operands are only quoted variables, each bound to one needed job's result, and none other.
+    bindings = dict(re.findall(r"(?m)^          ([A-Z_]+): \$\{\{ needs\.([A-Za-z0-9_-]+)\.result \}\}$", step))
+    operands = [operand[2:-1] for operand in loop[1].split(" ")]
+    if sorted(operands) != sorted(bindings) or len(operands) != len(set(operands)):
+        return False
+    return job in bindings.values()
 
 
 def rerun_backing_problems(

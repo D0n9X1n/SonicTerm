@@ -616,8 +616,12 @@ class RepositoryTests(unittest.TestCase):
             self.assertNotRegex(steps[0], r"(?m)^        (?:if|continue-on-error):")
             self.assertNotRegex(block, r"(?m)^    continue-on-error:")
             self.assertIn("\n        shell: bash\n", "\n" + steps[0])
-            self.assertRegex(steps[0], r'        run: \|\n          for result in .+; do\n'
-                                       r'            test "\$result" = "success"\n          done\n*\Z')
+            body = re.search(r'        run: \|\n          for result in ((?:"\$[A-Z_]+")(?: "\$[A-Z_]+")*); do\n'
+                             r'            test "\$result" = "success"\n          done\n*\Z', steps[0])
+            self.assertIsNotNone(body)
+            # The loop runs over exactly the bound shard results: only quoted variables, each bound once.
+            bindings = re.findall(r"(?m)^          ([A-Z_]+): \$\{\{ needs\.[A-Za-z0-9_-]+\.result \}\}$", steps[0])
+            self.assertEqual(sorted(operand[2:-1] for operand in body[1].split(" ")), sorted(bindings))
 
         for job, (name, shards) in contracts.items():
             with self.subTest(job=job):
@@ -637,6 +641,11 @@ class RepositoryTests(unittest.TestCase):
                         assert_contract(job, block.replace(verify, bypass, 1), name, shards)
                 with self.assertRaises(AssertionError):
                     assert_contract(job, block.replace('= "success"', '= "success" || true', 1), name, shards)
+                # A header that consumes the real results in a no-op loop and then tests a literal is fail-open.
+                header = re.search(r"(?m)^          for result in (.+); do$", block)
+                compound = header[0].replace("; do", ' ; do :; done; for result in "success"; do', 1)
+                with self.assertRaises(AssertionError):
+                    assert_contract(job, block.replace(header[0], compound, 1), name, shards)
                 with self.assertRaises(AssertionError):
                     assert_contract(
                         job,

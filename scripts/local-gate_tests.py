@@ -1982,6 +1982,7 @@ class CiParityTests(unittest.TestCase):
         aggregate, after_linux = after_aggregate.split("  linux-core:\n", 1)
         verify = "      - name: Verify Windows shards\n        shell: bash\n"
         compare = '            test "$result" = "success"\n'
+        loop_header = re.search(r"(?m)^          for result in .+; do$", aggregate)[0]
 
         def in_aggregate(old: str, new: str) -> str:
             """Mutate only the Windows aggregate's body; the macOS and Linux aggregates carry the same lines."""
@@ -2020,6 +2021,12 @@ class CiParityTests(unittest.TestCase):
                 "aggregate must need and check windows-tests-workspace"),
             "the aggregate made conditional on success": (
                 in_aggregate("    if: always()\n", "    if: success()\n"),
+                "aggregate must need and check windows-tests-workspace"),
+            "the aggregate's results consumed by a no-op loop": (
+                in_aggregate(loop_header, loop_header.replace("; do", ' ; do :; done; for result in "success"; do', 1)),
+                "aggregate must need and check windows-tests-workspace"),
+            "an extra unbound loop operand": (
+                in_aggregate(loop_header, loop_header.replace("; do", ' "$UNBOUND"; do', 1)),
                 "aggregate must need and check windows-tests-workspace"),
         }
         for label, (mutated, expected) in mutations.items():
