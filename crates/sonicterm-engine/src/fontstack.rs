@@ -7,6 +7,9 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::sync::Once;
 
+/// Ablation: false resolves every style face through the configuration on each request.
+const STYLE_FACE_MEMO: bool = false;
+
 use anyhow::Result;
 use config::TextStyle;
 use sonicterm_font::{
@@ -339,9 +342,11 @@ impl FontStack {
             *self.faces.borrow_mut() = Default::default();
             self.faces_epoch.set(epoch);
         }
-        if let Some(face) = &self.faces.borrow()[slot] {
-            // When: this style was resolved in the current epoch, the shared face is returned.
-            return Ok(std::rc::Rc::clone(face));
+        if STYLE_FACE_MEMO {
+            if let Some(face) = &self.faces.borrow()[slot] {
+                // When: this style was resolved in the current epoch, the shared face is returned.
+                return Ok(std::rc::Rc::clone(face));
+            }
         }
         let mut style: TextStyle = self.font_config.config().font.clone();
         if bold {
@@ -351,7 +356,9 @@ impl FontStack {
             style = style.make_italic();
         }
         let face = self.font_config.resolve_font_at_size(&style, self.font_size_pt)?;
-        self.faces.borrow_mut()[slot] = Some(std::rc::Rc::clone(&face));
+        if STYLE_FACE_MEMO {
+            self.faces.borrow_mut()[slot] = Some(std::rc::Rc::clone(&face));
+        }
         Ok(face)
     }
 

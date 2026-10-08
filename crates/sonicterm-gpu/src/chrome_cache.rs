@@ -674,6 +674,9 @@ pub(crate) struct PaletteCache {
     computes: u64,
 }
 
+/// Ablation: false derives the UI palette on every request instead of keeping it.
+const PALETTE_CACHE: bool = false;
+
 impl PaletteCache {
     /// A cache seeded from `theme`, so the first frame derives nothing. A theme over the allowance
     /// seeds the default theme's colors instead, and is derived when it is drawn.
@@ -694,6 +697,11 @@ impl PaletteCache {
     /// The UI palette of `theme`: the kept one when `theme`'s colors equal the kept colors,
     /// otherwise derived once and kept; colors over the allowance are derived and not kept.
     pub(crate) fn palette_for(&mut self, theme: &Theme) -> UiPalette {
+        if !PALETTE_CACHE {
+            // Ablation: the palette is derived on every request and never kept.
+            self.computes = self.computes.saturating_add(1);
+            return UiPalette::from_theme(theme);
+        }
         if palette_hex_bytes(&theme.colors, String::len) > PALETTE_ALLOWANCE_BYTES {
             // When: the `theme` colors pass the allowance, the palette is derived for this request
             // only, so neither its strings nor a comparison of them is kept.
