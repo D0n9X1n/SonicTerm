@@ -319,8 +319,20 @@ def _accepted_result(where: str, identity: dict, label: str, dataset: str, side_
     return result
 
 
-def load_run(root: Path) -> LoadedRun:
-    """Load one run's artifacts under `root` and compute its flag checks per platform.
+@dataclass
+class Evidence:
+    """One run's validated evidence: its shared identity, its settings per platform, and each set's final accepted
+    results keyed (platform, label, dataset), with the artifact, identity, inventory entry and raw attempt files
+    they came from. Both this script and perf-compare's analysis modes read evidence only through it."""
+
+    root: Path
+    identity: dict
+    settings: dict = field(default_factory=dict)
+    sets: dict = field(default_factory=dict)
+
+
+def load_evidence(root: Path) -> Evidence:
+    """Load and validate one run's artifacts under `root`.
 
     Every artifact's identity, settings and capabilities are validated first. Each set's inventory is then
     reconciled with its attempts on disk; two copies of one attempt must agree on every evidence file. The latest
@@ -331,7 +343,7 @@ def load_run(root: Path) -> LoadedRun:
         raise NotComparable(f"{root}: no {compare.RUN_IDENTITY_FILE}")
     identities = [(path.parent, _identity(path)) for path in identity_paths]
     shared = {key: identities[0][1][key] for key in SHARED_IDENTITY}
-    loaded = LoadedRun(Path(root), shared)
+    loaded = Evidence(Path(root), shared)
     for path, identity in identities:
         differing = [key for key in SHARED_IDENTITY if identity[key] != shared[key]]
         if differing:
@@ -360,19 +372,29 @@ def load_run(root: Path) -> LoadedRun:
                                         f"that disagree ({earlier[0].name})")
                 continue
             attempts[identity["run_attempt"]] = (artifact, entry, evidence)
-    per_platform: dict[str, list] = {}
     for (platform, label, dataset), attempts in inventories.items():
         artifact, entry, evidence = attempts[max(attempts)]
         identity = dict(identities)[artifact]
-        sides = {}
-        for side_name in SIDE_NAMES:
-            inventory = entry[side_name]
-            outcomes = [SimpleNamespace(result=_accepted_result(f"{artifact.name} {label} {dataset} {name}",
-                                                                identity, label, dataset, side_name,
-                                                                evidence[name]),
-                                        evidence=artifact / "runs" / name)
-                        for name in inventory["accepted"]]
-            sides[side_name] = compare.SideRuns(outcomes, blocked=inventory["status"] or None)
+        results = {side_name: [(name, _accepted_result(f"{artifact.name} {label} {dataset} {name}", identity, label,
+                                                       dataset, side_name, evidence[name]))
+                               for name in entry[side_name]["accepted"]]
+                   for side_name in SIDE_NAMES}
+        loaded.sets[(platform, label, dataset)] = SimpleNamespace(artifact=artifact, identity=identity, entry=entry,
+                                                                  evidence=evidence, results=results)
+    return loaded
+
+
+def load_run(root: Path) -> LoadedRun:
+    """Load one run's artifacts under `root` through load_evidence and compute its flag checks per platform. A
+    blocked or failed side keeps its status and accepts no run."""
+    evidence = load_evidence(root)
+    loaded = LoadedRun(evidence.root, evidence.identity, evidence.settings)
+    per_platform: dict[str, list] = {}
+    for (platform, label, dataset), found in evidence.sets.items():
+        sides = {side_name: compare.SideRuns([SimpleNamespace(result=result, evidence=found.artifact / "runs" / name)
+                                              for name, result in found.results[side_name]],
+                                             blocked=found.entry[side_name]["status"] or None)
+                 for side_name in SIDE_NAMES}
         per_platform.setdefault(platform, []).append(compare.SetResult(label, dataset, sides["base"], sides["head"]))
     for platform, results in per_platform.items():
         for check in compare.flag_checks(results):

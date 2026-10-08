@@ -7,7 +7,7 @@ name: Performance comparison
 #
 # Two modes:
 # - A pull request labelled `perf` (when the label is added, and on every push while it is set) gets a
-#   quick comparison that must finish within 30 minutes of the run's creation, queue time included:
+#   quick comparison that must finish within 35 minutes of the run's creation, queue time included:
 #   `--short` runs (every hold 5 s, smaller floods) and a release profile without LTO, the same for both
 #   refs, plus two frame-counter runs per scenario on the head, and on the base too when it declares
 #   perf-counters (`--counters --counters-runs 2`).
@@ -133,7 +133,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
           echo "base $base_sha, head $head_sha, $length runs"
 
-      # A pull request's comparison must fit 30 minutes, and fat LTO with one codegen unit dominates its
+      # A pull request's comparison must fit 35 minutes, and fat LTO with one codegen unit dominates its
       # two release builds. Both refs build with the same overrides, and the table's details name them.
       - name: Relax the release profile for a pull request
         if: github.event_name == 'pull_request'
@@ -294,7 +294,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
           echo "base $base_sha, head $head_sha, $length runs"
 
-      # A pull request's comparison must fit 30 minutes, and fat LTO with one codegen unit dominates its
+      # A pull request's comparison must fit 35 minutes, and fat LTO with one codegen unit dominates its
       # two release builds. Both refs build with the same overrides, and the table's details name them.
       - name: Relax the release profile for a pull request
         if: github.event_name == 'pull_request'
@@ -351,7 +351,7 @@ jobs:
           PERF_SHARD: ${{ matrix.shard }}
         run: |
           read -ra scenarios <<<"$SCENARIOS"
-          # A pull request fits 30 minutes with short runs and two counters runs; a release runs --runs of each.
+          # A pull request fits 35 minutes with short runs and two counters runs; a release runs --runs of each.
           run_flags=(--counters)
           if [ "$RUN_LENGTH" = "short" ]; then
             run_flags=(--short --counters --counters-runs 2)
@@ -521,7 +521,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
           echo "base $base_sha, head $head_sha, $length runs"
 
-      # A pull request's comparison must fit 30 minutes, and fat LTO with one codegen unit dominates its
+      # A pull request's comparison must fit 35 minutes, and fat LTO with one codegen unit dominates its
       # two release builds. Both refs build with the same overrides, and the table's details name them.
       - name: Relax the release profile for a pull request
         if: github.event_name == 'pull_request'
@@ -545,7 +545,7 @@ jobs:
           PERF_SHARD: ${{ matrix.shard }}
         run: |
           read -ra scenarios <<<"$SCENARIOS"
-          # A pull request fits 30 minutes with short runs and two counters runs; a release runs --runs of each.
+          # A pull request fits 35 minutes with short runs and two counters runs; a release runs --runs of each.
           run_flags=(--counters)
           if [ "$RUN_LENGTH" = "short" ]; then
             run_flags=(--short --counters --counters-runs 2)

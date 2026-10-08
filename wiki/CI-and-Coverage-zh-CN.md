@@ -12,7 +12,7 @@ Coverage 证据与重新建立基线见[开发与发布](Development-and-Release
 SHA 区分的 group，且不会在运行中被取消，因此后续合并不能抹去前一个 merge SHA 的精确验证记录。
 
 `.github/workflows/perf.yml`（`Performance comparison`）单独运行，且不是必需的 job。它为带 `perf` 标签的
-pull request 在从运行创建起的 30 分钟内（包含排队时间）测量一张快速的前后对比表，并为每个 release tag 运行完整对比，均在 GitHub 托管的 macOS 与 Windows runner 上运行，两个平台都运行帧计数器组及其表格。一个 macOS job 把两个 ref 各构建一次，并把二进制作为保留一天的 artifact 发布，绑定运行、其 attempt 与 manifest 摘要；macOS 对比分片测量这些二进制，每个 Windows 分片自行构建。每个对比都传入 `--require-base`，因此无法构建或测量的 base 会让其分片失败。最后一个 job 不 checkout，仅当构建 job 与两个对比 job 都成功时才通过。只有符合条件的运行把它命名为 `Performance comparison result`；不符合条件的运行被跳过的结果显示未求值的名称表达式，从不显示真正的名称。合并证据是该 job 在确切 head 上那次符合条件的运行中的 SUCCESS，按 run id 读取，绝不只按检查名称读取；被取代的运行从不算作成功。两种模式、job 布局与 concurrency 详见
+pull request 在从运行创建起的 35 分钟内（包含排队时间）测量一张快速的前后对比表，并为每个 release tag 运行完整对比，均在 GitHub 托管的 macOS 与 Windows runner 上运行，两个平台都运行帧计数器组及其表格。一个 macOS job 把两个 ref 各构建一次，并把二进制作为保留一天的 artifact 发布，绑定运行、其 attempt 与 manifest 摘要；macOS 对比分片测量这些二进制，每个 Windows 分片自行构建。每个对比都传入 `--require-base`，因此无法构建或测量的 base 会让其分片失败。最后一个 job 不 checkout，仅当构建 job 与两个对比 job 都成功时才通过。只有符合条件的运行把它命名为 `Performance comparison result`；不符合条件的运行被跳过的结果显示未求值的名称表达式，从不显示真正的名称。合并证据是该 job 在确切 head 上那次符合条件的运行中的 SUCCESS，按 run id 读取，绝不只按检查名称读取；被取代的运行从不算作成功。两种模式、job 布局与 concurrency 详见
 [开发与发布](Development-and-Release-zh-CN#ci-能测量什么)。
 
 只要任一必需的 pull-request job 仍在排队、运行、缺失、被取消、意外跳过或失败，就绝不能

@@ -455,6 +455,51 @@ PR 与 Change。
   都至少占被记功样本的 80% 且两侧相差不超过 10 个百分点时通过，否则失败，并给出两侧数值；两项比较都是精确的
   整数交叉相乘。什么都未记录的一侧显示 `unavailable`，绝不是测得的零，此时关卡也为 `unavailable`；测试工具早于
   该能力的一侧显示 `n/a (no timeline)`。计时运行保持计数器关闭，因此构建带有 `perf-echo-trace` 时其时间线记为带 `gate-off` 的 `unavailable`，不带时记为带 `cfg-off` 的 `unavailable`。
+- `perf-compare.py --echo-attribution DIR DIR [--echo-control NAME DIR]... [--echo-platform macos|windows]`
+  对 S2/flood 回显时间线应用 #1607 冻结的归因流程。它只做分析：不构建、不运行，也不接受对比、smoke 或 `--out`
+  选项。每个目录存放一次工作流执行下载的 perf-comparison 制品。它们通过 `perf-flags.py` 的验证路径读取，与其
+  标记比较使用同一条路径：
+  - 校验每个制品的 `run-identity.json`（运行、引用、测试工具、设置、能力）；
+  - 将最终的集合清单与磁盘上的尝试核对，因此以 blocked 或 failed 结束的一侧不接受任何运行，有效运行也不例外；
+  - 在 head 声明的能力下校验每个被接受尝试的 outcome 与 `result.json`，只有测试工具声明了
+    `echo_timeline_schema` 时才要求时间线；
+  - 每个分类种类都必须是 perf-compare 会写出的种类，且每个结果的 `attributed` 与 `total` 必须等于其样本自身
+    的计数；
+  - 无论测试工具声明了什么，每个延迟样本都必须是对象，且其 `latency_ms` 为 null 或不小于 0 的有限数，整数不得
+    超过 2^64 − 1，因此 NaN、无穷大、负延迟、过大的整数或裸数字都会被拒绝，而不会被读取。
+  格式错误的证据以退出码 1 拒绝。不指向任何工作流执行的身份同样被拒绝：运行 id 必须是正的十进制 GitHub Actions
+  运行 id，尝试次数必须为正，`guard_api` 必须为 null 或布尔值。`perf-flags.py` 本身仍可在没有这些条件时加载本地
+  制品。不是不同执行（同一工作流运行的两个目录，按运行 id 识别）或未配对的执行也被拒绝：重放执行必须共享引用、
+  测试工具、设置、能力、`guard_api` 与平台，null 的 `guard_api` 只与另一个 null 匹配。对照组 `C1` 至 `C5` 各给
+  两次，按顺序与重放执行配对；它必须共享重放的 base、测试工具、设置、能力、`guard_api` 与平台，并运行在自己的
+  head 上，与重放的 head 以及其他对照的 head 都不同。
+  结论以 Markdown 输出，依次由以下步骤得出。时间线数值是整数纳秒上的精确计算；第 1 步读取序列化的
+  `latency_ms`：
+  - 证据：两次带有身份的重放执行，每侧都有已接受的运行与被记功的样本；否则为
+    `inconclusive (evidence unavailable)`，并指出以 blocked 或 failed 结束的一侧。
+  - 复现：两次执行中，每个 head 运行的被记功延迟中位数都高于每个 base 运行的；否则为
+    `inconclusive (not reproduced under instrumentation)`。
+  - 时间线什么都未记录的一侧为 `inconclusive (evidence unavailable)`，绝不当作零；未声明的
+    `echo_timeline_schema` 会被指出。按键归因与 `ordered` 总体都必须每侧至少 80% 且两侧相差不超过 10 个百分点，
+    否则为 `inconclusive (population coverage)`。`published_during_dispatch` 占比变化超过 10 个百分点时，
+    作为候选列出。
+  - `ordered` 上的均值筛查：Δ_total 是七个部分上 head 均值减去 base 均值；零或更小为
+    `inconclusive (mean and median disagree)`。某部分在两次执行中占 Δ_total 的比例都至少为 0.5，且其中位数
+    偏移同号时，它是主要部分；没有主要部分时结论为 `distributed / inconclusive`。
+  - 筛查：主要部分为 `render` 时是 M1（渲染工作），为 `publication_to_frame_request` 时是 M2（上游就绪）。
+    对 `frame_request_to_entry`，M3（洪流竞争）要求两次执行中在 `ordered ∩ m3_complete` 上每样本的平均洪流
+    服务数都上升至少 1.0。M4（节拍）在每次执行中单独判断，基于 tick 合格总体：积分得到的 `permit_absent_ns`
+    均值必须至少占该部分 Δ 的一半，且该次执行中 M3 的条件不成立。`tick_to_entry_ns` 仅作描述性报告。低于 80%
+    关卡的总体不可用；M3 不可用的执行中不评估 M4。多项筛查成立时为 `combined`，逐一列出；一项都不成立时为
+    `inconclusive (no mechanism screened)`。
+  - 对照确认：没有对照运行时（如在 main 上），每个机制为 `screened, unconfirmed (no control runs)`。在计算对照
+    的任何数值之前，先检查其证据与 §2 的两项关卡；一侧为空或未通过关卡的对照不能确认。C1 至 C3 确认 M1 与
+    M2，C4 确认 M4：当两次执行中 R_C = 1 − Δ(对照)/Δ(重放) 对该部分与总中位数偏移都至少为 0.5 时，该对照完成
+    归因。M3 至多为 `supporting evidence only`，因为 C5 是宽泛的对照；支持还要求每个 head 运行中没有洪流服务的
+    样本的 `frame_request_to_entry` 中位数低于有一次或以上洪流服务的样本。
+  - 对照身份未经验证：v5 V3 的 `sonic::perf_control` 检查留在实验分支（裁定 D1）。命令行上指定的对照被信任为
+    该对照，因此每项归因与支持都标注 `control identity unverified`。
+  退出码 0 表示证据已读取，不表示某个机制已确认。
 - 测试工具的 `--list` 还声明 `capabilities.phase_kinds: 1`。此时每个阶段记录其 `kind`（`sustained`、
   `transition` 或 `hold`）；transition 阶段记录其 `endpoint`，并且恰好带有 `completion_ms` 与
   `completion_missing` 之一，其他种类两者都不带。每个阶段还记录来自主窗口 `RedrawRequested` 派发的呈现
@@ -698,7 +743,7 @@ S2 与 S10/sync；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1
 各平台包含 S9 的分片（macOS 的 S9-S10sync，Windows 的 S9-S10）还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传
 lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结论。
 裸场景 ID 只选择其默认变体，因此每个变体都按名称列出。在 `--short` 下，`S2/flood` 每侧上限 2 次，`S11/release` 上限 1 次，
-`S11/gdi`、`S11/wgpu` 与 `S1/atlas-retry` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 30 分钟内：release 对比完整运行它。
+`S11/gdi`、`S11/wgpu` 与 `S1/atlas-retry` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 35 分钟内：release 对比完整运行它。
 带 `perf-frame-texture` 时，S11 的 `end` 检查点记录 `frame_texture_bytes`：head 在 GDI 下为 4 B，未声明该 feature 的 base
 为 `n/a`。S9 与 S12 的 `end` 检查点记录渲染器的字形完整性：每次呈现 `Full` 帧时，渲染器保存一份证书，包含该帧的场景
 （去掉窗格 revision 与 dirty generation 的帧键）、字形图集的内容戳与尺寸，以及终端与界面各自缺失的不同字符。之后同一场景、同一图集的帧会并入
@@ -709,12 +754,12 @@ lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结�
 并在 `comparison.md` 中列出。这些只是 perf 结束行；helper 行与真实渲染器行来自工作集测试。合并的关卡步骤 `perf-scenarios-harness-api-clippy` 与
 `perf-scenarios-harness-api-tests` 在开启该 cfg（以及其他每一项）时对 harness 做 lint 与测试。每个分片在自己的 runner 上交错运行其场景组的 base 与 head 运行，因此一次对比从不跨 runner 或平台。macOS 分片数（目前为四个，与实测试验中 CI 的 macOS job 运行期间分给 perf 的 macOS runner 数一致）
 根据实测的关键路径选定。两种模式都会运行计数器组，在 head 上，以及在声明 `perf-counters` 的 base 上：pull request 为每个场景、
-每一侧运行两次计数器运行以保持在 30 分钟内，release 运行 `--runs` 次。Windows runner 没有 GPU，也没有用户会话：其对比表测量
+每一侧运行两次计数器运行以保持在 35 分钟内，release 运行 `--runs` 次。Windows runner 没有 GPU，也没有用户会话：其对比表测量
 软件渲染路径，前台变化在那里只被记录，不被判定。
 
 | 模式 | 时机 | 对比 | 运行 | Release profile | 时长 |
 | --- | --- | --- | --- | --- | --- |
-| Pull request | 带 `perf` 标签的 pull request：加上该标签时，以及标签存在期间的每次 push | merge base 与 head | `--short --runs 5 --counters --counters-runs 2` | 两个 ref 都关闭 LTO、使用 16 个 codegen unit | 从运行创建起 30 分钟内，包含排队时间 |
+| Pull request | 带 `perf` 标签的 pull request：加上该标签时，以及标签存在期间的每次 push | merge base 与 head | `--short --runs 5 --counters --counters-runs 2` | 两个 ref 都关闭 LTO、使用 16 个 codegen unit | 从运行创建起 35 分钟内，包含排队时间 |
 | Release | 推送的 `v*` tag | 上一个 release tag 与该 tag | 完整时长，`--runs 5 --counters` | 发布用的 profile | 可能数小时 |
 
 每个对比 job 把它的 `comparison.md` 写入 job summary，并把它、它的 `timing.json` 与每次运行的日志和记录一起作为 artifact
@@ -723,7 +768,7 @@ lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结�
 profile 上的短运行只是快速检查；release 对比在完整时长下测量发布用的 profile。共享 runner 的噪声比空闲的桌面主机大，因此
 应以同类 runner、同一模式的 A/A 对比来解读一项改动。
 
-Pull request 的预算是从运行创建到其最后一个 job 结束的 30 分钟，包含排队时间与重新运行；只算分片时长不算数。
+Pull request 的预算是从运行创建到其最后一个 job 结束的 35 分钟，包含排队时间与重新运行；只算分片时长不算数。
 `python3 scripts/perf-critical-path.py --run <id>` 负责核算（`--fixture <file>` 读取已记录的运行）。它把经过的时间分到每次
 attempt 与重新运行之间的等待，把每次重新运行中继承的 job 行映射到实际执行它们的唯一 attempt，并把每次 attempt 中每条
 needs 链拆成兄弟等待、创建等待、runner 排队与运行时间类别（setup、build、打包与上传、下载与解包、compare、evidence、check、

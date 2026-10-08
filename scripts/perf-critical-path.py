@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Account for a Performance comparison run's time, from its creation to its last attempt's finish.
 
-The PR pipeline's budget is 30 minutes measured that way, queue included. This report reads the run, each
+The PR pipeline's budget is 35 minutes measured that way, queue included. This report reads the run, each
 attempt and each attempt's job rows and artifacts with `gh api` (or a recorded `--fixture`), and splits
 the time into the attempts and the waits between them, then, inside each attempt, each chain of needs
 into sibling wait, creation wait, runner queue and runtime classes. A comparison job's compare step is
@@ -41,7 +41,7 @@ from typing import Callable, Mapping, Sequence
 import zipfile
 
 DEFAULT_REPOSITORY = "D0n9X1n/SonicTerm"
-BUDGET_S = 30 * 60
+BUDGET_S = 35 * 60
 # Timestamps are whole seconds, so sums and window checks allow one second of rounding.
 TOLERANCE_S = 1
 GH_TIMEOUT_S = 120

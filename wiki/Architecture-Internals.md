@@ -358,8 +358,10 @@ correctness, not only speed.
   Renderer surface, pane grids/PTYs, IME geometry, and redraw follow the same
   target before the native size commit.
 
-The event-loop thread collects a complete visible frame without waiting on the VT
-worker. `VisibleFrameSources` validates unique live tree leaves, active-pane identity,
+The event-loop thread collects a complete visible frame with a bounded wait on the
+VT worker. It waits for busy visible parsers under one shared 2 ms requested
+deadline, which scheduler preemption can overrun; image stores are only probed,
+and a miss settles through the unchanged contention retry. `VisibleFrameSources` validates unique live tree leaves, active-pane identity,
 and zoom agreement before owning handles for only the visible layout. Its source
 vector is declared before the separately borrowed parser-guard vector. Both roles use
 parsers → visible images; this changes main's former images-first order and retains
@@ -876,7 +878,7 @@ that pane's log before the `before_lock` read, outside the parser-guard scope,
 and publishes it with the section counters' own `before_lock` and `locked_at`
 reads. A section that unwinds is abandoned after its parser guard drops, so the
 log mutex is never taken while a parser guard is held. Each counting collection
-issues a collection identity before its first `try_lock` and notes each guard as
+issues a collection identity before its first parser acquisition and notes each guard as
 it is acquired. The custody's single release read ends both the custody total and
 every span of that collection; past 16 guards one hull covers the rest. Every
 buffer is allocated before recording and again before each take, so recording

@@ -1605,3 +1605,332 @@ fn gate_off_sources_take_no_correlation_clock_or_recorder() {
         );
     }
 }
+
+/// What a scripted acquisition does for one pane: succeed at once, or stay busy while the clock moves.
+#[derive(Clone, Copy)]
+enum ScriptedOutcome {
+    /// The probe takes the free parser.
+    Free,
+    /// The probe takes the free parser, but the clock moves by `late` before it returns, as under preemption.
+    FreeLate { late: Duration },
+    /// The probe fails; the timed wait advances the clock by `wait` and then takes the parser.
+    BusyThenFree { wait: Duration },
+    /// The probe fails; the timed wait advances the clock by `wait` and gives up.
+    BusyThroughout { wait: Duration },
+}
+
+/// One acquisition call the scripted seam saw: the pane, the call, and the clock when it was made.
+#[derive(Clone, Debug, PartialEq)]
+enum AcquireCall {
+    Probe(u64),
+    Wait { pane_id: u64, deadline: Instant, at: Instant },
+}
+
+/// A deterministic acquisition over an injected clock: each pane follows its script, and every call is
+/// recorded, so the shared-deadline and late-guard contracts are pinned without timing assumptions.
+struct ScriptedAcquire {
+    clock: std::cell::Cell<Instant>,
+    script: HashMap<u64, ScriptedOutcome>,
+    calls: std::cell::RefCell<Vec<AcquireCall>>,
+    /// How far the clock moves while the hook after a failed probe runs.
+    hook_advance: std::cell::Cell<Duration>,
+}
+
+impl ScriptedAcquire {
+    fn new(script: &[(u64, ScriptedOutcome)]) -> Self {
+        Self {
+            clock: std::cell::Cell::new(Instant::now()),
+            script: script.iter().copied().collect(),
+            calls: Default::default(),
+            hook_advance: Default::default(),
+        }
+    }
+}
+
+impl ParserAcquire for ScriptedAcquire {
+    fn now(&self) -> Instant {
+        self.clock.get()
+    }
+
+    fn probe<'a>(&self, pane_id: u64, parser: &'a Mutex<Parser>) -> Option<MutexGuard<'a, Parser>> {
+        self.calls.borrow_mut().push(AcquireCall::Probe(pane_id));
+        match self.script[&pane_id] {
+            // The parser is genuinely free in these tests, so a scripted success takes the real guard.
+            ScriptedOutcome::Free => parser.try_lock(),
+            ScriptedOutcome::FreeLate { late } => {
+                let guard = parser.try_lock();
+                self.clock.set(self.clock.get() + late);
+                guard
+            }
+            ScriptedOutcome::BusyThenFree { .. } | ScriptedOutcome::BusyThroughout { .. } => None,
+        }
+    }
+
+    fn after_failed_probe(&self, _pane_id: u64) {
+        self.clock.set(self.clock.get() + self.hook_advance.get());
+    }
+
+    fn wait_until<'a>(
+        &self,
+        pane_id: u64,
+        parser: &'a Mutex<Parser>,
+        deadline: Instant,
+    ) -> Option<MutexGuard<'a, Parser>> {
+        let at = self.clock.get();
+        self.calls.borrow_mut().push(AcquireCall::Wait { pane_id, deadline, at });
+        match self.script[&pane_id] {
+            ScriptedOutcome::Free | ScriptedOutcome::FreeLate { .. } => parser.try_lock(),
+            ScriptedOutcome::BusyThenFree { wait } => {
+                self.clock.set(at + wait);
+                parser.try_lock()
+            }
+            ScriptedOutcome::BusyThroughout { wait } => {
+                self.clock.set(at + wait);
+                None
+            }
+        }
+    }
+}
+
+/// A later pane is offered only what remains of the one absolute deadline, never a fresh budget.
+#[test]
+fn every_visible_parser_waits_against_one_absolute_collection_deadline() {
+    let (mut app, window, left, right, _inactive) = fixture(false, false);
+    let sources = sources(&mut app, window, false).ok().unwrap();
+    let budget = Duration::from_micros(2_000);
+    let acquire = ScriptedAcquire::new(&[
+        (left, ScriptedOutcome::BusyThenFree { wait: Duration::from_micros(1_500) }),
+        (right, ScriptedOutcome::BusyThenFree { wait: Duration::from_micros(100) }),
+    ]);
+    let start = acquire.now();
+    let Ok(held) = sources.try_collect_with(&acquire, budget, || {}) else {
+        panic!("both panes were freed within the shared deadline");
+    };
+    assert_eq!(held.guards.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(), vec![left, right]);
+    let calls = acquire.calls.borrow().clone();
+    // Both waits carry the same deadline; the second starts 1.5 ms in, so it has 0.5 ms left.
+    assert_eq!(
+        calls,
+        vec![
+            AcquireCall::Probe(left),
+            AcquireCall::Wait { pane_id: left, deadline: start + budget, at: start },
+            AcquireCall::Probe(right),
+            AcquireCall::Wait {
+                pane_id: right,
+                deadline: start + budget,
+                at: start + Duration::from_micros(1_500),
+            },
+        ]
+    );
+}
+
+/// A parser still busy at the deadline is a miss: every guard already taken is released, and no
+/// acquisition is attempted for a later pane once the deadline is observed to have passed.
+#[test]
+fn a_parser_busy_through_the_deadline_is_contended_with_every_guard_released() {
+    let (mut app, window, left, right, _inactive) = fixture(false, false);
+    let sources = sources(&mut app, window, false).ok().unwrap();
+    let budget = Duration::from_micros(2_000);
+    // The first pane uses the whole budget, so the second is never probed.
+    let exhausted = ScriptedAcquire::new(&[
+        (left, ScriptedOutcome::BusyThroughout { wait: budget }),
+        (right, ScriptedOutcome::Free),
+    ]);
+    let outcome = sources.try_collect_with(&exhausted, budget, || {});
+    assert_eq!(outcome.err(), Some(FrameUnavailable::Contended { pane_id: left, images: false }));
+    assert!(!exhausted.calls.borrow().contains(&AcquireCall::Probe(right)), "no call after expiry");
+    // The first pane is free and taken; the second stays busy past the deadline, so the first guard is released.
+    let second_busy = ScriptedAcquire::new(&[
+        (left, ScriptedOutcome::Free),
+        (right, ScriptedOutcome::BusyThroughout { wait: budget }),
+    ]);
+    let outcome = sources.try_collect_with(&second_busy, budget, || {});
+    assert_eq!(outcome.err(), Some(FrameUnavailable::Contended { pane_id: right, images: false }));
+    let state = &app.windows[&window];
+    assert!(state.panes[&left].parser.try_lock().is_some(), "the earlier guard was released");
+    assert!(state.panes[&right].parser.try_lock().is_some());
+    assert!(sources.image_visits.borrow().is_empty(), "every parser is taken before any image");
+}
+
+/// A guard that arrives after the deadline, on either acquisition path, is dropped and reported as
+/// contention rather than lengthening the collection.
+#[test]
+fn a_guard_obtained_after_the_deadline_is_released_and_counts_as_a_miss() {
+    let (mut app, window, left, right, _inactive) = fixture(false, false);
+    let sources = sources(&mut app, window, false).ok().unwrap();
+    let budget = Duration::from_micros(2_000);
+    // The timed wait returns the guard, but only after the clock passed the deadline.
+    let late = ScriptedAcquire::new(&[
+        (left, ScriptedOutcome::Free),
+        (right, ScriptedOutcome::BusyThenFree { wait: Duration::from_micros(2_500) }),
+    ]);
+    let outcome = sources.try_collect_with(&late, budget, || {});
+    assert_eq!(outcome.err(), Some(FrameUnavailable::Contended { pane_id: right, images: false }));
+    let state = &app.windows[&window];
+    assert!(state.panes[&left].parser.try_lock().is_some(), "the earlier guard was released");
+    assert!(state.panes[&right].parser.try_lock().is_some(), "the late guard was released");
+    // The nonwaiting probe succeeds, but only after the deadline: that guard is released too.
+    let late_probe = ScriptedAcquire::new(&[
+        (left, ScriptedOutcome::Free),
+        (right, ScriptedOutcome::FreeLate { late: Duration::from_micros(2_500) }),
+    ]);
+    let outcome = sources.try_collect_with(&late_probe, budget, || {});
+    assert_eq!(outcome.err(), Some(FrameUnavailable::Contended { pane_id: right, images: false }));
+    let state = &app.windows[&window];
+    assert!(state.panes[&left].parser.try_lock().is_some(), "the earlier guard was released");
+    assert!(state.panes[&right].parser.try_lock().is_some(), "the late probe's guard was released");
+    assert!(sources.image_visits.borrow().is_empty(), "no image is visited after a late guard");
+    // A zero budget expires before the first probe: a free parser is still not taken.
+    let expired =
+        ScriptedAcquire::new(&[(left, ScriptedOutcome::Free), (right, ScriptedOutcome::Free)]);
+    let outcome = sources.try_collect_with(&expired, Duration::ZERO, || {});
+    assert_eq!(outcome.err(), Some(FrameUnavailable::Contended { pane_id: left, images: false }));
+    assert!(expired.calls.borrow().is_empty(), "no acquisition is attempted after expiry");
+    // The deadline passes while the hook after a failed probe runs: the timed wait is never entered.
+    let during_hook = ScriptedAcquire::new(&[
+        (left, ScriptedOutcome::BusyThenFree { wait: Duration::ZERO }),
+        (right, ScriptedOutcome::Free),
+    ]);
+    during_hook.hook_advance.set(budget);
+    let outcome = sources.try_collect_with(&during_hook, budget, || {});
+    assert_eq!(outcome.err(), Some(FrameUnavailable::Contended { pane_id: left, images: false }));
+    assert_eq!(*during_hook.calls.borrow(), vec![AcquireCall::Probe(left)], "no wait after expiry");
+}
+
+/// Production acquisition whose hook releases a held parser only after the nonwaiting probe failed.
+struct ReleaseAfterFailedProbe {
+    release: std::sync::mpsc::Sender<()>,
+    failed_probes: std::cell::Cell<usize>,
+}
+
+impl ParserAcquire for ReleaseAfterFailedProbe {
+    fn now(&self) -> Instant {
+        TimedParserAcquire.now()
+    }
+
+    fn probe<'a>(&self, pane_id: u64, parser: &'a Mutex<Parser>) -> Option<MutexGuard<'a, Parser>> {
+        TimedParserAcquire.probe(pane_id, parser)
+    }
+
+    fn after_failed_probe(&self, _pane_id: u64) {
+        self.failed_probes.set(self.failed_probes.get() + 1);
+        // The holder may already have left if a previous hook released it; nothing then waits.
+        let _ = self.release.send(());
+    }
+
+    fn wait_until<'a>(
+        &self,
+        pane_id: u64,
+        parser: &'a Mutex<Parser>,
+        deadline: Instant,
+    ) -> Option<MutexGuard<'a, Parser>> {
+        TimedParserAcquire.wait_until(pane_id, parser, deadline)
+    }
+}
+
+/// The deterministic red/green pin: a probe that is known to fail, because another thread owns the
+/// visible parser, is followed by the timed wait, which takes the parser once it is released. Returning
+/// the failed probe instead would yield `Contended` here whatever the scheduling. Both roles are covered.
+#[test]
+fn a_failed_probe_falls_through_to_the_timed_wait_that_takes_the_released_parser() {
+    for child in [false, true] {
+        let (mut app, window, _left, right, _inactive) = fixture(child, false);
+        let parser = Arc::clone(&app.windows[&window].panes[&right].parser);
+        let sources = sources(&mut app, window, child).ok().unwrap();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let guard = parser.lock();
+            held_tx.send(()).unwrap();
+            // Released only on the hook's signal, which comes after the collector's probe failed.
+            let _ = release_rx.recv();
+            drop(guard);
+        });
+        held_rx.recv().unwrap();
+        let acquire = ReleaseAfterFailedProbe {
+            release: release_tx.clone(),
+            failed_probes: Default::default(),
+        };
+        // The five-second budget is a watchdog for a stalled host, not a timing assertion.
+        let outcome = sources.try_collect_with(&acquire, Duration::from_secs(5), || {});
+        let collected = outcome.is_ok();
+        let why = outcome.err();
+        // Always release the holder, even when the collector returned before its hook ran.
+        let _ = release_tx.send(());
+        holder.join().unwrap();
+        assert_eq!(acquire.failed_probes.get(), 1, "the held parser's probe failed exactly once");
+        assert!(collected, "the timed wait takes the released parser, got {why:?}");
+    }
+}
+
+/// The production collector takes every parser through the deadline-checked timed helper, and the VT
+/// worker releases each section's parser fairly. These pins support the behaviour tests above.
+#[test]
+fn collection_waits_with_a_deadline_and_the_worker_releases_fairly() {
+    let strip = |source: &str| -> String {
+        source
+            .replace("\r\n", "\n")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let collector = strip(include_str!("visible_frame.rs"));
+    let production = collector.split("#[path = \"visible_frame_tests.rs\"]").next().unwrap();
+    assert!(production.contains("parser.try_lock_until(deadline)"));
+    assert!(production.contains("acquire_parser(acquire, entry.id, &entry.parser, deadline)"));
+    assert!(production.contains(
+        "self.try_collect_with(&TimedParserAcquire, COLLECTION_LOCK_BUDGET, before_first_lock)"
+    ));
+    assert!(!production.contains("entry.parser.try_lock()"), "no parser is only probed");
+    assert_eq!(production.matches("let deadline = acquire.now() + budget;").count(), 1);
+    let worker = strip(include_str!("spawn_pane.rs"));
+    assert_eq!(worker.matches("MutexGuard::unlock_fair(parser);").count(), 1);
+}
+
+/// Integration over the real mutex: a collector parks on a held parser and takes it when the holder
+/// releases on its own timer. The holder never waits for the collector, so this cannot hang.
+#[test]
+fn a_parked_collection_takes_a_parser_its_holder_releases() {
+    let (mut app, window, _left, right, _inactive) = fixture(false, false);
+    let parser = Arc::clone(&app.windows[&window].panes[&right].parser);
+    let sources = sources(&mut app, window, false).ok().unwrap();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let guard = parser.lock();
+        held_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        drop(guard);
+    });
+    held_rx.recv().unwrap();
+    // The five-second budget is a watchdog for a stalled host, not a timing assertion.
+    let collected =
+        sources.try_collect_with(&TimedParserAcquire, Duration::from_secs(5), || {}).is_ok();
+    holder.join().unwrap();
+    assert!(collected, "the parked collection takes the parser once it is released");
+}
+
+/// The production budget expires on a parser held past it, and the holder releases on a watchdog if the
+/// collector never returns, so a regression to an unbounded lock fails by assertion rather than hanging.
+#[test]
+fn a_parser_held_past_the_production_budget_is_contended_without_hanging() {
+    let (mut app, window, _left, right, _inactive) = fixture(false, false);
+    let parser = Arc::clone(&app.windows[&window].panes[&right].parser);
+    let sources = sources(&mut app, window, false).ok().unwrap();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (returned_tx, returned_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let guard = parser.lock();
+        held_tx.send(()).unwrap();
+        // Released when the collector returns, or after the watchdog if it is stuck in an unbounded lock.
+        let returned = returned_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        drop(guard);
+        returned
+    });
+    held_rx.recv().unwrap();
+    let outcome = sources.try_collect(|| {});
+    let why = outcome.err();
+    let _ = returned_tx.send(());
+    assert!(holder.join().unwrap(), "the collector returned while the parser was still held");
+    assert_eq!(why, Some(FrameUnavailable::Contended { pane_id: right, images: false }));
+}
