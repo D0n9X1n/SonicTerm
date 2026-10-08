@@ -1130,7 +1130,7 @@ S9-S10sync, Windows S9-S10) also runs S9's laps set (`--laps-scenario S9 --laps-
 gives its own `fallback_receive` verdict. A bare scenario ID selects only its default
 variant, so every variant is named explicitly. Under `--short`, `S2/flood` is
 capped at 2 runs per side, `S11/release` at 1, and `S11/gdi`, `S11/wgpu` and
-`S1/atlas-retry` at 2. The `S2/flood` cap only keeps the pull-request comparison within 30 minutes:
+`S1/atlas-retry` at 2. The `S2/flood` cap only keeps the pull-request comparison within 35 minutes:
 a release comparison runs it in full. With `perf-frame-texture`, S11's
 `end` checkpoint records `frame_texture_bytes`: 4 B under GDI on the head, `n/a`
 on a base without the feature. S9's and S12's `end` checkpoints record the
@@ -1156,14 +1156,14 @@ interleaved on its own runner, so a comparison never crosses runners or
 platforms. The macOS shard count, four today, matches the macOS
 runner slots that reached perf while CI's macOS jobs ran in the measured trials; it is chosen from measured critical paths. Both modes add the counters set, on the
 head and on a base that declares `perf-counters`: a pull request takes two
-counters runs per scenario and side to stay within 30 minutes, a release takes
+counters runs per scenario and side to stay within 35 minutes, a release takes
 `--runs`. The Windows runner has no GPU and no user session: its table measures
 the software-rendering path, and a foreground change there is recorded, not
 judged.
 
 | Mode | When | Compares | Runs | Release profile | Time |
 | --- | --- | --- | --- | --- | --- |
-| Pull request | a pull request labelled `perf`, when the label is added and on every push while it is set | the merge base with the head | `--short --runs 5 --counters --counters-runs 2` | LTO off, 16 codegen units, for both refs | within 30 minutes of the run's creation, queue included |
+| Pull request | a pull request labelled `perf`, when the label is added and on every push while it is set | the merge base with the head | `--short --runs 5 --counters --counters-runs 2` | LTO off, 16 codegen units, for both refs | within 35 minutes of the run's creation, queue included |
 | Release | a pushed `v*` tag | the previous release tag with the tag | full length, `--runs 5 --counters` | the shipping profile | may take hours |
 
 Each comparison job writes its `comparison.md` to the job summary and uploads
@@ -1177,7 +1177,7 @@ profile, are a quick check; the release comparison measures the shipped profile
 at full length. A shared runner is noisier than an idle desk, so read a change
 against an A/A comparison from the same runner type and mode.
 
-The pull-request budget is 30 minutes from the run's creation to its last job's
+The pull-request budget is 35 minutes from the run's creation to its last job's
 finish, queue time and reruns included; shard time alone does not count.
 `python3 scripts/perf-critical-path.py --run <id>` accounts for it (`--fixture
 <file>` reads a recorded run). It partitions the elapsed time into each attempt

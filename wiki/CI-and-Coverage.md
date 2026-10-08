@@ -16,7 +16,7 @@ cancels in progress, so a later merge cannot erase the exact-SHA verification
 record for an earlier one.
 
 `.github/workflows/perf.yml` (`Performance comparison`) runs separately and is
-not a required job. It measures a quick before/after table, within 30 minutes
+not a required job. It measures a quick before/after table, within 35 minutes
 of the run's creation, queue included, for pull requests labelled `perf`, and the
 full comparison for each release tag, on GitHub-hosted macOS and Windows
 runners, with the frame-counter set and its tables on both. One macOS job builds

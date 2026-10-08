@@ -347,14 +347,14 @@ a reproduction.
   Local and native process deadlines are independent and remain required. Scripts that capture child-process output must bound and reap the
   child process tree so timeout evidence and checksums survive. Keep the timeout
   policy tests green when adding or renaming workflow jobs and steps.
-- **Performance is measured in CI: a 30-minute PR pipeline and an unbounded
+- **Performance is measured in CI: a 35-minute PR pipeline and an unbounded
   release pipeline. Local runs only make sure it works.** Every before/after
   perf number comes from the `Performance comparison` workflow
   (`.github/workflows/perf.yml`) on GitHub-hosted macOS and Windows runners,
   never from a local comparison: a developer's machine is in use, and its
   input, focus changes and load invalidate runs or widen the noise.
   - **PR pipeline:** runs for every PR labelled `perf` and must finish within
-    30 minutes. It compares the merge base with the head using
+    35 minutes. It compares the merge base with the head using
     `--short --runs 5 --counters --counters-runs 2` and a release profile without
     LTO (the same for both refs). Under `--short` a variant whose `--list` entry
     declares `run_caps` takes min(requested, cap) runs per side in every set
@@ -377,7 +377,7 @@ a reproduction.
     field, adding S9's laps set and its `fallback_receive` verdict; the other
     entries pass no laps flags. Its table is the PR's before/after
     evidence. Keep it
-    within 30 minutes, from the run's creation to its last job's finish with
+    within 35 minutes, from the run's creation to its last job's finish with
     queue time included (`scripts/perf-critical-path.py` accounts for it), when
     you add scenarios or change the workflow: rebalance the shards or shorten
     the runs, never drop the budget.

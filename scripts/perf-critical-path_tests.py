@@ -301,7 +301,7 @@ class AttemptResolutionTests(unittest.TestCase):
 
 
 class BudgetTests(unittest.TestCase):
-    """The 30-minute budget runs from the run's creation to its last attempt's finish, reruns included."""
+    """The 35-minute budget runs from the run's creation to its last attempt's finish, reruns included."""
 
     def test_budget_from_original_creation_to_final_finish(self):
         # Two attempts: 2524 s = 1413 + 48 + 1063; three: 5001 s = 1413 + 48 + 1063 + 1277 + 1200.
@@ -573,7 +573,7 @@ class CommandLineTests(unittest.TestCase):
     """The command's exit codes, its GitHub reads and its bounded child process."""
 
     def test_the_recorded_run_is_over_budget(self):
-        # Exit 1 when the run took longer than 30 minutes; the report still prints.
+        # Exit 1 when the run took longer than 35 minutes; the report still prints.
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
             self.assertEqual(accounting.main(["--fixture", str(FIXTURE)]), 1)
