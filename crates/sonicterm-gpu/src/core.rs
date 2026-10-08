@@ -3403,14 +3403,8 @@ impl GpuRenderer {
             palette_footer_font_stack: font_stacks.palette_footer,
             // Seeded from the constructor theme, so the first frame derives no palette.
             chrome_caches: crate::chrome_cache::ChromeCaches::new(theme),
-            // Ablation: tab titles and chrome runs are prepared cold on every frame.
-            chrome_reuse: false,
-            // Ablation: the frame scratch is dropped on every restore, so each pass allocates afresh.
-            frame_scratch: {
-                let home = frame_scratch::ScratchHome::new();
-                home.set_reuse(false);
-                home
-            },
+            chrome_reuse: true,
+            frame_scratch: frame_scratch::ScratchHome::new(),
             row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
             line_quad_cache: crate::row_quad_cache::LineQuadCache::new(),
             last_emit_origins: Vec::new(),
