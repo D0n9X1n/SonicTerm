@@ -133,13 +133,19 @@ fn concurrent_misses_publish_one_buffer() {
 }
 
 /// Contract: missing, directory and oversized paths fail with the same messages as before sharing.
+/// A directory fails where the platform refuses it: Unix opens it and the metadata check says
+/// `is not a file`, while Windows' `File::open` refuses a directory, so the open error is reported.
 #[test]
 fn unreadable_paths_keep_their_errors() {
     let missing = std::env::temp_dir().join("sonicterm-font-bytes-missing.ttf");
     let error = shared_file_bytes(&missing, usize::MAX, "freetype").unwrap_err();
     assert!(format!("{error:#}").starts_with("opening file "), "{error:#}");
     let error = shared_file_bytes(&std::env::temp_dir(), usize::MAX, "freetype").unwrap_err();
-    assert!(format!("{error:#}").ends_with("is not a file"), "{error:#}");
+    if cfg!(windows) {
+        assert!(format!("{error:#}").starts_with("opening file "), "{error:#}");
+    } else {
+        assert!(format!("{error:#}").ends_with("is not a file"), "{error:#}");
+    }
     let font = TempFont::new();
     let error = shared_file_bytes(&font.0, 10, "harfbuzz").unwrap_err();
     assert!(format!("{error:#}").contains("is too large to pass to harfbuzz! (len=1368)"));
