@@ -13,6 +13,9 @@ work so config-load failures and panics are visible.
 - `exit_trace.rs` - drop-guard exit markers, `exit_with`, and the coverage matrix;
   `exit_trace/unix.rs` holds the chained fatal-signal handler.
 - `path.rs` - `~/.sonicterm/logs` path helpers.
+- `process_memory.rs` - the fixed OS figures the periodic `memory snapshot` line reports.
+- `process_report.rs` - Memory Usage report OS figures: footprint and peak, threads, and a
+  bounded, cancellable child-process walk per pane shell.
 
 ## Local gate
 ```bash

@@ -70,6 +70,26 @@ fn command_catalogs_cover_existing_action_labels() {
     }
 }
 
+/// Contract: the palette lists Memory Usage in every shipped locale with its translated label,
+/// and its English aliases (`memory`, `ram`, `footprint`) stay searchable in each.
+#[test]
+fn memory_usage_command_is_listed_and_translated_in_every_locale() {
+    use crate::command_label::{localized_label, localized_search_haystack};
+    use sonicterm_cfg::keymap::Action;
+    assert!(crate::command_palette::palette_actions().contains(&Action::ShowMemoryUsage));
+    for (locale, expected) in
+        [("en", "Memory Usage"), ("zh-CN", "内存占用"), ("ja", "メモリ使用量")]
+    {
+        let i18n = translator(locale);
+        assert_eq!(localized_label(&Action::ShowMemoryUsage, &i18n), expected, "{locale}");
+        let haystack = localized_search_haystack(&Action::ShowMemoryUsage, &i18n);
+        for alias in ["memory", "mem", "ram", "usage", "footprint"] {
+            assert!(haystack.contains(alias), "{locale} haystack lost {alias}");
+        }
+        assert_ne!(i18n.translate("memory-report-window-title"), "memory-report-window-title");
+    }
+}
+
 /// Missing action templates fall back wholly to English, even if the locale has translated enum words.
 #[test]
 fn command_labels_fall_back_to_existing_english_text() {

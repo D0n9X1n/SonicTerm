@@ -287,6 +287,13 @@ pub enum UserEvent {
         /// Identity of the admitted recovery request.
         ticket: u64,
     },
+    /// The Memory Usage report's worker sampled the OS figures for one refresh.
+    MemoryReportSampled {
+        /// The refresh this sample belongs to; an older one is dropped.
+        generation: u64,
+        /// Footprint, threads, and each pane shell's process tree.
+        sample: Box<memory_report::OsSample>,
+    },
 }
 
 mod broadcast;
@@ -372,6 +379,8 @@ pub use keyboard_protocol::HeldKey;
 mod keymap_dispatch;
 mod locale;
 mod media;
+mod memory_report;
+mod memory_report_window;
 pub mod memory_snapshot;
 mod misc;
 pub mod os_drag;
@@ -589,6 +598,8 @@ pub struct App {
     // path was deleted as the last of the per-window migration.
     /// Requested logical dimensions survive focus changes until native window creation can run.
     pub(super) pending_new_window: Option<WindowRequest>,
+    /// The Memory Usage report's pending open, refresh generation and last rendered text.
+    pub(super) memory_report: memory_report_window::MemoryReportState,
     /// Deferred in-process tab tear-out request from either drag/drop or the
     /// Move Tab to New Window action. Drained only while an ActiveEventLoop is
     /// available so every path uses the same native-window constructor.
@@ -926,9 +937,18 @@ impl App {
         }
         window.refresh_monitor_period();
         let owner_prepared = window.owner.is_some();
-        let key = self.window_keys.intern(id);
-        if let Some(native) = &window.window {
-            native.set_title(&compose_window_title(key, &window.custom_window_name));
+        if window.role == WindowRole::MemoryReport {
+            // The Memory Usage report's title is its name, and it takes no window number,
+            // so terminal windows keep consecutive numbers.
+            if let Some(native) = &window.window {
+                native.set_title(&window.custom_window_name);
+            }
+        } else {
+            // When: `window.role` is not MemoryReport, intern a window number and compose the numbered title.
+            let key = self.window_keys.intern(id);
+            if let Some(native) = &window.window {
+                native.set_title(&compose_window_title(key, &window.custom_window_name));
+            }
         }
         self.windows.insert(id, window);
         // The link takes the period the refresh above just read; only macOS installs one.

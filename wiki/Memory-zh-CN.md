@@ -288,6 +288,32 @@ allocator_largest_block_bytes
 设备 8 MiB / 主机 4 MiB。这些只是放置与块大小提示，不是分配上限；
 更大的资源仍可分配。
 
+### 内存占用报告
+
+命令面板中的 **内存占用** 命令（`show_memory_usage`，默认未绑定）会打开报告窗口；
+已打开时则聚焦并刷新它。报告是一个没有 PTY 的窗格中的纯文本，可以像终端输出一样
+选择、搜索、滚动和复制，键入内容不会到达任何 shell。报告是某一时刻的采样，不会自动
+刷新，因此复制时选区不会被清除。
+
+| 部分 | 内容 |
+| --- | --- |
+| `PROCESS (from the OS)` | 平台自带监视器显示的数值及其峰值，另有常驻、私有提交与虚拟内存数值。macOS 报告 physical footprint 与 lifetime peak footprint；Windows 报告 private commit 与 peak commit；Linux 报告常驻集（`VmRSS`）与峰值 RSS（`VmHWM`）。平台不提供的数值显示 `not available`，绝不显示 `0`。`GPU` 显示 `not available yet`。 |
+| `ACCOUNTED BY SONICTERM` | SonicTerm 自行统计的渲染器与窗格总量，与 `memory snapshot` 日志行来自同一采样周期。 |
+| `DIFFERENCE` | 操作系统 footprint 减去 SonicTerm 统计的容量，带符号且不截断。它是诊断值而非对账：分配器空闲、GPU 内存、字体和未跟踪的分配都会计入这里，各数值也可能重叠。 |
+| `SAMPLE` | 已测量的窗格数，以及因锁被占用而跳过的窗格数（`busy, skipped`），因此不完整的总量不会被当成整个会话。 |
+| `WINDOWS / RENDERERS` | 每个窗口渲染器的各部分（字形图集的尺寸、条目数与 fit、行缓存、临时缓冲），报告窗口自身的渲染器，以及预热渲染器。 |
+| `PANES` | 按标签页标题列出每个窗格，分为网格可见区、历史、备用屏、解析器、超链接、内联媒体以及 PTY 输出与输入。各窗格行之和等于窗格总量。 |
+| `THREADS` | 线程数量与名称。线程共享进程内存，自身不持有内存。 |
+| `CHILD PROCESSES` | 每个窗格的 shell 及其后代进程，并给出各自的操作系统数值（`footprint`、`private` 或 `RSS`），每个窗格最多 64 个后代。它们是独立进程，不计入 SonicTerm 的 footprint。已离开 shell 进程树的进程（例如守护化的 tmux server）不会列出，WSL 与远程进程也不可见。 |
+
+统计数值在 UI 线程上读取，遵循与日志行相同的 `try_lock` 规则。操作系统数值、线程列表与
+进程遍历在一个短生命周期的 `sonicterm-memory-report` 线程上运行；在它返回前，窗口显示
+统计数值和 `sampling the OS figures...`。刷新会取消未完成的遍历，旧刷新迟到的结果会被
+丢弃。根 pid 的启动时间与窗格 shell 不符时，报告显示其已退出，而不会遍历它。标签页标题
+和进程名在进入报告前会去除控制字符。报告窗格固定保留 10,000 行历史，不受
+`[terminal] scrollback` 影响；全部复制复制的是渲染出的文本，而不是折行后的网格。按键与
+窗口行为见[快捷键](Keybindings-zh-CN)和[运行时生命周期](Runtime-Lifecycle-zh-CN)。
+
 ### 遮挡窗口裁剪
 
 原生遮挡持续 30 秒的窗口会交还其渲染器能够重建的内容。保留量处理每 30 秒对每个窗口检查一次，
@@ -346,6 +372,9 @@ grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log*
 | 窗格限制与所有者注册 | `crates/sonicterm-app/src/app/{mod,owners}.rs` |
 | 窗格测量、记账、回收 | `crates/sonicterm-app/src/app/retention.rs` |
 | 聚合快照 | `crates/sonicterm-app/src/app/memory_snapshot.rs` |
+| 内存占用报告模型、渲染与 action 路由 | `crates/sonicterm-app/src/app/memory_report.rs` |
+| 内存占用报告窗口、刷新与操作系统采样线程 | `crates/sonicterm-app/src/app/memory_report_window.rs` |
+| 操作系统 footprint、峰值、线程与子进程遍历 | `crates/sonicterm-logging/src/process_report.rs` |
 | 内联媒体上限 | `crates/sonicterm-app/src/app/media.rs` |
 | 网格与超链接上限 | `crates/sonicterm-grid/src/{grid,hyperlink}.rs` |
 | 解析器捕获上限 | `crates/sonicterm-vt/src/vt.rs`、`crates/sonicterm-vt/src/vt/staging.rs` |

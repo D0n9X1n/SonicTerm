@@ -66,6 +66,10 @@ impl App {
     ) -> std::collections::BTreeSet<u64> {
         let mut receivers = std::collections::BTreeSet::new();
         for window in self.windows.values() {
+            if window.role == WindowRole::MemoryReport {
+                // When: the window is the Memory Usage report, its pane has no shell and is never a receiver.
+                continue;
+            }
             match scope {
                 BroadcastScope::Tab => {
                     // When: `scope` is `Tab`, so only panes sharing the source's

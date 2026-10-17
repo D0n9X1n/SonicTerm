@@ -619,6 +619,16 @@ when their last tab closes. The main window can become hidden while child
 windows remain. Its `WindowState` remains the identified main entry until a
 later policy shows or replaces it.
 
+The Memory Usage report window is a `WindowRole::MemoryReport` entry in the same
+window map, created at the next `drain_pending_window_creates` after
+`show_memory_usage` and focused instead of duplicated when it is already open. It
+shares the live GPU device, takes no window number, is never a tab drop target,
+tear-out source or broadcast receiver, and is not a native drop target. It never
+keeps the app alive: the last-window check counts only terminal windows, so
+closing the last terminal window exits and `finish_session` retires the report
+with every other window. Closing the report window never quits, and cancels any
+unfinished OS sample.
+
 When an action sets `pending_exit`, `about_to_wait` clears it and calls
 `ActiveEventLoop::exit`. With no active terminal window, normal last-window
 policy also reaches this path.

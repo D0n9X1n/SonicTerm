@@ -216,7 +216,7 @@ pub fn sample() -> ProcessMemory {
 /// snapshot learns that this figure is not available rather than being handed
 /// a number that might be another field entirely.
 #[cfg(target_os = "macos")]
-fn macos_task_info() -> Option<libc::proc_taskinfo> {
+pub(crate) fn macos_task_info() -> Option<libc::proc_taskinfo> {
     let mut info: libc::proc_taskinfo =
         // SAFETY: `proc_taskinfo` is a plain C struct of integers, for which an
         // all-zero bit pattern is a valid value. Zeroing first also means a
@@ -287,7 +287,8 @@ fn sample_pressure_platform() -> ProcessPressure {
 
 /// Read Windows commit and working-set counters in one fixed-cost query.
 #[cfg(windows)]
-fn windows_counters() -> Option<windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS_EX> {
+pub(crate) fn windows_counters(
+) -> Option<windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS_EX> {
     use windows::Win32::System::ProcessStatus::{
         GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
     };

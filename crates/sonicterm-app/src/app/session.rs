@@ -165,6 +165,7 @@ impl App {
             // so the ledger stays disabled and adds no per-write cost.
             pty_write_log_enabled: event_loop_proxy.is_none(),
             pending_new_window: None,
+            memory_report: Default::default(),
             pending_tear_out: None,
             pending_os_teardown: false,
             test_post_snapshot_hook: None,

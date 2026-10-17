@@ -348,13 +348,19 @@ impl App {
         false
     }
 
-    /// How many torn-out child windows are live.
+    /// How many terminal child windows are live.
     ///
-    /// The shadow main entry is excluded, so this counts only windows a user
-    /// tore off rather than every entry in the map.
+    /// The shadow main entry and the Memory Usage report window are excluded,
+    /// so a report window never keeps the app alive or stops a drained main
+    /// window from exiting.
     #[doc(hidden)]
     pub fn child_window_count(&self) -> usize {
-        self.windows.len().saturating_sub(self.shadow_main_count())
+        self.windows
+            .iter()
+            .filter(|(id, window)| {
+                window.role == WindowRole::Terminal && Some(**id) != self.main_window_id
+            })
+            .count()
     }
 
     /// `1` if the shadow main entry is present in

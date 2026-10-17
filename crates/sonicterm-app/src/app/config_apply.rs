@@ -571,9 +571,14 @@ impl App {
         // included). Lowering the cap drains excess history immediately.
         // App-thread, not render hot path, so lock is fine.
         if new_cfg.terminal.scrollback != self.config.terminal.scrollback {
+            // When: `scrollback` changed, re-apply it to every terminal pane; report panes keep their own size.
             let limit = new_cfg.terminal.scrollback;
             tracing::info!("live-reload: scrollback -> {limit} rows");
             for child in self.windows.values_mut() {
+                if child.role == super::WindowRole::MemoryReport {
+                    // When: `child.role` is MemoryReport, its history is sized to the report, not the setting.
+                    continue;
+                }
                 for pane in child.panes.values_mut() {
                     let parser = pane.parser.clone();
                     let mut parser = crate::app::frame_counters::lock_parser(&parser);

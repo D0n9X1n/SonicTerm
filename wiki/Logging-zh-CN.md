@@ -638,6 +638,10 @@ perf_present kind="present" arming=<id> seq=<n> window="main" pane=<id> resets=<
 
 ## 内存诊断
 
+如需在不改日志级别、不重启的情况下快速查看可读结果，请使用[内存](Memory-zh-CN)中说明的
+**内存占用** 命令。它读取与下文 `memory snapshot` 行相同的采样周期，并增加每个窗格的行、
+操作系统 footprint 与峰值、线程以及每个窗格 shell 的进程。日志行本身不变。
+
 ### `info` 级别的聚合快照
 
 在 `level = "info"` 下，`target="memory"` 最多每 30 秒写一条 `memory snapshot`。

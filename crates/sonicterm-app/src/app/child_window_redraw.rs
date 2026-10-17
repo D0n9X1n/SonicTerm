@@ -525,7 +525,10 @@ impl App {
                     inner_size,
                     &layout,
                 );
-                self.os_drag_bars.publish(snap);
+                if child.role == super::WindowRole::Terminal {
+                    // Only a terminal window's bar is a drop target; the Memory Usage report's is not.
+                    self.os_drag_bars.publish(snap);
+                }
             }
             if let Some(timing) = timing {
                 timing.finish();

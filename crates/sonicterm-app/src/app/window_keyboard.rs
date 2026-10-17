@@ -206,6 +206,13 @@ impl App {
             }
             Some(WindowKeyOwner::Terminal) => {
                 // When: Terminal owns this window, configured bindings still precede protocol encoding.
+                if self.is_memory_report_window(win_id) {
+                    // When: win_id is the Memory Usage report, its own keys and the gate handle the
+                    // press, and nothing is encoded because its pane has no shell.
+                    let chords = key_event_to_strings(event, modifiers);
+                    self.handle_memory_report_key(win_id, &chords, event.repeat);
+                    return;
+                }
             }
             None => {
                 // When: win_id disappeared, do not substitute another input owner.

@@ -578,6 +578,17 @@ fn emit_tagged_memory_snapshot(
     );
 }
 
+/// One pane's retention from a sampling cycle, with the identity the Memory Usage report needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PaneMeasure {
+    /// Window the pane belongs to.
+    pub(super) window_id: winit::window::WindowId,
+    /// The pane's id within the app.
+    pub(super) pane_id: u64,
+    /// What the pane retains, or `None` when its lock was held and it was skipped.
+    pub(super) retention: Option<PaneRetention>,
+}
+
 impl super::App {
     /// Measure the process, every pane, and every renderer as one cycle.
     ///
@@ -590,19 +601,28 @@ impl super::App {
     /// renderer in main/visible/warm priority instead of summing duplicate
     /// reports from every window.
     pub(super) fn build_memory_snapshot(&self) -> MemorySnapshot {
+        self.build_memory_snapshot_with_panes().0
+    }
+
+    /// Measure one cycle exactly as [`Self::build_memory_snapshot`] does, and also return each
+    /// pane's measurement, so the Memory Usage report's per-pane rows sum to the same `session`.
+    pub(super) fn build_memory_snapshot_with_panes(&self) -> (MemorySnapshot, Vec<PaneMeasure>) {
         let mut session = PaneRetention::default();
         let mut panes_sampled = 0usize;
         let mut panes_contended = 0usize;
+        let mut measures = Vec::new();
 
-        for window in self.windows.values() {
-            for pane in window.panes.values() {
-                match super::retention::measure_pane(pane) {
+        for (window_id, window) in &self.windows {
+            for (pane_id, pane) in &window.panes {
+                let retention = super::retention::measure_pane(pane);
+                match retention {
                     Some(retention) => {
                         session = add_retention(session, &retention);
                         panes_sampled += 1;
                     }
                     None => panes_contended += 1,
                 }
+                measures.push(PaneMeasure { window_id: *window_id, pane_id: *pane_id, retention });
             }
         }
 
@@ -653,7 +673,7 @@ impl super::App {
             &warm_allocator_refs,
             sonicterm_gpu::core::GpuRenderer::allocator_snapshot,
         );
-        MemorySnapshot {
+        let snapshot = MemorySnapshot {
             process: process_memory::sample(),
             session,
             panes_total: panes_sampled.saturating_add(panes_contended),
@@ -665,7 +685,8 @@ impl super::App {
             allocator,
             live_renderers: sonicterm_gpu::core::live_renderer_count(),
             live_fg_probe_workers: self.fg_probes.live_workers(),
-        }
+        };
+        (snapshot, measures)
     }
 }
 

@@ -40,6 +40,7 @@ pub mod exit_trace;
 pub mod path;
 pub mod postmortem;
 pub mod process_memory;
+pub mod process_report;
 pub mod session_state;
 pub mod sinks;
 

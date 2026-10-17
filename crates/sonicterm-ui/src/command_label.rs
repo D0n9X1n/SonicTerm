@@ -76,6 +76,8 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "ScrollToPrevPrompt",
     "ScrollToNextPrompt",
     "ReloadConfig",
+    "ShowMemoryUsage",
+    "CopyMemoryReport",
 ];
 
 /// Stable command grouping independent of translated display text.
@@ -476,6 +478,18 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         Action::ReloadConfig => {
             ("ReloadConfig", Settings, "command-reload-config", &["refresh", "config", "settings"])
         }
+        Action::ShowMemoryUsage => (
+            "ShowMemoryUsage",
+            Settings,
+            "command-show-memory-usage",
+            &["memory", "mem", "ram", "usage", "footprint"],
+        ),
+        Action::CopyMemoryReport => (
+            "CopyMemoryReport",
+            Settings,
+            "command-copy-memory-report",
+            &["memory", "mem", "ram", "usage", "footprint", "copy", "report"],
+        ),
     };
     use CommandRequirement as Requirement;
     let (requirement, read_only_allowed) = match action {
@@ -485,7 +499,10 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         | Action::OpenKeymapFile
         | Action::ReloadConfig
         | Action::ApplyTheme(_) => (Requirement::Global, false),
-        Action::CheckForUpdates | Action::SaveCurrentSettings => (Requirement::Global, true),
+        Action::CheckForUpdates
+        | Action::SaveCurrentSettings
+        | Action::ShowMemoryUsage
+        | Action::CopyMemoryReport => (Requirement::Global, true),
         Action::NewTab
         | Action::IncreaseFontSize
         | Action::DecreaseFontSize
@@ -589,6 +606,8 @@ pub fn label(action: &Action) -> String {
         Action::ScrollToPrevPrompt => "Scroll to Previous Prompt".into(),
         Action::ScrollToNextPrompt => "Scroll to Next Prompt".into(),
         Action::ReloadConfig => "Reload Config".into(),
+        Action::ShowMemoryUsage => "Memory Usage".into(),
+        Action::CopyMemoryReport => "Copy Memory Report".into(),
     }
 }
 

@@ -53,6 +53,13 @@ window. The version comes from the running build. The notification replaces any
 current bubble and closes after five seconds or with its close button. The command
 works in READONLY mode and does not query releases online or send input to the shell.
 
+Search **Memory Usage** (or `memory`, `ram`, `footprint`) and press Enter to open
+a report of where SonicTerm's memory goes: OS figures, each renderer and pane,
+threads, and each pane shell's processes. Select any lines and copy them, or
+press `Cmd+Shift+C` on macOS or `Alt+Shift+C` on Windows and Linux to copy the
+whole report. `R` takes a fresh sample and `Esc` closes the window. See
+[Memory](Memory) for what each figure means.
+
 Common defaults are:
 
 | Action | macOS | Windows and Linux |

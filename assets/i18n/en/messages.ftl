@@ -125,6 +125,8 @@ command-scroll =
 command-prev-prompt = Scroll to Previous Prompt
 command-next-prompt = Scroll to Next Prompt
 command-reload-config = Reload Config
+command-show-memory-usage = Memory Usage
+command-copy-memory-report = Copy Memory Report
 command-category-tabs = Tabs
 command-category-panes = Panes
 command-category-clipboard = Clipboard
@@ -158,3 +160,5 @@ palette-command-footer =
         [one] command
        *[other] commands
     } · ↑↓ navigate · ↵ run · esc close
+memory-report-window-title = Memory Usage
+memory-report-copied = Copied the memory report

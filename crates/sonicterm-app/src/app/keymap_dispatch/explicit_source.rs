@@ -29,6 +29,11 @@ impl App {
             // When: source_window_id's palette or search field owns copy or paste, consume it before READONLY or terminal routing.
             return true;
         }
+        if let Some(handled) = self.gate_memory_report_action(action, Some(source_window_id), false)
+        {
+            // When: source_window_id is the Memory Usage report and the gate closed, consumed or redirected the action.
+            return handled;
+        }
         if self.read_only_active_for_kind(source_kind) && !read_only_allows_action(action) {
             // When: source_kind is READONLY and action is not allowed, consume it without dispatch.
             return true;

@@ -46,6 +46,11 @@ Linux package 面向 x86_64，并保证最多需要 glibc 2.35 ABI。`.deb` 会�
 自动关闭，也可点击其关闭按钮。READONLY 模式下也可使用；不会在线查询发布版本，
 也不会向 shell 发送输入。
 
+搜索 **内存占用**（或 `memory`、`ram`、`footprint`）后按 Enter，可打开一份说明 SonicTerm
+内存去向的报告：操作系统数值、每个渲染器与窗格、线程，以及每个窗格 shell 的进程。
+可以选择任意行复制，或在 macOS 上按 `Cmd+Shift+C`、在 Windows 和 Linux 上按
+`Alt+Shift+C` 复制整份报告。`R` 重新采样，`Esc` 关闭窗口。各数值含义见[内存](Memory-zh-CN)。
+
 常用默认快捷键如下：
 
 | 功能 | macOS | Windows 和 Linux |

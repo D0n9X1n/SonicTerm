@@ -525,6 +525,9 @@ impl App {
             UserEvent::GpuRecoveryReady { ticket } => {
                 self.gpu_recovery_ready(event_loop, ticket);
             }
+            UserEvent::MemoryReportSampled { generation, sample } => {
+                self.handle_memory_report_sampled(generation, *sample);
+            }
             UserEvent::UpdateCheckFinished { level, message } => {
                 self.show_notification_for_kind(self.frontmost_kind(), level, message);
             }

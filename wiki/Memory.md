@@ -372,6 +372,38 @@ allocator blocks from 128 MiB device / 64 MiB host to 8 MiB device / 4 MiB host.
 Those are placement and block-sizing hints, not allocation caps; larger
 resources still allocate.
 
+### Memory Usage report
+
+The command palette's **Memory Usage** command (`show_memory_usage`, unbound by
+default) opens a report window, or focuses and refreshes it when one is already
+open. The report is plain text in a pane with no PTY, so it can be selected,
+searched, scrolled and copied like terminal output, and typing never reaches a
+shell. It is a point-in-time sample: it never refreshes on its own, so a
+selection is not wiped while you copy it.
+
+| Section | What it shows |
+| --- | --- |
+| `PROCESS (from the OS)` | The figure the platform's own monitor shows, with its peak, plus resident, private committed and virtual figures. macOS reports physical footprint and lifetime peak footprint; Windows reports private commit and peak commit; Linux reports resident set (`VmRSS`) and peak RSS (`VmHWM`). A figure the platform does not expose prints `not available`, never `0`. `GPU` prints `not available yet`. |
+| `ACCOUNTED BY SONICTERM` | Renderer and pane totals SonicTerm counts itself, from the same sampling cycle as the `memory snapshot` log line. |
+| `DIFFERENCE` | The OS footprint minus SonicTerm's counted capacity, signed and never clamped. It is a diagnostic, not a reconciliation: allocator slack, GPU memory, fonts and untracked allocations land here, and the figures can overlap. |
+| `SAMPLE` | Panes measured and panes skipped because their lock was held (`busy, skipped`), so a partial total is never shown as the whole session. |
+| `WINDOWS / RENDERERS` | Each window's renderer by part (glyph atlas with size, entries and fit, row caches, scratch buffers), the report window's own renderer, and any warm renderer. |
+| `PANES` | Each pane by tab title, split into grid visible, history and alternate, parser, hyperlinks, inline media, and PTY output and input. The per-pane rows sum to the pane total. |
+| `THREADS` | Thread count and names. Threads share the process's memory and hold none of their own. |
+| `CHILD PROCESSES` | Each pane shell and its descendants with the OS figure for each (`footprint`, `private` or `RSS`), at most 64 descendants per pane. These are separate processes, not part of SonicTerm's footprint. A process that left its shell's tree, such as a daemonized tmux server, is not listed, and WSL or remote processes are not visible. |
+
+Counted figures are read on the UI thread with the same `try_lock` rule as the
+log line. The OS figures, thread list and process walk run on a short-lived
+`sonicterm-memory-report` thread; the window shows the counted figures with
+`sampling the OS figures...` until it answers. A refresh cancels an unfinished
+walk, and a late answer for an older refresh is dropped. A root pid whose start
+time no longer matches the pane's shell is reported as exited instead of being
+walked. Tab titles and process names are stripped of control characters before
+they reach the report. The report pane keeps 10,000 history rows regardless of
+`[terminal] scrollback`, and copy-all copies the rendered text, not the wrapped
+grid. Keys and window behavior are on [Keybindings](Keybindings) and
+[Runtime Lifecycle](Runtime-Lifecycle).
+
 ### Covered-window trim
 
 A window natively occluded for 30 s gives back what its renderer can rebuild.
@@ -447,6 +479,9 @@ aggregate understates the session.
 | Pane limits and owner registration | `crates/sonicterm-app/src/app/{mod,owners}.rs` |
 | Pane measurement, charging, reclamation | `crates/sonicterm-app/src/app/retention.rs` |
 | Aggregate snapshot | `crates/sonicterm-app/src/app/memory_snapshot.rs` |
+| Memory Usage report model, rendering and action routing | `crates/sonicterm-app/src/app/memory_report.rs` |
+| Memory Usage report window, refresh and OS sampling worker | `crates/sonicterm-app/src/app/memory_report_window.rs` |
+| OS footprint, peak, threads and child-process walk | `crates/sonicterm-logging/src/process_report.rs` |
 | Inline-media limits | `crates/sonicterm-app/src/app/media.rs` |
 | Grid and hyperlink limits | `crates/sonicterm-grid/src/{grid,hyperlink}.rs` |
 | Parser capture limits | `crates/sonicterm-vt/src/vt.rs`, `crates/sonicterm-vt/src/vt/staging.rs` |

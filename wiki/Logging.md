@@ -808,6 +808,12 @@ The retry policy and limits are on [Rendering Modes](Rendering-Modes).
 
 ## Memory diagnostics
 
+For a quick, readable view without changing the log level or restarting, use the
+**Memory Usage** command described on [Memory](Memory). It reads the same
+sampling cycle as the `memory snapshot` line below and adds per-pane rows, OS
+footprint and peak, threads and each pane shell's processes. The log line itself
+is unchanged.
+
 ### Aggregate snapshot at `info`
 
 At `level = "info"`, `target="memory"` writes one `memory snapshot` at most

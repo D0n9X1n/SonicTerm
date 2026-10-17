@@ -38,6 +38,9 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/child_window_pointer.rs` - child pointer chrome, hover, selection, left-button and wheel routing.
 - `src/app/child_tabs.rs` - child tab and pane operations and child PTY/VT wiring.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
+- `src/app/memory_report.rs`, `memory_report_window.rs` - the Memory Usage report: its text model, the
+  report-window action gate and keys, the PTY-less report window, and its off-thread OS sample.
+  `WindowRole::MemoryReport` never counts as a terminal window, drop target or broadcast receiver.
 - `src/app/redraw.rs` - owner-local causes, pre-lock output snapshots, outcome settlement,
   structural/device suppression, and typed due-owner service.
 - `src/app/visible_frame.rs` - validated visible-only frame handles, deadline-bounded parser guards,
