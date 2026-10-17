@@ -266,3 +266,56 @@ fn a_collection_face_index_selects_its_own_directory() {
         "named-instance bits do not change the face"
     );
 }
+
+/// Contract: bytes read while the open file was rewritten in place with the same length are
+/// returned to that caller but never published under the pre-read key, so no later or waiting
+/// caller receives the mixed bytes, and the next open reads the rewritten file afresh. The read
+/// step is injected: it reads half, rewrites the file with a later mtime, then reads the rest.
+#[test]
+fn a_same_length_rewrite_during_the_read_is_not_published() {
+    let font = TempFont::new();
+    let pre_read_key = test_key(&font.0);
+    let rewritten: Vec<u8> = FIXTURE.iter().map(|byte| !byte).collect();
+    let half = FIXTURE.len() / 2;
+    let mixed = shared_file_bytes_with(&font.0, usize::MAX, "test", |file, data, limit| {
+        let mut first_half = vec![0u8; half];
+        file.read_exact(&mut first_half)?;
+        data.extend_from_slice(&first_half);
+        std::fs::write(&font.0, &rewritten)?;
+        let writer = std::fs::File::options().write(true).open(&font.0)?;
+        writer.set_modified(SystemTime::now() + Duration::from_secs(5))?;
+        drop(writer);
+        read_bounded(file, data, limit)
+    })
+    .unwrap();
+    assert_eq!(mixed.len(), FIXTURE.len(), "the rewrite kept the length");
+    assert_eq!(&mixed[..half], &FIXTURE[..half]);
+    assert_eq!(&mixed[half..], &rewritten[half..], "the caller got mixed bytes");
+    assert!(!test_is_live(&pre_read_key), "mixed bytes must not be published under the old key");
+    let fresh = shared_file_bytes(&font.0, usize::MAX, "test").unwrap();
+    assert!(!Arc::ptr_eq(&mixed, &fresh));
+    assert_eq!(&fresh[..], &rewritten[..], "the next open reads the rewritten file");
+}
+
+/// Contract: a file that grows past `max_len` during the read fails with the same too-large error
+/// as one that was too large before it, instead of returning more bytes than the limit allows.
+/// The read step is injected: it appends to the file after the size check, then reads.
+#[test]
+fn a_file_that_grows_past_the_limit_during_the_read_is_too_large() {
+    let font = TempFont::new();
+    let max_len = FIXTURE.len() + 10;
+    let error = shared_file_bytes_with(&font.0, max_len, "harfbuzz", |file, data, limit| {
+        let mut appender = std::fs::File::options().append(true).open(&font.0)?;
+        std::io::Write::write_all(&mut appender, &[0u8; 64])?;
+        drop(appender);
+        read_bounded(file, data, limit)
+    })
+    .unwrap_err();
+    let expected_len = FIXTURE.len() + 64;
+    assert!(
+        format!("{error:#}")
+            .contains(&format!("is too large to pass to harfbuzz! (len={expected_len})")),
+        "{error:#}"
+    );
+    assert!(!test_is_live(&test_key(&font.0)));
+}

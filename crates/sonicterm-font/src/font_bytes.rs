@@ -23,7 +23,8 @@
 //! Unix the device and inode. Windows uses path, length and modification time:
 //! its file index is not available through stable `std`. A file replaced or
 //! rewritten on disk is a new generation and gets a fresh buffer; faces already
-//! open keep the bytes they opened.
+//! open keep the bytes they opened. Bytes read while the open file's generation
+//! changed go to that caller alone and are never published.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -40,13 +41,26 @@ use crate::locator::FontDataSource;
 /// The bytes of one font file generation, shared by every stream and blob opened on it.
 pub type FontBytes = Arc<Box<[u8]>>;
 
-/// Identity of one generation of a font file.
+/// What identifies one generation of a file's contents, read from an open handle's metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct FileKey {
-    path: PathBuf,
+struct Generation {
     len: u64,
     modified: Option<SystemTime>,
     file_id: Option<(u64, u64)>,
+}
+
+impl Generation {
+    /// The generation `meta` describes.
+    fn of(meta: &Metadata) -> Self {
+        Self { len: meta.len(), modified: meta.modified().ok(), file_id: file_id(meta) }
+    }
+}
+
+/// Identity of one generation of a font file: its canonical path and contents generation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FileKey {
+    path: PathBuf,
+    generation: Generation,
 }
 
 impl FileKey {
@@ -54,9 +68,7 @@ impl FileKey {
     fn new(path: &Path, meta: &Metadata) -> Self {
         Self {
             path: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
-            len: meta.len(),
-            modified: meta.modified().ok(),
-            file_id: file_id(meta),
+            generation: Generation::of(meta),
         }
     }
 }
@@ -83,15 +95,37 @@ static CACHE: LazyLock<Mutex<HashMap<FileKey, Slot>>> = LazyLock::new(Default::d
 /// The shared bytes of the font file at `path`, reading it only when no face or blob holds them.
 ///
 /// `max_len` and `library` keep each caller's size limit and error text: a file longer than
-/// `max_len` fails with "`<path>` is too large to pass to `<library>`! (len=…)" before any read.
-/// Open, metadata and not-a-file failures carry the same context they did before sharing.
-/// Concurrent misses on one file read it once: the map lock only finds or creates the file's
-/// slot, and the read runs under that slot's own lock, so other files never wait for it.
-// Lock order: `CACHE` map guard, then released; then the per-file `slot` lock alone.
+/// `max_len`, before or during the read, fails with "`<path>` is too large to pass to
+/// `<library>`! (len=…)". Open, metadata and not-a-file failures carry the same context they did
+/// before sharing. Concurrent misses on one file read it once: the map lock only finds or creates
+/// the file's slot, and the read runs under that slot's own lock, so other files never wait for it.
 pub(crate) fn shared_file_bytes(
     path: &Path,
     max_len: usize,
     library: &str,
+) -> anyhow::Result<FontBytes> {
+    shared_file_bytes_with(path, max_len, library, read_bounded)
+}
+
+/// Read at most `limit` bytes of `file` from its current position, appending them to `data`.
+fn read_bounded(file: &mut File, data: &mut Vec<u8>, limit: u64) -> std::io::Result<usize> {
+    file.by_ref().take(limit).read_to_end(data)
+}
+
+/// [`shared_file_bytes`] with the read step injected, so a test can change the file mid-read.
+///
+/// The generation is taken from the open handle's metadata, not a path stat, so it describes the
+/// file actually read. A cached buffer is returned only while the handle still matches the key
+/// after the slot lock is held; bytes are published only when the handle's generation is the same
+/// before and after the read. Otherwise the bytes go to this caller alone, unshared, so no other
+/// caller receives changed or mixed bytes under the key. A same-length rewrite that keeps the
+/// modification time (and on Unix the inode) is indistinguishable from no change.
+// Lock order: `CACHE` map guard, then released; then the per-file `slot` lock alone.
+fn shared_file_bytes_with(
+    path: &Path,
+    max_len: usize,
+    library: &str,
+    read: impl FnOnce(&mut File, &mut Vec<u8>, u64) -> std::io::Result<usize>,
 ) -> anyhow::Result<FontBytes> {
     let mut file = File::open(path).with_context(|| format!("opening file {}", path.display()))?;
     let meta =
@@ -108,20 +142,30 @@ pub(crate) fn shared_file_bytes(
     let slot = {
         let mut map = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
         prune(&mut map);
-        Arc::clone(map.entry(key).or_default())
+        Arc::clone(map.entry(key.clone()).or_default())
     };
     let mut held = slot.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(bytes) = held.upgrade() {
-        // When: `held` still upgrades, another face or blob holds this generation; share it.
+    let current = |file: &File| file.metadata().ok().map(|meta| Generation::of(&meta));
+    // A waiter whose file changed while it waited for the slot no longer matches the key.
+    let matches_key = current(&file).as_ref() == Some(&key.generation);
+    if let Some(bytes) = held.upgrade().filter(|_| matches_key) {
+        // When: `held` upgrades and `matches_key`, a face or blob holds this generation; share it.
         return Ok(bytes);
     }
+    // One byte past `max_len` is enough to tell that the file grew beyond it during the read.
+    let limit = u64::try_from(max_len).unwrap_or(u64::MAX).saturating_add(1);
     let mut data = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
-    file.read_to_end(&mut data).with_context(|| format!("reading font file {}", path.display()))?;
-    let complete = data.len() as u64 == meta.len();
+    read(&mut file, &mut data, limit)
+        .with_context(|| format!("reading font file {}", path.display()))?;
+    if data.len() > max_len {
+        // More than `max_len` bytes means the file grew during the read; refuse it as too large.
+        let len = file.metadata().map_or(data.len() as u64, |meta| meta.len());
+        anyhow::bail!("{} is too large to pass to {library}! (len={len})", path.display());
+    }
+    let unchanged = matches_key && current(&file).as_ref() == Some(&key.generation);
     let bytes: FontBytes = Arc::new(data.into_boxed_slice());
-    if complete {
-        // The bytes match the key's length; a file that changed mid-read is returned unshared,
-        // so no later open reuses bytes that do not match its key.
+    if unchanged {
+        // Only bytes read while the handle kept this key's generation are published.
         *held = Arc::downgrade(&bytes);
     }
     Ok(bytes)
