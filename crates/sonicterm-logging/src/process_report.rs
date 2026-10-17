@@ -602,7 +602,9 @@ mod platform {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use windows::Win32::Foundation::{CloseHandle, LocalFree, FILETIME, HANDLE, HLOCAL};
+    use windows::Win32::Foundation::{
+        CloseHandle, LocalFree, FILETIME, HANDLE, HLOCAL, WAIT_OBJECT_0,
+    };
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First, Thread32Next,
         PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32,
@@ -612,7 +614,8 @@ mod platform {
     };
     use windows::Win32::System::Threading::{
         GetCurrentProcess, GetProcessTimes, GetThreadDescription, OpenProcess, OpenThread,
-        PROCESS_QUERY_LIMITED_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION,
+        WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        THREAD_QUERY_LIMITED_INFORMATION,
     };
 
     use super::{group_thread_names, MemoryMetric, ProcessFootprint, ProcessTable, ThreadSummary};
@@ -641,6 +644,29 @@ mod platform {
             // SAFETY: `OpenProcess` takes only plain values and returns an owned handle on success.
             unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
         Some(OwnedHandle(handle))
+    }
+
+    /// Whether `pid` has exited although some open handle still keeps its process object alive.
+    ///
+    /// Tool Help keeps listing such a process, so a listed pid is checked here: a process handle
+    /// is signaled once the process exits. The exit code cannot tell, since `STILL_ACTIVE` (259)
+    /// is also a legal exit code. A process this one cannot open for `PROCESS_SYNCHRONIZE`, such
+    /// as a protected one, is not known to have exited and stays listed.
+    fn has_exited(pid: u32) -> bool {
+        let access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
+        let opened =
+            // SAFETY: `OpenProcess` takes only plain values and returns an owned handle on success.
+            unsafe { OpenProcess(access, false, pid) };
+        let Ok(raw) = opened else {
+            // When: `opened` failed, the process is gone from the table or protected; keep it.
+            return false;
+        };
+        let handle = OwnedHandle(raw);
+        let waited =
+            // SAFETY: `handle.0` is a live process handle opened with `PROCESS_SYNCHRONIZE`, and a
+            // zero timeout only polls its signaled state; `handle` closes it on every path.
+            unsafe { WaitForSingleObject(handle.0, 0) };
+        waited == WAIT_OBJECT_0
     }
 
     /// The creation `FILETIME` of `handle`'s process as one 64-bit token.
@@ -680,7 +706,12 @@ mod platform {
 
     impl ProcessTable for Table {
         fn name(&self, pid: u32) -> Option<String> {
-            self.entries.get(&pid).map(|(_, name)| name.clone())
+            let (_, name) = self.entries.get(&pid)?;
+            if has_exited(pid) {
+                // When: `has_exited(pid)` holds, only a lingering handle keeps it listed; absent.
+                return None;
+            }
+            Some(name.clone())
         }
 
         fn start_token(&self, pid: u32) -> Option<u64> {

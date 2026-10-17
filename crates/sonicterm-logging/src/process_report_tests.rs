@@ -275,7 +275,8 @@ fn the_test_process_finds_itself() {
 }
 
 /// Contract: a spawned child appears among this process's descendants with a name, and once it
-/// has exited and been reaped its pid samples as absent.
+/// has exited and been reaped its pid samples as absent. The `Child` is dropped before sampling,
+/// so no handle of ours keeps the exited process object alive on Windows either.
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 #[test]
 fn a_spawned_child_is_listed_and_an_exited_one_is_absent() {
@@ -286,10 +287,26 @@ fn a_spawned_child_is_listed_and_an_exited_one_is_absent() {
     let found = trees[0].processes.iter().find(|process| process.pid == child_pid).cloned();
     drop(child.stdin.take());
     let _ = child.wait();
+    drop(child);
     let found = found.expect("spawned helper listed as a descendant");
     assert_eq!(found.depth, 1);
     assert!(!found.name.is_empty());
     assert!(sample_process(child_pid).is_none(), "an exited, reaped child samples as absent");
+}
+
+/// Contract: on Windows an exited child whose `Child` still holds its process handle samples as
+/// absent. That open handle keeps the process object, so Tool Help still lists the pid; this test
+/// failed on Windows before `Table::name` checked whether the handle is signaled. It compiles only
+/// for Windows, so Windows CI is where it runs.
+#[cfg(windows)]
+#[test]
+fn an_exited_child_whose_handle_is_still_open_samples_as_absent() {
+    let mut child = spawn_helper();
+    drop(child.stdin.take());
+    child.wait().expect("helper exits once its stdin closes");
+    // `child` stays alive here, so its process handle is still open while sampling.
+    assert!(sample_process(child.id()).is_none(), "an exited child samples as absent");
+    drop(child);
 }
 
 /// A generated children stream `"1 2 3 … end "` that counts the bytes it hands out.
