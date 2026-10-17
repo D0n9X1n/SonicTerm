@@ -23,7 +23,7 @@ use ::freetype::{
 use anyhow::{bail, Context as _};
 use cairo::{Content, Context, Extend, Format, ImageSurface, Matrix, Operator, RecordingSurface};
 use config::{DisplayPixelGeometry, FreeTypeLoadFlags, FreeTypeLoadTarget};
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::f64::consts::PI;
 use std::mem;
 use std::mem::MaybeUninit;
@@ -38,7 +38,14 @@ pub struct FreeTypeRasterizer {
     freetype_load_flags: Option<FreeTypeLoadFlags>,
     display_pixel_geometry: DisplayPixelGeometry,
     scale: f64,
-    hb_raster: HarfbuzzRasterizer,
+    /// The font this rasterizer was opened from, kept to build `hb_raster` on demand.
+    parsed: ParsedFont,
+    /// HarfBuzz painter for SVG and COLRv1 glyphs, built on first use.
+    ///
+    /// Building it reads the whole font file into the heap, while FreeType
+    /// streams the same file from disk. Most fonts never draw such a glyph, so
+    /// building it eagerly held a full copy of every font file per rasterizer.
+    hb_raster: OnceCell<HarfbuzzRasterizer>,
 }
 
 // SAFETY: `slot.bitmap.buffer` must name `source_len` initialized bytes for the lifetime of `slot`.
@@ -114,7 +121,7 @@ impl FontRasterizer for FreeTypeRasterizer {
                         | FontRasterizerSelection::DirectWrite => {
                             // When: Harfbuzz or DirectWrite is configured, so
                             // the HarfBuzz painter renders this glyph instead.
-                            return self.hb_raster.rasterize_glyph(glyph_pos, size, dpi);
+                            return self.hb_raster()?.rasterize_glyph(glyph_pos, size, dpi);
                         }
                     }
                 }
@@ -464,8 +471,22 @@ impl FreeTypeRasterizer {
             freetype_render_target: parsed.freetype_render_target,
             display_pixel_geometry,
             scale: parsed.scale.unwrap_or(1.),
-            hb_raster: HarfbuzzRasterizer::from_locator(parsed)?,
+            parsed: parsed.clone(),
+            hb_raster: OnceCell::new(),
         })
+    }
+
+    /// The HarfBuzz painter, built from the stored font on the first SVG or COLRv1 glyph.
+    ///
+    /// A build failure is returned for that glyph and retried on the next one,
+    /// as an eager build's failure would have refused the whole rasterizer.
+    fn hb_raster(&self) -> anyhow::Result<&HarfbuzzRasterizer> {
+        if let Some(raster) = self.hb_raster.get() {
+            // When: `hb_raster` was already built, reuse it instead of re-reading the font.
+            return Ok(raster);
+        }
+        let raster = HarfbuzzRasterizer::from_locator(&self.parsed)?;
+        Ok(self.hb_raster.get_or_init(|| raster))
     }
 
     fn rasterize_outlines(

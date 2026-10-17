@@ -875,3 +875,27 @@ fn colr_sweep_gradient_quadrants_match_harfbuzz() {
         assert_eq!(bands.len(), 4, "{size_px}px: the four quadrants are four bands");
     }
 }
+
+/// Plain outline glyphs never build the HarfBuzz painter, so a font that has no
+/// SVG or COLRv1 glyph is never read whole into the heap; FreeType streams it.
+#[test]
+fn outline_glyphs_leave_the_harfbuzz_painter_unbuilt() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf");
+    let handle = crate::locator::FontDataHandle {
+        source: crate::locator::FontDataSource::OnDisk(path),
+        index: 0,
+        variation: 0,
+        origin: crate::locator::FontOrigin::FontDirs,
+        coverage: None,
+    };
+    let parsed = ParsedFont::from_locator(&handle).expect("bundled fixture parses");
+    let rasterizer =
+        FreeTypeRasterizer::from_locator(&parsed, DisplayPixelGeometry::default()).unwrap();
+    assert!(rasterizer.hb_raster.get().is_none(), "construction must not read the font whole");
+    let rendered = (1..32u32)
+        .filter(|glyph_id| rasterizer.rasterize_glyph(*glyph_id, 13.5, 144).is_ok())
+        .count();
+    assert!(rendered > 0, "the fixture must rasterize at least one outline glyph");
+    assert!(rasterizer.hb_raster.get().is_none(), "outline glyphs must not build the painter");
+}
