@@ -1016,13 +1016,29 @@ fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     }
 }
 
-fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+/// Environment variable that replaces the whole config directory.
+///
+/// Diagnostic runs set it to a scratch copy of the config so they never edit
+/// the user's files, while `HOME` stays unchanged for the shell inside the
+/// terminal. Themes and keymaps resolve under it like under `~/.sonicterm`.
+pub const CONFIG_DIR_ENV: &str = "SONICTERM_CONFIG_DIR";
+
+/// SonicTerm 1.0 config directory (the on-disk layout): [`CONFIG_DIR_ENV`]
+/// when set and non-empty, else `~/.sonicterm`.
+pub fn default_config_dir() -> Option<PathBuf> {
+    config_dir_with(|name| std::env::var_os(name))
 }
 
-/// SonicTerm 1.0 config directory (the on-disk layout).
-pub fn default_config_dir() -> Option<PathBuf> {
-    Some(dirs_home()?.join(".sonicterm"))
+/// Resolve the config directory from an injected environment lookup.
+///
+/// Separate from [`default_config_dir`] so tests cover each branch without
+/// mutating the process environment.
+fn config_dir_with(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    if let Some(dir) = lookup(CONFIG_DIR_ENV).filter(|value| !value.is_empty()) {
+        // When: `CONFIG_DIR_ENV` names a directory, it replaces `~/.sonicterm` entirely.
+        return Some(PathBuf::from(dir));
+    }
+    Some(PathBuf::from(lookup("HOME").or_else(|| lookup("USERPROFILE"))?).join(".sonicterm"))
 }
 
 fn seed_user_examples(config_dir: &Path) -> Result<()> {

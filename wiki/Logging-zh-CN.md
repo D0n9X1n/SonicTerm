@@ -12,6 +12,9 @@
 - Panic 工件：`~/.sonicterm/logs/crashes/`
 - 会话标记：`~/.sonicterm/logs/sessions/`
 - 有界诊断记录：`~/.sonicterm/logs/breadcrumbs/`
+- 覆盖：非空的 `SONICTERM_LOG_DIR` 会代替上面所有路径中的 `~/.sonicterm/logs`，
+  让诊断运行的日志、崩溃转储和会话标记与用户自己的分开，且不改变 `HOME`。配置
+  目录有单独的覆盖变量 `SONICTERM_CONFIG_DIR`（见[配置](Configuration-zh-CN)）。
 
 `tracing-appender` 按天生成 `sonicterm.log.YYYY-MM-DD` 之类的文件；修改时间最新的
 文件正在使用。按大小轮转时还可能增加 Unix 时间后缀。在 Windows 上，`~` 表示当前

@@ -13,6 +13,12 @@ SonicTerm uses one cross-platform config file:
 The first launch creates this file and seeds editable examples under
 `~/.sonicterm/themes/` and `~/.sonicterm/keymaps/`.
 
+Set `SONICTERM_CONFIG_DIR` to an absolute path to use that directory instead of
+`~/.sonicterm` for the config file, themes and keymaps; an empty value is
+ignored. It exists for diagnostic runs against a scratch copy of the config:
+`HOME` stays unchanged, so the shell inside the terminal behaves as usual. Logs
+have their own override, `SONICTERM_LOG_DIR` (see [Logging](Logging)).
+
 `theme` and `keymap` accept either a name or a TOML path. A named value first
 checks the matching user directory, then the bundled `assets/` directory. A
 path-like value is used directly.

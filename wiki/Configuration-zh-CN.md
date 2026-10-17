@@ -13,6 +13,11 @@ SonicTerm 在所有平台使用同一个配置文件：
 首次启动会创建这个文件，并在 `~/.sonicterm/themes/` 和
 `~/.sonicterm/keymaps/` 中写入可编辑示例。
 
+把 `SONICTERM_CONFIG_DIR` 设为一个绝对路径，SonicTerm 就会用该目录代替
+`~/.sonicterm` 存放配置文件、主题和键位表；空值会被忽略。它用于针对配置的临时
+副本做诊断运行：`HOME` 保持不变，所以终端里的 shell 行为照常。日志有单独的覆盖
+变量 `SONICTERM_LOG_DIR`（见[日志](Logging-zh-CN)）。
+
 `theme` 和 `keymap` 可以写名称，也可以写 TOML 路径。使用名称时，SonicTerm
 先查找用户目录，再查找内置 `assets/` 目录。看起来像路径的值会直接使用。
 

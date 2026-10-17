@@ -13,6 +13,10 @@ its own section; a missing crash dump does not mean a clean exit.
 - Panic artifacts: `~/.sonicterm/logs/crashes/`
 - Session markers: `~/.sonicterm/logs/sessions/`
 - Bounded breadcrumbs: `~/.sonicterm/logs/breadcrumbs/`
+- Override: a non-empty `SONICTERM_LOG_DIR` replaces `~/.sonicterm/logs` for all
+  of the above, so a diagnostic run keeps its logs, crash dumps and session
+  markers apart from the user's without changing `HOME`. The config directory
+  has its own override, `SONICTERM_CONFIG_DIR` (see [Configuration](Configuration)).
 
 `tracing-appender` uses daily names such as `sonicterm.log.YYYY-MM-DD`; the file
 with the newest modification time is active. Size rotation may add a Unix-time
