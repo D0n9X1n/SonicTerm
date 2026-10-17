@@ -378,8 +378,11 @@ The command palette's **Memory Usage** command (`show_memory_usage`, unbound by
 default) opens a report window, or focuses and refreshes it when one is already
 open. The report is plain text in a pane with no PTY, so it can be selected,
 searched, scrolled and copied like terminal output, and typing never reaches a
-shell. It is a point-in-time sample: it never refreshes on its own, so a
-selection is not wiped while you copy it.
+shell. It is a point-in-time sample: it never refreshes on its own. The OS
+figures arrive a moment after the counted ones; if a selection or READONLY mode
+holds the report pane when they do, the shown text stays as it is and the new
+figures appear once the selection clears or READONLY ends, so a selection is
+never wiped while you copy it. Pressing `R` always shows a fresh sample.
 
 | Section | What it shows |
 | --- | --- |
@@ -393,12 +396,17 @@ selection is not wiped while you copy it.
 | `CHILD PROCESSES` | Each pane shell and its descendants with the OS figure for each (`footprint`, `private` or `RSS`), at most 64 descendants per pane. These are separate processes, not part of SonicTerm's footprint. A process that left its shell's tree, such as a daemonized tmux server, is not listed, and WSL or remote processes are not visible. |
 
 Counted figures are read on the UI thread with the same `try_lock` rule as the
-log line. The OS figures, thread list and process walk run on a short-lived
+log line. The OS figures, thread list and process walk run on a
 `sonicterm-memory-report` thread; the window shows the counted figures with
-`sampling the OS figures...` until it answers. A refresh cancels an unfinished
-walk, and a late answer for an older refresh is dropped. A root pid whose start
-time no longer matches the pane's shell is reported as exited instead of being
-walked. Tab titles and process names are stripped of control characters before
+`sampling the OS figures...` until it answers. At most one walk runs at a time:
+a refresh cancels the running walk, which checks for cancellation before each
+pane shell and between processes, and the newest refresh's walk starts when it
+answers; intermediate refreshes are dropped. Child lists are read only up to the
+64-process limit. A pane shell is checked against the start time recorded when
+its pane spawned it, before and again after its tree is read: a different start
+time is reported as exited, and a start time that cannot be read is reported as
+`not available (shell identity unverified)`, so a reused pid is never described
+as the pane's shell. Tab titles and process names are stripped of control characters before
 they reach the report. The report pane keeps 10,000 history rows regardless of
 `[terminal] scrollback`, and copy-all copies the rendered text, not the wrapped
 grid. Keys and window behavior are on [Keybindings](Keybindings) and

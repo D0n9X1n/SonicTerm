@@ -293,7 +293,9 @@ allocator_largest_block_bytes
 命令面板中的 **内存占用** 命令（`show_memory_usage`，默认未绑定）会打开报告窗口；
 已打开时则聚焦并刷新它。报告是一个没有 PTY 的窗格中的纯文本，可以像终端输出一样
 选择、搜索、滚动和复制，键入内容不会到达任何 shell。报告是某一时刻的采样，不会自动
-刷新，因此复制时选区不会被清除。
+刷新。操作系统数值会比统计数值稍晚到达；若到达时报告窗格中有选区或处于 READONLY 模式，
+显示的文本保持不变，新数值在选区清除或 READONLY 结束后才出现，因此复制时选区不会被清除。
+按 `R` 总会显示一次新的采样。
 
 | 部分 | 内容 |
 | --- | --- |
@@ -307,9 +309,12 @@ allocator_largest_block_bytes
 | `CHILD PROCESSES` | 每个窗格的 shell 及其后代进程，并给出各自的操作系统数值（`footprint`、`private` 或 `RSS`），每个窗格最多 64 个后代。它们是独立进程，不计入 SonicTerm 的 footprint。已离开 shell 进程树的进程（例如守护化的 tmux server）不会列出，WSL 与远程进程也不可见。 |
 
 统计数值在 UI 线程上读取，遵循与日志行相同的 `try_lock` 规则。操作系统数值、线程列表与
-进程遍历在一个短生命周期的 `sonicterm-memory-report` 线程上运行；在它返回前，窗口显示
-统计数值和 `sampling the OS figures...`。刷新会取消未完成的遍历，旧刷新迟到的结果会被
-丢弃。根 pid 的启动时间与窗格 shell 不符时，报告显示其已退出，而不会遍历它。标签页标题
+进程遍历在 `sonicterm-memory-report` 线程上运行；在它返回前，窗口显示统计数值和
+`sampling the OS figures...`。同一时间最多只有一次遍历：刷新会取消正在进行的遍历（它在
+每个窗格 shell 之前以及进程之间检查取消），并在其返回后启动最新一次刷新的遍历，中间的刷新
+会被丢弃。子进程列表最多只读取到 64 个进程的上限。窗格 shell 在遍历前后都会与其窗格创建时
+记录的启动时间核对：启动时间不同则报告其已退出，无法读取启动时间则报告
+`not available (shell identity unverified)`，因此被复用的 pid 不会被当成该窗格的 shell。标签页标题
 和进程名在进入报告前会去除控制字符。报告窗格固定保留 10,000 行历史，不受
 `[terminal] scrollback` 影响；全部复制复制的是渲染出的文本，而不是折行后的网格。按键与
 窗口行为见[快捷键](Keybindings-zh-CN)和[运行时生命周期](Runtime-Lifecycle-zh-CN)。

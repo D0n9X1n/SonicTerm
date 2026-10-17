@@ -214,6 +214,11 @@ impl App {
             // When: run_field_clipboard_action accepts field_window's copy or paste, READONLY and terminal routing never see it.
             return true;
         }
+        if self.read_only_active_for_kind(self.frontmost_kind()) && !read_only_allows_action(action)
+        {
+            // When: READONLY is active and read_only_allows_action rejects action, consume it safely.
+            return true;
+        }
         let report_source = match self.frontmost_kind() {
             FrontmostKind::Child(id) => Some(id),
             FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => None,
@@ -221,11 +226,6 @@ impl App {
         if let Some(handled) = self.gate_memory_report_action(action, report_source, true) {
             // When: the frontmost window is the Memory Usage report and the gate closed, consumed or redirected the action.
             return handled;
-        }
-        if self.read_only_active_for_kind(self.frontmost_kind()) && !read_only_allows_action(action)
-        {
-            // When: READONLY is active and read_only_allows_action rejects action, consume it safely.
-            return true;
         }
         match action {
             Action::CopyToClipboard => self.copy_selection_for_kind(self.frontmost_kind()),

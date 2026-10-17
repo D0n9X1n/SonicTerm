@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use super::*;
 
@@ -9,19 +11,49 @@ use super::*;
 const HELPER_ENV: &str = "SONICTERM_PROCESS_REPORT_HELPER";
 
 /// An in-memory process table: pid -> (name, start token, children, memory bytes).
+///
+/// `token_reads`, when not empty, injects the start-token reader: each read pops the next value,
+/// so a test can make the token unreadable or change it between the walk's two checks.
+/// `child_limits` records each `children` request, and `cancel_on_name` sets a flag when one pid's
+/// name is read, so a test can cancel a walk partway through.
 struct FakeTable {
     processes: HashMap<u32, (&'static str, u64, Vec<u32>, u64)>,
+    token_reads: RefCell<VecDeque<Option<u64>>>,
+    child_limits: RefCell<Vec<usize>>,
+    cancel_on_name: Option<(u32, Arc<AtomicBool>)>,
+}
+
+impl FakeTable {
+    /// A table over `processes` with the real token reader and no cancel trigger.
+    fn new(processes: HashMap<u32, (&'static str, u64, Vec<u32>, u64)>) -> Self {
+        Self {
+            processes,
+            token_reads: RefCell::new(VecDeque::new()),
+            child_limits: RefCell::new(Vec::new()),
+            cancel_on_name: None,
+        }
+    }
 }
 
 impl ProcessTable for FakeTable {
     fn name(&self, pid: u32) -> Option<String> {
+        if let Some((trigger, cancel)) = &self.cancel_on_name {
+            if *trigger == pid {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         self.processes.get(&pid).map(|entry| entry.0.to_string())
     }
     fn start_token(&self, pid: u32) -> Option<u64> {
+        if let Some(injected) = self.token_reads.borrow_mut().pop_front() {
+            return injected;
+        }
         self.processes.get(&pid).map(|entry| entry.1)
     }
-    fn children(&self, pid: u32) -> Vec<u32> {
-        self.processes.get(&pid).map(|entry| entry.2.clone()).unwrap_or_default()
+    fn children(&self, pid: u32, limit: usize) -> Vec<u32> {
+        self.child_limits.borrow_mut().push(limit);
+        let all = self.processes.get(&pid).map(|entry| entry.2.clone()).unwrap_or_default();
+        all.into_iter().take(limit).collect()
     }
     fn memory(&self, pid: u32) -> MemoryMetric {
         self.processes
@@ -32,14 +64,12 @@ impl ProcessTable for FakeTable {
 
 /// A shell (10) with two children (20, 30), where 20 has a grandchild (21).
 fn sample_table() -> FakeTable {
-    FakeTable {
-        processes: HashMap::from([
-            (10, ("zsh", 100, vec![30, 20], 1_000)),
-            (20, ("tmux", 200, vec![21], 2_000)),
-            (21, ("vim", 210, vec![], 3_000)),
-            (30, ("claude", 300, vec![], 4_000)),
-        ]),
-    }
+    FakeTable::new(HashMap::from([
+        (10, ("zsh", 100, vec![30, 20], 1_000)),
+        (20, ("tmux", 200, vec![21], 2_000)),
+        (21, ("vim", 210, vec![], 3_000)),
+        (30, ("claude", 300, vec![], 4_000)),
+    ]))
 }
 
 /// Spawn this test binary as a child that blocks until its stdin closes.
@@ -116,21 +146,88 @@ fn a_reused_root_pid_is_reported_gone() {
     assert_eq!(missing.outcome, WalkOutcome::RootGone);
 }
 
-/// Contract: a set cancel flag stops the walk before any descendant and reports cancellation.
+/// Contract: a cancel flag set before the walk stops it before the root is read at all.
 #[test]
 fn a_cancelled_walk_stops_and_says_so() {
     let cancel = AtomicBool::new(true);
-    let tree = walk_tree(&sample_table(), 10, None, 64, &cancel);
-    assert_eq!(tree.processes.len(), 1, "only the root was sampled");
+    let table = sample_table();
+    let tree = walk_tree(&table, 10, None, 64, &cancel);
+    assert!(tree.processes.is_empty(), "nothing is sampled once cancelled");
     assert_eq!(tree.outcome, WalkOutcome::Cancelled);
+    assert!(table.child_limits.borrow().is_empty(), "no child list was requested");
+}
+
+/// Contract: a recorded start token that cannot be read now fails closed: the pane's tree is
+/// reported unverified and nothing is listed, rather than trusting a pid that may be reused.
+#[test]
+fn an_unreadable_root_token_fails_closed() {
+    let cancel = AtomicBool::new(false);
+    let table = sample_table();
+    table.token_reads.borrow_mut().push_back(None);
+    let tree = walk_tree(&table, 10, Some(100), 64, &cancel);
+    assert!(tree.processes.is_empty());
+    assert_eq!(tree.outcome, WalkOutcome::Unverified);
+}
+
+/// Contract: the root token is checked again after the walk, so a pid that changed hands while
+/// its children were read is reported gone and none of the collected rows are kept.
+#[test]
+fn a_root_token_changed_during_the_walk_discards_the_tree() {
+    let cancel = AtomicBool::new(false);
+    let table = sample_table();
+    table.token_reads.borrow_mut().extend([Some(100), Some(555)]);
+    let tree = walk_tree(&table, 10, Some(100), 64, &cancel);
+    assert!(tree.processes.is_empty());
+    assert_eq!(tree.outcome, WalkOutcome::RootGone);
+    let after_failure = sample_table();
+    after_failure.token_reads.borrow_mut().extend([Some(100), None]);
+    let tree = walk_tree(&after_failure, 10, Some(100), 64, &cancel);
+    assert_eq!(tree.outcome, WalkOutcome::Unverified, "an unreadable recheck also fails closed");
+}
+
+/// Contract: child lists are requested with a bound of the remaining room plus one, so a process
+/// with many children never costs more than the walk can list.
+#[test]
+fn child_lists_are_requested_within_the_limit() {
+    let cancel = AtomicBool::new(false);
+    let mut processes = HashMap::from([(1, ("sh", 1, (2..2_000).collect::<Vec<u32>>(), 10))]);
+    for child in 2..2_000 {
+        processes.insert(child, ("job", 2, Vec::new(), 1));
+    }
+    let table = FakeTable::new(processes);
+    let tree = walk_tree(&table, 1, None, 5, &cancel);
+    assert_eq!(tree.processes.len(), 6, "the root plus five descendants");
+    assert_eq!(tree.outcome, WalkOutcome::Truncated);
+    assert!(
+        table.child_limits.borrow().iter().all(|limit| *limit <= 6),
+        "{:?}",
+        table.child_limits
+    );
+}
+
+/// Contract: cancellation is checked before each root and between processes, so a refresh that
+/// lands mid-walk stops the current root and skips every later one.
+#[test]
+fn cancellation_between_roots_skips_the_rest() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut table = sample_table();
+    table.processes.insert(40, ("bash", 400, vec![41], 5_000));
+    table.processes.insert(41, ("make", 410, Vec::new(), 6_000));
+    table.cancel_on_name = Some((20, Arc::clone(&cancel)));
+    let trees = walk_roots(&table, &[(10, None), (40, None)], 64, &cancel);
+    assert_eq!(trees[0].outcome, WalkOutcome::Cancelled);
+    assert!(trees[0].processes.iter().all(|process| process.pid != 30), "the walk stopped");
+    assert_eq!(trees[1].outcome, WalkOutcome::Cancelled);
+    assert!(trees[1].processes.is_empty(), "a later root is never read");
 }
 
 /// Contract: a parent link that loops back (pid reuse) lists each process once and terminates.
 #[test]
 fn a_parent_cycle_lists_each_process_once() {
-    let table = FakeTable {
-        processes: HashMap::from([(1, ("sh", 1, vec![2], 10)), (2, ("loop", 2, vec![1, 2], 20))]),
-    };
+    let table = FakeTable::new(HashMap::from([
+        (1, ("sh", 1, vec![2], 10)),
+        (2, ("loop", 2, vec![1, 2], 20)),
+    ]));
     let cancel = AtomicBool::new(false);
     let tree = walk_tree(&table, 1, None, 64, &cancel);
     let pids: Vec<u32> = tree.processes.iter().map(|process| process.pid).collect();
@@ -170,7 +267,7 @@ fn the_test_process_finds_itself() {
     let peak = footprint.peak.bytes().expect("peak footprint measured");
     assert!(current > 0);
     assert!(peak >= current, "peak {peak} below current {current}");
-    let threads = sample_threads();
+    let threads = sample_threads(&AtomicBool::new(false));
     let total = threads.total.expect("thread count");
     assert!(total >= 1);
     assert_eq!(threads.names.iter().map(|(_, count)| count).sum::<usize>(), total);

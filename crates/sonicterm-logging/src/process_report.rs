@@ -89,6 +89,8 @@ pub enum WalkOutcome {
     Truncated,
     /// The root pid no longer names the shell it was taken for.
     RootGone,
+    /// The shell's start token was expected but could not be read, so the pid is not trusted.
+    Unverified,
     /// A newer refresh cancelled this walk.
     Cancelled,
     /// This platform has no process-table query.
@@ -110,17 +112,35 @@ pub trait ProcessTable {
     fn name(&self, pid: u32) -> Option<String>;
     /// The process's start token in the format `ProcessIdentity::start` uses, if readable.
     fn start_token(&self, pid: u32) -> Option<u64>;
-    /// Direct children of `pid`; empty when it has none or cannot be read.
-    fn children(&self, pid: u32) -> Vec<u32>;
+    /// At most `limit` direct children of `pid`; empty when it has none or cannot be read.
+    ///
+    /// Implementations stop collecting at `limit`, so a process with thousands of children
+    /// costs no more than the walk can list.
+    fn children(&self, pid: u32, limit: usize) -> Vec<u32>;
     /// The figure named by [`CHILD_MEMORY_LABEL`].
     fn memory(&self, pid: u32) -> MemoryMetric;
 }
 
+/// Check `root` against the start token its pane recorded at spawn.
+///
+/// `None` means the walk may describe `root`. A recorded token that the live process no longer
+/// has means the pid was reused ([`WalkOutcome::RootGone`]); a recorded token that cannot be read
+/// now means the pid cannot be trusted ([`WalkOutcome::Unverified`]). Without a recorded token,
+/// as on platforms that keep none, the pid is described as it is.
+fn verify_root(table: &dyn ProcessTable, root: u32, expected: Option<u64>) -> Option<WalkOutcome> {
+    let expected = expected?;
+    match table.start_token(root) {
+        Some(live) if live == expected => None,
+        Some(_) => Some(WalkOutcome::RootGone),
+        None => Some(WalkOutcome::Unverified),
+    }
+}
+
 /// Walk `root` and its descendants in `table`, listing at most `limit` descendants.
 ///
-/// `expected_start` is the start token the root had when its pane spawned it. When both it
-/// and the live token are known and they differ, the pid now names another process and the
-/// walk reports [`WalkOutcome::RootGone`] instead of describing a stranger's tree.
+/// The root is verified against `expected_start` before anything is read and again after the
+/// walk, as the foreground-process probe does, so a pid reused mid-walk never attributes another
+/// program's tree to the pane. Cancellation is checked before the root and before each process.
 // Ordering: `cancel` is loaded Relaxed; it is a standalone stop request that publishes no other memory.
 pub fn walk_tree(
     table: &dyn ProcessTable,
@@ -129,24 +149,28 @@ pub fn walk_tree(
     limit: usize,
     cancel: &AtomicBool,
 ) -> ProcessTree {
-    let gone = ProcessTree { processes: Vec::new(), outcome: WalkOutcome::RootGone };
+    let empty = |outcome| ProcessTree { processes: Vec::new(), outcome };
+    if cancel.load(Ordering::Relaxed) {
+        // When: `cancel` is already set, a newer refresh superseded this walk before it began.
+        return empty(WalkOutcome::Cancelled);
+    }
     let Some(root_name) = table.name(root) else {
         // When: `table.name(root)` finds no process, the shell exited before the sample.
-        return gone;
+        return empty(WalkOutcome::RootGone);
     };
-    if let (Some(expected), Some(live)) = (expected_start, table.start_token(root)) {
-        // When: `expected` and `live` start tokens are both known, a mismatch proves the pid was reused.
-        if expected != live {
-            // When: `expected` differs from `live`, the pid names a different process now.
-            return gone;
-        }
+    if let Some(failed) = verify_root(table, root, expected_start) {
+        // When: `verify_root` rejected the root, its pid was reused or cannot be checked.
+        return empty(failed);
     }
     let mut processes =
         vec![ChildProcess { pid: root, depth: 0, name: root_name, memory: table.memory(root) }];
     let mut visited = HashSet::from([root]);
-    let mut stack: Vec<(u32, usize)> =
-        sorted_children(table, root).into_iter().rev().map(|pid| (pid, 1)).collect();
+    let mut stack: Vec<(u32, usize)> = Vec::new();
+    let mut room = limit;
     let mut outcome = WalkOutcome::Complete;
+    if admit_children(table, root, 1, &mut room, &visited, &mut stack) {
+        outcome = WalkOutcome::Truncated;
+    }
     while let Some((pid, depth)) = stack.pop() {
         if cancel.load(Ordering::Relaxed) {
             // When: `cancel` is set, a newer refresh superseded this walk, so stop at once.
@@ -157,55 +181,93 @@ pub fn walk_tree(
             // When: `visited` already holds `pid`, a reused pid formed a cycle; list it once.
             continue;
         }
-        if processes.len() > limit {
-            // When: `processes` already holds `limit` descendants after the root, stop listing.
-            outcome = WalkOutcome::Truncated;
-            break;
-        }
         let Some(name) = table.name(pid) else {
             // When: `table.name(pid)` is None, the child exited between listing and sampling.
             continue;
         };
         processes.push(ChildProcess { pid, depth, name, memory: table.memory(pid) });
-        for child in sorted_children(table, pid).into_iter().rev() {
-            stack.push((child, depth.saturating_add(1)));
+        if admit_children(table, pid, depth.saturating_add(1), &mut room, &visited, &mut stack) {
+            outcome = WalkOutcome::Truncated;
         }
+    }
+    // A cancelled walk is discarded by its caller, so only a finished one is checked again.
+    let recheck = (outcome != WalkOutcome::Cancelled)
+        .then(|| verify_root(table, root, expected_start))
+        .flatten();
+    if let Some(failed) = recheck {
+        // When: `recheck` failed after collection, the pid changed hands mid-walk; list nothing.
+        return empty(failed);
     }
     ProcessTree { processes, outcome }
 }
 
-/// Children of `pid` in ascending pid order, so a walk lists siblings deterministically.
-fn sorted_children(table: &dyn ProcessTable, pid: u32) -> Vec<u32> {
-    let mut children = table.children(pid);
-    children.retain(|child| *child != pid);
+/// Push up to `room` unvisited children of `pid` onto `stack` so they pop in ascending pid order.
+///
+/// Asks the table for one more child than `room` holds, so it can tell a full list from a cut
+/// one, and returns whether children were left out.
+fn admit_children(
+    table: &dyn ProcessTable,
+    pid: u32,
+    depth: usize,
+    room: &mut usize,
+    visited: &HashSet<u32>,
+    stack: &mut Vec<(u32, usize)>,
+) -> bool {
+    let mut children = table.children(pid, room.saturating_add(1));
+    children.retain(|child| *child != pid && !visited.contains(child));
     children.sort_unstable();
     children.dedup();
-    children
+    let truncated = children.len() > *room;
+    children.truncate(*room);
+    *room -= children.len();
+    stack.extend(children.into_iter().rev().map(|child| (child, depth)));
+    truncated
+}
+
+/// Walk each root in `table`, checking `cancel` before each one.
+///
+/// A root not reached because `cancel` was set reports [`WalkOutcome::Cancelled`].
+pub fn walk_roots(
+    table: &dyn ProcessTable,
+    roots: &[(u32, Option<u64>)],
+    limit: usize,
+    cancel: &AtomicBool,
+) -> Vec<ProcessTree> {
+    roots.iter().map(|(pid, start)| walk_tree(table, *pid, *start, limit, cancel)).collect()
 }
 
 /// Walk each root's descendants in the live OS process table.
 ///
 /// Each root is `(pid, expected start token)`. One process-table snapshot serves every root
 /// on platforms that take one, so a refresh costs one snapshot rather than one per pane.
+// Ordering: `cancel` is loaded Relaxed; it is a standalone stop request that publishes no other memory.
 #[must_use]
 pub fn sample_trees(roots: &[(u32, Option<u64>)], cancel: &AtomicBool) -> Vec<ProcessTree> {
-    let Some(table) = platform::table() else {
-        // When: `platform::table` is None, this platform cannot enumerate processes.
-        return roots
-            .iter()
-            .map(|_| ProcessTree { processes: Vec::new(), outcome: WalkOutcome::Unsupported })
-            .collect();
+    let every = |outcome| {
+        roots.iter().map(|_| ProcessTree { processes: Vec::new(), outcome }).collect::<Vec<_>>()
     };
-    roots
-        .iter()
-        .map(|(pid, start)| walk_tree(&table, *pid, *start, MAX_DESCENDANTS_PER_ROOT, cancel))
-        .collect()
+    if cancel.load(Ordering::Relaxed) {
+        // When: `cancel` is already set, skip the process-table snapshot entirely.
+        return every(WalkOutcome::Cancelled);
+    }
+    let Some(table) = platform::table(cancel) else {
+        // When: `platform::table` is None, enumeration was cancelled or this platform has none.
+        // A set `cancel` stopped the snapshot; otherwise the platform has no process query.
+        let outcome = if cancel.load(Ordering::Relaxed) {
+            WalkOutcome::Cancelled
+        } else {
+            WalkOutcome::Unsupported
+        };
+        return every(outcome);
+    };
+    walk_roots(&table, roots, MAX_DESCENDANTS_PER_ROOT, cancel)
 }
 
 /// One OS process's name and memory figure, or `None` when it does not exist.
 #[must_use]
 pub fn sample_process(pid: u32) -> Option<ChildProcess> {
-    let table = platform::table()?;
+    let never_cancelled = AtomicBool::new(false);
+    let table = platform::table(&never_cancelled)?;
     let name = table.name(pid)?;
     Some(ChildProcess { pid, depth: 0, name, memory: table.memory(pid) })
 }
@@ -232,15 +294,17 @@ pub fn group_thread_names(names: impl IntoIterator<Item = Option<String>>) -> Ve
     grouped
 }
 
-/// List this process's threads and their names.
+/// List this process's threads and their names; a set `cancel` stops the listing early.
 #[must_use]
-pub fn sample_threads() -> ThreadSummary {
-    platform::threads()
+pub fn sample_threads(cancel: &AtomicBool) -> ThreadSummary {
+    platform::threads(cancel)
 }
 
 #[cfg(target_os = "macos")]
 mod platform {
     //! macOS: `libproc` (`proc_pid_rusage`, `proc_pidinfo`, `proc_listchildpids`).
+
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{group_thread_names, MemoryMetric, ProcessFootprint, ProcessTable, ThreadSummary};
 
@@ -318,7 +382,7 @@ mod platform {
             )
         }
 
-        fn children(&self, pid: u32) -> Vec<u32> {
+        fn children(&self, pid: u32, limit: usize) -> Vec<u32> {
             let Ok(pid) = libc::pid_t::try_from(pid) else {
                 // When: `pid` does not fit a `pid_t`, the kernel cannot be asked about it.
                 return Vec::new();
@@ -346,6 +410,7 @@ mod platform {
                 .take(returned.min(MAX_CHILD_PIDS))
                 .filter_map(|child| u32::try_from(child).ok())
                 .filter(|child| *child != 0)
+                .take(limit)
                 .collect()
         }
 
@@ -356,8 +421,8 @@ mod platform {
         }
     }
 
-    /// The live table; always available on macOS.
-    pub(super) fn table() -> Option<Table> {
+    /// The live table, queried per pid; always available on macOS, so `_cancel` is not consulted.
+    pub(super) fn table(_cancel: &AtomicBool) -> Option<Table> {
         Some(Table)
     }
 
@@ -404,7 +469,10 @@ mod platform {
     }
 
     /// List this process's threads by kernel handle and read each one's name.
-    pub(super) fn threads() -> ThreadSummary {
+    ///
+    /// A set `cancel` stops between names and reports no thread list.
+    // Ordering: `cancel` is loaded Relaxed; it is a standalone stop request that publishes no other memory.
+    pub(super) fn threads(cancel: &AtomicBool) -> ThreadSummary {
         let unknown = ThreadSummary { total: None, names: Vec::new() };
         let Ok(pid) = libc::c_int::try_from(std::process::id()) else {
             // When: this pid does not fit a c_int, no thread query can name it.
@@ -438,8 +506,15 @@ mod platform {
         };
         let listed = (written / std::mem::size_of::<u64>()).min(capacity);
         handles.truncate(listed);
-        let names = group_thread_names(handles.iter().map(|handle| thread_name(pid, *handle)));
-        ThreadSummary { total: Some(listed), names }
+        let mut names = Vec::with_capacity(listed);
+        for handle in &handles {
+            if cancel.load(Ordering::Relaxed) {
+                // When: `cancel` is set, a newer refresh superseded this listing, so stop naming threads.
+                return unknown;
+            }
+            names.push(thread_name(pid, *handle));
+        }
+        ThreadSummary { total: Some(listed), names: group_thread_names(names) }
     }
 }
 
@@ -448,6 +523,7 @@ mod platform {
     //! Windows: Tool Help snapshots for processes and threads, `GetProcessMemoryInfo` per process.
 
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use windows::Win32::Foundation::{CloseHandle, LocalFree, FILETIME, HANDLE, HLOCAL};
     use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -535,7 +611,7 @@ mod platform {
             creation_token(handle.0)
         }
 
-        fn children(&self, pid: u32) -> Vec<u32> {
+        fn children(&self, pid: u32, limit: usize) -> Vec<u32> {
             // A parent pid can outlive its process and be reused, so a listed child counts only
             // when it started after the parent did.
             let parent_start = self.start_token(pid);
@@ -547,6 +623,7 @@ mod platform {
                     (Some(parent), Some(started)) => started >= parent,
                     _ => true,
                 })
+                .take(limit)
                 .collect()
         }
 
@@ -559,8 +636,12 @@ mod platform {
         }
     }
 
-    /// Take one process snapshot, or `None` when Tool Help refuses.
-    pub(super) fn table() -> Option<Table> {
+    /// Take one process snapshot, or `None` when Tool Help refuses or `cancel` is set mid-read.
+    ///
+    /// The map holds one entry per process on the system, which the parent lookup needs; the
+    /// copy is bounded by the snapshot itself and stops as soon as `cancel` is set.
+    // Ordering: `cancel` is loaded Relaxed; it is a standalone stop request that publishes no other memory.
+    pub(super) fn table(cancel: &AtomicBool) -> Option<Table> {
         let raw =
             // SAFETY: `CreateToolhelp32Snapshot` takes plain values and returns an owned handle on success.
             unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
@@ -574,6 +655,10 @@ mod platform {
             // SAFETY: `snapshot` is live and `entry.dwSize` describes `entry`.
             unsafe { Process32FirstW(snapshot.0, &mut entry) }.is_ok();
         while more {
+            if cancel.load(Ordering::Relaxed) {
+                // When: `cancel` is set, a newer refresh superseded this snapshot, so stop reading it.
+                return None;
+            }
             entries
                 .insert(entry.th32ProcessID, (entry.th32ParentProcessID, wide(&entry.szExeFile)));
             more =
@@ -630,7 +715,10 @@ mod platform {
     }
 
     /// List this process's threads from one Tool Help thread snapshot.
-    pub(super) fn threads() -> ThreadSummary {
+    ///
+    /// A set `cancel` stops the snapshot read or the naming and reports no thread list.
+    // Ordering: `cancel` is loaded Relaxed; it is a standalone stop request that publishes no other memory.
+    pub(super) fn threads(cancel: &AtomicBool) -> ThreadSummary {
         let unknown = ThreadSummary { total: None, names: Vec::new() };
         let snapshot_result =
             // SAFETY: `CreateToolhelp32Snapshot` takes plain values and returns an owned handle on success.
@@ -651,6 +739,10 @@ mod platform {
             // SAFETY: `snapshot` is live and `entry.dwSize` describes `entry`.
             unsafe { Thread32First(snapshot.0, &mut entry) }.is_ok();
         while more {
+            if cancel.load(Ordering::Relaxed) {
+                // When: `cancel` is set, a newer refresh superseded this listing, so stop reading it.
+                return unknown;
+            }
             if entry.th32OwnerProcessID == own_pid {
                 ids.push(entry.th32ThreadID);
             }
@@ -658,14 +750,23 @@ mod platform {
                 // SAFETY: as above; `Thread32Next` fails once the snapshot is exhausted.
                 unsafe { Thread32Next(snapshot.0, &mut entry) }.is_ok();
         }
-        let names = group_thread_names(ids.iter().map(|id| thread_name(*id)));
-        ThreadSummary { total: Some(ids.len()), names }
+        let mut names = Vec::with_capacity(ids.len());
+        for id in &ids {
+            if cancel.load(Ordering::Relaxed) {
+                // When: `cancel` is set, a newer refresh superseded this listing, so stop naming threads.
+                return unknown;
+            }
+            names.push(thread_name(*id));
+        }
+        ThreadSummary { total: Some(ids.len()), names: group_thread_names(names) }
     }
 }
 
 #[cfg(target_os = "linux")]
 mod platform {
     //! Linux: `/proc`.
+
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{group_thread_names, MemoryMetric, ProcessFootprint, ProcessTable, ThreadSummary};
 
@@ -689,34 +790,48 @@ mod platform {
         Some(after_name.split_whitespace().map(str::to_string).collect())
     }
 
-    /// The live `/proc` table, read per pid.
-    pub(super) struct Table;
+    /// Start time of `pid` in clock ticks since boot: field 22 of stat, index 19 after the name.
+    fn start_ticks(pid: u32) -> Option<u64> {
+        stat_fields(pid)?.get(19)?.parse::<u64>().ok()
+    }
 
-    impl ProcessTable for Table {
+    /// The live `/proc` table, read per pid, stopping its parent scan when `cancel` is set.
+    pub(super) struct Table<'cancel> {
+        cancel: &'cancel AtomicBool,
+    }
+
+    impl ProcessTable for Table<'_> {
         fn name(&self, pid: u32) -> Option<String> {
             let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
             Some(comm.trim_end().to_string())
         }
 
         fn start_token(&self, pid: u32) -> Option<u64> {
-            // Field 22 of stat is start time in clock ticks; index 19 after the name and state.
-            stat_fields(pid)?.get(19)?.parse().ok()
+            start_ticks(pid)
         }
 
-        fn children(&self, pid: u32) -> Vec<u32> {
-            let mut children = Vec::new();
+        // Ordering: `cancel` is loaded Relaxed; it is a standalone stop request that publishes no other memory.
+        fn children(&self, pid: u32, limit: usize) -> Vec<u32> {
+            let mut children: Vec<u32> = Vec::new();
             let mut listed = false;
             if let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) {
+                // When: `tasks` lists the process's threads, each thread's `children` file is read.
                 for task in tasks.flatten() {
-                    let path = task.path().join("children");
-                    if let Ok(text) = std::fs::read_to_string(path) {
+                    if children.len() >= limit || self.cancel.load(Ordering::Relaxed) {
+                        // When: `children` reached `limit` or `cancel` is set, stop reading task files.
+                        break;
+                    }
+                    if let Ok(text) = std::fs::read_to_string(task.path().join("children")) {
                         listed = true;
-                        children.extend(text.split_whitespace().filter_map(|id| id.parse().ok()));
+                        children.extend(
+                            text.split_whitespace().filter_map(|id| id.parse::<u32>().ok()),
+                        );
                     }
                 }
             }
             if listed {
                 // When: some task's `children` file was readable, the kernel listed them directly.
+                children.truncate(limit);
                 return children;
             }
             let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -724,6 +839,10 @@ mod platform {
                 return children;
             };
             for entry in entries.flatten() {
+                if children.len() >= limit || self.cancel.load(Ordering::Relaxed) {
+                    // When: `children` reached `limit` or `cancel` is set, stop the parent scan.
+                    break;
+                }
                 let Some(child) =
                     entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok())
                 else {
@@ -745,8 +864,8 @@ mod platform {
     }
 
     /// The live table; available whenever `/proc` is mounted.
-    pub(super) fn table() -> Option<Table> {
-        std::path::Path::new("/proc").is_dir().then_some(Table)
+    pub(super) fn table(cancel: &AtomicBool) -> Option<Table<'_>> {
+        std::path::Path::new("/proc").is_dir().then_some(Table { cancel })
     }
 
     /// Resident set and its high-water mark.
@@ -761,7 +880,7 @@ mod platform {
 
     /// Seconds since this process started, from its start ticks and the system uptime.
     pub(super) fn uptime_secs() -> Option<u64> {
-        let start_ticks: u64 = Table.start_token(std::process::id())?;
+        let process_ticks = start_ticks(std::process::id())?;
         let raw_ticks =
             // SAFETY: `sysconf` reads a system constant and has no memory-safety preconditions.
             unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
@@ -769,23 +888,29 @@ mod platform {
         let uptime = std::fs::read_to_string("/proc/uptime").ok()?;
         let system_secs =
             uptime.split_whitespace().next()?.split('.').next()?.parse::<u64>().ok()?;
-        system_secs.checked_sub(start_ticks / ticks_per_sec.max(1))
+        system_secs.checked_sub(process_ticks / ticks_per_sec.max(1))
     }
 
-    /// Thread names from `/proc/self/task/*/comm`.
-    pub(super) fn threads() -> ThreadSummary {
+    /// Thread names from `/proc/self/task/*/comm`; a set `cancel` reports no thread list.
+    // Ordering: `cancel` is loaded Relaxed; it is a standalone stop request that publishes no other memory.
+    pub(super) fn threads(cancel: &AtomicBool) -> ThreadSummary {
+        let unknown = ThreadSummary { total: None, names: Vec::new() };
         let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
             // When: `read_dir` gave no `tasks`, the task directory is unreadable and threads cannot be listed.
-            return ThreadSummary { total: None, names: Vec::new() };
+            return unknown;
         };
-        let names: Vec<Option<String>> = tasks
-            .flatten()
-            .map(|task| {
+        let mut names: Vec<Option<String>> = Vec::new();
+        for task in tasks.flatten() {
+            if cancel.load(Ordering::Relaxed) {
+                // When: `cancel` is set, a newer refresh superseded this listing, so stop reading names.
+                return unknown;
+            }
+            names.push(
                 std::fs::read_to_string(task.path().join("comm"))
                     .ok()
-                    .map(|name| name.trim_end().to_string())
-            })
-            .collect();
+                    .map(|name| name.trim_end().to_string()),
+            );
+        }
         ThreadSummary { total: Some(names.len()), names: group_thread_names(names) }
     }
 }
@@ -794,9 +919,12 @@ mod platform {
 mod platform {
     //! Other platforms: no process-table or footprint query.
 
+    use std::sync::atomic::AtomicBool;
+
     use super::{MemoryMetric, ProcessFootprint, ProcessTable, ThreadSummary};
 
-    /// Placeholder table type; never constructed.
+    /// Placeholder table type; `table` never returns one on these platforms.
+    #[allow(dead_code)] // Named only in `table`'s signature, which always returns `None`.
     pub(super) struct Table;
 
     impl ProcessTable for Table {
@@ -806,7 +934,7 @@ mod platform {
         fn start_token(&self, _pid: u32) -> Option<u64> {
             None
         }
-        fn children(&self, _pid: u32) -> Vec<u32> {
+        fn children(&self, _pid: u32, _limit: usize) -> Vec<u32> {
             Vec::new()
         }
         fn memory(&self, _pid: u32) -> MemoryMetric {
@@ -815,7 +943,7 @@ mod platform {
     }
 
     /// No process table on this platform.
-    pub(super) fn table() -> Option<Table> {
+    pub(super) fn table(_cancel: &AtomicBool) -> Option<Table> {
         None
     }
 
@@ -835,7 +963,7 @@ mod platform {
     }
 
     /// No thread query on this platform.
-    pub(super) fn threads() -> ThreadSummary {
+    pub(super) fn threads(_cancel: &AtomicBool) -> ThreadSummary {
         ThreadSummary { total: None, names: Vec::new() }
     }
 }

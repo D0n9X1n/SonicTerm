@@ -639,6 +639,21 @@ fn render_tree(text: &mut String, label: &str, pid: u32, tree: &ProcessTree) {
             );
             return;
         }
+        WalkOutcome::Unverified => {
+            // When: Unverified, the shell's start token could not be read, so its pid is not trusted.
+            push_line(
+                text,
+                &format!(
+                    "  {}",
+                    columns(
+                        label,
+                        16,
+                        &format!("pid {pid}: not available (shell identity unverified)")
+                    )
+                ),
+            );
+            return;
+        }
         WalkOutcome::Unsupported => {
             // When: Unsupported, this platform has no process table, so say so instead of listing.
             push_line(
@@ -682,8 +697,11 @@ fn render_tree(text: &mut String, label: &str, pid: u32, tree: &ProcessTree) {
         WalkOutcome::Cancelled => {
             push_line(text, &format!("{}... walk cancelled by a newer refresh", " ".repeat(18)));
         }
-        WalkOutcome::Complete | WalkOutcome::RootGone | WalkOutcome::Unsupported => {
-            // When: Complete, RootGone or Unsupported, the list needs no trailing note.
+        WalkOutcome::Complete
+        | WalkOutcome::RootGone
+        | WalkOutcome::Unverified
+        | WalkOutcome::Unsupported => {
+            // When: Complete, RootGone, Unverified or Unsupported, the list needs no trailing note.
         }
     }
 }

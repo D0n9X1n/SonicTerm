@@ -626,8 +626,10 @@ shares the live GPU device, takes no window number, is never a tab drop target,
 tear-out source or broadcast receiver, and is not a native drop target. It never
 keeps the app alive: the last-window check counts only terminal windows, so
 closing the last terminal window exits and `finish_session` retires the report
-with every other window. Closing the report window never quits, and cancels any
-unfinished OS sample.
+with every other window. Closing the report window never quits. Every path that
+removes it (the close action, the native close button, its tab's close button)
+runs one teardown that cancels any unfinished OS sample, drops the report text,
+and returns focus to a terminal window; `finish_session` cancels the sample too.
 
 When an action sets `pending_exit`, `about_to_wait` clears it and calls
 `ActiveEventLoop::exit`. With no active terminal window, normal last-window

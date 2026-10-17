@@ -158,6 +158,8 @@ impl App {
         self.service_gpu_recovery(event_loop, Instant::now());
         self.clear_closed_broadcast_source();
         self.drain_winit_file_drops();
+        // A report that waited for a selection or copy mode is shown once neither holds the pane.
+        self.apply_deferred_memory_report();
         self.expire_quit_confirmation();
         if self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.needs_fresh_window()) {
             // When: smoke needs a fresh HWND, disable replenishment rather than accidentally adopting another spare.

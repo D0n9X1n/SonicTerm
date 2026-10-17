@@ -48,12 +48,38 @@ pub(crate) struct MemoryReportState {
     pub(crate) open_requested: bool,
     /// Identity of the newest refresh; an OS sample tagged with another is stale.
     pub(crate) generation: u64,
-    /// Cancel flag shared with the newest worker; a refresh sets it before replacing it.
+    /// Cancel flag shared with the newest walk; a refresh or close sets it before replacing it.
     pub(crate) cancel: Arc<AtomicBool>,
     /// The newest report, waiting for its OS figures or already complete.
     pub(crate) current: Option<MemoryReport>,
     /// Exactly the text the report pane shows, which copy-all copies.
     pub(crate) last_text: Option<String>,
+    /// Generation of the one walk running now; no second walk starts until it answers.
+    pub(crate) in_flight: Option<u64>,
+    /// The newest refresh's walk, waiting for the running one to answer; newer requests replace it.
+    pub(crate) queued: Option<SampleRequest>,
+    /// The current report changed while a selection or copy mode held the pane, so it waits.
+    pub(crate) render_deferred: bool,
+    /// Test-only: generations whose walk started, in order.
+    #[cfg(test)]
+    pub(crate) started: Vec<u64>,
+    /// Test-only: hold each walk here instead of running it, so a test decides when it answers.
+    #[cfg(test)]
+    pub(crate) manual_sampler: bool,
+    /// Test-only: the walk the manual sampler is holding.
+    #[cfg(test)]
+    pub(crate) manual_pending: Option<SampleRequest>,
+}
+
+/// One OS walk: its refresh generation, the pane roots, and its cancel flag.
+#[derive(Debug)]
+pub(crate) struct SampleRequest {
+    /// The refresh this walk answers.
+    pub(crate) generation: u64,
+    /// Pane shells to walk, as `(pid, recorded start token)`.
+    pub(crate) roots: Vec<(u32, Option<u64>)>,
+    /// Set when a newer refresh or a close supersedes this walk.
+    pub(crate) cancel: Arc<AtomicBool>,
 }
 
 impl App {
@@ -232,8 +258,11 @@ impl App {
         self.refresh_memory_report();
     }
 
-    /// Take a fresh sample: counted figures now, OS figures on a worker thread.
-    // Ordering: `cancel` is stored and loaded Relaxed; it is a standalone stop request that publishes no other memory.
+    /// Take a fresh sample: counted figures now, OS figures from the one sampling worker.
+    ///
+    /// An explicit refresh always replaces the shown report. The previous walk is cancelled, and
+    /// if it is still running this refresh's walk waits for it, so at most one walk runs at a time.
+    // Ordering: `cancel` is stored Relaxed; it is a standalone stop request that publishes no other memory.
     pub(crate) fn refresh_memory_report(&mut self) {
         if self.memory_report_window_id().is_none() {
             // When: `memory_report_window_id` is None, there is no window to show a sample in.
@@ -249,35 +278,68 @@ impl App {
         self.memory_report.cancel = Arc::clone(&cancel);
         self.memory_report.current = Some(report);
         self.render_current_memory_report();
+        self.request_memory_sample(SampleRequest { generation, roots, cancel });
+    }
+
+    /// Start `request` now, or queue it behind the running walk, replacing any older queued one.
+    fn request_memory_sample(&mut self, request: SampleRequest) {
+        if self.memory_report.in_flight.is_some() {
+            // When: `in_flight` names a running walk, this request waits; only the newest is kept.
+            self.memory_report.queued = Some(request);
+            return;
+        }
+        self.start_memory_sample(request);
+    }
+
+    /// Run one walk: on the worker thread, inline when there is no event loop, or held by a test.
+    fn start_memory_sample(&mut self, request: SampleRequest) {
+        self.memory_report.in_flight = Some(request.generation);
+        #[cfg(test)]
+        {
+            self.memory_report.started.push(request.generation);
+            if self.memory_report.manual_sampler {
+                // When: `manual_sampler` is set, the test holds the walk and answers it explicitly.
+                self.memory_report.manual_pending = Some(request);
+                return;
+            }
+        }
+        let SampleRequest { generation, roots, cancel } = request;
         let Some(proxy) = self.event_loop_proxy.clone() else {
             // When: no event-loop proxy exists (headless use), sample inline on this thread.
             let sample = sample_os(&roots, &cancel);
             self.handle_memory_report_sampled(generation, sample);
             return;
         };
+        // The worker answers even when cancelled, so `in_flight` always clears and a queued walk starts.
         let spawned =
             std::thread::Builder::new().name("sonicterm-memory-report".into()).spawn(move || {
                 let sample = sample_os(&roots, &cancel);
-                if !cancel.load(Ordering::Relaxed) {
-                    // When: `cancel` is unset, no newer refresh superseded this walk, so deliver its result.
-                    let _ = proxy.send_event(UserEvent::MemoryReportSampled {
-                        generation,
-                        sample: Box::new(sample),
-                    });
-                }
+                let _ = proxy.send_event(UserEvent::MemoryReportSampled {
+                    generation,
+                    sample: Box::new(sample),
+                });
             });
         if let Err(error) = spawned {
             // The worker could not start: show the counted figures and say the OS ones failed.
             tracing::warn!("memory report: sampling thread failed to start: {error}");
-            if let Some(report) = self.memory_report.current.as_mut() {
-                report.os = OsFigures::Failed;
+            self.memory_report.in_flight = None;
+            if generation == self.memory_report.generation {
+                if let Some(report) = self.memory_report.current.as_mut() {
+                    report.os = OsFigures::Failed;
+                }
+                self.render_or_defer_memory_report();
             }
-            self.render_current_memory_report();
         }
     }
 
-    /// Accept the worker's OS figures for `generation` and show the completed report.
+    /// Accept a walk's answer: free the worker, start any queued walk, and apply a current sample.
     pub(crate) fn handle_memory_report_sampled(&mut self, generation: u64, sample: OsSample) {
+        if self.memory_report.in_flight == Some(generation) {
+            self.memory_report.in_flight = None;
+            if let Some(next) = self.memory_report.queued.take() {
+                self.start_memory_sample(next);
+            }
+        }
         if generation != self.memory_report.generation {
             // When: `generation` is older than the newest refresh, the sample is stale.
             return;
@@ -287,7 +349,36 @@ impl App {
             return;
         };
         report.os = OsFigures::Sampled(sample);
+        self.render_or_defer_memory_report();
+    }
+
+    /// Show the current report unless a selection or copy mode holds the report pane.
+    ///
+    /// A held pane keeps its text, so a selection is never wiped while the user copies it; the
+    /// report waits in `current` and [`Self::apply_deferred_memory_report`] shows it later.
+    fn render_or_defer_memory_report(&mut self) {
+        let held = self.memory_report_window_id().and_then(|id| self.windows.get(&id)).is_some_and(
+            |window| {
+                window.copy_mode.is_some()
+                    || window.selection.as_ref().is_some_and(|selection| !selection.is_empty())
+            },
+        );
+        if held {
+            // When: `held`, a selection or copy mode owns the pane, so the new text waits.
+            self.memory_report.render_deferred = true;
+            return;
+        }
+        self.memory_report.render_deferred = false;
         self.render_current_memory_report();
+    }
+
+    /// Show a report that waited for a selection or copy mode, once neither holds the pane.
+    ///
+    /// Runs once per event-loop turn and does nothing unless a report is waiting.
+    pub(super) fn apply_deferred_memory_report(&mut self) {
+        if self.memory_report.render_deferred {
+            self.render_or_defer_memory_report();
+        }
     }
 
     /// Render the current report into text and feed it to the report pane.
@@ -303,7 +394,9 @@ impl App {
 
     /// Replace the report pane's content with `text`, scrolled to its first line.
     ///
-    /// Returns whether a report pane received it.
+    /// Invalidates the window's retained frame, as a visibility change does: a replacement of
+    /// equal length whose changed rows sit in history would otherwise plan as unchanged and leave
+    /// the old figures on screen. Returns whether a report pane received the text.
     pub(super) fn feed_memory_report(&mut self, text: &str) -> bool {
         let Some(report_id) = self.memory_report_window_id() else {
             // When: `memory_report_window_id` is None, the report window closed and no pane can show the text.
@@ -334,7 +427,7 @@ impl App {
         let _ = pane.release_viewport();
         window.selection = None;
         super::child_window::scroll_child_pane(window, pane_id, i32::MIN, scrollbar);
-        window.mark_redraw(super::redraw::RedrawCause::Output);
+        window.invalidate_visibility_frame();
         window.request_window_redraw();
         true
     }
@@ -361,20 +454,39 @@ impl App {
         copied
     }
 
-    /// Close the report window. Never quits the app.
-    // Ordering: `cancel` is stored Relaxed; it is a standalone stop request that publishes no other memory.
+    /// Close the report window through the shared child-window teardown. Never quits the app.
     pub(crate) fn close_memory_report_window(&mut self) {
-        self.memory_report.cancel.store(true, Ordering::Relaxed);
-        self.memory_report.current = None;
-        self.memory_report.last_text = None;
         let Some(report_id) = self.memory_report_window_id() else {
-            // When: `memory_report_window_id` is None, the window is already gone and only its state needed clearing.
+            // When: `memory_report_window_id` is None, the window is already gone; still drop its state.
+            self.cancel_memory_report_sampling();
             return;
         };
         self.close_child_window(report_id);
-        if self.frontmost_window == Some(report_id) {
-            self.frontmost_window = self.memory_report_redirect_target();
+    }
+
+    /// Stop the running walk and drop every report the closed window would have shown.
+    ///
+    /// `in_flight` is kept: the cancelled walk still answers, which frees the one worker slot.
+    // Ordering: `cancel` is stored Relaxed; it is a standalone stop request that publishes no other memory.
+    pub(super) fn cancel_memory_report_sampling(&mut self) {
+        self.memory_report.cancel.store(true, Ordering::Relaxed);
+        self.memory_report.current = None;
+        self.memory_report.last_text = None;
+        self.memory_report.queued = None;
+        self.memory_report.render_deferred = false;
+    }
+
+    /// Report-specific teardown, run by every path that removes the report window.
+    ///
+    /// Called from `close_child_window` (action close, native close button) and
+    /// `reap_empty_child` (tab close button); `finish_session` cancels sampling directly.
+    pub(super) fn forget_memory_report_window(&mut self, removed: WindowId) {
+        self.cancel_memory_report_sampling();
+        if self.frontmost_window != Some(removed) {
+            // When: `frontmost_window` is another window, focus does not need repairing.
+            return;
         }
+        self.frontmost_window = self.memory_report_redirect_target();
         if let Some(window) = self
             .frontmost_window
             .and_then(|id| self.windows.get(&id))
@@ -586,6 +698,30 @@ impl App {
         }
     }
 
+    /// Test-only: answer the walk the manual sampler holds, as its worker would.
+    #[cfg(test)]
+    pub(crate) fn __test_answer_memory_sample(&mut self) -> Option<u64> {
+        let request = self.memory_report.manual_pending.take()?;
+        let sample = OsSample {
+            footprint: sonicterm_logging::process_report::ProcessFootprint {
+                current: sonicterm_logging::process_memory::MemoryMetric::Bytes(
+                    request.generation * 1_000_000,
+                ),
+                current_label: "physical footprint",
+                peak: sonicterm_logging::process_memory::MemoryMetric::Unsupported,
+                peak_label: "peak",
+            },
+            uptime_secs: Some(request.generation),
+            threads: sonicterm_logging::process_report::ThreadSummary {
+                total: None,
+                names: Vec::new(),
+            },
+            trees: Vec::new(),
+        };
+        self.handle_memory_report_sampled(request.generation, sample);
+        Some(request.generation)
+    }
+
     /// Test-only: open a headless report window with no native window or renderer.
     #[cfg(test)]
     pub(crate) fn __test_open_memory_report_window(&mut self) -> WindowId {
@@ -614,7 +750,7 @@ fn sample_os(roots: &[(u32, Option<u64>)], cancel: &AtomicBool) -> OsSample {
     OsSample {
         footprint: report::sample_footprint(),
         uptime_secs: report::process_uptime_secs(),
-        threads: report::sample_threads(),
+        threads: report::sample_threads(cancel),
         trees: report::sample_trees(roots, cancel),
     }
 }

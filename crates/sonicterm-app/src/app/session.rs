@@ -241,6 +241,8 @@ impl App {
             // When: session_finished is cached, no pane or driver may be shut down a second time.
             return settled;
         }
+        // A report walk still running must not outlive the session it describes.
+        self.cancel_memory_report_sampling();
         let panes: Vec<_> = self
             .windows
             .values_mut()
