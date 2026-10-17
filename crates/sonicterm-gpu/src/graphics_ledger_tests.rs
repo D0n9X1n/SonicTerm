@@ -126,77 +126,194 @@ fn method_rest(source: &str, offset: usize) -> &str {
     &rest[..rest.find("\n    }\n").unwrap_or(rest.len())]
 }
 
-/// Assert every `install` in `source` is followed by `record` before its method ends; returns how
-/// many installs there were.
-fn assert_installs_record(name: &str, source: &str, install: &str, record: &str) -> usize {
+/// Check every `install` in `source` reaches `record` before its method ends, adding a violation
+/// for each that does not; returns how many installs there were.
+fn check_installs_record(
+    violations: &mut Vec<String>,
+    name: &str,
+    source: &str,
+    install: &str,
+    record: &str,
+) -> usize {
     let offsets: Vec<usize> = source.match_indices(install).map(|(offset, _)| offset).collect();
     for offset in &offsets {
-        assert!(
-            method_rest(source, *offset).contains(record),
-            "{name}: `{install}` at byte {offset} does not reach `{record}` in its method"
-        );
+        if !method_rest(source, *offset).contains(record) {
+            violations.push(format!("{name}: `{install}` at byte {offset} misses `{record}`"));
+        }
     }
     offsets.len()
 }
 
-/// Contract: every production site that installs a GPU resource records it in the ledger: each
-/// `surface.configure` is followed at once by `record_surface_request`, each frame-texture,
-/// atlas-upload and present-buffer install reaches its record call in the same method, and the
-/// renderer's drop releases the whole ledger. A new install site without its hook fails here on
-/// every host, where the real-renderer case runs only on Windows CI.
-#[test]
-fn every_production_install_site_records_in_the_ledger() {
-    const CORE: &str = include_str!("core.rs");
-    const PRESENT: &str = include_str!("present.rs");
-    const REBIND: &str = include_str!("rebind.rs");
-    const ATLAS: &str = include_str!("atlas_lifecycle.rs");
-    const PIPELINE: &str = include_str!("wezterm_pipeline.rs");
+/// The production sources the hook guard reads, in [`hook_violations`] order.
+const SOURCES: [(&str, &str); 5] = [
+    ("core.rs", include_str!("core.rs")),
+    ("present.rs", include_str!("present.rs")),
+    ("rebind.rs", include_str!("rebind.rs")),
+    ("atlas_lifecycle.rs", include_str!("atlas_lifecycle.rs")),
+    ("wezterm_pipeline.rs", include_str!("wezterm_pipeline.rs")),
+];
+
+/// Every missing ledger hook in `sources` (core, present, rebind, atlas lifecycle, pipeline).
+fn hook_violations(sources: [&str; 5]) -> Vec<String> {
+    let [core, present, rebind, atlas, pipeline] = sources;
+    let mut violations = Vec::new();
+    let mut require = |found: bool, what: &str| {
+        if !found {
+            violations.push(what.to_string());
+        }
+    };
+    // Construction attaches the pipeline and records every resource it built.
+    require(
+        core.contains("present_pipeline.attach_graphics_ledger(graphics_ledger.clone());"),
+        "construction attaches the present pipeline",
+    );
+    for record in [
+        "renderer.record_surface_request();",
+        "renderer.record_frame_texture_request();",
+        "renderer.record_glyph_atlas_request();",
+        "renderer.record_image_atlas_request();",
+    ] {
+        require(core.contains(record), record);
+    }
+    // Recovery attaches the candidate pipeline to the same ledger.
+    require(
+        rebind.contains(
+            "self.present_pipeline.attach_graphics_ledger(self.graphics_ledger.clone());",
+        ),
+        "recovery attaches the candidate pipeline",
+    );
+    // Attaching reports all three present buffers.
+    let attach =
+        pipeline.find("fn attach_graphics_ledger").map(|offset| method_rest(pipeline, offset));
+    for record in
+        ["PresentUniform", "self.record_vertex_request();", "self.record_index_request();"]
+    {
+        require(attach.is_some_and(|body| body.contains(record)), "attach reports its buffers");
+    }
+    // The drop logs its teardown record, then releases the ledger.
+    let drop = core.find("impl Drop for GpuRenderer").map(|offset| method_rest(core, offset));
+    let teardown = drop.and_then(|body| body.find("\"renderer graphics teardown\""));
+    let release = drop.and_then(|body| body.find("self.graphics_ledger.release_all();"));
+    require(
+        matches!((teardown, release), (Some(logged), Some(released)) if logged < released),
+        "the drop logs its teardown before releasing the ledger",
+    );
+
     let configure = "self.surface.configure(&self.device, &self.config);";
     let mut configures = 0;
-    for (name, source) in [("core.rs", CORE), ("present.rs", PRESENT), ("rebind.rs", REBIND)] {
+    for (name, source) in [("core.rs", core), ("present.rs", present), ("rebind.rs", rebind)] {
         for (offset, _) in source.match_indices(configure) {
-            let next = source[offset + configure.len()..].trim_start();
-            assert!(
-                next.starts_with("self.record_surface_request();"),
-                "{name}: a configure at byte {offset} is not followed by record_surface_request"
-            );
+            if !source[offset + configure.len()..]
+                .trim_start()
+                .starts_with("self.record_surface_request();")
+            {
+                violations.push(format!("{name}: a configure at byte {offset} is not recorded"));
+            }
             configures += 1;
         }
     }
-    assert_eq!(configures, 7, "resize, degrade, rebind and four present recovery arms");
-    assert!(
-        CORE.contains("renderer.record_surface_request();"),
-        "construction records the surface"
-    );
-
+    if configures != 7 {
+        violations.push(format!("{configures} surface configures, expected 7"));
+    }
     let frame = "self.frame_texture = frame_texture;";
     let frame_record = "record_frame_texture_request()";
-    assert_eq!(assert_installs_record("core.rs", CORE, frame, frame_record), 2);
-    assert_eq!(assert_installs_record("rebind.rs", REBIND, frame, frame_record), 1);
-    for (name, source, expected) in [("atlas_lifecycle.rs", ATLAS, 1), ("rebind.rs", REBIND, 1)] {
-        let glyph = "self.glyph_upload = ";
-        let image = "self.image_upload = ";
-        assert_eq!(
-            assert_installs_record(name, source, glyph, "record_glyph_atlas_request()"),
-            expected
-        );
-        assert_eq!(
-            assert_installs_record(name, source, image, "record_image_atlas_request()"),
-            expected
+    let mut counts = vec![
+        check_installs_record(&mut violations, "core.rs", core, frame, frame_record),
+        check_installs_record(&mut violations, "rebind.rs", rebind, frame, frame_record),
+    ];
+    for (name, source) in [("atlas_lifecycle.rs", atlas), ("rebind.rs", rebind)] {
+        counts.push(check_installs_record(
+            &mut violations,
+            name,
+            source,
+            "self.glyph_upload = ",
+            "record_glyph_atlas_request()",
+        ));
+        counts.push(check_installs_record(
+            &mut violations,
+            name,
+            source,
+            "self.image_upload = ",
+            "record_image_atlas_request()",
+        ));
+    }
+    if counts != [2, 1, 1, 1, 1, 1] {
+        violations.push(format!("install counts {counts:?}, expected [2, 1, 1, 1, 1, 1]"));
+    }
+    let vertices = check_installs_record(
+        &mut violations,
+        "wezterm_pipeline.rs",
+        pipeline,
+        "self.vertex_buf = ",
+        "record_vertex_request()",
+    );
+    let indices = check_installs_record(
+        &mut violations,
+        "wezterm_pipeline.rs",
+        pipeline,
+        "self.index_buf = ",
+        "record_index_request()",
+    );
+    if vertices < 2 || indices < 2 {
+        violations.push(format!("present buffer installs {vertices}/{indices}, expected 2+"));
+    }
+    violations
+}
+
+/// Contract: every production site that installs a GPU resource records it in the ledger: each
+/// `surface.configure` is followed at once by `record_surface_request`; each frame-texture,
+/// atlas-upload and present-buffer install reaches its record call in the same method; the
+/// constructor and the recovery commit attach the present pipeline, which reports its buffers;
+/// the constructor records its frame texture and atlases; and the drop logs its teardown before
+/// releasing the ledger. The real-renderer case runs only on Windows CI; this runs on every host.
+#[test]
+fn every_production_install_site_records_in_the_ledger() {
+    let violations = hook_violations(SOURCES.map(|(_, source)| source));
+    assert!(violations.is_empty(), "{violations:#?}");
+}
+
+/// Contract: the guard catches the deletion of each hook it pins. Every case removes one call from
+/// a copy of its source; the guard must then report a violation, so a hook that could be deleted
+/// unnoticed is not counted as pinned.
+#[test]
+fn deleting_any_pinned_hook_fails_the_guard() {
+    let cases: [(usize, &str); 20] = [
+        (0, "present_pipeline.attach_graphics_ledger(graphics_ledger.clone());"),
+        (0, "renderer.record_surface_request();"),
+        (0, "renderer.record_frame_texture_request();"),
+        (0, "renderer.record_glyph_atlas_request();"),
+        (0, "renderer.record_image_atlas_request();"),
+        (0, "self.record_frame_texture_request();"),
+        (0, "self.record_surface_request();"),
+        (0, "\"renderer graphics teardown\""),
+        (0, "self.graphics_ledger.release_all();"),
+        (1, "self.record_surface_request();"),
+        (2, "self.present_pipeline.attach_graphics_ledger(self.graphics_ledger.clone());"),
+        (2, "self.record_surface_request();"),
+        (2, "self.record_frame_texture_request();"),
+        (2, "self.record_glyph_atlas_request();"),
+        (2, "self.record_image_atlas_request();"),
+        (3, "self.record_glyph_atlas_request();"),
+        (3, "self.record_image_atlas_request();"),
+        (4, "self.record_vertex_request();"),
+        (4, "self.record_index_request();"),
+        (4, "crate::graphics_ledger::GraphicsSlot::PresentUniform,"),
+    ];
+    for (index, needle) in cases {
+        let mut sources = SOURCES.map(|(_, source)| source.to_string());
+        assert!(sources[index].contains(needle), "{}: `{needle}` not found", SOURCES[index].0);
+        sources[index] = sources[index].replacen(needle, "", 1);
+        let borrowed = [
+            sources[0].as_str(),
+            sources[1].as_str(),
+            sources[2].as_str(),
+            sources[3].as_str(),
+            sources[4].as_str(),
+        ];
+        assert!(
+            !hook_violations(borrowed).is_empty(),
+            "deleting `{needle}` from {} went unnoticed",
+            SOURCES[index].0
         );
     }
-    assert!(
-        assert_installs_record(
-            "pipeline",
-            PIPELINE,
-            "self.vertex_buf = ",
-            "record_vertex_request()"
-        ) >= 2
-    );
-    assert!(
-        assert_installs_record("pipeline", PIPELINE, "self.index_buf = ", "record_index_request()")
-            >= 2
-    );
-    let drop_body = &CORE[CORE.find("impl Drop for GpuRenderer").expect("renderer drop")..];
-    assert!(method_rest(drop_body, 0).contains("self.graphics_ledger.release_all();"));
 }

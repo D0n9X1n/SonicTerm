@@ -36,7 +36,9 @@
 //!
 //! wgpu identifies its adapter by PCI vendor and device id, which name a GPU
 //! model, not one installed GPU. When two DXGI adapters share the renderer's ids
-//! the reading is unavailable rather than possibly another GPU's usage.
+//! the reading is unavailable rather than possibly another GPU's usage, and so is
+//! a list that ended in an error or at the adapter cap, where an unseen adapter
+//! could share them.
 
 use crate::process_memory::MemoryMetric;
 
@@ -148,31 +150,63 @@ pub(crate) struct ListedAdapter {
     pub(crate) device: u32,
 }
 
-/// Which listed adapter is the renderer's, judged by PCI ids alone.
+/// What enumerating one adapter index returned.
 #[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AdapterMatch {
-    /// Exactly one listed adapter has the renderer's ids; its position in the list.
-    Unique(usize),
-    /// No listed adapter has the renderer's ids.
-    Missing,
-    /// Two or more listed adapters have the renderer's ids, so the ids cannot tell them apart.
-    Ambiguous,
+pub(crate) enum Enumerated {
+    /// An adapter and its PCI ids.
+    Adapter(ListedAdapter),
+    /// `DXGI_ERROR_NOT_FOUND`: the index is past the last adapter, so the list is complete.
+    End,
+    /// Any other failure, or an adapter whose description could not be read.
+    Failed,
 }
 
-/// Find the renderer's adapter, `ids`, in `listed`; ids shared by two adapters are ambiguous.
+/// Most adapters enumerated while looking for the renderer's; a real system lists a handful.
 #[cfg(any(windows, test))]
-pub(crate) fn match_adapter(ids: DxgiAdapterIds, listed: &[ListedAdapter]) -> AdapterMatch {
-    let mut matching = listed
-        .iter()
-        .enumerate()
-        .filter(|(_, adapter)| adapter.vendor == ids.vendor && adapter.device == ids.device)
-        .map(|(position, _)| position);
-    match (matching.next(), matching.next()) {
-        (Some(position), None) => AdapterMatch::Unique(position),
-        (None, _) => AdapterMatch::Missing,
-        (Some(_), Some(_)) => AdapterMatch::Ambiguous,
+pub(crate) const MAX_DXGI_ADAPTERS: u32 = 16;
+
+/// The index of the renderer's adapter, `ids`, among the adapters `enumerate` lists, or why none
+/// can be chosen.
+///
+/// The choice fails closed: only an explicit end of list ([`Enumerated::End`]) proves the list
+/// complete; the probe one index past [`MAX_DXGI_ADAPTERS`] checks for it. An enumeration
+/// failure, or an adapter beyond the cap, leaves an adapter unchecked that could share the ids, so
+/// neither can confirm a unique match.
+#[cfg(any(windows, test))]
+pub(crate) fn select_adapter(
+    ids: DxgiAdapterIds,
+    mut enumerate: impl FnMut(u32) -> Enumerated,
+) -> Result<u32, &'static str> {
+    let mut found = None;
+    // One probe past the cap: only an end of list there proves a full list of `MAX` complete.
+    for index in 0..=MAX_DXGI_ADAPTERS {
+        let adapter = match enumerate(index) {
+            Enumerated::Adapter(adapter) => adapter,
+            Enumerated::End => {
+                // When: `End`, every adapter has been seen; one match is unique, none is missing.
+                return found.ok_or("no DXGI adapter has the renderer's ids");
+            }
+            Enumerated::Failed => {
+                // When: `Failed`, an adapter may be unseen, so uniqueness cannot be proved.
+                return Err("DXGI adapter enumeration failed before the end of the list");
+            }
+        };
+        if index == MAX_DXGI_ADAPTERS {
+            // When: `index` is past the cap and an adapter is there, it is unchecked; stop.
+            break;
+        }
+        if adapter.vendor != ids.vendor || adapter.device != ids.device {
+            // When: `adapter` names another GPU, keep looking for the renderer's.
+            continue;
+        }
+        if found.is_some() {
+            // When: `found` already holds a match, the ids are shared and cannot pick one GPU.
+            return Err("two or more DXGI adapters share the renderer's vendor and device ids");
+        }
+        found = Some(index);
     }
+    Err("DXGI listed more adapters than SonicTerm checks, so uniqueness is unproved")
 }
 
 /// `task_vm_info` through revision 7, as `mach/task_info.h` declares it under
@@ -353,58 +387,53 @@ fn sample_platform(dxgi_adapter: Option<DxgiAdapterIds>) -> GraphicsMemory {
     }
 }
 
-/// Most adapters enumerated while looking for the renderer's; a real system lists a handful.
-#[cfg(windows)]
-const MAX_DXGI_ADAPTERS: u32 = 16;
-
 /// `CurrentUsage` of the renderer's DXGI adapter for the local and non-local segment groups of
 /// node 0, or why it cannot be read.
 ///
 /// The adapter is found by PCI vendor and device id, the identity `wgpu::AdapterInfo` exposes. Ids
-/// name a model, so an adapter is read only when it is the one listed adapter with those ids; an
-/// adapter whose description cannot be read makes the match unknowable too.
+/// name a model, so an adapter is read only when [`select_adapter`] proves it is the one adapter
+/// with those ids in a complete list.
 #[cfg(windows)]
 fn dxgi_usage(ids: DxgiAdapterIds) -> Result<(u64, u64), &'static str> {
     use windows::core::Interface;
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, IDXGIAdapter1, IDXGIAdapter3, IDXGIFactory1, DXGI_MEMORY_SEGMENT_GROUP,
-        DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,
-        DXGI_QUERY_VIDEO_MEMORY_INFO,
+        CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory1, DXGI_ERROR_NOT_FOUND,
+        DXGI_MEMORY_SEGMENT_GROUP, DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
+        DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
     };
 
     let created =
         // SAFETY: `CreateDXGIFactory1` takes no pointers and returns an owned COM interface.
         unsafe { CreateDXGIFactory1::<IDXGIFactory1>() };
     let factory = created.map_err(|_| "the DXGI factory could not be created")?;
-    let mut adapters: Vec<IDXGIAdapter1> = Vec::new();
-    let mut listed = Vec::new();
-    for index in 0..MAX_DXGI_ADAPTERS {
+    let index = select_adapter(ids, |index| {
         let enumerated =
-            // SAFETY: `factory` is a live interface; an index past the last adapter returns Err.
+            // SAFETY: `factory` is a live interface; an index past the last adapter returns
+            // `DXGI_ERROR_NOT_FOUND`.
             unsafe { factory.EnumAdapters1(index) };
-        let Ok(adapter) = enumerated else {
-            // When: `enumerated` is Err, the list is exhausted.
-            break;
+        let adapter = match enumerated {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                // When: `error` is `DXGI_ERROR_NOT_FOUND` the list ended; any other fails closed.
+                return if error.code() == DXGI_ERROR_NOT_FOUND {
+                    Enumerated::End
+                } else {
+                    Enumerated::Failed
+                };
+            }
         };
         let described =
             // SAFETY: `adapter` is a live interface and `GetDesc1` writes only its own result.
             unsafe { adapter.GetDesc1() };
-        let desc = described.map_err(|_| "a DXGI adapter's description could not be read")?;
-        listed.push(ListedAdapter { vendor: desc.VendorId, device: desc.DeviceId });
-        adapters.push(adapter);
-    }
-    let position = match match_adapter(ids, &listed) {
-        AdapterMatch::Unique(position) => position,
-        AdapterMatch::Missing => {
-            // When: `Missing`, no listed adapter is the renderer's, so there is nothing to read.
-            return Err("no DXGI adapter has the renderer's ids");
-        }
-        AdapterMatch::Ambiguous => {
-            // When: `Ambiguous`, the ids cannot tell the renderer's GPU from its twin; refuse.
-            return Err("two or more DXGI adapters share the renderer's vendor and device ids");
-        }
-    };
-    let adapter3 = adapters[position]
+        described.map_or(Enumerated::Failed, |desc| {
+            Enumerated::Adapter(ListedAdapter { vendor: desc.VendorId, device: desc.DeviceId })
+        })
+    })?;
+    let enumerated =
+        // SAFETY: `factory` is a live interface; `index` was just enumerated successfully.
+        unsafe { factory.EnumAdapters1(index) };
+    let adapter3 = enumerated
+        .map_err(|_| "the renderer's DXGI adapter could not be enumerated again")?
         .cast::<IDXGIAdapter3>()
         .map_err(|_| "the renderer's DXGI adapter has no IDXGIAdapter3")?;
     let usage = |group: DXGI_MEMORY_SEGMENT_GROUP| -> Result<u64, &'static str> {
