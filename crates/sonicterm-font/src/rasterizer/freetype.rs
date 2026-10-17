@@ -38,13 +38,16 @@ pub struct FreeTypeRasterizer {
     freetype_load_flags: Option<FreeTypeLoadFlags>,
     display_pixel_geometry: DisplayPixelGeometry,
     scale: f64,
-    /// The font this rasterizer was opened from, kept to build `hb_raster` on demand.
+    /// The font this rasterizer was opened from, kept to build `hb_raster` on demand. An on-disk
+    /// colour face (one listing `SVG ` or `COLR`) is replaced by the shared bytes the FreeType
+    /// face opened, so its painter reads exactly those bytes even if the file is replaced or
+    /// deleted on disk afterwards. Any other font keeps its path; its painter is never needed.
     parsed: ParsedFont,
     /// HarfBuzz painter for SVG and COLRv1 glyphs, built on first use.
     ///
-    /// Building it reads the whole font file into the heap, while FreeType
-    /// streams the same file from disk. Most fonts never draw such a glyph, so
-    /// building it eagerly held a full copy of every font file per rasterizer.
+    /// For a colour font it wraps the same shared font buffer as the FreeType face, so building
+    /// it copies no font bytes. It is built lazily because most fonts never draw such a glyph,
+    /// and a font without one would otherwise read its whole file into the heap.
     hb_raster: OnceCell<HarfbuzzRasterizer>,
 }
 
@@ -445,8 +448,12 @@ impl FreeTypeRasterizer {
         display_pixel_geometry: DisplayPixelGeometry,
     ) -> anyhow::Result<Self> {
         log::trace!("Rasterizier wants {:?}", parsed);
+        let mut pinned = parsed.clone();
+        pinned.handle.source =
+            crate::font_bytes::pin_colour_face(&parsed.handle.source, parsed.handle.index)
+                .into_owned();
         let lib = ftwrap::Library::new()?;
-        let mut face = lib.face_from_locator(&parsed.handle)?;
+        let mut face = lib.face_from_locator(&pinned.handle)?;
         let has_color =
             // SAFETY: face_from_locator returned an initialized FT_Face, and
             // `face` owns it for the whole read of its face_flags bitfield.
@@ -471,7 +478,7 @@ impl FreeTypeRasterizer {
             freetype_render_target: parsed.freetype_render_target,
             display_pixel_geometry,
             scale: parsed.scale.unwrap_or(1.),
-            parsed: parsed.clone(),
+            parsed: pinned,
             hb_raster: OnceCell::new(),
         })
     }

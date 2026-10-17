@@ -35,6 +35,7 @@ pub enum Direction {
 
 mod diagnostic_timing;
 mod fallback_notice;
+mod font_bytes;
 mod hbwrap;
 
 pub mod color;

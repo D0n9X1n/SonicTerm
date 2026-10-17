@@ -280,6 +280,24 @@ BGRA 彩色位图按非透明区域的半开边界裁剪，保留最后一行和
 单元格内保持纵横比的最大矩形，并沿两个轴居中。普通文字、复合字符簇、宽字形、自定义
 块字形和多单元格连字保持自然光栅几何。GPU 与 Windows 软件呈现共用上游生成的同一矩形。
 
+### 字体文件字节
+
+普通字体从磁盘流式读取：FreeType face 以回调流打开，只读取 FreeType 请求的数据帧；
+HarfBuzz blob 把文件读入自己的缓冲区。表目录中列出 `SVG ` 或 `COLR` 表的字体 face 则不同：
+FreeType 会整份提取这些表（以及 `CPAL`），并在 face 存续期间一直保留；在回调流上每个 face
+都持有自己的副本，彩色 emoji 字体的 `SVG ` 表就有 18.55 MiB。这样的文件按文件版本（规范
+路径、长度、修改时间，在 Unix 上还有设备号与 inode；Windows 使用路径、长度与修改时间）
+整份读入一个共享的只读堆缓冲区，只读一次。该文件上的每个 FreeType face 都以内存流打开，
+彩色表直接指向这块缓冲区而不被复制；每个 HarfBuzz blob（包括延迟构建的 SVG/COLRv1
+绘制器）都包装同一块缓冲区。绘制器使用的正是其 FreeType face 打开的字节，即使之后磁盘上
+的文件被替换或删除。
+
+是否共享按 face 决定，依据是对 sfnt 表目录的有界读取（字体集先读 `ttcf` 头和所请求 face
+的偏移，然后最多读取 256 条表记录）。格式错误或无法读取的表目录视为没有彩色表，继续使用
+回调流。缓存只保存弱引用：最后一个使用它的 face 与 blob 关闭时缓冲区即被释放；磁盘上被
+修改的文件属于新版本，会得到新的缓冲区。face 本身不共享。普通字体不共享，是因为把每个
+字体文件（包括 75 MiB 的 CJK `.ttc`）整份保留所占的内存，多于它节省的彩色表。
+
 ### 原生源码版本与配置
 
 源码固定版本为 FreeType 2.14.3、HarfBuzz 14.4.0、libpng 1.6.58 和 zlib 1.3.2。
@@ -713,6 +731,7 @@ Result 适配器只为 Timeout/Occluded 恢复原生重试，不对其它原因�
 | 渲染器字体适配 | `crates/sonicterm-engine/src/fontstack.rs` |
 | 发现与匹配 | `crates/sonicterm-font/src/db.rs`、`crates/sonicterm-font/src/locator/` |
 | HarfBuzz 塑形 | `crates/sonicterm-font/src/shaper/harfbuzz.rs` |
+| 共享彩色字体缓冲区 | `crates/sonicterm-font/src/font_bytes.rs` |
 | 光栅化与原生包装 | `crates/sonicterm-font/src/rasterizer/`、`crates/sonicterm-font/src/{ftwrap,hbwrap,fcwrap}.rs` |
 | CPU 图集与行缓存 | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache,shape}.rs` |
 | 图集上传与图像图集 | `crates/sonicterm-gpu/src/{core,atlas_upload}.rs` |

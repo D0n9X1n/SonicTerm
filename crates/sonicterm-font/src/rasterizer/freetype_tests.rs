@@ -876,8 +876,8 @@ fn colr_sweep_gradient_quadrants_match_harfbuzz() {
     }
 }
 
-/// Plain outline glyphs never build the HarfBuzz painter, so a font that has no
-/// SVG or COLRv1 glyph is never read whole into the heap; FreeType streams it.
+/// Plain outline glyphs never build the HarfBuzz painter, so a font with no SVG or
+/// COLRv1 glyph never pays for HarfBuzz face and font state.
 #[test]
 fn outline_glyphs_leave_the_harfbuzz_painter_unbuilt() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -898,4 +898,39 @@ fn outline_glyphs_leave_the_harfbuzz_painter_unbuilt() {
         .count();
     assert!(rendered > 0, "the fixture must rasterize at least one outline glyph");
     assert!(rasterizer.hb_raster.get().is_none(), "outline glyphs must not build the painter");
+}
+
+/// A temp on-disk copy of the COLRv1 fixture, so a test can delete it after opening.
+fn temp_fixture_path(tag: &str) -> std::path::PathBuf {
+    let path =
+        std::env::temp_dir().join(format!("sonicterm-painter-{tag}-{}.ttf", std::process::id()));
+    std::fs::write(&path, COLR_FIXTURE).expect("write temp fixture");
+    path
+}
+
+/// Contract: the lazy HarfBuzz painter builds from the bytes the FreeType face opened, not by
+/// reopening the path, so a font deleted on disk after the rasterizer opened still paints its
+/// colour glyph through the painter, and the painter shares the face's buffer.
+#[test]
+fn the_painter_builds_from_retained_bytes_after_the_file_is_deleted() {
+    let path = temp_fixture_path("deleted");
+    let handle = crate::locator::FontDataHandle {
+        source: crate::locator::FontDataSource::OnDisk(path.clone()),
+        index: 0,
+        variation: 0,
+        origin: crate::locator::FontOrigin::FontDirs,
+        coverage: None,
+    };
+    let parsed = ParsedFont::from_locator(&handle).expect("the fixture parses");
+    let rasterizer = FreeTypeRasterizer::from_locator(&parsed, DisplayPixelGeometry::RGB).unwrap();
+    std::fs::remove_file(&path).expect("delete the font on disk");
+    let crate::locator::FontDataSource::Memory { data, .. } = &rasterizer.parsed.handle.source
+    else {
+        panic!("the rasterizer must hold the shared bytes, not the path");
+    };
+    let before = std::sync::Arc::strong_count(data);
+    let painter = rasterizer.hb_raster().expect("the painter builds after the file is gone");
+    assert!(std::sync::Arc::strong_count(data) > before, "the painter holds the same buffer");
+    let glyph = painter.rasterize_glyph(GLYPH_LINEAR, 32.0, 72).expect("a colour glyph paints");
+    assert!(glyph.width > 0 && glyph.height > 0, "the colour path drew ink");
 }

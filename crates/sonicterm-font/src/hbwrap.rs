@@ -104,8 +104,13 @@ impl Blob {
         }
     }
 
-    pub fn from_source(source: &FontDataSource) -> anyhow::Result<Self> {
-        let blob = match source {
+    /// Wrap the font bytes of face `face_index` of `source` as a read-only blob.
+    ///
+    /// An on-disk face that lists an `SVG ` or `COLR` table wraps the file's shared buffer from
+    /// [`crate::font_bytes`]; any other on-disk face reads the file into a blob of its own.
+    pub fn from_source(source: &FontDataSource, face_index: u32) -> anyhow::Result<Self> {
+        let source = crate::font_bytes::pin_colour_face(source, face_index);
+        let blob = match source.as_ref() {
             FontDataSource::OnDisk(path) => {
                 // When: `source` is `OnDisk`, load the blob from the named font file.
                 let mut file = std::fs::File::open(path)
@@ -228,11 +233,11 @@ impl Drop for Face {
 
 impl Face {
     pub fn from_locator(handle: &FontDataHandle) -> anyhow::Result<Self> {
-        let blob = Blob::from_source(&handle.source)?;
         let mut index = handle.index;
         if handle.variation != 0 {
             index |= handle.variation << 16;
         }
+        let blob = Blob::from_source(&handle.source, index)?;
 
         let face =
             // SAFETY: `blob.blob` is live for the call; HarfBuzz takes its own reference and

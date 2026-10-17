@@ -1536,10 +1536,18 @@ impl Library {
     fn new_face(&self, source: &FontDataSource, face_index: FT_Long) -> anyhow::Result<FT_Face> {
         let mut face = ptr::null_mut();
 
+        // A face that lists an `SVG ` or `COLR` table opens on the file's shared bytes, so
+        // FreeType's whole-table extraction points into them instead of copying per face. A
+        // negative `face_index` only counts faces and loads no colour table.
+        let source = match u32::try_from(face_index) {
+            Ok(index) => crate::font_bytes::pin_colour_face(source, index),
+            Err(_) => std::borrow::Cow::Borrowed(source),
+        };
+
         // FT_Open_Face will take ownership of this and closes it in both
         // the error case and the success case (although the latter is when
         // the face is dropped).
-        let stream = FreeTypeStream::from_source(source)?;
+        let stream = FreeTypeStream::from_source(&source)?;
 
         let args = FT_Open_Args {
             flags: FT_OPEN_STREAM,
