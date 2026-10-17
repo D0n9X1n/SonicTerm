@@ -90,6 +90,9 @@ mod row_ink;
 /// A row's style runs and their shaping text, shared by the row emitter and a test inspector.
 mod row_runs;
 
+/// Test hook: whether the planner draws nothing after an in-place replacement; not a supported API.
+#[doc(hidden)]
+pub use frame_plan::{__replacement_plans_noop, ReplacementShape};
 /// Test hook: the style runs the row emitter cuts a row into; not a supported API.
 #[doc(hidden)]
 pub use row_runs::__row_shape_runs;

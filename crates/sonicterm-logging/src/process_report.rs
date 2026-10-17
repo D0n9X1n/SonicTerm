@@ -263,6 +263,83 @@ pub fn sample_trees(roots: &[(u32, Option<u64>)], cancel: &AtomicBool) -> Vec<Pr
     walk_roots(&table, roots, MAX_DESCENDANTS_PER_ROOT, cancel)
 }
 
+/// Longest decimal pid token accepted; a longer token cannot be a `u32` and is skipped.
+const MAX_PID_DIGITS: usize = 10;
+
+/// Read up to `limit` whitespace-separated pids from `reader`, stopping as soon as it has them.
+///
+/// Parses as it reads, one buffered chunk at a time, so a children list of any length costs no
+/// more than the pids taken; `cancel` is checked before each chunk. Tokens that are not decimal
+/// `u32` values are skipped. A read error ends the list with the pids found so far.
+// Ordering: `cancel` is loaded Relaxed; it is a standalone stop request that publishes no other memory.
+pub fn read_pids(mut reader: impl std::io::BufRead, limit: usize, cancel: &AtomicBool) -> Vec<u32> {
+    let mut pids = Vec::new();
+    let mut token = PidToken::default();
+    while pids.len() < limit {
+        if cancel.load(Ordering::Relaxed) {
+            // When: `cancel` is set, a newer refresh superseded this read, so stop reading.
+            return pids;
+        }
+        let Ok(chunk) = reader.fill_buf() else {
+            // When: `fill_buf` failed, keep the pids already read.
+            return pids;
+        };
+        if chunk.is_empty() {
+            // When: `chunk` is empty at end of input, the last token ends here.
+            token.finish_into(&mut pids, limit);
+            return pids;
+        }
+        let mut used = 0;
+        for byte in chunk {
+            used += 1;
+            if byte.is_ascii_whitespace() {
+                // When: `byte` is whitespace, the current token ends and is kept if it is a pid.
+                token.finish_into(&mut pids, limit);
+                if pids.len() >= limit {
+                    // When: `pids` reached `limit`, stop here; the rest of the stream is never read.
+                    break;
+                }
+            } else {
+                // When: `byte` is not whitespace, it extends the current token.
+                token.push(*byte);
+            }
+        }
+        reader.consume(used);
+    }
+    pids
+}
+
+/// One pid token being parsed: its value so far, digit count, and whether it is still valid.
+#[derive(Debug, Default)]
+struct PidToken {
+    value: u64,
+    digits: usize,
+    invalid: bool,
+}
+
+impl PidToken {
+    /// Add one byte; anything but a digit, or too many digits, invalidates the token.
+    fn push(&mut self, byte: u8) {
+        if !byte.is_ascii_digit() || self.digits >= MAX_PID_DIGITS {
+            // When: `byte` is not a digit or the token passed `MAX_PID_DIGITS`, it is no pid.
+            self.invalid = true;
+            return;
+        }
+        self.value = self.value * 10 + u64::from(byte - b'0');
+        self.digits += 1;
+    }
+
+    /// End the token: push it to `pids` when it is a valid `u32` and room remains, then reset.
+    fn finish_into(&mut self, pids: &mut Vec<u32>, limit: usize) {
+        let token = std::mem::take(self);
+        if token.digits > 0 && !token.invalid && pids.len() < limit {
+            if let Ok(pid) = u32::try_from(token.value) {
+                pids.push(pid);
+            }
+        }
+    }
+}
+
 /// One OS process's name and memory figure, or `None` when it does not exist.
 #[must_use]
 pub fn sample_process(pid: u32) -> Option<ChildProcess> {
@@ -766,9 +843,15 @@ mod platform {
 mod platform {
     //! Linux: `/proc`.
 
+    use std::io::Read;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::{group_thread_names, MemoryMetric, ProcessFootprint, ProcessTable, ThreadSummary};
+    use super::{
+        group_thread_names, read_pids, MemoryMetric, ProcessFootprint, ProcessTable, ThreadSummary,
+    };
+
+    /// Longest `/proc/<pid>/stat` read; the kernel line is far shorter.
+    const MAX_STAT_BYTES: u64 = 4096;
 
     /// A `kB` field from `/proc/<pid>/status`, in bytes.
     fn status_kib(pid: &str, field: &str) -> MemoryMetric {
@@ -785,7 +868,9 @@ mod platform {
 
     /// The fields of `/proc/<pid>/stat` after the parenthesised command name.
     fn stat_fields(pid: u32) -> Option<Vec<String>> {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let file = std::fs::File::open(format!("/proc/{pid}/stat")).ok()?;
+        let mut stat = String::new();
+        file.take(MAX_STAT_BYTES).read_to_string(&mut stat).ok()?;
         let after_name = &stat[stat.rfind(')')? + 1..];
         Some(after_name.split_whitespace().map(str::to_string).collect())
     }
@@ -821,11 +906,14 @@ mod platform {
                         // When: `children` reached `limit` or `cancel` is set, stop reading task files.
                         break;
                     }
-                    if let Ok(text) = std::fs::read_to_string(task.path().join("children")) {
+                    if let Ok(file) = std::fs::File::open(task.path().join("children")) {
                         listed = true;
-                        children.extend(
-                            text.split_whitespace().filter_map(|id| id.parse::<u32>().ok()),
-                        );
+                        let room = limit.saturating_sub(children.len());
+                        children.extend(read_pids(
+                            std::io::BufReader::new(file),
+                            room,
+                            self.cancel,
+                        ));
                     }
                 }
             }

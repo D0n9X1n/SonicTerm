@@ -379,10 +379,11 @@ default) opens a report window, or focuses and refreshes it when one is already
 open. The report is plain text in a pane with no PTY, so it can be selected,
 searched, scrolled and copied like terminal output, and typing never reaches a
 shell. It is a point-in-time sample: it never refreshes on its own. The OS
-figures arrive a moment after the counted ones; if a selection or READONLY mode
-holds the report pane when they do, the shown text stays as it is and the new
-figures appear once the selection clears or READONLY ends, so a selection is
-never wiped while you copy it. Pressing `R` always shows a fresh sample.
+figures arrive a moment after the counted ones; if a selection, a mouse press or
+drag that may start one, or READONLY mode holds the report pane when they do,
+the shown text stays as it is and the new figures appear once the button is
+released with nothing selected, the selection clears, or READONLY ends, so a
+selection is never wiped while you make or copy it. Pressing `R` always shows a fresh sample.
 
 | Section | What it shows |
 | --- | --- |
@@ -401,8 +402,10 @@ log line. The OS figures, thread list and process walk run on a
 `sampling the OS figures...` until it answers. At most one walk runs at a time:
 a refresh cancels the running walk, which checks for cancellation before each
 pane shell and between processes, and the newest refresh's walk starts when it
-answers; intermediate refreshes are dropped. Child lists are read only up to the
-64-process limit. A pane shell is checked against the start time recorded when
+answers; intermediate refreshes are dropped. On macOS and Linux a child list is
+parsed as it is read and reading stops at the 64-process limit. Windows reads one
+system-wide process snapshot, which the parent lookup needs, and takes at most 64
+children per pane from it. A pane shell is checked against the start time recorded when
 its pane spawned it, before and again after its tree is read: a different start
 time is reported as exited, and a start time that cannot be read is reported as
 `not available (shell identity unverified)`, so a reused pid is never described

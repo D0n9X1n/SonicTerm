@@ -352,19 +352,24 @@ impl App {
         self.render_or_defer_memory_report();
     }
 
-    /// Show the current report unless a selection or copy mode holds the report pane.
+    /// Show the current report unless a selection, a selection gesture, or copy mode holds the pane.
     ///
-    /// A held pane keeps its text, so a selection is never wiped while the user copies it; the
-    /// report waits in `current` and [`Self::apply_deferred_memory_report`] shows it later.
+    /// A held pane keeps its text, so a selection is never wiped while the user copies it. A press
+    /// starts an empty selection with a live gesture before any motion, so the button being down or
+    /// a gesture owning the pointer also holds the pane; otherwise the first drag motion would find
+    /// the history it anchored to replaced. The report waits in `current` and
+    /// [`Self::apply_deferred_memory_report`] shows it later.
     fn render_or_defer_memory_report(&mut self) {
         let held = self.memory_report_window_id().and_then(|id| self.windows.get(&id)).is_some_and(
             |window| {
                 window.copy_mode.is_some()
+                    || window.mouse_down
+                    || window.pointer_gesture.is_some()
                     || window.selection.as_ref().is_some_and(|selection| !selection.is_empty())
             },
         );
         if held {
-            // When: `held`, a selection or copy mode owns the pane, so the new text waits.
+            // When: `held`, a selection, gesture or copy mode owns the pane, so the new text waits.
             self.memory_report.render_deferred = true;
             return;
         }
@@ -372,7 +377,7 @@ impl App {
         self.render_current_memory_report();
     }
 
-    /// Show a report that waited for a selection or copy mode, once neither holds the pane.
+    /// Show a report that waited for a selection, gesture or copy mode, once none holds the pane.
     ///
     /// Runs once per event-loop turn and does nothing unless a report is waiting.
     pub(super) fn apply_deferred_memory_report(&mut self) {

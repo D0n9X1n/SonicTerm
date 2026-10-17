@@ -291,3 +291,53 @@ fn a_spawned_child_is_listed_and_an_exited_one_is_absent() {
     assert!(!found.name.is_empty());
     assert!(sample_process(child_pid).is_none(), "an exited, reaped child samples as absent");
 }
+
+/// A generated children stream `"1 2 3 … end "` that counts the bytes it hands out.
+struct SyntheticPids {
+    next: u32,
+    end: u32,
+    pending: Vec<u8>,
+    served: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl std::io::Read for SyntheticPids {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        while self.pending.len() < buffer.len() && self.next <= self.end {
+            self.pending.extend_from_slice(format!("{} ", self.next).as_bytes());
+            self.next += 1;
+        }
+        let count = buffer.len().min(self.pending.len());
+        buffer[..count].copy_from_slice(&self.pending[..count]);
+        self.pending.drain(..count);
+        self.served.set(self.served.get() + count);
+        Ok(count)
+    }
+}
+
+/// Contract: a children list of a million pids is parsed incrementally and reading stops at the
+/// limit, so the bytes consumed stay a few buffer reads, not the whole stream.
+#[test]
+fn read_pids_stops_at_the_limit_on_a_huge_stream() {
+    let served = std::rc::Rc::new(std::cell::Cell::new(0));
+    let stream = SyntheticPids {
+        next: 1,
+        end: 1_000_000,
+        pending: Vec::new(),
+        served: std::rc::Rc::clone(&served),
+    };
+    let reader = std::io::BufReader::with_capacity(64, stream);
+    let pids = read_pids(reader, 65, &AtomicBool::new(false));
+    assert_eq!(pids, (1..=65).collect::<Vec<u32>>());
+    assert!(served.get() < 1_024, "read {} bytes for 65 pids", served.get());
+}
+
+/// Contract: tokens that are not decimal `u32` pids are skipped, the last token is kept without a
+/// trailing separator, and a set cancel flag reads nothing.
+#[test]
+fn read_pids_skips_invalid_tokens_and_honours_cancel() {
+    let text = "12 x7 99999999999 4294967296 4294967295\n\t8";
+    let pids = read_pids(text.as_bytes(), 64, &AtomicBool::new(false));
+    assert_eq!(pids, vec![12, 4_294_967_295, 8]);
+    assert!(read_pids("1 2 3".as_bytes(), 64, &AtomicBool::new(true)).is_empty());
+    assert_eq!(read_pids("1 2 3".as_bytes(), 0, &AtomicBool::new(false)), Vec::<u32>::new());
+}

@@ -259,25 +259,61 @@ fn report_selection(app: &App, report_id: WindowId) -> Selection {
         .with_content_fingerprint(grid)
 }
 
-/// Contract: every report replacement invalidates the window's retained frame, so an equal-length
-/// report whose changed rows keep the same viewport is never planned as an unchanged frame.
+/// A 200-line report whose row 5 reads `marker`; every report from this has the same length.
+fn report_with_row_five(marker: &str) -> String {
+    (0..200)
+        .map(|line| {
+            if line == 5 {
+                format!("row 005 {marker}\n")
+            } else {
+                format!("row {line:03} same\n")
+            }
+        })
+        .collect()
+}
+
+/// Contract: replacing the report with one of equal height that differs only in a row the
+/// scrolled-back view shows from history is never planned as `Noop`. The replacement marks only
+/// live rows dirty, all off screen, so the real planner draws nothing against a retained frame;
+/// the replacement must drop that frame. Runs the planner on the exact state the feed leaves.
 #[test]
-fn an_equal_length_replacement_invalidates_the_retained_frame() {
-    use crate::app::redraw::RedrawCause;
+fn a_history_row_replacement_is_not_planned_as_noop() {
     let (mut app, _, report_id) = app_with_report();
-    let first = format!("{}figure 111.1 MB\n", "header\n".repeat(60));
-    let second = format!("{}figure 222.2 MB\n", "header\n".repeat(60));
-    assert_eq!(first.len(), second.len());
-    assert!(app.feed_memory_report(&first));
-    let view_before = app.windows[&report_id].panes[&report_pane(&app, report_id)].viewport_top_abs;
-    let visibility = app.windows[&report_id].redraw.cause_generation(RedrawCause::Visibility);
-    assert!(app.feed_memory_report(&second));
-    let view_after = app.windows[&report_id].panes[&report_pane(&app, report_id)].viewport_top_abs;
-    assert_eq!(view_before, view_after, "the viewport is unchanged by an equal-length report");
+    assert!(app.feed_memory_report(&report_with_row_five("AAAA")));
+    let drops_before = app.windows[&report_id].redraw.retained_frame_drops;
+    assert!(app.feed_memory_report(&report_with_row_five("BBBB")));
+    let retained = app.windows[&report_id].redraw.retained_frame_drops == drops_before;
+
+    let pane_id = report_pane(&app, report_id);
+    let pane = &app.windows[&report_id].panes[&pane_id];
+    let parser = pane.parser.clone();
+    let guard = parser.lock();
+    let grid = guard.grid();
+    let scrollback_len = grid.scrollback_len() as u64;
+    let view_top = pane.resolved_view_top(grid);
+    let changed_row: u64 = 5;
+    assert!(changed_row < scrollback_len, "the changed row is in history");
     assert!(
-        app.windows[&report_id].redraw.cause_generation(RedrawCause::Visibility) > visibility,
-        "the replacement must force a full frame, not a Noop"
+        (view_top..view_top + u64::from(grid.rows)).contains(&changed_row),
+        "the changed row is inside the visible viewport"
     );
+    let mut selection = Selection::new(5, 0);
+    selection.extend(5, 11);
+    assert!(selection.as_text(grid).contains("BBBB"), "the grid holds the new row");
+    let shape = sonicterm_gpu::ReplacementShape {
+        cols: grid.cols,
+        rows: grid.rows,
+        scrollback_len,
+        viewport_top_abs: (view_top < scrollback_len).then_some(view_top),
+        dirty_rows: grid.dirty_rows().collect(),
+    };
+    drop(guard);
+    assert!(
+        sonicterm_gpu::__replacement_plans_noop(&shape, true),
+        "this shape is the reported failure: a retained frame plans it as Noop"
+    );
+    assert!(!retained, "the replacement must drop the retained frame");
+    assert!(!sonicterm_gpu::__replacement_plans_noop(&shape, retained));
 }
 
 /// Contract: a READONLY report window applies its READONLY policy before the gate, so a redirect
@@ -389,5 +425,58 @@ fn a_late_sample_waits_for_the_selection_then_applies() {
     assert_eq!(app.memory_report.last_text, held, "copy mode also holds the pane");
     app.windows.get_mut(&report_id).unwrap().copy_mode = None;
     app.apply_deferred_memory_report();
+    assert!(app.memory_report.last_text.as_deref().is_some_and(|text| text.contains("uptime 2s")));
+}
+
+/// Contract: a press in the report starts an empty selection whose gesture owns the pointer. OS
+/// figures that arrive then (or a deferred report drained then) wait, so the first drag motion
+/// still extends against the text it pressed on; a plain click applies them at release, and a
+/// drag keeps them waiting until its selection clears.
+#[test]
+fn a_sample_during_a_press_waits_for_the_gesture_to_end() {
+    let (mut app, report_id) = app_with_manual_report();
+    let pane_id = report_pane(&app, report_id);
+    let before = app.memory_report.last_text.clone();
+    let press = |app: &mut App| {
+        let window = app.windows.get_mut(&report_id).unwrap();
+        assert!(window.begin_local_selection(pane_id, (2, 0), 1));
+        window.mouse_down = true;
+        assert!(
+            window.selection.as_ref().is_some_and(Selection::is_empty),
+            "a press selects nothing"
+        );
+    };
+    let release = |app: &mut App| {
+        let window = app.windows.get_mut(&report_id).unwrap();
+        let modifiers = window.modifiers;
+        let _ =
+            crate::app::window_event::take_pointer_release(&mut window.pointer_gesture, modifiers);
+        window.mouse_down = false;
+    };
+
+    press(&mut app);
+    assert_eq!(app.__test_answer_memory_sample(), Some(1));
+    app.apply_deferred_memory_report();
+    assert!(app.memory_report.render_deferred, "the pressed pane holds the new figures");
+    assert_eq!(app.memory_report.last_text, before);
+    assert!(app.windows.get_mut(&report_id).unwrap().extend_local_selection_to_cell((2, 10)));
+    let dragged = app.windows[&report_id].selection.expect("the drag extended the selection");
+    assert!(!dragged.is_empty());
+    assert_eq!(app.memory_report.last_text, before, "the old text stays until release");
+    release(&mut app);
+    app.apply_deferred_memory_report();
+    assert_eq!(app.windows[&report_id].selection, Some(dragged), "a dragged selection is kept");
+    assert_eq!(app.memory_report.last_text, before, "and the figures wait for it to clear");
+
+    app.windows.get_mut(&report_id).unwrap().selection = None;
+    app.refresh_memory_report();
+    let refreshed = app.memory_report.last_text.clone();
+    press(&mut app);
+    assert_eq!(app.__test_answer_memory_sample(), Some(2));
+    app.apply_deferred_memory_report();
+    assert_eq!(app.memory_report.last_text, refreshed, "held while the button is down");
+    release(&mut app);
+    app.apply_deferred_memory_report();
+    assert!(!app.memory_report.render_deferred, "a plain click applies the figures at release");
     assert!(app.memory_report.last_text.as_deref().is_some_and(|text| text.contains("uptime 2s")));
 }

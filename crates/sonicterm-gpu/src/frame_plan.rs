@@ -333,6 +333,70 @@ pub(crate) struct FrameFacts {
     pub previous_recolor: RecolorRecord,
 }
 
+/// One pane's state after its whole content was replaced in place, as the planner reads it.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacementShape {
+    /// Grid columns.
+    pub cols: u16,
+    /// Grid rows on screen.
+    pub rows: u16,
+    /// History rows above the live screen.
+    pub scrollback_len: u64,
+    /// Absolute top row of a scrolled-back view, or `None` when following the live screen.
+    pub viewport_top_abs: Option<u64>,
+    /// Live rows the replacement marked dirty.
+    pub dirty_rows: Vec<usize>,
+}
+
+/// Test hook, not a supported API: whether the real planner draws nothing for `shape`.
+///
+/// Plans the pane once at revision 1 and again at revision 2 after the replacement. `retained`
+/// passes the first plan's key as the previous frame, as a renderer that kept its retained
+/// frame does; without it the second plan is a first frame. Lets a crate without a GPU check
+/// that an in-place replacement it performs is never planned as `Noop`.
+#[doc(hidden)]
+#[must_use]
+pub fn __replacement_plans_noop(shape: &ReplacementShape, retained: bool) -> bool {
+    let cell_h = 20.0;
+    let rows_px = u32::from(shape.rows) * 20 + 4;
+    let facts = FrameFacts {
+        window: WindowIdentity {
+            width: u32::from(shape.cols) * 10 + 4,
+            height: rows_px,
+            ..Default::default()
+        },
+        cell_w: 10.0,
+        cell_h,
+        padding: [2.0; 4],
+        vertical_ink_pad: 0.0,
+        scrollbar_mode: ScrollbarMode::Auto,
+        degraded: false,
+        tab_bar_top: None,
+        scale: 1.0,
+        previous_recolor: RecolorRecord::default(),
+    };
+    let input = |revision, dirty_rows: Vec<usize>| PaneMetadata {
+        id: 1,
+        revision,
+        dirty_generation: 0,
+        rect: PixelRect { x: 0, y: 0, w: u32::from(shape.cols) * 10 + 4, h: rows_px },
+        cols: shape.cols,
+        rows: shape.rows,
+        scrollback_len: shape.scrollback_len,
+        viewport_top_abs: shape.viewport_top_abs,
+        is_active: true,
+        is_alt: false,
+        scrollbar_alpha: 0.0,
+        dirty_rows,
+        row_ink: Vec::new(),
+    };
+    let before = FramePlan::build(facts.clone(), [input(1, Vec::new())], None);
+    let previous = retained.then_some(&before.key);
+    let after = FramePlan::build(facts, [input(2, shape.dirty_rows.clone())], previous);
+    after.mode == RenderMode::Noop
+}
+
 /// Visible-pane metadata contains row indices but no cells or hidden-history payloads.
 #[derive(Debug, Clone)]
 pub(crate) struct PaneMetadata {
