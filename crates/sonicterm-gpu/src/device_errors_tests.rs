@@ -311,6 +311,8 @@ const NOT_GPU_WORK: &[&str] = &[
     "set_subpixel_aa_mode",
     "set_theme",
     "set_theme_with_opacity",
+    // Reads the adapter's fixed backend, vendor and device ids for the OS graphics figure.
+    "dxgi_adapter_ids",
 ];
 
 /// Receivers and fields that hold a wgpu handle: the renderer's own, a candidate

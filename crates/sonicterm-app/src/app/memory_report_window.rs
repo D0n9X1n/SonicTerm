@@ -591,6 +591,7 @@ impl App {
     /// Gather the counted figures and the row identities for one report.
     pub(super) fn collect_memory_report(&self) -> MemoryReport {
         let (snapshot, measures) = self.build_memory_snapshot_with_panes();
+        let graphics = self.build_graphics_reading();
         let retention: HashMap<(WindowId, u64), _> = measures
             .iter()
             .map(|measure| ((measure.window_id, measure.pane_id), measure.retention))
@@ -696,6 +697,7 @@ impl App {
                 copy_all_hint: COPY_ALL_HINT,
             },
             snapshot,
+            graphics,
             windows,
             panes,
             roots,

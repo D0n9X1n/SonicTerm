@@ -16,6 +16,9 @@ work so config-load failures and panics are visible.
 - `process_memory.rs` - the fixed OS figures the periodic `memory snapshot` line reports.
 - `process_report.rs` - Memory Usage report OS figures: footprint and peak, threads, and a
   bounded, cancellable child-process walk per pane shell.
+- `graphics_memory.rs` - the OS graphics figure, labelled by source: macOS `TASK_VM_INFO`
+  graphics ledgers (read only where the kernel's returned count covers them), Windows DXGI
+  dedicated and shared usage of the renderer's adapter, unavailable elsewhere.
 
 ## Local gate
 ```bash

@@ -47,6 +47,8 @@ pub mod device_errors;
 /// Exact caret, selection, scroll, clip, and pointer geometry of the palette
 /// and search query fields, measured from the same shaped run they paint.
 pub mod field_geometry;
+/// Requested GPU bytes per renderer, by resource class: requests, not driver residency.
+pub mod graphics_ledger;
 /// Quad pipeline (`QuadInstance` + WGSL): cursor blocks, selection tint,
 /// rounded chrome, underlines, focus borders.
 pub mod quad;

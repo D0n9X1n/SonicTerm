@@ -1315,3 +1315,42 @@ fn a_window_of_empty_draws_still_shrinks_the_buffers() {
     assert_eq!(next.red_columns, vec![4]);
     assert_eq!(harness.index_buffer(), build_indices(1));
 }
+
+/// Contract: the present pipeline records its own buffer requests at the real creation sites:
+/// attaching reports all three buffers, a growth replaces the grown buffer, the covered-window
+/// trim's reset returns both to their initial size, and the ledger then holds exactly the
+/// pipeline's current request; releasing everything, as the renderer's drop does, reads zero.
+#[test]
+fn present_buffer_growth_and_reset_move_the_graphics_ledger() {
+    use crate::graphics_ledger::{GraphicsClass, GraphicsLedgerHandle};
+    let device = uniform_test_device();
+    let mut pipeline = WeztermPipeline::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb, 4);
+    let ledger = GraphicsLedgerHandle::default();
+    pipeline.attach_graphics_ledger(ledger.clone());
+    let uniform_bytes = std::mem::size_of::<ShaderUniform>() as u64;
+    let present =
+        |ledger: &GraphicsLedgerHandle| ledger.snapshot().class(GraphicsClass::PresentBuffers);
+    let initial = present(&ledger);
+    assert_eq!(initial.live_bytes, pipeline.present_buffer_bytes() + uniform_bytes);
+    assert_eq!(initial.live_resources, 3);
+
+    pipeline.ensure_capacity(&device, 4 * 4 * 64, 6 * 64);
+    let grown = present(&ledger);
+    assert_eq!(grown.live_bytes, pipeline.present_buffer_bytes() + uniform_bytes);
+    assert!(grown.live_bytes > initial.live_bytes);
+    assert_eq!(grown.created_resources, 5, "three at attach, then one vertex and one index growth");
+
+    let released = pipeline.reset_to_initial(&device);
+    let reset = present(&ledger);
+    assert_eq!(reset.live_bytes, initial.live_bytes);
+    assert_eq!(
+        grown.live_bytes - reset.live_bytes,
+        released,
+        "the trim's figure matches the ledger"
+    );
+
+    ledger.release_all();
+    let dropped = present(&ledger);
+    assert_eq!((dropped.live_bytes, dropped.live_resources), (0, 0));
+    assert_eq!(dropped.created_bytes, dropped.released_bytes);
+}

@@ -487,10 +487,12 @@ impl GpuRenderer {
                     }
                     SurfaceRecovery::Reconfigure => {
                         self.surface.configure(&self.device, &self.config);
+                        self.record_surface_request();
                     }
                     SurfaceRecovery::Recreate => {
                         self.surface = self.instance.create_surface(self.window.clone())?;
                         self.surface.configure(&self.device, &self.config);
+                        self.record_surface_request();
                     }
                 }
                 return Ok(self.finish_surface_retry(reason));
@@ -610,10 +612,14 @@ impl GpuRenderer {
                 SurfaceRecovery::Keep => {
                     // When: `Keep` selects timeout or occlusion, no reconfiguration is needed.
                 }
-                SurfaceRecovery::Reconfigure => self.surface.configure(&self.device, &self.config),
+                SurfaceRecovery::Reconfigure => {
+                    self.surface.configure(&self.device, &self.config);
+                    self.record_surface_request();
+                }
                 SurfaceRecovery::Recreate => {
                     self.surface = self.instance.create_surface(self.window.clone())?;
                     self.surface.configure(&self.device, &self.config);
+                    self.record_surface_request();
                 }
             }
         }

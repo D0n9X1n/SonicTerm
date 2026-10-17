@@ -32,10 +32,12 @@ libc = "0.2"
 # counters, `Threading` the process and thread handles, `Memory` the
 # address-space walk that produces the reserved figure those counters omit,
 # and `Diagnostics_ToolHelp` the process and thread snapshots the Memory Usage
-# report walks for child processes and thread names.
+# report walks for child processes and thread names. `Graphics_Dxgi` reads the renderer
+# adapter's dedicated and shared video memory usage.
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Memory",

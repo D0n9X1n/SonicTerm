@@ -284,9 +284,9 @@ fn surface_acquisition_wires_every_reason_and_drops_suboptimal_before_recovery()
     let finish = acquire.find("returnOk(self.finish_surface_retry(reason));").unwrap();
     assert!(clear < recover && recover < finish);
     assert!(acquire.contains(
-        "SurfaceRecovery::Reconfigure=>{self.surface.configure(&self.device,&self.config);}"
+        "SurfaceRecovery::Reconfigure=>{self.surface.configure(&self.device,&self.config);self.record_surface_request();}"
     ));
-    assert!(acquire.contains("SurfaceRecovery::Recreate=>{self.surface=self.instance.create_surface(self.window.clone())?;self.surface.configure(&self.device,&self.config);}"));
+    assert!(acquire.contains("SurfaceRecovery::Recreate=>{self.surface=self.instance.create_surface(self.window.clone())?;self.surface.configure(&self.device,&self.config);self.record_surface_request();}"));
     assert!(!acquire.contains("finish_successful_frame") && !acquire.contains("queue.present("));
 }
 
@@ -441,7 +441,7 @@ fn surface_probe_native_calls_and_retained_key_invalidation_stay_inside_the_gate
     );
     assert!(probe.contains("CurrentSurfaceTexture::Success(frame)=>{drop(frame);None}"));
     assert!(probe.contains("CurrentSurfaceTexture::Suboptimal(frame)=>{drop(frame);Some(SurfaceRetryReason::Suboptimal)}"));
-    assert!(probe.contains("SurfaceRecovery::Recreate=>{self.surface=self.instance.create_surface(self.window.clone())?;self.surface.configure(&self.device,&self.config);}"));
+    assert!(probe.contains("SurfaceRecovery::Recreate=>{self.surface=self.instance.create_surface(self.window.clone())?;self.surface.configure(&self.device,&self.config);self.record_surface_request();}"));
     for forbidden in [
         "create_command_encoder",
         "queue.submit",

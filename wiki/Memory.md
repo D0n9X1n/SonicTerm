@@ -313,6 +313,59 @@ heap buffer, while any FreeType face or HarfBuzz blob uses it; faces and blobs o
 it share that buffer instead of FreeType copying the colour table per face. See
 [Rendering and Fonts](Rendering-and-Fonts).
 
+### Graphics memory
+
+Graphics memory is reported two ways, and the two answer different questions.
+
+**Requested bytes, per renderer.** Each renderer keeps a graphics ledger
+(`crates/sonicterm-gpu/src/graphics_ledger.rs`) of what it asked the device for,
+by class: the surface (width x height x bytes per pixel x drawable count), the
+retained frame texture, the glyph atlas texture, the image atlas texture, and
+the present pipeline's vertex, index and uniform buffers. The ledger is updated
+where those resources are created, rebuilt, resized, trimmed and dropped, so a
+covered-window trim moves it by exactly what it gave back, and a dropped
+renderer's ledger reads zero. The drawable count follows the configured frame
+latency as the backend applies it. It is exact on Metal, where wgpu clamps
+latency to `1..=2` and sets `maximumDrawableCount` to latency + 1 (latency 2
+means 3 drawables, latency 1 means 2), and on DX12, which uses latency + 1 back
+buffers, at most 16. It is an **estimate** elsewhere, and marked as one: Vulkan
+clamps latency to the surface's image-count range, which wgpu does not expose,
+and may create more images than it requests, so the ledger records latency + 1;
+GL ignores latency, so the ledger records double buffering, 2, whatever the
+latency.
+
+Each live renderer's ledger also keeps the bytes and resources it has created
+and released per class, which the `memory snapshot` line reports. When a
+renderer drops, it logs one `renderer graphics teardown` record with its live,
+created and released totals before releasing its ledger, so a closed window's
+history stays in the log.
+
+These are **requests**. The driver decides physical residency: it may pad,
+compress, defer the release of a dropped resource, or keep drawables in the
+compositor. The ledger does not count the legacy text and quad pipelines' instance
+buffers, which no renderer builds in production, or the test-only frame readback
+buffer.
+
+**What the OS charges the process.** Each platform's figure is labelled as what it is:
+
+| Platform | Source | Figures |
+| --- | --- | --- |
+| macOS | `task_info(TASK_VM_INFO)`, revision 3 and later | `ledger_tag_graphics_footprint` (graphics memory charged to the physical footprint) and `ledger_tag_graphics_nofootprint` (tagged to the process, not charged to it). These are the kernel's ledgers, not necessarily the split the `footprint` tool prints; IOSurface mappings appear in neither. |
+| Windows | `IDXGIAdapter3::QueryVideoMemoryInfo` on the renderer's DXGI adapter | `LOCAL` (dedicated) and `NON_LOCAL` (shared) current usage, separately. Only when the renderer presents through DX12; under the GDI software presenter there is no adapter to ask. wgpu identifies its adapter by PCI vendor and device id, which name a GPU model, so when two adapters share those ids the figure is not available, with that reason, rather than possibly another GPU's usage. |
+| Linux | none | not available |
+
+The macOS structure is declared by hand, so it is checked twice. The header
+declares it under `#pragma pack(push, 4)`, so the declaration is packed to four
+bytes, and its size (372 bytes, `TASK_VM_INFO_COUNT` 93) and the offsets of the
+fields read are asserted at compile time against figures measured from the SDK
+header. At run time a field is read only when the count the kernel returns
+covers its last byte. An older kernel leaves the field `unsupported`, never a
+wrong number or a zero.
+
+A gap between the OS figure and the requested total is not by itself a missing
+resource: driver padding, deferred release and compositor-held surfaces all land
+in it.
+
 ### Aggregate snapshot
 
 Set the log level to `info` for one `memory snapshot` at most every 30 s:
@@ -393,11 +446,11 @@ selection is never wiped while you make or copy it. Pressing `R` always shows a 
 
 | Section | What it shows |
 | --- | --- |
-| `PROCESS (from the OS)` | The figure the platform's own monitor shows, with its peak, plus resident, private committed and virtual figures. macOS reports physical footprint and lifetime peak footprint; Windows reports private commit and peak commit; Linux reports resident set (`VmRSS`) and peak RSS (`VmHWM`). A figure the platform does not expose prints `not available`, never `0`. `GPU` prints `not available yet`. |
+| `PROCESS (from the OS)` | The figure the platform's own monitor shows, with its peak, plus resident, private committed and virtual figures. macOS reports physical footprint and lifetime peak footprint; Windows reports private commit and peak commit; Linux reports resident set (`VmRSS`) and peak RSS (`VmHWM`). A figure the platform does not expose prints `not available`, never `0`. `GPU (OS)` shows the OS graphics figure under its own name (macOS kernel graphics ledgers, Windows DXGI dedicated and shared usage), or says no query applies; `GPU requested` is every renderer's requested total, labelled as a request (see [Graphics memory](#graphics-memory)). |
 | `ACCOUNTED BY SONICTERM` | Renderer and pane totals SonicTerm counts itself, from the same sampling cycle as the `memory snapshot` log line. |
 | `DIFFERENCE` | The OS footprint minus SonicTerm's counted capacity, signed and never clamped. It is a diagnostic, not a reconciliation: allocator slack, GPU memory, fonts and untracked allocations land here, and the figures can overlap. |
 | `SAMPLE` | Panes measured and panes skipped because their lock was held (`busy, skipped`), so a partial total is never shown as the whole session. |
-| `WINDOWS / RENDERERS` | Each window's renderer by part (glyph atlas with size, entries and fit, row caches, scratch buffers), the report window's own renderer, and any warm renderer. |
+| `WINDOWS / RENDERERS` | Each window's renderer by part (glyph atlas with size, entries and fit, row caches, scratch buffers), the report window's own renderer, and any warm renderer. Under each renderer, `GPU requested` lists its requested GPU bytes and resource count by class: surface, frame texture, glyph atlas, image atlas and present buffers. |
 | `PANES` | Each pane by tab title, split into grid visible, history and alternate, parser, hyperlinks, inline media, and PTY output and input. The per-pane rows sum to the pane total. |
 | `THREADS` | Thread count and names. Threads share the process's memory and hold none of their own. |
 | `CHILD PROCESSES` | Each pane shell and its descendants with the OS figure for each (`footprint`, `private` or `RSS`), at most 64 descendants per pane. These are separate processes, not part of SonicTerm's footprint. A process that left its shell's tree, such as a daemonized tmux server, is not listed, and WSL or remote processes are not visible. |
@@ -499,6 +552,8 @@ aggregate understates the session.
 | Memory Usage report model, rendering and action routing | `crates/sonicterm-app/src/app/memory_report.rs` |
 | Memory Usage report window, refresh and OS sampling worker | `crates/sonicterm-app/src/app/memory_report_window.rs` |
 | OS footprint, peak, threads and child-process walk | `crates/sonicterm-logging/src/process_report.rs` |
+| OS graphics figure (macOS kernel ledgers, Windows DXGI usage) | `crates/sonicterm-logging/src/graphics_memory.rs` |
+| Per-renderer requested GPU bytes by class | `crates/sonicterm-gpu/src/graphics_ledger.rs` |
 | Inline-media limits | `crates/sonicterm-app/src/app/media.rs` |
 | Grid and hyperlink limits | `crates/sonicterm-grid/src/{grid,hyperlink}.rs` |
 | Parser capture limits | `crates/sonicterm-vt/src/vt.rs`, `crates/sonicterm-vt/src/vt/staging.rs` |

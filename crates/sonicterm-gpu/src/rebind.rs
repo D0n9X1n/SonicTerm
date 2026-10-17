@@ -287,6 +287,11 @@ impl GpuRenderer {
         self.frame_blitter = frame_blitter;
         self.glyph_upload = glyph_upload;
         self.image_upload = image_upload;
+        // The candidate's resources replace the old device's in the ledger, slot by slot.
+        self.present_pipeline.attach_graphics_ledger(self.graphics_ledger.clone());
+        self.record_frame_texture_request();
+        self.record_glyph_atlas_request();
+        self.record_image_atlas_request();
         self.config.width = width;
         self.config.height = height;
         self.config.present_mode =
@@ -300,6 +305,7 @@ impl GpuRenderer {
         self.reset_after_rebind();
         commit_scope.set_operation("recovery.configure");
         self.surface.configure(&self.device, &self.config);
+        self.record_surface_request();
         Ok(self.device_errors.gate())
     }
 

@@ -839,7 +839,11 @@ impl super::App {
             // built once here and shared, so neither consumer builds it twice.
             let snapshot = self.build_memory_snapshot();
             if info_enabled {
-                memory_snapshot::emit_memory_snapshot(&snapshot, self.last_memory_totals);
+                memory_snapshot::emit_memory_snapshot_with_graphics(
+                    &snapshot,
+                    self.last_memory_totals,
+                    &self.build_graphics_reading(),
+                );
                 self.last_memory_totals = Some(snapshot.totals());
             }
             if let Some(recorder) = &self.breadcrumb_recorder {

@@ -1,4 +1,7 @@
+use super::super::memory_snapshot::{GraphicsReading, RendererGraphics};
 use sonicterm_cfg::keymap::{BroadcastScope, Direction, ScrollAction};
+use sonicterm_gpu::graphics_ledger::{GraphicsLedgerSnapshot, GraphicsTally};
+use sonicterm_logging::graphics_memory::{GraphicsMemory, GraphicsSource};
 use sonicterm_logging::process_memory::ProcessMemory;
 use sonicterm_logging::process_report::ChildProcess;
 
@@ -44,6 +47,37 @@ fn renderer(label: &str) -> RendererSummary {
     }
 }
 
+/// One live tally of `mib` MiB standing for `resources` GPU resources.
+fn tally(mib: u64, resources: u64) -> GraphicsTally {
+    GraphicsTally {
+        live_bytes: mib * MIB as u64,
+        live_resources: resources,
+        created_bytes: mib * MIB as u64,
+        created_resources: resources,
+        ..GraphicsTally::default()
+    }
+}
+
+/// The fixture's graphics: macOS kernel ledgers and one renderer's requests, a 3-drawable surface,
+/// a frame texture, a 16 MiB glyph atlas, an empty image atlas and three present buffers.
+fn graphics(label: &str) -> GraphicsReading {
+    GraphicsReading {
+        os: GraphicsMemory {
+            footprint: MemoryMetric::Bytes(287 * MIB as u64),
+            nofootprint: MemoryMetric::Bytes(10 * MIB as u64),
+            ..GraphicsMemory::unavailable(GraphicsSource::TaskVmInfo)
+        },
+        renderers: vec![RendererGraphics {
+            label: label.to_string(),
+            role: "visible",
+            ledger: GraphicsLedgerSnapshot {
+                classes: [tally(18, 3), tally(6, 1), tally(16, 1), tally(0, 1), tally(1, 3)],
+                surface_estimated: false,
+            },
+        }],
+    }
+}
+
 /// A fixed two-pane report with its OS figures sampled, independent of the host.
 fn fixture() -> MemoryReport {
     let panes = [retention(4), retention(1)];
@@ -77,6 +111,7 @@ fn fixture() -> MemoryReport {
             live_renderers: 1,
             live_fg_probe_workers: 0,
         },
+        graphics: graphics("WindowId(1)"),
         windows: vec![WindowRow {
             label: "window 1".to_string(),
             is_report: false,
@@ -139,7 +174,8 @@ PROCESS (from the OS)
   resident (RSS)        600.0 MB
   private committed     not available
   virtual               400.0 GB   (reserved address space, not consumption)
-  GPU                   not available yet
+  GPU (OS)              graphics in footprint 287.0 MB, graphics not in footprint 10.0 MB   (kernel graphics ledgers)
+  GPU requested         41.0 MB   9 resources   (asked of the device; the driver decides what it keeps)
 
 ACCOUNTED BY SONICTERM    27.0 MB
   renderers               20.5 MB
@@ -160,6 +196,12 @@ WINDOWS / RENDERERS
     vertex scratch        0.5 MB   1 buffers
     software frame        0.0 MB   0 frames
     chrome cache          0.0 MB   0 entries
+    GPU requested         41.0 MB   9 resources
+      surface             18.0 MB   3 resources
+      frame_texture       6.0 MB   1 resources
+      glyph_atlas         16.0 MB   1 resources
+      image_atlas         0.0 MB   1 resources
+      present_buffers     1.0 MB   3 resources
 
 PANES
   tab 1 "zsh" pane 1                      total 4.8 MB
@@ -314,4 +356,71 @@ fn report_keys_match_r_escape_and_the_copy_all_chord() {
     assert_eq!(report_key(&chords(&[COPY_ALL_CHORD])), Some(ReportKey::CopyAll));
     assert_eq!(report_key(&chords(&["ctrl+r"])), None);
     assert_eq!(report_key(&chords(&["super+c"])), None);
+}
+
+/// Contract: a missing OS graphics figure prints `not available`, never `0.0 MB`: a platform or
+/// presenter with no query says so, and a source whose query did not answer names each figure as
+/// not available, while the requested total stays labelled as a request.
+#[test]
+fn a_missing_os_graphics_figure_prints_not_available_never_zero() {
+    let mut report = fixture();
+    report.graphics.os = GraphicsMemory::unavailable(GraphicsSource::None);
+    let text = report.render();
+    let row = text.lines().find(|line| line.starts_with("  GPU (OS)")).expect("GPU row");
+    assert!(row.ends_with("not available on this platform or presenter"), "{row}");
+    assert!(!row.contains("0.0 MB"), "{row}");
+
+    report.graphics.os = GraphicsMemory::unavailable(GraphicsSource::Dxgi);
+    let text = report.render();
+    let row = text.lines().find(|line| line.starts_with("  GPU (OS)")).expect("GPU row");
+    assert!(row.contains("dedicated (local) not available"), "{row}");
+    assert!(row.contains("shared (non-local) not available"), "{row}");
+    assert!(!row.contains("0.0 MB"), "{row}");
+    let requested = text.lines().find(|line| line.starts_with("  GPU requested")).expect("row");
+    assert!(requested.contains("asked of the device"), "{requested}");
+}
+
+/// Contract: a renderer the graphics reading did not sample prints `not sampled` for its GPU
+/// request instead of zero bytes.
+#[test]
+fn an_unsampled_renderer_prints_not_sampled_for_its_gpu_request() {
+    let mut report = fixture();
+    report.graphics.renderers.clear();
+    let text = report.render();
+    assert!(text.contains("    GPU requested         not sampled"), "{text}");
+}
+
+/// Contract: a surface whose drawable count the backend does not fix (Vulkan, GL) is labelled as
+/// estimated on its own row and in the requested total, so an estimate is never read as a request.
+#[test]
+fn an_estimated_surface_count_is_labelled_as_an_estimate() {
+    let mut report = fixture();
+    report.graphics.renderers[0].ledger.surface_estimated = true;
+    let text = report.render();
+    let total = text.lines().find(|line| line.starts_with("  GPU requested")).expect("row");
+    assert!(total.contains("surface counts are estimated"), "{total}");
+    let surface = text.lines().find(|line| line.trim_start().starts_with("surface ")).expect("row");
+    assert!(
+        surface.contains("(estimated: the backend does not fix its drawable count)"),
+        "{surface}"
+    );
+}
+
+/// Contract: when the OS query declined to answer (two DXGI adapters share the renderer's ids),
+/// the GPU row says why instead of printing figures or zeros.
+#[test]
+fn a_declined_os_query_states_its_reason() {
+    let mut report = fixture();
+    report.graphics.os = GraphicsMemory::unavailable_because(
+        GraphicsSource::Dxgi,
+        "two or more DXGI adapters share the renderer's vendor and device ids",
+    );
+    let text = report.render();
+    let row = text.lines().find(|line| line.starts_with("  GPU (OS)")).expect("GPU row");
+    assert!(
+        row.ends_with(
+            "not available: two or more DXGI adapters share the renderer's vendor and device ids"
+        ),
+        "{row}"
+    );
 }

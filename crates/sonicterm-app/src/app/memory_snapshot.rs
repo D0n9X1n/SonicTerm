@@ -53,6 +53,8 @@
 use std::fmt;
 
 use sonicterm_gpu::core::AllocatorSnapshot;
+use sonicterm_gpu::graphics_ledger::{GraphicsClass, GraphicsLedgerSnapshot};
+use sonicterm_logging::graphics_memory::{self, DxgiAdapterIds, GraphicsMemory, GraphicsSource};
 use sonicterm_logging::process_memory::{self, MemoryDelta, MemoryMetric, ProcessMemory};
 
 use super::retention::PaneRetention;
@@ -421,6 +423,112 @@ impl MemorySnapshot {
     }
 }
 
+/// One renderer's requested GPU bytes by class, with the identity [`RendererSummary`] uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RendererGraphics {
+    /// Window identifier for a visible renderer, or the pool slot for a warm one.
+    pub label: String,
+    /// `visible` or `warm`.
+    pub role: &'static str,
+    /// Requested bytes and counts by class: requests, not what the driver keeps resident.
+    pub ledger: GraphicsLedgerSnapshot,
+}
+
+impl RendererGraphics {
+    /// Render as one entry of the composed `graphics_renderers` field: `bytes/resources` per class.
+    fn render(&self) -> String {
+        let mut text = format!("{}[{}]", self.role, self.label);
+        for class in GraphicsClass::ALL {
+            let tally = self.ledger.class(class);
+            text.push_str(&format!(
+                " {}={}/{}",
+                class.as_str(),
+                tally.live_bytes,
+                tally.live_resources
+            ));
+        }
+        text + &format!(
+            " requested_total={}/{} surface_count={}",
+            self.ledger.live_bytes(),
+            self.ledger.live_resources(),
+            self.ledger.surface_count_kind()
+        )
+    }
+}
+
+/// Graphics memory for one sampling cycle: the OS figure and every renderer's requested bytes.
+///
+/// Kept beside [`MemorySnapshot`] rather than inside it: the OS figure and the ledger answer a
+/// different question (what the device holds) from the CPU storage the snapshot sums.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphicsReading {
+    /// What the OS charges this process for graphics memory, labelled by its source.
+    pub os: GraphicsMemory,
+    /// Every renderer's requested GPU bytes, visible and warm.
+    pub renderers: Vec<RendererGraphics>,
+}
+
+impl GraphicsReading {
+    /// A reading for a line emitted without sampling graphics: no OS figure, no renderer.
+    #[must_use]
+    pub fn not_sampled() -> Self {
+        Self { os: GraphicsMemory::unavailable(GraphicsSource::None), renderers: Vec::new() }
+    }
+
+    /// Requested GPU bytes every renderer holds now.
+    #[must_use]
+    pub fn requested_live_bytes(&self) -> u64 {
+        self.renderers
+            .iter()
+            .fold(0_u64, |total, renderer| total.saturating_add(renderer.ledger.live_bytes()))
+    }
+
+    /// GPU resources every renderer holds now.
+    #[must_use]
+    pub fn requested_live_resources(&self) -> u64 {
+        self.renderers
+            .iter()
+            .fold(0_u64, |total, renderer| total.saturating_add(renderer.ledger.live_resources()))
+    }
+
+    /// Every renderer's tallies summed per class: created and released totals across live renderers.
+    ///
+    /// A dropped renderer's totals are not here; its drop logs them once as
+    /// `renderer graphics teardown`.
+    #[must_use]
+    pub fn summed(&self) -> GraphicsLedgerSnapshot {
+        let mut total = GraphicsLedgerSnapshot::default();
+        for renderer in &self.renderers {
+            for (sum, tally) in total.classes.iter_mut().zip(renderer.ledger.classes) {
+                sum.live_bytes = sum.live_bytes.saturating_add(tally.live_bytes);
+                sum.live_resources = sum.live_resources.saturating_add(tally.live_resources);
+                sum.created_bytes = sum.created_bytes.saturating_add(tally.created_bytes);
+                sum.created_resources =
+                    sum.created_resources.saturating_add(tally.created_resources);
+                sum.released_bytes = sum.released_bytes.saturating_add(tally.released_bytes);
+                sum.released_resources =
+                    sum.released_resources.saturating_add(tally.released_resources);
+            }
+            total.surface_estimated |= renderer.ledger.surface_estimated;
+        }
+        total
+    }
+
+    /// Every renderer's ledger as one field, sorted like `renderers`; `none` when there is none.
+    #[must_use]
+    pub fn render_renderers(&self) -> String {
+        if self.renderers.is_empty() {
+            // When: `renderers` is empty, emit an explicit sentinel instead of a blank field.
+            return "none".to_string();
+        }
+        let mut renderers = self.renderers.iter().collect::<Vec<_>>();
+        renderers.sort_by(|left, right| {
+            (left.role, left.label.as_str()).cmp(&(right.role, right.label.as_str()))
+        });
+        renderers.into_iter().map(RendererGraphics::render).collect::<Vec<_>>().join("; ")
+    }
+}
+
 /// The previous sample's totals, kept to compute deltas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryTotals {
@@ -459,8 +567,21 @@ fn counted_delta(previous: Option<usize>, current: usize) -> MemoryDelta {
 /// A class omitted when empty makes successive samples structurally different,
 /// which defeats the diffing this line exists for and leaves a reader unable to
 /// tell "held nothing" from "stopped being reported".
+///
+/// The graphics fields carry no OS figure and no renderer ledger; the periodic line uses
+/// [`emit_memory_snapshot_with_graphics`].
 pub fn emit_memory_snapshot(snapshot: &MemorySnapshot, previous: Option<MemoryTotals>) {
-    emit_tagged_memory_snapshot(snapshot, previous, None);
+    emit_graphics_memory_snapshot(snapshot, previous, None, &GraphicsReading::not_sampled());
+}
+
+/// Emit the aggregate snapshot as [`emit_memory_snapshot`] does, with `graphics` in the trailing
+/// graphics fields: the OS graphics figure and every renderer's requested GPU bytes.
+pub fn emit_memory_snapshot_with_graphics(
+    snapshot: &MemorySnapshot,
+    previous: Option<MemoryTotals>,
+    graphics: &GraphicsReading,
+) {
+    emit_graphics_memory_snapshot(snapshot, previous, None, graphics);
 }
 
 /// A perf checkpoint a memory sample was taken for: which one, and which attempt at it.
@@ -496,13 +617,25 @@ fn snapshot_trimmed(snapshot: &MemorySnapshot) -> bool {
     snapshot.renderers.iter().any(|renderer| renderer.trimmed)
 }
 
-/// Emit the aggregate snapshot, tagged with the perf checkpoint it was taken for when `checkpoint`
-/// is set. A periodic sample passes `None` and carries none of the checkpoint or trim fields; a
-/// tagged one carries the trim fields only in a build with the trim hook.
+/// Emit a tagged snapshot with no graphics reading, as the checkpoint tests compare it.
+#[cfg(test)]
 fn emit_tagged_memory_snapshot(
     snapshot: &MemorySnapshot,
     previous: Option<MemoryTotals>,
     checkpoint: Option<CheckpointTag<'_>>,
+) {
+    emit_graphics_memory_snapshot(snapshot, previous, checkpoint, &GraphicsReading::not_sampled());
+}
+
+/// Emit the aggregate snapshot, tagged with the perf checkpoint it was taken for when `checkpoint`
+/// is set. A periodic sample passes `None` and carries none of the checkpoint or trim fields; a
+/// tagged one carries the trim fields only in a build with the trim hook. The graphics fields
+/// come last, after every field an earlier version of this line carried, in the same order.
+fn emit_graphics_memory_snapshot(
+    snapshot: &MemorySnapshot,
+    previous: Option<MemoryTotals>,
+    checkpoint: Option<CheckpointTag<'_>>,
+    graphics: &GraphicsReading,
 ) {
     let session = &snapshot.session;
     let session_bytes = snapshot.session_bytes();
@@ -574,6 +707,24 @@ fn emit_tagged_memory_snapshot(
         trimmed = trim_tags.map(|_| snapshot_trimmed(snapshot)),
         trim_source = trim_tags.map(|_| snapshot.trim_source.unwrap_or("none")),
         trim_seq = trim_tags.map(|_| snapshot.trim_seq),
+        // Graphics, appended after every earlier field. The OS figure names its source; each
+        // figure is a byte count or `unsupported`. Requested bytes are what the renderers asked
+        // the device for, not what the driver keeps resident.
+        graphics_os_source = graphics.os.source.as_str(),
+        graphics_os_footprint_bytes = %graphics.os.footprint,
+        graphics_os_nofootprint_bytes = %graphics.os.nofootprint,
+        graphics_os_dedicated_bytes = %graphics.os.dedicated,
+        graphics_os_shared_bytes = %graphics.os.shared,
+        graphics_requested_live_bytes = graphics.requested_live_bytes(),
+        graphics_requested_live_resources = graphics.requested_live_resources(),
+        graphics_renderers = %graphics.render_renderers(),
+        // Lifecycle evidence, appended after the fields above: requested bytes/resources created
+        // and released per class since each live renderer was built, and why the OS gave no figure.
+        graphics_requested_created =
+            %graphics.summed().render_per_class(|tally| (tally.created_bytes, tally.created_resources)),
+        graphics_requested_released =
+            %graphics.summed().render_per_class(|tally| (tally.released_bytes, tally.released_resources)),
+        graphics_os_unavailable_reason = graphics.os.unavailable_reason.unwrap_or("none"),
         "memory snapshot"
     );
 }
@@ -707,15 +858,57 @@ impl super::App {
         attempt: u32,
     ) -> CheckpointMemory {
         let snapshot = self.build_memory_snapshot();
-        emit_tagged_memory_snapshot(
+        emit_graphics_memory_snapshot(
             &snapshot,
             self.last_memory_totals,
             Some(CheckpointTag { index, label, attempt }),
+            &self.build_graphics_reading(),
         );
         CheckpointMemory {
             complete: snapshot_complete(&snapshot),
             panes_contended: snapshot.panes_contended,
         }
+    }
+}
+
+impl super::App {
+    /// Read every renderer's graphics ledger and the OS graphics figure for one cycle.
+    ///
+    /// The DXGI adapter is the one the main renderer presents through, else the lowest-labelled
+    /// visible renderer's, else the first warm one's, as the allocator reading picks its device.
+    pub(super) fn build_graphics_reading(&self) -> GraphicsReading {
+        let mut renderers = Vec::new();
+        let mut visible = Vec::new();
+        for (window_id, window) in &self.windows {
+            let Some(renderer) = window.renderer.as_ref() else {
+                // When: this window has no renderer yet, it has requested nothing.
+                continue;
+            };
+            let label = format!("{window_id:?}");
+            renderers.push(RendererGraphics {
+                label: label.clone(),
+                role: "visible",
+                ledger: renderer.graphics_ledger(),
+            });
+            visible.push((label, renderer));
+        }
+        for (index, warm) in self.warm_window_pool.iter().enumerate() {
+            renderers.push(RendererGraphics {
+                label: format!("{index}"),
+                role: "warm",
+                ledger: warm.renderer.graphics_ledger(),
+            });
+        }
+        let authoritative = self
+            .main_renderer()
+            .or_else(|| {
+                visible.iter().min_by(|left, right| left.0.cmp(&right.0)).map(|entry| entry.1)
+            })
+            .or_else(|| self.warm_window_pool.first().map(|warm| &warm.renderer));
+        let dxgi_adapter = authoritative
+            .and_then(sonicterm_gpu::core::GpuRenderer::dxgi_adapter_ids)
+            .map(|(vendor, device)| DxgiAdapterIds { vendor, device });
+        GraphicsReading { os: graphics_memory::sample(dxgi_adapter), renderers }
     }
 }
 

@@ -671,6 +671,13 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
                 allocator_allocations=<count> allocator_blocks=<count> allocator_largest_block_bytes=<bytes>
                 [checkpoint_index=<index> checkpoint_label="<label>" checkpoint_attempt=<attempt> checkpoint_complete=<bool>
                  trimmed=<bool> trim_source="<source>" trim_seq=<count>]
+                graphics_os_source=<source> graphics_os_footprint_bytes=<metric> graphics_os_nofootprint_bytes=<metric>
+                graphics_os_dedicated_bytes=<metric> graphics_os_shared_bytes=<metric>
+                graphics_requested_live_bytes=<bytes> graphics_requested_live_resources=<count>
+                graphics_renderers="visible[<window-id>] surface=<bytes>/<count> frame_texture=<bytes>/<count> glyph_atlas=<bytes>/<count> image_atlas=<bytes>/<count> present_buffers=<bytes>/<count> requested_total=<bytes>/<count> surface_count=exact|estimated; warm[<slot>] ..."
+                graphics_requested_created="surface=<bytes>/<count> frame_texture=<bytes>/<count> ..."
+                graphics_requested_released="surface=<bytes>/<count> frame_texture=<bytes>/<count> ..."
+                graphics_os_unavailable_reason="<reason>|none"
 ```
 
 进程数据来自操作系统，因此包含 SonicTerm 自身接缝未统计的分配器碎片、尚未归还的页、
@@ -701,6 +708,19 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
 | `checkpoint_index` / `checkpoint_label` / `checkpoint_attempt` | 仅出现在为性能检查点采集的样本中：哪个检查点，以及对它的第几次尝试（从 1 起） |
 | `checkpoint_complete` | 仅出现在检查点样本中：没有窗格被锁占用且每个窗格都已采样时为 `true` |
 | `trimmed` / `trim_source` / `trim_seq` | 仅出现在带裁剪钩子构建的检查点样本中：是否有可见渲染器在当前遮挡期间被裁剪、最近一次裁剪由谁请求（`scheduler`、`hook`，尚未裁剪时为 `none`），以及启动以来的裁剪次数 |
+| `graphics_os_source` | 产生图形数值的操作系统查询：`task_vm_info`（macOS）、`dxgi`（Windows 上的 DX12 渲染器），或 `none`（Linux、Windows GDI 呈现器，或尚无渲染器） |
+| `graphics_os_footprint_bytes` / `graphics_os_nofootprint_bytes` | macOS 内核图形账本：计入物理 footprint 的图形内存，以及标记给本进程但不计入的图形内存；其他平台，或内核回复未覆盖该字段时为 `unsupported` |
+| `graphics_os_dedicated_bytes` / `graphics_os_shared_bytes` | Windows 上渲染器适配器的 DXGI `LOCAL`（专用）与 `NON_LOCAL`（共享）当前用量；其他平台为 `unsupported` |
+| `graphics_requested_live_bytes` / `graphics_requested_live_resources` | 所有渲染器已请求且尚未释放的 GPU 字节数与资源数：是请求量，不是驱动的驻留量 |
+| `graphics_renderers` | 每个渲染器按类别（`surface`、`frame_texture`、`glyph_atlas`、`image_atlas`、`present_buffers`）请求的字节数与资源数，排序方式与 `renderers` 相同，每项以 `surface_count=exact`（Metal、DX12）或 `estimated`（Vulkan、GL）结尾；尚无渲染器时为 `none` |
+| `graphics_requested_created` / `graphics_requested_released` | 各存活渲染器自创建以来按类别已创建与已释放的请求字节数和资源数，在所有存活渲染器间求和；已丢弃渲染器的总量记录在它的 `renderer graphics teardown` 记录中 |
+| `graphics_os_unavailable_reason` | 操作系统查询拒绝给出数值时的原因（例如两个 DXGI 适配器共享渲染器的厂商 id 与设备 id）；否则为 `none` |
+
+图形字段位于所有其他字段之后，因此它们之前的字段保持原有名称与顺序。渲染器被丢弃时，会在
+`memory` 目标上以 `info` 级别写一条 `renderer graphics teardown` 记录，包含 `renderer_role`、
+`window_id`、`graphics_live`、`graphics_created`、`graphics_released`（每项均为按类别的
+`class=bytes/resources`）与 `surface_count`。各数值能看到什么、
+看不到什么，见[图形内存](Memory-zh-CN#图形内存)。
 
 共享设备/context 的分配器只报告一次，不会按每个渲染器重复。采样沿用保留量节奏；
 空闲会话会为到期采样唤醒，但该次唤醒会抑制重绘，不绘制任何帧。

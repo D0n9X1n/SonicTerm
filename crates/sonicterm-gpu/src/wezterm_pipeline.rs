@@ -254,6 +254,8 @@ pub struct WeztermPipeline {
     initial_quads: u64,
     /// The current 600-draw window of the shrink policy.
     shrink_window: ShrinkWindow,
+    /// The owning renderer's graphics ledger, once attached; every buffer recreation records here.
+    graphics_ledger: Option<crate::graphics_ledger::GraphicsLedgerHandle>,
 }
 
 impl WeztermPipeline {
@@ -405,6 +407,44 @@ impl WeztermPipeline {
             vertex_scratch: Vec::new(),
             initial_quads,
             shrink_window: ShrinkWindow::default(),
+            graphics_ledger: None,
+        }
+    }
+
+    /// Report this pipeline's three buffers to `ledger` now, and every later recreation or growth.
+    pub(crate) fn attach_graphics_ledger(
+        &mut self,
+        ledger: crate::graphics_ledger::GraphicsLedgerHandle,
+    ) {
+        ledger.replace(
+            crate::graphics_ledger::GraphicsSlot::PresentUniform,
+            std::mem::size_of::<ShaderUniform>() as u64,
+            1,
+        );
+        self.graphics_ledger = Some(ledger);
+        self.record_vertex_request();
+        self.record_index_request();
+    }
+
+    /// Record the vertex buffer's requested bytes in the attached ledger, if any.
+    fn record_vertex_request(&self) {
+        if let Some(ledger) = &self.graphics_ledger {
+            ledger.replace(
+                crate::graphics_ledger::GraphicsSlot::PresentVertices,
+                self.vertex_capacity * std::mem::size_of::<Vertex>() as u64,
+                1,
+            );
+        }
+    }
+
+    /// Record the index buffer's requested bytes in the attached ledger, if any.
+    fn record_index_request(&self) {
+        if let Some(ledger) = &self.graphics_ledger {
+            ledger.replace(
+                crate::graphics_ledger::GraphicsSlot::PresentIndices,
+                self.index_capacity * std::mem::size_of::<u32>() as u64,
+                1,
+            );
         }
     }
 
@@ -429,6 +469,8 @@ impl WeztermPipeline {
         self.vertex_capacity = vertex_capacity;
         self.index_capacity = index_capacity;
         self.index_pattern_quads = 0;
+        self.record_vertex_request();
+        self.record_index_request();
     }
 
     /// Return both present buffers to their initial size and empty the vertex scratch, for a
@@ -584,6 +626,7 @@ impl WeztermPipeline {
                 mapped_at_creation: false,
             });
             self.vertex_capacity = cap;
+            self.record_vertex_request();
         }
         if indices > self.index_capacity {
             let mut cap = self.index_capacity.max(1);
@@ -593,6 +636,7 @@ impl WeztermPipeline {
             self.index_buf = create_index_buffer(device, cap, INDEX_BUFFER_USAGE);
             self.index_capacity = cap;
             self.index_pattern_quads = 0;
+            self.record_index_request();
         }
     }
 }

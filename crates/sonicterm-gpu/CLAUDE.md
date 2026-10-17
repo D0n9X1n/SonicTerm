@@ -22,6 +22,7 @@ the production glyph path.
 - `wezterm_pipeline.rs` - production glyph and geometry presentation via the shared atlas.
 - `text_pipeline.rs` - legacy alpha-only compatibility pipeline.
 - `atlas_upload.rs` - glyph atlas uploads.
+- `graphics_ledger.rs` - per-renderer requested GPU bytes by class (surface x drawable count, frame texture, both atlas textures, present buffers); requests, not residency.
 - `row_quad_cache.rs` - row background/quad caching.
 - `row_runs.rs` - a row's visible cells cut into bold/italic style runs as borrowed slices, and the one text-and-column materializer the emitter calls only for a run it shapes; the doc-hidden `__row_shape_runs` test inspector reuses both.
 - `chrome_text.rs`, `cursor.rs`, `color.rs` - UI text/cursor/color helpers; prepared chrome runs share shaping between field geometry and glyph emission.
@@ -83,6 +84,9 @@ cargo build -p sonicterm-gpu
   `rebuild_for_sf`, `clear_shape_cache`) clears both chrome run caches beside the
   row-cache invalidation; an applied fallback generation empties the chrome-run
   cache through `FontApplyTargets.chrome_runs`, and titles miss by their epoch.
+- Every new GPU resource the renderer owns records its request in the graphics ledger where it is
+  created, rebuilt or trimmed, and every `surface.configure` is followed by
+  `record_surface_request`; the renderer's drop releases the whole ledger.
 - `retained_amounts()` answers about the instance you ask, and every instance
   reports the same atlas capacity. It cannot tell you whether the *previous*
   renderer was released — comparing it across open/close cycles compares a

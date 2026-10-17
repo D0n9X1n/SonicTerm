@@ -22,7 +22,10 @@ use sonicterm_logging::process_report::{
 };
 use sonicterm_types::ResourceAmount;
 
-use super::memory_snapshot::{MemorySnapshot, RendererSummary};
+use sonicterm_gpu::graphics_ledger::GraphicsClass;
+use sonicterm_logging::graphics_memory::GraphicsSource;
+
+use super::memory_snapshot::{GraphicsReading, MemorySnapshot, RendererSummary};
 use super::retention::PaneRetention;
 
 /// History rows the report pane keeps, independent of `[terminal] scrollback`, so a long
@@ -122,6 +125,8 @@ pub(crate) struct MemoryReport {
     pub(crate) roots: Vec<RootRow>,
     /// OS figures, filled in when the worker answers.
     pub(crate) os: OsFigures,
+    /// The OS graphics figure and every renderer's requested GPU bytes, from the same cycle.
+    pub(crate) graphics: GraphicsReading,
 }
 
 /// Replace every control character in text from outside SonicTerm with a space.
@@ -293,8 +298,97 @@ impl MemoryReport {
                 columns("virtual", 22, &format_metric(process.virtual_bytes))
             ),
         );
-        push_line(text, &format!("  {}", columns("GPU", 22, "not available yet")));
+        self.render_os_graphics(text);
         push_line(text, "");
+    }
+
+    /// The OS graphics figure under its own name, then every renderer's requested total.
+    ///
+    /// A figure the OS did not give prints `not available`, never `0.0 MB`, and a platform with no
+    /// query says so; requested bytes are labelled as requests, which the driver may not keep.
+    fn render_os_graphics(&self, text: &mut String) {
+        let value = os_graphics_value(&self.graphics.os);
+        push_line(text, &format!("  {}", columns("GPU (OS)", 22, &value)));
+        push_line(
+            text,
+            &format!(
+                "  {}   (asked of the device; the driver decides what it keeps{})",
+                columns(
+                    "GPU requested",
+                    22,
+                    &format!(
+                        "{}   {} resources",
+                        format_bytes(self.graphics.requested_live_bytes()),
+                        format_count(
+                            usize::try_from(self.graphics.requested_live_resources())
+                                .unwrap_or(usize::MAX)
+                        )
+                    )
+                ),
+                if self.graphics.summed().surface_estimated {
+                    "; surface counts are estimated"
+                } else {
+                    ""
+                }
+            ),
+        );
+    }
+
+    /// One renderer's requested GPU bytes by class, under its CPU parts.
+    fn render_renderer_graphics(&self, text: &mut String, renderer: &RendererSummary) {
+        let Some(graphics) = self
+            .graphics
+            .renderers
+            .iter()
+            .find(|entry| entry.label == renderer.label && entry.role == renderer.role)
+        else {
+            // When: no ledger entry matches this renderer, it was not sampled; print no zeros.
+            push_line(text, &format!("    {}", columns("GPU requested", 22, "not sampled")));
+            return;
+        };
+        let ledger = &graphics.ledger;
+        push_line(
+            text,
+            &format!(
+                "    {}",
+                columns(
+                    "GPU requested",
+                    22,
+                    &format!(
+                        "{}   {} resources",
+                        format_bytes(ledger.live_bytes()),
+                        format_count(
+                            usize::try_from(ledger.live_resources()).unwrap_or(usize::MAX)
+                        )
+                    )
+                )
+            ),
+        );
+        for class in GraphicsClass::ALL {
+            let tally = ledger.class(class);
+            push_line(
+                text,
+                &format!(
+                    "      {}",
+                    columns(
+                        class.as_str(),
+                        20,
+                        &format!(
+                            "{}   {} resources{}",
+                            format_bytes(tally.live_bytes),
+                            format_count(
+                                usize::try_from(tally.live_resources).unwrap_or(usize::MAX)
+                            ),
+                            if class == GraphicsClass::Surface && ledger.surface_estimated {
+                                "   (estimated: the backend does not fix its drawable count)"
+                            } else {
+                                ""
+                            }
+                        )
+                    )
+                ),
+            );
+        }
     }
 
     /// SonicTerm's own counted figures, the signed difference, and sample coverage.
@@ -390,6 +484,7 @@ impl MemoryReport {
                 ),
             );
             render_renderer_parts(text, renderer);
+            self.render_renderer_graphics(text, renderer);
         }
         let warm: Vec<&RendererSummary> =
             self.snapshot.renderers.iter().filter(|renderer| renderer.role == "warm").collect();
@@ -406,6 +501,7 @@ impl MemoryReport {
                 ),
             );
             render_renderer_parts(text, renderer);
+            self.render_renderer_graphics(text, renderer);
         }
         push_line(text, "");
     }
@@ -580,6 +676,31 @@ impl MemoryReport {
         );
         push_line(text, "  WSL and remote processes are not visible from here.");
     }
+}
+
+/// The `GPU (OS)` row's value: each figure under its own name and the query that produced them,
+/// or a statement that no query applies; a figure the OS did not give reads `not available`.
+fn os_graphics_value(os: &sonicterm_logging::graphics_memory::GraphicsMemory) -> String {
+    let figures = os.figures();
+    if figures.is_empty() {
+        // When: `figures` is empty, this platform or presenter has no OS graphics query.
+        return "not available on this platform or presenter".to_string();
+    }
+    if let Some(reason) = os.unavailable_reason {
+        // When: `unavailable_reason` is set, the query declined to answer; say why, not a zero.
+        return format!("not available: {reason}");
+    }
+    let listed = figures
+        .iter()
+        .map(|(label, metric)| format!("{label} {}", format_metric(*metric)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = match os.source {
+        GraphicsSource::TaskVmInfo => "kernel graphics ledgers",
+        GraphicsSource::Dxgi => "DXGI adapter usage",
+        GraphicsSource::None => "no query",
+    };
+    format!("{listed}   ({source})")
 }
 
 /// The parts of one renderer, two figures per line.

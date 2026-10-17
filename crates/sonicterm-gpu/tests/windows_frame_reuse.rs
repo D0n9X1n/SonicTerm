@@ -1315,8 +1315,95 @@ fn trim_during_a_pending_atlas_retry(active: &ActiveEventLoop) -> Result<(), Str
     })
 }
 
+/// Contract: the graphics ledger follows a real renderer through its production hooks, not hand
+/// calls: construction records the surface at its size times its drawables, the frame texture,
+/// both atlases and three present buffers; a resize replaces the surface and the frame texture;
+/// a covered-window trim moves the ledger by exactly what its report says it released; and the
+/// drop releases every request, leaving created equal to released in every class.
+fn graphics_ledger_follows_create_resize_trim_and_drop(
+    active: &ActiveEventLoop,
+) -> Result<(), String> {
+    use sonicterm_gpu::graphics_ledger::GraphicsClass;
+    let (_window, mut renderer) =
+        renderer(active, SoftwareRenderMode::Off, &Theme::default(), (480, 240), true)?;
+    let ledger = renderer.__graphics_ledger_handle();
+    let bgra_bytes =
+        |size: (u32, u32), copies: u64| u64::from(size.0) * u64::from(size.1) * 4 * copies;
+
+    let created = ledger.snapshot();
+    let surface = created.class(GraphicsClass::Surface);
+    let size = renderer.surface_size();
+    check(
+        surface.live_resources >= 2
+            && surface.live_bytes == bgra_bytes(size, surface.live_resources),
+        &format!("the surface is recorded at {size:?} times its drawables: {surface:?}"),
+    )?;
+    check(
+        created.class(GraphicsClass::FrameTexture).live_bytes
+            == bgra_bytes(renderer.frame_texture_extent(), 1),
+        "the frame texture is recorded at its extent",
+    )?;
+    for class in [GraphicsClass::GlyphAtlas, GraphicsClass::ImageAtlas] {
+        check(created.class(class).live_resources == 1, "each atlas texture is recorded")?;
+    }
+    check(
+        created.class(GraphicsClass::PresentBuffers).live_resources == 3,
+        "three present buffers",
+    )?;
+
+    check(renderer.try_resize(400, 200), "the resize is accepted")?;
+    let resized = ledger.snapshot();
+    let size = renderer.surface_size();
+    let surface = resized.class(GraphicsClass::Surface);
+    check(
+        surface.live_bytes == bgra_bytes(size, surface.live_resources)
+            && surface.released_resources
+                > created.class(GraphicsClass::Surface).released_resources,
+        &format!("the resize replaces the surface: {surface:?} for {size:?}"),
+    )?;
+    let frame = resized.class(GraphicsClass::FrameTexture);
+    check(
+        frame.live_bytes == bgra_bytes(renderer.frame_texture_extent(), 1)
+            && frame.released_resources
+                > created.class(GraphicsClass::FrameTexture).released_resources,
+        "the resize replaces the frame texture",
+    )?;
+
+    let mut scene = split_scene(&renderer, &["shell", "logs"]);
+    settle_fallback(&mut renderer, &mut scene)?;
+    let before = ledger.snapshot();
+    let report = renderer.trim_for_occlusion();
+    let after = ledger.snapshot();
+    check(!report.refused, "a usable device admits the trim")?;
+    check(after.class(GraphicsClass::FrameTexture).live_bytes == 4, "the trimmed texture is 1x1")?;
+    let trimmed = |snapshot: &sonicterm_gpu::graphics_ledger::GraphicsLedgerSnapshot| {
+        snapshot.class(GraphicsClass::FrameTexture).live_bytes
+            + snapshot.class(GraphicsClass::PresentBuffers).live_bytes
+    };
+    check(
+        trimmed(&before) - trimmed(&after) == report.gpu_released_requested_bytes,
+        &format!("the ledger moves by the trim report: {report:?}"),
+    )?;
+
+    drop(renderer);
+    let dropped = ledger.snapshot();
+    check(
+        dropped.live_bytes() == 0 && dropped.live_resources() == 0,
+        "the drop releases every request",
+    )?;
+    for class in GraphicsClass::ALL {
+        let tally = dropped.class(class);
+        check(
+            tally.created_bytes == tally.released_bytes
+                && tally.created_resources == tally.released_resources,
+            &format!("{} balances after the drop: {tally:?}", class.as_str()),
+        )?;
+    }
+    Ok(())
+}
+
 fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
-    let cases: [(&str, Case); 13] = [
+    let cases: [(&str, Case); 14] = [
         ("assembled frames reuse scratch", assembled_frames_reuse_scratch),
         ("scratch survives failed and retried frames", scratch_survives_failed_and_retried_frames),
         ("scratch caps hold", scratch_caps_hold_after_unbounded_frames),
@@ -1325,6 +1412,10 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
         ("palette follows the render theme", renderer_palette_follows_the_render_theme),
         ("search overlay reuses its runs", search_overlay_reuses_its_runs),
         ("trim releases and accounts", trim_releases_and_accounts),
+        (
+            "graphics ledger follows the renderer",
+            graphics_ledger_follows_create_resize_trim_and_drop,
+        ),
         ("trim restores without a resize", trim_restores_without_a_resize),
         ("trim on the software presenter", trim_on_the_software_presenter),
         ("trim during a pending atlas retry", trim_during_a_pending_atlas_retry),
