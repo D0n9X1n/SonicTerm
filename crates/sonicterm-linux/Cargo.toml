@@ -22,7 +22,9 @@ sonicterm-logging.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# Linux needs libc for the euid probe and for killing a hung `xdg-mime` process group;
+# other Unix hosts need it for the same runner's tests.
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [[bin]]
@@ -31,3 +33,4 @@ path = "src/main.rs"
 
 [dev-dependencies]
 roxmltree = "0.21"
+tempfile = "3"

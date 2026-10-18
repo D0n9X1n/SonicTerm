@@ -14,6 +14,9 @@ use sonicterm_cfg::keymap::Keymap;
 #[cfg(target_os = "linux")]
 use sonicterm_cfg::theme::Theme;
 
+#[cfg(any(target_os = "linux", all(unix, test)))]
+mod default_handlers;
+
 #[cfg(any(target_os = "linux", test))]
 const PACKAGED_FONT_FILES: &[&str] = &[
     "RecMonoSt.Helens-Regular.ttf",
@@ -324,7 +327,10 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
         let theme_loader: sonicterm_app::ThemeLoader =
             Box::new(|name| Theme::load_name_or_path(name, &asset_dir()));
         let keymap_loader: sonicterm_app::KeymapLoader = Box::new(Keymap::load_strict);
-        shell = shell.with_asset_loaders(theme_loader, keymap_loader);
+        // Only the palette command reaches this backend; installing it changes nothing.
+        shell = shell.with_asset_loaders(theme_loader, keymap_loader).with_default_handlers(
+            Box::new(default_handlers::LinuxDefaultHandlers::from_process_env()),
+        );
     }
     if let Some(recorder) = breadcrumb_recorder.clone() {
         // When: breadcrumb startup succeeded, let the app report runtime state without filesystem IO.
