@@ -300,8 +300,8 @@ FreeType 会整份提取这些表（以及 `CPAL`），并在 face 存续期间�
 
 ### 原生源码版本与配置
 
-源码固定版本为 FreeType 2.14.3、HarfBuzz 14.4.0、libpng 1.6.58 和 zlib 1.3.2。
-仓库内的 FreeType 带有两项上游可变字体多余坐标修复；仓库内的 zlib 带有上游
+源码固定版本为 FreeType 2.15.0、HarfBuzz 14.6.0、libpng 1.6.59 和 zlib 1.3.2。
+FreeType、HarfBuzz 和 libpng 均为未经修改的上游发布；仓库内的 zlib 带有上游
 `inflateBack` 无效距离修复以及三项相关的非阻塞 gzip 写入修复。这些修复已存在于导入的
 源码中，而不是在构建时应用。准确的发布提交、归档 SHA-256、导入路径、每项已携带修复的
 上游修订号与 URL，以及最终源码树摘要记录在 `scripts/native-dependencies.json`。头文件
@@ -309,14 +309,15 @@ FreeType 会整份提取这些表（以及 `CPAL`），并在 face 存续期间�
 表示 macOS 应用包已自包含其运行依赖。
 
 FreeType 配置在第三方源码树之外生成，启用错误字符串、外部 zlib、PNG 字形、长 PCF
-族名、次像素光栅化和受支持的布尔次像素 hinting 选项。定义缺失、重复或出现意外值会
+族名、次像素光栅化和受支持的布尔次像素 hinting 选项。其他选项保持上游默认值；实验性
+HVF 驱动按上游的禁用桩编译，会拒绝所有字体。定义缺失、重复或出现意外值会
 使构建失败；C 编译探针还会检查预处理后这些选项仍然启用。不会恢复已淘汰的数值型
 hinting 转换。Cargo 监视原生源码和配置输入；构建既不下载源码，也不初始化子模块。
 
 仓库中的 Rust 绑定由 bindgen-cli 0.71.1 重新生成。两个生成脚本共用原生构建的配置生成器，
 并优先包含生成头文件，确保 bindgen 和编译出的库看到相同的 FreeType 选项；保留定宽整数覆盖、定点数包装、
 显式 unsafe 块和同级测试声明。原生版本测试检查实际链接的 FreeType/HarfBuzz 版本，
-并核对 FreeType 无符号 span ABI。更新和验证命令见
+并核对 FreeType span ABI（`x` 为有符号，`len` 和 `coverage` 为无符号）。更新和验证命令见
 [仓库与工具链](Repository-and-Toolchain-zh-CN#原生依赖维护)。
 
 ### 行缓存与塑形缓存

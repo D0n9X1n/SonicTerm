@@ -387,9 +387,9 @@ Ordinary fonts are not shared because holding every font file whole, a 75 MiB CJ
 
 ### Native source versions and configuration
 
-The source-pinned stack is FreeType 2.14.3, HarfBuzz 14.4.0, libpng 1.6.58,
-and zlib 1.3.2. The vendored FreeType carries two upstream excess-variable-coordinate
-fixes; the vendored zlib carries the upstream invalid-distance `inflateBack`
+The source-pinned stack is FreeType 2.15.0, HarfBuzz 14.6.0, libpng 1.6.59,
+and zlib 1.3.2. FreeType, HarfBuzz and libpng are plain upstream releases; the
+vendored zlib carries the upstream invalid-distance `inflateBack`
 correction and three related nonblocking gzip-writing fixes. Those fixes are
 already present in the imported sources rather than applied at build time. The
 exact release commits, archive SHA-256 values, selected paths, the upstream
@@ -400,7 +400,9 @@ this inventory does not pin Cairo or imply a self-contained macOS bundle.
 
 FreeType configuration is generated outside the vendored tree. It enables error
 strings, external zlib, PNG glyphs, long PCF family names, subpixel rendering,
-and the supported boolean subpixel-hinting option. Missing, repeated, or
+and the supported boolean subpixel-hinting option. Upstream defaults stay in
+effect for the other options; the experimental HVF driver is compiled as
+upstream's disabled stub, which rejects every face. Missing, repeated, or
 unexpectedly valued definitions fail the build; a C compilation probe also
 checks that preprocessing leaves each option enabled. The removed historical
 numeric hinting transformation is not restored. Cargo watches the native source
@@ -411,7 +413,8 @@ regeneration scripts use the native build's configuration generator and put its
 header before upstream includes, so bindgen and the compiled library see the same
 FreeType options. Regeneration preserves fixed-width integer overrides, fixed-point wrappers, explicit unsafe
 blocks, and sibling test declarations. Native version tests check the actually
-linked FreeType/HarfBuzz releases, including the unsigned FreeType span ABI.
+linked FreeType/HarfBuzz releases, including the FreeType span ABI (signed `x`,
+unsigned `len` and `coverage`).
 Update and verification commands are in
 [Repository and Toolchain](Repository-and-Toolchain#native-dependency-maintenance).
 

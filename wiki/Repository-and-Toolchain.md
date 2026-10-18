@@ -164,8 +164,8 @@ For an update, use one reviewable library change at a time:
    raster output. Require exact-head platform CI; local macOS tests do not validate
    Windows code or Intel binaries. Update both wiki language files in the same PR.
 
-The vendored FreeType carries two upstream fixes for excess-coordinate handling
-after 2.14.3; the vendored zlib carries the invalid-distance decoding fix and the
+The vendored FreeType, HarfBuzz and libpng are plain upstream releases with no
+carried fixes. The vendored zlib carries the invalid-distance decoding fix and the
 related gzip-write corrections after 1.3.2. Those fixes are already present in the
 imported sources, and the manifest records the full upstream commits for each one.
 These choices do not establish that every advisory is reachable through SonicTerm
