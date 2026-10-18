@@ -96,6 +96,29 @@ fn no_open_script_routes_nothing() {
     assert!(!sink_called.get());
 }
 
+/// A plain launch queues nothing, so the first tab keeps its `%USERPROFILE%` default.
+#[test]
+fn plain_launch_queues_no_terminal() {
+    let parsed = parsed([OsString::from("sonicterm")]);
+    assert_eq!(startup_terminal(&parsed, Some(absolute_root()), None), None);
+}
+
+/// A command launch without `--dir` starts in the process cwd; a shell with options keeps its default.
+#[test]
+fn command_launch_defaults_to_the_process_cwd() {
+    let root = std::env::temp_dir();
+    let command =
+        parsed([OsString::from("sonicterm"), OsString::from("-e"), OsString::from("cmd")]);
+    let launch = startup_terminal(&command, Some(root.clone()), None).expect("command launch");
+    assert_eq!(launch.cwd, Some(root.clone()));
+    assert_eq!(launch.command.expect("command").program, "cmd");
+
+    let held = parsed([OsString::from("sonicterm"), OsString::from("--hold")]);
+    let launch = startup_terminal(&held, Some(root), None).expect("held shell launch");
+    assert!(launch.hold);
+    assert_eq!(launch.cwd, None, "a plain shell keeps its %USERPROFILE% default");
+}
+
 #[test]
 fn main_queues_the_request_before_constructing_the_windows_shell() {
     let source = include_str!("main.rs");
@@ -111,4 +134,17 @@ fn main_queues_the_request_before_constructing_the_windows_shell() {
         .map(|offset| interactive + offset)
         .expect("interactive Windows shell construction");
     assert!(queue < shell);
+    let terminal = source[interactive..]
+        .find("startup::queue_startup_terminal(&parsed_cli)")
+        .map(|offset| interactive + offset)
+        .expect("terminal launch producer call");
+    assert!(terminal < shell);
+}
+
+/// Usage errors exit 2 and `--help` exits 0, both before any window or log session starts.
+#[test]
+fn main_maps_usage_errors_to_exit_two() {
+    let source = include_str!("main.rs");
+    assert!(source.contains("ExitCode::from(sonicterm_app::launch_cli::USAGE_EXIT_CODE)"));
+    assert!(source.contains("AttachConsole(ATTACH_PARENT_PROCESS)"));
 }

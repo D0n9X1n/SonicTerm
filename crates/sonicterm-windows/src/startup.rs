@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
-use sonicterm_app::launch_queue;
-use sonicterm_types::{OpenScriptRequest, OpenScriptResolveError};
+use sonicterm_app::launch_cli::{terminal_launch, CliDialect};
+use sonicterm_app::launch_queue::{self, LaunchRequest};
+use sonicterm_types::{OpenScriptRequest, OpenScriptResolveError, TerminalLaunch};
 
 use crate::cli::ParsedCli;
 
@@ -48,6 +49,37 @@ where
     queue_startup_open_script_with(parsed, cwd_lookup, |request| {
         let _ = launch_queue::push_scripts(vec![request]);
     })
+}
+
+/// The terminal launch to queue, or `None` for a plain launch that keeps the default first tab.
+///
+/// A plain shell keeps today's `%USERPROFILE%` default, because the installer's
+/// shortcuts start the process in the install folder; only a command launch
+/// defaults to the process cwd.
+fn startup_terminal(
+    parsed: &ParsedCli,
+    process_cwd: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<TerminalLaunch> {
+    let terminal = parsed.terminal.clone()?;
+    if terminal == Default::default() {
+        // When: `terminal` has no option or command, the default first tab is identical; queue nothing.
+        return None;
+    }
+    Some(terminal_launch(terminal, CliDialect::Windows, process_cwd, home))
+}
+
+/// Queue the startup terminal launch, if any, before the shell runs; returns whether one was queued.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn queue_startup_terminal(parsed: &ParsedCli) -> bool {
+    let process_cwd = std::env::current_dir().ok();
+    let home = sonicterm_app::launch_cli::home_dir();
+    let Some(launch) = startup_terminal(parsed, process_cwd, home) else {
+        // When: `startup_terminal` returns None, the default first tab needs no request.
+        return false;
+    };
+    let _ = launch_queue::push_requests(vec![LaunchRequest::Terminal(launch)]);
+    true
 }
 
 #[cfg(test)]

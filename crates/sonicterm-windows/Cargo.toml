@@ -44,6 +44,7 @@ windows = { workspace = true, features = [
     "Win32_Security_Authorization",
     "Win32_System_IO",
     "Win32_System_Threading",
+    "Win32_System_Console",
 ] }
 windows-implement = "0.60"
 windows-core = "0.62"

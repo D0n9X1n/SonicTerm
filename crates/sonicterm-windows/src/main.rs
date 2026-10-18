@@ -209,10 +209,60 @@ mod software_presenter;
 #[cfg(target_os = "windows")]
 mod tab_drag_os;
 
+/// Write `text` to the console of the process that started this one, if it has one.
+///
+/// This GUI-subsystem binary owns no console; output reaches a terminal only
+/// after `AttachConsole(ATTACH_PARENT_PROCESS)` succeeds. Otherwise the log is the only record.
+#[cfg(target_os = "windows")]
+fn write_to_parent_console(text: &str) {
+    use std::io::Write;
+    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    let attached =
+        // SAFETY: AttachConsole takes a process id constant and no pointers; failure only means no console.
+        unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    if attached.is_err() {
+        // When: `AttachConsole` fails, no parent console exists and the log entry stands alone.
+        return;
+    }
+    if let Ok(mut console) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+        let _ = console.write_all(text.as_bytes());
+    }
+}
+
+/// Report a usage error: usage on the parent console, then one value-free `warn` in the log.
+#[cfg(target_os = "windows")]
+fn report_usage_error(error: sonicterm_app::launch_cli::UsageError) {
+    use sonicterm_app::launch_cli::{usage, CliDialect};
+    write_to_parent_console(&format!(
+        "\r\nsonicterm-windows: {error}\r\n\r\n{}",
+        usage(CliDialect::Windows).replace('\n', "\r\n")
+    ));
+    let log_cfg = sonicterm_cfg::config::Config::default().logging;
+    let _log_guard = sonicterm_logging::init(&log_cfg).ok();
+    error.log();
+}
+
 fn main() -> Result<std::process::ExitCode> {
     set_process_dpi_awareness();
     #[cfg(target_os = "windows")]
-    let parsed_cli = cli::parse_cli_from_env()?;
+    let parsed_cli = match cli::parse_cli_from_env() {
+        Ok(parsed) => parsed,
+        Err(cli::CliError::Usage(error)) => {
+            // When: the command line breaks the grammar, exit 2 with usage and a value-free log line.
+            report_usage_error(error);
+            return Ok(std::process::ExitCode::from(sonicterm_app::launch_cli::USAGE_EXIT_CODE));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    #[cfg(target_os = "windows")]
+    if parsed_cli.help {
+        // When: `help` was requested, print usage to the parent console and exit 0.
+        write_to_parent_console(
+            &sonicterm_app::launch_cli::usage(sonicterm_app::launch_cli::CliDialect::Windows)
+                .replace('\n', "\r\n"),
+        );
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
     #[cfg(target_os = "windows")]
     if parsed_cli.runtime_smoke {
         let code = u8::try_from(run_windows_runtime_smoke()?)?;
@@ -225,6 +275,8 @@ fn main() -> Result<std::process::ExitCode> {
     }
     #[cfg(target_os = "windows")]
     startup::queue_startup_open_script(&parsed_cli, || std::env::current_dir().ok())?;
+    #[cfg(target_os = "windows")]
+    startup::queue_startup_terminal(&parsed_cli);
     // Install panic hook BEFORE config load so a panic during load
     // still produces a crash dump. Logger init is deferred until
     // after the user's `[logging]` section has been read so its
