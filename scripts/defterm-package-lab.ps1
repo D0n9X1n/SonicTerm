@@ -28,6 +28,11 @@ param(
     [string]$Console = 'Own',
     [string]$ProbeExe,
     [string]$OpenConsoleDir,
+    [switch]$NoProxyStub,
+    [string]$ProxyDll,
+    [switch]$Sparse,
+    [string]$CertThumbprint,
+    [string]$Publisher = 'CN=SonicTerm Lab',
     [string]$WorkDir = (Join-Path $env:TEMP 'defterm-1655\package')
 )
 
@@ -59,12 +64,17 @@ function Install-LabPackage {
         $consoleClsid = $ownConsoleClsid
         Copy-Item -LiteralPath (Join-Path $OpenConsoleDir 'OpenConsole.exe') -Destination $layout
         Copy-Item -LiteralPath (Join-Path $OpenConsoleDir 'OpenConsoleProxy.dll') -Destination $layout
+        # When: -ProxyDll substitutes another proxy DLL to separate the DLL from its registration.
+        if ($ProxyDll) { Copy-Item -LiteralPath $ProxyDll -Destination (Join-Path $layout 'OpenConsoleProxy.dll') -Force }
         $consoleServer = @"
             <com:ExeServer DisplayName="SonicTerm lab console" Executable="OpenConsole.exe">
               <com:Class Id="$consoleClsid" />
             </com:ExeServer>
 "@
-        $proxyStub = @"
+        # When: the variant without a proxy-stub measures whether this package's proxy
+        # registration is what breaks other packages' handoffs.
+        if ($NoProxyStub) { $proxyStubClsid = '' }
+        $proxyStub = if (-not $proxyStubClsid) { '' } else { @"
         <com:Extension Category="windows.comInterface">
           <com:ComInterface>
             <com:ProxyStub Id="$proxyStubClsid" DisplayName="SonicTerm lab handoff proxy" Path="OpenConsoleProxy.dll" />
@@ -73,9 +83,14 @@ function Install-LabPackage {
             <com:Interface Id="746E6BC0-AB05-4E38-AB14-71E86763141F" ProxyStubClsid="$proxyStubClsid" />
           </com:ComInterface>
         </com:Extension>
-"@
+"@ }
     }
     $logPath = Join-Path $WorkDir 'packaged-probe.log'
+    # A sparse package carries only identity; its executables stay in the external layout
+    # folder, which is how identity would attach to the existing MSI install.
+    $sparseProperty = if ($Sparse) { '    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>' } else { '' }
+    # A win32App runtime behavior must not also declare an EntryPoint.
+    $sparseApplication = if ($Sparse) { ' uap10:TrustLevel="mediumIL" uap10:RuntimeBehavior="win32App"' } else { ' EntryPoint="Windows.FullTrustApplication"' }
     $manifest = @"
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
@@ -84,20 +99,22 @@ function Install-LabPackage {
          xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
          xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-         IgnorableNamespaces="uap uap3 com desktop6 rescap">
-  <Identity Name="$packageName" Publisher="CN=SonicTerm Lab" Version="0.0.1.0" ProcessorArchitecture="x64" />
+         xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+         IgnorableNamespaces="uap uap3 com desktop6 rescap uap10">
+  <Identity Name="$packageName" Publisher="$Publisher" Version="0.0.1.0" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>SonicTerm (defterm lab)</DisplayName>
     <PublisherDisplayName>SonicTerm Lab</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
+$sparseProperty
   </Properties>
   <Dependencies>
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
   </Dependencies>
   <Resources><Resource Language="en-us" /></Resources>
   <Applications>
-    <Application Id="DefTermLab" Executable="defterm_handoff_probe.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="DefTermLab" Executable="defterm_handoff_probe.exe"$sparseApplication>
       <uap:VisualElements DisplayName="SonicTerm (defterm lab)" Description="Default terminal handoff lab"
                           BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png"
                           Square44x44Logo="Assets\Square44x44Logo.png" AppListEntry="none" />
@@ -131,8 +148,25 @@ $proxyStub
 </Package>
 "@
     New-Item -ItemType Directory -Force -Path "$layout\Public" | Out-Null
-    Set-Content -LiteralPath "$layout\AppxManifest.xml" -Value $manifest -Encoding utf8
-    Add-AppxPackage -Register "$layout\AppxManifest.xml"
+    # When: sparse mode packs a signed identity-only package and attaches the layout as external content.
+    if ($Sparse) {
+        if (-not $CertThumbprint) { throw '-CertThumbprint is required for -Sparse' }
+        $kit = 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64'
+        $pkgDir = Join-Path $WorkDir 'sparse-pkg'
+        if (Test-Path -LiteralPath $pkgDir) { Remove-Item -LiteralPath $pkgDir -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path "$pkgDir\Assets" | Out-Null
+        Copy-Item -Path "$layout\Assets\*" -Destination "$pkgDir\Assets"
+        Set-Content -LiteralPath "$pkgDir\AppxManifest.xml" -Value $manifest -Encoding utf8
+        $msix = Join-Path $WorkDir 'SonicTermDefTermLab.msix'
+        & "$kit\makeappx.exe" pack /d $pkgDir /p $msix /nv /o | Select-Object -Last 1
+        if (-not (Test-Path -LiteralPath $msix)) { throw "makeappx produced no package at $msix" }
+        & "$kit\signtool.exe" sign /fd SHA256 /sha1 $CertThumbprint $msix | Select-Object -Last 1
+        if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+        Add-AppxPackage -Path $msix -ExternalLocation $layout
+    } else {
+        Set-Content -LiteralPath "$layout\AppxManifest.xml" -Value $manifest -Encoding utf8
+        Add-AppxPackage -Register "$layout\AppxManifest.xml"
+    }
     $installed = Get-AppxPackage -Name $packageName
     Write-Host "installed $($installed.PackageFullName) console=$Console"
 }

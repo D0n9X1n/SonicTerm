@@ -117,7 +117,7 @@ try {
     }
     Start-Sleep -Milliseconds 3000
     $newHosts = Get-CimInstance Win32_Process | Where-Object { ($hostNames -contains [IO.Path]::GetFileNameWithoutExtension($_.Name)) -and ($hostsBefore -notcontains $_.ProcessId) } |
-        ForEach-Object { "$($_.Name):$($_.ProcessId):parent=$($_.ParentProcessId)" }
+        ForEach-Object { "$($_.Name):$($_.ProcessId):parent=$($_.ParentProcessId):path=$($_.ExecutablePath)" }
     Write-Lab "new_host_processes=$($newHosts -join ',')"
     $client = Get-CimInstance Win32_Process -Filter "Name = 'cmd.exe'" | Where-Object CommandLine -like "*$nonce*" | Select-Object -First 1
     if ($client) {
