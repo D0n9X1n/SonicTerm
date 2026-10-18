@@ -302,6 +302,11 @@ impl PathProbeState {
         changed
     }
 
+    /// Whether `key` is the current probe key, for which [`Self::request`] would do nothing.
+    pub(super) fn is_current(&self, key: &PathProbeKey) -> bool {
+        self.current.as_ref() == Some(key)
+    }
+
     pub(super) fn request(&mut self, key: PathProbeKey) -> Option<PathProbeRequest> {
         if self.current.as_ref() == Some(&key) {
             // When: `key` is already current, retain its epoch and avoid duplicating an in-flight openability probe.
@@ -874,9 +879,8 @@ fn hardwrap_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) -> HardwrapUri 
             // When: soft_wrapped_from_previous holds, or may hold, at either boundary, the logical scanner owns it.
             continue;
         }
-        let cells = row.iter().collect::<Vec<_>>();
         let mut result = HardwrapUri::NotApplicable;
-        for (index, cell) in cells.iter().enumerate() {
+        for (index, cell) in row.iter().enumerate() {
             let closer = match cell.ch {
                 '(' => ')',
                 '[' => ']',
@@ -886,9 +890,8 @@ fn hardwrap_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) -> HardwrapUri 
                 }
             };
             let start = index + 1;
-            let scheme = cells[start..].iter().take(8).map(|cell| cell.ch).collect::<String>();
-            if !scheme.starts_with("https://") && !scheme.starts_with("http://") {
-                // When: scheme is neither https:// nor http://, this wrapper opens ordinary prose.
+            if !opens_http_scheme(row, start) {
+                // When: opens_http_scheme finds neither https:// nor http:// at start, this wrapper opens ordinary prose.
                 continue;
             }
             let found = hardwrap_uri_candidate(frame, pointed, row_number, start, closer);
@@ -907,6 +910,22 @@ fn hardwrap_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) -> HardwrapUri 
         }
     }
     HardwrapUri::NotApplicable
+}
+
+/// Whether `row`'s cells from column `start` spell `https://` or `http://`, read into a fixed
+/// buffer so the pre-pass allocates nothing for the many wrappers that open ordinary prose.
+fn opens_http_scheme(row: &Row, start: usize) -> bool {
+    let mut scheme = ['\0'; 8];
+    for (offset, slot) in scheme.iter_mut().enumerate() {
+        let Some(cell) = row.get(start + offset) else {
+            // When: the row ends before eight cells, the remaining slots stay empty.
+            break;
+        };
+        *slot = cell.ch;
+    }
+    let spells =
+        |prefix: &str| prefix.chars().zip(scheme).all(|(expected, found)| expected == found);
+    spells("https://") || spells("http://")
 }
 
 fn hardwrap_uri_candidate(
@@ -1110,6 +1129,38 @@ impl PathCellText {
         Some(Self { text, scalars })
     }
 
+    /// The scalar starting at byte `byte`. Scalars are in strictly increasing byte order, so a
+    /// binary search finds the one match a linear scan would.
+    fn scalar_starting_at(&self, byte: usize) -> Option<usize> {
+        let found = self.scalars.binary_search_by_key(&byte, |scalar| scalar.byte_start).ok();
+        #[cfg(test)]
+        assert_eq!(found, self.scalars.iter().position(|scalar| scalar.byte_start == byte));
+        found
+    }
+
+    /// The scalar ending at byte `byte`, by binary search as [`Self::scalar_starting_at`].
+    fn scalar_ending_at(&self, byte: usize) -> Option<usize> {
+        let found = self.scalars.binary_search_by_key(&byte, |scalar| scalar.byte_end).ok();
+        #[cfg(test)]
+        assert_eq!(found, self.scalars.iter().position(|scalar| scalar.byte_end == byte));
+        found
+    }
+
+    /// The scalar whose cells hold cell `cell`. Scalars cover contiguous, increasing cell ranges.
+    fn scalar_covering_cell(&self, cell: usize) -> Option<usize> {
+        let index = self.scalars.partition_point(|scalar| scalar.cell_end <= cell);
+        let found =
+            self.scalars.get(index).filter(|scalar| scalar.cell_start <= cell).map(|_| index);
+        #[cfg(test)]
+        assert_eq!(
+            found,
+            self.scalars
+                .iter()
+                .position(|scalar| (scalar.cell_start..scalar.cell_end).contains(&cell))
+        );
+        found
+    }
+
     fn candidates(
         &self,
         cells: &[&Cell],
@@ -1117,28 +1168,17 @@ impl PathCellText {
         style: PathStyle,
         include_bare_names: bool,
     ) -> Vec<(TargetMatch, std::ops::Range<usize>)> {
-        let Some(col) = self
-            .scalars
-            .iter()
-            .position(|scalar| (scalar.cell_start..scalar.cell_end).contains(&pointed))
-        else {
+        let Some(col) = self.scalar_covering_cell(pointed) else {
             // When: no scalar contains pointed, it cannot own a scanner target.
             return Vec::new();
         };
         target_candidates_at_char_col_for_style(&self.text, col, style, include_bare_names)
             .into_iter()
             .filter_map(|matched| {
-                let start =
-                    self.scalars.iter().position(|scalar| scalar.byte_start == matched.start)?;
-                let end =
-                    self.scalars.iter().position(|scalar| scalar.byte_end == matched.end)? + 1;
-                let source_start = self
-                    .scalars
-                    .iter()
-                    .position(|scalar| scalar.byte_start == matched.source_start)?;
-                let source_end =
-                    self.scalars.iter().position(|scalar| scalar.byte_end == matched.source_end)?
-                        + 1;
+                let start = self.scalar_starting_at(matched.start)?;
+                let end = self.scalar_ending_at(matched.end)? + 1;
+                let source_start = self.scalar_starting_at(matched.source_start)?;
+                let source_end = self.scalar_ending_at(matched.source_end)? + 1;
                 if source_start > start || source_end < end || start >= end {
                     // When: source_start/source_end fail to enclose start..end, no identity can authorize the match.
                     return None;
@@ -1301,6 +1341,12 @@ fn logical_path_scan_in(
             }
             cells.push(cell);
             positions.push(AbsoluteCell { row: segment.row, col: column });
+        }
+        // Every scalar is at least one byte and covers at most two cells, so a chain past twice the
+        // byte cap is a line `PathCellText::from_cells` refuses; stop gathering cells here.
+        if cells.len() > 2 * MAX_LOGICAL_LINE_BYTES {
+            // When: `cells` passes twice `MAX_LOGICAL_LINE_BYTES`, the line exceeds the cap.
+            return None;
         }
     }
     let pointed_index = positions.iter().position(|position| *position == pointed)?;
@@ -2800,7 +2846,10 @@ impl App {
                     if let Some(result) = window.path_probe.pending_result.take() {
                         window.path_probe.accept(&result, Some(key));
                     }
-                    probe_request = window.path_probe.request(key.clone());
+                    // A current key needs no request, so it is compared rather than deep-cloned.
+                    if !window.path_probe.is_current(key) {
+                        probe_request = window.path_probe.request(key.clone());
+                    }
                     if let Some(selection) =
                         window.path_probe.authorized_selection(key, modifier_held)
                     {

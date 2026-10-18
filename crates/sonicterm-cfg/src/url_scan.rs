@@ -202,9 +202,43 @@ pub fn find_urls(text: &str) -> Vec<UrlMatch> {
 
 /// Return the URL covering byte offset `byte_col`, if any.
 pub fn url_at_byte(text: &str, byte_col: usize) -> Option<UrlMatch> {
-    find_urls(text)
+    find_url_at(text, byte_col)
+}
+
+/// The URL covering byte offset `byte`, found by scanning only the run of URL-body bytes around
+/// it. A URL never spans a byte outside that run, and the byte before the run is never a body
+/// byte, so the result equals scanning the whole line, without allocating every URL in it.
+#[must_use]
+pub fn find_url_at(text: &str, byte: usize) -> Option<UrlMatch> {
+    let bytes = text.as_bytes();
+    if !bytes.get(byte).is_some_and(|value| is_url_body_char(*value as char)) {
+        // When: the byte is not a URL body byte, no URL covers it.
+        return None;
+    }
+    let run_start = bytes[..byte]
+        .iter()
+        .rposition(|value| !is_url_body_char(*value as char))
+        .map_or(0, |index| index + 1);
+    let run_end = bytes[byte..]
+        .iter()
+        .position(|value| !is_url_body_char(*value as char))
+        .map_or(bytes.len(), |offset| byte + offset);
+    find_urls_in(text, run_start, run_end)
         .into_iter()
-        .find(|url_match| byte_col >= url_match.start && byte_col < url_match.end)
+        .find(|url_match| byte >= url_match.start && byte < url_match.end)
+}
+
+/// Every URL in `text[start..end]`, at offsets into `text`. Equals the full scan's URLs inside
+/// that range when `start` and `end` sit on bytes no URL spans, as hard delimiters are.
+fn find_urls_in(text: &str, start: usize, end: usize) -> Vec<UrlMatch> {
+    find_urls(&text[start..end])
+        .into_iter()
+        .map(|url_match| UrlMatch {
+            start: url_match.start + start,
+            end: url_match.end + start,
+            url: url_match.url,
+        })
+        .collect()
 }
 
 /// Return the URL covering character column `col` (0-based, counting
@@ -364,8 +398,7 @@ pub fn target_candidates_at_char_col_for_style(
         // When: `col` lies beyond the row, no candidate can own the pointed cell.
         return Vec::new();
     };
-    let urls = find_urls(text);
-    if let Some(url) = urls.iter().find(|url| clicked_byte >= url.start && clicked_byte < url.end) {
+    if let Some(url) = find_url_at(text, clicked_byte) {
         // When: a validated URI owns `clicked_byte`, return only that stronger provenance.
         let source_start =
             text[..url.start].trim_end_matches(['(', '[', '{', '\'', '"', '`']).len();
@@ -379,7 +412,7 @@ pub fn target_candidates_at_char_col_for_style(
             source_start,
             source_end,
             missing_before: Vec::new(),
-            target: DetectedTarget::Uri(url.url.clone()),
+            target: DetectedTarget::Uri(url.url),
         }];
     }
     if let Some(found) = log_field_candidates(text, clicked_byte, style) {
@@ -408,6 +441,9 @@ pub fn target_candidates_at_char_col_for_style(
             is_path_hard_delimiter(character).then_some(clicked_byte + offset)
         })
         .unwrap_or(text.len());
+    // Every candidate lies inside this hard-delimited segment, and no URL spans a hard delimiter,
+    // so the URLs a candidate may overlap are exactly the segment's.
+    let urls = find_urls_in(text, segment_start, segment_end);
     if let Some(quoted) = quoted_path_target(text, clicked_byte, segment_start, segment_end, style)
     {
         // When: quoted recognizes an explicit quoted segment, never fall back to partial inner paths.
@@ -1437,11 +1473,35 @@ fn structure_tail_end(text: &str, end: usize) -> Option<usize> {
     Some(cursor)
 }
 
+/// Test-only count of bytes the structural parse visits, so a test can prove its work is linear.
+#[cfg(test)]
+pub(crate) mod structure_work {
+    use std::cell::Cell;
+
+    thread_local! {
+        static BYTES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Add `bytes` visited by one structural step.
+    pub(crate) fn add(bytes: usize) {
+        BYTES.with(|count| count.set(count.get() + bytes as u64));
+    }
+
+    /// Bytes visited by `body` on this thread.
+    pub(crate) fn measure(body: impl FnOnce()) -> u64 {
+        let before = BYTES.with(Cell::get);
+        body();
+        BYTES.with(Cell::get) - before
+    }
+}
+
 fn structure_close(text: &str, open: usize, opener: char, closer: char) -> Option<usize> {
     let start = open + opener.len_utf8();
     let quoted = matches!(opener, '\'' | '"' | '`' | '“' | '‘' | '«');
     let mut stack = vec![closer];
     for (offset, character) in text[start..].char_indices() {
+        #[cfg(test)]
+        structure_work::add(character.len_utf8());
         if offset > MAX_TARGET_BYTES || character.is_control() {
             // When: offset exceeds the byte budget or character is controlled, incomplete source cannot authorize a path.
             return None;
@@ -1476,7 +1536,26 @@ fn structure_close(text: &str, open: usize, opener: char, closer: char) -> Optio
     None
 }
 
-fn structure_prefix_start(text: &str, floor: usize, open: usize, opener: char) -> Option<usize> {
+/// Whether `word` opens with an explicit path anchor: a root, a home or dot prefix, or a drive.
+fn rooted_word(word: &str) -> bool {
+    word.starts_with(['/', '\\'])
+        || word.starts_with("~/")
+        || word.starts_with("~\\")
+        || word.starts_with("./")
+        || word.starts_with(".\\")
+        || word.starts_with("../")
+        || word.starts_with("..\\")
+        || matches!(word.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic())
+}
+
+/// The prefix check as a rescan from the floor: the test-only reference [`PrefixScan`] must equal.
+#[cfg(test)]
+fn structure_prefix_start_reference(
+    text: &str,
+    floor: usize,
+    open: usize,
+    opener: char,
+) -> Option<usize> {
     let prefix = &text[floor..open];
     let word_start = floor
         + prefix.rfind(char::is_whitespace).map_or(0, |space_offset| {
@@ -1489,24 +1568,93 @@ fn structure_prefix_start(text: &str, floor: usize, open: usize, opener: char) -
             byte == b'_' || byte.is_ascii_alphabetic() || index > 0 && byte.is_ascii_digit()
         });
     if !word.is_empty() && !call {
-        // When: word is not an identifier call, retain its prefix rather than treating a suffix as independent.
+        // When: word is non-empty and not an identifier call, the prefix owns this structure.
         return None;
     }
-    let rooted_prefix = text[floor..word_start].split_whitespace().any(|word| {
-        word.starts_with(['/', '\\'])
-            || word.starts_with("~/")
-            || word.starts_with("~\\")
-            || word.starts_with("./")
-            || word.starts_with(".\\")
-            || word.starts_with("../")
-            || word.starts_with("..\\")
-            || matches!(word.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic())
-    });
-    if rooted_prefix {
-        // When: rooted_prefix proves an unconsumed explicit anchor, preserve its spaced name instead of exposing an inner suffix.
+    if text[floor..word_start].split_whitespace().any(rooted_word) {
+        // When: any whitespace-split word before word_start is rooted, an explicit anchor owns it.
         return None;
     }
     Some(if call { word_start } else { open })
+}
+
+/// The text between the structural floor and the next opener, summarized as it is read, so each
+/// opener's prefix check costs only the current word's length rather than a rescan from the floor.
+struct PrefixScan {
+    /// Byte offset of the floor; nothing before it belongs to the prefix.
+    floor: usize,
+    /// Byte offset where the current, still-open word starts.
+    word_start: usize,
+    /// Whether every byte of the current word so far keeps it an identifier.
+    identifier: bool,
+    /// Whether a completed word since the floor opened with an explicit path anchor.
+    rooted: bool,
+}
+
+impl PrefixScan {
+    /// An empty prefix starting at byte offset `floor`.
+    fn at(floor: usize) -> Self {
+        Self { floor, word_start: floor, identifier: true, rooted: false }
+    }
+
+    /// Read `character`, which starts at byte offset `index`, into the prefix.
+    fn feed(&mut self, text: &str, index: usize, character: char) {
+        if index < self.floor {
+            // When: `index` precedes the floor, a reset already skipped past this character.
+            return;
+        }
+        #[cfg(test)]
+        structure_work::add(character.len_utf8());
+        if character.is_whitespace() {
+            // When: `character` ends a word, record whether that word was rooted.
+            self.rooted |= self.word_start < index && rooted_word(&text[self.word_start..index]);
+            self.word_start = index + character.len_utf8();
+            self.identifier = true;
+            return;
+        }
+        let first = index == self.word_start;
+        // A multi-byte character is never an identifier byte, as in a bytewise check.
+        self.identifier &= character == '_'
+            || character.is_ascii_alphabetic()
+            || (!first && character.is_ascii_digit());
+    }
+
+    /// [`Self::source_start`], checked under tests against the rescan it replaces from `floor`.
+    fn checked_source_start(
+        &self,
+        text: &str,
+        floor: usize,
+        open: usize,
+        opener: char,
+    ) -> Option<usize> {
+        let found = self.source_start(text, open, opener);
+        #[cfg(test)]
+        assert_eq!(
+            found,
+            structure_prefix_start_reference(text, floor, open, opener),
+            "{text:?} at {open} from floor {floor}"
+        );
+        #[cfg(not(test))]
+        let _ = floor;
+        found
+    }
+
+    /// Where the source of a structure opened by `opener` at `open` starts: the identifier of a
+    /// call, or the opener itself. `None` when a non-call word touches the opener or a completed
+    /// word since the floor is rooted, so a suffix of a longer explicit path is never independent.
+    fn source_start(&self, text: &str, open: usize, opener: char) -> Option<usize> {
+        let word = &text[self.word_start..open];
+        let call = opener == '(' && !word.is_empty() && self.identifier;
+        if !word.is_empty() && !call {
+            // When: word is not an identifier call, retain its prefix rather than treating a suffix as independent.
+            return None;
+        }
+        if self.rooted {
+            // When: rooted proves an unconsumed explicit anchor, preserve its spaced name instead of exposing an inner suffix.
+            return None;
+        }
+        Some(if call { self.word_start } else { open })
+    }
 }
 
 fn structured_path_candidates(
@@ -1517,18 +1665,22 @@ fn structured_path_candidates(
 ) -> Option<Vec<TargetMatch>> {
     let mut floor = 0;
     let mut skip_until = 0;
+    let mut prefix = PrefixScan::at(0);
     for (open, opener) in text.char_indices() {
         if open < skip_until {
             // When: open belongs to a previously consumed pair, do not promote nested presentation fragments.
+            prefix.feed(text, open, opener);
             continue;
         }
         if opener.is_control() || (opener.is_whitespace() && opener != ' ') {
             // When: opener is a hard delimiter, prior path anchors cannot span it.
             floor = open + opener.len_utf8();
+            prefix = PrefixScan::at(floor);
             continue;
         }
         let Some(closer) = presentation_pair(opener) else {
             // When: opener has no presentation pair, ordinary text does not establish structure.
+            prefix.feed(text, open, opener);
             continue;
         };
         let start = open + opener.len_utf8();
@@ -1536,19 +1688,20 @@ fn structured_path_candidates(
             // When: an incomplete structure encloses explicit path text, prevent a suffix from becoming another target.
             if clicked >= start
                 && !text[start..].starts_with(char::is_whitespace)
-                && structure_prefix_start(text, floor, open, opener).is_some()
+                && prefix.checked_source_start(text, floor, open, opener).is_some()
                 && has_path_prefix(&text[start..], style)
             {
                 // When: clicked lies inside an incomplete explicit path structure, never recover a partial destination.
                 return Some(Vec::new());
             }
+            prefix.feed(text, open, opener);
             continue;
         };
         let end = close + closer.len_utf8();
         skip_until = end;
         let body = &text[start..close];
         let owns = (open..end).contains(&clicked);
-        let source_start = structure_prefix_start(text, floor, open, opener);
+        let source_start = prefix.checked_source_start(text, floor, open, opener);
         let source_end = structure_tail_end(text, end);
         if clicked >= end && source_end.is_some_and(|tail| clicked < tail) {
             // When: clicked is in the separator run, it must not activate the enclosed filename.
@@ -1559,6 +1712,10 @@ fn structured_path_candidates(
             if source_start.is_some() && source_end.is_some() {
                 // Both validated source bounds separate this completed anchor from the next target.
                 floor = end;
+                prefix = PrefixScan::at(floor);
+            } else {
+                // When: source_start or source_end is unproven, the opener stays part of the prefix.
+                prefix.feed(text, open, opener);
             }
             continue;
         }

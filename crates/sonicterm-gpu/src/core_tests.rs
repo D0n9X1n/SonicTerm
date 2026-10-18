@@ -8493,3 +8493,29 @@ fn an_oversize_ascii_fallback_tile_draws_nothing_and_its_row_is_cached() {
     assert!(drawn.glyphs.is_empty(), "the oversize tile draws no glyph");
     assert!(rig.cache.contains(7, drawn.key), "the row stays complete and is cached");
 }
+
+/// The allocation-free hit test equals the edge-vector scan for every pixel across panes with
+/// fractional origins and cell widths, including padding on both sides and exact boundaries.
+#[test]
+fn snapped_col_at_matches_the_edge_vector_scan() {
+    for (origin_x, cell_w, cols) in [(10.0, 7.5, 8), (0.0, 8.25, 120), (3.3, 9.7, 1), (5.0, 7.0, 0)]
+    {
+        let edges = build_snapped_cell_x(origin_x, cell_w, cols);
+        let right = origin_x + cell_w * f32::from(cols) + 4.0;
+        let mut px = origin_x - 4.0;
+        while px <= right {
+            assert_eq!(
+                snapped_col_at(px, origin_x, cell_w, cols),
+                pixel_to_local_col(px, &edges, cols),
+                "origin {origin_x} width {cell_w} cols {cols} px {px}"
+            );
+            px += 0.25;
+        }
+        for edge in &edges {
+            assert_eq!(
+                snapped_col_at(*edge, origin_x, cell_w, cols),
+                pixel_to_local_col(*edge, &edges, cols)
+            );
+        }
+    }
+}

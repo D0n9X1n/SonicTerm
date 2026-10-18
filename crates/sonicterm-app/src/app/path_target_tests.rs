@@ -5758,3 +5758,29 @@ fn an_osc8_link_with_the_same_label_and_a_new_destination_detects_again() {
     assert_eq!(hover_counts(&app), (2, 2, 0));
     assert_eq!(app.windows[&window].hovered_url.as_ref().unwrap().url, "https://b.example/");
 }
+
+/// Span mapping by binary search returns what the linear scans it replaced return, on a recorded-
+/// wrap line of exactly 16 KiB (the cap) whose spaced tokens give many candidates per cell: each
+/// mapping helper asserts its result against the linear scan under tests, at every pointed cell.
+#[test]
+fn span_mapping_matches_the_linear_scan_on_a_full_sixteen_kib_line() {
+    let (cols, rows) = (512_u16, 32_u16);
+    let mut grid = Grid::new(cols, rows);
+    let unit = "./ab cd ef gh ij kl mn op ";
+    let text = unit.repeat(usize::from(cols) * usize::from(rows) / unit.len() + 1);
+    for character in text.chars().take(usize::from(cols) * usize::from(rows)) {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+    }
+    let mut most_candidates = 0;
+    for col in (0..cols).step_by(7) {
+        let pointed = AbsoluteCell { row: 16, col };
+        if let Some(scan) = logical_path_scan_at_cell(&grid, 0, pointed, PathStyle::Posix, true) {
+            assert!(scan
+                .candidates
+                .iter()
+                .all(|candidate| candidate.spans.iter().any(|span| span.contains(pointed))));
+            most_candidates = most_candidates.max(scan.candidates.len());
+        }
+    }
+    assert!(most_candidates >= 8, "the line offers many candidates per cell: {most_candidates}");
+}

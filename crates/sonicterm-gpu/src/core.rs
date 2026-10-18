@@ -5736,8 +5736,8 @@ impl GpuRenderer {
         // pick the bucket the renderer actually drew. Half-open
         // `edge[col] <= px < edge[col+1]`; boundaries resolve to the
         // RHS cell, which matches `partition_point`'s contract.
-        let edges = build_snapped_cell_x(pane.origin_x_logical, pane.cell_w_logical, pane.cols);
-        let col = pixel_to_local_col(px, &edges, pane.cols)?;
+        // Binary search over edges computed on demand: no edge vector per lookup.
+        let col = snapped_col_at(px, pane.origin_x_logical, pane.cell_w_logical, pane.cols)?;
         // Row: cell_h has no per-cell snapping cache today, so the
         // straight division is correct. Clamp to the pane's grid.
         let row_f = local_y / pane.cell_h_logical;
@@ -10107,17 +10107,49 @@ pub fn build_snapped_cell_x(origin_x: f32, cell_w: f32, cols: u16) -> Vec<f32> {
     edges
 }
 
+/// The snapped left edge of column `col`, as slot `col` of [`build_snapped_cell_x`] holds it.
+fn snapped_cell_edge(origin_x: f32, cell_w: f32, col: u16) -> f32 {
+    sonicterm_render_model::geometry::snap_to_device_pixels(
+        (origin_x + (col as f32) * cell_w, 0.0, 0.0, 0.0),
+        1.0,
+    )
+    .0
+}
+
+/// [`pixel_to_local_col`] without building the edge vector: a binary search over the same snapped
+/// edges, computed only where the search looks, so a hit test allocates nothing.
+#[doc(hidden)]
+#[must_use]
+pub fn snapped_col_at(px: f32, origin_x: f32, cell_w: f32, cols: u16) -> Option<u16> {
+    if cols == 0 {
+        // When: cols is zero, the pane has no addressable cell.
+        return None;
+    }
+    let edge = |col: u16| snapped_cell_edge(origin_x, cell_w, col);
+    if px < edge(0) || px >= edge(cols) {
+        // When: px is left of the first edge or at or past the last, it lies in padding.
+        return None;
+    }
+    // Edges are non-decreasing, so the cell is the last column whose left edge is at or below px;
+    // a boundary px resolves to the right-hand cell, as the linear scan does.
+    let (mut low, mut high) = (0_u16, cols);
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if edge(middle) <= px {
+            low = middle;
+        } else {
+            // When: middle's left edge is past px, the cell lies before middle.
+            high = middle;
+        }
+    }
+    Some(low)
+}
+
 /// [`build_snapped_cell_x`] into a reused buffer: `edges` is cleared and refilled with the same
 /// `cols + 1` snapped edges, keeping its allocation across frames.
 pub(crate) fn fill_snapped_cell_x(edges: &mut Vec<f32>, origin_x: f32, cell_w: f32, cols: u16) {
     edges.clear();
-    edges.extend((0..=cols).map(|col| {
-        sonicterm_render_model::geometry::snap_to_device_pixels(
-            (origin_x + (col as f32) * cell_w, 0.0, 0.0, 0.0),
-            1.0,
-        )
-        .0
-    }));
+    edges.extend((0..=cols).map(|col| snapped_cell_edge(origin_x, cell_w, col)));
 }
 
 /// Pure column-from-pixel lookup that mirrors the renderer's
