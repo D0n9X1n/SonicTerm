@@ -98,6 +98,8 @@ serde_plain = "1"
 pollster = "1.0"
 arboard = "3"
 regex = "1"
+# Exact lock pin: terminal-link URLs decode each component once with this crate.
+percent-encoding = "=2.3.2"
 
 # Platform
 [workspace.dependencies.windows]
