@@ -40,18 +40,18 @@
     {
       "name": "libpng",
       "path": "crates/sonicterm-freetype/libpng",
-      "version": "1.6.58",
-      "tag": "v1.6.58",
-      "revision": "3061454d980de7d53608f594194cfac722721d2a",
+      "version": "1.6.59",
+      "tag": "v1.6.59",
+      "revision": "cd952f49f95bb27154ae77dbb103032d95f6e580",
       "archive": {
-        "url": "https://download.sourceforge.net/libpng/libpng-1.6.58.tar.xz",
-        "sha256": "28eb403f51f0f7405249132cecfe82ea5c0ef97f1b32c5a65828814ae0d34775",
-        "root": "libpng-1.6.58"
+        "url": "https://download.sourceforge.net/libpng/libpng-1.6.59.tar.xz",
+        "sha256": "d80dd2a38a37f803cb9b6ac7b14bd6e74ddc3b654780a8380bdf93523fdb4389",
+        "root": "libpng-1.6.59"
       },
       "include": ["*.c", "*.h", "arm/**", "intel/**", "loongarch/**", "mips/**", "powerpc/**", "riscv/**", "scripts/pnglibconf.h.prebuilt", "LICENSE", "AUTHORS", "CHANGES", "README", "TRADEMARK"],
       "upstream_fixes": [],
-      "tree_sha256": "75a542981ad0461cf449c448a20267256111f1fe61d2a4d537e4c865774303da",
-      "version_check": {"path": "png.h", "pattern": "PNG_LIBPNG_VER_STRING\\s+\"([^\"]+)\"", "value": "1.6.58"}
+      "tree_sha256": "a4663dc1dfe43329e9808cba99f2a0dbd2400218ccfaccd57a36f0d3ab88cad9",
+      "version_check": {"path": "png.h", "pattern": "PNG_LIBPNG_VER_STRING\\s+\"([^\"]+)\"", "value": "1.6.59"}
     },
     {
       "name": "zlib",
