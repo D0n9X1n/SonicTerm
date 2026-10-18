@@ -5456,11 +5456,17 @@ fn detection_reads_no_row_outside_the_displayed_frame() {
 /// wrap. The same row away from the edge, and on the live view's bottom row, keeps its target.
 #[test]
 fn a_bottom_edge_target_of_a_scrolled_back_view_is_refused_without_reading_below() {
+    // The native grammar decides what is a path, so each platform gets an absolute path it reads.
+    let (wrapped_path, notes_path) = if cfg!(windows) {
+        ("C:/tmp/abcdefghijklmnopqrstuvwxyz.txt", "C:/tmp/notes.txt")
+    } else {
+        ("/tmp/abcdefghijklmnopqrstuvwxyz.txt", "/tmp/notes.txt")
+    };
     for (label, line, pointed_col) in [
         // The row below is a recorded continuation of this path.
-        ("wrapped", "/tmp/abcdefghijklmnopqrstuvwxyz.txt", 3_u16),
+        ("wrapped", wrapped_path, 3_u16),
         // The row below is unrelated text.
-        ("complete", "/tmp/notes.txt", 3),
+        ("complete", notes_path, 3),
     ] {
         let output = format!("one\r\ntwo\r\n{line}\r\nnext\r\nfour\r\nfive\r\nsix\r\nseven");
         let (app, window, pane) = pane_after(20, 3, &output);
@@ -5483,7 +5489,7 @@ fn a_bottom_edge_target_of_a_scrolled_back_view_is_refused_without_reading_below
         }
     }
     // On the live view no row exists below the bottom row, so the bottom-row target stays.
-    let (app, window, pane) = pane_after(20, 3, "one\r\ntwo\r\n/tmp/notes.txt");
+    let (app, window, pane) = pane_after(20, 3, &format!("one\r\ntwo\r\n{notes_path}"));
     let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
     let guard = parser.lock();
     let target =
