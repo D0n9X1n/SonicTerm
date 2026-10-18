@@ -148,3 +148,35 @@ fn main_maps_usage_errors_to_exit_two() {
     assert!(source.contains("ExitCode::from(sonicterm_app::launch_cli::USAGE_EXIT_CODE)"));
     assert!(source.contains("AttachConsole(ATTACH_PARENT_PROCESS)"));
 }
+
+/// A relative script against a relative process cwd is refused with a reason, never joined.
+#[test]
+fn relative_open_script_with_a_relative_cwd_is_a_contextual_error() {
+    let parsed = parsed([
+        OsString::from("sonicterm"),
+        OsString::from("--open-script"),
+        OsString::from("build.ps1"),
+    ]);
+    let error = queue_startup_open_script_with(&parsed, || Some(PathBuf::from("relative")), |_| {})
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("not absolute"), "{error:#}");
+}
+
+/// The production queue entry points report whether they queued anything.
+#[test]
+fn startup_queue_entry_points_report_what_they_queued() {
+    let plain = parsed([OsString::from("sonicterm")]);
+    assert!(!queue_startup_open_script(&plain, || None).unwrap());
+    assert!(!queue_startup_terminal(&plain), "a plain launch keeps the default first tab");
+
+    let script = parsed([
+        OsString::from("sonicterm"),
+        OsString::from("--open-script"),
+        absolute_root().join("build.ps1").into_os_string(),
+    ]);
+    assert!(queue_startup_open_script(&script, || None).unwrap());
+
+    let command =
+        parsed([OsString::from("sonicterm"), OsString::from("-e"), OsString::from("cmd")]);
+    assert!(queue_startup_terminal(&command), "a command launch is queued");
+}

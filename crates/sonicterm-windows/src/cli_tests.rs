@@ -193,3 +193,13 @@ fn open_script_preserves_unpaired_surrogates() {
     .unwrap();
     assert_eq!(parsed.open_script.unwrap().as_os_str().encode_wide().collect::<Vec<_>>(), raw);
 }
+
+/// Both refusal kinds display their reason; a payload error names the option it came from.
+#[test]
+fn cli_errors_display_their_reason() {
+    let payload = CliError::Payload("bad json".to_string());
+    assert_eq!(payload.to_string(), "decode --tear-out-payload JSON: bad json");
+    let usage = parse_cli_from(["sonicterm", "--unknown"]).unwrap_err();
+    assert!(matches!(usage, CliError::Usage(_)));
+    assert!(!usage.to_string().is_empty());
+}

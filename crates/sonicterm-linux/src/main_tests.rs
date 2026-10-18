@@ -300,3 +300,30 @@ fn linux_runtime_assets_include_platform_keymap_and_all_font_faces() {
         assert!(assets.join("fonts").join(face).is_file(), "missing packaged face {face}");
     }
 }
+
+/// A relative `--open-script` with no process cwd is an error, never a guess at a directory.
+#[test]
+fn relative_open_script_without_a_cwd_is_refused() {
+    use sonicterm_app::launch_cli::LaunchCli;
+    let error = linux_startup(LaunchCli::OpenScript("x.sh".into()), None, None)
+        .expect_err("a relative script needs a process cwd");
+    assert!(error.to_string().contains("process cwd is unavailable"), "{error}");
+}
+
+/// Windows-only modes that reach the Linux startup are refused, not run as a terminal.
+#[test]
+fn windows_only_modes_are_refused_on_linux() {
+    use sonicterm_app::launch_cli::LaunchCli;
+    for cli in [LaunchCli::RefreshShellAssociations, LaunchCli::TearOut("{}".into())] {
+        let error = linux_startup(cli, None, None).expect_err("Windows-only mode");
+        assert!(error.to_string().contains("Windows-only"), "{error}");
+    }
+}
+
+/// On a non-Linux host the Linux binary refuses to start instead of opening a window.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn main_refuses_non_linux_hosts() {
+    let error = main().expect_err("the Linux binary must not start elsewhere");
+    assert!(error.to_string().contains("supported only on Linux"), "{error}");
+}
