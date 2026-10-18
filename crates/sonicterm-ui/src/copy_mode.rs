@@ -25,6 +25,9 @@ pub enum CopyMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuickSelectState {
     pub hints: Vec<QuickSelectHint>,
+    /// The grid's `scrollback_evicted` when the hints were scanned. Hint rows are
+    /// scrollback-relative, so each history row evicted since then moves a hint up one row.
+    pub scrollback_evicted: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +58,7 @@ impl QuickSelectState {
     pub fn scan_viewport(grid: &Grid, view_top: usize) -> (Self, u64) {
         let mut hints = Vec::new();
         let mut rows_visited = 0u64;
+        let scrollback_evicted = grid.scrollback_evicted();
         // One buffer holds each row's text in turn, so scanning allocates no string per row.
         let mut line = String::new();
         for row_idx in view_top..view_top + grid.rows as usize {
@@ -69,7 +73,7 @@ impl QuickSelectState {
                 let Some(hint) = nth_hint(hints.len()) else {
                     // When: nth_hint has spent all 26 single-letter labels;
                     // return with the hints already assigned and stop scanning.
-                    return (Self { hints }, rows_visited);
+                    return (Self { hints, scrollback_evicted }, rows_visited);
                 };
                 // `url_match.start`/`url_match.end` are byte offsets into `line`. The hint's
                 // `col_*` fields are consumed downstream as grid columns, so
@@ -88,7 +92,15 @@ impl QuickSelectState {
                 });
             }
         }
-        (Self { hints }, rows_visited)
+        (Self { hints, scrollback_evicted }, rows_visited)
+    }
+
+    /// The scrollback-relative row `hint` occupies in a grid that has now evicted
+    /// `scrollback_evicted` history rows in its lifetime; `None` once its own row was evicted.
+    pub fn hint_row_now(&self, hint: &QuickSelectHint, scrollback_evicted: u64) -> Option<usize> {
+        let evicted_since = scrollback_evicted.saturating_sub(self.scrollback_evicted);
+        let evicted_since = usize::try_from(evicted_since).ok()?;
+        hint.row.checked_sub(evicted_since)
     }
 
     /// Text captured for a hint key, matched without regard to case.

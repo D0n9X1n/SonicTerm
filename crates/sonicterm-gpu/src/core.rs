@@ -6836,6 +6836,7 @@ impl GpuRenderer {
                     active_origin_y,
                     plan.active_view_top_abs,
                     grid.rows as usize,
+                    grid.scrollback_evicted(),
                     theme,
                     sw,
                     sh,
@@ -8717,11 +8718,15 @@ impl GpuRenderer {
                         .unwrap_or(self.cell_h);
                     let mut wt = stack.clone();
                     for hint in &qs.hints {
-                        let Some(visible_row) = quick_select_viewport_row(
-                            hint.row,
-                            plan.active_view_top_abs,
-                            grid.rows as usize,
-                        ) else {
+                        let Some(visible_row) =
+                            qs.hint_row_now(hint, grid.scrollback_evicted()).and_then(|row| {
+                                quick_select_viewport_row(
+                                    row,
+                                    plan.active_view_top_abs,
+                                    grid.rows as usize,
+                                )
+                            })
+                        else {
                             // When: quick_select_viewport_row finds the hint off the displayed rows, its letter is not drawn.
                             continue;
                         };
@@ -9032,6 +9037,7 @@ impl GpuRenderer {
         origin_y: f32,
         view_top_abs: u64,
         visible_rows: usize,
+        scrollback_evicted: u64,
         _theme: &Theme,
         sw: f32,
         sh: f32,
@@ -9043,7 +9049,9 @@ impl GpuRenderer {
         // edges with adjacent glyph cells at fractional DPI.
         let raw_fallback = snapped_cell_x.is_empty();
         for hint in &quick_select.hints {
-            let Some(visible_row) = quick_select_viewport_row(hint.row, view_top_abs, visible_rows)
+            let Some(visible_row) = quick_select
+                .hint_row_now(hint, scrollback_evicted)
+                .and_then(|row| quick_select_viewport_row(row, view_top_abs, visible_rows))
             else {
                 // When: quick_select_viewport_row finds the hint off the displayed rows, it draws nothing.
                 continue;

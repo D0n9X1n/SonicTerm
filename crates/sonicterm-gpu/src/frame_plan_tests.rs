@@ -364,10 +364,11 @@ fn compact_copy_identity_covers_every_drawn_and_owned_field() {
             col_end: 5,
             text: "https://example.com".into(),
         }],
+        scrollback_evicted: 0,
     });
     let identity = CopyModeIdentity::from(&baseline);
     assert_eq!(identity, CopyModeIdentity::from(&baseline));
-    let changes: [fn(&mut CopyModeState); 11] = [
+    let changes: [fn(&mut CopyModeState); 12] = [
         |s| s.cursor.0 += 1,
         |s| s.cursor.1 += 1,
         |s| s.anchor = Some((0, 0)),
@@ -379,6 +380,7 @@ fn compact_copy_identity_covers_every_drawn_and_owned_field() {
         |s| s.quick_select.as_mut().unwrap().hints[0].col_start += 1,
         |s| s.quick_select.as_mut().unwrap().hints[0].col_end += 1,
         |s| s.quick_select.as_mut().unwrap().hints[0].text.push('x'),
+        |s| s.quick_select.as_mut().unwrap().scrollback_evicted += 1,
     ];
     for change in changes {
         let mut changed = baseline.clone();

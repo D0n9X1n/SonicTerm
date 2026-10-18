@@ -452,3 +452,42 @@ fn from_viewport_labels_only_the_displayed_rows() {
     assert!(live.hints.iter().all(|hint| hint.row >= history_rows), "{:?}", live.hints);
     assert!(!live.hints.iter().any(|hint| hint.text == "https://m.io"));
 }
+
+/// Hint rows are scrollback-relative, so a history eviction after the scan moves every hint's
+/// content up one row: `hint_row_now` follows it to the row that still holds the hint's text, and
+/// a hint whose own row was evicted has no row left to draw on.
+#[test]
+fn hint_rows_follow_history_eviction_after_the_scan() {
+    let mut grid = Grid::new(30, 2);
+    grid.set_scrollback_limit(3);
+    // "one" is evicted while writing, so history holds the two URL rows and "four"; the view at
+    // row 0 shows both URL rows.
+    for line in ["one", "two http://a.co", "three http://b.co", "four", "five"] {
+        write(&mut grid, line);
+        grid.carriage_return();
+        grid.linefeed();
+    }
+    let quick_select = QuickSelectState::from_viewport(&grid, 0);
+    assert_eq!(quick_select.scrollback_evicted, grid.scrollback_evicted());
+    let row_text = |grid: &Grid, row: usize| -> String {
+        grid.row_at_abs(row as u64).unwrap().iter().map(|cell| cell.ch).collect()
+    };
+    let hint = quick_select.hints.first().expect("a hint on the top history row");
+    assert!(row_text(&grid, hint.row).contains(&hint.text));
+    write(&mut grid, "six");
+    grid.carriage_return();
+    grid.linefeed();
+    let evicted = grid.scrollback_evicted();
+    assert_eq!(evicted, quick_select.scrollback_evicted + 1, "one more row evicted");
+    for hint in &quick_select.hints {
+        // When: the hint's own row was evicted, it has no row; otherwise its text is still there.
+        match quick_select.hint_row_now(hint, evicted) {
+            Some(row) => assert!(row_text(&grid, row).contains(&hint.text), "{hint:?}"),
+            None => assert_eq!(hint.row, 0, "only a top-row hint can be evicted"),
+        }
+    }
+    let survivor = quick_select.hints.iter().find(|hint| hint.row > 0).expect("a hint survives");
+    // The scan-time row now holds other text: drawing at it would label the wrong row.
+    assert!(!row_text(&grid, survivor.row).contains(&survivor.text));
+    assert_eq!(quick_select.hint_row_now(&quick_select.hints[0], evicted), None);
+}
