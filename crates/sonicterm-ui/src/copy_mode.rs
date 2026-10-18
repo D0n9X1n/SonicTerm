@@ -11,7 +11,7 @@
 //! [`CopyModeState::selected_range`] is `None`. Quick select builds a state
 //! that is not read-only but carries a [`QuickSelectState`] and never sets an
 //! anchor, so it has no range either; what a hint keypress copies is the
-//! owned text captured by [`QuickSelectState::from_grid`], which is a
+//! owned text captured by [`QuickSelectState::from_viewport`], which is a
 //! snapshot and does not follow later writes to the grid it was scanned from.
 
 use sonicterm_cfg::url_scan::find_urls;
@@ -37,20 +37,26 @@ pub struct QuickSelectHint {
 }
 
 impl QuickSelectState {
-    /// Scan the live screen rows for URLs and label each with a keyboard hint.
+    /// Scan the displayed viewport for URLs and label each with a keyboard hint.
     ///
-    /// Hints are assigned in row-major order and run out after 26 matches. Each
-    /// hint owns a copy of its URL text, so later writes to `grid` do not
-    /// change what a hint keypress copies.
-    pub fn from_grid(grid: &Grid) -> Self {
+    /// `view_top` is the scrollback-absolute row the pane displays at its top:
+    /// `grid.scrollback_len()` on the live view, a history row when scrolled
+    /// back. Only the `grid.rows` rows from there are read, so hints label
+    /// exactly what is on screen. Hint rows stay scrollback-absolute and hint
+    /// columns are grid columns. Hints are assigned in row-major order and run
+    /// out after 26 matches. Each hint owns a copy of its URL text, so later
+    /// writes to `grid` do not change what a hint keypress copies.
+    pub fn from_viewport(grid: &Grid, view_top: usize) -> Self {
         let mut hints = Vec::new();
-        for row_idx in grid.scrollback_len()..grid.scrollback_len() + grid.rows as usize {
+        // One buffer holds each row's text in turn, so scanning allocates no string per row.
+        let mut line = String::new();
+        for row_idx in view_top..view_top + grid.rows as usize {
             let Some(row) = visible_row(grid, row_idx) else {
                 // When: visible_row cannot resolve row_idx to a stored or live
                 // line; keep the hints gathered so far and move on.
                 continue;
             };
-            let line = row_text_of(row);
+            row_text_into(row, &mut line);
             for url_match in find_urls(&line) {
                 let Some(hint) = nth_hint(hints.len()) else {
                     // When: nth_hint has spent all 26 single-letter labels;
@@ -343,8 +349,9 @@ fn last_non_blank_col(row: &Row) -> Option<usize> {
         (!cell.flags.contains(CellFlags::WIDE_CONT) && cell.ch != ' ').then_some(idx)
     })
 }
-fn row_text_of(row: &Row) -> String {
-    let mut text = String::with_capacity(row.len());
+/// Write `row`'s text into `text`, replacing what it held.
+fn row_text_into(row: &Row, text: &mut String) {
+    text.clear();
     for cell in row.iter() {
         if cell.flags.contains(CellFlags::WIDE_CONT) {
             // When: cell is the trailing half of a wide glyph; its lead cell
@@ -356,20 +363,19 @@ fn row_text_of(row: &Row) -> String {
             text.push_str(extras);
         }
     }
-    text
 }
 
 fn nth_hint(idx: usize) -> Option<char> {
     (idx < 26).then(|| (b'a' + idx as u8) as char)
 }
 
-/// Number of UTF-8 bytes a cell contributes to [`row_text_of`]: its lead
+/// Number of UTF-8 bytes a cell contributes to [`row_text_into`]: its lead
 /// `char` plus any combining marks stored in `extras()`.
 fn cell_text_len(cell: &Cell) -> usize {
     cell.ch.len_utf8() + cell.extras().map_or(0, str::len)
 }
 
-/// Map a byte offset in [`row_text_of`]'s string back to the grid column of
+/// Map a byte offset in [`row_text_into`]'s string back to the grid column of
 /// the cell that produced that byte. `WIDE_CONT` cells emit no text but still
 /// occupy a column, so this walks the row cell-by-cell keeping a byte cursor
 /// and a column cursor in lock-step. Offsets past the emitted text clamp to

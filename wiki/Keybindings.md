@@ -327,9 +327,10 @@ writable and READONLY windows alike, search paste never reaches a PTY or broadca
 peer. Any other bound action not listed above is consumed without running or
 reaching the PTY unless a local text field handles it.
 
-`enter_quick_select` labels up to 26 URLs on the current screen with `a` through
-`z`. Press a label to copy that URL and close the overlay. Press `Escape` to
-cancel.
+`enter_quick_select` labels up to 26 URLs on the rows the pane displays with `a`
+through `z`. When you have scrolled back, that is the history on screen, not the
+live screen below it. Press a label to copy that URL and close the overlay. Press
+`Escape` to cancel.
 
 ### App text fields
 

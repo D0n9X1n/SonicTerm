@@ -105,9 +105,14 @@ impl App {
         let (state, rows_scanned) = {
             let guard = crate::app::frame_counters::lock_parser(&pane.parser);
             let grid = guard.grid();
-            let mut state =
-                sonicterm_ui::copy_mode::CopyModeState::new_at((0, grid.scrollback_len()));
-            state.quick_select = Some(sonicterm_ui::copy_mode::QuickSelectState::from_grid(grid));
+            // Quick select labels what the pane displays: its resolved viewport, history included.
+            let view_top = sonicterm_gpu::core::GpuRenderer::resolved_view_top_abs_legacy(
+                grid,
+                pane.resolved_viewport(grid),
+            ) as usize;
+            let mut state = sonicterm_ui::copy_mode::CopyModeState::new_at((0, view_top));
+            state.quick_select =
+                Some(sonicterm_ui::copy_mode::QuickSelectState::from_viewport(grid, view_top));
             // Quick select scans one row per displayed grid row.
             (state, u64::from(grid.rows))
         };

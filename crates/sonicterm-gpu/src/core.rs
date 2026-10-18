@@ -6834,7 +6834,7 @@ impl GpuRenderer {
                     quick_select,
                     active_origin_x,
                     active_origin_y,
-                    grid.scrollback_len(),
+                    plan.active_view_top_abs,
                     grid.rows as usize,
                     theme,
                     sw,
@@ -8701,16 +8701,15 @@ impl GpuRenderer {
         // Quick-select hint overlay → chrome_text into the overlay
         // glyph instance vec. Each hint is anchored at its (row, col)
         // cell origin so the hint character sits exactly inside the
-        // chosen cell.
+        // chosen cell. The hint set is sparse, so emitting each hint through chrome_text avoids
+        // materializing a full padded hint string.
         if quick_select_hint_count > 0 {
-            // Reconstruct the hint string the legacy
-            // `prepare_quick_select_overlay` routed through
-            // `self.quick_select_buffer`. The hint set is sparse so
-            // emitting per-hint via chrome_text avoids materializing
-            // the full padded string.
+            // When: quick_select_hint_count is positive, each hint's letter is laid out on its cell.
             if let Some(qs) = copy_mode.and_then(|cm| cm.quick_select.as_ref()) {
+                // When: copy_mode carries quick_select, its hints supply the letters to draw.
                 let bg_color = hex_to_chrome_color(theme.colors.background.0.as_str());
                 if let Some(stack) = self.font_stack.as_ref() {
+                    // When: font_stack exists, chrome_text can shape each hint letter.
                     let native_em = stack
                         .cell_metrics_raster_px()
                         .ok()
@@ -8718,8 +8717,16 @@ impl GpuRenderer {
                         .unwrap_or(self.cell_h);
                     let mut wt = stack.clone();
                     for hint in &qs.hints {
+                        let Some(visible_row) = quick_select_viewport_row(
+                            hint.row,
+                            plan.active_view_top_abs,
+                            grid.rows as usize,
+                        ) else {
+                            // When: quick_select_viewport_row finds the hint off the displayed rows, its letter is not drawn.
+                            continue;
+                        };
                         let x = active_origin_x + hint.col_start as f32 * self.cell_w;
-                        let y = active_origin_y + hint.row as f32 * self.cell_h;
+                        let y = active_origin_y + visible_row as f32 * self.cell_h;
                         let s = hint.hint.to_string();
                         let l = chrome_text::layout(
                             stack,
@@ -9023,7 +9030,7 @@ impl GpuRenderer {
         quick_select: &QuickSelectState,
         origin_x: f32,
         origin_y: f32,
-        scrollback_len: usize,
+        view_top_abs: u64,
         visible_rows: usize,
         _theme: &Theme,
         sw: f32,
@@ -9036,16 +9043,11 @@ impl GpuRenderer {
         // edges with adjacent glyph cells at fractional DPI.
         let raw_fallback = snapped_cell_x.is_empty();
         for hint in &quick_select.hints {
-            let Some(visible_row) = hint.row.checked_sub(scrollback_len) else {
-                // When: `hint.row.checked_sub(scrollback_len)` is None — the
-                // hint sits above the viewport, in scrolled-off history.
+            let Some(visible_row) = quick_select_viewport_row(hint.row, view_top_abs, visible_rows)
+            else {
+                // When: quick_select_viewport_row finds the hint off the displayed rows, it draws nothing.
                 continue;
             };
-            if visible_row >= visible_rows {
-                // When: `visible_row >= visible_rows` — below the viewport, so
-                // its background quad would land outside the pane.
-                continue;
-            }
             let (x, w) = if raw_fallback {
                 (origin_x + hint.col_start as f32 * self.cell_w, self.cell_w)
             } else {
@@ -10105,6 +10107,20 @@ pub fn build_snapped_cell_x(origin_x: f32, cell_w: f32, cols: u16) -> Vec<f32> {
     let mut edges = Vec::with_capacity(usize::from(cols) + 1);
     fill_snapped_cell_x(&mut edges, origin_x, cell_w, cols);
     edges
+}
+
+/// The displayed row of a quick-select hint at scrollback-absolute `hint_row` in a viewport whose
+/// top is `view_top_abs` and which shows `visible_rows` rows; `None` when the row is not displayed.
+/// The hint background and the hint letter both place a hint through this one mapping.
+#[doc(hidden)]
+#[must_use]
+pub fn quick_select_viewport_row(
+    hint_row: usize,
+    view_top_abs: u64,
+    visible_rows: usize,
+) -> Option<usize> {
+    let offset = (hint_row as u64).checked_sub(view_top_abs)?;
+    usize::try_from(offset).ok().filter(|row| *row < visible_rows)
 }
 
 /// The snapped left edge of column `col`, as slot `col` of [`build_snapped_cell_x`] holds it.

@@ -300,7 +300,8 @@ just below the view is not read, so a plain-text target on the view's bottom row
 whose text reaches the right edge may continue off screen and is not linked;
 scroll it up one row to use it. On the live view nothing changes, because no row
 exists below the bottom one. OSC 8 links keep their stored destination at the
-edge; only their underline stops at the view.
+edge; only their underline stops at the view. Quick select also labels only the
+rows on screen, history included when you have scrolled back.
 
 Plain hover underlines both detected URLs and OSC 8 labels with the theme's yellow
 hint; the open modifier switches to the action accent. Plain hover leaves glyph

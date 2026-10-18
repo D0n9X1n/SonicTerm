@@ -8519,3 +8519,15 @@ fn snapped_col_at_matches_the_edge_vector_scan() {
         }
     }
 }
+
+/// A quick-select hint is placed relative to the displayed viewport's top, so on a scrolled-back
+/// view a history hint lands on its displayed row, and a row above or below the view draws nothing.
+/// Placing it from the live top instead put a history hint off screen.
+#[test]
+fn quick_select_hints_map_to_the_displayed_viewport_row() {
+    assert_eq!(quick_select_viewport_row(12, 10, 5), Some(2));
+    assert_eq!(quick_select_viewport_row(10, 10, 5), Some(0));
+    assert_eq!(quick_select_viewport_row(14, 10, 5), Some(4));
+    assert_eq!(quick_select_viewport_row(9, 10, 5), None, "above the view");
+    assert_eq!(quick_select_viewport_row(15, 10, 5), None, "below the view");
+}
