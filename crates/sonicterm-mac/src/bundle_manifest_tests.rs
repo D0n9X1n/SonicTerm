@@ -46,26 +46,54 @@ fn native_registration_and_runtime_share_one_font_directory() {
     assert!(!MACOS_DMG_SCRIPT.contains("Resources/Fonts"));
 }
 
-#[test]
-fn packaged_app_declares_one_alternate_shell_document_type() {
+/// The parsed root dictionary of the generated Info.plist.
+fn with_root_dict<T>(check: impl FnOnce(Node<'_, '_>) -> T) -> T {
     let xml = info_plist_xml();
     let dtd = r#"<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">"#;
     assert_eq!(xml.lines().filter(|line| *line == dtd).count(), 1);
     let parseable_xml = xml.lines().filter(|line| *line != dtd).collect::<Vec<_>>().join("\n");
     let document = Document::parse(&parseable_xml).expect("generated Info.plist must be valid XML");
     let plist = document.descendants().find(|node| node.has_tag_name("plist")).unwrap();
-    let root_dict = element_children(plist)[0];
-    let document_types = dict_value(root_dict, "CFBundleDocumentTypes");
-    assert!(document_types.has_tag_name("array"));
+    check(element_children(plist)[0])
+}
 
-    let declarations = element_children(document_types);
-    assert_eq!(declarations.len(), 1, "only one script-handler declaration is allowed");
-    let declaration = declarations[0];
-    assert_eq!(dict_value(declaration, "CFBundleTypeRole").text(), Some("Shell"));
-    assert_eq!(dict_value(declaration, "LSHandlerRank").text(), Some("Alternate"));
+/// The text of every element child of `array`.
+fn strings(array: Node<'_, '_>) -> Vec<String> {
+    assert!(array.has_tag_name("array"));
+    element_children(array).into_iter().map(|node| node.text().unwrap().to_string()).collect()
+}
 
-    let content_types = dict_value(declaration, "LSItemContentTypes");
-    let values: Vec<_> =
-        element_children(content_types).into_iter().map(|node| node.text().unwrap()).collect();
-    assert_eq!(values, ["public.shell-script", "com.apple.terminal.shell-script"]);
+/// The app claims scripts and Unix executables only in the Shell role at Alternate rank, so
+/// installing it never takes over an existing default.
+#[test]
+fn packaged_app_declares_alternate_shell_document_types() {
+    with_root_dict(|root_dict| {
+        let declarations = element_children(dict_value(root_dict, "CFBundleDocumentTypes"));
+        assert_eq!(declarations.len(), 2, "scripts and Unix executables only");
+        let expected: [(&str, &[&str]); 2] = [
+            ("Shell Script", &["public.shell-script", "com.apple.terminal.shell-script"]),
+            ("Unix Executable", &["public.unix-executable"]),
+        ];
+        for (declaration, (name, content_types)) in declarations.into_iter().zip(expected) {
+            assert_eq!(dict_value(declaration, "CFBundleTypeName").text(), Some(name));
+            assert_eq!(dict_value(declaration, "CFBundleTypeRole").text(), Some("Shell"));
+            assert_eq!(dict_value(declaration, "LSHandlerRank").text(), Some("Alternate"));
+            assert_eq!(strings(dict_value(declaration, "LSItemContentTypes")), content_types);
+        }
+    });
+}
+
+/// The app declares exactly the ssh and x-man-page schemes it can serve; telnet is not claimed.
+#[test]
+fn packaged_app_declares_only_the_served_url_schemes() {
+    with_root_dict(|root_dict| {
+        let url_types = element_children(dict_value(root_dict, "CFBundleURLTypes"));
+        assert_eq!(url_types.len(), 1);
+        assert_eq!(
+            dict_value(url_types[0], "CFBundleURLName").text(),
+            Some("com.d0n9x1n.sonicterm.terminal-links")
+        );
+        assert_eq!(strings(dict_value(url_types[0], "CFBundleURLSchemes")), ["ssh", "x-man-page"]);
+    });
+    assert!(!MACOS_DMG_SCRIPT.to_ascii_lowercase().contains("telnet"));
 }

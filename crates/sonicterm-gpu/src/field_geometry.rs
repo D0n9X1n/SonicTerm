@@ -97,8 +97,10 @@ impl FieldText {
     /// in the colour picker, whose title row is not an editable field.
     #[must_use]
     pub fn palette(palette: &CommandPalette, preedit: &str) -> Option<Self> {
-        if !palette.is_open() || palette.mode() == CommandPaletteMode::TabColor {
-            // When: the palette is closed or shows the colour picker title, no query is editable.
+        if !palette.is_open()
+            || matches!(palette.mode(), CommandPaletteMode::TabColor | CommandPaletteMode::Confirm)
+        {
+            // When: the palette is closed or shows a picker or confirmation title, no query is editable.
             return None;
         }
         let display = command_palette_query_display(palette, preedit);
@@ -164,6 +166,7 @@ fn palette_variant(palette: &CommandPalette) -> u8 {
         CommandPaletteMode::RenameTab => 1,
         CommandPaletteMode::RenameWindow => 2,
         CommandPaletteMode::TabColor => 3,
+        CommandPaletteMode::Confirm => 4,
     };
     mode * 2 + u8::from(palette.tabs_only())
 }

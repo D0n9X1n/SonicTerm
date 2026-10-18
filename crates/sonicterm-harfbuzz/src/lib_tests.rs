@@ -19,5 +19,5 @@ fn linked_harfbuzz_matches_the_pinned_release() {
     let (mut major, mut minor, mut patch) = (0, 0, 0);
     // SAFETY: hb_version writes three initialized, correctly sized output pointers without retaining them.
     unsafe { crate::hb_version(&mut major, &mut minor, &mut patch) };
-    assert_eq!((major, minor, patch), (14, 4, 0));
+    assert_eq!((major, minor, patch), (14, 6, 0));
 }

@@ -487,7 +487,7 @@ impl App {
         match event {
             UserEvent::MenuAction => self.drain_menubar_actions(event_loop),
             UserEvent::OpenScripts => {
-                self.drain_open_script_requests();
+                self.drain_launch_requests();
             }
             UserEvent::OsDrag => self.drain_os_drag(),
             UserEvent::DragMoved => {
@@ -530,13 +530,19 @@ impl App {
             UserEvent::MemoryReportSampled { generation, sample } => {
                 self.handle_memory_report_sampled(generation, *sample);
             }
+            UserEvent::DefaultHandlerResult { request, index, outcome } => {
+                self.handle_default_handler_result(request, index, outcome);
+            }
+            UserEvent::DefaultHandlerDeadline { request } => {
+                self.handle_default_handler_deadline(request);
+            }
             UserEvent::UpdateCheckFinished { level, message } => {
                 self.show_notification_for_kind(self.frontmost_kind(), level, message);
             }
-            UserEvent::PaneProcessExited { pane_id, was_clean } => {
-                self.handle_pane_process_exited(pane_id, was_clean);
+            UserEvent::PaneProcessExited { pane_id, status, .. } => {
+                self.handle_pane_process_exited(pane_id, status);
             }
-            UserEvent::ScriptDraftRejected { message } => {
+            UserEvent::LaunchFailed { message } | UserEvent::ScriptDraftRejected { message } => {
                 self.handle_script_draft_rejected(message);
             }
             UserEvent::ClipboardWrite { text } => {
@@ -694,33 +700,86 @@ impl App {
         }
     }
 
-    pub(super) fn drain_open_script_requests(&mut self) -> usize {
+    pub(super) fn drain_launch_requests(&mut self) -> usize {
+        self.drain_launch_requests_with_fallback(false)
+    }
+
+    /// Open a tab for each queued launch and show each queued notice; returns the tabs opened.
+    ///
+    /// With `fallback_shell`, a drain that opened no tab opens the plain shell tab first, so a
+    /// notice on a cold start (for example a rejected link) lands in a window with a terminal.
+    fn drain_launch_requests_with_fallback(&mut self, fallback_shell: bool) -> usize {
         if self.main().is_none() {
             // When: no main window exists yet to host a tab; returning before
             // drain() leaves the requests queued for a later pass.
             return 0;
         }
-        let requests = crate::open_script_bridge::drain();
-        let count = requests.len();
+        let requests = crate::launch_queue::drain();
+        let mut count = 0;
+        let mut notices = Vec::new();
         for request in requests {
-            let title = request
-                .launch_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("script")
-                .to_string();
-            self.new_tab_with_launch(title, super::pane_launch::PaneLaunch::for_script(request));
+            match request {
+                sonicterm_types::LaunchRequest::Script(request) => {
+                    let title = request
+                        .launch_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("script")
+                        .to_string();
+                    let launch = super::pane_launch::PaneLaunch::for_script(request);
+                    self.new_tab_with_launch(title, launch);
+                    count += 1;
+                }
+                sonicterm_types::LaunchRequest::Terminal(launch) => {
+                    let tab_title =
+                        sonicterm_types::replace_control_characters(&launch.tab_title());
+                    if let Some(title) = launch.title.as_deref() {
+                        // A launcher's title names the native window as well as the first tab.
+                        self.set_main_window_name(&sonicterm_types::replace_control_characters(
+                            title,
+                        ));
+                    }
+                    let launch = super::pane_launch::PaneLaunch::for_terminal(launch);
+                    self.new_tab_with_launch(tab_title, launch);
+                    count += 1;
+                }
+                sonicterm_types::LaunchRequest::Notice(message) => notices.push(message),
+            }
         }
-        if count > 0 && self.main_is_hidden() {
+        if fallback_shell && count == 0 {
+            // A cold start that opened no tab still gets its plain shell before any notice shows.
+            self.new_tab("shell");
+        }
+        if (count > 0 || !notices.is_empty()) && self.main_is_hidden() {
             self.show_main_window();
+        }
+        for message in notices {
+            self.handle_script_draft_rejected(sonicterm_types::replace_control_characters(
+                &message,
+            ));
         }
         count
     }
 
-    pub(super) fn seed_initial_tabs(&mut self) {
-        if self.drain_open_script_requests() == 0 {
-            self.new_tab("shell");
+    /// Name the main window, as the rename command does, and update its native title.
+    fn set_main_window_name(&mut self, name: &str) {
+        let Some(id) = self.main_window_id else {
+            // When: `main_window_id` is unset there is no window to name.
+            return;
+        };
+        let Some(window) = self.windows.get_mut(&id) else {
+            // When: `windows` no longer holds the main id, the title has no target.
+            return;
+        };
+        window.custom_window_name = name.to_string();
+        let title = self.native_window_title(id);
+        if let (Some(native), Some(title)) = (self.windows[&id].window.as_ref(), title) {
+            native.set_title(&title);
         }
+    }
+
+    pub(super) fn seed_initial_tabs(&mut self) {
+        self.drain_launch_requests_with_fallback(true);
     }
 
     pub(super) fn do_resumed(&mut self, event_loop: &ActiveEventLoop) {

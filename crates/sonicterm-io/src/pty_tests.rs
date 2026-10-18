@@ -3609,7 +3609,7 @@ fn pending_peek_publishes_exit_before_the_consuming_wait() {
     assert!(exited);
     assert_eq!(seen_during_wait, Some(true), "exit was published before the wait");
     assert_eq!(try_wait_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(child.exit_was_clean, Some(true));
+    assert_eq!(child.exit_status, Some(PaneExitStatus::Code(0)));
 }
 
 /// A live child's peek reports nothing pending, so no consuming wait runs and exit stays
@@ -3894,4 +3894,103 @@ fn a_spawned_pty_stamps_its_output_only_with_the_diagnostic_option() {
         drop(chunk);
         drop(pty);
     }
+}
+
+/// Spawn `command` with `args`, wait for it to exit, and return its typed status.
+fn observe_exit_status(command: &str, args: &[String]) -> Option<PaneExitStatus> {
+    let pty = PtyHandle::spawn_with_args(command, args, 80, 24).expect("spawn short-lived process");
+    let probe = pty.child_exit_probe();
+    #[cfg(windows)]
+    pty.send_input_nonblocking(b"\x1b[1;1R".to_vec()).expect("answer ConPTY cursor query");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !probe.has_exited().expect("probe child") && std::time::Instant::now() < deadline {
+        while pty.out_rx.try_recv().is_ok() {}
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(probe.has_exited().expect("final probe"), "{command} did not exit in time");
+    probe.exit_status()
+}
+
+/// A nonzero exit code reaches the probe as that exact code, not just "unclean".
+#[test]
+fn the_exit_probe_reports_the_exit_code() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    #[cfg(unix)]
+    let (program, args) = ("/bin/sh", vec!["-c".to_string(), "exit 3".to_string()]);
+    #[cfg(windows)]
+    let (program, args) = ("cmd.exe", vec!["/c".to_string(), "exit".to_string(), "3".to_string()]);
+    assert_eq!(observe_exit_status(program, &args), Some(PaneExitStatus::Code(3)));
+}
+
+/// A signal death reaches the probe as the signal's conventional name.
+#[cfg(unix)]
+#[test]
+fn the_exit_probe_reports_the_killing_signal() {
+    let args = vec!["-c".to_string(), "kill -KILL $$".to_string()];
+    assert_eq!(
+        observe_exit_status("/bin/sh", &args),
+        Some(PaneExitStatus::Signal("SIGKILL".to_string()))
+    );
+}
+
+/// The first observed status wins, so a later consuming wait cannot rewrite the `waitid` record.
+#[test]
+fn a_recorded_exit_status_is_not_overwritten() {
+    let (leader, _calls) = mock_leader(false, Some(4242));
+    let mut child = ChildState::new(Box::new(leader), None);
+    child.record_exit_status(Some(PaneExitStatus::Signal("SIGTERM".to_string())));
+    child.record_exit_status(Some(PaneExitStatus::Code(0)));
+    assert_eq!(child.exit_status, Some(PaneExitStatus::Signal("SIGTERM".to_string())));
+}
+
+/// Unlisted Unix signals keep their number instead of borrowing a wrong name.
+#[cfg(unix)]
+#[test]
+fn unlisted_signals_are_named_by_number() {
+    assert_eq!(unix_signal_name(libc::SIGKILL), "SIGKILL");
+    assert_eq!(unix_signal_name(250), "signal 250");
+}
+
+/// A command whose program cannot be resolved fails with a typed error and starts no process or shell.
+#[test]
+fn spawn_command_failure_starts_nothing() {
+    let cwd = std::env::temp_dir();
+    let spawn = CommandSpawn {
+        program: std::ffi::OsString::from("sonicterm-no-such-program-for-tests"),
+        args: vec![std::ffi::OsString::from("secret-argument-value")],
+        cwd,
+    };
+    let error = PtyHandle::spawn_command(&spawn, 80, 24, &ShellSpawnOpts::default())
+        .err()
+        .expect("missing program must fail");
+    assert!(matches!(error, CommandSpawnError::NotFound { .. }), "{error:?}");
+    assert!(!error.to_string().contains("secret-argument-value"));
+}
+
+/// A missing cwd fails the spawn instead of starting the program in a home directory.
+#[test]
+fn spawn_command_with_missing_cwd_fails() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gone = root.path().join("gone");
+    #[cfg(unix)]
+    let program = "/bin/sh";
+    #[cfg(windows)]
+    let program = "cmd.exe";
+    let spawn = CommandSpawn { program: program.into(), args: Vec::new(), cwd: gone };
+    let error = PtyHandle::spawn_command(&spawn, 80, 24, &ShellSpawnOpts::default())
+        .err()
+        .expect("missing cwd must fail");
+    assert!(matches!(error, CommandSpawnError::InvalidCwd { .. }), "{error:?}");
+}
+
+/// A native spawn failure is mapped to a fixed reason; the lower layer's path text is not forwarded.
+#[test]
+fn spawn_errors_are_sanitized() {
+    let native = anyhow::Error::new(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "Unable to spawn /secret/dir/tool",
+    ));
+    let error = sanitize_spawn_error(std::ffi::OsStr::new("/secret/dir/tool"), &native);
+    assert_eq!(error.to_string(), "cannot run tool: permission denied");
 }

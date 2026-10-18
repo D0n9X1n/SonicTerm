@@ -6,7 +6,6 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use sonicterm_cfg::keymap::Direction;
 use sonicterm_grid::grid::Grid;
-use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::{pane::PaneTree, tabs::Tab};
 use sonicterm_vt::vt::Parser;
 use winit::window::{Window, WindowId};
@@ -157,17 +156,9 @@ impl App {
         // The gate is read before the PTY exists, so its reader stamps reads from the first one.
         let frame_counters = self.pane_frame_counters();
         let shell_opts = self.pane_spawn_opts(launch, frame_counters.is_some());
-        let pty = match PtyHandle::spawn_default_shell(cols, rows, shell_opts) {
-            Ok(pty) => Some(pty),
-            Err(error) => {
-                tracing::error!(
-                    target: "sonicterm_app::app::child_window",
-                    "failed to spawn pty for child pane: {error}"
-                );
-                None
-            }
-        };
+        let pty = self.spawn_launch_pty(pane_id, &parser, launch, cols, rows, &shell_opts).ok();
         let mut pane_state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
+        pane_state.hold_on_exit = launch.hold;
         self.reserve_pane_teardown(&mut pane_state);
         let mut frame_counters = frame_counters;
         pane_state.guard_correlation = self.attach_guard_correlation(pane_id, &mut frame_counters);

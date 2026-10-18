@@ -139,17 +139,56 @@ and Linux install no link. The native check runs on a real `NSView` on the
 process main thread in `crates/sonicterm-app/tests/display_link_native.rs`,
 which has no libtest harness; it does not assert that the display fires a tick.
 
-### Shell-script open events
+### File and link open events
 
-The app bundle advertises `public.shell-script` and
-`com.apple.terminal.shell-script` at `LSHandlerRank=Alternate`. A process-lifetime
-observer receives `NSApplicationWillFinishLaunchingNotification` and then
-installs the `kAEOpenDocuments` Apple Event handler. Paths are copied into the
-shared open-script queue; window and PTY creation remains on the event-loop
-thread. Cold multi-file opens preserve order and avoid an unrelated blank tab;
-later events append tabs. Relative paths use the process's initial working
-directory. This is Finder **Open With** integration, not a global default-terminal
-selector.
+The app bundle declares two Shell-role document types at `LSHandlerRank=Alternate`
+(shell scripts, and `public.unix-executable`) and claims the `ssh` and `x-man-page`
+URL schemes. A process-lifetime observer receives
+`NSApplicationWillFinishLaunchingNotification` and installs two Apple Event
+handlers: `kAEOpenDocuments` for files and `kAEGetURL` (class and id `'GURL'`,
+defined locally because `objc2-core-services` 0.3 does not export them) for links.
+Both handlers only queue requests on the shared launch queue; window and PTY
+creation remain on the event-loop thread. Cold multi-file opens preserve order and
+avoid an unrelated blank tab; later events add tabs to the running app. Relative
+paths use the process's initial working directory. This is Finder **Open With**
+and link integration, not a global default-terminal selector.
+
+A file open never executes a script. `executable_classify.rs` decides each file:
+
+```mermaid
+flowchart TD
+    start[Opened path] --> canon{realpath succeeds?}
+    canon -- no --> home[Shell in home + warning]
+    canon -- yes --> bundle{Any component ends in .app?}
+    bundle -- yes --> beside[Shell beside the bundle + warning]
+    bundle -- no --> open{open O_NOFOLLOW, fstat: regular file?}
+    open -- directory, other type or error --> parent[Shell in parent + warning]
+    open -- yes --> script{Script extension or #! header?}
+    script -- yes --> draft[Draft path: draft or warning, never run]
+    script -- no --> macho{Thin Mach-O, or fat with 1-16 architectures?}
+    macho -- no --> draft
+    macho -- yes --> quarantine{com.apple.quarantine absent on the same fd?}
+    quarantine -- no or error --> parent
+    quarantine -- yes --> exec{access X_OK?}
+    exec -- no --> parent
+    exec -- yes --> run[Run in canonical parent, held]
+```
+
+A run records the descriptor's device and inode. Just before spawn the app checks
+that the path is still a regular file, not a symlink, with that identity; otherwise
+the pane shows "Not run: <name> changed before it could start." and nothing
+starts. macOS has no `fexecve`, so a narrow window between that check and `execve`
+remains. SonicTerm never adds an execute bit, removes quarantine, or retries
+through a shell or `open`.
+
+A link is parsed by `sonicterm_cfg::launch_url`: the URI structure is split on raw
+delimiters, each component is percent-decoded exactly once, and the decoded text
+must match a per-field grammar. A valid link runs `/usr/bin/ssh` or `/usr/bin/man`
+by absolute path in `$HOME`, unheld. A rejected link, or a missing client, opens
+no tab of its own and queues a notice; on a cold start the notice waits for the
+first window, which still opens its plain shell tab. `telnet` is not claimed:
+macOS ships no `/usr/bin/telnet`, and a client in a user-writable prefix is not
+trusted.
 
 ### Tab handoff
 
@@ -192,11 +231,27 @@ uses an opaque window because the GDI presenter cannot composite transparency.
 
 ### CLI and shell-file registration
 
-The installed executable accepts one lossless `--open-script <PATH>` argument.
-The startup path resolves a relative argument against the process's initial
-working directory and queues it before `WindowsShell::run`, so cold startup
-opens the script tab instead of a HOME tab. The private tear-out payload cannot
-be combined with `--open-script`.
+`sonicterm-windows.exe` reads its arguments with `std::env::args_os()` through the
+launcher grammar it shares with Linux (`crates/sonicterm-app/src/launch_cli.rs`;
+see [Usage](Usage) for the options). It also accepts the windowless
+`--refresh-shell-associations` and the private `--tear-out-payload`, which keeps
+its last value when repeated and cannot be combined with any other mode.
+
+Unknown options and stray arguments are usage errors that exit `2`. No command
+line SonicTerm registers or spawns passes one: the MSI ProgIDs run
+`--open-script "%1"`, its custom actions run `--refresh-shell-associations`, the
+shortcuts pass no arguments, and tab tear-out and release smokes pass only
+`--tear-out-payload` and `--runtime-smoke`. The binary is a GUI-subsystem program
+with no console, so usage and `--help` are printed only after
+`AttachConsole(ATTACH_PARENT_PROCESS)` succeeds; a usage error is always logged.
+
+`--open-script <PATH>` is lossless. The startup path resolves a relative argument
+against the process's initial working directory and queues it before
+`WindowsShell::run`, so cold startup opens the script tab instead of a HOME tab.
+A command launch (`-e`) without `--dir` starts in the process's working directory;
+a plain shell keeps its `%USERPROFILE%` default, because the installer's shortcuts
+start the process in the install folder. Batch files are refused as commands (see
+[Usage](Usage)). Each launch is a new process with its own window.
 
 `--refresh-shell-associations` runs without a window and broadcasts
 `SHCNE_ASSOCCHANGED`. The MSI registers SonicTerm ProgIDs, Default Apps
@@ -293,6 +348,53 @@ Mono faces, passes their directory to `FontStack` before native Fontconfig
 discovery, and retains that directory across font reloads. Native fallback
 remains available.
 
+### Terminal launchers
+
+`sonicterm` reads `std::env::args_os()` through the shared launcher grammar, so a
+non-Unicode argument never panics. A usage error prints usage to standard error,
+logs one `warn` naming the argument position and rule, and exits `2`; `--help`
+exits `0`. Every launch is a new process with a new window; there is no
+single-instance IPC. Without `--dir`, the first tab starts in the process's
+working directory, else `$HOME`, which is what KIO and Debian launchers expect.
+Later tabs keep their rules: the active pane's OSC 7 directory, else `$HOME`.
+
+`-e`, `--command` and `--` run the program directly through
+`PtyHandle::spawn_command`, never through a shell:
+
+- A name without `/` is searched on SonicTerm's own `PATH`, using only absolute
+  entries. A path is used as given; a relative path resolves against the launch
+  directory.
+- The target must be a regular file that passes `access(X_OK)` and starts with
+  `#!` or the platform's native executable magic (ELF on Linux, Mach-O on macOS).
+  libc's `execvp` retries a file the kernel rejects with `ENOEXEC` through
+  `/bin/sh`; refusing such a file first keeps that shell path from running.
+- The working directory must exist when the program starts; it never falls back
+  to `$HOME`.
+- A failure opens the tab, writes the reason into its own grid, shows a
+  notification, and starts nothing else.
+
+The terminal desktop entry `com.d0n9x1n.SonicTerm.desktop` keeps `Exec=sonicterm`
+with no field code: KDE appends `-e cmd` to the raw `Exec`, and xdg-terminal-exec
+strips field codes. It declares `X-TerminalArgExec=-e`, `X-ExecArg=-e` (read by
+xdg-terminal-exec's compatibility mode), `X-TerminalArgTitle=-T`,
+`X-TerminalArgDir=--dir=` and `X-TerminalArgHold=--hold`.
+
+A second, hidden entry, `com.d0n9x1n.SonicTerm.open-script.desktop`
+(`NoDisplay=true`), runs `sonicterm --open-script %f` for
+`application/x-shellscript` and `text/x-shellscript`. A file association therefore
+types a draft at the prompt and never executes the script.
+
+Which launchers reach SonicTerm:
+
+| Launcher | How it selects SonicTerm |
+| --- | --- |
+| xdg-terminal-exec | The user lists `com.d0n9x1n.SonicTerm.desktop` in `xdg-terminals.list`. |
+| GLib ≥ 2.75 `Terminal=true` apps | Through xdg-terminal-exec, which GLib tries first. GLib never tries `x-terminal-emulator`. |
+| KDE | The user picks SonicTerm in Default Applications (`TerminalService`), or sets `TerminalApplication=sonicterm`. KIO appends `-e` and starts the process in the target directory. |
+| Debian `x-terminal-emulator` | Only after the user registers the alternative; see [Packaging](Packaging). |
+
+Installing never changes any of these defaults.
+
 ### Runtime smoke boundary
 
 All three shipping binaries accept the hidden `--runtime-smoke` mode. The
@@ -369,6 +471,64 @@ and Wayland. [Packaging](Packaging) describes the Linux scenario argument and
 isolated evidence paths. Otherwise successful smoke with unsettled native PTY
 teardown exits `20`; an earlier fault, loss or recovery failure keeps its original code.
 
+## Default-handler command
+
+One palette command, `Action::SetDefaultHandlers`, is the only path that changes a
+system default; install, startup and config reload never reach it. Each binary
+installs its backend through `with_default_handlers` on its shell, and only the
+command calls it.
+
+```mermaid
+flowchart TD
+    select[User selects the palette command] --> plan{Backend plan}
+    plan -- refused --> refusal[Notification with the reason; nothing changes]
+    plan -- ready --> confirm[Confirmation page: Apply, Cancel, affected items]
+    confirm -- Cancel or Esc --> nothing[Nothing changes]
+    confirm -- Apply --> apply[Backend apply returns at once]
+    apply --> results[Each item posts its outcome through the event-loop proxy]
+    results --> report[One report in the green notification]
+    apply -. deadline of 120 s .-> report
+```
+
+The report lists every item as `changed`, `opened`, `denied`, `cancelled`,
+`failed (<detail>)` or `pending`. An item with no result by the deadline is
+pending, never changed; a later result for that run is ignored.
+
+- **macOS** (`crates/sonicterm-mac/src/default_handlers.rs`). The plan reads
+  `CFBundleDocumentTypes` content types and `CFBundleURLTypes` schemes from the
+  running bundle's own `Info.plist`, so it lists exactly what the bundle claims.
+  It refuses unless the main bundle is a `.app` with identifier
+  `com.d0n9x1n.sonicterm`, on a writable volume, outside any `AppTranslocation`
+  path, and listed by `URLsForApplicationsWithBundleIdentifier:`. A mounted DMG and
+  a translocated copy both run from a read-only volume (`statfs` `MNT_RDONLY`), so
+  no private API is needed. Apply calls
+  `setDefaultApplicationAtURL:toOpenContentType:` and
+  `setDefaultApplicationAtURL:toOpenURLsWithScheme:` on the main thread with the
+  checked bundle URL; `UTType` is resolved at runtime. Each completion block maps
+  its `NSError`: no error is changed, `NSCocoaErrorDomain` 3072 and
+  `NSOSStatusErrorDomain` -128 are cancelled, -54 and -5000 are denied, and any
+  other error is failed with its domain and code. Which codes a declined consent
+  prompt returns is not documented; this mapping is an assumption. The modern
+  setters take no role, so which role they record for `public.unix-executable` is
+  checked by hand with the ignored `shell_role_handler_for_unix_executables` test.
+- **Linux** (`crates/sonicterm-linux/src/default_handlers.rs`). The plan finds the
+  open-script entry in `$XDG_DATA_HOME/applications`, then each
+  `$XDG_DATA_DIRS/applications`, reads its `MimeType`, and resolves `xdg-mime` to
+  an absolute executable from the absolute `PATH` entries. Apply runs
+  `xdg-mime default com.d0n9x1n.SonicTerm.open-script.desktop <types>`, then
+  `xdg-mime query default <type>` for each type, on a worker thread with no shell.
+  Each run leads its own process group; at its 10-second deadline the group is
+  killed before the child is reaped. A type is changed only when the read-back
+  names the entry. Nothing writes `xdg-terminals.list`, `kdeglobals` or an
+  alternative.
+- **Windows** (`crates/sonicterm-windows/src/default_handlers.rs`). Apply opens
+  `ms-settings:defaultapps?registeredAppMachine=SonicTerm` (the HKLM
+  `RegisteredApplications` name from `wix/main.wxs`), else
+  `ms-settings:defaultapps`, through `ShellExecuteExW` in a COM apartment on a
+  worker thread. Whether the per-app link opens SonicTerm's own page depends on
+  the Windows build and is unverified. The backend writes no registry value and
+  never touches `UserChoice`.
+
 ## Platform matrix
 
 | Capability | macOS | Windows | Linux |
@@ -383,6 +543,7 @@ teardown exits `20`; an earlier fault, loss or recovery failure keeps its origin
 | Software present | wgpu adapter path | CPU BGRA + GDI | wgpu Vulkan/lavapipe or selected platform adapter |
 | Package format | `.app` in per-architecture `.dmg` | x64 WiX `.msi` | x86_64 `.deb` and `.tar.gz` |
 | Signing | ad-hoc bundle signature | unsigned | unsigned |
+| Default-handler command | `NSWorkspace` setters for claimed types and schemes | opens Settings › Default apps | `xdg-mime` for shell-script MIME types |
 
 ## Code map
 
@@ -391,9 +552,12 @@ teardown exits `20`; an earlier fault, loss or recovery failure keeps its origin
 | Shared platform shell | `crates/sonicterm-app/src/shell.rs` |
 | Path and URL detection, shared by every OS | `crates/sonicterm-cfg/src/url_scan.rs`, `crates/sonicterm-app/src/app/path_target.rs` |
 | Safe native target open | `crates/sonicterm-app/src/app/path_target.rs`, `crates/sonicterm-app/src/app/path_target/{unix,macos,linux,windows}.rs`, `crates/sonicterm-cfg/src/url_open/{macos,linux,windows}.rs` |
-| macOS entry/menu/open documents/tab handoff | `crates/sonicterm-mac/src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs` |
+| macOS entry/menu/open documents and links/tab handoff | `crates/sonicterm-mac/src/{main,menubar,open_documents,open_urls,executable_classify,os_drag_mac,tab_drag_os}.rs` |
+| Terminal link grammar | `crates/sonicterm-cfg/src/launch_url.rs` |
 | macOS display link | `crates/sonicterm-app/src/app/display_link.rs` |
 | Windows entry/CLI/menu/backdrop/tab drag | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
 | Windows software present | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`, `crates/sonicterm-windows/src/software_presenter.rs` |
 | Linux entry and identity | `crates/sonicterm-linux/src/main.rs`, `crates/sonicterm-linux/resources/` |
+| Launcher grammar and launch queue | `crates/sonicterm-app/src/{launch_cli,launch_queue}.rs`, `crates/sonicterm-app/src/app/{pane_launch,pane_exit}.rs` |
+| Direct command spawn and program resolution | `crates/sonicterm-io/src/{pty,command_resolve}.rs` |
 | Asset lookup | `crates/sonicterm-cfg/src/assets.rs` |

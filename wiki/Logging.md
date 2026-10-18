@@ -227,6 +227,52 @@ Attempts still run: only invalid sizes and successful duplicates are skipped by
 the IO boundary. The grid keeps the requested geometry. There is no rollback,
 retry timer, or failure heartbeat.
 
+## Launch diagnostics
+
+Launches log on target `sonicterm_app::launch`. They never record an argument
+value, a path, or a title, at any level.
+
+| Event | Level | Fields |
+| --- | --- | --- |
+| `pane launched` | `info` | `pane`, `kind` (`command`, `executable`, `url`, `script` or `shell`), `cwd_source` (`--dir`, `process`, `home`, `parent` or `default`), `hold`; a command also logs `scheme` (`ssh`, `x-man-page` or `none`), `program` (its file name only) and `arg_count` |
+| `pane command argument byte lengths` | `debug` | `pane`, `arg_bytes` (each argument's length in bytes) |
+| `pane command did not start` | `warn` | `pane`, `program` (file name), `reason` (the failing rule, never lower-layer error text); for an opened executable replaced before spawn, `pane`, `kind` and `reason=identity_changed` |
+| `launch arguments rejected` | `warn` | `position` (1-based argument index), `rule` (for example `unknown-option` or `dir-not-a-directory`) |
+
+`info` and `debug` lines are hidden at the default `warn` level. A usage error is
+logged before the process exits with status `2`.
+
+macOS file and link opens log refusals on their own targets, never a path, link,
+user, host, port or page:
+
+| Event | Target | Level | Fields |
+| --- | --- | --- | --- |
+| `document open not run` | `sonicterm_mac::open_document` | `warn` | `reason` (`unresolvable`, `bundle`, `directory`, `not_regular`, `unreadable`, `quarantined` or `not_executable`) |
+| `terminal link rejected` | `sonicterm_mac::open_url` | `warn` | `scheme` (`ssh`, `x-man-page` or `unsupported`), `field` (for example `user`, `host` or `page`), `reason`; or only `reason=no_link` |
+| `terminal link client is missing` | `sonicterm_mac::open_url` | `warn` | `scheme`, `client` (`ssh` or `man`), `reason=client_missing` |
+
+## Default-handler diagnostics
+
+The default-handler command logs on target `sonicterm_app::default_handlers`, plus
+one target per OS backend. Item names are type identifiers, schemes, MIME types or
+a settings page, never a path or user data; a refused macOS bundle logs facts, not
+its path.
+
+| Event | Target | Level | Fields |
+| --- | --- | --- | --- |
+| `default handlers command invoked` | `sonicterm_app::default_handlers` | `info` | `platform` (`macos`, `linux`, `windows` or `none`) |
+| `default handlers refused before confirmation` | `sonicterm_app::default_handlers` | `info` | `platform` |
+| `default handlers cancelled at confirmation` | `sonicterm_app::default_handlers` | `info` | `platform` |
+| `default handlers apply started` | `sonicterm_app::default_handlers` | `info` | `platform`, `items` |
+| `default handler item finished` | `sonicterm_app::default_handlers` | `debug` | `platform`, `item`, `outcome` |
+| `default handler item failed` | `sonicterm_app::default_handlers` | `warn` | `platform`, `item`, `error` (error domain and code, or the failing step) |
+| `late default handler result ignored` | `sonicterm_app::default_handlers` | `debug` | `request`, `index`, `outcome` |
+| `default handlers finished` | `sonicterm_app::default_handlers` | `info` | `platform`, `changed`, `opened`, `denied`, `cancelled`, `failed`, `pending` |
+| `default handlers deadline timer did not start` | `sonicterm_app::default_handlers` | `warn` | `error` |
+| `default handlers refused for this bundle` | `sonicterm_mac::default_handlers` | `info` | `app_bundle`, `identifier_matches`, `read_only_volume`, `translocated`, `registered` |
+| `xdg-mime default finished` | `sonicterm_linux::default_handlers` | `info` | `status` (`exit <code>`, `killed by a signal`, `timed out` or `could not start (<kind>)`) |
+| `default apps settings requested` | `sonicterm_windows::default_handlers` | `info` | `outcome` |
+
 ## Render and performance diagnostics
 
 `frame_collection` warns once per invalid-topology episode with `id` (window)

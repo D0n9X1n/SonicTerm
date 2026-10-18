@@ -82,7 +82,7 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 | `sonicterm-resource` | `ResourceGovernor` 共享 `Arc<Ledger>`；reservation token 拥有记账量，`ReaperSupervisor` 拥有已接纳的清理任务。`UnresolvedSink` 将类型擦除的原生载荷与其记账一起保留。 | `try_reserve`、`Reservation`、`CommittedReservation`、`snapshot`、`ReaperSupervisor` 和 `UnresolvedSink`；快照是观察结果，GUI 进程/窗口限制仍仅用于跟踪。 |
 | `sonicterm-grid` | 每个 `Grid` 拥有可见/历史/保存的主屏行、版本和脏位；`HyperlinkRegistry` 单独拥有链接元数据。生产解析器拥有网格。 | `Grid::resize`、`revision`、`retained_amount_by_region`、行访问和 `Line`；不包含原生句柄、PTY 传输或呈现。 |
 | `sonicterm-vt` | `Parser` 拥有 `Grid`、解析状态、捕获缓冲和回复/事件状态；窗格 worker 在该窗格的解析器锁下推进它。 | `src/vt.rs` 中的 `Parser::advance`、`grid`、`grid_mut` 和 `VtEvent`；回调产生数据，不调用原生窗口。 |
-| `sonicterm-io` | `PtyHandle` 拥有子进程、有界输入/输出传输状态、取消以及 reader/writer 生命周期。Drop 启动有界清理。 | `spawn_default_shell`、`send_input_nonblocking`、`PtyInputSender`、`resize`、`out_rx` 和可选 `SshHandle`；GUI 调用方不拥有原生 PTY 内部状态。 |
+| `sonicterm-io` | `PtyHandle` 拥有子进程、有界输入/输出传输状态、取消以及 reader/writer 生命周期。Drop 启动有界清理。 | `spawn_default_shell`、`spawn_command`（不经 shell 运行启动器指定的程序，由 `command_resolve` 解析）、`send_input_nonblocking`、`PtyInputSender`、`resize`、`out_rx`、带类型 `PaneExitStatus` 的退出探针和可选 `SshHandle`；GUI 调用方不拥有原生 PTY 内部状态。 |
 | `sonicterm-cfg` | 调用方拥有加载后的 `Config`、`Theme` 和 `Keymap` 值，并决定何时替换。 | `src/{config,theme,keymap,assets,url_scan,url_open}.rs` 中的 TOML/资源/URI API；`LoggingConfig` 从 logging 重导出，文件系统目标不进入 URI 打开器。 |
 | `sonicterm-logging` | 进程 subscriber、panic/exit hook、ring 和工件 worker 由 logging 管理；二进制保留 `LoggingGuard` 维持 appender 生命周期。 | `init`、`init_in`、`LoggingConfig`、`install_panic_hook` 和 breadcrumb/session API；按进程初始化，不是每个窗口一个 subscriber。持久化范围见[日志](Logging-zh-CN)。 |
 | `sonicterm-ui` | `App` 和 `WindowState` 持有 UI controller；`CommandPalette` 拥有缓存文本与过滤选择，`TabBar` 拥有标签页身份和每个标签页测得的标题宽度，当前生效的标签宽度上下限是进程级标量，每个 `TabBar` 记录其上次布局所用的上下限。 | `CommandPalette`、`PaletteLayout`、`TabBarLayout`、`PaneTree`、`Selection` 和 `I18n`；仅计算状态/布局，不拥有原生窗口或执行动作。 |
@@ -100,7 +100,7 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 | `sonicterm-app` | `App` 拥有实时 `WindowState`、预热渲染器、路由和资源协调。每个窗口拥有标签页/窗格；每个窗格拥有 parser/PTY/image 状态。 | `App`、`WindowState`、`PaneState`、`run_action_for_window` 和平台 `Shell` 封装；重绘以 `try_lock` 收集可见解析器 guard，并移入仅在组装期间持有的帧源；帧源及其 guard 在呈现前释放，已呈现帧的回执在下一次收集时确认。原生 worker 不解析 UI 窗口身份。 |
 | `sonicterm-mac` | 二进制启动保留 logging/session guard，安装 AppKit hook，并将事件循环交给 `MacShell`。 | `src/main.rs` 和 menu/open-document/drag 模块；AppKit 调用留在主线程，终端行为留在共享 app/IO crate。 |
 | `sonicterm-windows` | 二进制启动保留 logging/session guard，安装 Win32 menu/backdrop/OLE hook，并运行 `WindowsShell`。 | `src/main.rs`、CLI 和原生 GUI 模块，以及 WiX 资源；PTY/ConPTY 进程所有权保留在 `sonicterm-io`。 |
-| `sonicterm-linux` | 二进制启动拥有 Linux 能力归一化与打包字体预检，保留 logging/session guard，然后运行 `LinuxShell`。 | `src/main.rs` 与包资源；直接 engine 依赖用于字体预检，X11/Wayland 窗口和终端状态仍由 app 拥有。 |
+| `sonicterm-linux` | 二进制启动拥有 Linux 能力归一化与打包字体预检，保留 logging/session guard，然后运行 `LinuxShell`。 | `src/main.rs`（通过共用的 `launch_cli` 语法解析启动器参数）与包资源（终端与 open-script 桌面条目、man page）；直接 engine 依赖用于字体预检，X11/Wayland 窗口和终端状态仍由 app 拥有。 |
 
 ## 契约与终端核心
 
@@ -202,7 +202,8 @@ grant 可以接纳。接纳关闭后，不再走这条正常重试路径。
 
 **第一方依赖：** `sonicterm-logging`、`sonicterm-types`。
 
-**阅读：** `src/{config,theme,keymap,assets,url_scan,url_open,dimension}.rs`。
+**阅读：** `src/{config,theme,keymap,assets,url_scan,url_open,launch_url,dimension}.rs`。
+`launch_url.rs` 把 `ssh:` 和 `x-man-page:` 链接校验为固定客户端的 argv。
 
 ### `sonicterm-ui`
 
@@ -400,13 +401,13 @@ crate 存在于 lockfile 中，用于每窗口的 `NSView.displayLink` 及其 ti
 
 ### `sonicterm-mac`
 
-**职责：** macOS 二进制与 AppKit 胶水，包括启动、NSMenu、打开文档事件、
-NSPasteboard 标签页交接、NSWindow 设置和 app bundle 入口。
+**职责：** macOS 二进制与 AppKit 胶水，包括启动、NSMenu、带可执行文件分类的打开文档
+与打开 URL 事件、NSPasteboard 标签页交接、NSWindow 设置和 app bundle 入口。
 
 **第一方依赖：** `sonicterm-app`、`sonicterm-app-core`、`sonicterm-cfg`、
-`sonicterm-logging`。
+`sonicterm-logging`、`sonicterm-types`。
 
-**阅读：** `src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs`。
+**阅读：** `src/{main,menubar,open_documents,open_urls,executable_classify,os_drag_mac,tab_drag_os}.rs`。
 原生边界见[平台集成](Platform-Integration-zh-CN)。
 
 ### `sonicterm-windows`

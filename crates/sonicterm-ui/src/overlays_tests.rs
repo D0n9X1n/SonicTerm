@@ -385,3 +385,19 @@ fn command_palette_layout_keeps_six_padded_rows_visible() {
         "query icon remains vertically centered after compacting padding"
     );
 }
+
+/// Contract: a confirmation page shows its title in the query row, Apply and Cancel as live rows,
+/// each affected item dimmed, and the confirmation footer.
+#[test]
+fn confirmation_page_layout_dims_item_rows() {
+    let mut palette = CommandPalette::new();
+    palette.start_confirm("Title", "Apply", "Cancel", vec!["URL scheme ssh:".into()]);
+    let layout = PaletteLayout::compute(&mut palette, 900.0, 600.0, 0.0, 1.0).unwrap();
+    assert_eq!(layout.query_label, "Title");
+    assert_eq!(layout.query_placeholder, None);
+    assert_eq!(layout.row_labels, vec!["Apply", "Cancel", "URL scheme ssh:"]);
+    assert_eq!(layout.row_disabled, vec![false, false, true]);
+    assert_eq!(layout.selected_row, Some(1));
+    assert_eq!(layout.empty_label, None);
+    assert_eq!(layout.footer_label, palette.text().confirm_footer);
+}

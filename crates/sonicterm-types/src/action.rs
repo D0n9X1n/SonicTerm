@@ -186,4 +186,9 @@ pub enum Action {
     ShowMemoryUsage,
     /// Copy the whole Memory Usage report text to the clipboard.
     CopyMemoryReport,
+
+    // System integration
+    /// Show the file and link handlers SonicTerm can claim, and change them only after
+    /// the user chooses Apply. Nothing else changes a system default.
+    SetDefaultHandlers,
 }

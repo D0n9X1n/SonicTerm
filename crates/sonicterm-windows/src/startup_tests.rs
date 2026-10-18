@@ -96,6 +96,29 @@ fn no_open_script_routes_nothing() {
     assert!(!sink_called.get());
 }
 
+/// A plain launch queues nothing, so the first tab keeps its `%USERPROFILE%` default.
+#[test]
+fn plain_launch_queues_no_terminal() {
+    let parsed = parsed([OsString::from("sonicterm")]);
+    assert_eq!(startup_terminal(&parsed, Some(absolute_root()), None), None);
+}
+
+/// A command launch without `--dir` starts in the process cwd; a shell with options keeps its default.
+#[test]
+fn command_launch_defaults_to_the_process_cwd() {
+    let root = std::env::temp_dir();
+    let command =
+        parsed([OsString::from("sonicterm"), OsString::from("-e"), OsString::from("cmd")]);
+    let launch = startup_terminal(&command, Some(root.clone()), None).expect("command launch");
+    assert_eq!(launch.cwd, Some(root.clone()));
+    assert_eq!(launch.command.expect("command").program, "cmd");
+
+    let held = parsed([OsString::from("sonicterm"), OsString::from("--hold")]);
+    let launch = startup_terminal(&held, Some(root), None).expect("held shell launch");
+    assert!(launch.hold);
+    assert_eq!(launch.cwd, None, "a plain shell keeps its %USERPROFILE% default");
+}
+
 #[test]
 fn main_queues_the_request_before_constructing_the_windows_shell() {
     let source = include_str!("main.rs");
@@ -111,4 +134,49 @@ fn main_queues_the_request_before_constructing_the_windows_shell() {
         .map(|offset| interactive + offset)
         .expect("interactive Windows shell construction");
     assert!(queue < shell);
+    let terminal = source[interactive..]
+        .find("startup::queue_startup_terminal(&parsed_cli)")
+        .map(|offset| interactive + offset)
+        .expect("terminal launch producer call");
+    assert!(terminal < shell);
+}
+
+/// Usage errors exit 2 and `--help` exits 0, both before any window or log session starts.
+#[test]
+fn main_maps_usage_errors_to_exit_two() {
+    let source = include_str!("main.rs");
+    assert!(source.contains("ExitCode::from(sonicterm_app::launch_cli::USAGE_EXIT_CODE)"));
+    assert!(source.contains("AttachConsole(ATTACH_PARENT_PROCESS)"));
+}
+
+/// A relative script against a relative process cwd is refused with a reason, never joined.
+#[test]
+fn relative_open_script_with_a_relative_cwd_is_a_contextual_error() {
+    let parsed = parsed([
+        OsString::from("sonicterm"),
+        OsString::from("--open-script"),
+        OsString::from("build.ps1"),
+    ]);
+    let error = queue_startup_open_script_with(&parsed, || Some(PathBuf::from("relative")), |_| {})
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("not absolute"), "{error:#}");
+}
+
+/// The production queue entry points report whether they queued anything.
+#[test]
+fn startup_queue_entry_points_report_what_they_queued() {
+    let plain = parsed([OsString::from("sonicterm")]);
+    assert!(!queue_startup_open_script(&plain, || None).unwrap());
+    assert!(!queue_startup_terminal(&plain), "a plain launch keeps the default first tab");
+
+    let script = parsed([
+        OsString::from("sonicterm"),
+        OsString::from("--open-script"),
+        absolute_root().join("build.ps1").into_os_string(),
+    ]);
+    assert!(queue_startup_open_script(&script, || None).unwrap());
+
+    let command =
+        parsed([OsString::from("sonicterm"), OsString::from("-e"), OsString::from("cmd")]);
+    assert!(queue_startup_terminal(&command), "a command launch is queued");
 }

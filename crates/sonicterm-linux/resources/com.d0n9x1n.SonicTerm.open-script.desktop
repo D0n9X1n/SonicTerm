@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=SonicTerm
+Comment=Open a shell script as a command draft in SonicTerm
+Exec=sonicterm --open-script %f
+Icon=com.d0n9x1n.SonicTerm
+Terminal=false
+NoDisplay=true
+MimeType=application/x-shellscript;text/x-shellscript;
+StartupWMClass=com.d0n9x1n.SonicTerm

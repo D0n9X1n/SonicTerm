@@ -267,6 +267,9 @@ pub enum hb_script_t {
     HB_SCRIPT_SIDETIC = 1399415924,
     HB_SCRIPT_TAI_YO = 1415674223,
     HB_SCRIPT_TOLONG_SIKI = 1416588403,
+    HB_SCRIPT_JURCHEN = 1249210979,
+    HB_SCRIPT_PROTO_CUNEIFORM = 1348695406,
+    HB_SCRIPT_SEAL = 1399153004,
     HB_SCRIPT_INVALID = 0,
     _HB_SCRIPT_MAX_VALUE = 2147483647,
 }
@@ -1199,6 +1202,28 @@ pub type hb_draw_close_path_func_t = ::std::option::Option<
         user_data: *mut ::std::os::raw::c_void,
     ),
 >;
+pub type hb_draw_set_budget_func_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        dfuncs: *mut hb_draw_funcs_t,
+        draw_data: *mut ::std::os::raw::c_void,
+        budget: i64,
+        user_data: *mut ::std::os::raw::c_void,
+    ) -> hb_bool_t,
+>;
+pub type hb_draw_get_budget_func_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        dfuncs: *mut hb_draw_funcs_t,
+        draw_data: *mut ::std::os::raw::c_void,
+        user_data: *mut ::std::os::raw::c_void,
+    ) -> i64,
+>;
+pub type hb_draw_get_budget_remaining_func_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        dfuncs: *mut hb_draw_funcs_t,
+        draw_data: *mut ::std::os::raw::c_void,
+        user_data: *mut ::std::os::raw::c_void,
+    ) -> *mut i64,
+>;
 unsafe extern "C" {
     pub fn hb_draw_funcs_set_move_to_func(
         dfuncs: *mut hb_draw_funcs_t,
@@ -1240,6 +1265,30 @@ unsafe extern "C" {
     );
 }
 unsafe extern "C" {
+    pub fn hb_draw_funcs_set_set_budget_func(
+        dfuncs: *mut hb_draw_funcs_t,
+        func: hb_draw_set_budget_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+        destroy: hb_destroy_func_t,
+    );
+}
+unsafe extern "C" {
+    pub fn hb_draw_funcs_set_get_budget_func(
+        dfuncs: *mut hb_draw_funcs_t,
+        func: hb_draw_get_budget_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+        destroy: hb_destroy_func_t,
+    );
+}
+unsafe extern "C" {
+    pub fn hb_draw_funcs_set_get_budget_remaining_func(
+        dfuncs: *mut hb_draw_funcs_t,
+        func: hb_draw_get_budget_remaining_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+        destroy: hb_destroy_func_t,
+    );
+}
+unsafe extern "C" {
     pub fn hb_draw_funcs_create() -> *mut hb_draw_funcs_t;
 }
 unsafe extern "C" {
@@ -1271,6 +1320,25 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn hb_draw_funcs_is_immutable(dfuncs: *mut hb_draw_funcs_t) -> hb_bool_t;
+}
+unsafe extern "C" {
+    pub fn hb_draw_set_budget(
+        dfuncs: *mut hb_draw_funcs_t,
+        draw_data: *mut ::std::os::raw::c_void,
+        budget: i64,
+    ) -> hb_bool_t;
+}
+unsafe extern "C" {
+    pub fn hb_draw_get_budget(
+        dfuncs: *mut hb_draw_funcs_t,
+        draw_data: *mut ::std::os::raw::c_void,
+    ) -> i64;
+}
+unsafe extern "C" {
+    pub fn hb_draw_get_budget_remaining(
+        dfuncs: *mut hb_draw_funcs_t,
+        draw_data: *mut ::std::os::raw::c_void,
+    ) -> i64;
 }
 unsafe extern "C" {
     pub fn hb_draw_move_to(
@@ -1369,6 +1437,52 @@ unsafe extern "C" {
 pub struct hb_paint_funcs_t {
     _unused: [u8; 0],
 }
+pub type hb_paint_set_budget_func_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
+        budget: i64,
+        user_data: *mut ::std::os::raw::c_void,
+    ) -> hb_bool_t,
+>;
+pub type hb_paint_get_budget_func_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
+        user_data: *mut ::std::os::raw::c_void,
+    ) -> i64,
+>;
+pub type hb_paint_get_budget_remaining_func_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
+        user_data: *mut ::std::os::raw::c_void,
+    ) -> *mut i64,
+>;
+unsafe extern "C" {
+    pub fn hb_paint_funcs_set_set_budget_func(
+        funcs: *mut hb_paint_funcs_t,
+        func: hb_paint_set_budget_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+        destroy: hb_destroy_func_t,
+    );
+}
+unsafe extern "C" {
+    pub fn hb_paint_funcs_set_get_budget_func(
+        funcs: *mut hb_paint_funcs_t,
+        func: hb_paint_get_budget_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+        destroy: hb_destroy_func_t,
+    );
+}
+unsafe extern "C" {
+    pub fn hb_paint_funcs_set_get_budget_remaining_func(
+        funcs: *mut hb_paint_funcs_t,
+        func: hb_paint_get_budget_remaining_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+        destroy: hb_destroy_func_t,
+    );
+}
 unsafe extern "C" {
     pub fn hb_paint_funcs_create() -> *mut hb_paint_funcs_t;
 }
@@ -1401,6 +1515,25 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn hb_paint_funcs_is_immutable(funcs: *mut hb_paint_funcs_t) -> hb_bool_t;
+}
+unsafe extern "C" {
+    pub fn hb_paint_set_budget(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
+        budget: i64,
+    ) -> hb_bool_t;
+}
+unsafe extern "C" {
+    pub fn hb_paint_get_budget(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
+    ) -> i64;
+}
+unsafe extern "C" {
+    pub fn hb_paint_get_budget_remaining(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
+    ) -> i64;
 }
 pub type hb_paint_push_transform_func_t = ::std::option::Option<
     unsafe extern "C" fn(

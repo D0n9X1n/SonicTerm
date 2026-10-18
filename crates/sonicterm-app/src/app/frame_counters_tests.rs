@@ -491,8 +491,8 @@ fn parser_lock_audit(
 const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("menubar_bridge.rs", "proxy_slot()", 2),
     ("menubar_bridge.rs", "queue()", 2),
-    ("open_script_bridge.rs", "proxy_slot()", 2),
-    ("open_script_bridge.rs", "queue()", 2),
+    ("launch_queue.rs", "proxy_slot()", 2),
+    ("launch_queue.rs", "queue()", 2),
     ("os_drag_bridge.rs", "proxy_slot()", 2),
     ("os_drag_bridge.rs", "tab_queue()", 2),
     ("os_drag_bridge.rs", "file_queue()", 2),
@@ -507,6 +507,8 @@ const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/window_setup/windows.rs", "brushes", 1),
     ("app/media.rs", "charge", 3),
     ("app/command_events.rs", "command_events", 1),
+    // The event-loop proxy a default-handler completion posts its result through.
+    ("app/default_handlers.rs", "proxy", 1),
     ("app/os_drag.rs", "snapshots", 6),
     ("app/os_drag.rs", "moved", 2),
     ("app/os_drag.rs", "ended", 3),
@@ -536,6 +538,8 @@ const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/memory_report_window.rs", 2),
     ("app/misc.rs", 5),
     ("app/overlays.rs", 2),
+    // The local status line a held pane or a failed command launch writes into its own grid.
+    ("app/pane_exit.rs", 1),
     ("app/pane_refresh.rs", 3),
     ("app/pane_state.rs", 1),
     ("app/scroll.rs", 1),

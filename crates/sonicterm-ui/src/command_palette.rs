@@ -64,7 +64,34 @@ pub enum CommandPaletteMode {
     RenameTab,
     RenameWindow,
     TabColor,
+    /// A confirmation page: Apply and Cancel rows above the items the change affects.
+    Confirm,
 }
+
+/// One row of a confirmation page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmRow {
+    /// Carry out the change the page describes.
+    Apply(String),
+    /// Close the page and change nothing.
+    Cancel(String),
+    /// One thing the change affects; shown dimmed and never selectable.
+    Item(String),
+}
+
+impl ConfirmRow {
+    /// The text the row shows.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Apply(label) | Self::Cancel(label) | Self::Item(label) => label,
+        }
+    }
+}
+
+/// Number of selectable rows at the top of a confirmation page: Apply, then Cancel.
+const CONFIRM_ACTION_ROWS: usize = 2;
+/// The row a confirmation page highlights when it opens, so a stray Enter cancels.
+const CONFIRM_CANCEL_ROW: usize = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabColorChoice {
@@ -209,6 +236,7 @@ pub(crate) struct PaletteText {
     pub(crate) empty_hint: String,
     pub(crate) rename_footer: String,
     pub(crate) color_footer: String,
+    pub(crate) confirm_footer: String,
     command_footer_one: TextSlot,
     command_footer_other: TextSlot,
     color_title: TextSlot,
@@ -269,6 +297,7 @@ impl PaletteText {
             empty_hint: text("palette-empty-hint", "Try settings, split, font, shortcut"),
             rename_footer: text("palette-rename-footer", "↵ rename · esc cancel"),
             color_footer: text("palette-color-footer", "↑↓ choose color · ↵ apply · esc cancel"),
+            confirm_footer: text("palette-confirm-footer", "↑↓ choose · ↵ confirm · esc cancel"),
             command_footer_one: footer("one", "command"),
             command_footer_other: footer("other", "commands"),
             color_title,
@@ -324,6 +353,9 @@ pub struct CommandPalette {
     visible_rows: usize,
     tab_color_title: String,
     tab_color_choices: Vec<TabColorChoice>,
+    /// Title and rows of the confirmation page while `mode` is `Confirm`.
+    confirm_title: String,
+    confirm_rows: Vec<ConfirmRow>,
     window_name_error: Option<WindowNameError>,
     /// Increments on every open, so a gesture held across close and reopen is not
     /// mistaken for one in the new editor.
@@ -368,6 +400,8 @@ impl CommandPalette {
             visible_rows: 0,
             tab_color_title: String::new(),
             tab_color_choices: Vec::new(),
+            confirm_title: String::new(),
+            confirm_rows: Vec::new(),
             window_name_error: None,
             session: 0,
         }
@@ -538,6 +572,8 @@ impl CommandPalette {
     pub fn close(&mut self) {
         self.open = false;
         self.mode = CommandPaletteMode::Commands;
+        self.confirm_title.clear();
+        self.confirm_rows.clear();
         self.tabs_only = false;
         self.window_name_error = None;
         self.query.clear();
@@ -857,6 +893,52 @@ impl CommandPalette {
         self.tab_color_choices.get(self.selected)
     }
 
+    /// Open a confirmation page: `apply` and `cancel` rows, then each affected item.
+    ///
+    /// Cancel is highlighted first, so Enter right after opening changes nothing.
+    pub fn start_confirm(
+        &mut self,
+        title: impl Into<String>,
+        apply: impl Into<String>,
+        cancel: impl Into<String>,
+        items: Vec<String>,
+    ) {
+        self.session = self.session.wrapping_add(1);
+        self.open = true;
+        self.mode = CommandPaletteMode::Confirm;
+        self.tabs_only = false;
+        self.window_name_error = None;
+        self.query.clear();
+        self.selection = TextSelection::default();
+        self.confirm_title = title.into();
+        self.confirm_rows =
+            vec![ConfirmRow::Apply(apply.into()), ConfirmRow::Cancel(cancel.into())];
+        self.confirm_rows.extend(items.into_iter().map(ConfirmRow::Item));
+        self.items = (0..self.confirm_rows.len()).collect();
+        self.selected = CONFIRM_CANCEL_ROW;
+        self.scroll_offset = 0;
+    }
+
+    /// Title of the confirmation page.
+    pub fn confirm_title(&self) -> &str {
+        &self.confirm_title
+    }
+
+    /// Rows of the confirmation page in display order; empty in any other mode.
+    pub fn confirm_rows(&self) -> &[ConfirmRow] {
+        if self.mode != CommandPaletteMode::Confirm {
+            // When: `mode` is not Confirm, stale rows from a closed page must not be shown.
+            return &[];
+        }
+        &self.confirm_rows
+    }
+
+    /// Whether the highlighted row of an open confirmation page is Apply.
+    pub fn confirm_applies(&self) -> bool {
+        self.mode == CommandPaletteMode::Confirm
+            && matches!(self.confirm_rows.get(self.selected), Some(ConfirmRow::Apply(_)))
+    }
+
     /// Move the text cursor one character left.
     pub fn move_cursor_left(&mut self) {
         self.apply_text_edit(TextEdit::MoveBackward);
@@ -895,6 +977,11 @@ impl CommandPalette {
 
     /// Highlight the next row, wrapping to the top past the last one.
     pub fn move_selection_down(&mut self) {
+        if self.mode == CommandPaletteMode::Confirm {
+            // When: `mode` is `Confirm`, only the page's Apply and Cancel rows can be chosen.
+            self.step_confirm_selection();
+            return;
+        }
         if self.items.is_empty() {
             // When: `items` is empty, there is no row to highlight, so the view resets to the top.
             self.selected = 0;
@@ -912,6 +999,11 @@ impl CommandPalette {
 
     /// Highlight the previous row, wrapping to the bottom past the first one.
     pub fn move_selection_up(&mut self) {
+        if self.mode == CommandPaletteMode::Confirm {
+            // When: `mode` is `Confirm`, only the page's Apply and Cancel rows can be chosen.
+            self.step_confirm_selection();
+            return;
+        }
         if self.items.is_empty() {
             // When: `items` is empty, there is no row to highlight, so the view resets to the top.
             self.selected = 0;
@@ -925,6 +1017,12 @@ impl CommandPalette {
             self.selected - 1
         };
         self.ensure_selected_in_view();
+    }
+
+    /// Alternate between Apply and Cancel; with two choices, up and down are the same step.
+    fn step_confirm_selection(&mut self) {
+        self.selected = (self.selected.min(CONFIRM_ACTION_ROWS - 1) + 1) % CONFIRM_ACTION_ROWS;
+        self.scroll_offset = 0;
     }
 
     /// Current first-visible-row offset. The renderer uses this to draw
@@ -1080,6 +1178,7 @@ pub fn action_display_name(action: &Action) -> String {
         Action::ReloadConfig => "ReloadConfig".into(),
         Action::ShowMemoryUsage => "ShowMemoryUsage".into(),
         Action::CopyMemoryReport => "CopyMemoryReport".into(),
+        Action::SetDefaultHandlers => "SetDefaultHandlers".into(),
         Action::ApplyTheme(name) => format!("ApplyTheme({name})"),
         Action::ToggleTabBar => "ToggleTabBar".into(),
         Action::RenameTab => "RenameTab".into(),
@@ -1202,6 +1301,8 @@ pub fn palette_actions() -> Vec<Action> {
         // Diagnostics
         Action::ShowMemoryUsage,
         Action::CopyMemoryReport,
+        // System integration
+        Action::SetDefaultHandlers,
     ]
 }
 

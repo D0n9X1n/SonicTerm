@@ -20,6 +20,9 @@ use bytes::{Bytes, BytesMut};
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
+pub use sonicterm_types::PaneExitStatus;
+
+pub use crate::command_resolve::CommandSpawnError;
 
 pub use crate::reply_spool::PtyReplySender;
 use crate::reply_spool::{reply_spool, ReplyReader};
@@ -410,7 +413,7 @@ impl PtyChildExitProbe {
             }
             // Recorded before signalling the group: teardown reaps the child,
             // after which the status is unrecoverable.
-            child.exit_was_clean = observed.was_clean;
+            child.record_exit_status(observed.status);
             // The exit is observed: publish it before signalling the group or any later reap.
             child.publish_exit();
             signal_process_group_for_platform(&mut child)?;
@@ -429,7 +432,15 @@ impl PtyChildExitProbe {
     /// Only meaningful after [`Self::has_exited`] returns `true`; that call
     /// is what records the status.
     pub fn exit_was_clean(&self) -> Option<bool> {
-        self.child.try_lock_for(PTY_IO_SHUTDOWN_TIMEOUT).and_then(|child| child.exit_was_clean)
+        self.exit_status().map(|status| status.is_clean())
+    }
+
+    /// How the child's own process ended, once it has exited.
+    ///
+    /// `None` has the same meaning as for [`Self::exit_was_clean`]: the status
+    /// was not observed, which callers report as unknown rather than a crash.
+    pub fn exit_status(&self) -> Option<PaneExitStatus> {
+        self.child.try_lock_for(PTY_IO_SHUTDOWN_TIMEOUT).and_then(|child| child.exit_status.clone())
     }
 }
 
@@ -442,7 +453,7 @@ impl PtyChildExitProbe {
 #[cfg(unix)]
 struct UnixExitObservation {
     pending: bool,
-    was_clean: Option<bool>,
+    status: Option<PaneExitStatus>,
 }
 
 #[cfg(unix)]
@@ -470,7 +481,7 @@ fn unix_child_exit_pending(pid: u32) -> std::io::Result<UnixExitObservation> {
             != 0;
     if !pending {
         // When: `pending` is false, `WNOHANG` found no child exit status to record.
-        return Ok(UnixExitObservation { pending: false, was_clean: None });
+        return Ok(UnixExitObservation { pending: false, status: None });
     }
     // `si_code` distinguishes a normal exit from a signal death; `si_status`
     // carries the exit code only in the former case. A child killed by a
@@ -480,12 +491,50 @@ fn unix_child_exit_pending(pid: u32) -> std::io::Result<UnixExitObservation> {
         // SAFETY: pending exit status from `waitid` initialized the `si_status` union field.
         unsafe { info.si_status() },
     );
-    let was_clean = match code {
-        libc::CLD_EXITED => Some(status == 0),
-        // Killed, dumped, trapped, stopped: not a clean exit, and we know it.
-        _ => Some(false),
+    let exit_status = match code {
+        libc::CLD_EXITED => PaneExitStatus::Code(status as u32),
+        libc::CLD_KILLED | libc::CLD_DUMPED => PaneExitStatus::Signal(unix_signal_name(status)),
+        // Trapped or stopped cannot satisfy `WEXITED`; the kind is unknown, and still not clean.
+        _ => PaneExitStatus::Unknown,
     };
-    Ok(UnixExitObservation { pending: true, was_clean })
+    Ok(UnixExitObservation { pending: true, status: Some(exit_status) })
+}
+
+/// Map `portable-pty`'s status to the typed pane status.
+///
+/// A signal death carries the signal's name; anything else carries its code.
+fn pane_exit_status(status: &portable_pty::ExitStatus) -> PaneExitStatus {
+    match status.signal() {
+        Some(name) => PaneExitStatus::Signal(name.to_string()),
+        None => PaneExitStatus::Code(status.exit_code()),
+    }
+}
+
+/// The conventional name of Unix signal `signal`, or `signal N` for an unlisted one.
+#[cfg(unix)]
+pub(crate) fn unix_signal_name(signal: i32) -> String {
+    let name = match signal {
+        libc::SIGHUP => Some("SIGHUP"),
+        libc::SIGINT => Some("SIGINT"),
+        libc::SIGQUIT => Some("SIGQUIT"),
+        libc::SIGILL => Some("SIGILL"),
+        libc::SIGTRAP => Some("SIGTRAP"),
+        libc::SIGABRT => Some("SIGABRT"),
+        libc::SIGBUS => Some("SIGBUS"),
+        libc::SIGFPE => Some("SIGFPE"),
+        libc::SIGKILL => Some("SIGKILL"),
+        libc::SIGUSR1 => Some("SIGUSR1"),
+        libc::SIGSEGV => Some("SIGSEGV"),
+        libc::SIGUSR2 => Some("SIGUSR2"),
+        libc::SIGPIPE => Some("SIGPIPE"),
+        libc::SIGALRM => Some("SIGALRM"),
+        libc::SIGTERM => Some("SIGTERM"),
+        libc::SIGXCPU => Some("SIGXCPU"),
+        libc::SIGXFSZ => Some("SIGXFSZ"),
+        libc::SIGSYS => Some("SIGSYS"),
+        _ => None,
+    };
+    name.map_or_else(|| format!("signal {signal}"), str::to_string)
 }
 
 struct ChildState {
@@ -500,7 +549,7 @@ struct ChildState {
     /// pane must treat `None` as "unknown", not as "crashed": tearing down a
     /// window because we could not read a status would lose the user's
     /// scrollback on our own uncertainty.
-    exit_was_clean: Option<bool>,
+    exit_status: Option<PaneExitStatus>,
     unix_session_id: Option<u32>,
     process_group_signalled: bool,
     /// Set once exit is observed or intended, before anything can release the child's identity.
@@ -543,7 +592,7 @@ impl ChildState {
             child: Some(NativeValue::new(child).0),
             closing: false,
             exited: false,
-            exit_was_clean: None,
+            exit_status: None,
             unix_session_id,
             process_group_signalled: false,
             exit_observed: Arc::new(AtomicBool::new(false)),
@@ -553,6 +602,11 @@ impl ChildState {
     /// Publish exit for this child; see [`publish_exit`].
     fn publish_exit(&self) {
         publish_exit(&self.exit_observed);
+    }
+
+    /// Keep the first observed status: the `waitid` peek and the consuming wait describe one exit.
+    fn record_exit_status(&mut self, status: Option<PaneExitStatus>) {
+        self.exit_status = self.exit_status.take().or(status);
     }
 
     fn has_exited(&mut self) -> std::io::Result<bool> {
@@ -608,7 +662,7 @@ impl ChildState {
         self.exited = true;
         // Recorded here because this is the only place the status is available: the wait
         // reaps the child, so a later call returns `None` and the status is gone for good.
-        self.exit_was_clean = Some(status.success());
+        self.record_exit_status(Some(pane_exit_status(&status)));
         Ok(true)
     }
 
@@ -2394,6 +2448,29 @@ fn pty_writer(master: &dyn portable_pty::MasterPty) -> Result<Box<dyn Write + Se
     master.take_writer()
 }
 
+/// A program a launcher asked SonicTerm to run directly, with no shell.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandSpawn {
+    /// The program as the launcher spelled it. A name without a separator is
+    /// searched on SonicTerm's own `PATH` (absolute entries only); a path is
+    /// used as given, and a relative one resolves against `cwd`.
+    pub program: std::ffi::OsString,
+    /// The program's arguments, passed verbatim.
+    pub args: Vec<std::ffi::OsString>,
+    /// The child's working directory: absolute and existing, or the spawn fails.
+    pub cwd: PathBuf,
+}
+
+/// Map a native spawn failure to a fixed reason; `portable-pty`'s text names paths and is not forwarded.
+fn sanitize_spawn_error(program: &std::ffi::OsStr, error: &anyhow::Error) -> CommandSpawnError {
+    let reason = match error.downcast_ref::<std::io::Error>().map(std::io::Error::kind) {
+        Some(std::io::ErrorKind::NotFound) => "the program or its interpreter was not found",
+        Some(std::io::ErrorKind::PermissionDenied) => "permission denied",
+        _ => "the operating system refused to start it",
+    };
+    CommandSpawnError::Spawn { program: crate::command_resolve::display_name(program), reason }
+}
+
 impl PtyHandle {
     /// Spawn the user's default shell.
     ///
@@ -2435,9 +2512,6 @@ impl PtyHandle {
         rows: u16,
         opts: ShellSpawnOpts,
     ) -> Result<Self> {
-        let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
-
         let mut builder = CommandBuilder::new(cmd);
         for a in args {
             builder.arg(a);
@@ -2446,6 +2520,54 @@ impl PtyHandle {
         let home = std::env::var("HOME").ok();
         apply_child_cwd(&mut builder, opts.cwd.as_deref(), home.as_deref());
         apply_child_pty_env(&mut builder, &opts.term_program);
+        Self::spawn_built(builder, cmd.to_string(), cols, rows, opts.diagnostic_timestamps)
+    }
+
+    /// Run a launcher's program directly in a new PTY, with no shell.
+    ///
+    /// SonicTerm resolves `spawn.program` itself (see [`CommandSpawn`]) and
+    /// hands `portable-pty` an absolute path, so no later layer searches a
+    /// path relative to the child's cwd. `spawn.cwd` must be an absolute,
+    /// existing directory; the spawn never substitutes a home directory and
+    /// never falls back to a shell. Only `opts.term_program` and
+    /// `opts.diagnostic_timestamps` apply; the shell, cwd and clean-startup
+    /// options describe shells and are ignored.
+    ///
+    /// Errors are [`CommandSpawnError`] values whose messages name only the
+    /// program's file name and the failing rule.
+    pub fn spawn_command(
+        spawn: &CommandSpawn,
+        cols: u16,
+        rows: u16,
+        opts: &ShellSpawnOpts,
+    ) -> std::result::Result<Self, CommandSpawnError> {
+        let path_var = crate::command_resolve::process_path_var();
+        let resolved = crate::command_resolve::resolve_program(
+            &spawn.program,
+            &spawn.cwd,
+            path_var.as_deref(),
+        )?;
+        let mut builder = CommandBuilder::new(resolved.as_os_str());
+        for arg in &spawn.args {
+            builder.arg(arg);
+        }
+        builder.cwd(&spawn.cwd);
+        apply_child_pty_env(&mut builder, &opts.term_program);
+        let program_path = resolved.to_string_lossy().into_owned();
+        Self::spawn_built(builder, program_path, cols, rows, opts.diagnostic_timestamps)
+            .map_err(|error| sanitize_spawn_error(&spawn.program, &error))
+    }
+
+    /// Open a PTY, start `builder` on it, and wire the reader, writer and teardown.
+    fn spawn_built(
+        builder: CommandBuilder,
+        program_path: String,
+        cols: u16,
+        rows: u16,
+        diagnostic_timestamps: bool,
+    ) -> Result<Self> {
+        let pty_system = native_pty_system();
+        let pair = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
 
         let child = pair.slave.spawn_command(builder)?;
         drop(pair.slave);
@@ -2501,7 +2623,7 @@ impl PtyHandle {
             out_tx,
             reader_cancel_rx,
             output_meter.clone(),
-            opts.diagnostic_timestamps,
+            diagnostic_timestamps,
         );
         // Writer thread: in_rx -> pty.
         let queued_input_bytes = Arc::new(AtomicUsize::new(0));
@@ -2564,7 +2686,7 @@ impl PtyHandle {
                 direct_drop: true,
                 pass_failed: false,
             }),
-            shell_program_path: cmd.to_string(),
+            shell_program_path: program_path,
             output_meter,
             process_identity,
         })

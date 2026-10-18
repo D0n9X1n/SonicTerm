@@ -520,7 +520,8 @@ jobs:
           deb="dist/SonicTerm-${{ github.ref_name }}-linux-x86_64.deb"
           bash scripts/test-linux-packages.sh "$tarball" "$deb"
           desktop-file-validate \
-            "dist/.linux-package-work/SonicTerm-${{ github.ref_name }}-linux-x86_64/share/applications/com.d0n9x1n.SonicTerm.desktop"
+            "dist/.linux-package-work/SonicTerm-${{ github.ref_name }}-linux-x86_64/share/applications/com.d0n9x1n.SonicTerm.desktop" \
+            "dist/.linux-package-work/SonicTerm-${{ github.ref_name }}-linux-x86_64/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop"
           appstreamcli validate --no-net \
             "dist/.linux-package-work/SonicTerm-${{ github.ref_name }}-linux-x86_64/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml"
           if ! lintian "$deb"; then

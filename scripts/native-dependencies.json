@@ -4,63 +4,54 @@
     {
       "name": "freetype",
       "path": "crates/sonicterm-freetype/freetype2",
-      "version": "2.14.3",
-      "tag": "VER-2-14-3",
-      "revision": "0a0221a1347e2f1e07c395263540026e9a0aa7c7",
+      "version": "2.15.0",
+      "tag": "VER-2-15-0",
+      "revision": "37515cf56ba3349656049edbed89ffc6f6466f2d",
       "archive": {
-        "url": "https://sourceforge.net/projects/freetype/files/freetype2/2.14.3/freetype-2.14.3.tar.xz/download",
-        "sha256": "36bc4f1cc413335368ee656c42afca65c5a3987e8768cc28cf11ba775e785a5f",
-        "root": "freetype-2.14.3"
+        "url": "https://sourceforge.net/projects/freetype/files/freetype2/2.15.0/freetype-2.15.0.tar.xz/download",
+        "sha256": "93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5",
+        "root": "freetype-2.15.0"
       },
       "include": ["include/**", "src/**", "builds/**", "LICENSE.TXT", "README", "ChangeLog", "docs/FTL.TXT", "docs/GPLv2.TXT", "docs/LICENSE.TXT", "docs/CHANGES"],
-      "upstream_fixes": [
-        {
-          "revision": "8fa928f1617aba65f45b00f0dcb109f077b7741e",
-          "url": "https://gitlab.freedesktop.org/freetype/freetype/-/commit/8fa928f1617aba65f45b00f0dcb109f077b7741e"
-        },
-        {
-          "revision": "5a280ecde6f324de0d226261036e736e0cb49a71",
-          "url": "https://gitlab.freedesktop.org/freetype/freetype/-/commit/5a280ecde6f324de0d226261036e736e0cb49a71"
-        }
-      ],
-      "tree_sha256": "283cb02ba9baaa5e6b8a99e7bfa8673bd2d45dae9c9f4debdfd685c9abd97bb6",
+      "upstream_fixes": [],
+      "tree_sha256": "ab93a207b5f03bd923590dac918cc7463e10bd101a430e0fc020f748b2be419d",
       "version_check": [
         {"path": "include/freetype/freetype.h", "pattern": "#define\\s+FREETYPE_MAJOR\\s+(\\d+)", "value": "2"},
-        {"path": "include/freetype/freetype.h", "pattern": "#define\\s+FREETYPE_MINOR\\s+(\\d+)", "value": "14"},
-        {"path": "include/freetype/freetype.h", "pattern": "#define\\s+FREETYPE_PATCH\\s+(\\d+)", "value": "3"}
+        {"path": "include/freetype/freetype.h", "pattern": "#define\\s+FREETYPE_MINOR\\s+(\\d+)", "value": "15"},
+        {"path": "include/freetype/freetype.h", "pattern": "#define\\s+FREETYPE_PATCH\\s+(\\d+)", "value": "0"}
       ]
     },
     {
       "name": "harfbuzz",
       "path": "crates/sonicterm-harfbuzz/harfbuzz",
-      "version": "14.4.0",
-      "tag": "14.4.0",
-      "revision": "36cb489cb02ce4b92099669ba9f9bea348eff93f",
+      "version": "14.6.0",
+      "tag": "14.6.0",
+      "revision": "c7a7457b7385f33178e8cf87615ca077a810bbe7",
       "archive": {
-        "url": "https://github.com/harfbuzz/harfbuzz/releases/download/14.4.0/harfbuzz-14.4.0.tar.xz",
-        "sha256": "2357ed966c6ced7bfa720b0640c0231065af01158fbea215093ffa15aed44371",
-        "root": "harfbuzz-14.4.0"
+        "url": "https://github.com/harfbuzz/harfbuzz/releases/download/14.6.0/harfbuzz-14.6.0.tar.xz",
+        "sha256": "d07a007327277708a2a73ae437887cdbaf282937f6d03ca5467723e9099af586",
+        "root": "harfbuzz-14.6.0"
       },
       "include": ["src/**", "COPYING", "AUTHORS", "NEWS", "README.md", "CONFIG.md", "SECURITY.md"],
       "upstream_fixes": [],
-      "tree_sha256": "5c177bc1d1ba83d5f06d9ea1fe6bcdd69bdb853bac2490af34ac148de582c787",
-      "version_check": {"path": "src/hb-version.h", "pattern": "HB_VERSION_STRING\\s+\"([^\"]+)\"", "value": "14.4.0"}
+      "tree_sha256": "618e4922d98ef66891b520fe7f32b61a8161b4ea1d5cf61b233556cf876c5f62",
+      "version_check": {"path": "src/hb-version.h", "pattern": "HB_VERSION_STRING\\s+\"([^\"]+)\"", "value": "14.6.0"}
     },
     {
       "name": "libpng",
       "path": "crates/sonicterm-freetype/libpng",
-      "version": "1.6.58",
-      "tag": "v1.6.58",
-      "revision": "3061454d980de7d53608f594194cfac722721d2a",
+      "version": "1.6.59",
+      "tag": "v1.6.59",
+      "revision": "cd952f49f95bb27154ae77dbb103032d95f6e580",
       "archive": {
-        "url": "https://download.sourceforge.net/libpng/libpng-1.6.58.tar.xz",
-        "sha256": "28eb403f51f0f7405249132cecfe82ea5c0ef97f1b32c5a65828814ae0d34775",
-        "root": "libpng-1.6.58"
+        "url": "https://download.sourceforge.net/libpng/libpng-1.6.59.tar.xz",
+        "sha256": "d80dd2a38a37f803cb9b6ac7b14bd6e74ddc3b654780a8380bdf93523fdb4389",
+        "root": "libpng-1.6.59"
       },
       "include": ["*.c", "*.h", "arm/**", "intel/**", "loongarch/**", "mips/**", "powerpc/**", "riscv/**", "scripts/pnglibconf.h.prebuilt", "LICENSE", "AUTHORS", "CHANGES", "README", "TRADEMARK"],
       "upstream_fixes": [],
-      "tree_sha256": "75a542981ad0461cf449c448a20267256111f1fe61d2a4d537e4c865774303da",
-      "version_check": {"path": "png.h", "pattern": "PNG_LIBPNG_VER_STRING\\s+\"([^\"]+)\"", "value": "1.6.58"}
+      "tree_sha256": "a4663dc1dfe43329e9808cba99f2a0dbd2400218ccfaccd57a36f0d3ab88cad9",
+      "version_check": {"path": "png.h", "pattern": "PNG_LIBPNG_VER_STRING\\s+\"([^\"]+)\"", "value": "1.6.59"}
     },
     {
       "name": "zlib",

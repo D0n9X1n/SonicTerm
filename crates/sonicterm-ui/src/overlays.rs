@@ -373,8 +373,10 @@ impl PaletteLayout {
 
         let visible = palette.visible();
         let color_choices = palette.tab_color_choices();
+        let confirm_rows = palette.confirm_rows();
         let total = match palette.mode() {
             CommandPaletteMode::TabColor => color_choices.len(),
+            CommandPaletteMode::Confirm => confirm_rows.len(),
             _ => visible.len(),
         };
 
@@ -397,8 +399,25 @@ impl PaletteLayout {
             };
             rows.push(PaletteRow { item_index, rect: row_rect });
             row_details.push(palette.detail_for_visible_index(item_index));
-            row_disabled.push(palette.disabled_reason_for_visible_index(item_index).is_some());
+            row_disabled.push(
+                palette.disabled_reason_for_visible_index(item_index).is_some()
+                    || matches!(
+                        confirm_rows.get(item_index),
+                        Some(crate::command_palette::ConfirmRow::Item(_))
+                    ),
+            );
             match palette.mode() {
+                CommandPaletteMode::Confirm => {
+                    // A confirmation page's rows are Apply, Cancel and the dimmed affected items.
+                    row_labels.push(
+                        confirm_rows
+                            .get(item_index)
+                            .map(|row| row.label().to_string())
+                            .unwrap_or_default(),
+                    );
+                    row_shortcuts.push(None);
+                    row_swatches.push(None);
+                }
                 CommandPaletteMode::TabColor => {
                     if let Some(choice) = color_choices.get(item_index) {
                         row_labels.push(format!("{} — {}", choice.name, palette.tab_color_title()));
@@ -436,13 +455,16 @@ impl PaletteLayout {
         };
         let query_label = if palette.mode() == CommandPaletteMode::TabColor {
             palette.text().color_title(palette.tab_color_title())
+        } else if palette.mode() == CommandPaletteMode::Confirm {
+            // When: mode is Confirm, the query row carries the page title; nothing is typed there.
+            palette.confirm_title().to_string()
         } else {
             // When: mode is any palette other than TabColor, so the row shows
             // the typed query with its caret rather than a tab title.
             command_palette_query_label(palette, "")
         };
         let query_placeholder = if palette.query().is_empty()
-            && palette.mode() != CommandPaletteMode::TabColor
+            && !matches!(palette.mode(), CommandPaletteMode::TabColor | CommandPaletteMode::Confirm)
         {
             Some(match palette.mode() {
                 CommandPaletteMode::Commands if palette.tabs_only() => {
@@ -451,7 +473,7 @@ impl PaletteLayout {
                 CommandPaletteMode::Commands => palette.text().search_placeholder.clone(),
                 CommandPaletteMode::RenameTab => palette.text().rename_placeholder.clone(),
                 CommandPaletteMode::RenameWindow => palette.text().window_name_placeholder.clone(),
-                CommandPaletteMode::TabColor => String::new(),
+                CommandPaletteMode::TabColor | CommandPaletteMode::Confirm => String::new(),
             })
         } else {
             // When: palette query already holds text, or mode is TabColor,
@@ -461,7 +483,9 @@ impl PaletteLayout {
 
         let empty_label = if matches!(
             palette.mode(),
-            CommandPaletteMode::RenameTab | CommandPaletteMode::RenameWindow
+            CommandPaletteMode::RenameTab
+                | CommandPaletteMode::RenameWindow
+                | CommandPaletteMode::Confirm
         ) {
             None
         } else if total == 0 && (palette.tabs_only() || !palette.query().is_empty()) {
@@ -505,6 +529,7 @@ impl PaletteLayout {
                 None => palette.text().window_name_footer.clone(),
             },
             CommandPaletteMode::TabColor => palette.text().color_footer.clone(),
+            CommandPaletteMode::Confirm => palette.text().confirm_footer.clone(),
         };
 
         Some(PaletteLayout {

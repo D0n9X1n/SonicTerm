@@ -8,7 +8,7 @@ exclude = ["crates/sonicterm-winit"]
 winit = { path = "crates/sonicterm-winit" }
 
 [workspace.package]
-version = "1.3.9"
+version = "1.3.10"
 edition = "2021"
 # Raised to what the lockfile actually requires rather than an aspirational
 # floor: `enum-map` needs 1.95 and reaches the shipping app through
@@ -23,28 +23,28 @@ readme = "README.md"
 
 [workspace.dependencies]
 # Internal
-sonicterm-types = { path = "crates/sonicterm-types", version = "1.3.9" }
-sonicterm-resource = { path = "crates/sonicterm-resource", version = "1.3.9" }
-sonicterm-vt = { path = "crates/sonicterm-vt", version = "1.3.9" }
-sonicterm-grid = { path = "crates/sonicterm-grid", version = "1.3.9" }
-sonicterm-cfg = { path = "crates/sonicterm-cfg", version = "1.3.9" }
-sonicterm-io = { path = "crates/sonicterm-io", version = "1.3.9" }
-sonicterm-text = { path = "crates/sonicterm-text", version = "1.3.9" }
-sonicterm-ui = { path = "crates/sonicterm-ui", version = "1.3.9" }
-sonicterm-render-model = { path = "crates/sonicterm-render-model", version = "1.3.9" }
-sonicterm-gpu = { path = "crates/sonicterm-gpu", version = "1.3.9" }
-sonicterm-app = { path = "crates/sonicterm-app", version = "1.3.9" }
-sonicterm-app-core = { path = "crates/sonicterm-app-core", version = "1.3.9" }
-sonicterm-logging = { path = "crates/sonicterm-logging", version = "1.3.9" }
-sonicterm-block-glyph = { path = "crates/sonicterm-block-glyph", version = "1.3.9" }
-sonicterm-engine = { path = "crates/sonicterm-engine", version = "1.3.9" }
-sonicterm-font = { path = "crates/sonicterm-font", version = "1.3.9" }
+sonicterm-types = { path = "crates/sonicterm-types", version = "1.3.10" }
+sonicterm-resource = { path = "crates/sonicterm-resource", version = "1.3.10" }
+sonicterm-vt = { path = "crates/sonicterm-vt", version = "1.3.10" }
+sonicterm-grid = { path = "crates/sonicterm-grid", version = "1.3.10" }
+sonicterm-cfg = { path = "crates/sonicterm-cfg", version = "1.3.10" }
+sonicterm-io = { path = "crates/sonicterm-io", version = "1.3.10" }
+sonicterm-text = { path = "crates/sonicterm-text", version = "1.3.10" }
+sonicterm-ui = { path = "crates/sonicterm-ui", version = "1.3.10" }
+sonicterm-render-model = { path = "crates/sonicterm-render-model", version = "1.3.10" }
+sonicterm-gpu = { path = "crates/sonicterm-gpu", version = "1.3.10" }
+sonicterm-app = { path = "crates/sonicterm-app", version = "1.3.10" }
+sonicterm-app-core = { path = "crates/sonicterm-app-core", version = "1.3.10" }
+sonicterm-logging = { path = "crates/sonicterm-logging", version = "1.3.10" }
+sonicterm-block-glyph = { path = "crates/sonicterm-block-glyph", version = "1.3.10" }
+sonicterm-engine = { path = "crates/sonicterm-engine", version = "1.3.10" }
+sonicterm-font = { path = "crates/sonicterm-font", version = "1.3.10" }
 
 # Internal aliases preserve the crate names used by the absorbed font stack.
-config = { package = "sonicterm-font-config", path = "crates/sonicterm-font-config", version = "1.3.9" }
-fontconfig = { package = "sonicterm-fontconfig", path = "crates/sonicterm-fontconfig", version = "1.3.9" }
-freetype = { package = "sonicterm-freetype", path = "crates/sonicterm-freetype", version = "1.3.9" }
-harfbuzz = { package = "sonicterm-harfbuzz", path = "crates/sonicterm-harfbuzz", version = "1.3.9" }
+config = { package = "sonicterm-font-config", path = "crates/sonicterm-font-config", version = "1.3.10" }
+fontconfig = { package = "sonicterm-fontconfig", path = "crates/sonicterm-fontconfig", version = "1.3.10" }
+freetype = { package = "sonicterm-freetype", path = "crates/sonicterm-freetype", version = "1.3.10" }
+harfbuzz = { package = "sonicterm-harfbuzz", path = "crates/sonicterm-harfbuzz", version = "1.3.10" }
 
 # Core terminal
 vte = "0.15"
@@ -98,6 +98,8 @@ serde_plain = "1"
 pollster = "1.0"
 arboard = "3"
 regex = "1"
+# Exact lock pin: terminal-link URLs decode each component once with this crate.
+percent-encoding = "=2.3.2"
 
 # Platform
 [workspace.dependencies.windows]

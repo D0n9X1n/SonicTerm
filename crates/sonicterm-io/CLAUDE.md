@@ -5,7 +5,8 @@ Terminal process IO: PTY abstraction, foreground process detection, and
 process information.
 
 ## Key files
-- `pty.rs` - PTY handle and platform process boundary.
+- `pty.rs` - PTY handle and platform process boundary, including `spawn_command`.
+- `command_resolve.rs` - program resolution for direct command launches.
 - `foreground_proc.rs` - foreground command detection.
 - `proc_info.rs` - process metadata helpers.
 - `lib.rs` - public exports.
@@ -56,6 +57,15 @@ cargo build -p sonicterm-io
   cross-platform.
 - Unix automatic shell selection is executable `$SHELL`, then the current
   user's executable passwd shell, then `/bin/sh`; explicit config still wins.
+- `PtyHandle::spawn_command` runs a launcher's program with no shell. It
+  resolves the program itself (Unix: `PATH` absolute entries, `/` paths against
+  the launch cwd, a regular executable whose header is `#!` or native magic, so
+  libc's `ENOEXEC` shell retry never runs; Windows: `.exe`/`.com` only, batch
+  files refused) and hands `portable-pty` an absolute path. An invalid cwd is an
+  error, never a home-directory fallback, and a failure never starts a shell.
+  Error text names only the program's file name; native error text is mapped.
+- The exit probe records the first observed `PaneExitStatus` (code, signal
+  name or unknown); a later consuming wait does not overwrite it.
 
 ## Cross-references
 - Consumed by: `sonicterm-app`. Platform binaries reach it through

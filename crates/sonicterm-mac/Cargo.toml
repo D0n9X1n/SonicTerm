@@ -18,6 +18,7 @@ sonicterm-app.workspace = true
 sonicterm-app-core.workspace = true
 sonicterm-cfg.workspace = true
 sonicterm-logging.workspace = true
+sonicterm-types.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 
@@ -43,6 +44,9 @@ objc2-app-kit = { version = "0.3", features = [
     "NSWorkspace",
 ] }
 raw-window-handle = { workspace = true }
+# The default-handler command: completion blocks for NSWorkspace, and the bundle's Info.plist.
+block2 = "0.6"
+roxmltree = "0.21"
 
 [[bin]]
 name = "sonicterm-mac"
@@ -53,6 +57,8 @@ roxmltree = "0.21"
 winit.workspace = true
 sonicterm-gpu.workspace = true
 sonicterm-io.workspace = true
+tempfile = "3"
+tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2-app-kit = { version = "0.3", features = ["NSEvent", "NSGraphicsContext", "NSWindow"] }

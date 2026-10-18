@@ -641,12 +641,66 @@ The local-target setting also applies to local file URIs and native-path OSC 8 l
 web/mail URI links remain enabled. For exact defaults and reload
 behavior, see [Configuration](Configuration).
 
+### Run a command from a launcher
+
+On Linux and Windows, a launcher (or you) can ask SonicTerm to run one program
+in a new window. macOS reads no launch options.
+
+```text
+sonicterm [OPTION...] [(-e | --command | --) PROGRAM [ARG...]]
+sonicterm --open-script PATH
+sonicterm --help
+```
+
+The Windows executable is `sonicterm-windows.exe` and takes the same options.
+
+| Option | Meaning |
+| --- | --- |
+| `-T TITLE`, `--title=TITLE` | Window title and first tab label. The value is taken verbatim, even `-T -e`. |
+| `--dir=PATH`, `--working-directory=PATH` | First tab's working directory. A relative path resolves against the current directory; it must exist. |
+| `--hold` | Keep the first pane open after its process exits, even after a clean exit. |
+| `-e`, `--command`, `--` | Run `PROGRAM` with every later argument, unchanged. |
+| `--open-script PATH` | Open `PATH` as a draft (below). Cannot be combined with any other option. |
+| `--help` | Print usage and exit. |
+
+Options are read only before `-e`, `--command` or `--`; everything after belongs
+to the program, so `sonicterm -e ls -T x` passes `-T x` to `ls`.
+
+- **No shell.** `PROGRAM` runs directly with its exact arguments. `-e` takes one
+  program name: `-e "cmd args"` names a program called `cmd args`. To use shell
+  syntax, run the shell yourself: `sonicterm -e sh -c 'make && make test'`.
+- **Program lookup.** A bare name is searched on `PATH` (absolute entries only); a
+  path runs as given, relative to the first tab's directory. On Linux and macOS a
+  text file runs only when it starts with `#!`. On Windows `.exe` and `.com` are
+  found; `.bat` and `.cmd` files are refused, because Windows would run them through
+  `cmd.exe` with quoting SonicTerm cannot make safe. Run them with
+  `sonicterm-windows.exe -e cmd /c script.bat`.
+- **Errors.** An unknown option, a stray argument, a missing or repeated value,
+  conflicting options, or a `--dir` that is not a directory prints usage and exits
+  with status `2` (on Windows, usage appears only when started from a console). A
+  program that cannot start still opens its tab, which shows the reason; no shell
+  starts in its place.
+- **Working directory.** Without `--dir`, Linux starts the first tab in the
+  current directory (else `$HOME`), for a shell or a command. Windows does that for
+  a command; a plain shell starts in `%USERPROFILE%`. A missing directory is an
+  error, never silently `$HOME`.
+- **Exit.** A pane closes when its program exits with status `0`. Any other exit,
+  a signal, an unknown status, or `--hold` keeps the pane and adds one line such as
+  `[process exited with code 1]` or `[process killed by signal SIGKILL]` to its
+  output. The line is written by SonicTerm, not sent to the program.
+- **One window per launch.** Each invocation starts a new process and window.
+
+To make SonicTerm the terminal other Linux programs open, see
+[Platform Integration](Platform-Integration) and [Packaging](Packaging).
+
 ### Open script files as drafts
 
 Installed macOS builds can appear in Finder’s **Open With** menu for `.sh`,
 `.command`, and `.tool`. The Windows MSI registers SonicTerm as an available
-handler for `.ps1`, `.cmd`, `.bat`, and `.sh`. Installation does not replace the
-current default handler.
+handler for `.ps1`, `.cmd`, `.bat`, and `.sh`. Linux packages install a hidden
+entry that offers SonicTerm for shell scripts; it runs
+`sonicterm --open-script %f`. Installation does not replace the current default
+handler.
 
 Opening a supported file creates a tab whose working directory is the file’s
 parent. SonicTerm safely quotes an absolute path and inserts a command at the
@@ -668,8 +722,65 @@ or consume the draft without Enter. Do not select SonicTerm as a script handler
 when your shell startup code does that. SonicTerm itself does not run the script
 or interpreter for the open action.
 
-On Windows, each file-association invocation starts a new SonicTerm process. On
-macOS, later open requests go to the running app and add tabs.
+On Linux and Windows, each file-association invocation starts a new SonicTerm
+process. On macOS, later open requests go to the running app and add tabs.
+A draft is never run; only `-e`, `--command` or `--` runs a program.
+
+### Open executables and terminal links on macOS
+
+Installed macOS builds also appear in **Open With** for Unix executables, and can
+handle `ssh:` and `x-man-page:` links. Installing changes no default.
+
+- **Native programs.** Opening a native Mach-O executable runs it directly in a new
+  tab whose working directory is the program's folder. The tab stays open after the
+  program exits so its output stays visible. A program that is quarantined because
+  it was downloaded is not run: a shell opens in its folder with "Not run: <name> is
+  quarantined (downloaded). Run it yourself after review." A program without the
+  execute permission is not run either. SonicTerm never changes either.
+- **Scripts are never run by an open.** A `.sh`, `.command` or `.tool` file gets the
+  draft described below; an executable script without an extension (`#!` first)
+  opens a tab with a warning and no draft. Folders, application bundles and
+  anything inside a bundle open a shell beside them with a warning.
+- **`ssh://[user@]host[:port]`** runs `/usr/bin/ssh [-l user] [-p port] -- host` in
+  your home folder. The host is an ASCII name, an IPv4 address or a bracketed IPv6
+  address; passwords, queries, paths and percent-encoded `%`, `/`, `@`, `:` or
+  control characters are refused.
+- **`x-man-page:///page`, `x-man-page://page` and `x-man-page://section/page`** run
+  `/usr/bin/man [-S section] -- page`.
+- A rejected link opens no tab and shows a warning naming the scheme and the part
+  that failed, never its value. `telnet:` links are not handled.
+
+### Choose SonicTerm as the default
+
+Installing SonicTerm never changes a default handler. To choose it, run the
+palette-only command for your OS (see [Keybindings](Keybindings)). It first
+shows what will change; nothing changes until you choose **Apply**, and
+**Cancel** or Esc changes nothing. The result appears in the green notification.
+
+- **macOS.** Lists the content types (`public.shell-script`,
+  `com.apple.terminal.shell-script`, `public.unix-executable`) and the URL
+  schemes (`ssh`, `x-man-page`) that the installed bundle declares, and makes
+  SonicTerm their default. macOS may ask you to confirm some of them. The report
+  lists each item as changed, denied, cancelled, failed (with the error domain and
+  code) or pending, and says when only part was applied. Run it from
+  `/Applications`: a copy running from the disk image or a translocated copy
+  is refused with "Move SonicTerm.app to /Applications", a copy Launch Services
+  has not registered is refused, and a `cargo run` build reports "Missing bundle".
+  Afterwards `open ssh://host` opens SonicTerm, a `.sh` opens as a draft, and a
+  native executable runs as described above.
+- **Linux.** Makes the hidden `com.d0n9x1n.SonicTerm.open-script.desktop` entry the
+  default for `application/x-shellscript` and `text/x-shellscript`, so shell
+  scripts open in SonicTerm as drafts. It then reads each type back and reports
+  whether it now names that entry. This is not the terminal choice: the report
+  lists the `update-alternatives`, `xdg-terminals.list` and KDE steps for you to
+  take yourself. Without xdg-utils it reports "xdg-mime not found (install
+  xdg-utils)"; with the entry missing (an uninstalled tarball) it points to
+  [Packaging](Packaging).
+- **Windows.** Windows lets only you change default apps, so SonicTerm changes
+  nothing. The command opens Settings › Apps › Default apps at SonicTerm's page
+  when the per-app link works, otherwise the general page, and tells you to choose
+  SonicTerm for `.ps1`, `.cmd`, `.bat` and `.sh`. If Settings does not open, the
+  notification gives the steps as text.
 
 ### Configure and troubleshoot
 

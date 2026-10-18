@@ -49,6 +49,15 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/selection_gesture.rs` - local selection gestures bound to their press pane and anchor, click counting, and
   the pointer-gesture types.
 - `src/shell.rs` - shared shell runner with thin macOS, Windows, and Linux builders.
+- `src/launch_cli.rs` - the frozen launcher grammar (`-e`/`--command`/`--`, `-T`, `--dir=`,
+  `--hold`, `--open-script`) shared by the Linux and Windows binaries; usage errors exit 2.
+- `src/launch_queue.rs` - the one queue platform boundaries use for terminal launches and
+  script drafts; requests wait until a main window exists.
+- `src/default_handlers.rs`, `src/app/default_handlers.rs` - the "set as default" palette
+  command: the backend trait, plan, outcomes and report, and the confirmation page, run and
+  120 s deadline. Only Apply on that page calls a backend; startup and reload never do.
+- `src/app/pane_launch.rs`, `pane_exit.rs` - per-pane launch (shell, script draft or direct
+  command, cwd, hold, title) and the exit policy with its local status line.
 
 ## Local gate
 ```bash
@@ -161,6 +170,13 @@ cargo build -p sonicterm-app
   `App::apply_tab_*` carries the result out; the handlers supply only the bar layout and,
   for a tear-out, the event loop.
 - Window-ready hooks fire once, immediately after winit creates the window.
+- A command launch runs through `PtyHandle::spawn_command` only: a failure writes its
+  sanitized reason into the pane's own grid and notifies, and never starts a shell. Launch
+  logs carry the kind, program file name, argument count and byte lengths, cwd source and
+  hold, never an argument value, a path or a title. Only `Code(0)` without hold closes a
+  pane; a held pane gets one local status line, written once (`exit_reported`).
+- `UserEvent::PaneProcessExited` keeps `was_clean` beside the typed `status`, because the
+  perf harness also builds against trees whose event has only that field.
 - Every terminal window enforces the shared 30-column by 10-row native inner-size
   floor from live renderer geometry and refreshes it after metric/DPI changes.
 - Local-target hover never performs filesystem I/O on the event-loop thread.

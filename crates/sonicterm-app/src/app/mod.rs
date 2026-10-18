@@ -155,7 +155,9 @@ pub enum UserEvent {
     /// [`crate::menubar_bridge`] buffer; this variant is just the
     /// wake-up signal so the loop drains it.
     MenuAction,
-    /// Script-file open requests were queued by a platform boundary.
+    /// Launch requests were queued by a platform boundary: terminals, direct commands or
+    /// script drafts. The name is kept from when only scripts were queued, because the perf
+    /// harness compiles against older trees that match on it.
     OpenScripts,
     /// A platform OS-drag drop landed and stashed payloads in
     /// [`crate::os_drag_bridge`]. The variant is just the wake-up
@@ -226,10 +228,18 @@ pub enum UserEvent {
     PaneProcessExited {
         /// The pane whose child ended.
         pane_id: u64,
-        /// Whether that child exited cleanly, or `None` if it could not be
-        /// determined. `None` is not a crash — it holds the pane open, the
-        /// same as an unclean exit.
+        /// How that child ended. `Unknown` is not a crash — it holds the
+        /// pane open, the same as an unclean exit.
+        status: sonicterm_types::PaneExitStatus,
+        /// `status` as a clean flag: `Some(true)` for code 0, `Some(false)` for any other code or a
+        /// signal, `None` when unknown. Kept because the perf harness also builds against older
+        /// trees, whose event carries only this field.
         was_clean: Option<bool>,
+    },
+    /// A launcher's command could not start; the message names only the program's file name.
+    LaunchFailed {
+        /// User-facing explanation of why the command did not run.
+        message: String,
     },
     /// A script path could not be represented safely for the active shell.
     ScriptDraftRejected {
@@ -287,6 +297,20 @@ pub enum UserEvent {
         /// Identity of the admitted recovery request.
         ticket: u64,
     },
+    /// One item of an applied default-handler plan finished; posted from any thread.
+    DefaultHandlerResult {
+        /// The run the item belongs to; a result for another run is ignored.
+        request: u64,
+        /// The item's index in that run's plan.
+        index: usize,
+        /// What happened to it.
+        outcome: crate::default_handlers::HandlerOutcome,
+    },
+    /// A default-handler run's deadline passed; items still missing report as pending.
+    DefaultHandlerDeadline {
+        /// The run whose deadline passed.
+        request: u64,
+    },
     /// The Memory Usage report's worker sampled the OS figures for one refresh.
     MemoryReportSampled {
         /// The refresh this sample belongs to; an older one is dropped.
@@ -326,6 +350,7 @@ const _: () = {
     let _: fn(&mut App, DispatchTimelineToken) -> DispatchTimelineTakeV1 =
         App::take_dispatch_timeline_v1;
 };
+mod default_handlers;
 mod echo_timeline;
 pub use echo_timeline::{
     AdmissionDecisionV1, DeferReasonV1, EchoTimelineEventV1, EchoTimelineKindV1,
@@ -836,6 +861,8 @@ pub struct App {
     /// drag outcomes into. Drained by `do_user_event` on every
     /// `UserEvent::DragMoved` / `DragEnded` wake.
     pub(super) os_drag_pending: Arc<os_drag::PendingDragOutcome>,
+    /// The default-handler command's backend, confirmation and active run.
+    pub(in crate::app) default_handlers: default_handlers::DefaultHandlersState,
     /// Shared tab-bar snapshot registry. The App publishes the live
     /// per-window tab bar layout into this on every redraw (see
     /// `publish_os_drag_bar_snapshot`); a Phase-C2 OS-drag backend

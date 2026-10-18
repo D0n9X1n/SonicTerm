@@ -429,7 +429,7 @@ fn an_exit_clears_name_warning_and_entry_but_keeps_an_unclean_pane() {
     assert!(window.tabs.set_foreground_privileged(0, true));
     exited.publish_for_test();
 
-    app.handle_pane_process_exited(pane_id, Some(false));
+    app.handle_pane_process_exited(pane_id, sonicterm_types::PaneExitStatus::Code(1));
 
     let pane = &app.windows[&main].panes[&pane_id];
     assert_eq!(cached(&app, main, pane_id), None);

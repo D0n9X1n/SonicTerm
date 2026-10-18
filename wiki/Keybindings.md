@@ -115,6 +115,20 @@ the originating window's existing green notification. It replaces any current
 bubble and closes after five seconds or with its close button. The command is
 available in READONLY mode and does not send input to the terminal.
 
+**Set SonicTerm as Default…** is a palette-only command with no default
+shortcut; the bundled keymaps never bind it. Its label names what it changes on
+each OS: **Set SonicTerm as Default for Scripts, Executables and Terminal
+Links…** on macOS, **Set SonicTerm as Default for Shell Scripts…** on Linux, and
+**Choose SonicTerm in Default Apps…** on Windows. Search `default`, `handler`,
+`terminal`, `open with`, or their localized equivalents. Enter does not change
+anything: it opens a confirmation page listing every type, scheme or page
+affected, with **Apply** and **Cancel** rows. Cancel is highlighted first;
+↑ and ↓ move between the two, Enter chooses, and Esc cancels. The page is
+keyboard only, and nothing else on it can be selected. The result appears in the
+originating window's existing green notification, which closes after five
+seconds. The command is available in READONLY mode. See
+[Usage](Usage#choose-sonicterm-as-the-default).
+
 **Go to Tab** searches live tabs in the attached window by title or displayed
 position, including in READONLY. Selection follows tab identity across reorder
 and rename, and is revalidated before activation. A closed or no-longer-matching

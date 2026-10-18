@@ -473,11 +473,59 @@ Windows 上打开 URI 与打开已验证本地目标使用同一条不经过 she
 和本机路径 OSC 8 链接；网页和邮件 URI 链接不受影响。设置 `terminal.clickable_path_max_chars`
 可以修改检测候选的最大长度。准确默认值和重载行为见 [配置](Configuration-zh-CN)。
 
+### 从启动器运行命令
+
+在 Linux 和 Windows 上，启动器（或你自己）可以让 SonicTerm 在新窗口中运行一个程序。
+macOS 不读取启动选项。
+
+```text
+sonicterm [OPTION...] [(-e | --command | --) PROGRAM [ARG...]]
+sonicterm --open-script PATH
+sonicterm --help
+```
+
+Windows 可执行文件是 `sonicterm-windows.exe`，选项相同。
+
+| 选项 | 含义 |
+| --- | --- |
+| `-T TITLE`、`--title=TITLE` | 窗口标题和第一个标签页名称。值按原样读取，`-T -e` 也是如此。 |
+| `--dir=PATH`、`--working-directory=PATH` | 第一个标签页的工作目录。相对路径相对当前目录解析；目录必须存在。 |
+| `--hold` | 第一个窗格的进程退出后保留窗格，即使是正常退出。 |
+| `-e`、`--command`、`--` | 运行 `PROGRAM`，其后的每个参数都原样传入。 |
+| `--open-script PATH` | 以草稿方式打开 `PATH`（见下文）。不能与其它选项组合。 |
+| `--help` | 打印用法并退出。 |
+
+选项只在 `-e`、`--command` 或 `--` 之前读取；其后的全部内容都属于该程序，因此
+`sonicterm -e ls -T x` 会把 `-T x` 传给 `ls`。
+
+- **不经过 shell。**`PROGRAM` 带着原样的参数直接运行。`-e` 只接受一个程序名：
+  `-e "cmd args"` 指名为 `cmd args` 的程序。需要 shell 语法时，请自己运行 shell：
+  `sonicterm -e sh -c 'make && make test'`。
+- **程序查找。**单独的名称在 `PATH` 中查找（只用绝对路径条目）；路径按原样运行，
+  相对第一个标签页的目录解析。在 Linux 和 macOS 上，文本文件只有以 `#!` 开头才会运行。
+  在 Windows 上可以找到 `.exe` 和 `.com`；`.bat` 和 `.cmd` 文件会被拒绝，因为 Windows
+  会通过 `cmd.exe` 运行它们，而 SonicTerm 无法保证其引号处理安全。请用
+  `sonicterm-windows.exe -e cmd /c script.bat` 运行。
+- **错误。**未知选项、多余参数、缺少或重复的值、相互冲突的选项，或不是目录的 `--dir`，
+  都会打印用法并以状态 `2` 退出（在 Windows 上，只有从控制台启动时才会显示用法）。无法
+  启动的程序仍会打开标签页并显示原因；不会改为启动 shell。
+- **工作目录。**没有 `--dir` 时，Linux 让第一个标签页从当前目录开始（否则 `$HOME`），
+  无论是 shell 还是命令。Windows 对命令这样处理；普通 shell 从 `%USERPROFILE%` 开始。
+  目录不存在是错误，绝不会悄悄改用 `$HOME`。
+- **退出。**程序以状态 `0` 退出时窗格关闭。其它退出码、信号、未知状态或 `--hold` 会保留
+  窗格，并在输出中加入一行，例如 `[process exited with code 1]` 或
+  `[process killed by signal SIGKILL]`。这一行由 SonicTerm 写入，不会发送给程序。
+- **每次启动一个窗口。**每次调用都会启动新的进程和窗口。
+
+要让其它 Linux 程序打开 SonicTerm 作为终端，见[平台集成](Platform-Integration-zh-CN)和
+[打包](Packaging-zh-CN)。
+
 ### 以草稿方式打开脚本
 
 安装后的 macOS build 可以出现在 Finder 为 `.sh`、`.command`、`.tool` 提供的
 **Open With** 菜单中。Windows MSI 会把 SonicTerm 注册为 `.ps1`、`.cmd`、`.bat`、
-`.sh` 的可选 handler。安装不会替换当前默认 handler。
+`.sh` 的可选 handler。Linux 安装包会安装一个隐藏条目，为 shell 脚本提供 SonicTerm；
+它运行 `sonicterm --open-script %f`。安装不会替换当前默认 handler。
 
 打开受支持文件时，SonicTerm 会在文件父目录创建标签页，安全引用绝对路径，并把命令
 放到提示符中，**不会发送 Enter 或其它 control byte**：
@@ -495,8 +543,55 @@ Windows 上打开 URI 与打开已验证本地目标使用同一条不经过 she
 不要把 SonicTerm 设为脚本 handler。对于这个 open action，SonicTerm 自身不会运行脚本
 或解释器。
 
-Windows 中，每次文件关联调用都会启动新的 SonicTerm 进程。macOS 会把后续 open request
-发送到当前运行的应用，并添加标签页。
+Linux 和 Windows 中，每次文件关联调用都会启动新的 SonicTerm 进程。macOS 会把后续 open
+request 发送到当前运行的应用，并添加标签页。草稿绝不会被运行；只有 `-e`、`--command` 或
+`--` 才会运行程序。
+
+### 在 macOS 上打开可执行文件和终端链接
+
+安装后的 macOS build 也会出现在 Unix 可执行文件的**打开方式**菜单中，并能处理 `ssh:`
+和 `x-man-page:` 链接。安装不会更改任何默认设置。
+
+- **原生程序。** 打开原生 Mach-O 可执行文件时，会在新标签页中直接运行它，工作目录是
+  程序所在文件夹。程序退出后标签页保持打开，以便查看输出。因下载而被 quarantine 的
+  程序不会运行：SonicTerm 在其所在文件夹打开 shell，并显示“Not run: <name> is
+  quarantined (downloaded). Run it yourself after review.”。没有执行权限的程序同样不会
+  运行。SonicTerm 不会修改这两项。
+- **打开操作绝不运行脚本。** `.sh`、`.command`、`.tool` 文件按下文以草稿方式打开；没有
+  扩展名的可执行脚本（以 `#!` 开头）会打开标签页并显示警告，不插入草稿。文件夹、应用
+  bundle 以及 bundle 内的任何文件，都会在其旁边打开 shell 并显示警告。
+- **`ssh://[user@]host[:port]`** 在你的主目录中运行
+  `/usr/bin/ssh [-l user] [-p port] -- host`。host 必须是 ASCII 名称、IPv4 地址或
+  带方括号的 IPv6 地址；密码、query、路径，以及百分号编码的 `%`、`/`、`@`、`:` 或
+  control character 都会被拒绝。
+- **`x-man-page:///page`、`x-man-page://page` 和 `x-man-page://section/page`** 运行
+  `/usr/bin/man [-S section] -- page`。
+- 被拒绝的链接不会打开标签页，只显示一条警告，指出 scheme 和失败的部分，绝不显示其值。
+  不处理 `telnet:` 链接。
+
+### 将 SonicTerm 设为默认程序
+
+安装 SonicTerm 从不更改默认处理程序。要选择它，请运行当前系统的面板专用命令（见
+[快捷键](Keybindings-zh-CN)）。它会先显示将要更改的内容；在选择 **应用** 之前不会更改任何内容，
+**取消** 或 Esc 也不会更改任何内容。结果显示在绿色通知中。
+
+- **macOS。** 列出已安装 bundle 声明的内容类型（`public.shell-script`、
+  `com.apple.terminal.shell-script`、`public.unix-executable`）和 URL scheme
+  （`ssh`、`x-man-page`），并把 SonicTerm 设为它们的默认程序。macOS 可能要求你确认其中一部分。
+  报告把每一项列为 changed、denied、cancelled、failed（附错误 domain 和 code）或 pending，
+  只应用了一部分时也会说明。请从 `/Applications` 运行：从磁盘映像运行的副本或被转移
+  （translocated）的副本会被拒绝，并提示 "Move SonicTerm.app to /Applications"；
+  Launch Services 未注册的副本会被拒绝；`cargo run` 构建会报告 "Missing bundle"。
+  之后 `open ssh://host` 会打开 SonicTerm，`.sh` 以草稿方式打开，原生可执行文件按上文所述运行。
+- **Linux。** 把隐藏条目 `com.d0n9x1n.SonicTerm.open-script.desktop` 设为
+  `application/x-shellscript` 和 `text/x-shellscript` 的默认程序，使 shell 脚本在 SonicTerm
+  中以草稿方式打开。随后逐一读回每个类型，并报告它现在是否指向该条目。这不是选择终端：报告会列出
+  `update-alternatives`、`xdg-terminals.list` 和 KDE 的步骤，由你自己执行。没有 xdg-utils 时报告
+  "xdg-mime not found (install xdg-utils)"；条目缺失（未安装的 tarball）时指向
+  [打包](Packaging-zh-CN)。
+- **Windows。** Windows 只允许你自己更改默认应用，因此 SonicTerm 不会更改任何内容。该命令会打开
+  “设置 › 应用 › 默认应用”：按应用的链接可用时打开 SonicTerm 的页面，否则打开总页面，并提示你为
+  `.ps1`、`.cmd`、`.bat` 和 `.sh` 选择 SonicTerm。如果设置未打开，通知会以文字给出步骤。
 
 ### 配置与排障
 

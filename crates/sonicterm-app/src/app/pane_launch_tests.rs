@@ -38,13 +38,17 @@ fn inherited_cwd_validates_local_authority_and_native_paths() {
     assert_eq!(PaneLaunch::default().inherit_cwd(Some(&huge), PathStyle::Posix, "host").cwd, None);
 }
 
-/// Explicit launch directories and script parents outrank a source pane's OSC 7.
+/// Explicit launch directories, script parents and command launches outrank a source pane's OSC 7.
 #[test]
 fn inherited_cwd_never_overrides_explicit_or_script_launch() {
     let inherited = Osc7Cwd { authority: String::new(), path: "/different".into() };
     let script = PaneLaunch::for_script(request("scripts/build.sh"));
-    let explicit = PaneLaunch { cwd: Some(PathBuf::from("/explicit")), script: None };
-    for launch in [script, explicit] {
+    let explicit = PaneLaunch { cwd: Some(PathBuf::from("/explicit")), ..PaneLaunch::default() };
+    let command = PaneLaunch {
+        command: Some(CommandLaunch { program: "ls".into(), args: Vec::new() }),
+        ..PaneLaunch::default()
+    };
+    for launch in [script, explicit, command] {
         assert_eq!(launch.clone().inherit_cwd(Some(&inherited), PathStyle::Posix, "host"), launch);
     }
 }
@@ -191,4 +195,51 @@ fn spawned_pane_sends_the_unterminated_draft_through_the_real_pty() {
 
     drop(app);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Identity matching accepts only the same regular file, never a replacement or a symlink to it.
+#[cfg(unix)]
+#[test]
+fn file_identity_matches_only_the_classified_regular_file() {
+    use std::os::unix::fs::MetadataExt;
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("tool");
+    std::fs::write(&file, b"one").unwrap();
+    let metadata = std::fs::metadata(&file).unwrap();
+    let identity = sonicterm_types::FileIdentity { device: metadata.dev(), inode: metadata.ino() };
+    assert!(file_identity_matches(&file, identity));
+
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&file, &link).unwrap();
+    assert!(!file_identity_matches(&link, identity), "a symlink is refused even to the same file");
+
+    // The replacement is written while the original still exists, so the two hold distinct
+    // inodes; deleting first lets ext4 or tmpfs hand the freed inode straight to the new file.
+    // The rename then swaps the path atomically.
+    let other = root.path().join("other");
+    std::fs::write(&other, b"two").unwrap();
+    std::fs::rename(&other, &file).unwrap();
+    assert!(!file_identity_matches(&file, identity), "a replaced inode is refused");
+    assert!(!file_identity_matches(&root.path().join("missing"), identity));
+}
+
+/// The log kind names who asked for a command, and only a link launch carries a scheme.
+#[test]
+fn kind_and_scheme_follow_the_launch_origin() {
+    let identity = sonicterm_types::FileIdentity { device: 1, inode: 2 };
+    let command = Some(CommandLaunch { program: "tool".into(), args: Vec::new() });
+    let with = |origin: LaunchOrigin| PaneLaunch {
+        command: command.clone(),
+        origin,
+        ..PaneLaunch::default()
+    };
+    assert_eq!(with(LaunchOrigin::Launcher).kind(), "command");
+    assert_eq!(with(LaunchOrigin::Executable { identity }).kind(), "executable");
+    assert_eq!(with(LaunchOrigin::Url { scheme: "ssh" }).kind(), "url");
+    assert_eq!(with(LaunchOrigin::Url { scheme: "ssh" }).scheme(), Some("ssh"));
+    assert_eq!(with(LaunchOrigin::Launcher).scheme(), None);
+    assert!(with(LaunchOrigin::Launcher).executable_still_matches());
+    let no_command =
+        PaneLaunch { origin: LaunchOrigin::Executable { identity }, ..PaneLaunch::default() };
+    assert!(!no_command.executable_still_matches(), "an executable origin without a command fails");
 }

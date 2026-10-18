@@ -9,7 +9,9 @@ It loads config/theme/keymap, installs logging, then runs
 
 ## Key files
 - `main.rs` - startup and shell construction.
-- `cli.rs` - Windows CLI entry handling.
+- `cli.rs` - Windows CLI entry handling over the shared `sonicterm_app::launch_cli` grammar,
+  plus `--refresh-shell-associations` and the private `--tear-out-payload`.
+- `startup.rs` - queues the startup script draft or terminal launch before the shell runs.
 - `chrome.rs`, `backdrop.rs` - window chrome and DWM backdrop.
 - `menubar.rs` - native menu integration.
 - `os_drag_win.rs`, `tab_drag_os.rs` - OLE drag/drop and tab transfer.
@@ -35,6 +37,10 @@ Release MSI builds require the Windows Cairo setup script and WiX.
   Direct COM tests are not physical drag proof.
 - Keep packaging paths in sync with `wix/main.wxs`, `Packaging`, and the
   release workflow.
+- Unknown options are usage errors that exit 2. Every command line the MSI registers
+  (`--open-script "%1"`, `--refresh-shell-associations`) or the app spawns
+  (`--tear-out-payload`, `--runtime-smoke`) must stay inside the grammar. Usage is printed
+  only after `AttachConsole(ATTACH_PARENT_PROCESS)` succeeds; the log always records it.
 
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-app`, `sonicterm-cfg`,

@@ -166,7 +166,7 @@ impl App {
             // When: the palette is open on `window_id`, only its query may own a field gesture.
             let mode = self.command_palette.mode();
             let live = match mode {
-                CommandPaletteMode::TabColor => false,
+                CommandPaletteMode::TabColor | CommandPaletteMode::Confirm => false,
                 // A rename edits one captured tab or window; once it closed or moved, the
                 // editor still shows but its query belongs to nothing and must not be edited.
                 CommandPaletteMode::RenameTab => self.tab_edit_target_window() == Some(window_id),

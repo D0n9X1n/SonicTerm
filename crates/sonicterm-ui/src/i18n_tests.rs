@@ -316,6 +316,7 @@ fn palette_locale_refresh_in_other_modes_preserves_rows_but_refreshes_commands()
         CommandPaletteMode::RenameTab,
         CommandPaletteMode::RenameWindow,
         CommandPaletteMode::TabColor,
+        CommandPaletteMode::Confirm,
     ] {
         let mut palette = CommandPalette::new();
         palette.set_context(CommandContext {
@@ -344,6 +345,10 @@ fn palette_locale_refresh_in_other_modes_preserves_rows_but_refreshes_commands()
             CommandPaletteMode::RenameWindow => {
                 palette.start_rename_window("title 中文");
                 palette.move_cursor_left();
+            }
+            CommandPaletteMode::Confirm => {
+                palette.start_confirm("title 中文", "Apply", "Cancel", vec!["item".into()]);
+                palette.move_selection_up();
             }
             CommandPaletteMode::Commands => unreachable!(),
         }
@@ -413,7 +418,7 @@ fn palette_refreshes_preserve_reversed_text_selection() {
             }
             CommandPaletteMode::RenameTab => palette.start_rename_tab("a你🙂z"),
             CommandPaletteMode::RenameWindow => palette.start_rename_window("a你🙂z"),
-            CommandPaletteMode::TabColor => unreachable!(),
+            CommandPaletteMode::TabColor | CommandPaletteMode::Confirm => unreachable!(),
         }
         palette.set_cursor("a你🙂".len());
         palette.extend_to("a".len());
@@ -722,4 +727,64 @@ fn reload_switches_the_active_locale() {
 
     assert_eq!(i18n.locale(), expected);
     assert_eq!(i18n.translate("menu-file-new-tab"), expected_label);
+}
+
+/// Contract: the default-handler command is a palette action with no shortcut hint, its label
+/// on each OS names what it changes, and every locale translates all three labels and finds the
+/// command by English and localized "default" keywords.
+#[test]
+fn default_handlers_command_is_registered_and_translated() {
+    use crate::command_label::{
+        default_handlers_label, default_handlers_label_key, localized_search_haystack,
+        DefaultHandlersPlatform,
+    };
+    use sonicterm_cfg::keymap::Action;
+    assert!(crate::command_palette::palette_actions().contains(&Action::SetDefaultHandlers));
+    assert_eq!(
+        default_handlers_label(DefaultHandlersPlatform::Mac),
+        "Set SonicTerm as Default for Scripts, Executables and Terminal Links…"
+    );
+    assert_eq!(
+        default_handlers_label(DefaultHandlersPlatform::Linux),
+        "Set SonicTerm as Default for Shell Scripts…"
+    );
+    assert_eq!(
+        default_handlers_label(DefaultHandlersPlatform::Windows),
+        "Choose SonicTerm in Default Apps…"
+    );
+    for (locale, keyword) in [("en", "default"), ("zh-CN", "默认"), ("ja", "既定")] {
+        let i18n = translator(locale);
+        for platform in [
+            DefaultHandlersPlatform::Mac,
+            DefaultHandlersPlatform::Linux,
+            DefaultHandlersPlatform::Windows,
+        ] {
+            let key = default_handlers_label_key(platform);
+            assert!(i18n.active_bundle.get_message(key).is_some(), "{locale}: {key}");
+        }
+        for key in [
+            "palette-confirm-footer",
+            "default-handlers-title-change",
+            "default-handlers-title-windows",
+            "default-handlers-apply",
+            "default-handlers-open-settings",
+            "default-handlers-cancel",
+        ] {
+            assert!(i18n.active_bundle.get_message(key).is_some(), "{locale}: {key}");
+        }
+        let haystack = localized_search_haystack(&Action::SetDefaultHandlers, &i18n);
+        for alias in ["default", "handler", "terminal", "open with", keyword] {
+            assert!(haystack.contains(alias), "{locale} haystack lost {alias}");
+        }
+    }
+    let mut palette = crate::command_palette::CommandPalette::new();
+    palette.set_keymap(&sonicterm_cfg::keymap::Keymap::default(), &translator("en"));
+    palette.open();
+    palette.set_query("default handler");
+    let index = palette
+        .visible()
+        .iter()
+        .position(|entry| matches!(entry, Command(Action::SetDefaultHandlers)))
+        .expect("keywords find the command");
+    assert_eq!(palette.shortcut_hint_for_visible_index(index), None);
 }

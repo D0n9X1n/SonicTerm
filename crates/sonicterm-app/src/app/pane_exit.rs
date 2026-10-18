@@ -6,9 +6,26 @@
 //! or one whose status could not be read — leaves the pane on screen with
 //! whatever killed it still legible.
 
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use sonicterm_types::PaneExitStatus;
+use sonicterm_vt::vt::Parser;
 use winit::window::WindowId;
 
 use super::{child_window, App};
+
+/// Write `text` into a pane's own grid as one line, never to its PTY.
+///
+/// Control characters are replaced first, so a program name or signal name
+/// cannot drive the terminal. The line starts on a fresh row with default attributes.
+pub(super) fn write_local_line(parser: &Arc<Mutex<Parser>>, text: &str) {
+    let printable = sonicterm_types::replace_control_characters(text);
+    let bytes = format!("\x1b[0m\r\n{printable}\r\n").into_bytes();
+    let mut guard = crate::app::frame_counters::lock_parser(parser);
+    let _ = guard.advance(&bytes);
+    guard.grid_mut().mark_all_dirty();
+}
 
 /// Where an exited pane sits in the window/tab topology.
 struct ExitedPaneSite {
@@ -23,20 +40,28 @@ struct ExitedPaneSite {
 impl App {
     /// Act on a pane whose child process ended.
     ///
-    /// `was_clean` is the classification made by that pane's VT worker before
-    /// it exited. `None` means the status could not be read, which holds the
-    /// pane open exactly as an unclean exit does: closing on our own
-    /// uncertainty would discard a user's scrollback to no purpose.
-    pub(super) fn handle_pane_process_exited(&mut self, pane_id: u64, was_clean: Option<bool>) {
+    /// `status` is the classification made by that pane's VT worker before it
+    /// exited. Only `Code(0)` closes the pane, and only when it was not
+    /// launched with `--hold`. `Unknown` holds the pane open exactly as an
+    /// unclean exit does: closing on our own uncertainty would discard a
+    /// user's scrollback to no purpose. A held pane gets one local status
+    /// line in its grid; a repeated report for the same pane does nothing.
+    pub(super) fn handle_pane_process_exited(&mut self, pane_id: u64, status: PaneExitStatus) {
         // Any exit, clean or not, clears the pane's process name and warning; an unclean pane stays.
         self.clear_exited_foreground(pane_id, std::time::Instant::now());
-        if was_clean != Some(true) {
-            // When: `was_clean` is false or unknown, preserve the pane and its scrollback for diagnosis.
+        let Some(hold) = self.mark_exit_reported(pane_id) else {
+            // When: `mark_exit_reported` finds no live pane, or one already reported, nothing remains to do.
+            return;
+        };
+        if hold || !status.is_clean() {
+            // When: `hold` is set or `status` is not clean, keep the pane and its scrollback, and say why.
             tracing::debug!(
                 pane = pane_id,
-                ?was_clean,
-                "pane child exited without a clean status; holding the pane open"
+                ?status,
+                hold,
+                "pane child exited; holding the pane open"
             );
+            self.write_exit_status_line(pane_id, &status);
             return;
         }
         let Some(site) = self.locate_exited_pane(pane_id) else {
@@ -76,6 +101,29 @@ impl App {
             // Reaps its own window when the last tab goes.
             self.close_tab_at_in_child(site.window, site.tab_index);
         }
+    }
+
+    /// Mark `pane_id`'s exit as handled and return its hold flag; `None` if absent or already marked.
+    fn mark_exit_reported(&mut self, pane_id: u64) -> Option<bool> {
+        let pane = self.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))?;
+        if pane.exit_reported {
+            // When: `exit_reported` is already set, the status line exists and the close was decided.
+            return None;
+        }
+        pane.exit_reported = true;
+        Some(pane.hold_on_exit)
+    }
+
+    /// Write `status`'s line into the held pane's grid and redraw its window.
+    fn write_exit_status_line(&mut self, pane_id: u64, status: &PaneExitStatus) {
+        let Some(window) =
+            self.windows.values_mut().find(|window| window.panes.contains_key(&pane_id))
+        else {
+            // When: no window holds `pane_id`, it closed after its exit was marked.
+            return;
+        };
+        write_local_line(&window.panes[&pane_id].parser, &status.status_line());
+        window.request_window_redraw();
     }
 
     /// Find the window and tab holding `pane_id`.

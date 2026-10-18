@@ -12,7 +12,10 @@ use objc2_foundation::{
     MainThreadMarker, NSAppleEventDescriptor, NSAppleEventManager, NSNotification,
     NSNotificationCenter, NSObject, NSObjectProtocol,
 };
-use sonicterm_app::open_script_bridge::{self, OpenScriptRequest};
+use sonicterm_app::launch_queue::{self, LaunchRequest, OpenScriptRequest};
+use sonicterm_types::{CommandLaunch, CwdSource, LaunchOrigin, TerminalLaunch};
+
+use crate::executable_classify::{self, Disposition};
 
 thread_local! {
     static HANDLER: RefCell<Option<Retained<OpenDocumentsTarget>>> = const { RefCell::new(None) };
@@ -40,6 +43,16 @@ define_class!(
                     kAEOpenDocuments,
                 );
             }
+            // SAFETY: `self` is stored in `HANDLER` for the life of the process, so the manager's
+            // unretained handler reference stays valid; the selector is implemented below.
+            unsafe {
+                manager.setEventHandler_andSelector_forEventClass_andEventID(
+                    self,
+                    sel!(handleGetURL:withReplyEvent:),
+                    crate::open_urls::INTERNET_EVENT_CLASS,
+                    crate::open_urls::GET_URL_EVENT_ID,
+                );
+            }
         }
 
         #[unsafe(method(handleOpenDocuments:withReplyEvent:))]
@@ -49,9 +62,21 @@ define_class!(
             _reply: &NSAppleEventDescriptor,
         ) {
             let requests = requests_from_event(event, INITIAL_CWD.get().and_then(Option::as_deref));
-            if !requests.is_empty() {
-                let _ = open_script_bridge::push_requests(requests);
+            let home = sonicterm_app::launch_cli::home_dir();
+            let launches: Vec<LaunchRequest> = requests
+                .into_iter()
+                .flat_map(|request| {
+                    launch_requests_for(executable_classify::classify(request), home.clone())
+                })
+                .collect();
+            if !launches.is_empty() {
+                let _ = launch_queue::push_requests(launches);
             }
+        }
+
+        #[unsafe(method(handleGetURL:withReplyEvent:))]
+        fn handle_get_url(&self, event: &NSAppleEventDescriptor, _reply: &NSAppleEventDescriptor) {
+            crate::open_urls::handle_get_url(event);
         }
     }
 );
@@ -105,6 +130,45 @@ fn requests_from_event(
         }
     }
     requests
+}
+
+/// Turn one classified document open into the requests to queue.
+///
+/// A script keeps today's draft path. A verified executable runs directly in its
+/// canonical parent with `hold` on, so its output stays visible. A refusal opens a
+/// plain shell tab beside the file (or in home) and queues a notice; the refusal
+/// is logged by reason only, never by path.
+pub(crate) fn launch_requests_for(
+    disposition: Disposition,
+    home: Option<PathBuf>,
+) -> Vec<LaunchRequest> {
+    match disposition {
+        Disposition::Draft(request) => vec![LaunchRequest::Script(request)],
+        Disposition::Run { program, cwd, identity } => {
+            vec![LaunchRequest::Terminal(TerminalLaunch {
+                command: Some(CommandLaunch {
+                    program: program.into_os_string(),
+                    args: Vec::new(),
+                }),
+                cwd: Some(cwd),
+                cwd_source: Some(CwdSource::Parent),
+                title: None,
+                hold: true,
+                origin: LaunchOrigin::Executable { identity },
+            })]
+        }
+        Disposition::Refuse { refusal, cwd, file_name } => {
+            tracing::warn!(
+                target: "sonicterm_mac::open_document",
+                reason = refusal.as_str(),
+                "document open not run"
+            );
+            let cwd_source = Some(cwd.as_ref().map_or(CwdSource::Home, |_| CwdSource::Parent));
+            let shell =
+                TerminalLaunch { cwd: cwd.or(home), cwd_source, ..TerminalLaunch::default() };
+            vec![LaunchRequest::Terminal(shell), LaunchRequest::Notice(refusal.notice(&file_name))]
+        }
+    }
 }
 
 pub fn install() {

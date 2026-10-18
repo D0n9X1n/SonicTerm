@@ -229,6 +229,11 @@ action = "copy_memory_report"
             )),
             "bundled {os} keymap must leave the memory-report actions unbound"
         );
+        // The default-handler command changes system state, so it stays palette-only.
+        assert!(
+            bundled.bindings.iter().all(|binding| binding.action.0 != Action::SetDefaultHandlers),
+            "bundled {os} keymap must leave the default-handler command unbound"
+        );
         for chord in ["super+shift+c", "alt+shift+c"] {
             assert_eq!(bundled.lookup(chord), None, "bundled {os} keymap must not bind {chord}");
         }

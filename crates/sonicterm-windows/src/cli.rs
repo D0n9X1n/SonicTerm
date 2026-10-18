@@ -1,24 +1,52 @@
 #![allow(dead_code)] // CLI helpers compile cross-host for tests; production runs on Windows.
 
-use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use sonicterm_app::launch_cli::{
+    parse_launch_args, CliDialect, LaunchCli, TerminalCli, UsageError,
+};
 use sonicterm_app::os_drag::TabPayload;
 
-/// Parsed CLI inputs for the Windows binary. We still hand-roll the
-/// parser to keep the production binary's diff surface minimal — clap
-/// migration is tracked separately.
+/// Parsed CLI inputs for the Windows binary.
+///
+/// The launch grammar is the shared `launch_cli` one; this binary adds the
+/// windowless `--refresh-shell-associations` and the private
+/// `--tear-out-payload` that tab tear-out passes to a new process.
 #[derive(Default, Debug)]
 pub struct ParsedCli {
     pub tearout: Option<TabPayload>,
     pub open_script: Option<PathBuf>,
     pub refresh_shell_associations: bool,
     pub runtime_smoke: bool,
+    /// `--help`: print usage and exit 0.
+    pub help: bool,
+    /// Terminal options and an optional command; `None` for the other modes.
+    pub terminal: Option<TerminalCli>,
 }
 
+/// Why the command line was refused.
+#[derive(Debug)]
+pub enum CliError {
+    /// The command line breaks the grammar; the binary exits 2.
+    Usage(UsageError),
+    /// The private tear-out payload is not valid JSON for a tab.
+    Payload(String),
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Usage(error) => write!(formatter, "{error}"),
+            Self::Payload(reason) => write!(formatter, "decode --tear-out-payload JSON: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for CliError {}
+
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn parse_tearout_payload_from<I, S>(args: I) -> Result<Option<TabPayload>>
+pub fn parse_tearout_payload_from<I, S>(args: I) -> Result<Option<TabPayload>, CliError>
 where
     I: IntoIterator<Item = S>,
     S: Into<OsString>,
@@ -27,66 +55,48 @@ where
 }
 
 #[cfg_attr(any(test, not(windows)), allow(dead_code))]
-pub fn parse_tearout_payload_from_env() -> Result<Option<TabPayload>> {
+pub fn parse_tearout_payload_from_env() -> Result<Option<TabPayload>, CliError> {
     parse_tearout_payload_from(std::env::args_os())
 }
 
-/// Full CLI parse. Hand-rolled so we don't pull clap into a startup-sensitive binary.
-pub fn parse_cli_from<I, S>(args: I) -> Result<ParsedCli>
+/// Parse `args` (binary name first) with the process cwd for a relative `--dir`.
+pub fn parse_cli_from<I, S>(args: I) -> Result<ParsedCli, CliError>
 where
     I: IntoIterator<Item = S>,
     S: Into<OsString>,
 {
-    let mut args = args.into_iter().map(Into::into);
-    let _program = args.next();
+    let cwd = std::env::current_dir().ok();
+    parse_cli_from_with_cwd(args, cwd.as_deref())
+}
+
+/// Parse `args` (binary name first), resolving a relative `--dir` against `process_cwd`.
+pub fn parse_cli_from_with_cwd<I, S>(
+    args: I,
+    process_cwd: Option<&Path>,
+) -> Result<ParsedCli, CliError>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<OsString>,
+{
+    let cli = parse_launch_args(args, CliDialect::Windows, process_cwd).map_err(CliError::Usage)?;
     let mut out = ParsedCli::default();
-    let mut unknown_args = 0usize;
-    let mut runtime_smoke_flags = 0usize;
-    while let Some(arg) = args.next() {
-        if arg == OsStr::new("--tear-out-payload") {
-            let Some(json) = args.next() else {
-                bail!("--tear-out-payload requires a JSON argument")
-            };
-            let parsed = TabPayload::from_json(&json.to_string_lossy())
-                .context("decode --tear-out-payload JSON")?;
-            out.tearout = Some(parsed);
-        } else if arg == OsStr::new("--open-script") {
-            // When: `arg` selects script opening after the tear-out option was rejected; parse exactly one path.
-            let Some(path) = args.next() else { bail!("--open-script requires a path argument") };
-            if out.open_script.is_some() {
-                bail!("--open-script may be provided only once")
-            }
-            out.open_script = Some(PathBuf::from(path));
-        } else if arg == OsStr::new("--refresh-shell-associations") {
-            // When: `arg` selects association refresh after both payload options were rejected; no path value is consumed.
-            out.refresh_shell_associations = true;
-        } else if arg == OsStr::new("--runtime-smoke") {
-            // When: `arg` equals `--runtime-smoke`, count the one permitted hidden-mode flag.
-            runtime_smoke_flags = runtime_smoke_flags.saturating_add(1);
-            out.runtime_smoke = true;
-        } else {
-            // When: `arg` is not SonicTerm-owned, ordinary startup tolerates launch-shim metadata.
-            unknown_args = unknown_args.saturating_add(1);
+    match cli {
+        LaunchCli::Terminal(terminal) => out.terminal = Some(terminal),
+        LaunchCli::OpenScript(path) => out.open_script = Some(path),
+        LaunchCli::RuntimeSmoke => out.runtime_smoke = true,
+        LaunchCli::Help => out.help = true,
+        LaunchCli::RefreshShellAssociations => out.refresh_shell_associations = true,
+        LaunchCli::TearOut(json) => {
+            let payload = TabPayload::from_json(&json.to_string_lossy())
+                .map_err(|error| CliError::Payload(error.to_string()))?;
+            out.tearout = Some(payload);
         }
-    }
-    if out.open_script.is_some() && out.tearout.is_some() {
-        bail!("--open-script cannot be combined with --tear-out-payload")
-    }
-    if out.runtime_smoke
-        && (out.open_script.is_some()
-            || out.tearout.is_some()
-            || out.refresh_shell_associations
-            || unknown_args > 0
-            || runtime_smoke_flags != 1)
-    {
-        // Reject hidden smoke mode when launch state, unknown arguments, or duplicate flags accompany it.
-        bail!("--runtime-smoke cannot be combined with user launch options")
     }
     Ok(out)
 }
 
 #[cfg_attr(any(test, not(windows)), allow(dead_code))]
-pub fn parse_cli_from_env() -> Result<ParsedCli> {
+pub fn parse_cli_from_env() -> Result<ParsedCli, CliError> {
     parse_cli_from(std::env::args_os())
 }
 

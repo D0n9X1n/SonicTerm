@@ -61,6 +61,26 @@ cat > "$APP/Contents/Info.plist" <<PLIST
                 <string>com.apple.terminal.shell-script</string>
             </array>
         </dict>
+        <dict>
+            <key>CFBundleTypeName</key> <string>Unix Executable</string>
+            <key>CFBundleTypeRole</key> <string>Shell</string>
+            <key>LSHandlerRank</key>    <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.unix-executable</string>
+            </array>
+        </dict>
+    </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>  <string>com.d0n9x1n.sonicterm.terminal-links</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>ssh</string>
+                <string>x-man-page</string>
+            </array>
+        </dict>
     </array>
     <key>LSMinimumSystemVersion</key>   <string>14.0</string>
     <key>ATSApplicationFontsPath</key>  <string>assets/fonts</string>

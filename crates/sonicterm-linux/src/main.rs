@@ -14,6 +14,9 @@ use sonicterm_cfg::keymap::Keymap;
 #[cfg(target_os = "linux")]
 use sonicterm_cfg::theme::Theme;
 
+#[cfg(any(target_os = "linux", all(unix, test)))]
+mod default_handlers;
+
 #[cfg(any(target_os = "linux", test))]
 const PACKAGED_FONT_FILES: &[&str] = &[
     "RecMonoSt.Helens-Regular.ttf",
@@ -46,19 +49,68 @@ fn detect_process_privilege() -> sonicterm_app::ProcessPrivilege {
     process_privilege_from_euid(euid)
 }
 
+/// What a Linux command line asks the binary to do.
 #[cfg(any(target_os = "linux", test))]
-fn parse_startup_mode<I, S>(args: I) -> std::result::Result<StartupMode, &'static str>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let mut args = args.into_iter();
-    let _program = args.next();
-    match (args.next(), args.next()) {
-        (None, None) => Ok(StartupMode::Interactive),
-        (Some(flag), None) if flag.as_ref() == "--runtime-smoke" => Ok(StartupMode::RuntimeSmoke),
-        _ => Err("usage: sonicterm [--runtime-smoke]"),
+#[derive(Debug, PartialEq, Eq)]
+enum LinuxStartup {
+    /// Run the app in `mode`, first queueing `launch` when it is present.
+    Run { mode: StartupMode, launch: Option<sonicterm_app::launch_queue::LaunchRequest> },
+    /// Print usage to stdout and exit 0.
+    Help,
+}
+
+/// Turn a parsed command line into a startup decision.
+///
+/// Every interactive launch queues a terminal request, so the first tab starts
+/// in the process cwd (else `home`), as Debian launchers and KIO expect. A
+/// relative `--open-script` path resolves against the process cwd.
+#[cfg(any(target_os = "linux", test))]
+fn linux_startup(
+    cli: sonicterm_app::launch_cli::LaunchCli,
+    process_cwd: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Result<LinuxStartup> {
+    use sonicterm_app::launch_cli::{terminal_launch, CliDialect, LaunchCli};
+    use sonicterm_app::launch_queue::{LaunchRequest, OpenScriptRequest};
+    match cli {
+        LaunchCli::Help => Ok(LinuxStartup::Help),
+        LaunchCli::RuntimeSmoke => {
+            Ok(LinuxStartup::Run { mode: StartupMode::RuntimeSmoke, launch: None })
+        }
+        LaunchCli::Terminal(terminal) => {
+            let launch = terminal_launch(terminal, CliDialect::Linux, process_cwd, home);
+            Ok(LinuxStartup::Run {
+                mode: StartupMode::Interactive,
+                launch: Some(LaunchRequest::Terminal(launch)),
+            })
+        }
+        LaunchCli::OpenScript(path) => {
+            let request = OpenScriptRequest::resolve_with_cwd_lookup(path, || process_cwd)
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "cannot resolve a relative --open-script path: the process cwd is unavailable"
+                    )
+                })?;
+            Ok(LinuxStartup::Run {
+                mode: StartupMode::Interactive,
+                launch: Some(LaunchRequest::Script(request)),
+            })
+        }
+        LaunchCli::RefreshShellAssociations | LaunchCli::TearOut(_) => {
+            // When: a Windows-only mode reached Linux, the shared parser broke its dialect contract.
+            anyhow::bail!("the Linux parser accepted a Windows-only option")
+        }
     }
+}
+
+/// Report a usage error: usage on stderr, then one value-free `warn` in the log.
+#[cfg(target_os = "linux")]
+fn report_usage_error(error: sonicterm_app::launch_cli::UsageError) {
+    use sonicterm_app::launch_cli::{usage, CliDialect};
+    eprintln!("sonicterm: {error}\n\n{}", usage(CliDialect::Linux));
+    let log_dir = sonicterm_logging::log_dir();
+    let _log_guard = sonicterm_logging::init_in(&Config::default().logging, &log_dir).ok();
+    error.log();
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -275,7 +327,10 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
         let theme_loader: sonicterm_app::ThemeLoader =
             Box::new(|name| Theme::load_name_or_path(name, &asset_dir()));
         let keymap_loader: sonicterm_app::KeymapLoader = Box::new(Keymap::load_strict);
-        shell = shell.with_asset_loaders(theme_loader, keymap_loader);
+        // Only the palette command reaches this backend; installing it changes nothing.
+        shell = shell.with_asset_loaders(theme_loader, keymap_loader).with_default_handlers(
+            Box::new(default_handlers::LinuxDefaultHandlers::from_process_env()),
+        );
     }
     if let Some(recorder) = breadcrumb_recorder.clone() {
         // When: breadcrumb startup succeeded, let the app report runtime state without filesystem IO.
@@ -314,7 +369,31 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
 fn main() -> Result<std::process::ExitCode> {
     #[cfg(target_os = "linux")]
     {
-        let mode = parse_startup_mode(std::env::args()).map_err(anyhow::Error::msg)?;
+        use sonicterm_app::launch_cli::{
+            home_dir, parse_launch_args, usage, CliDialect, USAGE_EXIT_CODE,
+        };
+        let process_cwd = std::env::current_dir().ok();
+        let cli =
+            match parse_launch_args(std::env::args_os(), CliDialect::Linux, process_cwd.as_deref())
+            {
+                Ok(cli) => cli,
+                Err(error) => {
+                    // When: the command line breaks the grammar, exit 2 with usage and a value-free log line.
+                    report_usage_error(error);
+                    return Ok(std::process::ExitCode::from(USAGE_EXIT_CODE));
+                }
+            };
+        let (mode, launch) = match linux_startup(cli, process_cwd, home_dir())? {
+            LinuxStartup::Help => {
+                print!("{}", usage(CliDialect::Linux));
+                return Ok(std::process::ExitCode::SUCCESS);
+            }
+            LinuxStartup::Run { mode, launch } => (mode, launch),
+        };
+        if let Some(launch) = launch {
+            // When: an interactive `launch` exists, queue it before the shell installs its proxy and drains.
+            let _ = sonicterm_app::launch_queue::push_requests(vec![launch]);
+        }
         let code = u8::try_from(run_linux(mode)?).context("Linux exit code fits in one byte")?;
         Ok(std::process::ExitCode::from(code))
     }

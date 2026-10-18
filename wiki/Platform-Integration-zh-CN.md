@@ -112,14 +112,49 @@ SonicTerm 不使用 `CVDisplayLink`。Windows 和 Linux 不安装链接。原生
 `crates/sonicterm-app/tests/display_link_native.rs` 中于进程主线程上的真实 `NSView` 运行，该测试没有
 libtest 框架；它不断言显示器会触发 tick。
 
-### Shell 脚本打开事件
+### 文件与链接打开事件
 
-App bundle 以 `LSHandlerRank=Alternate` 声明 `public.shell-script` 和
-`com.apple.terminal.shell-script`。进程级 observer 接收
-`NSApplicationWillFinishLaunchingNotification` 后安装 `kAEOpenDocuments` Apple Event
-handler。回调只把路径放入共享 open-script 队列；窗口与 PTY 仍由事件循环线程创建。
-冷启动打开多个文件时会保持顺序且不额外创建空白标签页，之后的事件则追加标签页。
-相对路径以进程启动时的工作目录为准。这是 Finder 的**打开方式**集成，不是全局默认终端选择器。
+App bundle 声明两个 Shell 角色、`LSHandlerRank=Alternate` 的文档类型（shell 脚本与
+`public.unix-executable`），并声明 `ssh` 和 `x-man-page` URL scheme。进程级 observer
+接收 `NSApplicationWillFinishLaunchingNotification` 后安装两个 Apple Event handler：
+文件用 `kAEOpenDocuments`，链接用 `kAEGetURL`（class 与 id 均为 `'GURL'`，因为
+`objc2-core-services` 0.3 未导出，所以在本地定义）。两个 handler 都只把请求放入共享
+启动队列；窗口与 PTY 仍由事件循环线程创建。冷启动打开多个文件时会保持顺序且不额外创建
+空白标签页，之后的事件向正在运行的应用追加标签页。相对路径以进程启动时的工作目录为准。
+这是 Finder 的**打开方式**和链接集成，不是全局默认终端选择器。
+
+打开文件绝不会执行脚本。`executable_classify.rs` 按以下顺序判断每个文件：
+
+```mermaid
+flowchart TD
+    start[打开的路径] --> canon{realpath 成功？}
+    canon -- 否 --> home[在 home 打开 shell + 警告]
+    canon -- 是 --> bundle{任一路径组件以 .app 结尾？}
+    bundle -- 是 --> beside[在 bundle 旁打开 shell + 警告]
+    bundle -- 否 --> open{O_NOFOLLOW 打开并 fstat：普通文件？}
+    open -- 目录、其它类型或出错 --> parent[在父目录打开 shell + 警告]
+    open -- 是 --> script{脚本扩展名或 #! 开头？}
+    script -- 是 --> draft[草稿路径：草稿或警告，绝不运行]
+    script -- 否 --> macho{thin Mach-O，或 1-16 个架构的 fat Mach-O？}
+    macho -- 否 --> draft
+    macho -- 是 --> quarantine{同一 fd 上没有 com.apple.quarantine？}
+    quarantine -- 否或出错 --> parent
+    quarantine -- 是 --> exec{access X_OK？}
+    exec -- 否 --> parent
+    exec -- 是 --> run[在规范化父目录运行，保留窗格]
+```
+
+运行时会记录该描述符的 device 与 inode。spawn 之前，应用再次确认该路径仍是普通文件、
+不是符号链接，且 identity 相同；否则窗格显示“Not run: <name> changed before it could
+start.”，不会启动任何进程。macOS 没有 `fexecve`，所以该检查与 `execve` 之间仍有一个
+很窄的窗口。SonicTerm 绝不添加执行权限、不移除 quarantine，也不通过 shell 或 `open`
+重试。
+
+链接由 `sonicterm_cfg::launch_url` 解析：先按原始分隔符拆分 URI 结构，每个组件只做一次
+百分号解码，解码后的文本必须匹配逐字段语法。有效链接以绝对路径在 `$HOME` 中运行
+`/usr/bin/ssh` 或 `/usr/bin/man`，不保留窗格。被拒绝的链接或缺失的客户端不会单独打开
+标签页，只排队一条提示；冷启动时该提示等待第一个窗口，第一个窗口仍会打开普通 shell
+标签页。不声明 `telnet`：macOS 不自带 `/usr/bin/telnet`，用户可写前缀中的客户端不被信任。
 
 ### 标签页交接
 
@@ -155,9 +190,22 @@ winit 创建 HWND 前，`sonicterm-windows` 会请求
 
 ### CLI 与脚本文件注册
 
-安装后的 executable 接受一个无损的 `--open-script <PATH>` 参数。启动逻辑会相对进程
-最初工作目录解析相对参数，并在 `WindowsShell::run` 前入队，因此冷启动直接打开脚本标签页，
-不会先创建 HOME 标签页。私有 tear-out payload 不能与 `--open-script` 同时使用。
+`sonicterm-windows.exe` 通过 `std::env::args_os()` 读取参数，使用与 Linux 共用的启动器
+语法（`crates/sonicterm-app/src/launch_cli.rs`；选项见[用法](Usage-zh-CN)）。它另外接受
+不创建窗口的 `--refresh-shell-associations`，以及私有的 `--tear-out-payload`：重复时取最后
+一个值，且不能与其它任何模式组合。
+
+未知选项和多余参数都是用法错误，退出码为 `2`。SonicTerm 注册或启动的命令行都不会传入
+这类参数：MSI ProgID 运行 `--open-script "%1"`，自定义操作运行
+`--refresh-shell-associations`，快捷方式不带参数，标签页拆出和发布 smoke 只传
+`--tear-out-payload` 与 `--runtime-smoke`。该程序属于 GUI 子系统，没有自己的控制台，所以只有
+在 `AttachConsole(ATTACH_PARENT_PROCESS)` 成功后才输出用法和 `--help`；用法错误总会写入日志。
+
+`--open-script <PATH>` 是无损的。启动逻辑会相对进程最初工作目录解析相对参数，并在
+`WindowsShell::run` 前入队，因此冷启动直接打开脚本标签页，不会先创建 HOME 标签页。
+没有 `--dir` 的命令启动（`-e`）从进程工作目录开始；普通 shell 仍使用 `%USERPROFILE%`，
+因为安装程序的快捷方式会在安装目录中启动进程。批处理文件不能作为命令运行（见
+[用法](Usage-zh-CN)）。每次启动都是一个拥有独立窗口的新进程。
 
 `--refresh-shell-associations` 不创建窗口，只广播 `SHCNE_ASSOCCHANGED`。MSI 为 `.ps1`、
 `.cmd`、`.bat` 和 `.sh` 注册 SonicTerm ProgID、Default Apps capabilities 和
@@ -233,6 +281,44 @@ passwd shell、最后 `/bin/sh`。显式 shell 配置优先。
 `/usr/share/sonicterm/assets`。启动时会检查四个内置 Rec Mono 字体，把字体目录在原生
 Fontconfig discovery 前传给 `FontStack`，并在字体重载时继续保留。原生 fallback 仍可用。
 
+### 终端启动器
+
+`sonicterm` 通过共用的启动器语法读取 `std::env::args_os()`，因此非 Unicode 参数不会导致
+panic。用法错误会把用法打印到标准错误，记录一条写明参数位置和规则的 `warn`，并以 `2`
+退出；`--help` 以 `0` 退出。每次启动都是一个拥有新窗口的新进程，没有单实例 IPC。没有
+`--dir` 时，第一个标签页从进程工作目录开始，否则使用 `$HOME`，这正是 KIO 和 Debian
+启动器预期的行为。后续标签页沿用原规则：活动窗格的 OSC 7 目录，否则 `$HOME`。
+
+`-e`、`--command` 和 `--` 通过 `PtyHandle::spawn_command` 直接运行程序，绝不经过 shell：
+
+- 不含 `/` 的名称在 SonicTerm 自己的 `PATH` 中查找，只使用绝对路径条目。路径按原样
+  使用；相对路径相对启动目录解析。
+- 目标必须是通过 `access(X_OK)` 的普通文件，并以 `#!` 或平台原生可执行文件 magic
+  （Linux 为 ELF，macOS 为 Mach-O）开头。内核以 `ENOEXEC` 拒绝的文件会被 libc 的
+  `execvp` 交给 `/bin/sh` 重试；预先拒绝这类文件，可确保这条 shell 路径不会运行。
+- 程序启动时工作目录必须存在；不会退回到 `$HOME`。
+- 失败时仍打开标签页，把原因写入该标签页自己的网格，显示通知，且不启动任何其它进程。
+
+终端桌面条目 `com.d0n9x1n.SonicTerm.desktop` 保持 `Exec=sonicterm`，不带字段代码：KDE
+会把 `-e cmd` 追加到原始 `Exec` 后，xdg-terminal-exec 会去掉字段代码。它声明
+`X-TerminalArgExec=-e`、`X-ExecArg=-e`（xdg-terminal-exec 兼容模式读取）、
+`X-TerminalArgTitle=-T`、`X-TerminalArgDir=--dir=` 和 `X-TerminalArgHold=--hold`。
+
+第二个隐藏条目 `com.d0n9x1n.SonicTerm.open-script.desktop`（`NoDisplay=true`）为
+`application/x-shellscript` 和 `text/x-shellscript` 运行 `sonicterm --open-script %f`。
+因此文件关联只会在提示符处输入草稿，绝不执行脚本。
+
+哪些启动器能调用 SonicTerm：
+
+| 启动器 | 如何选择 SonicTerm |
+| --- | --- |
+| xdg-terminal-exec | 用户在 `xdg-terminals.list` 中列出 `com.d0n9x1n.SonicTerm.desktop`。 |
+| GLib ≥ 2.75 的 `Terminal=true` 应用 | 经由 GLib 优先尝试的 xdg-terminal-exec。GLib 从不尝试 `x-terminal-emulator`。 |
+| KDE | 用户在默认应用程序中选择 SonicTerm（`TerminalService`），或设置 `TerminalApplication=sonicterm`。KIO 追加 `-e`，并在目标目录中启动进程。 |
+| Debian `x-terminal-emulator` | 仅在用户注册 alternative 之后；见[打包](Packaging-zh-CN)。 |
+
+安装不会改变上述任何默认设置。
+
 ### 运行时 smoke 边界
 
 三个发行二进制都接受隐藏的 `--runtime-smoke` 模式。平台提供真实 shell 命令（macOS/Linux
@@ -284,6 +370,50 @@ Wayland 上的两种 Linux 包布局中运行三个场景。[打包](Packaging-z
 隔离证据路径。其它阶段成功但原生 PTY 清理未完成时退出码为 `20`；更早的故障、设备丢失或恢复失败
 保留原退出码。
 
+## 默认处理程序命令
+
+面板命令 `Action::SetDefaultHandlers` 是唯一会更改系统默认程序的路径；安装、启动和配置重载
+都不会触及它。每个二进制通过 shell 的 `with_default_handlers` 安装自己的后端，只有该命令会调用它。
+
+```mermaid
+flowchart TD
+    select[用户选择面板命令] --> plan{后端计划}
+    plan -- 拒绝 --> refusal[通知中显示原因；不更改任何内容]
+    plan -- 就绪 --> confirm[确认页：应用、取消、受影响的项目]
+    confirm -- 取消或 Esc --> nothing[不更改任何内容]
+    confirm -- 应用 --> apply[后端 apply 立即返回]
+    apply --> results[每一项通过事件循环 proxy 发回结果]
+    results --> report[绿色通知中的一份报告]
+    apply -. 120 秒期限 .-> report
+```
+
+报告把每一项列为 `changed`、`opened`、`denied`、`cancelled`、`failed (<detail>)` 或 `pending`。
+期限内没有结果的项目为 pending，绝不算作 changed；该次运行之后到达的结果会被忽略。
+
+- **macOS**（`crates/sonicterm-mac/src/default_handlers.rs`）。计划从正在运行的 bundle 自身的
+  `Info.plist` 读取 `CFBundleDocumentTypes` 内容类型和 `CFBundleURLTypes` scheme，因此只列出 bundle
+  实际声明的内容。只有当主 bundle 是标识符为 `com.d0n9x1n.sonicterm` 的 `.app`、位于可写卷、不在任何
+  `AppTranslocation` 路径下、且被 `URLsForApplicationsWithBundleIdentifier:` 列出时才继续，否则拒绝。
+  挂载的 DMG 和被转移的副本都从只读卷运行（`statfs` 的 `MNT_RDONLY`），因此不需要私有 API。
+  应用时在主线程用已检查的 bundle URL 调用 `setDefaultApplicationAtURL:toOpenContentType:` 和
+  `setDefaultApplicationAtURL:toOpenURLsWithScheme:`；`UTType` 在运行时解析。每个完成 block 映射其
+  `NSError`：无错误为 changed，`NSCocoaErrorDomain` 3072 和 `NSOSStatusErrorDomain` -128 为 cancelled，
+  -54 和 -5000 为 denied，其它错误为 failed 并附 domain 和 code。拒绝同意提示时返回哪些 code 没有文档；
+  这一映射是假设。新版 setter 不接受 role 参数，因此它为 `public.unix-executable` 记录的 role
+  需用被忽略的 `shell_role_handler_for_unix_executables` 测试手动检查。
+- **Linux**（`crates/sonicterm-linux/src/default_handlers.rs`）。计划依次在
+  `$XDG_DATA_HOME/applications` 和每个 `$XDG_DATA_DIRS/applications` 中查找 open-script 条目，读取其
+  `MimeType`，并从 `PATH` 的绝对路径项中把 `xdg-mime` 解析为绝对路径的可执行文件。应用时在工作线程上
+  不经 shell 运行 `xdg-mime default com.d0n9x1n.SonicTerm.open-script.desktop <types>`，再对每个类型运行
+  `xdg-mime query default <type>`。每次运行都位于自己的进程组；到 10 秒期限时先杀死整个进程组，再回收
+  子进程。只有读回结果指向该条目时，该类型才算 changed。不会写入 `xdg-terminals.list`、`kdeglobals`
+  或 alternative。
+- **Windows**（`crates/sonicterm-windows/src/default_handlers.rs`）。应用时在工作线程的 COM apartment 中
+  通过 `ShellExecuteExW` 打开 `ms-settings:defaultapps?registeredAppMachine=SonicTerm`（即
+  `wix/main.wxs` 中 HKLM `RegisteredApplications` 的名称），失败则打开 `ms-settings:defaultapps`。
+  按应用的链接能否打开 SonicTerm 自己的页面取决于 Windows 版本，尚未验证。后端不写入任何注册表值，
+  也从不触及 `UserChoice`。
+
 ## 平台矩阵
 
 | 能力 | macOS | Windows | Linux |
@@ -298,6 +428,7 @@ Wayland 上的两种 Linux 包布局中运行三个场景。[打包](Packaging-z
 | 软件呈现 | wgpu adapter 路径 | CPU BGRA + GDI | wgpu Vulkan/lavapipe 或选中的平台 adapter |
 | 安装包格式 | 各架构 `.dmg` 中的 `.app` | x64 WiX `.msi` | x86_64 `.deb` 与 `.tar.gz` |
 | 签名 | ad-hoc bundle 签名 | 未签名 | 未签名 |
+| 默认处理程序命令 | 对声明的类型和 scheme 调用 `NSWorkspace` setter | 打开“设置 › 默认应用” | 对 shell 脚本 MIME 类型运行 `xdg-mime` |
 
 ## 源码索引
 
@@ -306,9 +437,12 @@ Wayland 上的两种 Linux 包布局中运行三个场景。[打包](Packaging-z
 | 共享平台 shell | `crates/sonicterm-app/src/shell.rs` |
 | 路径与 URL 检测（各操作系统共用） | `crates/sonicterm-cfg/src/url_scan.rs`、`crates/sonicterm-app/src/app/path_target.rs` |
 | 安全原生目标打开 | `crates/sonicterm-app/src/app/path_target.rs`、`crates/sonicterm-app/src/app/path_target/{unix,macos,linux,windows}.rs`、`crates/sonicterm-cfg/src/url_open/{macos,linux,windows}.rs` |
-| macOS 入口/菜单/打开文档/标签页交接 | `crates/sonicterm-mac/src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs` |
+| macOS 入口/菜单/打开文档与链接/标签页交接 | `crates/sonicterm-mac/src/{main,menubar,open_documents,open_urls,executable_classify,os_drag_mac,tab_drag_os}.rs` |
+| 终端链接语法 | `crates/sonicterm-cfg/src/launch_url.rs` |
 | macOS 显示链接 | `crates/sonicterm-app/src/app/display_link.rs` |
 | Windows 入口/CLI/菜单/backdrop/标签页拖放 | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
 | Windows 软件呈现 | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`、`crates/sonicterm-windows/src/software_presenter.rs` |
 | Linux 入口与 identity | `crates/sonicterm-linux/src/main.rs`、`crates/sonicterm-linux/resources/` |
+| 启动器语法与启动队列 | `crates/sonicterm-app/src/{launch_cli,launch_queue}.rs`、`crates/sonicterm-app/src/app/{pane_launch,pane_exit}.rs` |
+| 直接命令启动与程序解析 | `crates/sonicterm-io/src/{pty,command_resolve}.rs` |
 | 资源查找 | `crates/sonicterm-cfg/src/assets.rs` |
