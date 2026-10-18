@@ -106,6 +106,24 @@ fn from_grid_caps_at_26_hints() {
     assert_eq!(quick_select.hints.last().unwrap().hint, 'z');
 }
 
+/// The scan reports the rows it read, not the viewport's height: it stops at the row holding the
+/// 27th URL, so the rows after it are never visited and never counted.
+#[test]
+fn scan_viewport_counts_only_the_rows_it_visited() {
+    let mut grid = Grid::new(12, 40);
+    for row in 0..30u16 {
+        grid.goto(row, 0);
+        write(&mut grid, "http://a.com");
+    }
+    let (quick_select, rows_visited) =
+        QuickSelectState::scan_viewport(&grid, grid.scrollback_len());
+    assert_eq!(quick_select.hints.len(), 26);
+    assert_eq!(rows_visited, 27, "rows 0..=26 were read; the 27th URL's row ends the scan");
+    // A viewport with fewer URLs than hints reads every displayed row.
+    let (_, short_rows) = QuickSelectState::scan_viewport(&blank_grid(12, 5), 0);
+    assert_eq!(short_rows, 5);
+}
+
 #[test]
 fn from_grid_maps_columns_across_leading_wide_cell() {
     // '中' is a wide cell: occupies grid columns 0 and 1 (WIDE + WIDE_CONT)

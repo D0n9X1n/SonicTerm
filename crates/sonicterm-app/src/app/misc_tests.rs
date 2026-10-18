@@ -972,3 +972,21 @@ fn quick_select_labels_the_displayed_viewport() {
     assert!(hints.iter().all(|hint| hint.row >= history_rows), "{hints:?}");
     assert!(!hints.iter().any(|hint| hint.text == "https://m.io"));
 }
+
+/// The quick-select rows counter records the rows the scan read: a viewport whose first 27 rows
+/// hold URLs ends the scan at the 27th, so the 13 rows below it are never visited or counted.
+#[test]
+fn quick_select_counts_only_the_rows_it_visited() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.force_frame_counters_on().expect("no window exists yet");
+    let window = app.__test_seed_child_window(&["quick select rows"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(20, 40);
+    let output: String = (1..=30).map(|row| format!("\x1b[{row};1Hhttp://a{row}.com")).collect();
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    app.enter_quick_select_for_kind(FrontmostKind::Child(window));
+    let hints = app.windows[&window].copy_mode.clone().unwrap().quick_select.unwrap().hints;
+    assert_eq!(hints.len(), 26);
+    let rows_scanned = app.frame_counters.as_ref().unwrap().hover.quick_select_rows_scanned;
+    assert_eq!(rows_scanned, 27, "the scan stops at the 27th URL's row of the 40 displayed");
+}

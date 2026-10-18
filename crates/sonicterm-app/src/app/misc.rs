@@ -111,10 +111,11 @@ impl App {
                 pane.resolved_viewport(grid),
             ) as usize;
             let mut state = sonicterm_ui::copy_mode::CopyModeState::new_at((0, view_top));
-            state.quick_select =
-                Some(sonicterm_ui::copy_mode::QuickSelectState::from_viewport(grid, view_top));
-            // Quick select scans one row per displayed grid row.
-            (state, u64::from(grid.rows))
+            // The scan stops at the 27th URL, so it reports the rows it actually read.
+            let (quick_select, rows_visited) =
+                sonicterm_ui::copy_mode::QuickSelectState::scan_viewport(grid, view_top);
+            state.quick_select = Some(quick_select);
+            (state, rows_visited)
         };
         self.note_hover(|hover| hover.quick_select_rows_scanned += rows_scanned);
         let window_id = match kind {

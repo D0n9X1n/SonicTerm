@@ -47,7 +47,14 @@ impl QuickSelectState {
     /// out after 26 matches. Each hint owns a copy of its URL text, so later
     /// writes to `grid` do not change what a hint keypress copies.
     pub fn from_viewport(grid: &Grid, view_top: usize) -> Self {
+        Self::scan_viewport(grid, view_top).0
+    }
+
+    /// [`Self::from_viewport`], also returning how many rows the scan read. The scan stops at the
+    /// row holding the 27th URL, so the count can be smaller than `grid.rows`.
+    pub fn scan_viewport(grid: &Grid, view_top: usize) -> (Self, u64) {
         let mut hints = Vec::new();
+        let mut rows_visited = 0u64;
         // One buffer holds each row's text in turn, so scanning allocates no string per row.
         let mut line = String::new();
         for row_idx in view_top..view_top + grid.rows as usize {
@@ -57,11 +64,12 @@ impl QuickSelectState {
                 continue;
             };
             row_text_into(row, &mut line);
+            rows_visited += 1;
             for url_match in find_urls(&line) {
                 let Some(hint) = nth_hint(hints.len()) else {
                     // When: nth_hint has spent all 26 single-letter labels;
                     // return with the hints already assigned and stop scanning.
-                    return Self { hints };
+                    return (Self { hints }, rows_visited);
                 };
                 // `url_match.start`/`url_match.end` are byte offsets into `line`. The hint's
                 // `col_*` fields are consumed downstream as grid columns, so
@@ -80,7 +88,7 @@ impl QuickSelectState {
                 });
             }
         }
-        Self { hints }
+        (Self { hints }, rows_visited)
     }
 
     /// Text captured for a hint key, matched without regard to case.
