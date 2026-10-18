@@ -75,36 +75,73 @@ const DETECTION_SOURCES: &[(&str, &str)] = &[
     ("windows.rs", include_str!("windows.rs")),
 ];
 
-/// `line` without its line comment: a `//` at the start, or one set off by spaces after code,
-/// which a `scheme://` inside a string literal never is.
-fn code_part(line: &str) -> &str {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("//") {
-        // When: the whole line is a comment, none of it is code.
-        return "";
-    }
-    line.find(" // ").map_or(line, |comment_start| &line[..comment_start])
+/// The comment- and literal-aware source scanner the `sonicterm-gpu` source checks also use,
+/// included by path so the two crates share one lexer without a dependency between their tests.
+#[path = "../../../../sonicterm-gpu/src/source_scan.rs"]
+mod source_scan;
+
+/// Token sequences that read a grid row directly: the absolute-row accessor, and `.row(` on a grid
+/// binding or on the grid `FrameRows::grid` hands out.
+const DIRECT_ROW_READS: [&str; 3] = ["row_at_abs", "grid().row(", "grid.row("];
+
+/// Each direct row read in `source`, as its 1-based line and the pattern it matched. Comments and
+/// literal contents are blanked first, and tokens match across spaces and line breaks.
+fn direct_row_reads(source: &str) -> Vec<(usize, &'static str)> {
+    let code = source_scan::code_only(source);
+    let mut reads = DIRECT_ROW_READS
+        .iter()
+        .flat_map(|pattern| {
+            source_scan::token_matches(&code, pattern)
+                .into_iter()
+                .map(|offset| (source_scan::line_number(&code, offset), *pattern))
+        })
+        .collect::<Vec<_>>();
+    reads.sort_unstable();
+    reads
+}
+
+/// A row accessor named only in a block comment, a line comment or a string, including a URL
+/// holding `//`, is no read, and a read through the frame reader is allowed.
+#[test]
+fn direct_row_read_scan_ignores_comments_literals_and_frame_reads() {
+    let source = concat!(
+        "/* grid.row(0) */ let name = \"row_at_abs\"; // frame.grid().row(1)\n",
+        "let url = \"https://grid.row(2)\"; let raw = r#\"parser.grid().row(3)\"#;\n",
+        "let kept = frame.row(4);\n",
+    );
+    assert_eq!(direct_row_reads(source), Vec::new());
+}
+
+/// A real read is found after a string holding ` // `, when the call is split across lines and when
+/// it reaches the absolute accessor, each on the line where its receiver starts.
+#[test]
+fn direct_row_read_scan_finds_reads_after_literals_and_across_lines() {
+    let source = concat!(
+        "let note = \" // \"; let row = grid.row(0);\n",
+        "let split = frame.grid()\n",
+        "    .row(1);\n",
+        "let abs = parser.grid().row_at_abs(5); let allowed = frame.row(2);\n",
+    );
+    assert_eq!(
+        direct_row_reads(source),
+        vec![(1, "grid.row("), (2, "grid().row("), (4, "row_at_abs")]
+    );
 }
 
 /// Detection reads rows only through `FrameRows`: `FrameRows::grid` still hands out the grid for
 /// its geometry and screen identity, so this source check pins that no detection source other
-/// than the reader calls `row_at_abs`, or `.row(` on a grid, outside comments, where it could read
-/// a row the pane does not display.
+/// than the reader calls `row_at_abs`, or `.row(` on a grid, in code, where it could read a row
+/// the pane does not display.
 #[test]
 fn path_detection_never_reads_rows_past_the_frame_reader() {
-    let mut direct_reads = Vec::new();
-    for (file_name, source) in DETECTION_SOURCES {
-        for (index, line) in source.lines().enumerate() {
-            let code = code_part(line);
-            if code.contains("row_at_abs")
-                || code.contains("grid().row(")
-                || code.contains("grid.row(")
-            {
-                // When: the code part reads a grid row directly, report its file and line.
-                direct_reads.push(format!("{file_name}:{}: {}", index + 1, line.trim()));
-            }
-        }
-    }
+    let direct_reads = DETECTION_SOURCES
+        .iter()
+        .flat_map(|(file_name, source)| {
+            direct_row_reads(source)
+                .into_iter()
+                .map(move |(line, pattern)| format!("{file_name}:{line}: {pattern}"))
+        })
+        .collect::<Vec<_>>();
     assert!(direct_reads.is_empty(), "detection reads rows directly: {direct_reads:?}");
 }
 

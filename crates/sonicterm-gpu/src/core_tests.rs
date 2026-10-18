@@ -8564,32 +8564,133 @@ fn quick_select_hints_follow_history_eviction_to_their_displayed_row() {
     assert_eq!(display_row(2, 8), None, "a hint moved above the view draws nothing");
 }
 
-/// The hint background and the hint letter are both placed through
-/// `quick_select_hint_display_row`, so neither draws a hint at its scan-time row after an
-/// eviction. The renderer cannot be built without a window, so the draw sites are pinned in
-/// source: outside that helper, no code reads a hint's raw `row` or calls `hint_row_now`.
+/// Every way the quick-select draw sites in `source`, a copy of `core.rs`, fail to place a hint
+/// through `quick_select_hint_display_row`, each named by its site; empty when both comply.
+///
+/// Comments and literal contents are blanked and tokens are matched whatever the layout, so a name
+/// in prose or a string neither satisfies nor fails the check, and a read split across lines is
+/// still seen. The background site is the body of `prepare_quick_select_overlay`; the letter site
+/// is the block `render` runs when `quick_select_hint_count > 0`.
+fn quick_select_placement_violations(source: &str) -> Vec<String> {
+    use crate::source_scan::{block_span, code_only, token_matches};
+    let code = code_only(&source.replace("\r\n", "\n"));
+    let Some(helper_start) =
+        token_matches(&code, "pub fn quick_select_hint_display_row(").first().copied()
+    else {
+        // When: the helper is gone, no site can place a hint through it.
+        return vec!["the placement helper quick_select_hint_display_row is missing".to_string()];
+    };
+    let mut violations = Vec::new();
+    for (site, anchor) in [
+        ("background", "fn prepare_quick_select_overlay("),
+        ("letter", "if quick_select_hint_count > 0"),
+    ] {
+        let anchor_offsets = token_matches(&code, anchor);
+        let [anchor_offset] = anchor_offsets[..] else {
+            // When: the anchor is missing or repeated, the site cannot be told apart; fail closed.
+            violations.push(format!("{site}: expected one `{anchor}`, found {anchor_offsets:?}"));
+            continue;
+        };
+        let Some(site_span) = block_span(&code, anchor_offset) else {
+            // When: the site's block never closes, its body cannot be checked; fail closed.
+            violations.push(format!("{site}: the block after `{anchor}` never closes"));
+            continue;
+        };
+        let body = &code[site_span];
+        let helper_calls = token_matches(body, "quick_select_hint_display_row(").len();
+        if helper_calls != 1 {
+            // When: the site does not place its hints through exactly one helper call, report it.
+            violations.push(format!("{site}: {helper_calls} placement-helper calls, expected 1"));
+        }
+        for raw_placement in ["hint.row", "hint_row_now("] {
+            if !token_matches(body, raw_placement).is_empty() {
+                // When: the site reads the scan-time row or shifts it itself, it bypasses the helper.
+                violations.push(format!("{site}: reads `{raw_placement}` directly"));
+            }
+        }
+    }
+    let helper_span = block_span(&code, helper_start).unwrap_or(helper_start..code.len());
+    let outside_helper = format!("{}{}", &code[..helper_start], &code[helper_span.end..]);
+    if !token_matches(&outside_helper, "hint_row_now(").is_empty() {
+        // When: code outside the helper shifts a hint for eviction, a third placement exists.
+        violations.push("hint_row_now is called outside the placement helper".to_string());
+    }
+    violations
+}
+
+/// A minimal `core.rs` stand-in whose two draw sites both comply. The background site follows a
+/// string holding `//`, so a check that took the URL for a comment would lose its helper call.
+const COMPLIANT_PLACEMENT_FIXTURE: &str = r#"
+pub fn quick_select_hint_display_row(qs: &Q, hint: &H, evicted: u64) -> Option<usize> {
+    qs.hint_row_now(hint, evicted).and_then(|row| quick_select_viewport_row(row))
+}
+fn prepare_quick_select_overlay(&mut self, quick_select: &Q) {
+    for hint in &quick_select.hints {
+        let link = "https://a.co"; let Some(visible_row) = quick_select_hint_display_row(
+            quick_select, hint, evicted,
+        ) else {
+            continue;
+        };
+        draw_background(hint.col_start, visible_row, '{');
+    }
+}
+fn render(&mut self) {
+    if quick_select_hint_count > 0 {
+        for hint in &qs.hints {
+            // Prose may name hint.row and hint_row_now( without counting.
+            let Some(visible_row) = quick_select_hint_display_row(qs, hint, evicted) else {
+                continue;
+            };
+            draw_letter(hint.hint, hint.col_start, visible_row, "hint.row");
+        }
+    }
+}
+"#;
+
+/// The placement check accepts compliant draw sites even when a string holds `//` or a brace and
+/// prose or a literal names the raw row, and it accepts the production renderer.
 #[test]
-fn quick_select_draw_sites_place_hints_through_the_eviction_aware_row() {
-    let source = include_str!("core.rs").replace("\r\n", "\n");
-    // Drop line comments so prose that names a field cannot satisfy or fail the check.
-    let code = source
-        .lines()
-        .map(|line| line.find("//").map_or(line, |comment_start| &line[..comment_start]))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let helper_start =
-        code.find("pub fn quick_select_hint_display_row(").expect("the placement helper exists");
-    let helper_end = helper_start + code[helper_start..].find("\n}\n").expect("helper body ends");
-    let outside_helper = format!("{}{}", &code[..helper_start], &code[helper_end..]);
+fn quick_select_placement_check_accepts_compliant_sites() {
     assert_eq!(
-        outside_helper.matches("quick_select_hint_display_row(").count(),
-        2,
-        "the background and the letter draw sites both call the placement helper"
+        quick_select_placement_violations(COMPLIANT_PLACEMENT_FIXTURE),
+        Vec::<String>::new()
     );
-    assert!(!outside_helper.contains("hint_row_now("), "draw sites go through the helper");
-    let raw_row_reads = outside_helper.match_indices("hint.row").filter(|(index, matched)| {
-        let after = outside_helper[index + matched.len()..].chars().next();
-        !after.is_some_and(|next| next.is_alphanumeric() || next == '_')
-    });
-    assert_eq!(raw_row_reads.count(), 0, "no draw site places a hint at its scan-time row");
+    assert_eq!(quick_select_placement_violations(include_str!("core.rs")), Vec::<String>::new());
+}
+
+/// The placement check names the site that bypasses the helper: a raw read split across lines, a
+/// helper call that survives only in a comment or string, an eviction shift outside the helper,
+/// and a missing site all fail it.
+#[test]
+fn quick_select_placement_check_names_each_bypassing_site() {
+    let letter_raw_read = COMPLIANT_PLACEMENT_FIXTURE.replace(
+        "draw_letter(hint.hint, hint.col_start, visible_row,",
+        "draw_letter(hint.hint, hint.col_start, hint\n                .row,",
+    );
+    assert_eq!(
+        quick_select_placement_violations(&letter_raw_read),
+        vec!["letter: reads `hint.row` directly".to_string()]
+    );
+    let background_in_prose_only = COMPLIANT_PLACEMENT_FIXTURE.replace(
+        "let Some(visible_row) = quick_select_hint_display_row(\n            quick_select, hint, evicted,\n        ) else {\n            continue;\n        };",
+        "/* quick_select_hint_display_row( */ let label = \"quick_select_hint_display_row(\";\n        let visible_row = hint.row;",
+    );
+    assert_eq!(
+        quick_select_placement_violations(&background_in_prose_only),
+        vec![
+            "background: 0 placement-helper calls, expected 1".to_string(),
+            "background: reads `hint.row` directly".to_string(),
+        ]
+    );
+    let shifted_outside_helper = COMPLIANT_PLACEMENT_FIXTURE.replace(
+        "fn render(&mut self) {",
+        "fn render(&mut self) {\n    let _ = qs.hint_row_now(hint, 0);",
+    );
+    assert_eq!(
+        quick_select_placement_violations(&shifted_outside_helper),
+        vec!["hint_row_now is called outside the placement helper".to_string()]
+    );
+    let letter_site_removed =
+        COMPLIANT_PLACEMENT_FIXTURE.replace("if quick_select_hint_count > 0", "if true");
+    assert_eq!(quick_select_placement_violations(&letter_site_removed).len(), 1);
 }

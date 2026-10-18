@@ -102,3 +102,6 @@ pub use row_runs::__row_shape_runs;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;
+/// Test-only comment- and literal-aware source scanning shared by the source checks.
+#[cfg(test)]
+pub(crate) mod source_scan;
