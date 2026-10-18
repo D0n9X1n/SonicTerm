@@ -479,7 +479,14 @@ pub fn terminal_launch(
         }
         None => (None, None),
     };
-    TerminalLaunch { command: cli.command, cwd, cwd_source, title: cli.title, hold: cli.hold }
+    TerminalLaunch {
+        command: cli.command,
+        cwd,
+        cwd_source,
+        title: cli.title,
+        hold: cli.hold,
+        origin: sonicterm_types::LaunchOrigin::Launcher,
+    }
 }
 
 /// The process cwd when it is an absolute directory, else `home`.

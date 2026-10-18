@@ -59,6 +59,7 @@ fn cwd_sources_have_stable_log_values() {
     assert_eq!(CwdSource::Dir.as_str(), "--dir");
     assert_eq!(CwdSource::Process.as_str(), "process");
     assert_eq!(CwdSource::Home.as_str(), "home");
+    assert_eq!(CwdSource::Parent.as_str(), "parent");
 }
 
 /// Non-UTF-8 program bytes survive in the request unchanged.
@@ -74,4 +75,11 @@ fn non_utf8_program_and_args_round_trip() {
     assert_eq!(launch.program.as_bytes(), raw.as_slice());
     assert_eq!(launch.args[0].as_bytes(), b"\xfe");
     assert_eq!(launch.program_file_name(), "prog-\u{FFFD}");
+}
+
+/// A launch built without an explicit origin is a launcher's, so it keeps the `command` log kind.
+#[test]
+fn launch_origin_defaults_to_the_launcher() {
+    assert_eq!(LaunchOrigin::default(), LaunchOrigin::Launcher);
+    assert_eq!(TerminalLaunch::default().origin, LaunchOrigin::Launcher);
 }

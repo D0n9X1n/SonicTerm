@@ -1,8 +1,9 @@
 //! The one queue platform boundaries use to ask the app for a tab.
 //!
 //! A binary queues its startup launch before the event loop runs, and the macOS
-//! open-documents handler queues script drafts at any time. Requests that
-//! arrive before a main window exists stay queued until the window is ready.
+//! open-documents and open-URL handlers queue drafts, launches and notices at any
+//! time. Requests that arrive before a main window exists stay queued until the
+//! window is ready.
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
@@ -49,6 +50,11 @@ pub fn push_requests(requests: Vec<LaunchRequest>) -> bool {
 /// Queue script drafts; see [`push_requests`].
 pub fn push_scripts(requests: Vec<OpenScriptRequest>) -> bool {
     push_requests(requests.into_iter().map(LaunchRequest::Script).collect())
+}
+
+/// Queue a warning for the frontmost window; on a cold start it waits for the first window.
+pub fn push_notice(message: String) -> bool {
+    push_requests(vec![LaunchRequest::Notice(message)])
 }
 
 pub(crate) fn drain() -> Vec<LaunchRequest> {

@@ -33,8 +33,8 @@ pub use geom::{GeometryQuad, Pos};
 pub use glyph_key::{GlyphKey, GlyphRasterVariant};
 pub use hyperlink_id::HyperlinkId;
 pub use launch_request::{
-    printable_file_name, replace_control_characters, CommandLaunch, CwdSource, LaunchRequest,
-    PaneExitStatus, TerminalLaunch,
+    printable_file_name, replace_control_characters, CommandLaunch, CwdSource, FileIdentity,
+    LaunchOrigin, LaunchRequest, PaneExitStatus, TerminalLaunch,
 };
 pub use lifecycle::{
     CancelOutcome, CancelReason, IllegalTransition, LifecycleState, ReapAdmission, ReapResult,

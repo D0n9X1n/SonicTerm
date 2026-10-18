@@ -70,6 +70,8 @@ pub enum CwdSource {
     Process,
     /// The user's home directory.
     Home,
+    /// The parent directory of the file a document open ran.
+    Parent,
 }
 
 impl CwdSource {
@@ -80,8 +82,36 @@ impl CwdSource {
             Self::Dir => "--dir",
             Self::Process => "process",
             Self::Home => "home",
+            Self::Parent => "parent",
         }
     }
+}
+
+/// The device and inode a classified file had, so a spawn can confirm the path still names it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileIdentity {
+    /// The file's device number (`st_dev`).
+    pub device: u64,
+    /// The file's inode number (`st_ino`).
+    pub inode: u64,
+}
+
+/// What asked for a terminal launch; it selects the launch's log kind and spawn checks.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum LaunchOrigin {
+    /// A launcher's command line (`-e`, `--`, terminal options).
+    #[default]
+    Launcher,
+    /// A document open of a verified native executable.
+    Executable {
+        /// The identity the classifier read; a spawn refuses a path that no longer names it.
+        identity: FileIdentity,
+    },
+    /// A validated terminal link.
+    Url {
+        /// The link's scheme, for logs (`ssh`, `x-man-page`).
+        scheme: &'static str,
+    },
 }
 
 /// A terminal launch: a shell, or a command run directly, plus its options.
@@ -97,6 +127,8 @@ pub struct TerminalLaunch {
     pub title: Option<String>,
     /// Keep the pane after its process exits, whatever the status.
     pub hold: bool,
+    /// What asked for this launch.
+    pub origin: LaunchOrigin,
 }
 
 impl TerminalLaunch {
@@ -118,6 +150,8 @@ pub enum LaunchRequest {
     Terminal(TerminalLaunch),
     /// Open a script as a draft at the shell prompt; never executed.
     Script(OpenScriptRequest),
+    /// Show this warning in the frontmost window; it opens no tab of its own.
+    Notice(String),
 }
 
 /// How a pane's child process ended.

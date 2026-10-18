@@ -695,13 +695,22 @@ impl App {
     }
 
     pub(super) fn drain_launch_requests(&mut self) -> usize {
+        self.drain_launch_requests_with_fallback(false)
+    }
+
+    /// Open a tab for each queued launch and show each queued notice; returns the tabs opened.
+    ///
+    /// With `fallback_shell`, a drain that opened no tab opens the plain shell tab first, so a
+    /// notice on a cold start (for example a rejected link) lands in a window with a terminal.
+    fn drain_launch_requests_with_fallback(&mut self, fallback_shell: bool) -> usize {
         if self.main().is_none() {
             // When: no main window exists yet to host a tab; returning before
             // drain() leaves the requests queued for a later pass.
             return 0;
         }
         let requests = crate::launch_queue::drain();
-        let count = requests.len();
+        let mut count = 0;
+        let mut notices = Vec::new();
         for request in requests {
             match request {
                 sonicterm_types::LaunchRequest::Script(request) => {
@@ -713,6 +722,7 @@ impl App {
                         .to_string();
                     let launch = super::pane_launch::PaneLaunch::for_script(request);
                     self.new_tab_with_launch(title, launch);
+                    count += 1;
                 }
                 sonicterm_types::LaunchRequest::Terminal(launch) => {
                     let tab_title =
@@ -725,11 +735,22 @@ impl App {
                     }
                     let launch = super::pane_launch::PaneLaunch::for_terminal(launch);
                     self.new_tab_with_launch(tab_title, launch);
+                    count += 1;
                 }
+                sonicterm_types::LaunchRequest::Notice(message) => notices.push(message),
             }
         }
-        if count > 0 && self.main_is_hidden() {
+        if fallback_shell && count == 0 {
+            // A cold start that opened no tab still gets its plain shell before any notice shows.
+            self.new_tab("shell");
+        }
+        if (count > 0 || !notices.is_empty()) && self.main_is_hidden() {
             self.show_main_window();
+        }
+        for message in notices {
+            self.handle_script_draft_rejected(sonicterm_types::replace_control_characters(
+                &message,
+            ));
         }
         count
     }
@@ -752,9 +773,7 @@ impl App {
     }
 
     pub(super) fn seed_initial_tabs(&mut self) {
-        if self.drain_launch_requests() == 0 {
-            self.new_tab("shell");
-        }
+        self.drain_launch_requests_with_fallback(true);
     }
 
     pub(super) fn do_resumed(&mut self, event_loop: &ActiveEventLoop) {

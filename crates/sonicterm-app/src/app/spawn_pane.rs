@@ -977,6 +977,20 @@ impl App {
             };
         };
         let program = command.program_file_name();
+        if !launch.executable_still_matches() {
+            // When: `executable_still_matches` is false, the opened file was replaced after classification.
+            let message = format!("Not run: {program} changed before it could start.");
+            tracing::warn!(
+                target: "sonicterm_app::launch",
+                pane = pane_id,
+                kind = launch.kind(),
+                reason = "identity_changed",
+                "pane command did not start"
+            );
+            self.report_launch_failure(parser, message);
+            return Err(());
+        }
+        let scheme = launch.scheme().unwrap_or("none");
         let spawn = sonicterm_io::pty::CommandSpawn {
             program: command.program.clone(),
             args: command.args.clone(),
@@ -988,6 +1002,7 @@ impl App {
                     target: "sonicterm_app::launch",
                     pane = pane_id,
                     kind = launch.kind(),
+                    scheme,
                     program = %program,
                     arg_count = command.args.len(),
                     cwd_source,
@@ -1004,7 +1019,7 @@ impl App {
                 Ok(pty)
             }
             Err(error) => {
-                // When: `spawn_command` returns Err(error), whose text names only the file name and rule.
+                // The error's text names only the program's file name and the rule it broke.
                 let message = error.to_string();
                 tracing::warn!(
                     target: "sonicterm_app::launch",
@@ -1013,13 +1028,18 @@ impl App {
                     reason = %message,
                     "pane command did not start"
                 );
-                super::pane_exit::write_local_line(parser, &message);
-                if let Some(proxy) = self.event_loop_proxy.as_ref() {
-                    // When: `event_loop_proxy` is set, surface the failure in the notification bubble.
-                    let _ = proxy.send_event(UserEvent::LaunchFailed { message });
-                }
+                self.report_launch_failure(parser, message);
                 Err(())
             }
+        }
+    }
+
+    /// Write a command's failure `message` into its pane's grid and post it as a notification.
+    fn report_launch_failure(&self, parser: &Arc<Mutex<Parser>>, message: String) {
+        super::pane_exit::write_local_line(parser, &message);
+        if let Some(proxy) = self.event_loop_proxy.as_ref() {
+            // When: `event_loop_proxy` is set, surface the failure in the notification bubble.
+            let _ = proxy.send_event(UserEvent::LaunchFailed { message });
         }
     }
 
