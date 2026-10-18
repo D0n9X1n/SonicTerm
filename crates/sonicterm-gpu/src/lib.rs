@@ -47,6 +47,8 @@ pub mod device_errors;
 /// Exact caret, selection, scroll, clip, and pointer geometry of the palette
 /// and search query fields, measured from the same shaped run they paint.
 pub mod field_geometry;
+/// Requested GPU bytes per renderer, by resource class: requests, not driver residency.
+pub mod graphics_ledger;
 /// Quad pipeline (`QuadInstance` + WGSL): cursor blocks, selection tint,
 /// rounded chrome, underlines, focus borders.
 pub mod quad;
@@ -90,6 +92,9 @@ mod row_ink;
 /// A row's style runs and their shaping text, shared by the row emitter and a test inspector.
 mod row_runs;
 
+/// Test hook: whether the planner draws nothing after an in-place replacement; not a supported API.
+#[doc(hidden)]
+pub use frame_plan::{__replacement_plans_noop, ReplacementShape};
 /// Test hook: the style runs the row emitter cuts a row into; not a supported API.
 #[doc(hidden)]
 pub use row_runs::__row_shape_runs;

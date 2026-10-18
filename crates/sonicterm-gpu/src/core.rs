@@ -2226,6 +2226,9 @@ pub struct GpuRenderer {
     /// Frame textures installed after construction, by a rebuild or a recovery commit; read only
     /// through [`Self::__frame_texture_rebuilds`].
     frame_texture_installs: u64,
+    /// Requested bytes of every GPU resource this renderer holds, by class; shared with
+    /// `present_pipeline`, which records its own buffer growth.
+    graphics_ledger: crate::graphics_ledger::GraphicsLedgerHandle,
 
     font_family: String,
     font_dirs: Vec<PathBuf>,
@@ -3144,7 +3147,9 @@ impl GpuRenderer {
         // prebake — chrome and grid share the glyph atlas, populated
         // on demand by the wezterm rasterizer on every miss.
         let timing = InitTiming::begin("present_pipeline");
-        let present_pipeline = WeztermPipeline::new(&device, format, 4096);
+        let mut present_pipeline = WeztermPipeline::new(&device, format, 4096);
+        let graphics_ledger = crate::graphics_ledger::GraphicsLedgerHandle::default();
+        present_pipeline.attach_graphics_ledger(graphics_ledger.clone());
         InitTiming::finish(timing, InitOutcome::Returned);
         let software_presenter = cfg!(target_os = "windows") && software_render_degrade;
         let timing = InitTiming::begin("frame_texture");
@@ -3325,6 +3330,7 @@ impl GpuRenderer {
             glyph_atlas_resets: 0,
             frame_texture_trimmed: false,
             frame_texture_installs: 0,
+            graphics_ledger,
             font_family: font_family.to_string(),
             font_dirs: font_dirs.to_vec(),
             font_size,
@@ -3416,6 +3422,10 @@ impl GpuRenderer {
             drag_chip: None,
             async_loader: None,
         };
+        renderer.record_surface_request();
+        renderer.record_frame_texture_request();
+        renderer.record_glyph_atlas_request();
+        renderer.record_image_atlas_request();
         renderer.log_subpixel_aa_policy();
         Ok(renderer)
     }
@@ -3482,6 +3492,7 @@ impl GpuRenderer {
         if let Some(_scope) = self.device_errors.enter_gpu_work("try_resize") {
             // A stopped device records the size only; the surface is not reconfigured.
             self.surface.configure(&self.device, &self.config);
+            self.record_surface_request();
             self.rebuild_frame_texture();
         }
         // Geometry change → force the next frame to actually render.
@@ -4644,6 +4655,7 @@ impl GpuRenderer {
         if let Some(_scope) = self.device_errors.enter_gpu_work("set_software_render_degrade") {
             // A stopped device records the flag only; the surface is not reconfigured.
             self.surface.configure(&self.device, &self.config);
+            self.record_surface_request();
         }
         let uses_software_presenter = self.uses_windows_software_presenter();
         if used_software_presenter != uses_software_presenter {
@@ -4713,6 +4725,80 @@ impl GpuRenderer {
         self.frame_view = frame_view;
         self.frame_texture_trimmed = false;
         self.frame_texture_installs += 1;
+        self.record_frame_texture_request();
+    }
+
+    /// Record the configured surface in the graphics ledger: one drawable's requested bytes times
+    /// the drawables the backend keeps for the configured latency, marked as an estimate where the
+    /// backend does not fix that count (Vulkan, GL). Follows every `configure`.
+    pub(crate) fn record_surface_request(&self) {
+        let drawables = crate::graphics_ledger::surface_drawables(
+            self.adapter.get_info().backend,
+            self.config.desired_maximum_frame_latency,
+            None,
+        );
+        let drawable_bytes = crate::graphics_ledger::surface_drawable_bytes(
+            self.config.width,
+            self.config.height,
+            self.config.format,
+        );
+        self.graphics_ledger.replace_request(
+            crate::graphics_ledger::GraphicsSlot::Surface,
+            drawable_bytes.saturating_mul(drawables.count),
+            drawables.count,
+            drawables.estimated,
+        );
+    }
+
+    /// Record the installed frame texture's requested bytes in the graphics ledger.
+    pub(crate) fn record_frame_texture_request(&self) {
+        self.graphics_ledger.replace(
+            crate::graphics_ledger::GraphicsSlot::FrameTexture,
+            frame_texture_payload_bytes(self.frame_texture_extent()),
+            1,
+        );
+    }
+
+    /// Record the installed glyph atlas texture's requested bytes in the graphics ledger.
+    pub(crate) fn record_glyph_atlas_request(&self) {
+        self.graphics_ledger.replace(
+            crate::graphics_ledger::GraphicsSlot::GlyphAtlas,
+            self.glyph_upload.payload_bytes(),
+            1,
+        );
+    }
+
+    /// Record the installed image atlas texture's requested bytes in the graphics ledger.
+    pub(crate) fn record_image_atlas_request(&self) {
+        self.graphics_ledger.replace(
+            crate::graphics_ledger::GraphicsSlot::ImageAtlas,
+            self.image_upload.payload_bytes(),
+            1,
+        );
+    }
+
+    /// This renderer's requested GPU bytes and resource counts by class. Requests, not
+    /// residency: the driver decides what it keeps, and a released resource may stay resident.
+    #[must_use]
+    pub fn graphics_ledger(&self) -> crate::graphics_ledger::GraphicsLedgerSnapshot {
+        self.graphics_ledger.snapshot()
+    }
+
+    /// Test hook: a shared handle on this renderer's ledger, readable after the renderer drops.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __graphics_ledger_handle(&self) -> crate::graphics_ledger::GraphicsLedgerHandle {
+        self.graphics_ledger.clone()
+    }
+
+    /// The adapter's PCI vendor and device ids while this renderer presents through DX12 rather
+    /// than the Windows software presenter, so the OS graphics figure can find the same DXGI
+    /// adapter; `None` on every other backend and under the software presenter.
+    #[must_use]
+    pub fn dxgi_adapter_ids(&self) -> Option<(u32, u32)> {
+        let info = self.adapter.get_info();
+        (info.backend == wgpu::Backend::Dx12 && !self.uses_windows_software_presenter())
+            .then_some((info.vendor, info.device))
     }
 
     /// Restore a trimmed frame texture to the surface size before a GPU present; returns false
@@ -4752,6 +4838,7 @@ impl GpuRenderer {
             self.frame_texture = frame_texture;
             self.frame_view = frame_view;
             self.frame_texture_trimmed = true;
+            self.record_frame_texture_request();
             released_bytes += frame_texture_payload_bytes(frame_texture_before)
                 .saturating_sub(frame_texture_payload_bytes((1, 1)));
         }
@@ -9509,6 +9596,23 @@ impl Drop for GpuRenderer {
     // the `Ordering::AcqRel` increment in `new_async`. Publishes no payload.
     fn drop(&mut self) {
         self.finalize_frame_stats();
+        // The renderer's lifetime totals are logged once before its ledger is released, so a
+        // dropped window's creations and releases stay in the log after the snapshot loses it.
+        let ledger = self.graphics_ledger.snapshot();
+        tracing::info!(
+            target: "memory",
+            renderer_role = self.render_timing_label,
+            window_id = ?self.window.id(),
+            graphics_live = %ledger.render_per_class(|tally| (tally.live_bytes, tally.live_resources)),
+            graphics_created =
+                %ledger.render_per_class(|tally| (tally.created_bytes, tally.created_resources)),
+            graphics_released =
+                %ledger.render_per_class(|tally| (tally.released_bytes, tally.released_resources)),
+            surface_count = ledger.surface_count_kind(),
+            "renderer graphics teardown"
+        );
+        // Every resource this renderer requested is released with it.
+        self.graphics_ledger.release_all();
         // Paired with the increment in `new`. Together they make the live
         // count return to its starting value across balanced open/close
         // churn, and stay above it when a renderer survives.

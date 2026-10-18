@@ -219,6 +219,14 @@ impl App {
             // When: READONLY is active and read_only_allows_action rejects action, consume it safely.
             return true;
         }
+        let report_source = match self.frontmost_kind() {
+            FrontmostKind::Child(id) => Some(id),
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => None,
+        };
+        if let Some(handled) = self.gate_memory_report_action(action, report_source, true) {
+            // When: the frontmost window is the Memory Usage report and the gate closed, consumed or redirected the action.
+            return handled;
+        }
         match action {
             Action::CopyToClipboard => self.copy_selection_for_kind(self.frontmost_kind()),
             Action::EnterCopyMode => self.enter_copy_mode_for_kind(self.frontmost_kind()),
@@ -673,6 +681,11 @@ impl App {
             }
             Action::ToggleFullscreen => {
                 self.toggle_fullscreen_for(self.frontmost_kind());
+            }
+            Action::ShowMemoryUsage => self.show_memory_usage(),
+            Action::CopyMemoryReport => {
+                // When: action is CopyMemoryReport, copy the report text; a missing report or refused clipboard is a no-op.
+                let _ = self.copy_memory_report();
             }
             Action::QuitApp => {
                 // Explicit (menu / command palette) invocation quits

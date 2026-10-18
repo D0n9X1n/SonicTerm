@@ -13,6 +13,9 @@ keys. New font behavior should land here instead of depending on
 - `rasterizer/` - FreeType, HarfBuzz, and COLR raster support.
 - `parser.rs`, `rangeset.rs`, `units.rs`, `color.rs` - shared font helpers.
 - `fcwrap.rs`, `ftwrap.rs`, `hbwrap.rs` - FFI-safe wrappers.
+- `font_bytes.rs` - one shared, immutable buffer per generation of an on-disk colour font (a
+  face listing `SVG ` or `COLR`); its FreeType memory streams and HarfBuzz blobs hold it.
+  Ordinary fonts keep the callback stream. Share bytes, never faces.
 
 ## Local gate
 ```bash

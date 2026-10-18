@@ -230,6 +230,78 @@ worker 线程最多一个，以 `live_fg_probe_workers` 报告。
 `retained_amounts().image_atlas` 立即从 16 MiB 降到 4 B；聚合的 `renderer_total_bytes` 在下一次
 内存采样（每 30 秒一次）时显示这一下降，每个窗格的 `InlineMediaRetained` 计费保持不变。
 
+字体文件不是被统计的类别。普通字体从磁盘流式读取，不会被整份保留。带有 `SVG ` 或 `COLR`
+表的字体，在仍有 FreeType face 或 HarfBuzz blob 使用时，会整份保存一次在共享堆缓冲区中；
+其上的 face 与 blob 共享这块缓冲区，而不是由 FreeType 为每个 face 复制彩色表。详见
+[渲染与字体](Rendering-and-Fonts-zh-CN)。
+
+### 图形内存
+
+图形内存以两种方式报告，二者回答不同的问题。
+
+**每个渲染器请求的字节数。** 每个渲染器都维护一份图形账本
+（`crates/sonicterm-gpu/src/graphics_ledger.rs`），按类别记录它向设备请求了什么：
+surface（宽 x 高 x 每像素字节数 x drawable 数量）、保留帧纹理、字形图集纹理、图像图集纹理，
+以及呈现管线的顶点、索引与 uniform 缓冲区。账本在这些资源被创建、重建、调整尺寸、裁剪和
+丢弃的位置更新，因此遮挡窗口裁剪让账本恰好减少它释放的量，已丢弃渲染器的账本读数为零。
+drawable 数量按后端实际采用的帧延迟计算。在 Metal 上它是精确值：wgpu 把延迟限制在 `1..=2`，
+并把 `maximumDrawableCount` 设为延迟 + 1（延迟 2 对应 3 个 drawable，延迟 1 对应 2 个）；
+在 DX12 上同样精确，DX12 使用延迟 + 1 个后台缓冲区，最多 16 个。其他后端上它是**估计值**，
+并标注为估计：Vulkan 会把延迟限制在 surface 的图像数量范围内，而 wgpu 不公开该范围，驱动还
+可能创建多于请求数量的图像，因此账本记录延迟 + 1；GL 忽略延迟，因此无论延迟多少，账本都按
+双缓冲记录为 2。
+
+每个存活渲染器的账本还按类别保留它已创建与已释放的字节数和资源数，`memory snapshot` 日志行
+会报告这些数值。渲染器被丢弃时，会在释放账本之前记录一条 `renderer graphics teardown`，
+包含其当前、已创建与已释放的总量，因此已关闭窗口的历史仍保留在日志中。
+
+这些都是**请求**。物理驻留由驱动决定：驱动可能填充、压缩、延迟释放已丢弃的资源，或把
+drawable 留在合成器中。账本不统计旧版文本与 quad 管线的实例缓冲区（生产环境中没有渲染器
+构建它们），也不统计仅供测试使用的帧回读缓冲区。
+
+**操作系统向进程计入的量。** 每个平台的数值都按其本来含义标注：
+
+| 平台 | 来源 | 数值 |
+| --- | --- | --- |
+| macOS | `task_info(TASK_VM_INFO)`，修订版 3 及以后 | `ledger_tag_graphics_footprint`（计入物理 footprint 的图形内存）与 `ledger_tag_graphics_nofootprint`（标记给本进程但不计入其 footprint）。它们是内核的账本，不一定与 `footprint` 工具打印的划分相同；IOSurface 映射不在其中任何一项里。 |
+| Windows | 渲染器所用 DXGI 适配器上的 `IDXGIAdapter3::QueryVideoMemoryInfo` | `LOCAL`（专用）与 `NON_LOCAL`（共享）当前用量，分别报告。仅当渲染器通过 DX12 呈现时可用；GDI 软件呈现器没有可查询的适配器。wgpu 以 PCI 厂商 id 与设备 id 标识适配器，而它们标识的是 GPU 型号，因此当两个适配器共享这些 id 时，该数值不可用并说明原因，而不是可能报告另一块 GPU 的用量。 |
+| Linux | 无 | not available |
+
+macOS 的结构体是手工声明的，因此做了两重检查。头文件在 `#pragma pack(push, 4)` 下声明它，
+所以 Rust 声明按四字节打包；其大小（372 字节，`TASK_VM_INFO_COUNT` 为 93）以及读取字段的
+偏移量都在编译期与从 SDK 头文件测得的数值进行断言。运行时，只有当内核返回的计数覆盖某个字段的
+最后一个字节时才读取它。较旧的内核会让该字段保持 `unsupported`，绝不会给出错误数值或零。
+
+操作系统数值与请求总量之间的差距本身并不意味着缺失了某个资源：驱动填充、延迟释放以及
+合成器持有的 surface 都会落在这个差距里。
+
+#### 呈现时驱动持有的内存
+
+在 Metal 上，驱动会在呈现帧期间持有图形内存。以下数值是在一台 Apple M3 Pro 主机上读取
+`footprint` 的 "Owned physical footprint (unmapped) (graphics)" 得到的本地诊断读数。探针各行
+来自独立的 wgpu 30.0.1 探针，条件为 1600x1280 px、Fifo、帧延迟 2。SonicTerm 各行来自
+80x40、使用临时配置的 SonicTerm：
+
+| 呈现期间 | 图形内存 |
+| --- | --- |
+| 仅清屏并呈现（探针） | 约 107 MB |
+| 任何记录了缓冲区复制命令的帧（`queue.write_buffer` 或 `copy_buffer_to_buffer`，任意大小；即使每秒只有一次 1 KB 复制）（探针） | 约 180 MB |
+| SonicTerm 在 80x40、临时配置下绘制 | 约 220 MB |
+| SonicTerm 空闲窗口，不呈现 | 28 MB |
+| 探针停止呈现 5 s 之后 | 不到 4 MB |
+
+SonicTerm 每绘制一帧都会上传顶点数据，因此绘制期间处于较高的数值。在停止呈现 5 s 后读取时，
+探针的这部分内存已被释放；释放的具体时机没有测量。呈现继续进行时，最后一次复制之后较高数值是否
+保持，也没有测量。在这台主机上，帧延迟 1 和更少的预热窗口都没有降低它，隐藏的预热窗口不占用
+物理图形内存。完全不记录复制的帧路径（把顶点数据写入绘制直接读取的映射缓冲区）在探针中保持在
+仅清屏的数值，但前提是没有任何帧发生复制：新字形（图集写入）、缓冲区增长或回退都会让复制重新
+出现。SonicTerm 不使用这样的路径。
+
+内存占用报告的 `GPU (OS)` 行和 `graphics_os_*` 快照字段读取的是内核的按任务图形账本，而不是
+上面的 `footprint` 类别。`GPU requested` 只显示 SonicTerm 请求的量。三者是覆盖范围不同的相关
+诊断读数，它们的差值不能衡量驱动持有的内存：在 CI 上，`GPU (OS)` 读数为 14.6-18.1 MB，而
+`GPU requested` 为 42-43 MB。CI 的 macOS 运行器是虚拟机，不会重现上面驱动持有的数值。
+
 ### 聚合快照
 
 把日志级别设为 `info`，最多每 30 s 得到一条 `memory snapshot`：
@@ -287,6 +359,39 @@ allocator_largest_block_bytes
 `MemoryHints::Performance`。D3D12 上，软件策略把初始分配器块从设备 128 MiB / 主机 64 MiB 改为
 设备 8 MiB / 主机 4 MiB。这些只是放置与块大小提示，不是分配上限；
 更大的资源仍可分配。
+
+### 内存占用报告
+
+命令面板中的 **内存占用** 命令（`show_memory_usage`，默认未绑定）会打开报告窗口；
+已打开时则聚焦并刷新它。报告是一个没有 PTY 的窗格中的纯文本，可以像终端输出一样
+选择、搜索、滚动和复制，键入内容不会到达任何 shell。报告是某一时刻的采样，不会自动
+刷新。操作系统数值会比统计数值稍晚到达；若到达时报告窗格中有选区、有可能开始选区的
+鼠标按下或拖动，或处于 READONLY 模式，显示的文本保持不变，新数值在松开按键且没有选区、
+选区清除或 READONLY 结束后才出现，因此建立或复制选区时选区不会被清除。
+按 `R` 总会显示一次新的采样。
+
+| 部分 | 内容 |
+| --- | --- |
+| `PROCESS (from the OS)` | 平台自带监视器显示的数值及其峰值，另有常驻、私有提交与虚拟内存数值。macOS 报告 physical footprint 与 lifetime peak footprint；Windows 报告 private commit 与 peak commit；Linux 报告常驻集（`VmRSS`）与峰值 RSS（`VmHWM`）。平台不提供的数值显示 `not available`，绝不显示 `0`。`GPU (OS)` 以数值本来的名称显示操作系统的图形内存（macOS 内核图形账本、Windows DXGI 专用与共享用量），或说明没有适用的查询；`GPU requested` 是所有渲染器请求的总量，并标注为请求（见[图形内存](#图形内存)）。 |
+| `ACCOUNTED BY SONICTERM` | SonicTerm 自行统计的渲染器与窗格总量，与 `memory snapshot` 日志行来自同一采样周期。 |
+| `DIFFERENCE` | 操作系统 footprint 减去 SonicTerm 统计的容量，带符号且不截断。它是诊断值而非对账：分配器空闲、GPU 内存、字体和未跟踪的分配都会计入这里，各数值也可能重叠。 |
+| `SAMPLE` | 已测量的窗格数，以及因锁被占用而跳过的窗格数（`busy, skipped`），因此不完整的总量不会被当成整个会话。 |
+| `WINDOWS / RENDERERS` | 每个窗口渲染器的各部分（字形图集的尺寸、条目数与 fit、行缓存、临时缓冲），报告窗口自身的渲染器，以及预热渲染器。每个渲染器下的 `GPU requested` 按类别列出其请求的 GPU 字节数与资源数：surface、帧纹理、字形图集、图像图集与呈现缓冲区。 |
+| `PANES` | 按标签页标题列出每个窗格，分为网格可见区、历史、备用屏、解析器、超链接、内联媒体以及 PTY 输出与输入。各窗格行之和等于窗格总量。 |
+| `THREADS` | 线程数量与名称。线程共享进程内存，自身不持有内存。 |
+| `CHILD PROCESSES` | 每个窗格的 shell 及其后代进程，并给出各自的操作系统数值（`footprint`、`private` 或 `RSS`），每个窗格最多 64 个后代。它们是独立进程，不计入 SonicTerm 的 footprint。已离开 shell 进程树的进程（例如守护化的 tmux server）不会列出，WSL 与远程进程也不可见。 |
+
+统计数值在 UI 线程上读取，遵循与日志行相同的 `try_lock` 规则。操作系统数值、线程列表与
+进程遍历在 `sonicterm-memory-report` 线程上运行；在它返回前，窗口显示统计数值和
+`sampling the OS figures...`。同一时间最多只有一次遍历：刷新会取消正在进行的遍历（它在
+每个窗格 shell 之前以及进程之间检查取消），并在其返回后启动最新一次刷新的遍历，中间的刷新
+会被丢弃。在 macOS 和 Linux 上，子进程列表边读边解析，读到 64 个进程的上限即停止。
+Windows 读取一份全系统进程快照（查找父进程需要它），每个窗格最多从中取 64 个子进程。窗格 shell 在遍历前后都会与其窗格创建时
+记录的启动时间核对：启动时间不同则报告其已退出，无法读取启动时间则报告
+`not available (shell identity unverified)`，因此被复用的 pid 不会被当成该窗格的 shell。标签页标题
+和进程名在进入报告前会去除控制字符。报告窗格固定保留 10,000 行历史，不受
+`[terminal] scrollback` 影响；全部复制复制的是渲染出的文本，而不是折行后的网格。按键与
+窗口行为见[快捷键](Keybindings-zh-CN)和[运行时生命周期](Runtime-Lifecycle-zh-CN)。
 
 ### 遮挡窗口裁剪
 
@@ -346,6 +451,11 @@ grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log*
 | 窗格限制与所有者注册 | `crates/sonicterm-app/src/app/{mod,owners}.rs` |
 | 窗格测量、记账、回收 | `crates/sonicterm-app/src/app/retention.rs` |
 | 聚合快照 | `crates/sonicterm-app/src/app/memory_snapshot.rs` |
+| 内存占用报告模型、渲染与 action 路由 | `crates/sonicterm-app/src/app/memory_report.rs` |
+| 内存占用报告窗口、刷新与操作系统采样线程 | `crates/sonicterm-app/src/app/memory_report_window.rs` |
+| 操作系统 footprint、峰值、线程与子进程遍历 | `crates/sonicterm-logging/src/process_report.rs` |
+| 操作系统图形内存数值（macOS 内核账本、Windows DXGI 用量） | `crates/sonicterm-logging/src/graphics_memory.rs` |
+| 每个渲染器按类别请求的 GPU 字节数 | `crates/sonicterm-gpu/src/graphics_ledger.rs` |
 | 内联媒体上限 | `crates/sonicterm-app/src/app/media.rs` |
 | 网格与超链接上限 | `crates/sonicterm-grid/src/{grid,hyperlink}.rs` |
 | 解析器捕获上限 | `crates/sonicterm-vt/src/vt.rs`、`crates/sonicterm-vt/src/vt/staging.rs` |

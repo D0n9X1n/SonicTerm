@@ -180,4 +180,10 @@ pub enum Action {
 
     /// Reload the user configuration file from disk.
     ReloadConfig,
+
+    // Diagnostics
+    /// Open the Memory Usage report window, or focus and refresh it when it is already open.
+    ShowMemoryUsage,
+    /// Copy the whole Memory Usage report text to the clipboard.
+    CopyMemoryReport,
 }

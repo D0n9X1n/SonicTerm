@@ -6,8 +6,7 @@ use super::*;
 /// Classification of a window tracked in the app's role-tagged window map.
 ///
 /// Each tracked window carries a role, so callers can count or select windows
-/// by kind rather than by identity. Only terminals are tracked today, so the
-/// enum has a single variant.
+/// by kind rather than by identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowRole {
     /// A terminal window created by tearing a tab off the bar.
@@ -16,6 +15,11 @@ pub enum WindowRole {
     /// redraw target is repointed at the child's surface so shell output
     /// redraws the window that now contains it rather than the parent.
     Terminal,
+    /// The Memory Usage report window: one tab, one pane with no PTY.
+    ///
+    /// It never keeps the app alive, is never a tab drop target or broadcast
+    /// receiver, and redirects terminal actions to a terminal window.
+    MemoryReport,
 }
 
 #[derive(Debug, Clone)]

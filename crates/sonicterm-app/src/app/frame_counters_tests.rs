@@ -532,6 +532,8 @@ const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
     ("app/child_window_pointer.rs", 1),
     ("app/config_apply.rs", 2),
     ("app/keymap_dispatch/explicit_source.rs", 1),
+    // The report pane's theme seed at creation, and the report feed that replaces its text.
+    ("app/memory_report_window.rs", 2),
     ("app/misc.rs", 5),
     ("app/overlays.rs", 2),
     ("app/pane_refresh.rs", 3),

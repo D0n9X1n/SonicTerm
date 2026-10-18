@@ -1078,6 +1078,8 @@ pub fn action_display_name(action: &Action) -> String {
         Action::ScrollToPrevPrompt => "ScrollToPrevPrompt".into(),
         Action::ScrollToNextPrompt => "ScrollToNextPrompt".into(),
         Action::ReloadConfig => "ReloadConfig".into(),
+        Action::ShowMemoryUsage => "ShowMemoryUsage".into(),
+        Action::CopyMemoryReport => "CopyMemoryReport".into(),
         Action::ApplyTheme(name) => format!("ApplyTheme({name})"),
         Action::ToggleTabBar => "ToggleTabBar".into(),
         Action::RenameTab => "RenameTab".into(),
@@ -1197,6 +1199,9 @@ pub fn palette_actions() -> Vec<Action> {
         Action::ScrollToNextPrompt,
         // Config
         Action::ReloadConfig,
+        // Diagnostics
+        Action::ShowMemoryUsage,
+        Action::CopyMemoryReport,
     ]
 }
 

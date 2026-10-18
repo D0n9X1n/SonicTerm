@@ -560,3 +560,33 @@ fn clickable_path_max_chars_defaults_and_clamps() {
     }
     assert_eq!(MAX_CLICKABLE_PATH_CHARS, 1024);
 }
+
+/// A non-empty `SONICTERM_CONFIG_DIR` replaces `~/.sonicterm`, so a diagnostic
+/// run reads and writes only its scratch copy of the config.
+#[test]
+fn config_dir_override_replaces_the_default() {
+    let dir = config_dir_with(|name| match name {
+        CONFIG_DIR_ENV => Some("/scratch/config".into()),
+        "HOME" => Some("/home/user".into()),
+        _ => None,
+    });
+    assert_eq!(dir, Some(PathBuf::from("/scratch/config")));
+}
+
+/// An empty override is ignored and the home directory decides, as before.
+#[test]
+fn empty_config_dir_override_falls_back_to_home() {
+    let dir = config_dir_with(|name| match name {
+        CONFIG_DIR_ENV => Some("".into()),
+        "HOME" => Some("/home/user".into()),
+        _ => None,
+    });
+    assert_eq!(dir, Some(PathBuf::from("/home/user/.sonicterm")));
+}
+
+/// With no override and no home directory there is no config directory, which
+/// callers already handle by running on defaults.
+#[test]
+fn config_dir_is_none_without_override_or_home() {
+    assert_eq!(config_dir_with(|_| None), None);
+}

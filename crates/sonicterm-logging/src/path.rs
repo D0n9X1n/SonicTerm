@@ -12,9 +12,16 @@ pub const fn log_file_name() -> &'static str {
     "sonicterm.log"
 }
 
+/// Environment variable that replaces the whole log directory.
+///
+/// Diagnostic runs set it to a scratch directory so their logs, crash dumps and
+/// session markers never mix with the user's own, while `HOME` stays unchanged
+/// for the shell running inside the terminal.
+pub const LOG_DIR_ENV: &str = "SONICTERM_LOG_DIR";
+
 /// Absolute path of the directory holding `sonicterm.log` and `crashes/`.
 ///
-/// Resolution: `~/.sonicterm/logs`.
+/// Resolution: [`LOG_DIR_ENV`] when set and non-empty, else `~/.sonicterm/logs`.
 ///
 /// On the first call, the result is memoised — subsequent calls are
 /// O(1) and return the same path even if env vars change later. This
@@ -43,15 +50,24 @@ pub fn crash_dir_in(log_dir: &std::path::Path) -> PathBuf {
 }
 
 fn resolve_log_dir() -> PathBuf {
-    if let Some(home) = home_dir() {
-        // When: `home` resolves from the environment, keep logs under that user's SonicTerm directory.
-        return home.join(".sonicterm").join("logs");
-    }
-    PathBuf::from(".sonicterm/logs")
+    resolve_log_dir_with(|name| std::env::var_os(name))
 }
 
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+/// Resolve the log directory from an injected environment lookup.
+///
+/// Separate from [`resolve_log_dir`] so tests exercise every branch without
+/// mutating the process environment, which other tests read concurrently.
+fn resolve_log_dir_with(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(dir) = lookup(LOG_DIR_ENV).filter(|value| !value.is_empty()) {
+        // When: `LOG_DIR_ENV` names a directory, it replaces the whole default tree.
+        return PathBuf::from(dir);
+    }
+    let home = lookup("HOME").or_else(|| lookup("USERPROFILE"));
+    if let Some(home) = home {
+        // When: `home` resolves from the environment, keep logs under that user's SonicTerm directory.
+        return PathBuf::from(home).join(".sonicterm").join("logs");
+    }
+    PathBuf::from(".sonicterm/logs")
 }
 
 /// Atomically replace `destination` with the complete file at `source`.

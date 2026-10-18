@@ -13,6 +13,10 @@ its own section; a missing crash dump does not mean a clean exit.
 - Panic artifacts: `~/.sonicterm/logs/crashes/`
 - Session markers: `~/.sonicterm/logs/sessions/`
 - Bounded breadcrumbs: `~/.sonicterm/logs/breadcrumbs/`
+- Override: a non-empty `SONICTERM_LOG_DIR` replaces `~/.sonicterm/logs` for all
+  of the above, so a diagnostic run keeps its logs, crash dumps and session
+  markers apart from the user's without changing `HOME`. The config directory
+  has its own override, `SONICTERM_CONFIG_DIR` (see [Configuration](Configuration)).
 
 `tracing-appender` uses daily names such as `sonicterm.log.YYYY-MM-DD`; the file
 with the newest modification time is active. Size rotation may add a Unix-time
@@ -808,6 +812,12 @@ The retry policy and limits are on [Rendering Modes](Rendering-Modes).
 
 ## Memory diagnostics
 
+For a quick, readable view without changing the log level or restarting, use the
+**Memory Usage** command described on [Memory](Memory). It reads the same
+sampling cycle as the `memory snapshot` line below and adds per-pane rows, OS
+footprint and peak, threads and each pane shell's processes. The log line itself
+is unchanged.
+
 ### Aggregate snapshot at `info`
 
 At `level = "info"`, `target="memory"` writes one `memory snapshot` at most
@@ -835,6 +845,13 @@ memory snapshot process_private_committed_bytes=<metric> process_resident_bytes=
                 allocator_allocations=<count> allocator_blocks=<count> allocator_largest_block_bytes=<bytes>
                 [checkpoint_index=<index> checkpoint_label="<label>" checkpoint_attempt=<attempt> checkpoint_complete=<bool>
                  trimmed=<bool> trim_source="<source>" trim_seq=<count>]
+                graphics_os_source=<source> graphics_os_footprint_bytes=<metric> graphics_os_nofootprint_bytes=<metric>
+                graphics_os_dedicated_bytes=<metric> graphics_os_shared_bytes=<metric>
+                graphics_requested_live_bytes=<bytes> graphics_requested_live_resources=<count>
+                graphics_renderers="visible[<window-id>] surface=<bytes>/<count> frame_texture=<bytes>/<count> glyph_atlas=<bytes>/<count> image_atlas=<bytes>/<count> present_buffers=<bytes>/<count> requested_total=<bytes>/<count> surface_count=exact|estimated; warm[<slot>] ..."
+                graphics_requested_created="surface=<bytes>/<count> frame_texture=<bytes>/<count> ..."
+                graphics_requested_released="surface=<bytes>/<count> frame_texture=<bytes>/<count> ..."
+                graphics_os_unavailable_reason="<reason>|none"
 ```
 
 Process figures come from the OS, so they include allocator fragmentation,
@@ -866,6 +883,20 @@ SonicTerm's own seams do not count.
 | `checkpoint_index` / `checkpoint_label` / `checkpoint_attempt` | only on a sample taken for a perf checkpoint: which checkpoint, and which attempt at it, from 1 |
 | `checkpoint_complete` | only on a checkpoint sample: `true` when no pane was contended and every pane was sampled |
 | `trimmed` / `trim_source` / `trim_seq` | only on a checkpoint sample from a build with the trim hook: whether a visible renderer was trimmed in its current covered stretch, what requested the latest trim (`scheduler`, `hook`, or `none` before any), and the trims since startup |
+| `graphics_os_source` | which OS query produced the graphics figures: `task_vm_info` (macOS), `dxgi` (Windows on a DX12 renderer), or `none` (Linux, the Windows GDI presenter, or no renderer) |
+| `graphics_os_footprint_bytes` / `graphics_os_nofootprint_bytes` | macOS kernel graphics ledgers: graphics memory charged to the physical footprint, and tagged to the process but not charged; `unsupported` elsewhere or when the kernel's reply does not reach the field |
+| `graphics_os_dedicated_bytes` / `graphics_os_shared_bytes` | Windows DXGI `LOCAL` (dedicated) and `NON_LOCAL` (shared) current usage of the renderer's adapter; `unsupported` elsewhere |
+| `graphics_requested_live_bytes` / `graphics_requested_live_resources` | GPU bytes and resources every renderer has requested and not released: requests, not driver residency |
+| `graphics_renderers` | per-renderer requested bytes and resource counts by class (`surface`, `frame_texture`, `glyph_atlas`, `image_atlas`, `present_buffers`), sorted like `renderers`, each ending with `surface_count=exact` (Metal, DX12) or `estimated` (Vulkan, GL); `none` before a renderer exists |
+| `graphics_requested_created` / `graphics_requested_released` | requested bytes and resources created and released per class since each live renderer was built, summed across live renderers; a dropped renderer's totals are in its `renderer graphics teardown` record |
+| `graphics_os_unavailable_reason` | why the OS query gave no figure when it declined (for example, two DXGI adapters share the renderer's vendor and device ids); `none` otherwise |
+
+The graphics fields come after every other field, so the fields before them keep
+their names and order. When a renderer drops, it writes one `renderer graphics
+teardown` record at `info` on `memory` with `renderer_role`, `window_id`,
+`graphics_live`, `graphics_created`, `graphics_released` (each
+`class=bytes/resources` per class) and `surface_count`. See [Graphics memory](Memory#graphics-memory) for what
+each figure can and cannot see.
 
 The allocator is reported once per shared device/context, not once per renderer.
 Sampling shares the retention cadence. An idle session wakes for a due sample,

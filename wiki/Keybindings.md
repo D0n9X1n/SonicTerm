@@ -225,6 +225,17 @@ Actions without arguments use a string. The active action names are:
 | Window and app | `new_window`, `rename_window`, `move_tab_to_new_window`, `toggle_fullscreen`, `quit_app` |
 | Files and maintenance | `edit_config_file`, `open_keymap_file`, `reload_config`, `check_for_updates` |
 | Shell navigation | `scroll_to_prev_prompt`, `scroll_to_next_prompt` |
+| Diagnostics | `show_memory_usage`, `copy_memory_report` |
+
+`show_memory_usage` and `copy_memory_report` are unbound by default. Inside the
+Memory Usage report window, `Cmd+Shift+C` on macOS or `Alt+Shift+C` on Windows
+and Linux copies the whole report, `R` takes a fresh sample, and `Esc` closes the
+window. The report window handles those keys itself, so they never become
+global bindings, and an open search field, IME composition or READONLY mode
+receives them first. Copy, search, scrolling, font size and the command palette
+work there as in any window; close-tab and close-pane close the report; new tab,
+new window, config and theme actions run in the main terminal window; paste,
+splits, tab switching and broadcast do nothing.
 
 Parameterized actions use inline TOML tables:
 

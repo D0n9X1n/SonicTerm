@@ -463,6 +463,7 @@ impl App {
         if let Some(request) = self.pending_new_window.take() {
             self.create_new_terminal_window(event_loop, request);
         }
+        self.drain_pending_memory_report(event_loop);
         // In-process tear-out drain. The `Command::new`-based spawn
         // (`spawn_tearout_child` + `--tear-out-payload`) is still reached from
         // the Windows OLE drop path, so both routes exist.

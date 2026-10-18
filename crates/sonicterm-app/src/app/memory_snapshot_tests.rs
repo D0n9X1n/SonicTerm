@@ -3,6 +3,7 @@ use super::*;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use sonicterm_logging::graphics_memory::{GraphicsMemory, GraphicsSource};
 use sonicterm_types::ResourceAmount;
 use tracing::field::{Field, Visit};
 
@@ -1138,4 +1139,155 @@ fn the_renderer_entry_names_its_trim_fields_apart_from_the_checkpoint_tags() {
         python_tests.contains(TRIMMED_RENDERER_ENTRY),
         "perf-compare_tests.py builds its renderer entries from this exact text"
     );
+}
+
+/// Every field name an event records, in record order; the message is not a field here.
+#[derive(Default)]
+struct OrderedNames(Vec<String>);
+
+impl Visit for OrderedNames {
+    fn record_debug(&mut self, field: &Field, _value: &dyn std::fmt::Debug) {
+        if field.name() != "message" {
+            self.0.push(field.name().to_string());
+        }
+    }
+}
+
+/// Layer that records each event's field names in order.
+#[derive(Clone, Default)]
+struct OrderLayer {
+    names: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+impl<S: tracing::Subscriber> Layer<S> for OrderLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        let mut names = OrderedNames::default();
+        event.record(&mut names);
+        self.names.lock().expect("not poisoned").push(names.0);
+    }
+}
+
+/// The field names of the one event `body` emits, in order.
+fn ordered_field_names(body: impl FnOnce()) -> Vec<String> {
+    let layer = OrderLayer::default();
+    let subscriber = Registry::default().with(layer.clone());
+    sonicterm_logging::test_capture::with_default(subscriber, body);
+    let mut events = layer.names.lock().expect("not poisoned").clone();
+    assert_eq!(events.len(), 1);
+    events.remove(0)
+}
+
+/// Contract: the graphics fields are appended. Every field a periodic line carried before them
+/// keeps its name and position, so a reader or tool that parses the line by its existing fields
+/// is unaffected, and the eight graphics fields follow in a fixed order.
+#[test]
+fn graphics_fields_are_appended_after_the_unchanged_prefix() {
+    let prefix = [
+        "process_private_committed_bytes",
+        "process_resident_bytes",
+        "process_virtual_bytes",
+        "process_private_committed_delta",
+        "process_resident_delta",
+        "process_virtual_delta",
+        "session_total_bytes",
+        "session_delta",
+        "grid_visible_bytes",
+        "grid_history_bytes",
+        "grid_alternate_bytes",
+        "parser_bytes",
+        "hyperlink_bytes",
+        "inline_media_bytes",
+        "pty_output_bytes",
+        "pty_input_bytes",
+        "panes_total",
+        "panes_sampled",
+        "panes_contended",
+        "renderer_total_bytes",
+        "renderer_total_items",
+        "renderer_row_glyph_cache_bytes",
+        "renderer_row_glyph_cache_items",
+        "renderer_row_quad_cache_bytes",
+        "renderer_row_quad_cache_items",
+        "renderer_delta",
+        "live_renderers",
+        "live_fg_probe_workers",
+        "renderers",
+        "allocator_state",
+        "allocator_source",
+        "allocator_label",
+        "allocator_allocated_bytes",
+        "allocator_reserved_bytes",
+        "allocator_allocations",
+        "allocator_blocks",
+        "allocator_largest_block_bytes",
+    ];
+    let graphics_fields = [
+        "graphics_os_source",
+        "graphics_os_footprint_bytes",
+        "graphics_os_nofootprint_bytes",
+        "graphics_os_dedicated_bytes",
+        "graphics_os_shared_bytes",
+        "graphics_requested_live_bytes",
+        "graphics_requested_live_resources",
+        "graphics_renderers",
+        "graphics_requested_created",
+        "graphics_requested_released",
+        "graphics_os_unavailable_reason",
+    ];
+    let names = ordered_field_names(|| emit_memory_snapshot(&populated_snapshot(), None));
+    assert_eq!(names[..prefix.len()], prefix.map(str::to_string));
+    assert_eq!(names[prefix.len()..], graphics_fields.map(str::to_string));
+}
+
+/// Contract: the graphics fields carry the OS figure under its source and each renderer's
+/// requested bytes by class; a figure the OS did not give is `unsupported`, never `0`.
+#[test]
+fn graphics_fields_carry_the_os_figure_and_each_renderer_ledger() {
+    use sonicterm_gpu::graphics_ledger::{GraphicsLedgerSnapshot, GraphicsTally};
+    let mut ledger = GraphicsLedgerSnapshot::default();
+    ledger.classes[0] = GraphicsTally {
+        live_bytes: 300,
+        live_resources: 3,
+        created_bytes: 600,
+        created_resources: 6,
+        released_bytes: 300,
+        released_resources: 3,
+    };
+    ledger.classes[2] = GraphicsTally { live_bytes: 40, live_resources: 1, ..Default::default() };
+    let graphics = GraphicsReading {
+        os: GraphicsMemory {
+            footprint: MemoryMetric::Bytes(4096),
+            ..GraphicsMemory::unavailable(GraphicsSource::TaskVmInfo)
+        },
+        renderers: vec![RendererGraphics { label: "WindowId(1)".into(), role: "visible", ledger }],
+    };
+    let events = capture(|| {
+        emit_memory_snapshot_with_graphics(&populated_snapshot(), None, &graphics);
+    });
+    let event = &events[0];
+    assert_eq!(event.text("graphics_os_source"), Some("task_vm_info"));
+    assert_eq!(event.text("graphics_os_footprint_bytes"), Some("4096"));
+    assert_eq!(event.text("graphics_os_nofootprint_bytes"), Some("unsupported"));
+    assert_eq!(event.text("graphics_os_dedicated_bytes"), Some("unsupported"));
+    assert_eq!(event.number("graphics_requested_live_bytes"), Some(340));
+    assert_eq!(event.number("graphics_requested_live_resources"), Some(4));
+    assert_eq!(
+        event.text("graphics_renderers"),
+        Some(
+            "visible[WindowId(1)] surface=300/3 frame_texture=0/0 glyph_atlas=40/1 \
+             image_atlas=0/0 present_buffers=0/0 requested_total=340/4 surface_count=exact"
+        )
+    );
+    assert_eq!(
+        event.text("graphics_requested_created"),
+        Some("surface=600/6 frame_texture=0/0 glyph_atlas=0/0 image_atlas=0/0 present_buffers=0/0")
+    );
+    assert_eq!(
+        event.text("graphics_requested_released"),
+        Some("surface=300/3 frame_texture=0/0 glyph_atlas=0/0 image_atlas=0/0 present_buffers=0/0")
+    );
+    assert_eq!(event.text("graphics_os_unavailable_reason"), Some("none"));
+    let unsampled = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
+    assert_eq!(unsampled[0].text("graphics_os_source"), Some("none"));
+    assert_eq!(unsampled[0].text("graphics_renderers"), Some("none"));
 }

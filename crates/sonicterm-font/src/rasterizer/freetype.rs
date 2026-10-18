@@ -23,7 +23,7 @@ use ::freetype::{
 use anyhow::{bail, Context as _};
 use cairo::{Content, Context, Extend, Format, ImageSurface, Matrix, Operator, RecordingSurface};
 use config::{DisplayPixelGeometry, FreeTypeLoadFlags, FreeTypeLoadTarget};
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::f64::consts::PI;
 use std::mem;
 use std::mem::MaybeUninit;
@@ -38,7 +38,17 @@ pub struct FreeTypeRasterizer {
     freetype_load_flags: Option<FreeTypeLoadFlags>,
     display_pixel_geometry: DisplayPixelGeometry,
     scale: f64,
-    hb_raster: HarfbuzzRasterizer,
+    /// The font this rasterizer was opened from, kept to build `hb_raster` on demand. An on-disk
+    /// colour face (one listing `SVG ` or `COLR`) is replaced by the shared bytes the FreeType
+    /// face opened, so its painter reads exactly those bytes even if the file is replaced or
+    /// deleted on disk afterwards. Any other font keeps its path; its painter is never needed.
+    parsed: ParsedFont,
+    /// HarfBuzz painter for SVG and COLRv1 glyphs, built on first use.
+    ///
+    /// For a colour font it wraps the same shared font buffer as the FreeType face, so building
+    /// it copies no font bytes. It is built lazily because most fonts never draw such a glyph,
+    /// and a font without one would otherwise read its whole file into the heap.
+    hb_raster: OnceCell<HarfbuzzRasterizer>,
 }
 
 // SAFETY: `slot.bitmap.buffer` must name `source_len` initialized bytes for the lifetime of `slot`.
@@ -114,7 +124,7 @@ impl FontRasterizer for FreeTypeRasterizer {
                         | FontRasterizerSelection::DirectWrite => {
                             // When: Harfbuzz or DirectWrite is configured, so
                             // the HarfBuzz painter renders this glyph instead.
-                            return self.hb_raster.rasterize_glyph(glyph_pos, size, dpi);
+                            return self.hb_raster()?.rasterize_glyph(glyph_pos, size, dpi);
                         }
                     }
                 }
@@ -438,8 +448,12 @@ impl FreeTypeRasterizer {
         display_pixel_geometry: DisplayPixelGeometry,
     ) -> anyhow::Result<Self> {
         log::trace!("Rasterizier wants {:?}", parsed);
+        let mut pinned = parsed.clone();
+        pinned.handle.source =
+            crate::font_bytes::pin_colour_face(&parsed.handle.source, parsed.handle.index)
+                .into_owned();
         let lib = ftwrap::Library::new()?;
-        let mut face = lib.face_from_locator(&parsed.handle)?;
+        let mut face = lib.face_from_locator(&pinned.handle)?;
         let has_color =
             // SAFETY: face_from_locator returned an initialized FT_Face, and
             // `face` owns it for the whole read of its face_flags bitfield.
@@ -464,8 +478,22 @@ impl FreeTypeRasterizer {
             freetype_render_target: parsed.freetype_render_target,
             display_pixel_geometry,
             scale: parsed.scale.unwrap_or(1.),
-            hb_raster: HarfbuzzRasterizer::from_locator(parsed)?,
+            parsed: pinned,
+            hb_raster: OnceCell::new(),
         })
+    }
+
+    /// The HarfBuzz painter, built from the stored font on the first SVG or COLRv1 glyph.
+    ///
+    /// A build failure is returned for that glyph and retried on the next one,
+    /// as an eager build's failure would have refused the whole rasterizer.
+    fn hb_raster(&self) -> anyhow::Result<&HarfbuzzRasterizer> {
+        if let Some(raster) = self.hb_raster.get() {
+            // When: `hb_raster` was already built, reuse it instead of re-reading the font.
+            return Ok(raster);
+        }
+        let raster = HarfbuzzRasterizer::from_locator(&self.parsed)?;
+        Ok(self.hb_raster.get_or_init(|| raster))
     }
 
     fn rasterize_outlines(

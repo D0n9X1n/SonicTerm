@@ -192,6 +192,49 @@ action = "save_current_settings"
     assert_eq!(keymap.lookup("alt+shift+s"), Some(&Action::SaveCurrentSettings));
 }
 
+/// Contract: both memory-report actions deserialize from their snake_case names, and no bundled
+/// keymap binds them or the report window's copy-all chords, so those chords stay free for the
+/// report window's own key path and for programs running in a terminal pane.
+#[test]
+fn memory_report_actions_parse_and_stay_unbound_in_bundled_keymaps() {
+    let source = r#"
+[meta]
+name = "test"
+version = "1"
+
+[[binding]]
+keys = "alt+shift+m"
+action = "show_memory_usage"
+
+[[binding]]
+keys = "alt+shift+r"
+action = "copy_memory_report"
+"#;
+    let keymap: Keymap = toml::from_str(source).expect("memory actions should deserialize");
+    assert_eq!(keymap.lookup("alt+shift+m"), Some(&Action::ShowMemoryUsage));
+    assert_eq!(keymap.lookup("alt+shift+r"), Some(&Action::CopyMemoryReport));
+
+    let bundles: [(&str, &str); 4] = [
+        ("generic", include_str!("../../../assets/keymaps/sonicterm.toml")),
+        ("macos", include_str!("../../../assets/keymaps/sonicterm-macos.toml")),
+        ("windows", include_str!("../../../assets/keymaps/sonicterm-windows.toml")),
+        ("linux", include_str!("../../../assets/keymaps/sonicterm-linux.toml")),
+    ];
+    for (os, text) in bundles {
+        let bundled: Keymap = toml::from_str(text).expect("bundled keymap parses");
+        assert!(
+            bundled.bindings.iter().all(|binding| !matches!(
+                binding.action.0,
+                Action::ShowMemoryUsage | Action::CopyMemoryReport
+            )),
+            "bundled {os} keymap must leave the memory-report actions unbound"
+        );
+        for chord in ["super+shift+c", "alt+shift+c"] {
+            assert_eq!(bundled.lookup(chord), None, "bundled {os} keymap must not bind {chord}");
+        }
+    }
+}
+
 /// `bundled_default()` (the runtime fallback) parses for the host platform.
 #[test]
 fn bundled_default_parses() {

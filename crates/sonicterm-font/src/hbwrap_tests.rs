@@ -57,7 +57,7 @@ fn on_disk_blob_survives_source_file_replacement() {
     let path =
         std::env::temp_dir().join(format!("sonicterm-hbwrap-blob-{}.bin", std::process::id()));
     std::fs::write(&path, original).unwrap();
-    let blob = Blob::from_source(&FontDataSource::OnDisk(path.clone())).unwrap();
+    let blob = Blob::from_source(&FontDataSource::OnDisk(path.clone()), 0).unwrap();
 
     std::fs::write(&path, b"replacement").unwrap();
     assert_eq!(blob.as_slice(), original);

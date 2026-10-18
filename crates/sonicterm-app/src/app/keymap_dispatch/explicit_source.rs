@@ -33,6 +33,11 @@ impl App {
             // When: source_kind is READONLY and action is not allowed, consume it without dispatch.
             return true;
         }
+        if let Some(handled) = self.gate_memory_report_action(action, Some(source_window_id), false)
+        {
+            // When: source_window_id is the Memory Usage report and the gate closed, consumed or redirected the action.
+            return handled;
+        }
         match action {
             Action::CopyToClipboard => self.copy_selection_for_kind(source_kind),
             Action::EnterCopyMode => self.enter_copy_mode_for_kind(source_kind),

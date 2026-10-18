@@ -192,6 +192,14 @@ super+ctrl+alt+shift+key
 | 窗口与应用 | `new_window`、`rename_window`、`move_tab_to_new_window`、`toggle_fullscreen`、`quit_app` |
 | 文件与维护 | `edit_config_file`、`open_keymap_file`、`reload_config`、`check_for_updates` |
 | Shell 导航 | `scroll_to_prev_prompt`、`scroll_to_next_prompt` |
+| 诊断 | `show_memory_usage`、`copy_memory_report` |
+
+`show_memory_usage` 与 `copy_memory_report` 默认未绑定。在内存占用报告窗口中，macOS 上
+`Cmd+Shift+C`、Windows 和 Linux 上 `Alt+Shift+C` 复制整份报告，`R` 重新采样，`Esc` 关闭
+窗口。这些按键由报告窗口自身处理，不会成为全局绑定；已打开的搜索框、输入法组字或 READONLY
+模式会优先接收它们。复制、搜索、滚动、字号与命令面板在报告窗口中照常可用；关闭标签页和
+关闭 pane 会关闭报告；新建标签页、新建窗口、配置与主题 action 在主终端窗口中执行；粘贴、
+分屏、切换标签页与广播不起作用。
 
 带参数的 action 使用 inline TOML table：
 

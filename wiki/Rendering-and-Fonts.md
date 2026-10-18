@@ -360,6 +360,31 @@ Ordinary text, composite clusters, wide glyphs, custom block glyphs, and
 multi-cell ligatures keep their natural raster geometry. The same producer-built
 rectangle is used by GPU and Windows software presentation.
 
+### Font file bytes
+
+Ordinary fonts stream from disk: a FreeType face opens on a callback stream that
+reads only the frames FreeType asks for, and a HarfBuzz blob reads the file
+into its own buffer. A font face whose table directory lists an `SVG ` or `COLR`
+table is different, because FreeType extracts those tables (and `CPAL`) whole and
+keeps them for the face's life; on a callback stream every face held its own
+copy, 18.55 MiB of `SVG ` for a colour emoji font. Such a file is read once,
+whole, into one shared, immutable heap buffer per file generation (canonical
+path, length, modification time and, on Unix, device and inode; Windows uses
+path, length and modification time). Every FreeType face on it opens as a memory
+stream, so the colour tables point into that buffer instead of being copied, and
+every HarfBuzz blob, including the lazy SVG/COLRv1 painter, wraps the same
+buffer. The painter uses exactly the bytes its FreeType face opened, even if the
+file is replaced or deleted on disk afterwards.
+
+The decision is made per face from a bounded read of the sfnt table directory
+(the `ttcf` header and the requested face's offset for a collection, then at most
+256 table records). A malformed or unreadable directory counts as no colour
+table and keeps the callback stream. The cache holds only weak references: the
+buffer is freed when the last face and blob using it close, and a file changed on
+disk is a new generation with a fresh buffer. Faces themselves are not shared.
+Ordinary fonts are not shared because holding every font file whole, a 75 MiB CJK
+`.ttc` included, cost more memory than the colour tables it saved.
+
 ### Native source versions and configuration
 
 The source-pinned stack is FreeType 2.14.3, HarfBuzz 14.4.0, libpng 1.6.58,
@@ -967,6 +992,7 @@ The adapted WezTerm implementation is attributed in
 | Renderer font adapter | `crates/sonicterm-engine/src/fontstack.rs` |
 | Discovery and matching | `crates/sonicterm-font/src/db.rs`, `crates/sonicterm-font/src/locator/` |
 | HarfBuzz shaping | `crates/sonicterm-font/src/shaper/harfbuzz.rs` |
+| Shared colour font buffers | `crates/sonicterm-font/src/font_bytes.rs` |
 | Rasterization and native wrappers | `crates/sonicterm-font/src/rasterizer/`, `crates/sonicterm-font/src/{ftwrap,hbwrap,fcwrap}.rs` |
 | CPU atlas and row cache | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache,shape}.rs` |
 | Atlas upload and image atlas | `crates/sonicterm-gpu/src/{core,atlas_upload}.rs` |

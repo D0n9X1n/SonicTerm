@@ -324,6 +324,7 @@ impl GpuRenderer {
             self.present_pipeline.glyph_bind_group_layout(),
             AtlasBindingKind::Glyph,
         );
+        self.record_glyph_atlas_request();
     }
 
     /// Rebuild a mismatched image mirror only inside the live device gate.
@@ -346,6 +347,7 @@ impl GpuRenderer {
             self.present_pipeline.image_bind_group_layout(),
             AtlasBindingKind::Image,
         );
+        self.record_image_atlas_request();
     }
 
     /// Report actual dirty-region uploads without logging unchanged frames.

@@ -165,6 +165,7 @@ impl App {
             // so the ledger stays disabled and adds no per-write cost.
             pty_write_log_enabled: event_loop_proxy.is_none(),
             pending_new_window: None,
+            memory_report: Default::default(),
             pending_tear_out: None,
             pending_os_teardown: false,
             test_post_snapshot_hook: None,
@@ -240,6 +241,8 @@ impl App {
             // When: session_finished is cached, no pane or driver may be shut down a second time.
             return settled;
         }
+        // A report walk still running must not outlive the session it describes.
+        self.cancel_memory_report_sampling();
         let panes: Vec<_> = self
             .windows
             .values_mut()

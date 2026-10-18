@@ -143,6 +143,10 @@ pub(crate) struct WindowRedrawState {
     /// Test-only monitor source: `Some(rate)` replaces the native refresh-rate read.
     #[cfg(test)]
     pub(super) monitor_rate_override: Option<Option<u32>>,
+    /// Test-only: how many times this window's retained frame was dropped, counted even when a
+    /// headless test window has no renderer, so a test can check what the planner will see.
+    #[cfg(test)]
+    pub(super) retained_frame_drops: u64,
 }
 
 impl Default for WindowRedrawState {
@@ -178,6 +182,8 @@ impl Default for WindowRedrawState {
             surface_probe_at: None,
             #[cfg(test)]
             monitor_rate_override: None,
+            #[cfg(test)]
+            retained_frame_drops: 0,
         }
     }
 }
@@ -607,6 +613,10 @@ impl WindowState {
     /// Mark one full visibility frame without acquiring pane locks or performing GPU work.
     pub(super) fn invalidate_visibility_frame(&mut self) {
         self.mark_redraw(RedrawCause::Visibility);
+        #[cfg(test)]
+        {
+            self.redraw.retained_frame_drops += 1;
+        }
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.invalidate_retained_frame();
         }

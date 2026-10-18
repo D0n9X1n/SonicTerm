@@ -37,9 +37,12 @@ pub mod cleanup;
 pub mod config;
 pub mod crash;
 pub mod exit_trace;
+/// The process's graphics memory as the OS reports it: macOS kernel ledgers, Windows DXGI usage.
+pub mod graphics_memory;
 pub mod path;
 pub mod postmortem;
 pub mod process_memory;
+pub mod process_report;
 pub mod session_state;
 pub mod sinks;
 

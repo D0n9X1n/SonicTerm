@@ -43,6 +43,10 @@ impl App {
                 // which was already pushed above; skip so no window is a candidate twice.
                 continue;
             }
+            if child.role == crate::app::WindowRole::MemoryReport {
+                // When: `child` is the Memory Usage report, it accepts no tab, so it is no drop target.
+                continue;
+            }
             let Some(renderer) = child.renderer.as_ref() else {
                 // When: the child has no `renderer`, so its width and tab-bar height are
                 // unknown and no drop rect can be built; leave it out of `candidates`.
@@ -77,9 +81,11 @@ impl App {
             .unwrap_or_else(|_| (0, 0));
         let global = crate::tab_drag::local_to_global(main_origin, local_in_main);
         let candidates = self.windows.iter().filter_map(|(id, child)| {
-            if Some(*id) == self.main_window_id {
-                // When: `id` is `main_window_id`, the window this drag started in; a tab
-                // cannot drop onto its own source, so keep it out of `candidates`.
+            if Some(*id) == self.main_window_id
+                || child.role == crate::app::WindowRole::MemoryReport
+            {
+                // When: `id` is `main_window_id`, the window this drag started in, or the Memory
+                // Usage report, which accepts no tab; keep both out of `candidates`.
                 return None;
             }
             let renderer = child.renderer.as_ref()?;

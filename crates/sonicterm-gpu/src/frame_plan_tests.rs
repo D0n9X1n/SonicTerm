@@ -2046,3 +2046,19 @@ fn the_scene_ignores_only_dirt() {
     );
     assert_ne!(moved.key.scene(), base.key.scene(), "a pane viewport move is a new scene");
 }
+
+/// Contract: a pane whose whole content was replaced in place while its view shows history (every
+/// live row dirty, none on screen) is planned as `Noop` against a retained key, so a caller that
+/// replaces content must drop the retained frame; without it the plan is a full first frame.
+#[test]
+fn an_offscreen_replacement_is_noop_only_with_a_retained_key() {
+    let shape = ReplacementShape {
+        cols: 100,
+        rows: 40,
+        scrollback_len: 160,
+        viewport_top_abs: Some(0),
+        dirty_rows: (0..40).collect(),
+    };
+    assert!(__replacement_plans_noop(&shape, true), "the retained key hides the replaced rows");
+    assert!(!__replacement_plans_noop(&shape, false), "a dropped key forces a full frame");
+}
