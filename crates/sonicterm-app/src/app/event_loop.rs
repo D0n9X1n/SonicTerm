@@ -999,6 +999,7 @@ impl App {
             hovered_url: None,
             link_preview: None,
             path_probe: super::path_target::PathProbeState::default(),
+            hover_detection: super::path_target::HoverDetectionCache::default(),
             notification: None,
             hidden: false,
             scrollbar_drag: None,

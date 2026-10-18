@@ -1032,6 +1032,7 @@ impl App {
             hovered_url: None,
             link_preview: None,
             path_probe: crate::app::path_target::PathProbeState::default(),
+            hover_detection: crate::app::path_target::HoverDetectionCache::default(),
             notification: None,
             hidden: false,
             scrollbar_drag: None,

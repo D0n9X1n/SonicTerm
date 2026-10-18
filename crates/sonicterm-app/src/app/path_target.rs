@@ -21,8 +21,11 @@ use winit::window::WindowId;
 
 use super::App;
 use frame_rows::FrameRows;
+use hover_cache::DetectionContext;
+pub(super) use hover_cache::HoverDetectionCache;
 
 mod frame_rows;
+mod hover_cache;
 #[cfg(any(target_os = "linux", test))]
 mod linux;
 #[cfg(any(target_os = "macos", test))]
@@ -2692,8 +2695,38 @@ impl App {
         let grid = parser.grid();
         let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, viewport_top_abs);
         let frame = FrameRows::new(grid, view_top);
+        let terminal = &self.config.terminal;
+        let context = DetectionContext {
+            pane_id,
+            pointed: (viewport_row, col),
+            view_top,
+            rows_below: frame.rows_below(),
+            scrollback_evicted: grid.scrollback_evicted(),
+            screen_epoch: grid.screen_epoch(),
+            size_generation: grid.size_generation(),
+            alt_screen: grid.is_alt(),
+            cwd_revision: parser.cwd_revision(),
+            clickable_local_targets: terminal.clickable_local_targets,
+            clickable_bare_names: terminal.clickable_bare_names,
+            clickable_path_max_chars: terminal.effective_clickable_path_max_chars(),
+        };
+        let cached = self
+            .windows
+            .get(&window_id)
+            .and_then(|window| window.hover_detection.lookup(&context, grid));
+        if let Some(target) = cached {
+            // When: the key and every read row's stamp match, the cached result stands; apply still runs.
+            self.note_hover(|hover| {
+                hover.lookups += 1;
+                hover.cache_hits += 1;
+            });
+            return target;
+        }
         let target = self.detect_cell_target(window_id, pane_id, viewport_row, col, parser, &frame);
         let rows_read = frame.rows_read();
+        if let Some(window) = self.windows.get_mut(&window_id) {
+            window.hover_detection.store(context, grid, frame.read_span(), target.clone());
+        }
         self.note_hover(|hover| {
             hover.lookups += 1;
             hover.detections += 1;
@@ -2833,6 +2866,7 @@ impl App {
             // When: `window_id` no longer identifies a live window, there is no hover or probe state left to clear.
             return;
         };
+        window.hover_detection.clear();
         let probe_changed = window.path_probe.invalidate();
         let hover_changed = window.hovered_url.take().is_some();
         let link_changed = window.hover_link;

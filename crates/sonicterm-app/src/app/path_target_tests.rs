@@ -5490,3 +5490,271 @@ fn a_bottom_edge_target_of_a_scrolled_back_view_is_refused_without_reading_below
         app.cell_target_from_parser(window, pane, 2, 3, &guard, None).expect("live bottom row");
     assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
 }
+
+/// An App that counts hover work, with an injected probe mailbox the test drains itself, and one
+/// child window whose pane is `cols` × `rows` cells.
+fn counted_hover_app(cols: u16, rows: u16) -> (App, WindowId, u64, PathProbeMailbox) {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.force_frame_counters_on().expect("no window exists yet");
+    let (mailbox, _wake) = PathProbeMailbox::new();
+    let (open, _) = crossbeam_channel::bounded(1);
+    app.path_workers = Some(PathWorkers { probe: mailbox.clone(), open });
+    let window = app.__test_seed_child_window(&["hover cache"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    (app, window, pane, mailbox)
+}
+
+/// One hover lookup of `pane`'s cell (`row`, `col`) as a frame runs it from its held parser, at
+/// the pane's own viewport or at `viewport`, then the apply that always follows.
+fn frame_hover_at(
+    app: &mut App,
+    window: WindowId,
+    pane: u64,
+    (row, col): (u16, u16),
+    viewport: Option<u64>,
+) {
+    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let guard = parser.lock();
+    let viewport =
+        viewport.or_else(|| app.windows[&window].panes[&pane].resolved_viewport(guard.grid()));
+    let target = app.hover_target_from_parser(window, pane, row, col, &guard, viewport);
+    drop(guard);
+    app.apply_target_hover(window, target);
+}
+
+/// [`frame_hover_at`] at the pane's own viewport.
+fn frame_hover(app: &mut App, window: WindowId, pane: u64, cell: (u16, u16)) {
+    frame_hover_at(app, window, pane, cell, None);
+}
+
+/// The App's hover counters as `(lookups, detections, cache_hits)`.
+fn hover_counts(app: &App) -> (u64, u64, u64) {
+    let hover = app.frame_counters.as_ref().expect("counters are on").hover;
+    (hover.lookups, hover.detections, hover.cache_hits)
+}
+
+/// Probe requests hover submitted since the last drain.
+fn drained_probes(mailbox: &PathProbeMailbox) -> usize {
+    std::iter::from_fn(|| mailbox.take_next()).count()
+}
+
+/// Hold or release the platform's open modifier in `window`.
+fn set_open_modifier(app: &mut App, window: WindowId, held: bool) {
+    let modifier = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    };
+    app.windows.get_mut(&window).unwrap().modifiers =
+        if held { modifier } else { winit::keyboard::ModifiersState::empty() };
+}
+
+/// With the pointer still and the rows detection read unchanged while another row streams, every
+/// frame after the first reuses the cached result: zero further detections and zero further probe
+/// submissions, counted through the injected mailbox.
+#[cfg(unix)]
+#[test]
+fn a_still_pointer_over_unchanged_rows_detects_once_while_other_rows_stream() {
+    let (mut app, window, pane, mailbox) = counted_hover_app(40, 6);
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"/tmp/sonicterm-cache/notes.txt"));
+    for frame in 0..20 {
+        frame_hover(&mut app, window, pane, (0, 3));
+        let streamed = format!("\x1b[5;1H{frame:>4} streamed");
+        assert!(app.__test_advance_child_pane_parser(window, pane, streamed.as_bytes()));
+    }
+    assert_eq!(hover_counts(&app), (20, 1, 19));
+    assert_eq!(drained_probes(&mailbox), 1, "only the first frame submits a probe");
+    assert_eq!(app.frame_counters.as_ref().unwrap().hover.probes_submitted, 1);
+}
+
+/// A change to one row detection read causes exactly one detection on the next lookup, and the
+/// lookup after it reuses that result.
+#[cfg(unix)]
+#[test]
+fn one_dependency_row_change_detects_once_then_reuses() {
+    let (mut app, window, pane, _mailbox) = counted_hover_app(40, 6);
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"/tmp/sonicterm-cache/notes.txt"));
+    frame_hover(&mut app, window, pane, (0, 3));
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (2, 1, 1));
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"\x1b[1;36Hx"));
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (3, 2, 1), "the changed row detects again");
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (4, 2, 2), "and the next lookup reuses it");
+}
+
+/// Same-cell motion and a modifier change hit the cache, through both the frame path and the
+/// event-time lookup, while the apply that follows still flips the underline's `active` state.
+#[test]
+fn same_cell_motion_and_modifier_changes_hit_the_cache_and_still_apply() {
+    let (mut app, window, pane, _mailbox) = counted_hover_app(40, 4);
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
+    let active = |app: &App| app.windows[&window].hovered_url.as_ref().unwrap().active();
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert!(!active(&app));
+    set_open_modifier(&mut app, window, true);
+    let lookup = app.hover_lookup(window, pane, 0, 3);
+    app.apply_target_lookup(window, lookup);
+    assert!(active(&app), "the modifier activates the cached target");
+    set_open_modifier(&mut app, window, false);
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert!(!active(&app), "releasing it deactivates the cached target");
+    assert_eq!(hover_counts(&app), (3, 1, 2));
+}
+
+/// A probe that completes for an unchanged key is applied by the frame it requests with no new
+/// detection and no duplicate probe, and a same-value repaint of the target's row detects once and
+/// yields an equal key, so the authorization stands.
+#[cfg(unix)]
+#[test]
+fn probe_completion_and_same_value_repaint_keep_the_cached_authorization() {
+    let root = native_test_root().join(format!(
+        "sonicterm-hover-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("notes.txt");
+    std::fs::write(&path, b"notes").unwrap();
+    let (mut app, window, pane, mailbox) = counted_hover_app(200, 4);
+    let text = path.to_str().unwrap().to_owned();
+    assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
+    frame_hover(&mut app, window, pane, (0, 3));
+    let request = mailbox.take_next().expect("the first frame submits a probe");
+    let outcome = probe_candidates(&request.key.candidates, classify_local_target);
+    let key = request.key.clone();
+    app.handle_path_probe_finished(PathProbeResult {
+        failure: outcome.as_ref().err().copied(),
+        selection: outcome.ok(),
+        request,
+    });
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (2, 1, 1), "the completion's frame reuses the detection");
+    assert_eq!(drained_probes(&mailbox), 0, "and submits no duplicate probe");
+    assert!(app.windows[&window].path_probe.authorized(&key, true));
+    let repaint = format!("\x1b[1;1H{text}");
+    assert!(app.__test_advance_child_pane_parser(window, pane, repaint.as_bytes()));
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (3, 2, 1), "a same-value repaint detects once");
+    let fresh = match app.cell_target_at(window, pane, 0, 3).unwrap().target {
+        ResolvedCellTarget::Path(fresh) => fresh,
+        other => panic!("a path target, not {other:?}"),
+    };
+    assert_eq!(fresh, key, "the recomputed key is equal");
+    assert!(app.windows[&window].path_probe.authorized(&key, true), "authorization stands");
+    assert_eq!(drained_probes(&mailbox), 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Every input of a detection invalidates the cache on its own: each change below is followed by
+/// one lookup of the same cell, which must detect again. A theme change is not an input, so the
+/// lookup after it hits.
+#[test]
+fn each_detection_input_invalidates_the_cache() {
+    type Change = fn(&mut App, WindowId, u64);
+    let changes: [(&str, Change); 10] = [
+        ("resize", |app, window, pane| {
+            app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(41, 4);
+        }),
+        ("alt-screen enter", |app, window, pane| {
+            assert!(app.__test_advance_child_pane_parser(window, pane, b"\x1b[?1049h"));
+        }),
+        ("cursor leave", |app, window, _| app.clear_target_hover(window)),
+        ("pane hover invalidation", |app, window, _| {
+            app.windows.get_mut(&window).unwrap().invalidate_path_hover();
+        }),
+        ("clickable_local_targets", |app, _, _| {
+            app.config.terminal.clickable_local_targets ^= true;
+        }),
+        ("clickable_bare_names", |app, _, _| app.config.terminal.clickable_bare_names ^= true),
+        ("clickable_path_max_chars", |app, _, _| app.config.terminal.clickable_path_max_chars = 9),
+        ("cwd revision", |app, window, pane| {
+            assert!(app.__test_advance_child_pane_parser(
+                window,
+                pane,
+                b"\x1b]7;file:///tmp\x1b\\"
+            ));
+        }),
+        ("dependency row write", |app, window, pane| {
+            assert!(app.__test_advance_child_pane_parser(window, pane, b"\x1b[1;30Hz"));
+        }),
+        ("history clear", |app, window, pane| {
+            app.windows[&window].panes[&pane].parser.lock().grid_mut().clear_scrollback();
+        }),
+    ];
+    for (label, change) in changes {
+        let (mut app, window, pane, _mailbox) = counted_hover_app(40, 4);
+        // Two rows of history, so the history clear has rows to drop.
+        let output = b"one\r\ntwo\r\nhttps://example.com/\r\nfour\r\nfive";
+        assert!(app.__test_advance_child_pane_parser(window, pane, output));
+        frame_hover(&mut app, window, pane, (0, 3));
+        frame_hover(&mut app, window, pane, (0, 3));
+        assert_eq!(hover_counts(&app), (2, 1, 1), "{label}: warm");
+        change(&mut app, window, pane);
+        frame_hover(&mut app, window, pane, (0, 3));
+        assert_eq!(hover_counts(&app).1, 2, "{label}: detects again");
+    }
+    let (mut app, window, pane, _mailbox) = counted_hover_app(40, 4);
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
+    frame_hover(&mut app, window, pane, (0, 3));
+    app.theme = Theme::default();
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (2, 1, 1), "a theme change keeps the cached result");
+}
+
+/// The cache holds one entry per window: another cell (a font or DPI change moves the pointer to
+/// one), another pane, another view top or another window each detect, and each window keeps its
+/// own entry, so returning to a window's cell hits.
+#[test]
+fn the_cache_is_one_entry_per_window_keyed_by_cell_pane_and_view() {
+    let (mut app, first, first_pane, _mailbox) = counted_hover_app(40, 4);
+    let second = app.__test_seed_child_window(&["second", "tab"]);
+    let panes = app.__test_child_pane_ids(second).unwrap();
+    let output: &[u8] = b"one\r\ntwo\r\nhttps://example.com/\r\nfour\r\nfive\r\nsix";
+    assert!(app.__test_advance_child_pane_parser(first, first_pane, output));
+    for pane in &panes {
+        app.windows[&second].panes[pane].parser.lock().grid_mut().resize(40, 4);
+        assert!(app.__test_advance_child_pane_parser(second, *pane, output));
+    }
+    frame_hover(&mut app, first, first_pane, (0, 3));
+    frame_hover(&mut app, second, panes[0], (0, 3));
+    assert_eq!(hover_counts(&app), (2, 2, 0), "each window detects for itself");
+    frame_hover(&mut app, first, first_pane, (0, 3));
+    frame_hover(&mut app, second, panes[0], (0, 3));
+    assert_eq!(hover_counts(&app), (4, 2, 2), "and keeps its own entry");
+    frame_hover(&mut app, first, first_pane, (0, 4));
+    assert_eq!(hover_counts(&app).1, 3, "another cell detects");
+    if let Some(other_pane) = panes.get(1) {
+        frame_hover(&mut app, second, *other_pane, (0, 3));
+        assert_eq!(hover_counts(&app).1, 4, "another pane detects");
+    }
+    let before = hover_counts(&app).1;
+    frame_hover_at(&mut app, first, first_pane, (0, 3), Some(0));
+    assert_eq!(hover_counts(&app).1, before + 1, "another view top detects");
+}
+
+/// An OSC 8 link rewritten with the same label and a different destination is detected again and
+/// resolves to the new destination: the rewrite restamps the row, so no hyperlink id has to join
+/// the key.
+#[test]
+fn an_osc8_link_with_the_same_label_and_a_new_destination_detects_again() {
+    let (mut app, window, pane, _mailbox) = counted_hover_app(40, 4);
+    let link = |uri: &str| format!("\x1b[1;1H\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\");
+    assert!(app.__test_advance_child_pane_parser(
+        window,
+        pane,
+        link("https://a.example/").as_bytes()
+    ));
+    frame_hover(&mut app, window, pane, (0, 2));
+    assert_eq!(app.windows[&window].hovered_url.as_ref().unwrap().url, "https://a.example/");
+    assert!(app.__test_advance_child_pane_parser(
+        window,
+        pane,
+        link("https://b.example/").as_bytes()
+    ));
+    frame_hover(&mut app, window, pane, (0, 2));
+    assert_eq!(hover_counts(&app), (2, 2, 0));
+    assert_eq!(app.windows[&window].hovered_url.as_ref().unwrap().url, "https://b.example/");
+}

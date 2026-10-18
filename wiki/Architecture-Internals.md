@@ -322,6 +322,19 @@ correctness, not only speed.
   could change the result: on a scrolled-back view a bottom-row segment reaching the
   grid's edge leaves its chain `Incomplete`, and the hard-wrap pre-pass treats that
   boundary as possibly wrapped. `rows_below` answers from the row count alone.
+  Each window keeps one `HoverDetectionCache` entry: the detection's key (pane,
+  pointed cell, `view_top`, `rows_below`, `scrollback_evicted`, `screen_epoch`,
+  `size_generation`, alternate screen, OSC 7 CWD revision and the three
+  `clickable_*` settings) and the content stamp of every row in the span detection
+  read. A hover lookup whose key and stamps all match returns the cached result,
+  `PathProbeKey` and row fingerprints included, without reading a cell or hashing a
+  row; any difference detects again and recomputes the fingerprints, so a same-value
+  repaint, which advances a stamp, yields an equal key and keeps authorization. The
+  cache gates the scan only: `apply_target_hover` runs on every lookup, so modifier
+  changes, probe completions, previews and frontmost state still apply. Cursor leave,
+  `invalidate_path_hover` (pane removal or transfer, config reload, focus, resize and
+  palette) and window close drop the entry; theme changes do not. A click never uses
+  the cache: it computes its own fresh target.
   Each window retains at most one current-epoch filesystem-probe completion and
   requests a frame to validate it against a fresh target, rather than discarding
   it during parser contention. Clicks always require a fresh lookup, never

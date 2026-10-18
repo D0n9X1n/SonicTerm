@@ -217,6 +217,12 @@ cargo build -p sonicterm-app
   the selected tier (`open_request_still_selected`) and opens only on the same path and
   decision; `key_preserves_selection` drops authorization when a new candidate appears at
   or before that tier. Reloading a changed cap revokes path results.
+- Hover detection is memoized per window (`path_target/hover_cache.rs`): a lookup whose key
+  (pane, pointed cell, viewport, `rows_below`, eviction, screen epoch, size generation, alternate
+  screen, CWD revision, `clickable_*` settings) and every read row's content stamp match reuses the
+  cached `CellTargetSnapshot` without hashing. Content stamps are only this fast path; probe
+  identity is unchanged, the cache gates the scan and never `apply_target_hover`, and a click
+  always computes its own fresh target. Clear it wherever `invalidate_path_hover` runs.
 - On the alternate screen a multiplexer places each pane row with a cursor move. The
   plain-target scan reads only the pointed pane's columns of each row, so a pane border
   ends every name as the grid's edge does. A recorded wrap happens only at the grid's

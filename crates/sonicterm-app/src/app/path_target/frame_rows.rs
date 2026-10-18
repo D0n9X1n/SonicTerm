@@ -15,6 +15,8 @@ pub(in crate::app) struct FrameRows<'grid> {
     view_end: u64,
     /// Rows served, counting a repeated read of one row each time.
     rows_read: Cell<u64>,
+    /// The lowest and highest absolute rows served, or `None` before the first.
+    read_span: Cell<Option<(u64, u64)>>,
 }
 
 impl<'grid> FrameRows<'grid> {
@@ -25,6 +27,7 @@ impl<'grid> FrameRows<'grid> {
             view_top,
             view_end: view_top.saturating_add(u64::from(grid.rows)),
             rows_read: Cell::new(0),
+            read_span: Cell::new(None),
         }
     }
 
@@ -68,12 +71,23 @@ impl<'grid> FrameRows<'grid> {
             return None;
         }
         self.rows_read.set(self.rows_read.get().saturating_add(1));
+        let span = match self.read_span.get() {
+            Some((low, high)) => (low.min(row), high.max(row)),
+            None => (row, row),
+        };
+        self.read_span.set(Some(span));
         self.grid.row_at_abs(row)
     }
 
     /// Rows served so far, a repeated read counting each time.
     pub(in crate::app) fn rows_read(&self) -> u64 {
         self.rows_read.get()
+    }
+
+    /// The lowest and highest absolute rows served so far; `None` when none was. Every row a
+    /// detection depends on lies in this span, because detection reads rows only through here.
+    pub(in crate::app) fn read_span(&self) -> Option<(u64, u64)> {
+        self.read_span.get()
     }
 }
 

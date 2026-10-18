@@ -31,6 +31,9 @@ fn reader_serves_and_counts_only_displayed_rows() {
     assert!(frame.row(2).is_some());
     assert!(frame.row(0).is_none() && frame.row(5).is_none(), "rows outside the frame are refused");
     assert_eq!(frame.rows_read(), 2, "a repeated read counts each time; a refused one never");
+    assert_eq!(frame.read_span(), Some((2, 2)), "a refused row never widens the read span");
+    assert!(frame.row(4).is_some());
+    assert_eq!(frame.read_span(), Some((2, 4)));
 }
 
 /// `rows_below` is true exactly when the view is scrolled back, read from the row count alone.
