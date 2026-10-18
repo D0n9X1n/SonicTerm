@@ -486,7 +486,7 @@ impl App {
     pub(super) fn do_user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::MenuAction => self.drain_menubar_actions(event_loop),
-            UserEvent::LaunchRequests => {
+            UserEvent::OpenScripts => {
                 self.drain_launch_requests();
             }
             UserEvent::OsDrag => self.drain_os_drag(),

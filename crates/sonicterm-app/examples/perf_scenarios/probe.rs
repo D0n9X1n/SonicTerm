@@ -999,7 +999,7 @@ impl Probe {
         }
         let unexpected = match &event {
             UserEvent::MenuAction => Some("a menu action"),
-            UserEvent::LaunchRequests => Some("a launch request"),
+            UserEvent::OpenScripts => Some("a launch request"),
             UserEvent::OsDrag | UserEvent::DragMoved | UserEvent::DragEnded => {
                 Some("an OS drag event")
             }

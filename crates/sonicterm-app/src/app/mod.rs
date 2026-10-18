@@ -155,8 +155,10 @@ pub enum UserEvent {
     /// [`crate::menubar_bridge`] buffer; this variant is just the
     /// wake-up signal so the loop drains it.
     MenuAction,
-    /// Launch requests (terminals or script drafts) were queued by a platform boundary.
-    LaunchRequests,
+    /// Launch requests were queued by a platform boundary: terminals, direct commands or
+    /// script drafts. The name is kept from when only scripts were queued, because the perf
+    /// harness compiles against older trees that match on it.
+    OpenScripts,
     /// A platform OS-drag drop landed and stashed payloads in
     /// [`crate::os_drag_bridge`]. The variant is just the wake-up
     /// signal so the loop drains the queues — separate from

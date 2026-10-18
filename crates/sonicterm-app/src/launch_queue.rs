@@ -39,8 +39,8 @@ pub fn push_requests(requests: Vec<LaunchRequest>) -> bool {
     if let Ok(slot) = proxy_slot().lock() {
         // When: `proxy_slot().lock()` yields `slot`, inspect whether a wake target is installed.
         if let Some(proxy) = slot.as_ref() {
-            // When: `slot` contains `proxy`, post `LaunchRequests` and report whether winit accepted it.
-            return proxy.send_event(UserEvent::LaunchRequests).is_ok();
+            // When: `slot` contains `proxy`, post `OpenScripts` and report whether winit accepted it.
+            return proxy.send_event(UserEvent::OpenScripts).is_ok();
         }
     }
     false
