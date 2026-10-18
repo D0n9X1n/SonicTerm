@@ -18,9 +18,18 @@ fn recording_sink() -> (HandlerResultSink, Reported) {
 }
 
 /// Write an executable shell script named `name` into `dir`.
+///
+/// The executable is created by a separate `cp` process, never by a write handle in this test
+/// process. Tests run in parallel and spawn children; a child forked while this process held the
+/// script open for writing would keep that handle until it execs, and Linux then refuses to run
+/// the script with "executable file busy" (ETXTBSY). Once `cp` exits, no write handle to the
+/// executable exists anywhere. The source file is written here but never executed.
 fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    let source = dir.join(format!("{name}.source"));
+    std::fs::write(&source, format!("#!/bin/sh\n{body}\n")).unwrap();
+    let copied = std::process::Command::new("/bin/cp").arg(&source).arg(&path).status().unwrap();
+    assert!(copied.success(), "cp {} failed: {copied}", source.display());
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
 }
