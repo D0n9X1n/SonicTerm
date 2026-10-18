@@ -125,6 +125,8 @@ fn run_mac_runtime_smoke() -> Result<i32> {
 
 #[cfg(target_os = "macos")]
 use sonicterm_mac::menubar;
+#[cfg(any(target_os = "macos", test))]
+mod default_handlers;
 #[cfg(target_os = "macos")]
 mod executable_classify;
 #[cfg(target_os = "macos")]
@@ -299,7 +301,9 @@ fn main() -> Result<std::process::ExitCode> {
             .with_os_drag_sink(os_drag_mac::MacOsDragSink::arc())
             .with_os_drag_backend(tab_drag_os::MacOsTabDragBackend::boxed())
             .with_on_resumed(on_resumed)
-            .with_on_window_ready(on_window_ready);
+            .with_on_window_ready(on_window_ready)
+            // Only the palette command reaches this backend; installing it changes nothing.
+            .with_default_handlers(Box::new(default_handlers::MacDefaultHandlers::default()));
         if let Some(recorder) = breadcrumb_recorder.clone() {
             shell = shell.with_breadcrumb_recorder(recorder);
         }

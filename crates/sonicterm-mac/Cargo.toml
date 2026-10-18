@@ -44,6 +44,9 @@ objc2-app-kit = { version = "0.3", features = [
     "NSWorkspace",
 ] }
 raw-window-handle = { workspace = true }
+# The default-handler command: completion blocks for NSWorkspace, and the bundle's Info.plist.
+block2 = "0.6"
+roxmltree = "0.21"
 
 [[bin]]
 name = "sonicterm-mac"
