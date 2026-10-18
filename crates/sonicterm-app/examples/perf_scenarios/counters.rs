@@ -177,6 +177,12 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::App, "frame_dispatches"),
     count(Section::App, "frame_dispatch_failed_ns"),
     count(Section::App, "frame_dispatches_failed"),
+    count(Section::App, "hover_lookups"),
+    count(Section::App, "hover_detections"),
+    count(Section::App, "hover_cache_hits"),
+    count(Section::App, "hover_rows_read"),
+    count(Section::App, "path_probes_submitted"),
+    count(Section::App, "quick_select_rows_scanned"),
     histogram(Section::App, "about_to_wait_ms", Unit::Millis, "about_to_wait"),
     histogram(Section::App, "user_event_ms", Unit::Millis, "user_event"),
     histogram(Section::App, "new_events_ms", Unit::Millis, "new_events"),
@@ -303,7 +309,6 @@ impl CounterTotals {
     }
 
     /// The value of contract field `name`.
-    #[cfg(test)]
     pub(crate) fn get(&self, name: &str) -> Option<&FieldValue> {
         let index = FIELDS.iter().position(|field| field.name == name)?;
         self.values[index].as_ref()

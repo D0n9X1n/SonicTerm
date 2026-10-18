@@ -34,7 +34,13 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     spec("S3", "output flood throughput", &["default"], 480, 80),
     spec("S4", "visible streaming output", &["default"], 300, 240),
     spec("S5", "background tab streaming", &["default", "gdi", "wgpu"], 300, 240),
-    spec("S6", "pointer motion", &["default", "flood", "selection-drag"], 300, 240),
+    // S6/rest is capped at 2 short runs a side to keep the shards that list it inside the PR budget; the
+    // exact-head run, read with scripts/perf-critical-path.py, measures its time. A release comparison
+    // runs it uncapped.
+    capped(
+        spec("S6", "pointer motion", &["default", "flood", "selection-drag", "rest"], 300, 240),
+        &[("rest", 2)],
+    ),
     spec("S7", "scrollback wheel", &["default"], 420, 360),
     spec("S8", "search", &["default"], 300, 240),
     spec("S9", "emoji and CJK text", &["default"], 300, 240),
@@ -149,6 +155,10 @@ pub(crate) enum Workload {
     Frames { count: u32, synchronized: bool },
     /// Exit 1 right after GO, printing nothing: `role-exit`, which runs only on Windows.
     ExitAfterGo,
+    /// S6/rest: clear the screen, create the rest target file, print a URL row and that file's
+    /// absolute path, the sentinel on row 4, then stream `date` lines forever inside a scroll region
+    /// that starts below the fixture rows, so the hovered rows never change.
+    RestStream,
 }
 
 /// How a plan's config sets `[appearance].software_render_mode`.
@@ -262,6 +272,97 @@ pub(crate) enum Driver {
     Wheel { hertz: u32, role: usize },
     /// Settle the scene, then inject eight atlas recovery episodes into the main renderer.
     AtlasRetry,
+    /// Rest the pointer on one grid cell, `(row, col)`, repeating the same `CursorMoved` at `hertz`
+    /// as a resting hand's sensor does, never pressing.
+    Park { row: u16, col: u16, hertz: u32 },
+}
+
+/// The grid row S6/rest prints the rest target's absolute path on; its pointer rests here.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const REST_PATH_ROW: u16 = 1;
+/// The first grid row of S6/rest's streaming scroll region, 1-based as DECSTBM takes it: rows
+/// 0 to 4 (the fixture, a blank row and the sentinel) stay fixed above it.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const REST_REGION_TOP: u16 = 6;
+/// The grid row S6/rest's `tail` phase rests on, inside the streaming region.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const REST_TAIL_ROW: u16 = 40;
+
+/// The hover counter deltas over one parked phase, read only while counters are on.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HoverDeltas {
+    pub(crate) detections: u64,
+    pub(crate) cache_hits: u64,
+    pub(crate) probes_submitted: u64,
+}
+
+/// What one parked S6/rest phase observed between its start and its end.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ParkEvidence {
+    pub(crate) presented_frames: u64,
+    pub(crate) streamed_rows_advanced: bool,
+    /// The screen identity, history length, screen and viewport are those the phase started on.
+    pub(crate) screen_unchanged: bool,
+    /// No fixed fixture row was rewritten, a same-value repaint included.
+    pub(crate) fixture_unchanged: bool,
+    pub(crate) pointed_row_changed: bool,
+    /// `None` when counters are off.
+    pub(crate) hover: Option<HoverDeltas>,
+}
+
+/// Whether a parked phase measured what it claims, or why not.
+///
+/// Every parked phase must present frames and see the streamed rows advance, or it measured an
+/// idle screen; its screen and viewport must stay the ones it started on, and a repaint of its
+/// fixture rows makes the run invalid rather than passing. `rest` claims the pointer rests over
+/// unchanged rows, so with counters on it must hit the hover cache and run no detection and
+/// submit no probe after warm-up. `tail` rests on streaming rows, so its pointed row must change
+/// and, with counters on, it must report detections: the cache misses there by design.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) fn park_progress(phase: &str, evidence: &ParkEvidence) -> Result<(), String> {
+    if evidence.presented_frames == 0 {
+        // When: no frame presented, the phase measured nothing the pointer could rest over.
+        return Err(format!("S6/rest phase {phase} presented no frame"));
+    }
+    if !evidence.streamed_rows_advanced {
+        // When: the streamed rows never changed, the scroll region did not stream.
+        return Err(format!("S6/rest phase {phase} saw no streamed row advance"));
+    }
+    if !evidence.screen_unchanged {
+        // When: the screen identity or viewport changed, the rows are not the ones the phase started on.
+        return Err(format!("S6/rest phase {phase} changed its screen or viewport"));
+    }
+    if !evidence.fixture_unchanged {
+        // When: a fixture row was rewritten, the pointer no longer rests over unchanged rows.
+        return Err(format!("S6/rest phase {phase} saw its fixture rows repainted"));
+    }
+    if phase == "tail" {
+        if !evidence.pointed_row_changed {
+            // When: the tail's pointed row never changed, the phase rested on a stationary row.
+            return Err("S6/rest phase tail rested on a row that never changed".to_owned());
+        }
+        if evidence.hover.is_some_and(|hover| hover.detections == 0) {
+            // When: the tail rests on changing rows yet ran no detection, the hover counters are broken.
+            return Err("S6/rest phase tail ran no detection over streaming rows".to_owned());
+        }
+    }
+    if let (true, Some(hover)) = (phase == "rest", evidence.hover) {
+        // When: the rest phase has counters, its warm cache must answer every lookup.
+        if hover.detections > 0 || hover.probes_submitted > 0 {
+            // When: detections or probes_submitted is nonzero, the rest phase did work after warm-up.
+            return Err(format!(
+                "S6/rest phase rest ran {} detections and {} probe submissions after warm-up",
+                hover.detections, hover.probes_submitted
+            ));
+        }
+        if hover.cache_hits == 0 {
+            // When: cache_hits is zero, no lookup reused the warm result.
+            return Err("S6/rest phase rest never hit the hover cache".to_owned());
+        }
+    }
+    Ok(())
 }
 
 /// When a phase ends.
@@ -571,6 +672,37 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             vec![SetupAction::NewTab, SetupAction::NewTab, SetupAction::ActivateTab(0)],
             vec![sweep, idle, end],
         ),
+        // The pointer rests on the path row while rows below stream, then on the streaming rows.
+        ("S6", "rest") => {
+            let park = |row| Driver::Park { row, col: 3, hertz: 30 };
+            (
+                vec![Workload::RestStream],
+                vec![],
+                vec![
+                    print(vec![0]),
+                    Step::Phase(driven(
+                        "warmup",
+                        PhaseKind::Hold,
+                        park(REST_PATH_ROW),
+                        PhaseEnd::Hold(1_000),
+                    )),
+                    Step::Phase(driven(
+                        "rest",
+                        PhaseKind::Sustained,
+                        park(REST_PATH_ROW),
+                        PhaseEnd::Hold(hold(10_000)),
+                    )),
+                    Step::Phase(driven(
+                        "tail",
+                        PhaseKind::Sustained,
+                        park(REST_TAIL_ROW),
+                        PhaseEnd::Hold(hold(10_000)),
+                    )),
+                    idle,
+                    end,
+                ],
+            )
+        }
         ("S6", _) => (
             vec![Workload::PrintThenShell(Fixture::DenseScreen)],
             vec![],

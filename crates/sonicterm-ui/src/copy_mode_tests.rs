@@ -22,13 +22,13 @@ fn blank_grid(cols: u16, rows: u16) -> Grid {
     Grid::new(cols, rows)
 }
 
-// --- QuickSelectState::from_grid + text_for_hint --------------------------
+// --- QuickSelectState::from_viewport + text_for_hint --------------------------
 
 #[test]
 fn from_grid_finds_ascii_url_with_grid_columns() {
     // "see http://a.co" — url starts at col 4, last url char 'o' at col 14.
     let grid = grid_with_line("see http://a.co", 20);
-    let quick_select = QuickSelectState::from_grid(&grid);
+    let quick_select = QuickSelectState::from_viewport(&grid, grid.scrollback_len());
     assert_eq!(quick_select.hints.len(), 1);
     let entry = &quick_select.hints[0];
     assert_eq!(entry.hint, 'a');
@@ -44,7 +44,7 @@ fn from_grid_assigns_sequential_hints_in_visible_order() {
     write(&mut grid, "http://a.com x https://b.org");
     grid.goto(1, 0);
     write(&mut grid, "mailto:c@d.io");
-    let quick_select = QuickSelectState::from_grid(&grid);
+    let quick_select = QuickSelectState::from_viewport(&grid, grid.scrollback_len());
     let seen: Vec<(char, usize, &str)> = quick_select
         .hints
         .iter()
@@ -60,7 +60,7 @@ fn from_grid_assigns_sequential_hints_in_visible_order() {
 fn from_grid_recognizes_all_supported_schemes() {
     for url in ["http://a.co", "https://a.co", "mailto:a@b.co", "file://x/y"] {
         let grid = grid_with_line(url, 40);
-        let quick_select = QuickSelectState::from_grid(&grid);
+        let quick_select = QuickSelectState::from_viewport(&grid, grid.scrollback_len());
         assert_eq!(quick_select.hints.len(), 1, "expected a hint for {url}");
         assert_eq!(quick_select.hints[0].text, url);
     }
@@ -70,7 +70,7 @@ fn from_grid_recognizes_all_supported_schemes() {
 fn from_grid_ignores_unsupported_schemes() {
     for text in ["ftp://a.co", "ws://a.co", "just words", "a.co no scheme"] {
         let grid = grid_with_line(text, 40);
-        let quick_select = QuickSelectState::from_grid(&grid);
+        let quick_select = QuickSelectState::from_viewport(&grid, grid.scrollback_len());
         assert!(quick_select.hints.is_empty(), "did not expect a hint for {text:?}");
     }
 }
@@ -87,7 +87,7 @@ fn from_grid_scans_absolute_rows_with_scrollback_offset() {
     // Now write a URL into the (blank) first visible row.
     grid.goto(0, 0);
     write(&mut grid, "http://x.io");
-    let quick_select = QuickSelectState::from_grid(&grid);
+    let quick_select = QuickSelectState::from_viewport(&grid, grid.scrollback_len());
     assert_eq!(quick_select.hints.len(), 1);
     // Row is scrollback-absolute: first visible row == scrollback_len().
     assert_eq!(quick_select.hints[0].row, grid.scrollback_len());
@@ -100,10 +100,28 @@ fn from_grid_caps_at_26_hints() {
         grid.goto(row, 0);
         write(&mut grid, "http://a.com");
     }
-    let quick_select = QuickSelectState::from_grid(&grid);
+    let quick_select = QuickSelectState::from_viewport(&grid, grid.scrollback_len());
     assert_eq!(quick_select.hints.len(), 26);
     assert_eq!(quick_select.hints.first().unwrap().hint, 'a');
     assert_eq!(quick_select.hints.last().unwrap().hint, 'z');
+}
+
+/// The scan reports the rows it read, not the viewport's height: it stops at the row holding the
+/// 27th URL, so the rows after it are never visited and never counted.
+#[test]
+fn scan_viewport_counts_only_the_rows_it_visited() {
+    let mut grid = Grid::new(12, 40);
+    for row in 0..30u16 {
+        grid.goto(row, 0);
+        write(&mut grid, "http://a.com");
+    }
+    let (quick_select, rows_visited) =
+        QuickSelectState::scan_viewport(&grid, grid.scrollback_len());
+    assert_eq!(quick_select.hints.len(), 26);
+    assert_eq!(rows_visited, 27, "rows 0..=26 were read; the 27th URL's row ends the scan");
+    // A viewport with fewer URLs than hints reads every displayed row.
+    let (_, short_rows) = QuickSelectState::scan_viewport(&blank_grid(12, 5), 0);
+    assert_eq!(short_rows, 5);
 }
 
 #[test]
@@ -112,7 +130,7 @@ fn from_grid_maps_columns_across_leading_wide_cell() {
     // but only one `char`. The URL 'h' therefore sits at grid column 2.
     // A char-count mapping would report col_start = 1 — the regression.
     let grid = grid_with_line("中http://a.co", 20);
-    let quick_select = QuickSelectState::from_grid(&grid);
+    let quick_select = QuickSelectState::from_viewport(&grid, grid.scrollback_len());
     assert_eq!(quick_select.hints.len(), 1);
     let entry = &quick_select.hints[0];
     assert_eq!(entry.text, "http://a.co");
@@ -127,7 +145,7 @@ fn from_grid_maps_columns_across_leading_combining_mark() {
     // extras) but TWO chars / three bytes. The URL 'h' sits at grid
     // column 1. A byte/char mapping would over-count and report col 2.
     let grid = grid_with_line("e\u{0301}http://a.co", 20);
-    let quick_select = QuickSelectState::from_grid(&grid);
+    let quick_select = QuickSelectState::from_viewport(&grid, grid.scrollback_len());
     assert_eq!(quick_select.hints.len(), 1);
     let entry = &quick_select.hints[0];
     assert_eq!(entry.text, "http://a.co");
@@ -138,7 +156,7 @@ fn from_grid_maps_columns_across_leading_combining_mark() {
 #[test]
 fn text_for_hint_is_case_insensitive_and_misses_are_none() {
     let grid = grid_with_line("http://a.co", 20);
-    let quick_select = QuickSelectState::from_grid(&grid);
+    let quick_select = QuickSelectState::from_viewport(&grid, grid.scrollback_len());
     assert_eq!(quick_select.text_for_hint('a'), Some("http://a.co"));
     assert_eq!(quick_select.text_for_hint('A'), Some("http://a.co"));
     assert_eq!(quick_select.text_for_hint('b'), None);
@@ -298,7 +316,7 @@ fn quick_select_lifecycle_set_query_clear() {
     let mut state = CopyModeState::new_at((0, 0));
     assert!(state.quick_select.is_none());
 
-    state.quick_select = Some(QuickSelectState::from_grid(&grid));
+    state.quick_select = Some(QuickSelectState::from_viewport(&grid, grid.scrollback_len()));
     let quick_select = state.quick_select.as_ref().unwrap();
     assert_eq!(quick_select.hints.len(), 1);
     assert_eq!(quick_select.text_for_hint('a'), Some("http://a.co"));
@@ -359,7 +377,7 @@ fn quick_select_shape_has_no_anchor_or_range() {
     let grid = grid_with_line("http://a.co", 20);
     // The shape entering quick select builds: not read-only, hints attached.
     let mut state = CopyModeState::new_at((0, grid.scrollback_len()));
-    state.quick_select = Some(QuickSelectState::from_grid(&grid));
+    state.quick_select = Some(QuickSelectState::from_viewport(&grid, grid.scrollback_len()));
 
     assert!(!state.is_read_only());
     assert_eq!(state.quick_select.as_ref().unwrap().hints.len(), 1);
@@ -376,7 +394,7 @@ fn quick_select_shape_has_no_anchor_or_range() {
 #[test]
 fn quick_select_text_is_a_snapshot_immune_to_later_grid_writes() {
     let mut grid = grid_with_line("http://a.co", 20);
-    let captured = QuickSelectState::from_grid(&grid);
+    let captured = QuickSelectState::from_viewport(&grid, grid.scrollback_len());
     assert_eq!(captured.text_for_hint('a'), Some("http://a.co"));
 
     // The pane keeps producing output: overwrite the scanned row in place.
@@ -384,7 +402,10 @@ fn quick_select_text_is_a_snapshot_immune_to_later_grid_writes() {
     write(&mut grid, "http://b.co");
 
     // A fresh scan sees the new text, so the grid really did change...
-    assert_eq!(QuickSelectState::from_grid(&grid).text_for_hint('a'), Some("http://b.co"));
+    assert_eq!(
+        QuickSelectState::from_viewport(&grid, grid.scrollback_len()).text_for_hint('a'),
+        Some("http://b.co")
+    );
     // ...while the captured snapshot still yields what it scanned.
     assert_eq!(captured.text_for_hint('a'), Some("http://a.co"));
     assert_eq!(captured.hints[0].text, "http://a.co");
@@ -394,7 +415,7 @@ fn quick_select_text_is_a_snapshot_immune_to_later_grid_writes() {
 fn quick_select_text_survives_scrollback_shift() {
     let mut grid = Grid::new(20, 2);
     write(&mut grid, "http://a.co");
-    let captured = QuickSelectState::from_grid(&grid);
+    let captured = QuickSelectState::from_viewport(&grid, grid.scrollback_len());
     assert_eq!(captured.hints[0].row, 0);
 
     // Output scrolls the scanned row out of the visible window.
@@ -402,6 +423,71 @@ fn quick_select_text_survives_scrollback_shift() {
     assert_eq!(grid.scrollback_len(), 1);
 
     // The hint's row is stale now, but the text it copies is intact.
-    assert!(QuickSelectState::from_grid(&grid).hints.is_empty());
+    assert!(QuickSelectState::from_viewport(&grid, grid.scrollback_len()).hints.is_empty());
     assert_eq!(captured.text_for_hint('a'), Some("http://a.co"));
+}
+
+/// On a scrolled-back view quick select labels only the URLs on the displayed rows, history ones
+/// included, at their scrollback-absolute rows and grid columns; the live screen's URL, which is
+/// not displayed, gets no hint. On the live view the same grid labels only the live screen's.
+#[test]
+fn from_viewport_labels_only_the_displayed_rows() {
+    let mut grid = Grid::new(30, 2);
+    for line in ["old http://h.co", "plain", "mid https://m.io", "live http://l.co"] {
+        write(&mut grid, line);
+        grid.carriage_return();
+        grid.linefeed();
+    }
+    // Rows 0..3 are history (the last linefeed scrolled one more); the screen shows the rest.
+    let history_rows = grid.scrollback_len();
+    assert!(history_rows >= 3, "the fixture scrolls rows into history");
+    let scrolled = QuickSelectState::from_viewport(&grid, 1);
+    let seen: Vec<(usize, usize, &str)> =
+        scrolled.hints.iter().map(|hint| (hint.row, hint.col_start, hint.text.as_str())).collect();
+    assert_eq!(seen, vec![(2, 4, "https://m.io")], "row 1 is plain, row 2 holds the history URL");
+    let top = QuickSelectState::from_viewport(&grid, 0);
+    assert_eq!(top.hints[0].text, "http://h.co");
+    assert_eq!((top.hints[0].row, top.hints[0].col_start), (0, 4));
+    let live = QuickSelectState::from_viewport(&grid, history_rows);
+    assert!(live.hints.iter().all(|hint| hint.row >= history_rows), "{:?}", live.hints);
+    assert!(!live.hints.iter().any(|hint| hint.text == "https://m.io"));
+}
+
+/// Hint rows are scrollback-relative, so a history eviction after the scan moves every hint's
+/// content up one row: `hint_row_now` follows it to the row that still holds the hint's text, and
+/// a hint whose own row was evicted has no row left to draw on.
+#[test]
+fn hint_rows_follow_history_eviction_after_the_scan() {
+    let mut grid = Grid::new(30, 2);
+    grid.set_scrollback_limit(3);
+    // "one" is evicted while writing, so history holds the two URL rows and "four"; the view at
+    // row 0 shows both URL rows.
+    for line in ["one", "two http://a.co", "three http://b.co", "four", "five"] {
+        write(&mut grid, line);
+        grid.carriage_return();
+        grid.linefeed();
+    }
+    let quick_select = QuickSelectState::from_viewport(&grid, 0);
+    assert_eq!(quick_select.scrollback_evicted, grid.scrollback_evicted());
+    let row_text = |grid: &Grid, row: usize| -> String {
+        grid.row_at_abs(row as u64).unwrap().iter().map(|cell| cell.ch).collect()
+    };
+    let hint = quick_select.hints.first().expect("a hint on the top history row");
+    assert!(row_text(&grid, hint.row).contains(&hint.text));
+    write(&mut grid, "six");
+    grid.carriage_return();
+    grid.linefeed();
+    let evicted = grid.scrollback_evicted();
+    assert_eq!(evicted, quick_select.scrollback_evicted + 1, "one more row evicted");
+    for hint in &quick_select.hints {
+        // When: the hint's own row was evicted, it has no row; otherwise its text is still there.
+        match quick_select.hint_row_now(hint, evicted) {
+            Some(row) => assert!(row_text(&grid, row).contains(&hint.text), "{hint:?}"),
+            None => assert_eq!(hint.row, 0, "only a top-row hint can be evicted"),
+        }
+    }
+    let survivor = quick_select.hints.iter().find(|hint| hint.row > 0).expect("a hint survives");
+    // The scan-time row now holds other text: drawing at it would label the wrong row.
+    assert!(!row_text(&grid, survivor.row).contains(&survivor.text));
+    assert_eq!(quick_select.hint_row_now(&quick_select.hints[0], evicted), None);
 }

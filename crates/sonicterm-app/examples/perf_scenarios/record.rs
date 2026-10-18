@@ -10,7 +10,10 @@ use serde_json::{json, Map, Value};
 use sonicterm_grid::grid::Grid;
 use sonicterm_ui::selection::plain_text_from_grid_range;
 
-use crate::scenarios::{Host, Presentation};
+use crate::scenarios::{
+    Host, HoverDeltas, ParkEvidence, Presentation, Workload, REST_PATH_ROW, REST_REGION_TOP,
+};
+use crate::workload::{REST_TARGET_NAME, REST_URL};
 
 use crate::counters::{CounterTotals, CountersMode};
 
@@ -861,6 +864,153 @@ pub(crate) fn line_row_near_cursor(grid: &Grid, text: &str, rows_above: u16) -> 
             .all(|(index, expected)| line.get(index).is_some_and(|cell| cell.ch == expected))
     })?;
     Some(grid.scrollback_evicted() + grid.scrollback_len() as u64 + u64::from(found))
+}
+
+/// The lifetime-absolute number of the first displayed row that starts with `text`, searched over
+/// the whole screen rather than near the cursor.
+pub(crate) fn line_row_on_screen(grid: &Grid, text: &str) -> Option<u64> {
+    let found = (0..grid.rows).find(|row| {
+        let line = grid.row(*row);
+        text.chars()
+            .enumerate()
+            .all(|(index, expected)| line.get(index).is_some_and(|cell| cell.ch == expected))
+    })?;
+    Some(grid.scrollback_evicted() + grid.scrollback_len() as u64 + u64::from(found))
+}
+
+/// Where `workload`'s completion sentinel `text` is, on `host`. Most workloads print the sentinel
+/// last, so it lies a few rows above the cursor. S6/rest prints it on a fixed fixture row and then
+/// moves the cursor to the bottom of its streaming region, possibly in the same parser batch, so its
+/// sentinel is searched over the whole screen; the run's nonce makes that line unique.
+pub(crate) fn sentinel_row(grid: &Grid, text: &str, workload: Workload, host: Host) -> Option<u64> {
+    if workload == Workload::RestStream {
+        // When: `workload` is RestStream, its sentinel row is fixed while the cursor has moved away.
+        return line_row_on_screen(grid, text);
+    }
+    line_row_near_cursor(grid, text, protocol_rows(host))
+}
+
+/// What a parked S6/rest phase sees of role 0's pane: the screen's identity, the content stamps of
+/// the fixed fixture rows above the streaming region, and the stamp of the row the pointer rests on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ParkSnapshot {
+    /// Eviction, screen incarnation and size generation; any change renumbers or replaces rows.
+    pub(crate) identity: RowIdentity,
+    /// History rows; a scroll region below the fixture never adds one.
+    pub(crate) scrollback_len: usize,
+    pub(crate) alt_screen: bool,
+    /// The pane's pinned viewport top; `None` follows the live screen.
+    pub(crate) viewport: Option<u64>,
+    /// The grid's whole-content stamp, which the streaming region advances.
+    pub(crate) content_seq: u64,
+    /// Content stamps of the fixed rows above `REST_REGION_TOP`, top first.
+    pub(crate) fixture_stamps: Vec<Option<u64>>,
+    /// The displayed row the pointer rests on, and its content stamp.
+    pub(crate) pointed_row: u16,
+    pub(crate) pointed_stamp: Option<u64>,
+}
+
+impl ParkSnapshot {
+    /// The evidence a parked phase leaves when it started at `self` and ended at `end`.
+    pub(crate) fn evidence(
+        &self,
+        end: &Self,
+        presented_frames: u64,
+        hover: Option<HoverDeltas>,
+    ) -> ParkEvidence {
+        ParkEvidence {
+            presented_frames,
+            streamed_rows_advanced: end.content_seq > self.content_seq,
+            screen_unchanged: (self.identity, self.scrollback_len, self.alt_screen, self.viewport)
+                == (end.identity, end.scrollback_len, end.alt_screen, end.viewport),
+            fixture_unchanged: self.fixture_stamps == end.fixture_stamps,
+            pointed_row_changed: self.pointed_stamp != end.pointed_stamp,
+            hover,
+        }
+    }
+}
+
+/// Snapshot role 0's `grid`, shown at `viewport`, with the pointer resting on displayed row `pointed_row`.
+pub(crate) fn park_snapshot(grid: &Grid, viewport: Option<u64>, pointed_row: u16) -> ParkSnapshot {
+    let live_top = grid.scrollback_len() as u64;
+    let stamp = |row: u16| grid.row_content_seq_at_abs(live_top + u64::from(row));
+    ParkSnapshot {
+        identity: prompt_identity(grid),
+        scrollback_len: grid.scrollback_len(),
+        alt_screen: grid.is_alt(),
+        viewport,
+        content_seq: grid.content_seq(),
+        fixture_stamps: (0..REST_REGION_TOP - 1).map(stamp).collect(),
+        pointed_row,
+        pointed_stamp: stamp(pointed_row),
+    }
+}
+
+/// Displayed row `row` of `grid` as text, trailing blanks removed; empty past the screen.
+fn displayed_row_text(grid: &Grid, row: u16) -> String {
+    if row >= grid.rows {
+        // When: `row` is past the screen, there is no text to read.
+        return String::new();
+    }
+    let text: String = grid.row(row).iter().map(|cell| cell.ch).collect();
+    text.trim_end().to_owned()
+}
+
+/// Why a parked S6/rest phase cannot measure what it claims, checked as it starts; `None` when it
+/// can. The fixture must be displayed on the live primary screen (the URL, the target's path, a
+/// blank row, then `sentinel`), and the pointer must resolve to `expected`, the phase's cell:
+/// a non-blank path cell for `warmup` and `rest`, a streaming-region row for `tail`. `pointed` is
+/// the cell of role 0's pane the parked point resolves to, `None` when it resolves to none.
+pub(crate) fn park_entry_problem(
+    phase: &str,
+    grid: &Grid,
+    viewport: Option<u64>,
+    sentinel: &str,
+    pointed: Option<(u16, u16)>,
+    expected: (u16, u16),
+) -> Option<String> {
+    if grid.is_alt() {
+        // When: the alternate screen is up, the fixture's primary-screen rows are not displayed.
+        return Some(format!("S6/rest phase {phase} started on the alternate screen"));
+    }
+    if viewport.is_some_and(|top| top < grid.scrollback_len() as u64) {
+        // When: the view is scrolled back, the displayed rows are history, not the fixture.
+        return Some(format!("S6/rest phase {phase} started scrolled back"));
+    }
+    let fixture = [
+        displayed_row_text(grid, 0) == REST_URL,
+        displayed_row_text(grid, REST_PATH_ROW).ends_with(REST_TARGET_NAME),
+        displayed_row_text(grid, REST_PATH_ROW + 1).is_empty(),
+        displayed_row_text(grid, REST_PATH_ROW + 2) == sentinel,
+    ];
+    if fixture.contains(&false) {
+        // When: any fixture row differs from what the workload printed, the scene is not the fixture.
+        return Some(format!("S6/rest phase {phase} does not display its fixture"));
+    }
+    let (expected_row, expected_col) = expected;
+    if expected_row >= grid.rows || expected_col >= grid.cols {
+        // When: the phase's cell lies outside the grid, no pointer can rest on it.
+        return Some(format!("S6/rest phase {phase} parks outside the grid at {expected:?}"));
+    }
+    if pointed != Some(expected) {
+        // When: `pointed` is not the phase's cell, the pointer rests somewhere else, or nowhere.
+        return Some(format!(
+            "S6/rest phase {phase} pointer resolves to {pointed:?}, not role 0's cell {expected:?}"
+        ));
+    }
+    let on_target = if phase == "tail" {
+        expected_row >= REST_REGION_TOP - 1
+    } else {
+        // When: the phase is warmup or rest, the pointer must rest on the path's text.
+        expected_row == REST_PATH_ROW
+            && grid
+                .row(expected_row)
+                .get(usize::from(expected_col))
+                .is_some_and(|cell| cell.ch != ' ')
+    };
+    // When: `on_target` is false, the pointed cell is not the one the phase measures.
+    (!on_target)
+        .then(|| format!("S6/rest phase {phase} pointer cell {expected:?} is not its target"))
 }
 
 /// Why the rows strictly between the READY row and the sentinel's row are not the `planned_rows`

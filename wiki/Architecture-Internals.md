@@ -315,6 +315,38 @@ correctness, not only speed.
   drops modifier-only feedback when the modifier is released, and requests a
   source-window redraw. Main and child frames resolve hover from their held parser
   snapshots before presentation.
+  URL and path detection reads rows only through `FrameRows`, which serves the
+  displayed frame `[view_top, view_top + rows)` and nothing else, not even the wrap
+  flag or pane-border glyph of the row just above or below it. A wrap, border
+  inference or target that touches a frame edge fails closed where the unread row
+  could change the result: on a scrolled-back view a bottom-row segment reaching the
+  grid's edge leaves its chain `Incomplete` (on the primary screen every segment spans
+  the row, so every plain-text target whose chain reaches the bottom row is refused),
+  and the hard-wrap pre-pass treats that boundary as possibly wrapped. `rows_below` answers from the row count alone.
+  Each window keeps one `HoverDetectionCache` entry: the detection's key (pane,
+  pointed cell, `view_top`, `rows_below`, `scrollback_evicted`, `screen_epoch`,
+  `size_generation`, alternate screen, OSC 7 CWD revision and the three
+  `clickable_*` settings) and the content stamp of every row in the span detection
+  read. A hover lookup whose key and stamps all match returns the cached result,
+  `PathProbeKey` and row fingerprints included, without reading a cell or hashing a
+  row; any difference detects again and recomputes the fingerprints, so a same-value
+  repaint, which advances a stamp, yields an equal key and keeps authorization. The
+  cache gates the scan only: `apply_target_hover` runs on every lookup, so modifier
+  changes, probe completions, previews and frontmost state still apply. Cursor leave,
+  `invalidate_path_hover` (pane removal or transfer, config reload, focus, resize and
+  palette) and window close drop the entry; theme changes do not. A click never uses
+  the cache: it computes its own fresh target.
+  A detection run that does happen is linear in the rows it reads with a bounded
+  multiplier. The structural bracket parse reads its prefix once as it advances
+  (`PrefixScan`) instead of rescanning from its floor at every pair; the URI-wins
+  check scans only the run of URL-body bytes around the pointer (`find_url_at`) and
+  the overlap check only the hard-delimited segment; span mapping binary-searches the
+  ordered scalars; the hard-wrap pre-pass reads a scheme into a fixed buffer; the
+  chain stops gathering cells past what the 16 KiB cap refuses; and the hit test
+  binary-searches snapped column edges without building them. The `frame_counters`
+  hover fields (`hover_lookups`, `hover_detections`, `hover_cache_hits`,
+  `hover_rows_read`, `path_probes_submitted`, `quick_select_rows_scanned`) measure
+  this, and the `S6/rest` perf variant exercises it.
   Each window retains at most one current-epoch filesystem-probe completion and
   requests a frame to validate it against a fresh target, rather than discarding
   it during parser contention. Clicks always require a fresh lookup, never

@@ -814,6 +814,25 @@ pub(crate) struct AppFrameCounters {
     pub(crate) next_s10_arming: u64,
     /// Raw guard-correlation records: every pane's section log, the UI span store and the take sequence.
     pub(crate) correlation: super::guard_correlation::GuardCorrelation,
+    /// URL and path hover work on the event-loop thread.
+    pub(crate) hover: HoverCounters,
+}
+
+/// URL and path detection work on the event-loop thread, cumulative for the App's lifetime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HoverCounters {
+    /// Hover lookups that reached a pane cell, from a frame or a pointer or modifier event.
+    pub(crate) lookups: u64,
+    /// Lookups that ran text detection.
+    pub(crate) detections: u64,
+    /// Lookups answered from the window's detection cache without running detection.
+    pub(crate) cache_hits: u64,
+    /// Rows detection read, a repeated read of one row counting each time.
+    pub(crate) rows_read: u64,
+    /// Openability probes hover submitted to the probe worker.
+    pub(crate) probes_submitted: u64,
+    /// Rows quick select scanned for URLs.
+    pub(crate) quick_select_rows_scanned: u64,
 }
 
 /// A retired window's counters, held until the dispatch that closed it has been timed.
@@ -862,6 +881,7 @@ impl AppFrameCounters {
             s10_watches: std::collections::HashMap::new(),
             next_s10_arming: 1,
             correlation: super::guard_correlation::GuardCorrelation::new(),
+            hover: HoverCounters::default(),
         }
     }
 
@@ -931,7 +951,7 @@ impl super::App {
     /// Count a `new_events` wake by its cause.
     pub(super) fn note_frame_wake(&mut self, cause: &winit::event::StartCause) {
         if let Some(counters) = self.frame_counters.as_mut() {
-            // the gate is on, every wake counts; none authorizes a line by itself.
+            // The gate is on, so every wake counts; none authorizes a line by itself.
             counters.note_wake(cause);
         }
     }
@@ -939,8 +959,16 @@ impl super::App {
     /// Count a `user_event` wake.
     pub(super) fn note_frame_user_wake(&mut self) {
         if let Some(counters) = self.frame_counters.as_mut() {
-            // the gate is on, every user event counts.
+            // The gate is on, so every user event counts.
             counters.wake_user += 1;
+        }
+    }
+
+    /// Apply `update` to the hover counters, when the gate is on; nothing runs when it is off.
+    pub(super) fn note_hover(&mut self, update: impl FnOnce(&mut HoverCounters)) {
+        if let Some(counters) = self.frame_counters.as_mut() {
+            // The gate is on, so the hover work is counted.
+            update(&mut counters.hover);
         }
     }
 
@@ -1583,6 +1611,12 @@ impl AppFrameCounters {
             ("wake_wait_cancelled", self.wake_wait_cancelled),
             ("wake_resume_time", self.wake_resume_time),
             ("wake_user", self.wake_user),
+            ("hover_lookups", self.hover.lookups),
+            ("hover_detections", self.hover.detections),
+            ("hover_cache_hits", self.hover.cache_hits),
+            ("hover_rows_read", self.hover.rows_read),
+            ("path_probes_submitted", self.hover.probes_submitted),
+            ("quick_select_rows_scanned", self.hover.quick_select_rows_scanned),
         ] {
             record.push_count(name, value);
         }

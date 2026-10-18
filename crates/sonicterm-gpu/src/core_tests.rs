@@ -8493,3 +8493,234 @@ fn an_oversize_ascii_fallback_tile_draws_nothing_and_its_row_is_cached() {
     assert!(drawn.glyphs.is_empty(), "the oversize tile draws no glyph");
     assert!(rig.cache.contains(7, drawn.key), "the row stays complete and is cached");
 }
+
+/// The allocation-free hit test equals the edge-vector scan for every pixel across panes with
+/// fractional origins and cell widths, including padding on both sides and exact boundaries.
+#[test]
+fn snapped_col_at_matches_the_edge_vector_scan() {
+    for (origin_x, cell_w, cols) in [(10.0, 7.5, 8), (0.0, 8.25, 120), (3.3, 9.7, 1), (5.0, 7.0, 0)]
+    {
+        let edges = build_snapped_cell_x(origin_x, cell_w, cols);
+        let right = origin_x + cell_w * f32::from(cols) + 4.0;
+        let mut px = origin_x - 4.0;
+        while px <= right {
+            assert_eq!(
+                snapped_col_at(px, origin_x, cell_w, cols),
+                pixel_to_local_col(px, &edges, cols),
+                "origin {origin_x} width {cell_w} cols {cols} px {px}"
+            );
+            px += 0.25;
+        }
+        for edge in &edges {
+            assert_eq!(
+                snapped_col_at(*edge, origin_x, cell_w, cols),
+                pixel_to_local_col(*edge, &edges, cols)
+            );
+        }
+    }
+}
+
+/// A quick-select hint is placed relative to the displayed viewport's top, so on a scrolled-back
+/// view a history hint lands on its displayed row, and a row above or below the view draws nothing.
+/// Placing it from the live top instead put a history hint off screen.
+#[test]
+fn quick_select_hints_map_to_the_displayed_viewport_row() {
+    assert_eq!(quick_select_viewport_row(12, 10, 5), Some(2));
+    assert_eq!(quick_select_viewport_row(10, 10, 5), Some(0));
+    assert_eq!(quick_select_viewport_row(14, 10, 5), Some(4));
+    assert_eq!(quick_select_viewport_row(9, 10, 5), None, "above the view");
+    assert_eq!(quick_select_viewport_row(15, 10, 5), None, "below the view");
+}
+
+/// A quick-select hint after one more history row is evicted draws one displayed row higher, on
+/// the row that still holds its text, and a hint whose own row was evicted draws nothing.
+#[test]
+fn quick_select_hints_follow_history_eviction_to_their_displayed_row() {
+    let hint_at = |letter: char, row: usize| QuickSelectHint {
+        hint: letter,
+        row,
+        col_start: 0,
+        col_end: 3,
+        text: "https://a.co".to_string(),
+    };
+    let quick_select = QuickSelectState {
+        hints: vec![hint_at('a', 0), hint_at('b', 12), hint_at('c', 10)],
+        scrollback_evicted: 5,
+    };
+    let (view_top_abs, visible_rows) = (8, 5);
+    let display_row = |hint_index: usize, scrollback_evicted: u64| {
+        quick_select_hint_display_row(
+            &quick_select,
+            &quick_select.hints[hint_index],
+            scrollback_evicted,
+            view_top_abs,
+            visible_rows,
+        )
+    };
+    assert_eq!(display_row(1, 5), Some(4), "no eviction since the scan keeps the scan row");
+    assert_eq!(display_row(1, 6), Some(3), "one eviction moves the hint up one row");
+    assert_eq!(display_row(2, 7), Some(0), "two evictions move it up two rows");
+    assert_eq!(display_row(0, 6), None, "a hint whose own row was evicted draws nothing");
+    assert_eq!(display_row(2, 8), None, "a hint moved above the view draws nothing");
+}
+
+/// With the viewport at the top of the grid, so no clipping can hide it, a hint whose own row is
+/// evicted draws nothing rather than being clamped onto row 0, and the hint below it moves up into
+/// row 0. A placement that saturated the eviction shift at row 0 would draw the evicted hint there.
+#[test]
+fn an_evicted_quick_select_hint_is_suppressed_even_at_the_viewport_top() {
+    let hint_at = |letter: char, row: usize| QuickSelectHint {
+        hint: letter,
+        row,
+        col_start: 0,
+        col_end: 3,
+        text: "https://a.co".to_string(),
+    };
+    let quick_select =
+        QuickSelectState { hints: vec![hint_at('a', 0), hint_at('b', 1)], scrollback_evicted: 5 };
+    let (view_top_abs, visible_rows) = (0, 5);
+    let display_row = |hint_index: usize, scrollback_evicted: u64| {
+        quick_select_hint_display_row(
+            &quick_select,
+            &quick_select.hints[hint_index],
+            scrollback_evicted,
+            view_top_abs,
+            visible_rows,
+        )
+    };
+    assert_eq!(display_row(0, 5), Some(0), "before any eviction the hint draws on row 0");
+    assert_eq!(display_row(1, 5), Some(1));
+    assert_eq!(display_row(0, 6), None, "its own row evicted, the hint draws nothing");
+    assert_eq!(display_row(1, 6), Some(0), "the surviving hint moves up into row 0");
+}
+
+/// Every way the quick-select draw sites in `source`, a copy of `core.rs`, fail to place a hint
+/// through `quick_select_hint_display_row`, each named by its site; empty when both comply.
+///
+/// Comments and literal contents are blanked and tokens are matched whatever the layout, so a name
+/// in prose or a string neither satisfies nor fails the check, and a read split across lines is
+/// still seen. The background site is the body of `prepare_quick_select_overlay`; the letter site
+/// is the block `render` runs when `quick_select_hint_count > 0`.
+fn quick_select_placement_violations(source: &str) -> Vec<String> {
+    use crate::source_scan::{block_span, code_only, token_matches};
+    let code = code_only(&source.replace("\r\n", "\n"));
+    let Some(helper_start) =
+        token_matches(&code, "pub fn quick_select_hint_display_row(").first().copied()
+    else {
+        // When: the helper is gone, no site can place a hint through it.
+        return vec!["the placement helper quick_select_hint_display_row is missing".to_string()];
+    };
+    let mut violations = Vec::new();
+    for (site, anchor) in [
+        ("background", "fn prepare_quick_select_overlay("),
+        ("letter", "if quick_select_hint_count > 0"),
+    ] {
+        let anchor_offsets = token_matches(&code, anchor);
+        let [anchor_offset] = anchor_offsets[..] else {
+            // When: the anchor is missing or repeated, the site cannot be told apart; fail closed.
+            violations.push(format!("{site}: expected one `{anchor}`, found {anchor_offsets:?}"));
+            continue;
+        };
+        let Some(site_span) = block_span(&code, anchor_offset) else {
+            // When: the site's block never closes, its body cannot be checked; fail closed.
+            violations.push(format!("{site}: the block after `{anchor}` never closes"));
+            continue;
+        };
+        let body = &code[site_span];
+        let helper_calls = token_matches(body, "quick_select_hint_display_row(").len();
+        if helper_calls != 1 {
+            // When: the site does not place its hints through exactly one helper call, report it.
+            violations.push(format!("{site}: {helper_calls} placement-helper calls, expected 1"));
+        }
+        for raw_placement in ["hint.row", "hint_row_now("] {
+            if !token_matches(body, raw_placement).is_empty() {
+                // When: the site reads the scan-time row or shifts it itself, it bypasses the helper.
+                violations.push(format!("{site}: reads `{raw_placement}` directly"));
+            }
+        }
+    }
+    let helper_span = block_span(&code, helper_start).unwrap_or(helper_start..code.len());
+    let outside_helper = format!("{}{}", &code[..helper_start], &code[helper_span.end..]);
+    if !token_matches(&outside_helper, "hint_row_now(").is_empty() {
+        // When: code outside the helper shifts a hint for eviction, a third placement exists.
+        violations.push("hint_row_now is called outside the placement helper".to_string());
+    }
+    violations
+}
+
+/// A minimal `core.rs` stand-in whose two draw sites both comply. The background site follows a
+/// string holding `//`, so a check that took the URL for a comment would lose its helper call.
+const COMPLIANT_PLACEMENT_FIXTURE: &str = r#"
+pub fn quick_select_hint_display_row(qs: &Q, hint: &H, evicted: u64) -> Option<usize> {
+    qs.hint_row_now(hint, evicted).and_then(|row| quick_select_viewport_row(row))
+}
+fn prepare_quick_select_overlay(&mut self, quick_select: &Q) {
+    for hint in &quick_select.hints {
+        let link = "https://a.co"; let Some(visible_row) = quick_select_hint_display_row(
+            quick_select, hint, evicted,
+        ) else {
+            continue;
+        };
+        draw_background(hint.col_start, visible_row, '{');
+    }
+}
+fn render(&mut self) {
+    if quick_select_hint_count > 0 {
+        for hint in &qs.hints {
+            // Prose may name hint.row and hint_row_now( without counting.
+            let Some(visible_row) = quick_select_hint_display_row(qs, hint, evicted) else {
+                continue;
+            };
+            draw_letter(hint.hint, hint.col_start, visible_row, "hint.row");
+        }
+    }
+}
+"#;
+
+/// The placement check accepts compliant draw sites even when a string holds `//` or a brace and
+/// prose or a literal names the raw row, and it accepts the production renderer.
+#[test]
+fn quick_select_placement_check_accepts_compliant_sites() {
+    assert_eq!(
+        quick_select_placement_violations(COMPLIANT_PLACEMENT_FIXTURE),
+        Vec::<String>::new()
+    );
+    assert_eq!(quick_select_placement_violations(include_str!("core.rs")), Vec::<String>::new());
+}
+
+/// The placement check names the site that bypasses the helper: a raw read split across lines, a
+/// helper call that survives only in a comment or string, an eviction shift outside the helper,
+/// and a missing site all fail it.
+#[test]
+fn quick_select_placement_check_names_each_bypassing_site() {
+    let letter_raw_read = COMPLIANT_PLACEMENT_FIXTURE.replace(
+        "draw_letter(hint.hint, hint.col_start, visible_row,",
+        "draw_letter(hint.hint, hint.col_start, hint\n                .row,",
+    );
+    assert_eq!(
+        quick_select_placement_violations(&letter_raw_read),
+        vec!["letter: reads `hint.row` directly".to_string()]
+    );
+    let background_in_prose_only = COMPLIANT_PLACEMENT_FIXTURE.replace(
+        "let Some(visible_row) = quick_select_hint_display_row(\n            quick_select, hint, evicted,\n        ) else {\n            continue;\n        };",
+        "/* quick_select_hint_display_row( */ let label = \"quick_select_hint_display_row(\";\n        let visible_row = hint.row;",
+    );
+    assert_eq!(
+        quick_select_placement_violations(&background_in_prose_only),
+        vec![
+            "background: 0 placement-helper calls, expected 1".to_string(),
+            "background: reads `hint.row` directly".to_string(),
+        ]
+    );
+    let shifted_outside_helper = COMPLIANT_PLACEMENT_FIXTURE.replace(
+        "fn render(&mut self) {",
+        "fn render(&mut self) {\n    let _ = qs.hint_row_now(hint, 0);",
+    );
+    assert_eq!(
+        quick_select_placement_violations(&shifted_outside_helper),
+        vec!["hint_row_now is called outside the placement helper".to_string()]
+    );
+    let letter_site_removed =
+        COMPLIANT_PLACEMENT_FIXTURE.replace("if quick_select_hint_count > 0", "if true");
+    assert_eq!(quick_select_placement_violations(&letter_site_removed).len(), 1);
+}

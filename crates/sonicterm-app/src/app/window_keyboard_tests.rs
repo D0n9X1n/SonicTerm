@@ -1056,6 +1056,7 @@ fn copy_quick_select_owns_hints_before_safe_bindings() {
                 col_end: 3,
                 text: "hint".into(),
             }],
+            scrollback_evicted: 0,
         });
         app.windows.get_mut(&owner).unwrap().copy_mode = Some(copy);
         assert!(!app.copy_mode_allows_keymap(owner));

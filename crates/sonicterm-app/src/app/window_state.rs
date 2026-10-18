@@ -157,6 +157,8 @@ pub struct WindowState {
     pub link_preview: Option<sonicterm_render_model::inputs::LinkPreview>,
     /// Epoch-guarded openability decision for the local target under this pointer.
     pub(in crate::app) path_probe: path_target::PathProbeState,
+    /// The last hover detection, reused while its key and the rows it read are unchanged.
+    pub(in crate::app) hover_detection: path_target::HoverDetectionCache,
     pub notification: Option<NotificationBubble>,
     /// "this window is hidden / drained" latch.
     /// Promoted from the App-level `main_hidden` bool so the visibility
@@ -559,6 +561,7 @@ impl WindowState {
 
     /// Revoke any path authorization and remove pointer-owned target visuals.
     pub(super) fn invalidate_path_hover(&mut self) {
+        self.hover_detection.clear();
         let changed = self.path_probe.invalidate()
             | self.hovered_url.take().is_some()
             | self.link_preview.take().is_some()

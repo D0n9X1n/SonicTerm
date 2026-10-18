@@ -934,6 +934,7 @@ display with its refresh rate and scale.
 | `S2/flood` | S3's flood runs in the first pane while S2's typing goes to a split pane's shell. |
 | `S6/flood` | S6's pointer sweep during an S3 flood. |
 | `S6/selection-drag` | On a screen of static dense text, a repeated press, move across the grid, and release for 10 s, inside the grid area only. |
+| `S6/rest` | The role prints a URL and the absolute path of a file it creates, then streams `date` lines inside a scroll region (DECSTBM) that starts below those rows. The pointer rests on the path row for a 1 s `warmup` and a 10 s `rest` phase, so the hovered rows stay unchanged while other rows stream, then on a streaming row for a 10 s `tail` phase. Each parked phase starts only when the fixture is displayed on the live primary screen and the pointer resolves to its own cell (a path cell for `warmup` and `rest`, a streaming-region cell for `tail`). Each must present frames and see the streamed rows advance while its screen, viewport and fixture rows stay the ones it started on; a repaint of a fixture row, even with the same text, makes the run invalid. `tail`'s pointed row must change. With counters on, `rest` must hit the hover cache and run no detection and submit no probe after warm-up, and `tail` must run detections. The hover counters are App counters a base older than them lacks, so the comparison gives head-side counter evidence and a both-sides timing and CPU comparison, not a before/after detection delta. |
 | `S10/sync` | S10's redraw streams with each frame wrapped in `ESC[?2026h` … `ESC[?2026l`. |
 | `S1/gdi`, `S5/gdi`, `S11/gdi` | Windows only: the scenario with `[appearance].software_render_mode = "force"`, presenting through GDI. |
 | `S1/wgpu`, `S5/wgpu`, `S11/wgpu` | Windows only: the scenario with `software_render_mode = "off"`, presenting through wgpu without degrading. |
@@ -941,8 +942,8 @@ display with its refresh rate and scale.
 | `S1/role-exit` | Windows only: the role's program exits 1 right after GO, which must end the run invalid; the smoke uses it. |
 | `S1/atlas-retry` | Counters set only, and refused when no counters set runs. After 70 static rows settle, 8 recovery episodes of four forced frames each: A retries an injected glyph-atlas change, B is the first presented recovery, C and D redraw the unchanged scene. `result.json` records each frame's counter deltas as `atlas_recovery`, and the comparison adds an "Atlas retry recovery" table that sums each frame's row-cache misses and hits, shaping requests and attempts over the accepted counters runs. A scene change after settling invalidates the run with a reason that names the changed field with its settled and read values (titles escaped to ASCII), or, for row text, the first differing row. Settling also waits until the App has applied two foreground samples that each name a process and were taken strictly after the final process was observed (the sentinel on Windows, a completed harness lookup naming `sleep` on macOS), the latest naming that process and the read title equal to the one it gives. A missing or cleared sample restarts the count, an unmet barrier expires the attempt at the 10 s settle bound with a reason naming the unmet condition, and a custom tab title makes the attempt invalid at once. The harness log gets one `atlas-retry evidence` line at settle and one at failure, each taken from the reading the judge saw: the compared titles and the App's applied foreground sample captured with that reading, the role's leader pid, the cumulative title and foreground counters, and the harness's own foreground lookup, labelled separately with its own time, plus the final-process lookups' count and total time and the instant the final process was observed. |
 
-The pull-request perf pipeline runs `S2/flood`, `S6/flood`, `S6/selection-drag`
-and `S1/atlas-retry` by name on macOS and Windows; [What CI measures](#what-ci-measures) lists their shards.
+The pull-request perf pipeline runs `S2/flood`, `S6/flood`, `S6/selection-drag`,
+`S6/rest` and `S1/atlas-retry` by name on macOS and Windows; [What CI measures](#what-ci-measures) lists their shards.
 
 Every scenario's final memory checkpoint comes at least 60 s after GO, when the
 harness releases the workloads (5 s with `--short`, which the smoke uses). Most
@@ -1119,18 +1120,18 @@ its `comparison.md` opens with `**Incomplete comparison:**`. Two gaps are
 allowed: a counters set on a base that does not declare `perf-counters`, which
 still reads `n/a`, and a diagnostic declared unavailable on both sides because
 its harness API cfg is off, which runs nothing. Any other blocked side still
-fails, and a selection with nothing runnable never passes. The four macOS shards run S7, S4 and S1/atlas-retry;
+fails, and a selection with nothing runnable never passes. The four macOS shards run S7, S4, S1/atlas-retry and S6/rest;
 S10/sync, S9, S11, S6, S1 and S5; S10, S11/release and S2/flood; and S2, S12, S3,
 S8, S6/selection-drag and S6/flood. The five Windows shards run S7; S9, S10, S6/flood,
-S6/selection-drag and S2/flood; S2 and S10/sync; S4, S5, S11, S11/release,
+S6/selection-drag and S2/flood; S2, S10/sync and S6/rest; S4, S5, S11, S11/release,
 S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12 and S1/atlas-retry, which balances each
 platform's measured shard times. On each platform the shard holding S9 (macOS
 S9-S10sync, Windows S9-S10) also runs S9's laps set (`--laps-scenario S9 --laps-runs 2`, set by that matrix entry's
 `laps` field; the other entries pass no laps flags), and each platform's table
 gives its own `fallback_receive` verdict. A bare scenario ID selects only its default
 variant, so every variant is named explicitly. Under `--short`, `S2/flood` is
-capped at 2 runs per side, `S11/release` at 1, and `S11/gdi`, `S11/wgpu` and
-`S1/atlas-retry` at 2. The `S2/flood` cap only keeps the pull-request comparison within 35 minutes:
+capped at 2 runs per side, `S11/release` at 1, and `S11/gdi`, `S11/wgpu`,
+`S1/atlas-retry` and `S6/rest` at 2. The `S2/flood` cap only keeps the pull-request comparison within 35 minutes:
 a release comparison runs it in full. With `perf-frame-texture`, S11's
 `end` checkpoint records `frame_texture_bytes`: 4 B under GDI on the head, `n/a`
 on a base without the feature. S9's and S12's `end` checkpoints record the

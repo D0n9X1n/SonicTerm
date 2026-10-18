@@ -46,6 +46,10 @@ const BLOCK_BYTES: usize = 1 << 20;
 const BULK_LINE_BYTES: usize = 128;
 /// The bulk fixture's file name below `workload/fixtures/`.
 const BULK_FILE_NAME: &str = "bulk.txt";
+/// The URL S6/rest prints on its first row.
+pub(crate) const REST_URL: &str = "https://example.com/sonicterm/rest";
+/// The file S6/rest creates below `workload/` and prints the absolute path of on its second row.
+pub(crate) const REST_TARGET_NAME: &str = "rest-target.txt";
 /// Bytes per buffer `write_yes` writes: 32,768 `y` lines.
 #[cfg_attr(not(test), allow(dead_code))]
 const YES_BUFFER_BYTES: usize = 64 << 10;
@@ -554,7 +558,11 @@ pub(crate) fn fixtures(plan: &Plan) -> Vec<FixtureFile> {
             continue;
         }
         match *workload {
-            Workload::IdleShell | Workload::DateLoop | Workload::ExitAfterGo => {}
+            // RestStream creates its target file at run time, beside the generated fixtures.
+            Workload::IdleShell
+            | Workload::DateLoop
+            | Workload::ExitAfterGo
+            | Workload::RestStream => {}
             Workload::Flood { bulk_bytes, .. } => files.push(bulk_fixture(bulk_bytes)),
             Workload::PrintThenShell(fixture) | Workload::PrintThenSleep(fixture) => {
                 let relative_path = fixture_file_name(fixture).to_owned();
@@ -661,7 +669,28 @@ fn workload_lines(workload: Workload, role: usize, nonce: &str, bound_s: u64) ->
             );
             [vec!["frame=0".to_owned(), play], finish, shell].concat()
         }
+        Workload::RestStream => [rest_fixture_lines(), finish, rest_region_lines()].concat(),
     }
+}
+
+/// S6/rest's fixture: clear the screen, create the rest target, print the URL and the target's
+/// absolute path, then a blank row; the sentinel that follows lands on the fourth row.
+fn rest_fixture_lines() -> Vec<String> {
+    vec![
+        r"printf '\033[H\033[2J'".to_owned(),
+        format!(": > \"$scratch/workload/{REST_TARGET_NAME}\""),
+        format!("printf '%s\\n' '{REST_URL}' \"$scratch/workload/{REST_TARGET_NAME}\" ''"),
+    ]
+}
+
+/// S6/rest's stream: a scroll region from row `REST_REGION_TOP` down, the cursor at its bottom,
+/// then a `date` line every 10 ms forever, so only rows inside the region change.
+fn rest_region_lines() -> Vec<String> {
+    let top = crate::scenarios::REST_REGION_TOP;
+    vec![
+        format!(r"printf '\033[{top}r\033[999;1H'"),
+        "while :; do date; sleep 0.01; done".to_owned(),
+    ]
 }
 
 /// The completion sentinel `role` prints after its workload.
@@ -758,6 +787,10 @@ pub(crate) enum ProgramStep {
     SleepBound,
     /// Exit 1 at once, printing nothing: `role-exit`'s role, which ends right after GO.
     ExitAfterGo,
+    /// S6/rest's fixture: clear, create the rest target, print the URL, its path and a blank row.
+    RestFixture,
+    /// S6/rest's stream: set the scroll region, then print a `date` line every 10 ms forever.
+    RestRegion,
 }
 
 /// The steps a pane's program performs for `workload`, in the order the role script runs them.
@@ -778,6 +811,9 @@ pub(crate) fn program_steps(workload: Workload) -> Vec<ProgramStep> {
             vec![Cat(fixture_file_name(fixture)), Sentinel, Done, SleepBound]
         }
         Workload::Frames { count, .. } => vec![ProgramStep::Frames(count), Sentinel, Done, Shell],
+        Workload::RestStream => {
+            vec![ProgramStep::RestFixture, Sentinel, Done, ProgramStep::RestRegion]
+        }
     }
 }
 
@@ -806,6 +842,8 @@ pub(crate) fn posix_lines(
         ProgramStep::Shell => vec![format!("export PS1='{PROMPT}'"), "exec /bin/zsh -f".to_owned()],
         ProgramStep::SleepBound => vec![format!("exec sleep {bound_s}")],
         ProgramStep::ExitAfterGo => vec!["exit 1".to_owned()],
+        ProgramStep::RestFixture => rest_fixture_lines(),
+        ProgramStep::RestRegion => rest_region_lines(),
     }
 }
 
@@ -1062,6 +1100,28 @@ fn run_step(
             host.run_shell().map_err(|error| format!("run the idle shell: {error}"))
         }
         ProgramStep::ExitAfterGo => Err("ExitAfterGo ends the role in run_role".to_owned()),
+        ProgramStep::RestFixture => {
+            let target = run.scratch.join("workload").join(REST_TARGET_NAME);
+            std::fs::write(&target, b"")
+                .map_err(|error| format!("create {}: {error}", target.display()))?;
+            write!(out, "\x1b[H\x1b[2J{REST_URL}\n{}\n\n", target.display())
+                .and_then(|()| out.flush())
+                .map_err(|error| format!("write the rest fixture: {error}"))
+        }
+        // The loop never ends by itself; only an error, or the pane's teardown, ends it.
+        ProgramStep::RestRegion => {
+            let top = crate::scenarios::REST_REGION_TOP;
+            write!(out, "\x1b[{top}r\x1b[999;1H")
+                .and_then(|()| out.flush())
+                .map_err(|error| format!("set the rest scroll region: {error}"))?;
+            loop {
+                writeln!(out, "{}", date_line(host.now_unix_s()))
+                    .and_then(|()| out.flush())
+                    .map_err(|error| format!("write a date line: {error}"))?;
+                host.sleep(DATE_INTERVAL)
+                    .map_err(|error| format!("pause after a date line: {error}"))?;
+            }
+        }
         ProgramStep::SleepBound => {
             host.sleep(run.bound).map_err(|error| format!("sleep out the bound: {error}"))
         }

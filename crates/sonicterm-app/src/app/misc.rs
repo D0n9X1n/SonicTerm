@@ -102,14 +102,22 @@ impl App {
             // When: active_pane_id_for_kind or pane_by_id has no live grid, quick-select cannot construct its labels.
             return;
         };
-        let state = {
+        let (state, rows_scanned) = {
             let guard = crate::app::frame_counters::lock_parser(&pane.parser);
             let grid = guard.grid();
-            let mut state =
-                sonicterm_ui::copy_mode::CopyModeState::new_at((0, grid.scrollback_len()));
-            state.quick_select = Some(sonicterm_ui::copy_mode::QuickSelectState::from_grid(grid));
-            state
+            // Quick select labels what the pane displays: its resolved viewport, history included.
+            let view_top = sonicterm_gpu::core::GpuRenderer::resolved_view_top_abs_legacy(
+                grid,
+                pane.resolved_viewport(grid),
+            ) as usize;
+            let mut state = sonicterm_ui::copy_mode::CopyModeState::new_at((0, view_top));
+            // The scan stops at the 27th URL, so it reports the rows it actually read.
+            let (quick_select, rows_visited) =
+                sonicterm_ui::copy_mode::QuickSelectState::scan_viewport(grid, view_top);
+            state.quick_select = Some(quick_select);
+            (state, rows_visited)
         };
+        self.note_hover(|hover| hover.quick_select_rows_scanned += rows_scanned);
         let window_id = match kind {
             FrontmostKind::Child(id) => Some(id),
             _ => self.main_window_id,
@@ -754,6 +762,7 @@ impl App {
             hovered_url: None,
             link_preview: None,
             path_probe: super::path_target::PathProbeState::default(),
+            hover_detection: super::path_target::HoverDetectionCache::default(),
             notification: None,
             hidden: false,
             scrollbar_drag: None,

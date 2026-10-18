@@ -2331,3 +2331,84 @@ fn rejects_editor_location_suffixes() {
         assert!(find_targets_for_style(candidate, PathStyle::Windows).is_empty());
     }
 }
+
+/// The structural parse visits bytes linearly in the line's length, with a bounded multiplier,
+/// on inputs built from repeated pairs: doubling the line at most doubles the work. A rescan of
+/// the prefix from the floor at every pair made this quadratic.
+#[test]
+fn structural_parse_work_grows_linearly_with_the_line() {
+    for unit in ["()x ", "a() ", "()", "(a)b", "x(", "(", "()()x(", "[a]", "/a (b) "] {
+        let work = |repeats: usize| {
+            let text = unit.repeat(repeats);
+            let last_col = text.chars().count() - 1;
+            super::structure_work::measure(|| {
+                let _ = target_candidates_at_char_col_for_style(
+                    &text,
+                    last_col,
+                    PathStyle::Posix,
+                    true,
+                );
+            })
+        };
+        let (single, double) = (work(1_000), work(2_000));
+        // Linear work doubles plus a constant; a quadratic scan would about quadruple.
+        assert!(
+            double * 100 <= single * 205,
+            "{unit:?}: {single} bytes, then {double} at twice the line"
+        );
+    }
+}
+
+/// The incremental prefix check equals the rescan it replaced at every structure: candidates over
+/// a deterministic corpus of short lines, at every column and for both grammars, run with each
+/// structure's prefix checked against the reference.
+#[test]
+fn incremental_prefix_check_matches_the_rescan_over_a_corpus() {
+    const ALPHABET: [char; 16] =
+        ['a', '/', '(', ')', '[', ']', ' ', 'x', '1', '_', '.', '~', '\t', ':', 'C', '\u{e9}'];
+    let mut seed = 0x5eed_u64;
+    let mut next = || {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) as usize
+    };
+    for _ in 0..1_500 {
+        let length = 1 + next() % 24;
+        let text = (0..length).map(|_| ALPHABET[next() % ALPHABET.len()]).collect::<String>();
+        for col in 0..text.chars().count() {
+            for style in [PathStyle::Posix, PathStyle::Windows] {
+                let _ = target_candidates_at_char_col_for_style(&text, col, style, true);
+            }
+        }
+    }
+}
+
+/// `find_url_at` returns exactly the full scan's URL covering each byte, over every existing URL
+/// fixture shape and a deterministic corpus that mixes schemes, wrappers, punctuation, spaces,
+/// quotes and multi-byte characters, so scanning only the run around the pointer changes nothing.
+#[test]
+fn find_url_at_matches_the_full_scan_at_every_byte() {
+    const PIECES: [&str; 18] = [
+        "https://", "http://", "mailto:", "file://", "a.b", "/x", "(", ")", "[", "]", " ", ".",
+        ",", "\"", "'", "\u{e9}", "\u{276f}", "\t",
+    ];
+    let mut seed = 0x0bad_5eed_u64;
+    let mut next = || {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) as usize
+    };
+    let mut lines = vec![
+        "see https://example.com/a?b=c#d.".to_owned(),
+        "(https://ex.co/path) and [http://x.y/z], mailto:a@b.c".to_owned(),
+        "xhttps://embedded.example file:///tmp/a".to_owned(),
+    ];
+    lines.extend(
+        (0..2_000).map(|_| (0..1 + next() % 10).map(|_| PIECES[next() % PIECES.len()]).collect()),
+    );
+    for line in &lines {
+        let full = find_urls(line);
+        for byte in 0..=line.len() {
+            let expected = full.iter().find(|url| byte >= url.start && byte < url.end);
+            assert_eq!(find_url_at(line, byte).as_ref(), expected, "{line:?} at byte {byte}");
+        }
+    }
+}

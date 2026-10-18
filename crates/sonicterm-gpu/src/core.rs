@@ -1418,7 +1418,7 @@ use crate::{
 use sonicterm_render_model::boundary::cfg::config::CursorShape;
 use sonicterm_render_model::boundary::ui::{
     command_palette::CommandPalette,
-    copy_mode::{CopyModeState, QuickSelectState},
+    copy_mode::{CopyModeState, QuickSelectHint, QuickSelectState},
     cursor as ui_cursor,
     ime::ImeState,
     overlays::{
@@ -5736,8 +5736,8 @@ impl GpuRenderer {
         // pick the bucket the renderer actually drew. Half-open
         // `edge[col] <= px < edge[col+1]`; boundaries resolve to the
         // RHS cell, which matches `partition_point`'s contract.
-        let edges = build_snapped_cell_x(pane.origin_x_logical, pane.cell_w_logical, pane.cols);
-        let col = pixel_to_local_col(px, &edges, pane.cols)?;
+        // Binary search over edges computed on demand: no edge vector per lookup.
+        let col = snapped_col_at(px, pane.origin_x_logical, pane.cell_w_logical, pane.cols)?;
         // Row: cell_h has no per-cell snapping cache today, so the
         // straight division is correct. Clamp to the pane's grid.
         let row_f = local_y / pane.cell_h_logical;
@@ -6834,8 +6834,9 @@ impl GpuRenderer {
                     quick_select,
                     active_origin_x,
                     active_origin_y,
-                    grid.scrollback_len(),
+                    plan.active_view_top_abs,
                     grid.rows as usize,
+                    grid.scrollback_evicted(),
                     theme,
                     sw,
                     sh,
@@ -8701,16 +8702,15 @@ impl GpuRenderer {
         // Quick-select hint overlay → chrome_text into the overlay
         // glyph instance vec. Each hint is anchored at its (row, col)
         // cell origin so the hint character sits exactly inside the
-        // chosen cell.
+        // chosen cell. The hint set is sparse, so emitting each hint through chrome_text avoids
+        // materializing a full padded hint string.
         if quick_select_hint_count > 0 {
-            // Reconstruct the hint string the legacy
-            // `prepare_quick_select_overlay` routed through
-            // `self.quick_select_buffer`. The hint set is sparse so
-            // emitting per-hint via chrome_text avoids materializing
-            // the full padded string.
+            // When: quick_select_hint_count is positive, each hint's letter is laid out on its cell.
             if let Some(qs) = copy_mode.and_then(|cm| cm.quick_select.as_ref()) {
+                // When: copy_mode carries quick_select, its hints supply the letters to draw.
                 let bg_color = hex_to_chrome_color(theme.colors.background.0.as_str());
                 if let Some(stack) = self.font_stack.as_ref() {
+                    // When: font_stack exists, chrome_text can shape each hint letter.
                     let native_em = stack
                         .cell_metrics_raster_px()
                         .ok()
@@ -8718,8 +8718,18 @@ impl GpuRenderer {
                         .unwrap_or(self.cell_h);
                     let mut wt = stack.clone();
                     for hint in &qs.hints {
+                        let Some(visible_row) = quick_select_hint_display_row(
+                            qs,
+                            hint,
+                            grid.scrollback_evicted(),
+                            plan.active_view_top_abs,
+                            grid.rows as usize,
+                        ) else {
+                            // When: quick_select_hint_display_row finds the hint evicted or off the displayed rows, its letter is not drawn.
+                            continue;
+                        };
                         let x = active_origin_x + hint.col_start as f32 * self.cell_w;
-                        let y = active_origin_y + hint.row as f32 * self.cell_h;
+                        let y = active_origin_y + visible_row as f32 * self.cell_h;
                         let s = hint.hint.to_string();
                         let l = chrome_text::layout(
                             stack,
@@ -9023,8 +9033,9 @@ impl GpuRenderer {
         quick_select: &QuickSelectState,
         origin_x: f32,
         origin_y: f32,
-        scrollback_len: usize,
+        view_top_abs: u64,
         visible_rows: usize,
+        scrollback_evicted: u64,
         _theme: &Theme,
         sw: f32,
         sh: f32,
@@ -9036,16 +9047,16 @@ impl GpuRenderer {
         // edges with adjacent glyph cells at fractional DPI.
         let raw_fallback = snapped_cell_x.is_empty();
         for hint in &quick_select.hints {
-            let Some(visible_row) = hint.row.checked_sub(scrollback_len) else {
-                // When: `hint.row.checked_sub(scrollback_len)` is None — the
-                // hint sits above the viewport, in scrolled-off history.
+            let Some(visible_row) = quick_select_hint_display_row(
+                quick_select,
+                hint,
+                scrollback_evicted,
+                view_top_abs,
+                visible_rows,
+            ) else {
+                // When: quick_select_hint_display_row finds the hint evicted or off the displayed rows, it draws nothing.
                 continue;
             };
-            if visible_row >= visible_rows {
-                // When: `visible_row >= visible_rows` — below the viewport, so
-                // its background quad would land outside the pane.
-                continue;
-            }
             let (x, w) = if raw_fallback {
                 (origin_x + hint.col_start as f32 * self.cell_w, self.cell_w)
             } else {
@@ -10107,17 +10118,80 @@ pub fn build_snapped_cell_x(origin_x: f32, cell_w: f32, cols: u16) -> Vec<f32> {
     edges
 }
 
+/// The displayed row of a quick-select hint at scrollback-absolute `hint_row` in a viewport whose
+/// top is `view_top_abs` and which shows `visible_rows` rows; `None` when the row is not displayed.
+/// The hint background and the hint letter both place a hint through this one mapping.
+#[doc(hidden)]
+#[must_use]
+pub fn quick_select_viewport_row(
+    hint_row: usize,
+    view_top_abs: u64,
+    visible_rows: usize,
+) -> Option<usize> {
+    let offset = (hint_row as u64).checked_sub(view_top_abs)?;
+    usize::try_from(offset).ok().filter(|row| *row < visible_rows)
+}
+
+/// The displayed row the quick-select `hint` of `quick_select` draws on, once the grid has evicted
+/// `scrollback_evicted` history rows in its lifetime; `None` when its own row was evicted or the row
+/// is outside the viewport. The hint background and the hint letter both place a hint through it.
+#[doc(hidden)]
+#[must_use]
+pub fn quick_select_hint_display_row(
+    quick_select: &QuickSelectState,
+    hint: &QuickSelectHint,
+    scrollback_evicted: u64,
+    view_top_abs: u64,
+    visible_rows: usize,
+) -> Option<usize> {
+    quick_select
+        .hint_row_now(hint, scrollback_evicted)
+        .and_then(|row| quick_select_viewport_row(row, view_top_abs, visible_rows))
+}
+
+/// The snapped left edge of column `col`, as slot `col` of [`build_snapped_cell_x`] holds it.
+fn snapped_cell_edge(origin_x: f32, cell_w: f32, col: u16) -> f32 {
+    sonicterm_render_model::geometry::snap_to_device_pixels(
+        (origin_x + (col as f32) * cell_w, 0.0, 0.0, 0.0),
+        1.0,
+    )
+    .0
+}
+
+/// [`pixel_to_local_col`] without building the edge vector: a binary search over the same snapped
+/// edges, computed only where the search looks, so a hit test allocates nothing.
+#[doc(hidden)]
+#[must_use]
+pub fn snapped_col_at(px: f32, origin_x: f32, cell_w: f32, cols: u16) -> Option<u16> {
+    if cols == 0 {
+        // When: cols is zero, the pane has no addressable cell.
+        return None;
+    }
+    let edge = |col: u16| snapped_cell_edge(origin_x, cell_w, col);
+    if px < edge(0) || px >= edge(cols) {
+        // When: px is left of the first edge or at or past the last, it lies in padding.
+        return None;
+    }
+    // Edges are non-decreasing, so the cell is the last column whose left edge is at or below px;
+    // a boundary px resolves to the right-hand cell, as the linear scan does.
+    let (mut low, mut high) = (0_u16, cols);
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if edge(middle) <= px {
+            low = middle;
+        } else {
+            // When: middle's left edge is past px, the cell lies before middle.
+            high = middle;
+        }
+    }
+    Some(low)
+}
+
 /// [`build_snapped_cell_x`] into a reused buffer: `edges` is cleared and refilled with the same
 /// `cols + 1` snapped edges, keeping its allocation across frames.
 pub(crate) fn fill_snapped_cell_x(edges: &mut Vec<f32>, origin_x: f32, cell_w: f32, cols: u16) {
     edges.clear();
-    edges.extend((0..=cols).map(|col| {
-        sonicterm_render_model::geometry::snap_to_device_pixels(
-            (origin_x + (col as f32) * cell_w, 0.0, 0.0, 0.0),
-            1.0,
-        )
-        .0
-    }));
+    edges.extend((0..=cols).map(|col| snapped_cell_edge(origin_x, cell_w, col)));
 }
 
 /// Pure column-from-pixel lookup that mirrors the renderer's

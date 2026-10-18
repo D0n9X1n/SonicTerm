@@ -41,7 +41,7 @@ use crate::record::{
     armed_token, attribute_dispatch, bulk_tail_mismatch, echo_api, echo_outcome, echo_target,
     line_row_near_cursor, missing_wide_tokens, planned_rows, presenter_blocked,
     presenter_record_for, prompt_identity, prompt_origin, protocol_rows, retained_text,
-    row_count_mismatch, snapshot_echo, snapshot_identity_changed, split_in_scope,
+    row_count_mismatch, sentinel_row, snapshot_echo, snapshot_identity_changed, split_in_scope,
     takes_completeness, wide_tokens, write_progress, ArmState, AtlasReading, Attribution,
     CheckpointRecord, CompletenessRecord, DispatchObservation, EchoSnapshot, EchoTarget,
     LatencySample, Measurements, MonitorInfo, PhaseRecord, PresenterRecord, RowIdentity, RunResult,
@@ -170,6 +170,7 @@ enum DriverState {
     Drag(Drag),
     Wheel(Wheel),
     AtlasRetry(Box<AtlasRetryDriver>),
+    Park(Park),
 }
 
 /// S1/atlas-retry: the episode machine, what is armed for its next frame, and the scene it settled on.
@@ -316,6 +317,14 @@ struct Sweep {
     lanes: [f64; 4],
     left: f64,
     right: f64,
+}
+
+/// S6/rest: the pointer resting on one cell, the same `CursorMoved` repeated at a fixed rate.
+struct Park {
+    interval: Duration,
+    started: Instant,
+    ticks: u32,
+    point: (f64, f64),
 }
 
 /// S6 selection drag inside the grid.
@@ -764,6 +773,8 @@ struct Probe {
     /// S10's attribution while its counted phase runs, taken into that phase's record when it ends.
     attribution: Option<attribution::Attribution>,
     role_panes: Vec<u64>,
+    /// S6/rest: role 0's pane as the parked phase started, for its progress check.
+    park_entry: Option<crate::record::ParkSnapshot>,
     /// Windows: every pane exit before the run finished, so a pane that joins the roles later is judged.
     exited_panes: Vec<(u64, Option<bool>)>,
     go_at: Option<Instant>,
@@ -1754,6 +1765,7 @@ impl Probe {
             forced_delivery_problem: None,
             attribution: None,
             role_panes: Vec::new(),
+            park_entry: None,
             exited_panes: Vec::new(),
             go_at: None,
             sentinel_roles: Vec::new(),
@@ -2033,9 +2045,10 @@ impl Probe {
                 continue;
             }
             let sentinel = &self.sentinels[role];
+            let workload = self.plan.roles[role];
             let found = self
                 .role_grid(role, |grid| {
-                    line_row_near_cursor(grid, sentinel, protocol_rows(scenarios::BUILD_HOST))
+                    sentinel_row(grid, sentinel, workload, scenarios::BUILD_HOST)
                 })
                 .flatten();
             if let Some(row) = found {
@@ -2950,6 +2963,12 @@ impl Probe {
         if matches!(&self.driver, DriverState::Drag(drag) if drag.pressed) {
             self.button(event_loop, ElementState::Released);
         }
+        if let Some(reason) = self.park_problem(phase) {
+            // When: a parked phase saw no frame, no streamed row or no tail detection, it measured nothing.
+            self.finalize_phase(phase);
+            self.invalidate(event_loop, reason);
+            return;
+        }
         if let Some(reason) = self.finalize_phase(phase) {
             // When: ConPTY did not deliver what the role printed, the phase measured something else.
             self.finish(event_loop, Status::Blocked, Some(reason));
@@ -3313,6 +3332,45 @@ impl Probe {
                 })
             }
             Driver::AtlasRetry => self.start_atlas_retry(event_loop),
+            Driver::Park { row, col, hertz } => {
+                let Some(point) = self.cell_point(row, col) else {
+                    self.invalidate(event_loop, "no pane layout for the parked pointer".to_owned());
+                    return DriverState::None;
+                };
+                let pointed = self.pointed_cell(point);
+                let entry = self.role_pane(0).map(|pane| {
+                    let parser = pane.parser.lock();
+                    let viewport = pane.viewport_top_abs;
+                    let problem = crate::record::park_entry_problem(
+                        phase.name,
+                        parser.grid(),
+                        viewport,
+                        &self.sentinels[0],
+                        pointed,
+                        (row, col),
+                    );
+                    (problem, crate::record::park_snapshot(parser.grid(), viewport, row))
+                });
+                let snapshot = match entry {
+                    Some((None, snapshot)) => snapshot,
+                    Some((Some(reason), _)) => {
+                        // When: park_entry_problem names a reason, the phase cannot measure its claim.
+                        self.invalidate(event_loop, reason);
+                        return DriverState::None;
+                    }
+                    None => {
+                        self.invalidate(event_loop, "no pane for the parked pointer".to_owned());
+                        return DriverState::None;
+                    }
+                };
+                self.park_entry = Some(snapshot);
+                DriverState::Park(Park {
+                    interval: Duration::from_secs(1) / hertz.max(1),
+                    started: Instant::now(),
+                    ticks: 0,
+                    point,
+                })
+            }
             Driver::Wheel { hertz, role } => {
                 let Some((retained, center)) = self.wheel_setup(role) else {
                     self.invalidate(event_loop, format!("no pane layout for role {role}'s wheel"));
@@ -3625,6 +3683,60 @@ impl Probe {
         ))
     }
 
+    /// The center of the active pane's cell (`row`, `col`), in window pixels.
+    fn cell_point(&self, row: u16, col: u16) -> Option<(f64, f64)> {
+        let pane = self.active_pane()?;
+        let layout = self.app.main_renderer()?.pane_layout(pane)?;
+        Some((
+            f64::from(layout.origin_x_logical)
+                + (f64::from(col) + 0.5) * f64::from(layout.cell_w_logical),
+            f64::from(layout.origin_y_logical)
+                + (f64::from(row) + 0.5) * f64::from(layout.cell_h_logical),
+        ))
+    }
+
+    /// The cell of role 0's pane that window point `point` resolves to; `None` when it resolves to
+    /// another pane or to no cell.
+    fn pointed_cell(&self, point: (f64, f64)) -> Option<(u16, u16)> {
+        let role_pane = *self.role_panes.first()?;
+        let (pane, row, col) =
+            self.app.main_renderer()?.pixel_to_pane_cell(point.0 as f32, point.1 as f32)?;
+        // A renderer that names no pane (0) leaves the pointer in the active pane.
+        let in_role_pane =
+            pane == role_pane || (pane == 0 && self.active_pane() == Some(role_pane));
+        in_role_pane.then_some((row, col))
+    }
+
+    /// Why a parked S6/rest phase did not measure what it claims, if it did not: see
+    /// [`scenarios::park_progress`]. The phase's start snapshot is compared with its end.
+    fn park_problem(&mut self, phase: &PhaseSpec) -> Option<String> {
+        let entry = self.park_entry.take()?;
+        let presented_frames = self.meter.as_ref().map_or(0, |meter| meter.presented_frames);
+        let end = self.role_pane(0).map(|pane| {
+            let parser = pane.parser.lock();
+            crate::record::park_snapshot(parser.grid(), pane.viewport_top_abs, entry.pointed_row)
+        });
+        let Some(end) = end else {
+            // When: role 0's pane is gone, the phase has no end to compare.
+            return Some(format!("S6/rest phase {} lost its pane", phase.name));
+        };
+        let counters_start = self.meter.as_ref().and_then(|meter| meter.counters_start.clone());
+        let hover = counters_start.zip(self.counter_totals()).and_then(|(start, totals)| {
+            let delta = totals.delta_since(&start);
+            let count = |name: &str| match delta.get(name) {
+                Some(crate::counters::FieldValue::Count(count)) => Some(*count),
+                _ => None,
+            };
+            Some(scenarios::HoverDeltas {
+                detections: count("hover_detections")?,
+                cache_hits: count("hover_cache_hits")?,
+                probes_submitted: count("path_probes_submitted")?,
+            })
+        });
+        let evidence = entry.evidence(&end, presented_frames, hover);
+        scenarios::park_progress(phase.name, &evidence).err()
+    }
+
     /// Drag endpoints at cell centers inside the grid.
     fn drag_geometry(&self) -> Option<((f64, f64), (f64, f64))> {
         let pane = self.active_pane()?;
@@ -3672,6 +3784,7 @@ impl Probe {
                 Some(wheel.started + wheel.interval * wheel.sent.min(wheel.total))
             }
             DriverState::AtlasRetry(retry) => retry.due(),
+            DriverState::Park(park) => Some(park.started + park.interval * park.ticks),
         }
     }
 
@@ -3687,7 +3800,18 @@ impl Probe {
             DriverState::Drag(_) => self.inject_drag(event_loop),
             DriverState::Wheel(_) => self.inject_wheel(event_loop),
             DriverState::AtlasRetry(_) => self.drive_atlas_retry(event_loop, now),
+            DriverState::Park(_) => self.inject_park(event_loop),
         }
+    }
+
+    /// Repeat the parked pointer's `CursorMoved` on the same cell.
+    fn inject_park(&mut self, event_loop: &ActiveEventLoop) {
+        let DriverState::Park(park) = &mut self.driver else {
+            return;
+        };
+        park.ticks += 1;
+        let point = park.point;
+        self.pointer(event_loop, point);
     }
 
     /// Type the next character: the previous sample closes and this character's sample opens.

@@ -4152,7 +4152,7 @@ RESULT_STEP = "Require every comparison job to succeed"
 # run beside their scenario's default, since a bare ID selects only the default; S1/atlas-retry runs only
 # its counters set.
 ALL_SCENARIOS = ["S1", "S1/atlas-retry", "S2", "S2/flood", "S3", "S4", "S5", "S6", "S6/flood", "S6/selection-drag",
-                 "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12"]
+                 "S6/rest", "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12"]
 # The variants only one platform's shards add: S11/release on both (capped at 1), the presenter controls on Windows.
 PLATFORM_SCENARIOS = {"macOS": ["S11/release"], "Windows": ["S11/release", "S11/gdi", "S11/wgpu"]}
 JOB_RESULTS = ("success", "failure", "cancelled", "skipped", "")
@@ -5257,9 +5257,10 @@ class WindowsComparisonLegTests(unittest.TestCase):
         self.assertEqual(shard["scenarios"].split()[:6], ["S4", "S5", "S11"] + PLATFORM_SCENARIOS["Windows"])
 
     def test_the_macos_shards_are_the_reviewed_four_set_partition(self):
-        # The partition balanced from trial-2 costs (about 830 s each); a change here needs remeasuring.
+        # The partition balanced from trial-2 costs (about 830 s each); a change here needs remeasuring. S6/rest
+        # joined S7-S4, the shortest set, on an estimate the exact-head run must confirm.
         self.assertEqual({entry["shard"]: entry["scenarios"].split() for entry in self.matrix("compare-macos")}, {
-            "S7-S4": ["S7", "S4", "S1/atlas-retry"],
+            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S6/rest"],
             "S9-S10sync": ["S10/sync", "S9", "S11", "S6", "S1", "S5"],
             "S10-S11release": ["S10", "S11/release", "S2/flood"],
             "S2-S3-S8-S12": ["S2", "S12", "S3", "S8", "S6/selection-drag", "S6/flood"],
@@ -5322,7 +5323,9 @@ COUNTER_CONTRACT = {
     "app": (("wake_init", "wake_poll", "wake_wait_cancelled", "wake_resume_time", "wake_user", "ui_parser_locks",
              "fg_probe_calls", "fg_probe_panes", "fg_worker_probes", "fg_worker_panes", "fg_results_stale",
              "native_request_redraw_unregistered", "ui_guard_custody_ns", "ui_guard_custodies",
-             "frame_dispatch_ns", "frame_dispatches", "frame_dispatch_failed_ns", "frame_dispatches_failed"),
+             "frame_dispatch_ns", "frame_dispatches", "frame_dispatch_failed_ns", "frame_dispatches_failed",
+             "hover_lookups", "hover_detections", "hover_cache_hits", "hover_rows_read", "path_probes_submitted",
+             "quick_select_rows_scanned"),
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced",
@@ -5901,6 +5904,25 @@ class CounterTableTests(unittest.TestCase):
                          ("0 (0–0)", "3 (3–3)", perf.percent_change(0, 3)))
         gate_off = valid_result(frame_counters="off")
         self.assertEqual(perf.validate_result(gate_off, HARNESS_HASH, 0, counters=False), [])
+
+    def test_hover_counters_print_their_zeros_beside_any_hover_event_and_n_a_on_an_older_base(self):
+        # The hover counters are head-only App fields: a head must report them, and a base built before them
+        # reads n/a with no change. Once any of them saw an event in a phase, every hover row prints, so a real 0
+        # detections beside nonzero lookups is shown instead of omitted; a phase with no hover event omits them.
+        lacking = counters_result()
+        del lacking["phases"][0]["frame_counters"]["app"]["hover_detections"]
+        problems = perf.validate_result(lacking, HARNESS_HASH, 0, counters=True)
+        self.assertTrue(any("app.hover_detections" in problem for problem in problems), problems)
+        self.assertEqual(perf.validate_result(lacking, HARNESS_HASH, 0, counters=True, partial_counters=True), [])
+        head = counters_side({"app.hover_lookups": 40, "app.hover_cache_hits": 40})
+        rows, _omitted = perf.counter_rows("S6/rest", perf.SideRuns(outcomes=[make_outcome(result=lacking)]), head)
+        cells = {row[2]: (row[3], row[4], row[5]) for row in rows[1:]}
+        self.assertEqual(cells["app.hover_detections (count)"], ("n/a", "0 (0–0)", "n/a"))
+        self.assertEqual(cells["app.path_probes_submitted (count)"], ("0 (0–0)", "0 (0–0)", perf.percent_change(0, 0)))
+        self.assertEqual(cells["app.hover_cache_hits (count)"][1], "40 (40–40)")
+        idle = counters_side({"window.attempts": 3})
+        rows, _omitted = perf.counter_rows("S1/default", idle, idle)
+        self.assertFalse(any(row[2].startswith("app.hover_") for row in rows[1:]), rows)
 
     def test_stream_clock_exemptions_are_required_on_the_head_and_n_a_on_an_older_base(self):
         # stream_clock_exempt joined the window section: a head must report it, a base built before it reads n/a

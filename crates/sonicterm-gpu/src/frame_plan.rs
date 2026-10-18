@@ -63,14 +63,16 @@ pub(crate) struct CopyModeIdentity {
 impl From<&CopyModeState> for CopyModeIdentity {
     fn from(state: &CopyModeState) -> Self {
         let CopyModeState { cursor, anchor, mode, quick_select, read_only } = state;
-        let quick_select = quick_select.as_ref().map(|QuickSelectState { hints }| {
-            let mut hash = std::collections::hash_map::DefaultHasher::new();
-            hints.len().hash(&mut hash);
-            for QuickSelectHint { hint, row, col_start, col_end, text } in hints {
-                (hint, row, col_start, col_end, text).hash(&mut hash);
-            }
-            hash.finish()
-        });
+        let quick_select =
+            quick_select.as_ref().map(|QuickSelectState { hints, scrollback_evicted }| {
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                scrollback_evicted.hash(&mut hash);
+                hints.len().hash(&mut hash);
+                for QuickSelectHint { hint, row, col_start, col_end, text } in hints {
+                    (hint, row, col_start, col_end, text).hash(&mut hash);
+                }
+                hash.finish()
+            });
         Self {
             cursor: *cursor,
             anchor: *anchor,

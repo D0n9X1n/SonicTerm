@@ -5371,3 +5371,1202 @@ fn path_and_url_detection_read_trimmed_history_rows() {
     }
     assert_eq!(checked, [200, 200], "every URL and path row was checked");
 }
+
+/// The absolute row whose text starts with `prefix`, searched over history and the live screen.
+fn absolute_row_starting_with(grid: &Grid, prefix: &str) -> u64 {
+    let stored_rows = grid.scrollback_len() as u64 + u64::from(grid.rows);
+    (0..stored_rows)
+        .find(|row| {
+            grid.row_at_abs(*row).is_some_and(|line| {
+                line.iter().map(|cell| cell.ch).collect::<String>().starts_with(prefix)
+            })
+        })
+        .expect("a row with the prefix")
+}
+
+/// A child-window pane of `cols` × `rows` cells that has parsed `output`.
+fn pane_after(cols: u16, rows: u16, output: &str) -> (App, WindowId, u64) {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["frame scope"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    (app, window, pane)
+}
+
+/// Detection reads only the displayed frame: from every cell of every scrolled-back view over
+/// recorded wraps, an OSC 8 link and a hard-wrapped bracketed URL that cross both frame edges, and
+/// from every cell of an alternate screen whose pane borders reach its bottom row, no row outside
+/// `[view_top, view_top + rows)` is read, not even the wrap flag or border glyph of a neighbour.
+#[test]
+fn detection_reads_no_row_outside_the_displayed_frame() {
+    let link = "\x1b]8;;https://example.com/linked\x1b\\";
+    let close = "\x1b]8;;\x1b\\";
+    let mut output = String::new();
+    for index in 0..12 {
+        match index % 3 {
+            // 30 characters on 20 columns: a recorded wrap into the next row.
+            0 => output.push_str("/tmp/a/b/c/d/e/f/g/h/i/j/k.txt"),
+            // An OSC 8 label that wraps with the row.
+            1 => output.push_str(&format!("{link}linked-label-that-wraps-on{close}")),
+            // A bracketed URL a program wrapped itself, continued on a hard line.
+            _ => output.push_str("(https://ex.co/aaaaaaaaaa\r\n/bbbb) tail"),
+        }
+        output.push_str("\r\n");
+    }
+    let (app, window, pane) = pane_after(20, 4, &output);
+    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let guard = parser.lock();
+    let history_rows = guard.grid().scrollback_len() as u64;
+    assert!(history_rows > 8, "the fixture scrolls rows into history");
+    for view_top in 0..=history_rows {
+        for row in 0..4 {
+            for col in 0..20 {
+                let (_, reads) = frame_rows::read_observer::observe(|| {
+                    app.cell_target_from_parser(window, pane, row, col, &guard, Some(view_top))
+                });
+                let outside = reads.iter().filter(|(_, in_frame)| !in_frame).collect::<Vec<_>>();
+                assert!(outside.is_empty(), "view {view_top} cell ({row}, {col}) read {outside:?}");
+            }
+        }
+    }
+    drop(guard);
+
+    // On the alternate screen a split border runs to the bottom row and text fills both panes.
+    let screen = format!(
+        "\x1b[?1049h{}\x1b[1;1Hhttps://ex.co/aaaaaaaa\x1b[2;1Hmore/path\x1b[4;1H/tmp/left/side.txt\x1b[4;23H/tmp/right.txt",
+        pane_border(21, 4)
+    );
+    let (app, window, pane) = pane_after(41, 4, &screen);
+    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let guard = parser.lock();
+    for row in 0..4 {
+        for col in 0..41 {
+            let (_, reads) = frame_rows::read_observer::observe(|| {
+                app.cell_target_from_parser(window, pane, row, col, &guard, None)
+            });
+            let outside = reads.iter().filter(|(_, in_frame)| !in_frame).collect::<Vec<_>>();
+            assert!(outside.is_empty(), "alternate cell ({row}, {col}) read {outside:?}");
+        }
+    }
+}
+
+/// A target on the bottom row of a scrolled-back view may continue on the row below, which is not
+/// displayed, so it is refused without reading that row, whether or not the row below records a
+/// wrap. The same row away from the edge, and on the live view's bottom row, keeps its target.
+#[test]
+fn a_bottom_edge_target_of_a_scrolled_back_view_is_refused_without_reading_below() {
+    // The native grammar decides what is a path, so each platform gets an absolute path it reads.
+    let (wrapped_path, notes_path) = if cfg!(windows) {
+        ("C:/tmp/abcdefghijklmnopqrstuvwxyz.txt", "C:/tmp/notes.txt")
+    } else {
+        ("/tmp/abcdefghijklmnopqrstuvwxyz.txt", "/tmp/notes.txt")
+    };
+    for (label, line, pointed_col) in [
+        // The row below is a recorded continuation of this path.
+        ("wrapped", wrapped_path, 3_u16),
+        // The row below is unrelated text.
+        ("complete", notes_path, 3),
+    ] {
+        let output = format!("one\r\ntwo\r\n{line}\r\nnext\r\nfour\r\nfive\r\nsix\r\nseven");
+        let (app, window, pane) = pane_after(20, 3, &output);
+        let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+        let guard = parser.lock();
+        let path_row = absolute_row_starting_with(guard.grid(), &line[..10]);
+        assert!(path_row + 2 < guard.grid().scrollback_len() as u64, "{label}: in history");
+        // Bottom edge: the path is the last of three displayed rows.
+        let (target, reads) = frame_rows::read_observer::observe(|| {
+            app.cell_target_from_parser(window, pane, 2, pointed_col, &guard, Some(path_row - 2))
+        });
+        assert!(target.is_none(), "{label}: a bottom-edge target is refused");
+        assert!(reads.iter().all(|(_, in_frame)| *in_frame), "{label}: {reads:?}");
+        // One row up the path is the middle row, so the row below is displayed and read.
+        if label == "complete" {
+            let target = app
+                .cell_target_from_parser(window, pane, 1, pointed_col, &guard, Some(path_row - 1))
+                .expect("the same path away from the edge");
+            assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+        }
+    }
+    // On the live view no row exists below the bottom row, so the bottom-row target stays.
+    let (app, window, pane) = pane_after(20, 3, &format!("one\r\ntwo\r\n{notes_path}"));
+    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let guard = parser.lock();
+    let target =
+        app.cell_target_from_parser(window, pane, 2, 3, &guard, None).expect("live bottom row");
+    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+}
+
+/// An App that counts hover work, with an injected probe mailbox the test drains itself, and one
+/// child window whose pane is `cols` × `rows` cells.
+fn counted_hover_app(cols: u16, rows: u16) -> (App, WindowId, u64, PathProbeMailbox) {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.force_frame_counters_on().expect("no window exists yet");
+    let (mailbox, _wake) = PathProbeMailbox::new();
+    let (open, _) = crossbeam_channel::bounded(1);
+    app.path_workers = Some(PathWorkers { probe: mailbox.clone(), open });
+    let window = app.__test_seed_child_window(&["hover cache"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    (app, window, pane, mailbox)
+}
+
+/// One hover lookup of `pane`'s cell (`row`, `col`) as a frame runs it from its held parser, at
+/// the pane's own viewport or at `viewport`, then the apply that always follows.
+fn frame_hover_at(
+    app: &mut App,
+    window: WindowId,
+    pane: u64,
+    (row, col): (u16, u16),
+    viewport: Option<u64>,
+) {
+    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let guard = parser.lock();
+    let viewport =
+        viewport.or_else(|| app.windows[&window].panes[&pane].resolved_viewport(guard.grid()));
+    let target = app.hover_target_from_parser(window, pane, row, col, &guard, viewport);
+    drop(guard);
+    app.apply_target_hover(window, target);
+}
+
+/// [`frame_hover_at`] at the pane's own viewport.
+fn frame_hover(app: &mut App, window: WindowId, pane: u64, cell: (u16, u16)) {
+    frame_hover_at(app, window, pane, cell, None);
+}
+
+/// The App's hover counters as `(lookups, detections, cache_hits)`.
+fn hover_counts(app: &App) -> (u64, u64, u64) {
+    let hover = app.frame_counters.as_ref().expect("counters are on").hover;
+    (hover.lookups, hover.detections, hover.cache_hits)
+}
+
+/// Probe requests hover submitted since the last drain.
+fn drained_probes(mailbox: &PathProbeMailbox) -> usize {
+    std::iter::from_fn(|| mailbox.take_next()).count()
+}
+
+/// Hold or release the platform's open modifier in `window`.
+fn set_open_modifier(app: &mut App, window: WindowId, held: bool) {
+    let modifier = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    };
+    app.windows.get_mut(&window).unwrap().modifiers =
+        if held { modifier } else { winit::keyboard::ModifiersState::empty() };
+}
+
+/// With the pointer still and the rows detection read unchanged while another row streams, every
+/// frame after the first reuses the cached result: zero further detections and zero further probe
+/// submissions, counted through the injected mailbox.
+#[cfg(unix)]
+#[test]
+fn a_still_pointer_over_unchanged_rows_detects_once_while_other_rows_stream() {
+    let (mut app, window, pane, mailbox) = counted_hover_app(40, 6);
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"/tmp/sonicterm-cache/notes.txt"));
+    for frame in 0..20 {
+        frame_hover(&mut app, window, pane, (0, 3));
+        let streamed = format!("\x1b[5;1H{frame:>4} streamed");
+        assert!(app.__test_advance_child_pane_parser(window, pane, streamed.as_bytes()));
+    }
+    assert_eq!(hover_counts(&app), (20, 1, 19));
+    assert_eq!(drained_probes(&mailbox), 1, "only the first frame submits a probe");
+    assert_eq!(app.frame_counters.as_ref().unwrap().hover.probes_submitted, 1);
+}
+
+/// A change to one row detection read causes exactly one detection on the next lookup, and the
+/// lookup after it reuses that result.
+#[cfg(unix)]
+#[test]
+fn one_dependency_row_change_detects_once_then_reuses() {
+    let (mut app, window, pane, _mailbox) = counted_hover_app(40, 6);
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"/tmp/sonicterm-cache/notes.txt"));
+    frame_hover(&mut app, window, pane, (0, 3));
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (2, 1, 1));
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"\x1b[1;36Hx"));
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (3, 2, 1), "the changed row detects again");
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (4, 2, 2), "and the next lookup reuses it");
+}
+
+/// Same-cell motion and a modifier change hit the cache, through both the frame path and the
+/// event-time lookup, while the apply that follows still flips the underline's `active` state.
+#[test]
+fn same_cell_motion_and_modifier_changes_hit_the_cache_and_still_apply() {
+    let (mut app, window, pane, _mailbox) = counted_hover_app(40, 4);
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
+    let active = |app: &App| app.windows[&window].hovered_url.as_ref().unwrap().active();
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert!(!active(&app));
+    set_open_modifier(&mut app, window, true);
+    let lookup = app.hover_lookup(window, pane, 0, 3);
+    app.apply_target_lookup(window, lookup);
+    assert!(active(&app), "the modifier activates the cached target");
+    set_open_modifier(&mut app, window, false);
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert!(!active(&app), "releasing it deactivates the cached target");
+    assert_eq!(hover_counts(&app), (3, 1, 2));
+}
+
+/// A probe that completes for an unchanged key is applied by the frame it requests with no new
+/// detection and no duplicate probe, and a same-value repaint of the target's row detects once and
+/// yields an equal key, so the authorization stands.
+#[cfg(unix)]
+#[test]
+fn probe_completion_and_same_value_repaint_keep_the_cached_authorization() {
+    let root = native_test_root().join(format!(
+        "sonicterm-hover-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("notes.txt");
+    std::fs::write(&path, b"notes").unwrap();
+    let (mut app, window, pane, mailbox) = counted_hover_app(200, 4);
+    let text = path.to_str().unwrap().to_owned();
+    assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
+    frame_hover(&mut app, window, pane, (0, 3));
+    let request = mailbox.take_next().expect("the first frame submits a probe");
+    let outcome = probe_candidates(&request.key.candidates, classify_local_target);
+    let key = request.key.clone();
+    app.handle_path_probe_finished(PathProbeResult {
+        failure: outcome.as_ref().err().copied(),
+        selection: outcome.ok(),
+        request,
+    });
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (2, 1, 1), "the completion's frame reuses the detection");
+    assert_eq!(drained_probes(&mailbox), 0, "and submits no duplicate probe");
+    assert!(app.windows[&window].path_probe.authorized(&key, true));
+    let repaint = format!("\x1b[1;1H{text}");
+    assert!(app.__test_advance_child_pane_parser(window, pane, repaint.as_bytes()));
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (3, 2, 1), "a same-value repaint detects once");
+    let fresh = match app.cell_target_at(window, pane, 0, 3).unwrap().target {
+        ResolvedCellTarget::Path(fresh) => fresh,
+        other => panic!("a path target, not {other:?}"),
+    };
+    assert_eq!(fresh, key, "the recomputed key is equal");
+    assert!(app.windows[&window].path_probe.authorized(&key, true), "authorization stands");
+    assert_eq!(drained_probes(&mailbox), 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Every input of a detection invalidates the cache on its own: each change below is followed by
+/// one lookup of the same cell, which must detect again. A theme change is not an input, so the
+/// lookup after it hits.
+#[test]
+fn each_detection_input_invalidates_the_cache() {
+    type Change = fn(&mut App, WindowId, u64);
+    let changes: [(&str, Change); 10] = [
+        ("resize", |app, window, pane| {
+            app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(41, 4);
+        }),
+        ("alt-screen enter", |app, window, pane| {
+            assert!(app.__test_advance_child_pane_parser(window, pane, b"\x1b[?1049h"));
+        }),
+        ("cursor leave", |app, window, _| app.clear_target_hover(window)),
+        ("pane hover invalidation", |app, window, _| {
+            app.windows.get_mut(&window).unwrap().invalidate_path_hover();
+        }),
+        ("clickable_local_targets", |app, _, _| {
+            app.config.terminal.clickable_local_targets ^= true;
+        }),
+        ("clickable_bare_names", |app, _, _| app.config.terminal.clickable_bare_names ^= true),
+        ("clickable_path_max_chars", |app, _, _| app.config.terminal.clickable_path_max_chars = 9),
+        ("cwd revision", |app, window, pane| {
+            assert!(app.__test_advance_child_pane_parser(
+                window,
+                pane,
+                b"\x1b]7;file:///tmp\x1b\\"
+            ));
+        }),
+        ("dependency row write", |app, window, pane| {
+            assert!(app.__test_advance_child_pane_parser(window, pane, b"\x1b[1;30Hz"));
+        }),
+        ("history clear", |app, window, pane| {
+            app.windows[&window].panes[&pane].parser.lock().grid_mut().clear_scrollback();
+        }),
+    ];
+    for (label, change) in changes {
+        let (mut app, window, pane, _mailbox) = counted_hover_app(40, 4);
+        // Two rows of history, so the history clear has rows to drop.
+        let output = b"one\r\ntwo\r\nhttps://example.com/\r\nfour\r\nfive";
+        assert!(app.__test_advance_child_pane_parser(window, pane, output));
+        frame_hover(&mut app, window, pane, (0, 3));
+        frame_hover(&mut app, window, pane, (0, 3));
+        assert_eq!(hover_counts(&app), (2, 1, 1), "{label}: warm");
+        change(&mut app, window, pane);
+        frame_hover(&mut app, window, pane, (0, 3));
+        assert_eq!(hover_counts(&app).1, 2, "{label}: detects again");
+    }
+    let (mut app, window, pane, _mailbox) = counted_hover_app(40, 4);
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
+    frame_hover(&mut app, window, pane, (0, 3));
+    app.theme = Theme::default();
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (2, 1, 1), "a theme change keeps the cached result");
+}
+
+/// Leaving the alternate screen invalidates the cache: the primary screen's rows are back on
+/// display, so the next lookup detects again and resolves the primary screen's URL.
+#[test]
+fn alt_screen_exit_invalidates_the_cache() {
+    let (mut app, window, pane, _mailbox) = counted_hover_app(40, 4);
+    let output = b"https://primary.example/\x1b[?1049h\x1b[1;1Hhttps://alternate.example/";
+    assert!(app.__test_advance_child_pane_parser(window, pane, output));
+    frame_hover(&mut app, window, pane, (0, 3));
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (2, 1, 1), "warm on the alternate screen");
+    assert_eq!(
+        app.windows[&window].hovered_url.as_ref().unwrap().url,
+        "https://alternate.example/"
+    );
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"\x1b[?1049l"));
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (3, 2, 1), "the exit detects again");
+    assert_eq!(app.windows[&window].hovered_url.as_ref().unwrap().url, "https://primary.example/");
+}
+
+/// With history full and the view scrolled back, a line of output evicts the oldest history row:
+/// the view keeps its text, but every absolute row index shifts, so the cache must not compare
+/// stamps at the old indices. The eviction invalidates it and the next lookup detects again.
+#[test]
+fn history_eviction_while_scrolled_back_invalidates_the_cache() {
+    let (mut app, window, pane, _mailbox) = counted_hover_app(40, 4);
+    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    parser.lock().grid_mut().set_scrollback_limit(10);
+    let lines: String = (0..20).map(|line| format!("https://example.com/{line:02}\r\n")).collect();
+    assert!(app.__test_advance_child_pane_parser(window, pane, lines.as_bytes()));
+    let evicted_before = parser.lock().grid().scrollback_evicted();
+    assert!(evicted_before > 0, "the fixture fills history");
+    app.windows.get_mut(&window).unwrap().panes.get_mut(&pane).unwrap().pin_viewport_top(Some(2));
+    frame_hover(&mut app, window, pane, (0, 3));
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (2, 1, 1), "warm while scrolled back");
+    let hovered = app.windows[&window].hovered_url.as_ref().unwrap().url.clone();
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/new\r\n"));
+    assert_eq!(parser.lock().grid().scrollback_evicted(), evicted_before + 1, "one row evicted");
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (3, 2, 1), "the eviction detects again");
+    assert_eq!(
+        app.windows[&window].hovered_url.as_ref().unwrap().url,
+        hovered,
+        "the anchored view still shows, and resolves, the same row"
+    );
+}
+
+/// The child-window frame path, `refresh_target_hover_from_parsers` with the held parser both
+/// redraw adapters pass it, reuses the cache while nothing changes. Moving another tab out of the
+/// window completes a topology change, which clears the cache, so the next frame detects again.
+#[test]
+fn the_child_frame_path_uses_the_cache_and_a_tab_transfer_invalidates_it() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.force_frame_counters_on().expect("no window exists yet");
+    let window = app.__test_seed_child_window(&["moved", "pointed"]);
+    let target = app.__test_seed_child_window(&["target"]);
+    // A 400 × 80 px viewport of 10 × 20 px cells is a 40 × 4 grid with no renderer.
+    let viewport = sonicterm_ui::pane::Rect::new(0.0, 0.0, 400.0, 80.0);
+    for id in [window, target] {
+        assert!(app.__test_set_child_pane_viewport(id, viewport, 10.0, 20.0));
+    }
+    let child = &app.windows[&window];
+    assert_eq!(child.tabs.active_index(), 1, "the last seeded tab is active");
+    let pane = child.tab_states[1].active_pane;
+    for pane_state in app.windows[&window].panes.values() {
+        pane_state.parser.lock().grid_mut().resize(40, 4);
+    }
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
+    // The pointer rests on row 0, column 3 of the pointed pane.
+    app.windows.get_mut(&window).unwrap().cursor_pos = (35.0, 10.0);
+    let frame = |app: &mut App| {
+        let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+        let guard = parser.lock();
+        app.refresh_target_hover_from_parsers(window, [(pane, &*guard)]);
+    };
+    frame(&mut app);
+    frame(&mut app);
+    assert_eq!(hover_counts(&app), (2, 1, 1), "the frame path reuses the cache");
+    assert_eq!(app.windows[&window].hovered_url.as_ref().unwrap().url, "https://example.com/");
+    app.transfer_tab(Some(window), 0, Some(target), 1).expect("the inactive tab moves");
+    assert_eq!(app.windows[&window].tab_states[0].active_pane, pane, "the pointed tab stays");
+    assert!(app.windows[&window].hover_detection.is_empty(), "the transfer cleared the cache");
+    frame(&mut app);
+    frame(&mut app);
+    assert_eq!(hover_counts(&app), (4, 2, 2), "detects once after the transfer, then reuses");
+}
+
+/// Authorization is revoked through the cache: a probed, authorized path whose row is rewritten
+/// to a different path is detected again on the next frame, the old key is no longer authorized,
+/// and exactly one probe is submitted, for the new path.
+#[cfg(unix)]
+#[test]
+fn rewriting_an_authorized_path_revokes_it_through_the_cache() {
+    let root = native_test_root().join(format!(
+        "sonicterm-hover-revoke-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (first_path, second_path) = (root.join("first.txt"), root.join("other.txt"));
+    for path in [&first_path, &second_path] {
+        std::fs::write(path, b"notes").unwrap();
+    }
+    let (first_text, second_text) =
+        (first_path.to_str().unwrap().to_owned(), second_path.to_str().unwrap().to_owned());
+    let (mut app, window, pane, mailbox) = counted_hover_app(200, 4);
+    assert!(app.__test_advance_child_pane_parser(window, pane, first_text.as_bytes()));
+    frame_hover(&mut app, window, pane, (0, 3));
+    let request = mailbox.take_next().expect("the first frame submits a probe");
+    let outcome = probe_candidates(&request.key.candidates, classify_local_target);
+    let first_key = request.key.clone();
+    app.handle_path_probe_finished(PathProbeResult {
+        failure: outcome.as_ref().err().copied(),
+        selection: outcome.ok(),
+        request,
+    });
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (2, 1, 1), "the completion's frame reuses the detection");
+    assert!(app.windows[&window].path_probe.authorized(&first_key, true));
+    let submitted_before = app.frame_counters.as_ref().unwrap().hover.probes_submitted;
+
+    let rewrite = format!("\x1b[1;1H{second_text}\x1b[K");
+    assert!(app.__test_advance_child_pane_parser(window, pane, rewrite.as_bytes()));
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (3, 2, 1), "the rewritten row detects again");
+    assert!(
+        !app.windows[&window].path_probe.authorized(&first_key, true),
+        "the old path's key is no longer authorized"
+    );
+    let second_request = mailbox.take_next().expect("the new path submits a probe");
+    assert_ne!(second_request.key, first_key);
+    assert!(
+        second_request.key.candidates.iter().any(|candidate| candidate.display() == second_text),
+        "the probe is for the new path"
+    );
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(drained_probes(&mailbox), 0, "exactly one new probe");
+    assert_eq!(app.frame_counters.as_ref().unwrap().hover.probes_submitted, submitted_before + 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Authorization is revoked through the cache on every platform, Windows included: a relative path
+/// resolved against the pane's OSC 7 directory and authorized by the platform classifier is
+/// detected again once its row is rewritten to another file, the old key loses its authorization,
+/// and exactly one probe is submitted, for the new path.
+#[test]
+fn rewriting_an_authorized_relative_path_revokes_it_through_the_cache() {
+    let root = native_test_root().join(format!(
+        "sonicterm-hover-revoke-relative-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("notes")).unwrap();
+    let (first_text, second_text) = ("notes/first.txt", "notes/other.txt");
+    for relative in [first_text, second_text] {
+        std::fs::write(root.join(relative), b"notes").unwrap();
+    }
+    // File URIs carry a slash-prefixed drive path on Windows.
+    let uri_path = if cfg!(windows) {
+        PathBuf::from(format!("/{}", root.to_str().unwrap().replace('\\', "/")))
+    } else {
+        root.clone()
+    };
+    let cwd = local_file_uri(&uri_path).unwrap();
+    let (mut app, window, pane, mailbox) = counted_hover_app(80, 4);
+    let first_output = format!("\x1b]7;{cwd}\x1b\\{first_text}");
+    assert!(app.__test_advance_child_pane_parser(window, pane, first_output.as_bytes()));
+    frame_hover(&mut app, window, pane, (0, 3));
+    let request = mailbox.take_next().expect("the first frame submits a probe");
+    let outcome = probe_candidates(&request.key.candidates, classify_local_target);
+    assert_eq!(
+        outcome.as_ref().map(|selection| selection.candidate.resolved_path.clone()),
+        Ok(root.join(first_text)),
+        "the platform classifier authorizes the first file"
+    );
+    let first_key = request.key.clone();
+    app.handle_path_probe_finished(PathProbeResult {
+        failure: outcome.as_ref().err().copied(),
+        selection: outcome.ok(),
+        request,
+    });
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (2, 1, 1), "the completion's frame reuses the detection");
+    assert!(app.windows[&window].path_probe.authorized(&first_key, true));
+    let submitted_before = app.frame_counters.as_ref().unwrap().hover.probes_submitted;
+
+    let rewrite = format!("\x1b[1;1H{second_text}\x1b[K");
+    assert!(app.__test_advance_child_pane_parser(window, pane, rewrite.as_bytes()));
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (3, 2, 1), "the rewritten row detects again");
+    assert!(
+        !app.windows[&window].path_probe.authorized(&first_key, true),
+        "the old path's key is no longer authorized"
+    );
+    let second_request = mailbox.take_next().expect("the new path submits a probe");
+    assert_ne!(second_request.key, first_key);
+    assert_eq!(
+        probe_candidates(&second_request.key.candidates, classify_local_target)
+            .map(|selection| selection.candidate.resolved_path),
+        Ok(root.join(second_text)),
+        "the probe is for the new path"
+    );
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(drained_probes(&mailbox), 0, "exactly one new probe");
+    assert_eq!(app.frame_counters.as_ref().unwrap().hover.probes_submitted, submitted_before + 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The cache holds one entry per window: another cell (a font or DPI change moves the pointer to
+/// one), another pane, another view top or another window each detect, and each window keeps its
+/// own entry, so returning to a window's cell hits.
+#[test]
+fn the_cache_is_one_entry_per_window_keyed_by_cell_pane_and_view() {
+    let (mut app, first, first_pane, _mailbox) = counted_hover_app(40, 4);
+    let second = app.__test_seed_child_window(&["second", "tab"]);
+    let panes = app.__test_child_pane_ids(second).unwrap();
+    let output: &[u8] = b"one\r\ntwo\r\nhttps://example.com/\r\nfour\r\nfive\r\nsix";
+    assert!(app.__test_advance_child_pane_parser(first, first_pane, output));
+    for pane in &panes {
+        app.windows[&second].panes[pane].parser.lock().grid_mut().resize(40, 4);
+        assert!(app.__test_advance_child_pane_parser(second, *pane, output));
+    }
+    frame_hover(&mut app, first, first_pane, (0, 3));
+    frame_hover(&mut app, second, panes[0], (0, 3));
+    assert_eq!(hover_counts(&app), (2, 2, 0), "each window detects for itself");
+    frame_hover(&mut app, first, first_pane, (0, 3));
+    frame_hover(&mut app, second, panes[0], (0, 3));
+    assert_eq!(hover_counts(&app), (4, 2, 2), "and keeps its own entry");
+    frame_hover(&mut app, first, first_pane, (0, 4));
+    assert_eq!(hover_counts(&app).1, 3, "another cell detects");
+    if let Some(other_pane) = panes.get(1) {
+        frame_hover(&mut app, second, *other_pane, (0, 3));
+        assert_eq!(hover_counts(&app).1, 4, "another pane detects");
+    }
+    let before = hover_counts(&app).1;
+    frame_hover_at(&mut app, first, first_pane, (0, 3), Some(0));
+    assert_eq!(hover_counts(&app).1, before + 1, "another view top detects");
+}
+
+/// An OSC 8 link rewritten with the same label and a different destination is detected again and
+/// resolves to the new destination: the rewrite restamps the row, so no hyperlink id has to join
+/// the key.
+#[test]
+fn an_osc8_link_with_the_same_label_and_a_new_destination_detects_again() {
+    let (mut app, window, pane, _mailbox) = counted_hover_app(40, 4);
+    let link = |uri: &str| format!("\x1b[1;1H\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\");
+    assert!(app.__test_advance_child_pane_parser(
+        window,
+        pane,
+        link("https://a.example/").as_bytes()
+    ));
+    frame_hover(&mut app, window, pane, (0, 2));
+    assert_eq!(app.windows[&window].hovered_url.as_ref().unwrap().url, "https://a.example/");
+    assert!(app.__test_advance_child_pane_parser(
+        window,
+        pane,
+        link("https://b.example/").as_bytes()
+    ));
+    frame_hover(&mut app, window, pane, (0, 2));
+    assert_eq!(hover_counts(&app), (2, 2, 0));
+    assert_eq!(app.windows[&window].hovered_url.as_ref().unwrap().url, "https://b.example/");
+}
+
+/// Span mapping by binary search returns what the linear scans it replaced return, on a recorded-
+/// wrap line of exactly 16 KiB (the cap) whose spaced tokens give many candidates per cell: each
+/// mapping helper asserts its result against the linear scan under tests, at every pointed cell.
+#[test]
+fn span_mapping_matches_the_linear_scan_on_a_full_sixteen_kib_line() {
+    let (cols, rows) = (512_u16, 32_u16);
+    let mut grid = Grid::new(cols, rows);
+    let unit = "./ab cd ef gh ij kl mn op ";
+    let text = unit.repeat(usize::from(cols) * usize::from(rows) / unit.len() + 1);
+    for character in text.chars().take(usize::from(cols) * usize::from(rows)) {
+        grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+    }
+    let mut most_candidates = 0;
+    for col in (0..cols).step_by(7) {
+        let pointed = AbsoluteCell { row: 16, col };
+        if let Some(scan) = logical_path_scan_at_cell(&grid, 0, pointed, PathStyle::Posix, true) {
+            assert!(scan
+                .candidates
+                .iter()
+                .all(|candidate| candidate.spans.iter().any(|span| span.contains(pointed))));
+            most_candidates = most_candidates.max(scan.candidates.len());
+        }
+    }
+    assert!(most_candidates >= 8, "the line offers many candidates per cell: {most_candidates}");
+}
+
+// The hard-wrap pre-pass as it was before each row was read once: every wrapper collected its own
+// row and searched a growing suffix. It is kept only as the equivalence oracle and the cost
+// baseline for the shared-view pre-pass.
+fn reference_hardwrap_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) -> HardwrapUri {
+    let first =
+        pointed.row.saturating_sub((MAX_WRAPPED_PATH_ROWS - 1) as u64).max(frame.view_top());
+    for row_number in (first..=pointed.row).rev() {
+        let Some(row) = frame.row(row_number) else {
+            // When: row_at_abs has no row_number, that evicted row cannot open a visible candidate.
+            continue;
+        };
+        // The frame's last row may wrap into a row below it that is not displayed, so on a
+        // scrolled-back view that boundary is unknown and the logical scanner, which fails closed
+        // there, owns it.
+        let next_row_number = row_number + 1;
+        let wraps_below = if frame.contains(next_row_number) {
+            frame.row(next_row_number).is_some_and(|next| next.soft_wrapped_from_previous())
+        } else {
+            // When: the next row is outside the frame, only a scrolled-back view has one at all.
+            frame.rows_below()
+        };
+        if row.soft_wrapped_from_previous() || wraps_below {
+            // When: soft_wrapped_from_previous holds, or may hold, at either boundary, the logical scanner owns it.
+            continue;
+        }
+        let mut result = HardwrapUri::NotApplicable;
+        hardwrap_work::add(row.len());
+        for (index, cell) in row.iter().enumerate() {
+            let closer = match cell.ch {
+                '(' => ')',
+                '[' => ']',
+                _ => {
+                    // When: cell.ch opens no supported wrapper, this column cannot delimit a URI.
+                    continue;
+                }
+            };
+            let start = index + 1;
+            if !reference_opens_http_scheme(row, start) {
+                // When: opens_http_scheme finds neither https:// nor http:// at start, this wrapper opens ordinary prose.
+                continue;
+            }
+            let found = reference_hardwrap_uri_candidate(frame, pointed, row_number, start, closer);
+            // When: matches! excludes NotApplicable for found, retain this wrapper's claim on pointed.
+            if !matches!(found, HardwrapUri::NotApplicable) {
+                if !matches!(result, HardwrapUri::NotApplicable) {
+                    // When: matches! excludes NotApplicable for result, another wrapper already owns pointed.
+                    return HardwrapUri::Incomplete;
+                }
+                result = found;
+            }
+        }
+        if !matches!(result, HardwrapUri::NotApplicable) {
+            // When: matches! excludes NotApplicable for result, the nearest owning wrapper decides pointed.
+            return result;
+        }
+    }
+    HardwrapUri::NotApplicable
+}
+
+/// Whether `row`'s cells from column `start` spell `https://` or `http://`, read into a fixed
+/// buffer so the pre-pass allocates nothing for the many wrappers that open ordinary prose.
+fn reference_opens_http_scheme(row: &Row, start: usize) -> bool {
+    let mut scheme = ['\0'; 8];
+    for (offset, slot) in scheme.iter_mut().enumerate() {
+        let Some(cell) = row.get(start + offset) else {
+            // When: the row ends before eight cells, the remaining slots stay empty.
+            break;
+        };
+        *slot = cell.ch;
+    }
+    let spells =
+        |prefix: &str| prefix.chars().zip(scheme).all(|(expected, found)| expected == found);
+    spells("https://") || spells("http://")
+}
+
+fn reference_hardwrap_uri_candidate(
+    frame: &FrameRows<'_>,
+    pointed: AbsoluteCell,
+    first_row: u64,
+    first_col: usize,
+    closer: char,
+) -> HardwrapUri {
+    let mut spans = SmallVec::<[AbsoluteCellSpan; 2]>::new();
+    let mut joined = String::new();
+    let mut indent = None;
+    let mut authority_end = None;
+    let refusal = |spans: &[AbsoluteCellSpan]| {
+        // When: a span contains pointed and spans_join_across_pane_border is false, suppress that fragment's truncated prefix.
+        if spans.iter().any(|span| span.contains(pointed))
+            && !spans_join_across_pane_border(frame, spans)
+        {
+            HardwrapUri::Incomplete
+        } else {
+            HardwrapUri::NotApplicable
+        }
+    };
+    for offset in 0..MAX_WRAPPED_PATH_ROWS {
+        let row_number = first_row + offset as u64;
+        // When: row_number reaches view_end, the chain leaves the viewport and cannot be proven complete.
+        if row_number >= frame.view_end() {
+            return refusal(&spans);
+        }
+        let Some(row) = frame.row(row_number) else {
+            // When: row_at_abs has no row_number, the chain cannot be continued or proven.
+            return refusal(&spans);
+        };
+        if row.soft_wrapped_from_previous() {
+            // When: soft_wrapped_from_previous holds, the wrap-aware scanner owns this boundary.
+            return refusal(&spans);
+        }
+        let cells = row.iter().collect::<Vec<_>>();
+        hardwrap_work::add(cells.len());
+        let start = if offset == 0 {
+            first_col
+        } else {
+            // When: offset is past zero, start skips the continuation indent rather than first_col.
+            cells.iter().position(|cell| cell.ch != ' ').unwrap_or(cells.len())
+        };
+        let close = cells
+            .iter()
+            .enumerate()
+            .skip(start)
+            .find(|(_, cell)| cell.ch == closer)
+            .map(|(col, _)| col);
+        if offset == 0 && close.is_some() {
+            // When: close exists at offset zero, single-row detection stays authoritative.
+            return HardwrapUri::NotApplicable;
+        }
+        let end = close.unwrap_or(usize::from(frame.grid().cols));
+        let Some(body) = cells.get(start..end).filter(|body| !body.is_empty()) else {
+            // When: cells hold no non-empty body between start and end, this row adds no fragment.
+            return refusal(&spans);
+        };
+        if body.iter().any(|cell| {
+            unsafe_path_cell(cell)
+                || cell.hyperlink().is_some()
+                || !cell.ch.is_ascii()
+                || cell.ch.is_whitespace()
+                || cell.ch.is_control()
+                || matches!(cell.ch, '(' | ')' | '[' | ']')
+        }) {
+            // When: any body cell is unsafe, hyperlinked, non-ascii, blank, control, or a wrapper,
+            // the row carries prose rather than a continuation of this candidate.
+            return refusal(&spans);
+        }
+        if offset > 0 {
+            // When: offset is past zero, a continuation row must open no scheme and respect the indent.
+            let prefix = body.iter().take(8).map(|cell| cell.ch).collect::<String>();
+            if prefix.starts_with("https://") || prefix.starts_with("http://") {
+                // When: prefix opens its own scheme, that independent URI keeps its destination.
+                return refusal(&spans);
+            }
+            if start > MAX_HARDWRAP_INDENT {
+                // When: start passes MAX_HARDWRAP_INDENT, the row is too deep to be one continued line.
+                return refusal(&spans);
+            }
+        }
+        if offset > 0 && *indent.get_or_insert(start) != start {
+            // When: start differs from the recorded indent, the preceding fragment does not own this row.
+            return refusal(&spans);
+        }
+        spans.push(AbsoluteCellSpan {
+            row: row_number,
+            start_col: start as u16,
+            end_col: end as u16,
+        });
+        if joined.len() + body.len() > MAX_LOGICAL_PATH_BYTES {
+            // When: joined plus body passes MAX_LOGICAL_PATH_BYTES, stop before admitting more text.
+            return refusal(&spans);
+        }
+        joined.extend(body.iter().map(|cell| cell.ch));
+        if offset == 0 {
+            // When: offset is zero, joined must prove a complete authority before the margin cut.
+            let scheme_len = if joined.starts_with("https://") { 8 } else { 7 };
+            authority_end = joined[scheme_len..]
+                .find(['/', '?', '#'])
+                .filter(|index| *index > 0 && joined.as_bytes()[scheme_len + index] == b'/')
+                .map(|index| scheme_len + index);
+            if authority_end.is_none() {
+                // When: authority_end is absent, no path slash followed the host, so invent no suffix.
+                return refusal(&spans);
+            }
+        }
+        if joined.matches("://").count() != 1 {
+            // When: joined holds other than one :// separator, two destinations were concatenated.
+            return refusal(&spans);
+        }
+        if close.is_some() {
+            // When: close exists, the wrapper terminates and joined must validate as one whole URI.
+            if unsafe_path_cell(&cells[end])
+                || cells[end].hyperlink().is_some()
+                || cells[end + 1..].iter().take_while(|cell| !cell.ch.is_whitespace()).any(|cell| {
+                    unsafe_path_cell(cell) || !matches!(cell.ch, '.' | ',' | ';' | ':' | '!' | '?')
+                })
+            {
+                // When: cells after end continue the token, the apparent closer may be internal URI text.
+                return refusal(&spans);
+            }
+            let matches = sonicterm_cfg::url_scan::find_urls(&joined);
+            let Some(found) = matches.first().filter(|found| {
+                matches.len() == 1
+                    && found.start == 0
+                    && found.end == joined.len()
+                    && found.url == joined
+                    && authority_end.is_some()
+            }) else {
+                // When: find_urls does not return exactly joined as one whole match, reject the prefix.
+                return refusal(&spans);
+            };
+            if !spans.iter().any(|span| span.contains(pointed)) {
+                // When: no span contains pointed, this proven chain does not own the pointer.
+                return HardwrapUri::NotApplicable;
+            }
+            if spans_join_across_pane_border(frame, &spans) {
+                // When: spans_join_across_pane_border holds, the chain runs into the next pane's text.
+                return HardwrapUri::NotApplicable;
+            }
+            return HardwrapUri::Complete(LogicalTargetCandidate {
+                target: DetectedTarget::Uri(found.url.clone()),
+                spans,
+            });
+        }
+    }
+    refusal(&spans)
+}
+
+/// A deterministic xorshift generator, so the equivalence corpus is the same on every run.
+struct CorpusRng(u64);
+
+impl CorpusRng {
+    fn next_value(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        (self.next_value() % bound as u64) as usize
+    }
+}
+
+/// Fragments a random prose row is built from: wrappers, schemes, blanks, wide and combining-free
+/// non-ASCII text, a box-drawing border and an OSC 8 link.
+const CORPUS_FRAGMENTS: &[&str] = &[
+    "(",
+    ")",
+    "[",
+    "]",
+    "(https://",
+    "[http://",
+    "ex.co/",
+    "/",
+    "a",
+    "bb",
+    " ",
+    "  ",
+    ".",
+    "?",
+    "é",
+    "\u{754c}",
+    "\u{2502}",
+    "\x1b]8;;https://h.test/\x1b\\ln\x1b]8;;\x1b\\",
+];
+
+/// One random prose row of at most `cols` cells' worth of fragments.
+fn corpus_prose_line(rng: &mut CorpusRng, cols: u16) -> String {
+    let fragment_count = rng.below(usize::from(cols) / 2);
+    (0..fragment_count).map(|_| CORPUS_FRAGMENTS[rng.below(CORPUS_FRAGMENTS.len())]).collect()
+}
+
+/// A hard-wrapped bracketed URL: a first row filled to the edge, one or two indented continuation
+/// rows and a closer, sometimes with an unequal indent or one character mutated into a break.
+fn corpus_chain_lines(rng: &mut CorpusRng, cols: u16) -> Vec<String> {
+    let width = usize::from(cols);
+    let (opener, closer) = if rng.below(2) == 0 { ('(', ')') } else { ('[', ']') };
+    let head = ["", "x ", "see "][rng.below(3)];
+    let scheme = ["https://ex.co/", "http://ex.co/", "https://ex.co"][rng.below(3)];
+    let mut first = format!("{head}{opener}{scheme}");
+    while first.len() < width {
+        first.push('a');
+    }
+    let mut lines = vec![first];
+    let continuation_count = 1 + rng.below(2);
+    let indent = rng.below(3);
+    for index in 0..continuation_count {
+        let row_indent = if rng.below(8) == 0 { indent + 1 } else { indent };
+        let mut line = " ".repeat(row_indent);
+        if index + 1 < continuation_count {
+            while line.len() < width {
+                line.push('b');
+            }
+        } else {
+            let body_len = 1 + rng.below(width - row_indent - 2);
+            line.push_str(&"c".repeat(body_len));
+            line.push(closer);
+            line.push_str(["", " done", ".", "x", ")"][rng.below(5)]);
+            line.truncate(width);
+        }
+        lines.push(line);
+    }
+    if rng.below(4) == 0 {
+        // Mutate one character of one row into a break or a wrapper.
+        let line_index = rng.below(lines.len());
+        let mut chars = lines[line_index].chars().collect::<Vec<_>>();
+        let position = rng.below(chars.len());
+        chars[position] = ['(', ' ', ')', 'é', '/', ']'][rng.below(6)];
+        lines[line_index] = chars.into_iter().collect();
+    }
+    lines
+}
+
+/// The shared-view pre-pass decides every cell exactly as the per-wrapper pre-pass did: the same
+/// refusal (`Incomplete`), the same ownership and the same spans, over primary and alternate
+/// screens, live and scrolled-back frames, split borders, hyperlinks and wide cells. The corpus
+/// must reach both `Complete` and `Incomplete`, or the agreement would prove little.
+#[test]
+fn hardwrap_pre_pass_matches_the_per_wrapper_reference() {
+    let mut rng = CorpusRng(0x5eed_1649_cafe_f00d);
+    let (mut complete_count, mut incomplete_count) = (0usize, 0usize);
+    for grid_index in 0..160 {
+        let cols = [20u16, 24, 30][rng.below(3)];
+        let rows = 8u16;
+        let mut lines = Vec::new();
+        while lines.len() < 12 {
+            // When: the coin picks a chain, emit a hard-wrapped URL; otherwise one prose row.
+            if rng.below(2) == 0 {
+                lines.extend(corpus_chain_lines(&mut rng, cols));
+            } else {
+                lines.push(corpus_prose_line(&mut rng, cols));
+            }
+        }
+        let alt_screen = grid_index % 3 == 0;
+        let output = if alt_screen {
+            let mut placed = String::from("\x1b[?1049h");
+            for (row, line) in lines.iter().take(usize::from(rows)).enumerate() {
+                placed.push_str(&format!("\x1b[{};1H{line}", row + 1));
+            }
+            if grid_index % 2 == 0 {
+                placed.push_str(&pane_border(cols / 2, rows));
+            }
+            placed
+        } else {
+            lines.join("\r\n")
+        };
+        let mut parser = sonicterm_vt::vt::Parser::new(Grid::new(cols, rows));
+        parser.advance(output.as_bytes());
+        let grid = parser.grid();
+        let live_top = grid.scrollback_evicted() + grid.scrollback_len() as u64;
+        let scrolled_top = live_top.saturating_sub(1 + rng.below(3) as u64);
+        for view_top in [live_top, scrolled_top] {
+            for row in view_top..view_top + u64::from(rows) {
+                for col in 0..cols {
+                    let pointed = AbsoluteCell { row, col };
+                    let found = hardwrap_uri_in(&FrameRows::new(grid, view_top), pointed);
+                    let expected =
+                        reference_hardwrap_uri_in(&FrameRows::new(grid, view_top), pointed);
+                    assert_eq!(
+                        found, expected,
+                        "grid {grid_index}, view_top {view_top}, cell {row}:{col}, output {output:?}"
+                    );
+                    match expected {
+                        HardwrapUri::Complete(_) => complete_count += 1,
+                        HardwrapUri::Incomplete => incomplete_count += 1,
+                        HardwrapUri::NotApplicable => {}
+                    }
+                }
+            }
+        }
+    }
+    assert!(complete_count > 50, "the corpus reached Complete only {complete_count} times");
+    assert!(incomplete_count > 50, "the corpus reached Incomplete only {incomplete_count} times");
+}
+
+/// Assert the shared-view pre-pass decides every cell of `grid`'s live frame as the per-wrapper
+/// reference does, including cells a row holds past the grid's edge, and return how many cells the
+/// reference resolved `Complete` and `Incomplete`.
+fn assert_hardwrap_cells_match_reference(grid: &Grid, label: &str) -> (usize, usize) {
+    let view_top = grid.scrollback_evicted() + grid.scrollback_len() as u64;
+    let (mut complete_count, mut incomplete_count) = (0usize, 0usize);
+    for row in view_top..view_top + u64::from(grid.rows) {
+        let row_len = FrameRows::new(grid, view_top).row(row).map_or(0, Row::len);
+        // Walk past `cols` so a row longer than the grid is compared at every cell it holds.
+        let col_end = row_len.max(usize::from(grid.cols)) as u16;
+        for col in 0..col_end {
+            let pointed = AbsoluteCell { row, col };
+            let expected = reference_hardwrap_uri_in(&FrameRows::new(grid, view_top), pointed);
+            assert_eq!(
+                hardwrap_uri_in(&FrameRows::new(grid, view_top), pointed),
+                expected,
+                "{label}: cell {row}:{col}"
+            );
+            match expected {
+                HardwrapUri::Complete(_) => complete_count += 1,
+                HardwrapUri::Incomplete => incomplete_count += 1,
+                HardwrapUri::NotApplicable => {}
+            }
+        }
+    }
+    (complete_count, incomplete_count)
+}
+
+/// A parser over a primary-screen grid `cols` wide holding `lines` as hard line breaks, so no row
+/// is soft-wrapped.
+fn hardwrap_grid(cols: u16, lines: &[String]) -> sonicterm_vt::vt::Parser {
+    let rows = lines.len() as u16 + 1;
+    let mut parser = sonicterm_vt::vt::Parser::new(Grid::new(cols, rows));
+    parser.advance(lines.join("\r\n").as_bytes());
+    parser
+}
+
+/// Append `text` to visible row `row` past its current length, as a row left longer than the grid
+/// by a resize that did not reflow it.
+fn extend_row_past_grid(grid: &mut Grid, row: u16, text: &str) {
+    let line = grid.row_mut(row);
+    let old_len = line.len();
+    line.resize(old_len + text.chars().count(), Cell::default());
+    for (cell, character) in line.iter_mut().skip(old_len).zip(text.chars()) {
+        *cell = Cell::plain(character, Color::Default, Color::Default, CellFlags::empty());
+    }
+}
+
+/// A row with two `(https://` openers, the earlier one still followed by a chain of URL text, is
+/// decided as the reference decides it: only the opener at the row's last break can start a chain,
+/// and the earlier opener's body holds that later wrapper. The chain must resolve, or the case
+/// would not exercise a completed claim beside the shadowed opener.
+#[test]
+fn hardwrap_pre_pass_matches_the_reference_with_two_openers_on_one_row() {
+    let cols = 40u16;
+    let width = usize::from(cols);
+    let opener_text = "x (https://a.co/y (https://ex.co/";
+    let first = format!("{opener_text}{}", "a".repeat(width - opener_text.len()));
+    let middle = format!("  {}", "b".repeat(width - 2));
+    let lines = vec![first.clone(), middle.clone(), "  cccc) done".to_string()];
+    let parser = hardwrap_grid(cols, &lines);
+    let (complete_count, _) = assert_hardwrap_cells_match_reference(parser.grid(), "two openers");
+    assert!(complete_count > 0, "the later opener's chain resolves");
+    let pointed = AbsoluteCell { row: 1, col: 4 };
+    let HardwrapUri::Complete(candidate) = hardwrap_uri_at_cell(parser.grid(), 0, pointed) else {
+        panic!("the continuation belongs to the later opener's chain");
+    };
+    let expected_url = format!("https://ex.co/{}{}cccc", &first[opener_text.len()..], &middle[2..]);
+    assert_eq!(candidate.target, DetectedTarget::Uri(expected_url));
+    // An unterminated variant: the last row holds no closer, so the chain cannot be proven.
+    let lines = vec![first, middle, "  cccc done".to_string()];
+    let parser = hardwrap_grid(cols, &lines);
+    let (_, incomplete_count) =
+        assert_hardwrap_cells_match_reference(parser.grid(), "two openers, unclosed");
+    assert!(incomplete_count > 0, "an unterminated chain refuses its truncated prefix");
+}
+
+/// Wrapper text a row holds past `cols`, as a resize without reflow leaves it, is decided as the
+/// reference decides it: the edge bounds the body and its breaks, while closers past the edge stay
+/// visible to the closer search, whether the opener sits inside the grid or past its edge.
+#[test]
+fn hardwrap_pre_pass_matches_the_reference_on_rows_longer_than_the_grid() {
+    let cols = 24u16;
+    let continuation =
+        [format!("  {}", "b".repeat(usize::from(cols) - 2)), "  cccc) done".to_string()];
+    // The opener inside the grid, its body running past the edge.
+    let mut lines = vec!["x (https://ex.co/aaaaaaa".to_string()];
+    lines.extend(continuation.iter().cloned());
+    let mut parser = hardwrap_grid(cols, &lines);
+    // The appended cells hold a blank, a break no body may contain, but past the edge it is no body.
+    extend_row_past_grid(parser.grid_mut(), 0, "zz tail");
+    let (complete_count, _) =
+        assert_hardwrap_cells_match_reference(parser.grid(), "body past the edge");
+    assert!(complete_count > 0, "the chain still resolves from the cells inside the grid");
+    let pointed = AbsoluteCell { row: 1, col: 4 };
+    let HardwrapUri::Complete(candidate) = hardwrap_uri_at_cell(parser.grid(), 0, pointed) else {
+        panic!("the continuation belongs to the opener's chain");
+    };
+    let expected_url = format!("https://ex.co/aaaaaaa{}cccc", &continuation[0][2..]);
+    assert_eq!(
+        candidate.target,
+        DetectedTarget::Uri(expected_url),
+        "cells past the edge join nothing"
+    );
+    // The opener inside the grid with its own closer past the edge.
+    let mut parser = hardwrap_grid(cols, &lines);
+    extend_row_past_grid(parser.grid_mut(), 0, "aa) tail");
+    let counts = assert_hardwrap_cells_match_reference(parser.grid(), "closer past the edge");
+    assert_eq!(
+        counts,
+        (0, 0),
+        "a same-row closer, even past the edge, leaves single-row detection in charge"
+    );
+    // The whole two-opener wrapper text sitting past the edge, after prose that fills the grid.
+    let mut lines = vec!["see the docs at the link".to_string()];
+    lines.extend(continuation.iter().cloned());
+    let mut parser = hardwrap_grid(cols, &lines);
+    extend_row_past_grid(parser.grid_mut(), 0, " x (https://a.co/y (https://ex.co/aaaa");
+    assert!(parser.grid().row(0).len() > usize::from(cols), "the row is longer than the grid");
+    let (complete_count, _) =
+        assert_hardwrap_cells_match_reference(parser.grid(), "wrapper past the edge");
+    assert_eq!(complete_count, 0, "no chain opens beyond the grid's edge");
+}
+
+/// An opener in the grid's last column is decided as the reference decides it: its scheme cannot
+/// fit inside the row, and on a row longer than the grid its scheme lies past the edge, so neither
+/// opens a chain; a `[` opener in that column behaves the same.
+#[test]
+fn hardwrap_pre_pass_matches_the_reference_with_an_opener_in_the_last_column() {
+    let cols = 20u16;
+    let mut first = "a".repeat(usize::from(cols) - 1);
+    first.push('(');
+    let lines = vec![first, "  https://ex.co/b".to_string(), "  cccc) done".to_string()];
+    let parser = hardwrap_grid(cols, &lines);
+    let counts = assert_hardwrap_cells_match_reference(parser.grid(), "opener at cols - 1");
+    assert_eq!(counts, (0, 0), "an opener with no room for a scheme opens nothing");
+    let mut parser = hardwrap_grid(cols, &lines);
+    extend_row_past_grid(parser.grid_mut(), 0, "https://ex.co/aaa");
+    let counts = assert_hardwrap_cells_match_reference(
+        parser.grid(),
+        "opener at cols - 1, scheme past the edge",
+    );
+    assert_eq!(counts, (0, 0), "a scheme past the edge leaves the opener no body inside the grid");
+    let mut bracket = "a".repeat(usize::from(cols) - 1);
+    bracket.push('[');
+    let middle = format!("  {}", "b".repeat(usize::from(cols) - 2));
+    let lines = vec![bracket, middle, "  cccc] done".to_string()];
+    let parser = hardwrap_grid(cols, &lines);
+    let counts = assert_hardwrap_cells_match_reference(parser.grid(), "bracket at cols - 1");
+    assert_eq!(counts, (0, 0), "a bracket with no room for a scheme opens nothing");
+}
+
+/// Cells walked by `pre_pass` for one primary-screen row holding `pattern` repeated to `cols`
+/// columns, pointed at its first cell.
+fn hardwrap_cells_walked(
+    pattern: &str,
+    cols: u16,
+    pre_pass: fn(&FrameRows<'_>, AbsoluteCell) -> HardwrapUri,
+) -> u64 {
+    let row_text = pattern.chars().cycle().take(usize::from(cols)).collect::<String>();
+    let mut parser = sonicterm_vt::vt::Parser::new(Grid::new(cols, 2));
+    parser.advance(row_text.as_bytes());
+    let grid = parser.grid();
+    let pointed = AbsoluteCell { row: 0, col: 0 };
+    let (_, walked) = hardwrap_work::measure(|| pre_pass(&FrameRows::new(grid, 0), pointed));
+    walked
+}
+
+/// Assert that doubling the row width at most about doubles the pre-pass's work on `pattern`,
+/// while the per-wrapper reference grows about fourfold, which proves the measure can tell them apart.
+fn assert_hardwrap_work_is_linear(pattern: &str) {
+    let narrow = hardwrap_cells_walked(pattern, 400, hardwrap_uri_in);
+    let wide = hardwrap_cells_walked(pattern, 800, hardwrap_uri_in);
+    assert!(narrow > 0, "{pattern:?}: the measure counted no work");
+    assert!(wide * 2 <= narrow * 5, "{pattern:?}: {narrow} cells at 400 columns, {wide} at 800");
+    let reference_narrow = hardwrap_cells_walked(pattern, 400, reference_hardwrap_uri_in);
+    let reference_wide = hardwrap_cells_walked(pattern, 800, reference_hardwrap_uri_in);
+    assert!(
+        reference_wide >= reference_narrow * 3,
+        "{pattern:?}: the reference walked {reference_narrow} then {reference_wide} cells"
+    );
+}
+
+/// A row of repeated complete `(https://a)` wrappers costs the pre-pass work linear in its width:
+/// each wrapper's same-row closer is not found by re-collecting the row per wrapper.
+#[test]
+fn repeated_complete_wrappers_cost_linear_work() {
+    assert_hardwrap_work_is_linear("(https://a)");
+}
+
+/// A row of repeated unmatched `(https://` openers costs work linear in its width: no opener
+/// searches the growing suffix after it for a closer that never comes.
+#[test]
+fn repeated_unmatched_openers_cost_linear_work() {
+    assert_hardwrap_work_is_linear("(https://a/b ");
+}

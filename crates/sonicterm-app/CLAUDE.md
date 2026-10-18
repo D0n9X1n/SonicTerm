@@ -217,6 +217,12 @@ cargo build -p sonicterm-app
   the selected tier (`open_request_still_selected`) and opens only on the same path and
   decision; `key_preserves_selection` drops authorization when a new candidate appears at
   or before that tier. Reloading a changed cap revokes path results.
+- Hover detection is memoized per window (`path_target/hover_cache.rs`): a lookup whose key
+  (pane, pointed cell, viewport, `rows_below`, eviction, screen epoch, size generation, alternate
+  screen, CWD revision, `clickable_*` settings) and every read row's content stamp match reuses the
+  cached `CellTargetSnapshot` without hashing. Content stamps are only this fast path; probe
+  identity is unchanged, the cache gates the scan and never `apply_target_hover`, and a click
+  always computes its own fresh target. Clear it wherever `invalidate_path_hover` runs.
 - On the alternate screen a multiplexer places each pane row with a cursor move. The
   plain-target scan reads only the pointed pane's columns of each row, so a pane border
   ends every name as the grid's edge does. A recorded wrap happens only at the grid's
@@ -227,7 +233,10 @@ cargo build -p sonicterm-app
   same pane edges when it starts with text, unless a recorded wrap between those rows
   joins different panes. One loop grows both ends (`ChainStep`, `admit_chain_step`), so a
   row reached by inference is still checked for its own recorded wrap and an incomplete
-  chain fails closed; chains stop at 32 rows and the view edges. These joins carry URIs as
+  chain fails closed; chains stop at 32 rows and the view edges. Detection reads rows only
+  through `FrameRows` (`path_target/frame_rows.rs`), which never serves a row outside the
+  displayed frame; a scrolled-back view's bottom-row segment that reaches the grid's edge is
+  `Incomplete`, never decided by reading the row below. These joins carry URIs as
   well as paths, because tmux separates rows with CR LF when it redraws; unrelated rows
   that exactly fill a pane edge can join into a longer URI, and the modifier-hover
   preview shows the full destination before activation. `spans_reach_cut_pane_edge` checks against the joined chain
