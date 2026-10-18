@@ -145,23 +145,79 @@ fn path_detection_never_reads_rows_past_the_frame_reader() {
     assert!(direct_reads.is_empty(), "detection reads rows directly: {direct_reads:?}");
 }
 
-/// Every production source in `path_target/` except the reader is in `DETECTION_SOURCES`, so a
-/// new detection module cannot read rows directly unchecked.
+/// Every production Rust source under `directory`, at any depth, as a `/`-separated path relative
+/// to it, sorted; test siblings (`*_tests.rs`) and the reader `frame_rows.rs` are left out, so a
+/// nested module such as `helper/mod.rs` is listed by its relative path.
+fn production_modules_under(directory: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        for entry in std::fs::read_dir(&current).expect("readable source directory") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                // When: `path` is a subdirectory, its modules are walked too, so none escapes.
+                pending.push(path);
+                continue;
+            }
+            let relative = path.strip_prefix(directory).expect("walked path is under the root");
+            let relative = relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            if relative.ends_with(".rs")
+                && !relative.ends_with("_tests.rs")
+                && relative != "frame_rows.rs"
+            {
+                // When: `relative` is a production source other than the reader, it must be listed.
+                found.push(relative);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Every production source in `path_target/`, at any depth, except the reader is in
+/// `DETECTION_SOURCES`, so a new detection module, flat or nested, cannot read rows unchecked.
 #[test]
 fn the_frame_reader_source_check_covers_every_detection_module() {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/path_target");
-    let mut on_disk = std::fs::read_dir(&directory)
-        .expect("path_target directory")
-        .map(|entry| entry.expect("directory entry").file_name().to_string_lossy().into_owned())
-        .filter(|name| name.ends_with(".rs") && !name.ends_with("_tests.rs"))
-        .filter(|name| name != "frame_rows.rs")
-        .collect::<Vec<_>>();
-    on_disk.sort();
     let mut listed = DETECTION_SOURCES
         .iter()
         .map(|(file_name, _)| file_name.to_string())
         .filter(|name| name != "path_target.rs")
         .collect::<Vec<_>>();
     listed.sort();
-    assert_eq!(listed, on_disk);
+    assert_eq!(listed, production_modules_under(&directory));
+}
+
+/// A nested module such as `helper/mod.rs` is found by its relative path, so it cannot escape the
+/// coverage check that a flat listing would pass; test siblings at any depth and the reader are
+/// skipped, and a non-Rust file is ignored. The fixture tree is built in a private temporary
+/// directory and removed before asserting, so a failure leaves nothing behind.
+#[test]
+fn a_nested_detection_module_cannot_escape_the_coverage_check() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after the epoch")
+        .as_nanos();
+    let root = std::env::temp_dir()
+        .join(format!("sonicterm-frame-rows-guard-{}-{unique}", std::process::id()));
+    std::fs::create_dir_all(root.join("helper/deeper")).expect("fixture directories");
+    for file_name in [
+        "unix.rs",
+        "unix_tests.rs",
+        "frame_rows.rs",
+        "notes.txt",
+        "helper/mod.rs",
+        "helper/mod_tests.rs",
+        "helper/deeper/scan.rs",
+    ] {
+        std::fs::write(root.join(file_name), "").expect("fixture file");
+    }
+    let found = production_modules_under(&root);
+    std::fs::remove_dir_all(&root).expect("fixture cleanup");
+    assert_eq!(found, vec!["helper/deeper/scan.rs", "helper/mod.rs", "unix.rs"]);
+    assert_ne!(found, vec!["unix.rs"], "a flat listing would let the nested modules through");
 }
