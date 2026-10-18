@@ -60,6 +60,8 @@ for required in \
   assets/i18n/zh-CN/messages.ftl \
   assets/icons/exports/png/sonic-256.png \
   share/applications/com.d0n9x1n.SonicTerm.desktop \
+  share/applications/com.d0n9x1n.SonicTerm.open-script.desktop \
+  share/man/man1/sonicterm.1 \
   share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml \
   share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png \
   LICENSE \
@@ -87,9 +89,28 @@ for required_text in \
   '--sort=name' \
   '--numeric-owner' \
   'dpkg-deb --root-owner-group' \
+  'gzip -n -9 -c "$payload/share/man/man1/sonicterm.1"' \
+  '"$deb_root/usr/share/applications/$identity.open-script.desktop"' \
   'GLIBC_2.35'; do
   grep -Fq -- "$required_text" "$builder" || fail "builder is missing contract text: $required_text"
 done
+
+# Installing must change no default: no alternative registration, no Provides, no maintainer script.
+for forbidden_text in 'update-alternatives' 'Provides:' 'DEBIAN/postinst' 'DEBIAN/prerm'; do
+  if grep -Fq -- "$forbidden_text" "$builder"; then
+    fail "builder must not use $forbidden_text: installing would change or claim a default"
+  fi
+done
+
+# The open-script entry types a draft and never runs a command; the terminal entry keeps a bare Exec.
+open_script_entry="$stage/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop"
+grep -Fxq 'Exec=sonicterm --open-script %f' "$open_script_entry" || \
+  fail "open-script entry must run sonicterm --open-script %f"
+grep -Fxq 'NoDisplay=true' "$open_script_entry" || fail "open-script entry must be hidden"
+grep -Fxq 'Exec=sonicterm' "$stage/share/applications/com.d0n9x1n.SonicTerm.desktop" || \
+  fail "terminal entry Exec must stay a bare sonicterm"
+grep -Fxq 'X-TerminalArgExec=-e' "$stage/share/applications/com.d0n9x1n.SonicTerm.desktop" || \
+  fail "terminal entry must declare X-TerminalArgExec=-e"
 
 if [[ $# -eq 0 ]]; then
   printf 'linux package test: source contract ok\n'
@@ -133,6 +154,36 @@ for license in "$portable_root/LICENSE-winit-Apache-2.0" \
   cmp -s "$root/crates/sonicterm-winit/LICENSE" "$license" || \
     fail "package winit license is missing or differs from the pinned source license: $license"
 done
+
+[[ -f "$portable_root/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop" ]] || \
+  fail "tarball open-script desktop entry is missing"
+[[ -f "$deb_root/usr/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop" ]] || \
+  fail "Debian open-script desktop entry is missing"
+man_page="$deb_root/usr/share/man/man1/sonicterm.1.gz"
+[[ -f "$man_page" ]] || fail "Debian man page is missing"
+python3 - "$man_page" <<'PY' || fail "Debian man page is not a reproducible gzip file"
+import pathlib
+import sys
+
+header = pathlib.Path(sys.argv[1]).read_bytes()[:10]
+if len(header) != 10 or header[:3] != b"\x1f\x8b\x08":
+    raise SystemExit(1)
+if int.from_bytes(header[4:8], "little") != 0 or header[3] & 0x08:
+    raise SystemExit(1)
+PY
+
+# Inspect modes inside the archive, not after extraction, so the umask cannot hide a wrong mode.
+dpkg-deb --fsys-tarfile "$deb" | tar -tvf - ./usr/share/man/man1/sonicterm.1.gz | grep -Eq '^-rw-r--r-- ' || \
+  fail "Debian man page mode is not 0644"
+control_members="$(dpkg-deb --ctrl-tarfile "$deb" | tar -tf -)"
+for script in preinst postinst prerm postrm; do
+  if printf '%s\n' "$control_members" | grep -Eq "(^|/)$script\$"; then
+    fail "Debian package ships a $script maintainer script; installation must change no default"
+  fi
+done
+if dpkg-deb -f "$deb" Provides | grep -Fq 'x-terminal-emulator'; then
+  fail "Debian package must not provide x-terminal-emulator without registering it"
+fi
 
 architecture="$(dpkg-deb -f "$deb" Architecture)"
 [[ "$architecture" == "amd64" ]] || fail "Debian architecture is $architecture, expected amd64"

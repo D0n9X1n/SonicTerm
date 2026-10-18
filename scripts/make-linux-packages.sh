@@ -43,6 +43,7 @@ export SOURCE_DATE_EPOCH
 rm -rf "$work"
 mkdir -p "$payload/assets" \
   "$payload/share/applications" \
+  "$payload/share/man/man1" \
   "$payload/share/metainfo" \
   "$payload/share/icons/hicolor/256x256/apps"
 install -m 0755 "$binary" "$payload/sonicterm"
@@ -53,8 +54,14 @@ install -m 0644 \
   "$root/crates/sonicterm-linux/resources/$identity.desktop" \
   "$payload/share/applications/$identity.desktop"
 install -m 0644 \
+  "$root/crates/sonicterm-linux/resources/$identity.open-script.desktop" \
+  "$payload/share/applications/$identity.open-script.desktop"
+install -m 0644 \
   "$root/crates/sonicterm-linux/resources/$identity.metainfo.xml" \
   "$payload/share/metainfo/$identity.metainfo.xml"
+install -m 0644 \
+  "$root/crates/sonicterm-linux/resources/sonicterm.1" \
+  "$payload/share/man/man1/sonicterm.1"
 install -m 0644 \
   "$root/assets/icons/exports/png/sonic-256.png" \
   "$payload/share/icons/hicolor/256x256/apps/$identity.png"
@@ -128,6 +135,7 @@ mkdir -p \
   "$deb_root/usr/bin" \
   "$deb_root/usr/share/sonicterm" \
   "$deb_root/usr/share/applications" \
+  "$deb_root/usr/share/man/man1" \
   "$deb_root/usr/share/metainfo" \
   "$deb_root/usr/share/icons/hicolor/256x256/apps" \
   "$deb_root/usr/share/doc/sonicterm"
@@ -135,6 +143,10 @@ install -m 0755 "$payload/sonicterm" "$deb_root/usr/bin/sonicterm"
 cp -R "$payload/assets" "$deb_root/usr/share/sonicterm/"
 install -m 0644 "$payload/share/applications/$identity.desktop" \
   "$deb_root/usr/share/applications/$identity.desktop"
+install -m 0644 "$payload/share/applications/$identity.open-script.desktop" \
+  "$deb_root/usr/share/applications/$identity.open-script.desktop"
+# The packaged man page is compressed without a name or timestamp, so the archive stays reproducible.
+gzip -n -9 -c "$payload/share/man/man1/sonicterm.1" > "$deb_root/usr/share/man/man1/sonicterm.1.gz"
 install -m 0644 "$payload/share/metainfo/$identity.metainfo.xml" \
   "$deb_root/usr/share/metainfo/$identity.metainfo.xml"
 install -m 0644 "$payload/share/icons/hicolor/256x256/apps/$identity.png" \
@@ -186,6 +198,8 @@ Description: Fast GPU-accelerated terminal emulator
  SonicTerm provides split panes, searchable commands, configurable keybindings,
  and bundled typography in a native terminal application.
 CONTROL
+# Installing changes no default: no maintainer script registers an x-terminal-emulator
+# alternative, and the control file claims no virtual package. Users opt in explicitly.
 
 find "$deb_root" -type d -exec chmod 0755 {} +
 find "$deb_root" -type f ! -path "$deb_root/usr/bin/sonicterm" -exec chmod 0644 {} +

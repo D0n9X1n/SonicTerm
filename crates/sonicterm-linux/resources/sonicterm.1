@@ -1,0 +1,97 @@
+.TH SONICTERM 1 "" "SonicTerm" "User Commands"
+.SH NAME
+sonicterm \- GPU-accelerated terminal emulator
+.SH SYNOPSIS
+.B sonicterm
+[\fIOPTION\fR...]
+[(\fB\-e\fR | \fB\-\-command\fR | \fB\-\-\fR) \fIPROGRAM\fR [\fIARG\fR...]]
+.br
+.B sonicterm \-\-open\-script
+.I PATH
+.br
+.B sonicterm \-\-help
+.SH DESCRIPTION
+.B sonicterm
+opens a terminal window. Without a program it runs the user's shell; with
+.BR \-e ,
+.B \-\-command
+or
+.B \-\-
+it runs
+.I PROGRAM
+directly, with no shell, passing every later argument to it unchanged.
+Each invocation starts a new process with its own window.
+.PP
+Options are read only before the first
+.BR \-e ,
+.B \-\-command
+or
+.BR \-\- .
+Everything after it belongs to the program, including words that look like
+SonicTerm options.
+.SH OPTIONS
+.TP
+.BI \-T " TITLE"
+Set the window title and the first tab's label. The value is taken verbatim,
+even when it starts with a dash.
+.TP
+.BI \-\-title= TITLE
+Same as
+.BR \-T .
+.TP
+.BI \-\-dir= PATH ", \-\-working\-directory=" PATH
+Start the first tab in
+.IR PATH .
+A relative path resolves against the current directory. The directory must exist.
+.TP
+.B \-\-hold
+Keep the first pane open after its process exits, and show how it exited.
+.TP
+.BR \-e ", " \-\-command ", " \-\- " \fIPROGRAM\fR [\fIARG\fR...]"
+Run
+.I PROGRAM
+with its arguments instead of the shell.
+.I PROGRAM
+is one program name: \fB\-e "cmd args"\fR names a program called
+.IR "cmd args" .
+A name without a slash is searched on
+.BR PATH ;
+a relative path resolves against the first tab's directory. A text file runs
+only when it starts with
+.BR #! .
+.TP
+.BI \-\-open\-script " PATH"
+Open a tab whose shell prompt holds a command that would run
+.IR PATH .
+The script is not run until the user presses Enter. This option cannot be
+combined with any other.
+.TP
+.B \-\-help
+Print usage and exit.
+.SH WORKING DIRECTORY
+Without
+.BR \-\-dir ,
+the first tab starts in the current directory, or in
+.B $HOME
+when the current directory is unavailable. Later tabs follow the active pane's
+reported directory, else
+.BR $HOME .
+.SH EXIT STATUS
+.TP
+.B 0
+The window closed normally, or
+.B \-\-help
+was given.
+.TP
+.B 2
+The command line is invalid: an unknown option, a stray argument, a missing or
+repeated value, conflicting modes, or a
+.B \-\-dir
+that is not a directory. Usage is printed to standard error.
+.SH FILES
+.TP
+.I ~/.sonicterm/sonicterm.toml
+User configuration.
+.SH SEE ALSO
+.BR update\-alternatives (1),
+.BR xdg\-terminal\-exec (1)
