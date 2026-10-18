@@ -2744,22 +2744,29 @@ impl App {
 
     /// The pane cell under a point in a window with no renderer: a headless test with a pane
     /// viewport resolves it on that viewport's uniform grid; otherwise there is none.
+    #[cfg(test)]
     fn headless_pointer_cell(
         window: &super::WindowState,
         cursor_x_px: f32,
         cursor_y_px: f32,
     ) -> Option<(u64, u16, u16)> {
-        #[cfg(test)]
-        if let Some((_, cell_width_px, cell_height_px)) = window.test_pane_viewport {
-            // When: `test_pane_viewport` is set and no renderer exists, resolve on its uniform grid.
-            return super::window_event::headless_pane_cell(
-                &Self::compute_pane_rects_for(window),
-                (cell_width_px, cell_height_px),
-                cursor_x_px,
-                cursor_y_px,
-            );
-        }
-        let _ = (window, cursor_x_px, cursor_y_px);
+        // A window without `test_pane_viewport` has no uniform grid to resolve the point on.
+        let (_, cell_width_px, cell_height_px) = window.test_pane_viewport?;
+        super::window_event::headless_pane_cell(
+            &Self::compute_pane_rects_for(window),
+            (cell_width_px, cell_height_px),
+            cursor_x_px,
+            cursor_y_px,
+        )
+    }
+
+    /// The pane cell under a point in a window with no renderer: outside tests there is none.
+    #[cfg(not(test))]
+    fn headless_pointer_cell(
+        _window: &super::WindowState,
+        _cursor_x_px: f32,
+        _cursor_y_px: f32,
+    ) -> Option<(u64, u16, u16)> {
         None
     }
 

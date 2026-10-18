@@ -5534,8 +5534,7 @@ fn hover_counts(app: &App) -> (u64, u64, u64) {
     (hover.lookups, hover.detections, hover.cache_hits)
 }
 
-/// Probe requests hover submitted since the last drain; only the POSIX-path tests submit probes.
-#[cfg(unix)]
+/// Probe requests hover submitted since the last drain.
 fn drained_probes(mailbox: &PathProbeMailbox) -> usize {
     std::iter::from_fn(|| mailbox.take_next()).count()
 }
@@ -5839,6 +5838,73 @@ fn rewriting_an_authorized_path_revokes_it_through_the_cache() {
     assert_ne!(second_request.key, first_key);
     assert!(
         second_request.key.candidates.iter().any(|candidate| candidate.display() == second_text),
+        "the probe is for the new path"
+    );
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(drained_probes(&mailbox), 0, "exactly one new probe");
+    assert_eq!(app.frame_counters.as_ref().unwrap().hover.probes_submitted, submitted_before + 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Authorization is revoked through the cache on every platform, Windows included: a relative path
+/// resolved against the pane's OSC 7 directory and authorized by the platform classifier is
+/// detected again once its row is rewritten to another file, the old key loses its authorization,
+/// and exactly one probe is submitted, for the new path.
+#[test]
+fn rewriting_an_authorized_relative_path_revokes_it_through_the_cache() {
+    let root = native_test_root().join(format!(
+        "sonicterm-hover-revoke-relative-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("notes")).unwrap();
+    let (first_text, second_text) = ("notes/first.txt", "notes/other.txt");
+    for relative in [first_text, second_text] {
+        std::fs::write(root.join(relative), b"notes").unwrap();
+    }
+    // File URIs carry a slash-prefixed drive path on Windows.
+    let uri_path = if cfg!(windows) {
+        PathBuf::from(format!("/{}", root.to_str().unwrap().replace('\\', "/")))
+    } else {
+        root.clone()
+    };
+    let cwd = local_file_uri(&uri_path).unwrap();
+    let (mut app, window, pane, mailbox) = counted_hover_app(80, 4);
+    let first_output = format!("\x1b]7;{cwd}\x1b\\{first_text}");
+    assert!(app.__test_advance_child_pane_parser(window, pane, first_output.as_bytes()));
+    frame_hover(&mut app, window, pane, (0, 3));
+    let request = mailbox.take_next().expect("the first frame submits a probe");
+    let outcome = probe_candidates(&request.key.candidates, classify_local_target);
+    assert_eq!(
+        outcome.as_ref().map(|selection| selection.candidate.resolved_path.clone()),
+        Ok(root.join(first_text)),
+        "the platform classifier authorizes the first file"
+    );
+    let first_key = request.key.clone();
+    app.handle_path_probe_finished(PathProbeResult {
+        failure: outcome.as_ref().err().copied(),
+        selection: outcome.ok(),
+        request,
+    });
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (2, 1, 1), "the completion's frame reuses the detection");
+    assert!(app.windows[&window].path_probe.authorized(&first_key, true));
+    let submitted_before = app.frame_counters.as_ref().unwrap().hover.probes_submitted;
+
+    let rewrite = format!("\x1b[1;1H{second_text}\x1b[K");
+    assert!(app.__test_advance_child_pane_parser(window, pane, rewrite.as_bytes()));
+    frame_hover(&mut app, window, pane, (0, 3));
+    assert_eq!(hover_counts(&app), (3, 2, 1), "the rewritten row detects again");
+    assert!(
+        !app.windows[&window].path_probe.authorized(&first_key, true),
+        "the old path's key is no longer authorized"
+    );
+    let second_request = mailbox.take_next().expect("the new path submits a probe");
+    assert_ne!(second_request.key, first_key);
+    assert_eq!(
+        probe_candidates(&second_request.key.candidates, classify_local_target)
+            .map(|selection| selection.candidate.resolved_path),
+        Ok(root.join(second_text)),
         "the probe is for the new path"
     );
     frame_hover(&mut app, window, pane, (0, 3));
