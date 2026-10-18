@@ -35,6 +35,10 @@ cargo test -p sonicterm-ui
   without a newline and keeps the predecessor's trailing cells; hard breaks and
   the selection end trim trailing whitespace. Unmarked rows are hard breaks, and
   a coherent right-edge frame is stripped only across hard breaks.
+- Quick select scans only the displayed viewport (`QuickSelectState::from_viewport`, given the
+  pane's resolved view top), history included when scrolled back; hint rows stay
+  scrollback-absolute and hint columns are grid columns. Copy-mode word navigation and search
+  read history by design.
 - Keep localized labels and command labels in sync when adding actions.
 - Tab widths come from `TabBar::refresh_content_widths`, which the renderer
   runs right before it draws the bar; every `TabBarLayout::compute*` reads the

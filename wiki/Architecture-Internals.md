@@ -335,6 +335,17 @@ correctness, not only speed.
   `invalidate_path_hover` (pane removal or transfer, config reload, focus, resize and
   palette) and window close drop the entry; theme changes do not. A click never uses
   the cache: it computes its own fresh target.
+  A detection run that does happen is linear in the rows it reads with a bounded
+  multiplier. The structural bracket parse reads its prefix once as it advances
+  (`PrefixScan`) instead of rescanning from its floor at every pair; the URI-wins
+  check scans only the run of URL-body bytes around the pointer (`find_url_at`) and
+  the overlap check only the hard-delimited segment; span mapping binary-searches the
+  ordered scalars; the hard-wrap pre-pass reads a scheme into a fixed buffer; the
+  chain stops gathering cells past what the 16 KiB cap refuses; and the hit test
+  binary-searches snapped column edges without building them. The `frame_counters`
+  hover fields (`hover_lookups`, `hover_detections`, `hover_cache_hits`,
+  `hover_rows_read`, `path_probes_submitted`, `quick_select_rows_scanned`) measure
+  this, and the `S6/rest` perf variant exercises it.
   Each window retains at most one current-epoch filesystem-probe completion and
   requests a frame to validate it against a fresh target, rather than discarding
   it during parser contention. Clicks always require a fresh lookup, never
