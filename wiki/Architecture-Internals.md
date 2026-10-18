@@ -315,6 +315,13 @@ correctness, not only speed.
   drops modifier-only feedback when the modifier is released, and requests a
   source-window redraw. Main and child frames resolve hover from their held parser
   snapshots before presentation.
+  URL and path detection reads rows only through `FrameRows`, which serves the
+  displayed frame `[view_top, view_top + rows)` and nothing else, not even the wrap
+  flag or pane-border glyph of the row just above or below it. A wrap, border
+  inference or target that touches a frame edge fails closed where the unread row
+  could change the result: on a scrolled-back view a bottom-row segment reaching the
+  grid's edge leaves its chain `Incomplete`, and the hard-wrap pre-pass treats that
+  boundary as possibly wrapped. `rows_below` answers from the row count alone.
   Each window retains at most one current-epoch filesystem-probe completion and
   requests a frame to validate it against a fresh target, rather than discarding
   it during parser contention. Clicks always require a fresh lookup, never

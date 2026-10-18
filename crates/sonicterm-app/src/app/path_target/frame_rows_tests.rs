@@ -18,9 +18,10 @@ fn scrolled_grid() -> Grid {
     grid
 }
 
-/// The reader reports the displayed frame's bounds and counts every row it serves.
+/// The reader reports the displayed frame's bounds, serves only displayed rows and counts every
+/// row it serves; a refused row outside the frame is not counted as read.
 #[test]
-fn reader_counts_rows_and_reports_its_frame() {
+fn reader_serves_and_counts_only_displayed_rows() {
     let grid = scrolled_grid();
     let frame = FrameRows::new(&grid, 1);
     assert_eq!((frame.view_top(), frame.view_end()), (1, 5));
@@ -28,7 +29,21 @@ fn reader_counts_rows_and_reports_its_frame() {
     assert!(!frame.contains(0) && !frame.contains(5));
     assert!(frame.row(2).is_some());
     assert!(frame.row(2).is_some());
-    assert_eq!(frame.rows_read(), 2, "a repeated read counts each time");
+    assert!(frame.row(0).is_none() && frame.row(5).is_none(), "rows outside the frame are refused");
+    assert_eq!(frame.rows_read(), 2, "a repeated read counts each time; a refused one never");
+}
+
+/// `rows_below` is true exactly when the view is scrolled back, read from the row count alone.
+#[test]
+fn rows_below_reports_a_scrolled_back_view() {
+    let grid = scrolled_grid();
+    let live_top = grid.scrollback_len() as u64;
+    assert!(FrameRows::new(&grid, live_top - 1).rows_below());
+    assert!(!FrameRows::new(&grid, live_top).rows_below());
+    let ((), reads) = read_observer::observe(|| {
+        let _ = FrameRows::new(&grid, 0).rows_below();
+    });
+    assert!(reads.is_empty(), "the answer reads no row");
 }
 
 /// The test observer records every requested row with whether the frame displayed it, so a

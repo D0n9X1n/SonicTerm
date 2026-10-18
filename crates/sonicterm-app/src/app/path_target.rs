@@ -857,10 +857,18 @@ fn hardwrap_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) -> HardwrapUri 
             // When: row_at_abs has no row_number, that evicted row cannot open a visible candidate.
             continue;
         };
-        if row.soft_wrapped_from_previous()
-            || frame.row(row_number + 1).is_some_and(|next| next.soft_wrapped_from_previous())
-        {
-            // When: soft_wrapped_from_previous holds at either boundary, the logical scanner owns it.
+        // The frame's last row may wrap into a row below it that is not displayed, so on a
+        // scrolled-back view that boundary is unknown and the logical scanner, which fails closed
+        // there, owns it.
+        let next_row_number = row_number + 1;
+        let wraps_below = if frame.contains(next_row_number) {
+            frame.row(next_row_number).is_some_and(|next| next.soft_wrapped_from_previous())
+        } else {
+            // When: the next row is outside the frame, only a scrolled-back view has one at all.
+            frame.rows_below()
+        };
+        if row.soft_wrapped_from_previous() || wraps_below {
+            // When: soft_wrapped_from_previous holds, or may hold, at either boundary, the logical scanner owns it.
             continue;
         }
         let cells = row.iter().collect::<Vec<_>>();
@@ -1228,15 +1236,18 @@ fn logical_path_scan_in(
             // When: `last.row` has no successor, the logical line ends at `last`.
             return ChainStep::End;
         };
+        // The row below the frame is never read. On a scrolled-back view a segment reaching the
+        // grid's edge may wrap into it, so that chain is unproven; the live view has no row below.
+        if next_row_number >= view_end {
+            // When: `next_row_number` reaches `view_end`, geometry alone decides Incomplete or End.
+            let may_wrap = last.right == grid.cols && frame.rows_below();
+            return if may_wrap { ChainStep::Incomplete } else { ChainStep::End };
+        }
         let recorded = last.right == grid.cols
             && frame.row(next_row_number).is_some_and(|row| row.soft_wrapped_from_previous());
         if recorded && !wrap_joins_one_pane(frame, last.row) {
             // When: `recorded` but `wrap_joins_one_pane` fails, the wrap carries this pane's text into another pane.
             return ChainStep::End;
-        }
-        if recorded && next_row_number >= view_end {
-            // When: `recorded` and `next_row_number` is below the view, the chain is unproven.
-            return ChainStep::Incomplete;
         }
         if recorded {
             // When: `recorded`, the terminal proved `last` continues on the next row.
@@ -1817,7 +1828,8 @@ fn pointed_text_spans(
 }
 
 /// Report whether `column` of absolute `row` is a pane border: a vertical box-drawing glyph that
-/// the visible row above or the row below also draws in the same column.
+/// the displayed row above or below also draws in the same column. A neighbour outside the frame
+/// is never read, so at a frame edge only the displayed neighbour counts.
 fn pane_border_at(frame: &FrameRows<'_>, row: u64, column: u16) -> bool {
     let border_in = |row_number: u64| {
         is_pane_border(
@@ -1826,7 +1838,7 @@ fn pane_border_at(frame: &FrameRows<'_>, row: u64, column: u16) -> bool {
     };
     border_in(row)
         && (row.checked_sub(1).filter(|above| *above >= frame.view_top()).is_some_and(border_in)
-            || row.checked_add(1).is_some_and(border_in))
+            || row.checked_add(1).filter(|below| frame.contains(*below)).is_some_and(border_in))
 }
 
 /// Report whether consecutive hard-wrap `spans` continue across a vertical pane border: on the
@@ -2376,6 +2388,10 @@ impl App {
     ) -> Option<CellTargetSnapshot> {
         let grid = frame.grid();
         let view_top = frame.view_top();
+        if viewport_row >= grid.rows {
+            // When: `viewport_row` is past the frame's rows, the pointer is on no displayed cell.
+            return None;
+        }
         let absolute_row = view_top.checked_add(u64::from(viewport_row))?;
         let row = frame.row(absolute_row)?;
         let cell = row.iter().nth(usize::from(col))?;

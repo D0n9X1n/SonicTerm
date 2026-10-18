@@ -227,7 +227,10 @@ cargo build -p sonicterm-app
   same pane edges when it starts with text, unless a recorded wrap between those rows
   joins different panes. One loop grows both ends (`ChainStep`, `admit_chain_step`), so a
   row reached by inference is still checked for its own recorded wrap and an incomplete
-  chain fails closed; chains stop at 32 rows and the view edges. These joins carry URIs as
+  chain fails closed; chains stop at 32 rows and the view edges. Detection reads rows only
+  through `FrameRows` (`path_target/frame_rows.rs`), which never serves a row outside the
+  displayed frame; a scrolled-back view's bottom-row segment that reaches the grid's edge is
+  `Incomplete`, never decided by reading the row below. These joins carry URIs as
   well as paths, because tmux separates rows with CR LF when it redraws; unrelated rows
   that exactly fill a pane edge can join into a longer URI, and the modifier-hover
   preview shows the full destination before activation. `spans_reach_cut_pane_edge` checks against the joined chain

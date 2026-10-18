@@ -48,11 +48,25 @@ impl<'grid> FrameRows<'grid> {
         (self.view_top..self.view_end).contains(&row)
     }
 
-    /// The row at absolute `row`; `None` past the grid's rows. A read outside the frame is
-    /// recorded for tests and still served, so callers keep their current edge behavior.
+    /// Whether the grid holds a row below the frame, from its row count alone: true exactly when
+    /// the view is scrolled back. No row outside the frame is read to answer it.
+    pub(in crate::app) fn rows_below(&self) -> bool {
+        let stored_rows =
+            (self.grid.scrollback_len() as u64).saturating_add(u64::from(self.grid.rows));
+        self.view_end < stored_rows
+    }
+
+    /// The displayed row at absolute `row`; `None` outside the frame or past the grid's rows.
+    ///
+    /// `None` outside the frame is not evidence about that row: a caller at a frame edge checks
+    /// [`Self::contains`] or [`Self::rows_below`] first and fails closed where it would matter.
     pub(in crate::app) fn row(&self, row: u64) -> Option<&'grid Row> {
         #[cfg(test)]
         read_observer::record(row, self.contains(row));
+        if !self.contains(row) {
+            // When: `row` is not displayed, detection must not see it.
+            return None;
+        }
         self.rows_read.set(self.rows_read.get().saturating_add(1));
         self.grid.row_at_abs(row)
     }

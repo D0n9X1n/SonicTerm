@@ -5371,3 +5371,122 @@ fn path_and_url_detection_read_trimmed_history_rows() {
     }
     assert_eq!(checked, [200, 200], "every URL and path row was checked");
 }
+
+/// The absolute row whose text starts with `prefix`, searched over history and the live screen.
+fn absolute_row_starting_with(grid: &Grid, prefix: &str) -> u64 {
+    let stored_rows = grid.scrollback_len() as u64 + u64::from(grid.rows);
+    (0..stored_rows)
+        .find(|row| {
+            grid.row_at_abs(*row).is_some_and(|line| {
+                line.iter().map(|cell| cell.ch).collect::<String>().starts_with(prefix)
+            })
+        })
+        .expect("a row with the prefix")
+}
+
+/// A child-window pane of `cols` × `rows` cells that has parsed `output`.
+fn pane_after(cols: u16, rows: u16, output: &str) -> (App, WindowId, u64) {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["frame scope"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    (app, window, pane)
+}
+
+/// Detection reads only the displayed frame: from every cell of every scrolled-back view over
+/// recorded wraps, an OSC 8 link and a hard-wrapped bracketed URL that cross both frame edges, and
+/// from every cell of an alternate screen whose pane borders reach its bottom row, no row outside
+/// `[view_top, view_top + rows)` is read, not even the wrap flag or border glyph of a neighbour.
+#[test]
+fn detection_reads_no_row_outside_the_displayed_frame() {
+    let link = "\x1b]8;;https://example.com/linked\x1b\\";
+    let close = "\x1b]8;;\x1b\\";
+    let mut output = String::new();
+    for index in 0..12 {
+        match index % 3 {
+            // 30 characters on 20 columns: a recorded wrap into the next row.
+            0 => output.push_str("/tmp/a/b/c/d/e/f/g/h/i/j/k.txt"),
+            // An OSC 8 label that wraps with the row.
+            1 => output.push_str(&format!("{link}linked-label-that-wraps-on{close}")),
+            // A bracketed URL a program wrapped itself, continued on a hard line.
+            _ => output.push_str("(https://ex.co/aaaaaaaaaa\r\n/bbbb) tail"),
+        }
+        output.push_str("\r\n");
+    }
+    let (app, window, pane) = pane_after(20, 4, &output);
+    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let guard = parser.lock();
+    let history_rows = guard.grid().scrollback_len() as u64;
+    assert!(history_rows > 8, "the fixture scrolls rows into history");
+    for view_top in 0..=history_rows {
+        for row in 0..4 {
+            for col in 0..20 {
+                let (_, reads) = frame_rows::read_observer::observe(|| {
+                    app.cell_target_from_parser(window, pane, row, col, &guard, Some(view_top))
+                });
+                let outside = reads.iter().filter(|(_, in_frame)| !in_frame).collect::<Vec<_>>();
+                assert!(outside.is_empty(), "view {view_top} cell ({row}, {col}) read {outside:?}");
+            }
+        }
+    }
+    drop(guard);
+
+    // On the alternate screen a split border runs to the bottom row and text fills both panes.
+    let screen = format!(
+        "\x1b[?1049h{}\x1b[1;1Hhttps://ex.co/aaaaaaaa\x1b[2;1Hmore/path\x1b[4;1H/tmp/left/side.txt\x1b[4;23H/tmp/right.txt",
+        pane_border(21, 4)
+    );
+    let (app, window, pane) = pane_after(41, 4, &screen);
+    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let guard = parser.lock();
+    for row in 0..4 {
+        for col in 0..41 {
+            let (_, reads) = frame_rows::read_observer::observe(|| {
+                app.cell_target_from_parser(window, pane, row, col, &guard, None)
+            });
+            let outside = reads.iter().filter(|(_, in_frame)| !in_frame).collect::<Vec<_>>();
+            assert!(outside.is_empty(), "alternate cell ({row}, {col}) read {outside:?}");
+        }
+    }
+}
+
+/// A target on the bottom row of a scrolled-back view may continue on the row below, which is not
+/// displayed, so it is refused without reading that row, whether or not the row below records a
+/// wrap. The same row away from the edge, and on the live view's bottom row, keeps its target.
+#[test]
+fn a_bottom_edge_target_of_a_scrolled_back_view_is_refused_without_reading_below() {
+    for (label, line, pointed_col) in [
+        // The row below is a recorded continuation of this path.
+        ("wrapped", "/tmp/abcdefghijklmnopqrstuvwxyz.txt", 3_u16),
+        // The row below is unrelated text.
+        ("complete", "/tmp/notes.txt", 3),
+    ] {
+        let output = format!("one\r\ntwo\r\n{line}\r\nnext\r\nfour\r\nfive\r\nsix\r\nseven");
+        let (app, window, pane) = pane_after(20, 3, &output);
+        let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+        let guard = parser.lock();
+        let path_row = absolute_row_starting_with(guard.grid(), &line[..10]);
+        assert!(path_row + 2 < guard.grid().scrollback_len() as u64, "{label}: in history");
+        // Bottom edge: the path is the last of three displayed rows.
+        let (target, reads) = frame_rows::read_observer::observe(|| {
+            app.cell_target_from_parser(window, pane, 2, pointed_col, &guard, Some(path_row - 2))
+        });
+        assert!(target.is_none(), "{label}: a bottom-edge target is refused");
+        assert!(reads.iter().all(|(_, in_frame)| *in_frame), "{label}: {reads:?}");
+        // One row up the path is the middle row, so the row below is displayed and read.
+        if label == "complete" {
+            let target = app
+                .cell_target_from_parser(window, pane, 1, pointed_col, &guard, Some(path_row - 1))
+                .expect("the same path away from the edge");
+            assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+        }
+    }
+    // On the live view no row exists below the bottom row, so the bottom-row target stays.
+    let (app, window, pane) = pane_after(20, 3, "one\r\ntwo\r\n/tmp/notes.txt");
+    let parser = Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let guard = parser.lock();
+    let target =
+        app.cell_target_from_parser(window, pane, 2, 3, &guard, None).expect("live bottom row");
+    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+}

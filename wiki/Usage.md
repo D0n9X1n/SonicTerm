@@ -295,6 +295,13 @@ filesystem detection. Unrelated terminal output and same-value repaints do not
 blink an unchanged target; changing the pointed row, target, CWD, viewport, or
 openability identity revokes authorization and requires a fresh probe.
 
+Detection reads only the rows on screen. When you have scrolled back, the row
+just below the view is not read, so a plain-text target on the view's bottom row
+whose text reaches the right edge may continue off screen and is not linked;
+scroll it up one row to use it. On the live view nothing changes, because no row
+exists below the bottom one. OSC 8 links keep their stored destination at the
+edge; only their underline stops at the view.
+
 Plain hover underlines both detected URLs and OSC 8 labels with the theme's yellow
 hint; the open modifier switches to the action accent. Plain hover leaves glyph
 foreground colors unchanged. A temporarily busy parser does not remove an
