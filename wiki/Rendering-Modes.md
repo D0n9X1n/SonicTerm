@@ -488,7 +488,8 @@ a lock busy, retries and other outcomes, present intervals, parser lock waits an
 holds, flush-to-redraw delay, and dispatch stalls. Use `render_timing` when a
 frame is slow, and `frame_counters` when frames are late, missing, or contended;
 it writes at most one line a second per window. Memory snapshots and allocator-state interpretation are
-owned by [Logging](Logging) and [Memory](Memory).
+owned by [Logging](Logging) and [Memory](Memory). On Metal the driver holds extra graphics memory while
+frames are presented; see [Driver-held memory while presenting](Memory#driver-held-memory-while-presenting).
 
 ### Code locations
 

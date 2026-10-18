@@ -366,6 +366,34 @@ A gap between the OS figure and the requested total is not by itself a missing
 resource: driver padding, deferred release and compositor-held surfaces all land
 in it.
 
+#### Driver-held memory while presenting
+
+On Metal, most of that gap is memory the driver holds while frames are being
+presented. Measured on an Apple M3 Pro at 1600x1280 px, Fifo, frame latency 2,
+with a standalone wgpu 30.0.1 probe and with SonicTerm itself, reading
+`footprint`'s "Owned physical footprint (unmapped) (graphics)":
+
+| While presenting | Graphics |
+| --- | --- |
+| Clear and present only (probe) | about 107 MB |
+| Any frame that records a buffer copy (`queue.write_buffer` or `copy_buffer_to_buffer`, any size; even one 1 KB copy per second) (probe) | about 180 MB |
+| SonicTerm drawing at 80x40, default config | about 220 MB |
+| SonicTerm idle window, no presentation | 28 MB |
+| Probe after presentation stops | under 4 MB |
+
+SonicTerm uploads vertex data on every drawn frame, so it sits at the higher
+figure while it draws. The memory is released once presentation stops. Frame
+latency 1 and fewer warm spares do not reduce it, and hidden warm spares cost no
+physical graphics memory. A frame path that records no copy at all (vertex data
+written into mapped buffers the draw reads) stays at the clear-only figure, but
+only while no frame copies: new glyphs (atlas writes), buffer growth or a
+fallback bring the full cost back. SonicTerm does not use such a path.
+
+The Memory Usage report's `GPU (OS)` row and the `graphics_os_*` snapshot fields
+show this figure. `GPU requested` shows only what SonicTerm asked for, so the
+difference is driver-held memory. CI's macOS runners are virtual machines and do
+not reproduce it.
+
 ### Aggregate snapshot
 
 Set the log level to `info` for one `memory snapshot` at most every 30 s:
