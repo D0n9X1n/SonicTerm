@@ -922,3 +922,31 @@ fn palette_presentation_hash_tracks_the_selection_anchor() {
     assert_ne!(from_start, from_end);
     assert_ne!(collapsed, from_end);
 }
+
+/// Contract: a confirmation page lists Apply, Cancel, then the items; it opens on Cancel, arrow
+/// keys move only between Apply and Cancel, and closing clears the page.
+#[test]
+fn confirmation_page_selects_only_apply_or_cancel() {
+    let mut palette = CommandPalette::new();
+    let session = palette.session();
+    palette.start_confirm("Title", "Apply", "Cancel", vec!["one".into(), "two".into()]);
+    assert_ne!(palette.session(), session);
+    assert_eq!(palette.mode(), CommandPaletteMode::Confirm);
+    assert_eq!(palette.confirm_title(), "Title");
+    assert_eq!(
+        palette.confirm_rows().iter().map(ConfirmRow::label).collect::<Vec<_>>(),
+        vec!["Apply", "Cancel", "one", "two"]
+    );
+    assert!(palette.visible().is_empty(), "no command entry is selectable");
+    assert!(!palette.confirm_applies());
+    palette.move_selection_down();
+    assert!(palette.confirm_applies());
+    palette.move_selection_down();
+    assert!(!palette.confirm_applies());
+    palette.move_selection_up();
+    assert!(palette.confirm_applies());
+    assert!(!palette.select_visible_index(3), "item rows cannot be selected");
+    palette.close();
+    assert!(palette.confirm_rows().is_empty());
+    assert!(!palette.confirm_applies());
+}

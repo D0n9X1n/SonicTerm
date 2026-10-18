@@ -530,6 +530,12 @@ impl App {
             UserEvent::MemoryReportSampled { generation, sample } => {
                 self.handle_memory_report_sampled(generation, *sample);
             }
+            UserEvent::DefaultHandlerResult { request, index, outcome } => {
+                self.handle_default_handler_result(request, index, outcome);
+            }
+            UserEvent::DefaultHandlerDeadline { request } => {
+                self.handle_default_handler_deadline(request);
+            }
             UserEvent::UpdateCheckFinished { level, message } => {
                 self.show_notification_for_kind(self.frontmost_kind(), level, message);
             }

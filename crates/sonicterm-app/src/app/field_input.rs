@@ -156,7 +156,7 @@ impl App {
                 self.window_rename_target.and_then(|key| self.window_keys.resolve(key))
                     == Some(window_id)
             }
-            CommandPaletteMode::TabColor => false,
+            CommandPaletteMode::TabColor | CommandPaletteMode::Confirm => false,
         };
         if !editable
             || self.windows.get(&window_id).is_none_or(|window| window.hidden)

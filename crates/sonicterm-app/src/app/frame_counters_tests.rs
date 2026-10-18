@@ -507,6 +507,8 @@ const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("app/window_setup/windows.rs", "brushes", 1),
     ("app/media.rs", "charge", 3),
     ("app/command_events.rs", "command_events", 1),
+    // The event-loop proxy a default-handler completion posts its result through.
+    ("app/default_handlers.rs", "proxy", 1),
     ("app/os_drag.rs", "snapshots", 6),
     ("app/os_drag.rs", "moved", 2),
     ("app/os_drag.rs", "ended", 3),

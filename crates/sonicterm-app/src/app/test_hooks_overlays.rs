@@ -64,11 +64,13 @@ impl App {
             // so a core text edit would corrupt composition or edit nothing.
             return self.command_palette.is_open();
         }
-        if self.command_palette.mode()
-            == sonicterm_ui::command_palette::CommandPaletteMode::TabColor
-        {
-            // When: `TabColor` mode owns the keystroke, so it counts as handled
-            // without editing the query text behind the picker.
+        if matches!(
+            self.command_palette.mode(),
+            sonicterm_ui::command_palette::CommandPaletteMode::TabColor
+                | sonicterm_ui::command_palette::CommandPaletteMode::Confirm
+        ) {
+            // When: `matches!` finds `TabColor` or `Confirm`, the picker owns the keystroke,
+            // so it counts as handled without editing the query text behind it.
             return true;
         }
         let Some(edit) = text_edit::core_text_edit_for_key(key, modifiers) else {

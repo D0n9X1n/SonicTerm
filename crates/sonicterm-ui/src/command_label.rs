@@ -78,6 +78,7 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "ReloadConfig",
     "ShowMemoryUsage",
     "CopyMemoryReport",
+    "SetDefaultHandlers",
 ];
 
 /// Stable command grouping independent of translated display text.
@@ -490,6 +491,12 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
             "command-copy-memory-report",
             &["memory", "mem", "ram", "usage", "footprint", "copy", "report"],
         ),
+        Action::SetDefaultHandlers => (
+            "SetDefaultHandlers",
+            Settings,
+            default_handlers_label_key(DefaultHandlersPlatform::native()),
+            &["default", "handler", "terminal", "open with", "file type", "link", "association"],
+        ),
     };
     use CommandRequirement as Requirement;
     let (requirement, read_only_allowed) = match action {
@@ -503,6 +510,7 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         | Action::SaveCurrentSettings
         | Action::ShowMemoryUsage
         | Action::CopyMemoryReport => (Requirement::Global, true),
+        Action::SetDefaultHandlers => (Requirement::Window, true),
         Action::NewTab
         | Action::IncreaseFontSize
         | Action::DecreaseFontSize
@@ -608,6 +616,61 @@ pub fn label(action: &Action) -> String {
         Action::ReloadConfig => "Reload Config".into(),
         Action::ShowMemoryUsage => "Memory Usage".into(),
         Action::CopyMemoryReport => "Copy Memory Report".into(),
+        Action::SetDefaultHandlers => {
+            default_handlers_label(DefaultHandlersPlatform::native()).into()
+        }
+    }
+}
+
+/// Which operating system's default-handler command the palette describes.
+///
+/// Each OS changes different things, so each gets a label that names what it changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DefaultHandlersPlatform {
+    /// Content types and URL schemes through Launch Services.
+    Mac,
+    /// Shell-script MIME types through `xdg-mime`.
+    Linux,
+    /// The Settings › Default apps page; SonicTerm itself changes nothing.
+    Windows,
+}
+
+impl DefaultHandlersPlatform {
+    /// The platform this binary was built for.
+    #[must_use]
+    pub fn native() -> Self {
+        if cfg!(target_os = "macos") {
+            // When: `target_os` is `macos`, the command changes Launch Services handlers.
+            Self::Mac
+        } else if cfg!(target_os = "windows") {
+            // When: `target_os` is `windows`, the command only opens Settings.
+            Self::Windows
+        } else {
+            // When: `target_os` is neither `macos` nor `windows`, the freedesktop `xdg-mime` branch applies.
+            Self::Linux
+        }
+    }
+}
+
+/// Catalog key for the default-handler command on `platform`.
+#[must_use]
+pub fn default_handlers_label_key(platform: DefaultHandlersPlatform) -> &'static str {
+    match platform {
+        DefaultHandlersPlatform::Mac => "command-set-default-handlers-mac",
+        DefaultHandlersPlatform::Linux => "command-set-default-handlers-linux",
+        DefaultHandlersPlatform::Windows => "command-set-default-handlers-windows",
+    }
+}
+
+/// English label for the default-handler command on `platform`; it names what changes.
+#[must_use]
+pub fn default_handlers_label(platform: DefaultHandlersPlatform) -> &'static str {
+    match platform {
+        DefaultHandlersPlatform::Mac => {
+            "Set SonicTerm as Default for Scripts, Executables and Terminal Links…"
+        }
+        DefaultHandlersPlatform::Linux => "Set SonicTerm as Default for Shell Scripts…",
+        DefaultHandlersPlatform::Windows => "Choose SonicTerm in Default Apps…",
     }
 }
 
@@ -696,12 +759,20 @@ fn direction_token(direction: Direction) -> &'static str {
 pub fn localized_search_haystack(action: &Action, i18n: &crate::i18n::I18n) -> String {
     let translated = localized_label(action, i18n);
     let english = search_haystack(action);
-    if translated == label(action) {
+    let mut haystack = if translated == label(action) {
         english
     } else {
         // When: `translated` differs from `label(action)`, retain both spellings for localized and English queries.
         format!("{translated} {english}")
+    };
+    if matches!(action, Action::SetDefaultHandlers) {
+        // Localized words such as "default" must find the default-handler command too.
+        if let Some(aliases) = i18n.try_t_args("command-set-default-handlers-search", None) {
+            haystack.push(' ');
+            haystack.push_str(&aliases);
+        }
     }
+    haystack
 }
 
 fn broadcast_scope_human(scope: sonicterm_cfg::keymap::BroadcastScope) -> &'static str {

@@ -3517,6 +3517,7 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
         CommandPaletteMode::RenameTab,
         CommandPaletteMode::RenameWindow,
         CommandPaletteMode::TabColor,
+        CommandPaletteMode::Confirm,
     ] {
         let mut palette = CommandPalette::new();
         match mode {
@@ -3524,6 +3525,9 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
             CommandPaletteMode::RenameTab => palette.start_rename_tab("tab"),
             CommandPaletteMode::RenameWindow => palette.start_rename_window("window"),
             CommandPaletteMode::TabColor => palette.start_tab_color_picker("tab", Vec::new()),
+            CommandPaletteMode::Confirm => {
+                palette.start_confirm("title", "Apply", "Cancel", Vec::new())
+            }
         }
         let layout = PaletteLayout::compute(&mut palette, 4000.0, 2400.0, 0.0, 1.0)
             .expect("open palette has layout");

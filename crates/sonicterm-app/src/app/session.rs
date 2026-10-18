@@ -220,6 +220,7 @@ impl App {
             os_drag_sink: None,
             os_drag_backend: None,
             os_drag_pending: Arc::new(os_drag::PendingDragOutcome::default()),
+            default_handlers: default_handlers::DefaultHandlersState::default(),
             os_drag_bars: Arc::new(os_drag::TabBarRegistry::default()),
             os_drag_source: None,
             tab_bar_visible: true,

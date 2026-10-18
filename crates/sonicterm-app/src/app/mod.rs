@@ -297,6 +297,20 @@ pub enum UserEvent {
         /// Identity of the admitted recovery request.
         ticket: u64,
     },
+    /// One item of an applied default-handler plan finished; posted from any thread.
+    DefaultHandlerResult {
+        /// The run the item belongs to; a result for another run is ignored.
+        request: u64,
+        /// The item's index in that run's plan.
+        index: usize,
+        /// What happened to it.
+        outcome: crate::default_handlers::HandlerOutcome,
+    },
+    /// A default-handler run's deadline passed; items still missing report as pending.
+    DefaultHandlerDeadline {
+        /// The run whose deadline passed.
+        request: u64,
+    },
     /// The Memory Usage report's worker sampled the OS figures for one refresh.
     MemoryReportSampled {
         /// The refresh this sample belongs to; an older one is dropped.
@@ -336,6 +350,7 @@ const _: () = {
     let _: fn(&mut App, DispatchTimelineToken) -> DispatchTimelineTakeV1 =
         App::take_dispatch_timeline_v1;
 };
+mod default_handlers;
 mod echo_timeline;
 pub use echo_timeline::{
     AdmissionDecisionV1, DeferReasonV1, EchoTimelineEventV1, EchoTimelineKindV1,
@@ -846,6 +861,8 @@ pub struct App {
     /// drag outcomes into. Drained by `do_user_event` on every
     /// `UserEvent::DragMoved` / `DragEnded` wake.
     pub(super) os_drag_pending: Arc<os_drag::PendingDragOutcome>,
+    /// The default-handler command's backend, confirmation and active run.
+    pub(in crate::app) default_handlers: default_handlers::DefaultHandlersState,
     /// Shared tab-bar snapshot registry. The App publishes the live
     /// per-window tab bar layout into this on every redraw (see
     /// `publish_os_drag_bar_snapshot`); a Phase-C2 OS-drag backend

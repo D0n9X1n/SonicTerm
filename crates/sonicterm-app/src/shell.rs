@@ -17,6 +17,7 @@ use crate::app::{
     identity_config_normalizer, App, ConfigNormalizer, KeymapLoader, RuntimeSmokeFailure,
     RuntimeSmokeSpec, ThemeLoader, UserEvent,
 };
+use crate::default_handlers::DefaultHandlerBackend;
 use crate::os_drag::{OsDragSink, TabPayload};
 use crate::ProcessPrivilege;
 use sonicterm_app_core::AppStateMachine;
@@ -111,6 +112,7 @@ struct ShellRunner {
     breadcrumb_recorder: Option<sonicterm_logging::breadcrumbs::BreadcrumbRecorder>,
     on_resumed: Option<Box<dyn FnOnce() + Send>>,
     on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
+    default_handlers: Option<Box<dyn DefaultHandlerBackend>>,
 }
 
 impl ShellRunner {
@@ -130,6 +132,7 @@ impl ShellRunner {
             breadcrumb_recorder: None,
             on_resumed: None,
             on_window_ready: None,
+            default_handlers: None,
         }
     }
 
@@ -169,6 +172,10 @@ impl ShellRunner {
         }
         if let Some(hook) = self.on_window_ready {
             app.set_on_window_ready(hook);
+        }
+        if let Some(backend) = self.default_handlers {
+            // The platform supplied a backend; only the palette command may ever call it.
+            app.set_default_handler_backend(backend);
         }
         if let Some(payload) = self.pending {
             // When: `pending` carries a startup handoff, seed its tab before the event loop starts.
@@ -348,6 +355,13 @@ impl MacShell {
         self
     }
 
+    /// Install the backend the "set as default" palette command uses; nothing else calls it.
+    #[must_use]
+    pub fn with_default_handlers(mut self, backend: Box<dyn DefaultHandlerBackend>) -> Self {
+        self.runner.default_handlers = Some(backend);
+        self
+    }
+
     /// Run the event loop and report its result separately from native teardown settlement.
     pub fn run(self) -> ShellRunResult<anyhow::Error> {
         self.runner.run()
@@ -435,6 +449,13 @@ impl WindowsShell {
         self
     }
 
+    /// Install the backend the "set as default" palette command uses; nothing else calls it.
+    #[must_use]
+    pub fn with_default_handlers(mut self, backend: Box<dyn DefaultHandlerBackend>) -> Self {
+        self.runner.default_handlers = Some(backend);
+        self
+    }
+
     /// Run the event loop and report its result separately from native teardown settlement.
     pub fn run(self) -> ShellRunResult<anyhow::Error> {
         self.runner.run()
@@ -511,6 +532,13 @@ impl LinuxShell {
         hook: Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>,
     ) -> Self {
         self.runner.on_window_ready = Some(hook);
+        self
+    }
+
+    /// Install the backend the "set as default" palette command uses; nothing else calls it.
+    #[must_use]
+    pub fn with_default_handlers(mut self, backend: Box<dyn DefaultHandlerBackend>) -> Self {
+        self.runner.default_handlers = Some(backend);
         self
     }
 

@@ -683,6 +683,7 @@ impl App {
                 self.toggle_fullscreen_for(self.frontmost_kind());
             }
             Action::ShowMemoryUsage => self.show_memory_usage(),
+            Action::SetDefaultHandlers => self.start_default_handlers(),
             Action::CopyMemoryReport => {
                 // When: action is CopyMemoryReport, copy the report text; a missing report or refused clipboard is a no-op.
                 let _ = self.copy_memory_report();

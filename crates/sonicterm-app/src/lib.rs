@@ -11,6 +11,7 @@
 #![warn(clippy::min_ident_chars)]
 
 pub mod app;
+pub mod default_handlers;
 pub mod launch_cli;
 pub mod launch_queue;
 pub mod menu;

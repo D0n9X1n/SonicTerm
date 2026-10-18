@@ -105,6 +105,28 @@ impl App {
             }
             return true;
         }
+        if self.command_palette.mode() == CommandPaletteMode::Confirm {
+            // When: `mode` is `Confirm`, only Apply or Cancel closes the page; text input is ignored.
+            match logical_key {
+                Key::Named(NamedKey::Escape) => self.confirm_default_handlers(false),
+                Key::Named(NamedKey::Enter) => {
+                    let apply = self.command_palette.confirm_applies();
+                    self.confirm_default_handlers(apply);
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.command_palette.move_selection_down();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.command_palette.move_selection_up();
+                    self.request_redraw_for_overlay(self.palette_attached_window);
+                }
+                _ => {
+                    // When: `logical_key` is any other key, swallow it so it never reaches a terminal.
+                }
+            }
+            return true;
+        }
         if self.command_palette.mode()
             == sonicterm_ui::command_palette::CommandPaletteMode::TabColor
         {
