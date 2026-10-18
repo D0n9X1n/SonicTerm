@@ -3726,6 +3726,7 @@ dependencies = [
  "sonicterm-types",
  "sonicterm-ui",
  "sonicterm-vt",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "ureq",

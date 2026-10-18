@@ -80,6 +80,8 @@ windows = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# Temporary directories for launch-argument and working-directory tests.
+tempfile = "3"
 # For the software-adapter detection test, which enumerates the host's real
 # adapters. A dev-dependency rather than a dependency: the app reaches wgpu
 # through `sonicterm-gpu` and must not gain a direct one.

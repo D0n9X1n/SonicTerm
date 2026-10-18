@@ -11,6 +11,7 @@
 #![warn(clippy::min_ident_chars)]
 
 pub mod app;
+pub mod launch_cli;
 pub mod menu;
 pub mod menubar_bridge;
 pub mod open_script_bridge;
