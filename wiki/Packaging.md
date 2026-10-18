@@ -323,6 +323,8 @@ SonicTerm-<tag>-linux-x86_64/
 ├── sonicterm
 ├── assets/{fonts,themes,keymaps,icons,i18n}/
 ├── share/applications/com.d0n9x1n.SonicTerm.desktop
+├── share/applications/com.d0n9x1n.SonicTerm.open-script.desktop
+├── share/man/man1/sonicterm.1
 ├── share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
 ├── share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
 ├── LICENSE
@@ -337,6 +339,8 @@ The Debian package is `SonicTerm-<tag>-linux-x86_64.deb` and installs:
 /usr/bin/sonicterm
 /usr/share/sonicterm/assets/{fonts,themes,keymaps,icons,i18n}/
 /usr/share/applications/com.d0n9x1n.SonicTerm.desktop
+/usr/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop
+/usr/share/man/man1/sonicterm.1.gz
 /usr/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
 /usr/share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
 /usr/share/doc/sonicterm/{copyright,LICENSE-Rec-Mono-OFL-1.1,LICENSE-winit-Apache-2.0,README.md}
@@ -348,6 +352,52 @@ than 2.35. `dpkg-shlibdeps` derives linked `Depends`; the script also adds
 archive's host must provide `libxkbcommon-x11.so.0` when using X11. The package
 script verifies all four Rec Mono faces plus themes, keymaps, icons, and English
 and Simplified Chinese catalogs.
+
+The Debian man page is compressed with `gzip -n -9`, so it carries no name or
+timestamp, and installed with mode `0644`. The terminal entry declares the
+launcher arguments; the hidden open-script entry opens shell scripts as drafts.
+See [Platform Integration](Platform-Integration).
+
+### Choosing SonicTerm as the terminal
+
+Installing changes no default. The package ships no maintainer script, so it
+registers no `x-terminal-emulator` alternative: `update-alternatives --install`
+can switch a group in automatic mode, which would take over at install. It also
+declares no `Provides: x-terminal-emulator`, because providing the virtual package
+without the `/usr/bin/x-terminal-emulator` link could satisfy a dependent package
+with no such binary. SonicTerm meets Debian Policy 11.8.3's requirements (`-e`
+with execvp semantics, `-T`, VT100 emulation) and leaves out its two
+recommendations for this reason.
+
+To make SonicTerm the Debian `x-terminal-emulator`:
+
+```sh
+sudo update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /usr/bin/sonicterm 20 \
+  --slave /usr/share/man/man1/x-terminal-emulator.1.gz x-terminal-emulator.1.gz /usr/share/man/man1/sonicterm.1.gz
+sudo update-alternatives --set x-terminal-emulator /usr/bin/sonicterm
+```
+
+To undo it:
+
+```sh
+sudo update-alternatives --remove x-terminal-emulator /usr/bin/sonicterm
+```
+
+Run the undo command before removing the package; the package does not remove an
+alternative it did not register.
+
+For xdg-terminal-exec (used by GLib 2.75 and later), add this line to
+`~/.config/xdg-terminals.list`:
+
+```text
+com.d0n9x1n.SonicTerm.desktop
+```
+
+The entry must sit in an XDG applications directory to resolve. The Debian package
+installs it in `/usr/share/applications`; from the portable archive, copy
+`share/applications/*.desktop` into `~/.local/share/applications/` and make sure
+`sonicterm` is on `PATH`. KDE users choose SonicTerm in System Settings → Default
+Applications → Terminal Emulator.
 
 ### Package validation and runtime proof
 

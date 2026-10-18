@@ -473,11 +473,59 @@ Windows 上打开 URI 与打开已验证本地目标使用同一条不经过 she
 和本机路径 OSC 8 链接；网页和邮件 URI 链接不受影响。设置 `terminal.clickable_path_max_chars`
 可以修改检测候选的最大长度。准确默认值和重载行为见 [配置](Configuration-zh-CN)。
 
+### 从启动器运行命令
+
+在 Linux 和 Windows 上，启动器（或你自己）可以让 SonicTerm 在新窗口中运行一个程序。
+macOS 不读取启动选项。
+
+```text
+sonicterm [OPTION...] [(-e | --command | --) PROGRAM [ARG...]]
+sonicterm --open-script PATH
+sonicterm --help
+```
+
+Windows 可执行文件是 `sonicterm-windows.exe`，选项相同。
+
+| 选项 | 含义 |
+| --- | --- |
+| `-T TITLE`、`--title=TITLE` | 窗口标题和第一个标签页名称。值按原样读取，`-T -e` 也是如此。 |
+| `--dir=PATH`、`--working-directory=PATH` | 第一个标签页的工作目录。相对路径相对当前目录解析；目录必须存在。 |
+| `--hold` | 第一个窗格的进程退出后保留窗格，即使是正常退出。 |
+| `-e`、`--command`、`--` | 运行 `PROGRAM`，其后的每个参数都原样传入。 |
+| `--open-script PATH` | 以草稿方式打开 `PATH`（见下文）。不能与其它选项组合。 |
+| `--help` | 打印用法并退出。 |
+
+选项只在 `-e`、`--command` 或 `--` 之前读取；其后的全部内容都属于该程序，因此
+`sonicterm -e ls -T x` 会把 `-T x` 传给 `ls`。
+
+- **不经过 shell。**`PROGRAM` 带着原样的参数直接运行。`-e` 只接受一个程序名：
+  `-e "cmd args"` 指名为 `cmd args` 的程序。需要 shell 语法时，请自己运行 shell：
+  `sonicterm -e sh -c 'make && make test'`。
+- **程序查找。**单独的名称在 `PATH` 中查找（只用绝对路径条目）；路径按原样运行，
+  相对第一个标签页的目录解析。在 Linux 和 macOS 上，文本文件只有以 `#!` 开头才会运行。
+  在 Windows 上可以找到 `.exe` 和 `.com`；`.bat` 和 `.cmd` 文件会被拒绝，因为 Windows
+  会通过 `cmd.exe` 运行它们，而 SonicTerm 无法保证其引号处理安全。请用
+  `sonicterm-windows.exe -e cmd /c script.bat` 运行。
+- **错误。**未知选项、多余参数、缺少或重复的值、相互冲突的选项，或不是目录的 `--dir`，
+  都会打印用法并以状态 `2` 退出（在 Windows 上，只有从控制台启动时才会显示用法）。无法
+  启动的程序仍会打开标签页并显示原因；不会改为启动 shell。
+- **工作目录。**没有 `--dir` 时，Linux 让第一个标签页从当前目录开始（否则 `$HOME`），
+  无论是 shell 还是命令。Windows 对命令这样处理；普通 shell 从 `%USERPROFILE%` 开始。
+  目录不存在是错误，绝不会悄悄改用 `$HOME`。
+- **退出。**程序以状态 `0` 退出时窗格关闭。其它退出码、信号、未知状态或 `--hold` 会保留
+  窗格，并在输出中加入一行，例如 `[process exited with code 1]` 或
+  `[process killed by signal SIGKILL]`。这一行由 SonicTerm 写入，不会发送给程序。
+- **每次启动一个窗口。**每次调用都会启动新的进程和窗口。
+
+要让其它 Linux 程序打开 SonicTerm 作为终端，见[平台集成](Platform-Integration-zh-CN)和
+[打包](Packaging-zh-CN)。
+
 ### 以草稿方式打开脚本
 
 安装后的 macOS build 可以出现在 Finder 为 `.sh`、`.command`、`.tool` 提供的
 **Open With** 菜单中。Windows MSI 会把 SonicTerm 注册为 `.ps1`、`.cmd`、`.bat`、
-`.sh` 的可选 handler。安装不会替换当前默认 handler。
+`.sh` 的可选 handler。Linux 安装包会安装一个隐藏条目，为 shell 脚本提供 SonicTerm；
+它运行 `sonicterm --open-script %f`。安装不会替换当前默认 handler。
 
 打开受支持文件时，SonicTerm 会在文件父目录创建标签页，安全引用绝对路径，并把命令
 放到提示符中，**不会发送 Enter 或其它 control byte**：
@@ -495,8 +543,9 @@ Windows 上打开 URI 与打开已验证本地目标使用同一条不经过 she
 不要把 SonicTerm 设为脚本 handler。对于这个 open action，SonicTerm 自身不会运行脚本
 或解释器。
 
-Windows 中，每次文件关联调用都会启动新的 SonicTerm 进程。macOS 会把后续 open request
-发送到当前运行的应用，并添加标签页。
+Linux 和 Windows 中，每次文件关联调用都会启动新的 SonicTerm 进程。macOS 会把后续 open
+request 发送到当前运行的应用，并添加标签页。草稿绝不会被运行；只有 `-e`、`--command` 或
+`--` 才会运行程序。
 
 ### 配置与排障
 

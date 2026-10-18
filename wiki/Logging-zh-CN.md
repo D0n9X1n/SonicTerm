@@ -179,6 +179,19 @@ UI 队列饱和不会丢弃回复、产生拒绝 warning 或停止输出处理�
 频率写日志。尝试仍会执行：IO 边界只跳过无效尺寸和成功的重复请求。网格保留请求尺寸，
 没有回滚、重试定时器或失败心跳。
 
+## 启动诊断
+
+启动事件记录在 target `sonicterm_app::launch` 上。任何级别都不会记录参数值、路径或标题。
+
+| 事件 | 级别 | 字段 |
+| --- | --- | --- |
+| `pane launched` | `info` | `pane`、`kind`（`command`、`script` 或 `shell`）、`cwd_source`（`--dir`、`process`、`home` 或 `default`）、`hold`；命令还会记录 `program`（仅文件名）和 `arg_count` |
+| `pane command argument byte lengths` | `debug` | `pane`、`arg_bytes`（每个参数的字节长度） |
+| `pane command did not start` | `warn` | `pane`、`program`（文件名）、`reason`（失败的规则，绝不是底层错误文本） |
+| `launch arguments rejected` | `warn` | `position`（从 1 开始的参数序号）、`rule`（例如 `unknown-option` 或 `dir-not-a-directory`） |
+
+默认 `warn` 级别下看不到 `info` 和 `debug` 行。用法错误会在进程以状态 `2` 退出之前写入日志。
+
 ## 渲染与性能诊断
 
 叶子重复/缺失或活动/缩放不一致导致无法收集完整帧时，`frame_collection` 按每段无效布局

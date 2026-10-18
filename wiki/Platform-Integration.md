@@ -192,11 +192,27 @@ uses an opaque window because the GDI presenter cannot composite transparency.
 
 ### CLI and shell-file registration
 
-The installed executable accepts one lossless `--open-script <PATH>` argument.
-The startup path resolves a relative argument against the process's initial
-working directory and queues it before `WindowsShell::run`, so cold startup
-opens the script tab instead of a HOME tab. The private tear-out payload cannot
-be combined with `--open-script`.
+`sonicterm-windows.exe` reads its arguments with `std::env::args_os()` through the
+launcher grammar it shares with Linux (`crates/sonicterm-app/src/launch_cli.rs`;
+see [Usage](Usage) for the options). It also accepts the windowless
+`--refresh-shell-associations` and the private `--tear-out-payload`, which keeps
+its last value when repeated and cannot be combined with any other mode.
+
+Unknown options and stray arguments are usage errors that exit `2`. No command
+line SonicTerm registers or spawns passes one: the MSI ProgIDs run
+`--open-script "%1"`, its custom actions run `--refresh-shell-associations`, the
+shortcuts pass no arguments, and tab tear-out and release smokes pass only
+`--tear-out-payload` and `--runtime-smoke`. The binary is a GUI-subsystem program
+with no console, so usage and `--help` are printed only after
+`AttachConsole(ATTACH_PARENT_PROCESS)` succeeds; a usage error is always logged.
+
+`--open-script <PATH>` is lossless. The startup path resolves a relative argument
+against the process's initial working directory and queues it before
+`WindowsShell::run`, so cold startup opens the script tab instead of a HOME tab.
+A command launch (`-e`) without `--dir` starts in the process's working directory;
+a plain shell keeps its `%USERPROFILE%` default, because the installer's shortcuts
+start the process in the install folder. Batch files are refused as commands (see
+[Usage](Usage)). Each launch is a new process with its own window.
 
 `--refresh-shell-associations` runs without a window and broadcasts
 `SHCNE_ASSOCCHANGED`. The MSI registers SonicTerm ProgIDs, Default Apps
@@ -292,6 +308,53 @@ resolves `/usr/share/sonicterm/assets`. Startup verifies all four bundled Rec
 Mono faces, passes their directory to `FontStack` before native Fontconfig
 discovery, and retains that directory across font reloads. Native fallback
 remains available.
+
+### Terminal launchers
+
+`sonicterm` reads `std::env::args_os()` through the shared launcher grammar, so a
+non-Unicode argument never panics. A usage error prints usage to standard error,
+logs one `warn` naming the argument position and rule, and exits `2`; `--help`
+exits `0`. Every launch is a new process with a new window; there is no
+single-instance IPC. Without `--dir`, the first tab starts in the process's
+working directory, else `$HOME`, which is what KIO and Debian launchers expect.
+Later tabs keep their rules: the active pane's OSC 7 directory, else `$HOME`.
+
+`-e`, `--command` and `--` run the program directly through
+`PtyHandle::spawn_command`, never through a shell:
+
+- A name without `/` is searched on SonicTerm's own `PATH`, using only absolute
+  entries. A path is used as given; a relative path resolves against the launch
+  directory.
+- The target must be a regular file that passes `access(X_OK)` and starts with
+  `#!` or the platform's native executable magic (ELF on Linux, Mach-O on macOS).
+  libc's `execvp` retries a file the kernel rejects with `ENOEXEC` through
+  `/bin/sh`; refusing such a file first keeps that shell path from running.
+- The working directory must exist when the program starts; it never falls back
+  to `$HOME`.
+- A failure opens the tab, writes the reason into its own grid, shows a
+  notification, and starts nothing else.
+
+The terminal desktop entry `com.d0n9x1n.SonicTerm.desktop` keeps `Exec=sonicterm`
+with no field code: KDE appends `-e cmd` to the raw `Exec`, and xdg-terminal-exec
+strips field codes. It declares `X-TerminalArgExec=-e`, `X-ExecArg=-e` (read by
+xdg-terminal-exec's compatibility mode), `X-TerminalArgTitle=-T`,
+`X-TerminalArgDir=--dir=` and `X-TerminalArgHold=--hold`.
+
+A second, hidden entry, `com.d0n9x1n.SonicTerm.open-script.desktop`
+(`NoDisplay=true`), runs `sonicterm --open-script %f` for
+`application/x-shellscript` and `text/x-shellscript`. A file association therefore
+types a draft at the prompt and never executes the script.
+
+Which launchers reach SonicTerm:
+
+| Launcher | How it selects SonicTerm |
+| --- | --- |
+| xdg-terminal-exec | The user lists `com.d0n9x1n.SonicTerm.desktop` in `xdg-terminals.list`. |
+| GLib ≥ 2.75 `Terminal=true` apps | Through xdg-terminal-exec, which GLib tries first. GLib never tries `x-terminal-emulator`. |
+| KDE | The user picks SonicTerm in Default Applications (`TerminalService`), or sets `TerminalApplication=sonicterm`. KIO appends `-e` and starts the process in the target directory. |
+| Debian `x-terminal-emulator` | Only after the user registers the alternative; see [Packaging](Packaging). |
+
+Installing never changes any of these defaults.
 
 ### Runtime smoke boundary
 
@@ -396,4 +459,6 @@ teardown exits `20`; an earlier fault, loss or recovery failure keeps its origin
 | Windows entry/CLI/menu/backdrop/tab drag | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
 | Windows software present | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`, `crates/sonicterm-windows/src/software_presenter.rs` |
 | Linux entry and identity | `crates/sonicterm-linux/src/main.rs`, `crates/sonicterm-linux/resources/` |
+| Launcher grammar and launch queue | `crates/sonicterm-app/src/{launch_cli,launch_queue}.rs`, `crates/sonicterm-app/src/app/{pane_launch,pane_exit}.rs` |
+| Direct command spawn and program resolution | `crates/sonicterm-io/src/{pty,command_resolve}.rs` |
 | Asset lookup | `crates/sonicterm-cfg/src/assets.rs` |

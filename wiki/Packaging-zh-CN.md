@@ -273,6 +273,8 @@ SonicTerm-<tag>-linux-x86_64/
 ├── sonicterm
 ├── assets/{fonts,themes,keymaps,icons,i18n}/
 ├── share/applications/com.d0n9x1n.SonicTerm.desktop
+├── share/applications/com.d0n9x1n.SonicTerm.open-script.desktop
+├── share/man/man1/sonicterm.1
 ├── share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
 ├── share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
 ├── LICENSE
@@ -287,6 +289,8 @@ Debian package 为 `SonicTerm-<tag>-linux-x86_64.deb`，安装到：
 /usr/bin/sonicterm
 /usr/share/sonicterm/assets/{fonts,themes,keymaps,icons,i18n}/
 /usr/share/applications/com.d0n9x1n.SonicTerm.desktop
+/usr/share/applications/com.d0n9x1n.SonicTerm.open-script.desktop
+/usr/share/man/man1/sonicterm.1.gz
 /usr/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
 /usr/share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
 /usr/share/doc/sonicterm/{copyright,LICENSE-Rec-Mono-OFL-1.1,LICENSE-winit-Apache-2.0,README.md}
@@ -296,6 +300,47 @@ Builder 会检查 x86_64 ELF，并拒绝高于 2.35 的 GLIBC requirement。`dpk
 推导已链接的 `Depends`；脚本还会加入 `libxkbcommon-x11-0`，因为 winit 在 X11 下动态
 加载它。便携归档的主机在使用 X11 时必须提供 `libxkbcommon-x11.so.0`。打包脚本会验证
 四个 Rec Mono 字体，以及主题、键位、图标、英文和简体中文 catalog。
+
+Debian man page 用 `gzip -n -9` 压缩，因此不含文件名和时间戳，并以 `0644` 权限安装。
+终端条目声明启动器参数；隐藏的 open-script 条目以草稿方式打开 shell 脚本。见
+[平台集成](Platform-Integration-zh-CN)。
+
+### 选择 SonicTerm 作为终端
+
+安装不会改变任何默认设置。安装包不带 maintainer script，因此不会注册
+`x-terminal-emulator` alternative：`update-alternatives --install` 可能切换处于自动模式的
+组，相当于安装时接管默认终端。它也不声明 `Provides: x-terminal-emulator`，因为只提供
+虚拟包而没有 `/usr/bin/x-terminal-emulator` 链接，可能让依赖它的软件包得到一个并不存在的
+程序。SonicTerm 满足 Debian Policy 11.8.3 的要求（具有 execvp 语义的 `-e`、`-T`、VT100
+仿真），并因此省略了其中两条建议。
+
+要让 SonicTerm 成为 Debian 的 `x-terminal-emulator`：
+
+```sh
+sudo update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /usr/bin/sonicterm 20 \
+  --slave /usr/share/man/man1/x-terminal-emulator.1.gz x-terminal-emulator.1.gz /usr/share/man/man1/sonicterm.1.gz
+sudo update-alternatives --set x-terminal-emulator /usr/bin/sonicterm
+```
+
+撤销：
+
+```sh
+sudo update-alternatives --remove x-terminal-emulator /usr/bin/sonicterm
+```
+
+请在删除安装包之前运行撤销命令；安装包不会删除它没有注册的 alternative。
+
+对于 xdg-terminal-exec（GLib 2.75 及以后版本使用），在 `~/.config/xdg-terminals.list`
+中加入这一行：
+
+```text
+com.d0n9x1n.SonicTerm.desktop
+```
+
+该条目必须位于 XDG applications 目录中才能被解析。Debian 安装包把它安装到
+`/usr/share/applications`；使用便携归档时，把 `share/applications/*.desktop` 复制到
+`~/.local/share/applications/`，并确保 `sonicterm` 在 `PATH` 中。KDE 用户在系统设置 →
+默认应用程序 → 终端模拟器中选择 SonicTerm。
 
 ### 安装包校验与运行证明
 

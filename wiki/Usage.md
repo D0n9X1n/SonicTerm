@@ -641,12 +641,66 @@ The local-target setting also applies to local file URIs and native-path OSC 8 l
 web/mail URI links remain enabled. For exact defaults and reload
 behavior, see [Configuration](Configuration).
 
+### Run a command from a launcher
+
+On Linux and Windows, a launcher (or you) can ask SonicTerm to run one program
+in a new window. macOS reads no launch options.
+
+```text
+sonicterm [OPTION...] [(-e | --command | --) PROGRAM [ARG...]]
+sonicterm --open-script PATH
+sonicterm --help
+```
+
+The Windows executable is `sonicterm-windows.exe` and takes the same options.
+
+| Option | Meaning |
+| --- | --- |
+| `-T TITLE`, `--title=TITLE` | Window title and first tab label. The value is taken verbatim, even `-T -e`. |
+| `--dir=PATH`, `--working-directory=PATH` | First tab's working directory. A relative path resolves against the current directory; it must exist. |
+| `--hold` | Keep the first pane open after its process exits, even after a clean exit. |
+| `-e`, `--command`, `--` | Run `PROGRAM` with every later argument, unchanged. |
+| `--open-script PATH` | Open `PATH` as a draft (below). Cannot be combined with any other option. |
+| `--help` | Print usage and exit. |
+
+Options are read only before `-e`, `--command` or `--`; everything after belongs
+to the program, so `sonicterm -e ls -T x` passes `-T x` to `ls`.
+
+- **No shell.** `PROGRAM` runs directly with its exact arguments. `-e` takes one
+  program name: `-e "cmd args"` names a program called `cmd args`. To use shell
+  syntax, run the shell yourself: `sonicterm -e sh -c 'make && make test'`.
+- **Program lookup.** A bare name is searched on `PATH` (absolute entries only); a
+  path runs as given, relative to the first tab's directory. On Linux and macOS a
+  text file runs only when it starts with `#!`. On Windows `.exe` and `.com` are
+  found; `.bat` and `.cmd` files are refused, because Windows would run them through
+  `cmd.exe` with quoting SonicTerm cannot make safe. Run them with
+  `sonicterm-windows.exe -e cmd /c script.bat`.
+- **Errors.** An unknown option, a stray argument, a missing or repeated value,
+  conflicting options, or a `--dir` that is not a directory prints usage and exits
+  with status `2` (on Windows, usage appears only when started from a console). A
+  program that cannot start still opens its tab, which shows the reason; no shell
+  starts in its place.
+- **Working directory.** Without `--dir`, Linux starts the first tab in the
+  current directory (else `$HOME`), for a shell or a command. Windows does that for
+  a command; a plain shell starts in `%USERPROFILE%`. A missing directory is an
+  error, never silently `$HOME`.
+- **Exit.** A pane closes when its program exits with status `0`. Any other exit,
+  a signal, an unknown status, or `--hold` keeps the pane and adds one line such as
+  `[process exited with code 1]` or `[process killed by signal SIGKILL]` to its
+  output. The line is written by SonicTerm, not sent to the program.
+- **One window per launch.** Each invocation starts a new process and window.
+
+To make SonicTerm the terminal other Linux programs open, see
+[Platform Integration](Platform-Integration) and [Packaging](Packaging).
+
 ### Open script files as drafts
 
 Installed macOS builds can appear in Finder’s **Open With** menu for `.sh`,
 `.command`, and `.tool`. The Windows MSI registers SonicTerm as an available
-handler for `.ps1`, `.cmd`, `.bat`, and `.sh`. Installation does not replace the
-current default handler.
+handler for `.ps1`, `.cmd`, `.bat`, and `.sh`. Linux packages install a hidden
+entry that offers SonicTerm for shell scripts; it runs
+`sonicterm --open-script %f`. Installation does not replace the current default
+handler.
 
 Opening a supported file creates a tab whose working directory is the file’s
 parent. SonicTerm safely quotes an absolute path and inserts a command at the
@@ -668,8 +722,9 @@ or consume the draft without Enter. Do not select SonicTerm as a script handler
 when your shell startup code does that. SonicTerm itself does not run the script
 or interpreter for the open action.
 
-On Windows, each file-association invocation starts a new SonicTerm process. On
-macOS, later open requests go to the running app and add tabs.
+On Linux and Windows, each file-association invocation starts a new SonicTerm
+process. On macOS, later open requests go to the running app and add tabs.
+A draft is never run; only `-e`, `--command` or `--` runs a program.
 
 ### Configure and troubleshoot
 

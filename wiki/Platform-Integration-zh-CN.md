@@ -155,9 +155,22 @@ winit 创建 HWND 前，`sonicterm-windows` 会请求
 
 ### CLI 与脚本文件注册
 
-安装后的 executable 接受一个无损的 `--open-script <PATH>` 参数。启动逻辑会相对进程
-最初工作目录解析相对参数，并在 `WindowsShell::run` 前入队，因此冷启动直接打开脚本标签页，
-不会先创建 HOME 标签页。私有 tear-out payload 不能与 `--open-script` 同时使用。
+`sonicterm-windows.exe` 通过 `std::env::args_os()` 读取参数，使用与 Linux 共用的启动器
+语法（`crates/sonicterm-app/src/launch_cli.rs`；选项见[用法](Usage-zh-CN)）。它另外接受
+不创建窗口的 `--refresh-shell-associations`，以及私有的 `--tear-out-payload`：重复时取最后
+一个值，且不能与其它任何模式组合。
+
+未知选项和多余参数都是用法错误，退出码为 `2`。SonicTerm 注册或启动的命令行都不会传入
+这类参数：MSI ProgID 运行 `--open-script "%1"`，自定义操作运行
+`--refresh-shell-associations`，快捷方式不带参数，标签页拆出和发布 smoke 只传
+`--tear-out-payload` 与 `--runtime-smoke`。该程序属于 GUI 子系统，没有自己的控制台，所以只有
+在 `AttachConsole(ATTACH_PARENT_PROCESS)` 成功后才输出用法和 `--help`；用法错误总会写入日志。
+
+`--open-script <PATH>` 是无损的。启动逻辑会相对进程最初工作目录解析相对参数，并在
+`WindowsShell::run` 前入队，因此冷启动直接打开脚本标签页，不会先创建 HOME 标签页。
+没有 `--dir` 的命令启动（`-e`）从进程工作目录开始；普通 shell 仍使用 `%USERPROFILE%`，
+因为安装程序的快捷方式会在安装目录中启动进程。批处理文件不能作为命令运行（见
+[用法](Usage-zh-CN)）。每次启动都是一个拥有独立窗口的新进程。
 
 `--refresh-shell-associations` 不创建窗口，只广播 `SHCNE_ASSOCCHANGED`。MSI 为 `.ps1`、
 `.cmd`、`.bat` 和 `.sh` 注册 SonicTerm ProgID、Default Apps capabilities 和
@@ -232,6 +245,44 @@ passwd shell、最后 `/bin/sh`。显式 shell 配置优先。
 便携包使用 executable 相邻的 `assets/`；Debian 安装使用
 `/usr/share/sonicterm/assets`。启动时会检查四个内置 Rec Mono 字体，把字体目录在原生
 Fontconfig discovery 前传给 `FontStack`，并在字体重载时继续保留。原生 fallback 仍可用。
+
+### 终端启动器
+
+`sonicterm` 通过共用的启动器语法读取 `std::env::args_os()`，因此非 Unicode 参数不会导致
+panic。用法错误会把用法打印到标准错误，记录一条写明参数位置和规则的 `warn`，并以 `2`
+退出；`--help` 以 `0` 退出。每次启动都是一个拥有新窗口的新进程，没有单实例 IPC。没有
+`--dir` 时，第一个标签页从进程工作目录开始，否则使用 `$HOME`，这正是 KIO 和 Debian
+启动器预期的行为。后续标签页沿用原规则：活动窗格的 OSC 7 目录，否则 `$HOME`。
+
+`-e`、`--command` 和 `--` 通过 `PtyHandle::spawn_command` 直接运行程序，绝不经过 shell：
+
+- 不含 `/` 的名称在 SonicTerm 自己的 `PATH` 中查找，只使用绝对路径条目。路径按原样
+  使用；相对路径相对启动目录解析。
+- 目标必须是通过 `access(X_OK)` 的普通文件，并以 `#!` 或平台原生可执行文件 magic
+  （Linux 为 ELF，macOS 为 Mach-O）开头。内核以 `ENOEXEC` 拒绝的文件会被 libc 的
+  `execvp` 交给 `/bin/sh` 重试；预先拒绝这类文件，可确保这条 shell 路径不会运行。
+- 程序启动时工作目录必须存在；不会退回到 `$HOME`。
+- 失败时仍打开标签页，把原因写入该标签页自己的网格，显示通知，且不启动任何其它进程。
+
+终端桌面条目 `com.d0n9x1n.SonicTerm.desktop` 保持 `Exec=sonicterm`，不带字段代码：KDE
+会把 `-e cmd` 追加到原始 `Exec` 后，xdg-terminal-exec 会去掉字段代码。它声明
+`X-TerminalArgExec=-e`、`X-ExecArg=-e`（xdg-terminal-exec 兼容模式读取）、
+`X-TerminalArgTitle=-T`、`X-TerminalArgDir=--dir=` 和 `X-TerminalArgHold=--hold`。
+
+第二个隐藏条目 `com.d0n9x1n.SonicTerm.open-script.desktop`（`NoDisplay=true`）为
+`application/x-shellscript` 和 `text/x-shellscript` 运行 `sonicterm --open-script %f`。
+因此文件关联只会在提示符处输入草稿，绝不执行脚本。
+
+哪些启动器能调用 SonicTerm：
+
+| 启动器 | 如何选择 SonicTerm |
+| --- | --- |
+| xdg-terminal-exec | 用户在 `xdg-terminals.list` 中列出 `com.d0n9x1n.SonicTerm.desktop`。 |
+| GLib ≥ 2.75 的 `Terminal=true` 应用 | 经由 GLib 优先尝试的 xdg-terminal-exec。GLib 从不尝试 `x-terminal-emulator`。 |
+| KDE | 用户在默认应用程序中选择 SonicTerm（`TerminalService`），或设置 `TerminalApplication=sonicterm`。KIO 追加 `-e`，并在目标目录中启动进程。 |
+| Debian `x-terminal-emulator` | 仅在用户注册 alternative 之后；见[打包](Packaging-zh-CN)。 |
+
+安装不会改变上述任何默认设置。
 
 ### 运行时 smoke 边界
 
@@ -311,4 +362,6 @@ Wayland 上的两种 Linux 包布局中运行三个场景。[打包](Packaging-z
 | Windows 入口/CLI/菜单/backdrop/标签页拖放 | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
 | Windows 软件呈现 | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`、`crates/sonicterm-windows/src/software_presenter.rs` |
 | Linux 入口与 identity | `crates/sonicterm-linux/src/main.rs`、`crates/sonicterm-linux/resources/` |
+| 启动器语法与启动队列 | `crates/sonicterm-app/src/{launch_cli,launch_queue}.rs`、`crates/sonicterm-app/src/app/{pane_launch,pane_exit}.rs` |
+| 直接命令启动与程序解析 | `crates/sonicterm-io/src/{pty,command_resolve}.rs` |
 | 资源查找 | `crates/sonicterm-cfg/src/assets.rs` |

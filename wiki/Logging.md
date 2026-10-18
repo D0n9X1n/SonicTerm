@@ -227,6 +227,21 @@ Attempts still run: only invalid sizes and successful duplicates are skipped by
 the IO boundary. The grid keeps the requested geometry. There is no rollback,
 retry timer, or failure heartbeat.
 
+## Launch diagnostics
+
+Launches log on target `sonicterm_app::launch`. They never record an argument
+value, a path, or a title, at any level.
+
+| Event | Level | Fields |
+| --- | --- | --- |
+| `pane launched` | `info` | `pane`, `kind` (`command`, `script` or `shell`), `cwd_source` (`--dir`, `process`, `home` or `default`), `hold`; a command also logs `program` (its file name only) and `arg_count` |
+| `pane command argument byte lengths` | `debug` | `pane`, `arg_bytes` (each argument's length in bytes) |
+| `pane command did not start` | `warn` | `pane`, `program` (file name), `reason` (the failing rule, never lower-layer error text) |
+| `launch arguments rejected` | `warn` | `position` (1-based argument index), `rule` (for example `unknown-option` or `dir-not-a-directory`) |
+
+`info` and `debug` lines are hidden at the default `warn` level. A usage error is
+logged before the process exits with status `2`.
+
 ## Render and performance diagnostics
 
 `frame_collection` warns once per invalid-topology episode with `id` (window)
