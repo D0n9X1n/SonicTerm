@@ -251,6 +251,28 @@ user, host, port or page:
 | `terminal link rejected` | `sonicterm_mac::open_url` | `warn` | `scheme` (`ssh`, `x-man-page` or `unsupported`), `field` (for example `user`, `host` or `page`), `reason`; or only `reason=no_link` |
 | `terminal link client is missing` | `sonicterm_mac::open_url` | `warn` | `scheme`, `client` (`ssh` or `man`), `reason=client_missing` |
 
+## Default-handler diagnostics
+
+The default-handler command logs on target `sonicterm_app::default_handlers`, plus
+one target per OS backend. Item names are type identifiers, schemes, MIME types or
+a settings page, never a path or user data; a refused macOS bundle logs facts, not
+its path.
+
+| Event | Target | Level | Fields |
+| --- | --- | --- | --- |
+| `default handlers command invoked` | `sonicterm_app::default_handlers` | `info` | `platform` (`macos`, `linux`, `windows` or `none`) |
+| `default handlers refused before confirmation` | `sonicterm_app::default_handlers` | `info` | `platform` |
+| `default handlers cancelled at confirmation` | `sonicterm_app::default_handlers` | `info` | `platform` |
+| `default handlers apply started` | `sonicterm_app::default_handlers` | `info` | `platform`, `items` |
+| `default handler item finished` | `sonicterm_app::default_handlers` | `debug` | `platform`, `item`, `outcome` |
+| `default handler item failed` | `sonicterm_app::default_handlers` | `warn` | `platform`, `item`, `error` (error domain and code, or the failing step) |
+| `late default handler result ignored` | `sonicterm_app::default_handlers` | `debug` | `request`, `index`, `outcome` |
+| `default handlers finished` | `sonicterm_app::default_handlers` | `info` | `platform`, `changed`, `opened`, `denied`, `cancelled`, `failed`, `pending` |
+| `default handlers deadline timer did not start` | `sonicterm_app::default_handlers` | `warn` | `error` |
+| `default handlers refused for this bundle` | `sonicterm_mac::default_handlers` | `info` | `app_bundle`, `identifier_matches`, `read_only_volume`, `translocated`, `registered` |
+| `xdg-mime default finished` | `sonicterm_linux::default_handlers` | `info` | `status` (`exit <code>`, `killed by a signal`, `timed out` or `could not start (<kind>)`) |
+| `default apps settings requested` | `sonicterm_windows::default_handlers` | `info` | `outcome` |
+
 ## Render and performance diagnostics
 
 `frame_collection` warns once per invalid-topology episode with `id` (window)

@@ -370,6 +370,50 @@ Wayland 上的两种 Linux 包布局中运行三个场景。[打包](Packaging-z
 隔离证据路径。其它阶段成功但原生 PTY 清理未完成时退出码为 `20`；更早的故障、设备丢失或恢复失败
 保留原退出码。
 
+## 默认处理程序命令
+
+面板命令 `Action::SetDefaultHandlers` 是唯一会更改系统默认程序的路径；安装、启动和配置重载
+都不会触及它。每个二进制通过 shell 的 `with_default_handlers` 安装自己的后端，只有该命令会调用它。
+
+```mermaid
+flowchart TD
+    select[用户选择面板命令] --> plan{后端计划}
+    plan -- 拒绝 --> refusal[通知中显示原因；不更改任何内容]
+    plan -- 就绪 --> confirm[确认页：应用、取消、受影响的项目]
+    confirm -- 取消或 Esc --> nothing[不更改任何内容]
+    confirm -- 应用 --> apply[后端 apply 立即返回]
+    apply --> results[每一项通过事件循环 proxy 发回结果]
+    results --> report[绿色通知中的一份报告]
+    apply -. 120 秒期限 .-> report
+```
+
+报告把每一项列为 `changed`、`opened`、`denied`、`cancelled`、`failed (<detail>)` 或 `pending`。
+期限内没有结果的项目为 pending，绝不算作 changed；该次运行之后到达的结果会被忽略。
+
+- **macOS**（`crates/sonicterm-mac/src/default_handlers.rs`）。计划从正在运行的 bundle 自身的
+  `Info.plist` 读取 `CFBundleDocumentTypes` 内容类型和 `CFBundleURLTypes` scheme，因此只列出 bundle
+  实际声明的内容。只有当主 bundle 是标识符为 `com.d0n9x1n.sonicterm` 的 `.app`、位于可写卷、不在任何
+  `AppTranslocation` 路径下、且被 `URLsForApplicationsWithBundleIdentifier:` 列出时才继续，否则拒绝。
+  挂载的 DMG 和被转移的副本都从只读卷运行（`statfs` 的 `MNT_RDONLY`），因此不需要私有 API。
+  应用时在主线程用已检查的 bundle URL 调用 `setDefaultApplicationAtURL:toOpenContentType:` 和
+  `setDefaultApplicationAtURL:toOpenURLsWithScheme:`；`UTType` 在运行时解析。每个完成 block 映射其
+  `NSError`：无错误为 changed，`NSCocoaErrorDomain` 3072 和 `NSOSStatusErrorDomain` -128 为 cancelled，
+  -54 和 -5000 为 denied，其它错误为 failed 并附 domain 和 code。拒绝同意提示时返回哪些 code 没有文档；
+  这一映射是假设。新版 setter 不接受 role 参数，因此它为 `public.unix-executable` 记录的 role
+  需用被忽略的 `shell_role_handler_for_unix_executables` 测试手动检查。
+- **Linux**（`crates/sonicterm-linux/src/default_handlers.rs`）。计划依次在
+  `$XDG_DATA_HOME/applications` 和每个 `$XDG_DATA_DIRS/applications` 中查找 open-script 条目，读取其
+  `MimeType`，并从 `PATH` 的绝对路径项中把 `xdg-mime` 解析为绝对路径的可执行文件。应用时在工作线程上
+  不经 shell 运行 `xdg-mime default com.d0n9x1n.SonicTerm.open-script.desktop <types>`，再对每个类型运行
+  `xdg-mime query default <type>`。每次运行都位于自己的进程组；到 10 秒期限时先杀死整个进程组，再回收
+  子进程。只有读回结果指向该条目时，该类型才算 changed。不会写入 `xdg-terminals.list`、`kdeglobals`
+  或 alternative。
+- **Windows**（`crates/sonicterm-windows/src/default_handlers.rs`）。应用时在工作线程的 COM apartment 中
+  通过 `ShellExecuteExW` 打开 `ms-settings:defaultapps?registeredAppMachine=SonicTerm`（即
+  `wix/main.wxs` 中 HKLM `RegisteredApplications` 的名称），失败则打开 `ms-settings:defaultapps`。
+  按应用的链接能否打开 SonicTerm 自己的页面取决于 Windows 版本，尚未验证。后端不写入任何注册表值，
+  也从不触及 `UserChoice`。
+
 ## 平台矩阵
 
 | 能力 | macOS | Windows | Linux |
@@ -384,6 +428,7 @@ Wayland 上的两种 Linux 包布局中运行三个场景。[打包](Packaging-z
 | 软件呈现 | wgpu adapter 路径 | CPU BGRA + GDI | wgpu Vulkan/lavapipe 或选中的平台 adapter |
 | 安装包格式 | 各架构 `.dmg` 中的 `.app` | x64 WiX `.msi` | x86_64 `.deb` 与 `.tar.gz` |
 | 签名 | ad-hoc bundle 签名 | 未签名 | 未签名 |
+| 默认处理程序命令 | 对声明的类型和 scheme 调用 `NSWorkspace` setter | 打开“设置 › 默认应用” | 对 shell 脚本 MIME 类型运行 `xdg-mime` |
 
 ## 源码索引
 

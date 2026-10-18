@@ -53,6 +53,9 @@ drag/tear-out, and the platform shell abstractions.
   `--hold`, `--open-script`) shared by the Linux and Windows binaries; usage errors exit 2.
 - `src/launch_queue.rs` - the one queue platform boundaries use for terminal launches and
   script drafts; requests wait until a main window exists.
+- `src/default_handlers.rs`, `src/app/default_handlers.rs` - the "set as default" palette
+  command: the backend trait, plan, outcomes and report, and the confirmation page, run and
+  120 s deadline. Only Apply on that page calls a backend; startup and reload never do.
 - `src/app/pane_launch.rs`, `pane_exit.rs` - per-pane launch (shell, script draft or direct
   command, cwd, hold, title) and the exit policy with its local status line.
 

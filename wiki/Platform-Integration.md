@@ -471,6 +471,64 @@ and Wayland. [Packaging](Packaging) describes the Linux scenario argument and
 isolated evidence paths. Otherwise successful smoke with unsettled native PTY
 teardown exits `20`; an earlier fault, loss or recovery failure keeps its original code.
 
+## Default-handler command
+
+One palette command, `Action::SetDefaultHandlers`, is the only path that changes a
+system default; install, startup and config reload never reach it. Each binary
+installs its backend through `with_default_handlers` on its shell, and only the
+command calls it.
+
+```mermaid
+flowchart TD
+    select[User selects the palette command] --> plan{Backend plan}
+    plan -- refused --> refusal[Notification with the reason; nothing changes]
+    plan -- ready --> confirm[Confirmation page: Apply, Cancel, affected items]
+    confirm -- Cancel or Esc --> nothing[Nothing changes]
+    confirm -- Apply --> apply[Backend apply returns at once]
+    apply --> results[Each item posts its outcome through the event-loop proxy]
+    results --> report[One report in the green notification]
+    apply -. deadline of 120 s .-> report
+```
+
+The report lists every item as `changed`, `opened`, `denied`, `cancelled`,
+`failed (<detail>)` or `pending`. An item with no result by the deadline is
+pending, never changed; a later result for that run is ignored.
+
+- **macOS** (`crates/sonicterm-mac/src/default_handlers.rs`). The plan reads
+  `CFBundleDocumentTypes` content types and `CFBundleURLTypes` schemes from the
+  running bundle's own `Info.plist`, so it lists exactly what the bundle claims.
+  It refuses unless the main bundle is a `.app` with identifier
+  `com.d0n9x1n.sonicterm`, on a writable volume, outside any `AppTranslocation`
+  path, and listed by `URLsForApplicationsWithBundleIdentifier:`. A mounted DMG and
+  a translocated copy both run from a read-only volume (`statfs` `MNT_RDONLY`), so
+  no private API is needed. Apply calls
+  `setDefaultApplicationAtURL:toOpenContentType:` and
+  `setDefaultApplicationAtURL:toOpenURLsWithScheme:` on the main thread with the
+  checked bundle URL; `UTType` is resolved at runtime. Each completion block maps
+  its `NSError`: no error is changed, `NSCocoaErrorDomain` 3072 and
+  `NSOSStatusErrorDomain` -128 are cancelled, -54 and -5000 are denied, and any
+  other error is failed with its domain and code. Which codes a declined consent
+  prompt returns is not documented; this mapping is an assumption. The modern
+  setters take no role, so which role they record for `public.unix-executable` is
+  checked by hand with the ignored `shell_role_handler_for_unix_executables` test.
+- **Linux** (`crates/sonicterm-linux/src/default_handlers.rs`). The plan finds the
+  open-script entry in `$XDG_DATA_HOME/applications`, then each
+  `$XDG_DATA_DIRS/applications`, reads its `MimeType`, and resolves `xdg-mime` to
+  an absolute executable from the absolute `PATH` entries. Apply runs
+  `xdg-mime default com.d0n9x1n.SonicTerm.open-script.desktop <types>`, then
+  `xdg-mime query default <type>` for each type, on a worker thread with no shell.
+  Each run leads its own process group; at its 10-second deadline the group is
+  killed before the child is reaped. A type is changed only when the read-back
+  names the entry. Nothing writes `xdg-terminals.list`, `kdeglobals` or an
+  alternative.
+- **Windows** (`crates/sonicterm-windows/src/default_handlers.rs`). Apply opens
+  `ms-settings:defaultapps?registeredAppMachine=SonicTerm` (the HKLM
+  `RegisteredApplications` name from `wix/main.wxs`), else
+  `ms-settings:defaultapps`, through `ShellExecuteExW` in a COM apartment on a
+  worker thread. Whether the per-app link opens SonicTerm's own page depends on
+  the Windows build and is unverified. The backend writes no registry value and
+  never touches `UserChoice`.
+
 ## Platform matrix
 
 | Capability | macOS | Windows | Linux |
@@ -485,6 +543,7 @@ teardown exits `20`; an earlier fault, loss or recovery failure keeps its origin
 | Software present | wgpu adapter path | CPU BGRA + GDI | wgpu Vulkan/lavapipe or selected platform adapter |
 | Package format | `.app` in per-architecture `.dmg` | x64 WiX `.msi` | x86_64 `.deb` and `.tar.gz` |
 | Signing | ad-hoc bundle signature | unsigned | unsigned |
+| Default-handler command | `NSWorkspace` setters for claimed types and schemes | opens Settings › Default apps | `xdg-mime` for shell-script MIME types |
 
 ## Code map
 

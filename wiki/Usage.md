@@ -750,6 +750,38 @@ handle `ssh:` and `x-man-page:` links. Installing changes no default.
 - A rejected link opens no tab and shows a warning naming the scheme and the part
   that failed, never its value. `telnet:` links are not handled.
 
+### Choose SonicTerm as the default
+
+Installing SonicTerm never changes a default handler. To choose it, run the
+palette-only command for your OS (see [Keybindings](Keybindings)). It first
+shows what will change; nothing changes until you choose **Apply**, and
+**Cancel** or Esc changes nothing. The result appears in the green notification.
+
+- **macOS.** Lists the content types (`public.shell-script`,
+  `com.apple.terminal.shell-script`, `public.unix-executable`) and the URL
+  schemes (`ssh`, `x-man-page`) that the installed bundle declares, and makes
+  SonicTerm their default. macOS may ask you to confirm some of them. The report
+  lists each item as changed, denied, cancelled, failed (with the error domain and
+  code) or pending, and says when only part was applied. Run it from
+  `/Applications`: a copy running from the disk image or a translocated copy
+  is refused with "Move SonicTerm.app to /Applications", a copy Launch Services
+  has not registered is refused, and a `cargo run` build reports "Missing bundle".
+  Afterwards `open ssh://host` opens SonicTerm, a `.sh` opens as a draft, and a
+  native executable runs as described above.
+- **Linux.** Makes the hidden `com.d0n9x1n.SonicTerm.open-script.desktop` entry the
+  default for `application/x-shellscript` and `text/x-shellscript`, so shell
+  scripts open in SonicTerm as drafts. It then reads each type back and reports
+  whether it now names that entry. This is not the terminal choice: the report
+  lists the `update-alternatives`, `xdg-terminals.list` and KDE steps for you to
+  take yourself. Without xdg-utils it reports "xdg-mime not found (install
+  xdg-utils)"; with the entry missing (an uninstalled tarball) it points to
+  [Packaging](Packaging).
+- **Windows.** Windows lets only you change default apps, so SonicTerm changes
+  nothing. The command opens Settings › Apps › Default apps at SonicTerm's page
+  when the per-app link works, otherwise the general page, and tells you to choose
+  SonicTerm for `.ps1`, `.cmd`, `.bat` and `.sh`. If Settings does not open, the
+  notification gives the steps as text.
+
 ### Configure and troubleshoot
 
 Use these canonical pages instead of duplicating their detailed rules here:

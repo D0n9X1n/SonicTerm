@@ -569,6 +569,30 @@ request 发送到当前运行的应用，并添加标签页。草稿绝不会被
 - 被拒绝的链接不会打开标签页，只显示一条警告，指出 scheme 和失败的部分，绝不显示其值。
   不处理 `telnet:` 链接。
 
+### 将 SonicTerm 设为默认程序
+
+安装 SonicTerm 从不更改默认处理程序。要选择它，请运行当前系统的面板专用命令（见
+[快捷键](Keybindings-zh-CN)）。它会先显示将要更改的内容；在选择 **应用** 之前不会更改任何内容，
+**取消** 或 Esc 也不会更改任何内容。结果显示在绿色通知中。
+
+- **macOS。** 列出已安装 bundle 声明的内容类型（`public.shell-script`、
+  `com.apple.terminal.shell-script`、`public.unix-executable`）和 URL scheme
+  （`ssh`、`x-man-page`），并把 SonicTerm 设为它们的默认程序。macOS 可能要求你确认其中一部分。
+  报告把每一项列为 changed、denied、cancelled、failed（附错误 domain 和 code）或 pending，
+  只应用了一部分时也会说明。请从 `/Applications` 运行：从磁盘映像运行的副本或被转移
+  （translocated）的副本会被拒绝，并提示 "Move SonicTerm.app to /Applications"；
+  Launch Services 未注册的副本会被拒绝；`cargo run` 构建会报告 "Missing bundle"。
+  之后 `open ssh://host` 会打开 SonicTerm，`.sh` 以草稿方式打开，原生可执行文件按上文所述运行。
+- **Linux。** 把隐藏条目 `com.d0n9x1n.SonicTerm.open-script.desktop` 设为
+  `application/x-shellscript` 和 `text/x-shellscript` 的默认程序，使 shell 脚本在 SonicTerm
+  中以草稿方式打开。随后逐一读回每个类型，并报告它现在是否指向该条目。这不是选择终端：报告会列出
+  `update-alternatives`、`xdg-terminals.list` 和 KDE 的步骤，由你自己执行。没有 xdg-utils 时报告
+  "xdg-mime not found (install xdg-utils)"；条目缺失（未安装的 tarball）时指向
+  [打包](Packaging-zh-CN)。
+- **Windows。** Windows 只允许你自己更改默认应用，因此 SonicTerm 不会更改任何内容。该命令会打开
+  “设置 › 应用 › 默认应用”：按应用的链接可用时打开 SonicTerm 的页面，否则打开总页面，并提示你为
+  `.ps1`、`.cmd`、`.bat` 和 `.sh` 选择 SonicTerm。如果设置未打开，通知会以文字给出步骤。
+
 ### 配置与排障
 
 详细规则由以下页面维护，这里不重复：
