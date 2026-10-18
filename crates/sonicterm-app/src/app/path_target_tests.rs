@@ -5534,7 +5534,8 @@ fn hover_counts(app: &App) -> (u64, u64, u64) {
     (hover.lookups, hover.detections, hover.cache_hits)
 }
 
-/// Probe requests hover submitted since the last drain.
+/// Probe requests hover submitted since the last drain; only the POSIX-path tests submit probes.
+#[cfg(unix)]
 fn drained_probes(mailbox: &PathProbeMailbox) -> usize {
     std::iter::from_fn(|| mailbox.take_next()).count()
 }
