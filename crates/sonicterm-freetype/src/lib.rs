@@ -985,7 +985,7 @@ pub use self::FT_Glyph_Format_ as FT_Glyph_Format;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FT_Span_ {
-    pub x: ::std::os::raw::c_ushort,
+    pub x: ::std::os::raw::c_short,
     pub len: ::std::os::raw::c_ushort,
     pub coverage: ::std::os::raw::c_uchar,
 }
@@ -1164,6 +1164,7 @@ pub const FT_Mod_Err_Type42: _bindgen_ty_1 = _bindgen_ty_1::FT_Mod_Err_Base;
 pub const FT_Mod_Err_Winfonts: _bindgen_ty_1 = _bindgen_ty_1::FT_Mod_Err_Base;
 pub const FT_Mod_Err_GXvalid: _bindgen_ty_1 = _bindgen_ty_1::FT_Mod_Err_Base;
 pub const FT_Mod_Err_Sdf: _bindgen_ty_1 = _bindgen_ty_1::FT_Mod_Err_Base;
+pub const FT_Mod_Err_HVF: _bindgen_ty_1 = _bindgen_ty_1::FT_Mod_Err_Base;
 pub const FT_Mod_Err_Max: _bindgen_ty_1 = _bindgen_ty_1::FT_Mod_Err_Max;
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]

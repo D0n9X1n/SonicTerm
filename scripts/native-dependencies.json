@@ -4,30 +4,21 @@
     {
       "name": "freetype",
       "path": "crates/sonicterm-freetype/freetype2",
-      "version": "2.14.3",
-      "tag": "VER-2-14-3",
-      "revision": "0a0221a1347e2f1e07c395263540026e9a0aa7c7",
+      "version": "2.15.0",
+      "tag": "VER-2-15-0",
+      "revision": "37515cf56ba3349656049edbed89ffc6f6466f2d",
       "archive": {
-        "url": "https://sourceforge.net/projects/freetype/files/freetype2/2.14.3/freetype-2.14.3.tar.xz/download",
-        "sha256": "36bc4f1cc413335368ee656c42afca65c5a3987e8768cc28cf11ba775e785a5f",
-        "root": "freetype-2.14.3"
+        "url": "https://sourceforge.net/projects/freetype/files/freetype2/2.15.0/freetype-2.15.0.tar.xz/download",
+        "sha256": "93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5",
+        "root": "freetype-2.15.0"
       },
       "include": ["include/**", "src/**", "builds/**", "LICENSE.TXT", "README", "ChangeLog", "docs/FTL.TXT", "docs/GPLv2.TXT", "docs/LICENSE.TXT", "docs/CHANGES"],
-      "upstream_fixes": [
-        {
-          "revision": "8fa928f1617aba65f45b00f0dcb109f077b7741e",
-          "url": "https://gitlab.freedesktop.org/freetype/freetype/-/commit/8fa928f1617aba65f45b00f0dcb109f077b7741e"
-        },
-        {
-          "revision": "5a280ecde6f324de0d226261036e736e0cb49a71",
-          "url": "https://gitlab.freedesktop.org/freetype/freetype/-/commit/5a280ecde6f324de0d226261036e736e0cb49a71"
-        }
-      ],
-      "tree_sha256": "283cb02ba9baaa5e6b8a99e7bfa8673bd2d45dae9c9f4debdfd685c9abd97bb6",
+      "upstream_fixes": [],
+      "tree_sha256": "ab93a207b5f03bd923590dac918cc7463e10bd101a430e0fc020f748b2be419d",
       "version_check": [
         {"path": "include/freetype/freetype.h", "pattern": "#define\\s+FREETYPE_MAJOR\\s+(\\d+)", "value": "2"},
-        {"path": "include/freetype/freetype.h", "pattern": "#define\\s+FREETYPE_MINOR\\s+(\\d+)", "value": "14"},
-        {"path": "include/freetype/freetype.h", "pattern": "#define\\s+FREETYPE_PATCH\\s+(\\d+)", "value": "3"}
+        {"path": "include/freetype/freetype.h", "pattern": "#define\\s+FREETYPE_MINOR\\s+(\\d+)", "value": "15"},
+        {"path": "include/freetype/freetype.h", "pattern": "#define\\s+FREETYPE_PATCH\\s+(\\d+)", "value": "0"}
       ]
     },
     {

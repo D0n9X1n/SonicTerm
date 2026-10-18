@@ -160,6 +160,8 @@ fn freetype() {
         "cff/cff.c",
         "cid/type1cid.c",
         "gzip/ftgzip.c",
+        // ftmodule.h registers the HVF driver; with FT_CONFIG_OPTION_HVF off it is a stub that rejects every face.
+        "hvf/hvf.c",
         "lzw/ftlzw.c",
         "pcf/pcf.c",
         "pfr/pfr.c",

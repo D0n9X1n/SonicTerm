@@ -14,8 +14,8 @@ fn exports_freetype_aliases_and_constants() {
 }
 
 #[test]
-fn linked_freetype_matches_the_pinned_release_and_unsigned_span_abi() {
-    // A successful link must use the imported library and the matching span field types.
+fn linked_freetype_matches_the_pinned_release_and_signed_span_abi() {
+    // A successful link must use the imported library and its span layout: signed x, unsigned len and coverage.
     let mut library = std::ptr::null_mut();
     let (mut major, mut minor, mut patch) = (0, 0, 0);
     // SAFETY: library and version outputs are valid; the successful native allocation is released once.
@@ -24,7 +24,7 @@ fn linked_freetype_matches_the_pinned_release_and_unsigned_span_abi() {
         crate::FT_Library_Version(library, &mut major, &mut minor, &mut patch);
         assert_eq!(crate::FT_Done_FreeType(library), 0);
     }
-    assert_eq!((major, minor, patch), (2, 14, 3));
-    let span = crate::FT_Span_ { x: u16::MAX, len: 1, coverage: u8::MAX };
-    assert_eq!(span.x, u16::MAX);
+    assert_eq!((major, minor, patch), (2, 15, 0));
+    let span = crate::FT_Span_ { x: i16::MIN, len: u16::MAX, coverage: u8::MAX };
+    assert_eq!((span.x, span.len), (i16::MIN, u16::MAX));
 }
