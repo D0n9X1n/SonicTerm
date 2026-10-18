@@ -123,15 +123,21 @@ fn drawable_bytes_use_the_format_pixel_size() {
 /// Byte index of the `}` that closes the block open at `start` in `source`, or `None` when the
 /// source ends first.
 ///
-/// Braces are counted by a small lexer that skips `//` and `/* */` comments, string and byte-string
-/// literals (with escapes), raw strings (`r"..."`, `r#"..."#`) and char literals such as `'{'`, so
-/// a brace or a `    }` line inside text never ends a block. Indentation and line endings play no
+/// Braces are counted by a small lexer that skips `//` comments, nested `/* */` comments, string,
+/// byte-string and C-string literals (with escapes), raw strings with any prefix (`r`, `br`, `cr`,
+/// any number of `#`) and char literals such as `'{'`, so a brace or a `    }` line inside text
+/// never ends a block. Indentation and line endings play no
 /// part. A source that never closes the block returns `None`, so callers fail closed.
 fn block_close(source: &str, start: usize) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut depth = 0_usize;
     let mut index = start;
     while index < bytes.len() {
+        if let Some(end) = raw_string_end(source, index) {
+            // When: `raw_string_end` finds a raw string here, skip it whole, quotes and braces included.
+            index = end;
+            continue;
+        }
         let byte = bytes[index];
         let next = bytes.get(index + 1).copied();
         match byte {
@@ -140,23 +146,12 @@ fn block_close(source: &str, start: usize) -> Option<usize> {
                 index = source[index..].find('\n').map_or(bytes.len(), |end| index + end);
             }
             b'/' if next == Some(b'*') => {
-                // When: `next` starts a block comment, skip past its `*/`.
-                index = source[index + 2..].find("*/").map_or(bytes.len(), |end| index + end + 4);
+                // When: `next` starts a block comment, skip it and every comment nested in it.
+                index = block_comment_end(bytes, index + 2);
             }
+            // A `b` or `c` prefix is an identifier byte the lexer passes over, so `b"..."` and
+            // `c"..."` reach this arm like an ordinary string.
             b'"' => index = string_end(bytes, index + 1),
-            b'r' if index == 0 || !is_ident_byte(bytes[index - 1]) => {
-                let hashes = bytes[index + 1..].iter().take_while(|byte| **byte == b'#').count();
-                if bytes.get(index + 1 + hashes) == Some(&b'"') {
-                    // When: `r`, `#`* and `"` open a raw string, skip to its `"` and `#`*.
-                    let closing = format!("\"{}", "#".repeat(hashes));
-                    let body = index + 2 + hashes;
-                    index = source[body..]
-                        .find(&closing)
-                        .map_or(bytes.len(), |end| body + end + closing.len());
-                } else {
-                    index += 1;
-                }
-            }
             b'\'' if next == Some(b'\\') => {
                 // When: `next` is a backslash, an escaped char literal runs to its closing quote.
                 index = source[index + 2..].find('\'').map_or(bytes.len(), |end| index + end + 3);
@@ -178,6 +173,57 @@ fn block_close(source: &str, start: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// Byte index just past the `*/` closing a block comment whose body starts at `start`. Rust block
+/// comments nest, so each inner `/*` needs its own `*/` before the outer comment ends.
+fn block_comment_end(bytes: &[u8], start: usize) -> usize {
+    let mut depth = 1_usize;
+    let mut index = start;
+    while index < bytes.len() {
+        match (bytes[index], bytes.get(index + 1).copied()) {
+            (b'/', Some(b'*')) => {
+                depth += 1;
+                index += 2;
+            }
+            (b'*', Some(b'/')) => {
+                depth -= 1;
+                index += 2;
+                if depth == 0 {
+                    // When: `depth` reaches zero, the outermost comment has closed.
+                    return index;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Byte index just past a raw string that opens at `index` (`r"..."`, `r#"..."#`, `br#"..."#` or
+/// `cr#"..."#`), or `None` when no raw string opens there.
+fn raw_string_end(source: &str, index: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if index > 0 && is_ident_byte(bytes[index - 1]) {
+        // When: the previous byte continues an identifier, this letter is no literal prefix.
+        return None;
+    }
+    let prefix = match (bytes[index], bytes.get(index + 1).copied()) {
+        (b'r', _) => 1,
+        (b'b' | b'c', Some(b'r')) => 2,
+        _ => {
+            // When: the bytes are no `r`, `br` or `cr` prefix, no raw string opens here.
+            return None;
+        }
+    };
+    let hashes = bytes[index + prefix..].iter().take_while(|byte| **byte == b'#').count();
+    if bytes.get(index + prefix + hashes) != Some(&b'"') {
+        // When: no `"` follows the prefix and hashes, this is an identifier such as `r#type`.
+        return None;
+    }
+    let closing = format!("\"{}", "#".repeat(hashes));
+    let body = index + prefix + hashes + 1;
+    Some(source[body..].find(&closing).map_or(bytes.len(), |end| body + end + closing.len()))
 }
 
 /// Byte index just past the `"` closing a string whose body starts at `start`, honouring escapes.
@@ -541,4 +587,61 @@ fn a_function_without_an_end_is_reported_not_read_to_end_of_file() {
 fn deleting_from_a_function_without_an_end_panics_with_its_name() {
     let fixture = "fn first(&mut self) {\n    self.record_frame_texture_request();\n";
     let _ = delete_in_function(fixture, "fn first(", "self.record_frame_texture_request();");
+}
+
+/// Contract: block comments nest, so a brace after an inner `*/` but inside the outer comment is
+/// not code. The install's function closes where its real brace is: the hook only in the next
+/// function is reported as missing, and a hook after the comment in the same function is found.
+#[test]
+fn a_brace_inside_a_nested_block_comment_is_not_counted() {
+    let fixture = r#"
+    fn first(&mut self) {
+        self.frame_texture = frame_texture;
+        /* outer /* inner */ { */
+    }
+
+    fn second(&self) {
+        self.record_frame_texture_request();
+    }
+"#;
+    let install = "self.frame_texture = frame_texture;";
+    let record = "record_frame_texture_request()";
+    let mut violations = Vec::new();
+    check_installs_record(&mut violations, "fixture", fixture, install, record);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert!(violations[0].contains("misses"), "{violations:?}");
+
+    let recorded = fixture.replacen(
+        "{ */\n    }",
+        "{ */\n        self.record_frame_texture_request();\n    }",
+        1,
+    );
+    let mut violations = Vec::new();
+    check_installs_record(&mut violations, "fixture", &recorded, install, record);
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+/// Contract: raw byte and raw C strings are skipped whole, so a `"` and a `}` inside them neither
+/// end the string early nor close the function; the hook after them stays in scope.
+#[test]
+fn raw_byte_and_c_strings_keep_their_quotes_and_braces() {
+    let fixture = r##"
+    fn first(&mut self) {
+        self.frame_texture = frame_texture;
+        let bytes = br#"a " } b"#;
+        let text = cr#"c " } d"#;
+        self.record_frame_texture_request();
+    }
+
+    fn second(&self) {}
+"##;
+    let mut violations = Vec::new();
+    check_installs_record(
+        &mut violations,
+        "fixture",
+        fixture,
+        "self.frame_texture = frame_texture;",
+        "record_frame_texture_request()",
+    );
+    assert!(violations.is_empty(), "{violations:?}");
 }
