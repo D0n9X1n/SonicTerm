@@ -285,6 +285,33 @@ fn process_exists(pid: libc::pid_t) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// Whether process `pid` is still running: it exists and is not a zombie. An orphaned helper is
+/// reparented to PID 1, which in a CI container may never reap it, so a killed helper can stay a
+/// zombie indefinitely; only its parent could reap it, and that is not this test.
+fn process_running(pid: libc::pid_t) -> bool {
+    if !process_exists(pid) {
+        // When: `kill(pid, 0)` fails, the process is gone entirely.
+        return false;
+    }
+    !process_is_zombie(pid)
+}
+
+/// Whether `pid` is a zombie, read from `/proc/<pid>/stat` (the state follows the last `)`).
+#[cfg(target_os = "linux")]
+fn process_is_zombie(pid: libc::pid_t) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| stat.rsplit_once(')').map(|(_, rest)| rest.trim_start().starts_with('Z')))
+        .unwrap_or(false)
+}
+
+/// Whether `pid` is a zombie. Outside Linux launchd reaps orphans at once, so an existing process
+/// is treated as running.
+#[cfg(not(target_os = "linux"))]
+fn process_is_zombie(_pid: libc::pid_t) -> bool {
+    false
+}
+
 /// Contract: a hung child is killed at the deadline together with a helper it started, the
 /// child is reaped, and the run reports a timeout.
 #[test]
@@ -298,9 +325,18 @@ fn a_hung_child_and_its_helper_are_killed_and_reaped() {
     assert!(started.elapsed() < Duration::from_secs(5), "the run was not bounded");
     let text = std::fs::read_to_string(&pids).unwrap();
     let ids: Vec<libc::pid_t> = text.split_whitespace().map(|id| id.parse().unwrap()).collect();
+    let (child, helper) = (ids[0], ids[1]);
+    // The direct child must be reaped (gone, not a zombie); the helper is not ours to reap, so it
+    // only has to stop running.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while ids.iter().any(|pid| process_exists(*pid)) {
-        assert!(Instant::now() < deadline, "a process from the hung run survived: {ids:?}");
+    while process_exists(child) || process_running(helper) {
+        assert!(
+            Instant::now() < deadline,
+            "a process from the hung run survived: child {child} exists={}, helper {helper} \
+             running={}",
+            process_exists(child),
+            process_running(helper)
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
     let (sink, reported) = recording_sink();
