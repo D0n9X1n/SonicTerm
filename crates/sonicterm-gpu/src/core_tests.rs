@@ -8564,6 +8564,36 @@ fn quick_select_hints_follow_history_eviction_to_their_displayed_row() {
     assert_eq!(display_row(2, 8), None, "a hint moved above the view draws nothing");
 }
 
+/// With the viewport at the top of the grid, so no clipping can hide it, a hint whose own row is
+/// evicted draws nothing rather than being clamped onto row 0, and the hint below it moves up into
+/// row 0. A placement that saturated the eviction shift at row 0 would draw the evicted hint there.
+#[test]
+fn an_evicted_quick_select_hint_is_suppressed_even_at_the_viewport_top() {
+    let hint_at = |letter: char, row: usize| QuickSelectHint {
+        hint: letter,
+        row,
+        col_start: 0,
+        col_end: 3,
+        text: "https://a.co".to_string(),
+    };
+    let quick_select =
+        QuickSelectState { hints: vec![hint_at('a', 0), hint_at('b', 1)], scrollback_evicted: 5 };
+    let (view_top_abs, visible_rows) = (0, 5);
+    let display_row = |hint_index: usize, scrollback_evicted: u64| {
+        quick_select_hint_display_row(
+            &quick_select,
+            &quick_select.hints[hint_index],
+            scrollback_evicted,
+            view_top_abs,
+            visible_rows,
+        )
+    };
+    assert_eq!(display_row(0, 5), Some(0), "before any eviction the hint draws on row 0");
+    assert_eq!(display_row(1, 5), Some(1));
+    assert_eq!(display_row(0, 6), None, "its own row evicted, the hint draws nothing");
+    assert_eq!(display_row(1, 6), Some(0), "the surviving hint moves up into row 0");
+}
+
 /// Every way the quick-select draw sites in `source`, a copy of `core.rs`, fail to place a hint
 /// through `quick_select_hint_display_row`, each named by its site; empty when both comply.
 ///
