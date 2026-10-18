@@ -213,9 +213,12 @@ fn file_identity_matches_only_the_classified_regular_file() {
     std::os::unix::fs::symlink(&file, &link).unwrap();
     assert!(!file_identity_matches(&link, identity), "a symlink is refused even to the same file");
 
-    std::fs::remove_file(&file).unwrap();
-    std::fs::write(root.path().join("other"), b"two").unwrap();
-    std::fs::rename(root.path().join("other"), &file).unwrap();
+    // The replacement is written while the original still exists, so the two hold distinct
+    // inodes; deleting first lets ext4 or tmpfs hand the freed inode straight to the new file.
+    // The rename then swaps the path atomically.
+    let other = root.path().join("other");
+    std::fs::write(&other, b"two").unwrap();
+    std::fs::rename(&other, &file).unwrap();
     assert!(!file_identity_matches(&file, identity), "a replaced inode is refused");
     assert!(!file_identity_matches(&root.path().join("missing"), identity));
 }
