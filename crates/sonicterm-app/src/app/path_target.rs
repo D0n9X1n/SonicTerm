@@ -2720,8 +2720,10 @@ impl App {
     fn pointer_target_cell(&self, window_id: WindowId) -> Option<(u64, u16, u16)> {
         let window = self.windows.get(&window_id)?;
         let (cursor_x_px, cursor_y_px) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
-        let (rendered_pane, row, col) =
-            window.renderer.as_ref()?.pixel_to_pane_cell(cursor_x_px, cursor_y_px)?;
+        let (rendered_pane, row, col) = match window.renderer.as_ref() {
+            Some(renderer) => renderer.pixel_to_pane_cell(cursor_x_px, cursor_y_px)?,
+            None => Self::headless_pointer_cell(window, cursor_x_px, cursor_y_px)?,
+        };
         let pane_id = if rendered_pane == 0 {
             // When: `rendered_pane` is zero, use `main_window_id` geometry for the main `window_id` and child geometry otherwise.
             if Some(window_id) == self.main_window_id {
@@ -2738,6 +2740,27 @@ impl App {
             rendered_pane
         };
         Some((pane_id, row, col))
+    }
+
+    /// The pane cell under a point in a window with no renderer: a headless test with a pane
+    /// viewport resolves it on that viewport's uniform grid; otherwise there is none.
+    fn headless_pointer_cell(
+        window: &super::WindowState,
+        cursor_x_px: f32,
+        cursor_y_px: f32,
+    ) -> Option<(u64, u16, u16)> {
+        #[cfg(test)]
+        if let Some((_, cell_width_px, cell_height_px)) = window.test_pane_viewport {
+            // When: `test_pane_viewport` is set and no renderer exists, resolve on its uniform grid.
+            return super::window_event::headless_pane_cell(
+                &Self::compute_pane_rects_for(window),
+                (cell_width_px, cell_height_px),
+                cursor_x_px,
+                cursor_y_px,
+            );
+        }
+        let _ = (window, cursor_x_px, cursor_y_px);
+        None
     }
 
     /// Refreshes pointer feedback without treating a busy parser as a missing target.
