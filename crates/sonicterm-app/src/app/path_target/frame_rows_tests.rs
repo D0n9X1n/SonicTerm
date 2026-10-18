@@ -64,18 +64,67 @@ fn observer_records_reads_inside_and_outside_the_frame() {
     assert!(outside.is_empty(), "an observation sees only its own reads");
 }
 
+/// Production sources of path detection other than the reader itself, by file name, so the
+/// source check covers each and can tell when a new module joins the directory unlisted.
+const DETECTION_SOURCES: &[(&str, &str)] = &[
+    ("path_target.rs", include_str!("../path_target.rs")),
+    ("hover_cache.rs", include_str!("hover_cache.rs")),
+    ("linux.rs", include_str!("linux.rs")),
+    ("macos.rs", include_str!("macos.rs")),
+    ("unix.rs", include_str!("unix.rs")),
+    ("windows.rs", include_str!("windows.rs")),
+];
+
+/// `line` without its line comment: a `//` at the start, or one set off by spaces after code,
+/// which a `scheme://` inside a string literal never is.
+fn code_part(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") {
+        // When: the whole line is a comment, none of it is code.
+        return "";
+    }
+    line.find(" // ").map_or(line, |comment_start| &line[..comment_start])
+}
+
 /// Detection reads rows only through `FrameRows`: `FrameRows::grid` still hands out the grid for
-/// its geometry and screen identity, so this source check pins that `path_target.rs` never calls
-/// `row_at_abs` itself, outside comments, where it could read a row the pane does not display.
+/// its geometry and screen identity, so this source check pins that no detection source other
+/// than the reader calls `row_at_abs`, or `.row(` on a grid, outside comments, where it could read
+/// a row the pane does not display.
 #[test]
 fn path_detection_never_reads_rows_past_the_frame_reader() {
-    let source = include_str!("../path_target.rs");
-    let direct_reads = source
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| !line.trim_start().starts_with("//"))
-        .filter(|(_, line)| line.contains("row_at_abs"))
-        .map(|(index, line)| format!("{}: {}", index + 1, line.trim()))
+    let mut direct_reads = Vec::new();
+    for (file_name, source) in DETECTION_SOURCES {
+        for (index, line) in source.lines().enumerate() {
+            let code = code_part(line);
+            if code.contains("row_at_abs")
+                || code.contains("grid().row(")
+                || code.contains("grid.row(")
+            {
+                // When: the code part reads a grid row directly, report its file and line.
+                direct_reads.push(format!("{file_name}:{}: {}", index + 1, line.trim()));
+            }
+        }
+    }
+    assert!(direct_reads.is_empty(), "detection reads rows directly: {direct_reads:?}");
+}
+
+/// Every production source in `path_target/` except the reader is in `DETECTION_SOURCES`, so a
+/// new detection module cannot read rows directly unchecked.
+#[test]
+fn the_frame_reader_source_check_covers_every_detection_module() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/path_target");
+    let mut on_disk = std::fs::read_dir(&directory)
+        .expect("path_target directory")
+        .map(|entry| entry.expect("directory entry").file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".rs") && !name.ends_with("_tests.rs"))
+        .filter(|name| name != "frame_rows.rs")
         .collect::<Vec<_>>();
-    assert!(direct_reads.is_empty(), "path_target.rs reads rows directly: {direct_reads:?}");
+    on_disk.sort();
+    let mut listed = DETECTION_SOURCES
+        .iter()
+        .map(|(file_name, _)| file_name.to_string())
+        .filter(|name| name != "path_target.rs")
+        .collect::<Vec<_>>();
+    listed.sort();
+    assert_eq!(listed, on_disk);
 }
