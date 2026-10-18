@@ -40,13 +40,86 @@ fn desktop_value(key: &str) -> Option<&str> {
     })
 }
 
+/// Parse `args` (binary name prepended) and decide startup with a fixed cwd and home.
+fn startup(args: &[&str]) -> std::result::Result<LinuxStartup, String> {
+    use sonicterm_app::launch_cli::{parse_launch_args, CliDialect};
+    let mut all = vec!["sonicterm"];
+    all.extend_from_slice(args);
+    let cwd = std::env::temp_dir();
+    let cli =
+        parse_launch_args(all, CliDialect::Linux, Some(&cwd)).map_err(|error| error.to_string())?;
+    linux_startup(cli, Some(cwd), None).map_err(|error| error.to_string())
+}
+
+/// Release automation's hidden smoke flag stays exclusive and queues no launch.
 #[test]
-fn hidden_runtime_smoke_flag_is_the_only_alternate_startup_mode() {
-    // Protect release automation from silently running an ordinary interactive session.
-    assert_eq!(parse_startup_mode(["sonicterm"]), Ok(StartupMode::Interactive));
-    assert_eq!(parse_startup_mode(["sonicterm", "--runtime-smoke"]), Ok(StartupMode::RuntimeSmoke));
-    assert!(parse_startup_mode(["sonicterm", "--runtime-smoke", "extra"]).is_err());
-    assert!(parse_startup_mode(["sonicterm", "--unknown"]).is_err());
+fn hidden_runtime_smoke_flag_stays_exclusive() {
+    assert_eq!(
+        startup(&["--runtime-smoke"]),
+        Ok(LinuxStartup::Run { mode: StartupMode::RuntimeSmoke, launch: None })
+    );
+    assert!(startup(&["--runtime-smoke", "extra"]).is_err());
+    assert!(startup(&["--unknown"]).is_err());
+}
+
+/// A plain launch queues a terminal request whose first tab starts in the process cwd.
+#[test]
+fn plain_launch_starts_in_the_process_cwd() {
+    use sonicterm_app::launch_queue::LaunchRequest;
+    let Ok(LinuxStartup::Run { mode, launch: Some(LaunchRequest::Terminal(launch)) }) =
+        startup(&[])
+    else {
+        panic!("a plain launch queues a terminal request");
+    };
+    assert_eq!(mode, StartupMode::Interactive);
+    assert_eq!(launch.cwd, Some(std::env::temp_dir()));
+    assert_eq!(launch.cwd_source.map(|source| source.as_str()), Some("process"));
+    assert!(launch.command.is_none());
+}
+
+/// `-e` passes the program and every later argument through unchanged, with the title and hold.
+#[test]
+fn command_launch_keeps_exact_argv() {
+    use sonicterm_app::launch_queue::LaunchRequest;
+    let Ok(LinuxStartup::Run { launch: Some(LaunchRequest::Terminal(launch)), .. }) =
+        startup(&["-T", "Logs", "--hold", "-e", "printf", "%s\\n", "a b", "-T"])
+    else {
+        panic!("a command launch queues a terminal request");
+    };
+    let command = launch.command.expect("command");
+    assert_eq!(command.program, "printf");
+    assert_eq!(command.args, ["%s\\n", "a b", "-T"]);
+    assert_eq!(launch.title.as_deref(), Some("Logs"));
+    assert!(launch.hold);
+}
+
+/// `--open-script` queues a draft resolved against the process cwd, never a command.
+#[test]
+fn open_script_queues_a_draft() {
+    use sonicterm_app::launch_queue::LaunchRequest;
+    let Ok(LinuxStartup::Run { launch: Some(LaunchRequest::Script(request)), .. }) =
+        startup(&["--open-script", "x.sh"])
+    else {
+        panic!("--open-script queues a script draft");
+    };
+    assert_eq!(request.launch_path, std::env::temp_dir().join("x.sh"));
+}
+
+/// `--help` prints usage instead of starting, and usage errors use exit code 2.
+#[test]
+fn help_and_usage_exit_codes() {
+    assert_eq!(startup(&["--help"]), Ok(LinuxStartup::Help));
+    assert_eq!(sonicterm_app::launch_cli::USAGE_EXIT_CODE, 2);
+    assert!(startup(&["file.sh"]).is_err());
+}
+
+/// `main` reads arguments losslessly and maps usage errors to exit 2, never panicking on non-UTF-8.
+#[test]
+fn main_parses_os_arguments_and_exits_two() {
+    const MAIN: &str = include_str!("main.rs");
+    assert!(MAIN.contains("std::env::args_os()"));
+    assert!(!MAIN.contains("std::env::args()"));
+    assert!(MAIN.contains("ExitCode::from(USAGE_EXIT_CODE)"));
 }
 
 #[test]
@@ -106,11 +179,49 @@ fn runtime_smoke_isolates_state_without_changing_interactive_startup() {
 fn desktop_entry_matches_runtime_identity_and_binary() {
     // Protect package discovery, launch, icon, and task grouping as one identity contract.
     assert_eq!(desktop_value("Type"), Some("Application"));
-    assert_eq!(desktop_value("Exec"), Some("sonicterm"));
+    assert_eq!(desktop_value("Exec"), Some("sonicterm"), "KDE appends -e to the raw Exec");
     assert_eq!(desktop_value("Icon"), Some("com.d0n9x1n.SonicTerm"));
     assert_eq!(desktop_value("StartupWMClass"), Some("com.d0n9x1n.SonicTerm"));
     assert_eq!(desktop_value("Terminal"), Some("false"));
     assert!(desktop_value("Categories").is_some_and(|value| value.contains("TerminalEmulator;")));
+}
+
+/// The terminal entry advertises the launcher options xdg-terminal-exec reads.
+#[test]
+fn desktop_entry_declares_terminal_launcher_arguments() {
+    assert_eq!(desktop_value("X-TerminalArgExec"), Some("-e"));
+    assert_eq!(desktop_value("X-ExecArg"), Some("-e"));
+    assert_eq!(desktop_value("X-TerminalArgTitle"), Some("-T"));
+    assert_eq!(desktop_value("X-TerminalArgDir"), Some("--dir="));
+    assert_eq!(desktop_value("X-TerminalArgHold"), Some("--hold"));
+    assert_eq!(desktop_value("MimeType"), None, "the terminal entry handles no file types");
+}
+
+const OPEN_SCRIPT_ENTRY: &str =
+    include_str!("../resources/com.d0n9x1n.SonicTerm.open-script.desktop");
+
+/// The value of `key` in the hidden open-script entry.
+fn open_script_value(key: &str) -> Option<&str> {
+    OPEN_SCRIPT_ENTRY.lines().find_map(|line| {
+        line.split_once('=').filter(|(name, _)| *name == key).map(|(_, value)| value)
+    })
+}
+
+/// The hidden script entry opens scripts as drafts, never as commands, and stays out of menus.
+#[test]
+fn open_script_entry_types_drafts_and_is_hidden() {
+    assert_eq!(open_script_value("Type"), Some("Application"));
+    assert_eq!(open_script_value("Name"), Some("SonicTerm"));
+    assert_eq!(open_script_value("Icon"), Some("com.d0n9x1n.SonicTerm"));
+    assert_eq!(open_script_value("StartupWMClass"), Some("com.d0n9x1n.SonicTerm"));
+    assert_eq!(open_script_value("NoDisplay"), Some("true"));
+    assert_eq!(open_script_value("Exec"), Some("sonicterm --open-script %f"));
+    assert_eq!(
+        open_script_value("MimeType"),
+        Some("application/x-shellscript;text/x-shellscript;")
+    );
+    assert_eq!(open_script_value("Terminal"), Some("false"));
+    assert!(!OPEN_SCRIPT_ENTRY.contains(" -e"), "a file association must never execute");
 }
 
 #[test]
