@@ -121,6 +121,9 @@ fn drawable_bytes_use_the_format_pixel_size() {
 }
 
 /// The rest of the method holding `offset` in `source`: up to the next method-closing brace.
+///
+/// `source` must use `\n` line endings; [`hook_violations`] normalizes before calling this, since a
+/// Windows checkout has `\r\n` and the closing-brace pattern would otherwise never match.
 fn method_rest(source: &str, offset: usize) -> &str {
     let rest = &source[offset..];
     &rest[..rest.find("\n    }\n").unwrap_or(rest.len())]
@@ -154,8 +157,17 @@ const SOURCES: [(&str, &str); 5] = [
 ];
 
 /// Every missing ledger hook in `sources` (core, present, rebind, atlas lifecycle, pipeline).
+///
+/// Line endings are normalized to `\n` first, so the guard reads a Windows CRLF checkout the same.
 fn hook_violations(sources: [&str; 5]) -> Vec<String> {
-    let [core, present, rebind, atlas, pipeline] = sources;
+    let normalized = sources.map(|source| source.replace("\r\n", "\n"));
+    let [core, present, rebind, atlas, pipeline] = [
+        normalized[0].as_str(),
+        normalized[1].as_str(),
+        normalized[2].as_str(),
+        normalized[3].as_str(),
+        normalized[4].as_str(),
+    ];
     let mut violations = Vec::new();
     let mut require = |found: bool, what: &str| {
         if !found {
@@ -272,48 +284,93 @@ fn every_production_install_site_records_in_the_ledger() {
     assert!(violations.is_empty(), "{violations:#?}");
 }
 
-/// Contract: the guard catches the deletion of each hook it pins. Every case removes one call from
-/// a copy of its source; the guard must then report a violation, so a hook that could be deleted
-/// unnoticed is not counted as pinned.
-#[test]
-fn deleting_any_pinned_hook_fails_the_guard() {
-    let cases: [(usize, &str); 20] = [
-        (0, "present_pipeline.attach_graphics_ledger(graphics_ledger.clone());"),
-        (0, "renderer.record_surface_request();"),
-        (0, "renderer.record_frame_texture_request();"),
-        (0, "renderer.record_glyph_atlas_request();"),
-        (0, "renderer.record_image_atlas_request();"),
-        (0, "self.record_frame_texture_request();"),
-        (0, "self.record_surface_request();"),
-        (0, "\"renderer graphics teardown\""),
-        (0, "self.graphics_ledger.release_all();"),
-        (1, "self.record_surface_request();"),
-        (2, "self.present_pipeline.attach_graphics_ledger(self.graphics_ledger.clone());"),
-        (2, "self.record_surface_request();"),
-        (2, "self.record_frame_texture_request();"),
-        (2, "self.record_glyph_atlas_request();"),
-        (2, "self.record_image_atlas_request();"),
-        (3, "self.record_glyph_atlas_request();"),
-        (3, "self.record_image_atlas_request();"),
-        (4, "self.record_vertex_request();"),
-        (4, "self.record_index_request();"),
-        (4, "crate::graphics_ledger::GraphicsSlot::PresentUniform,"),
-    ];
-    for (index, needle) in cases {
-        let mut sources = SOURCES.map(|(_, source)| source.to_string());
-        assert!(sources[index].contains(needle), "{}: `{needle}` not found", SOURCES[index].0);
-        sources[index] = sources[index].replacen(needle, "", 1);
-        let borrowed = [
-            sources[0].as_str(),
-            sources[1].as_str(),
-            sources[2].as_str(),
-            sources[3].as_str(),
-            sources[4].as_str(),
-        ];
+/// Each pinned hook: its source's index in [`SOURCES`], the unique text that opens the function
+/// holding it, and the call. The function anchor names the occurrence, so a call that appears in
+/// two functions is deleted where this case pins it, not wherever the text first appears.
+const PINNED_HOOKS: [(usize, &str, &str); 25] = [
+    (0, "fn new_async(", "present_pipeline.attach_graphics_ledger(graphics_ledger.clone());"),
+    (0, "fn new_async(", "renderer.record_surface_request();"),
+    (0, "fn new_async(", "renderer.record_frame_texture_request();"),
+    (0, "fn new_async(", "renderer.record_glyph_atlas_request();"),
+    (0, "fn new_async(", "renderer.record_image_atlas_request();"),
+    (0, "fn rebuild_frame_texture(", "self.record_frame_texture_request();"),
+    (0, "fn trim_for_occlusion(", "self.record_frame_texture_request();"),
+    (0, "fn try_resize_outcome(", "self.record_surface_request();"),
+    (0, "fn set_software_render_degrade(", "self.record_surface_request();"),
+    (0, "impl Drop for GpuRenderer", "\"renderer graphics teardown\""),
+    (0, "impl Drop for GpuRenderer", "self.graphics_ledger.release_all();"),
+    (1, "fn present_wgpu_frame(", "self.record_surface_request();"),
+    (1, "fn probe_surface_availability(", "self.record_surface_request();"),
+    (
+        2,
+        "fn commit_rebind(",
+        "self.present_pipeline.attach_graphics_ledger(self.graphics_ledger.clone());",
+    ),
+    (2, "fn commit_rebind(", "self.record_surface_request();"),
+    (2, "fn commit_rebind(", "self.record_frame_texture_request();"),
+    (2, "fn commit_rebind(", "self.record_glyph_atlas_request();"),
+    (2, "fn commit_rebind(", "self.record_image_atlas_request();"),
+    (3, "fn rebuild_glyph_upload_if_needed(", "self.record_glyph_atlas_request();"),
+    (3, "fn rebuild_image_upload_if_needed(", "self.record_image_atlas_request();"),
+    (4, "fn attach_graphics_ledger(", "crate::graphics_ledger::GraphicsSlot::PresentUniform,"),
+    (4, "fn recreate_buffers(", "self.record_vertex_request();"),
+    (4, "fn recreate_buffers(", "self.record_index_request();"),
+    (4, "fn ensure_capacity(", "self.record_vertex_request();"),
+    (4, "fn ensure_capacity(", "self.record_index_request();"),
+];
+
+/// `source` with the first `needle` inside the function opened by the unique `anchor` removed.
+///
+/// The function ends at its closing brace with either line ending, so the deletion lands in the
+/// same function in an LF and a CRLF copy.
+fn delete_in_function(source: &str, anchor: &str, needle: &str) -> String {
+    assert_eq!(source.matches(anchor).count(), 1, "`{anchor}` must name one function");
+    let start = source.find(anchor).expect("anchor present");
+    let body = &source[start..];
+    let end = ["\n    }\n", "\r\n    }\r\n"]
+        .iter()
+        .filter_map(|closing| body.find(closing))
+        .min()
+        .unwrap_or(body.len());
+    let offset = body[..end].find(needle).unwrap_or_else(|| panic!("`{needle}` not in `{anchor}`"));
+    let at = start + offset;
+    format!("{}{}", &source[..at], &source[at + needle.len()..])
+}
+
+/// Borrow five owned sources as the guard's string slices.
+fn borrow(sources: &[String; 5]) -> [&str; 5] {
+    sources.each_ref().map(String::as_str)
+}
+
+/// Assert the guard finds no violation in `sources`, and one after deleting each pinned hook.
+fn assert_guard_catches_every_deletion(sources: [String; 5], label: &str) {
+    let clean = hook_violations(borrow(&sources));
+    assert!(clean.is_empty(), "{label}: unmodified sources report {clean:#?}");
+    for (index, anchor, needle) in PINNED_HOOKS {
+        let mut mutated = sources.clone();
+        mutated[index] = delete_in_function(&sources[index], anchor, needle);
         assert!(
-            !hook_violations(borrowed).is_empty(),
-            "deleting `{needle}` from {} went unnoticed",
+            !hook_violations(borrow(&mutated)).is_empty(),
+            "{label}: deleting `{needle}` from `{anchor}` in {} went unnoticed",
             SOURCES[index].0
         );
     }
+}
+
+/// Contract: the guard catches the deletion of each hook it pins. Every case removes one call from
+/// the function that holds it, in a copy of its source; the guard must then report a violation, so
+/// a hook that could be deleted unnoticed is not counted as pinned.
+#[test]
+fn deleting_any_pinned_hook_fails_the_guard() {
+    let sources = SOURCES.map(|(_, source)| source.replace("\r\n", "\n"));
+    assert_guard_catches_every_deletion(sources, "LF");
+}
+
+/// Contract: the guard does not depend on line endings. A Windows checkout has CRLF, which once
+/// made a method's end unfindable, so a deleted `rebuild_frame_texture` record was hidden by the
+/// one in `trim_for_occlusion`; the same deletions in a CRLF copy must each still be reported.
+#[test]
+fn the_guard_catches_every_deletion_in_crlf_sources() {
+    let sources = SOURCES.map(|(_, source)| source.replace("\r\n", "\n").replace('\n', "\r\n"));
+    assert_guard_catches_every_deletion(sources, "CRLF");
 }
