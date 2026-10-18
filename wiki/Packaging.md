@@ -112,8 +112,12 @@ SonicTerm.app/Contents/
 ```
 
 `Info.plist` records the supplied version, bundle id
-`com.d0n9x1n.sonicterm`, `ATSApplicationFontsPath=assets/fonts`, and alternate handlers
-for `public.shell-script` and `com.apple.terminal.shell-script`. All four unchanged
+`com.d0n9x1n.sonicterm`, `ATSApplicationFontsPath=assets/fonts`, two Shell-role
+document types at `LSHandlerRank=Alternate` (scripts: `public.shell-script` and
+`com.apple.terminal.shell-script`; Unix executables: `public.unix-executable`), and one
+`CFBundleURLTypes` entry, `com.d0n9x1n.sonicterm.terminal-links`, for the `ssh` and
+`x-man-page` schemes. `telnet` is not declared. These declarations make SonicTerm
+available; installing changes no default handler. All four unchanged
 Rec Mono faces are stored once: the runtime and AppKit/CoreText share this path.
 
 `scripts/macos-bundle.py` recursively collects the executable's non-system dylib

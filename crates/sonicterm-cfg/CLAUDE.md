@@ -13,6 +13,8 @@ and target safety. This crate is the only place that should parse
 - `url_scan.rs` / `url_open.rs` - typed URL/path detection and safe URI-open policy;
   `url_open/windows.rs`, `url_open/macos.rs`, and `url_open/linux.rs` (every Unix
   except macOS) hold each OS's dispatch.
+- `launch_url.rs` - `ssh:`/`x-man-page:` link grammar: split, decode each component
+  once, validate, then build the fixed client argv. Rejections carry no link text.
 - `dimension.rs` - size/unit helpers shared with font and UI code.
 
 ## Local gate

@@ -97,8 +97,11 @@ SonicTerm.app/Contents/
 ```
 
 `Info.plist` 写入传入的版本、bundle id `com.d0n9x1n.sonicterm`、
-`ATSApplicationFontsPath=assets/fonts`，并为 `public.shell-script` 和
-`com.apple.terminal.shell-script` 声明 alternate handler。四个未经修改的 Rec Mono 字体
+`ATSApplicationFontsPath=assets/fonts`，声明两个 Shell 角色、`LSHandlerRank=Alternate`
+的文档类型（脚本：`public.shell-script` 和 `com.apple.terminal.shell-script`；Unix
+可执行文件：`public.unix-executable`），以及一个 `CFBundleURLTypes` 条目
+`com.d0n9x1n.sonicterm.terminal-links`，声明 `ssh` 和 `x-man-page` scheme。不声明
+`telnet`。这些声明只让 SonicTerm 成为可选项；安装不会更改任何默认 handler。四个未经修改的 Rec Mono 字体
 仅保存一次，运行时和 AppKit/CoreText 共用同一路径。
 
 `scripts/macos-bundle.py` 从已安装的 Homebrew keg 递归收集可执行文件依赖的非系统 dylib，

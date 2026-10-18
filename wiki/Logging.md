@@ -234,13 +234,22 @@ value, a path, or a title, at any level.
 
 | Event | Level | Fields |
 | --- | --- | --- |
-| `pane launched` | `info` | `pane`, `kind` (`command`, `script` or `shell`), `cwd_source` (`--dir`, `process`, `home` or `default`), `hold`; a command also logs `program` (its file name only) and `arg_count` |
+| `pane launched` | `info` | `pane`, `kind` (`command`, `executable`, `url`, `script` or `shell`), `cwd_source` (`--dir`, `process`, `home`, `parent` or `default`), `hold`; a command also logs `scheme` (`ssh`, `x-man-page` or `none`), `program` (its file name only) and `arg_count` |
 | `pane command argument byte lengths` | `debug` | `pane`, `arg_bytes` (each argument's length in bytes) |
-| `pane command did not start` | `warn` | `pane`, `program` (file name), `reason` (the failing rule, never lower-layer error text) |
+| `pane command did not start` | `warn` | `pane`, `program` (file name), `reason` (the failing rule, never lower-layer error text); for an opened executable replaced before spawn, `pane`, `kind` and `reason=identity_changed` |
 | `launch arguments rejected` | `warn` | `position` (1-based argument index), `rule` (for example `unknown-option` or `dir-not-a-directory`) |
 
 `info` and `debug` lines are hidden at the default `warn` level. A usage error is
 logged before the process exits with status `2`.
+
+macOS file and link opens log refusals on their own targets, never a path, link,
+user, host, port or page:
+
+| Event | Target | Level | Fields |
+| --- | --- | --- | --- |
+| `document open not run` | `sonicterm_mac::open_document` | `warn` | `reason` (`unresolvable`, `bundle`, `directory`, `not_regular`, `unreadable`, `quarantined` or `not_executable`) |
+| `terminal link rejected` | `sonicterm_mac::open_url` | `warn` | `scheme` (`ssh`, `x-man-page` or `unsupported`), `field` (for example `user`, `host` or `page`), `reason`; or only `reason=no_link` |
+| `terminal link client is missing` | `sonicterm_mac::open_url` | `warn` | `scheme`, `client` (`ssh` or `man`), `reason=client_missing` |
 
 ## Render and performance diagnostics
 

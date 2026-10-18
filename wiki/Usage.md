@@ -726,6 +726,30 @@ On Linux and Windows, each file-association invocation starts a new SonicTerm
 process. On macOS, later open requests go to the running app and add tabs.
 A draft is never run; only `-e`, `--command` or `--` runs a program.
 
+### Open executables and terminal links on macOS
+
+Installed macOS builds also appear in **Open With** for Unix executables, and can
+handle `ssh:` and `x-man-page:` links. Installing changes no default.
+
+- **Native programs.** Opening a native Mach-O executable runs it directly in a new
+  tab whose working directory is the program's folder. The tab stays open after the
+  program exits so its output stays visible. A program that is quarantined because
+  it was downloaded is not run: a shell opens in its folder with "Not run: <name> is
+  quarantined (downloaded). Run it yourself after review." A program without the
+  execute permission is not run either. SonicTerm never changes either.
+- **Scripts are never run by an open.** A `.sh`, `.command` or `.tool` file gets the
+  draft described below; an executable script without an extension (`#!` first)
+  opens a tab with a warning and no draft. Folders, application bundles and
+  anything inside a bundle open a shell beside them with a warning.
+- **`ssh://[user@]host[:port]`** runs `/usr/bin/ssh [-l user] [-p port] -- host` in
+  your home folder. The host is an ASCII name, an IPv4 address or a bracketed IPv6
+  address; passwords, queries, paths and percent-encoded `%`, `/`, `@`, `:` or
+  control characters are refused.
+- **`x-man-page:///page`, `x-man-page://page` and `x-man-page://section/page`** run
+  `/usr/bin/man [-S section] -- page`.
+- A rejected link opens no tab and shows a warning naming the scheme and the part
+  that failed, never its value. `telnet:` links are not handled.
+
 ### Configure and troubleshoot
 
 Use these canonical pages instead of duplicating their detailed rules here:

@@ -221,7 +221,8 @@ asset lookup, typed URI/path detection, and safe URI-open policy.
 
 **First-party dependencies:** `sonicterm-logging`, `sonicterm-types`.
 
-**Read:** `src/{config,theme,keymap,assets,url_scan,url_open,dimension}.rs`.
+**Read:** `src/{config,theme,keymap,assets,url_scan,url_open,launch_url,dimension}.rs`.
+`launch_url.rs` validates `ssh:` and `x-man-page:` links into fixed client argv.
 
 ### `sonicterm-ui`
 
@@ -455,13 +456,14 @@ per-window `NSView.displayLink` and its tick target (`src/app/display_link.rs`).
 
 ### `sonicterm-mac`
 
-**Role:** macOS binary and AppKit glue: startup, NSMenu, open-document events,
-NSPasteboard tab handoff, NSWindow setup, and bundle entry point.
+**Role:** macOS binary and AppKit glue: startup, NSMenu, open-document and
+open-URL events with executable classification, NSPasteboard tab handoff, NSWindow
+setup, and bundle entry point.
 
 **First-party dependencies:** `sonicterm-app`, `sonicterm-app-core`,
-`sonicterm-cfg`, `sonicterm-logging`.
+`sonicterm-cfg`, `sonicterm-logging`, `sonicterm-types`.
 
-**Read:** `src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs`.
+**Read:** `src/{main,menubar,open_documents,open_urls,executable_classify,os_drag_mac,tab_drag_os}.rs`.
 Native details belong on [Platform Integration](Platform-Integration).
 
 ### `sonicterm-windows`

@@ -185,12 +185,21 @@ UI 队列饱和不会丢弃回复、产生拒绝 warning 或停止输出处理�
 
 | 事件 | 级别 | 字段 |
 | --- | --- | --- |
-| `pane launched` | `info` | `pane`、`kind`（`command`、`script` 或 `shell`）、`cwd_source`（`--dir`、`process`、`home` 或 `default`）、`hold`；命令还会记录 `program`（仅文件名）和 `arg_count` |
+| `pane launched` | `info` | `pane`、`kind`（`command`、`executable`、`url`、`script` 或 `shell`）、`cwd_source`（`--dir`、`process`、`home`、`parent` 或 `default`）、`hold`；命令还会记录 `scheme`（`ssh`、`x-man-page` 或 `none`）、`program`（仅文件名）和 `arg_count` |
 | `pane command argument byte lengths` | `debug` | `pane`、`arg_bytes`（每个参数的字节长度） |
-| `pane command did not start` | `warn` | `pane`、`program`（文件名）、`reason`（失败的规则，绝不是底层错误文本） |
+| `pane command did not start` | `warn` | `pane`、`program`（文件名）、`reason`（失败的规则，绝不是底层错误文本）；打开的可执行文件在 spawn 前被替换时，记录 `pane`、`kind` 和 `reason=identity_changed` |
 | `launch arguments rejected` | `warn` | `position`（从 1 开始的参数序号）、`rule`（例如 `unknown-option` 或 `dir-not-a-directory`） |
 
 默认 `warn` 级别下看不到 `info` 和 `debug` 行。用法错误会在进程以状态 `2` 退出之前写入日志。
+
+macOS 的文件与链接打开在各自的 target 上记录拒绝事件，绝不记录路径、链接、用户、主机、
+端口或页面：
+
+| 事件 | Target | 级别 | 字段 |
+| --- | --- | --- | --- |
+| `document open not run` | `sonicterm_mac::open_document` | `warn` | `reason`（`unresolvable`、`bundle`、`directory`、`not_regular`、`unreadable`、`quarantined` 或 `not_executable`） |
+| `terminal link rejected` | `sonicterm_mac::open_url` | `warn` | `scheme`（`ssh`、`x-man-page` 或 `unsupported`）、`field`（例如 `user`、`host` 或 `page`）、`reason`；或仅 `reason=no_link` |
+| `terminal link client is missing` | `sonicterm_mac::open_url` | `warn` | `scheme`、`client`（`ssh` 或 `man`）、`reason=client_missing` |
 
 ## 渲染与性能诊断
 

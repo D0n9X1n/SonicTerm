@@ -112,14 +112,49 @@ SonicTerm 不使用 `CVDisplayLink`。Windows 和 Linux 不安装链接。原生
 `crates/sonicterm-app/tests/display_link_native.rs` 中于进程主线程上的真实 `NSView` 运行，该测试没有
 libtest 框架；它不断言显示器会触发 tick。
 
-### Shell 脚本打开事件
+### 文件与链接打开事件
 
-App bundle 以 `LSHandlerRank=Alternate` 声明 `public.shell-script` 和
-`com.apple.terminal.shell-script`。进程级 observer 接收
-`NSApplicationWillFinishLaunchingNotification` 后安装 `kAEOpenDocuments` Apple Event
-handler。回调只把路径放入共享 open-script 队列；窗口与 PTY 仍由事件循环线程创建。
-冷启动打开多个文件时会保持顺序且不额外创建空白标签页，之后的事件则追加标签页。
-相对路径以进程启动时的工作目录为准。这是 Finder 的**打开方式**集成，不是全局默认终端选择器。
+App bundle 声明两个 Shell 角色、`LSHandlerRank=Alternate` 的文档类型（shell 脚本与
+`public.unix-executable`），并声明 `ssh` 和 `x-man-page` URL scheme。进程级 observer
+接收 `NSApplicationWillFinishLaunchingNotification` 后安装两个 Apple Event handler：
+文件用 `kAEOpenDocuments`，链接用 `kAEGetURL`（class 与 id 均为 `'GURL'`，因为
+`objc2-core-services` 0.3 未导出，所以在本地定义）。两个 handler 都只把请求放入共享
+启动队列；窗口与 PTY 仍由事件循环线程创建。冷启动打开多个文件时会保持顺序且不额外创建
+空白标签页，之后的事件向正在运行的应用追加标签页。相对路径以进程启动时的工作目录为准。
+这是 Finder 的**打开方式**和链接集成，不是全局默认终端选择器。
+
+打开文件绝不会执行脚本。`executable_classify.rs` 按以下顺序判断每个文件：
+
+```mermaid
+flowchart TD
+    start[打开的路径] --> canon{realpath 成功？}
+    canon -- 否 --> home[在 home 打开 shell + 警告]
+    canon -- 是 --> bundle{任一路径组件以 .app 结尾？}
+    bundle -- 是 --> beside[在 bundle 旁打开 shell + 警告]
+    bundle -- 否 --> open{O_NOFOLLOW 打开并 fstat：普通文件？}
+    open -- 目录、其它类型或出错 --> parent[在父目录打开 shell + 警告]
+    open -- 是 --> script{脚本扩展名或 #! 开头？}
+    script -- 是 --> draft[草稿路径：草稿或警告，绝不运行]
+    script -- 否 --> macho{thin Mach-O，或 1-16 个架构的 fat Mach-O？}
+    macho -- 否 --> draft
+    macho -- 是 --> quarantine{同一 fd 上没有 com.apple.quarantine？}
+    quarantine -- 否或出错 --> parent
+    quarantine -- 是 --> exec{access X_OK？}
+    exec -- 否 --> parent
+    exec -- 是 --> run[在规范化父目录运行，保留窗格]
+```
+
+运行时会记录该描述符的 device 与 inode。spawn 之前，应用再次确认该路径仍是普通文件、
+不是符号链接，且 identity 相同；否则窗格显示“Not run: <name> changed before it could
+start.”，不会启动任何进程。macOS 没有 `fexecve`，所以该检查与 `execve` 之间仍有一个
+很窄的窗口。SonicTerm 绝不添加执行权限、不移除 quarantine，也不通过 shell 或 `open`
+重试。
+
+链接由 `sonicterm_cfg::launch_url` 解析：先按原始分隔符拆分 URI 结构，每个组件只做一次
+百分号解码，解码后的文本必须匹配逐字段语法。有效链接以绝对路径在 `$HOME` 中运行
+`/usr/bin/ssh` 或 `/usr/bin/man`，不保留窗格。被拒绝的链接或缺失的客户端不会单独打开
+标签页，只排队一条提示；冷启动时该提示等待第一个窗口，第一个窗口仍会打开普通 shell
+标签页。不声明 `telnet`：macOS 不自带 `/usr/bin/telnet`，用户可写前缀中的客户端不被信任。
 
 ### 标签页交接
 
@@ -357,7 +392,8 @@ Wayland 上的两种 Linux 包布局中运行三个场景。[打包](Packaging-z
 | 共享平台 shell | `crates/sonicterm-app/src/shell.rs` |
 | 路径与 URL 检测（各操作系统共用） | `crates/sonicterm-cfg/src/url_scan.rs`、`crates/sonicterm-app/src/app/path_target.rs` |
 | 安全原生目标打开 | `crates/sonicterm-app/src/app/path_target.rs`、`crates/sonicterm-app/src/app/path_target/{unix,macos,linux,windows}.rs`、`crates/sonicterm-cfg/src/url_open/{macos,linux,windows}.rs` |
-| macOS 入口/菜单/打开文档/标签页交接 | `crates/sonicterm-mac/src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs` |
+| macOS 入口/菜单/打开文档与链接/标签页交接 | `crates/sonicterm-mac/src/{main,menubar,open_documents,open_urls,executable_classify,os_drag_mac,tab_drag_os}.rs` |
+| 终端链接语法 | `crates/sonicterm-cfg/src/launch_url.rs` |
 | macOS 显示链接 | `crates/sonicterm-app/src/app/display_link.rs` |
 | Windows 入口/CLI/菜单/backdrop/标签页拖放 | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
 | Windows 软件呈现 | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`、`crates/sonicterm-windows/src/software_presenter.rs` |

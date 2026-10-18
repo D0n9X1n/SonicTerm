@@ -202,7 +202,8 @@ grant 可以接纳。接纳关闭后，不再走这条正常重试路径。
 
 **第一方依赖：** `sonicterm-logging`、`sonicterm-types`。
 
-**阅读：** `src/{config,theme,keymap,assets,url_scan,url_open,dimension}.rs`。
+**阅读：** `src/{config,theme,keymap,assets,url_scan,url_open,launch_url,dimension}.rs`。
+`launch_url.rs` 把 `ssh:` 和 `x-man-page:` 链接校验为固定客户端的 argv。
 
 ### `sonicterm-ui`
 
@@ -400,13 +401,13 @@ crate 存在于 lockfile 中，用于每窗口的 `NSView.displayLink` 及其 ti
 
 ### `sonicterm-mac`
 
-**职责：** macOS 二进制与 AppKit 胶水，包括启动、NSMenu、打开文档事件、
-NSPasteboard 标签页交接、NSWindow 设置和 app bundle 入口。
+**职责：** macOS 二进制与 AppKit 胶水，包括启动、NSMenu、带可执行文件分类的打开文档
+与打开 URL 事件、NSPasteboard 标签页交接、NSWindow 设置和 app bundle 入口。
 
 **第一方依赖：** `sonicterm-app`、`sonicterm-app-core`、`sonicterm-cfg`、
-`sonicterm-logging`。
+`sonicterm-logging`、`sonicterm-types`。
 
-**阅读：** `src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs`。
+**阅读：** `src/{main,menubar,open_documents,open_urls,executable_classify,os_drag_mac,tab_drag_os}.rs`。
 原生边界见[平台集成](Platform-Integration-zh-CN)。
 
 ### `sonicterm-windows`

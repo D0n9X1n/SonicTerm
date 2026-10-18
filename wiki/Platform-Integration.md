@@ -139,17 +139,56 @@ and Linux install no link. The native check runs on a real `NSView` on the
 process main thread in `crates/sonicterm-app/tests/display_link_native.rs`,
 which has no libtest harness; it does not assert that the display fires a tick.
 
-### Shell-script open events
+### File and link open events
 
-The app bundle advertises `public.shell-script` and
-`com.apple.terminal.shell-script` at `LSHandlerRank=Alternate`. A process-lifetime
-observer receives `NSApplicationWillFinishLaunchingNotification` and then
-installs the `kAEOpenDocuments` Apple Event handler. Paths are copied into the
-shared open-script queue; window and PTY creation remains on the event-loop
-thread. Cold multi-file opens preserve order and avoid an unrelated blank tab;
-later events append tabs. Relative paths use the process's initial working
-directory. This is Finder **Open With** integration, not a global default-terminal
-selector.
+The app bundle declares two Shell-role document types at `LSHandlerRank=Alternate`
+(shell scripts, and `public.unix-executable`) and claims the `ssh` and `x-man-page`
+URL schemes. A process-lifetime observer receives
+`NSApplicationWillFinishLaunchingNotification` and installs two Apple Event
+handlers: `kAEOpenDocuments` for files and `kAEGetURL` (class and id `'GURL'`,
+defined locally because `objc2-core-services` 0.3 does not export them) for links.
+Both handlers only queue requests on the shared launch queue; window and PTY
+creation remain on the event-loop thread. Cold multi-file opens preserve order and
+avoid an unrelated blank tab; later events add tabs to the running app. Relative
+paths use the process's initial working directory. This is Finder **Open With**
+and link integration, not a global default-terminal selector.
+
+A file open never executes a script. `executable_classify.rs` decides each file:
+
+```mermaid
+flowchart TD
+    start[Opened path] --> canon{realpath succeeds?}
+    canon -- no --> home[Shell in home + warning]
+    canon -- yes --> bundle{Any component ends in .app?}
+    bundle -- yes --> beside[Shell beside the bundle + warning]
+    bundle -- no --> open{open O_NOFOLLOW, fstat: regular file?}
+    open -- directory, other type or error --> parent[Shell in parent + warning]
+    open -- yes --> script{Script extension or #! header?}
+    script -- yes --> draft[Draft path: draft or warning, never run]
+    script -- no --> macho{Thin Mach-O, or fat with 1-16 architectures?}
+    macho -- no --> draft
+    macho -- yes --> quarantine{com.apple.quarantine absent on the same fd?}
+    quarantine -- no or error --> parent
+    quarantine -- yes --> exec{access X_OK?}
+    exec -- no --> parent
+    exec -- yes --> run[Run in canonical parent, held]
+```
+
+A run records the descriptor's device and inode. Just before spawn the app checks
+that the path is still a regular file, not a symlink, with that identity; otherwise
+the pane shows "Not run: <name> changed before it could start." and nothing
+starts. macOS has no `fexecve`, so a narrow window between that check and `execve`
+remains. SonicTerm never adds an execute bit, removes quarantine, or retries
+through a shell or `open`.
+
+A link is parsed by `sonicterm_cfg::launch_url`: the URI structure is split on raw
+delimiters, each component is percent-decoded exactly once, and the decoded text
+must match a per-field grammar. A valid link runs `/usr/bin/ssh` or `/usr/bin/man`
+by absolute path in `$HOME`, unheld. A rejected link, or a missing client, opens
+no tab of its own and queues a notice; on a cold start the notice waits for the
+first window, which still opens its plain shell tab. `telnet` is not claimed:
+macOS ships no `/usr/bin/telnet`, and a client in a user-writable prefix is not
+trusted.
 
 ### Tab handoff
 
@@ -454,7 +493,8 @@ teardown exits `20`; an earlier fault, loss or recovery failure keeps its origin
 | Shared platform shell | `crates/sonicterm-app/src/shell.rs` |
 | Path and URL detection, shared by every OS | `crates/sonicterm-cfg/src/url_scan.rs`, `crates/sonicterm-app/src/app/path_target.rs` |
 | Safe native target open | `crates/sonicterm-app/src/app/path_target.rs`, `crates/sonicterm-app/src/app/path_target/{unix,macos,linux,windows}.rs`, `crates/sonicterm-cfg/src/url_open/{macos,linux,windows}.rs` |
-| macOS entry/menu/open documents/tab handoff | `crates/sonicterm-mac/src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs` |
+| macOS entry/menu/open documents and links/tab handoff | `crates/sonicterm-mac/src/{main,menubar,open_documents,open_urls,executable_classify,os_drag_mac,tab_drag_os}.rs` |
+| Terminal link grammar | `crates/sonicterm-cfg/src/launch_url.rs` |
 | macOS display link | `crates/sonicterm-app/src/app/display_link.rs` |
 | Windows entry/CLI/menu/backdrop/tab drag | `crates/sonicterm-windows/src/{main,cli,startup,menubar,backdrop,os_drag_win,tab_drag_os}.rs` |
 | Windows software present | `crates/sonicterm-gpu/src/{software_frame,software_windows}.rs`, `crates/sonicterm-windows/src/software_presenter.rs` |

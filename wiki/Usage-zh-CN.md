@@ -547,6 +547,28 @@ Linux 和 Windows 中，每次文件关联调用都会启动新的 SonicTerm 进
 request 发送到当前运行的应用，并添加标签页。草稿绝不会被运行；只有 `-e`、`--command` 或
 `--` 才会运行程序。
 
+### 在 macOS 上打开可执行文件和终端链接
+
+安装后的 macOS build 也会出现在 Unix 可执行文件的**打开方式**菜单中，并能处理 `ssh:`
+和 `x-man-page:` 链接。安装不会更改任何默认设置。
+
+- **原生程序。** 打开原生 Mach-O 可执行文件时，会在新标签页中直接运行它，工作目录是
+  程序所在文件夹。程序退出后标签页保持打开，以便查看输出。因下载而被 quarantine 的
+  程序不会运行：SonicTerm 在其所在文件夹打开 shell，并显示“Not run: <name> is
+  quarantined (downloaded). Run it yourself after review.”。没有执行权限的程序同样不会
+  运行。SonicTerm 不会修改这两项。
+- **打开操作绝不运行脚本。** `.sh`、`.command`、`.tool` 文件按下文以草稿方式打开；没有
+  扩展名的可执行脚本（以 `#!` 开头）会打开标签页并显示警告，不插入草稿。文件夹、应用
+  bundle 以及 bundle 内的任何文件，都会在其旁边打开 shell 并显示警告。
+- **`ssh://[user@]host[:port]`** 在你的主目录中运行
+  `/usr/bin/ssh [-l user] [-p port] -- host`。host 必须是 ASCII 名称、IPv4 地址或
+  带方括号的 IPv6 地址；密码、query、路径，以及百分号编码的 `%`、`/`、`@`、`:` 或
+  control character 都会被拒绝。
+- **`x-man-page:///page`、`x-man-page://page` 和 `x-man-page://section/page`** 运行
+  `/usr/bin/man [-S section] -- page`。
+- 被拒绝的链接不会打开标签页，只显示一条警告，指出 scheme 和失败的部分，绝不显示其值。
+  不处理 `telnet:` 链接。
+
 ### 配置与排障
 
 详细规则由以下页面维护，这里不重复：
