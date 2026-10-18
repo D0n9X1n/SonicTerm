@@ -8531,3 +8531,65 @@ fn quick_select_hints_map_to_the_displayed_viewport_row() {
     assert_eq!(quick_select_viewport_row(9, 10, 5), None, "above the view");
     assert_eq!(quick_select_viewport_row(15, 10, 5), None, "below the view");
 }
+
+/// A quick-select hint after one more history row is evicted draws one displayed row higher, on
+/// the row that still holds its text, and a hint whose own row was evicted draws nothing.
+#[test]
+fn quick_select_hints_follow_history_eviction_to_their_displayed_row() {
+    let hint_at = |letter: char, row: usize| QuickSelectHint {
+        hint: letter,
+        row,
+        col_start: 0,
+        col_end: 3,
+        text: "https://a.co".to_string(),
+    };
+    let quick_select = QuickSelectState {
+        hints: vec![hint_at('a', 0), hint_at('b', 12), hint_at('c', 10)],
+        scrollback_evicted: 5,
+    };
+    let (view_top_abs, visible_rows) = (8, 5);
+    let display_row = |hint_index: usize, scrollback_evicted: u64| {
+        quick_select_hint_display_row(
+            &quick_select,
+            &quick_select.hints[hint_index],
+            scrollback_evicted,
+            view_top_abs,
+            visible_rows,
+        )
+    };
+    assert_eq!(display_row(1, 5), Some(4), "no eviction since the scan keeps the scan row");
+    assert_eq!(display_row(1, 6), Some(3), "one eviction moves the hint up one row");
+    assert_eq!(display_row(2, 7), Some(0), "two evictions move it up two rows");
+    assert_eq!(display_row(0, 6), None, "a hint whose own row was evicted draws nothing");
+    assert_eq!(display_row(2, 8), None, "a hint moved above the view draws nothing");
+}
+
+/// The hint background and the hint letter are both placed through
+/// `quick_select_hint_display_row`, so neither draws a hint at its scan-time row after an
+/// eviction. The renderer cannot be built without a window, so the draw sites are pinned in
+/// source: outside that helper, no code reads a hint's raw `row` or calls `hint_row_now`.
+#[test]
+fn quick_select_draw_sites_place_hints_through_the_eviction_aware_row() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    // Drop line comments so prose that names a field cannot satisfy or fail the check.
+    let code = source
+        .lines()
+        .map(|line| line.find("//").map_or(line, |comment_start| &line[..comment_start]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let helper_start =
+        code.find("pub fn quick_select_hint_display_row(").expect("the placement helper exists");
+    let helper_end = helper_start + code[helper_start..].find("\n}\n").expect("helper body ends");
+    let outside_helper = format!("{}{}", &code[..helper_start], &code[helper_end..]);
+    assert_eq!(
+        outside_helper.matches("quick_select_hint_display_row(").count(),
+        2,
+        "the background and the letter draw sites both call the placement helper"
+    );
+    assert!(!outside_helper.contains("hint_row_now("), "draw sites go through the helper");
+    let raw_row_reads = outside_helper.match_indices("hint.row").filter(|(index, matched)| {
+        let after = outside_helper[index + matched.len()..].chars().next();
+        !after.is_some_and(|next| next.is_alphanumeric() || next == '_')
+    });
+    assert_eq!(raw_row_reads.count(), 0, "no draw site places a hint at its scan-time row");
+}

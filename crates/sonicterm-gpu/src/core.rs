@@ -1418,7 +1418,7 @@ use crate::{
 use sonicterm_render_model::boundary::cfg::config::CursorShape;
 use sonicterm_render_model::boundary::ui::{
     command_palette::CommandPalette,
-    copy_mode::{CopyModeState, QuickSelectState},
+    copy_mode::{CopyModeState, QuickSelectHint, QuickSelectState},
     cursor as ui_cursor,
     ime::ImeState,
     overlays::{
@@ -8718,16 +8718,14 @@ impl GpuRenderer {
                         .unwrap_or(self.cell_h);
                     let mut wt = stack.clone();
                     for hint in &qs.hints {
-                        let Some(visible_row) =
-                            qs.hint_row_now(hint, grid.scrollback_evicted()).and_then(|row| {
-                                quick_select_viewport_row(
-                                    row,
-                                    plan.active_view_top_abs,
-                                    grid.rows as usize,
-                                )
-                            })
-                        else {
-                            // When: quick_select_viewport_row finds the hint off the displayed rows, its letter is not drawn.
+                        let Some(visible_row) = quick_select_hint_display_row(
+                            qs,
+                            hint,
+                            grid.scrollback_evicted(),
+                            plan.active_view_top_abs,
+                            grid.rows as usize,
+                        ) else {
+                            // When: quick_select_hint_display_row finds the hint evicted or off the displayed rows, its letter is not drawn.
                             continue;
                         };
                         let x = active_origin_x + hint.col_start as f32 * self.cell_w;
@@ -9049,11 +9047,14 @@ impl GpuRenderer {
         // edges with adjacent glyph cells at fractional DPI.
         let raw_fallback = snapped_cell_x.is_empty();
         for hint in &quick_select.hints {
-            let Some(visible_row) = quick_select
-                .hint_row_now(hint, scrollback_evicted)
-                .and_then(|row| quick_select_viewport_row(row, view_top_abs, visible_rows))
-            else {
-                // When: quick_select_viewport_row finds the hint off the displayed rows, it draws nothing.
+            let Some(visible_row) = quick_select_hint_display_row(
+                quick_select,
+                hint,
+                scrollback_evicted,
+                view_top_abs,
+                visible_rows,
+            ) else {
+                // When: quick_select_hint_display_row finds the hint evicted or off the displayed rows, it draws nothing.
                 continue;
             };
             let (x, w) = if raw_fallback {
@@ -10129,6 +10130,23 @@ pub fn quick_select_viewport_row(
 ) -> Option<usize> {
     let offset = (hint_row as u64).checked_sub(view_top_abs)?;
     usize::try_from(offset).ok().filter(|row| *row < visible_rows)
+}
+
+/// The displayed row the quick-select `hint` of `quick_select` draws on, once the grid has evicted
+/// `scrollback_evicted` history rows in its lifetime; `None` when its own row was evicted or the row
+/// is outside the viewport. The hint background and the hint letter both place a hint through it.
+#[doc(hidden)]
+#[must_use]
+pub fn quick_select_hint_display_row(
+    quick_select: &QuickSelectState,
+    hint: &QuickSelectHint,
+    scrollback_evicted: u64,
+    view_top_abs: u64,
+    visible_rows: usize,
+) -> Option<usize> {
+    quick_select
+        .hint_row_now(hint, scrollback_evicted)
+        .and_then(|row| quick_select_viewport_row(row, view_top_abs, visible_rows))
 }
 
 /// The snapped left edge of column `col`, as slot `col` of [`build_snapped_cell_x`] holds it.
