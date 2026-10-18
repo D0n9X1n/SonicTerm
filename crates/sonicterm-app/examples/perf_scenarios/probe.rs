@@ -170,6 +170,7 @@ enum DriverState {
     Drag(Drag),
     Wheel(Wheel),
     AtlasRetry(Box<AtlasRetryDriver>),
+    Park(Park),
 }
 
 /// S1/atlas-retry: the episode machine, what is armed for its next frame, and the scene it settled on.
@@ -316,6 +317,14 @@ struct Sweep {
     lanes: [f64; 4],
     left: f64,
     right: f64,
+}
+
+/// S6/rest: the pointer resting on one cell, the same `CursorMoved` repeated at a fixed rate.
+struct Park {
+    interval: Duration,
+    started: Instant,
+    ticks: u32,
+    point: (f64, f64),
 }
 
 /// S6 selection drag inside the grid.
@@ -764,6 +773,8 @@ struct Probe {
     /// S10's attribution while its counted phase runs, taken into that phase's record when it ends.
     attribution: Option<attribution::Attribution>,
     role_panes: Vec<u64>,
+    /// S6/rest: role 0's grid content stamp when the parked phase started, for its progress check.
+    park_seq_start: Option<u64>,
     /// Windows: every pane exit before the run finished, so a pane that joins the roles later is judged.
     exited_panes: Vec<(u64, Option<bool>)>,
     go_at: Option<Instant>,
@@ -1754,6 +1765,7 @@ impl Probe {
             forced_delivery_problem: None,
             attribution: None,
             role_panes: Vec::new(),
+            park_seq_start: None,
             exited_panes: Vec::new(),
             go_at: None,
             sentinel_roles: Vec::new(),
@@ -2950,6 +2962,12 @@ impl Probe {
         if matches!(&self.driver, DriverState::Drag(drag) if drag.pressed) {
             self.button(event_loop, ElementState::Released);
         }
+        if let Some(reason) = self.park_problem(phase) {
+            // When: a parked phase saw no frame, no streamed row or no tail detection, it measured nothing.
+            self.finalize_phase(phase);
+            self.invalidate(event_loop, reason);
+            return;
+        }
         if let Some(reason) = self.finalize_phase(phase) {
             // When: ConPTY did not deliver what the role printed, the phase measured something else.
             self.finish(event_loop, Status::Blocked, Some(reason));
@@ -3313,6 +3331,19 @@ impl Probe {
                 })
             }
             Driver::AtlasRetry => self.start_atlas_retry(event_loop),
+            Driver::Park { row, col, hertz } => {
+                let Some(point) = self.cell_point(row, col) else {
+                    self.invalidate(event_loop, "no pane layout for the parked pointer".to_owned());
+                    return DriverState::None;
+                };
+                self.park_seq_start = self.role_content_seq(0);
+                DriverState::Park(Park {
+                    interval: Duration::from_secs(1) / hertz.max(1),
+                    started: Instant::now(),
+                    ticks: 0,
+                    point,
+                })
+            }
             Driver::Wheel { hertz, role } => {
                 let Some((retained, center)) = self.wheel_setup(role) else {
                     self.invalidate(event_loop, format!("no pane layout for role {role}'s wheel"));
@@ -3625,6 +3656,40 @@ impl Probe {
         ))
     }
 
+    /// The center of the active pane's cell (`row`, `col`), in window pixels.
+    fn cell_point(&self, row: u16, col: u16) -> Option<(f64, f64)> {
+        let pane = self.active_pane()?;
+        let layout = self.app.main_renderer()?.pane_layout(pane)?;
+        Some((
+            f64::from(layout.origin_x_logical)
+                + (f64::from(col) + 0.5) * f64::from(layout.cell_w_logical),
+            f64::from(layout.origin_y_logical)
+                + (f64::from(row) + 0.5) * f64::from(layout.cell_h_logical),
+        ))
+    }
+
+    /// `role`'s grid content stamp, waiting for its parser; `None` when the pane is gone.
+    fn role_content_seq(&self, role: usize) -> Option<u64> {
+        Some(self.role_pane(role)?.parser.lock().grid().content_seq())
+    }
+
+    /// Why a parked S6/rest phase measured no progress, if it did not: no frame presented, no
+    /// streamed row advanced, or, with counters on, a `tail` phase that ran no detection.
+    fn park_problem(&mut self, phase: &PhaseSpec) -> Option<String> {
+        let started_seq = self.park_seq_start.take()?;
+        let presented_frames = self.meter.as_ref().map_or(0, |meter| meter.presented_frames);
+        let advanced = self.role_content_seq(0).is_some_and(|seq| seq > started_seq);
+        let counters_start = self.meter.as_ref().and_then(|meter| meter.counters_start.clone());
+        let detections =
+            counters_start.zip(self.counter_totals()).and_then(|(start, end)| {
+                match end.delta_since(&start).get("hover_detections") {
+                    Some(crate::counters::FieldValue::Count(count)) => Some(*count),
+                    _ => None,
+                }
+            });
+        scenarios::park_progress(phase.name, presented_frames, advanced, detections).err()
+    }
+
     /// Drag endpoints at cell centers inside the grid.
     fn drag_geometry(&self) -> Option<((f64, f64), (f64, f64))> {
         let pane = self.active_pane()?;
@@ -3672,6 +3737,7 @@ impl Probe {
                 Some(wheel.started + wheel.interval * wheel.sent.min(wheel.total))
             }
             DriverState::AtlasRetry(retry) => retry.due(),
+            DriverState::Park(park) => Some(park.started + park.interval * park.ticks),
         }
     }
 
@@ -3687,7 +3753,18 @@ impl Probe {
             DriverState::Drag(_) => self.inject_drag(event_loop),
             DriverState::Wheel(_) => self.inject_wheel(event_loop),
             DriverState::AtlasRetry(_) => self.drive_atlas_retry(event_loop, now),
+            DriverState::Park(_) => self.inject_park(event_loop),
         }
+    }
+
+    /// Repeat the parked pointer's `CursorMoved` on the same cell.
+    fn inject_park(&mut self, event_loop: &ActiveEventLoop) {
+        let DriverState::Park(park) = &mut self.driver else {
+            return;
+        };
+        park.ticks += 1;
+        let point = park.point;
+        self.pointer(event_loop, point);
     }
 
     /// Type the next character: the previous sample closes and this character's sample opens.

@@ -102,14 +102,16 @@ impl App {
             // When: active_pane_id_for_kind or pane_by_id has no live grid, quick-select cannot construct its labels.
             return;
         };
-        let state = {
+        let (state, rows_scanned) = {
             let guard = crate::app::frame_counters::lock_parser(&pane.parser);
             let grid = guard.grid();
             let mut state =
                 sonicterm_ui::copy_mode::CopyModeState::new_at((0, grid.scrollback_len()));
             state.quick_select = Some(sonicterm_ui::copy_mode::QuickSelectState::from_grid(grid));
-            state
+            // Quick select scans one row per displayed grid row.
+            (state, u64::from(grid.rows))
         };
+        self.note_hover(|hover| hover.quick_select_rows_scanned += rows_scanned);
         let window_id = match kind {
             FrontmostKind::Child(id) => Some(id),
             _ => self.main_window_id,

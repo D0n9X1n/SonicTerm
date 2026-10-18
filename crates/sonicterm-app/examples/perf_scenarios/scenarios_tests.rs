@@ -44,7 +44,7 @@ fn driver_ms(plan: &Plan, driver: Driver) -> u64 {
         }
         // The settle and 32 single-frame steps take a few frame periods each; 2 s is generous.
         Driver::AtlasRetry => 2_000,
-        Driver::None | Driver::Sweep { .. } | Driver::Drag { .. } => 0,
+        Driver::None | Driver::Sweep { .. } | Driver::Drag { .. } | Driver::Park { .. } => 0,
     }
 }
 
@@ -75,7 +75,7 @@ fn catalog_lists_twelve_scenarios_with_their_variants() {
     let ids: Vec<_> = SCENARIOS.iter().map(|spec| spec.id).collect();
     assert_eq!(ids, ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S12"]);
     assert_eq!(find("S2").unwrap().variants, ["default", "flood"]);
-    assert_eq!(find("S6").unwrap().variants, ["default", "flood", "selection-drag"]);
+    assert_eq!(find("S6").unwrap().variants, ["default", "flood", "selection-drag", "rest"]);
     assert_eq!(find("S10").unwrap().variants, ["default", "sync"]);
     // The presenter variants and the role program's exit are Windows runs; the catalog lists them everywhere.
     // `atlas-retry` runs only in the counters set; perf-compare enforces it.
@@ -289,6 +289,44 @@ fn pointer_plans_sweep_or_drag_for_ten_seconds() {
     assert_eq!(phase(&drag, "drag").end, PhaseEnd::Hold(10_000));
 }
 
+/// S6/rest prints its fixture, then rests the pointer on the path row while rows below it stream,
+/// then on a streaming row; each hold shortens to 5 s under `--short` except the 1 s warm-up.
+#[test]
+fn rest_plan_parks_on_the_path_row_then_on_the_streaming_tail() {
+    for (short, hold_ms) in [(false, 10_000), (true, 5_000)] {
+        let rest = plan("S6", "rest", short).unwrap();
+        assert_eq!(rest.roles, [Workload::RestStream]);
+        assert!(rest.setup.is_empty());
+        assert_eq!(phase_names(&rest), ["print", "warmup", "rest", "tail", "idle"]);
+        assert_eq!(phase(&rest, "print").end, PhaseEnd::Sentinels(vec![0]));
+        let on_path = Driver::Park { row: REST_PATH_ROW, col: 3, hertz: 30 };
+        assert_eq!(phase(&rest, "warmup").driver, on_path);
+        assert_eq!(phase(&rest, "warmup").end, PhaseEnd::Hold(1_000));
+        assert_eq!(phase(&rest, "rest").driver, on_path);
+        assert_eq!(phase(&rest, "rest").end, PhaseEnd::Hold(hold_ms));
+        assert_eq!(
+            phase(&rest, "tail").driver,
+            Driver::Park { row: REST_TAIL_ROW, col: 3, hertz: 30 }
+        );
+        assert_eq!(phase(&rest, "tail").end, PhaseEnd::Hold(hold_ms));
+    }
+    // The fixture rows sit above the 1-based region top, and the tail row is inside the region.
+    const { assert!(REST_PATH_ROW + 4 < REST_REGION_TOP) };
+    const { assert!(REST_TAIL_ROW >= REST_REGION_TOP) };
+}
+
+/// A parked phase is valid only when frames presented and streamed rows advanced; the tail phase
+/// also needs a detection when counters report one, while an absent counter (an older base) passes.
+#[test]
+fn park_progress_requires_frames_streamed_rows_and_tail_detections() {
+    assert_eq!(park_progress("rest", 30, true, Some(0)), Ok(()));
+    assert_eq!(park_progress("tail", 30, true, Some(12)), Ok(()));
+    assert_eq!(park_progress("tail", 30, true, None), Ok(()));
+    assert!(park_progress("rest", 0, true, None).unwrap_err().contains("no frame"));
+    assert!(park_progress("rest", 30, false, None).unwrap_err().contains("no streamed row"));
+    assert!(park_progress("tail", 30, true, Some(0)).unwrap_err().contains("no detection"));
+}
+
 #[test]
 fn scrollback_search_and_text_plans_print_before_their_measured_phase() {
     // S7 wheels through its retained history; S8 opens search with `e`; S9 holds emoji and CJK.
@@ -444,10 +482,11 @@ fn image_release_variant_waits_for_media_free_holds_and_reshows() {
 
 #[test]
 fn run_caps_list_only_where_a_scenario_declares_them() {
-    // `--list` carries `run_caps` only for S1, S2 and S11: S1/atlas-retry at 2, S2/flood at 2 (it
-    // rebalances the PR budget; a release comparison runs it in full), S11/release at 1 and the
-    // Windows presenter variants at 2.
+    // `--list` carries `run_caps` only for S1, S2, S6 and S11: S1/atlas-retry at 2, S2/flood at 2 (it
+    // rebalances the PR budget; a release comparison runs it in full), S6/rest at 2, S11/release at 1
+    // and the Windows presenter variants at 2.
     assert_eq!(find("S1").unwrap().run_caps, [("atlas-retry", 2)]);
+    assert_eq!(find("S6").unwrap().run_caps, [("rest", 2)]);
     assert_eq!(find("S2").unwrap().variants, ["default", "flood"]);
     assert_eq!(find("S2").unwrap().run_caps, [("flood", 2)]);
     assert_eq!(find("S11").unwrap().variants, ["default", "gdi", "wgpu", "release"]);
@@ -458,6 +497,8 @@ fn run_caps_list_only_where_a_scenario_declares_them() {
             assert_eq!(entry["run_caps"], serde_json::json!({"atlas-retry": 2}));
         } else if entry["id"] == "S2" {
             assert_eq!(entry["run_caps"], serde_json::json!({"flood": 2}));
+        } else if entry["id"] == "S6" {
+            assert_eq!(entry["run_caps"], serde_json::json!({"rest": 2}));
         } else if entry["id"] == "S11" {
             assert_eq!(entry["run_caps"], serde_json::json!({"release": 1, "gdi": 2, "wgpu": 2}));
         } else {
@@ -584,6 +625,11 @@ const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S6/selection-drag", "drag", "sustained", None),
     ("S6/selection-drag", "idle", "hold", None),
     ("S6/selection-drag", "print", "transition", Some("sentinel-parsed")),
+    ("S6/rest", "idle", "hold", None),
+    ("S6/rest", "print", "transition", Some("sentinel-parsed")),
+    ("S6/rest", "rest", "sustained", None),
+    ("S6/rest", "tail", "sustained", None),
+    ("S6/rest", "warmup", "hold", None),
     ("S7/default", "idle", "hold", None),
     ("S7/default", "print", "transition", Some("sentinel-parsed")),
     ("S7/default", "scroll", "sustained", None),

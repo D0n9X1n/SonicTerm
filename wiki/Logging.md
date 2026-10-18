@@ -459,6 +459,12 @@ coalesced flushes.
 | `fg_worker_probes` | count | foreground-probe worker batches |
 | `fg_worker_panes` | count | panes those batches covered |
 | `fg_results_stale` | count | worker results the event loop dropped: the pane closed, its process identity changed, or its child exited |
+| `hover_lookups` | count | URL and path hover lookups that reached a pane cell, from a frame or from a pointer or modifier event; a click's own lookup is not counted |
+| `hover_detections` | count | those lookups that ran text detection |
+| `hover_cache_hits` | count | those lookups answered from the window's detection cache without running detection |
+| `hover_rows_read` | count | rows detection read, a repeated read of one row counting each time |
+| `path_probes_submitted` | count | openability probes hover submitted to the probe worker |
+| `quick_select_rows_scanned` | count | rows quick select scanned for URLs |
 | `fg_worker_probe` | µs histogram | each batch's duration |
 
 These come from the `sonicterm-fg-probe` worker thread; the event-loop thread never

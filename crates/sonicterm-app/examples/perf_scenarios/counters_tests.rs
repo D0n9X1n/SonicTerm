@@ -115,6 +115,12 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "frame_dispatches",
             "frame_dispatch_failed_ns",
             "frame_dispatches_failed",
+            "hover_lookups",
+            "hover_detections",
+            "hover_cache_hits",
+            "hover_rows_read",
+            "path_probes_submitted",
+            "quick_select_rows_scanned",
             "about_to_wait_ms",
             "user_event_ms",
             "new_events_ms",
@@ -700,7 +706,7 @@ fn gate_off_run_reads_arm_gate_off_for_every_credited_sample() {
     assert!(samples.iter().all(|sample| sample.split.is_none() && sample.latency_ms.is_some()));
 }
 
-/// The window, vt and renderer fields a base without the newest counters cannot read, by API name.
+/// The window, app, vt and renderer fields a base without the newest counters cannot read, by API name.
 const NEWER_SOURCES: &[&str] = &[
     "sync_timeouts",
     "defer_sync",
@@ -749,6 +755,12 @@ const NEWER_SOURCES: &[&str] = &[
     "glyph_atlas_growths",
     "atlas_growth_abandoned",
     "atlas_growth_to_present",
+    "hover_lookups",
+    "hover_detections",
+    "hover_cache_hits",
+    "hover_rows_read",
+    "path_probes_submitted",
+    "quick_select_rows_scanned",
 ];
 
 #[test]

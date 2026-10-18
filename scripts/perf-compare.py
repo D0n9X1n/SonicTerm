@@ -2645,6 +2645,11 @@ _PHASE_FIELDS = {
     "guard_correlation_transport_ns": lambda value: _is_int(value) and value >= 0,
 }
 
+# The hover counters, shown together: once any of them saw an event in a phase, each row of the group prints, so
+# a real 0 detections or 0 probes beside nonzero lookups is evidence rather than an omitted row.
+HOVER_COUNTER_FIELDS = ("hover_lookups", "hover_detections", "hover_cache_hits", "hover_rows_read",
+                        "path_probes_submitted", "quick_select_rows_scanned")
+
 # result.json's `frame_counters`: whether the binary has the perf-counters feature and the run forced the gate on.
 FRAME_COUNTER_STATES = ("unsupported", "off", "on")
 # With the gate on, each phase's deltas: per section, its integer counts, then its histograms. A histogram's
@@ -2670,7 +2675,11 @@ FRAME_COUNTER_FIELDS = {
              # Guard custody (first parser guard to last release) and frame dispatch (first guard to the render
              # call's return; failed collections apart), as sums in ns and counts; a base older than them shows n/a.
              "ui_guard_custody_ns", "ui_guard_custodies", "frame_dispatch_ns", "frame_dispatches",
-             "frame_dispatch_failed_ns", "frame_dispatches_failed"),
+             "frame_dispatch_failed_ns", "frame_dispatches_failed",
+             # URL and path hover work: lookups, detections run, cache hits, rows detection read, probes hover
+             # submitted and rows quick select scanned. They are App counters, so a base older than them shows
+             # n/a and the comparison gives head-side evidence, not a before/after detection delta.
+             *HOVER_COUNTER_FIELDS),
             # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker.
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),
@@ -7018,12 +7027,14 @@ def counter_rows(label: str, base: SideRuns, head: SideRuns) -> tuple[list[list[
     phase_names = list(per_side[1]) + [name for name in per_side[0] if name not in per_side[1]]
     omitted = 0
     for phase_name in phase_names:
+        hover_active = _hover_group_active(phase_name, sides, per_side)
         for section, (counts, histograms) in FRAME_COUNTER_FIELDS.items():
             for field_name in counts + histograms:
                 unit = None if field_name in counts else field_name.rsplit("_", 1)[1]
                 cells = [_counter_cell(phases.get(phase_name, []), len(side.outcomes), section, field_name, unit)
                          for side, phases in zip(sides, per_side)]
-                if not any(active for _text, _figure, active in cells):
+                shown_zero = hover_active and section == "app" and field_name in HOVER_COUNTER_FIELDS
+                if not shown_zero and not any(active for _text, _figure, active in cells):
                     omitted += 1
                     continue
                 texts = [text if text is not None else ("n/a" if head_only else _missing_cell(side))
@@ -7034,6 +7045,12 @@ def counter_rows(label: str, base: SideRuns, head: SideRuns) -> tuple[list[list[
         rows.extend(_attempt_split_rows(label, phase_name, sides, per_side, head_only))
         rows.extend(_derived_counter_rows(label, phase_name, sides, per_side, head_only))
     return rows, omitted
+
+
+def _hover_group_active(phase_name: str, sides: Sequence[SideRuns], per_side: Sequence[dict]) -> bool:
+    """Whether any hover counter saw an event in `phase_name` on either side."""
+    return any(_counter_cell(phases.get(phase_name, []), len(side.outcomes), "app", field_name, None)[2]
+               for side, phases in zip(sides, per_side) for field_name in HOVER_COUNTER_FIELDS)
 
 
 # The only variant whose samples are split; S2/flood types beside a flood and is never armed.

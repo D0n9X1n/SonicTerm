@@ -210,14 +210,17 @@ jobs:
       # is about 830 s of measured runs (trial-2 phase envelopes scaled to each shard's measured window): S7 with
       # S4 and S1/atlas-retry; S10/sync with S9 (and its laps set), S11, S6, S1 and S5; S10 with S11/release and
       # S2/flood; S2 with S12, S3, S8, S6/selection-drag and S6/flood. Every scenario stays in exactly one shard.
-      # S11/release holds 65 s after its media-free frame, so --short caps it at one run per side; S2/flood and
-      # S1/atlas-retry run twice per side (--list run_caps). A release comparison runs them uncapped.
+      # S11/release holds 65 s after its media-free frame, so --short caps it at one run per side; S2/flood,
+      # S1/atlas-retry and S6/rest run twice per side (--list run_caps). A release comparison runs them uncapped.
+      # S6/rest joins S7-S4, the shard with the shortest set. Estimated, not measured: under --short its
+      # schedule is about 21 s a run (print, 1 s warm-up, two 5 s parked holds, idle to GO + 5 s, startup and
+      # the end checkpoint), so 2 timed and 2 counters runs a side add about 8 runs, about 3 min.
       matrix:
         include:
           - platform: macOS
             runner: macos-14
             shard: S7-S4
-            scenarios: S7 S4 S1/atlas-retry
+            scenarios: S7 S4 S1/atlas-retry S6/rest
             laps: ""
           - platform: macOS
             runner: macos-14
@@ -408,7 +411,8 @@ jobs:
       # S4-S5-S11 17.5, S9-S10 13.4. S6/flood (+2.0), S6/selection-drag (+1.3) and S2/flood (+5.3) all join
       # S9-S10 (about 22.0), so no shard passes the longest one. S2/flood's cap of 2 short runs saves about
       # 3.8 min there; a release comparison runs it uncapped. S9-S10 measured 22.6 (run 37147065934); S9's
-      # laps set, two runs a side, adds about 0.4 (about 23.0).
+      # laps set, two runs a side, adds about 0.4 (about 23.0). S6/rest joins S2-S10sync (20.2): estimated,
+      # not measured, at about 21 s a short run and 2 timed plus 2 counters runs a side, about 3 min (about 23.2).
       matrix:
         include:
           - platform: Windows
@@ -424,7 +428,7 @@ jobs:
           - platform: Windows
             runner: windows-latest
             shard: S2-S10sync
-            scenarios: S2 S10/sync
+            scenarios: S2 S10/sync S6/rest
             laps: ""
           - platform: Windows
             runner: windows-latest

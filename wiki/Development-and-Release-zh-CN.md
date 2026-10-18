@@ -609,6 +609,7 @@ Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 
 | `S2/flood` | S3 的输出洪流在第一个窗格中运行，同时 S2 的输入发往一个分屏窗格的 shell。 |
 | `S6/flood` | 在 S3 的输出洪流期间进行 S6 的指针扫动。 |
 | `S6/selection-drag` | 在一屏静态密集文本上反复按下、在网格上移动并释放，持续 10 秒，只在网格区域内进行。 |
+| `S6/rest` | 角色打印一个 URL 和它创建的一个文件的绝对路径，然后在从这些行下方开始的滚动区域（DECSTBM）内持续输出 `date` 行。指针先在路径行上停留，经过 1 秒 `warmup` 与 10 秒 `rest` 阶段，使悬停所依赖的行保持不变而其他行持续输出；再在一行持续输出的行上停留 10 秒 `tail` 阶段。每个停留阶段都必须呈现帧并看到输出行前进；开启计数器时，`tail` 还必须运行过检测。悬停计数器是 App 计数器，更早的 base 没有它们，因此对比给出 head 一侧的计数器证据和两侧的耗时与 CPU 对比，而不是检测次数的前后差值。 |
 | `S10/sync` | S10 的重绘流，每一帧都包在 `ESC[?2026h` … `ESC[?2026l` 之间。 |
 | `S1/gdi`、`S5/gdi`、`S11/gdi` | 仅 Windows：该场景使用 `[appearance].software_render_mode = "force"`，通过 GDI 呈现。 |
 | `S1/wgpu`、`S5/wgpu`、`S11/wgpu` | 仅 Windows：该场景使用 `software_render_mode = "off"`，通过 wgpu 呈现且不降级。 |
@@ -617,7 +618,7 @@ Counters overhead 表只覆盖 S2 与 S3，在计时对比表的指标上比较 
 | `S1/atlas-retry` | 只在计数器组中运行；没有计数器组时被拒绝。70 行静态文本稳定后，运行 8 个恢复回合，每回合四个强制帧：A 重试一次注入的字形图集变更，B 是第一次呈现的恢复帧，C 与 D 重绘不变的画面。`result.json` 以 `atlas_recovery` 记录每帧的计数器增量，对比增加一张 "Atlas retry recovery" 表，在被接受的计数器运行上汇总每帧的行缓存未命中与命中、塑形请求和尝试次数。稳定后画面一旦变化，运行即判为无效，原因写明变化的字段及其稳定值与读取值（标题转义为 ASCII）；行文本变化则只写出第一个不同的行号。稳定还要等待 App 已应用两个前台进程样本：每个都给出进程名，且采样时间严格晚于观察到最终进程的时刻（Windows 上为看到哨兵行，macOS 上为 harness 自己的查询完成并给出 `sleep`），最新一个给出该进程名，读取到的标题等于该进程对应的标题。缺失或被清除的样本会使计数重新开始；屏障未满足时，尝试在 10 秒稳定上限处过期，原因写明未满足的条件；标签页带自定义标题时，尝试立即判为无效。harness 日志在稳定时和失败时各记一行 `atlas-retry evidence`，内容取自判定所依据的那次读取：比较的两个标题、与该次读取一同采集的 App 已应用前台进程样本、角色的 leader pid、标题与前台进程相关的累计计数器，以及 harness 自己的前台进程查询（单独标注，带有自己的时间），另外还有最终进程查询的次数与总耗时，以及观察到最终进程的时刻。 |
 
 pull request 性能流水线在 macOS 和 Windows 上按名称运行 `S2/flood`、`S6/flood`、
-`S6/selection-drag` 和 `S1/atlas-retry`；它们所在的分片见 [CI 能测量什么](#ci-能测量什么)。
+`S6/selection-drag`、`S6/rest` 和 `S1/atlas-retry`；它们所在的分片见 [CI 能测量什么](#ci-能测量什么)。
 
 每个场景的最终内存检查点都至少在 GO（harness 让各负载开始运行的时刻）之后 60 秒（使用 `--short` 时为
 5 秒，smoke 即如此）。多数场景以一段至少持续到那时的空闲期结束；S4 与 S5 则结束于 60 秒的输出流阶段，此时
@@ -737,13 +738,13 @@ job 完成。被取代、被取消或被跳过的运行从不算作成功。
 每个 CI 对比都通过 `--require-base` 让 base 与 head 适用同样的标准：base 无法构建、无法列出场景或无法凑满某组的有效运行时，
 该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。允许两种缺口：base 未声明 `perf-counters` 时的计数器组，
 它仍显示 `n/a`；以及因 harness API cfg 关闭而被声明为两侧都不可用的诊断，它不运行任何内容。其他任何被阻止的一侧仍会失败，
-没有可运行内容的选择也永远不会通过。四个 macOS 分片运行 S7、S4 与 S1/atlas-retry；S10/sync、S9、S11、S6、S1 与 S5；S10、S11/release 与 S2/flood；
+没有可运行内容的选择也永远不会通过。四个 macOS 分片运行 S7、S4、S1/atlas-retry 与 S6/rest；S10/sync、S9、S11、S6、S1 与 S5；S10、S11/release 与 S2/flood；
 以及 S2、S12、S3、S8、S6/selection-drag 与 S6/flood。五个 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
-S2 与 S10/sync；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8、S12 与 S1/atlas-retry，以均衡各平台分片的实测时长。
+S2、S10/sync 与 S6/rest；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8、S12 与 S1/atlas-retry，以均衡各平台分片的实测时长。
 各平台包含 S9 的分片（macOS 的 S9-S10sync，Windows 的 S9-S10）还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传
 lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结论。
 裸场景 ID 只选择其默认变体，因此每个变体都按名称列出。在 `--short` 下，`S2/flood` 每侧上限 2 次，`S11/release` 上限 1 次，
-`S11/gdi`、`S11/wgpu` 与 `S1/atlas-retry` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 35 分钟内：release 对比完整运行它。
+`S11/gdi`、`S11/wgpu`、`S1/atlas-retry` 与 `S6/rest` 上限 2 次。`S2/flood` 的上限只为让 pull request 对比保持在 35 分钟内：release 对比完整运行它。
 带 `perf-frame-texture` 时，S11 的 `end` 检查点记录 `frame_texture_bytes`：head 在 GDI 下为 4 B，未声明该 feature 的 base
 为 `n/a`。S9 与 S12 的 `end` 检查点记录渲染器的字形完整性：每次呈现 `Full` 帧时，渲染器保存一份证书，包含该帧的场景
 （去掉窗格 revision 与 dirty generation 的帧键）、字形图集的内容戳与尺寸，以及终端与界面各自缺失的不同字符。之后同一场景、同一图集的帧会并入

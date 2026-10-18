@@ -247,6 +247,8 @@ const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
     ("S6 default short", "263ae81928978b6938dac22c16822ade0f26812fcc9012649fe35c5fb72d2bd9"),
     ("S6 flood full", "ae12beb3c10a444d36001f20ac30ed973bdd3a2f9f9de740cb7983dc1b9a79cd"),
     ("S6 flood short", "7b4d3320fd201f1cca9e93a9545b59ad8aab8fcc02db8138e2868c629704bfeb"),
+    ("S6 rest full", "60062364a7adea23e03d9be4f7406b8098505facdba4b2fb159187c6f3262ee8"),
+    ("S6 rest short", "e6d46d41e825334c14ae8b0225167912ebf004c58f2e30f6799f7a2746d96caf"),
     ("S6 selection-drag full", "a0d20c1c6bb05037839b82ddeb24362373923b0498628bc922ae523856ac7e85"),
     ("S6 selection-drag short", "febef4c45ea35262cf1f37bd9a1e6dea37310d985b80f8ceb2472f6c73edaf1b"),
     ("S7 default full", "f253827bf744454cb31bbe9bb2587b2df13f4887073ecfcb197505e6c229e6ac"),
@@ -772,7 +774,9 @@ fn expected_role_output(plan: &Plan, role: usize) -> Vec<u8> {
     let mut expected = format!("{}\n", ready_line(role)).into_bytes();
     let body = match plan.roles[role] {
         Workload::IdleShell | Workload::ExitAfterGo => return expected,
-        Workload::DateLoop => panic!("a date loop's output depends on the clock"),
+        Workload::DateLoop | Workload::RestStream => {
+            panic!("a date loop's output depends on the clock")
+        }
         Workload::Flood { lines, .. } => {
             [b"y\n".repeat(lines as usize), file_bytes("bulk.txt")].concat()
         }
@@ -1897,4 +1901,34 @@ fn row_run_workloads_cut_into_the_contract_runs() {
             }
         }
     }
+}
+
+/// The Windows program plays S6/rest as the POSIX script does: it creates the rest target, prints
+/// the URL and the target's absolute path above the sentinel, then sets the scroll region and
+/// streams date lines inside it until the host stops it.
+#[test]
+fn run_steps_prints_the_rest_fixture_then_streams_inside_its_region() {
+    let rest = plan("S6", "rest", true).unwrap();
+    let dir = program_dir("rest-stream", &rest, true);
+    let mut host = FakeHost::new(2);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_ne!(run_steps(&dir, &mut host, &mut out, &mut err), 0, "the fake host ends the stream");
+    let target = dir.join("workload").join(REST_TARGET_NAME);
+    assert!(target.exists(), "the rest target file is created before its path is printed");
+    let fixture = format!(
+        "READY 0\n\x1b[H\x1b[2J{REST_URL}\n{}\n\n{}\n\x1b[{}r\x1b[999;1H",
+        target.display(),
+        sentinel_line(0, NONCE),
+        crate::scenarios::REST_REGION_TOP
+    );
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.starts_with(&fixture), "{text:?}");
+    let streamed = &text[fixture.len()..];
+    assert_eq!(
+        streamed.lines().count(),
+        3,
+        "one date line before each granted sleep and the failed one"
+    );
+    assert!(streamed.lines().all(|line| line.ends_with("UTC 1970") || line.contains("UTC")));
+    std::fs::remove_dir_all(&dir).unwrap();
 }

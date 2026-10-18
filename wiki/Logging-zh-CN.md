@@ -363,6 +363,12 @@ backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保
 | `fg_worker_probes` | 次数 | 前台探测 worker 的批次 |
 | `fg_worker_panes` | 次数 | 这些批次覆盖的窗格 |
 | `fg_results_stale` | 次数 | 事件循环丢弃的 worker 结果：窗格已关闭、进程身份已变化或子进程已退出 |
+| `hover_lookups` | 次数 | 到达某个窗格单元格的 URL 与路径悬停查找，来自一帧或指针、修饰键事件；点击自己的查找不计入 |
+| `hover_detections` | 次数 | 其中运行了文本检测的查找 |
+| `hover_cache_hits` | 次数 | 其中由窗口检测缓存直接给出、未运行检测的查找 |
+| `hover_rows_read` | 次数 | 检测读取的行数，同一行重复读取每次都计入 |
+| `path_probes_submitted` | 次数 | 悬停提交给探测 worker 的可打开性探测 |
+| `quick_select_rows_scanned` | 次数 | quick select 为查找 URL 扫描的行数 |
 | `fg_worker_probe` | 微秒直方图 | 每个批次的耗时 |
 
 这些数据来自 `sonicterm-fg-probe` worker 线程；事件循环线程从不探测。在 macOS 上，一个批次逐个
