@@ -41,7 +41,7 @@ use crate::record::{
     armed_token, attribute_dispatch, bulk_tail_mismatch, echo_api, echo_outcome, echo_target,
     line_row_near_cursor, missing_wide_tokens, planned_rows, presenter_blocked,
     presenter_record_for, prompt_identity, prompt_origin, protocol_rows, retained_text,
-    row_count_mismatch, snapshot_echo, snapshot_identity_changed, split_in_scope,
+    row_count_mismatch, sentinel_row, snapshot_echo, snapshot_identity_changed, split_in_scope,
     takes_completeness, wide_tokens, write_progress, ArmState, AtlasReading, Attribution,
     CheckpointRecord, CompletenessRecord, DispatchObservation, EchoSnapshot, EchoTarget,
     LatencySample, Measurements, MonitorInfo, PhaseRecord, PresenterRecord, RowIdentity, RunResult,
@@ -2045,9 +2045,10 @@ impl Probe {
                 continue;
             }
             let sentinel = &self.sentinels[role];
+            let workload = self.plan.roles[role];
             let found = self
                 .role_grid(role, |grid| {
-                    line_row_near_cursor(grid, sentinel, protocol_rows(scenarios::BUILD_HOST))
+                    sentinel_row(grid, sentinel, workload, scenarios::BUILD_HOST)
                 })
                 .flatten();
             if let Some(row) = found {

@@ -10,7 +10,7 @@ use serde_json::{json, Map, Value};
 use sonicterm_grid::grid::Grid;
 use sonicterm_ui::selection::plain_text_from_grid_range;
 
-use crate::scenarios::{Host, Presentation};
+use crate::scenarios::{Host, Presentation, Workload};
 
 use crate::counters::{CounterTotals, CountersMode};
 
@@ -861,6 +861,30 @@ pub(crate) fn line_row_near_cursor(grid: &Grid, text: &str, rows_above: u16) -> 
             .all(|(index, expected)| line.get(index).is_some_and(|cell| cell.ch == expected))
     })?;
     Some(grid.scrollback_evicted() + grid.scrollback_len() as u64 + u64::from(found))
+}
+
+/// The lifetime-absolute number of the first displayed row that starts with `text`, searched over
+/// the whole screen rather than near the cursor.
+pub(crate) fn line_row_on_screen(grid: &Grid, text: &str) -> Option<u64> {
+    let found = (0..grid.rows).find(|row| {
+        let line = grid.row(*row);
+        text.chars()
+            .enumerate()
+            .all(|(index, expected)| line.get(index).is_some_and(|cell| cell.ch == expected))
+    })?;
+    Some(grid.scrollback_evicted() + grid.scrollback_len() as u64 + u64::from(found))
+}
+
+/// Where `workload`'s completion sentinel `text` is, on `host`. Most workloads print the sentinel
+/// last, so it lies a few rows above the cursor. S6/rest prints it on a fixed fixture row and then
+/// moves the cursor to the bottom of its streaming region, possibly in the same parser batch, so its
+/// sentinel is searched over the whole screen; the run's nonce makes that line unique.
+pub(crate) fn sentinel_row(grid: &Grid, text: &str, workload: Workload, host: Host) -> Option<u64> {
+    if workload == Workload::RestStream {
+        // When: `workload` is RestStream, its sentinel row is fixed while the cursor has moved away.
+        return line_row_on_screen(grid, text);
+    }
+    line_row_near_cursor(grid, text, protocol_rows(host))
 }
 
 /// Why the rows strictly between the READY row and the sentinel's row are not the `planned_rows`

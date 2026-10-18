@@ -6,7 +6,7 @@ use sonicterm_vt::vt::Parser;
 
 use super::*;
 use crate::counters::FieldValue;
-use crate::scenarios::{plan_for, Host, Presentation};
+use crate::scenarios::{plan_for, Host, Presentation, Workload};
 use crate::workload::{fixtures, FixtureBody};
 
 fn parser(cols: u16, rows: u16) -> Parser {
@@ -1513,4 +1513,31 @@ fn a_renderer_checkpoint_maps_to_its_record() {
             CompletenessRecord::unavailable(reason.reason(), 2.0)
         );
     }
+}
+
+/// S6/rest prints its sentinel on its fourth row, then sets its scroll region and moves the cursor to
+/// the bottom row; all of it, and the first streamed line, can reach the parser in one batch before
+/// discovery runs. The cursor-relative scan then misses the sentinel, so the print phase would time
+/// out; the rest workload's discovery searches the screen and finds the sentinel's own row.
+#[test]
+fn the_rest_sentinel_is_found_when_the_cursor_moved_away_in_the_same_batch() {
+    let mut pane = run_pane(100);
+    pane.advance(b"READY 0\r\n");
+    let sentinel = "PERF_DONE 0 0123456789abcdef";
+    let batch = format!(
+        "\x1b[H\x1b[2Jhttps://example.com/sonicterm/rest\r\n/tmp/scratch/workload/rest-target.txt\r\n\r\n\
+         {sentinel}\r\n\x1b[{}r\x1b[999;1HThu Jan  1 00:00:00 UTC 1970\r\n",
+        crate::scenarios::REST_REGION_TOP
+    );
+    pane.advance(batch.as_bytes());
+    let grid = pane.grid();
+    assert_eq!(grid.cursor.row, grid.rows - 1, "the cursor sits at the region's bottom");
+    for host in [Host::Posix, Host::Windows] {
+        assert_eq!(line_row_near_cursor(grid, sentinel, protocol_rows(host)), None);
+        let found =
+            sentinel_row(grid, sentinel, Workload::RestStream, host).expect("the sentinel row");
+        assert_eq!(found, grid.scrollback_evicted() + grid.scrollback_len() as u64 + 3);
+    }
+    // Other workloads keep the cursor-relative scan.
+    assert_eq!(sentinel_row(grid, sentinel, Workload::IdleShell, Host::Posix), None);
 }
