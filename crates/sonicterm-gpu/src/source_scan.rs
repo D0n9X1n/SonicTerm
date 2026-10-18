@@ -2,8 +2,8 @@
 //!
 //! [`code_only`] blanks comments and the contents of string and char literals, so prose and
 //! literal text can neither satisfy nor fail a check, and [`token_matches`] finds a token sequence
-//! whatever whitespace or line breaks sit between its tokens. The `sonicterm-app` frame-reader
-//! check includes this file by path, so both crates share one lexer without a crate dependency.
+//! whatever whitespace or line breaks sit between its tokens. Only this crate compiles it, so the
+//! coverage report lists it once.
 
 use std::ops::Range;
 

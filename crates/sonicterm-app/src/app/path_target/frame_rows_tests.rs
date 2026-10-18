@@ -75,25 +75,69 @@ const DETECTION_SOURCES: &[(&str, &str)] = &[
     ("windows.rs", include_str!("windows.rs")),
 ];
 
-/// The comment- and literal-aware source scanner the `sonicterm-gpu` source checks also use,
-/// included by path so the two crates share one lexer without a dependency between their tests.
-#[path = "../../../../sonicterm-gpu/src/source_scan.rs"]
-mod source_scan;
+/// The tokens of `code` with their byte offsets, skipping whitespace: a word (identifier or
+/// number) is one token and every other char is its own, so a match ignores spacing and line breaks.
+fn code_tokens(code: &str) -> Vec<(usize, &str)> {
+    let mut found = Vec::new();
+    let mut chars = code.char_indices().peekable();
+    while let Some((start, current)) = chars.next() {
+        if current.is_whitespace() {
+            // When: `current` is whitespace, it separates tokens and is none itself.
+            continue;
+        }
+        let mut end = start + current.len_utf8();
+        if current.is_alphanumeric() || current == '_' {
+            // When: `current` starts a word, the token runs to the end of the word.
+            while let Some(&(next_start, next)) = chars.peek() {
+                if !(next.is_alphanumeric() || next == '_') {
+                    // When: `next` cannot continue the word, the word token ends before it.
+                    break;
+                }
+                end = next_start + next.len_utf8();
+                chars.next();
+            }
+        }
+        found.push((start, &code[start..end]));
+    }
+    found
+}
+
+/// Byte offsets in `code` where the token sequence of `pattern` starts. Whole tokens compare, so
+/// `grid.row(` matches `frame.grid\n    .row(0)` but not `grid.rows(`.
+fn token_matches(code: &str, pattern: &str) -> Vec<usize> {
+    let wanted = code_tokens(pattern);
+    let present = code_tokens(code);
+    if wanted.is_empty() {
+        // When: `pattern` has no token, it can match nothing.
+        return Vec::new();
+    }
+    present
+        .windows(wanted.len())
+        .filter(|window| window.iter().zip(&wanted).all(|(have, want)| have.1 == want.1))
+        .map(|window| window[0].0)
+        .collect()
+}
+
+/// The 1-based line of byte `offset` in `text`.
+fn line_number(text: &str, offset: usize) -> usize {
+    1 + text.as_bytes()[..offset.min(text.len())].iter().filter(|byte| **byte == b'\n').count()
+}
 
 /// Token sequences that read a grid row directly: the absolute-row accessor, and `.row(` on a grid
 /// binding or on the grid `FrameRows::grid` hands out.
 const DIRECT_ROW_READS: [&str; 3] = ["row_at_abs", "grid().row(", "grid.row("];
 
 /// Each direct row read in `source`, as its 1-based line and the pattern it matched. Comments and
-/// literal contents are blanked first, and tokens match across spaces and line breaks.
+/// literal contents are blanked first (the crate's shared `code_views` scanner), and tokens match
+/// across spaces and line breaks.
 fn direct_row_reads(source: &str) -> Vec<(usize, &'static str)> {
-    let code = source_scan::code_only(source);
+    let (_, code) = crate::app::source_scan_support::code_views(source);
     let mut reads = DIRECT_ROW_READS
         .iter()
         .flat_map(|pattern| {
-            source_scan::token_matches(&code, pattern)
+            token_matches(&code, pattern)
                 .into_iter()
-                .map(|offset| (source_scan::line_number(&code, offset), *pattern))
+                .map(|offset| (line_number(&code, offset), *pattern))
         })
         .collect::<Vec<_>>();
     reads.sort_unstable();
