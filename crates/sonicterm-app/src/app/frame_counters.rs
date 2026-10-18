@@ -951,7 +951,7 @@ impl super::App {
     /// Count a `new_events` wake by its cause.
     pub(super) fn note_frame_wake(&mut self, cause: &winit::event::StartCause) {
         if let Some(counters) = self.frame_counters.as_mut() {
-            // When: frame_counters is Some, the gate is on and every wake counts; none authorizes a line.
+            // The gate is on, so every wake counts; none authorizes a line by itself.
             counters.note_wake(cause);
         }
     }
@@ -959,7 +959,7 @@ impl super::App {
     /// Count a `user_event` wake.
     pub(super) fn note_frame_user_wake(&mut self) {
         if let Some(counters) = self.frame_counters.as_mut() {
-            // When: frame_counters is Some, the gate is on and every user event counts.
+            // The gate is on, so every user event counts.
             counters.wake_user += 1;
         }
     }
@@ -967,7 +967,7 @@ impl super::App {
     /// Apply `update` to the hover counters, when the gate is on; nothing runs when it is off.
     pub(super) fn note_hover(&mut self, update: impl FnOnce(&mut HoverCounters)) {
         if let Some(counters) = self.frame_counters.as_mut() {
-            // When: frame_counters is Some, the gate is on and the hover work is counted.
+            // The gate is on, so the hover work is counted.
             update(&mut counters.hover);
         }
     }
