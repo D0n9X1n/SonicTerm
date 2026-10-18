@@ -189,8 +189,9 @@ mod probe {
             iid: *const GUID,
             object: *mut *mut core::ffi::c_void,
         ) -> windows_core::Result<()> {
-            // SAFETY: COM passes a valid IID pointer to CreateInstance.
-            let requested = unsafe { *iid };
+            let requested =
+                // SAFETY: COM passes a valid IID pointer to CreateInstance.
+                unsafe { *iid };
             self.state.log("create_instance", &format!("iid={requested:?}"));
             // When: aggregation is not part of the handoff protocol, so refuse it as COM requires.
             if outer.is_some() {
@@ -212,6 +213,7 @@ mod probe {
     }
 
     impl ITerminalHandoff3_Impl for ProbeHandoff_Impl {
+        // SAFETY: COM calls this only with the out pointers, borrowed handles and startup info the IDL defines.
         unsafe fn EstablishPtyHandoff(
             &self,
             input: *mut HANDLE,
@@ -223,8 +225,8 @@ mod probe {
             startup_info: *const TerminalStartupInfo,
         ) -> HRESULT {
             let state = &self.state;
-            // SAFETY: conhost passes valid process handles and a startup-info pointer for this call.
             let (client_pid, server_pid, info) =
+                // SAFETY: conhost passes valid process handles and a startup-info pointer for this call.
                 unsafe { (GetProcessId(client), GetProcessId(server), &*startup_info) };
             state.log(
                 "handoff",
@@ -318,8 +320,9 @@ mod probe {
     fn process_image(process: HANDLE) -> String {
         let mut buffer = [0u16; 1024];
         let mut length = buffer.len() as u32;
-        // SAFETY: `buffer` holds `length` UTF-16 units and outlives the call.
-        let queried = unsafe {
+        let queried =
+            // SAFETY: `buffer` holds `length` UTF-16 units and outlives the call.
+            unsafe {
             QueryFullProcessImageNameW(
                 process,
                 PROCESS_NAME_WIN32,
@@ -337,14 +340,17 @@ mod probe {
     ///
     /// # Safety
     /// `bstr` must be null or point at a live BSTR.
+    // SAFETY: callers pass null or a BSTR that stays alive for the duration of the call.
     unsafe fn bstr_to_string(bstr: *const u16) -> String {
         if bstr.is_null() {
             return String::new();
         }
-        // SAFETY: a BSTR stores its byte length in the u32 before the character data.
-        let byte_len = unsafe { *(bstr as *const u32).sub(1) } as usize;
-        // SAFETY: the BSTR holds `byte_len / 2` UTF-16 units starting at `bstr`.
-        let units = unsafe { std::slice::from_raw_parts(bstr, byte_len / 2) };
+        let byte_len =
+            // SAFETY: a BSTR stores its byte length in the u32 before the character data.
+            unsafe { *(bstr as *const u32).sub(1) } as usize;
+        let units =
+            // SAFETY: the BSTR holds `byte_len / 2` UTF-16 units starting at `bstr`.
+            unsafe { std::slice::from_raw_parts(bstr, byte_len / 2) };
         String::from_utf16_lossy(units)
     }
 
@@ -408,13 +414,16 @@ mod probe {
             drop(signal);
             drop(reference);
             let closed_at = Instant::now();
-            // SAFETY: `client` is an owned process handle.
-            let client_wait = unsafe { WaitForSingleObject(client.0, 10_000) };
+            let client_wait =
+                // SAFETY: `client` is an owned process handle.
+                unsafe { WaitForSingleObject(client.0, 10_000) };
             let mut exit_code = u32::MAX;
-            // SAFETY: `client` is an owned process handle with query rights.
-            let _ = unsafe { GetExitCodeProcess(client.0, &mut exit_code) };
-            // SAFETY: `server` is an owned process handle.
-            let server_wait = unsafe { WaitForSingleObject(server.0, 10_000) };
+            let _ =
+                // SAFETY: `client` is an owned process handle with query rights.
+                unsafe { GetExitCodeProcess(client.0, &mut exit_code) };
+            let server_wait =
+                // SAFETY: `server` is an owned process handle.
+                unsafe { WaitForSingleObject(server.0, 10_000) };
             state.log(
                 "close_done",
                 &format!(
@@ -469,11 +478,13 @@ mod probe {
         write_all(&input_write, b"echo SONIC_ERRORLEVEL=%ERRORLEVEL%\r");
         wait_for("SONIC_ERRORLEVEL=", 2, Duration::from_secs(5));
         write_all(&input_write, b"exit\r");
-        // SAFETY: `client` and `server` are owned process handles.
-        let client_wait = unsafe { WaitForSingleObject(client.0, 10_000) };
+        let client_wait =
+            // SAFETY: `client` and `server` are owned process handles.
+            unsafe { WaitForSingleObject(client.0, 10_000) };
         let mut exit_code = u32::MAX;
-        // SAFETY: `client` is an owned process handle with query rights.
-        let _ = unsafe { GetExitCodeProcess(client.0, &mut exit_code) };
+        let _ =
+            // SAFETY: `client` is an owned process handle with query rights.
+            unsafe { GetExitCodeProcess(client.0, &mut exit_code) };
         state.log(
             "client_exit",
             &format!("exited={} exit_code={exit_code}", client_wait == WAIT_OBJECT_0),
@@ -481,8 +492,9 @@ mod probe {
 
         drop(signal);
         drop(reference);
-        // SAFETY: `server` is an owned process handle.
-        let server_wait = unsafe { WaitForSingleObject(server.0, 10_000) };
+        let server_wait =
+            // SAFETY: `server` is an owned process handle.
+            unsafe { WaitForSingleObject(server.0, 10_000) };
         state.log("server_exit", &format!("exited={}", server_wait == WAIT_OBJECT_0));
         drop(input_write);
         let _ = reader.join();
@@ -509,8 +521,9 @@ mod probe {
         let mut buffer = vec![0u8; 16 * 1024];
         loop {
             let mut read = 0u32;
-            // SAFETY: `buffer` outlives the call and the handle is an open pipe read end.
-            let ok = unsafe { ReadFile(output.0, Some(&mut buffer), Some(&mut read), None) };
+            let ok =
+                // SAFETY: `buffer` outlives the call and the handle is an open pipe read end.
+                unsafe { ReadFile(output.0, Some(&mut buffer), Some(&mut read), None) };
             // When: a failed or empty read means conhost closed its end of the output pipe.
             if ok.is_err() || read == 0 {
                 return;
@@ -597,8 +610,9 @@ mod probe {
             return Ok(());
         }
         state.log("com_init", "");
-        // SAFETY: called once on this thread before any other COM use.
-        let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() };
+        let initialized =
+            // SAFETY: called once on this thread before any other COM use.
+            unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() };
         // When: a COM setup failure would otherwise end the probe without any log line.
         if let Err(error) = initialized {
             state.log("com_init_error", &format!("error={error:?}"));
@@ -607,8 +621,9 @@ mod probe {
         let factory: IClassFactory = ProbeFactory { state: Arc::clone(&state) }.into();
         let factory_unknown: IUnknown = factory.cast()?;
         state.log("registering", &format!("clsid={clsid:?}"));
-        // SAFETY: the factory stays alive until the registration is revoked below.
-        let registered = unsafe {
+        let registered =
+            // SAFETY: the factory stays alive until the registration is revoked below.
+            unsafe {
             CoRegisterClassObject(&clsid, &factory_unknown, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE)
         };
         let cookie = match registered {
