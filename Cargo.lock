@@ -3955,7 +3955,10 @@ dependencies = [
  "sonicterm-gpu",
  "sonicterm-io",
  "sonicterm-logging",
+ "sonicterm-types",
+ "tempfile",
  "tracing",
+ "tracing-subscriber",
  "winit",
 ]
 

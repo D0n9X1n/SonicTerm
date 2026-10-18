@@ -126,11 +126,17 @@ fn run_mac_runtime_smoke() -> Result<i32> {
 #[cfg(target_os = "macos")]
 use sonicterm_mac::menubar;
 #[cfg(target_os = "macos")]
+mod executable_classify;
+#[cfg(target_os = "macos")]
 mod open_documents;
+#[cfg(target_os = "macos")]
+mod open_urls;
 #[cfg(target_os = "macos")]
 mod os_drag_mac;
 #[cfg(target_os = "macos")]
 mod tab_drag_os;
+#[cfg(all(test, target_os = "macos"))]
+mod test_log;
 
 #[cfg(any(target_os = "macos", test))]
 fn process_privilege_from_euid(euid: u32) -> sonicterm_app::ProcessPrivilege {
