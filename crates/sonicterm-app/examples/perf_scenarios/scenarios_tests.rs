@@ -315,16 +315,65 @@ fn rest_plan_parks_on_the_path_row_then_on_the_streaming_tail() {
     const { assert!(REST_TAIL_ROW >= REST_REGION_TOP) };
 }
 
-/// A parked phase is valid only when frames presented and streamed rows advanced; the tail phase
-/// also needs a detection when counters report one, while an absent counter (an older base) passes.
+/// Evidence of a parked phase that measured what it claims, with `hover` as its counter deltas.
+fn valid_park(hover: Option<HoverDeltas>) -> ParkEvidence {
+    ParkEvidence {
+        presented_frames: 30,
+        streamed_rows_advanced: true,
+        screen_unchanged: true,
+        fixture_unchanged: true,
+        pointed_row_changed: true,
+        hover,
+    }
+}
+
+/// A parked phase is valid only when frames presented, streamed rows advanced, and its screen and
+/// fixture rows stayed the ones it started on; absent counters (counters off) skip the counter rules.
 #[test]
-fn park_progress_requires_frames_streamed_rows_and_tail_detections() {
-    assert_eq!(park_progress("rest", 30, true, Some(0)), Ok(()));
-    assert_eq!(park_progress("tail", 30, true, Some(12)), Ok(()));
-    assert_eq!(park_progress("tail", 30, true, None), Ok(()));
-    assert!(park_progress("rest", 0, true, None).unwrap_err().contains("no frame"));
-    assert!(park_progress("rest", 30, false, None).unwrap_err().contains("no streamed row"));
-    assert!(park_progress("tail", 30, true, Some(0)).unwrap_err().contains("no detection"));
+fn park_progress_requires_frames_streamed_rows_and_an_unchanged_fixture() {
+    for phase in ["warmup", "rest", "tail"] {
+        assert_eq!(park_progress(phase, &valid_park(None)), Ok(()), "{phase}");
+        let no_frames = ParkEvidence { presented_frames: 0, ..valid_park(None) };
+        assert!(park_progress(phase, &no_frames).unwrap_err().contains("no frame"));
+        let idle = ParkEvidence { streamed_rows_advanced: false, ..valid_park(None) };
+        assert!(park_progress(phase, &idle).unwrap_err().contains("no streamed row"));
+        let moved = ParkEvidence { screen_unchanged: false, ..valid_park(None) };
+        assert!(park_progress(phase, &moved).unwrap_err().contains("screen or viewport"));
+        // A repaint of the fixture, even with the same text, makes the run invalid, not passing.
+        let repainted = ParkEvidence { fixture_unchanged: false, ..valid_park(None) };
+        assert!(park_progress(phase, &repainted).unwrap_err().contains("repainted"));
+    }
+}
+
+/// `rest` with counters on must hit the warm cache and do no detection or probe work after warm-up.
+#[test]
+fn park_progress_requires_rest_to_reuse_the_warm_cache() {
+    let warm = HoverDeltas { detections: 0, cache_hits: 300, probes_submitted: 0 };
+    assert_eq!(park_progress("rest", &valid_park(Some(warm))), Ok(()));
+    let detected = HoverDeltas { detections: 1, ..warm };
+    assert!(park_progress("rest", &valid_park(Some(detected)))
+        .unwrap_err()
+        .contains("1 detections"));
+    let probed = HoverDeltas { probes_submitted: 1, ..warm };
+    assert!(park_progress("rest", &valid_park(Some(probed))).unwrap_err().contains("1 probe"));
+    let missed = HoverDeltas { cache_hits: 0, ..warm };
+    assert!(park_progress("rest", &valid_park(Some(missed))).unwrap_err().contains("never hit"));
+}
+
+/// `tail` must rest on a row that changes, and with counters on must run detections there; a
+/// stationary tail row rejects the run whether or not counters are on.
+#[test]
+fn park_progress_rejects_a_stationary_tail() {
+    let streaming = HoverDeltas { detections: 12, cache_hits: 3, probes_submitted: 0 };
+    assert_eq!(park_progress("tail", &valid_park(Some(streaming))), Ok(()));
+    for hover in [None, Some(streaming)] {
+        let stationary = ParkEvidence { pointed_row_changed: false, ..valid_park(hover) };
+        assert!(park_progress("tail", &stationary).unwrap_err().contains("never changed"));
+    }
+    let undetected = HoverDeltas { detections: 0, ..streaming };
+    assert!(park_progress("tail", &valid_park(Some(undetected)))
+        .unwrap_err()
+        .contains("no detection"));
 }
 
 #[test]

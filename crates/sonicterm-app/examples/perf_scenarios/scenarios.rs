@@ -288,29 +288,79 @@ pub(crate) const REST_REGION_TOP: u16 = 6;
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) const REST_TAIL_ROW: u16 = 40;
 
-/// Whether a parked phase made the progress its contract needs, or why not.
+/// The hover counter deltas over one parked phase, read only while counters are on.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HoverDeltas {
+    pub(crate) detections: u64,
+    pub(crate) cache_hits: u64,
+    pub(crate) probes_submitted: u64,
+}
+
+/// What one parked S6/rest phase observed between its start and its end.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ParkEvidence {
+    pub(crate) presented_frames: u64,
+    pub(crate) streamed_rows_advanced: bool,
+    /// The screen identity, history length, screen and viewport are those the phase started on.
+    pub(crate) screen_unchanged: bool,
+    /// No fixed fixture row was rewritten, a same-value repaint included.
+    pub(crate) fixture_unchanged: bool,
+    pub(crate) pointed_row_changed: bool,
+    /// `None` when counters are off.
+    pub(crate) hover: Option<HoverDeltas>,
+}
+
+/// Whether a parked phase measured what it claims, or why not.
 ///
 /// Every parked phase must present frames and see the streamed rows advance, or it measured an
-/// idle screen. The `tail` phase rests on streaming rows, so with counters on it must also report
-/// detections: the cache misses there by design, and 0 would mean the counter or the lookup broke.
+/// idle screen; its screen and viewport must stay the ones it started on, and a repaint of its
+/// fixture rows makes the run invalid rather than passing. `rest` claims the pointer rests over
+/// unchanged rows, so with counters on it must hit the hover cache and run no detection and
+/// submit no probe after warm-up. `tail` rests on streaming rows, so its pointed row must change
+/// and, with counters on, it must report detections: the cache misses there by design.
 #[cfg(any(target_os = "macos", windows, test))]
-pub(crate) fn park_progress(
-    phase: &str,
-    presented_frames: u64,
-    streamed_rows_advanced: bool,
-    tail_detections: Option<u64>,
-) -> Result<(), String> {
-    if presented_frames == 0 {
+pub(crate) fn park_progress(phase: &str, evidence: &ParkEvidence) -> Result<(), String> {
+    if evidence.presented_frames == 0 {
         // When: no frame presented, the phase measured nothing the pointer could rest over.
         return Err(format!("S6/rest phase {phase} presented no frame"));
     }
-    if !streamed_rows_advanced {
+    if !evidence.streamed_rows_advanced {
         // When: the streamed rows never changed, the scroll region did not stream.
         return Err(format!("S6/rest phase {phase} saw no streamed row advance"));
     }
-    if phase == "tail" && tail_detections == Some(0) {
-        // When: the tail phase rests on changing rows yet ran no detection, the hover counters are broken.
-        return Err("S6/rest phase tail ran no detection over streaming rows".to_owned());
+    if !evidence.screen_unchanged {
+        // When: the screen identity or viewport changed, the rows are not the ones the phase started on.
+        return Err(format!("S6/rest phase {phase} changed its screen or viewport"));
+    }
+    if !evidence.fixture_unchanged {
+        // When: a fixture row was rewritten, the pointer no longer rests over unchanged rows.
+        return Err(format!("S6/rest phase {phase} saw its fixture rows repainted"));
+    }
+    if phase == "tail" {
+        if !evidence.pointed_row_changed {
+            // When: the tail's pointed row never changed, the phase rested on a stationary row.
+            return Err("S6/rest phase tail rested on a row that never changed".to_owned());
+        }
+        if evidence.hover.is_some_and(|hover| hover.detections == 0) {
+            // When: the tail rests on changing rows yet ran no detection, the hover counters are broken.
+            return Err("S6/rest phase tail ran no detection over streaming rows".to_owned());
+        }
+    }
+    if let (true, Some(hover)) = (phase == "rest", evidence.hover) {
+        // When: the rest phase has counters, its warm cache must answer every lookup.
+        if hover.detections > 0 || hover.probes_submitted > 0 {
+            // When: detections or probes_submitted is nonzero, the rest phase did work after warm-up.
+            return Err(format!(
+                "S6/rest phase rest ran {} detections and {} probe submissions after warm-up",
+                hover.detections, hover.probes_submitted
+            ));
+        }
+        if hover.cache_hits == 0 {
+            // When: cache_hits is zero, no lookup reused the warm result.
+            return Err("S6/rest phase rest never hit the hover cache".to_owned());
+        }
     }
     Ok(())
 }

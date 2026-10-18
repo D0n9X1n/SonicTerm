@@ -1541,3 +1541,68 @@ fn the_rest_sentinel_is_found_when_the_cursor_moved_away_in_the_same_batch() {
     // Other workloads keep the cursor-relative scan.
     assert_eq!(sentinel_row(grid, sentinel, Workload::IdleShell, Host::Posix), None);
 }
+
+/// Role 0's pane after the S6/rest fixture and its scroll region setup, as the workload prints them.
+fn rest_fixture_pane(sentinel: &str) -> Parser {
+    let mut pane = run_pane(100);
+    let fixture = format!(
+        "\x1b[H\x1b[2Jhttps://example.com/sonicterm/rest\r\n/tmp/scratch/workload/rest-target.txt\r\n\r\n\
+         {sentinel}\r\n\x1b[{}r\x1b[999;1H",
+        crate::scenarios::REST_REGION_TOP
+    );
+    pane.advance(fixture.as_bytes());
+    pane
+}
+
+/// Streaming into the scroll region below the fixture advances the grid and the tail row, but
+/// leaves every fixture row's stamp, the history and the screen identity unchanged; rewriting a
+/// fixture row with the same text is still a repaint the evidence reports.
+#[test]
+fn a_streaming_region_leaves_the_fixture_and_screen_unchanged() {
+    let sentinel = "PERF_DONE 0 0123456789abcdef";
+    let mut pane = rest_fixture_pane(sentinel);
+    let rest_start = park_snapshot(pane.grid(), None, crate::scenarios::REST_PATH_ROW);
+    let tail_start = park_snapshot(pane.grid(), None, crate::scenarios::REST_TAIL_ROW);
+    for second in 0..200 {
+        pane.advance(format!("Thu Jan  1 00:00:{second:02} UTC 1970\r\n").as_bytes());
+    }
+    let rest_end = park_snapshot(pane.grid(), None, crate::scenarios::REST_PATH_ROW);
+    let rest = rest_start.evidence(&rest_end, 30, None);
+    assert!(rest.streamed_rows_advanced && rest.screen_unchanged && rest.fixture_unchanged);
+    assert!(!rest.pointed_row_changed, "the path row is fixed");
+    let tail_end = park_snapshot(pane.grid(), None, crate::scenarios::REST_TAIL_ROW);
+    assert!(tail_start.evidence(&tail_end, 30, None).pointed_row_changed, "the tail row streams");
+    // A same-value repaint of the path row restamps it, so the run is invalid.
+    pane.advance(b"\x1b7\x1b[2;1H/tmp/scratch/workload/rest-target.txt\x1b8");
+    let repainted = park_snapshot(pane.grid(), None, crate::scenarios::REST_PATH_ROW);
+    assert!(!rest_start.evidence(&repainted, 30, None).fixture_unchanged);
+}
+
+/// A parked phase starts only on its displayed fixture with the pointer on its own cell: the rest
+/// path cell and a streaming tail cell pass, while a changed fixture, a pointer that resolves to no
+/// cell, a cell outside the grid and a tail cell outside the region each reject the run.
+#[test]
+fn park_entry_rejects_a_changed_fixture_and_an_out_of_grid_pointer() {
+    let sentinel = "PERF_DONE 0 0123456789abcdef";
+    let pane = rest_fixture_pane(sentinel);
+    let grid = pane.grid();
+    let path_cell = (crate::scenarios::REST_PATH_ROW, 3);
+    let tail_cell = (crate::scenarios::REST_TAIL_ROW, 3);
+    assert_eq!(park_entry_problem("rest", grid, None, sentinel, Some(path_cell), path_cell), None);
+    assert_eq!(park_entry_problem("tail", grid, None, sentinel, Some(tail_cell), tail_cell), None);
+    let other_run = "PERF_DONE 0 fedcba9876543210";
+    let changed = park_entry_problem("rest", grid, None, other_run, Some(path_cell), path_cell);
+    assert!(changed.unwrap().contains("does not display its fixture"));
+    let nowhere = park_entry_problem("rest", grid, None, sentinel, None, path_cell);
+    assert!(nowhere.unwrap().contains("resolves to None"));
+    let outside = (grid.rows + 5, 3);
+    let beyond = park_entry_problem("tail", grid, None, sentinel, Some(outside), outside);
+    assert!(beyond.unwrap().contains("outside the grid"));
+    let fixed_tail = park_entry_problem("tail", grid, None, sentinel, Some(path_cell), path_cell);
+    assert!(fixed_tail.unwrap().contains("not its target"));
+    let mut repainted = rest_fixture_pane(sentinel);
+    repainted.advance(b"\x1b[1;1Hhttps://example.com/other\x1b[K");
+    let gone =
+        park_entry_problem("rest", repainted.grid(), None, sentinel, Some(path_cell), path_cell);
+    assert!(gone.unwrap().contains("does not display its fixture"));
+}

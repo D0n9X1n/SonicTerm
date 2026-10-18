@@ -47,9 +47,9 @@ const BULK_LINE_BYTES: usize = 128;
 /// The bulk fixture's file name below `workload/fixtures/`.
 const BULK_FILE_NAME: &str = "bulk.txt";
 /// The URL S6/rest prints on its first row.
-const REST_URL: &str = "https://example.com/sonicterm/rest";
+pub(crate) const REST_URL: &str = "https://example.com/sonicterm/rest";
 /// The file S6/rest creates below `workload/` and prints the absolute path of on its second row.
-const REST_TARGET_NAME: &str = "rest-target.txt";
+pub(crate) const REST_TARGET_NAME: &str = "rest-target.txt";
 /// Bytes per buffer `write_yes` writes: 32,768 `y` lines.
 #[cfg_attr(not(test), allow(dead_code))]
 const YES_BUFFER_BYTES: usize = 64 << 10;
