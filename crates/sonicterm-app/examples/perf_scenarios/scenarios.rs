@@ -34,8 +34,9 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     spec("S3", "output flood throughput", &["default"], 480, 80),
     spec("S4", "visible streaming output", &["default"], 300, 240),
     spec("S5", "background tab streaming", &["default", "gdi", "wgpu"], 300, 240),
-    // S6/rest is capped at 2 short runs a side: its holds make each run about 15 s, and two runs a side
-    // keep the shards that list it inside the PR budget; a release comparison runs it uncapped.
+    // S6/rest is capped at 2 short runs a side to keep the shards that list it inside the PR budget; the
+    // exact-head run, read with scripts/perf-critical-path.py, measures its time. A release comparison
+    // runs it uncapped.
     capped(
         spec("S6", "pointer motion", &["default", "flood", "selection-drag", "rest"], 300, 240),
         &[("rest", 2)],
