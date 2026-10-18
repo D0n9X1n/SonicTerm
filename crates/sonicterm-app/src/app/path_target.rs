@@ -846,6 +846,7 @@ const LINK_CONTINUATION_MARGIN: u16 = 2;
 const LINK_CONTINUATION_INDENT: u16 = 8;
 const MAX_HARDWRAP_INDENT: usize = 8;
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 enum HardwrapUri {
     NotApplicable,
     Incomplete,
@@ -857,79 +858,141 @@ fn hardwrap_uri_at_cell(grid: &Grid, view_top: u64, pointed: AbsoluteCell) -> Ha
     hardwrap_uri_in(&FrameRows::new(grid, view_top), pointed)
 }
 
+/// Test-only count of the row cells the hard-wrap pre-pass walks, so tests can pin its work as
+/// linear in the row width.
+#[cfg(test)]
+pub(super) mod hardwrap_work {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CELLS_WALKED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Record `cell_count` more cells walked on this thread.
+    pub(in crate::app) fn add(cell_count: usize) {
+        CELLS_WALKED.with(|walked| walked.set(walked.get().saturating_add(cell_count as u64)));
+    }
+
+    /// Run `body` and return its value with the cells it walked on this thread.
+    pub(in crate::app) fn measure<Value>(body: impl FnOnce() -> Value) -> (Value, u64) {
+        let before = CELLS_WALKED.with(Cell::get);
+        let value = body();
+        (value, CELLS_WALKED.with(Cell::get).saturating_sub(before))
+    }
+}
+
+/// One displayed row as the hard-wrap pre-pass reads it: its cells, collected once, and the last
+/// column before the grid's edge that no URI body may contain.
+struct HardwrapRowView<'grid> {
+    row: &'grid Row,
+    cells: Vec<&'grid Cell>,
+    /// The last column below `min(cells.len(), cols)` holding a [`hardwrap_body_break`] cell.
+    last_break: Option<usize>,
+}
+
+/// The displayed rows one hard-wrap pre-pass has read, each collected into a view once, so a row
+/// with many wrappers, or one that several chains reach, costs one walk over its cells.
+struct HardwrapRows<'grid> {
+    views: HashMap<u64, Option<HardwrapRowView<'grid>>>,
+}
+
+impl<'grid> HardwrapRows<'grid> {
+    /// The view of absolute `row_number`; `None` when the frame does not display it.
+    fn view(
+        &mut self,
+        frame: &FrameRows<'grid>,
+        row_number: u64,
+    ) -> Option<&HardwrapRowView<'grid>> {
+        self.views
+            .entry(row_number)
+            .or_insert_with(|| {
+                let row = frame.row(row_number)?;
+                let cells = row.iter().collect::<Vec<_>>();
+                #[cfg(test)]
+                hardwrap_work::add(cells.len());
+                let edge = cells.len().min(usize::from(frame.grid().cols));
+                let last_break = cells[..edge].iter().rposition(|cell| hardwrap_body_break(cell));
+                Some(HardwrapRowView { row, cells, last_break })
+            })
+            .as_ref()
+    }
+}
+
+/// Whether `cell` cannot be part of a hard-wrapped URI body: unsafe, hyperlinked, non-ASCII,
+/// blank, control, or a wrapper. Every wrapper is itself a break.
+fn hardwrap_body_break(cell: &Cell) -> bool {
+    unsafe_path_cell(&cell)
+        || cell.hyperlink().is_some()
+        || !cell.ch.is_ascii()
+        || cell.ch.is_whitespace()
+        || cell.ch.is_control()
+        || matches!(cell.ch, '(' | ')' | '[' | ']')
+}
+
 fn hardwrap_uri_in(frame: &FrameRows<'_>, pointed: AbsoluteCell) -> HardwrapUri {
     let first =
         pointed.row.saturating_sub((MAX_WRAPPED_PATH_ROWS - 1) as u64).max(frame.view_top());
+    let mut rows = HardwrapRows { views: HashMap::new() };
     for row_number in (first..=pointed.row).rev() {
-        let Some(row) = frame.row(row_number) else {
-            // When: row_at_abs has no row_number, that evicted row cannot open a visible candidate.
+        let Some(view) = rows.view(frame, row_number) else {
+            // When: the frame has no row_number, that row cannot open a visible candidate.
             continue;
         };
+        let soft_wrapped = view.row.soft_wrapped_from_previous();
+        // A chain's first row must reach the grid's edge with no closer and no break in its body.
+        // Every wrapper is a break, so only a wrapper at the row's last break can open such a body;
+        // an earlier wrapper's body holds that break and its candidate is never applicable.
+        let opener = view.last_break.and_then(|index| {
+            let closer = match view.cells[index].ch {
+                '(' => ')',
+                '[' => ']',
+                _ => {
+                    // When: view.cells[index].ch at last_break opens no supported wrapper, no wrapper owns a body.
+                    return None;
+                }
+            };
+            opens_http_scheme(&view.cells, index + 1).then_some((index + 1, closer))
+        });
         // The frame's last row may wrap into a row below it that is not displayed, so on a
         // scrolled-back view that boundary is unknown and the logical scanner, which fails closed
         // there, owns it.
         let next_row_number = row_number + 1;
         let wraps_below = if frame.contains(next_row_number) {
-            frame.row(next_row_number).is_some_and(|next| next.soft_wrapped_from_previous())
+            rows.view(frame, next_row_number)
+                .is_some_and(|next| next.row.soft_wrapped_from_previous())
         } else {
             // When: the next row is outside the frame, only a scrolled-back view has one at all.
             frame.rows_below()
         };
-        if row.soft_wrapped_from_previous() || wraps_below {
-            // When: soft_wrapped_from_previous holds, or may hold, at either boundary, the logical scanner owns it.
+        if soft_wrapped || wraps_below {
+            // When: soft_wrapped or wraps_below holds, or may hold, the logical scanner owns that boundary.
             continue;
         }
-        let mut result = HardwrapUri::NotApplicable;
-        for (index, cell) in row.iter().enumerate() {
-            let closer = match cell.ch {
-                '(' => ')',
-                '[' => ']',
-                _ => {
-                    // When: cell.ch opens no supported wrapper, this column cannot delimit a URI.
-                    continue;
-                }
-            };
-            let start = index + 1;
-            if !opens_http_scheme(row, start) {
-                // When: opens_http_scheme finds neither https:// nor http:// at start, this wrapper opens ordinary prose.
-                continue;
-            }
-            let found = hardwrap_uri_candidate(frame, pointed, row_number, start, closer);
-            // When: matches! excludes NotApplicable for found, retain this wrapper's claim on pointed.
-            if !matches!(found, HardwrapUri::NotApplicable) {
-                if !matches!(result, HardwrapUri::NotApplicable) {
-                    // When: matches! excludes NotApplicable for result, another wrapper already owns pointed.
-                    return HardwrapUri::Incomplete;
-                }
-                result = found;
-            }
-        }
-        if !matches!(result, HardwrapUri::NotApplicable) {
-            // When: matches! excludes NotApplicable for result, the nearest owning wrapper decides pointed.
-            return result;
+        let Some((start, closer)) = opener else {
+            // When: opener is None, no wrapper opens an http(s) body at last_break, so no chain starts here.
+            continue;
+        };
+        let found = hardwrap_uri_candidate(frame, &mut rows, pointed, row_number, start, closer);
+        if !matches!(found, HardwrapUri::NotApplicable) {
+            // When: matches! excludes NotApplicable for found, the nearest owning wrapper decides pointed.
+            return found;
         }
     }
     HardwrapUri::NotApplicable
 }
 
-/// Whether `row`'s cells from column `start` spell `https://` or `http://`, read into a fixed
-/// buffer so the pre-pass allocates nothing for the many wrappers that open ordinary prose.
-fn opens_http_scheme(row: &Row, start: usize) -> bool {
-    let mut scheme = ['\0'; 8];
-    for (offset, slot) in scheme.iter_mut().enumerate() {
-        let Some(cell) = row.get(start + offset) else {
-            // When: the row ends before eight cells, the remaining slots stay empty.
-            break;
-        };
-        *slot = cell.ch;
-    }
-    let spells =
-        |prefix: &str| prefix.chars().zip(scheme).all(|(expected, found)| expected == found);
+/// Whether `cells` from column `start` spell `https://` or `http://`, reading at most eight cells.
+fn opens_http_scheme(cells: &[&Cell], start: usize) -> bool {
+    let spells = |prefix: &str| {
+        let mut found = cells.get(start..).unwrap_or_default().iter().map(|cell| cell.ch);
+        prefix.chars().all(|expected| found.next() == Some(expected))
+    };
     spells("https://") || spells("http://")
 }
 
-fn hardwrap_uri_candidate(
-    frame: &FrameRows<'_>,
+fn hardwrap_uri_candidate<'grid>(
+    frame: &FrameRows<'grid>,
+    rows: &mut HardwrapRows<'grid>,
     pointed: AbsoluteCell,
     first_row: u64,
     first_col: usize,
@@ -955,15 +1018,18 @@ fn hardwrap_uri_candidate(
         if row_number >= frame.view_end() {
             return refusal(&spans);
         }
-        let Some(row) = frame.row(row_number) else {
-            // When: row_at_abs has no row_number, the chain cannot be continued or proven.
+        let Some(view) = rows.view(frame, row_number) else {
+            // When: the frame has no row_number, the chain cannot be continued or proven.
             return refusal(&spans);
         };
-        if row.soft_wrapped_from_previous() {
+        if view.row.soft_wrapped_from_previous() {
             // When: soft_wrapped_from_previous holds, the wrap-aware scanner owns this boundary.
             return refusal(&spans);
         }
-        let cells = row.iter().collect::<Vec<_>>();
+        let cells = &view.cells;
+        // Each chain row's closer, indent and body scans walk at most its cells once.
+        #[cfg(test)]
+        hardwrap_work::add(cells.len());
         let start = if offset == 0 {
             first_col
         } else {
@@ -985,14 +1051,7 @@ fn hardwrap_uri_candidate(
             // When: cells hold no non-empty body between start and end, this row adds no fragment.
             return refusal(&spans);
         };
-        if body.iter().any(|cell| {
-            unsafe_path_cell(cell)
-                || cell.hyperlink().is_some()
-                || !cell.ch.is_ascii()
-                || cell.ch.is_whitespace()
-                || cell.ch.is_control()
-                || matches!(cell.ch, '(' | ')' | '[' | ']')
-        }) {
+        if body.iter().any(|cell| hardwrap_body_break(cell)) {
             // When: any body cell is unsafe, hyperlinked, non-ascii, blank, control, or a wrapper,
             // the row carries prose rather than a continuation of this candidate.
             return refusal(&spans);
