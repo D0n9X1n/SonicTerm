@@ -63,3 +63,19 @@ fn observer_records_reads_inside_and_outside_the_frame() {
     let ((), outside) = read_observer::observe(|| ());
     assert!(outside.is_empty(), "an observation sees only its own reads");
 }
+
+/// Detection reads rows only through `FrameRows`: `FrameRows::grid` still hands out the grid for
+/// its geometry and screen identity, so this source check pins that `path_target.rs` never calls
+/// `row_at_abs` itself, outside comments, where it could read a row the pane does not display.
+#[test]
+fn path_detection_never_reads_rows_past_the_frame_reader() {
+    let source = include_str!("../path_target.rs");
+    let direct_reads = source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim_start().starts_with("//"))
+        .filter(|(_, line)| line.contains("row_at_abs"))
+        .map(|(index, line)| format!("{}: {}", index + 1, line.trim()))
+        .collect::<Vec<_>>();
+    assert!(direct_reads.is_empty(), "path_target.rs reads rows directly: {direct_reads:?}");
+}
