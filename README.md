@@ -103,8 +103,10 @@ back when the context belongs with the original session again.
   limits are not a hard process-wide quota: total memory can grow with the
   number of panes and windows. Stalled image transfers and reclaimed older
   images are reported at the default log level; optional retention reports
-  show sampled subsystem usage. See [Memory](wiki/Memory.md) for process
-  targets, residual bounds, and accounting exclusions.
+  show sampled subsystem usage. The **Memory Usage** palette command opens a
+  copyable report of process, renderer, graphics and per-pane memory. See
+  [Memory](wiki/Memory.md) for process targets, residual bounds, and accounting
+  exclusions.
 - **Real pane workflow** — split panes, close/resize behavior, per-pane PTYs,
   pane focus, READ ONLY mode for safe scrollback navigation, quick-select URL
   hints, and search.
@@ -114,6 +116,13 @@ back when the context belongs with the original session again.
   relative paths use that pane's trusted shell working directory, except on the
   alternate screen of full-screen programs such as tmux. See
   [local targets](wiki/Usage.md#open-urls-and-local-targets).
+- **Default terminal and file handler** — launchers can run a command directly
+  (`sonicterm -e htop`, xdg-terminal-exec, KDE); macOS can open Unix executables
+  and `ssh:`/`x-man-page:` links in SonicTerm; double-clicked scripts are still
+  typed at the prompt, not run. Installing changes no default: the
+  **Set SonicTerm as Default…** palette command does, after confirmation. See
+  [Run a command from a launcher](wiki/Usage.md#run-a-command-from-a-launcher) and
+  [Choose SonicTerm as the default](wiki/Usage.md#choose-sonicterm-as-the-default).
 - **Command palette first** — commands are searchable and display shortcuts from
   your current keymap config. **About SonicTerm** shows the running app's version
   in a green notification.
