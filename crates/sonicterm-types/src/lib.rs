@@ -16,6 +16,7 @@ pub mod cell;
 pub mod geom;
 pub mod glyph_key;
 pub mod hyperlink_id;
+pub mod launch_request;
 pub mod lifecycle;
 pub mod mod_key;
 pub mod open_script;
@@ -31,6 +32,10 @@ pub use cell::{Cell, CellFlags, Color, FatAttributes, UnderlineStyle};
 pub use geom::{GeometryQuad, Pos};
 pub use glyph_key::{GlyphKey, GlyphRasterVariant};
 pub use hyperlink_id::HyperlinkId;
+pub use launch_request::{
+    printable_file_name, replace_control_characters, CommandLaunch, CwdSource, LaunchRequest,
+    PaneExitStatus, TerminalLaunch,
+};
 pub use lifecycle::{
     CancelOutcome, CancelReason, IllegalTransition, LifecycleState, ReapAdmission, ReapResult,
 };

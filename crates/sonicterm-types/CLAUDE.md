@@ -8,6 +8,8 @@ window/clipboard/PTY boundaries, and the legacy painter compatibility seam.
 ## Key files
 - `cell.rs`, `geom.rs`, `glyph_key.rs`, `hyperlink_id.rs` - value types.
 - `action.rs`, `mod_key.rs`, `window_key.rs` - input/action contracts.
+- `open_script.rs`, `launch_request.rs` - launch contracts: script drafts, terminal and
+  direct-command launches, and the typed pane exit status.
 - `traits/` - window, clipboard, and PTY seams plus legacy painter compatibility types.
 - `lib.rs` - crate-level exports.
 
