@@ -33,18 +33,18 @@
     {
       "name": "harfbuzz",
       "path": "crates/sonicterm-harfbuzz/harfbuzz",
-      "version": "14.4.0",
-      "tag": "14.4.0",
-      "revision": "36cb489cb02ce4b92099669ba9f9bea348eff93f",
+      "version": "14.6.0",
+      "tag": "14.6.0",
+      "revision": "c7a7457b7385f33178e8cf87615ca077a810bbe7",
       "archive": {
-        "url": "https://github.com/harfbuzz/harfbuzz/releases/download/14.4.0/harfbuzz-14.4.0.tar.xz",
-        "sha256": "2357ed966c6ced7bfa720b0640c0231065af01158fbea215093ffa15aed44371",
-        "root": "harfbuzz-14.4.0"
+        "url": "https://github.com/harfbuzz/harfbuzz/releases/download/14.6.0/harfbuzz-14.6.0.tar.xz",
+        "sha256": "d07a007327277708a2a73ae437887cdbaf282937f6d03ca5467723e9099af586",
+        "root": "harfbuzz-14.6.0"
       },
       "include": ["src/**", "COPYING", "AUTHORS", "NEWS", "README.md", "CONFIG.md", "SECURITY.md"],
       "upstream_fixes": [],
-      "tree_sha256": "5c177bc1d1ba83d5f06d9ea1fe6bcdd69bdb853bac2490af34ac148de582c787",
-      "version_check": {"path": "src/hb-version.h", "pattern": "HB_VERSION_STRING\\s+\"([^\"]+)\"", "value": "14.4.0"}
+      "tree_sha256": "618e4922d98ef66891b520fe7f32b61a8161b4ea1d5cf61b233556cf876c5f62",
+      "version_check": {"path": "src/hb-version.h", "pattern": "HB_VERSION_STRING\\s+\"([^\"]+)\"", "value": "14.6.0"}
     },
     {
       "name": "libpng",
