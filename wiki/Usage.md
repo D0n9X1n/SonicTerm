@@ -296,9 +296,9 @@ blink an unchanged target; changing the pointed row, target, CWD, viewport, or
 openability identity revokes authorization and requires a fresh probe.
 
 Detection reads only the rows on screen. When you have scrolled back, the row
-just below the view is not read, so a plain-text target on the view's bottom row
-whose text reaches the right edge may continue off screen and is not linked;
-scroll it up one row to use it. On the live view nothing changes, because no row
+just below the view is not read, and it could continue the bottom row's text, so
+a plain-text target on the view's bottom row is not linked; scroll it up one row
+to use it. On the live view nothing changes, because no row
 exists below the bottom one. OSC 8 links keep their stored destination at the
 edge; only their underline stops at the view. Quick select also labels only the
 rows on screen, history included when you have scrolled back.

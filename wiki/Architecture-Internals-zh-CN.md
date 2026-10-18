@@ -231,7 +231,8 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
   URL 与路径检测只通过 `FrameRows` 读取行，它只提供显示的帧 `[view_top, view_top + rows)`，
   不提供任何其他行，连紧邻其上或其下那一行的换行标记或窗格边框字形也不提供。触及帧边缘的换行、
   边框推断或目标，在未读取的行可能改变结果之处失败关闭：在已回滚的视图上，到达网格边缘的最后一行片段
-  使其链为 `Incomplete`，硬换行预扫描把该边界视为可能已换行。`rows_below` 只依据行数作答。
+  使其链为 `Incomplete`（主屏幕上每个片段都覆盖整行，因此链到达最后一行的普通文字目标都会被拒绝），
+  硬换行预扫描把该边界视为可能已换行。`rows_below` 只依据行数作答。
   每个窗口保留一条 `HoverDetectionCache` 记录：检测的键（窗格、指向的单元格、`view_top`、`rows_below`、
   `scrollback_evicted`、`screen_epoch`、`size_generation`、是否备用屏幕、OSC 7 CWD 修订号以及三项
   `clickable_*` 设置），以及检测读取范围内每一行的内容戳。键与所有内容戳都相同时，悬停查找直接返回缓存的结果，

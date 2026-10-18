@@ -320,8 +320,9 @@ correctness, not only speed.
   flag or pane-border glyph of the row just above or below it. A wrap, border
   inference or target that touches a frame edge fails closed where the unread row
   could change the result: on a scrolled-back view a bottom-row segment reaching the
-  grid's edge leaves its chain `Incomplete`, and the hard-wrap pre-pass treats that
-  boundary as possibly wrapped. `rows_below` answers from the row count alone.
+  grid's edge leaves its chain `Incomplete` (on the primary screen every segment spans
+  the row, so every plain-text target whose chain reaches the bottom row is refused),
+  and the hard-wrap pre-pass treats that boundary as possibly wrapped. `rows_below` answers from the row count alone.
   Each window keeps one `HoverDetectionCache` entry: the detection's key (pane,
   pointed cell, `view_top`, `rows_below`, `scrollback_evicted`, `screen_epoch`,
   `size_generation`, alternate screen, OSC 7 CWD revision and the three
