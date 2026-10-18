@@ -193,6 +193,8 @@ fn refresh_shell_associations() {
 #[cfg(target_os = "windows")]
 mod backdrop;
 mod cli;
+#[cfg(any(target_os = "windows", test))]
+mod default_handlers;
 #[cfg(target_os = "windows")]
 mod menubar;
 #[cfg(target_os = "windows")]
@@ -438,10 +440,12 @@ fn main() -> Result<std::process::ExitCode> {
                 privileged = process_privilege.is_privileged(),
                 "process privilege observed"
             );
+            // Only the palette command reaches this backend; installing it changes nothing.
             let mut shell = sonicterm_app::shell::WindowsShell::new(machine, theme, config, keymap)
                 .with_process_privilege(process_privilege)
                 .with_asset_loaders(theme_loader, keymap_loader)
-                .with_on_window_ready(on_window_ready);
+                .with_on_window_ready(on_window_ready)
+                .with_default_handlers(Box::new(default_handlers::native()));
             if ole_available {
                 let drag_sink =
                     // SAFETY: `ole_guard` proves successful OLE initialization on
