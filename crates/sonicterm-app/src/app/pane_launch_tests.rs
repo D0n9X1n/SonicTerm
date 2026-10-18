@@ -38,13 +38,17 @@ fn inherited_cwd_validates_local_authority_and_native_paths() {
     assert_eq!(PaneLaunch::default().inherit_cwd(Some(&huge), PathStyle::Posix, "host").cwd, None);
 }
 
-/// Explicit launch directories and script parents outrank a source pane's OSC 7.
+/// Explicit launch directories, script parents and command launches outrank a source pane's OSC 7.
 #[test]
 fn inherited_cwd_never_overrides_explicit_or_script_launch() {
     let inherited = Osc7Cwd { authority: String::new(), path: "/different".into() };
     let script = PaneLaunch::for_script(request("scripts/build.sh"));
-    let explicit = PaneLaunch { cwd: Some(PathBuf::from("/explicit")), script: None };
-    for launch in [script, explicit] {
+    let explicit = PaneLaunch { cwd: Some(PathBuf::from("/explicit")), ..PaneLaunch::default() };
+    let command = PaneLaunch {
+        command: Some(CommandLaunch { program: "ls".into(), args: Vec::new() }),
+        ..PaneLaunch::default()
+    };
+    for launch in [script, explicit, command] {
         assert_eq!(launch.clone().inherit_cwd(Some(&inherited), PathStyle::Posix, "host"), launch);
     }
 }

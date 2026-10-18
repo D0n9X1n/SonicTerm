@@ -510,7 +510,7 @@ fn reaped_child_drops_its_field_capture() {
     assert!(dispatch(&mut app, child, &left(ElementState::Pressed)));
     assert!(matches!(app.field_pointer_capture, Some(FieldPointerCapture::Dragging { .. })));
 
-    app.handle_pane_process_exited(child_pane, Some(true));
+    app.handle_pane_process_exited(child_pane, sonicterm_types::PaneExitStatus::Code(0));
     assert!(!app.windows.contains_key(&child), "the empty child window is reaped");
     assert_eq!(app.field_pointer_capture, None, "the reaped child's capture is dropped");
     assert!(app.field_owed_releases.is_empty(), "the reaped child owes nothing");

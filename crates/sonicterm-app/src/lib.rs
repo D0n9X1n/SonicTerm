@@ -12,9 +12,9 @@
 
 pub mod app;
 pub mod launch_cli;
+pub mod launch_queue;
 pub mod menu;
 pub mod menubar_bridge;
-pub mod open_script_bridge;
 pub mod os_drag;
 pub mod os_drag_bridge;
 pub mod shell;

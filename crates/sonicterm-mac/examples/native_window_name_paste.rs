@@ -533,7 +533,7 @@ IFS= read -r -t "$left" ignored
         let proxy = event_loop.create_proxy();
         sonicterm_app::menubar_bridge::install_proxy(proxy.clone());
         sonicterm_app::os_drag_bridge::install_proxy(proxy.clone());
-        sonicterm_app::open_script_bridge::install_proxy(proxy.clone());
+        sonicterm_app::launch_queue::install_proxy(proxy.clone());
         let mut app = App::new_with_proxy(theme, config, keymap, Some(proxy));
         app.__test_set_memory_clipboard("");
         // The same production resumed-hook timing as normal main; no runtime-smoke state or auto-exit.

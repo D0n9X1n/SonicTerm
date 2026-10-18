@@ -12,7 +12,7 @@ use objc2_foundation::{
     MainThreadMarker, NSAppleEventDescriptor, NSAppleEventManager, NSNotification,
     NSNotificationCenter, NSObject, NSObjectProtocol,
 };
-use sonicterm_app::open_script_bridge::{self, OpenScriptRequest};
+use sonicterm_app::launch_queue::{self, OpenScriptRequest};
 
 thread_local! {
     static HANDLER: RefCell<Option<Retained<OpenDocumentsTarget>>> = const { RefCell::new(None) };
@@ -50,7 +50,7 @@ define_class!(
         ) {
             let requests = requests_from_event(event, INITIAL_CWD.get().and_then(Option::as_deref));
             if !requests.is_empty() {
-                let _ = open_script_bridge::push_requests(requests);
+                let _ = launch_queue::push_scripts(requests);
             }
         }
     }

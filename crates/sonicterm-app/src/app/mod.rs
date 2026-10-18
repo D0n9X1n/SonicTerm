@@ -155,8 +155,8 @@ pub enum UserEvent {
     /// [`crate::menubar_bridge`] buffer; this variant is just the
     /// wake-up signal so the loop drains it.
     MenuAction,
-    /// Script-file open requests were queued by a platform boundary.
-    OpenScripts,
+    /// Launch requests (terminals or script drafts) were queued by a platform boundary.
+    LaunchRequests,
     /// A platform OS-drag drop landed and stashed payloads in
     /// [`crate::os_drag_bridge`]. The variant is just the wake-up
     /// signal so the loop drains the queues — separate from
@@ -226,10 +226,18 @@ pub enum UserEvent {
     PaneProcessExited {
         /// The pane whose child ended.
         pane_id: u64,
-        /// Whether that child exited cleanly, or `None` if it could not be
-        /// determined. `None` is not a crash — it holds the pane open, the
-        /// same as an unclean exit.
+        /// How that child ended. `Unknown` is not a crash — it holds the
+        /// pane open, the same as an unclean exit.
+        status: sonicterm_types::PaneExitStatus,
+        /// `status` as a clean flag: `Some(true)` for code 0, `Some(false)` for any other code or a
+        /// signal, `None` when unknown. Kept because the perf harness also builds against older
+        /// trees, whose event carries only this field.
         was_clean: Option<bool>,
+    },
+    /// A launcher's command could not start; the message names only the program's file name.
+    LaunchFailed {
+        /// User-facing explanation of why the command did not run.
+        message: String,
     },
     /// A script path could not be represented safely for the active shell.
     ScriptDraftRejected {

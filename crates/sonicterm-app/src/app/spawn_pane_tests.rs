@@ -2036,7 +2036,7 @@ fn pane_spawn_options_stamp_reads_only_with_the_frame_counter_gate() {
 }
 
 /// Both pane creation paths, main and child, read the gate before spawning and pass it to the PTY
-/// through the one helper, then store the same counters on the pane, so no path starts a reader
+/// through the one options helper and the one launch spawn helper, then store the same counters on the pane, so no path starts a reader
 /// that disagrees with its pane. A child pane needs a native window, so this pins the source.
 #[test]
 fn main_and_child_panes_take_the_read_stamp_flag_from_the_gate_before_spawning() {
@@ -2051,7 +2051,7 @@ fn main_and_child_panes_take_the_read_stamp_flag_from_the_gate_before_spawning()
             .find("self.pane_spawn_opts(launch, frame_counters.is_some())")
             .unwrap_or_else(|| panic!("{name} passes the gate to the spawn options"));
         let spawn = source[opts..]
-            .find("PtyHandle::spawn_default_shell(cols, rows, shell_opts)")
+            .find("self.spawn_launch_pty(pane_id, &parser, launch, cols, rows, &shell_opts)")
             .map(|offset| opts + offset)
             .unwrap_or_else(|| panic!("{name} spawns with those options"));
         assert!(

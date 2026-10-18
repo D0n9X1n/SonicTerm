@@ -999,7 +999,7 @@ impl Probe {
         }
         let unexpected = match &event {
             UserEvent::MenuAction => Some("a menu action"),
-            UserEvent::OpenScripts => Some("a script-open request"),
+            UserEvent::LaunchRequests => Some("a launch request"),
             UserEvent::OsDrag | UserEvent::DragMoved | UserEvent::DragEnded => {
                 Some("an OS drag event")
             }
@@ -1011,7 +1011,7 @@ impl Probe {
             self.invalidate(event_loop, format!("unexpected user event before dispatch: {what}"));
             return;
         }
-        if let UserEvent::PaneProcessExited { pane_id, was_clean } = &event {
+        if let UserEvent::PaneProcessExited { pane_id, was_clean, .. } = &event {
             if scenarios::BUILD_HOST == Host::Windows && self.outcome.is_none() {
                 // When: on Windows each exit is kept, so a pane that becomes a role pane later is still judged.
                 self.exited_panes.push((*pane_id, *was_clean));

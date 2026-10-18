@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
-use sonicterm_app::open_script_bridge;
+use sonicterm_app::launch_queue;
 use sonicterm_types::{OpenScriptRequest, OpenScriptResolveError};
 
 use crate::cli::ParsedCli;
@@ -46,7 +46,7 @@ where
     F: FnOnce() -> Option<PathBuf>,
 {
     queue_startup_open_script_with(parsed, cwd_lookup, |request| {
-        let _ = open_script_bridge::push_requests(vec![request]);
+        let _ = launch_queue::push_scripts(vec![request]);
     })
 }
 

@@ -85,19 +85,21 @@ pub(super) fn osc52_clipboard_write_event(selection: char, data: &str) -> Option
     (!text.is_empty()).then_some(UserEvent::ClipboardWrite { text })
 }
 
-/// Whether the pane's child exited cleanly, waiting briefly for it to become
-/// observable.
+/// How the pane's child exited, waiting briefly for it to become observable.
 ///
-/// `None` means unknown — the child outlived the wait, or the probe failed.
-/// Callers must not read that as a crash: it decides only that the pane stays
-/// open, never that it closes.
-pub(super) fn observe_child_exit_cleanliness(probe: &PtyChildExitProbe) -> Option<bool> {
+/// `Unknown` means the child outlived the wait, the probe failed, or no status
+/// was recorded. Callers must not read that as a crash: it decides only that
+/// the pane stays open, never that it closes.
+pub(super) fn observe_child_exit_status(
+    probe: &PtyChildExitProbe,
+) -> sonicterm_types::PaneExitStatus {
+    use sonicterm_types::PaneExitStatus;
     let deadline = Instant::now() + CHILD_EXIT_OBSERVE_TIMEOUT;
     loop {
         match probe.has_exited() {
             Ok(true) => {
                 // When: has_exited returns Ok(true), report the child's recorded exit status.
-                return probe.exit_was_clean();
+                return probe.exit_status().unwrap_or(PaneExitStatus::Unknown);
             }
             Ok(false) => {
                 // When: has_exited returns Ok(false), keep polling until the observation deadline.
@@ -105,12 +107,12 @@ pub(super) fn observe_child_exit_cleanliness(probe: &PtyChildExitProbe) -> Optio
             Err(error) => {
                 // When: has_exited returns Err(error), preserve an unknown exit classification.
                 tracing::debug!(%error, "failed to observe pane child exit");
-                return None;
+                return PaneExitStatus::Unknown;
             }
         }
         if Instant::now() >= deadline {
             // When: Instant::now reaches deadline, stop waiting and preserve an unknown result.
-            return None;
+            return PaneExitStatus::Unknown;
         }
         std::thread::sleep(CHILD_EXIT_POLL_INTERVAL);
     }
@@ -149,8 +151,17 @@ pub(super) fn report_pane_exit(
         // When: proxy is None, there is no event-loop recipient for the pane exit.
         return;
     };
-    let was_clean = observe_child_exit_cleanliness(probe);
-    let _ = proxy.send_event(UserEvent::PaneProcessExited { pane_id, was_clean });
+    let status = observe_child_exit_status(probe);
+    let was_clean = clean_flag(&status);
+    let _ = proxy.send_event(UserEvent::PaneProcessExited { pane_id, status, was_clean });
+}
+
+/// `status` as the older clean flag: `None` only when the status is unknown.
+pub(super) fn clean_flag(status: &sonicterm_types::PaneExitStatus) -> Option<bool> {
+    match status {
+        sonicterm_types::PaneExitStatus::Unknown => None,
+        known => Some(known.is_clean()),
+    }
 }
 
 /// How long one synchronized update (DEC 2026) may hold a pane's output before it is released.
@@ -928,6 +939,90 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
 }
 
 impl App {
+    /// Start the PTY for a new pane: the launch's command run directly, or the shell.
+    ///
+    /// A command failure starts nothing else. Its sanitized reason is written
+    /// into the pane's own grid, logged at `warn`, and posted as a
+    /// notification; it never falls back to a shell. Logs name the launch
+    /// kind, the program's file name, the argument count and byte lengths,
+    /// the cwd source and `hold`, never an argument value, a path or a title.
+    pub(super) fn spawn_launch_pty(
+        &self,
+        pane_id: u64,
+        parser: &Arc<Mutex<Parser>>,
+        launch: &super::pane_launch::PaneLaunch,
+        cols: u16,
+        rows: u16,
+        shell_opts: &sonicterm_io::pty::ShellSpawnOpts,
+    ) -> Result<PtyHandle, ()> {
+        let cwd_source = launch.cwd_source.map_or("default", sonicterm_types::CwdSource::as_str);
+        let Some(command) = launch.command.as_ref() else {
+            // When: `command` is absent, the pane runs the configured shell exactly as before.
+            return match PtyHandle::spawn_default_shell(cols, rows, shell_opts.clone()) {
+                Ok(pty) => {
+                    tracing::info!(
+                        target: "sonicterm_app::launch",
+                        pane = pane_id,
+                        kind = launch.kind(),
+                        cwd_source,
+                        hold = launch.hold,
+                        "pane launched"
+                    );
+                    Ok(pty)
+                }
+                Err(error) => {
+                    tracing::error!("failed to spawn pty: {error}");
+                    Err(())
+                }
+            };
+        };
+        let program = command.program_file_name();
+        let spawn = sonicterm_io::pty::CommandSpawn {
+            program: command.program.clone(),
+            args: command.args.clone(),
+            cwd: launch.cwd.clone().or_else(crate::launch_cli::home_dir).unwrap_or_default(),
+        };
+        match PtyHandle::spawn_command(&spawn, cols, rows, shell_opts) {
+            Ok(pty) => {
+                tracing::info!(
+                    target: "sonicterm_app::launch",
+                    pane = pane_id,
+                    kind = launch.kind(),
+                    program = %program,
+                    arg_count = command.args.len(),
+                    cwd_source,
+                    hold = launch.hold,
+                    "pane launched"
+                );
+                let arg_bytes: Vec<usize> = command.args.iter().map(|arg| arg.len()).collect();
+                tracing::debug!(
+                    target: "sonicterm_app::launch",
+                    pane = pane_id,
+                    ?arg_bytes,
+                    "pane command argument byte lengths"
+                );
+                Ok(pty)
+            }
+            Err(error) => {
+                // When: `spawn_command` returns Err(error), whose text names only the file name and rule.
+                let message = error.to_string();
+                tracing::warn!(
+                    target: "sonicterm_app::launch",
+                    pane = pane_id,
+                    program = %program,
+                    reason = %message,
+                    "pane command did not start"
+                );
+                super::pane_exit::write_local_line(parser, &message);
+                if let Some(proxy) = self.event_loop_proxy.as_ref() {
+                    // When: `event_loop_proxy` is set, surface the failure in the notification bubble.
+                    let _ = proxy.send_event(UserEvent::LaunchFailed { message });
+                }
+                Err(())
+            }
+        }
+    }
+
     /// The shell spawn options for a new pane, main or child: the launch's own options, clean
     /// startup under the runtime smoke, and output read timestamps exactly when the pane's frame
     /// counters are on. The gate is fixed by then, so the reader's flag is fixed for its life.
@@ -978,9 +1073,9 @@ impl App {
         // The gate is read before the PTY exists, so its reader stamps reads from the first one.
         let frame_counters = self.pane_frame_counters();
         let shell_opts = self.pane_spawn_opts(launch, frame_counters.is_some());
-        let pty = match PtyHandle::spawn_default_shell(cols, rows, shell_opts) {
+        let pty = match self.spawn_launch_pty(pane_id, &parser, launch, cols, rows, &shell_opts) {
             Ok(pty) => {
-                // When: spawn_default_shell returns Ok(pty), stage any launch draft before the worker starts.
+                // When: spawn_launch_pty returns Ok(pty), stage any launch draft before the worker starts.
                 match launch.draft_for_shell(pty.shell_program_path()) {
                     Ok(Some(draft)) => {
                         Self::queue_pty_input(
@@ -1006,12 +1101,10 @@ impl App {
                 }
                 Some(pty)
             }
-            Err(error) => {
-                tracing::error!("failed to spawn pty: {error}");
-                None
-            }
+            Err(()) => None,
         };
         let mut state = PaneState::new_with_media_pool(parser, pty, &self.inline_media_pool);
+        state.hold_on_exit = launch.hold;
         self.reserve_pane_teardown(&mut state);
         let mut frame_counters = frame_counters;
         state.guard_correlation = self.attach_guard_correlation(pane_id, &mut frame_counters);

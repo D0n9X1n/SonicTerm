@@ -51,7 +51,7 @@ fn a_clean_exit_closes_the_tab_it_emptied() {
     let before = tab_ids(&app);
     assert_eq!(before.len(), 2, "precondition: two tabs seeded");
 
-    app.handle_pane_process_exited(panes[0], Some(true));
+    app.handle_pane_process_exited(panes[0], PaneExitStatus::Code(0));
 
     assert_eq!(
         tab_ids(&app),
@@ -76,7 +76,7 @@ fn an_unclean_exit_holds_its_tab_open() {
     let (mut app, panes) = app_with_tabs(&["first", "second"]);
     let before = tab_ids(&app);
 
-    app.handle_pane_process_exited(panes[0], Some(false));
+    app.handle_pane_process_exited(panes[0], PaneExitStatus::Code(1));
 
     assert_eq!(tab_ids(&app), before, "a non-zero exit must leave every tab exactly as it was");
     // The assertion that matters: holding the tab open is pointless if the
@@ -100,7 +100,7 @@ fn an_unknown_exit_status_holds_its_tab_open() {
     let (mut app, panes) = app_with_tabs(&["first", "second"]);
     let before = tab_ids(&app);
 
-    app.handle_pane_process_exited(panes[0], None);
+    app.handle_pane_process_exited(panes[0], PaneExitStatus::Unknown);
 
     assert_eq!(tab_ids(&app), before, "an unreadable status must not be treated as a clean exit");
     assert!(
@@ -122,7 +122,7 @@ fn a_clean_exit_in_a_split_closes_the_pane_and_keeps_the_tab() {
     assert_ne!(exiting, survivor, "precondition: the split produced a second pane");
     assert_eq!(app.__test_pane_count_in_tab(0), Some(2), "precondition: two panes");
 
-    app.handle_pane_process_exited(exiting, Some(true));
+    app.handle_pane_process_exited(exiting, PaneExitStatus::Code(0));
 
     assert_eq!(tab_count(&app), 1, "the tab still has a live pane, so it must survive");
     assert_eq!(
@@ -154,7 +154,7 @@ fn an_unclean_exit_in_a_split_holds_the_pane_open() {
     app.__test_split_active_right();
     let exiting = app.__test_active_pane_in_tab(0).expect("split focuses the new pane");
 
-    app.handle_pane_process_exited(exiting, Some(false));
+    app.handle_pane_process_exited(exiting, PaneExitStatus::Code(1));
 
     assert_eq!(
         app.__test_pane_count_in_tab(0),
@@ -175,7 +175,7 @@ fn the_last_tab_closing_on_a_clean_exit_takes_its_window_with_it() {
     assert!(!app.__test_main_hidden(), "precondition: the window starts visible");
     assert!(!app.__test_pending_exit(), "precondition: no exit is pending");
 
-    app.handle_pane_process_exited(panes[0], Some(true));
+    app.handle_pane_process_exited(panes[0], PaneExitStatus::Code(0));
 
     assert_eq!(tab_count(&app), 0, "the window's only tab closed");
     assert!(
@@ -204,7 +204,7 @@ fn a_clean_exit_closes_a_child_windows_tab_too() {
     let child_panes = app.__test_child_pane_ids(child).expect("seeded child window");
     assert_eq!(child_panes.len(), 2, "precondition: two child tabs");
 
-    app.handle_pane_process_exited(child_panes[0], Some(true));
+    app.handle_pane_process_exited(child_panes[0], PaneExitStatus::Code(0));
 
     // The TAB count, not the pane count. `close_pty_pane` already scans child
     // windows and removes the `PaneState` on its own, so a pane-map assertion
@@ -234,7 +234,7 @@ fn an_unclean_exit_holds_a_child_windows_tab_open() {
     let child = app.__test_seed_child_window(&["first", "second"]);
     let child_panes = app.__test_child_pane_ids(child).expect("seeded child window");
 
-    app.handle_pane_process_exited(child_panes[0], Some(false));
+    app.handle_pane_process_exited(child_panes[0], PaneExitStatus::Code(1));
 
     assert_eq!(
         app.__test_child_tab_count(child),
@@ -258,7 +258,7 @@ fn an_exit_for_an_already_closed_pane_changes_nothing() {
     app.close_tab_at(0);
     assert_eq!(tab_count(&app), 1, "precondition: the user closed the tab first");
 
-    app.handle_pane_process_exited(panes[0], Some(true));
+    app.handle_pane_process_exited(panes[0], PaneExitStatus::Code(0));
 
     assert_eq!(
         tab_ids(&app),
@@ -269,4 +269,68 @@ fn an_exit_for_an_already_closed_pane_changes_nothing() {
         pane_state_lives(&app, panes[1]),
         "and must not disturb the surviving pane's state on its way through"
     );
+}
+
+/// Every visible character of `pane_id`'s grid, row by row.
+fn pane_text(app: &App, pane_id: u64) -> String {
+    let panes = app.main_panes().expect("main panes");
+    let parser = panes[&pane_id].parser.lock();
+    parser
+        .grid()
+        .rows_iter()
+        .map(|row| row.iter().map(|cell| cell.ch).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `--hold` keeps a pane after a clean exit and shows its status line.
+#[test]
+fn hold_keeps_a_clean_exit_open_with_its_status_line() {
+    let (mut app, panes) = app_with_tabs(&["held", "other"]);
+    app.main_panes_mut().unwrap().get_mut(&panes[0]).unwrap().hold_on_exit = true;
+    let before = tab_ids(&app);
+
+    app.handle_pane_process_exited(panes[0], PaneExitStatus::Code(0));
+
+    assert_eq!(tab_ids(&app), before, "a held pane must survive a clean exit");
+    assert!(pane_state_lives(&app, panes[0]));
+    assert!(pane_text(&app, panes[0]).contains("[process exited with code 0]"));
+}
+
+/// A held exit writes exactly one status line, even when the exit is reported twice.
+#[test]
+fn the_status_line_is_written_once() {
+    let (mut app, panes) = app_with_tabs(&["crashed"]);
+    app.handle_pane_process_exited(panes[0], PaneExitStatus::Signal("SIGKILL".to_string()));
+    app.handle_pane_process_exited(panes[0], PaneExitStatus::Signal("SIGKILL".to_string()));
+    let text = pane_text(&app, panes[0]);
+    assert_eq!(text.matches("[process killed by signal SIGKILL]").count(), 1, "{text}");
+}
+
+/// Each status kind writes its own line into the held pane's grid.
+#[test]
+fn each_status_kind_writes_its_line() {
+    let (mut app, panes) = app_with_tabs(&["code", "unknown"]);
+    app.handle_pane_process_exited(panes[0], PaneExitStatus::Code(1));
+    app.handle_pane_process_exited(panes[1], PaneExitStatus::Unknown);
+    assert!(pane_text(&app, panes[0]).contains("[process exited with code 1]"));
+    assert!(pane_text(&app, panes[1]).contains("[process exit status unknown]"));
+}
+
+/// A clean exit without `--hold` closes the tab before any status line is written.
+#[test]
+fn a_clean_exit_without_hold_writes_nothing_and_closes() {
+    let (mut app, panes) = app_with_tabs(&["first", "second"]);
+    app.handle_pane_process_exited(panes[0], PaneExitStatus::Code(0));
+    assert!(!pane_state_lives(&app, panes[0]));
+}
+
+/// The older clean flag the perf harness reads matches the typed status, `None` only when unknown.
+#[test]
+fn clean_flag_matches_the_typed_status() {
+    use crate::app::spawn_pane::clean_flag;
+    assert_eq!(clean_flag(&PaneExitStatus::Code(0)), Some(true));
+    assert_eq!(clean_flag(&PaneExitStatus::Code(2)), Some(false));
+    assert_eq!(clean_flag(&PaneExitStatus::Signal("SIGTERM".to_string())), Some(false));
+    assert_eq!(clean_flag(&PaneExitStatus::Unknown), None);
 }

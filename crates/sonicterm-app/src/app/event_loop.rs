@@ -486,8 +486,8 @@ impl App {
     pub(super) fn do_user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::MenuAction => self.drain_menubar_actions(event_loop),
-            UserEvent::OpenScripts => {
-                self.drain_open_script_requests();
+            UserEvent::LaunchRequests => {
+                self.drain_launch_requests();
             }
             UserEvent::OsDrag => self.drain_os_drag(),
             UserEvent::DragMoved => {
@@ -533,10 +533,10 @@ impl App {
             UserEvent::UpdateCheckFinished { level, message } => {
                 self.show_notification_for_kind(self.frontmost_kind(), level, message);
             }
-            UserEvent::PaneProcessExited { pane_id, was_clean } => {
-                self.handle_pane_process_exited(pane_id, was_clean);
+            UserEvent::PaneProcessExited { pane_id, status, .. } => {
+                self.handle_pane_process_exited(pane_id, status);
             }
-            UserEvent::ScriptDraftRejected { message } => {
+            UserEvent::LaunchFailed { message } | UserEvent::ScriptDraftRejected { message } => {
                 self.handle_script_draft_rejected(message);
             }
             UserEvent::ClipboardWrite { text } => {
@@ -694,22 +694,39 @@ impl App {
         }
     }
 
-    pub(super) fn drain_open_script_requests(&mut self) -> usize {
+    pub(super) fn drain_launch_requests(&mut self) -> usize {
         if self.main().is_none() {
             // When: no main window exists yet to host a tab; returning before
             // drain() leaves the requests queued for a later pass.
             return 0;
         }
-        let requests = crate::open_script_bridge::drain();
+        let requests = crate::launch_queue::drain();
         let count = requests.len();
         for request in requests {
-            let title = request
-                .launch_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("script")
-                .to_string();
-            self.new_tab_with_launch(title, super::pane_launch::PaneLaunch::for_script(request));
+            match request {
+                sonicterm_types::LaunchRequest::Script(request) => {
+                    let title = request
+                        .launch_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("script")
+                        .to_string();
+                    let launch = super::pane_launch::PaneLaunch::for_script(request);
+                    self.new_tab_with_launch(title, launch);
+                }
+                sonicterm_types::LaunchRequest::Terminal(launch) => {
+                    let tab_title =
+                        sonicterm_types::replace_control_characters(&launch.tab_title());
+                    if let Some(title) = launch.title.as_deref() {
+                        // A launcher's title names the native window as well as the first tab.
+                        self.set_main_window_name(&sonicterm_types::replace_control_characters(
+                            title,
+                        ));
+                    }
+                    let launch = super::pane_launch::PaneLaunch::for_terminal(launch);
+                    self.new_tab_with_launch(tab_title, launch);
+                }
+            }
         }
         if count > 0 && self.main_is_hidden() {
             self.show_main_window();
@@ -717,8 +734,25 @@ impl App {
         count
     }
 
+    /// Name the main window, as the rename command does, and update its native title.
+    fn set_main_window_name(&mut self, name: &str) {
+        let Some(id) = self.main_window_id else {
+            // When: `main_window_id` is unset there is no window to name.
+            return;
+        };
+        let Some(window) = self.windows.get_mut(&id) else {
+            // When: `windows` no longer holds the main id, the title has no target.
+            return;
+        };
+        window.custom_window_name = name.to_string();
+        let title = self.native_window_title(id);
+        if let (Some(native), Some(title)) = (self.windows[&id].window.as_ref(), title) {
+            native.set_title(&title);
+        }
+    }
+
     pub(super) fn seed_initial_tabs(&mut self) {
-        if self.drain_open_script_requests() == 0 {
+        if self.drain_launch_requests() == 0 {
             self.new_tab("shell");
         }
     }

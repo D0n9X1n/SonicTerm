@@ -196,7 +196,7 @@ fn tab_edit_after_a_clean_exit_of_its_tab_changes_nothing() {
     for case in edit_cases() {
         let (mut app, window, tab) = open_tab_editor(case, &["earlier", "edited", "survivor"], 1);
         let pane = app.windows[&window].tab_states[1].active_pane;
-        app.handle_pane_process_exited(pane, Some(true));
+        app.handle_pane_process_exited(pane, sonicterm_types::PaneExitStatus::Code(0));
         let tabs = &app.windows[&window].tabs;
         assert!(
             tabs.tabs().iter().all(|entry| entry.id != tab),

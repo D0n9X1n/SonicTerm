@@ -1207,7 +1207,7 @@ fn parked_pane_exit_adapters_complete_topology_once_for_the_real_owner() {
             let before = park_owner(&mut app, owner);
             park_owner(&mut app, other);
             let other_before = app.windows[&other].redraw.snapshot();
-            app.handle_pane_process_exited(exiting, Some(true));
+            app.handle_pane_process_exited(exiting, sonicterm_types::PaneExitStatus::Code(0));
             let window = &app.windows[&owner];
             assert!(!window.redraw.parked);
             assert_eq!(window.redraw.snapshot().0[RedrawCause::Topology as usize], before + 1);
@@ -1218,7 +1218,7 @@ fn parked_pane_exit_adapters_complete_topology_once_for_the_real_owner() {
                 assert!(window.panes.contains_key(&original));
             }
             let after = window.redraw.snapshot();
-            app.handle_pane_process_exited(exiting, Some(true));
+            app.handle_pane_process_exited(exiting, sonicterm_types::PaneExitStatus::Code(0));
             assert_eq!(
                 app.windows[&owner].redraw.snapshot().0,
                 after.0,

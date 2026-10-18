@@ -136,7 +136,7 @@ impl ShellRunner {
     fn install_bridges(proxy: &EventLoopProxy<UserEvent>) {
         crate::menubar_bridge::install_proxy(proxy.clone());
         crate::os_drag_bridge::install_proxy(proxy.clone());
-        crate::open_script_bridge::install_proxy(proxy.clone());
+        crate::launch_queue::install_proxy(proxy.clone());
     }
 
     fn into_app(self, proxy: EventLoopProxy<UserEvent>) -> App {
