@@ -34,3 +34,9 @@ windows = { workspace = true, features = ["Win32_Security"] }
 # Needed by `PtyHandle::Drop` to send an explicit SIGKILL to the child
 # shell pid before invoking portable-pty's `Child::kill`.
 libc = "0.2"
+
+# Spawns itself through `PtyHandle::spawn_command` and checks the exact argv, so it owns its main.
+[[test]]
+name = "argv_echo"
+path = "tests/argv_echo.rs"
+harness = false

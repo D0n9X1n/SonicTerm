@@ -5,6 +5,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(clippy::min_ident_chars)]
 
+pub mod command_resolve;
 #[cfg(windows)]
 pub mod foreground_proc;
 pub mod proc_info;
