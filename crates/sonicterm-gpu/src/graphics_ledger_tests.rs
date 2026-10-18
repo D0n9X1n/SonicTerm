@@ -120,13 +120,95 @@ fn drawable_bytes_use_the_format_pixel_size() {
     assert_eq!(surface_drawable_bytes(10, 10, wgpu::TextureFormat::Rgba16Float), 800);
 }
 
-/// The rest of the method holding `offset` in `source`: up to the next method-closing brace.
+/// Byte index of the `}` that closes the block open at `start` in `source`, or `None` when the
+/// source ends first.
 ///
-/// `source` must use `\n` line endings; [`hook_violations`] normalizes before calling this, since a
-/// Windows checkout has `\r\n` and the closing-brace pattern would otherwise never match.
-fn method_rest(source: &str, offset: usize) -> &str {
-    let rest = &source[offset..];
-    &rest[..rest.find("\n    }\n").unwrap_or(rest.len())]
+/// Braces are counted by a small lexer that skips `//` and `/* */` comments, string and byte-string
+/// literals (with escapes), raw strings (`r"..."`, `r#"..."#`) and char literals such as `'{'`, so
+/// a brace or a `    }` line inside text never ends a block. Indentation and line endings play no
+/// part. A source that never closes the block returns `None`, so callers fail closed.
+fn block_close(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0_usize;
+    let mut index = start;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        match byte {
+            b'/' if next == Some(b'/') => {
+                // When: `next` starts a line comment, skip to its end of line.
+                index = source[index..].find('\n').map_or(bytes.len(), |end| index + end);
+            }
+            b'/' if next == Some(b'*') => {
+                // When: `next` starts a block comment, skip past its `*/`.
+                index = source[index + 2..].find("*/").map_or(bytes.len(), |end| index + end + 4);
+            }
+            b'"' => index = string_end(bytes, index + 1),
+            b'r' if index == 0 || !is_ident_byte(bytes[index - 1]) => {
+                let hashes = bytes[index + 1..].iter().take_while(|byte| **byte == b'#').count();
+                if bytes.get(index + 1 + hashes) == Some(&b'"') {
+                    // When: `r`, `#`* and `"` open a raw string, skip to its `"` and `#`*.
+                    let closing = format!("\"{}", "#".repeat(hashes));
+                    let body = index + 2 + hashes;
+                    index = source[body..]
+                        .find(&closing)
+                        .map_or(bytes.len(), |end| body + end + closing.len());
+                } else {
+                    index += 1;
+                }
+            }
+            b'\'' if next == Some(b'\\') => {
+                // When: `next` is a backslash, an escaped char literal runs to its closing quote.
+                index = source[index + 2..].find('\'').map_or(bytes.len(), |end| index + end + 3);
+            }
+            b'\'' if bytes.get(index + 2) == Some(&b'\'') => index += 3,
+            b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                if depth == 0 {
+                    // When: `depth` is zero, this brace closes the block the scan started in.
+                    return Some(index);
+                }
+                depth -= 1;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Byte index just past the `"` closing a string whose body starts at `start`, honouring escapes.
+fn string_end(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return index + 1,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Whether `byte` can continue an identifier, so an `r` after it is not a raw-string prefix.
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// The rest of the innermost block holding `offset`, up to its closing brace; `None` when that
+/// brace cannot be found, which every caller reports as a violation rather than reading on.
+fn block_rest(source: &str, offset: usize) -> Option<&str> {
+    block_close(source, offset).map(|close| &source[offset..close])
+}
+
+/// The braced body that follows `anchor_offset` (a `fn` or `impl` header), from its `{` through its
+/// matching `}`; `None` when there is no `{` or the body never closes.
+fn function_body(source: &str, anchor_offset: usize) -> Option<&str> {
+    let open = anchor_offset + source[anchor_offset..].find('{')?;
+    block_close(source, open + 1).map(|close| &source[open..=close])
 }
 
 /// Check every `install` in `source` reaches `record` before its method ends, adding a violation
@@ -140,8 +222,13 @@ fn check_installs_record(
 ) -> usize {
     let offsets: Vec<usize> = source.match_indices(install).map(|(offset, _)| offset).collect();
     for offset in &offsets {
-        if !method_rest(source, *offset).contains(record) {
-            violations.push(format!("{name}: `{install}` at byte {offset} misses `{record}`"));
+        match block_rest(source, *offset) {
+            Some(rest) if rest.contains(record) => {}
+            Some(_) => {
+                violations.push(format!("{name}: `{install}` at byte {offset} misses `{record}`"));
+            }
+            None => violations
+                .push(format!("{name}: the block holding `{install}` at byte {offset} has no end")),
         }
     }
     offsets.len()
@@ -195,15 +282,17 @@ fn hook_violations(sources: [&str; 5]) -> Vec<String> {
         "recovery attaches the candidate pipeline",
     );
     // Attaching reports all three present buffers.
-    let attach =
-        pipeline.find("fn attach_graphics_ledger").map(|offset| method_rest(pipeline, offset));
+    let attach = pipeline
+        .find("fn attach_graphics_ledger")
+        .and_then(|offset| function_body(pipeline, offset));
     for record in
         ["PresentUniform", "self.record_vertex_request();", "self.record_index_request();"]
     {
         require(attach.is_some_and(|body| body.contains(record)), "attach reports its buffers");
     }
     // The drop logs its teardown record, then releases the ledger.
-    let drop = core.find("impl Drop for GpuRenderer").map(|offset| method_rest(core, offset));
+    let drop =
+        core.find("impl Drop for GpuRenderer").and_then(|offset| function_body(core, offset));
     let teardown = drop.and_then(|body| body.find("\"renderer graphics teardown\""));
     let release = drop.and_then(|body| body.find("self.graphics_ledger.release_all();"));
     require(
@@ -321,20 +410,18 @@ const PINNED_HOOKS: [(usize, &str, &str); 25] = [
 
 /// `source` with the first `needle` inside the function opened by the unique `anchor` removed.
 ///
-/// The function ends at its closing brace with either line ending, so the deletion lands in the
-/// same function in an LF and a CRLF copy.
+/// The function's body is found by balanced braces, independent of line endings, so the deletion
+/// lands in the same function in an LF and a CRLF copy. A function whose end cannot be found
+/// panics with its anchor rather than deleting from whatever text follows it.
 fn delete_in_function(source: &str, anchor: &str, needle: &str) -> String {
     assert_eq!(source.matches(anchor).count(), 1, "`{anchor}` must name one function");
     let start = source.find(anchor).expect("anchor present");
-    let body = &source[start..];
-    let end = ["\n    }\n", "\r\n    }\r\n"]
-        .iter()
-        .filter_map(|closing| body.find(closing))
-        .min()
-        .unwrap_or(body.len());
-    let offset = body[..end].find(needle).unwrap_or_else(|| panic!("`{needle}` not in `{anchor}`"));
-    let at = start + offset;
-    format!("{}{}", &source[..at], &source[at + needle.len()..])
+    let body = function_body(source, start)
+        .unwrap_or_else(|| panic!("the end of `{anchor}` cannot be found"));
+    let body_start = start + source[start..].find('{').expect("body opens");
+    let offset = body.find(needle).unwrap_or_else(|| panic!("`{needle}` not in `{anchor}`"));
+    let removed = body_start + offset;
+    format!("{}{}", &source[..removed], &source[removed + needle.len()..])
 }
 
 /// Borrow five owned sources as the guard's string slices.
@@ -373,4 +460,85 @@ fn deleting_any_pinned_hook_fails_the_guard() {
 fn the_guard_catches_every_deletion_in_crlf_sources() {
     let sources = SOURCES.map(|(_, source)| source.replace("\r\n", "\n").replace('\n', "\r\n"));
     assert_guard_catches_every_deletion(sources, "CRLF");
+}
+
+/// Contract: a `    }` line inside a multi-line string does not end a function's scope early, and a
+/// hook in the next function is never credited to this one. Here the install's function lacks the
+/// record and only its neighbour has it, so the guard must report the install.
+#[test]
+fn a_string_holding_a_closing_brace_line_neither_ends_nor_widens_the_scope() {
+    let fixture = r#"
+    fn first(&mut self) {
+        self.frame_texture = frame_texture;
+        let text = "line
+    }
+still the string";
+    }
+
+    fn second(&self) {
+        self.record_frame_texture_request();
+    }
+"#;
+    let mut violations = Vec::new();
+    let installs = "self.frame_texture = frame_texture;";
+    check_installs_record(
+        &mut violations,
+        "fixture",
+        fixture,
+        installs,
+        "record_frame_texture_request()",
+    );
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert!(violations[0].contains("misses"), "{violations:?}");
+
+    // The same function with the record after the string is in scope and passes.
+    let recorded = fixture.replacen(
+        "still the string\";\n    }",
+        "still the string\";\n        self.record_frame_texture_request();\n    }",
+        1,
+    );
+    let mut violations = Vec::new();
+    check_installs_record(
+        &mut violations,
+        "fixture",
+        &recorded,
+        installs,
+        "record_frame_texture_request()",
+    );
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+/// Contract: the guard fails closed when a function's end cannot be found. With the closing brace
+/// missing, the old fallback read on to end of file and credited the next function's hook; the
+/// scan now finds no end and reports a violation.
+#[test]
+fn a_function_without_an_end_is_reported_not_read_to_end_of_file() {
+    let fixture = r#"
+    fn first(&mut self) {
+        self.frame_texture = frame_texture;
+
+    fn second(&self) {
+        self.record_frame_texture_request();
+    }
+"#;
+    let mut violations = Vec::new();
+    check_installs_record(
+        &mut violations,
+        "fixture",
+        fixture,
+        "self.frame_texture = frame_texture;",
+        "record_frame_texture_request()",
+    );
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert!(violations[0].contains("has no end"), "{violations:?}");
+    assert!(function_body(fixture, fixture.find("fn first").unwrap()).is_none());
+}
+
+/// Contract: deleting a hook from a function whose end cannot be found panics with the function's
+/// anchor, rather than deleting the first match in whatever text follows.
+#[test]
+#[should_panic(expected = "the end of `fn first(` cannot be found")]
+fn deleting_from_a_function_without_an_end_panics_with_its_name() {
+    let fixture = "fn first(&mut self) {\n    self.record_frame_texture_request();\n";
+    let _ = delete_in_function(fixture, "fn first(", "self.record_frame_texture_request();");
 }
