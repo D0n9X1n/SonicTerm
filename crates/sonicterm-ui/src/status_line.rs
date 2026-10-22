@@ -195,12 +195,12 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
         ),
         Seg::Link => (UpdateKind::Event, format_link, DefaultClick::None),
         Seg::Sel => (UpdateKind::Event, format_sel, DefaultClick::Action(Action::CopyToClipboard)),
+        Seg::Paste => (UpdateKind::Event, format_paste, DefaultClick::None),
+        Seg::Ime => (UpdateKind::Event, format_ime, DefaultClick::None),
         Seg::Alerts
         | Seg::Input
         | Seg::Clip
         | Seg::PathCheck
-        | Seg::Paste
-        | Seg::Ime
         | Seg::Cpu
         | Seg::Frame
         | Seg::Out
@@ -244,6 +244,21 @@ pub struct StatusLineInputs {
     pub mem: MemInput,
     /// The window's selection size or its last requested copy's result.
     pub sel: Option<SelInput>,
+    /// A paste into the focused pane would be unbracketed at a confirmed prompt.
+    pub paste_raw: bool,
+    /// An input-method problem in this window.
+    pub ime: Option<ImeInput>,
+}
+
+/// What the input-method segment shows; it appears only for a problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImeInput {
+    /// A commit was dropped because copy mode owned the keyboard.
+    DiscardedInCopyMode,
+    /// A composition is in progress and its commit will go to the search field.
+    ToSearch,
+    /// A composition is in progress and its commit will go to the command palette.
+    ToPalette,
 }
 
 /// What the selection segment shows.
@@ -1013,6 +1028,56 @@ fn format_sel(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Formatte
     // Only a live selection has something for the `default` click to copy.
     let default_click = matches!(sel, SelInput::Extent { .. } | SelInput::Capped { .. });
     Some(FormattedSegment { default_click, ..FormattedSegment::plain(parts, spoken) })
+}
+
+/// The paste segment: `Paste: ⚠ raw` while a paste would be unbracketed at a confirmed prompt.
+fn format_paste(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    if !inputs.paste_raw {
+        // When: `paste_raw` is false, bracketed paste is on or the pane is not at a prompt.
+        return None;
+    }
+    let raw = env.i18n.translate("status-value-raw");
+    let parts = vec![
+        name_part(env, "status-name-paste"),
+        StatusPart::new(format!("{} {raw}", symbol(env.icons, "⚠", "!")), StatusTone::Warn),
+    ];
+    Some(FormattedSegment::plain(parts, env.i18n.translate("status-spoken-paste-raw")))
+}
+
+/// The input-method segment: a dropped commit, or a composition bound away from the pane.
+fn format_ime(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let ime = inputs.ime?;
+    let (text, tone, spoken_key) = match ime {
+        ImeInput::DiscardedInCopyMode => (
+            format!(
+                "{} {}",
+                symbol(env.icons, "⚠", "!"),
+                env.i18n.translate("status-value-discarded-copy-mode")
+            ),
+            StatusTone::Warn,
+            "status-spoken-ime-discarded",
+        ),
+        ImeInput::ToSearch => (
+            format!(
+                "{} {}",
+                symbol(env.icons, "→", "->"),
+                env.i18n.translate("status-value-search")
+            ),
+            StatusTone::Value,
+            "status-spoken-ime-search",
+        ),
+        ImeInput::ToPalette => (
+            format!(
+                "{} {}",
+                symbol(env.icons, "→", "->"),
+                env.i18n.translate("status-value-palette")
+            ),
+            StatusTone::Value,
+            "status-spoken-ime-palette",
+        ),
+    };
+    let parts = vec![name_part(env, "status-name-ime"), StatusPart::new(text, tone)];
+    Some(FormattedSegment::plain(parts, env.i18n.translate(spoken_key)))
 }
 
 /// Formatter of a catalog id whose segment has not landed: shows nothing.

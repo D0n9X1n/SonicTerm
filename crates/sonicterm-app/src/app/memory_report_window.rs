@@ -841,6 +841,7 @@ fn report_window_state(
         path_probe: super::path_target::PathProbeState::default(),
         status_strip: None,
         sel_status: Default::default(),
+        ime_discarded_at: None,
         hover_detection: super::path_target::HoverDetectionCache::default(),
         notification: None,
         hidden: false,

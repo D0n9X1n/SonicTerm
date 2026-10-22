@@ -283,7 +283,7 @@ impl StatusSegmentId {
                     "status-spoken-sel",
                 ),
                 Self::Ime => {
-                    (Group::Input, Left, 500, Prot::None, Sensitivity::Parts, "status-spoken-ime")
+                    (Group::Input, Left, 500, Prot::None, Sensitivity::None, "status-spoken-ime")
                 }
                 Self::Scroll => {
                     (Group::Core, Left, 400, Prot::None, Sensitivity::None, "status-spoken-scroll")
@@ -361,14 +361,22 @@ impl StatusSegmentId {
             home_side,
             default_priority,
             default_show,
-            // The link segment has no idle fact to show, so it is active-only.
-            allows_always: self != Self::Link,
-            clickable: true,
+            // Link, paste and ime have no idle fact to show, so they are active-only.
+            allows_always: !matches!(self, Self::Link | Self::Paste | Self::Ime),
+            // Paste and ime only explain input; a click has nothing to act on.
+            clickable: !matches!(self, Self::Paste | Self::Ime),
             sensitivity,
             protection,
             implemented: matches!(
                 self,
-                Self::Health | Self::Mem | Self::Mode | Self::Scroll | Self::Link | Self::Sel
+                Self::Health
+                    | Self::Mem
+                    | Self::Mode
+                    | Self::Scroll
+                    | Self::Link
+                    | Self::Sel
+                    | Self::Paste
+                    | Self::Ime
             ),
             spoken_name_key,
         }
@@ -500,6 +508,30 @@ impl Default for SelSettings {
     }
 }
 
+/// When the paste segment warns about unbracketed paste.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasteWarning {
+    /// Bracketed paste is off at a confirmed prompt on the primary screen.
+    #[default]
+    WhenOff,
+    /// Never warn.
+    Never,
+}
+
+/// Input-method segment settings beyond the common keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImeSettings {
+    /// Seconds `discarded (copy mode)` stays shown after a commit was dropped.
+    pub hold_secs: u64,
+}
+
+impl Default for ImeSettings {
+    fn default() -> Self {
+        Self { hold_secs: 8 }
+    }
+}
+
 /// One configured segment after presets and overrides are applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSegment {
@@ -532,6 +564,10 @@ pub struct ResolvedStatusLine {
     pub mem: MemSettings,
     /// Selection segment settings.
     pub sel: SelSettings,
+    /// When the paste segment warns.
+    pub paste: PasteWarning,
+    /// Input-method segment settings.
+    pub ime: ImeSettings,
 }
 
 impl ResolvedStatusLine {
@@ -554,6 +590,8 @@ pub const UPDATE_INTERVAL_RANGE_MS: std::ops::RangeInclusive<u64> = 500..=60_000
 pub const MEM_THRESHOLD_RANGE_MIB: std::ops::RangeInclusive<u64> = 1..=1_048_576;
 /// Bounds of the selection segment's `copied_secs`.
 pub const COPIED_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=10;
+/// Bounds of the input-method segment's `hold_secs`.
+pub const HOLD_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=60;
 /// Highest accepted segment priority.
 pub const MAX_PRIORITY: u16 = 1000;
 
@@ -563,12 +601,18 @@ const COMMON_KEYS: &[&str] = &["show", "priority", "click"];
 const MEM_KEYS: &[&str] = &["show_trend", "sparkline", "warn_mib", "critical_mib"];
 /// Extra keys of the selection segment table.
 const SEL_KEYS: &[&str] = &["copied_secs"];
+/// Extra keys of the paste segment table.
+const PASTE_KEYS: &[&str] = &["paste"];
+/// Extra keys of the input-method segment table.
+const IME_KEYS: &[&str] = &["hold_secs"];
 
 /// Keys a segment table accepts beyond [`COMMON_KEYS`].
 fn segment_keys(id: StatusSegmentId) -> &'static [&'static str] {
     match id {
         StatusSegmentId::Mem => MEM_KEYS,
         StatusSegmentId::Sel => SEL_KEYS,
+        StatusSegmentId::Paste => PASTE_KEYS,
+        StatusSegmentId::Ime => IME_KEYS,
         _ => &[],
     }
 }
@@ -650,6 +694,8 @@ impl StatusLineConfig {
             ..MemSettings::default()
         };
         let mut sel = SelSettings::default();
+        let mut paste = PasteWarning::default();
+        let mut ime = ImeSettings::default();
         let mut segments = Vec::new();
         for (side, list_name, ids) in lists {
             for id in ids {
@@ -705,6 +751,24 @@ impl StatusLineConfig {
             if id == StatusSegmentId::Sel {
                 apply_sel_keys(&mut sel, table).context("status_line.segment.sel")?;
             }
+            if id == StatusSegmentId::Paste {
+                if let Some(value) = table.get("paste") {
+                    paste = value.clone().try_into().context(
+                        "status_line.segment.paste: paste must be \"when_off\" or \"never\"",
+                    )?;
+                }
+            }
+            if id == StatusSegmentId::Ime {
+                if let Some(value) = table.get("hold_secs") {
+                    ime.hold_secs = value
+                        .as_integer()
+                        .and_then(|secs| u64::try_from(secs).ok())
+                        .filter(|secs| HOLD_SECS_RANGE.contains(secs))
+                        .context(
+                            "status_line.segment.ime: hold_secs must be an integer in 1..=60",
+                        )?;
+                }
+            }
         }
         if mem.critical_mib < mem.warn_mib {
             // `critical_mib < warn_mib`, the red level would sit below the amber one.
@@ -722,6 +786,8 @@ impl StatusLineConfig {
             segments,
             mem,
             sel,
+            paste,
+            ime,
         })
     }
 

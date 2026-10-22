@@ -92,10 +92,16 @@ fn pane_facts_are_kept_only_while_the_strip_is_shown() {
     let mut app = app_with_strip(false);
     let _ = app.sync_status_line(Instant::now());
     let window_id = WindowId::dummy();
-    app.observe_status_pane(window_id, StatusPaneFacts { mouse_captured: true, scroll_lines: 3 });
+    app.observe_status_pane(
+        window_id,
+        StatusPaneFacts { mouse_captured: true, scroll_lines: 3, ..Default::default() },
+    );
     assert!(app.status_line.pane_facts.is_empty());
     app.toggle_status_line();
-    app.observe_status_pane(window_id, StatusPaneFacts { mouse_captured: true, scroll_lines: 3 });
+    app.observe_status_pane(
+        window_id,
+        StatusPaneFacts { mouse_captured: true, scroll_lines: 3, ..Default::default() },
+    );
     assert_eq!(app.status_line.pane_facts.len(), 1);
     let _ = app.sync_status_line(Instant::now());
     assert!(app.status_line.pane_facts.is_empty(), "facts of a closed window are dropped");
@@ -468,4 +474,63 @@ fn requested_copy_records_its_result() {
     app.__test_set_clipboard_write_failure(true);
     app.copy_selection_for_kind(crate::app::FrontmostKind::Main);
     assert_eq!(app.main().unwrap().sel_status.last_copy.map(|(_, copied)| copied), Some(false));
+}
+
+/// The raw-paste warning needs all of: `when_off`, bracketed paste off, the primary screen, and a
+/// confirmed prompt. `Unknown` (no OSC 133) and `Running` never warn.
+#[test]
+fn paste_warns_only_at_a_confirmed_prompt_without_bracketed_paste() {
+    use sonicterm_cfg::status_line::PasteWarning;
+    let plain = StatusPaneFacts::default();
+    assert!(paste_is_raw(PasteWarning::WhenOff, plain, CommandPhase::Prompt));
+    assert!(!paste_is_raw(PasteWarning::Never, plain, CommandPhase::Prompt));
+    assert!(!paste_is_raw(PasteWarning::WhenOff, plain, CommandPhase::Unknown));
+    let running = CommandPhase::Running { started_at: Instant::now() };
+    assert!(!paste_is_raw(PasteWarning::WhenOff, plain, running));
+    let bracketed = StatusPaneFacts { bracketed_paste: true, ..plain };
+    assert!(!paste_is_raw(PasteWarning::WhenOff, bracketed, CommandPhase::Prompt));
+    let alternate = StatusPaneFacts { alt_screen: true, ..plain };
+    assert!(!paste_is_raw(PasteWarning::WhenOff, alternate, CommandPhase::Prompt));
+}
+
+/// A dropped commit shows for `hold` and wakes once at its end; a composition shows only when
+/// its commit goes to search or the palette, never for an ordinary composition into the pane.
+#[test]
+fn ime_shows_a_dropped_commit_then_only_non_pane_compositions() {
+    let now = Instant::now();
+    let hold = Duration::from_secs(8);
+    let mut discarded_at = Some(now);
+    assert_eq!(
+        ime_input(&mut discarded_at, false, ImeRoute::CopyMode, now, hold),
+        (Some(ImeInput::DiscardedInCopyMode), Some(now + hold))
+    );
+    assert_eq!(ime_input(&mut discarded_at, false, ImeRoute::Pane, now + hold, hold), (None, None));
+    assert_eq!(discarded_at, None, "the warning is consumed at its deadline");
+    let composing = |route| ime_input(&mut None, true, route, now, hold).0;
+    assert_eq!(composing(ImeRoute::Search), Some(ImeInput::ToSearch));
+    assert_eq!(composing(ImeRoute::Palette), Some(ImeInput::ToPalette));
+    assert_eq!(composing(ImeRoute::Pane), None);
+    assert_eq!(ime_input(&mut None, false, ImeRoute::Search, now, hold).0, None, "not composing");
+}
+
+/// The shared route sends a commit in copy mode nowhere and records the drop; without copy mode
+/// the same commit reaches the pane and records nothing.
+#[test]
+fn copy_mode_commit_is_dropped_and_recorded() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane_id = app.__test_seed_tab("main");
+    let main_id = app.main_window_id.unwrap();
+    app.__test_enable_pty_write_log();
+    app.main_mut().unwrap().copy_mode = Some(CopyModeState::new_at((0, 0)));
+    assert_eq!(app.ime_route(main_id), Some(ImeRoute::CopyMode));
+    app.handle_window_ime(main_id, winit::event::Ime::Commit("你好".into()));
+    assert_eq!(app.__test_pty_write_log(), Vec::new(), "copy mode drops the commit");
+    assert!(app.main().unwrap().ime_discarded_at.is_some());
+    let window = app.main_mut().unwrap();
+    window.copy_mode = None;
+    window.ime_discarded_at = None;
+    assert_eq!(app.ime_route(main_id), Some(ImeRoute::Pane));
+    app.handle_window_ime(main_id, winit::event::Ime::Commit("你好".into()));
+    assert_eq!(app.__test_pty_write_log(), vec![(pane_id, "你好".as_bytes().to_vec())]);
+    assert_eq!(app.main().unwrap().ime_discarded_at, None);
 }

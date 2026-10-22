@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use sonicterm_cfg::status_line::{ResolvedStatusLine, StatusLineConfig, StatusSegmentId};
+use sonicterm_cfg::status_line::{
+    PasteWarning, ResolvedStatusLine, StatusLineConfig, StatusSegmentId,
+};
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_logging::MemoryMetric;
@@ -19,15 +21,17 @@ use sonicterm_ui::selection::{
     selection_extent_counted, Selection, SelectionExtent, SELECTION_EXTENT_MAX_ROWS,
 };
 use sonicterm_ui::status_line::{
-    build_view, sanitize_link_text, HealthInput, LinkInput, MemHistory, MemInput, ModeInput,
-    NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick, SegmentHandler, SelInput,
-    StatusLineInputs,
+    build_view, sanitize_link_text, HealthInput, ImeInput, LinkInput, MemHistory, MemInput,
+    ModeInput, NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick, SegmentHandler,
+    SelInput, StatusLineInputs,
 };
 use winit::window::WindowId;
 
 use super::path_target::{PathKind, PathOpenDecision, ProbeStatus};
 use super::redraw::RedrawCause;
+use super::window_keyboard::{ime_route_for, ImeRoute};
 use super::window_state::WindowState;
+use super::CommandPhase;
 use super::{resize_panes_to_rects, App};
 
 /// A path check still running after this long is shown as `checking`;
@@ -42,6 +46,10 @@ pub(crate) struct StatusPaneFacts {
     pub(crate) mouse_captured: bool,
     /// Lines the view sits above the live screen.
     pub(crate) scroll_lines: u64,
+    /// The program enabled bracketed paste.
+    pub(crate) bracketed_paste: bool,
+    /// The pane shows its alternate screen.
+    pub(crate) alt_screen: bool,
 }
 
 impl StatusPaneFacts {
@@ -53,6 +61,8 @@ impl StatusPaneFacts {
         Self {
             mouse_captured: parser.mouse_tracking() != sonicterm_vt::vt::MouseTracking::Off,
             scroll_lines: live_top.saturating_sub(view_top),
+            bracketed_paste: parser.bracketed_paste_enabled(),
+            alt_screen: grid.is_alt(),
         }
     }
 }
@@ -239,6 +249,46 @@ fn sel_input(
             SelInput::Extent { lines: extent.lines, chars: extent.chars }
         }
     });
+    (input, None)
+}
+
+/// Whether a paste into the focused pane would be unbracketed at a confirmed prompt on the primary
+/// screen. `Unknown` and `Running` are never a prompt, so a pane without OSC 133 never warns.
+pub(crate) fn paste_is_raw(
+    warning: PasteWarning,
+    facts: StatusPaneFacts,
+    phase: CommandPhase,
+) -> bool {
+    warning == PasteWarning::WhenOff
+        && !facts.bracketed_paste
+        && !facts.alt_screen
+        && phase == CommandPhase::Prompt
+}
+
+/// What the `ime` segment shows for a window, and when that ends by itself: a commit copy mode
+/// dropped within `hold`, else a composition whose commit will not reach the pane.
+fn ime_input(
+    discarded_at: &mut Option<Instant>,
+    composing: bool,
+    route: ImeRoute,
+    now: Instant,
+    hold: Duration,
+) -> (Option<ImeInput>, Option<Instant>) {
+    if let Some(at) = *discarded_at {
+        // When: discarded_at is set, the dropped commit shows until `hold` has passed.
+        let until = at + hold;
+        if now < until {
+            // When: now is before until, the warning still shows and its end is the wake.
+            return (Some(ImeInput::DiscardedInCopyMode), Some(until));
+        }
+        *discarded_at = None;
+    }
+    let input = match route {
+        ImeRoute::Search if composing => Some(ImeInput::ToSearch),
+        ImeRoute::Palette if composing => Some(ImeInput::ToPalette),
+        // An ordinary composition into the pane, or no composition, is not a problem.
+        _ => None,
+    };
     (input, None)
 }
 
@@ -566,7 +616,14 @@ impl App {
             !matches!(snapshot.phase, sonicterm_gpu::recovery::RecoveryPhase::Active)
         });
         let locale = self.config.locale.clone();
+        let palette_window = self
+            .command_palette
+            .is_open()
+            .then(|| self.palette_attached_window.or(self.main_window_id))
+            .flatten();
         let Self { windows, status_line: state, i18n, .. } = self;
+        let ime_shown = state.resolved.segment(StatusSegmentId::Ime).is_some();
+        let ime_hold = Duration::from_secs(state.resolved.ime.hold_secs);
         let sel_shown = state.resolved.segment(StatusSegmentId::Sel).is_some();
         let copied_for = Duration::from_secs(state.resolved.sel.copied_secs);
         state.pane_facts.retain(|window_id, _| windows.contains_key(window_id));
@@ -626,7 +683,26 @@ impl App {
                 // When: sel_shown is false, no list has `sel`, so nothing is formatted or woken for it.
                 None
             };
+            let ime = if ime_shown {
+                let route = ime_route_for(window, palette_window == Some(*window_id));
+                let composing = window.ime.is_composing();
+                let (ime, ime_wake) =
+                    ime_input(&mut window.ime_discarded_at, composing, route, now, ime_hold);
+                if let Some(wake) = ime_wake {
+                    next_wake = Some(next_wake.map_or(wake, |next| next.min(wake)));
+                }
+                ime
+            } else {
+                // When: ime_shown is false, no list has `ime`, so nothing is formatted or woken for it.
+                None
+            };
             let facts = state.pane_facts.get(window_id).copied().unwrap_or_default();
+            let phase = window
+                .tab_states
+                .get(window.tabs.active_index())
+                .and_then(|tab| window.panes.get(&tab.active_pane))
+                .map_or(CommandPhase::Unknown, |pane| pane.command_state.phase);
+            let paste_raw = paste_is_raw(state.resolved.paste, facts, phase);
             let Some(renderer) = window.renderer.as_ref() else {
                 // When: `renderer` is gone, the window cannot show a strip.
                 continue;
@@ -654,6 +730,8 @@ impl App {
                 },
                 mem: state.mem,
                 sel,
+                paste_raw,
+                ime,
             };
             let built = BuiltFrom { generation: state.generation, inputs };
             if state.built.get(window_id) == Some(&built) {

@@ -63,6 +63,8 @@ fn every_catalog_id_is_registered_with_a_glyph_free_spoken_name() {
             mode: ModeInput { copy: true, broadcast_receivers: Some(3), mouse_captured: true },
             scroll_lines: 340,
             sel: Some(SelInput::Capped { rows: 12_345 }),
+            paste_raw: true,
+            ime: Some(ImeInput::DiscardedInCopyMode),
             health: HealthInput {
                 config: Some(ReloadFailure { line: Some(12) }),
                 render: RenderHealth::SoftwareAdapter,
@@ -140,6 +142,8 @@ fn core_segments_format_as_name_value_and_chips() {
         },
         link: Some(LinkInput::from_url("https://github.com/D0n9X1n/SonicTerm/pull/1670")),
         sel: None,
+        paste_raw: false,
+        ime: None,
     };
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3COPYMOUSE");
@@ -227,6 +231,8 @@ fn ascii_icons_change_symbols_only() {
         },
         link: None,
         sel: Some(SelInput::CopyFailed),
+        paste_raw: false,
+        ime: None,
     };
     let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Sel).unwrap(), "Sel: x copy failed");
@@ -736,4 +742,48 @@ fn sel_shows_lines_chars_capped_rows_and_copy_results() {
     let inputs = StatusLineInputs { sel: Some(SelInput::Copied), ..idle_inputs() };
     let hidden = build_view(&developer(), true, &inputs, &i18n, NumberStyle::POINT);
     assert_eq!(shown(&hidden, StatusSegmentId::Sel).unwrap(), "Sel: ✓ copied");
+}
+
+#[test]
+fn paste_and_ime_show_only_problems() {
+    // `paste` warns only for a raw paste; `ime` names a dropped commit or a non-pane destination,
+    // and neither has a click. `ime` is not in the developer preset, so it is listed here.
+    let i18n = translator("en");
+    let mut resolved = developer();
+    resolved.segments.push(ResolvedSegment {
+        id: StatusSegmentId::Ime,
+        side: StatusSide::Left,
+        show: ShowMode::Active,
+        priority: 500,
+        click: ClickBinding::Default,
+    });
+    let quiet = build_view(&resolved, false, &idle_inputs(), &i18n, NumberStyle::POINT);
+    assert_eq!(shown(&quiet, StatusSegmentId::Paste), None);
+    assert_eq!(shown(&quiet, StatusSegmentId::Ime), None);
+    let cases = [
+        (
+            ImeInput::DiscardedInCopyMode,
+            "IME: ⚠ discarded (copy mode)",
+            "input discarded in copy mode",
+        ),
+        (ImeInput::ToSearch, "IME: → search", "composing into search"),
+        (ImeInput::ToPalette, "IME: → palette", "composing into the command palette"),
+    ];
+    for (ime, text, spoken) in cases {
+        let inputs = StatusLineInputs { paste_raw: true, ime: Some(ime), ..idle_inputs() };
+        let view = build_view(&resolved, true, &inputs, &i18n, NumberStyle::POINT);
+        let segment =
+            view.segments.iter().find(|segment| segment.id == StatusSegmentId::Ime).unwrap();
+        assert_eq!(
+            (text_of(&segment.parts).as_str(), segment.spoken.value.as_str()),
+            (text, spoken)
+        );
+        assert_eq!(segment.click, None);
+        let paste =
+            view.segments.iter().find(|segment| segment.id == StatusSegmentId::Paste).unwrap();
+        assert_eq!(text_of(&paste.parts), "Paste: ⚠ raw");
+        assert_eq!(paste.parts[1].tone, StatusTone::Warn);
+        assert_eq!(paste.spoken.value, "paste is unbracketed and may run lines");
+        assert_eq!(paste.click, None);
+    }
 }

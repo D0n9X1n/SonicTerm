@@ -73,7 +73,14 @@ fn protection_and_sensitivity_follow_the_catalog() {
     assert!(!Seg::Link.meta().allows_always, "link has no idle text");
     assert_eq!(Seg::Mem.meta().default_show, ShowMode::Always);
     let implemented: Vec<Seg> = Seg::ALL.into_iter().filter(|id| id.meta().implemented).collect();
-    assert_eq!(implemented, [Seg::Health, Seg::Mem, Seg::Mode, Seg::Link, Seg::Sel, Seg::Scroll]);
+    assert_eq!(
+        implemented,
+        [Seg::Health, Seg::Mem, Seg::Mode, Seg::Link, Seg::Paste, Seg::Sel, Seg::Ime, Seg::Scroll]
+    );
+    for id in [Seg::Paste, Seg::Ime] {
+        assert!(!id.meta().allows_always && !id.meta().clickable, "{id:?} only explains input");
+        assert_eq!(id.meta().sensitivity, Sensitivity::None, "{id:?} shows no typed text");
+    }
 }
 
 #[test]
@@ -84,7 +91,7 @@ fn default_table_is_the_developer_preset_and_off() {
     assert_eq!(resolved, parse("preset = \"developer\"\n").resolve().unwrap());
     assert_eq!(
         side_ids(&resolved, StatusSide::Left),
-        [StatusSegmentId::Mode, StatusSegmentId::Scroll]
+        [StatusSegmentId::Mode, StatusSegmentId::Scroll, StatusSegmentId::Paste]
     );
     assert_eq!(
         side_ids(&resolved, StatusSide::Center),
@@ -222,6 +229,11 @@ fn invalid_values_fail_the_load() {
         "[status_line.segment.mem]\nwarn_mib = 3000\n",
         "[status_line.segment.mem]\nsparkline = \"yes\"\n",
         "[status_line.segment.sel]\ncopied_secs = 0\n",
+        "[status_line.segment.paste]\npaste = \"when_on\"\n",
+        "[status_line.segment.paste]\nshow = \"always\"\n",
+        "[status_line.segment.paste]\nclick = \"show_memory_usage\"\n",
+        "[status_line.segment.ime]\nhold_secs = 0\n",
+        "[status_line.segment.ime]\nhold_secs = 61\n",
         "[status_line.segment.sel]\ncopied_secs = 11\n",
         "[status_line.segment.sel]\ncopied_secs = \"2\"\n",
         "[status_line.segment]\nmem = 3\n",
@@ -290,4 +302,20 @@ fn sel_copied_secs_overrides_and_is_a_known_key() {
     );
     assert_eq!(config.resolve().unwrap().sel, SelSettings { copied_secs: 5 });
     assert_eq!(config.unknown_keys(), ["status_line.segment.mem.copied_secs"]);
+}
+
+#[test]
+fn paste_and_ime_keys_resolve() {
+    // `paste` keeps only `when_off` (default) and `never`; `hold_secs` sets the discarded hold.
+    let defaults = StatusLineConfig::default().resolve().unwrap();
+    assert_eq!(
+        (defaults.paste, defaults.ime),
+        (PasteWarning::WhenOff, ImeSettings { hold_secs: 8 })
+    );
+    let config = parse(
+        "[status_line.segment.paste]\npaste = \"never\"\n[status_line.segment.ime]\nhold_secs = 3\n",
+    );
+    let resolved = config.resolve().unwrap();
+    assert_eq!((resolved.paste, resolved.ime), (PasteWarning::Never, ImeSettings { hold_secs: 3 }));
+    assert!(config.unknown_keys().is_empty());
 }
