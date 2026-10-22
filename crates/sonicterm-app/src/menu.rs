@@ -230,6 +230,12 @@ pub fn blueprint() -> MenuBlueprint {
                     binding: Action(sonicterm_cfg::keymap::Action::ToggleTabBar),
                 },
                 Item {
+                    title: "Toggle Status Line",
+                    key: "",
+                    mods: None,
+                    binding: Action(sonicterm_cfg::keymap::Action::ToggleStatusLine),
+                },
+                Item {
                     title: "Reset Zoom",
                     key: "0",
                     mods: Cmd,

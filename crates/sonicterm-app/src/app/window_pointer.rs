@@ -347,6 +347,14 @@ impl App {
         // cell height so trackpad scrolls match font size.
         let cursor_pos = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
         let (cursor_x, cursor_y) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
+        if self
+            .main()
+            .and_then(|window| window.status_strip.as_ref())
+            .is_some_and(|strip| strip.contains(cursor_y))
+        {
+            // When: the `status_strip` band `contains(cursor_y)`, the wheel is over the strip and no pane scrolls.
+            return;
+        }
         let cell_h = self
             .main_renderer()
             .map(|renderer| renderer.cell_size().1)
@@ -430,6 +438,15 @@ impl App {
     }
 
     /// Route a main-window left-button press or release to primary-pointer interaction.
+    /// Apply main-window notification and status line chrome to a left press; returns whether
+    /// the press was consumed before pane input, selection or tab-bar routing.
+    pub(super) fn handle_main_left_press_chrome(&mut self, win_id: WindowId) -> bool {
+        let cursor_pos = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
+        let (pointer_x, pointer_y) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
+        self.dismiss_notification_at(FrontmostKind::Main, pointer_x, pointer_y)
+            || self.press_status_line(win_id, pointer_x, pointer_y)
+    }
+
     pub(super) fn handle_main_left_mouse_input(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -456,13 +473,8 @@ impl App {
                         },
                     });
                 }
-                let cursor_pos = self.main().map(|window| window.cursor_pos).unwrap_or((0.0, 0.0));
-                if self.dismiss_notification_at(
-                    FrontmostKind::Main,
-                    cursor_pos.0 as f32,
-                    cursor_pos.1 as f32,
-                ) {
-                    // When: dismiss_notification_at returns true, consume the press before terminal interaction.
+                if self.handle_main_left_press_chrome(win_id) {
+                    // When: `handle_main_left_press_chrome` consumed the press, no pane or tab bar sees it.
                     return;
                 }
                 if let Some(window) = self.main_mut() {

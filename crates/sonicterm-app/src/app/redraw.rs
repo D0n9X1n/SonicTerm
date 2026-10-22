@@ -34,8 +34,9 @@ pub(super) enum RedrawCause {
     Visibility,
     DeviceRecovered,
     Topology,
+    StatusLine,
 }
-const CAUSES: usize = 11;
+const CAUSES: usize = 12;
 
 /// Captured cause generations; newer causes cannot be cleared by an older attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,6 +468,8 @@ pub(super) enum DueCause {
     SurfaceProbe,
     /// The renderer's promoted image atlas has had no renderable media for 30 s; released without a frame.
     ImageAtlasRelease,
+    /// A status line sample or pending path check is due; the sync requests any frame itself.
+    StatusLine,
 }
 
 /// A headless window's stand-in for the renderer's interval release: its deadline and how often it ran.
@@ -1305,6 +1308,7 @@ impl App {
                     let _ = self.quit_hold.on_tick(now);
                 }
                 DueCause::Memory
+                | DueCause::StatusLine
                 | DueCause::PointerMotion
                 | DueCause::GpuRecovery
                 | DueCause::Smoke => {

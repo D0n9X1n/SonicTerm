@@ -3,6 +3,7 @@ use sonicterm_render_model::inputs::{HoveredUrlCells, HoveredUrlSpan};
 
 fn hovered(active: bool) -> HoveredUrl {
     HoveredUrl {
+        label: None,
         cells: HoveredUrlCells::new(
             7,
             [

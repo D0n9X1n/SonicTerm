@@ -137,6 +137,10 @@ pub enum Action {
     // UI chrome
     /// Toggle visibility of the tab bar.
     ToggleTabBar,
+    /// Toggle the status line strip between the panes and the tab bar.
+    ToggleStatusLine,
+    /// Toggle hiding of sensitive status line content (screen sharing).
+    ToggleStatusLineSensitive,
     /// Rename the active tab title body.
     RenameTab,
     /// Pick a custom accent color for the active tab.

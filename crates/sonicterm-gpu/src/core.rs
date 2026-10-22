@@ -49,6 +49,7 @@ use crate::device_errors::{
     run_isolated_validation, DeviceErrorSnapshot, DeviceErrorState, DeviceStateWaker, GpuFaultKind,
 };
 use sonicterm_render_model::boundary::ui::drag_chip::{DragChipOverlay, DragChipVisual};
+use sonicterm_render_model::boundary::ui::status_line::{PlacedSegment, StatusLineView};
 use sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size;
 
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
@@ -2382,6 +2383,15 @@ pub struct GpuRenderer {
     /// View → Toggle Tab Bar menu action; when `false`, [`Self::top_inset`]
     /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
     tab_bar_visible: bool,
+    /// Whether the status line strip between the panes and the tab bar is shown.
+    status_line_visible: bool,
+    /// Segments the strip may present; replaced by the App before a frame.
+    status_line_view: StatusLineView,
+    /// Fitted strip keyed by view pixels, width and chrome font, so an
+    /// unchanged strip is not reshaped every frame.
+    status_line_fit: Option<(u64, Vec<PlacedSegment>)>,
+    /// Hit boxes of the segments the last drawn frame presented.
+    status_line_presented: Vec<crate::status_strip::PresentedStatusSegment>,
     /// Reserved height (logical px) above the tab bar for the OS native
     /// titlebar. Kept at zero while SonicTerm uses the normal OS titlebar with a
     /// bottom-pinned tab bar.
@@ -3393,6 +3403,10 @@ impl GpuRenderer {
             software_frame: None,
             render_timing_label: role,
             tab_bar_visible: true,
+            status_line_visible: false,
+            status_line_view: StatusLineView::default(),
+            status_line_fit: None,
+            status_line_presented: Vec::new(),
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
             last_missing_chrome_chars: Vec::new(),
@@ -3537,13 +3551,14 @@ impl GpuRenderer {
     /// scale_factor` separately so window padding still applies when the
     /// bar is off.
     pub fn bottom_inset(&self) -> f32 {
-        if self.tab_bar_visible {
+        let tab_bar = if self.tab_bar_visible {
             self.tab_bar_logical_height()
         } else {
             // When: `!tab_bar_visible` — the bar reserves nothing. Window
             // padding is applied separately by the caller.
             0.0
-        }
+        };
+        tab_bar + self.status_line_height()
     }
 
     /// Y offset (in raster px) at which the tab bar layout should be
@@ -3605,6 +3620,89 @@ impl GpuRenderer {
     /// Whether the tab bar is currently shown.
     pub fn tab_bar_visible(&self) -> bool {
         self.tab_bar_visible
+    }
+
+    /// Raster-px height of the status line strip; 0 while it is hidden. It
+    /// follows the font size and scale factor, so zoom and DPI changes refit it.
+    pub fn status_line_height(&self) -> f32 {
+        if self.status_line_visible {
+            crate::status_strip::status_line_height(self.font_size, self.scale_factor)
+        } else {
+            // When: `!status_line_visible`, the strip reserves no rows.
+            0.0
+        }
+    }
+
+    /// Raster-px top edge of the strip: directly above the tab bar, or at
+    /// the bottom edge when the tab bar is hidden.
+    pub fn status_line_top(&self) -> f32 {
+        (self.config.height as f32 - self.bottom_inset()).max(0.0)
+    }
+
+    /// Show or hide the strip. Returns `true` when visibility changed, so the
+    /// caller refits panes to the new bottom inset.
+    pub fn set_status_line_visible(&mut self, visible: bool) -> bool {
+        if self.status_line_visible == visible {
+            // When: `status_line_visible == visible`, the geometry is unchanged.
+            return false;
+        }
+        self.status_line_visible = visible;
+        self.status_line_fit = None;
+        self.status_line_presented.clear();
+        self.last_frame_key = None;
+        self.last_pane_layout.clear();
+        true
+    }
+
+    /// Whether the strip is shown.
+    pub fn status_line_visible(&self) -> bool {
+        self.status_line_visible
+    }
+
+    /// Replace the strip's segments. Returns `true` when its pixels change, so
+    /// the caller requests a frame; that frame damages only the strip band.
+    pub fn set_status_line_view(&mut self, view: StatusLineView) -> bool {
+        if self.status_line_view == view {
+            // When: the view is identical, there is nothing to redraw.
+            return false;
+        }
+        // A pixel change reaches the frame key as `status_hash`, which damages only the band.
+        let pixels_changed = self.status_line_view.pixel_hash != view.pixel_hash;
+        self.status_line_view = view;
+        pixels_changed
+    }
+
+    /// The segments the strip may present.
+    pub fn status_line_view(&self) -> &StatusLineView {
+        &self.status_line_view
+    }
+
+    /// The visible strip's band and the segments the last drawn frame presented; `None` while hidden.
+    pub fn status_line_hit(&self) -> Option<crate::status_strip::StripHit> {
+        self.status_line_visible.then(|| crate::status_strip::StripHit {
+            top: self.status_line_top(),
+            height: self.status_line_height(),
+            segments: self.status_line_presented.clone(),
+        })
+    }
+
+    /// Whether raster-px `y` falls inside the visible strip band.
+    pub fn status_line_contains(&self, y: f32) -> bool {
+        let top = self.status_line_top();
+        self.status_line_visible && y >= top && y < top + self.status_line_height()
+    }
+
+    /// The presented segment under raster-px `(x, y)`, from the last drawn frame.
+    pub fn status_segment_at(
+        &self,
+        x: f32,
+        y: f32,
+    ) -> Option<&crate::status_strip::PresentedStatusSegment> {
+        if !self.status_line_contains(y) {
+            // When: `(x, y)` is outside the band, no segment is under it.
+            return None;
+        }
+        crate::status_strip::segment_at(&self.status_line_presented, x)
     }
 
     /// Update the requested LCD subpixel coverage order without rebuilding fonts or atlases.
@@ -6235,6 +6333,11 @@ impl GpuRenderer {
                     width: self.config.width,
                     height: self.config.height,
                     tab_hash,
+                    status_hash: if self.status_line_visible {
+                        self.status_line_view.pixel_hash
+                    } else {
+                        0
+                    },
                     viewport_top_abs,
                     cursor_shape: self.cursor_shape as u8,
                     cursor_blink: self.cursor_blink,
@@ -6280,6 +6383,9 @@ impl GpuRenderer {
                 scrollbar_mode: self.scrollbar_mode,
                 degraded: self.software_render_degrade,
                 tab_bar_top: self.tab_bar_visible.then(|| self.tab_bar_y_offset()),
+                status_band: self
+                    .status_line_visible
+                    .then(|| (self.status_line_top(), self.status_line_height())),
                 scale: self.scale_factor,
                 previous_recolor: self.last_recolor,
             },
@@ -7175,6 +7281,74 @@ impl GpuRenderer {
         // -------- Tab bar ---------------------------------------------------
         // The insertion gap below opens 8 px at the current drop slot when a
         // drag is active over this bar.
+        // -------- Status line strip ----------------------------------------
+        if self.status_line_visible {
+            // The strip is on: draw its band and fitted segments above the tab bar.
+            use std::hash::{Hash, Hasher};
+            let strip_palette = self.chrome_caches.palette.palette_for(theme);
+            let colors = crate::status_strip::StatusColors::resolve(
+                theme,
+                self.tab_active_fg,
+                self.tab_inactive_fg,
+                &strip_palette,
+            );
+            let geometry = crate::status_strip::StripGeometry {
+                top: self.status_line_top(),
+                height: self.status_line_height(),
+                screen: (sw, sh),
+                scale_factor: self.scale_factor,
+                title_raster_px: self.tab_title_font.raster_px(),
+            };
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (
+                self.status_line_view.pixel_hash,
+                sw.to_bits(),
+                geometry.text_px().to_bits(),
+                self.tab_title_font.key(),
+                self.tab_title_font.fallback_epoch(),
+            )
+                .hash(&mut hasher);
+            let fit_key = hasher.finish();
+            let mut strip_rasterizer = self.tab_title_font.stack().cloned();
+            let stale = self.status_line_fit.as_ref().is_none_or(|(key, _)| *key != fit_key);
+            if let (true, Some(stack), Some(rasterizer)) =
+                (stale, self.tab_title_font.stack(), strip_rasterizer.as_mut())
+            {
+                // The view, width or font changed: refit with the chrome font.
+                let placed = crate::status_strip::fit_strip(
+                    &self.status_line_view,
+                    &geometry,
+                    stack,
+                    rasterizer,
+                    &mut self.glyph_atlas,
+                );
+                self.status_line_fit = Some((fit_key, placed));
+            }
+            let placed: &[PlacedSegment] =
+                self.status_line_fit.as_ref().map_or(&[], |(_, placed)| placed.as_slice());
+            crate::status_strip::emit_strip(
+                placed,
+                &geometry,
+                &colors,
+                self.tab_title_font.stack(),
+                strip_rasterizer.as_mut(),
+                &mut self.glyph_atlas,
+                &mut *quads,
+                &mut *glyph_instances,
+            );
+            self.status_line_presented = placed
+                .iter()
+                .filter_map(|segment| {
+                    let view = self.status_line_view.segments.get(segment.index)?;
+                    Some(crate::status_strip::PresentedStatusSegment {
+                        id: view.id,
+                        x: segment.left,
+                        width: segment.width,
+                        click: view.click.clone(),
+                    })
+                })
+                .collect();
+        }
         // Title glyphs can reach above the padded band, so their ink is measured from here.
         let tab_glyph_start = glyph_instances.len();
         if self.tab_bar_visible {

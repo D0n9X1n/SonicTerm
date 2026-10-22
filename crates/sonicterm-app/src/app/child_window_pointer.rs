@@ -31,6 +31,10 @@ impl App {
             // click dismissed a toast rather than reaching the grid.
             return true;
         }
+        if self.press_status_line(win_id, cursor_pos.0 as f32, cursor_pos.1 as f32) {
+            // When: `press_status_line` consumed the press inside the strip, no pane or tab bar sees it.
+            return true;
+        }
         let (cursor_x, cursor_y) = self
             .windows
             .get(&win_id)
@@ -197,6 +201,10 @@ impl App {
     ) {
         // The hovered pane's tracking mode takes precedence over screen-specific wheel fallbacks.
         let (cursor_x, cursor_y) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+        if child.status_strip.as_ref().is_some_and(|strip| strip.contains(cursor_y)) {
+            // When: the `status_strip` band `contains(cursor_y)`, the wheel is over the strip and no pane scrolls.
+            return;
+        }
         let cell_h = child
             .renderer
             .as_ref()

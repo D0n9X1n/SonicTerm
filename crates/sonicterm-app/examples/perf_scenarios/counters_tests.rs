@@ -121,6 +121,9 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "hover_rows_read",
             "path_probes_submitted",
             "quick_select_rows_scanned",
+            "status_line_samples",
+            "status_line_wakes",
+            "status_line_redraws",
             "about_to_wait_ms",
             "user_event_ms",
             "new_events_ms",
@@ -761,6 +764,9 @@ const NEWER_SOURCES: &[&str] = &[
     "hover_rows_read",
     "path_probes_submitted",
     "quick_select_rows_scanned",
+    "status_line_samples",
+    "status_line_wakes",
+    "status_line_redraws",
 ];
 
 #[test]

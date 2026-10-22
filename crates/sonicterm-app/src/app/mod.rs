@@ -466,6 +466,7 @@ mod selection_gesture;
 pub use selection_gesture::next_click_count;
 use selection_gesture::{PointerCell, PointerGesture, PointerGestureOwner};
 mod session;
+mod status_line;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
 mod shared_gpu;
@@ -878,6 +879,8 @@ pub struct App {
     /// `true`. Exposed via [`Self::tab_bar_visible`] so the renderer
     /// + hit-test code can read it on each frame.
     pub(super) tab_bar_visible: bool,
+    /// Status line strip: session toggles, memory sampler, reload errors and per-window pane facts.
+    pub(super) status_line: status_line::StatusLineState,
     /// Broadcast-input mode. When enabled, bytes typed into `source_pane`
     /// are mirrored into matching receiver panes after the source PTY write.
     pub(super) broadcast: BroadcastState,

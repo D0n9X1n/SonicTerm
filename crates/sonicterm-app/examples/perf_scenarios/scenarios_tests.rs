@@ -81,8 +81,10 @@ fn catalog_lists_twelve_scenarios_with_their_variants() {
     // `atlas-retry` runs only in the counters set; perf-compare enforces it.
     assert_eq!(
         find("S1").unwrap().variants,
-        ["default", "gdi", "wgpu", "role-exit", "atlas-retry"]
+        ["default", "gdi", "wgpu", "role-exit", "atlas-retry", "status-line"]
     );
+    // `status-line` runs the default plan with the status line on in the scratch config.
+    assert_eq!(find("S12").unwrap().variants, ["default", "status-line"]);
     // S11 adds `release`, whose run cap and plan are pinned by their own tests.
     assert_eq!(find("S5").unwrap().variants, ["default", "gdi", "wgpu"]);
     for (variant, presentation) in [
@@ -531,10 +533,11 @@ fn image_release_variant_waits_for_media_free_holds_and_reshows() {
 
 #[test]
 fn run_caps_list_only_where_a_scenario_declares_them() {
-    // `--list` carries `run_caps` only for S1, S2, S6 and S11: S1/atlas-retry at 2, S2/flood at 2 (it
-    // rebalances the PR budget; a release comparison runs it in full), S6/rest at 2, S11/release at 1
-    // and the Windows presenter variants at 2.
-    assert_eq!(find("S1").unwrap().run_caps, [("atlas-retry", 2)]);
+    // `--list` carries `run_caps` only for S1, S2, S6, S11 and S12: S1/atlas-retry at 2, S2/flood at 2
+    // (it rebalances the PR budget; a release comparison runs it in full), S6/rest at 2, S11/release at
+    // 1, the Windows presenter variants at 2, and both status-line variants at 1.
+    assert_eq!(find("S1").unwrap().run_caps, [("atlas-retry", 2), ("status-line", 1)]);
+    assert_eq!(find("S12").unwrap().run_caps, [("status-line", 1)]);
     assert_eq!(find("S6").unwrap().run_caps, [("rest", 2)]);
     assert_eq!(find("S2").unwrap().variants, ["default", "flood"]);
     assert_eq!(find("S2").unwrap().run_caps, [("flood", 2)]);
@@ -543,11 +546,13 @@ fn run_caps_list_only_where_a_scenario_declares_them() {
     let value: serde_json::Value = serde_json::from_str(&list_json()).unwrap();
     for entry in value["scenarios"].as_array().unwrap() {
         if entry["id"] == "S1" {
-            assert_eq!(entry["run_caps"], serde_json::json!({"atlas-retry": 2}));
+            assert_eq!(entry["run_caps"], serde_json::json!({"atlas-retry": 2, "status-line": 1}));
         } else if entry["id"] == "S2" {
             assert_eq!(entry["run_caps"], serde_json::json!({"flood": 2}));
         } else if entry["id"] == "S6" {
             assert_eq!(entry["run_caps"], serde_json::json!({"rest": 2}));
+        } else if entry["id"] == "S12" {
+            assert_eq!(entry["run_caps"], serde_json::json!({"status-line": 1}));
         } else if entry["id"] == "S11" {
             assert_eq!(entry["run_caps"], serde_json::json!({"release": 1, "gdi": 2, "wgpu": 2}));
         } else {
@@ -639,6 +644,7 @@ const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S1/default", "idle", "hold", None),
     ("S1/gdi", "idle", "hold", None),
     ("S1/role-exit", "idle", "hold", None),
+    ("S1/status-line", "idle", "hold", None),
     ("S1/wgpu", "idle", "hold", None),
     ("S10/default", "idle", "hold", None),
     ("S10/default", "stream", "sustained", None),
@@ -657,6 +663,9 @@ const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S12/default", "covered", "hold", None),
     ("S12/default", "print", "transition", Some("sentinel-parsed")),
     ("S12/default", "uncovered", "hold", None),
+    ("S12/status-line", "covered", "hold", None),
+    ("S12/status-line", "print", "transition", Some("sentinel-parsed")),
+    ("S12/status-line", "uncovered", "hold", None),
     ("S2/default", "idle", "hold", None),
     ("S2/default", "typing", "sustained", None),
     ("S2/flood", "idle", "hold", None),
@@ -690,6 +699,32 @@ const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S9/default", "idle", "hold", None),
     ("S9/default", "print", "transition", Some("sentinel-parsed")),
 ];
+
+/// A status line variant requests the same grid as its default variant, and that grid plus the
+/// strip fits below the macOS runner's 43-row screen clamp, so the ref without the strip and the
+/// ref with it measure the same terminal grid and the pair-grid check compares like for like.
+#[test]
+fn status_line_variants_request_their_default_grid_below_the_screen_clamp() {
+    const CLAMPED_ROWS: f32 = 43.0;
+    for id in ["S1", "S12"] {
+        for short in [false, true] {
+            let strip = plan(id, "status-line", short).unwrap();
+            let base = plan(id, "default", short).unwrap();
+            assert_eq!(strip.window_rows, base.window_rows, "{id}");
+            assert_eq!(strip.window_rows, Some(STRIP_SAFE_ROWS), "{id}");
+        }
+    }
+    let font_size = 13.0;
+    let row_px = font_size * 1.3;
+    let strip_px = sonicterm_gpu::status_strip::status_line_height(font_size, 1.0);
+    let strip_rows = strip_px / row_px;
+    assert!(f32::from(STRIP_SAFE_ROWS) + strip_rows < CLAMPED_ROWS - 1.0, "{strip_rows}");
+    assert_eq!(
+        plan("S1", "atlas-retry", true).unwrap().window_rows,
+        None,
+        "its fixture fills 70 rows"
+    );
+}
 
 /// Every catalog plan, on each host and at each length on its own, holds exactly its variant's contract phases,
 /// each once, with the contract's kind and, for a transition, its endpoint. A phase missing from one host or
@@ -745,5 +780,65 @@ fn every_planned_phase_has_its_contract_kind_and_endpoint() {
     assert_eq!(
         (STARTUP_KIND, STARTUP_ENDPOINT.name()),
         (PhaseKind::Transition, "first-present-then-about-to-wait")
+    );
+}
+
+/// Only the `status-line` variants turn the status line on, and their plans are otherwise the
+/// default plans, so a comparison measures the strip and nothing else.
+#[test]
+fn status_line_variants_differ_from_default_only_by_the_strip() {
+    for id in ["S1", "S12"] {
+        for short in [false, true] {
+            let strip = plan(id, "status-line", short).unwrap();
+            let base = plan(id, "default", short).unwrap();
+            assert!(strip.status_line && !base.status_line, "{id}");
+            assert_eq!(
+                (strip.roles, strip.setup, strip.steps),
+                (base.roles, base.setup, base.steps),
+                "{id}"
+            );
+        }
+    }
+    assert!(all_plans()
+        .iter()
+        .filter(|plan| plan.status_line)
+        .all(|plan| plan.variant == "status-line"));
+}
+
+/// The strip's idle contract per phase: cadence-bound samples and wakes, redraws only on a changed
+/// sample, one resume sample after uncover, and no sampling while occlusion was delivered.
+#[test]
+fn status_line_progress_checks_each_phase() {
+    let deltas = |samples, wakes, redraws| StatusLineDeltas { samples, wakes, redraws };
+    assert!(status_line_progress("idle", 5_000, false, deltas(3, 3, 3)).is_ok());
+    assert!(
+        status_line_progress("idle", 5_000, false, deltas(4, 3, 0)).is_err(),
+        "more samples than the cadence"
+    );
+    assert!(
+        status_line_progress("idle", 5_000, false, deltas(3, 9, 0)).is_err(),
+        "a wake without a sample"
+    );
+    assert!(
+        status_line_progress("idle", 5_000, false, deltas(1, 1, 3)).is_err(),
+        "redraws without samples"
+    );
+    assert!(
+        status_line_progress("covered", 90_000, true, deltas(1, 1, 0)).is_ok(),
+        "one sample before delivery"
+    );
+    assert!(status_line_progress("covered", 90_000, true, deltas(2, 2, 0)).is_err());
+    assert!(
+        status_line_progress("covered", 90_000, false, deltas(45, 45, 0)).is_ok(),
+        "no occlusion to pause on"
+    );
+    assert!(
+        status_line_progress("uncovered", 5_000, false, deltas(0, 0, 0)).is_err(),
+        "the resume sample"
+    );
+    assert!(status_line_progress("uncovered", 5_000, false, deltas(2, 2, 1)).is_ok());
+    assert!(
+        status_line_progress("print", 0, false, deltas(9, 9, 9)).is_ok(),
+        "other phases are not checked"
     );
 }

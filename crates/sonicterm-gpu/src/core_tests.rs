@@ -76,6 +76,7 @@ fn revision_plan(id: u64, revision: u64) -> FramePlan {
             scrollbar_mode: ScrollbarMode::Never,
             degraded: false,
             tab_bar_top: None,
+            status_band: None,
             scale: 1.0,
             previous_recolor: crate::cursor::RecolorRecord::default(),
         },
@@ -4632,6 +4633,7 @@ fn scrolled_back_cache_plan(dirty_live_rows: Vec<usize>) -> FramePlan {
         scrollbar_mode: ScrollbarMode::Never,
         degraded: false,
         tab_bar_top: None,
+        status_band: None,
         scale: 1.0,
         previous_recolor: crate::cursor::RecolorRecord::default(),
     };
@@ -6127,6 +6129,7 @@ fn fallback_facts() -> FrameFacts {
         scrollbar_mode: ScrollbarMode::Never,
         degraded: false,
         tab_bar_top: None,
+        status_band: None,
         scale: 1.0,
         previous_recolor: crate::cursor::RecolorRecord::default(),
     }
@@ -7072,6 +7075,7 @@ fn policy_plan(
         scrollbar_mode: ScrollbarMode::Never,
         degraded: false,
         tab_bar_top: None,
+        status_band: None,
         scale: 1.0,
         previous_recolor: crate::cursor::RecolorRecord::default(),
     };

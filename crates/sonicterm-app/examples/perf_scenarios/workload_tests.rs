@@ -209,6 +209,8 @@ const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
     ("S1 atlas-retry short", "f17352b1a7ac0623741485790348964943a48fcaea4129aa5cafea90be7daf9d"),
     ("S1 default full", "edbe606ddd384910eb1da472407c41ea22dfbe76e4328017a831cc47042f83c6"),
     ("S1 default short", "e0f2554d5d2cd7cd9db6a15f9fa3086652357ac3088181b86996174afe2e1359"),
+    ("S1 status-line full", "bfb67f7e9fc276d6ed80ba04eeb5edc2e146bed297864d93e0971d756868414f"),
+    ("S1 status-line short", "3b0ef7c0353dca150660dd2f5e68dd0afe5490b18f7a4e97cde134b50010324f"),
     ("S1 gdi full", "922fa48f7c0b81b136e107ede7f96feea700eaf36fb7cafe41e880ec913d4d5d"),
     ("S1 gdi short", "52697ce9881d23f19d5935e6e7f9b27d4b77ac6fcdacdb025045cb1dc22e7d67"),
     ("S1 role-exit full", "a5601180eb49ced355e02fa921b73910cd4cc32c19a5039a81614d446b5a6869"),
@@ -229,6 +231,8 @@ const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
     ("S11 wgpu short", "a34fc1428ba1444d714aa603ed670d7c88e3c852a51fbc6bb1997b80392fb47d"),
     ("S12 default full", "7a95a0b1b682cc2c75c9f198861af487908e966af93abfc1ee800e375b3ee433"),
     ("S12 default short", "12e58739e0e173d693595f72b1915631fe532349fbb3e33b726d372e36c88a77"),
+    ("S12 status-line full", "b984ba5b5085b58c3e26b7699fdb76c8b4fb84f33f8c36644c2030b0dc0c14b0"),
+    ("S12 status-line short", "24657fbb29b89bd13535177b112fe57182873abb125dbf311c3e5ad9ead561eb"),
     ("S2 default full", "910c0fc83d8cdae5a3feb69d07809cfceeda5cd3501371fd89f2be6e654d5e23"),
     ("S2 default short", "cda27e9cdf2161c513c001158abe51c1206e5a309e5e1872d697a242c7b0de68"),
     ("S2 flood full", "62ac538f1cf8f4356e8a874bdef2347ac5171181548e5103616249c109ea4930"),
@@ -484,8 +488,9 @@ fn scratch_config_loads_strictly_with_pinned_values() {
     use sonicterm_logging::config::LogLevel;
     let dir = scratch_dir("config");
     let scratch = dir.to_str().unwrap();
-    for (scenario, laps, level, scrollback) in
-        [("S1", false, LogLevel::Info, 1_000), ("S7", true, LogLevel::Debug, 10_000)]
+    // S1 requests the status line comparisons' 40 rows; S7 keeps the harness's 70.
+    for (scenario, laps, level, scrollback, rows) in
+        [("S1", false, LogLevel::Info, 1_000, 40), ("S7", true, LogLevel::Debug, 10_000, 70)]
     {
         let path = dir.join("sonicterm.toml");
         std::fs::write(
@@ -494,7 +499,7 @@ fn scratch_config_loads_strictly_with_pinned_values() {
         )
         .unwrap();
         let config = sonicterm_cfg::config::Config::load_strict(&path).unwrap();
-        assert_eq!((config.window.cols, config.window.rows), (250, 70));
+        assert_eq!((config.window.cols, config.window.rows), (250, rows));
         assert_eq!((config.font.family.as_str(), config.font.size), ("Rec Mono St.Helens", 13.0));
         assert_eq!(config.logging.level, level);
         assert_eq!(config.terminal.shell, Some(format!("{scratch}/workload/role.sh")));
@@ -658,7 +663,7 @@ fn windows_config_names_the_harness_as_the_shell() {
     let config = sonicterm_cfg::config::Config::load_strict(&path).unwrap();
     assert_eq!(config.terminal.shell.as_deref(), Some(harness));
     std::fs::remove_dir_all(&dir).unwrap();
-    let posix = "[window]\ncols = 250\nrows = 70\n\n\
+    let posix = "[window]\ncols = 250\nrows = 40\n\n\
                  [font]\nfamily = \"Rec Mono St.Helens\"\nsize = 13.0\n\n\
                  [logging]\nlevel = \"info\"\n\n\
                  [terminal]\nshell = '/tmp/perf-test/workload/role.sh'\nscrollback = 1000\n";
@@ -1931,4 +1936,16 @@ fn run_steps_prints_the_rest_fixture_then_streams_inside_its_region() {
     );
     assert!(streamed.lines().all(|line| line.ends_with("UTC 1970") || line.contains("UTC")));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Only a `status-line` plan's scratch config turns the status line on.
+#[test]
+fn status_line_plans_turn_the_strip_on_in_the_config() {
+    let strip = crate::scenarios::plan("S1", "status-line", true).unwrap();
+    let base = crate::scenarios::plan("S1", "default", true).unwrap();
+    let with_strip = config_toml_with_shell(&strip, "/bin/sh", false);
+    let without = config_toml_with_shell(&base, "/bin/sh", false);
+    assert!(with_strip.ends_with("\n[status_line]\nenabled = true\n"), "{with_strip}");
+    assert!(!without.contains("[status_line]"));
+    assert_eq!(with_strip.trim_end_matches("\n[status_line]\nenabled = true\n"), without);
 }

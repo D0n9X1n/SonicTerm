@@ -214,12 +214,14 @@ jobs:
       # S1/atlas-retry and S6/rest run twice per side (--list run_caps). A release comparison runs them uncapped.
       # S6/rest joins S7-S4, the shard with the shortest set. Its added time is not estimated here: the
       # exact-head run, read with scripts/perf-critical-path.py, is the measurement.
+      # S1/status-line and S12/status-line join S7-S4 too, one run per side in each set (--list run_caps):
+      # nominally about 1 min for S1 and 2 min for S12, not measured; the exact-head run is the measurement.
       matrix:
         include:
           - platform: macOS
             runner: macos-14
             shard: S7-S4
-            scenarios: S7 S4 S1/atlas-retry S6/rest
+            scenarios: S7 S4 S1/atlas-retry S6/rest S1/status-line S12/status-line
             laps: ""
           - platform: macOS
             runner: macos-14
@@ -411,13 +413,14 @@ jobs:
       # S9-S10. S2/flood's cap of 2 short runs saves about 3.8 min there; a release comparison runs it
       # uncapped. S9-S10 measured 22.6 (run 37147065934); S9's laps set, two runs a side, adds about 0.4.
       # S6/rest joins S2-S10sync. Its added time is not estimated here: the exact-head run, read with
-      # scripts/perf-critical-path.py, is the measurement.
+      # scripts/perf-critical-path.py, is the measurement. S1/status-line and S12/status-line join S7, the
+      # one-scenario shard, one run per side in each set: nominally about 1 and 2 min, not measured.
       matrix:
         include:
           - platform: Windows
             runner: windows-latest
             shard: S7
-            scenarios: S7
+            scenarios: S7 S1/status-line S12/status-line
             laps: ""
           - platform: Windows
             runner: windows-latest

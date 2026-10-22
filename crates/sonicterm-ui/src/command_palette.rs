@@ -1181,6 +1181,8 @@ pub fn action_display_name(action: &Action) -> String {
         Action::SetDefaultHandlers => "SetDefaultHandlers".into(),
         Action::ApplyTheme(name) => format!("ApplyTheme({name})"),
         Action::ToggleTabBar => "ToggleTabBar".into(),
+        Action::ToggleStatusLine => "ToggleStatusLine".into(),
+        Action::ToggleStatusLineSensitive => "ToggleStatusLineSensitive".into(),
         Action::RenameTab => "RenameTab".into(),
         Action::RenameWindow => "RenameWindow".into(),
         Action::UpdateTabColor => "UpdateTabColor".into(),
@@ -1272,6 +1274,8 @@ pub fn palette_actions() -> Vec<Action> {
         Action::SaveCurrentSettings,
         // UI chrome
         Action::ToggleTabBar,
+        Action::ToggleStatusLine,
+        Action::ToggleStatusLineSensitive,
         Action::RenameTab,
         Action::UpdateTabColor,
         // Window

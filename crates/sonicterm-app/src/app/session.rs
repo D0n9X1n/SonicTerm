@@ -224,6 +224,7 @@ impl App {
             os_drag_bars: Arc::new(os_drag::TabBarRegistry::default()),
             os_drag_source: None,
             tab_bar_visible: true,
+            status_line: Default::default(),
             broadcast: BroadcastState::Off,
             quit_hold: quit_hold::QuitHold::new(),
             on_resumed: None,

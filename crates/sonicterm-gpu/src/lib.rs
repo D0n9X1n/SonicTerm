@@ -62,6 +62,7 @@ pub mod row_quad_cache;
 pub(crate) mod software_frame;
 #[cfg(target_os = "windows")]
 pub(crate) mod software_windows;
+pub mod status_strip;
 /// Legacy alpha-only text pipeline retained for source compatibility.
 pub mod text_pipeline;
 /// WezTerm-style final presentation pipeline. This is the single wgpu draw

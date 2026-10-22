@@ -733,6 +733,23 @@ fn new_window_size_fallback_tracks_configured_rows_and_columns() {
     );
 }
 
+/// An enabled status line adds its own height to the initial window, with or without the tab
+/// bar, so a window opened with `[window]` rows keeps that many terminal rows.
+#[test]
+fn configured_window_size_adds_the_status_line_when_enabled() {
+    let mut config = Config::default();
+    let without = configured_window_size(&config, true);
+    config.status_line.enabled = true;
+    let strip = f64::from(sonicterm_gpu::status_strip::status_line_height(config.font.size, 1.0));
+    assert!(strip >= 20.0);
+    assert_eq!(configured_window_size(&config, true).height, without.height + strip);
+    assert_eq!(configured_window_size(&config, true).width, without.width);
+    config.status_line.enabled = false;
+    let bare = configured_window_size(&config, false);
+    config.status_line.enabled = true;
+    assert_eq!(configured_window_size(&config, false).height, bare.height + strip);
+}
+
 #[test]
 fn broadcast_render_flags_include_fixed_source_and_exclude_unrelated_panes() {
     // Visual membership includes the fixed source without changing delivery or following focus.

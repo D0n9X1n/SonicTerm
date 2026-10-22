@@ -70,12 +70,17 @@ pub(crate) fn config_toml(plan: &Plan, scratch: &str, laps: bool) -> String {
 pub(crate) fn config_toml_with_shell(plan: &Plan, shell: &str, laps: bool) -> String {
     let level = if laps { "debug" } else { "info" };
     let scrollback = plan.scrollback_rows;
-    let config = format!(
-        "[window]\ncols = {GRID_COLS}\nrows = {GRID_ROWS}\n\n\
+    let rows = plan.window_rows.map_or(GRID_ROWS, usize::from);
+    let mut config = format!(
+        "[window]\ncols = {GRID_COLS}\nrows = {rows}\n\n\
          [font]\nfamily = \"{FONT_FAMILY}\"\nsize = {FONT_SIZE}\n\n\
          [logging]\nlevel = \"{level}\"\n\n\
          [terminal]\nshell = '{shell}'\nscrollback = {scrollback}\n"
     );
+    if plan.status_line {
+        // A base without the status line ignores the table, so both sides run the same config.
+        config.push_str("\n[status_line]\nenabled = true\n");
+    }
     // Only the presenter variants set a mode, so every other config stays byte-identical.
     let mode = match plan.presentation {
         Presentation::Configured => return config,

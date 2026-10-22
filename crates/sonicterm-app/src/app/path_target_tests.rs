@@ -3434,6 +3434,7 @@ fn completed_probe_waits_for_fresh_hover_without_reprobing() {
         app.apply_target_hover(
             window,
             Some(CellTargetSnapshot {
+                label: None,
                 pane_id: key.pane_id,
                 hover_cells: None,
                 display: "./file".into(),
@@ -3461,6 +3462,7 @@ fn completed_probe_cannot_authorize_changed_content() {
     app.apply_target_hover(
         window,
         Some(CellTargetSnapshot {
+            label: None,
             pane_id: key.pane_id,
             hover_cells: None,
             display: "./file".into(),
@@ -3487,6 +3489,7 @@ fn completed_probe_ignores_old_epochs_and_clears_on_leave() {
     app.handle_path_probe_finished(openable_result(current));
     app.handle_path_probe_finished(openable_result(old));
     let target = CellTargetSnapshot {
+        label: None,
         pane_id: key.pane_id,
         hover_cells: None,
         display: "./file".into(),
@@ -3532,6 +3535,7 @@ fn local_path_preview_requires_current_authorization() {
     let mut key = probe_key("/work/source.rs", 0);
     key.window_id = window;
     let target = CellTargetSnapshot {
+        label: None,
         pane_id: key.pane_id,
         hover_cells: None,
         display: "./file".into(),
@@ -3580,6 +3584,7 @@ fn unresolved_local_path_preview_is_hidden() {
         app.apply_target_hover(
             window,
             Some(CellTargetSnapshot {
+                label: None,
                 pane_id: key.pane_id,
                 hover_cells: None,
                 display: "AM     3595 setup-windows-cairo.ps1".into(),
@@ -3592,6 +3597,7 @@ fn unresolved_local_path_preview_is_hidden() {
     app.apply_target_hover(
         window,
         Some(CellTargetSnapshot {
+            label: None,
             pane_id: 0,
             hover_cells: None,
             display: "file://remote/missing".into(),
@@ -4113,6 +4119,7 @@ fn hover_probe_key(app: &mut App, window: WindowId, key: &PathProbeKey) {
     app.apply_target_hover(
         window,
         Some(CellTargetSnapshot {
+            label: None,
             pane_id: key.pane_id,
             hover_cells: None,
             display: "./file".into(),
@@ -7309,5 +7316,39 @@ fn windows_posix_path_across_rows_keeps_the_single_row_decision() {
     assert_eq!(
         kind(target_after(30, 12, &wrapped, spans[0].row, 3)),
         kind(target_after(60, 12, &single, 0, 3))
+    );
+}
+
+/// Seed a child window, size its pane to `cols` x `rows`, write `output`, and return the label
+/// captured for the cell at `(row, col)`.
+fn captured_label(output: &str, cols: u16, rows: u16, row: u16, col: u16) -> Option<LinkLabel> {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["label"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    app.cell_target_at(window, pane, row, col).unwrap().label
+}
+
+/// An OSC 8 link's visible text is captured whole, across a recorded wrap, and compared by the
+/// status line; one that touches the view's top or bottom row is not read whole.
+#[test]
+fn osc8_label_is_captured_with_its_completeness() {
+    let link = |label: &str| format!("\x1b]8;;https://evil.example/\x1b\\{label}\x1b]8;;\x1b\\");
+    let inside = captured_label(&format!("\r\n{}", link("bank.example")), 40, 6, 1, 2).unwrap();
+    assert_eq!(inside, LinkLabel { text: "bank.example".into(), complete: true });
+    let wrapped =
+        captured_label(&format!("\r\n{}", link("https://bank.example/")), 12, 8, 1, 2).unwrap();
+    assert_eq!(wrapped, LinkLabel { text: "https://bank.example/".into(), complete: true });
+    let top_row = captured_label(&link("bank.example"), 40, 6, 0, 2).unwrap();
+    assert!(!top_row.complete, "a fragment on the top row may continue above the view");
+    let check = sonicterm_ui::status_line::check_link_label(
+        &inside.text,
+        inside.complete,
+        "https://evil.example/",
+    );
+    assert_eq!(
+        check,
+        sonicterm_ui::status_line::LinkLabelCheck::Mismatch { label_host: "bank.example".into() }
     );
 }

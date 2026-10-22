@@ -60,6 +60,8 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "SaveCurrentSettings",
     "ApplyTheme",
     "ToggleTabBar",
+    "ToggleStatusLine",
+    "ToggleStatusLineSensitive",
     "RenameTab",
     "RenameWindow",
     "UpdateTabColor",
@@ -414,6 +416,18 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         Action::ToggleTabBar => {
             ("ToggleTabBar", Appearance, "command-toggle-tab-bar", &["hide", "show"])
         }
+        Action::ToggleStatusLine => (
+            "ToggleStatusLine",
+            Appearance,
+            "command-toggle-status-line",
+            &["status", "memory", "hide", "show"],
+        ),
+        Action::ToggleStatusLineSensitive => (
+            "ToggleStatusLineSensitive",
+            Appearance,
+            "command-toggle-status-line-sensitive",
+            &["status", "privacy", "screen", "share", "hide"],
+        ),
         Action::RenameTab => {
             ("RenameTab", Tabs, "command-rename-tab", &["title", "name", "label", "edit"])
         }
@@ -519,6 +533,8 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         | Action::DecreaseFontWeight
         | Action::ResetFontWeight
         | Action::ToggleTabBar
+        | Action::ToggleStatusLine
+        | Action::ToggleStatusLineSensitive
         | Action::ToggleFullscreen => (Requirement::Window, false),
         Action::OpenCommandPalette | Action::RenameWindow => (Requirement::Window, true),
         Action::CloseTab
@@ -598,6 +614,8 @@ pub fn label(action: &Action) -> String {
         Action::SaveCurrentSettings => "Save Current Settings".into(),
         Action::ApplyTheme(name) => format!("Apply Theme: {name}"),
         Action::ToggleTabBar => "Toggle Tab Bar".into(),
+        Action::ToggleStatusLine => "Toggle Status Line".into(),
+        Action::ToggleStatusLineSensitive => "Toggle Status Line Sensitive Content".into(),
         Action::RenameTab => "Rename Active Tab".into(),
         Action::RenameWindow => "Rename Window".into(),
         Action::UpdateTabColor => "Update Tab Color".into(),

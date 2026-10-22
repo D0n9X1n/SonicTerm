@@ -135,6 +135,8 @@ impl App {
         // An owned handle for the watched dispatch's render pair; it holds no lock or borrow.
         let render_marker = child.redraw.timeline.render_marker();
         // Reconcile, then apply the previous frame's receipts under these guards, before planning.
+        // Focused-pane facts for the status line, copied under the frame's parser guard.
+        let mut status_facts = None;
         let frame_viewports = match sources.reconcile_and_apply_receipts(child, &mut frame.guards) {
             Ok(viewports) => viewports,
             Err(why) => {
@@ -230,6 +232,10 @@ impl App {
                 let grid = frame.guards[active_pos].1.grid();
                 (grid.cursor.row, grid.cursor.col)
             };
+            status_facts = Some(super::status_line::StatusPaneFacts::of(
+                &frame.guards[active_pos].1,
+                frame_viewports.active,
+            ));
             let cursor_rect_copy = frame.guards[active_pos].2;
             let recovery_sample = self.runtime_smoke.as_ref().and_then(|smoke| {
                 smoke.recovery_marker_sample(
@@ -536,6 +542,10 @@ impl App {
             if scrollbar_needs_more_frames {
                 child.request_window_redraw();
             }
+        }
+        if let Some(facts) = status_facts {
+            // The frame copied focused-pane facts; the next loop pass refreshes the strip.
+            self.observe_status_pane(win_id, facts);
         }
     }
 }

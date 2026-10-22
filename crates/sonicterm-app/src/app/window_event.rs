@@ -793,6 +793,8 @@ impl App {
         );
         // One anchored viewport projection feeds both the per-pane and active-frame viewports.
         // Reconcile, then apply the previous frame's receipts under these guards, before planning.
+        // Focused-pane facts for the status line, copied under the frame's parser guard.
+        let mut status_facts = None;
         let frame_viewports = match self
             .main_mut()
             .map(|window| sources.reconcile_and_apply_receipts(window, &mut frame.guards))
@@ -1003,6 +1005,10 @@ impl App {
                     let grid = frame.guards[active_pos].1.grid();
                     (grid.cursor.row, grid.cursor.col)
                 };
+                status_facts = Some(super::status_line::StatusPaneFacts::of(
+                    &frame.guards[active_pos].1,
+                    frame_viewports.active,
+                ));
                 let cursor_rect_copy = frame.guards[active_pos].2;
                 let recovery_sample = self.runtime_smoke.as_ref().and_then(|smoke| {
                     smoke.recovery_marker_sample(
@@ -1168,6 +1174,10 @@ impl App {
         } else {
             // When: the main window has no renderer, nothing renders; release the guards, then close the timing.
             drop(frame);
+        }
+        if let Some(facts) = status_facts {
+            // The frame copied focused-pane facts; the next loop pass refreshes the strip.
+            self.observe_status_pane(win_id, facts);
         }
         if let Some(window) = self.main_mut() {
             // A presented frame's receipts replace the pending set emptied at collection.

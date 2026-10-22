@@ -588,6 +588,8 @@ impl App {
             Action::ResetFontWeight => self.reset_font_weight(),
             Action::ApplyTheme(name) => self.apply_theme_by_name(name),
             Action::ToggleTabBar => self.toggle_tab_bar(),
+            Action::ToggleStatusLine => self.toggle_status_line(),
+            Action::ToggleStatusLineSensitive => self.toggle_status_line_sensitive(),
             Action::RenameTab => self.start_rename_active_tab(),
             Action::RenameWindow => {
                 let target = match self.frontmost_kind() {

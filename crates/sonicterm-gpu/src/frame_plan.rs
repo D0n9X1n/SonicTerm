@@ -33,6 +33,8 @@ pub(crate) struct ChangeClass {
     pub full: bool,
     /// The tab bar's content, hover, close control or privilege marker changed.
     pub tab_band: bool,
+    /// The status line's visible content changed; only its band is damaged.
+    pub status_band: bool,
     /// The cursor's visibility, shape, blink or drawn cell changed.
     pub cursor: bool,
     /// Window focus changed: the cursor and the tab bar's active marker and title.
@@ -46,7 +48,12 @@ pub(crate) struct ChangeClass {
 impl ChangeClass {
     /// True when any narrow class, but not necessarily `full`, is set.
     pub(crate) fn any_class(self) -> bool {
-        self.tab_band || self.cursor || self.focus || self.selection || self.scrollbar
+        self.tab_band
+            || self.status_band
+            || self.cursor
+            || self.focus
+            || self.selection
+            || self.scrollbar
     }
 }
 
@@ -101,6 +108,8 @@ pub(crate) struct WindowIdentity {
     pub width: u32,
     pub height: u32,
     pub tab_hash: u64,
+    /// Pixel hash of the status line strip; 0 while it is hidden.
+    pub status_hash: u64,
     pub viewport_top_abs: Option<u64>,
     pub cursor_shape: u8,
     pub cursor_blink: bool,
@@ -139,6 +148,7 @@ impl WindowIdentity {
             width,
             height,
             tab_hash,
+            status_hash,
             viewport_top_abs,
             cursor_shape,
             cursor_blink,
@@ -170,6 +180,7 @@ impl WindowIdentity {
             width: previous_width,
             height: previous_height,
             tab_hash: previous_tab_hash,
+            status_hash: previous_status_hash,
             viewport_top_abs: previous_viewport_top_abs,
             cursor_shape: previous_cursor_shape,
             cursor_blink: previous_cursor_blink,
@@ -211,6 +222,7 @@ impl WindowIdentity {
                 || hover_tab != previous_hover_tab
                 || close_override != previous_close_override
                 || process_privileged != previous_process_privileged,
+            status_band: status_hash != previous_status_hash,
             cursor: cursor_visible != previous_cursor_visible
                 || cursor_shape != previous_cursor_shape
                 || cursor_blink != previous_cursor_blink
@@ -285,6 +297,7 @@ impl PaneIdentity {
                 || is_alt != previous_is_alt,
             scrollbar: scrollbar_bucket != previous_scrollbar_bucket,
             tab_band: false,
+            status_band: false,
             cursor: false,
             focus: false,
             selection: false,
@@ -329,6 +342,9 @@ pub(crate) struct FrameFacts {
     pub degraded: bool,
     /// Top edge of the drawn tab bar in surface pixels; `None` while the bar is hidden.
     pub tab_bar_top: Option<f32>,
+    /// Top edge and height of the status line band in surface pixels; `None` while it is hidden.
+    /// Strip ink is clipped to this band, so its damage needs no ink padding.
+    pub status_band: Option<(f32, f32)>,
     /// Display scale factor, which sizes the scrollbar.
     pub scale: f32,
     /// What the last presented frame's cursor recolors rewrote.
@@ -375,6 +391,7 @@ pub fn __replacement_plans_noop(shape: &ReplacementShape, retained: bool) -> boo
         scrollbar_mode: ScrollbarMode::Auto,
         degraded: false,
         tab_bar_top: None,
+        status_band: None,
         scale: 1.0,
         previous_recolor: RecolorRecord::default(),
     };
@@ -519,6 +536,7 @@ impl FramePlan {
             surface,
         };
         let tab_bar_top = facts.tab_bar_top;
+        let status_band = facts.status_band;
         let scale = facts.scale;
         let previous_recolor = facts.previous_recolor;
         for input in inputs {
@@ -702,6 +720,7 @@ impl FramePlan {
                     active_index,
                     active_view_top_abs,
                     tab_bar_top,
+                    status_band,
                     scale,
                     scrollbar_mode: facts.scrollbar_mode,
                     previous_recolor,
@@ -1109,6 +1128,7 @@ struct ClassDamageInputs<'plan> {
     active_index: usize,
     active_view_top_abs: u64,
     tab_bar_top: Option<f32>,
+    status_band: Option<(f32, f32)>,
     scale: f32,
     scrollbar_mode: ScrollbarMode,
     previous_recolor: RecolorRecord,
@@ -1125,12 +1145,23 @@ fn add_class_damage(dirt: &mut DamageParts, inputs: ClassDamageInputs<'_>) {
         active_index,
         active_view_top_abs,
         tab_bar_top,
+        status_band,
         scale,
         scrollbar_mode,
         previous_recolor,
         geometry,
     } = inputs;
     let surface = geometry.surface;
+    if let (true, Some((top, height))) = (change.status_band, status_band) {
+        // The strip's glyphs are clipped to its band, so the band is exactly its ink.
+        let band_top = top.floor() as i32;
+        let band_h =
+            ((top + height).ceil() as i64 - i64::from(band_top)).clamp(0, i64::from(u32::MAX));
+        dirt.add_clipped(
+            PixelRect { x: surface.x, y: band_top, w: surface.w, h: band_h as u32 },
+            surface,
+        );
+    }
     if change.tab_band || change.focus {
         if let Some(top) = tab_bar_top {
             // The bar is pinned to the surface bottom; ink above its top edge is padded in.

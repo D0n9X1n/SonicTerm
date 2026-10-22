@@ -128,7 +128,11 @@ pub(super) fn configured_window_size(
     let height = f32::from(rows) * config.font.size * config.font.line_height
         + config.window.padding_top
         + config.window.padding_bottom
-        + if tab_bar_visible { sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT } else { 0.0 };
+        + if tab_bar_visible { sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT } else { 0.0 }
+        + match config.status_line.enabled {
+            true => sonicterm_gpu::status_strip::status_line_height(config.font.size, 1.0),
+            false => 0.0,
+        };
     winit::dpi::LogicalSize::new(f64::from(width), f64::from(height))
 }
 

@@ -816,6 +816,19 @@ pub(crate) struct AppFrameCounters {
     pub(crate) correlation: super::guard_correlation::GuardCorrelation,
     /// URL and path hover work on the event-loop thread.
     pub(crate) hover: HoverCounters,
+    /// Status line samples, timer wakes and strip-only redraw requests.
+    pub(crate) status_line: StatusLineCounters,
+}
+
+/// Status line work on the event-loop thread, cumulative for the App's lifetime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StatusLineCounters {
+    /// Memory samples the status line took.
+    pub(crate) samples: u64,
+    /// Syncs that serviced a due status line sample or pending path check.
+    pub(crate) wakes: u64,
+    /// Windows whose strip pixels changed, each one `StatusLine` redraw request.
+    pub(crate) redraws: u64,
 }
 
 /// URL and path detection work on the event-loop thread, cumulative for the App's lifetime.
@@ -882,6 +895,7 @@ impl AppFrameCounters {
             next_s10_arming: 1,
             correlation: super::guard_correlation::GuardCorrelation::new(),
             hover: HoverCounters::default(),
+            status_line: StatusLineCounters::default(),
         }
     }
 
@@ -961,6 +975,14 @@ impl super::App {
         if let Some(counters) = self.frame_counters.as_mut() {
             // The gate is on, so every user event counts.
             counters.wake_user += 1;
+        }
+    }
+
+    /// Count status line work with `update`, when the gate is on.
+    pub(super) fn note_status_line(&mut self, update: impl FnOnce(&mut StatusLineCounters)) {
+        if let Some(counters) = self.frame_counters.as_mut() {
+            // The gate is on, so the status line work is counted.
+            update(&mut counters.status_line);
         }
     }
 
@@ -1617,6 +1639,9 @@ impl AppFrameCounters {
             ("hover_rows_read", self.hover.rows_read),
             ("path_probes_submitted", self.hover.probes_submitted),
             ("quick_select_rows_scanned", self.hover.quick_select_rows_scanned),
+            ("status_line_samples", self.status_line.samples),
+            ("status_line_wakes", self.status_line.wakes),
+            ("status_line_redraws", self.status_line.redraws),
         ] {
             record.push_count(name, value);
         }

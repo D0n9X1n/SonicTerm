@@ -142,6 +142,57 @@ right edge.
 | `long_command` | `false` | Enables long-command desktop notifications on Windows. macOS and Linux currently do not send this notification. |
 | `threshold_secs` | `10` | A reported command duration must be greater than this value. |
 
+#### `[status_line]`
+
+The status line is a strip between the panes and the tab bar that shows SonicTerm's own state: what it detected under the pointer, which input modes are on, how far the focused pane is scrolled back, problems with SonicTerm itself, and its own memory. It shows only what SonicTerm knows and the shell prompt, tmux or the program cannot report. It is off by default.
+
+| Key | Default | Behavior |
+| --- | --- | --- |
+| `enabled` | `false` | Shows the strip. **Toggle Status Line** (`toggle_status_line`, also in the View menu) changes it for the session. |
+| `preset` | `"developer"` | Lists and segment defaults to start from: `"minimal"`, `"developer"` or `"diagnostics"`. |
+| `left`, `center`, `right` | the preset's lists | Each list, when present, replaces that list of the preset. An id outside the catalog, an id listed twice, or an id this build does not implement fails the load. |
+| `icons` | `"unicode"` | Symbols only: `"unicode"`, `"ascii"` or `"nerd"`. `nerd` uses the whole Unicode set, since this build defines no Nerd Font symbols for its segments; there is no per-glyph fallback. Segments have no tooltips; each has a plain-words spoken name and value for assistive technology. |
+| `hide_sensitive` | `false` | Hides every sensitive segment, such as the link under the pointer, for screen sharing. **Toggle Status Line Sensitive Content** (`toggle_status_line_sensitive`) changes it for the session. |
+| `update_interval_ms` | `2000` | Sampling interval of sampled segments (memory), `500` to `60000`. |
+
+A reload applies `enabled` or `hide_sensitive` only when that key's value in the file changed, so a session toggle survives unrelated reloads.
+
+Presets in this build:
+
+| Preset | `left` | `center` | `right` | Segment defaults |
+| --- | --- | --- | --- | --- |
+| `developer` | `mode`, `scroll` | `link` | `health`, `mem` | — |
+| `minimal` | — | — | `health`, `mem` | — |
+| `diagnostics` | as `developer` | as `developer` | as `developer` | `mem.sparkline = true` |
+
+Every segment except `mem` shows only while it has something to say, so an idle window shows only `Mem: 412 MB`.
+
+| Segment | Shows | Default priority | Default click |
+| --- | --- | --- | --- |
+| `health` | Only when something is wrong: `Config: ✗ line 12` (also `Theme:`, `Keymap:`) for the last failed load of each file, at startup or on a reload, kept until that file reloads cleanly; `Render: ⚠ software (GDI)`, `software adapter` or `software (forced)`; `GPU: ⚠ recovering`. | 950 | With a reload error, opens the config file; otherwise none. |
+| `mem` | SonicTerm's own process memory, `Mem: 412 MB`, in binary units with three significant figures, with `↑` or `↓` when it moved by at least 1% since the previous sample. Amber with `⚠` at `warn_mib`, red with `✗` at `critical_mib`. | 900 | Opens the Memory Usage report. |
+| `mode` | Chips: broadcast input `⇶ 3` with its receiver count, `COPY` for copy mode, `MOUSE` when a program captured the mouse. | 800 | None. |
+| `link` | What detection found under the pointer: `Link: github.com/…`; for an OSC 8 link whose visible text names another host, or whose text or target carries userinfo, `Link: ⚠ evil.example ≠ bank.example` (a heuristic warning, not spoof protection); `Link: … · label not checked` when the text reaches the view's top or bottom row, passes 32 fragments or 2 KiB, so it was not read whole and is never reported as matching; `Path: ~/proj/src · reveal` or `· open folder`, `· checking` after 300 ms, `✗ … · not found`, or `⚠ … · blocked` with its reason. | 600 | None. |
+| `scroll` | `Scroll: ↑ 340` while the focused pane is scrolled back. | 400 | Returns the pane to the bottom. |
+
+The memory figure is the one the Memory Usage report shows: physical footprint on macOS (Activity Monitor's Memory column), private committed bytes on Windows (Task Manager's **Commit size** column), and the resident set on Linux (`top`'s RES). Child processes are not counted. A failed query shows `n/a`.
+
+Each `[status_line.segment.<id>]` table takes:
+
+| Key | Values | Behavior |
+| --- | --- | --- |
+| `show` | `"always"` or `"active"` | `always` keeps the slot with idle text (`n/a`, `bottom`, `normal`); `active` hides the segment when it has nothing to say. `link` accepts only `active`. |
+| `priority` | `0` to `1000` | Higher survives longer when the window is narrow. |
+| `click` | `"default"`, `"none"` or an action name | `default` runs the segment's own click; `none` makes it inert; a keymap action that takes no arguments, such as `"show_memory_usage"`, runs for the clicked window. |
+
+`[status_line.segment.mem]` also takes `show_trend` (`true`), `sparkline` (`false`; accepted, not drawn by this build), `warn_mib` (`1024`) and `critical_mib` (`2048`, at least `warn_mib`), each `1` to `1048576`. Unknown keys under `[status_line]` and inside segment tables are ignored and logged once per load as one `sonicterm-cfg` warning that names them all.
+
+When the window is too narrow, the strip first uses compact forms (memory drops its arrow, `mode` drops `MOUSE`), then shortens a link's path in the middle, then drops whole segments, lowest priority first. Health errors, the broadcast chip and a link's destination host go last.
+
+The strip is 0.6 times the tab bar's height, at least 20 logical pixels, and follows font zoom and display scale. It shares the tab bar's background, with a thin line only on its terminal side, and sits at the bottom edge when the tab bar is hidden. Turning it on or off resizes the panes; a window opened with `[window]` `rows` keeps that many rows. A press or wheel over the strip never reaches a pane or the program. It appears in terminal windows only, not in the Memory Usage report.
+
+The strip does not keep the event loop awake: memory is sampled only while a terminal window that can draw frames shows `mem`, and a window redraws only when its strip's pixels change. On the hardware path such a frame damages only the strip's band, because the strip's glyphs and missing-glyph boxes are clipped to it; software rendering (including every GDI frame) and frames with an open overlay repaint the whole window as before.
+
 #### `[logging]`
 
 | Key | Default |

@@ -2963,8 +2963,8 @@ impl Probe {
         if matches!(&self.driver, DriverState::Drag(drag) if drag.pressed) {
             self.button(event_loop, ElementState::Released);
         }
-        if let Some(reason) = self.park_problem(phase) {
-            // When: a parked phase saw no frame, no streamed row or no tail detection, it measured nothing.
+        if let Some(reason) = self.park_problem(phase).or_else(|| self.status_line_problem(phase)) {
+            // When: a parked phase measured nothing, or a status-line phase broke the strip's idle contract.
             self.finalize_phase(phase);
             self.invalidate(event_loop, reason);
             return;
@@ -3735,6 +3735,35 @@ impl Probe {
         });
         let evidence = entry.evidence(&end, presented_frames, hover);
         scenarios::park_progress(phase.name, &evidence).err()
+    }
+
+    /// Why a `status-line` phase broke the strip's idle contract, if it did: see
+    /// [`scenarios::status_line_progress`]. Needs counters; a side without the status line counters
+    /// (a base older than the status line) reads them as absent and is not checked.
+    fn status_line_problem(&mut self, phase: &PhaseSpec) -> Option<String> {
+        if !self.plan.status_line {
+            // When: `status_line` is off for this plan, there is no strip to check.
+            return None;
+        }
+        let PhaseEnd::Hold(hold_ms) = phase.end else {
+            // When: the phase does not end on a hold, it has no cadence to check.
+            return None;
+        };
+        let counters_start = self.meter.as_ref().and_then(|meter| meter.counters_start.clone());
+        let deltas = counters_start.zip(self.counter_totals()).and_then(|(start, totals)| {
+            let delta = totals.delta_since(&start);
+            let count = |name: &str| match delta.get(name) {
+                Some(crate::counters::FieldValue::Count(count)) => Some(*count),
+                _ => None,
+            };
+            Some(scenarios::StatusLineDeltas {
+                samples: count("status_line_samples")?,
+                wakes: count("status_line_wakes")?,
+                redraws: count("status_line_redraws")?,
+            })
+        })?;
+        let occluded = self.occlusion.delivered == Some(true);
+        scenarios::status_line_progress(phase.name, hold_ms, occluded, deltas).err()
     }
 
     /// Drag endpoints at cell centers inside the grid.

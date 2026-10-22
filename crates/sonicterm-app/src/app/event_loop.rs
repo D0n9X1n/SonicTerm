@@ -298,6 +298,14 @@ impl App {
         let mut due = self.refresh_frame_due_work_at(now);
         // Links follow the modes the frame deadlines above already read; the deadlines do not depend on it.
         self.sync_display_links();
+        if let Some(deadline) = self.sync_status_line(now) {
+            // A strip sample or pending path check is due; wake for it without a frame.
+            due.push(super::redraw::DueWork {
+                owner: None,
+                cause: super::redraw::DueCause::StatusLine,
+                deadline,
+            });
+        }
         if let Some(deadline) = self.memory_sample_deadline() {
             due.push(super::redraw::DueWork {
                 owner: None,
@@ -1016,6 +1024,7 @@ impl App {
         // the authoritative source for `main_window_id`.
         self.retire_previous_main();
         self.main_window_id = Some(main_id);
+        self.record_startup_load_errors();
         // Both pacing clocks start at one instant, so neither paces a new window differently.
         let created_at = std::time::Instant::now();
         let shadow = super::WindowState {
@@ -1049,6 +1058,7 @@ impl App {
             redraw: Default::default(),
             display_link: Default::default(),
             hover_link: false,
+            hover_unresolved: false,
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
@@ -1058,6 +1068,7 @@ impl App {
             hovered_url: None,
             link_preview: None,
             path_probe: super::path_target::PathProbeState::default(),
+            status_strip: None,
             hover_detection: super::path_target::HoverDetectionCache::default(),
             notification: None,
             hidden: false,

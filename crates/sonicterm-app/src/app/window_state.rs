@@ -130,6 +130,9 @@ pub struct WindowState {
     /// `App.hover_link` (now deleted). Per-window so a torn-out child can
     /// flip its own cursor independently of the main window.
     pub hover_link: bool,
+    /// An event cleared the hover after the last frame resolved it; the next frame pass, which
+    /// re-detects the target under the pointer, resolves it again.
+    pub(crate) hover_unresolved: bool,
     /// Tab index pressed in the child's bar — same role as
     /// `App::pressed_tab` but for the child window. Used for
     /// drag-from-child merging.
@@ -157,6 +160,8 @@ pub struct WindowState {
     pub link_preview: Option<sonicterm_render_model::inputs::LinkPreview>,
     /// Epoch-guarded openability decision for the local target under this pointer.
     pub(in crate::app) path_probe: path_target::PathProbeState,
+    /// The status line band and segments the last presented frame drew; pointer routing reads it.
+    pub(crate) status_strip: Option<sonicterm_gpu::status_strip::StripHit>,
     /// The last hover detection, reused while its key and the rows it read are unchanged.
     pub(in crate::app) hover_detection: path_target::HoverDetectionCache,
     pub notification: Option<NotificationBubble>,
@@ -568,6 +573,8 @@ impl WindowState {
             | self.hover_link;
         self.hover_link = false;
         if changed {
+            // The redraw requested here re-detects the target; until then the hover is unresolved.
+            self.hover_unresolved = true;
             if let Some(window) = self.window.as_ref() {
                 window.set_cursor(winit::window::CursorIcon::Default);
             }

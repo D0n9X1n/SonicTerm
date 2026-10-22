@@ -46,6 +46,9 @@ pub struct Config {
     /// Desktop notification settings.
     #[serde(default)]
     pub notifications: NotificationsConfig,
+    /// Status line strip between the panes and the tab bar.
+    #[serde(default)]
+    pub status_line: crate::status_line::StatusLineConfig,
     /// Appearance and compositor backdrop settings.
     #[serde(default)]
     pub appearance: AppearanceConfig,
@@ -435,6 +438,7 @@ impl Default for Config {
             accessibility: AccessibilityConfig::default(),
             locale: String::new(),
             notifications: NotificationsConfig::default(),
+            status_line: crate::status_line::StatusLineConfig::default(),
             appearance: AppearanceConfig::default(),
             render: RenderConfig::default(),
             tab_close_button_color: None,
@@ -589,6 +593,7 @@ impl Config {
         let mut cfg: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;
         cfg.window.normalize_padding();
         cfg.font.normalize();
+        cfg.status_line.validate().with_context(|| format!("validate {path:?}"))?;
         Ok(cfg)
     }
 
@@ -621,7 +626,10 @@ impl Config {
     pub fn load_or_default_collecting(path: &Path, warnings: &mut Vec<String>) -> Self {
         // When: `load_strict(path)` errors, preserve startup with defaults and retain its diagnostic for later logging.
         match Self::load_strict(path) {
-            Ok(cfg) => cfg,
+            Ok(cfg) => {
+                warnings.extend(cfg.status_line.unknown_keys_warning());
+                cfg
+            }
             Err(error) => {
                 warnings.push(format!(
                     "config TOML parse failed at {}: {error}; falling back to defaults",
@@ -1256,6 +1264,19 @@ strong_focus = false
 # Desktop notification for long-running commands.
 long_command = false
 threshold_secs = 10
+
+[status_line]
+# A strip between the panes and the tab bar with SonicTerm's own state:
+# memory, modes, scroll position, the link under the pointer, and problems.
+enabled = false
+# Presets: "minimal", "developer", or "diagnostics".
+preset = "developer"
+# Symbols: "unicode", "ascii", or "nerd".
+icons = "unicode"
+# Hide sensitive segments such as the link under the pointer (screen sharing).
+hide_sensitive = false
+# Sampling interval of sampled segments such as memory, 500-60000 ms.
+update_interval_ms = 2000
 "#,
         config_dir = default_config_dir()
             .map(|dir| dir.display().to_string())
