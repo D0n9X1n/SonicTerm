@@ -333,6 +333,7 @@ fn assert_reload_revokes_path_authorization(mutate: fn(&mut Config)) {
             spans: smallvec::smallvec![AbsoluteCellSpan { row: 22, start_col: 4, end_col: 9 }],
             target: sonicterm_cfg::url_scan::DetectedTarget::BareName("entry".into()),
             resolved_path: PathBuf::from("/work/entry"),
+            joined: false,
         };
         let key = PathProbeKey {
             window_id,
@@ -398,6 +399,7 @@ fn assert_reload_revokes_path_authorization(mutate: fn(&mut Config)) {
                     }],
                     target: sonicterm_cfg::url_scan::DetectedTarget::BareName("entry".into()),
                     resolved_path: PathBuf::from("/work/entry"),
+                    joined: false,
                 }],
                 rows: smallvec::smallvec![PathRowIdentity { row: 22, fingerprint: 11 }],
                 cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),

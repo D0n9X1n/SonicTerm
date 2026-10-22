@@ -12,3 +12,6 @@ crates/sonicterm-freetype/libpng/**    linguist-vendored -text
 crates/sonicterm-freetype/zlib/**      linguist-vendored -text
 crates/sonicterm-harfbuzz/harfbuzz/**  linguist-vendored -text
 crates/sonicterm-winit/**             linguist-vendored -text
+
+# Terminal recordings replayed by tests: keep every byte, including CR, on every platform.
+crates/sonicterm-app/test-fixtures/** -text
