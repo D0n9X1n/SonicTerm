@@ -339,8 +339,26 @@ is capped at 4 KiB. Only the
 indentation and line boundaries are removed; query text, percent escapes, and
 hyphens remain literal. Whitespace inside a fragment, nested wrappers, unsafe
 cells, mixed wrap kinds, and multiple schemes prevent reconstruction. Incomplete
-recognized fragments never fall back to a truncated URL. Unwrapped hard rows and
-local paths are not joined; applications can use OSC 8 for arbitrary label layouts.
+recognized fragments never fall back to a truncated URL.
+
+A URL or absolute path that a program breaks across rows itself, as Claude Code
+does, is also joined, on the primary and the alternate screen, inside tmux, rmux
+and without a multiplexer. URLs use `http://`, `https://` or `file://`; paths
+start with `/`, `~/` or a drive such as `C:\` or `C:/`. The target must start its
+row's content, after the indent or one bullet (`⏺ `, `- `, `* `, `• `, `1. `);
+every row but the last must end exactly at the pane's right edge, since even one
+blank cell there means the program did not break the target; and every
+continuation row must start at the target's own column. A target that starts
+mid-row after other text is not joined. Text after the last fragment on its row
+leaves the whole target inert rather than opening a truncated prefix. A joined
+path goes through the same path checks as a single-row path, and the joined path
+is checked before the first row's own fragment, which is used only when the
+joined path does not exist; each hover over such a target adds at most one
+background check. Targets containing non-ASCII characters or parentheses are not
+joined, and UNC and network paths are never joined. The rule is a heuristic: a
+target that starts its row and ends exactly at the edge by coincidence, followed
+by a single word at its column, is joined. Other unwrapped hard rows and relative
+paths are not joined; applications can use OSC 8 for arbitrary label layouts.
 On the alternate screen, a full-screen program such as a multiplexer can continue a
 line on the next row with a cursor move that records no wrap. There, a pane segment
 whose last column holds text also continues into the next visible row when that row
