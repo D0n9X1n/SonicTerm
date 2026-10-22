@@ -1,5 +1,7 @@
 use super::*;
-use crate::app::spawn_pane::{osc52_clipboard_write_event, MAX_OSC52_CLIPBOARD_BYTES};
+use crate::app::spawn_pane::{
+    osc52_decision, Osc52Outcome, Osc52Refusal, MAX_OSC52_CLIPBOARD_BYTES,
+};
 use base64::Engine;
 use sonicterm_io::pty::{PtyInputDiagnostics, PtyInputError, PtyWriterPhase};
 
@@ -462,10 +464,7 @@ fn accepted_windows_pty_input_arms_foreground_probe() {
 fn osc52_clipboard_write_decodes_bounded_utf8() {
     let encoded = base64::engine::general_purpose::STANDARD.encode("Copilot copied text");
 
-    assert_eq!(
-        osc52_clipboard_write_event('c', &encoded),
-        Some(UserEvent::ClipboardWrite { text: "Copilot copied text".into() })
-    );
+    assert_eq!(osc52_decision('c', &encoded), Osc52Outcome::Write("Copilot copied text".into()));
 }
 
 /// The documented OSC 52 cap accepts its exact byte count and rejects the next byte.
@@ -473,31 +472,33 @@ fn osc52_clipboard_write_decodes_bounded_utf8() {
 fn osc52_clipboard_write_enforces_actual_decoded_boundary() {
     let exact = vec![b'x'; MAX_OSC52_CLIPBOARD_BYTES];
     let exact_encoded = base64::engine::general_purpose::STANDARD.encode(&exact);
-    let accepted = osc52_clipboard_write_event('c', &exact_encoded);
-    assert!(
-        matches!(accepted, Some(UserEvent::ClipboardWrite { text }) if text.len() == exact.len())
-    );
+    let accepted = osc52_decision('c', &exact_encoded);
+    assert!(matches!(accepted, Osc52Outcome::Write(text) if text.len() == exact.len()));
 
     let oversized = vec![b'x'; MAX_OSC52_CLIPBOARD_BYTES + 1];
     let oversized_encoded = base64::engine::general_purpose::STANDARD.encode(oversized);
-    assert_eq!(osc52_clipboard_write_event('c', &oversized_encoded), None);
+    assert_eq!(
+        osc52_decision('c', &oversized_encoded),
+        Osc52Outcome::Refused(Osc52Refusal::TooLarge)
+    );
 }
 
 /// Queries, unsupported targets, malformed data, and oversized writes fail closed.
 #[test]
 fn osc52_clipboard_write_rejects_unsupported_or_unsafe_payloads() {
-    assert_eq!(osc52_clipboard_write_event('c', "?"), None);
-    assert_eq!(osc52_clipboard_write_event('p', "dGV4dA=="), None);
-    assert_eq!(osc52_clipboard_write_event('c', "not base64!"), None);
+    // Each refusal names its reason; none can reach the native clipboard.
+    let refused = |reason| Osc52Outcome::Refused(reason);
+    assert_eq!(osc52_decision('c', "?"), refused(Osc52Refusal::Read));
+    assert_eq!(osc52_decision('p', "?"), refused(Osc52Refusal::Read), "a read of any selection");
+    assert_eq!(osc52_decision('p', "dGV4dA=="), refused(Osc52Refusal::Selection('p')));
+    assert_eq!(osc52_decision('c', ""), refused(Osc52Refusal::Invalid));
+    assert_eq!(osc52_decision('c', "not base64!"), refused(Osc52Refusal::Invalid));
     assert_eq!(
-        osc52_clipboard_write_event(
-            'c',
-            &"A".repeat((MAX_OSC52_CLIPBOARD_BYTES + 1).div_ceil(3) * 4)
-        ),
-        None
+        osc52_decision('c', &"A".repeat((MAX_OSC52_CLIPBOARD_BYTES + 1).div_ceil(3) * 4 + 4)),
+        refused(Osc52Refusal::TooLarge)
     );
     let invalid_utf8 = base64::engine::general_purpose::STANDARD.encode([0xff, 0xfe]);
-    assert_eq!(osc52_clipboard_write_event('c', &invalid_utf8), None);
+    assert_eq!(osc52_decision('c', &invalid_utf8), refused(Osc52Refusal::Invalid));
 }
 
 /// Windows reasserts an OSC 52 write after a failing native helper, but never over a newer copy.

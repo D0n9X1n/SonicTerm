@@ -583,3 +583,39 @@ fn history_trims_are_acknowledged_by_click_or_clear() {
     assert_eq!(history_input(cleared, 0), None, "a scrollback clear acknowledges it");
     assert_eq!(history_input(StatusPaneFacts::default(), 0), None, "nothing trimmed");
 }
+
+/// A write records its byte count, a failed native write records `Failed`, a refusal leaves the
+/// clipboard alone, attempts accumulate within the hold, and the click goes to the source tab.
+#[test]
+fn clip_records_outcomes_and_goes_to_the_source_tab() {
+    use crate::app::spawn_pane::{ClipAttempts, Osc52Refusal};
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let source = app.__test_seed_tab("source");
+    app.__test_seed_tab("other");
+    let main_id = app.main_window_id.unwrap();
+    app.__test_set_memory_clipboard("old");
+    let accepted = ClipAttempts { total: 1, accepted: 1, refused: 0, latest: None };
+    let now = Instant::now();
+    let written = app.handle_clipboard_write("hello".into());
+    app.note_clip_write(source, 5, written);
+    app.note_clip_attempts(source, accepted, now);
+    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("hello"));
+    assert_eq!(app.status_line.clip.unwrap().outcome, ClipOutcome::Written(5));
+
+    let read = ClipAttempts { total: 3, accepted: 0, refused: 3, latest: Some(Osc52Refusal::Read) };
+    app.note_clip_attempts(source, read, now);
+    let record = app.status_line.clip.unwrap();
+    assert_eq!((record.outcome, record.attempts), (ClipOutcome::ReadRefused, 4));
+    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("hello"), "a refusal writes nothing");
+
+    app.__test_set_clipboard_write_failure(true);
+    let written = app.handle_clipboard_write("lost".into());
+    app.note_clip_write(source, 4, written);
+    app.note_clip_attempts(source, accepted, now + Duration::from_secs(60));
+    let record = app.status_line.clip.unwrap();
+    assert_eq!((record.outcome, record.attempts), (ClipOutcome::Failed, 1), "a new hold");
+
+    app.activate_main_tab(1);
+    app.activate_clip_source();
+    assert_eq!(app.windows[&main_id].tabs.active_index(), 0, "the source tab");
+}

@@ -251,8 +251,18 @@ pub enum UserEvent {
     /// The VT worker decodes and bounds the payload before constructing this
     /// event; native clipboard access remains confined to the app thread.
     ClipboardWrite {
+        /// The pane whose program asked for the write.
+        pane_id: u64,
         /// UTF-8 text requested by the terminal application.
         text: String,
+    },
+    /// One VT batch's OSC 52 requests, counted without payloads, after its writes; refusals
+    /// reach the App only through this summary.
+    ClipboardAttempts {
+        /// The pane whose program sent the requests.
+        pane_id: u64,
+        /// How many there were and what happened to the last one.
+        attempts: spawn_pane::ClipAttempts,
     },
     /// A local-target openability probe completed off the event-loop thread.
     PathProbeFinished(Box<path_target::PathProbeResult>),

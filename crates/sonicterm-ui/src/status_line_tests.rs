@@ -76,6 +76,11 @@ fn every_catalog_id_is_registered_with_a_glyph_free_spoken_name() {
                 ],
                 other_windows: 1,
             },
+            clip: Some(ClipInput {
+                outcome: ClipOutcome::ReadRefused,
+                attempts: 1_000,
+                source: ClipSource::Tab(2),
+            }),
             health: HealthInput {
                 config: Some(ReloadFailure { line: Some(12) }),
                 render: RenderHealth::SoftwareAdapter,
@@ -160,6 +165,7 @@ fn core_segments_format_as_name_value_and_chips() {
         size: None,
         zoomed: false,
         alerts: AlertsInput::default(),
+        clip: None,
     };
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3COPYMOUSE");
@@ -254,6 +260,7 @@ fn ascii_icons_change_symbols_only() {
         size: None,
         zoomed: false,
         alerts: AlertsInput::default(),
+        clip: None,
     };
     let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Sel).unwrap(), "Sel: x copy failed");
@@ -910,4 +917,57 @@ fn alerts_lists_marked_tabs_and_names_each_source() {
     let elsewhere = alerts_view(AlertsInput { tabs: Vec::new(), other_windows: 2 }).unwrap();
     assert_eq!(text_of(&elsewhere.parts), "Alerts: +2 windows");
     assert_eq!(elsewhere.spoken.value, "2 other windows with alerts");
+}
+
+#[test]
+fn clip_shows_each_outcome_with_its_source() {
+    // Each outcome has its text and tone; `×N` only above one attempt; the source drops first and a
+    // closed source cannot be clicked. No clipboard text is ever part of it.
+    let i18n = translator("en");
+    let clip_view = |outcome, attempts, source| {
+        let inputs = StatusLineInputs {
+            clip: Some(ClipInput { outcome, attempts, source }),
+            ..idle_inputs()
+        };
+        let view = build_view(&developer(), false, &inputs, &i18n, NumberStyle::POINT);
+        view.segments.into_iter().find(|segment| segment.id == StatusSegmentId::Clip).unwrap()
+    };
+    let tab = ClipSource::Tab(2);
+    let cases = [
+        (ClipOutcome::Written(2_150), 1, tab, "Clip: 2.10 KB by #2", StatusTone::Value),
+        (ClipOutcome::Failed, 1, tab, "Clip: ✗ failed by #2", StatusTone::Error),
+        (
+            ClipOutcome::ReadRefused,
+            1_000,
+            tab,
+            "Clip: ⚠ read refused ×1,000 by #2",
+            StatusTone::Warn,
+        ),
+        (
+            ClipOutcome::SelectionRefused('p'),
+            1,
+            ClipSource::OtherWindow,
+            "Clip: refused (selection p) by another window",
+            StatusTone::Name,
+        ),
+        (ClipOutcome::TooLarge, 1, tab, "Clip: refused (too large) by #2", StatusTone::Name),
+        (
+            ClipOutcome::Invalid,
+            1,
+            ClipSource::Closed,
+            "Clip: refused (invalid) by a closed tab",
+            StatusTone::Name,
+        ),
+    ];
+    for (outcome, attempts, source, text, tone) in cases {
+        let segment = clip_view(outcome, attempts, source);
+        assert_eq!(text_of(&segment.parts), text, "{outcome:?}");
+        assert_eq!(segment.parts[1].tone, tone, "{outcome:?}");
+        assert!(segment.parts.last().unwrap().droppable, "the source drops first");
+        let clickable = source != ClipSource::Closed;
+        let expected = clickable.then_some(SegmentClick::Handler(SegmentHandler::ClipSource));
+        assert_eq!(segment.click, expected, "{outcome:?}");
+    }
+    let read = clip_view(ClipOutcome::ReadRefused, 1_000, tab);
+    assert_eq!(read.spoken.value, "clipboard read refused, 1,000 requests, from tab 2");
 }

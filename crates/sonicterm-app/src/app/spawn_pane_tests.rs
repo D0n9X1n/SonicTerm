@@ -414,7 +414,15 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
     assert!(keyboard_modes.backarrow_key());
     assert!(keyboard_modes.newline());
     assert_eq!(keyboard_modes.modify_other_keys(), 2);
-    assert_eq!(emitted, [UserEvent::ClipboardWrite { text: "copied".into() }]);
+    let attempts =
+        crate::app::spawn_pane::ClipAttempts { total: 1, accepted: 1, refused: 0, latest: None };
+    assert_eq!(
+        emitted,
+        [
+            UserEvent::ClipboardWrite { pane_id: 0, text: "copied".into() },
+            UserEvent::ClipboardAttempts { pane_id: 0, attempts },
+        ]
+    );
     let commands = handles.command_events.lock();
     assert_eq!(commands.len(), 2);
     assert_eq!(commands[0].event, CommandEvent::CmdStart);
@@ -2245,4 +2253,53 @@ fn a_worker_section_unwinding_after_its_lock_is_abandoned_after_the_guard() {
     let pane = log.take(crate::app::guard_correlation::LogBuffers::new()).0;
     assert_eq!(pane.abandoned.iter().map(|entry| entry.section_seq).collect::<Vec<_>>(), vec![1]);
     assert!(pane.pending.is_none() && pane.records.is_empty());
+}
+
+/// Run one VT batch of `bytes` through pane 7's worker handles and return what it emitted.
+fn osc52_batch(bytes: &[u8]) -> Vec<UserEvent> {
+    let (_pane, handles) = pane_and_worker_handles();
+    let handles = handles.with_pane_id(7);
+    let mut emitted = Vec::new();
+    process_pane_vt_batch_with(
+        &handles,
+        bytes,
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |event| emitted.push(event),
+        Instant::now,
+        |_| {},
+    );
+    emitted
+}
+
+/// Accepted writes stay separate events in order, then one payload-free summary follows; a batch of
+/// 1,000 reads writes nothing and sends exactly one summary, all naming the worker's pane.
+#[test]
+fn osc52_batch_keeps_each_write_and_sends_one_summary() {
+    use base64::Engine as _;
+    let encode = |text: &str| base64::engine::general_purpose::STANDARD.encode(text);
+    let two = format!("\x1b]52;c;{}\x07\x1b]52;c;{}\x07", encode("one"), encode("two"));
+    let accepted = ClipAttempts { total: 2, accepted: 2, refused: 0, latest: None };
+    assert_eq!(
+        osc52_batch(two.as_bytes()),
+        [
+            UserEvent::ClipboardWrite { pane_id: 7, text: "one".into() },
+            UserEvent::ClipboardWrite { pane_id: 7, text: "two".into() },
+            UserEvent::ClipboardAttempts { pane_id: 7, attempts: accepted },
+        ]
+    );
+    let reads = "\x1b]52;c;?\x07".repeat(1_000);
+    let refused = ClipAttempts {
+        total: 1_000,
+        accepted: 0,
+        refused: 1_000,
+        latest: Some(Osc52Refusal::Read),
+    };
+    assert_eq!(
+        osc52_batch(reads.as_bytes()),
+        [UserEvent::ClipboardAttempts { pane_id: 7, attempts: refused }]
+    );
+    assert!(osc52_batch(b"plain output").is_empty(), "no OSC 52, no summary");
 }

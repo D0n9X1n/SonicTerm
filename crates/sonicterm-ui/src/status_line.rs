@@ -135,6 +135,8 @@ pub enum SegmentHandler {
     AcknowledgeHistory,
     /// Go to the next marked tab after the active one, then to the next window with marks.
     NextAlert,
+    /// Go to the tab whose program sent the latest OSC 52 request.
+    ClipSource,
 }
 
 /// A segment's registered `default` click.
@@ -203,6 +205,9 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
         Seg::Alerts => {
             (UpdateKind::Event, format_alerts, DefaultClick::Handler(SegmentHandler::NextAlert))
         }
+        Seg::Clip => {
+            (UpdateKind::Event, format_clip, DefaultClick::Handler(SegmentHandler::ClipSource))
+        }
         Seg::History => (
             UpdateKind::Event,
             format_history,
@@ -213,7 +218,6 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
         Seg::Zoom => (UpdateKind::Event, format_zoom, DefaultClick::Action(Action::TogglePaneZoom)),
         Seg::Ime => (UpdateKind::Event, format_ime, DefaultClick::None),
         Seg::Input
-        | Seg::Clip
         | Seg::PathCheck
         | Seg::Cpu
         | Seg::Frame
@@ -268,6 +272,47 @@ pub struct StatusLineInputs {
     pub zoomed: bool,
     /// This window's marked tabs and how many other windows have marks.
     pub alerts: AlertsInput,
+    /// The latest OSC 52 request while it is held.
+    pub clip: Option<ClipInput>,
+}
+
+/// What SonicTerm did with the latest OSC 52 request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipOutcome {
+    /// Written: this many decoded UTF-8 bytes reached the clipboard.
+    Written(u64),
+    /// Accepted, but the native clipboard write failed.
+    Failed,
+    /// A clipboard read; reads are never answered.
+    ReadRefused,
+    /// Another selection than the clipboard.
+    SelectionRefused(char),
+    /// The payload was over the size cap.
+    TooLarge,
+    /// Empty, malformed Base64 or not UTF-8.
+    Invalid,
+}
+
+/// Where the latest OSC 52 request came from, as seen from one window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipSource {
+    /// This window's tab with this 1-based number.
+    Tab(usize),
+    /// A tab of another window.
+    OtherWindow,
+    /// A tab that has closed since.
+    Closed,
+}
+
+/// The clipboard segment's input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipInput {
+    /// The latest request's outcome.
+    pub outcome: ClipOutcome,
+    /// Requests the hold covers.
+    pub attempts: u64,
+    /// Where they came from.
+    pub source: ClipSource,
 }
 
 /// What the alerts segment shows: tabs of this window that need the user.
@@ -1237,6 +1282,87 @@ fn format_alerts(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Forma
         default_click: true,
         ..FormattedSegment::plain(parts, spoken.join(". "))
     })
+}
+
+/// The clipboard segment: what SonicTerm did with the latest OSC 52 request and which tab sent it,
+/// `Clip: 2.1 KB by #2` or `Clip: ⚠ read refused ×1000 by #2`. It shows no clipboard text and does
+/// not claim the clipboard still holds what was written.
+fn format_clip(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let clip = inputs.clip?;
+    let (text, tone, spoken) = match clip.outcome {
+        ClipOutcome::Written(bytes) => {
+            let size = format_bytes(bytes, env.numbers);
+            let spoken = env.i18n.t_args("status-spoken-clip-written", Some(&[("size", &size)]));
+            (size, StatusTone::Value, spoken)
+        }
+        ClipOutcome::Failed => (
+            format!(
+                "{} {}",
+                symbol(env.icons, "✗", "x"),
+                env.i18n.translate("status-value-clip-failed")
+            ),
+            StatusTone::Error,
+            env.i18n.translate("status-spoken-clip-failed"),
+        ),
+        ClipOutcome::ReadRefused => (
+            format!(
+                "{} {}",
+                symbol(env.icons, "⚠", "!"),
+                env.i18n.translate("status-value-clip-read-refused")
+            ),
+            StatusTone::Warn,
+            env.i18n.translate("status-spoken-clip-read-refused"),
+        ),
+        ClipOutcome::SelectionRefused(selection) => {
+            let selection = selection.to_string();
+            let args = [("selection", selection.as_str())];
+            (
+                env.i18n.t_args("status-value-clip-selection-refused", Some(&args)),
+                StatusTone::Name,
+                env.i18n.t_args("status-spoken-clip-selection-refused", Some(&args)),
+            )
+        }
+        ClipOutcome::TooLarge => (
+            env.i18n.translate("status-value-clip-too-large"),
+            StatusTone::Name,
+            env.i18n.translate("status-spoken-clip-too-large"),
+        ),
+        ClipOutcome::Invalid => (
+            env.i18n.translate("status-value-clip-invalid"),
+            StatusTone::Name,
+            env.i18n.translate("status-spoken-clip-invalid"),
+        ),
+    };
+    let mut parts = vec![name_part(env, "status-name-clip"), StatusPart::new(text, tone)];
+    let mut spoken = vec![spoken];
+    if clip.attempts > 1 {
+        let count = format_count(clip.attempts, env.numbers);
+        parts.push(StatusPart::new(format!(" \u{00D7}{count}"), tone).droppable());
+        spoken.push(env.i18n.t_args("status-spoken-clip-attempts", Some(&[("count", &count)])));
+    }
+    let (source_text, source_spoken) = match clip.source {
+        ClipSource::Tab(number) => {
+            let tab = number.to_string();
+            (
+                env.i18n.t_args("status-value-clip-by-tab", Some(&[("tab", &tab)])),
+                env.i18n.t_args("status-spoken-clip-by-tab", Some(&[("tab", &tab)])),
+            )
+        }
+        ClipSource::OtherWindow => (
+            env.i18n.translate("status-value-clip-by-window"),
+            env.i18n.translate("status-spoken-clip-by-window"),
+        ),
+        ClipSource::Closed => (
+            env.i18n.translate("status-value-clip-by-closed"),
+            env.i18n.translate("status-spoken-clip-by-closed"),
+        ),
+    };
+    // The source goes first when narrowed, then the count; the outcome always stays.
+    parts.push(StatusPart::new(format!(" {source_text}"), StatusTone::Name).droppable());
+    spoken.push(source_spoken);
+    // Only a tab that still exists can be switched to.
+    let default_click = !matches!(clip.source, ClipSource::Closed);
+    Some(FormattedSegment { default_click, ..FormattedSegment::plain(parts, spoken.join(", ")) })
 }
 
 /// The zoom segment: a `ZOOM` chip with no name while a split pane is zoomed.

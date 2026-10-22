@@ -366,6 +366,7 @@ impl StatusSegmentId {
             allows_always: !matches!(
                 self,
                 Self::Alerts
+                    | Self::Clip
                     | Self::Link
                     | Self::Paste
                     | Self::Ime
@@ -381,6 +382,7 @@ impl StatusSegmentId {
             implemented: matches!(
                 self,
                 Self::Alerts
+                    | Self::Clip
                     | Self::Health
                     | Self::Mem
                     | Self::Mode
@@ -548,6 +550,19 @@ impl Default for ImeSettings {
     }
 }
 
+/// Clipboard segment settings beyond the common keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClipSettings {
+    /// Seconds the latest OSC 52 request stays shown.
+    pub hold_secs: u64,
+}
+
+impl Default for ClipSettings {
+    fn default() -> Self {
+        Self { hold_secs: 10 }
+    }
+}
+
 /// Alerts segment settings beyond the common keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AlertsSettings {
@@ -620,6 +635,8 @@ pub struct ResolvedStatusLine {
     pub size: SizeSettings,
     /// Alerts segment settings.
     pub alerts: AlertsSettings,
+    /// Clipboard segment settings.
+    pub clip: ClipSettings,
 }
 
 impl ResolvedStatusLine {
@@ -644,6 +661,8 @@ pub const MEM_THRESHOLD_RANGE_MIB: std::ops::RangeInclusive<u64> = 1..=1_048_576
 pub const COPIED_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=10;
 /// Bounds of the input-method segment's `hold_secs`.
 pub const HOLD_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=60;
+/// Bounds of the clipboard segment's `hold_secs`.
+pub const CLIP_HOLD_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=600;
 /// Bounds of the alerts segment's `min_secs`.
 pub const MIN_SECS_RANGE: std::ops::RangeInclusive<u64> = 0..=86_400;
 /// Bounds of the size segment's `hold_ms`.
@@ -661,6 +680,8 @@ const SEL_KEYS: &[&str] = &["copied_secs"];
 const PASTE_KEYS: &[&str] = &["paste"];
 /// Extra keys of the input-method segment table.
 const IME_KEYS: &[&str] = &["hold_secs"];
+/// Extra keys of the clipboard segment table.
+const CLIP_KEYS: &[&str] = &["hold_secs"];
 /// Extra keys of the alerts segment table.
 const ALERTS_KEYS: &[&str] = &["min_secs", "sources"];
 /// Extra keys of the size segment table.
@@ -675,6 +696,7 @@ fn segment_keys(id: StatusSegmentId) -> &'static [&'static str] {
         StatusSegmentId::Ime => IME_KEYS,
         StatusSegmentId::Size => SIZE_KEYS,
         StatusSegmentId::Alerts => ALERTS_KEYS,
+        StatusSegmentId::Clip => CLIP_KEYS,
         _ => &[],
     }
 }
@@ -760,6 +782,7 @@ impl StatusLineConfig {
         let mut ime = ImeSettings::default();
         let mut size = SizeSettings::default();
         let mut alerts = AlertsSettings::default();
+        let mut clip = ClipSettings::default();
         let mut segments = Vec::new();
         for (side, list_name, ids) in lists {
             for id in ids {
@@ -833,6 +856,17 @@ impl StatusLineConfig {
                         )?;
                 }
             }
+            if id == StatusSegmentId::Clip {
+                if let Some(value) = table.get("hold_secs") {
+                    clip.hold_secs = value
+                        .as_integer()
+                        .and_then(|secs| u64::try_from(secs).ok())
+                        .filter(|secs| CLIP_HOLD_SECS_RANGE.contains(secs))
+                        .context(
+                            "status_line.segment.clip: hold_secs must be an integer in 1..=600",
+                        )?;
+                }
+            }
             if id == StatusSegmentId::Alerts {
                 apply_alerts_keys(&mut alerts, table).context("status_line.segment.alerts")?;
             }
@@ -868,6 +902,7 @@ impl StatusLineConfig {
             ime,
             size,
             alerts,
+            clip,
         })
     }
 

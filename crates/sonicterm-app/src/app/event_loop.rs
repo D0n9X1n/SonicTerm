@@ -553,8 +553,13 @@ impl App {
             UserEvent::LaunchFailed { message } | UserEvent::ScriptDraftRejected { message } => {
                 self.handle_script_draft_rejected(message);
             }
-            UserEvent::ClipboardWrite { text } => {
-                self.handle_clipboard_write(text);
+            UserEvent::ClipboardWrite { pane_id, text } => {
+                let bytes = text.len();
+                let written = self.handle_clipboard_write(text);
+                self.note_clip_write(pane_id, bytes, written);
+            }
+            UserEvent::ClipboardAttempts { pane_id, attempts } => {
+                self.note_clip_attempts(pane_id, attempts, Instant::now());
             }
             UserEvent::PathProbeFinished(result) => {
                 self.handle_path_probe_finished(*result);
@@ -643,22 +648,21 @@ impl App {
         );
     }
 
-    pub(super) fn handle_clipboard_write(&mut self, text: String) {
-        #[cfg(not(target_os = "windows"))]
-        let _ = self.set_clipboard_text(text);
+    /// Apply one accepted OSC 52 write; returns whether the native clipboard took it.
+    pub(super) fn handle_clipboard_write(&mut self, text: String) -> bool {
         #[cfg(target_os = "windows")]
-        {
-            let previous_text = self.clipboard_text_for_reassert();
-            if !self.set_clipboard_text(text.clone()) {
-                // When: set_clipboard_text returns false, no successful value exists to reassert.
-                return;
-            }
+        let (previous_text, reassert_text) = (self.clipboard_text_for_reassert(), text.clone());
+        let written = self.set_clipboard_text(text);
+        // Windows reasserts a successful write once; a failed one has no value to reassert.
+        #[cfg(target_os = "windows")]
+        if written {
             self.pending_osc52_reassert = Some(super::PendingOsc52Reassert {
-                text,
+                text: reassert_text,
                 previous_text,
                 due: Instant::now() + super::OSC52_CLIPBOARD_REASSERT_DELAY,
             });
         }
+        written
     }
 
     pub(super) fn handle_script_draft_rejected(&mut self, message: String) {

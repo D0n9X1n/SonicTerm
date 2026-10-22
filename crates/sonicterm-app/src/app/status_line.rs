@@ -21,9 +21,9 @@ use sonicterm_ui::selection::{
     selection_extent_counted, Selection, SelectionExtent, SELECTION_EXTENT_MAX_ROWS,
 };
 use sonicterm_ui::status_line::{
-    build_view, sanitize_link_text, AlertsInput, FontInput, HealthInput, ImeInput, LinkInput,
-    MemHistory, MemInput, ModeInput, NumberStyle, PathAction, ReloadFailure, RenderHealth,
-    SegmentClick, SegmentHandler, SelInput, StatusLineInputs,
+    build_view, sanitize_link_text, AlertsInput, ClipInput, ClipOutcome, ClipSource, FontInput,
+    HealthInput, ImeInput, LinkInput, MemHistory, MemInput, ModeInput, NumberStyle, PathAction,
+    ReloadFailure, RenderHealth, SegmentClick, SegmentHandler, SelInput, StatusLineInputs,
 };
 use winit::window::WindowId;
 
@@ -142,6 +142,25 @@ pub(crate) struct StatusLineState {
     size_seen: HashMap<u64, u64>,
     /// Per window, the pane whose resize `size` shows and when that hold ends.
     size_shown: HashMap<WindowId, (u64, Instant)>,
+    /// The latest OSC 52 batch, shown for `hold_secs`.
+    clip: Option<ClipRecord>,
+    /// Per pane, the native result of its latest accepted write, until its batch summary arrives.
+    clip_write: HashMap<u64, ClipOutcome>,
+    /// Per pane, when a refusal was last logged and how many batches were suppressed since.
+    clip_log: HashMap<u64, (Instant, u64)>,
+}
+
+/// The latest OSC 52 batch: payload-free, so no clipboard text is retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClipRecord {
+    /// The pane whose program sent it.
+    pub(crate) pane_id: u64,
+    /// What happened to the batch's last request.
+    pub(crate) outcome: ClipOutcome,
+    /// Requests since the hold began.
+    pub(crate) attempts: u64,
+    /// When the batch was serviced; the hold runs from here.
+    pub(crate) last_at: Instant,
 }
 
 /// What makes two selections count the same: the pane, the normalized
@@ -726,6 +745,24 @@ impl App {
         state.history_ack.retain(|pane_id, _| live_panes.contains(pane_id));
         state.size_seen.retain(|pane_id, _| live_panes.contains(pane_id));
         state.size_shown.retain(|window_id, _| windows.contains_key(window_id));
+        state.clip_write.retain(|pane_id, _| live_panes.contains(pane_id));
+        state.clip_log.retain(|pane_id, _| live_panes.contains(pane_id));
+        let clip_hold = Duration::from_secs(state.resolved.clip.hold_secs);
+        if state.clip.is_some_and(|record| now >= record.last_at + clip_hold) {
+            // The hold ended, so the record is dropped and nothing wakes for it again.
+            state.clip = None;
+        }
+        let clip = state.clip.filter(|_| state.resolved.segment(StatusSegmentId::Clip).is_some());
+        if let Some(record) = clip {
+            let wake = record.last_at + clip_hold;
+            next_wake = Some(next_wake.map_or(wake, |next| next.min(wake)));
+        }
+        let clip_owner = clip.and_then(|record| {
+            windows
+                .iter()
+                .find(|(_, window)| window.panes.contains_key(&record.pane_id))
+                .map(|(window_id, _)| *window_id)
+        });
         let ime_shown = state.resolved.segment(StatusSegmentId::Ime).is_some();
         let ime_hold = Duration::from_secs(state.resolved.ime.hold_secs);
         let sel_shown = state.resolved.segment(StatusSegmentId::Sel).is_some();
@@ -865,6 +902,19 @@ impl App {
                 font,
                 size,
                 zoomed,
+                clip: clip.map(|record| ClipInput {
+                    outcome: record.outcome,
+                    attempts: record.attempts,
+                    source: match clip_owner {
+                        Some(owner) if owner == *window_id => window
+                            .tab_states
+                            .iter()
+                            .position(|tab| tab.tree.leaves().contains(&record.pane_id))
+                            .map_or(ClipSource::OtherWindow, |index| ClipSource::Tab(index + 1)),
+                        Some(_) => ClipSource::OtherWindow,
+                        None => ClipSource::Closed,
+                    },
+                }),
                 alerts: if alerts_shown {
                     AlertsInput {
                         tabs: marked.get(window_id).cloned().unwrap_or_default(),
@@ -971,11 +1021,109 @@ impl App {
             Some(SegmentClick::Handler(SegmentHandler::NextAlert)) => {
                 self.activate_next_alert(window_id);
             }
+            Some(SegmentClick::Handler(SegmentHandler::ClipSource)) => {
+                self.activate_clip_source();
+            }
             None => {
                 // When: `click` is None, a gap or inert segment was pressed; consume it and do nothing.
             }
         }
         true
+    }
+
+    /// Record the native result of an accepted OSC 52 write from `pane_id`, `bytes` long.
+    pub(super) fn note_clip_write(&mut self, pane_id: u64, bytes: usize, written: bool) {
+        let outcome = if written {
+            ClipOutcome::Written(bytes as u64)
+        } else {
+            // When: written is false, the native clipboard refused the accepted text.
+            ClipOutcome::Failed
+        };
+        self.status_line.clip_write.insert(pane_id, outcome);
+    }
+
+    /// Record one VT batch's OSC 52 requests from `pane_id`: the display shows its last request and
+    /// counts every request since the hold began. Refusals log one debug line per pane per second.
+    pub(super) fn note_clip_attempts(
+        &mut self,
+        pane_id: u64,
+        attempts: super::spawn_pane::ClipAttempts,
+        now: Instant,
+    ) {
+        use super::spawn_pane::Osc52Refusal;
+        let outcome = match attempts.latest {
+            None => self.status_line.clip_write.remove(&pane_id),
+            Some(Osc52Refusal::Read) => Some(ClipOutcome::ReadRefused),
+            Some(Osc52Refusal::Selection(selection)) => {
+                Some(ClipOutcome::SelectionRefused(selection))
+            }
+            Some(Osc52Refusal::TooLarge) => Some(ClipOutcome::TooLarge),
+            Some(Osc52Refusal::Invalid) => Some(ClipOutcome::Invalid),
+        };
+        let Some(outcome) = outcome else {
+            // When: outcome is None, the batch's accepted write left no result, so nothing is shown.
+            return;
+        };
+        let hold = Duration::from_secs(self.status_line.resolved.clip.hold_secs);
+        let carried = self
+            .status_line
+            .clip
+            .filter(|record| now < record.last_at + hold)
+            .map_or(0, |record| record.attempts);
+        self.status_line.clip = Some(ClipRecord {
+            pane_id,
+            outcome,
+            attempts: carried.saturating_add(u64::from(attempts.total)),
+            last_at: now,
+        });
+        if attempts.refused == 0 {
+            // When: attempts.refused is 0, there is no refusal to log.
+            return;
+        }
+        let log = self.status_line.clip_log.entry(pane_id).or_insert((now, 0));
+        if log.1 > 0 && now.duration_since(log.0) < Duration::from_secs(1) {
+            // When: log.1 is set and log.0 is under a second old, this batch is only counted as suppressed.
+            log.1 += 1;
+            return;
+        }
+        let suppressed = log.1.saturating_sub(1);
+        *log = (now, 1);
+        tracing::debug!(
+            pane_id,
+            refused = attempts.refused,
+            latest = ?attempts.latest,
+            suppressed,
+            "OSC 52 clipboard requests refused"
+        );
+    }
+
+    /// Activate the tab whose program sent the latest OSC 52 request, in its own window, and focus
+    /// that window; nothing happens once the pane has closed.
+    pub(super) fn activate_clip_source(&mut self) {
+        let Some(pane_id) = self.status_line.clip.map(|record| record.pane_id) else {
+            // When: no clip record is shown, there is no source to go to.
+            return;
+        };
+        let target = self.windows.iter().find_map(|(window_id, window)| {
+            window
+                .tab_states
+                .iter()
+                .position(|tab| tab.tree.leaves().contains(&pane_id))
+                .map(|index| (*window_id, index))
+        });
+        let Some((window_id, index)) = target else {
+            // When: target is None, no window holds pane_id: the source tab has closed.
+            return;
+        };
+        if Some(window_id) == self.main_window_id {
+            self.activate_main_tab(index);
+        } else {
+            // When: window_id is not the main window, it is a torn-out child.
+            self.activate_tab_in_child(window_id, index);
+        }
+        if let Some(window) = self.windows.get(&window_id).and_then(|state| state.window.as_ref()) {
+            window.focus_window();
+        }
     }
 
     /// Activate the next marked tab after `window_id`'s active one, wrapping; with none there, the

@@ -80,6 +80,7 @@ fn protection_and_sensitivity_follow_the_catalog() {
             Seg::Health,
             Seg::Mem,
             Seg::Mode,
+            Seg::Clip,
             Seg::Link,
             Seg::Paste,
             Seg::Sel,
@@ -115,6 +116,7 @@ fn default_table_is_the_developer_preset_and_off() {
         side_ids(&resolved, StatusSide::Right),
         [
             StatusSegmentId::Alerts,
+            StatusSegmentId::Clip,
             StatusSegmentId::Health,
             StatusSegmentId::History,
             StatusSegmentId::Mem
@@ -140,7 +142,12 @@ fn presets_resolve_to_their_implemented_lists() {
     assert!(side_ids(&minimal, StatusSide::Center).is_empty());
     assert_eq!(
         side_ids(&minimal, StatusSide::Right),
-        [StatusSegmentId::Alerts, StatusSegmentId::Health, StatusSegmentId::Mem]
+        [
+            StatusSegmentId::Alerts,
+            StatusSegmentId::Clip,
+            StatusSegmentId::Health,
+            StatusSegmentId::Mem
+        ]
     );
     assert!(!minimal.mem.sparkline);
     let diagnostics = parse("preset = \"diagnostics\"\n").resolve().unwrap();
@@ -167,6 +174,7 @@ fn explicit_list_replaces_only_that_list() {
         side_ids(&resolved, StatusSide::Right),
         [
             StatusSegmentId::Alerts,
+            StatusSegmentId::Clip,
             StatusSegmentId::Health,
             StatusSegmentId::History,
             StatusSegmentId::Mem
@@ -268,6 +276,9 @@ fn invalid_values_fail_the_load() {
         "[status_line.segment.alerts]\nmin_secs = 86401\n",
         "[status_line.segment.alerts]\nsources = [\"activity\"]\n",
         "[status_line.segment.alerts]\nsources = \"bell\"\n",
+        "[status_line.segment.clip]\nhold_secs = 0\n",
+        "[status_line.segment.clip]\nhold_secs = 601\n",
+        "[status_line.segment.clip]\nshow = \"always\"\n",
         "[status_line.segment.size]\nclick = \"show_memory_usage\"\n",
         "[status_line.segment.sel]\ncopied_secs = 11\n",
         "[status_line.segment.sel]\ncopied_secs = \"2\"\n",
@@ -390,4 +401,19 @@ fn alerts_settings_resolve() {
     assert!(config.unknown_keys().is_empty());
     assert!(!StatusSegmentId::Alerts.meta().allows_always);
     assert!(StatusSegmentId::Alerts.meta().clickable);
+}
+
+#[test]
+fn clip_hold_resolves_and_clip_is_in_both_presets() {
+    // `clip` holds 10 s by default, is active-only and clickable, and joins developer and minimal.
+    let defaults = StatusLineConfig::default().resolve().unwrap();
+    assert_eq!(defaults.clip, ClipSettings { hold_secs: 10 });
+    assert!(defaults.segment(StatusSegmentId::Clip).is_some());
+    let minimal = parse("preset = \"minimal\"\n").resolve().unwrap();
+    assert!(minimal.segment(StatusSegmentId::Clip).is_some());
+    let config = parse("[status_line.segment.clip]\nhold_secs = 30\n");
+    assert_eq!(config.resolve().unwrap().clip, ClipSettings { hold_secs: 30 });
+    assert!(config.unknown_keys().is_empty());
+    assert!(!StatusSegmentId::Clip.meta().allows_always);
+    assert!(StatusSegmentId::Clip.meta().clickable);
 }
