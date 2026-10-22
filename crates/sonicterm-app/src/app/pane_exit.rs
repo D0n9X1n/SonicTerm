@@ -49,6 +49,12 @@ impl App {
     pub(super) fn handle_pane_process_exited(&mut self, pane_id: u64, status: PaneExitStatus) {
         // Any exit, clean or not, clears the pane's process name and warning; an unclean pane stays.
         self.clear_exited_foreground(pane_id, std::time::Instant::now());
+        if let Some(pane) =
+            self.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
+        {
+            // The shell is gone, so no prompt is confirmed; the last command is kept.
+            pane.command_state.phase = super::CommandPhase::Unknown;
+        }
         let Some(hold) = self.mark_exit_reported(pane_id) else {
             // When: `mark_exit_reported` finds no live pane, or one already reported, nothing remains to do.
             return;

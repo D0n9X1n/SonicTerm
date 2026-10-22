@@ -15,15 +15,19 @@ use super::*;
 ///
 /// The release runs only when a batch actually overshot, so the steady state,
 /// where the queue sits at or below the cap, does not reallocate.
+///
+/// Dropping events marks the queue `overflowed`, so the drain resets the pane's command state
+/// instead of applying a tail whose start is lost.
 pub(super) fn append_bounded_command_events(
-    queue: &mut Vec<PaneCommandEvent>,
+    queue: &mut CommandQueue,
     events: impl IntoIterator<Item = PaneCommandEvent>,
 ) {
-    queue.extend(events);
-    if queue.len() > MAX_PANE_COMMAND_EVENTS {
-        let excess = queue.len() - MAX_PANE_COMMAND_EVENTS;
-        queue.drain(0..excess);
-        queue.shrink_to(MAX_PANE_COMMAND_EVENTS);
+    queue.events.extend(events);
+    if queue.events.len() > MAX_PANE_COMMAND_EVENTS {
+        let excess = queue.events.len() - MAX_PANE_COMMAND_EVENTS;
+        queue.events.drain(0..excess);
+        queue.events.shrink_to(MAX_PANE_COMMAND_EVENTS);
+        queue.overflowed = true;
     }
 }
 
@@ -52,7 +56,7 @@ impl App {
             return;
         };
         poll_command_events_for_tab_state(
-            &main.panes,
+            &mut main.panes,
             &mut main.tab_states,
             &mut main.tabs,
             &self.config,
@@ -65,10 +69,11 @@ impl App {
 ///
 /// Events are collected across every leaf pane in the tab, so a command that
 /// finished in a non-focused split still updates the tab. A finished command
-/// holds its badge for a few seconds before the status lapses.
+/// holds its badge for a few seconds before the status lapses. Each pane's own command state
+/// takes its events in parse order, after a reset when its queue overflowed.
 #[doc(hidden)]
 pub fn poll_command_events_for_tab_state(
-    panes: &HashMap<u64, PaneState>,
+    panes: &mut HashMap<u64, PaneState>,
     tab_states: &mut [TabState],
     tabs: &mut TabBar,
     config: &Config,
@@ -82,8 +87,15 @@ pub fn poll_command_events_for_tab_state(
     let pane_ids = tab_state.tree.leaves();
     let mut events = Vec::new();
     for pane_id in pane_ids {
-        if let Some(pane) = panes.get(&pane_id) {
+        if let Some(pane) = panes.get_mut(&pane_id) {
             let mut queue = pane.command_events.lock();
+            if std::mem::take(&mut queue.overflowed) {
+                // The queue overflowed: the lost events' state is unknown, so the retained tail starts fresh.
+                pane.command_state.reset();
+            }
+            for event in queue.iter() {
+                pane.command_state.apply(event);
+            }
             events.extend(queue.drain(..));
         }
     }
@@ -118,7 +130,7 @@ pub fn poll_command_events_for_tab_state(
 pub fn poll_command_events_for_child_window(child: &mut WindowState, config: &Config) {
     for tab_idx in 0..child.tab_states.len() {
         poll_command_events_for_tab_state(
-            &child.panes,
+            &mut child.panes,
             &mut child.tab_states,
             &mut child.tabs,
             config,

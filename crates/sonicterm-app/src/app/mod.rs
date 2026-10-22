@@ -436,7 +436,10 @@ const _: () = {
     let _: fn(&mut App, u64, ArmToken) -> EchoTimelineTakeV1 = App::take_echo_timeline_v1;
 };
 use pane_state::pane_id_at_point;
-pub use pane_state::{next_pane_id, PaneCommandEvent, PaneState};
+pub use pane_state::{
+    next_pane_id, CommandPhase, CommandQueue, LastCommand, PaneCommandEvent, PaneCommandState,
+    PaneState,
+};
 mod path_target;
 mod perf_present;
 // Pins both S10 attribution signatures here, in the parent, in every build: a gate on the methods, their

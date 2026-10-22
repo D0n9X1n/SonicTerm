@@ -120,7 +120,9 @@ pub struct PaneState {
         Option<(sonicterm_io::proc_info::ProcessIdentity, sonicterm_io::pty::PtyExitObserved)>,
     /// Cross-thread queue populated by the VT loop when OSC 133 command
     /// lifecycle markers are parsed for this pane.
-    pub command_events: Arc<Mutex<Vec<PaneCommandEvent>>>,
+    pub command_events: Arc<Mutex<CommandQueue>>,
+    /// The pane's prompt phase and last command, written only on the event loop by the drain.
+    pub(crate) command_state: PaneCommandState,
     /// Per-pane DECTCEM cursor-visibility flag (`CSI ?25h/l`). Written
     /// by the VT loop, read by the render path for the active pane.
     /// **Per-pane (not per-window)** so the Arc travels with the pane
@@ -170,6 +172,100 @@ pub struct PaneCommandEvent {
     pub event: CommandEvent,
     pub at: Instant,
     pub duration: Option<Duration>,
+}
+
+/// A pane's bounded command-event queue and whether it dropped events since the last drain.
+#[derive(Debug, Default)]
+pub struct CommandQueue {
+    /// Events in parse order, at most `MAX_PANE_COMMAND_EVENTS`.
+    pub events: Vec<PaneCommandEvent>,
+    /// The bound dropped older events since the drain last ran, so the state they would have set
+    /// is unknown and the drain resets before applying the retained tail.
+    pub overflowed: bool,
+}
+
+impl std::ops::Deref for CommandQueue {
+    type Target = Vec<PaneCommandEvent>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.events
+    }
+}
+
+impl std::ops::DerefMut for CommandQueue {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.events
+    }
+}
+
+/// Where a pane's shell is, from its OSC 133 markers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CommandPhase {
+    /// No marker yet, or the markers since the last known state were lost. Never a prompt.
+    #[default]
+    Unknown,
+    /// The shell showed its prompt (`A` or `B`, or `D`): the only confirmed prompt state.
+    Prompt,
+    /// A command started (`C`) at this instant and has not ended.
+    Running {
+        /// When the VT worker parsed the `C` marker.
+        started_at: Instant,
+    },
+}
+
+/// How the pane's last command ended. No exit code is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LastCommand {
+    /// When it ended: the `D` marker, or the `A` that followed a command without `D`.
+    pub ended_at: Instant,
+    /// How long it ran; `None` for a `D` with no preceding `C`.
+    pub duration: Option<Duration>,
+    /// It ended without `D` (a new prompt started while it was running).
+    pub abandoned: bool,
+}
+
+/// A pane's prompt phase and last command, kept per pane so background panes and panes that move
+/// to another tab or window keep theirs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PaneCommandState {
+    /// Where the shell is.
+    pub phase: CommandPhase,
+    /// How the last command ended, if one did since the state was last known.
+    pub last: Option<LastCommand>,
+}
+
+impl PaneCommandState {
+    /// Apply one marker, in parse order.
+    pub fn apply(&mut self, event: &PaneCommandEvent) {
+        match event.event {
+            CommandEvent::PromptStart => {
+                if let CommandPhase::Running { started_at } = self.phase {
+                    // A new prompt while running: the command ended without `D`.
+                    self.last = Some(LastCommand {
+                        ended_at: event.at,
+                        duration: Some(event.at.saturating_duration_since(started_at)),
+                        abandoned: true,
+                    });
+                }
+                self.phase = CommandPhase::Prompt;
+            }
+            CommandEvent::PromptEnd => self.phase = CommandPhase::Prompt,
+            CommandEvent::CmdStart => self.phase = CommandPhase::Running { started_at: event.at },
+            CommandEvent::CmdEnd(_) => {
+                self.phase = CommandPhase::Prompt;
+                self.last = Some(LastCommand {
+                    ended_at: event.at,
+                    duration: event.duration,
+                    abandoned: false,
+                });
+            }
+        }
+    }
+
+    /// Forget everything: the markers that set it were lost.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 impl PaneState {
@@ -224,7 +320,8 @@ impl PaneState {
             fg_demanded_at: None,
             #[cfg(test)]
             test_foreground_source: None,
-            command_events: Arc::new(Mutex::new(Vec::new())),
+            command_events: Arc::new(Mutex::new(CommandQueue::default())),
+            command_state: PaneCommandState::default(),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             keyboard_input: Arc::new(AtomicU64::new(keyboard_input)),
             pointer_input: Arc::new(std::sync::atomic::AtomicU8::new(pointer_input)),

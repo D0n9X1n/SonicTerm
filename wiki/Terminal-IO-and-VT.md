@@ -289,7 +289,13 @@ URI to 8 KiB and client id to 1 KiB.
 - **OSC 8:** preserve the full URI, including semicolons. Only `id=` is extracted
   from the parameter field; other parameters are not treated as the client id.
 - **OSC 133:** `B` emits `PromptEnd` and does not start command timing; `C` marks
-  execution start. `A`/`D` retain their existing prompt-region behavior.
+  execution start. `A`/`D` retain their existing prompt-region behavior. Each pane
+  keeps its own command state, applied in parse order on the event loop: a phase
+  (`Unknown`, `Prompt` after `A`, `B` or `D`, `Running` from `C`) and its last
+  command's end instant and duration (`D`, or an `A` that arrives while running,
+  which marks the command abandoned). No exit code is kept. A queue that dropped
+  events resets the state before its retained tail, a pane whose process exited is
+  `Unknown`, and the state moves with the pane to another tab or window.
 
 The raw OSC 4 collector retains queries beyond vte's parameter count, up to
 4 KiB, and suppresses the truncated duplicate callback. Parser-owned sequence

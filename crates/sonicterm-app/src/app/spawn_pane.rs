@@ -290,7 +290,7 @@ impl SyncLatch {
 pub(in crate::app) struct PaneVtHandles {
     parser: Arc<Mutex<Parser>>,
     redraw_target: Arc<Mutex<Option<WindowId>>>,
-    command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>>,
+    command_events: Arc<Mutex<super::CommandQueue>>,
     cursor_visible: Arc<AtomicBool>,
     keyboard_input: Arc<AtomicU64>,
     pointer_input: Arc<std::sync::atomic::AtomicU8>,
