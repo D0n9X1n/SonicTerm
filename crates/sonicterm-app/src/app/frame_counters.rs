@@ -833,6 +833,8 @@ pub(crate) struct StatusLineCounters {
     pub(crate) sel_counts: u64,
     /// Cells those counts read, at most 200,000 per count.
     pub(crate) sel_cells: u64,
+    /// Times `History: trimmed` appeared in a window's strip.
+    pub(crate) history_shows: u64,
 }
 
 /// URL and path detection work on the event-loop thread, cumulative for the App's lifetime.
@@ -1648,6 +1650,7 @@ impl AppFrameCounters {
             ("status_line_redraws", self.status_line.redraws),
             ("status_line_sel_counts", self.status_line.sel_counts),
             ("status_line_sel_cells", self.status_line.sel_cells),
+            ("status_line_history_shows", self.status_line.history_shows),
         ] {
             record.push_count(name, value);
         }

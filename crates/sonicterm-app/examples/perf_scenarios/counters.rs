@@ -188,6 +188,7 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::App, "status_line_redraws"),
     count(Section::App, "status_line_sel_counts"),
     count(Section::App, "status_line_sel_cells"),
+    count(Section::App, "status_line_history_shows"),
     histogram(Section::App, "about_to_wait_ms", Unit::Millis, "about_to_wait"),
     histogram(Section::App, "user_event_ms", Unit::Millis, "user_event"),
     histogram(Section::App, "new_events_ms", Unit::Millis, "new_events"),

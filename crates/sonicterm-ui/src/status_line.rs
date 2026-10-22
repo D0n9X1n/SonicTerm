@@ -131,6 +131,8 @@ impl FormattedSegment {
 pub enum SegmentHandler {
     /// Return the focused pane to the bottom of its history.
     ScrollToBottom,
+    /// Acknowledge the focused pane's budget-trimmed history, hiding `History: trimmed`.
+    AcknowledgeHistory,
 }
 
 /// A segment's registered `default` click.
@@ -196,6 +198,14 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
         Seg::Link => (UpdateKind::Event, format_link, DefaultClick::None),
         Seg::Sel => (UpdateKind::Event, format_sel, DefaultClick::Action(Action::CopyToClipboard)),
         Seg::Paste => (UpdateKind::Event, format_paste, DefaultClick::None),
+        Seg::History => (
+            UpdateKind::Event,
+            format_history,
+            DefaultClick::Handler(SegmentHandler::AcknowledgeHistory),
+        ),
+        Seg::Font => (UpdateKind::Event, format_font, DefaultClick::Action(Action::ResetFontSize)),
+        Seg::Size => (UpdateKind::Event, format_size, DefaultClick::None),
+        Seg::Zoom => (UpdateKind::Event, format_zoom, DefaultClick::Action(Action::TogglePaneZoom)),
         Seg::Ime => (UpdateKind::Event, format_ime, DefaultClick::None),
         Seg::Alerts
         | Seg::Input
@@ -205,11 +215,7 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
         | Seg::Frame
         | Seg::Out
         | Seg::TabMem
-        | Seg::Glyphs
-        | Seg::History
-        | Seg::Font
-        | Seg::Zoom
-        | Seg::Size => (UpdateKind::Event, format_unavailable, DefaultClick::None),
+        | Seg::Glyphs => (UpdateKind::Event, format_unavailable, DefaultClick::None),
     };
     SegmentSpec { update, format, default_click }
 }
@@ -248,6 +254,23 @@ pub struct StatusLineInputs {
     pub paste_raw: bool,
     /// An input-method problem in this window.
     pub ime: Option<ImeInput>,
+    /// Rows the byte budget trimmed from the focused pane's history since it was acknowledged.
+    pub history_trimmed: Option<u64>,
+    /// The live font size while it differs from the configured size.
+    pub font: Option<FontInput>,
+    /// The focused pane's `(columns, rows)` while a recent resize is held.
+    pub size: Option<(u16, u16)>,
+    /// A split pane of the active tab is zoomed to fill it.
+    pub zoomed: bool,
+}
+
+/// The live and configured font sizes, in tenths of a point so the inputs stay comparable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontInput {
+    /// The live size.
+    pub live_tenths: u32,
+    /// The configured size.
+    pub configured_tenths: u32,
 }
 
 /// What the input-method segment shows; it appears only for a problem.
@@ -1078,6 +1101,72 @@ fn format_ime(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Formatte
     };
     let parts = vec![name_part(env, "status-name-ime"), StatusPart::new(text, tone)];
     Some(FormattedSegment::plain(parts, env.i18n.translate(spoken_key)))
+}
+
+/// `tenths` of a point as `16` or `13.5`, with the locale's decimal separator.
+fn format_tenths(tenths: u32, style: NumberStyle) -> String {
+    let whole = format_count(u64::from(tenths / 10), style);
+    match tenths % 10 {
+        0 => whole,
+        fraction => format!("{whole}{}{fraction}", style.decimal),
+    }
+}
+
+/// The history segment: `History: trimmed` after the byte budget dropped rows from the focused
+/// pane's scrollback, until the trim is acknowledged.
+fn format_history(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let rows = inputs.history_trimmed?;
+    let parts = vec![
+        name_part(env, "status-name-history"),
+        StatusPart::new(env.i18n.translate("status-value-trimmed"), StatusTone::Warn),
+    ];
+    let count = format_count(rows, env.numbers);
+    let spoken = env.i18n.t_args("status-spoken-history-trimmed", Some(&[("count", &count)]));
+    Some(FormattedSegment { default_click: true, ..FormattedSegment::plain(parts, spoken) })
+}
+
+/// The font segment: `Font: 16pt (+2)` while the live size differs from the configured size.
+fn format_font(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let font = inputs.font.filter(|font| font.live_tenths != font.configured_tenths)?;
+    let live = format_tenths(font.live_tenths, env.numbers);
+    let (sign, spoken_key, delta) = if font.live_tenths > font.configured_tenths {
+        ("+", "status-spoken-font-larger", font.live_tenths - font.configured_tenths)
+    } else {
+        // When: live_tenths is below configured_tenths, the delta is a reduction.
+        ("\u{2212}", "status-spoken-font-smaller", font.configured_tenths - font.live_tenths)
+    };
+    let delta = format_tenths(delta, env.numbers);
+    let parts = vec![
+        name_part(env, "status-name-font"),
+        StatusPart::new(format!("{live}pt ({sign}{delta})"), StatusTone::Value),
+    ];
+    let spoken = env.i18n.t_args(spoken_key, Some(&[("size", &live), ("delta", &delta)]));
+    Some(FormattedSegment { default_click: true, ..FormattedSegment::plain(parts, spoken) })
+}
+
+/// The size segment: `Size: 120×40` for a while after the focused pane's grid was resized.
+fn format_size(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let (cols, rows) = inputs.size?;
+    let parts = vec![
+        name_part(env, "status-name-size"),
+        StatusPart::new(format!("{cols}{}{rows}", symbol(env.icons, "×", "x")), StatusTone::Value),
+    ];
+    let spoken = env.i18n.t_args(
+        "status-spoken-size-grid",
+        Some(&[("cols", &cols.to_string()), ("rows", &rows.to_string())]),
+    );
+    Some(FormattedSegment::plain(parts, spoken))
+}
+
+/// The zoom segment: a `ZOOM` chip with no name while a split pane is zoomed.
+fn format_zoom(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    if !inputs.zoomed {
+        // When: `zoomed` is false, every pane of the active tab is drawn.
+        return None;
+    }
+    let parts = vec![StatusPart::new(env.i18n.translate("status-chip-zoom"), StatusTone::Chip)];
+    let spoken = env.i18n.translate("status-spoken-pane-zoomed");
+    Some(FormattedSegment { default_click: true, ..FormattedSegment::plain(parts, spoken) })
 }
 
 /// Formatter of a catalog id whose segment has not landed: shows nothing.

@@ -218,6 +218,10 @@ pub(crate) enum Fixture {
     InlinePng,
     /// 70 distinct numbered lines, one per visible row, for S1/atlas-retry.
     AtlasRetryRows,
+    /// 5,000 full-width rows, every cell inside an OSC 8 hyperlink, for S1/status-line: linked
+    /// cells cost far more than plain ones, so this history passes the grid's byte budget and
+    /// is trimmed below its row limit.
+    LinkedHistory,
 }
 
 /// A production action that opens the next role's pane or arranges tabs before GO.
@@ -330,6 +334,8 @@ pub(crate) struct StatusLineDeltas {
     pub(crate) sel_counts: u64,
     /// Cells those counts read.
     pub(crate) sel_cells: u64,
+    /// Times `History: trimmed` appeared.
+    pub(crate) history_shows: u64,
 }
 
 /// Whether a `status-line` phase kept the strip's idle contract, or why not.
@@ -342,7 +348,9 @@ pub(crate) struct StatusLineDeltas {
 /// and its delivery. Without delivered occlusion (Windows outside the short trim) the covered
 /// phase is not checked, because the platform reports no occlusion to pause on. `select` drags a
 /// selection: it must count at least once and read at most 200,000 cells per count; `selected`
-/// holds that selection unchanged, so it must not count again.
+/// holds that selection unchanged, so it must not count again. `print` floods the linked history
+/// with `history` and `size` listed: `History: trimmed` appears exactly once, and the strip redraws
+/// only for a sample or that appearance, never per output frame.
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn status_line_progress(
     phase: &str,
@@ -368,6 +376,14 @@ pub(crate) fn status_line_progress(
         }
         "idle" | "uncovered" if deltas.redraws > deltas.samples + 1 => Err(format!(
             "status line requested {} redraws for {} samples",
+            deltas.redraws, deltas.samples
+        )),
+        "print" if deltas.history_shows != 1 => Err(format!(
+            "`History: trimmed` appeared {} times while the linked history printed, not once",
+            deltas.history_shows
+        )),
+        "print" if deltas.redraws > deltas.samples + deltas.history_shows + 1 => Err(format!(
+            "status line requested {} redraws for {} samples during output",
             deltas.redraws, deltas.samples
         )),
         "select" if deltas.sel_counts == 0 => {
@@ -622,6 +638,15 @@ pub(crate) struct Plan {
     pub(crate) status_line: bool,
 }
 
+#[cfg(any(target_os = "macos", windows, test))]
+impl Plan {
+    /// Whether a role prints the linked history, the only fixture that passes the byte budget and
+    /// so shows `History: trimmed`; `print`'s trim check applies only to such a plan.
+    pub(crate) fn prints_linked_history(&self) -> bool {
+        self.roles.contains(&Workload::PrintThenShell(Fixture::LinkedHistory))
+    }
+}
+
 /// A phase of `kind` with no driver, no entry actions and no throughput figure.
 #[cfg(any(target_os = "macos", windows, test))]
 fn timed(name: &'static str, kind: PhaseKind, end: PhaseEnd) -> PhaseSpec {
@@ -699,12 +724,15 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 end,
             ],
         ),
-        // status-line keeps the idle default's hold, then drags a selection and holds it: the drag
-        // counts each changed selection once, within the cell bound, and the held one never again.
+        // status-line first prints a linked history that the byte budget trims, which shows
+        // `History: trimmed` once; then it keeps the idle default's hold, drags a selection and
+        // holds it: the drag counts each changed selection once, within the cell bound, and the
+        // held one never again.
         ("S1", "status-line") => (
-            vec![Workload::IdleShell],
+            vec![Workload::PrintThenShell(Fixture::LinkedHistory)],
             vec![],
             vec![
+                print(vec![0]),
                 Step::Phase(timed("idle", PhaseKind::Hold, PhaseEnd::Hold(hold(60_000)))),
                 Step::Phase(driven(
                     "select",
@@ -969,7 +997,13 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         short,
         timeout_s: if short { spec.short_timeout_s } else { spec.timeout_s },
         // Only S7 asks for more history than the default; the per-pane cell budget clamps it.
-        scrollback_rows: if spec.id == "S7" { 10_000 } else { 1_000 },
+        // S1/status-line's linked history needs room to pass the byte budget below the row limit.
+        scrollback_rows: if spec.id == "S7" || (spec.id == "S1" && variant == "status-line") {
+            10_000
+        } else {
+            // When: the plan is neither S7 nor S1/status-line, the default history is enough.
+            1_000
+        },
         // S1 and S12 carry the status line comparisons; every variant of theirs but atlas-retry,
         // whose fixture fills 70 rows, requests a grid below the macOS runner's screen clamp with
         // the strip on, so both refs measure the same grid and the presenter variants stay alike.

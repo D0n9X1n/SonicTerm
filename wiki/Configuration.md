@@ -161,7 +161,7 @@ Presets in this build:
 
 | Preset | `left` | `center` | `right` | Segment defaults |
 | --- | --- | --- | --- | --- |
-| `developer` | `mode`, `scroll`, `paste` | `link`, `sel` | `health`, `mem` | — |
+| `developer` | `mode`, `scroll`, `paste` | `link`, `sel` | `health`, `history`, `mem` | — |
 | `minimal` | — | — | `health`, `mem` | — |
 | `diagnostics` | as `developer` | as `developer` | as `developer` | `mem.sparkline = true` |
 
@@ -177,6 +177,10 @@ Every segment except `mem` shows only while it has something to say, so an idle 
 | `paste` | `Paste: ⚠ raw` in amber when a paste into the focused pane would be unbracketed: bracketed paste is off, the pane is on its primary screen, and its shell reported a prompt with OSC 133 (see [Terminal IO and VT](Terminal-IO-and-VT)). A pane without OSC 133, or one running a command, never shows it. Its spoken value is "paste is unbracketed and may run lines": SonicTerm cannot know what the shell does with a newline. `cmd.exe` sends no OSC 133, so it never shows the warning even though its pastes always run line by line; PowerShell shows it only with a prompt that sends OSC 133. | 560 | None. |
 | `ime` | Only an input-method problem: `IME: ⚠ discarded (copy mode)` for `hold_secs` after copy mode dropped a commit, or `IME: → search` / `IME: → palette` while a composition will commit to the search field or the command palette instead of the pane. An ordinary composition into the pane shows nothing. Where the platform reports no composition events (some Wayland setups), only the copy-mode warning can appear. Not in a preset. | 500 | None. |
 | `scroll` | `Scroll: ↑ 340` while the focused pane is scrolled back. | 400 | Returns the pane to the bottom. |
+| `history` | `History: trimmed` in amber after SonicTerm dropped rows from the focused pane's scrollback because its history passed the grid's memory budget; the spoken value gives the row count. Scrolling past the `[terminal] scrollback` limit, a clear, a resize or a lowered limit never shows it. It stays until a click on it or a program clears scrollback (`CSI 3 J`, as `clear` does in most shells), and shows again after a later trim. SonicTerm has no clear-scrollback action, so those are the two ways to acknowledge it. | 300 | Acknowledges the trim. |
+| `font` | Opt-in. `Font: 16pt (+2)` or `Font: 13.5pt (−0.5)` while the live font size differs from the configured size; hidden when they match. The size is app-wide, so every window shows the same value. | 280 | Resets the font size (`reset_font_size`). |
+| `zoom` | Opt-in. A `ZOOM` chip, with no name, while a split pane of the active tab is zoomed to fill it. | 260 | Toggles pane zoom (`toggle_pane_zoom`). |
+| `size` | Opt-in. `Size: 120×40`, the focused pane's columns and rows, for `hold_ms` after its grid was resized (a window resize, a split, a font-size or display-scale change). A pane's first frame, a new tab, a restored session, a tear-out and a focus change to another pane show nothing. | 80 | None. |
 
 The memory figure is the one the Memory Usage report shows: physical footprint on macOS (Activity Monitor's Memory column), private committed bytes on Windows (Task Manager's **Commit size** column), and the resident set on Linux (`top`'s RES). Child processes are not counted. A failed query shows `n/a`.
 
@@ -184,11 +188,11 @@ Each `[status_line.segment.<id>]` table takes:
 
 | Key | Values | Behavior |
 | --- | --- | --- |
-| `show` | `"always"` or `"active"` | `always` keeps the slot with idle text (`n/a`, `bottom`, `normal`, `none`); `active` hides the segment when it has nothing to say. `link`, `paste` and `ime` accept only `active`. |
+| `show` | `"always"` or `"active"` | `always` keeps the slot with idle text (`n/a`, `bottom`, `normal`, `none`); `active` hides the segment when it has nothing to say. `link`, `paste`, `ime`, `history`, `font`, `zoom` and `size` accept only `active`. |
 | `priority` | `0` to `1000` | Higher survives longer when the window is narrow. |
-| `click` | `"default"`, `"none"` or an action name | `default` runs the segment's own click; `none` makes it inert; a keymap action that takes no arguments, such as `"show_memory_usage"`, runs for the clicked window. `paste` and `ime` take only `default` or `none`, both inert. |
+| `click` | `"default"`, `"none"` or an action name | `default` runs the segment's own click; `none` makes it inert; a keymap action that takes no arguments, such as `"show_memory_usage"`, runs for the clicked window. `paste`, `ime` and `size` take only `default` or `none`, both inert. |
 
-`[status_line.segment.mem]` also takes `show_trend` (`true`), `sparkline` (`false`, `true` in `diagnostics`: eight dim cells of the last two minutes after the figure, each the largest sample of a wall-clock 15 s bucket, scaled between the drawn cells' smallest and largest; only completed buckets are drawn, so it changes only when a bucket ends, and a span with no sample, such as a covered window or a sleeping machine, stays blank), `warn_mib` (`1024`) and `critical_mib` (`2048`, at least `warn_mib`), each `1` to `1048576`. `[status_line.segment.sel]` also takes `copied_secs` (`2`, `1` to `10`), how long a copy result stays shown. `[status_line.segment.paste]` takes `paste` (`"when_off"`, the default, or `"never"`). `[status_line.segment.ime]` takes `hold_secs` (`8`, `1` to `60`), how long the copy-mode warning stays shown. Unknown keys under `[status_line]` and inside segment tables are ignored and logged once per load as one `sonicterm-cfg` warning that names them all.
+`[status_line.segment.mem]` also takes `show_trend` (`true`), `sparkline` (`false`, `true` in `diagnostics`: eight dim cells of the last two minutes after the figure, each the largest sample of a wall-clock 15 s bucket, scaled between the drawn cells' smallest and largest; only completed buckets are drawn, so it changes only when a bucket ends, and a span with no sample, such as a covered window or a sleeping machine, stays blank), `warn_mib` (`1024`) and `critical_mib` (`2048`, at least `warn_mib`), each `1` to `1048576`. `[status_line.segment.sel]` also takes `copied_secs` (`2`, `1` to `10`), how long a copy result stays shown. `[status_line.segment.paste]` takes `paste` (`"when_off"`, the default, or `"never"`). `[status_line.segment.ime]` takes `hold_secs` (`8`, `1` to `60`), how long the copy-mode warning stays shown. `[status_line.segment.size]` takes `hold_ms` (`1500`, `250` to `10000`). Unknown keys under `[status_line]` and inside segment tables are ignored and logged once per load as one `sonicterm-cfg` warning that names them all.
 
 When the window is too narrow, the strip first uses compact forms (memory drops its arrow and sparkline, `mode` drops `MOUSE`), then shortens a link's path in the middle, then drops whole segments, lowest priority first. Health errors, the broadcast chip and a link's destination host go last.
 

@@ -75,7 +75,20 @@ fn protection_and_sensitivity_follow_the_catalog() {
     let implemented: Vec<Seg> = Seg::ALL.into_iter().filter(|id| id.meta().implemented).collect();
     assert_eq!(
         implemented,
-        [Seg::Health, Seg::Mem, Seg::Mode, Seg::Link, Seg::Paste, Seg::Sel, Seg::Ime, Seg::Scroll]
+        [
+            Seg::Health,
+            Seg::Mem,
+            Seg::Mode,
+            Seg::Link,
+            Seg::Paste,
+            Seg::Sel,
+            Seg::Ime,
+            Seg::Scroll,
+            Seg::History,
+            Seg::Font,
+            Seg::Zoom,
+            Seg::Size
+        ]
     );
     for id in [Seg::Paste, Seg::Ime] {
         assert!(!id.meta().allows_always && !id.meta().clickable, "{id:?} only explains input");
@@ -99,7 +112,7 @@ fn default_table_is_the_developer_preset_and_off() {
     );
     assert_eq!(
         side_ids(&resolved, StatusSide::Right),
-        [StatusSegmentId::Health, StatusSegmentId::Mem]
+        [StatusSegmentId::Health, StatusSegmentId::History, StatusSegmentId::Mem]
     );
     for segment in &resolved.segments {
         let expected =
@@ -146,7 +159,7 @@ fn explicit_list_replaces_only_that_list() {
     );
     assert_eq!(
         side_ids(&resolved, StatusSide::Right),
-        [StatusSegmentId::Health, StatusSegmentId::Mem]
+        [StatusSegmentId::Health, StatusSegmentId::History, StatusSegmentId::Mem]
     );
     let moved = parse("left = [\"mem\"]\nright = [\"health\"]\n").resolve().unwrap();
     assert_eq!(moved.segment(StatusSegmentId::Mem).unwrap().side, StatusSide::Left);
@@ -234,6 +247,13 @@ fn invalid_values_fail_the_load() {
         "[status_line.segment.paste]\nclick = \"show_memory_usage\"\n",
         "[status_line.segment.ime]\nhold_secs = 0\n",
         "[status_line.segment.ime]\nhold_secs = 61\n",
+        "[status_line.segment.size]\nhold_ms = 249\n",
+        "[status_line.segment.size]\nhold_ms = 10001\n",
+        "[status_line.segment.size]\nshow = \"always\"\n",
+        "[status_line.segment.font]\nshow = \"always\"\n",
+        "[status_line.segment.history]\nshow = \"always\"\n",
+        "[status_line.segment.zoom]\nshow = \"always\"\n",
+        "[status_line.segment.size]\nclick = \"show_memory_usage\"\n",
         "[status_line.segment.sel]\ncopied_secs = 11\n",
         "[status_line.segment.sel]\ncopied_secs = \"2\"\n",
         "[status_line.segment]\nmem = 3\n",
@@ -317,5 +337,24 @@ fn paste_and_ime_keys_resolve() {
     );
     let resolved = config.resolve().unwrap();
     assert_eq!((resolved.paste, resolved.ime), (PasteWarning::Never, ImeSettings { hold_secs: 3 }));
+    assert!(config.unknown_keys().is_empty());
+}
+
+#[test]
+fn size_hold_and_display_segments_resolve() {
+    // `size` holds 1500 ms by default; `font` and `size` are opt-in, `history` is a developer default.
+    let defaults = StatusLineConfig::default().resolve().unwrap();
+    assert_eq!(defaults.size, SizeSettings { hold_ms: 1500 });
+    assert!(defaults.segment(StatusSegmentId::History).is_some());
+    assert!(defaults.segment(StatusSegmentId::Font).is_none());
+    assert!(defaults.segment(StatusSegmentId::Size).is_none());
+    let config =
+        parse("right = [\"font\", \"size\"]\n[status_line.segment.size]\nhold_ms = 3000\n");
+    let resolved = config.resolve().unwrap();
+    assert_eq!(resolved.size, SizeSettings { hold_ms: 3000 });
+    assert_eq!(
+        side_ids(&resolved, StatusSide::Right),
+        [StatusSegmentId::Font, StatusSegmentId::Size]
+    );
     assert!(config.unknown_keys().is_empty());
 }

@@ -65,6 +65,10 @@ fn every_catalog_id_is_registered_with_a_glyph_free_spoken_name() {
             sel: Some(SelInput::Capped { rows: 12_345 }),
             paste_raw: true,
             ime: Some(ImeInput::DiscardedInCopyMode),
+            history_trimmed: Some(1_280),
+            font: Some(FontInput { live_tenths: 135, configured_tenths: 140 }),
+            size: Some((120, 40)),
+            zoomed: true,
             health: HealthInput {
                 config: Some(ReloadFailure { line: Some(12) }),
                 render: RenderHealth::SoftwareAdapter,
@@ -144,6 +148,10 @@ fn core_segments_format_as_name_value_and_chips() {
         sel: None,
         paste_raw: false,
         ime: None,
+        history_trimmed: None,
+        font: None,
+        size: None,
+        zoomed: false,
     };
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3COPYMOUSE");
@@ -233,6 +241,10 @@ fn ascii_icons_change_symbols_only() {
         sel: Some(SelInput::CopyFailed),
         paste_raw: false,
         ime: None,
+        history_trimmed: None,
+        font: None,
+        size: None,
+        zoomed: false,
     };
     let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Sel).unwrap(), "Sel: x copy failed");
@@ -786,4 +798,76 @@ fn paste_and_ime_show_only_problems() {
         assert_eq!(paste.spoken.value, "paste is unbracketed and may run lines");
         assert_eq!(paste.click, None);
     }
+}
+
+#[test]
+fn history_font_and_size_show_only_active_display() {
+    // `history` warns after a budget trim and acknowledges on click; `font` shows only a size that
+    // differs from the configured one and resets on click; `size` shows the grid and is inert.
+    let i18n = translator("en");
+    let mut resolved = developer();
+    for id in [StatusSegmentId::Font, StatusSegmentId::Size] {
+        resolved.segments.push(ResolvedSegment {
+            id,
+            side: StatusSide::Right,
+            show: ShowMode::Active,
+            priority: id.meta().default_priority,
+            click: ClickBinding::Default,
+        });
+    }
+    let unchanged = StatusLineInputs {
+        font: Some(FontInput { live_tenths: 140, configured_tenths: 140 }),
+        ..idle_inputs()
+    };
+    let quiet = build_view(&resolved, false, &unchanged, &i18n, NumberStyle::POINT);
+    for id in [StatusSegmentId::History, StatusSegmentId::Font, StatusSegmentId::Size] {
+        assert_eq!(shown(&quiet, id), None, "{id:?}");
+    }
+    let by_id = |inputs: &StatusLineInputs, id| {
+        let view = build_view(&resolved, false, inputs, &i18n, NumberStyle::POINT);
+        view.segments.into_iter().find(|segment| segment.id == id).unwrap()
+    };
+    let busy = StatusLineInputs {
+        history_trimmed: Some(1_280),
+        font: Some(FontInput { live_tenths: 160, configured_tenths: 140 }),
+        size: Some((120, 40)),
+        ..idle_inputs()
+    };
+    let history = by_id(&busy, StatusSegmentId::History);
+    assert_eq!(text_of(&history.parts), "History: trimmed");
+    assert_eq!(history.parts[1].tone, StatusTone::Warn);
+    assert_eq!(history.spoken.value, "trimmed, 1,280 rows dropped by the memory budget");
+    assert_eq!(history.click, Some(SegmentClick::Handler(SegmentHandler::AcknowledgeHistory)));
+    let font = by_id(&busy, StatusSegmentId::Font);
+    assert_eq!(text_of(&font.parts), "Font: 16pt (+2)");
+    assert_eq!(font.spoken.value, "16 points, 2 larger than configured");
+    assert_eq!(font.click, Some(SegmentClick::Action(Action::ResetFontSize)));
+    let size = by_id(&busy, StatusSegmentId::Size);
+    assert_eq!((text_of(&size.parts).as_str(), size.click.clone()), ("Size: 120×40", None));
+    assert_eq!(size.spoken.value, "120 columns by 40 rows");
+    let smaller = StatusLineInputs {
+        font: Some(FontInput { live_tenths: 135, configured_tenths: 140 }),
+        ..idle_inputs()
+    };
+    let font = by_id(&smaller, StatusSegmentId::Font);
+    assert_eq!(text_of(&font.parts), "Font: 13.5pt (\u{2212}0.5)");
+    assert_eq!(font.spoken.value, "13.5 points, 0.5 smaller than configured");
+    // `zoom` is opt-in: a chip with no name while a split pane is zoomed, toggling zoom on click.
+    let mut zoom_table = developer();
+    zoom_table.segments.push(ResolvedSegment {
+        id: StatusSegmentId::Zoom,
+        side: StatusSide::Left,
+        show: ShowMode::Active,
+        priority: 260,
+        click: ClickBinding::Default,
+    });
+    let unzoomed = build_view(&zoom_table, false, &idle_inputs(), &i18n, NumberStyle::POINT);
+    assert_eq!(shown(&unzoomed, StatusSegmentId::Zoom), None);
+    let zoomed = StatusLineInputs { zoomed: true, ..idle_inputs() };
+    let view = build_view(&zoom_table, false, &zoomed, &i18n, NumberStyle::POINT);
+    let zoom =
+        view.segments.into_iter().find(|segment| segment.id == StatusSegmentId::Zoom).unwrap();
+    assert_eq!((text_of(&zoom.parts).as_str(), zoom.parts[0].tone), ("ZOOM", StatusTone::Chip));
+    assert_eq!(zoom.spoken.value, "pane zoomed");
+    assert_eq!(zoom.click, Some(SegmentClick::Action(Action::TogglePaneZoom)));
 }

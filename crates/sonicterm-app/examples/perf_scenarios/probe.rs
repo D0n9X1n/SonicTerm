@@ -3794,9 +3794,17 @@ impl Probe {
             // When: `status_line` is off for this plan, there is no strip to check.
             return None;
         }
-        let PhaseEnd::Hold(hold_ms) = phase.end else {
-            // When: the phase does not end on a hold, it has no cadence to check.
+        if phase.name == "print" && !self.plan.prints_linked_history() {
+            // When: the plan prints a history that never passes the byte budget (S12), nothing
+            // is trimmed, so `print` has no `History: trimmed` to count.
             return None;
+        }
+        let hold_ms = match phase.end {
+            PhaseEnd::Hold(hold_ms) => hold_ms,
+            // `print` ends on its sentinel; its checks count appearances, not a cadence.
+            _ if phase.name == "print" => 0,
+            // When: the phase neither holds nor prints, it has no cadence to check.
+            _ => return None,
         };
         let counters_start = self.meter.as_ref().and_then(|meter| meter.counters_start.clone());
         let deltas = counters_start.zip(self.counter_totals()).and_then(|(start, totals)| {
@@ -3811,6 +3819,7 @@ impl Probe {
                 redraws: count("status_line_redraws")?,
                 sel_counts: count("status_line_sel_counts")?,
                 sel_cells: count("status_line_sel_cells")?,
+                history_shows: count("status_line_history_shows")?,
             })
         })?;
         let occluded = self.occlusion.delivered == Some(true);

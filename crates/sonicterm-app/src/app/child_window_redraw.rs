@@ -253,6 +253,7 @@ impl App {
             status_facts = Some(super::status_line::StatusPaneFacts::of(
                 &frame.guards[active_pos].1,
                 frame_viewports.active,
+                active_id,
             ));
             let cursor_rect_copy = frame.guards[active_pos].2;
             let recovery_sample = self.runtime_smoke.as_ref().and_then(|smoke| {

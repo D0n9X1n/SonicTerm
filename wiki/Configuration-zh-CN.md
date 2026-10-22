@@ -149,7 +149,7 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 
 | 预设 | `left` | `center` | `right` | 段默认值 |
 | --- | --- | --- | --- | --- |
-| `developer` | `mode`、`scroll`、`paste` | `link`、`sel` | `health`、`mem` | — |
+| `developer` | `mode`、`scroll`、`paste` | `link`、`sel` | `health`、`history`、`mem` | — |
 | `minimal` | — | — | `health`、`mem` | — |
 | `diagnostics` | 同 `developer` | 同 `developer` | 同 `developer` | `mem.sparkline = true` |
 
@@ -165,6 +165,10 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 | `paste` | 粘贴到当前窗格不会被括起时，以琥珀色显示 `粘贴: ⚠ 未括起`：括号粘贴模式关闭、窗格处于主屏幕，且其 shell 已通过 OSC 133 报告提示符（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）。没有 OSC 133 的窗格或正在运行命令的窗格从不显示。朗读值为"粘贴未使用括号模式，可能逐行执行"：SonicTerm 无法知道 shell 会如何处理换行。`cmd.exe` 不发送 OSC 133，因此从不显示该警告，尽管它的粘贴总是逐行执行；PowerShell 只有在提示符发送 OSC 133 时才显示。 | 560 | 无。 |
 | `ime` | 只显示输入法问题：复制模式丢弃一次提交后，在 `hold_secs` 内显示 `输入法: ⚠ 已丢弃（复制模式）`；或在组字的提交将进入搜索框或命令面板而不是窗格时显示 `输入法: → 搜索` / `输入法: → 命令面板`。正常向窗格组字时不显示。平台不报告组字事件时（部分 Wayland 环境），只会出现复制模式警告。不在任何预设中。 | 500 | 无。 |
 | `scroll` | 当前窗格向上滚动时显示 `滚动: ↑ 340`。 | 400 | 让窗格回到底部。 |
+| `history` | SonicTerm 因当前窗格的历史超过网格内存预算而丢弃回滚行后，以琥珀色显示 `历史: 已截断`；朗读值给出行数。超过 `[terminal] scrollback` 上限的滚动、清除、调整大小或降低上限都不会显示。点击它或程序清除回滚（`CSI 3 J`，大多数 shell 中的 `clear` 会发送）前一直显示，之后再次截断时重新显示。SonicTerm 没有清除回滚的动作，因此只有这两种确认方式。 | 300 | 确认截断。 |
+| `font` | 需手动加入。实时字号与配置字号不同时显示 `字体: 16pt (+2)` 或 `字体: 13.5pt (−0.5)`；相同时隐藏。字号对整个应用生效，因此每个窗口显示相同的值。 | 280 | 重置字号（`reset_font_size`）。 |
+| `zoom` | 需手动加入。活动标签页中有分屏窗格被放大填满时显示 `缩放` 标记，不带名称。 | 260 | 切换窗格放大（`toggle_pane_zoom`）。 |
+| `size` | 需手动加入。当前窗格的网格调整大小后（调整窗口大小、分屏、改变字号或显示缩放），在 `hold_ms` 内显示 `尺寸: 120×40`，即列数和行数。窗格的第一帧、新标签页、恢复的会话、拆出的窗口以及焦点切换到另一个窗格都不会显示。 | 80 | 无。 |
 
 内存数字与内存占用报告相同：macOS 上是物理内存占用（活动监视器的“内存”列），Windows 上是私有提交字节（任务管理器的 **提交大小** 列），Linux 上是常驻集（`top` 的 RES）。不计入子进程。查询失败时显示 `不可用`。
 
@@ -172,11 +176,11 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 
 | Key | 取值 | 行为 |
 | --- | --- | --- |
-| `show` | `"always"` 或 `"active"` | `always` 保留位置并显示空闲文本（`不可用`、`底部`、`正常`、`无`）；`active` 在段没有内容时隐藏它。`link`、`paste` 和 `ime` 只接受 `active`。 |
+| `show` | `"always"` 或 `"active"` | `always` 保留位置并显示空闲文本（`不可用`、`底部`、`正常`、`无`）；`active` 在段没有内容时隐藏它。`link`、`paste`、`ime`、`history`、`font`、`zoom` 和 `size` 只接受 `active`。 |
 | `priority` | `0` 到 `1000` | 窗口变窄时，值越高保留越久。 |
-| `click` | `"default"`、`"none"` 或动作名 | `default` 执行该段自己的点击；`none` 让它不响应指针；不带参数的键位动作（如 `"show_memory_usage"`）在被点击的窗口中执行。`paste` 和 `ime` 只接受 `default` 或 `none`，二者都不响应。 |
+| `click` | `"default"`、`"none"` 或动作名 | `default` 执行该段自己的点击；`none` 让它不响应指针；不带参数的键位动作（如 `"show_memory_usage"`）在被点击的窗口中执行。`paste`、`ime` 和 `size` 只接受 `default` 或 `none`，二者都不响应。 |
 
-`[status_line.segment.mem]` 还接受 `show_trend`（`true`）、`sparkline`（`false`，`diagnostics` 中为 `true`：数字后面八个暗色单元，表示最近两分钟，每个单元是一个按墙钟对齐的 15 秒区间中的最大采样，在绘制单元的最小值和最大值之间缩放；只绘制已结束的区间，因此只在区间结束时变化；没有采样的时间段，例如窗口被遮挡或机器休眠，保持空白）、`warn_mib`（`1024`）和 `critical_mib`（`2048`，不小于 `warn_mib`），取值均为 `1` 到 `1048576`。`[status_line.segment.sel]` 还接受 `copied_secs`（`2`，`1` 到 `10`），即复制结果显示多久。`[status_line.segment.paste]` 接受 `paste`（`"when_off"`，默认，或 `"never"`）。`[status_line.segment.ime]` 接受 `hold_secs`（`8`，`1` 到 `60`），即复制模式警告显示多久。`[status_line]` 下和段表内的未知 key 会被忽略，并在每次加载时以一条列出全部未知 key 的 `sonicterm-cfg` 警告记录一次。
+`[status_line.segment.mem]` 还接受 `show_trend`（`true`）、`sparkline`（`false`，`diagnostics` 中为 `true`：数字后面八个暗色单元，表示最近两分钟，每个单元是一个按墙钟对齐的 15 秒区间中的最大采样，在绘制单元的最小值和最大值之间缩放；只绘制已结束的区间，因此只在区间结束时变化；没有采样的时间段，例如窗口被遮挡或机器休眠，保持空白）、`warn_mib`（`1024`）和 `critical_mib`（`2048`，不小于 `warn_mib`），取值均为 `1` 到 `1048576`。`[status_line.segment.sel]` 还接受 `copied_secs`（`2`，`1` 到 `10`），即复制结果显示多久。`[status_line.segment.paste]` 接受 `paste`（`"when_off"`，默认，或 `"never"`）。`[status_line.segment.ime]` 接受 `hold_secs`（`8`，`1` 到 `60`），即复制模式警告显示多久。`[status_line.segment.size]` 接受 `hold_ms`（`1500`，`250` 到 `10000`）。`[status_line]` 下和段表内的未知 key 会被忽略，并在每次加载时以一条列出全部未知 key 的 `sonicterm-cfg` 警告记录一次。
 
 窗口过窄时，状态栏先使用紧凑形式（内存去掉箭头和迷你图，`mode` 去掉 `鼠标`），再从中间缩短链接的路径，然后按优先级从低到高整段移除。健康错误、广播标记和链接的目标主机最后移除。
 

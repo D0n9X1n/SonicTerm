@@ -21,9 +21,9 @@ use sonicterm_ui::selection::{
     selection_extent_counted, Selection, SelectionExtent, SELECTION_EXTENT_MAX_ROWS,
 };
 use sonicterm_ui::status_line::{
-    build_view, sanitize_link_text, HealthInput, ImeInput, LinkInput, MemHistory, MemInput,
-    ModeInput, NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick, SegmentHandler,
-    SelInput, StatusLineInputs,
+    build_view, sanitize_link_text, FontInput, HealthInput, ImeInput, LinkInput, MemHistory,
+    MemInput, ModeInput, NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick,
+    SegmentHandler, SelInput, StatusLineInputs,
 };
 use winit::window::WindowId;
 
@@ -50,11 +50,27 @@ pub(crate) struct StatusPaneFacts {
     pub(crate) bracketed_paste: bool,
     /// The pane shows its alternate screen.
     pub(crate) alt_screen: bool,
+    /// The pane these facts describe.
+    pub(crate) pane_id: u64,
+    /// Rows the grid's byte budget has trimmed from history; see `Grid::budget_trimmed_rows`.
+    pub(crate) budget_trimmed: u64,
+    /// `budget_trimmed` at the last scrollback clear, which acknowledges every trim before it.
+    pub(crate) trim_cleared: u64,
+    /// Resizes that changed the grid; see `Grid::size_generation`.
+    pub(crate) size_generation: u64,
+    /// Grid columns.
+    pub(crate) cols: u16,
+    /// Grid rows.
+    pub(crate) rows: u16,
 }
 
 impl StatusPaneFacts {
-    /// Facts of the pane whose parser is `parser`, viewed from `viewport_top_abs`.
-    pub(crate) fn of(parser: &sonicterm_vt::vt::Parser, viewport_top_abs: Option<u64>) -> Self {
+    /// Facts of pane `pane_id`, whose parser is `parser`, viewed from `viewport_top_abs`.
+    pub(crate) fn of(
+        parser: &sonicterm_vt::vt::Parser,
+        viewport_top_abs: Option<u64>,
+        pane_id: u64,
+    ) -> Self {
         let grid = parser.grid();
         let live_top = GpuRenderer::resolved_view_top_abs_legacy(grid, None);
         let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, viewport_top_abs);
@@ -63,6 +79,12 @@ impl StatusPaneFacts {
             scroll_lines: live_top.saturating_sub(view_top),
             bracketed_paste: parser.bracketed_paste_enabled(),
             alt_screen: grid.is_alt(),
+            pane_id,
+            budget_trimmed: grid.budget_trimmed_rows(),
+            trim_cleared: grid.budget_trimmed_at_clear(),
+            size_generation: grid.size_generation(),
+            cols: grid.cols,
+            rows: grid.rows,
         }
     }
 }
@@ -114,6 +136,12 @@ pub(crate) struct StatusLineState {
     history: MemHistory,
     /// When the last sample was taken, on the monotonic and the wall clock.
     last_sample: Option<(Instant, u64)>,
+    /// Per pane, the budget-trimmed row count a `history` click acknowledged.
+    history_ack: HashMap<u64, u64>,
+    /// Per pane, the grid size generation first seen in a shown frame, then the latest.
+    size_seen: HashMap<u64, u64>,
+    /// Per window, the pane whose resize `size` shows and when that hold ends.
+    size_shown: HashMap<WindowId, (u64, Instant)>,
 }
 
 /// What makes two selections count the same: the pane, the normalized
@@ -290,6 +318,44 @@ fn ime_input(
         _ => None,
     };
     (input, None)
+}
+
+/// Record `facts`' size generation for its pane. Returns whether the grid was resized since the
+/// pane was last seen; the first sighting is the baseline, so spawn and first layout never show.
+pub(crate) fn size_changed(seen: &mut HashMap<u64, u64>, facts: StatusPaneFacts) -> bool {
+    seen.insert(facts.pane_id, facts.size_generation)
+        .is_some_and(|previous| previous != facts.size_generation)
+}
+
+/// The rows the byte budget trimmed from the focused pane's history and nobody acknowledged: not
+/// by a `history` click (`acked`), not by a scrollback clear.
+pub(crate) fn history_input(facts: StatusPaneFacts, acked: u64) -> Option<u64> {
+    let seen = acked.max(facts.trim_cleared);
+    (facts.budget_trimmed > seen).then(|| facts.budget_trimmed - seen)
+}
+
+/// The grid size `size` shows for the focused pane while its resize is held, and when that ends.
+/// A hold for another pane shows nothing, so a focus change never shows a size.
+fn size_input(
+    shown: &mut HashMap<WindowId, (u64, Instant)>,
+    window_id: WindowId,
+    facts: StatusPaneFacts,
+    now: Instant,
+) -> (Option<(u16, u16)>, Option<Instant>) {
+    let Some(&(pane_id, until)) = shown.get(&window_id) else {
+        // When: shown holds nothing for window_id, no resize is being shown.
+        return (None, None);
+    };
+    if now >= until {
+        // When: now reached until, the hold is over and the entry is dropped.
+        shown.remove(&window_id);
+        return (None, None);
+    }
+    if pane_id != facts.pane_id {
+        // When: the held pane_id is not the focused pane, its size is not this pane's.
+        return (None, Some(until));
+    }
+    (Some((facts.cols, facts.rows)), Some(until))
 }
 
 /// Milliseconds since the Unix epoch on the wall clock; 0 if the clock reads before it.
@@ -481,6 +547,11 @@ impl App {
     pub(super) fn observe_status_pane(&mut self, window_id: WindowId, facts: StatusPaneFacts) {
         if self.status_line.visible {
             self.status_line.pane_facts.insert(window_id, facts);
+            if size_changed(&mut self.status_line.size_seen, facts) {
+                let hold = Duration::from_millis(self.status_line.resolved.size.hold_ms);
+                let until = Instant::now() + hold;
+                self.status_line.size_shown.insert(window_id, (facts.pane_id, until));
+            }
         }
         if let Some(window) = self.windows.get_mut(&window_id) {
             window.status_strip = window.renderer.as_ref().and_then(GpuRenderer::status_line_hit);
@@ -621,7 +692,24 @@ impl App {
             .is_open()
             .then(|| self.palette_attached_window.or(self.main_window_id))
             .flatten();
+        let font = (self.config.font.size != self.configured_font_size).then(|| FontInput {
+            live_tenths: (self.config.font.size * 10.0).round() as u32,
+            configured_tenths: (self.configured_font_size * 10.0).round() as u32,
+        });
         let Self { windows, status_line: state, i18n, .. } = self;
+        let listed = |id| state.resolved.segment(id).is_some();
+        let zoom_shown = listed(StatusSegmentId::Zoom);
+        let (history_shown, font_shown, size_listed) = (
+            listed(StatusSegmentId::History),
+            listed(StatusSegmentId::Font),
+            listed(StatusSegmentId::Size),
+        );
+        let font = font.filter(|_| font_shown);
+        let live_panes: std::collections::HashSet<u64> =
+            windows.values().flat_map(|window| window.panes.keys().copied()).collect();
+        state.history_ack.retain(|pane_id, _| live_panes.contains(pane_id));
+        state.size_seen.retain(|pane_id, _| live_panes.contains(pane_id));
+        state.size_shown.retain(|window_id, _| windows.contains_key(window_id));
         let ime_shown = state.resolved.segment(StatusSegmentId::Ime).is_some();
         let ime_hold = Duration::from_secs(state.resolved.ime.hold_secs);
         let sel_shown = state.resolved.segment(StatusSegmentId::Sel).is_some();
@@ -631,6 +719,7 @@ impl App {
         state.built.retain(|window_id, _| windows.contains_key(window_id));
         let mut minimums_changed = false;
         let mut redraws = 0;
+        let mut history_shows = 0;
         for (window_id, window) in windows.iter_mut() {
             let Some(renderer) = window.renderer.as_mut() else {
                 // When: a test-seeded entry has no renderer, it has no strip.
@@ -703,6 +792,27 @@ impl App {
                 .and_then(|tab| window.panes.get(&tab.active_pane))
                 .map_or(CommandPhase::Unknown, |pane| pane.command_state.phase);
             let paste_raw = paste_is_raw(state.resolved.paste, facts, phase);
+            let zoomed = zoom_shown
+                && window
+                    .tab_states
+                    .get(window.tabs.active_index())
+                    .is_some_and(|tab| tab.tree.zoomed_pane_id().is_some());
+            let history_trimmed = if history_shown {
+                history_input(facts, state.history_ack.get(&facts.pane_id).copied().unwrap_or(0))
+            } else {
+                // When: history_shown is false, no list has `history`.
+                None
+            };
+            let size = if size_listed {
+                let (size, size_wake) = size_input(&mut state.size_shown, *window_id, facts, now);
+                if let Some(wake) = size_wake {
+                    next_wake = Some(next_wake.map_or(wake, |next| next.min(wake)));
+                }
+                size
+            } else {
+                // When: size_listed is false, no list has `size`, so no hold is shown or woken for.
+                None
+            };
             let Some(renderer) = window.renderer.as_ref() else {
                 // When: `renderer` is gone, the window cannot show a strip.
                 continue;
@@ -732,11 +842,22 @@ impl App {
                 sel,
                 paste_raw,
                 ime,
+                history_trimmed,
+                font,
+                size,
+                zoomed,
             };
             let built = BuiltFrom { generation: state.generation, inputs };
-            if state.built.get(window_id) == Some(&built) {
+            let previous = state.built.get(window_id);
+            if previous == Some(&built) {
                 // When: `built` matches the last build, the inputs and settings are unchanged.
                 continue;
+            }
+            // `History: trimmed` appears in this window now; later trims only change its count.
+            if built.inputs.history_trimmed.is_some()
+                && previous.is_none_or(|previous| previous.inputs.history_trimmed.is_none())
+            {
+                history_shows += 1;
             }
             let view = build_view(
                 &state.resolved,
@@ -763,6 +884,7 @@ impl App {
         self.note_status_line(|counters| {
             counters.wakes += u64::from(woke);
             counters.redraws += redraws;
+            counters.history_shows += history_shows;
         });
         let wake = visible.then_some(next_wake).flatten();
         self.status_line.armed_wake = wake;
@@ -812,11 +934,21 @@ impl App {
             Some(SegmentClick::Handler(SegmentHandler::ScrollToBottom)) => {
                 self.scroll_window_to_bottom(window_id);
             }
+            Some(SegmentClick::Handler(SegmentHandler::AcknowledgeHistory)) => {
+                self.acknowledge_history(window_id);
+            }
             None => {
                 // When: `click` is None, a gap or inert segment was pressed; consume it and do nothing.
             }
         }
         true
+    }
+
+    /// Acknowledge the budget trims of `window_id`'s focused pane, as the last frame saw them.
+    fn acknowledge_history(&mut self, window_id: WindowId) {
+        if let Some(facts) = self.status_line.pane_facts.get(&window_id).copied() {
+            self.status_line.history_ack.insert(facts.pane_id, facts.budget_trimmed);
+        }
     }
 
     /// Return `window_id`'s focused pane to the bottom of its history.

@@ -209,8 +209,8 @@ const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
     ("S1 atlas-retry short", "f17352b1a7ac0623741485790348964943a48fcaea4129aa5cafea90be7daf9d"),
     ("S1 default full", "edbe606ddd384910eb1da472407c41ea22dfbe76e4328017a831cc47042f83c6"),
     ("S1 default short", "e0f2554d5d2cd7cd9db6a15f9fa3086652357ac3088181b86996174afe2e1359"),
-    ("S1 status-line full", "bfb67f7e9fc276d6ed80ba04eeb5edc2e146bed297864d93e0971d756868414f"),
-    ("S1 status-line short", "3b0ef7c0353dca150660dd2f5e68dd0afe5490b18f7a4e97cde134b50010324f"),
+    ("S1 status-line full", "829eef5a559a5a8724cada968fd264ad8b09b27f69663ba4b60364c1eaa8c254"),
+    ("S1 status-line short", "567dde88a4e5ce4de53fdff23f48531472c92a0dc69f99282a56611b27fe32b0"),
     ("S1 gdi full", "922fa48f7c0b81b136e107ede7f96feea700eaf36fb7cafe41e880ec913d4d5d"),
     ("S1 gdi short", "52697ce9881d23f19d5935e6e7f9b27d4b77ac6fcdacdb025045cb1dc22e7d67"),
     ("S1 role-exit full", "a5601180eb49ced355e02fa921b73910cd4cc32c19a5039a81614d446b5a6869"),
@@ -289,6 +289,10 @@ const FIXTURE_PINS: &[(&str, &str)] = &[
     ("history.txt 97500", "a23f9a80a94d5bce790e812b1ecdf5626f5c0e2ecdfdd856908663cdd7dc8a94"),
     ("image.sixel 377", "5811aa986380a75e770fa445490d45057bf949b5d52d6108995a05d0b7c7c0f0"),
     ("inline.osc 461289", "06c2d2935c10dfc293a38ec38149c97a1e97c90501694c5e75cb14d904476f2c"),
+    (
+        "linked-history.txt 1443893",
+        "5ced320f01d3e8aa0c77f067e7c1966e07098a8dc142ed9ee3a37627ccf1b4cf",
+    ),
     ("scrollback.txt 960000", "80f85648d2537805c9ea6b138a622d3055972d18904232b35380473a8d4dd8a0"),
     ("search.txt 17500", "3b7beea9b0581d1dcb96b3d10a1c3d879b7189051c1c1aff3b4d3a5187b62eba"),
 ];
@@ -1945,7 +1949,33 @@ fn status_line_plans_turn_the_strip_on_in_the_config() {
     let base = crate::scenarios::plan("S1", "default", true).unwrap();
     let with_strip = config_toml_with_shell(&strip, "/bin/sh", false);
     let without = config_toml_with_shell(&base, "/bin/sh", false);
-    assert!(with_strip.ends_with("\n[status_line]\nenabled = true\n"), "{with_strip}");
+    let table =
+        "\n[status_line]\nenabled = true\nright = [\"health\", \"history\", \"size\", \"mem\"]\n";
+    assert!(with_strip.ends_with(table), "{with_strip}");
     assert!(!without.contains("[status_line]"));
-    assert_eq!(with_strip.trim_end_matches("\n[status_line]\nenabled = true\n"), without);
+    // S1/status-line also keeps 10,000 history rows, so its linked history passes the byte budget.
+    let scrollback =
+        with_strip.trim_end_matches(table).replace("scrollback = 10000", "scrollback = 1000");
+    assert_eq!(scrollback, without);
+    let covered = crate::scenarios::plan("S12", "status-line", true).unwrap();
+    let covered = config_toml_with_shell(&covered, "/bin/sh", false);
+    assert!(covered.ends_with("\n[status_line]\nenabled = true\n"), "{covered}");
+}
+
+/// The linked history passes the grid's byte budget at the requested 250 x 40 grid and at the
+/// 237 x 40 grid the macOS runner measures, with the 10,000-row limit, so S1/status-line's `print`
+/// really trims rows below the row limit.
+#[test]
+fn linked_history_fixture_is_trimmed_by_the_byte_budget() {
+    let bytes = fixture_bytes(crate::scenarios::Fixture::LinkedHistory);
+    let crlf = String::from_utf8(bytes).unwrap().replace('\n', "\r\n");
+    for (cols, rows) in [(GRID_COLS as u16, crate::scenarios::STRIP_SAFE_ROWS), (237, 40)] {
+        let mut grid = sonicterm_grid::grid::Grid::new(cols, rows);
+        grid.set_scrollback_limit(10_000);
+        let mut parser = sonicterm_vt::vt::Parser::new(grid);
+        parser.advance(crlf.as_bytes());
+        let grid = parser.grid();
+        assert!(grid.budget_trimmed_rows() > 0, "{cols}x{rows}: never trimmed");
+        assert!(grid.scrollback_len() < 10_000, "{cols}x{rows}: trimmed below the row limit");
+    }
 }

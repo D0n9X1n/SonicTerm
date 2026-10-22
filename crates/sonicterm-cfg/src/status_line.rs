@@ -361,10 +361,20 @@ impl StatusSegmentId {
             home_side,
             default_priority,
             default_show,
-            // Link, paste and ime have no idle fact to show, so they are active-only.
-            allows_always: !matches!(self, Self::Link | Self::Paste | Self::Ime),
-            // Paste and ime only explain input; a click has nothing to act on.
-            clickable: !matches!(self, Self::Paste | Self::Ime),
+            // These have no idle fact worth a permanent slot (a static `14pt` or `120×40`), so
+            // they are active-only.
+            allows_always: !matches!(
+                self,
+                Self::Link
+                    | Self::Paste
+                    | Self::Ime
+                    | Self::History
+                    | Self::Font
+                    | Self::Size
+                    | Self::Zoom
+            ),
+            // Paste, ime and size only explain state; a click has nothing to act on.
+            clickable: !matches!(self, Self::Paste | Self::Ime | Self::Size),
             sensitivity,
             protection,
             implemented: matches!(
@@ -377,6 +387,10 @@ impl StatusSegmentId {
                     | Self::Sel
                     | Self::Paste
                     | Self::Ime
+                    | Self::History
+                    | Self::Font
+                    | Self::Size
+                    | Self::Zoom
             ),
             spoken_name_key,
         }
@@ -532,6 +546,19 @@ impl Default for ImeSettings {
     }
 }
 
+/// Size segment settings beyond the common keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SizeSettings {
+    /// Milliseconds the grid size stays shown after the focused pane's grid was resized.
+    pub hold_ms: u64,
+}
+
+impl Default for SizeSettings {
+    fn default() -> Self {
+        Self { hold_ms: 1500 }
+    }
+}
+
 /// One configured segment after presets and overrides are applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSegment {
@@ -568,6 +595,8 @@ pub struct ResolvedStatusLine {
     pub paste: PasteWarning,
     /// Input-method segment settings.
     pub ime: ImeSettings,
+    /// Size segment settings.
+    pub size: SizeSettings,
 }
 
 impl ResolvedStatusLine {
@@ -592,6 +621,8 @@ pub const MEM_THRESHOLD_RANGE_MIB: std::ops::RangeInclusive<u64> = 1..=1_048_576
 pub const COPIED_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=10;
 /// Bounds of the input-method segment's `hold_secs`.
 pub const HOLD_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=60;
+/// Bounds of the size segment's `hold_ms`.
+pub const HOLD_MS_RANGE: std::ops::RangeInclusive<u64> = 250..=10_000;
 /// Highest accepted segment priority.
 pub const MAX_PRIORITY: u16 = 1000;
 
@@ -605,6 +636,8 @@ const SEL_KEYS: &[&str] = &["copied_secs"];
 const PASTE_KEYS: &[&str] = &["paste"];
 /// Extra keys of the input-method segment table.
 const IME_KEYS: &[&str] = &["hold_secs"];
+/// Extra keys of the size segment table.
+const SIZE_KEYS: &[&str] = &["hold_ms"];
 
 /// Keys a segment table accepts beyond [`COMMON_KEYS`].
 fn segment_keys(id: StatusSegmentId) -> &'static [&'static str] {
@@ -613,6 +646,7 @@ fn segment_keys(id: StatusSegmentId) -> &'static [&'static str] {
         StatusSegmentId::Sel => SEL_KEYS,
         StatusSegmentId::Paste => PASTE_KEYS,
         StatusSegmentId::Ime => IME_KEYS,
+        StatusSegmentId::Size => SIZE_KEYS,
         _ => &[],
     }
 }
@@ -696,6 +730,7 @@ impl StatusLineConfig {
         let mut sel = SelSettings::default();
         let mut paste = PasteWarning::default();
         let mut ime = ImeSettings::default();
+        let mut size = SizeSettings::default();
         let mut segments = Vec::new();
         for (side, list_name, ids) in lists {
             for id in ids {
@@ -769,6 +804,17 @@ impl StatusLineConfig {
                         )?;
                 }
             }
+            if id == StatusSegmentId::Size {
+                if let Some(value) = table.get("hold_ms") {
+                    size.hold_ms = value
+                        .as_integer()
+                        .and_then(|millis| u64::try_from(millis).ok())
+                        .filter(|millis| HOLD_MS_RANGE.contains(millis))
+                        .context(
+                            "status_line.segment.size: hold_ms must be an integer in 250..=10000",
+                        )?;
+                }
+            }
         }
         if mem.critical_mib < mem.warn_mib {
             // `critical_mib < warn_mib`, the red level would sit below the amber one.
@@ -788,6 +834,7 @@ impl StatusLineConfig {
             sel,
             paste,
             ime,
+            size,
         })
     }
 

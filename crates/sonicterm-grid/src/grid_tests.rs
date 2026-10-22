@@ -2319,3 +2319,34 @@ fn row_content_seq_at_abs_follows_a_row_from_the_screen_into_history() {
     assert!(grid.row_content_seq_at_abs(3) > before, "the written row's stamp advances");
     assert_eq!(grid.row_content_seq_at_abs(1), Some(written), "history is untouched");
 }
+
+/// Only a byte-budget trim advances `budget_trimmed_rows`: at-capacity scrolling and a clear
+/// evict rows without counting, and the trim counts exactly the rows it dropped.
+#[test]
+fn budget_trimmed_rows_counts_only_byte_budget_trims() {
+    let mut grid = Grid::new(10, 3);
+    grid.set_scrollback_limit(100);
+    for _ in 0..200 {
+        grid.linefeed();
+    }
+    assert!(grid.scrollback_evicted() > 0, "at-capacity scrolling evicted rows");
+    assert_eq!(grid.budget_trimmed_rows(), 0);
+    grid.clear_scrollback();
+    assert_eq!(grid.budget_trimmed_rows(), 0, "a clear is not a budget trim");
+    for _ in 0..100 {
+        grid.linefeed();
+    }
+    let before = grid.scrollback_len();
+    let evicted = grid.scrollback_evicted();
+    grid.trim_scrollback_to_reported_budget(0);
+    assert_eq!(grid.scrollback_len(), 0);
+    assert_eq!(grid.budget_trimmed_rows(), before as u64);
+    assert_eq!(grid.scrollback_evicted() - evicted, before as u64);
+    assert_eq!(grid.budget_trimmed_at_clear(), 0);
+    grid.clear_scrollback();
+    assert_eq!(
+        grid.budget_trimmed_at_clear(),
+        before as u64,
+        "a clear with no history left still marks"
+    );
+}

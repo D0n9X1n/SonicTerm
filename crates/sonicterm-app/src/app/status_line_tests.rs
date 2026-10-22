@@ -534,3 +534,52 @@ fn copy_mode_commit_is_dropped_and_recorded() {
     assert_eq!(app.__test_pty_write_log(), vec![(pane_id, "你好".as_bytes().to_vec())]);
     assert_eq!(app.main().unwrap().ime_discarded_at, None);
 }
+
+/// The first sighting of a pane is its size baseline, so spawn and first layout show nothing; a
+/// later resize shows the focused pane's grid until the hold ends, and a focus change to another
+/// pane shows nothing.
+#[test]
+fn size_shows_only_after_a_resize_of_the_focused_pane() {
+    let mut seen = HashMap::new();
+    let first = StatusPaneFacts {
+        pane_id: 1,
+        size_generation: 4,
+        cols: 80,
+        rows: 24,
+        ..Default::default()
+    };
+    assert!(!size_changed(&mut seen, first), "the baseline");
+    assert!(!size_changed(&mut seen, first), "unchanged");
+    let other = StatusPaneFacts {
+        pane_id: 2,
+        size_generation: 9,
+        cols: 40,
+        rows: 24,
+        ..Default::default()
+    };
+    assert!(!size_changed(&mut seen, other), "a newly focused pane is only a baseline");
+    let resized = StatusPaneFacts { size_generation: 5, cols: 120, rows: 40, ..first };
+    assert!(size_changed(&mut seen, resized));
+
+    let window_id = WindowId::dummy();
+    let now = Instant::now();
+    let until = now + Duration::from_millis(1500);
+    let mut shown = HashMap::from([(window_id, (1, until))]);
+    assert_eq!(size_input(&mut shown, window_id, resized, now), (Some((120, 40)), Some(until)));
+    assert_eq!(size_input(&mut shown, window_id, other, now), (None, Some(until)), "another pane");
+    assert_eq!(size_input(&mut shown, window_id, resized, until), (None, None), "the hold ended");
+    assert!(shown.is_empty());
+}
+
+/// `History: trimmed` counts budget trims past the larger of a click's acknowledgement and the
+/// last scrollback clear; with neither past the count it hides.
+#[test]
+fn history_trims_are_acknowledged_by_click_or_clear() {
+    let facts = StatusPaneFacts { budget_trimmed: 640, ..Default::default() };
+    assert_eq!(history_input(facts, 0), Some(640));
+    assert_eq!(history_input(facts, 640), None, "acknowledged by a click");
+    assert_eq!(history_input(facts, 576), Some(64), "a later trim shows again");
+    let cleared = StatusPaneFacts { trim_cleared: 640, ..facts };
+    assert_eq!(history_input(cleared, 0), None, "a scrollback clear acknowledges it");
+    assert_eq!(history_input(StatusPaneFacts::default(), 0), None, "nothing trimmed");
+}

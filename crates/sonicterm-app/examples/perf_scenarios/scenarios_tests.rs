@@ -228,7 +228,10 @@ fn idle_and_streaming_plans_hold_for_their_named_durations() {
     assert_eq!(phase(&background, "stream").end, PhaseEnd::Hold(60_000));
     for plan in all_plans() {
         assert!(plan.focused, "{} receives Focused(true) before GO", plan.scenario);
-        let expected_rows = if plan.scenario == "S7" { 10_000 } else { 1_000 };
+        // S1/status-line keeps 10,000 rows so its linked history passes the byte budget.
+        let long =
+            plan.scenario == "S7" || (plan.scenario == "S1" && plan.variant == "status-line");
+        let expected_rows = if long { 10_000 } else { 1_000 };
         assert_eq!(plan.scrollback_rows, expected_rows, "{}", plan.scenario);
     }
 }
@@ -645,6 +648,7 @@ const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S1/gdi", "idle", "hold", None),
     ("S1/role-exit", "idle", "hold", None),
     ("S1/status-line", "idle", "hold", None),
+    ("S1/status-line", "print", "transition", Some("sentinel-parsed")),
     ("S1/status-line", "select", "sustained", None),
     ("S1/status-line", "selected", "hold", None),
     ("S1/wgpu", "idle", "hold", None),
@@ -807,9 +811,11 @@ fn status_line_variants_differ_from_default_only_by_the_strip() {
         let strip = plan("S1", "status-line", short).unwrap();
         let base = plan("S1", "default", short).unwrap();
         assert!(strip.status_line && !base.status_line);
-        assert_eq!((&strip.roles, &strip.setup), (&base.roles, &base.setup));
-        assert_eq!(strip.steps[0], base.steps[0], "the idle hold the strip's guard checks");
-        assert_eq!(names(&strip), ["idle", "select", "selected", "end"]);
+        assert_eq!(strip.roles, [Workload::PrintThenShell(Fixture::LinkedHistory)]);
+        assert_eq!(strip.setup, base.setup);
+        assert_eq!(strip.steps[1], base.steps[0], "the idle hold the strip's guard checks");
+        assert_eq!(names(&strip), ["print", "idle", "select", "selected", "end"]);
+        assert_eq!(strip.scrollback_rows, 10_000);
     }
     assert!(all_plans()
         .iter()
@@ -827,6 +833,7 @@ fn status_line_progress_checks_each_phase() {
         redraws,
         sel_counts: 0,
         sel_cells: 0,
+        history_shows: 0,
     };
     assert!(status_line_progress("idle", 5_000, false, deltas(3, 3, 3)).is_ok());
     assert!(
@@ -856,7 +863,7 @@ fn status_line_progress_checks_each_phase() {
     );
     assert!(status_line_progress("uncovered", 5_000, false, deltas(2, 2, 1)).is_ok());
     assert!(
-        status_line_progress("print", 0, false, deltas(9, 9, 9)).is_ok(),
+        status_line_progress("drag", 0, false, deltas(9, 9, 9)).is_ok(),
         "other phases are not checked"
     );
 }
@@ -871,6 +878,7 @@ fn status_line_progress_checks_the_selection_phases() {
         redraws: 0,
         sel_counts,
         sel_cells,
+        history_shows: 0,
     };
     assert!(status_line_progress("select", 2_000, false, sel(3, 52_500)).is_ok());
     assert!(status_line_progress("select", 2_000, false, sel(0, 0)).is_err(), "nothing counted");
@@ -881,4 +889,36 @@ fn status_line_progress_checks_the_selection_phases() {
     assert!(status_line_progress("selected", 2_000, false, sel(0, 0)).is_ok());
     assert!(status_line_progress("selected", 2_000, false, sel(1, 10)).is_err(), "a recount");
     assert_eq!(SEL_CELLS_PER_COUNT, sonicterm_ui::selection::SELECTION_EXTENT_MAX_CELLS as u64);
+}
+
+/// `print` must show `History: trimmed` exactly once and redraw the strip only for a sample or
+/// that appearance, never once per output frame.
+#[test]
+fn status_line_progress_checks_the_trimmed_history_print() {
+    let print = |samples, redraws, history_shows| StatusLineDeltas {
+        samples,
+        wakes: samples,
+        redraws,
+        sel_counts: 0,
+        sel_cells: 0,
+        history_shows,
+    };
+    assert!(status_line_progress("print", 0, false, print(2, 4, 1)).is_ok());
+    assert!(status_line_progress("print", 0, false, print(2, 1, 0)).is_err(), "never trimmed");
+    assert!(status_line_progress("print", 0, false, print(2, 2, 2)).is_err(), "shown twice");
+    assert!(status_line_progress("print", 0, false, print(2, 30, 1)).is_err(), "per-frame redraws");
+}
+
+/// Only S1/status-line prints the linked history that passes the byte budget, so only its `print`
+/// carries the `History: trimmed` check; S12/status-line prints its default history first and is
+/// checked only on its covered and uncovered holds.
+#[test]
+fn only_s1_status_line_prints_the_trimmed_history() {
+    for short in [false, true] {
+        assert!(plan("S1", "status-line", short).unwrap().prints_linked_history());
+        let covered = plan("S12", "status-line", short).unwrap();
+        assert!(covered.status_line && !covered.prints_linked_history());
+        assert!(!covered.roles.contains(&Workload::PrintThenShell(Fixture::LinkedHistory)));
+        assert!(!plan("S1", "default", short).unwrap().prints_linked_history());
+    }
 }

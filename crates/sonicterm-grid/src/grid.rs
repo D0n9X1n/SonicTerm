@@ -254,6 +254,11 @@ pub struct Grid {
     /// I last looked" from "the grid has moved on". Never decremented, so a
     /// missed bump costs eagerness, never correctness.
     scrollback_evicted: u64,
+    /// Rows dropped only because retained bytes passed the grid's byte budget; see
+    /// [`Grid::budget_trimmed_rows`].
+    budget_trimmed_rows: u64,
+    /// `budget_trimmed_rows` when scrollback was last cleared; see [`Grid::budget_trimmed_at_clear`].
+    budget_trimmed_cleared: u64,
     /// Row-storage buffers the scroll path created or grew; see [`Grid::row_storage_allocs`].
     row_storage_allocs: u64,
     /// Per-row dirty bitset. `true` means the row has been mutated since
@@ -299,6 +304,8 @@ impl Grid {
             size_generation: 0,
             row_content_seq: vec![0; rows as usize].into(),
             scrollback_evicted: 0,
+            budget_trimmed_rows: 0,
+            budget_trimmed_cleared: 0,
             row_storage_allocs: 0,
             rows_since_budget_check: 0,
             // A freshly created grid is fully dirty: the renderer has
@@ -724,6 +731,8 @@ impl Grid {
                 vec![self.content_seq; rows as usize].into(),
             ),
             scrollback_evicted: 0,
+            budget_trimmed_rows: 0,
+            budget_trimmed_cleared: 0,
             row_storage_allocs: 0,
             rows_since_budget_check: 0,
             dirty_rows: vec![true; rows as usize],
@@ -755,6 +764,8 @@ impl Grid {
         let saved = *saved;
         self.screen_epoch = self.screen_epoch.saturating_add(1);
         self.scrollback_evicted = self.scrollback_evicted.saturating_add(saved.scrollback_evicted);
+        self.budget_trimmed_rows =
+            self.budget_trimmed_rows.saturating_add(saved.budget_trimmed_rows);
         let content_seq = self.content_seq.max(saved.content_seq);
         self.visible = saved.visible;
         self.scrollback = saved.scrollback;
@@ -911,6 +922,19 @@ impl Grid {
     /// and found nothing" from "the grid has moved on since I looked".
     pub fn scrollback_evicted(&self) -> u64 {
         self.scrollback_evicted
+    }
+
+    /// Scrollback rows dropped because the grid's retained bytes passed its byte budget, over this
+    /// grid's lifetime. Monotone. At-capacity scrolling, a clear, a resize and a lowered limit do
+    /// not count, so a change means history was lost to memory, not to the row limit.
+    pub fn budget_trimmed_rows(&self) -> u64 {
+        self.budget_trimmed_rows
+    }
+
+    /// [`Grid::budget_trimmed_rows`] as it was when scrollback was last cleared (`CSI 3 J`): trims
+    /// up to that count left no history to miss.
+    pub fn budget_trimmed_at_clear(&self) -> u64 {
+        self.budget_trimmed_cleared
     }
 
     /// Insert every hyperlink id any cell this grid owns still references.
@@ -1881,6 +1905,10 @@ impl Grid {
 
     /// Erase primary history without changing live cells, cursor state, or configured limits.
     pub fn clear_scrollback(&mut self) {
+        if !self.is_alt() {
+            // A primary clear acknowledges every budget trim so far, even with no history left.
+            self.budget_trimmed_cleared = self.budget_trimmed_rows;
+        }
         if self.is_alt() || self.scrollback.is_empty() {
             // When: `self.is_alt()` or `self.scrollback.is_empty()`, preserve both screens and every change identity.
             return;
@@ -2382,6 +2410,7 @@ impl Grid {
         while !self.scrollback.is_empty() && self.retained_amount().bytes > budget_bytes {
             let removed = TRIM_BLOCK_ROWS.min(self.scrollback.len());
             drop(self.drain_scrollback_prefix(removed));
+            self.budget_trimmed_rows = self.budget_trimmed_rows.saturating_add(removed as u64);
         }
         compact_scrollback_capacity(&mut self.scrollback);
     }
