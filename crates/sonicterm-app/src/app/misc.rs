@@ -768,6 +768,7 @@ impl App {
             status_strip: None,
             sel_status: Default::default(),
             ime_discarded_at: None,
+            alert_settings: None,
             hover_detection: super::path_target::HoverDetectionCache::default(),
             notification: None,
             hidden: false,

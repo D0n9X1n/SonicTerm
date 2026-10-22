@@ -645,3 +645,71 @@ fn a_fallback_epoch_change_is_measured_again_but_held_like_a_retitle() {
         "a font change is not held"
     );
 }
+
+/// A bar of `count` tabs with the first one active and the activation log emptied.
+fn marked_bar(count: usize) -> TabBar {
+    let mut bar = TabBar::new();
+    for index in 0..count {
+        bar.push(Tab::new(format!("#{} tab", index + 1)));
+    }
+    bar.activate(0);
+    let _ = bar.take_activation_log();
+    bar
+}
+
+/// Only an inactive tab can be marked; the first mark repaints, a repeat does not, and visiting
+/// the tab clears it and logs the change.
+#[test]
+fn marks_appear_once_and_clear_on_visit() {
+    let mut bar = marked_bar(3);
+    assert!(!bar.mark(0, |marks| marks.bell = true), "the active tab is never marked");
+    assert!(bar.mark(2, |marks| marks.bell = true));
+    assert!(!bar.mark(2, |marks| marks.finished_secs = Some(12)), "already marked");
+    assert!(bar.tabs()[2].marks.is_marked());
+    let tab_ids: Vec<TabId> = bar.tabs().iter().map(|tab| tab.id).collect();
+    bar.activate(2);
+    assert_eq!(bar.tabs()[2].marks, TabMarks::default());
+    let log = bar.take_activation_log();
+    assert_eq!(log.entries, [(Some(tab_ids[0]), Some(tab_ids[2]))]);
+    assert!(!log.overflowed);
+    assert_eq!(bar.take_activation_log(), ActivationLog::default(), "taking empties the log");
+}
+
+/// Each `next` logs one change in order; an unchanged activation logs nothing.
+#[test]
+fn activation_log_keeps_every_change_in_order() {
+    let mut bar = marked_bar(3);
+    let tab_ids: Vec<Option<TabId>> = bar.tabs().iter().map(|tab| Some(tab.id)).collect();
+    bar.next();
+    bar.next();
+    bar.next();
+    bar.activate(0);
+    assert_eq!(
+        bar.take_activation_log().entries,
+        [(tab_ids[0], tab_ids[1]), (tab_ids[1], tab_ids[2]), (tab_ids[2], tab_ids[0])]
+    );
+}
+
+/// Past the limit the log reports overflow instead of growing.
+#[test]
+fn activation_log_overflows_at_its_limit() {
+    let mut bar = marked_bar(2);
+    for _ in 0..=ACTIVATION_LOG_LIMIT {
+        bar.next();
+    }
+    let log = bar.take_activation_log();
+    assert_eq!(log.entries.len(), ACTIVATION_LOG_LIMIT);
+    assert!(log.overflowed);
+}
+
+/// A marked inactive tab draws `●` before its text; the active tab never does.
+#[test]
+fn marked_tab_content_draws_a_dot() {
+    let mut bar = marked_bar(2);
+    bar.mark(1, |marks| marks.bell = true);
+    let now = Instant::now();
+    let content = TabContent::of(&bar.tabs()[1], now, false, false);
+    assert!(content.marked);
+    assert_eq!(content.display_text(), "\u{25CF} #2 tab");
+    assert!(!TabContent::of(&bar.tabs()[1], now, true, false).marked);
+}

@@ -365,7 +365,8 @@ impl StatusSegmentId {
             // they are active-only.
             allows_always: !matches!(
                 self,
-                Self::Link
+                Self::Alerts
+                    | Self::Link
                     | Self::Paste
                     | Self::Ime
                     | Self::History
@@ -379,7 +380,8 @@ impl StatusSegmentId {
             protection,
             implemented: matches!(
                 self,
-                Self::Health
+                Self::Alerts
+                    | Self::Health
                     | Self::Mem
                     | Self::Mode
                     | Self::Scroll
@@ -546,6 +548,25 @@ impl Default for ImeSettings {
     }
 }
 
+/// Alerts segment settings beyond the common keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AlertsSettings {
+    /// A finished command marks its tab only after running at least this many seconds.
+    pub min_secs: u64,
+    /// A bell marks its tab.
+    pub bell: bool,
+    /// A program notification marks its tab.
+    pub notify: bool,
+    /// A finished command marks its tab.
+    pub finished: bool,
+}
+
+impl Default for AlertsSettings {
+    fn default() -> Self {
+        Self { min_secs: 10, bell: true, notify: true, finished: true }
+    }
+}
+
 /// Size segment settings beyond the common keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SizeSettings {
@@ -597,6 +618,8 @@ pub struct ResolvedStatusLine {
     pub ime: ImeSettings,
     /// Size segment settings.
     pub size: SizeSettings,
+    /// Alerts segment settings.
+    pub alerts: AlertsSettings,
 }
 
 impl ResolvedStatusLine {
@@ -621,6 +644,8 @@ pub const MEM_THRESHOLD_RANGE_MIB: std::ops::RangeInclusive<u64> = 1..=1_048_576
 pub const COPIED_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=10;
 /// Bounds of the input-method segment's `hold_secs`.
 pub const HOLD_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=60;
+/// Bounds of the alerts segment's `min_secs`.
+pub const MIN_SECS_RANGE: std::ops::RangeInclusive<u64> = 0..=86_400;
 /// Bounds of the size segment's `hold_ms`.
 pub const HOLD_MS_RANGE: std::ops::RangeInclusive<u64> = 250..=10_000;
 /// Highest accepted segment priority.
@@ -636,6 +661,8 @@ const SEL_KEYS: &[&str] = &["copied_secs"];
 const PASTE_KEYS: &[&str] = &["paste"];
 /// Extra keys of the input-method segment table.
 const IME_KEYS: &[&str] = &["hold_secs"];
+/// Extra keys of the alerts segment table.
+const ALERTS_KEYS: &[&str] = &["min_secs", "sources"];
 /// Extra keys of the size segment table.
 const SIZE_KEYS: &[&str] = &["hold_ms"];
 
@@ -647,6 +674,7 @@ fn segment_keys(id: StatusSegmentId) -> &'static [&'static str] {
         StatusSegmentId::Paste => PASTE_KEYS,
         StatusSegmentId::Ime => IME_KEYS,
         StatusSegmentId::Size => SIZE_KEYS,
+        StatusSegmentId::Alerts => ALERTS_KEYS,
         _ => &[],
     }
 }
@@ -731,6 +759,7 @@ impl StatusLineConfig {
         let mut paste = PasteWarning::default();
         let mut ime = ImeSettings::default();
         let mut size = SizeSettings::default();
+        let mut alerts = AlertsSettings::default();
         let mut segments = Vec::new();
         for (side, list_name, ids) in lists {
             for id in ids {
@@ -804,6 +833,9 @@ impl StatusLineConfig {
                         )?;
                 }
             }
+            if id == StatusSegmentId::Alerts {
+                apply_alerts_keys(&mut alerts, table).context("status_line.segment.alerts")?;
+            }
             if id == StatusSegmentId::Size {
                 if let Some(value) = table.get("hold_ms") {
                     size.hold_ms = value
@@ -835,6 +867,7 @@ impl StatusLineConfig {
             paste,
             ime,
             size,
+            alerts,
         })
     }
 
@@ -927,6 +960,32 @@ fn apply_mem_keys(mem: &mut MemSettings, table: &toml::Table) -> Result<()> {
                 .with_context(|| format!("{key} must be an integer in 1..=1048576"))?;
             *slot = mib;
         }
+    }
+    Ok(())
+}
+
+/// Apply the alerts segment's own keys.
+fn apply_alerts_keys(alerts: &mut AlertsSettings, table: &toml::Table) -> Result<()> {
+    if let Some(value) = table.get("min_secs") {
+        alerts.min_secs = value
+            .as_integer()
+            .and_then(|secs| u64::try_from(secs).ok())
+            .filter(|secs| MIN_SECS_RANGE.contains(secs))
+            .context("min_secs must be an integer in 0..=86400")?;
+    }
+    if let Some(value) = table.get("sources") {
+        let sources = value.as_array().context("sources must be a list")?;
+        let (mut bell, mut notify, mut finished) = (false, false, false);
+        for source in sources {
+            match source.as_str() {
+                Some("bell") => bell = true,
+                Some("notify") => notify = true,
+                Some("finished") => finished = true,
+                // An unknown source fails the load rather than silently marking nothing.
+                _ => bail!("sources entries must be \"bell\", \"notify\" or \"finished\""),
+            }
+        }
+        (alerts.bell, alerts.notify, alerts.finished) = (bell, notify, finished);
     }
     Ok(())
 }

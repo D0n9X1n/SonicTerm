@@ -66,6 +66,37 @@ impl CommandStatus {
     }
 }
 
+/// Why a tab needs the user, set while it is not the active tab and cleared when it is visited.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct TabMarks {
+    /// A program rang the bell.
+    pub bell: bool,
+    /// A program posted a notification.
+    pub notify: bool,
+    /// A command that ran this many seconds finished.
+    pub finished_secs: Option<u64>,
+}
+
+impl TabMarks {
+    /// Whether any source marked the tab.
+    #[must_use]
+    pub fn is_marked(&self) -> bool {
+        self.bell || self.notify || self.finished_secs.is_some()
+    }
+}
+
+/// Activation-log entries a tab bar keeps before it reports overflow.
+pub const ACTIVATION_LOG_LIMIT: usize = 64;
+
+/// Active-tab changes since the log was last taken, oldest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivationLog {
+    /// `(before, after)` tab ids of each change.
+    pub entries: Vec<(Option<TabId>, Option<TabId>)>,
+    /// More than [`ACTIVATION_LOG_LIMIT`] changes happened, so `entries` is incomplete.
+    pub overflowed: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Tab {
     pub id: TabId,
@@ -76,6 +107,8 @@ pub struct Tab {
     /// Whether this tab's current Windows foreground process requires a privilege warning.
     pub foreground_privileged: bool,
     pub command: CommandStatus,
+    /// Why this tab needs the user; travels with the tab when it moves to another window.
+    pub marks: TabMarks,
     /// Path or scheme-like icon hint ("github", "chrome", "bilibili", ...).
     /// The render layer maps this to a glyph/asset.
     pub icon_hint: Option<String>,
@@ -99,6 +132,7 @@ impl Tab {
             custom_color: None,
             foreground_privileged: false,
             command: CommandStatus::default(),
+            marks: TabMarks::default(),
             icon_hint: None,
             measured: None,
             laid_out: None,
@@ -142,6 +176,8 @@ pub struct TabContent<'a> {
     pub title: &'a str,
     /// Whether the privilege marker is drawn before the text.
     pub privileged: bool,
+    /// Whether the tab carries an alert mark, drawn as `●` before the text.
+    pub marked: bool,
 }
 
 impl<'a> TabContent<'a> {
@@ -153,6 +189,7 @@ impl<'a> TabContent<'a> {
             badge: tab.command.clone().badge(now, is_active),
             title: &tab.title,
             privileged: process_privileged || tab.foreground_privileged,
+            marked: !is_active && tab.marks.is_marked(),
         }
     }
 
@@ -160,8 +197,11 @@ impl<'a> TabContent<'a> {
     /// badge is shown, otherwise the title alone.
     #[must_use]
     pub fn display_text(&self) -> Cow<'a, str> {
+        let mark = if self.marked { "\u{25CF} " } else { "" };
         match self.badge {
-            Some(badge) => Cow::Owned(format!("{badge} {}", self.title)),
+            Some(badge) => Cow::Owned(format!("{mark}{badge} {}", self.title)),
+            None if self.marked => Cow::Owned(format!("{mark}{}", self.title)),
+            // No badge and no mark: the title is drawn as it is.
             None => Cow::Borrowed(self.title),
         }
     }
@@ -214,6 +254,8 @@ pub struct TabBar {
     active: usize,
     /// How many times the active tab has changed identity.
     activation: u64,
+    /// Active-tab changes not yet acknowledged by the App.
+    activation_log: ActivationLog,
     /// Instant of the last `refresh_content_widths` pass. The renderer
     /// judges command badges at this instant, so it draws the text it measured.
     content_measured_at: Option<Instant>,
@@ -539,9 +581,48 @@ impl TabBar {
 
     /// Count an activation when the active tab is no longer `before`.
     fn note_activation(&mut self, before: Option<TabId>) {
-        if self.active_id() != before {
+        let after = self.active_id();
+        if after != before {
             self.activation = self.activation.wrapping_add(1);
+            if self.activation_log.entries.len() < ACTIVATION_LOG_LIMIT {
+                self.activation_log.entries.push((before, after));
+            } else {
+                // When: the log already holds ACTIVATION_LOG_LIMIT entries, it records only overflow.
+                self.activation_log.overflowed = true;
+            }
         }
+        // A visited tab no longer needs the user.
+        let active = self.active;
+        if let Some(tab) = self.tabs.get_mut(active) {
+            tab.marks = TabMarks::default();
+        }
+    }
+
+    /// Take the active-tab changes since the last call, leaving the log empty.
+    pub fn take_activation_log(&mut self) -> ActivationLog {
+        std::mem::take(&mut self.activation_log)
+    }
+
+    /// Mark the tab at `index` with `update` unless it is the active tab. Returns whether the
+    /// tab's drawn mark appeared, the only change that repaints the tab bar.
+    pub fn mark(&mut self, index: usize, update: impl FnOnce(&mut TabMarks)) -> bool {
+        if index == self.active {
+            // When: index is the active tab, the user already sees it.
+            return false;
+        }
+        let Some(tab) = self.tabs.get_mut(index) else {
+            // When: no tab has index, there is nothing to mark.
+            return false;
+        };
+        let was_marked = tab.marks.is_marked();
+        update(&mut tab.marks);
+        !was_marked && tab.marks.is_marked()
+    }
+
+    /// Index of the tab with `id`, if the bar holds it.
+    #[must_use]
+    pub fn index_of(&self, id: TabId) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.id == id)
     }
 
     /// Append `tab`, make it the active tab, renumber every `#N` prefix, and

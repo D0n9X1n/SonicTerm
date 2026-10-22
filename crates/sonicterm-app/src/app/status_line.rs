@@ -21,9 +21,9 @@ use sonicterm_ui::selection::{
     selection_extent_counted, Selection, SelectionExtent, SELECTION_EXTENT_MAX_ROWS,
 };
 use sonicterm_ui::status_line::{
-    build_view, sanitize_link_text, FontInput, HealthInput, ImeInput, LinkInput, MemHistory,
-    MemInput, ModeInput, NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick,
-    SegmentHandler, SelInput, StatusLineInputs,
+    build_view, sanitize_link_text, AlertsInput, FontInput, HealthInput, ImeInput, LinkInput,
+    MemHistory, MemInput, ModeInput, NumberStyle, PathAction, ReloadFailure, RenderHealth,
+    SegmentClick, SegmentHandler, SelInput, StatusLineInputs,
 };
 use winit::window::WindowId;
 
@@ -698,6 +698,22 @@ impl App {
         });
         let Self { windows, status_line: state, i18n, .. } = self;
         let listed = |id| state.resolved.segment(id).is_some();
+        let alerts_shown = listed(StatusSegmentId::Alerts);
+        let alert_settings = (visible && alerts_shown).then_some(state.resolved.alerts);
+        let marked: HashMap<WindowId, Vec<(usize, sonicterm_ui::tabs::TabMarks)>> = windows
+            .iter()
+            .map(|(window_id, window)| {
+                let tabs = window
+                    .tabs
+                    .tabs()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, tab)| tab.marks.is_marked())
+                    .map(|(index, tab)| (index + 1, tab.marks))
+                    .collect();
+                (*window_id, tabs)
+            })
+            .collect();
         let zoom_shown = listed(StatusSegmentId::Zoom);
         let (history_shown, font_shown, size_listed) = (
             listed(StatusSegmentId::History),
@@ -721,6 +737,9 @@ impl App {
         let mut redraws = 0;
         let mut history_shows = 0;
         for (window_id, window) in windows.iter_mut() {
+            // Marks are recorded only while a shown strip lists `alerts`, renderer or not.
+            window.alert_settings =
+                alert_settings.filter(|_| window.role == super::WindowRole::Terminal);
             let Some(renderer) = window.renderer.as_mut() else {
                 // When: a test-seeded entry has no renderer, it has no strip.
                 continue;
@@ -846,6 +865,18 @@ impl App {
                 font,
                 size,
                 zoomed,
+                alerts: if alerts_shown {
+                    AlertsInput {
+                        tabs: marked.get(window_id).cloned().unwrap_or_default(),
+                        other_windows: marked
+                            .iter()
+                            .filter(|(other, tabs)| *other != window_id && !tabs.is_empty())
+                            .count(),
+                    }
+                } else {
+                    // When: alerts_shown is false, no list has `alerts`.
+                    AlertsInput::default()
+                },
             };
             let built = BuiltFrom { generation: state.generation, inputs };
             let previous = state.built.get(window_id);
@@ -937,11 +968,56 @@ impl App {
             Some(SegmentClick::Handler(SegmentHandler::AcknowledgeHistory)) => {
                 self.acknowledge_history(window_id);
             }
+            Some(SegmentClick::Handler(SegmentHandler::NextAlert)) => {
+                self.activate_next_alert(window_id);
+            }
             None => {
                 // When: `click` is None, a gap or inert segment was pressed; consume it and do nothing.
             }
         }
         true
+    }
+
+    /// Activate the next marked tab after `window_id`'s active one, wrapping; with none there, the
+    /// first marked tab of another window, which is focused.
+    pub(super) fn activate_next_alert(&mut self, window_id: WindowId) {
+        let next_marked = |window: &WindowState, from: usize| {
+            let count = window.tabs.len();
+            (1..=count)
+                .map(|step| (from + step) % count)
+                .find(|index| window.tabs.tabs()[*index].marks.is_marked())
+        };
+        let here = self
+            .windows
+            .get(&window_id)
+            .and_then(|window| next_marked(window, window.tabs.active_index()));
+        let target = here.map(|index| (window_id, index)).or_else(|| {
+            self.windows
+                .iter()
+                .filter(|(other, window)| {
+                    **other != window_id && window.role == super::WindowRole::Terminal
+                })
+                .find_map(|(other, window)| {
+                    next_marked(window, window.tabs.len()).map(|index| (*other, index))
+                })
+        });
+        let Some((target_window, index)) = target else {
+            // When: target is None, no window has a marked tab.
+            return;
+        };
+        if Some(target_window) == self.main_window_id {
+            self.activate_main_tab(index);
+        } else {
+            // When: target_window is not the main window, it is a torn-out child.
+            self.activate_tab_in_child(target_window, index);
+        }
+        if target_window != window_id {
+            if let Some(window) =
+                self.windows.get(&target_window).and_then(|state| state.window.as_ref())
+            {
+                window.focus_window();
+            }
+        }
     }
 
     /// Acknowledge the budget trims of `window_id`'s focused pane, as the last frame saw them.

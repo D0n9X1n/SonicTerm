@@ -891,9 +891,9 @@ impl App {
             return false;
         };
         let before = command_chrome(&window.tabs, now);
-        super::poll_command_events_for_child_window(window, &self.config);
+        let marked = super::poll_command_events_for_child_window(window, &self.config);
         window.tabs.clear_expired_command_badges(now);
-        before != command_chrome(&window.tabs, now)
+        marked || before != command_chrome(&window.tabs, now)
     }
 
     /// Deliver stopped-device reports without turning unchanged usable devices into redraw causes.

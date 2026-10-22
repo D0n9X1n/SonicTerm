@@ -55,12 +55,17 @@ impl App {
             // would write into is already gone.
             return;
         };
-        poll_command_events_for_tab_state(
+        let finished_min = main
+            .alert_settings
+            .filter(|settings| settings.finished)
+            .map(|settings| Duration::from_secs(settings.min_secs));
+        let _ = poll_command_events_for_tab_state(
             &mut main.panes,
             &mut main.tab_states,
             &mut main.tabs,
             &self.config,
             tab_idx,
+            finished_min,
         );
     }
 }
@@ -70,7 +75,9 @@ impl App {
 /// Events are collected across every leaf pane in the tab, so a command that
 /// finished in a non-focused split still updates the tab. A finished command
 /// holds its badge for a few seconds before the status lapses. Each pane's own command state
-/// takes its events in parse order, after a reset when its queue overflowed.
+/// takes its events in parse order, after a reset when its queue overflowed. A command that ran
+/// at least `finished_min` and ended while the tab was not active marks the tab for the alerts
+/// segment; returns whether that mark appeared.
 #[doc(hidden)]
 pub fn poll_command_events_for_tab_state(
     panes: &mut HashMap<u64, PaneState>,
@@ -78,11 +85,12 @@ pub fn poll_command_events_for_tab_state(
     tabs: &mut TabBar,
     config: &Config,
     tab_idx: usize,
-) {
+    finished_min: Option<Duration>,
+) -> bool {
     let Some(tab_state) = tab_states.get_mut(tab_idx) else {
         // When: `get_mut` cannot resolve `tab_idx`, so nothing exists to receive
         // the drained events and the panes are left holding them.
-        return;
+        return false;
     };
     let pane_ids = tab_state.tree.leaves();
     let mut events = Vec::new();
@@ -102,8 +110,9 @@ pub fn poll_command_events_for_tab_state(
     if events.is_empty() {
         // When: no pane produced `events`, so the existing status and badge
         // already describe the tab and republishing would only churn.
-        return;
+        return false;
     }
+    let mut marked = false;
     for pane_event in events {
         match pane_event.event {
             CommandEvent::CmdStart => tab_state.command = CommandStatus::Running(pane_event.at),
@@ -111,6 +120,12 @@ pub fn poll_command_events_for_tab_state(
                 tab_state.command =
                     CommandStatus::Done { exit, until: pane_event.at + Duration::from_secs(3) };
                 maybe_notify_long_command(config, pane_event.duration, exit);
+                let ran = pane_event.duration.zip(finished_min);
+                if let Some((duration, _)) = ran.filter(|(duration, min)| duration >= min) {
+                    // `mark` refuses the active tab, so a command the user watched marks nothing.
+                    let secs = duration.as_secs();
+                    marked |= tabs.mark(tab_idx, |marks| marks.finished_secs = Some(secs));
+                }
             }
             CommandEvent::PromptStart | CommandEvent::PromptEnd => {
                 // When: PromptStart or PromptEnd arrives, no command execution begins; preserve the running/done status.
@@ -120,23 +135,32 @@ pub fn poll_command_events_for_tab_state(
     if let Some(command_status) = tab_states.get(tab_idx).map(|tab| tab.command.clone()) {
         tabs.set_command_status(tab_idx, command_status);
     }
+    marked
 }
 
 /// Refresh every tab of a torn-out child window from its panes.
 ///
 /// A child runs its own tab bar, so it polls independently of the main window
 /// rather than inheriting the main window's sweep.
+/// Returns whether a finished-command mark appeared.
 #[doc(hidden)]
-pub fn poll_command_events_for_child_window(child: &mut WindowState, config: &Config) {
+pub fn poll_command_events_for_child_window(child: &mut WindowState, config: &Config) -> bool {
+    let finished_min = child
+        .alert_settings
+        .filter(|settings| settings.finished)
+        .map(|settings| Duration::from_secs(settings.min_secs));
+    let mut marked = false;
     for tab_idx in 0..child.tab_states.len() {
-        poll_command_events_for_tab_state(
+        marked |= poll_command_events_for_tab_state(
             &mut child.panes,
             &mut child.tab_states,
             &mut child.tabs,
             config,
             tab_idx,
+            finished_min,
         );
     }
+    marked
 }
 
 fn maybe_notify_long_command(config: &Config, duration: Option<Duration>, exit: Option<u8>) {

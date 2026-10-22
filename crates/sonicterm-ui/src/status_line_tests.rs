@@ -47,8 +47,8 @@ fn every_catalog_id_is_registered_with_a_glyph_free_spoken_name() {
         text.chars().all(|character| {
             character.is_alphanumeric()
                 || character.is_whitespace()
-                // CJK commas are punctuation a screen reader pauses on, not symbols.
-                || "(),.:-'，、".contains(character)
+                // CJK commas and colons are punctuation a screen reader pauses on, not symbols.
+                || "(),.:-'，、：".contains(character)
         })
     };
     for locale in SHIPPED_LOCALES {
@@ -69,6 +69,13 @@ fn every_catalog_id_is_registered_with_a_glyph_free_spoken_name() {
             font: Some(FontInput { live_tenths: 135, configured_tenths: 140 }),
             size: Some((120, 40)),
             zoomed: true,
+            alerts: AlertsInput {
+                tabs: vec![
+                    (2, crate::tabs::TabMarks { bell: true, ..Default::default() }),
+                    (3, crate::tabs::TabMarks { finished_secs: Some(134), ..Default::default() }),
+                ],
+                other_windows: 1,
+            },
             health: HealthInput {
                 config: Some(ReloadFailure { line: Some(12) }),
                 render: RenderHealth::SoftwareAdapter,
@@ -152,6 +159,7 @@ fn core_segments_format_as_name_value_and_chips() {
         font: None,
         size: None,
         zoomed: false,
+        alerts: AlertsInput::default(),
     };
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3COPYMOUSE");
@@ -245,6 +253,7 @@ fn ascii_icons_change_symbols_only() {
         font: None,
         size: None,
         zoomed: false,
+        alerts: AlertsInput::default(),
     };
     let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Sel).unwrap(), "Sel: x copy failed");
@@ -870,4 +879,35 @@ fn history_font_and_size_show_only_active_display() {
     assert_eq!((text_of(&zoom.parts).as_str(), zoom.parts[0].tone), ("ZOOM", StatusTone::Chip));
     assert_eq!(zoom.spoken.value, "pane zoomed");
     assert_eq!(zoom.click, Some(SegmentClick::Action(Action::TogglePaneZoom)));
+}
+
+#[test]
+fn alerts_lists_marked_tabs_and_names_each_source() {
+    // `Alerts: #2 #3` in tab order, `+N` past four tabs, `+1 window` for marks elsewhere; the
+    // spoken value names each source and never says a program is waiting. It is protected and
+    // its click goes to the next marked tab.
+    use crate::tabs::TabMarks;
+    let i18n = translator("en");
+    let bell = TabMarks { bell: true, ..Default::default() };
+    let finished = TabMarks { finished_secs: Some(134), ..Default::default() };
+    let alerts_view = |alerts: AlertsInput| {
+        let inputs = StatusLineInputs { alerts, ..idle_inputs() };
+        let view = build_view(&developer(), false, &inputs, &i18n, NumberStyle::POINT);
+        view.segments.into_iter().find(|segment| segment.id == StatusSegmentId::Alerts)
+    };
+    assert!(alerts_view(AlertsInput::default()).is_none(), "nothing marked");
+    let two = alerts_view(AlertsInput { tabs: vec![(2, bell), (3, finished)], other_windows: 0 })
+        .unwrap();
+    assert_eq!(text_of(&two.parts), "Alerts: #2 #3");
+    assert_eq!(two.spoken.value, "tab 2: bell. tab 3: finished after 2m14s");
+    assert!(two.protected);
+    assert_eq!(two.click, Some(SegmentClick::Handler(SegmentHandler::NextAlert)));
+    let many = AlertsInput {
+        tabs: [2, 3, 5, 6, 7, 9].into_iter().map(|number| (number, bell)).collect(),
+        other_windows: 1,
+    };
+    assert_eq!(text_of(&alerts_view(many).unwrap().parts), "Alerts: #2 #3 #5 #6 +2 +1 window");
+    let elsewhere = alerts_view(AlertsInput { tabs: Vec::new(), other_windows: 2 }).unwrap();
+    assert_eq!(text_of(&elsewhere.parts), "Alerts: +2 windows");
+    assert_eq!(elsewhere.spoken.value, "2 other windows with alerts");
 }

@@ -166,6 +166,8 @@ pub struct WindowState {
     pub(crate) sel_status: super::status_line::SelStatus,
     /// When copy mode last dropped an IME commit in this window; the status line holds it for a while.
     pub(crate) ime_discarded_at: Option<std::time::Instant>,
+    /// The alerts segment's settings while this window's strip lists `alerts`; `None` marks nothing.
+    pub(crate) alert_settings: Option<sonicterm_cfg::status_line::AlertsSettings>,
     /// The last hover detection, reused while its key and the rows it read are unchanged.
     pub(in crate::app) hover_detection: path_target::HoverDetectionCache,
     pub notification: Option<NotificationBubble>,

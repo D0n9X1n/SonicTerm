@@ -299,6 +299,7 @@ pub(in crate::app) struct PaneVtHandles {
     sync_resets: Arc<AtomicU64>,
     output_generation: Arc<AtomicU64>,
     output_outstanding: Arc<AtomicBool>,
+    bells: Arc<AtomicU64>,
     inline_images: Arc<Mutex<Vec<InlineImage>>>,
     inline_media_charge: super::media::SharedInlineMediaCharge,
     frame_counters: Option<super::frame_counters::PaneFrameCounters>,
@@ -322,6 +323,7 @@ impl PaneVtHandles {
             sync_resets: pane.sync_resets.clone(),
             output_generation: pane.output_generation.clone(),
             output_outstanding: pane.output_outstanding.clone(),
+            bells: pane.bells.clone(),
             inline_images: pane.inline_images.clone(),
             inline_media_charge: pane.inline_media_charge.clone(),
             frame_counters: pane.frame_counters.clone(),
@@ -767,8 +769,8 @@ pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>
 
 // Lock order: parser -> echo slot (pre_read, post_read); inline_images -> inline_media_charge after parser releases,
 // command_events after both.
-// Ordering: cursor_visible, keyboard_input, pointer_input and the output_generation load are Relaxed:
-// self-contained words; this worker alone writes output_generation.
+// Ordering: cursor_visible, keyboard_input, pointer_input, bells, output_generation load are Relaxed;
+// self-contained words, this worker the sole writer.
 #[allow(clippy::too_many_arguments)]
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
@@ -863,6 +865,10 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         let mut clipboard_requests = Vec::new();
         let mut command_side_effects = Vec::new();
         let mut media_events = Vec::new();
+        // A batch that rings any number of times is one bell, so a ringing loop marks its tab once.
+        if events.iter().any(|event| matches!(event, VtEvent::Bell)) {
+            handles.bells.fetch_add(1, Ordering::Relaxed);
+        }
         for event in events {
             match event {
                 VtEvent::CursorVisibility(visible) => {

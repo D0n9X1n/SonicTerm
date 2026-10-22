@@ -836,6 +836,8 @@ fn tab_bar_hash_with_limits(
         tab.content_width_px().map(f32::to_bits).hash(&mut hash);
         tab.custom_color.hash(&mut hash);
         tab.foreground_privileged.hash(&mut hash);
+        // A marked inactive tab draws `●`, so a mark appearing or clearing repaints the bar.
+        (index != active_index && tab.marks.is_marked()).hash(&mut hash);
         command_status_hash(&tab.command, now, index == active_index).hash(&mut hash);
     }
     hash.finish()

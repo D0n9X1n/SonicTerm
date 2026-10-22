@@ -76,6 +76,7 @@ fn protection_and_sensitivity_follow_the_catalog() {
     assert_eq!(
         implemented,
         [
+            Seg::Alerts,
             Seg::Health,
             Seg::Mem,
             Seg::Mode,
@@ -112,7 +113,12 @@ fn default_table_is_the_developer_preset_and_off() {
     );
     assert_eq!(
         side_ids(&resolved, StatusSide::Right),
-        [StatusSegmentId::Health, StatusSegmentId::History, StatusSegmentId::Mem]
+        [
+            StatusSegmentId::Alerts,
+            StatusSegmentId::Health,
+            StatusSegmentId::History,
+            StatusSegmentId::Mem
+        ]
     );
     for segment in &resolved.segments {
         let expected =
@@ -134,7 +140,7 @@ fn presets_resolve_to_their_implemented_lists() {
     assert!(side_ids(&minimal, StatusSide::Center).is_empty());
     assert_eq!(
         side_ids(&minimal, StatusSide::Right),
-        [StatusSegmentId::Health, StatusSegmentId::Mem]
+        [StatusSegmentId::Alerts, StatusSegmentId::Health, StatusSegmentId::Mem]
     );
     assert!(!minimal.mem.sparkline);
     let diagnostics = parse("preset = \"diagnostics\"\n").resolve().unwrap();
@@ -159,7 +165,12 @@ fn explicit_list_replaces_only_that_list() {
     );
     assert_eq!(
         side_ids(&resolved, StatusSide::Right),
-        [StatusSegmentId::Health, StatusSegmentId::History, StatusSegmentId::Mem]
+        [
+            StatusSegmentId::Alerts,
+            StatusSegmentId::Health,
+            StatusSegmentId::History,
+            StatusSegmentId::Mem
+        ]
     );
     let moved = parse("left = [\"mem\"]\nright = [\"health\"]\n").resolve().unwrap();
     assert_eq!(moved.segment(StatusSegmentId::Mem).unwrap().side, StatusSide::Left);
@@ -253,6 +264,10 @@ fn invalid_values_fail_the_load() {
         "[status_line.segment.font]\nshow = \"always\"\n",
         "[status_line.segment.history]\nshow = \"always\"\n",
         "[status_line.segment.zoom]\nshow = \"always\"\n",
+        "[status_line.segment.alerts]\nshow = \"always\"\n",
+        "[status_line.segment.alerts]\nmin_secs = 86401\n",
+        "[status_line.segment.alerts]\nsources = [\"activity\"]\n",
+        "[status_line.segment.alerts]\nsources = \"bell\"\n",
         "[status_line.segment.size]\nclick = \"show_memory_usage\"\n",
         "[status_line.segment.sel]\ncopied_secs = 11\n",
         "[status_line.segment.sel]\ncopied_secs = \"2\"\n",
@@ -357,4 +372,22 @@ fn size_hold_and_display_segments_resolve() {
         [StatusSegmentId::Font, StatusSegmentId::Size]
     );
     assert!(config.unknown_keys().is_empty());
+}
+
+#[test]
+fn alerts_settings_resolve() {
+    // `alerts` is in the developer and minimal presets; `sources` replaces the default set.
+    let defaults = StatusLineConfig::default().resolve().unwrap();
+    assert_eq!(defaults.alerts, AlertsSettings::default());
+    assert!(defaults.alerts.bell && defaults.alerts.notify && defaults.alerts.finished);
+    assert_eq!(defaults.alerts.min_secs, 10);
+    let config = parse("[status_line.segment.alerts]\nmin_secs = 0\nsources = [\"bell\"]\n");
+    let resolved = config.resolve().unwrap();
+    assert_eq!(
+        resolved.alerts,
+        AlertsSettings { min_secs: 0, bell: true, notify: false, finished: false }
+    );
+    assert!(config.unknown_keys().is_empty());
+    assert!(!StatusSegmentId::Alerts.meta().allows_always);
+    assert!(StatusSegmentId::Alerts.meta().clickable);
 }

@@ -62,6 +62,10 @@ pub struct PaneState {
     /// Whether an output event for this pane is queued and not yet serviced; the VT worker
     /// sends one only while it is clear. Travels with this pane across window transfers.
     pub(crate) output_outstanding: Arc<std::sync::atomic::AtomicBool>,
+    /// VT batches that rang the bell; the worker adds one per batch with any `BEL`.
+    pub(crate) bells: Arc<AtomicU64>,
+    /// `bells` when this pane's tab was last visited; only an activation writes it.
+    pub(crate) acked_bells: u64,
     /// Capture progress seen at the previous retention sample.
     ///
     /// A media capture holds its staging buffer until its terminator arrives,
@@ -306,6 +310,8 @@ impl PaneState {
             output_generation: Arc::new(AtomicU64::new(0)),
             observed_output_generation: 0,
             output_outstanding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bells: Arc::new(AtomicU64::new(0)),
+            acked_bells: 0,
             last_capture_progress: None,
             capture_stall_samples: 0,
             pty,

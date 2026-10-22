@@ -461,3 +461,106 @@ fn output_arms_route_only_through_the_service_and_only_the_worker_builds_pane_ou
     builders.sort();
     assert_eq!(builders, ["spawn_pane.rs: UserEvent::PaneOutput"]);
 }
+
+/// `owners()` with the alerts segment listed on the child window's strip.
+fn alerting_owners() -> (App, WindowId, WindowId) {
+    let (mut app, main, child) = owners();
+    app.windows.get_mut(&child).unwrap().alert_settings =
+        Some(sonicterm_cfg::status_line::AlertsSettings::default());
+    (app, main, child)
+}
+
+/// Service the pane's output event as the event loop would.
+fn service(app: &mut App, child: WindowId, pane_id: u64) {
+    app.service_output_event(OutputEvent::Pane { window_id: child, pane_id }, Instant::now());
+}
+
+/// A bell in a hidden tab marks it once; a bell in the active tab marks nothing, and leaving that
+/// tab acknowledges it, so the ring the user saw is never replayed. Visiting clears the mark.
+#[test]
+fn bell_marks_a_hidden_tab_until_it_is_visited() {
+    let (mut app, _main, child) = alerting_owners();
+    let (active, hidden) = (tab_pane(&app, child, 0), tab_pane(&app, child, 1));
+    worker_batch(&app, child, hidden, b"\x07\x07\x07");
+    assert_eq!(
+        app.windows[&child].panes[&hidden].bells.load(Ordering::Relaxed),
+        1,
+        "one per batch"
+    );
+    service(&mut app, child, hidden);
+    assert!(app.windows[&child].tabs.tabs()[1].marks.bell);
+    assert_eq!(app.windows[&child].panes[&hidden].acked_bells, 0, "service never acknowledges");
+
+    worker_batch(&app, child, active, b"\x07");
+    service(&mut app, child, active);
+    assert!(
+        !app.windows[&child].tabs.tabs()[0].marks.is_marked(),
+        "the active tab is never marked"
+    );
+    app.windows.get_mut(&child).unwrap().tabs.activate(1);
+    app.acknowledge_tab_activations();
+    assert!(!app.windows[&child].tabs.tabs()[1].marks.is_marked(), "visited");
+    service(&mut app, child, active);
+    assert!(!app.windows[&child].tabs.tabs()[0].marks.is_marked(), "a ring the user saw");
+}
+
+/// Without alerts listed nothing is marked; an OSC 9 notification marks nothing until the
+/// notification parser lands, and its OSC-terminating BEL is not a bell, nor is a ConEmu `9;4`.
+#[test]
+fn osc_9_and_unlisted_alerts_mark_nothing() {
+    let (mut app, _main, child) = owners();
+    let hidden = tab_pane(&app, child, 1);
+    worker_batch(&app, child, hidden, b"\x07");
+    service(&mut app, child, hidden);
+    assert!(!app.windows[&child].tabs.tabs()[1].marks.is_marked(), "alerts not listed");
+
+    let (mut app, _main, child) = alerting_owners();
+    let hidden = tab_pane(&app, child, 1);
+    for sequence in [&b"\x1b]9;4;1;50\x07"[..], b"\x1b]9;1;100\x07", b"\x1b]9;build done\x07"] {
+        worker_batch(&app, child, hidden, sequence);
+        service(&mut app, child, hidden);
+    }
+    assert_eq!(app.windows[&child].panes[&hidden].bells.load(Ordering::Relaxed), 0);
+    assert!(!app.windows[&child].tabs.tabs()[1].marks.is_marked());
+}
+
+/// A command that ran at least `min_secs` and ended in a hidden tab marks it with its duration; a
+/// shorter one marks nothing, and a command end queued before a visit is drained as seen.
+#[test]
+fn finished_command_marks_a_hidden_tab_after_min_secs() {
+    use sonicterm_vt::vt::CommandEvent;
+    let (mut app, _main, child) = alerting_owners();
+    let hidden = tab_pane(&app, child, 1);
+    let push = |app: &App, secs| {
+        app.windows[&child].panes[&hidden].command_events.lock().push(PaneCommandEvent {
+            event: CommandEvent::CmdEnd(Some(0)),
+            at: Instant::now(),
+            duration: Some(Duration::from_secs(secs)),
+        });
+    };
+    push(&app, 5);
+    app.command_maintenance(child, Instant::now());
+    assert!(!app.windows[&child].tabs.tabs()[1].marks.is_marked(), "under min_secs");
+    push(&app, 12);
+    app.command_maintenance(child, Instant::now());
+    assert_eq!(app.windows[&child].tabs.tabs()[1].marks.finished_secs, Some(12));
+    app.windows.get_mut(&child).unwrap().tabs.activate(1);
+    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    push(&app, 30);
+    app.windows.get_mut(&child).unwrap().tabs.activate(1);
+    app.acknowledge_tab_activations();
+    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    app.acknowledge_tab_activations();
+    app.command_maintenance(child, Instant::now());
+    assert!(!app.windows[&child].tabs.tabs()[1].marks.is_marked(), "seen during the visit");
+}
+
+/// The alerts click activates the next marked tab after the active one.
+#[test]
+fn alerts_click_goes_to_the_next_marked_tab() {
+    let (mut app, _main, child) = alerting_owners();
+    app.windows.get_mut(&child).unwrap().tabs.mark(1, |marks| marks.bell = true);
+    app.activate_next_alert(child);
+    assert_eq!(app.windows[&child].tabs.active_index(), 1);
+    assert!(!app.windows[&child].tabs.tabs()[1].marks.is_marked());
+}

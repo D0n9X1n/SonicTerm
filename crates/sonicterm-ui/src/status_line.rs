@@ -133,6 +133,8 @@ pub enum SegmentHandler {
     ScrollToBottom,
     /// Acknowledge the focused pane's budget-trimmed history, hiding `History: trimmed`.
     AcknowledgeHistory,
+    /// Go to the next marked tab after the active one, then to the next window with marks.
+    NextAlert,
 }
 
 /// A segment's registered `default` click.
@@ -198,6 +200,9 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
         Seg::Link => (UpdateKind::Event, format_link, DefaultClick::None),
         Seg::Sel => (UpdateKind::Event, format_sel, DefaultClick::Action(Action::CopyToClipboard)),
         Seg::Paste => (UpdateKind::Event, format_paste, DefaultClick::None),
+        Seg::Alerts => {
+            (UpdateKind::Event, format_alerts, DefaultClick::Handler(SegmentHandler::NextAlert))
+        }
         Seg::History => (
             UpdateKind::Event,
             format_history,
@@ -207,8 +212,7 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
         Seg::Size => (UpdateKind::Event, format_size, DefaultClick::None),
         Seg::Zoom => (UpdateKind::Event, format_zoom, DefaultClick::Action(Action::TogglePaneZoom)),
         Seg::Ime => (UpdateKind::Event, format_ime, DefaultClick::None),
-        Seg::Alerts
-        | Seg::Input
+        Seg::Input
         | Seg::Clip
         | Seg::PathCheck
         | Seg::Cpu
@@ -262,7 +266,21 @@ pub struct StatusLineInputs {
     pub size: Option<(u16, u16)>,
     /// A split pane of the active tab is zoomed to fill it.
     pub zoomed: bool,
+    /// This window's marked tabs and how many other windows have marks.
+    pub alerts: AlertsInput,
 }
+
+/// What the alerts segment shows: tabs of this window that need the user.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AlertsInput {
+    /// 1-based tab numbers and their marks, in tab order.
+    pub tabs: Vec<(usize, crate::tabs::TabMarks)>,
+    /// Other windows with at least one marked tab.
+    pub other_windows: usize,
+}
+
+/// Tab numbers the alerts segment lists before it counts the rest.
+const ALERT_TABS_SHOWN: usize = 4;
 
 /// The live and configured font sizes, in tenths of a point so the inputs stay comparable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1156,6 +1174,69 @@ fn format_size(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Formatt
         Some(&[("cols", &cols.to_string()), ("rows", &rows.to_string())]),
     );
     Some(FormattedSegment::plain(parts, spoken))
+}
+
+/// The alerts segment: `Alerts: #2 #3`, `#2 #3 #5 #6 +2`, and `+1 window` for marks elsewhere.
+/// The spoken value names each source; it never claims a program is waiting for input.
+fn format_alerts(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let alerts = &inputs.alerts;
+    if alerts.tabs.is_empty() && alerts.other_windows == 0 {
+        // When: alerts.tabs is empty and other_windows is 0, no tab anywhere is marked.
+        return None;
+    }
+    let mut words: Vec<String> =
+        alerts.tabs.iter().take(ALERT_TABS_SHOWN).map(|(number, _)| format!("#{number}")).collect();
+    if alerts.tabs.len() > ALERT_TABS_SHOWN {
+        words.push(format!("+{}", alerts.tabs.len() - ALERT_TABS_SHOWN));
+    }
+    let mut parts = vec![name_part(env, "status-name-alerts")];
+    if !words.is_empty() {
+        parts.push(StatusPart::new(words.join(" "), StatusTone::Value));
+    }
+    let count = format_count(alerts.other_windows as u64, env.numbers);
+    if alerts.other_windows > 0 {
+        let key = if alerts.other_windows == 1 {
+            "status-value-other-window"
+        } else {
+            // More than one other window takes the plural form with its count.
+            "status-value-other-windows"
+        };
+        let separator = if words.is_empty() { "" } else { " " };
+        let text = format!("{separator}{}", env.i18n.t_args(key, Some(&[("count", &count)])));
+        parts.push(StatusPart::new(text, StatusTone::Value).droppable());
+    }
+    let mut spoken: Vec<String> = alerts
+        .tabs
+        .iter()
+        .map(|(number, marks)| {
+            let mut sources = Vec::new();
+            if marks.bell {
+                sources.push(env.i18n.translate("status-spoken-alert-bell"));
+            }
+            if marks.notify {
+                sources.push(env.i18n.translate("status-spoken-alert-notify"));
+            }
+            if let Some(secs) = marks.finished_secs {
+                let duration = format_duration(secs);
+                sources.push(
+                    env.i18n
+                        .t_args("status-spoken-alert-finished", Some(&[("duration", &duration)])),
+                );
+            }
+            env.i18n.t_args(
+                "status-spoken-alert-tab",
+                Some(&[("tab", &number.to_string()), ("sources", &sources.join(", "))]),
+            )
+        })
+        .collect();
+    if alerts.other_windows > 0 {
+        spoken.push(env.i18n.t_args("status-spoken-alert-windows", Some(&[("count", &count)])));
+    }
+    Some(FormattedSegment {
+        protected: true,
+        default_click: true,
+        ..FormattedSegment::plain(parts, spoken.join(". "))
+    })
 }
 
 /// The zoom segment: a `ZOOM` chip with no name while a split pane is zoomed.

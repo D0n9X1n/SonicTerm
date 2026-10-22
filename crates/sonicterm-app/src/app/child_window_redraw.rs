@@ -55,7 +55,7 @@ impl App {
         // the forbidden unconditional heartbeat redraw).
         self.pending_redraw_windows.remove(&win_id);
         child.tabs.clear_expired_command_badges(Instant::now());
-        poll_command_events_for_child_window(child, config);
+        let _ = poll_command_events_for_child_window(child, config);
         crate::app::refresh_window_tab_privileges(
             &mut child.tabs,
             &child.tab_states,

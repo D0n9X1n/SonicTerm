@@ -149,14 +149,15 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 
 | 预设 | `left` | `center` | `right` | 段默认值 |
 | --- | --- | --- | --- | --- |
-| `developer` | `mode`、`scroll`、`paste` | `link`、`sel` | `health`、`history`、`mem` | — |
-| `minimal` | — | — | `health`、`mem` | — |
+| `developer` | `mode`、`scroll`、`paste` | `link`、`sel` | `alerts`、`health`、`history`、`mem` | — |
+| `minimal` | — | — | `alerts`、`health`、`mem` | — |
 | `diagnostics` | 同 `developer` | 同 `developer` | 同 `developer` | `mem.sparkline = true` |
 
 除 `mem` 外，每个段只在有内容时显示，因此空闲窗口只显示 `内存: 412 MB`。
 
 | 段 | 显示 | 默认优先级 | 默认点击 |
 | --- | --- | --- | --- |
+| `alerts` | `提醒: #2 #3`：本窗口中需要你处理的标签页编号，按标签页顺序：标签页不在前台时响过铃，或有运行至少 `min_secs` 的命令结束（需要 OSC 133 shell 集成）。超过四个时显示 `#2 #3 #5 #6 +2`；其他窗口有标记时追加 `+1 个窗口`。被标记的标签页在标签栏的标题前还会显示 `●`。访问该标签页会清除标记；你正看着该标签页时发生的响铃或命令结束，之后也不会标记它。朗读值写明每个来源（"响铃"、"2m14s 后完成"），从不声称程序在等待输入。`notify` 来源可以配置，但在 SonicTerm 解析程序通知之前不标记任何内容；`9;4` 进度等 ConEmu OSC 9 子命令永远不算通知。窗口变窄时保留。 | 990 | 跳到当前标签页之后的下一个被标记的标签页，循环，然后跳到下一个有标记的窗口。 |
 | `health` | 只在出问题时显示：每个文件最近一次失败的加载（启动时或重载时），如 `配置: ✗ 第 12 行`（以及 `主题:`、`键位:`），保留到该文件成功重载为止；`渲染: ⚠ 软件 (GDI)`、`软件适配器` 或 `软件 (强制)`；`GPU: ⚠ 恢复中`。 | 950 | 有重载错误时打开配置文件，否则无。 |
 | `mem` | SonicTerm 自身进程的内存，如 `内存: 412 MB`，使用二进制单位和三位有效数字；与上一次采样相比变化至少 1% 时显示 `↑` 或 `↓`。达到 `warn_mib` 时为琥珀色并带 `⚠`，达到 `critical_mib` 时为红色并带 `✗`。 | 900 | 打开内存占用报告。 |
 | `mode` | 标记：广播输入 `⇶ 3`（含接收窗格数）、复制模式 `复制`、程序捕获鼠标时的 `鼠标`。 | 800 | 无。 |
@@ -176,11 +177,11 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 
 | Key | 取值 | 行为 |
 | --- | --- | --- |
-| `show` | `"always"` 或 `"active"` | `always` 保留位置并显示空闲文本（`不可用`、`底部`、`正常`、`无`）；`active` 在段没有内容时隐藏它。`link`、`paste`、`ime`、`history`、`font`、`zoom` 和 `size` 只接受 `active`。 |
+| `show` | `"always"` 或 `"active"` | `always` 保留位置并显示空闲文本（`不可用`、`底部`、`正常`、`无`）；`active` 在段没有内容时隐藏它。`alerts`、`link`、`paste`、`ime`、`history`、`font`、`zoom` 和 `size` 只接受 `active`。 |
 | `priority` | `0` 到 `1000` | 窗口变窄时，值越高保留越久。 |
 | `click` | `"default"`、`"none"` 或动作名 | `default` 执行该段自己的点击；`none` 让它不响应指针；不带参数的键位动作（如 `"show_memory_usage"`）在被点击的窗口中执行。`paste`、`ime` 和 `size` 只接受 `default` 或 `none`，二者都不响应。 |
 
-`[status_line.segment.mem]` 还接受 `show_trend`（`true`）、`sparkline`（`false`，`diagnostics` 中为 `true`：数字后面八个暗色单元，表示最近两分钟，每个单元是一个按墙钟对齐的 15 秒区间中的最大采样，在绘制单元的最小值和最大值之间缩放；只绘制已结束的区间，因此只在区间结束时变化；没有采样的时间段，例如窗口被遮挡或机器休眠，保持空白）、`warn_mib`（`1024`）和 `critical_mib`（`2048`，不小于 `warn_mib`），取值均为 `1` 到 `1048576`。`[status_line.segment.sel]` 还接受 `copied_secs`（`2`，`1` 到 `10`），即复制结果显示多久。`[status_line.segment.paste]` 接受 `paste`（`"when_off"`，默认，或 `"never"`）。`[status_line.segment.ime]` 接受 `hold_secs`（`8`，`1` 到 `60`），即复制模式警告显示多久。`[status_line.segment.size]` 接受 `hold_ms`（`1500`，`250` 到 `10000`）。`[status_line]` 下和段表内的未知 key 会被忽略，并在每次加载时以一条列出全部未知 key 的 `sonicterm-cfg` 警告记录一次。
+`[status_line.segment.mem]` 还接受 `show_trend`（`true`）、`sparkline`（`false`，`diagnostics` 中为 `true`：数字后面八个暗色单元，表示最近两分钟，每个单元是一个按墙钟对齐的 15 秒区间中的最大采样，在绘制单元的最小值和最大值之间缩放；只绘制已结束的区间，因此只在区间结束时变化；没有采样的时间段，例如窗口被遮挡或机器休眠，保持空白）、`warn_mib`（`1024`）和 `critical_mib`（`2048`，不小于 `warn_mib`），取值均为 `1` 到 `1048576`。`[status_line.segment.sel]` 还接受 `copied_secs`（`2`，`1` 到 `10`），即复制结果显示多久。`[status_line.segment.paste]` 接受 `paste`（`"when_off"`，默认，或 `"never"`）。`[status_line.segment.ime]` 接受 `hold_secs`（`8`，`1` 到 `60`），即复制模式警告显示多久。`[status_line.segment.size]` 接受 `hold_ms`（`1500`，`250` 到 `10000`）。`[status_line.segment.alerts]` 接受 `min_secs`（`10`，`0` 到 `86400`）和 `sources`（`["bell", "notify", "finished"]`；列出的来源较少时，其余来源关闭）。`[status_line]` 下和段表内的未知 key 会被忽略，并在每次加载时以一条列出全部未知 key 的 `sonicterm-cfg` 警告记录一次。
 
 窗口过窄时，状态栏先使用紧凑形式（内存去掉箭头和迷你图，`mode` 去掉 `鼠标`），再从中间缩短链接的路径，然后按优先级从低到高整段移除。健康错误、广播标记和链接的目标主机最后移除。
 
