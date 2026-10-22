@@ -313,3 +313,32 @@ fn health_classifies_each_presenter_and_recovery_per_window() {
     assert!(!waits_on_gpu_recovery(true, false, true), "a healthy window is not waiting");
     assert!(!waits_on_gpu_recovery(false, true, false), "no recovery in progress");
 }
+
+/// A wall clock that ran ahead of the monotonic clock by more than one interval means the machine
+/// slept: the history re-aligns and a sample is due at once. Ordinary drift is not a jump.
+#[test]
+fn wall_clock_jump_after_sleep_resamples() {
+    let at = Instant::now();
+    let later = at + Duration::from_secs(2);
+    assert!(!wall_clock_jumped((at, 1_000_000), later, 1_002_000, 2_000), "in step");
+    assert!(
+        !wall_clock_jumped((at, 1_000_000), later, 1_003_500, 2_000),
+        "drift under an interval"
+    );
+    assert!(wall_clock_jumped((at, 1_000_000), later, 1_602_000, 2_000), "ten minutes asleep");
+    assert!(
+        !wall_clock_jumped((at, 1_000_000), later, 900_000, 2_000),
+        "a clock set back is not a sleep"
+    );
+}
+
+/// With the sparkline on and a window shown, the next wake is never later than the next bucket
+/// rollover; with it off, nothing wakes without an eligible window.
+#[test]
+fn sparkline_rollover_bounds_the_wake() {
+    let mut app = app_with_strip(true);
+    app.config.status_line.preset = sonicterm_cfg::status_line::StatusPreset::Diagnostics;
+    assert_eq!(app.sync_status_line(Instant::now()), None, "no eligible window, no rollover wake");
+    assert!(app.status_line.resolved.mem.sparkline);
+    assert_eq!(app.status_line.mem.history, [None; sonicterm_ui::status_line::SPARK_CELLS]);
+}

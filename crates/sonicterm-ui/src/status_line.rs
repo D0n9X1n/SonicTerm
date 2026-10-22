@@ -298,6 +298,88 @@ pub struct MemInput {
     pub bytes: Option<u64>,
     /// The sample before it, for the trend arrow.
     pub previous_bytes: Option<u64>,
+    /// The sparkline's completed 15 s buckets, oldest first; `None` is a bucket with no sample.
+    pub history: [Option<u64>; SPARK_CELLS],
+}
+
+/// Cells of the memory sparkline: two minutes of 15 s buckets.
+pub const SPARK_CELLS: usize = 8;
+/// Width of one sparkline bucket, in wall-clock milliseconds.
+pub const SPARK_BUCKET_MS: u64 = 15_000;
+
+/// Memory samples kept as the maximum per wall-clock-aligned 15 s bucket.
+///
+/// Buckets are keyed by wall time, so a span with no sample (sampling paused while every window
+/// was covered, or the machine asleep) leaves its buckets blank; nothing is interpolated, and a
+/// monotonic clock that stood still never stretches a bucket. Only completed buckets are drawn, so
+/// the sparkline changes at bucket rollover and never between.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemHistory {
+    /// `(bucket index, maximum bytes)`, oldest first; at most one more than the drawn cells.
+    buckets: std::collections::VecDeque<(u64, u64)>,
+}
+
+impl MemHistory {
+    /// Fold a sample of `bytes` taken at `wall_ms` into its bucket.
+    pub fn record(&mut self, wall_ms: u64, bytes: u64) {
+        let index = wall_ms / SPARK_BUCKET_MS;
+        match self.buckets.back_mut() {
+            Some((last, peak)) if *last == index => *peak = (*peak).max(bytes),
+            _ => {
+                self.buckets.push_back((index, bytes));
+                while self.buckets.len() > SPARK_CELLS + 1 {
+                    self.buckets.pop_front();
+                }
+            }
+        }
+    }
+
+    /// The completed buckets before the one holding `wall_ms`, oldest first.
+    pub fn cells(&self, wall_ms: u64) -> [Option<u64>; SPARK_CELLS] {
+        let current = wall_ms / SPARK_BUCKET_MS;
+        let mut cells = [None; SPARK_CELLS];
+        for (index, peak) in &self.buckets {
+            let age =
+                current.checked_sub(*index).filter(|age| (1..=SPARK_CELLS as u64).contains(age));
+            if let Some(age) = age {
+                cells[SPARK_CELLS - age as usize] = Some(*peak);
+            }
+        }
+        cells
+    }
+
+    /// Milliseconds from `wall_ms` to the next bucket boundary, always at least 1.
+    pub fn next_rollover_ms(wall_ms: u64) -> u64 {
+        SPARK_BUCKET_MS - wall_ms % SPARK_BUCKET_MS
+    }
+}
+
+/// The sparkline for `cells`, scaled between the minimum and maximum present cell; a blank cell is
+/// a space. `None` when no cell has a sample.
+pub fn sparkline(cells: &[Option<u64>; SPARK_CELLS], icons: StatusIcons) -> Option<String> {
+    const UNICODE: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    const ASCII: [char; 8] = [' ', '.', ':', '-', '=', '+', '*', '#'];
+    let ramp = match icons {
+        StatusIcons::Ascii => ASCII,
+        StatusIcons::Unicode | StatusIcons::Nerd => UNICODE,
+    };
+    let low = cells.iter().flatten().min().copied()?;
+    let high = cells.iter().flatten().max().copied()?;
+    let span = high - low;
+    Some(
+        cells
+            .iter()
+            .map(|cell| match cell {
+                None => ' ',
+                Some(_) if span == 0 => ramp[0],
+                Some(bytes) => {
+                    let level =
+                        (u128::from(bytes - low) * 7 + u128::from(span) / 2) / u128::from(span);
+                    ramp[level as usize]
+                }
+            })
+            .collect(),
+    )
 }
 
 /// What a click on a local path does.
@@ -546,6 +628,11 @@ fn format_mem(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Formatte
         };
         parts.push(StatusPart::new(format!(" {arrow}"), tone).droppable());
         spoken = format!("{spoken} {}", env.i18n.translate(word));
+    }
+    let line = env.mem.sparkline.then(|| sparkline(&inputs.mem.history, env.icons)).flatten();
+    if let Some(line) = line {
+        // The sparkline is configured and a completed bucket has a sample: draw it static and dim.
+        parts.push(StatusPart::new(format!(" {line}"), StatusTone::Name).droppable());
     }
     Some(FormattedSegment {
         compact: (compact != parts).then_some(compact),

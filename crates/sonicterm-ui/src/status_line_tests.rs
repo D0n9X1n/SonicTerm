@@ -31,7 +31,11 @@ fn tight(width: f32) -> FitMetrics {
 /// Inputs with a 412 MiB memory figure and nothing else to say.
 fn idle_inputs() -> StatusLineInputs {
     StatusLineInputs {
-        mem: MemInput { bytes: Some(412 * MIB), previous_bytes: Some(412 * MIB) },
+        mem: MemInput {
+            bytes: Some(412 * MIB),
+            previous_bytes: Some(412 * MIB),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -126,7 +130,11 @@ fn core_segments_format_as_name_value_and_chips() {
             gpu_recovering: true,
             ..Default::default()
         },
-        mem: MemInput { bytes: Some(500 * MIB), previous_bytes: Some(400 * MIB) },
+        mem: MemInput {
+            bytes: Some(500 * MIB),
+            previous_bytes: Some(400 * MIB),
+            ..Default::default()
+        },
         link: Some(LinkInput::from_url("https://github.com/D0n9X1n/SonicTerm/pull/1670")),
     };
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
@@ -180,7 +188,11 @@ fn memory_thresholds_and_trend_deadband() {
     let resolved = developer();
     let mem_text = |bytes: u64, previous: u64| {
         let inputs = StatusLineInputs {
-            mem: MemInput { bytes: Some(bytes), previous_bytes: Some(previous) },
+            mem: MemInput {
+                bytes: Some(bytes),
+                previous_bytes: Some(previous),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
@@ -204,7 +216,11 @@ fn ascii_icons_change_symbols_only() {
         mode: ModeInput { broadcast_receivers: Some(2), ..Default::default() },
         scroll_lines: 5,
         health: HealthInput { keymap: Some(ReloadFailure { line: None }), ..Default::default() },
-        mem: MemInput { bytes: Some(300 * MIB), previous_bytes: Some(200 * MIB) },
+        mem: MemInput {
+            bytes: Some(300 * MIB),
+            previous_bytes: Some(200 * MIB),
+            ..Default::default()
+        },
         link: None,
     };
     let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
@@ -608,4 +624,65 @@ fn rtl_path_text_is_sanitized_and_ellipsized_by_grapheme() {
                     .all(|grapheme| grapheme == "…" || whole.contains(&grapheme))
         );
     }
+}
+
+/// Each bucket keeps its maximum sample; only completed buckets are drawn; a span with no sample
+/// stays blank; and the rollover is never at `wall_ms` itself.
+#[test]
+fn memory_history_buckets_by_wall_clock() {
+    let bucket = SPARK_BUCKET_MS;
+    let mut history = MemHistory::default();
+    history.record(0, 100);
+    history.record(5_000, 300);
+    history.record(bucket, 200);
+    assert_eq!(history.cells(bucket + 1), [None, None, None, None, None, None, None, Some(300)]);
+    // A resume four buckets later: the slept buckets stay blank.
+    history.record(5 * bucket, 150);
+    let cells = history.cells(6 * bucket);
+    assert_eq!(cells, [None, None, Some(300), Some(200), None, None, None, Some(150)]);
+    assert_eq!(history.cells(6 * bucket + 14_999), cells, "unchanged until rollover");
+    assert_ne!(history.cells(7 * bucket), cells, "shifted at rollover");
+    assert_eq!(history.cells(20 * bucket), [None; SPARK_CELLS], "aged out");
+    assert_eq!(MemHistory::next_rollover_ms(0), bucket);
+    assert_eq!(MemHistory::next_rollover_ms(bucket - 1), 1);
+    for _ in 0..30 {
+        history.record(30 * bucket, 1);
+    }
+    assert!(history.buckets.len() <= SPARK_CELLS + 1, "bounded");
+}
+
+/// Cells scale between the visible minimum and maximum; blanks are spaces; ascii swaps symbols.
+#[test]
+fn sparkline_scales_and_leaves_gaps_blank() {
+    let cells = [Some(100), None, Some(200), Some(300), None, None, None, Some(1100)];
+    assert_eq!(sparkline(&cells, StatusIcons::Unicode).unwrap(), "▁ ▂▂   █");
+    assert_eq!(sparkline(&cells, StatusIcons::Ascii).unwrap(), "  ..   #");
+    assert_eq!(sparkline(&[Some(5); SPARK_CELLS], StatusIcons::Unicode).unwrap(), "▁▁▁▁▁▁▁▁");
+    assert_eq!(sparkline(&[None; SPARK_CELLS], StatusIcons::Unicode), None);
+}
+
+/// The diagnostics preset draws the sparkline after the figure; the compact form drops it first;
+/// it is never spoken.
+#[test]
+fn diagnostics_mem_shows_a_static_sparkline() {
+    let resolved = StatusLineConfig {
+        preset: sonicterm_cfg::status_line::StatusPreset::Diagnostics,
+        ..Default::default()
+    }
+    .resolve()
+    .unwrap();
+    let mut history = [None; SPARK_CELLS];
+    history[6] = Some(400 * MIB);
+    history[7] = Some(412 * MIB);
+    let inputs = StatusLineInputs {
+        mem: MemInput { bytes: Some(412 * MIB), previous_bytes: Some(412 * MIB), history },
+        ..Default::default()
+    };
+    let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
+    let mem = &view.segments[0];
+    assert_eq!(text_of(&mem.parts), "Mem: 412 MB       ▁█");
+    assert_eq!(text_of(mem.compact.as_ref().unwrap()), "Mem: 412 MB");
+    assert_eq!(mem.spoken.value, "412 MB");
+    let plain = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
+    assert_eq!(text_of(&plain.segments[0].parts), "Mem: 412 MB", "off outside diagnostics");
 }

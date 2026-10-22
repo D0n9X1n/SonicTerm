@@ -14,8 +14,9 @@ use sonicterm_cfg::status_line::{ResolvedStatusLine, StatusLineConfig, StatusSeg
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_logging::MemoryMetric;
 use sonicterm_ui::status_line::{
-    build_view, sanitize_link_text, HealthInput, LinkInput, MemInput, ModeInput, NumberStyle,
-    PathAction, ReloadFailure, RenderHealth, SegmentClick, SegmentHandler, StatusLineInputs,
+    build_view, sanitize_link_text, HealthInput, LinkInput, MemHistory, MemInput, ModeInput,
+    NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick, SegmentHandler,
+    StatusLineInputs,
 };
 use winit::window::WindowId;
 
@@ -94,6 +95,31 @@ pub(crate) struct StatusLineState {
     startup_checked: bool,
     /// The wake the last sync armed, so reaching it counts as a status line wake.
     armed_wake: Option<Instant>,
+    /// The sparkline's wall-clock buckets.
+    history: MemHistory,
+    /// When the last sample was taken, on the monotonic and the wall clock.
+    last_sample: Option<(Instant, u64)>,
+}
+
+/// Milliseconds since the Unix epoch on the wall clock; 0 if the clock reads before it.
+fn wall_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Whether the wall clock moved more than `interval_ms` beyond the monotonic clock since the last
+/// sample `(at, wall_ms)`: the machine slept, so the history clock re-aligns and a sample is due now.
+pub(crate) fn wall_clock_jumped(
+    last: (Instant, u64),
+    now: Instant,
+    wall_ms: u64,
+    interval_ms: u64,
+) -> bool {
+    let (at, last_wall_ms) = last;
+    let monotonic_ms =
+        u64::try_from(now.saturating_duration_since(at).as_millis()).unwrap_or(u64::MAX);
+    wall_ms.saturating_sub(last_wall_ms) > monotonic_ms.saturating_add(interval_ms)
 }
 
 impl StatusLineState {
@@ -351,22 +377,44 @@ impl App {
         let samples_mem = visible
             && any_eligible
             && self.status_line.resolved.segment(StatusSegmentId::Mem).is_some();
+        let wall_ms = wall_now_ms();
+        let interval_ms = self.status_line.resolved.update_interval_ms;
+        let slept = self
+            .status_line
+            .last_sample
+            .is_some_and(|last| wall_clock_jumped(last, now, wall_ms, interval_ms));
         if !samples_mem {
             // No visible window shows `mem`, nothing samples; resume samples at once.
             self.status_line.next_sample = None;
-        } else if self.status_line.next_sample.is_none_or(|due| now >= due) {
+        } else if slept || self.status_line.next_sample.is_none_or(|due| now >= due) {
             // When: a sample is due, read SonicTerm's own figure once for every window.
             let bytes = match sonicterm_logging::process_report::sample_footprint().current {
                 MemoryMetric::Bytes(bytes) => Some(bytes),
                 MemoryMetric::Unsupported => None,
             };
             let mem = &mut self.status_line.mem;
-            *mem = MemInput { previous_bytes: mem.bytes, bytes };
-            let interval = Duration::from_millis(self.status_line.resolved.update_interval_ms);
-            self.status_line.next_sample = Some(now + interval);
+            *mem = MemInput { previous_bytes: mem.bytes, bytes, history: mem.history };
+            if let Some(bytes) = bytes {
+                self.status_line.history.record(wall_ms, bytes);
+            }
+            self.status_line.last_sample = Some((now, wall_ms));
+            self.status_line.next_sample = Some(now + Duration::from_millis(interval_ms));
             self.note_status_line(|counters| counters.samples += 1);
         }
+        let sparkline = samples_mem && self.status_line.resolved.mem.sparkline;
+        // The drawn cells are the completed buckets, so they change only at a rollover.
+        self.status_line.mem.history = if sparkline {
+            self.status_line.history.cells(wall_ms)
+        } else {
+            // When: `sparkline` is off, no cells are drawn and the strip's pixels never depend on them.
+            Default::default()
+        };
         let mut next_wake = self.status_line.next_sample;
+        if sparkline {
+            // The rollover is its own wake, so cells shift on time even with a 60 s interval.
+            let rollover = now + Duration::from_millis(MemHistory::next_rollover_ms(wall_ms));
+            next_wake = Some(next_wake.map_or(rollover, |wake| wake.min(rollover)));
+        }
         let broadcast = match self.broadcast {
             super::BroadcastState::On { source_pane, .. } => {
                 Some((source_pane, self.broadcast_receivers().len()))
