@@ -73,7 +73,7 @@ fn protection_and_sensitivity_follow_the_catalog() {
     assert!(!Seg::Link.meta().allows_always, "link has no idle text");
     assert_eq!(Seg::Mem.meta().default_show, ShowMode::Always);
     let implemented: Vec<Seg> = Seg::ALL.into_iter().filter(|id| id.meta().implemented).collect();
-    assert_eq!(implemented, [Seg::Health, Seg::Mem, Seg::Mode, Seg::Link, Seg::Scroll]);
+    assert_eq!(implemented, [Seg::Health, Seg::Mem, Seg::Mode, Seg::Link, Seg::Sel, Seg::Scroll]);
 }
 
 #[test]
@@ -86,7 +86,10 @@ fn default_table_is_the_developer_preset_and_off() {
         side_ids(&resolved, StatusSide::Left),
         [StatusSegmentId::Mode, StatusSegmentId::Scroll]
     );
-    assert_eq!(side_ids(&resolved, StatusSide::Center), [StatusSegmentId::Link]);
+    assert_eq!(
+        side_ids(&resolved, StatusSide::Center),
+        [StatusSegmentId::Link, StatusSegmentId::Sel]
+    );
     assert_eq!(
         side_ids(&resolved, StatusSide::Right),
         [StatusSegmentId::Health, StatusSegmentId::Mem]
@@ -98,6 +101,7 @@ fn default_table_is_the_developer_preset_and_off() {
         assert_eq!(segment.click, ClickBinding::Default);
     }
     assert_eq!(resolved.mem, MemSettings::default());
+    assert_eq!(resolved.sel, SelSettings::default());
     assert_eq!(resolved.update_interval_ms, 2000);
     assert_eq!(resolved.icons, StatusIcons::Unicode);
 }
@@ -129,7 +133,10 @@ fn explicit_list_replaces_only_that_list() {
     // `left = [...]` replaces the preset's left list and keeps its center and right lists.
     let resolved = parse("left = [\"scroll\"]\n").resolve().unwrap();
     assert_eq!(side_ids(&resolved, StatusSide::Left), [StatusSegmentId::Scroll]);
-    assert_eq!(side_ids(&resolved, StatusSide::Center), [StatusSegmentId::Link]);
+    assert_eq!(
+        side_ids(&resolved, StatusSide::Center),
+        [StatusSegmentId::Link, StatusSegmentId::Sel]
+    );
     assert_eq!(
         side_ids(&resolved, StatusSide::Right),
         [StatusSegmentId::Health, StatusSegmentId::Mem]
@@ -214,6 +221,9 @@ fn invalid_values_fail_the_load() {
         "[status_line.segment.mem]\nwarn_mib = 0\n",
         "[status_line.segment.mem]\nwarn_mib = 3000\n",
         "[status_line.segment.mem]\nsparkline = \"yes\"\n",
+        "[status_line.segment.sel]\ncopied_secs = 0\n",
+        "[status_line.segment.sel]\ncopied_secs = 11\n",
+        "[status_line.segment.sel]\ncopied_secs = \"2\"\n",
         "[status_line.segment]\nmem = 3\n",
         "left = [\"mem\"]\n",
         "left = [\"scroll\"]\nright = [\"scroll\"]\n",
@@ -270,4 +280,14 @@ fn table_round_trips_through_toml() {
     let again: StatusLineConfig = toml::from_str(&text).unwrap();
     assert_eq!(again, config);
     assert_eq!(again.resolve().unwrap(), config.resolve().unwrap());
+}
+
+#[test]
+fn sel_copied_secs_overrides_and_is_a_known_key() {
+    // `copied_secs` sets how long a copy result shows; it is known only on the `sel` table.
+    let config = parse(
+        "[status_line.segment.sel]\ncopied_secs = 5\n[status_line.segment.mem]\ncopied_secs = 5\n",
+    );
+    assert_eq!(config.resolve().unwrap().sel, SelSettings { copied_secs: 5 });
+    assert_eq!(config.unknown_keys(), ["status_line.segment.mem.copied_secs"]);
 }

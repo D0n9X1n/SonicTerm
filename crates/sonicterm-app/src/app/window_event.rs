@@ -862,6 +862,7 @@ impl App {
         // panes live in the main `WindowState` too, so they're
         // pulled from the same field-disjoint split borrow.
         let main_id_opt = self.main_window_id;
+        let counts_selection = self.counts_selection();
         let mut ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
         if let Some(main) = ws_opt.as_deref_mut() {
             // The collector validated the actual active position before taking any lock.
@@ -871,6 +872,23 @@ impl App {
                 active_id,
                 frame.guards[active_pos].1.grid(),
             );
+            if counts_selection {
+                // Counted under the guard already held, after validation; a cached identity is free.
+                let cells_read = super::status_line::refresh_sel_status(
+                    &mut main.sel_status,
+                    main.selection.as_ref(),
+                    main.copy_mode.as_ref(),
+                    active_id,
+                    frame.guards[active_pos].1.grid(),
+                );
+                if let (Some(cells_read), Some(counters)) =
+                    (cells_read, self.frame_counters.as_mut())
+                {
+                    // The gate is on, so the count and the cells it read are recorded.
+                    counters.status_line.sel_counts += 1;
+                    counters.status_line.sel_cells += cells_read;
+                }
+            }
             if self.command_palette.is_open() && self.palette_attached_window.is_none() {
                 self.command_palette.set_context(super::overlays::command_palette_context(
                     main,

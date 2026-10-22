@@ -829,6 +829,10 @@ pub(crate) struct StatusLineCounters {
     pub(crate) wakes: u64,
     /// Windows whose strip pixels changed, each one `StatusLine` redraw request.
     pub(crate) redraws: u64,
+    /// Selection counts the frame passes ran; an unchanged selection is never recounted.
+    pub(crate) sel_counts: u64,
+    /// Cells those counts read, at most 200,000 per count.
+    pub(crate) sel_cells: u64,
 }
 
 /// URL and path detection work on the event-loop thread, cumulative for the App's lifetime.
@@ -1642,6 +1646,8 @@ impl AppFrameCounters {
             ("status_line_samples", self.status_line.samples),
             ("status_line_wakes", self.status_line.wakes),
             ("status_line_redraws", self.status_line.redraws),
+            ("status_line_sel_counts", self.status_line.sel_counts),
+            ("status_line_sel_cells", self.status_line.sel_cells),
         ] {
             record.push_count(name, value);
         }

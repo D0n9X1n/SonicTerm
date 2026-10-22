@@ -12,10 +12,15 @@ use std::time::{Duration, Instant};
 
 use sonicterm_cfg::status_line::{ResolvedStatusLine, StatusLineConfig, StatusSegmentId};
 use sonicterm_gpu::core::GpuRenderer;
+use sonicterm_grid::grid::Grid;
 use sonicterm_logging::MemoryMetric;
+use sonicterm_ui::copy_mode::CopyModeState;
+use sonicterm_ui::selection::{
+    selection_extent_counted, Selection, SelectionExtent, SELECTION_EXTENT_MAX_ROWS,
+};
 use sonicterm_ui::status_line::{
     build_view, sanitize_link_text, HealthInput, LinkInput, MemHistory, MemInput, ModeInput,
-    NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick, SegmentHandler,
+    NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick, SegmentHandler, SelInput,
     StatusLineInputs,
 };
 use winit::window::WindowId;
@@ -99,6 +104,142 @@ pub(crate) struct StatusLineState {
     history: MemHistory,
     /// When the last sample was taken, on the monotonic and the wall clock.
     last_sample: Option<(Instant, u64)>,
+}
+
+/// What makes two selections count the same: the pane, the normalized
+/// endpoints as `(col, abs_row)`, the screen and the eviction epoch. Output
+/// elsewhere in the pane is not part of it, so it never forces a recount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SelIdentity {
+    /// The pane whose grid was counted.
+    pane_id: u64,
+    /// First selected cell.
+    start: (usize, u64),
+    /// Last selected cell.
+    end: (usize, u64),
+    /// The selection was made on the alternate screen.
+    on_alt_screen: bool,
+    /// Rows evicted from scrollback when the endpoints were taken.
+    scrollback_evicted: u64,
+    /// Copy mode's range has no content check of its own, so it carries a
+    /// hash of its rows' content stamps; a window selection carries 0.
+    content_stamp: u64,
+}
+
+/// One window's selection segment state: the last counted extent and the
+/// last requested copy's result.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SelStatus {
+    /// The extent of the selection identity counted last.
+    counted: Option<(SelIdentity, SelectionExtent)>,
+    /// When the last user-requested copy finished, and whether it reached the clipboard.
+    last_copy: Option<(Instant, bool)>,
+}
+
+/// The identity of the selection the segment counts in `pane_id`'s `grid`:
+/// copy mode's range while it has one, else the window selection.
+fn sel_identity(
+    selection: Option<&Selection>,
+    copy_mode: Option<&CopyModeState>,
+    pane_id: u64,
+    grid: &Grid,
+) -> Option<SelIdentity> {
+    if let Some((start, end)) = copy_mode.and_then(CopyModeState::selected_range) {
+        // When: copy mode's selected_range exists, it is what a yank copies, so it is counted.
+        let (start, end) = ((start.0, start.1 as u64), (end.0, end.1 as u64));
+        // A range over the row bound is capped without reading rows, so its content cannot matter.
+        let content_stamp = if end.1 - start.1 < SELECTION_EXTENT_MAX_ROWS {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for row in start.1..=end.1 {
+                grid.row_content_seq_at_abs(row).hash(&mut hasher);
+            }
+            hasher.finish()
+        } else {
+            // When: the span exceeds SELECTION_EXTENT_MAX_ROWS, the count is capped either way.
+            0
+        };
+        return Some(SelIdentity {
+            pane_id,
+            start,
+            end,
+            on_alt_screen: grid.is_alt(),
+            scrollback_evicted: grid.scrollback_evicted(),
+            content_stamp,
+        });
+    }
+    let selection = selection.filter(|selection| !selection.is_empty())?;
+    if selection.pane_id.is_some_and(|owner| owner != pane_id) {
+        // When: the selection's pane_id is another pane, this grid is not its content.
+        return None;
+    }
+    let (start, end) = selection.normalized();
+    Some(SelIdentity {
+        pane_id,
+        start: (usize::from(start.1), start.0),
+        end: (usize::from(end.1), end.0),
+        on_alt_screen: selection.on_alt_screen,
+        scrollback_evicted: selection.scrollback_evicted,
+        content_stamp: 0,
+    })
+}
+
+/// Count the window's selection in the active pane's `grid` unless its
+/// identity was counted already. Runs in the frame pass under the guard it
+/// holds, after the selection was validated. Returns the cells it read when it counted.
+pub(crate) fn refresh_sel_status(
+    status: &mut SelStatus,
+    selection: Option<&Selection>,
+    copy_mode: Option<&CopyModeState>,
+    pane_id: u64,
+    grid: &Grid,
+) -> Option<u64> {
+    let Some(identity) = sel_identity(selection, copy_mode, pane_id, grid) else {
+        // When: sel_identity finds no selection, there is nothing to count or keep.
+        status.counted = None;
+        return None;
+    };
+    if status.counted.is_some_and(|(counted, _)| counted == identity) {
+        // When: the identity was counted already, its content is unchanged.
+        return None;
+    }
+    let (extent, cells_read) = selection_extent_counted(grid, identity.start, identity.end);
+    status.counted = Some((identity, extent));
+    Some(cells_read)
+}
+
+/// What the selection segment shows for a window, and when that changes by
+/// itself: a copy result for `copied_for`, else the counted extent of a
+/// selection that still exists.
+fn sel_input(
+    status: &mut SelStatus,
+    has_selection: bool,
+    now: Instant,
+    copied_for: Duration,
+) -> (Option<SelInput>, Option<Instant>) {
+    if let Some((at, copied)) = status.last_copy {
+        // When: last_copy holds a result, it shows until `copied_for` has passed.
+        let until = at + copied_for;
+        if now < until {
+            // When: now is before until, the copy result still shows and its end is the wake.
+            let input = if copied { SelInput::Copied } else { SelInput::CopyFailed };
+            return (Some(input), Some(until));
+        }
+        status.last_copy = None;
+    }
+    if !has_selection {
+        // When: has_selection is false, the selection was cleared since it was counted.
+        return (None, None);
+    }
+    let input = status.counted.map(|(_, extent)| {
+        if extent.capped {
+            SelInput::Capped { rows: extent.rows }
+        } else {
+            // When: extent.capped is false, the counts are exact.
+            SelInput::Extent { lines: extent.lines, chars: extent.chars }
+        }
+    });
+    (input, None)
 }
 
 /// Milliseconds since the Unix epoch on the wall clock; 0 if the clock reads before it.
@@ -426,6 +567,8 @@ impl App {
         });
         let locale = self.config.locale.clone();
         let Self { windows, status_line: state, i18n, .. } = self;
+        let sel_shown = state.resolved.segment(StatusSegmentId::Sel).is_some();
+        let copied_for = Duration::from_secs(state.resolved.sel.copied_secs);
         state.pane_facts.retain(|window_id, _| windows.contains_key(window_id));
         state.pending_since.retain(|window_id, _| windows.contains_key(window_id));
         state.built.retain(|window_id, _| windows.contains_key(window_id));
@@ -469,6 +612,20 @@ impl App {
             if let Some(wake) = link_wake {
                 next_wake = Some(next_wake.map_or(wake, |next| next.min(wake)));
             }
+            let sel = if sel_shown {
+                let has_selection =
+                    window.copy_mode.as_ref().and_then(CopyModeState::selected_range).is_some()
+                        || window.selection.is_some_and(|selection| !selection.is_empty());
+                let (sel, sel_wake) =
+                    sel_input(&mut window.sel_status, has_selection, now, copied_for);
+                if let Some(wake) = sel_wake {
+                    next_wake = Some(next_wake.map_or(wake, |next| next.min(wake)));
+                }
+                sel
+            } else {
+                // When: sel_shown is false, no list has `sel`, so nothing is formatted or woken for it.
+                None
+            };
             let facts = state.pane_facts.get(window_id).copied().unwrap_or_default();
             let Some(renderer) = window.renderer.as_ref() else {
                 // When: `renderer` is gone, the window cannot show a strip.
@@ -496,6 +653,7 @@ impl App {
                     ),
                 },
                 mem: state.mem,
+                sel,
             };
             let built = BuiltFrom { generation: state.generation, inputs };
             if state.built.get(window_id) == Some(&built) {
@@ -531,6 +689,20 @@ impl App {
         let wake = visible.then_some(next_wake).flatten();
         self.status_line.armed_wake = wake;
         wake
+    }
+
+    /// Whether the frame pass counts selections: the strip is shown and lists `sel`.
+    pub(super) fn counts_selection(&self) -> bool {
+        self.status_line.visible
+            && self.status_line.resolved.segment(StatusSegmentId::Sel).is_some()
+    }
+
+    /// Record the result of a copy the user requested in `window_id`; the
+    /// segment shows it for `copied_secs`, even when the copy cleared the selection.
+    pub(super) fn note_copy_result(&mut self, window_id: WindowId, copied: bool) {
+        if let Some(window) = self.windows.get_mut(&window_id) {
+            window.sel_status.last_copy = Some((Instant::now(), copied));
+        }
     }
 
     /// Route a left press at raster-px `(pointer_x, pointer_y)` in `window_id`. Returns `true`

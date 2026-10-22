@@ -645,6 +645,8 @@ const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S1/gdi", "idle", "hold", None),
     ("S1/role-exit", "idle", "hold", None),
     ("S1/status-line", "idle", "hold", None),
+    ("S1/status-line", "select", "sustained", None),
+    ("S1/status-line", "selected", "hold", None),
     ("S1/wgpu", "idle", "hold", None),
     ("S10/default", "idle", "hold", None),
     ("S10/default", "stream", "sustained", None),
@@ -783,21 +785,31 @@ fn every_planned_phase_has_its_contract_kind_and_endpoint() {
     );
 }
 
-/// Only the `status-line` variants turn the status line on, and their plans are otherwise the
-/// default plans, so a comparison measures the strip and nothing else.
+/// Only the `status-line` variants turn the status line on. S12's plan is otherwise the default
+/// plan; S1's keeps the default's idle hold and then adds the selection phases.
 #[test]
 fn status_line_variants_differ_from_default_only_by_the_strip() {
-    for id in ["S1", "S12"] {
-        for short in [false, true] {
-            let strip = plan(id, "status-line", short).unwrap();
-            let base = plan(id, "default", short).unwrap();
-            assert!(strip.status_line && !base.status_line, "{id}");
-            assert_eq!(
-                (strip.roles, strip.setup, strip.steps),
-                (base.roles, base.setup, base.steps),
-                "{id}"
-            );
-        }
+    let names = |plan: &Plan| -> Vec<&'static str> {
+        plan.steps
+            .iter()
+            .map(|step| match step {
+                Step::Phase(phase) => phase.name,
+                Step::Checkpoint(label) => label,
+                Step::Act(_) => "act",
+            })
+            .collect()
+    };
+    for short in [false, true] {
+        let strip = plan("S12", "status-line", short).unwrap();
+        let base = plan("S12", "default", short).unwrap();
+        assert!(strip.status_line && !base.status_line);
+        assert_eq!((strip.roles, strip.setup, strip.steps), (base.roles, base.setup, base.steps));
+        let strip = plan("S1", "status-line", short).unwrap();
+        let base = plan("S1", "default", short).unwrap();
+        assert!(strip.status_line && !base.status_line);
+        assert_eq!((&strip.roles, &strip.setup), (&base.roles, &base.setup));
+        assert_eq!(strip.steps[0], base.steps[0], "the idle hold the strip's guard checks");
+        assert_eq!(names(&strip), ["idle", "select", "selected", "end"]);
     }
     assert!(all_plans()
         .iter()
@@ -809,7 +821,13 @@ fn status_line_variants_differ_from_default_only_by_the_strip() {
 /// sample, one resume sample after uncover, and no sampling while occlusion was delivered.
 #[test]
 fn status_line_progress_checks_each_phase() {
-    let deltas = |samples, wakes, redraws| StatusLineDeltas { samples, wakes, redraws };
+    let deltas = |samples, wakes, redraws| StatusLineDeltas {
+        samples,
+        wakes,
+        redraws,
+        sel_counts: 0,
+        sel_cells: 0,
+    };
     assert!(status_line_progress("idle", 5_000, false, deltas(3, 3, 3)).is_ok());
     assert!(
         status_line_progress("idle", 5_000, false, deltas(4, 3, 0)).is_err(),
@@ -841,4 +859,26 @@ fn status_line_progress_checks_each_phase() {
         status_line_progress("print", 0, false, deltas(9, 9, 9)).is_ok(),
         "other phases are not checked"
     );
+}
+
+/// The selection phases: a drag must count within 200,000 cells per count, and a held selection
+/// must never be recounted.
+#[test]
+fn status_line_progress_checks_the_selection_phases() {
+    let sel = |sel_counts, sel_cells| StatusLineDeltas {
+        samples: 0,
+        wakes: 0,
+        redraws: 0,
+        sel_counts,
+        sel_cells,
+    };
+    assert!(status_line_progress("select", 2_000, false, sel(3, 52_500)).is_ok());
+    assert!(status_line_progress("select", 2_000, false, sel(0, 0)).is_err(), "nothing counted");
+    assert!(
+        status_line_progress("select", 2_000, false, sel(1, SEL_CELLS_PER_COUNT + 1)).is_err(),
+        "past the cell bound"
+    );
+    assert!(status_line_progress("selected", 2_000, false, sel(0, 0)).is_ok());
+    assert!(status_line_progress("selected", 2_000, false, sel(1, 10)).is_err(), "a recount");
+    assert_eq!(SEL_CELLS_PER_COUNT, sonicterm_ui::selection::SELECTION_EXTENT_MAX_CELLS as u64);
 }

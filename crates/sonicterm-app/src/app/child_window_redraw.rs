@@ -128,6 +128,7 @@ impl App {
             win_id,
             frame.guards.iter().map(|(id, parser, _)| (*id, &**parser)),
         );
+        let counts_selection = self.counts_selection();
         let Some(child) = self.windows.get_mut(&win_id) else {
             // When: windows no longer contains win_id, discard its collected frame instead of presenting retained hover.
             return;
@@ -170,6 +171,23 @@ impl App {
                 active_id,
                 frame.guards[active_pos].1.grid(),
             );
+            if counts_selection {
+                // Counted under the guard already held, after validation; a cached identity is free.
+                let cells_read = super::status_line::refresh_sel_status(
+                    &mut child.sel_status,
+                    child.selection.as_ref(),
+                    child.copy_mode.as_ref(),
+                    active_id,
+                    frame.guards[active_pos].1.grid(),
+                );
+                if let (Some(cells_read), Some(counters)) =
+                    (cells_read, self.frame_counters.as_mut())
+                {
+                    // The gate is on, so the count and the cells it read are recorded.
+                    counters.status_line.sel_counts += 1;
+                    counters.status_line.sel_cells += cells_read;
+                }
+            }
             // Run the same title formatter the main window uses, so OSC 7
             // cwd and foreground-process probes flow into every window's
             // tab bar uniformly instead of leaving a child on the literal

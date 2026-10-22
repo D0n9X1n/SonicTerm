@@ -342,3 +342,130 @@ fn sparkline_rollover_bounds_the_wake() {
     assert!(app.status_line.resolved.mem.sparkline);
     assert_eq!(app.status_line.mem.history, [None; sonicterm_ui::status_line::SPARK_CELLS]);
 }
+
+/// A three-row grid holding `abc`, `def` and `ghi` on hard-broken rows.
+fn three_rows() -> Grid {
+    use sonicterm_grid::grid::{CellFlags, Color};
+    let mut grid = Grid::new(10, 3);
+    for (row, text) in ["abc", "def", "ghi"].into_iter().enumerate() {
+        grid.goto(row as u16, 0);
+        for character in text.chars() {
+            grid.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+        }
+    }
+    grid
+}
+
+/// A window selection is counted once per identity: repeating the frame pass or writing rows
+/// outside it never recounts, a moved endpoint does, and another pane's selection counts nothing.
+#[test]
+fn selection_is_counted_once_per_identity() {
+    let mut grid = three_rows();
+    let selection =
+        Selection { start: (0, 0), end: (1, 2), anchored: true, ..Selection::new(0, 0) }
+            .with_content_state(7, grid.content_seq(), false, 0);
+    let mut status = SelStatus::default();
+    let cells_read = refresh_sel_status(&mut status, Some(&selection), None, 7, &grid);
+    assert_eq!(cells_read, Some(13), "`abc` and `def` padded to the 10-column first row, then 3");
+    let extent = status.counted.unwrap().1;
+    assert_eq!((extent.lines, extent.chars, extent.capped), (2, 7, false), "`abc\\ndef`");
+    assert!(refresh_sel_status(&mut status, Some(&selection), None, 7, &grid).is_none(), "cached");
+    grid.goto(2, 0);
+    grid.put_char(
+        'X',
+        sonicterm_grid::grid::Color::Default,
+        sonicterm_grid::grid::Color::Default,
+        Default::default(),
+    );
+    assert!(
+        refresh_sel_status(&mut status, Some(&selection), None, 7, &grid).is_none(),
+        "output below"
+    );
+    let moved = Selection { end: (1, 1), ..selection };
+    assert!(
+        refresh_sel_status(&mut status, Some(&moved), None, 7, &grid).is_some(),
+        "new endpoint"
+    );
+    assert!(refresh_sel_status(&mut status, Some(&moved), None, 8, &grid).is_none());
+    assert!(status.counted.is_none(), "a selection of another pane is not this grid's");
+}
+
+/// Copy mode's range has no content check of its own, so rewriting a row inside a stationary
+/// range changes its stamp and recounts it.
+#[test]
+fn stationary_copy_mode_range_is_recounted_when_its_rows_change() {
+    let mut grid = three_rows();
+    let mut copy_mode = CopyModeState::new_at((0, 0));
+    copy_mode.start_select();
+    copy_mode.cursor = (2, 1);
+    let mut status = SelStatus::default();
+    assert!(refresh_sel_status(&mut status, None, Some(&copy_mode), 3, &grid).is_some());
+    assert!(refresh_sel_status(&mut status, None, Some(&copy_mode), 3, &grid).is_none());
+    grid.goto(1, 0);
+    grid.put_char(
+        'X',
+        sonicterm_grid::grid::Color::Default,
+        sonicterm_grid::grid::Color::Default,
+        Default::default(),
+    );
+    assert!(
+        refresh_sel_status(&mut status, None, Some(&copy_mode), 3, &grid).is_some(),
+        "rewritten row"
+    );
+    assert_eq!(status.counted.unwrap().1.chars, 7, "`abc\\nXef`");
+}
+
+/// A copy result shows for `copied_secs` and wakes once at its end; then the counted extent of a
+/// live selection returns, and a cleared selection shows nothing.
+#[test]
+fn copy_result_shows_until_its_deadline() {
+    let grid = three_rows();
+    let selection =
+        Selection { start: (0, 0), end: (0, 2), anchored: true, ..Selection::new(0, 0) };
+    let mut status = SelStatus::default();
+    let _ = refresh_sel_status(&mut status, Some(&selection), None, 1, &grid);
+    let now = Instant::now();
+    let copied_for = Duration::from_secs(2);
+    status.last_copy = Some((now, false));
+    assert_eq!(
+        sel_input(&mut status, true, now, copied_for),
+        (Some(SelInput::CopyFailed), Some(now + copied_for))
+    );
+    let after = now + copied_for;
+    assert_eq!(
+        sel_input(&mut status, true, after, copied_for),
+        (Some(SelInput::Extent { lines: 1, chars: 3 }), None)
+    );
+    assert_eq!(status.last_copy, None, "the result is consumed at its deadline");
+    status.last_copy = Some((after, true));
+    assert_eq!(sel_input(&mut status, false, after, copied_for).0, Some(SelInput::Copied));
+    assert_eq!(sel_input(&mut status, false, after + copied_for, copied_for), (None, None));
+}
+
+/// `copy_to_clipboard` records whether its write reached the clipboard, for the window it copied.
+#[test]
+fn requested_copy_records_its_result() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane_id = app.__test_seed_tab("main");
+    assert!(app.__test_advance_pane_parser(pane_id, b"hello"));
+    let selection = {
+        let parser = app.main().unwrap().panes[&pane_id].parser.lock();
+        let grid = parser.grid();
+        Selection { start: (0, 0), end: (0, 4), anchored: true, ..Selection::new(0, 0) }
+            .with_content_state(
+                pane_id,
+                grid.content_seq(),
+                grid.is_alt(),
+                grid.scrollback_evicted(),
+            )
+            .with_content_fingerprint(grid)
+    };
+    app.main_mut().unwrap().selection = Some(selection);
+    app.__test_set_memory_clipboard("old");
+    app.copy_selection_for_kind(crate::app::FrontmostKind::Main);
+    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("hello"));
+    assert_eq!(app.main().unwrap().sel_status.last_copy.map(|(_, copied)| copied), Some(true));
+    app.__test_set_clipboard_write_failure(true);
+    app.copy_selection_for_kind(crate::app::FrontmostKind::Main);
+    assert_eq!(app.main().unwrap().sel_status.last_copy.map(|(_, copied)| copied), Some(false));
+}

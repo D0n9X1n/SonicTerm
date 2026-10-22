@@ -191,7 +191,9 @@ impl App {
             }
             (selection.as_text(grid), selection.on_alt_screen)
         };
-        if self.set_clipboard_text(text) && clear_after_copy {
+        let copied = self.set_clipboard_text(text);
+        self.note_copy_result(window_id, copied);
+        if copied && clear_after_copy {
             // A volatile selection is consumed only after confirmed clipboard delivery.
             if let Some(window) = self.windows.get_mut(&window_id) {
                 // Clear the highlight and invalidate retained rows before requesting its frame.
@@ -764,6 +766,7 @@ impl App {
             link_preview: None,
             path_probe: super::path_target::PathProbeState::default(),
             status_strip: None,
+            sel_status: Default::default(),
             hover_detection: super::path_target::HoverDetectionCache::default(),
             notification: None,
             hidden: false,

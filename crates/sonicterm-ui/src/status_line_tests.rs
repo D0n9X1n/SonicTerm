@@ -47,7 +47,8 @@ fn every_catalog_id_is_registered_with_a_glyph_free_spoken_name() {
         text.chars().all(|character| {
             character.is_alphanumeric()
                 || character.is_whitespace()
-                || "(),.:-'".contains(character)
+                // CJK commas are punctuation a screen reader pauses on, not symbols.
+                || "(),.:-'，、".contains(character)
         })
     };
     for locale in SHIPPED_LOCALES {
@@ -61,6 +62,7 @@ fn every_catalog_id_is_registered_with_a_glyph_free_spoken_name() {
         let inputs = StatusLineInputs {
             mode: ModeInput { copy: true, broadcast_receivers: Some(3), mouse_captured: true },
             scroll_lines: 340,
+            sel: Some(SelInput::Capped { rows: 12_345 }),
             health: HealthInput {
                 config: Some(ReloadFailure { line: Some(12) }),
                 render: RenderHealth::SoftwareAdapter,
@@ -110,6 +112,7 @@ fn always_shows_idle_text_and_active_hides() {
     assert_eq!(shown(&view, StatusSegmentId::Scroll).unwrap(), "Scroll: bottom");
     assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "normal");
     assert_eq!(shown(&view, StatusSegmentId::Health).unwrap(), "Health: normal");
+    assert_eq!(shown(&view, StatusSegmentId::Sel).unwrap(), "Sel: none");
     let scroll =
         view.segments.iter().find(|segment| segment.id == StatusSegmentId::Scroll).unwrap();
     assert_eq!(scroll.click, None, "nothing to scroll back to");
@@ -136,6 +139,7 @@ fn core_segments_format_as_name_value_and_chips() {
             ..Default::default()
         },
         link: Some(LinkInput::from_url("https://github.com/D0n9X1n/SonicTerm/pull/1670")),
+        sel: None,
     };
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3COPYMOUSE");
@@ -222,8 +226,10 @@ fn ascii_icons_change_symbols_only() {
             ..Default::default()
         },
         link: None,
+        sel: Some(SelInput::CopyFailed),
     };
     let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
+    assert_eq!(shown(&view, StatusSegmentId::Sel).unwrap(), "Sel: x copy failed");
     assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), ">> 2");
     assert_eq!(shown(&view, StatusSegmentId::Scroll).unwrap(), "Scroll: ^ 5");
     assert_eq!(shown(&view, StatusSegmentId::Health).unwrap(), "Keymap: x error");
@@ -685,4 +691,49 @@ fn diagnostics_mem_shows_a_static_sparkline() {
     assert_eq!(mem.spoken.value, "412 MB");
     let plain = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(text_of(&plain.segments[0].parts), "Mem: 412 MB", "off outside diagnostics");
+}
+
+#[test]
+fn sel_shows_lines_chars_capped_rows_and_copy_results() {
+    // The selection reads `Sel: 3 lines`, one line its characters, past the bound its exact row
+    // span with `count capped`, and after a copy the result; only a live selection copies on click.
+    let i18n = translator("en");
+    let sel_view = |sel: SelInput| {
+        let inputs = StatusLineInputs { sel: Some(sel), ..idle_inputs() };
+        let view = build_view(&developer(), false, &inputs, &i18n, NumberStyle::POINT);
+        view.segments.into_iter().find(|segment| segment.id == StatusSegmentId::Sel).unwrap()
+    };
+    let cases = [
+        (SelInput::Extent { lines: 3, chars: 142 }, "Sel: 3 lines", "3 lines selected", true),
+        (
+            SelInput::Extent { lines: 1, chars: 1_420 },
+            "Sel: 1,420 chars",
+            "1,420 characters selected",
+            true,
+        ),
+        (SelInput::Extent { lines: 1, chars: 1 }, "Sel: 1 char", "1 character selected", true),
+        (
+            SelInput::Capped { rows: 100_000 },
+            "Sel: 100,000 rows · count capped",
+            "100,000 rows selected, count capped",
+            true,
+        ),
+        (SelInput::Copied, "Sel: ✓ copied", "copied", false),
+        (SelInput::CopyFailed, "Sel: ✗ copy failed", "copy failed", false),
+    ];
+    for (sel, text, spoken, copies) in cases {
+        let segment = sel_view(sel);
+        assert_eq!(text_of(&segment.parts), text, "{sel:?}");
+        assert_eq!(segment.spoken.value, spoken, "{sel:?}");
+        let expected = copies.then_some(SegmentClick::Action(Action::CopyToClipboard));
+        assert_eq!(segment.click, expected, "{sel:?}");
+    }
+    let failed = sel_view(SelInput::CopyFailed);
+    assert_eq!(failed.parts.last().unwrap().tone, StatusTone::Error);
+    let capped = sel_view(SelInput::Capped { rows: 100_000 });
+    assert!(capped.parts[2..].iter().all(|part| part.droppable), "the row span survives narrowing");
+    // `sel` is not sensitive: it is only counts, so `hide_sensitive` keeps it.
+    let inputs = StatusLineInputs { sel: Some(SelInput::Copied), ..idle_inputs() };
+    let hidden = build_view(&developer(), true, &inputs, &i18n, NumberStyle::POINT);
+    assert_eq!(shown(&hidden, StatusSegmentId::Sel).unwrap(), "Sel: ✓ copied");
 }

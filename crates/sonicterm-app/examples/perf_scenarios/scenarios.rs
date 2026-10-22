@@ -312,6 +312,10 @@ pub(crate) struct HoverDeltas {
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) const STATUS_LINE_INTERVAL_MS: u64 = 2_000;
 
+/// Cells one selection count may read; `sonicterm_ui::selection::SELECTION_EXTENT_MAX_CELLS`.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const SEL_CELLS_PER_COUNT: u64 = 200_000;
+
 /// Status line counter deltas over one phase.
 #[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -322,6 +326,10 @@ pub(crate) struct StatusLineDeltas {
     pub(crate) wakes: u64,
     /// Strip-only redraw requests (one per window whose strip pixels changed).
     pub(crate) redraws: u64,
+    /// Selection counts the frame passes ran.
+    pub(crate) sel_counts: u64,
+    /// Cells those counts read.
+    pub(crate) sel_cells: u64,
 }
 
 /// Whether a `status-line` phase kept the strip's idle contract, or why not.
@@ -332,7 +340,9 @@ pub(crate) struct StatusLineDeltas {
 /// at least one sample, the resume sample. `covered`, when the App received `Occluded(true)`
 /// (`occluded`), takes at most one sample and one wake: the one that can land between the cover
 /// and its delivery. Without delivered occlusion (Windows outside the short trim) the covered
-/// phase is not checked, because the platform reports no occlusion to pause on.
+/// phase is not checked, because the platform reports no occlusion to pause on. `select` drags a
+/// selection: it must count at least once and read at most 200,000 cells per count; `selected`
+/// holds that selection unchanged, so it must not count again.
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn status_line_progress(
     phase: &str,
@@ -359,6 +369,17 @@ pub(crate) fn status_line_progress(
         "idle" | "uncovered" if deltas.redraws > deltas.samples + 1 => Err(format!(
             "status line requested {} redraws for {} samples",
             deltas.redraws, deltas.samples
+        )),
+        "select" if deltas.sel_counts == 0 => {
+            Err("the drag selected nothing the status line counted".to_owned())
+        }
+        "select" if deltas.sel_cells > deltas.sel_counts * SEL_CELLS_PER_COUNT => Err(format!(
+            "status line read {} cells in {} selection counts, more than {SEL_CELLS_PER_COUNT} each",
+            deltas.sel_cells, deltas.sel_counts
+        )),
+        "selected" if deltas.sel_counts > 0 => Err(format!(
+            "status line recounted an unchanged selection {} times",
+            deltas.sel_counts
         )),
         _ => Ok(()),
     }
@@ -675,6 +696,27 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                     PhaseEnd::DriverDone,
                 )),
                 idle,
+                end,
+            ],
+        ),
+        // status-line keeps the idle default's hold, then drags a selection and holds it: the drag
+        // counts each changed selection once, within the cell bound, and the held one never again.
+        ("S1", "status-line") => (
+            vec![Workload::IdleShell],
+            vec![],
+            vec![
+                Step::Phase(timed("idle", PhaseKind::Hold, PhaseEnd::Hold(hold(60_000)))),
+                Step::Phase(driven(
+                    "select",
+                    PhaseKind::Sustained,
+                    Driver::Drag { hertz: 120 },
+                    PhaseEnd::Hold(if short { 2_000 } else { 10_000 }),
+                )),
+                Step::Phase(timed(
+                    "selected",
+                    PhaseKind::Hold,
+                    PhaseEnd::Hold(if short { 2_000 } else { 10_000 }),
+                )),
                 end,
             ],
         ),

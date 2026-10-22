@@ -2680,9 +2680,10 @@ FRAME_COUNTER_FIELDS = {
              # submitted and rows quick select scanned. They are App counters, so a base older than them shows
              # n/a and the comparison gives head-side evidence, not a before/after detection delta.
              *HOVER_COUNTER_FIELDS,
-             # Status line memory samples, serviced status line wakes and strip-only redraw requests; App
-             # counters, so a base older than the status line shows n/a.
-             "status_line_samples", "status_line_wakes", "status_line_redraws"),
+             # Status line memory samples, serviced status line wakes and strip-only redraw requests, then
+             # selection counts and the cells they read; App counters, so a base older than them shows n/a.
+             "status_line_samples", "status_line_wakes", "status_line_redraws", "status_line_sel_counts",
+             "status_line_sel_cells"),
             # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker.
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),

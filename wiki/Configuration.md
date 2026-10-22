@@ -161,7 +161,7 @@ Presets in this build:
 
 | Preset | `left` | `center` | `right` | Segment defaults |
 | --- | --- | --- | --- | --- |
-| `developer` | `mode`, `scroll` | `link` | `health`, `mem` | — |
+| `developer` | `mode`, `scroll` | `link`, `sel` | `health`, `mem` | — |
 | `minimal` | — | — | `health`, `mem` | — |
 | `diagnostics` | as `developer` | as `developer` | as `developer` | `mem.sparkline = true` |
 
@@ -173,6 +173,7 @@ Every segment except `mem` shows only while it has something to say, so an idle 
 | `mem` | SonicTerm's own process memory, `Mem: 412 MB`, in binary units with three significant figures, with `↑` or `↓` when it moved by at least 1% since the previous sample. Amber with `⚠` at `warn_mib`, red with `✗` at `critical_mib`. | 900 | Opens the Memory Usage report. |
 | `mode` | Chips: broadcast input `⇶ 3` with its receiver count, `COPY` for copy mode, `MOUSE` when a program captured the mouse. | 800 | None. |
 | `link` | What detection found under the pointer: `Link: github.com/…`; for an OSC 8 link whose visible text names another host, or whose text or target carries userinfo, `Link: ⚠ evil.example ≠ bank.example` (a heuristic warning, not spoof protection); `Link: … · label not checked` when the text reaches the view's top or bottom row, passes 32 fragments or 2 KiB, so it was not read whole and is never reported as matching; `Path: ~/proj/src · reveal` or `· open folder`, `· checking` after 300 ms, `✗ … · not found`, or `⚠ … · blocked` with its reason. | 600 | None. |
+| `sel` | The size of what copying the window's selection (or copy mode's range) would put on the clipboard: `Sel: 3 lines`, or `Sel: 142 chars` for one line, counted with the copy's own rules (wrapped rows join, trailing padding and a detached right frame are dropped). A selection over 50,000 rows, or one whose walk would visit more than 200,000 cells, shows its exact row span instead: `Sel: 12,345 rows · count capped`. After `copy_to_clipboard` or copy mode's `y`/Enter it shows `Sel: ✓ copied` or, in red, `Sel: ✗ copy failed` for `copied_secs`, even when the copy cleared the selection. Copies a program makes with OSC 52 are not shown. The count is taken in the frame pass and reused until the selection's pane, endpoints, screen or scrollback eviction change; for copy mode's range, also until a row inside it changes. | 520 | Copies the window's selection; inert while a copy result is shown. |
 | `scroll` | `Scroll: ↑ 340` while the focused pane is scrolled back. | 400 | Returns the pane to the bottom. |
 
 The memory figure is the one the Memory Usage report shows: physical footprint on macOS (Activity Monitor's Memory column), private committed bytes on Windows (Task Manager's **Commit size** column), and the resident set on Linux (`top`'s RES). Child processes are not counted. A failed query shows `n/a`.
@@ -181,11 +182,11 @@ Each `[status_line.segment.<id>]` table takes:
 
 | Key | Values | Behavior |
 | --- | --- | --- |
-| `show` | `"always"` or `"active"` | `always` keeps the slot with idle text (`n/a`, `bottom`, `normal`); `active` hides the segment when it has nothing to say. `link` accepts only `active`. |
+| `show` | `"always"` or `"active"` | `always` keeps the slot with idle text (`n/a`, `bottom`, `normal`, `none`); `active` hides the segment when it has nothing to say. `link` accepts only `active`. |
 | `priority` | `0` to `1000` | Higher survives longer when the window is narrow. |
 | `click` | `"default"`, `"none"` or an action name | `default` runs the segment's own click; `none` makes it inert; a keymap action that takes no arguments, such as `"show_memory_usage"`, runs for the clicked window. |
 
-`[status_line.segment.mem]` also takes `show_trend` (`true`), `sparkline` (`false`, `true` in `diagnostics`: eight dim cells of the last two minutes after the figure, each the largest sample of a wall-clock 15 s bucket, scaled between the drawn cells' smallest and largest; only completed buckets are drawn, so it changes only when a bucket ends, and a span with no sample, such as a covered window or a sleeping machine, stays blank), `warn_mib` (`1024`) and `critical_mib` (`2048`, at least `warn_mib`), each `1` to `1048576`. Unknown keys under `[status_line]` and inside segment tables are ignored and logged once per load as one `sonicterm-cfg` warning that names them all.
+`[status_line.segment.mem]` also takes `show_trend` (`true`), `sparkline` (`false`, `true` in `diagnostics`: eight dim cells of the last two minutes after the figure, each the largest sample of a wall-clock 15 s bucket, scaled between the drawn cells' smallest and largest; only completed buckets are drawn, so it changes only when a bucket ends, and a span with no sample, such as a covered window or a sleeping machine, stays blank), `warn_mib` (`1024`) and `critical_mib` (`2048`, at least `warn_mib`), each `1` to `1048576`. `[status_line.segment.sel]` also takes `copied_secs` (`2`, `1` to `10`), how long a copy result stays shown. Unknown keys under `[status_line]` and inside segment tables are ignored and logged once per load as one `sonicterm-cfg` warning that names them all.
 
 When the window is too narrow, the strip first uses compact forms (memory drops its arrow and sparkline, `mode` drops `MOUSE`), then shortens a link's path in the middle, then drops whole segments, lowest priority first. Health errors, the broadcast chip and a link's destination host go last.
 

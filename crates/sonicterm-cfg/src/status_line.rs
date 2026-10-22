@@ -368,7 +368,7 @@ impl StatusSegmentId {
             protection,
             implemented: matches!(
                 self,
-                Self::Health | Self::Mem | Self::Mode | Self::Scroll | Self::Link
+                Self::Health | Self::Mem | Self::Mode | Self::Scroll | Self::Link | Self::Sel
             ),
             spoken_name_key,
         }
@@ -487,6 +487,19 @@ impl Default for MemSettings {
     }
 }
 
+/// Selection segment settings beyond the common keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SelSettings {
+    /// Seconds a copy result (`copied` / `copy failed`) stays shown.
+    pub copied_secs: u64,
+}
+
+impl Default for SelSettings {
+    fn default() -> Self {
+        Self { copied_secs: 2 }
+    }
+}
+
 /// One configured segment after presets and overrides are applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSegment {
@@ -517,6 +530,8 @@ pub struct ResolvedStatusLine {
     pub segments: Vec<ResolvedSegment>,
     /// Memory segment settings.
     pub mem: MemSettings,
+    /// Selection segment settings.
+    pub sel: SelSettings,
 }
 
 impl ResolvedStatusLine {
@@ -537,6 +552,8 @@ impl Default for ResolvedStatusLine {
 pub const UPDATE_INTERVAL_RANGE_MS: std::ops::RangeInclusive<u64> = 500..=60_000;
 /// Bounds of the memory thresholds, in MiB.
 pub const MEM_THRESHOLD_RANGE_MIB: std::ops::RangeInclusive<u64> = 1..=1_048_576;
+/// Bounds of the selection segment's `copied_secs`.
+pub const COPIED_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=10;
 /// Highest accepted segment priority.
 pub const MAX_PRIORITY: u16 = 1000;
 
@@ -544,6 +561,17 @@ pub const MAX_PRIORITY: u16 = 1000;
 const COMMON_KEYS: &[&str] = &["show", "priority", "click"];
 /// Extra keys of the memory segment table.
 const MEM_KEYS: &[&str] = &["show_trend", "sparkline", "warn_mib", "critical_mib"];
+/// Extra keys of the selection segment table.
+const SEL_KEYS: &[&str] = &["copied_secs"];
+
+/// Keys a segment table accepts beyond [`COMMON_KEYS`].
+fn segment_keys(id: StatusSegmentId) -> &'static [&'static str] {
+    match id {
+        StatusSegmentId::Mem => MEM_KEYS,
+        StatusSegmentId::Sel => SEL_KEYS,
+        _ => &[],
+    }
+}
 
 /// The `[status_line]` table as written in `sonicterm.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -621,6 +649,7 @@ impl StatusLineConfig {
             sparkline: self.preset == StatusPreset::Diagnostics,
             ..MemSettings::default()
         };
+        let mut sel = SelSettings::default();
         let mut segments = Vec::new();
         for (side, list_name, ids) in lists {
             for id in ids {
@@ -673,6 +702,9 @@ impl StatusLineConfig {
             if id == StatusSegmentId::Mem {
                 apply_mem_keys(&mut mem, table).context("status_line.segment.mem")?;
             }
+            if id == StatusSegmentId::Sel {
+                apply_sel_keys(&mut sel, table).context("status_line.segment.sel")?;
+            }
         }
         if mem.critical_mib < mem.warn_mib {
             // `critical_mib < warn_mib`, the red level would sit below the amber one.
@@ -689,6 +721,7 @@ impl StatusLineConfig {
             update_interval_ms: self.update_interval_ms,
             segments,
             mem,
+            sel,
         })
     }
 
@@ -710,7 +743,7 @@ impl StatusLineConfig {
             };
             for field in table.keys() {
                 let known = COMMON_KEYS.contains(&field.as_str())
-                    || (id == StatusSegmentId::Mem && MEM_KEYS.contains(&field.as_str()));
+                    || segment_keys(id).contains(&field.as_str());
                 if !known {
                     unknown.push(format!("status_line.segment.{key}.{field}"));
                 }
@@ -781,6 +814,18 @@ fn apply_mem_keys(mem: &mut MemSettings, table: &toml::Table) -> Result<()> {
                 .with_context(|| format!("{key} must be an integer in 1..=1048576"))?;
             *slot = mib;
         }
+    }
+    Ok(())
+}
+
+/// Apply the selection segment's own keys.
+fn apply_sel_keys(sel: &mut SelSettings, table: &toml::Table) -> Result<()> {
+    if let Some(value) = table.get("copied_secs") {
+        sel.copied_secs = value
+            .as_integer()
+            .and_then(|secs| u64::try_from(secs).ok())
+            .filter(|secs| COPIED_SECS_RANGE.contains(secs))
+            .context("copied_secs must be an integer in 1..=10")?;
     }
     Ok(())
 }

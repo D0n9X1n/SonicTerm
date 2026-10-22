@@ -925,3 +925,83 @@ fn a_mark_change_before_the_first_selected_row_preserves_a_bound_selection() {
     assert!(!revalidate_selection(&mut selection, PANE_ID, &grid));
     assert_eq!(selection.as_text(&grid), "ijklmnopqr");
 }
+
+// ---- bounded selection extent ----
+
+/// The extent of `selection` measured from the text copy would produce: one
+/// line per `\n`-separated piece, characters as Unicode scalar values.
+fn measured(selection: &Selection, grid: &Grid) -> (u64, u64) {
+    let text = selection.as_text(grid);
+    (text.split('\n').count() as u64, text.chars().count() as u64)
+}
+
+/// The extent of `selection` as `selection_extent` counts it.
+fn counted(selection: &Selection, grid: &Grid) -> SelectionExtent {
+    let (start, end) = selection.normalized();
+    selection_extent(grid, (usize::from(start.1), start.0), (usize::from(end.1), end.0))
+}
+
+/// An uncapped extent equals the copied text's length for every copy rule the
+/// shared walk applies: soft wraps, hard breaks, trimmed padding, wide and
+/// combining cells, and a stripped right frame.
+#[test]
+fn selection_extent_matches_the_copied_text() {
+    let mut framed = Grid::new(11, 3);
+    for (row, (text, frame)) in
+        [("first", '│'), ("middle", '│'), ("last", '┘')].into_iter().enumerate()
+    {
+        framed.goto(row as u16, 0);
+        for character in text.chars() {
+            framed.put_char(character, Color::Default, Color::Default, CellFlags::empty());
+        }
+        framed.goto(row as u16, framed.cols - 1);
+        framed.put_char(frame, Color::Default, Color::Default, CellFlags::empty());
+    }
+    let cases = [
+        (printed_grid(8, 3, "abcdefghij\nnext"), copy_region((0, 0), (2, 3))),
+        (printed_grid(8, 2, "abcdefg hij"), copy_region((0, 0), (1, 7))),
+        (printed_grid(12, 2, "trailing   \nx"), copy_region((0, 0), (1, 11))),
+        (printed_grid(8, 1, "a中b"), copy_region((0, 0), (0, 7))),
+        (printed_grid(8, 2, "abcdefgh\u{301}ij"), copy_region((0, 0), (1, 1))),
+        (framed, copy_region((0, 0), (2, 10))),
+    ];
+    for (grid, selection) in &cases {
+        let extent = counted(selection, grid);
+        assert!(!extent.capped);
+        assert_eq!(
+            (extent.lines, extent.chars),
+            measured(selection, grid),
+            "{:?}",
+            selection.as_text(grid)
+        );
+    }
+}
+
+/// A span longer than the row bound is capped by arithmetic alone: the rows do
+/// not exist in this grid, so any walk would have stopped at the first one.
+#[test]
+fn selection_extent_caps_a_long_span_without_reading_rows() {
+    let grid = Grid::new(8, 2);
+    let extent = selection_extent(&grid, (0, 0), (0, SELECTION_EXTENT_MAX_ROWS));
+    assert_eq!(
+        extent,
+        SelectionExtent { rows: SELECTION_EXTENT_MAX_ROWS + 1, lines: 0, chars: 0, capped: true }
+    );
+}
+
+/// The cell bound counts blank cells: exactly the bound is counted, one cell
+/// more is capped with the exact row span.
+#[test]
+fn selection_extent_caps_past_the_cell_bound() {
+    let grid = Grid::new(200, 1000);
+    let (exact, cells_read) = selection_extent_counted(&grid, (0, 0), (199, 999));
+    assert!(!exact.capped);
+    assert_eq!((exact.rows, exact.lines), (1000, 1000));
+    assert_eq!(cells_read, SELECTION_EXTENT_MAX_CELLS as u64, "every cell, never more");
+
+    // 200 cells on the first row, 999 whole rows, then one cell: 200,001.
+    let grid = Grid::new(200, 1001);
+    let (over, cells_read) = selection_extent_counted(&grid, (0, 0), (0, 1000));
+    assert_eq!(over, SelectionExtent { rows: 1001, lines: 0, chars: 0, capped: true });
+    assert_eq!(cells_read, 0, "capped by arithmetic before any row is read");
+}

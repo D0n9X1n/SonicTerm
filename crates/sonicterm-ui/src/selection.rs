@@ -333,17 +333,132 @@ impl Selection {
 /// row. Strip only a coherent multi-row right frame: vertical sides on every
 /// preceding row followed by a lower-right corner, with only hard breaks between
 /// the rows. Isolated or incomplete patterns remain literal text.
-pub fn plain_text_from_grid_range(
+pub fn plain_text_from_grid_range(grid: &Grid, start: (usize, u64), end: (usize, u64)) -> String {
+    let mut out = String::new();
+    let _ = walk_grid_range(grid, start, end, usize::MAX, |piece| match piece {
+        RangePiece::Break => out.push('\n'),
+        RangePiece::Text(text) => out.push_str(text),
+    });
+    out
+}
+
+/// Row span above which [`selection_extent`] reports `capped` without reading
+/// any row.
+pub const SELECTION_EXTENT_MAX_ROWS: u64 = 50_000;
+
+/// Cells one [`selection_extent`] walk may visit, blank cells included, before
+/// it stops and reports `capped`.
+pub const SELECTION_EXTENT_MAX_CELLS: usize = 200_000;
+
+/// Size of what copying a cell range would put on the clipboard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SelectionExtent {
+    /// Exact row span of the normalized endpoints, known even when capped.
+    pub rows: u64,
+    /// Logical lines in the copied text; zero when `capped`.
+    pub lines: u64,
+    /// Unicode scalar values in the copied text, newlines included; zero when
+    /// `capped`.
+    pub chars: u64,
+    /// The span or the walk exceeded its bound, so `lines` and `chars` are
+    /// not claimed.
+    pub capped: bool,
+}
+
+/// Count the lines and characters [`plain_text_from_grid_range`] would produce
+/// for the same range, within [`SELECTION_EXTENT_MAX_ROWS`] and
+/// [`SELECTION_EXTENT_MAX_CELLS`].
+///
+/// Both functions share one row walk, so the counts are the copied text's
+/// length. A span over the row bound is answered by arithmetic before any row
+/// is read; a walk that would visit more cells than the bound stops there.
+pub fn selection_extent(grid: &Grid, start: (usize, u64), end: (usize, u64)) -> SelectionExtent {
+    selection_extent_counted(grid, start, end).0
+}
+
+/// [`selection_extent`] and the cells its walk read, never more than
+/// [`SELECTION_EXTENT_MAX_CELLS`]; 0 when the span was capped by arithmetic.
+pub fn selection_extent_counted(
+    grid: &Grid,
+    start: (usize, u64),
+    end: (usize, u64),
+) -> (SelectionExtent, u64) {
+    let (first, last) = if (start.1, start.0) <= (end.1, end.0) {
+        (start, end)
+    } else {
+        // When: start is after end in reading order, the endpoints are swapped.
+        (end, start)
+    };
+    let rows = last.1 - first.1 + 1;
+    let capped = SelectionExtent { rows, lines: 0, chars: 0, capped: true };
+    if rows > SELECTION_EXTENT_MAX_ROWS
+        || span_cells(grid, first, last) > SELECTION_EXTENT_MAX_CELLS as u64
+    {
+        // When: rows or span_cells exceeds its bound, the extent is capped
+        // before any row is read, including the right-frame pre-scan.
+        return (capped, 0);
+    }
+    let mut lines = 1_u64;
+    let mut chars = 0_u64;
+    let walked =
+        walk_grid_range(grid, start, end, SELECTION_EXTENT_MAX_CELLS, |piece| match piece {
+            RangePiece::Break => {
+                lines += 1;
+                chars += 1;
+            }
+            RangePiece::Text(text) => chars += text.chars().count() as u64,
+        });
+    match walked {
+        Ok(cells_read) => {
+            (SelectionExtent { rows, lines, chars, capped: false }, cells_read as u64)
+        }
+        // The walk ran out of its cell budget, so the partial counts are dropped
+        // rather than shown as exact.
+        Err(cells_read) => (capped, cells_read as u64),
+    }
+}
+
+/// Cells the normalized range `first..=last` covers at the grid's width, by
+/// arithmetic: the first row's remainder, whole middle rows, the last row's
+/// prefix.
+fn span_cells(grid: &Grid, first: (usize, u64), last: (usize, u64)) -> u64 {
+    let cols = u64::from(grid.cols);
+    let start_col = (first.0 as u64).min(cols);
+    let end_cells = (last.0 as u64).saturating_add(1).min(cols);
+    if first.1 == last.1 {
+        // When: first and last share a row, the span is one column range.
+        return end_cells.saturating_sub(start_col);
+    }
+    let middle_rows = last.1 - first.1 - 1;
+    (cols - start_col).saturating_add(middle_rows.saturating_mul(cols)).saturating_add(end_cells)
+}
+
+/// One step of [`walk_grid_range`]'s output.
+enum RangePiece<'text> {
+    /// A hard break between two logical lines.
+    Break,
+    /// A row's selected text, already trimmed where the copy trims it.
+    Text(&'text str),
+}
+
+/// The row walk shared by [`plain_text_from_grid_range`] and
+/// [`selection_extent`]. Returns the cells read, as `Err` when visiting the
+/// next row's cells would exceed `cell_budget`; the pieces emitted so far are
+/// then incomplete.
+fn walk_grid_range(
     grid: &Grid,
     mut start: (usize, u64),
     mut end: (usize, u64),
-) -> String {
+    cell_budget: usize,
+    mut emit: impl FnMut(RangePiece<'_>),
+) -> Result<usize, usize> {
     if (start.1, start.0) > (end.1, end.0) {
         std::mem::swap(&mut start, &mut end);
     }
     let ((start_col, start_row), (end_col, end_row)) = (start, end);
     let strip_right_frame = has_coherent_right_frame(grid, start_col, start_row, end_row);
-    let mut out = String::new();
+    let mut cells_visited = 0_usize;
+    let mut line = String::new();
     for row_idx in start_row..=end_row {
         let Some(row) = grid.row_at_abs(row_idx) else {
             // When: row_at_abs runs past the last buffered row; stop
@@ -352,7 +467,7 @@ pub fn plain_text_from_grid_range(
         };
         // A row without the automatic-wrap mark starts a new logical line.
         if row_idx != start_row && !row.soft_wrapped_from_previous() {
-            out.push('\n');
+            emit(RangePiece::Break);
         }
         // A selected row keeps its trailing cells only when the next selected
         // row continues it; the final row and hard breaks trim padding.
@@ -375,7 +490,14 @@ pub fn plain_text_from_grid_range(
             // copy the requested width verbatim.
             requested_end
         };
-        let mut line = String::new();
+        let row_cells = cells_visited.saturating_add(col_end.saturating_sub(col_start));
+        if row_cells > cell_budget {
+            // When: row_cells passes cell_budget, the walk stops before reading
+            // this row's cells.
+            return Err(cells_visited);
+        }
+        cells_visited = row_cells;
+        line.clear();
         for cell in row.get_range(col_start, col_end) {
             if cell.flags.contains(CellFlags::WIDE_CONT) {
                 // When: cell is the trailing half of a wide glyph; its lead
@@ -390,14 +512,14 @@ pub fn plain_text_from_grid_range(
         if continues {
             // The next row soft-wraps from this one, so its trailing cells are
             // logical-line text and a space at the wrap boundary survives.
-            out.push_str(&line);
+            emit(RangePiece::Text(&line));
         } else {
             // When: `continues` is false, a hard break or the selection end
             // follows, so trailing padding is trimmed.
-            out.push_str(line.trim_end());
+            emit(RangePiece::Text(line.trim_end()));
         }
     }
-    out
+    Ok(cells_visited)
 }
 
 fn has_coherent_right_frame(grid: &Grid, start_col: usize, start_row: u64, end_row: u64) -> bool {

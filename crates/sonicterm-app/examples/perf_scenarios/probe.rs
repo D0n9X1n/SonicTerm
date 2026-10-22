@@ -338,8 +338,15 @@ struct Drag {
     end: (f64, f64),
     pressed: bool,
     deadline: Instant,
+    /// From here on the drag injects nothing but the release of a held press, so its last
+    /// selection change presents inside the phase; `None` drags until the deadline.
+    quiet_from: Option<Instant>,
     finished: bool,
 }
+
+/// How long before a status-line `select` phase ends its drag goes quiet: the pass that injects
+/// one tick per wake lags the 120 Hz schedule, so the last move can otherwise present a frame late.
+const STATUS_LINE_DRAG_SETTLE: Duration = Duration::from_millis(300);
 
 /// S7 wheel: line ticks up through the retained history, then back down.
 struct Wheel {
@@ -1689,10 +1696,45 @@ impl PhaseMeter {
 }
 
 /// One step of a drag gesture.
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum DragMotion {
     Press((f64, f64)),
     Move((f64, f64)),
     Release,
+}
+
+impl Drag {
+    /// The step due at `now`: press, move across the grid, release; idle ticks skip to the next
+    /// cycle's press. Past `quiet_from` only a held press is released, then the drag finishes.
+    fn next_motion(&mut self, now: Instant) -> Option<DragMotion> {
+        if self.finished {
+            return None;
+        }
+        if self.quiet_from.is_some_and(|quiet_from| now >= quiet_from) {
+            // When: the quiet tail began, the selection must stop changing before the phase ends.
+            self.finished = true;
+            return std::mem::take(&mut self.pressed).then_some(DragMotion::Release);
+        }
+        let step = self.ticks % self.cycle_ticks;
+        let (motion, advance) = if step == 0 {
+            let release_at = self.started + self.interval * (self.ticks + self.move_ticks + 1);
+            if release_at >= self.deadline {
+                // When: a whole press, move and release no longer fits in the phase, the drag stops.
+                self.finished = true;
+                return None;
+            }
+            self.pressed = true;
+            (DragMotion::Press(self.start), 1)
+        } else if step <= self.move_ticks {
+            let fraction = f64::from(step) / f64::from(self.move_ticks);
+            (DragMotion::Move(lerp(self.start, self.end, fraction)), 1)
+        } else {
+            self.pressed = false;
+            (DragMotion::Release, self.cycle_ticks - step)
+        };
+        self.ticks += advance;
+        Some(motion)
+    }
 }
 
 impl Typing {
@@ -3318,6 +3360,7 @@ impl Probe {
                 // A 0.6 s cycle: press, about 0.5 s of motion, release, then idle until the next
                 // press, so consecutive presses are farther apart than a double click.
                 let cycle_ticks = (hertz.max(2) * 3 / 5).max(3);
+                let deadline = self.phase_deadline(phase).unwrap_or(self.run_deadline);
                 DriverState::Drag(Drag {
                     interval: Duration::from_secs(1) / hertz.max(1),
                     started: Instant::now(),
@@ -3327,7 +3370,13 @@ impl Probe {
                     start,
                     end,
                     pressed: false,
-                    deadline: self.phase_deadline(phase).unwrap_or(self.run_deadline),
+                    deadline,
+                    // Only the status-line plan checks what its frames count; S6 keeps its schedule.
+                    quiet_from: self
+                        .plan
+                        .status_line
+                        .then(|| deadline.checked_sub(STATUS_LINE_DRAG_SETTLE))
+                        .flatten(),
                     finished: false,
                 })
             }
@@ -3760,6 +3809,8 @@ impl Probe {
                 samples: count("status_line_samples")?,
                 wakes: count("status_line_wakes")?,
                 redraws: count("status_line_redraws")?,
+                sel_counts: count("status_line_sel_counts")?,
+                sel_cells: count("status_line_sel_cells")?,
             })
         })?;
         let occluded = self.occlusion.delivered == Some(true);
@@ -3826,7 +3877,7 @@ impl Probe {
             DriverState::None => {}
             DriverState::Typing(_) => self.inject_typing(event_loop),
             DriverState::Sweep(_) => self.inject_sweep(event_loop),
-            DriverState::Drag(_) => self.inject_drag(event_loop),
+            DriverState::Drag(_) => self.inject_drag(event_loop, now),
             DriverState::Wheel(_) => self.inject_wheel(event_loop),
             DriverState::AtlasRetry(_) => self.drive_atlas_retry(event_loop, now),
             DriverState::Park(_) => self.inject_park(event_loop),
@@ -3902,29 +3953,15 @@ impl Probe {
         self.pointer(event_loop, position);
     }
 
-    /// Press, move across the grid, release; idle ticks are skipped to the next cycle's press.
-    fn inject_drag(&mut self, event_loop: &ActiveEventLoop) {
+    /// Inject the drag's next step at `now`, if it has one.
+    fn inject_drag(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
         let DriverState::Drag(drag) = &mut self.driver else {
             return;
         };
-        let step = drag.ticks % drag.cycle_ticks;
-        let (motion, advance) = if step == 0 {
-            let release_at = drag.started + drag.interval * (drag.ticks + drag.move_ticks + 1);
-            if release_at >= drag.deadline {
-                // When: a whole press, move and release no longer fits in the phase, the drag stops.
-                drag.finished = true;
-                return;
-            }
-            drag.pressed = true;
-            (DragMotion::Press(drag.start), 1)
-        } else if step <= drag.move_ticks {
-            let fraction = f64::from(step) / f64::from(drag.move_ticks);
-            (DragMotion::Move(lerp(drag.start, drag.end, fraction)), 1)
-        } else {
-            drag.pressed = false;
-            (DragMotion::Release, drag.cycle_ticks - step)
+        let Some(motion) = drag.next_motion(now) else {
+            // When: next_motion has nothing, the drag finished or went quiet with no press held.
+            return;
         };
-        drag.ticks += advance;
         match motion {
             DragMotion::Press(point) => {
                 self.pointer(event_loop, point);

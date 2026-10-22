@@ -194,12 +194,12 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
             DefaultClick::Handler(SegmentHandler::ScrollToBottom),
         ),
         Seg::Link => (UpdateKind::Event, format_link, DefaultClick::None),
+        Seg::Sel => (UpdateKind::Event, format_sel, DefaultClick::Action(Action::CopyToClipboard)),
         Seg::Alerts
         | Seg::Input
         | Seg::Clip
         | Seg::PathCheck
         | Seg::Paste
-        | Seg::Sel
         | Seg::Ime
         | Seg::Cpu
         | Seg::Frame
@@ -242,6 +242,29 @@ pub struct StatusLineInputs {
     pub health: HealthInput,
     /// SonicTerm's process memory.
     pub mem: MemInput,
+    /// The window's selection size or its last requested copy's result.
+    pub sel: Option<SelInput>,
+}
+
+/// What the selection segment shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelInput {
+    /// The copied text would have `lines` logical lines and `chars` characters.
+    Extent {
+        /// Logical lines, at least 1.
+        lines: u64,
+        /// Unicode scalar values, newlines included.
+        chars: u64,
+    },
+    /// The selection spans `rows` rows, past the counting bound.
+    Capped {
+        /// Exact row span of the selection.
+        rows: u64,
+    },
+    /// A copy the user requested reached the clipboard.
+    Copied,
+    /// A copy the user requested could not write the clipboard.
+    CopyFailed,
 }
 
 /// Modes shown as chips.
@@ -911,6 +934,85 @@ fn format_link(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Formatt
         ),
     };
     Some(FormattedSegment { protected, ..FormattedSegment::plain(parts, spoken) })
+}
+
+/// The selection segment: `Sel: 3 lines`, `Sel: 142 chars`, a capped row
+/// span, or the result of the last requested copy.
+fn format_sel(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let Some(sel) = inputs.sel else {
+        // When: `inputs.sel` is None there is no selection; `always` shows `none`.
+        let none = env.i18n.translate("status-value-none");
+        return (env.show == ShowMode::Always).then(|| {
+            FormattedSegment::plain(
+                vec![
+                    name_part(env, "status-name-sel"),
+                    StatusPart::new(none.clone(), StatusTone::Name),
+                ],
+                none,
+            )
+        });
+    };
+    let count_args = |key: &str, count: u64| {
+        env.i18n.t_args(key, Some(&[("count", &format_count(count, env.numbers))]))
+    };
+    let mut parts = vec![name_part(env, "status-name-sel")];
+    let spoken = match sel {
+        SelInput::Extent { lines, chars } => {
+            let (value, spoken) = if lines > 1 {
+                (
+                    count_args("status-value-sel-lines", lines),
+                    count_args("status-spoken-sel-lines", lines),
+                )
+            } else if chars == 1 {
+                // When: chars is 1; the catalogs carry no plural selectors, so it has its own words.
+                (
+                    env.i18n.translate("status-value-sel-char"),
+                    env.i18n.translate("status-spoken-sel-char"),
+                )
+            } else {
+                // When: `lines` is 1 and `chars` is not 1, a single line shows its character count.
+                (
+                    count_args("status-value-sel-chars", chars),
+                    count_args("status-spoken-sel-chars", chars),
+                )
+            };
+            parts.push(StatusPart::new(value, StatusTone::Value));
+            spoken
+        }
+        SelInput::Capped { rows } => {
+            parts.push(StatusPart::new(
+                count_args("status-value-sel-rows", rows),
+                StatusTone::Value,
+            ));
+            parts.push(
+                StatusPart::new(symbol(env.icons, " · ", " - "), StatusTone::Name).droppable(),
+            );
+            parts.push(
+                StatusPart::new(env.i18n.translate("status-value-count-capped"), StatusTone::Name)
+                    .droppable(),
+            );
+            count_args("status-spoken-sel-capped", rows)
+        }
+        SelInput::Copied => {
+            let copied = env.i18n.translate("status-value-copied");
+            parts.push(StatusPart::new(
+                format!("{} {copied}", symbol(env.icons, "✓", "ok")),
+                StatusTone::Value,
+            ));
+            copied
+        }
+        SelInput::CopyFailed => {
+            let failed = env.i18n.translate("status-value-copy-failed");
+            parts.push(StatusPart::new(
+                format!("{} {failed}", symbol(env.icons, "✗", "x")),
+                StatusTone::Error,
+            ));
+            failed
+        }
+    };
+    // Only a live selection has something for the `default` click to copy.
+    let default_click = matches!(sel, SelInput::Extent { .. } | SelInput::Capped { .. });
+    Some(FormattedSegment { default_click, ..FormattedSegment::plain(parts, spoken) })
 }
 
 /// Formatter of a catalog id whose segment has not landed: shows nothing.
