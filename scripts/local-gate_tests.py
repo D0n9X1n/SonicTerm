@@ -1861,6 +1861,38 @@ class CiParityTests(unittest.TestCase):
         self.assertTrue(any("neither a table step nor on the CI-only list" in problem
                             for problem in problems), problems)
 
+    def test_cargo_deny_runs_once_in_linux_core_and_any_other_spelling_fails_parity(self):
+        # Protect the dependency audit: CI runs exactly the table's `cargo deny --locked check` in
+        # linux-core; dropping it, altering it, or adding another audit invocation fails parity.
+        line = "        run: cargo deny --locked check\n"
+        self.assertEqual(WORKFLOW.count(line), 1)
+        self.assertEqual(gate.ci_parity_problems(WORKFLOW), [])
+        missing = "`cargo deny --locked check` is missing from CI job linux-core"
+        unlisted = "neither a table step nor on the CI-only list"
+        for mutated, expected in (
+            (WORKFLOW.replace(line, "        run: cargo deny check\n"), (missing, unlisted)),
+            (WORKFLOW.replace(line, "        run: cargo deny --locked check advisories\n"),
+             (missing, unlisted)),
+            (WORKFLOW.replace(line, "        run: cargo --locked deny check\n"),
+             (missing, "a cargo option before the gate subcommand")),
+            (WORKFLOW.replace(line, "        run: cargo deny --locked check || true\n"),
+             ("beside `||`",)),
+            (WORKFLOW.replace(line, "        run: echo skipped\n"), (missing,)),
+            (WORKFLOW.replace("      - name: Clippy\n",
+                              "      - name: Audit\n        run: cargo deny --locked check bans\n\n"
+                              "      - name: Clippy\n", 1),
+             (unlisted,)),
+        ):
+            problems = gate.ci_parity_problems(mutated)
+            for text in expected:
+                with self.subTest(expected=text):
+                    self.assertTrue(any(text in problem for problem in problems), problems)
+        # Without its table step, the CI audit is an unlisted gate.
+        steps = tuple(step for step in gate.STEPS if step.id != "cargo-deny")
+        problems = gate.ci_parity_problems(WORKFLOW, steps=steps)
+        self.assertTrue(any("`cargo deny --locked check`, which is neither a table step" in problem
+                            for problem in problems), problems)
+
     def test_a_new_ci_gate_invocation_must_be_tabled_or_allow_listed(self):
         # Protect against a new CI-only gate that a local run would never execute.
         anchor = "      - name: Clippy\n"
@@ -2243,6 +2275,27 @@ class CommandClassificationTests(unittest.TestCase):
                     [("script", "check_tests.py")],
                 )
                 self.assertTrue(gate.is_self_test(invocations[0]))
+
+    def test_cargo_deny_is_a_gate_in_every_spelling(self):
+        # Protect the audit from escaping classification: `cargo deny` normalizes like the other
+        # cargo gates, and a spelling that could hide its exit status is refused.
+        plain, reasons = gate.classify_command("cargo deny --locked check")
+        self.assertEqual(reasons, [])
+        self.assertEqual([(invocation.kind, invocation.name, invocation.args) for invocation in plain],
+                         [("cargo", "deny", ("--locked", "check"))])
+        pinned, reasons = gate.classify_command("cargo +stable deny --locked check")
+        self.assertEqual(reasons, [])
+        self.assertEqual((pinned[0].name, pinned[0].args, pinned[0].toolchain),
+                         ("deny", ("--locked", "check"), "+stable"))
+        for spelling, reason in {
+            "cargo deny --locked check | tee deny.log": "beside `|`",
+            'echo "$(cargo deny --locked check)"': "a gate inside a command substitution",
+            "env cargo deny --locked check": "a gate after `env`",
+            "cargo --locked deny check": "a cargo option before the gate subcommand",
+        }.items():
+            with self.subTest(spelling=spelling):
+                _invocations, reasons = gate.classify_command(spelling)
+                self.assertTrue(any(reason in text for text in reasons), reasons)
 
     def test_a_toolchain_override_is_still_a_cargo_test(self):
         # Protect the missing-local-test rule from `cargo +toolchain test`, which the plain

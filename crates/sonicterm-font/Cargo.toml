@@ -21,7 +21,8 @@ encoding_rs = "0.8"
 euclid = { version = "0.22", default-features = false }
 freetype.workspace = true
 harfbuzz.workspace = true
-image = "0.25"
+# Color glyph bitmaps are PNG only (`IS_PNG` in `rasterizer/harfbuzz.rs`).
+image = { version = "0.25", default-features = false, features = ["png"] }
 lazy_static = "1.4"
 log = "0.4"
 metrics = "0.24"

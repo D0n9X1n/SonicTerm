@@ -44,6 +44,7 @@ python3 scripts/local-gate.py
 | `rust-version` | `bash scripts/check-rust-version.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `window-owner` | `bash scripts/check-window-owner-registration.sh` | macOS, Windows, Linux | `local` | `bash` | `macos-core`, `windows-checks`, `linux-core` |
 | `workflow-supply-chain` | `bash scripts/check-workflow-supply-chain.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `macos-core`, `windows-checks`, `linux-core` |
+| `cargo-deny` | `cargo deny --locked check` | macOS, Windows, Linux | `local` | `rust`, `cargo-deny` | `linux-core` |
 | `workspace-crates` | `bash scripts/check-workspace-crates.sh` | macOS, Windows, Linux | `local` | `rust`, `native`, `bash` | `macos-core`, `windows-tests-workspace`, `linux-core` |
 | `doctests` | `cargo test --workspace --doc --no-fail-fast` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-workspace`, `linux-core` |
 | `perf-scenarios-tests` | `cargo test --locked -p sonicterm-app --example perf_scenarios` | macOS, Windows, Linux | `local` | `rust`, `native` | `macos-core`, `windows-tests-harness`, `linux-core` |
@@ -86,7 +87,8 @@ Needs:
 - `native`: the platform's native build libraries: Cairo and pkg-config on macOS (`brew install cairo pkg-config`), Cairo from `scripts/setup-windows-cairo.ps1` on Windows, and the packages the `linux-core` job installs on Linux.
 - `bash`: `bash` on `PATH`; on Windows, run the gate from Git Bash so Git's `bash` is found first.
 - `pwsh`: PowerShell 7 (`pwsh`) on `PATH`.
-- `llvm-cov`: `cargo-llvm-cov` at the `CARGO_LLVM_COV_VERSION` that `ci.yml` pins.
+- `llvm-cov`: `cargo-llvm-cov` at the version `scripts/pinned-tools.json` pins.
+- `cargo-deny`: `cargo-deny` at the version `scripts/pinned-tools.json` pins, and network access for its advisory database.
 - `win-target`: the `x86_64-pc-windows-msvc` standard library (`rustup target add x86_64-pc-windows-msvc`).
 - `warp`: a DX12 WARP adapter with allocator reporting.
 - Every step also needs Git and Python 3 on `PATH`.

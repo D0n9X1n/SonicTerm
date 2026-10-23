@@ -113,8 +113,13 @@ PREREQUISITES = {
         "`PATH` 上的 PowerShell 7（`pwsh`）。",
     ),
     "llvm-cov": (
-        "`cargo-llvm-cov` at the `CARGO_LLVM_COV_VERSION` that `ci.yml` pins.",
-        "`ci.yml` 中 `CARGO_LLVM_COV_VERSION` 固定版本的 `cargo-llvm-cov`。",
+        "`cargo-llvm-cov` at the version `scripts/pinned-tools.json` pins.",
+        "`scripts/pinned-tools.json` 固定版本的 `cargo-llvm-cov`。",
+    ),
+    "cargo-deny": (
+        "`cargo-deny` at the version `scripts/pinned-tools.json` pins, and network access for its "
+        "advisory database.",
+        "`scripts/pinned-tools.json` 固定版本的 `cargo-deny`，以及用于其 advisory 数据库的网络访问。",
     ),
     "win-target": (
         "the `x86_64-pc-windows-msvc` standard library (`rustup target add x86_64-pc-windows-msvc`).",
@@ -407,6 +412,9 @@ STEPS = (
          "local", ("bash",), _CORE_CHECKS),
     Step("workflow-supply-chain", ("bash", "scripts/check-workflow-supply-chain.sh"), HOSTS, 120,
          "local", ("rust", "bash"), _CORE_CHECKS),
+    # The dependency audit reads only Cargo.lock and deny.toml, so CI runs it once, in linux-core.
+    Step("cargo-deny", ("cargo", "deny", "--locked", "check"), HOSTS, 300, "local",
+         ("rust", "cargo-deny"), ("linux-core",)),
     Step("workspace-crates", ("bash", "scripts/check-workspace-crates.sh"), HOSTS, 2100, "local",
          ("rust", "native", "bash"), _WORKSPACE_TESTS,
          windows_preparations=(Preparation(_WINIT_TEST), Preparation(_WINIT_DOC, _WINIT_RUSTDOC_FLAGS),
@@ -723,6 +731,10 @@ CI_ONLY = (
            ("windows-native", "windows-checks", _WINDOWS_WORKSPACE, _WINDOWS_HARNESS, _WINDOWS_HARNESS_FEATURES,
             _WINDOWS_HARNESS_API, _WINDOWS_RUNTIME, "windows-smoke"),
            "installs the vcpkg Cairo that the native prerequisite names; it checks nothing"),
+    CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-llvm-cov", ("macos-coverage",),
+           "installs the pinned cargo-llvm-cov that the llvm-cov prerequisite names; it checks nothing"),
+    CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-deny", ("linux-core",),
+           "installs the pinned cargo-deny that the cargo-deny prerequisite names; it checks nothing"),
     CiOnly("evidence-rerun",
            "cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture",
            ("macos-core", _WINDOWS_RUNTIME),
@@ -843,7 +855,7 @@ CI_ONLY = (
 
 # Cargo's built-in aliases for gate subcommands, and the subcommands a gate runs.
 _CARGO_ALIASES = {"t": "test", "d": "doc"}
-_CARGO_GATES = ("fmt", "clippy", "doc", "test")
+_CARGO_GATES = ("fmt", "clippy", "doc", "test", "deny")
 _INTERPRETERS = ("bash", "sh", "python", "python3", "py", "pwsh", "powershell")
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
 _VARIABLE_WORD = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
@@ -852,7 +864,7 @@ _SCRIPT_MENTION = re.compile(r"(?<![\w-])scripts[/\\]")
 # A loose scan for text the tokenizer cannot split or does not model: `cargo`
 # followed by a gate subcommand or alias, or a first-party script path.
 _GATE_MENTION = re.compile(
-    r"(?<![\w.-])cargo(?![\w-]).*?(?<![\w-])(?:fmt|clippy|doc|test|t|d)(?![\w-])"
+    r"(?<![\w.-])cargo(?![\w-]).*?(?<![\w-])(?:fmt|clippy|doc|test|deny|t|d)(?![\w-])"
     r"|(?<![\w-])scripts[/\\]",
     re.S,
 )

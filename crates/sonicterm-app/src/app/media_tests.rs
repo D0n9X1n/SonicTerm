@@ -754,3 +754,93 @@ fn the_process_default_media_pool_is_one_shared_domain() {
     assert!(Arc::ptr_eq(&InlineMediaPool::process_default(), &InlineMediaPool::process_default()));
     assert!(!Arc::ptr_eq(&InlineMediaPool::process_default(), &InlineMediaPool::new()));
 }
+
+/// A tiny RGBA image with a distinct color per pixel, for encoding into each format.
+fn sample_rgba() -> image::DynamicImage {
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(3, 2, |column, row| {
+        image::Rgba([column as u8 * 80, row as u8 * 120, 200, 255])
+    }))
+}
+
+/// A 4x4 DXT1 DDS file, which `image` cannot encode: the 124-byte header, then one block of two
+/// colors with every index zero.
+fn dds_dxt1_sample() -> Vec<u8> {
+    let mut bytes = b"DDS ".to_vec();
+    // Header size; flags caps|height|width|pixelformat; height; width; linear size; depth; mipmaps.
+    for field in [124_u32, 0x1007, 4, 4, 8, 0, 0] {
+        bytes.extend(field.to_le_bytes());
+    }
+    bytes.extend([0; 44]);
+    // Pixel format: its size, the FourCC flag, `DXT1`, then an unused bit count and four masks.
+    bytes.extend(32_u32.to_le_bytes());
+    bytes.extend(4_u32.to_le_bytes());
+    bytes.extend(b"DXT1");
+    bytes.extend([0; 20]);
+    // Caps (texture), caps2, then caps3, caps4 and a reserved word.
+    bytes.extend(0x1000_u32.to_le_bytes());
+    bytes.extend([0; 16]);
+    // The block: red and blue endpoints, all sixteen pixels index 0.
+    bytes.extend(0xF800_u16.to_le_bytes());
+    bytes.extend(0x001F_u16.to_le_bytes());
+    bytes.extend([0; 4]);
+    bytes
+}
+
+/// What the inline-image path makes of `bytes` sent base64-encoded, as iTerm2 and Kitty send them.
+fn decode_sent(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    decode_base64_image(base64::engine::general_purpose::STANDARD.encode(bytes).as_bytes())
+}
+
+#[test]
+fn every_accepted_inline_image_format_still_decodes() {
+    // The formats `load_from_memory` recognizes and decodes with the enabled `image` features:
+    // narrowing those features must keep every one of them, each checked by a real decode.
+    use image::ImageFormat;
+    let formats = [
+        ImageFormat::Png,
+        ImageFormat::Jpeg,
+        ImageFormat::Gif,
+        ImageFormat::WebP,
+        ImageFormat::Tiff,
+        ImageFormat::Bmp,
+        ImageFormat::Ico,
+        ImageFormat::Hdr,
+        ImageFormat::OpenExr,
+        ImageFormat::Qoi,
+        ImageFormat::Pnm,
+        ImageFormat::Farbfeld,
+    ];
+    for format in formats {
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        // The HDR and OpenEXR encoders take only float pixels, and farbfeld only 16-bit RGBA.
+        let sample = match format {
+            ImageFormat::Hdr => image::DynamicImage::ImageRgb32F(sample_rgba().to_rgb32f()),
+            ImageFormat::OpenExr => image::DynamicImage::ImageRgba32F(sample_rgba().to_rgba32f()),
+            ImageFormat::Farbfeld => image::DynamicImage::ImageRgba16(sample_rgba().to_rgba16()),
+            _ => sample_rgba(),
+        };
+        sample.write_to(&mut encoded, format).unwrap_or_else(|error| {
+            panic!("{format:?} sample encodes: {error}");
+        });
+        let decoded = decode_sent(encoded.get_ref());
+        let (width, height, bgra) = decoded.unwrap_or_else(|| panic!("{format:?} decodes"));
+        assert_eq!((width, height, bgra.len()), (3, 2, 24), "{format:?}");
+    }
+    let (width, height, bgra) = decode_sent(&dds_dxt1_sample()).expect("DDS decodes");
+    assert_eq!((width, height, bgra.len()), (4, 4, 64));
+    // The first DXT1 endpoint is pure red, stored here as premultiplied BGRA.
+    assert_eq!(&bgra[..4], &[0, 0, 255, 255]);
+}
+
+#[test]
+fn tga_and_avif_inline_images_are_refused() {
+    // TGA has no signature the format guess recognizes, and AVIF has no decoder enabled, so
+    // neither has ever drawn inline; this pins that the feature change does not alter it.
+    let mut tga = vec![0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 24, 0];
+    tga.extend([10, 20, 30]);
+    assert!(decode_sent(&tga).is_none(), "TGA");
+    let mut avif = vec![0, 0, 0, 0x18];
+    avif.extend(b"ftypavif");
+    avif.extend([0; 12]);
+    assert!(decode_sent(&avif).is_none(), "AVIF");
+}

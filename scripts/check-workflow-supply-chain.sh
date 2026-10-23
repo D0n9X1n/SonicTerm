@@ -5,7 +5,8 @@
 # this script also checks the gate table against ci.yml, CLAUDE.md, and both
 # wiki files. The tests of the scripts that import local-gate.py's launcher, the
 # native selection smoke and the performance comparison, also run here, so they
-# run on macOS, Windows, and Linux, as do the critical-path accounting's tests.
+# run on macOS, Windows, and Linux, as do the critical-path accounting's tests and
+# the pinned-tool installer's tests (which skip on Windows, where it never runs).
 
 set -euo pipefail
 
@@ -33,7 +34,8 @@ fi
   "$ROOT/scripts/perf-critical-path.py" \
   "$ROOT/scripts/perf-critical-path_tests.py" \
   "$ROOT/scripts/perf-flags.py" \
-  "$ROOT/scripts/perf-flags_tests.py"
+  "$ROOT/scripts/perf-flags_tests.py" \
+  "$ROOT/scripts/install-pinned-tool_tests.py"
 
 (
   cd "$ROOT/scripts"
@@ -43,6 +45,7 @@ fi
   "$PY" perf-compare_tests.py
   "$PY" perf-critical-path_tests.py
   "$PY" perf-flags_tests.py
+  "$PY" install-pinned-tool_tests.py
 )
 
 exec "$PY" "$ROOT/scripts/check-workflow-supply-chain.py" --root "$ROOT"
