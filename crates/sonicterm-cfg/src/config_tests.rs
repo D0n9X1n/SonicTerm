@@ -590,3 +590,25 @@ fn empty_config_dir_override_falls_back_to_home() {
 fn config_dir_is_none_without_override_or_home() {
     assert_eq!(config_dir_with(|_| None), None);
 }
+
+#[test]
+fn load_strict_rejects_an_invalid_status_line_and_template_resolves() {
+    // An invalid `[status_line]` fails the whole load; the starter template's table is the default.
+    let dir = font_persist_test_dir("status-line-invalid");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, "[status_line]\nupdate_interval_ms = 1\n").unwrap();
+    assert!(Config::load_strict(&path).is_err());
+    let mut warnings = Vec::new();
+    let fallback = Config::load_or_default_collecting(&path, &mut warnings);
+    assert_eq!(fallback.status_line, crate::status_line::StatusLineConfig::default());
+    assert_eq!(warnings.len(), 1);
+    std::fs::write(&path, "[status_line.segment.mem]\ncolour = \"red\"\n").unwrap();
+    let mut warnings = Vec::new();
+    let _ = Config::load_or_default_collecting(&path, &mut warnings);
+    assert_eq!(warnings.len(), 1, "unknown keys are reported once per load");
+    assert!(warnings[0].contains("status_line.segment.mem.colour"));
+    let template: Config = toml::from_str(&default_config_template()).unwrap();
+    assert_eq!(template.status_line, crate::status_line::StatusLineConfig::default());
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -298,6 +298,14 @@ impl App {
         let mut due = self.refresh_frame_due_work_at(now);
         // Links follow the modes the frame deadlines above already read; the deadlines do not depend on it.
         self.sync_display_links();
+        if let Some(deadline) = self.sync_status_line(now) {
+            // A strip sample or pending path check is due; wake for it without a frame.
+            due.push(super::redraw::DueWork {
+                owner: None,
+                cause: super::redraw::DueCause::StatusLine,
+                deadline,
+            });
+        }
         if let Some(deadline) = self.memory_sample_deadline() {
             due.push(super::redraw::DueWork {
                 owner: None,
@@ -545,8 +553,13 @@ impl App {
             UserEvent::LaunchFailed { message } | UserEvent::ScriptDraftRejected { message } => {
                 self.handle_script_draft_rejected(message);
             }
-            UserEvent::ClipboardWrite { text } => {
-                self.handle_clipboard_write(text);
+            UserEvent::ClipboardWrite { pane_id, text } => {
+                let bytes = text.len();
+                let written = self.handle_clipboard_write(text);
+                self.note_clip_write(pane_id, bytes, written);
+            }
+            UserEvent::ClipboardAttempts { pane_id, attempts } => {
+                self.note_clip_attempts(pane_id, attempts, Instant::now());
             }
             UserEvent::PathProbeFinished(result) => {
                 self.handle_path_probe_finished(*result);
@@ -622,6 +635,9 @@ impl App {
             // When: `window_id` is absent, retain the diagnostic without alarming an unrelated frontmost terminal.
             return;
         };
+        let not_sent = super::status_line::not_sent_reason(&reason);
+        let now = self.dispatch_now();
+        self.note_input(window_id, sonicterm_ui::status_line::InputState::NotSent(not_sent), now);
         let kind = if Some(window_id) == self.main_window_id {
             super::FrontmostKind::Main
         } else {
@@ -635,22 +651,21 @@ impl App {
         );
     }
 
-    pub(super) fn handle_clipboard_write(&mut self, text: String) {
-        #[cfg(not(target_os = "windows"))]
-        let _ = self.set_clipboard_text(text);
+    /// Apply one accepted OSC 52 write; returns whether the native clipboard took it.
+    pub(super) fn handle_clipboard_write(&mut self, text: String) -> bool {
         #[cfg(target_os = "windows")]
-        {
-            let previous_text = self.clipboard_text_for_reassert();
-            if !self.set_clipboard_text(text.clone()) {
-                // When: set_clipboard_text returns false, no successful value exists to reassert.
-                return;
-            }
+        let (previous_text, reassert_text) = (self.clipboard_text_for_reassert(), text.clone());
+        let written = self.set_clipboard_text(text);
+        // Windows reasserts a successful write once; a failed one has no value to reassert.
+        #[cfg(target_os = "windows")]
+        if written {
             self.pending_osc52_reassert = Some(super::PendingOsc52Reassert {
-                text,
+                text: reassert_text,
                 previous_text,
                 due: Instant::now() + super::OSC52_CLIPBOARD_REASSERT_DELAY,
             });
         }
+        written
     }
 
     pub(super) fn handle_script_draft_rejected(&mut self, message: String) {
@@ -671,13 +686,17 @@ impl App {
     /// Handle a fallback wake: the window's renderer acknowledges its own current notice and
     /// says whether that generation still needs applying. A closed window, a replaced notice or an
     /// applied generation does nothing.
+    /// A face publication requests the `Chrome` frame that applies it. An unresolved-only wake
+    /// requests nothing here: the status-line sync that follows this event recounts `glyphs` and
+    /// requests one `StatusLine` frame only when the shown value changed.
     pub(super) fn handle_font_fallback_ready(&mut self, window_id: WindowId, notice_id: u64) {
-        let due = self
+        let wake = self
             .windows
             .get_mut(&window_id)
             .and_then(|window| window.renderer.as_mut())
-            .is_some_and(|renderer| renderer.acknowledge_font_fallback(notice_id));
-        self.request_font_fallback_frame(window_id, due);
+            .map(|renderer| renderer.acknowledge_font_fallback(notice_id))
+            .unwrap_or_default();
+        self.request_font_fallback_frame(window_id, wake.faces_due);
     }
 
     /// Request the frame that applies a published fallback generation when `due`. A hidden,
@@ -1016,6 +1035,7 @@ impl App {
         // the authoritative source for `main_window_id`.
         self.retire_previous_main();
         self.main_window_id = Some(main_id);
+        self.record_startup_load_errors();
         // Both pacing clocks start at one instant, so neither paces a new window differently.
         let created_at = std::time::Instant::now();
         let shadow = super::WindowState {
@@ -1049,6 +1069,7 @@ impl App {
             redraw: Default::default(),
             display_link: Default::default(),
             hover_link: false,
+            hover_unresolved: false,
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
@@ -1058,6 +1079,10 @@ impl App {
             hovered_url: None,
             link_preview: None,
             path_probe: super::path_target::PathProbeState::default(),
+            status_strip: None,
+            sel_status: Default::default(),
+            ime_discarded_at: None,
+            alert_settings: None,
             hover_detection: super::path_target::HoverDetectionCache::default(),
             notification: None,
             hidden: false,

@@ -216,29 +216,124 @@ fn descriptor_table_end() -> i32 {
     limit
 }
 
+/// Highest descriptor bound the `pre_exec` fallback walks one number at a time (2^20).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const FALLBACK_SCAN_LIMIT: u64 = 1 << 20;
+
+/// What the `pre_exec` hook does when one `close_range` call cannot mark every descriptor.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackScan {
+    /// Mark every descriptor number from 3 below this end.
+    Scan(i32),
+    /// The bound, in descriptors, is too large to walk; the spawn fails with `EOVERFLOW`.
+    Refuse(u64),
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl FallbackScan {
+    /// The fallback for a bound of `bound` descriptors: a scan up to [`FALLBACK_SCAN_LIMIT`], a
+    /// refusal above it. It never scans fewer numbers than the bound.
+    fn for_bound(bound: u64) -> Self {
+        match i32::try_from(bound) {
+            Ok(end) if bound <= FALLBACK_SCAN_LIMIT => Self::Scan(end),
+            _ => Self::Refuse(bound),
+        }
+    }
+}
+
+/// How the isolated child's inherited descriptors are marked close-on-exec, decided before fork so
+/// the hook between fork and exec reads nothing and allocates nothing.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Clone, Copy)]
+struct CloseOnExecPlan {
+    /// Try one `close_range` call first; it exists only on Linux.
+    try_close_range: bool,
+    /// What to do when that call is unavailable or fails.
+    fallback: FallbackScan,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl CloseOnExecPlan {
+    /// Linux: `close_range`, then a fallback bounded by `min(fs.nr_open, RLIMIT_NOFILE soft)`, or
+    /// higher when a descriptor opened before the soft limit was lowered is still open.
+    #[cfg(target_os = "linux")]
+    fn current() -> Self {
+        let table_end = u64::try_from(descriptor_table_end()).unwrap_or(u64::MAX);
+        let mut open_limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let status =
+            // SAFETY: `open_limit` is a writable `rlimit`.
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut open_limit) };
+        assert_eq!(status, 0, "read RLIMIT_NOFILE");
+        // New descriptors are numbered below the soft limit, so only ones listed now can sit above it.
+        let listed_end = match open_descriptors(std::path::Path::new("/proc/self/fd")) {
+            Ok(descriptors) => descriptors
+                .into_iter()
+                .filter_map(|descriptor| u64::try_from(descriptor).ok())
+                .max()
+                .map_or(0, |highest| highest + 1),
+            // An unreadable listing knows no open number, so fs.nr_open bounds them.
+            Err(_) => table_end,
+        };
+        let bound = open_limit.rlim_cur.min(table_end).max(listed_end);
+        Self { try_close_range: true, fallback: FallbackScan::for_bound(bound) }
+    }
+
+    /// macOS: no `close_range`; the scan stops at `kern.maxfilesperproc`.
+    #[cfg(target_os = "macos")]
+    fn current() -> Self {
+        Self { try_close_range: false, fallback: FallbackScan::Scan(descriptor_table_end()) }
+    }
+}
+
+/// The descriptor numbers listed in the directory `listing` (`/proc/self/fd` on Linux), read whole.
+/// The directory's own descriptor is closed before this returns; it may appear in the list.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_descriptors(listing: &std::path::Path) -> std::io::Result<Vec<i32>> {
+    let mut descriptors = Vec::new();
+    for entry in std::fs::read_dir(listing)? {
+        let name = entry?.file_name();
+        // Entries are named by descriptor number; anything else is not a descriptor.
+        if let Some(descriptor) = name.to_str().and_then(|name| name.parse().ok()) {
+            descriptors.push(descriptor);
+        }
+    }
+    Ok(descriptors)
+}
+
+/// Mark every descriptor from 3 up close-on-exec with one `close_range` call. Async-signal-safe.
+#[cfg(target_os = "linux")]
+fn close_range_marked_all() -> bool {
+    // SAFETY: `close_range` with `CLOSE_RANGE_CLOEXEC` only sets descriptor flags.
+    unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, libc::CLOSE_RANGE_CLOEXEC) == 0 }
+}
+
+/// macOS has no `close_range`, so the fallback always runs.
+#[cfg(target_os = "macos")]
+fn close_range_marked_all() -> bool {
+    false
+}
+
 /// Mark every descriptor above stderr close-on-exec in the isolated child before it execs. macOS
 /// has no `pipe2`, so std creates a spawn's pipe before marking it close-on-exec, and a child that
 /// another test spawns in between inherits the pipe. An isolated child runs for seconds, so it
-/// would hold that test's capture pipe open long after the test's own child exits. Linux marks
-/// them all with one `close_range` call when the kernel has it; otherwise, and on macOS, the hook
-/// visits every descriptor number below `descriptor_table_end`.
+/// would hold that test's capture pipe open long after the test's own child exits. `plan` says
+/// whether `close_range` is tried and how far the fallback walks, or that it refuses.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn close_inherited_descriptors_on_exec(command: &mut Command) {
+fn close_inherited_descriptors_on_exec(command: &mut Command, plan: CloseOnExecPlan) {
     use std::os::unix::process::CommandExt;
-    let table_end = descriptor_table_end();
     // SAFETY: the `pre_exec` hook runs between fork and exec and makes only the `close_range` system
     // call and `fcntl` calls, which are async-signal-safe; it allocates nothing and takes no lock.
     unsafe {
         command.pre_exec(move || {
-            #[cfg(target_os = "linux")]
-            {
-                let marked =
-                    libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, libc::CLOSE_RANGE_CLOEXEC);
-                if marked == 0 {
-                    // When: `marked` is 0, `close_range` flagged every descriptor from 3 up, so no loop runs.
-                    return Ok(());
-                }
+            if plan.try_close_range && close_range_marked_all() {
+                // When: close_range_marked_all succeeded, every descriptor from 3 up is marked.
+                return Ok(());
             }
+            let FallbackScan::Scan(table_end) = plan.fallback else {
+                // When: plan.fallback is Refuse, fail the spawn at once instead of walking ~2^31 numbers.
+                return Err(std::io::Error::from_raw_os_error(libc::EOVERFLOW));
+            };
             for descriptor in 3..table_end {
                 libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC);
             }
@@ -247,11 +342,34 @@ fn close_inherited_descriptors_on_exec(command: &mut Command) {
     }
 }
 
+/// The message for a failed isolated spawn, naming the refused fallback when that caused it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_failure(error: &std::io::Error, plan: CloseOnExecPlan) -> String {
+    match plan.fallback {
+        FallbackScan::Refuse(bound) if error.raw_os_error() == Some(libc::EOVERFLOW) => format!(
+            "spawn isolated PTY test: close_range could not mark inherited descriptors, and the \
+             fallback would walk {bound} descriptor numbers, more than 2^20: {error}"
+        ),
+        _ => format!("spawn isolated PTY test: {error}"),
+    }
+}
+
 fn run_test_child(name: &str, timeout: Duration) -> TestResult {
     run_test_child_with_config(name, IsolationConfig { timeout, ..IsolationConfig::ORDINARY })
 }
 
 fn run_test_child_with_config(name: &str, config: IsolationConfig) -> TestResult {
+    run_test_child_marking(name, config, true)
+}
+
+/// Run `name` in a killable child; `mark_close_on_exec` false leaves inherited descriptors open,
+/// which only the inheritance tests want. Both install a `pre_exec` hook, so both spawn through
+/// fork and exec: without a hook macOS std uses `posix_spawn`, which inherits nothing by default.
+fn run_test_child_marking(
+    name: &str,
+    config: IsolationConfig,
+    mark_close_on_exec: bool,
+) -> TestResult {
     assert!(
         !config.timeout.is_zero() && config.output_limit > 0,
         "isolated child needs finite nonzero budgets"
@@ -269,9 +387,20 @@ fn run_test_child_with_config(name: &str, config: IsolationConfig) -> TestResult
         command.process_group(0);
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        close_inherited_descriptors_on_exec(&mut command);
-    }
+    let plan = if mark_close_on_exec {
+        CloseOnExecPlan::current()
+    } else {
+        // When: mark_close_on_exec is false, an empty scan keeps the fork path but marks nothing.
+        CloseOnExecPlan { try_close_range: false, fallback: FallbackScan::Scan(3) }
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    close_inherited_descriptors_on_exec(&mut command, plan);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = mark_close_on_exec;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let mut child =
+        command.spawn().unwrap_or_else(|error| panic!("{}", spawn_failure(&error, plan)));
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let mut child = command.spawn().expect("spawn isolated PTY test");
     let output = Arc::new(Mutex::new(CapturedOutput::default()));
     let out_done = capture_pipe(child.stdout.take().unwrap(), output.clone(), config);

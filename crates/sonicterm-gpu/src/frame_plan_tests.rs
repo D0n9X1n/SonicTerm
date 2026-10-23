@@ -10,6 +10,7 @@ fn facts(degraded: bool) -> FrameFacts {
         scrollbar_mode: ScrollbarMode::Auto,
         degraded,
         tab_bar_top: Some(140.0),
+        status_band: None,
         scale: 1.0,
         previous_recolor: RecolorRecord::default(),
     }
@@ -1192,6 +1193,7 @@ fn each_window_field_has_exactly_its_class() {
         (|window| window.hover_tab = 1, narrow(|class| class.tab_band = true)),
         (|window| window.close_override = 1, narrow(|class| class.tab_band = true)),
         (|window| window.process_privileged = true, narrow(|class| class.tab_band = true)),
+        (|window| window.status_hash = 1, narrow(|class| class.status_band = true)),
         (
             |window| window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, false),
             ChangeClass::default(),
@@ -1276,6 +1278,7 @@ fn identity_destructures_name_every_field() {
         width: _,
         height: _,
         tab_hash: _,
+        status_hash: _,
         viewport_top_abs: _,
         cursor_shape: _,
         cursor_blink: _,
@@ -1572,6 +1575,7 @@ fn ten_row_facts(vertical_ink_pad: f32) -> FrameFacts {
         window: WindowIdentity { width: 240, height: 240, ..Default::default() },
         vertical_ink_pad,
         tab_bar_top: None,
+        status_band: None,
         ..facts(false)
     }
 }
@@ -1786,6 +1790,7 @@ fn sixteen_row_facts() -> FrameFacts {
     FrameFacts {
         window: WindowIdentity { width: 240, height: 400, ..Default::default() },
         tab_bar_top: None,
+        status_band: None,
         ..facts(false)
     }
 }
@@ -1908,6 +1913,7 @@ fn a_dirty_slot_is_emitted_whatever_its_record_and_a_stale_clean_slot_forces_ful
         window: WindowIdentity { width: 240, height: 100, ..Default::default() },
         vertical_ink_pad: 12.0,
         tab_bar_top: None,
+        status_band: None,
         ..facts(false)
     };
     let first = FramePlan::build(frame_facts.clone(), [ten_row_pane()], None);
@@ -2063,4 +2069,52 @@ fn an_offscreen_replacement_is_noop_only_with_a_retained_key() {
     };
     assert!(__replacement_plans_noop(&shape, true), "the retained key hides the replaced rows");
     assert!(!__replacement_plans_noop(&shape, false), "a dropped key forces a full frame");
+}
+
+/// Facts with a 20 px tab bar at 140 and a 12 px status line band directly above it at 128.
+fn strip_facts(degraded: bool) -> FrameFacts {
+    FrameFacts { status_band: Some((128.0, 12.0)), ..facts(degraded) }
+}
+
+/// A strip-only change damages exactly the strip band on the hardware path, with or without
+/// the tab bar, because the strip's glyphs are clipped to that band.
+#[test]
+fn status_line_change_damages_only_the_strip_band() {
+    let mut after = strip_facts(false);
+    after.window.status_hash = 1;
+    let plan = transition(strip_facts(false), after, pane(7, 1));
+    assert!(plan.change.status_band && !plan.change.full && !plan.change.tab_band);
+    assert_eq!(plan.damage, PixelRect { x: 0, y: 128, w: 240, h: 12 });
+
+    // With the tab bar hidden the strip sits at the bottom edge and its band is still all that changes.
+    let bottom = |degraded| FrameFacts {
+        tab_bar_top: None,
+        status_band: Some((148.0, 12.0)),
+        ..facts(degraded)
+    };
+    let mut after = bottom(false);
+    after.window.status_hash = 7;
+    let plan = transition(bottom(false), after, pane(7, 1));
+    assert_eq!(plan.damage, PixelRect { x: 0, y: 148, w: 240, h: 12 });
+}
+
+/// The existing full-frame fallbacks keep the whole surface for a strip change: degraded
+/// (software) rendering and an active overlay. An unchanged strip hash presents nothing.
+#[test]
+fn status_line_change_keeps_full_frame_fallbacks() {
+    let surface = PixelRect { x: 0, y: 0, w: 240, h: 160 };
+    let mut degraded_after = strip_facts(true);
+    degraded_after.window.status_hash = 1;
+    let plan = transition(strip_facts(true), degraded_after, pane(7, 1));
+    assert_eq!((plan.mode, plan.damage), (RenderMode::Full, surface));
+
+    let mut overlay_before = strip_facts(false);
+    overlay_before.window.overlay_active = true;
+    let mut overlay_after = overlay_before.clone();
+    overlay_after.window.status_hash = 1;
+    let plan = transition(overlay_before, overlay_after, pane(7, 1));
+    assert_eq!((plan.mode, plan.damage), (RenderMode::Full, surface));
+
+    let plan = transition(strip_facts(false), strip_facts(false), pane(7, 1));
+    assert_eq!(plan.mode, RenderMode::Noop);
 }

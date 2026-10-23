@@ -171,6 +171,7 @@ enum DriverState {
     Wheel(Wheel),
     AtlasRetry(Box<AtlasRetryDriver>),
     Park(Park),
+    Commit(Commit),
 }
 
 /// S1/atlas-retry: the episode machine, what is armed for its next frame, and the scene it settled on.
@@ -319,6 +320,30 @@ struct Sweep {
     right: f64,
 }
 
+/// A fixed-text driver: each step's text as one `Ime::Commit` at its offset, then a settle.
+struct Commit {
+    steps: &'static [scenarios::CommitStep],
+    sent: usize,
+    started: Instant,
+    settle: Duration,
+}
+
+impl Commit {
+    /// When the next step is due, or the settle's end once every step is sent.
+    fn next_due(&self) -> Instant {
+        match self.steps.get(self.sent) {
+            Some(step) => self.started + Duration::from_millis(step.after_ms),
+            None => self.settle_end(),
+        }
+    }
+
+    /// The end of the settle after the last step.
+    fn settle_end(&self) -> Instant {
+        let last_ms = self.steps.last().map_or(0, |step| step.after_ms);
+        self.started + Duration::from_millis(last_ms) + self.settle
+    }
+}
+
 /// S6/rest: the pointer resting on one cell, the same `CursorMoved` repeated at a fixed rate.
 struct Park {
     interval: Duration,
@@ -338,8 +363,15 @@ struct Drag {
     end: (f64, f64),
     pressed: bool,
     deadline: Instant,
+    /// From here on the drag injects nothing but the release of a held press, so its last
+    /// selection change presents inside the phase; `None` drags until the deadline.
+    quiet_from: Option<Instant>,
     finished: bool,
 }
+
+/// How long before a status-line `select` phase ends its drag goes quiet: the pass that injects
+/// one tick per wake lags the 120 Hz schedule, so the last move can otherwise present a frame late.
+const STATUS_LINE_DRAG_SETTLE: Duration = Duration::from_millis(300);
 
 /// S7 wheel: line ticks up through the retained history, then back down.
 struct Wheel {
@@ -1689,10 +1721,45 @@ impl PhaseMeter {
 }
 
 /// One step of a drag gesture.
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum DragMotion {
     Press((f64, f64)),
     Move((f64, f64)),
     Release,
+}
+
+impl Drag {
+    /// The step due at `now`: press, move across the grid, release; idle ticks skip to the next
+    /// cycle's press. Past `quiet_from` only a held press is released, then the drag finishes.
+    fn next_motion(&mut self, now: Instant) -> Option<DragMotion> {
+        if self.finished {
+            return None;
+        }
+        if self.quiet_from.is_some_and(|quiet_from| now >= quiet_from) {
+            // When: the quiet tail began, the selection must stop changing before the phase ends.
+            self.finished = true;
+            return std::mem::take(&mut self.pressed).then_some(DragMotion::Release);
+        }
+        let step = self.ticks % self.cycle_ticks;
+        let (motion, advance) = if step == 0 {
+            let release_at = self.started + self.interval * (self.ticks + self.move_ticks + 1);
+            if release_at >= self.deadline {
+                // When: a whole press, move and release no longer fits in the phase, the drag stops.
+                self.finished = true;
+                return None;
+            }
+            self.pressed = true;
+            (DragMotion::Press(self.start), 1)
+        } else if step <= self.move_ticks {
+            let fraction = f64::from(step) / f64::from(self.move_ticks);
+            (DragMotion::Move(lerp(self.start, self.end, fraction)), 1)
+        } else {
+            self.pressed = false;
+            (DragMotion::Release, self.cycle_ticks - step)
+        };
+        self.ticks += advance;
+        Some(motion)
+    }
 }
 
 impl Typing {
@@ -2963,8 +3030,8 @@ impl Probe {
         if matches!(&self.driver, DriverState::Drag(drag) if drag.pressed) {
             self.button(event_loop, ElementState::Released);
         }
-        if let Some(reason) = self.park_problem(phase) {
-            // When: a parked phase saw no frame, no streamed row or no tail detection, it measured nothing.
+        if let Some(reason) = self.park_problem(phase).or_else(|| self.status_line_problem(phase)) {
+            // When: a parked phase measured nothing, or a status-line phase broke the strip's idle contract.
             self.finalize_phase(phase);
             self.invalidate(event_loop, reason);
             return;
@@ -3064,6 +3131,9 @@ impl Probe {
                 }
                 DriverState::AtlasRetry(retry) => {
                     retry.machine.is_done() && retry.failure.is_none()
+                }
+                DriverState::Commit(commit) => {
+                    commit.sent >= commit.steps.len() && now >= commit.settle_end()
                 }
                 _ => true,
             },
@@ -3318,6 +3388,7 @@ impl Probe {
                 // A 0.6 s cycle: press, about 0.5 s of motion, release, then idle until the next
                 // press, so consecutive presses are farther apart than a double click.
                 let cycle_ticks = (hertz.max(2) * 3 / 5).max(3);
+                let deadline = self.phase_deadline(phase).unwrap_or(self.run_deadline);
                 DriverState::Drag(Drag {
                     interval: Duration::from_secs(1) / hertz.max(1),
                     started: Instant::now(),
@@ -3327,7 +3398,13 @@ impl Probe {
                     start,
                     end,
                     pressed: false,
-                    deadline: self.phase_deadline(phase).unwrap_or(self.run_deadline),
+                    deadline,
+                    // Only the status-line plan checks what its frames count; S6 keeps its schedule.
+                    quiet_from: self
+                        .plan
+                        .status_line
+                        .then(|| deadline.checked_sub(STATUS_LINE_DRAG_SETTLE))
+                        .flatten(),
                     finished: false,
                 })
             }
@@ -3371,6 +3448,12 @@ impl Probe {
                     point,
                 })
             }
+            Driver::Commit { steps, settle_ms } => DriverState::Commit(Commit {
+                steps,
+                sent: 0,
+                started: Instant::now(),
+                settle: Duration::from_millis(settle_ms),
+            }),
             Driver::Wheel { hertz, role } => {
                 let Some((retained, center)) = self.wheel_setup(role) else {
                     self.invalidate(event_loop, format!("no pane layout for role {role}'s wheel"));
@@ -3737,6 +3820,60 @@ impl Probe {
         scenarios::park_progress(phase.name, &evidence).err()
     }
 
+    /// Why a `status-line` phase broke the strip's idle contract, if it did: see
+    /// [`scenarios::status_line_progress`]. Needs counters; a side without the status line counters
+    /// (a base older than the status line) reads them as absent and is not checked.
+    fn status_line_problem(&mut self, phase: &PhaseSpec) -> Option<String> {
+        if !self.plan.status_line {
+            // When: `status_line` is off for this plan, there is no strip to check.
+            return None;
+        }
+        if phase.name == "print" && !self.plan.prints_linked_history() {
+            // When: the plan prints a history that never passes the byte budget (S12), nothing
+            // is trimmed, so `print` has no `History: trimmed` to count.
+            return None;
+        }
+        let hold_ms = match phase.end {
+            PhaseEnd::Hold(hold_ms) => hold_ms,
+            // `print` ends on its sentinel; its checks count appearances, not a cadence.
+            // `print` ends on its sentinel and `input` when its typing settles; neither checks a cadence.
+            _ if matches!(phase.name, "print" | "input" | "glyphs" | "held") => 0,
+            // When: the phase neither holds nor prints, it has no cadence to check.
+            _ => return None,
+        };
+        let counters_start = self.meter.as_ref().and_then(|meter| meter.counters_start.clone());
+        let deltas = counters_start.zip(self.counter_totals()).and_then(|(start, totals)| {
+            let delta = totals.delta_since(&start);
+            let count = |name: &str| match delta.get(name) {
+                Some(crate::counters::FieldValue::Count(count)) => Some(*count),
+                _ => None,
+            };
+            Some(scenarios::StatusLineDeltas {
+                samples: count("status_line_samples")?,
+                wakes: count("status_line_wakes")?,
+                redraws: count("status_line_redraws")?,
+                sel_counts: count("status_line_sel_counts")?,
+                sel_cells: count("status_line_sel_cells")?,
+                history_shows: count("status_line_history_shows")?,
+                // A side whose App predates the counter shows no `held` to count.
+                held_shows: count("status_line_held_shows").unwrap_or(0),
+                glyph_shows: count("status_line_glyph_shows").unwrap_or(0),
+            })
+        })?;
+        let occluded = self.occlusion.delivered == Some(true);
+        scenarios::status_line_progress(phase.name, hold_ms, occluded, deltas)
+            .and_then(|()| {
+                if cfg!(windows) {
+                    // A Windows role's shell cannot stall its reader, so `held` need not appear.
+                    Ok(())
+                } else {
+                    // When: the role shell is POSIX, the stalled paste must show `held` once.
+                    scenarios::status_line_posix_progress(phase.name, deltas)
+                }
+            })
+            .err()
+    }
+
     /// Drag endpoints at cell centers inside the grid.
     fn drag_geometry(&self) -> Option<((f64, f64), (f64, f64))> {
         let pane = self.active_pane()?;
@@ -3785,6 +3922,7 @@ impl Probe {
             }
             DriverState::AtlasRetry(retry) => retry.due(),
             DriverState::Park(park) => Some(park.started + park.interval * park.ticks),
+            DriverState::Commit(commit) => Some(commit.next_due()),
         }
     }
 
@@ -3797,11 +3935,33 @@ impl Probe {
             DriverState::None => {}
             DriverState::Typing(_) => self.inject_typing(event_loop),
             DriverState::Sweep(_) => self.inject_sweep(event_loop),
-            DriverState::Drag(_) => self.inject_drag(event_loop),
+            DriverState::Drag(_) => self.inject_drag(event_loop, now),
             DriverState::Wheel(_) => self.inject_wheel(event_loop),
             DriverState::AtlasRetry(_) => self.drive_atlas_retry(event_loop, now),
             DriverState::Park(_) => self.inject_park(event_loop),
+            DriverState::Commit(_) => self.inject_commit(event_loop),
         }
+    }
+
+    /// Commit the next due step's text into the active pane.
+    fn inject_commit(&mut self, event_loop: &ActiveEventLoop) {
+        let DriverState::Commit(commit) = &mut self.driver else {
+            // When: driver is not Commit, there is no step to send.
+            return;
+        };
+        let steps = commit.steps;
+        let Some(step) = steps.get(commit.sent) else {
+            // When: every step is sent, the settle runs out with nothing to inject.
+            return;
+        };
+        commit.sent += 1;
+        let text = match step.text {
+            scenarios::CommitText::Literal(text) => text.to_owned(),
+            scenarios::CommitText::Repeat(character, count) => {
+                std::iter::repeat_n(character, count).collect()
+            }
+        };
+        self.window_input(event_loop, WindowEvent::Ime(Ime::Commit(text)));
     }
 
     /// Repeat the parked pointer's `CursorMoved` on the same cell.
@@ -3873,29 +4033,15 @@ impl Probe {
         self.pointer(event_loop, position);
     }
 
-    /// Press, move across the grid, release; idle ticks are skipped to the next cycle's press.
-    fn inject_drag(&mut self, event_loop: &ActiveEventLoop) {
+    /// Inject the drag's next step at `now`, if it has one.
+    fn inject_drag(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
         let DriverState::Drag(drag) = &mut self.driver else {
             return;
         };
-        let step = drag.ticks % drag.cycle_ticks;
-        let (motion, advance) = if step == 0 {
-            let release_at = drag.started + drag.interval * (drag.ticks + drag.move_ticks + 1);
-            if release_at >= drag.deadline {
-                // When: a whole press, move and release no longer fits in the phase, the drag stops.
-                drag.finished = true;
-                return;
-            }
-            drag.pressed = true;
-            (DragMotion::Press(drag.start), 1)
-        } else if step <= drag.move_ticks {
-            let fraction = f64::from(step) / f64::from(drag.move_ticks);
-            (DragMotion::Move(lerp(drag.start, drag.end, fraction)), 1)
-        } else {
-            drag.pressed = false;
-            (DragMotion::Release, drag.cycle_ticks - step)
+        let Some(motion) = drag.next_motion(now) else {
+            // When: next_motion has nothing, the drag finished or went quiet with no press held.
+            return;
         };
-        drag.ticks += advance;
         match motion {
             DragMotion::Press(point) => {
                 self.pointer(event_loop, point);

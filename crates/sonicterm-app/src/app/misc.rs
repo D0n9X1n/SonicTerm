@@ -5,6 +5,7 @@
 #![allow(unused_imports)]
 
 use sonicterm_ui::ime::ImeState;
+use sonicterm_ui::status_line::InputState;
 use std::collections::HashMap;
 use std::sync::{atomic::Ordering, Arc};
 use std::time::{Duration, Instant};
@@ -191,7 +192,9 @@ impl App {
             }
             (selection.as_text(grid), selection.on_alt_screen)
         };
-        if self.set_clipboard_text(text) && clear_after_copy {
+        let copied = self.set_clipboard_text(text);
+        self.note_copy_result(window_id, copied);
+        if copied && clear_after_copy {
             // A volatile selection is consumed only after confirmed clipboard delivery.
             if let Some(window) = self.windows.get_mut(&window_id) {
                 // Clear the highlight and invalidate retained rows before requesting its frame.
@@ -310,6 +313,7 @@ impl App {
         };
         if !self.admits_new_user_input(pane_id) {
             // When: pane_id belongs to a READONLY window, consume native drops before quoting or broadcast.
+            self.note_pane_input(pane_id, InputState::Blocked(1));
             return;
         }
         let paths: Vec<_> = paths.into_iter().collect();
@@ -335,6 +339,17 @@ impl App {
         if refusals.is_empty() {
             // When: refusals is empty, a successful or consumed gesture must not replace an existing notification.
             return;
+        }
+        let window_id = match kind {
+            FrontmostKind::Main => self.main_window_id,
+            FrontmostKind::Child(id) => Some(id),
+            FrontmostKind::None | FrontmostKind::Other => None,
+        };
+        if let Some(window_id) = window_id {
+            let refused =
+                InputState::PasteRefused { refused: refusals.len(), attempted: destinations };
+            let now = self.dispatch_now();
+            self.note_input(window_id, refused, now);
         }
         let mut groups = std::collections::BTreeMap::new();
         for refusal in refusals {
@@ -370,13 +385,19 @@ impl App {
     ) -> (usize, Vec<PasteRefusal>) {
         if !self.admits_new_user_input(source_pane) {
             // When: source_pane is READONLY, consume the whole gesture rather than fan it out to writable peers.
+            self.note_pane_input(source_pane, InputState::Blocked(1));
             return (0, Vec::new());
         }
         let mut destinations = vec![source_pane];
         if matches!(self.broadcast, sonicterm_ui::broadcast::BroadcastState::On { source_pane: pane, .. } if pane == source_pane)
         {
             // `source_pane` armed this broadcast, so append only its currently admitted receivers.
-            destinations.extend(self.broadcast_receivers());
+            let (receivers, blocked) = self.broadcast_receivers_counted();
+            if blocked > 0 {
+                // READONLY receivers were skipped; the strip names how many.
+                self.note_pane_input(source_pane, InputState::Blocked(blocked));
+            }
+            destinations.extend(receivers);
         }
         let mut attempted = 0;
         let mut refusals = Vec::new();
@@ -753,6 +774,7 @@ impl App {
             redraw: Default::default(),
             display_link: Default::default(),
             hover_link: false,
+            hover_unresolved: false,
             pressed_tab: None,
             drag_session: None,
             drag_target: None,
@@ -762,6 +784,10 @@ impl App {
             hovered_url: None,
             link_preview: None,
             path_probe: super::path_target::PathProbeState::default(),
+            status_strip: None,
+            sel_status: Default::default(),
+            ime_discarded_at: None,
+            alert_settings: None,
             hover_detection: super::path_target::HoverDetectionCache::default(),
             notification: None,
             hidden: false,
@@ -856,6 +882,7 @@ impl App {
         };
         if !self.admits_new_user_input(pane) {
             // When: pane is READONLY at arrival, do not defer its drop until a later writable state.
+            self.note_pane_input(pane, InputState::Blocked(1));
             return;
         }
         self.pending_winit_file_drops.entry(window_id).or_default().push(path);

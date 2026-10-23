@@ -652,8 +652,10 @@ impl App {
             }
         }
         self.poll_command_events_for_all_tabs();
-        // A burst frame reads the cache only; other frames set demand, never probe.
-        let fg_probes = (!pty_burst).then(|| std::sync::Arc::clone(&self.fg_probes));
+        // A burst or strip-only frame reads the cache only; other frames set demand, never probe.
+        let status_only = self.main().is_some_and(|window| window.redraw.status_only_attempt());
+        let fg_probes = super::redraw::sets_fg_demand(pty_burst, status_only)
+            .then(|| std::sync::Arc::clone(&self.fg_probes));
         if let Some(id) = main_id_opt {
             if let Some(window) = self.windows.get_mut(&id) {
                 crate::app::refresh_window_tab_privileges(
@@ -793,6 +795,8 @@ impl App {
         );
         // One anchored viewport projection feeds both the per-pane and active-frame viewports.
         // Reconcile, then apply the previous frame's receipts under these guards, before planning.
+        // Focused-pane facts for the status line, copied under the frame's parser guard.
+        let mut status_facts = None;
         let frame_viewports = match self
             .main_mut()
             .map(|window| sources.reconcile_and_apply_receipts(window, &mut frame.guards))
@@ -860,6 +864,7 @@ impl App {
         // panes live in the main `WindowState` too, so they're
         // pulled from the same field-disjoint split borrow.
         let main_id_opt = self.main_window_id;
+        let counts_selection = self.counts_selection();
         let mut ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
         if let Some(main) = ws_opt.as_deref_mut() {
             // The collector validated the actual active position before taking any lock.
@@ -869,6 +874,23 @@ impl App {
                 active_id,
                 frame.guards[active_pos].1.grid(),
             );
+            if counts_selection {
+                // Counted under the guard already held, after validation; a cached identity is free.
+                let cells_read = super::status_line::refresh_sel_status(
+                    &mut main.sel_status,
+                    main.selection.as_ref(),
+                    main.copy_mode.as_ref(),
+                    active_id,
+                    frame.guards[active_pos].1.grid(),
+                );
+                if let (Some(cells_read), Some(counters)) =
+                    (cells_read, self.frame_counters.as_mut())
+                {
+                    // The gate is on, so the count and the cells it read are recorded.
+                    counters.status_line.sel_counts += 1;
+                    counters.status_line.sel_cells += cells_read;
+                }
+            }
             if self.command_palette.is_open() && self.palette_attached_window.is_none() {
                 self.command_palette.set_context(super::overlays::command_palette_context(
                     main,
@@ -1003,6 +1025,11 @@ impl App {
                     let grid = frame.guards[active_pos].1.grid();
                     (grid.cursor.row, grid.cursor.col)
                 };
+                status_facts = Some(super::status_line::StatusPaneFacts::of(
+                    &frame.guards[active_pos].1,
+                    frame_viewports.active,
+                    active_id,
+                ));
                 let cursor_rect_copy = frame.guards[active_pos].2;
                 let recovery_sample = self.runtime_smoke.as_ref().and_then(|smoke| {
                     smoke.recovery_marker_sample(
@@ -1168,6 +1195,10 @@ impl App {
         } else {
             // When: the main window has no renderer, nothing renders; release the guards, then close the timing.
             drop(frame);
+        }
+        if let Some(facts) = status_facts {
+            // The frame copied focused-pane facts; the next loop pass refreshes the strip.
+            self.observe_status_pane(win_id, facts);
         }
         if let Some(window) = self.main_mut() {
             // A presented frame's receipts replace the pending set emptied at collection.

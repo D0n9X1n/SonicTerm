@@ -2019,3 +2019,35 @@ fn an_early_phase_end_hands_its_one_transport_to_finish() {
     assert!(!probe.finalize_run(Status::Blocked, None));
     assert_eq!(calls.borrow().len(), 1, "exactly one transport");
 }
+
+/// A drag lagging its schedule, pressed mid-cycle, with its phase ending at `deadline`.
+fn lagging_drag(deadline: Instant, quiet_from: Option<Instant>) -> Drag {
+    Drag {
+        interval: Duration::from_millis(8),
+        started: deadline - Duration::from_secs(2),
+        ticks: 30,
+        cycle_ticks: 72,
+        move_ticks: 60,
+        start: (0.0, 0.0),
+        end: (100.0, 100.0),
+        pressed: true,
+        deadline,
+        quiet_from,
+        finished: false,
+    }
+}
+
+#[test]
+fn a_status_line_drag_goes_quiet_before_its_phase_ends() {
+    // A lagging drag would still be moving at the deadline, so its last selection change could
+    // present in `selected`; in the quiet tail it only releases the held press, then stops.
+    let deadline = Instant::now();
+    let quiet_from = deadline - STATUS_LINE_DRAG_SETTLE;
+    let mut drag = lagging_drag(deadline, Some(quiet_from));
+    assert_eq!(drag.next_motion(quiet_from), Some(DragMotion::Release));
+    assert!(!drag.pressed && drag.finished);
+    assert_eq!(drag.next_motion(deadline), None, "nothing changes the selection after the release");
+    // Without a quiet tail (S6), the same lagging drag keeps its schedule and moves.
+    let mut scheduled = lagging_drag(deadline, None);
+    assert!(matches!(scheduled.next_motion(quiet_from), Some(DragMotion::Move(_))));
+}

@@ -294,6 +294,48 @@ impl Default for ProbeEpoch {
     }
 }
 
+/// What the status line's link segment reads from the probe under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeStatus<'probe> {
+    /// Validation has not finished for this path.
+    Pending(&'probe Path),
+    /// The winning candidate's path and the action a click takes.
+    Selected(&'probe Path, PathOpenDecision),
+    /// Validation finished without an actionable candidate; the i18n key says why.
+    Failed(&'probe Path, &'static str),
+    /// A bare name with no shell-reported directory to resolve it against.
+    NoDirectory(&'probe Path),
+    /// A bare name on the alternate screen, where bare names are not resolved.
+    AltScreen(&'probe Path),
+}
+
+impl PathProbeState {
+    /// The probe under the pointer for the status line, or `None` when no
+    /// local path is under it. Reads retained state only; it never probes.
+    pub(crate) fn status(&self) -> Option<ProbeStatus<'_>> {
+        let key = self.current.as_ref()?;
+        let candidate = key.candidates.iter().min_by_key(|candidate| candidate.char_len())?;
+        let path = candidate.resolved_path.as_path();
+        let bare = matches!(candidate.target, DetectedTarget::BareName(_));
+        if bare && key.cwd.is_none() {
+            // When: a bare name has no OSC 7 directory, it can never resolve.
+            return Some(ProbeStatus::NoDirectory(path));
+        }
+        if bare && key.alt_screen {
+            // When: bare names are not resolved on the alternate screen, say so.
+            return Some(ProbeStatus::AltScreen(path));
+        }
+        Some(match (&self.selection, self.failure) {
+            (Some(selection), _) => ProbeStatus::Selected(
+                selection.candidate.resolved_path.as_path(),
+                selection.decision,
+            ),
+            (None, Some(reason)) => ProbeStatus::Failed(path, reason),
+            (None, None) => ProbeStatus::Pending(path),
+        })
+    }
+}
+
 impl PathProbeState {
     pub(super) fn invalidate(&mut self) -> bool {
         let changed = self.current.is_some() || self.selection.is_some();
@@ -445,6 +487,8 @@ fn key_preserves_selection(
 struct PathProbeQueue {
     order: VecDeque<WindowId>,
     pending: HashMap<WindowId, PathProbeRequest>,
+    /// `pending.len()`, published after every change so the status line reads it without the lock.
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl PathProbeQueue {
@@ -454,6 +498,13 @@ impl PathProbeQueue {
             // A replacement keeps the window's turn; only a newly waiting window joins the back.
             self.order.push_back(window_id);
         }
+        self.publish_waiting();
+    }
+
+    /// Publish how many requests wait, for `path_check`.
+    // Ordering: waiting is stored Relaxed; the reader needs a recent count, not a happens-before.
+    fn publish_waiting(&self) {
+        self.waiting.store(self.pending.len(), std::sync::atomic::Ordering::Relaxed);
     }
 
     fn take_next(&mut self) -> Option<PathProbeRequest> {
@@ -461,6 +512,7 @@ impl PathProbeQueue {
             if let Some(request) = self.pending.remove(&window_id) {
                 // When: `pending` holds `window_id`'s newest request, serve it before
                 // any later-queued window.
+                self.publish_waiting();
                 return Some(request);
             }
         }
@@ -469,7 +521,9 @@ impl PathProbeQueue {
 
     fn cancel_window(&mut self, window_id: WindowId) -> bool {
         self.order.retain(|queued| *queued != window_id);
-        self.pending.remove(&window_id).is_some()
+        let removed = self.pending.remove(&window_id).is_some();
+        self.publish_waiting();
+        removed
     }
 }
 
@@ -483,20 +537,35 @@ impl PathProbeQueue {
 pub(super) struct PathProbeMailbox {
     queue: Arc<Mutex<PathProbeQueue>>,
     wake: Sender<()>,
+    /// The queue's published waiting count.
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl PathProbeMailbox {
     pub(super) fn new() -> (Self, Receiver<()>) {
         let (wake, receiver) = crossbeam_channel::bounded(1);
-        (Self { queue: Arc::default(), wake }, receiver)
+        let queue = PathProbeQueue::default();
+        let waiting = Arc::clone(&queue.waiting);
+        (Self { queue: Arc::new(Mutex::new(queue)), wake, waiting }, receiver)
+    }
+
+    /// Requests waiting for the worker, without taking the queue lock.
+    // Ordering: waiting is loaded Relaxed, pairing with publish_waiting's Relaxed store.
+    pub(super) fn waiting(&self) -> usize {
+        self.waiting.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Queue `request` behind other windows' waiting probes, replacing only its own window's.
     pub(super) fn submit(&self, request: PathProbeRequest) -> Result<(), TrySendError<()>> {
+        let window_id = request.key.window_id;
         lock_probe_queue(&self.queue).submit(request);
         match self.wake.try_send(()) {
             Ok(()) | Err(TrySendError::Full(())) => Ok(()),
-            Err(error @ TrySendError::Disconnected(())) => Err(error),
+            Err(error @ TrySendError::Disconnected(())) => {
+                // A stopped worker never takes the request, so it must not count as waiting.
+                lock_probe_queue(&self.queue).cancel_window(window_id);
+                Err(error)
+            }
         }
     }
 
@@ -534,10 +603,15 @@ fn run_probe_worker(
     queue: &Mutex<PathProbeQueue>,
     mut classify: impl FnMut(&Path) -> PathOpenDecision,
     mut deliver: impl FnMut(PathProbeResult) -> bool,
+    busy: Option<&super::jobs::BusySlot>,
 ) {
     while wake.recv().is_ok() {
         while let Some(request) = take_next_probe(queue) {
-            let outcome = probe_candidates(&request.key.candidates, &mut classify);
+            let outcome = {
+                // Execution only, never queue wait, counts toward `path_check`'s age.
+                let _busy = busy.map(super::jobs::BusySlot::enter);
+                probe_candidates(&request.key.candidates, &mut classify)
+            };
             let result = PathProbeResult {
                 failure: outcome.as_ref().err().copied(),
                 selection: outcome.ok(),
@@ -730,6 +804,8 @@ fn open_request_still_selected(
 pub(crate) struct PathWorkers {
     probe: PathProbeMailbox,
     open: Sender<PathOpenRequest>,
+    /// Each worker's busy slot, stamped around its blocking call.
+    busy: Arc<super::jobs::PathBusy>,
 }
 
 impl PathWorkers {
@@ -738,17 +814,26 @@ impl PathWorkers {
         proxy: winit::event_loop::EventLoopProxy<super::UserEvent>,
     ) -> io::Result<Self> {
         let (probe, wake) = PathProbeMailbox::new();
+        let busy = Arc::new(super::jobs::PathBusy::new());
+        let (probe_busy, open_busy) = (Arc::clone(&busy), Arc::clone(&busy));
         // The worker owns no wake sender, so dropping the App's mailbox ends it.
         let queue = Arc::clone(&probe.queue);
         let probe_proxy = proxy.clone();
         std::thread::Builder::new()
             .name("sonicterm-path-probe".into())
             .spawn(move || {
-                run_probe_worker(&wake, &queue, classify_local_target, |result| {
+                let deliver = |result: PathProbeResult| {
                     probe_proxy
                         .send_event(super::UserEvent::PathProbeFinished(Box::new(result)))
                         .is_ok()
-                });
+                };
+                run_probe_worker(
+                    &wake,
+                    &queue,
+                    classify_local_target,
+                    deliver,
+                    Some(&probe_busy.probe),
+                );
             })
             .map_err(|error| io::Error::other(format!("spawn path probe worker: {error}")))?;
 
@@ -757,6 +842,8 @@ impl PathWorkers {
             .name("sonicterm-path-open".into())
             .spawn(move || {
                 while let Ok(request) = open_rx.recv() {
+                    // The re-probe and the native open or reveal are this request's execution.
+                    let _busy = open_busy.open.enter();
                     let result = if open_request_still_selected(&request, classify_local_target) {
                         open_path(&request.path, request.expected_decision)
                     } else {
@@ -780,7 +867,17 @@ impl PathWorkers {
             })
             .map_err(|error| io::Error::other(format!("spawn path open worker: {error}")))?;
 
-        Ok(Self { probe, open })
+        Ok(Self { probe, open, busy })
+    }
+
+    /// Path checks waiting for a worker: queued probes plus a queued open.
+    pub(super) fn waiting(&self) -> usize {
+        self.probe.waiting() + self.open.len()
+    }
+
+    /// The workers' busy slots, which the status line's `path_check` reads.
+    pub(super) fn busy(&self) -> &super::jobs::PathBusy {
+        &self.busy
     }
 
     pub(super) fn probe(&self, request: PathProbeRequest) -> io::Result<()> {
@@ -2718,6 +2815,57 @@ fn spans_reach_cut_pane_edge(
     tail_cut || head_cut
 }
 
+/// Byte cap of an OSC 8 link's captured visible text; a longer label is not compared.
+const MAX_LINK_LABEL_BYTES: usize = 2048;
+
+/// An OSC 8 link's visible text and whether it was read whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkLabel {
+    /// The text the link's cells show, at most [`MAX_LINK_LABEL_BYTES`].
+    pub text: String,
+    /// False when the fragments reach the view's top or bottom row, hit the span cap, or the
+    /// text passes the byte cap, so part of the label may be unseen.
+    pub complete: bool,
+}
+
+/// The visible text of the hover fragments `cells`, read from `frame`.
+fn hyperlink_label(
+    frame: &FrameRows<'_>,
+    cells: &sonicterm_render_model::inputs::HoveredUrlCells,
+) -> LinkLabel {
+    use sonicterm_render_model::inputs::MAX_HOVERED_URL_SPANS;
+    let spans = cells.spans();
+    let last_row = frame.grid().rows.saturating_sub(1);
+    let mut complete = spans.len() < MAX_HOVERED_URL_SPANS
+        && spans.first().is_some_and(|span| span.row > 0)
+        && spans.last().is_some_and(|span| span.row < last_row);
+    let mut text = String::new();
+    'spans: for span in spans {
+        let Some(row) = frame.row(frame.view_top() + u64::from(span.row)) else {
+            // When: a fragment's row is not in the frame, the label cannot be read whole.
+            complete = false;
+            break;
+        };
+        let width = usize::from(span.end_col - span.start_col);
+        for cell in row.iter().skip(usize::from(span.start_col)).take(width) {
+            if cell.flags.contains(sonicterm_types::CellFlags::WIDE_CONT) {
+                // When: `WIDE_CONT` marks the right half of a wide `cell`, its text is already read.
+                continue;
+            }
+            if text.len() + cell.ch.len_utf8() + cell.extras().map_or(0, str::len)
+                > MAX_LINK_LABEL_BYTES
+            {
+                // When: the label passes `MAX_LINK_LABEL_BYTES`, the rest is unseen.
+                complete = false;
+                break 'spans;
+            }
+            text.push(cell.ch);
+            text.extend(cell.extras());
+        }
+    }
+    LinkLabel { text, complete }
+}
+
 fn hyperlink_hover_cells(
     frame: &FrameRows<'_>,
     pane_id: u64,
@@ -2868,6 +3016,8 @@ pub(super) struct CellTargetSnapshot {
     pub(super) display: String,
     pub(super) explicit_hyperlink: bool,
     pub(super) target: ResolvedCellTarget,
+    /// An OSC 8 URI's visible text; `None` for every other target.
+    pub(super) label: Option<LinkLabel>,
 }
 
 impl CellTargetSnapshot {
@@ -2908,7 +3058,11 @@ impl CellTargetSnapshot {
     fn hovered(&self, active: bool) -> Option<super::hovered_url::HoveredUrl> {
         let mut cells = self.hover_cells?;
         cells.active = active;
-        Some(super::hovered_url::HoveredUrl { cells, url: self.display.clone() })
+        Some(super::hovered_url::HoveredUrl {
+            cells,
+            url: self.display.clone(),
+            label: self.label.clone(),
+        })
     }
 }
 
@@ -3068,6 +3222,7 @@ impl App {
         let cell = row.iter().nth(usize::from(col))?;
         let rejected = |destination: &str, reason| {
             Some(CellTargetSnapshot {
+                label: None,
                 pane_id,
                 hover_cells: None,
                 display: destination.to_owned(),
@@ -3140,6 +3295,7 @@ impl App {
                     alt_screen: grid.is_alt(),
                 };
                 Some(CellTargetSnapshot {
+                    label: None,
                     pane_id,
                     hover_cells,
                     display: destination.to_owned(),
@@ -3167,12 +3323,15 @@ impl App {
                     hyperlink_hover_cells(frame, pane_id, viewport_row, col, hyperlink_id),
                 );
             }
+            let hover_cells =
+                hyperlink_hover_cells(frame, pane_id, viewport_row, col, hyperlink_id);
             return Some(CellTargetSnapshot {
                 pane_id,
-                hover_cells: hyperlink_hover_cells(frame, pane_id, viewport_row, col, hyperlink_id),
+                hover_cells,
                 display: uri.clone(),
                 explicit_hyperlink: true,
                 target: ResolvedCellTarget::Uri(uri),
+                label: hover_cells.as_ref().map(|cells| hyperlink_label(frame, cells)),
             });
         }
 
@@ -3246,6 +3405,7 @@ impl App {
                 return local_snapshot(uri, local, false, Some(hover_cells));
             }
             return Some(CellTargetSnapshot {
+                label: None,
                 pane_id,
                 hover_cells: Some(hover_cells),
                 display: uri.clone(),
@@ -3310,6 +3470,7 @@ impl App {
             alt_screen: grid.is_alt(),
         };
         Some(CellTargetSnapshot {
+            label: None,
             pane_id,
             hover_cells: None,
             display,
@@ -3514,6 +3675,7 @@ impl App {
         let mut visual_changed = false;
 
         if let Some(window) = self.windows.get_mut(&window_id) {
+            window.hover_unresolved = false;
             let previous_hover = window.hovered_url.clone();
             let previous_link = window.hover_link;
             let show_preview = modifier_held
@@ -3557,6 +3719,7 @@ impl App {
                         hovered = cells.map(|cells| super::hovered_url::HoveredUrl {
                             cells,
                             url: selection.candidate.display().to_string(),
+                            label: None,
                         });
                     }
                 }
@@ -3580,10 +3743,16 @@ impl App {
 
         if let Some(request) = probe_request {
             self.note_hover(|hover| hover.probes_submitted += 1);
-            if let Some(workers) = &self.path_workers {
-                if let Err(error) = workers.probe(request) {
-                    tracing::warn!(%error, "path openability probe unavailable");
-                }
+            let submitted = self.path_workers.as_ref().is_some_and(|workers| {
+                workers
+                    .probe(request)
+                    .inspect_err(|error| {
+                        tracing::warn!(%error, "path openability probe unavailable");
+                    })
+                    .is_ok()
+            });
+            if submitted {
+                self.note_path_submit();
             }
         }
         if let Some(window) = self.windows.get(&window_id) {
@@ -3606,6 +3775,8 @@ impl App {
             return;
         };
         window.hover_detection.clear();
+        // The pointer left the targets, so the absence is resolved, not pending a re-detection.
+        window.hover_unresolved = false;
         let probe_changed = window.path_probe.invalidate();
         let hover_changed = window.hovered_url.take().is_some();
         let link_changed = window.hover_link;
@@ -3757,7 +3928,10 @@ impl App {
                     selection.decision,
                     contenders,
                 ) {
-                    Ok(true) => true,
+                    Ok(true) => {
+                        self.note_path_submit();
+                        true
+                    }
                     Ok(false) => {
                         tracing::warn!("path open queue full; request dropped");
                         self.report_failed_target(

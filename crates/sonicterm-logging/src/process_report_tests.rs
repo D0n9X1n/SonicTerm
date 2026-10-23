@@ -358,3 +358,22 @@ fn read_pids_skips_invalid_tokens_and_honours_cancel() {
     assert!(read_pids("1 2 3".as_bytes(), 64, &AtomicBool::new(true)).is_empty());
     assert_eq!(read_pids("1 2 3".as_bytes(), 0, &AtomicBool::new(false)), Vec::<u32>::new());
 }
+
+#[test]
+fn cpu_time_is_monotone_and_advances_over_a_busy_loop() {
+    // Two samples around a busy loop never go backwards, and the loop's work shows up where the
+    // platform has a query; elsewhere the sample is `None`.
+    let first = sample_cpu_time();
+    assert_eq!(first.is_some(), cfg!(any(target_os = "macos", windows, target_os = "linux")));
+    let Some(before) = first else {
+        return;
+    };
+    let started = std::time::Instant::now();
+    let mut spin: u64 = 0;
+    while started.elapsed() < std::time::Duration::from_millis(50) {
+        spin = std::hint::black_box(spin.wrapping_add(1));
+    }
+    let after = sample_cpu_time().unwrap();
+    assert!(after >= before);
+    assert!(after > before, "50 ms of spinning adds CPU time");
+}

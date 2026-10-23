@@ -2679,7 +2679,12 @@ FRAME_COUNTER_FIELDS = {
              # URL and path hover work: lookups, detections run, cache hits, rows detection read, probes hover
              # submitted and rows quick select scanned. They are App counters, so a base older than them shows
              # n/a and the comparison gives head-side evidence, not a before/after detection delta.
-             *HOVER_COUNTER_FIELDS),
+             *HOVER_COUNTER_FIELDS,
+             # Status line memory samples, serviced status line wakes and strip-only redraw requests, then
+             # selection counts, the cells they read and `History: trimmed` appearances; App counters, so a
+             # base older than them shows n/a.
+             "status_line_samples", "status_line_wakes", "status_line_redraws", "status_line_sel_counts",
+             "status_line_sel_cells", "status_line_history_shows"),
             # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker.
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),

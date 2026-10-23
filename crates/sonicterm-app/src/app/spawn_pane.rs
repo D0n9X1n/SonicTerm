@@ -61,28 +61,82 @@ const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// Maximum decoded UTF-8 text one OSC 52 write may place on the clipboard.
 pub(super) const MAX_OSC52_CLIPBOARD_BYTES: usize = 512 * 1024;
 
-/// Decode one ordinary OSC 52 clipboard write into a bounded app-thread event.
-///
-/// Only target `c` writes are accepted. Queries (`?`), unsupported selections,
-/// malformed Base64, non-UTF-8 payloads, and decoded output above the hard cap
-/// remain inert and can never expose or mutate the native clipboard.
-pub(super) fn osc52_clipboard_write_event(selection: char, data: &str) -> Option<UserEvent> {
-    if selection != 'c' || data == "?" || data.is_empty() {
-        // When: `selection` is not clipboard `c`, or `data` is a query/empty, refuse the unsupported operation.
-        return None;
+/// Why an OSC 52 request did not write the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc52Refusal {
+    /// A clipboard read (`?`); reads are never answered.
+    Read,
+    /// A selection other than the clipboard `c`.
+    Selection(char),
+    /// The payload decodes past [`MAX_OSC52_CLIPBOARD_BYTES`].
+    TooLarge,
+    /// Empty, malformed Base64, or text that is not UTF-8.
+    Invalid,
+}
+
+/// SonicTerm's decision on one OSC 52 request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Osc52Outcome {
+    /// Write this decoded text to the clipboard.
+    Write(String),
+    /// Leave the clipboard alone.
+    Refused(Osc52Refusal),
+}
+
+/// The OSC 52 requests of one VT batch, counted without their payloads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClipAttempts {
+    /// Requests in the batch.
+    pub total: u32,
+    /// Requests written to the clipboard.
+    pub accepted: u32,
+    /// Requests refused.
+    pub refused: u32,
+    /// The last request's refusal; `None` when it was accepted.
+    pub latest: Option<Osc52Refusal>,
+}
+
+/// Decide one OSC 52 request. Only target `c` writes are accepted. Queries (`?`), other
+/// selections, malformed Base64, non-UTF-8 payloads and decoded output above the hard cap are
+/// refused with their reason and can never expose or mutate the native clipboard.
+pub(super) fn osc52_decision(selection: char, data: &str) -> Osc52Outcome {
+    if data == "?" {
+        // When: `data` is a query, the request is a clipboard read.
+        return Osc52Outcome::Refused(Osc52Refusal::Read);
+    }
+    if selection != 'c' {
+        // When: `selection` is not clipboard `c`, the selection is unsupported.
+        return Osc52Outcome::Refused(Osc52Refusal::Selection(selection));
+    }
+    if data.is_empty() {
+        // When: `data` is empty, there is nothing to write.
+        return Osc52Outcome::Refused(Osc52Refusal::Invalid);
     }
     let max_encoded = MAX_OSC52_CLIPBOARD_BYTES.div_ceil(3) * 4;
     if data.len() > max_encoded {
         // When: `data` cannot encode a payload within the decoded cap, reject before allocating the output buffer.
-        return None;
+        return Osc52Outcome::Refused(Osc52Refusal::TooLarge);
     }
     let mut decoded = vec![0u8; MAX_OSC52_CLIPBOARD_BYTES];
-    let written = base64::engine::general_purpose::STANDARD
+    let written = match base64::engine::general_purpose::STANDARD
         .decode_slice(data.as_bytes(), &mut decoded)
-        .ok()?;
+    {
+        Ok(written) => written,
+        Err(base64::DecodeSliceError::OutputSliceTooSmall) => {
+            // When: OutputSliceTooSmall, the payload decodes past the cap: too large, not malformed.
+            return Osc52Outcome::Refused(Osc52Refusal::TooLarge);
+        }
+        Err(_) => {
+            // When: decode_slice returns any other Err, the Base64 is malformed.
+            return Osc52Outcome::Refused(Osc52Refusal::Invalid);
+        }
+    };
     decoded.truncate(written);
-    let text = String::from_utf8(decoded).ok()?;
-    (!text.is_empty()).then_some(UserEvent::ClipboardWrite { text })
+    match String::from_utf8(decoded) {
+        Ok(text) if !text.is_empty() => Osc52Outcome::Write(text),
+        // Non-UTF-8 or empty decoded text is never written.
+        _ => Osc52Outcome::Refused(Osc52Refusal::Invalid),
+    }
 }
 
 /// How the pane's child exited, waiting briefly for it to become observable.
@@ -290,7 +344,7 @@ impl SyncLatch {
 pub(in crate::app) struct PaneVtHandles {
     parser: Arc<Mutex<Parser>>,
     redraw_target: Arc<Mutex<Option<WindowId>>>,
-    command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>>,
+    command_events: Arc<Mutex<super::CommandQueue>>,
     cursor_visible: Arc<AtomicBool>,
     keyboard_input: Arc<AtomicU64>,
     pointer_input: Arc<std::sync::atomic::AtomicU8>,
@@ -298,16 +352,29 @@ pub(in crate::app) struct PaneVtHandles {
     sync_deadline_word: Arc<AtomicU64>,
     sync_resets: Arc<AtomicU64>,
     output_generation: Arc<AtomicU64>,
+    output_bytes: Arc<AtomicU64>,
+    output_counting: Arc<AtomicBool>,
     output_outstanding: Arc<AtomicBool>,
+    bells: Arc<AtomicU64>,
     inline_images: Arc<Mutex<Vec<InlineImage>>>,
     inline_media_charge: super::media::SharedInlineMediaCharge,
     frame_counters: Option<super::frame_counters::PaneFrameCounters>,
     /// This worker's echo-watch target and recorded facts, so an armed watch locks its slot once
     /// per token and once per fact.
     echo_cache: std::cell::Cell<super::echo_watch::EchoCache>,
+    /// The pane these handles belong to, named in the events the worker sends; 0 until set.
+    pane_id: u64,
 }
 
 impl PaneVtHandles {
+    /// Count `len` received PTY bytes toward the `out` segment, only while it is listed.
+    // Ordering: output_counting and output_bytes are Relaxed; the sampler needs an eventual total.
+    pub(in crate::app) fn count_output(&self, len: usize) {
+        if self.output_counting.load(Ordering::Relaxed) {
+            self.output_bytes.fetch_add(len as u64, Ordering::Relaxed);
+        }
+    }
+
     /// Clone the exact pane-owned handles that its VT worker must update.
     pub(in crate::app) fn from_pane_state(pane: &PaneState) -> Self {
         Self {
@@ -321,12 +388,22 @@ impl PaneVtHandles {
             sync_deadline_word: pane.sync_deadline_word.clone(),
             sync_resets: pane.sync_resets.clone(),
             output_generation: pane.output_generation.clone(),
+            output_bytes: pane.output_bytes.clone(),
+            output_counting: pane.output_counting.clone(),
             output_outstanding: pane.output_outstanding.clone(),
+            bells: pane.bells.clone(),
             inline_images: pane.inline_images.clone(),
             inline_media_charge: pane.inline_media_charge.clone(),
             frame_counters: pane.frame_counters.clone(),
             echo_cache: std::cell::Cell::new(super::echo_watch::EchoCache::default()),
+            pane_id: 0,
         }
+    }
+
+    /// These handles, naming `pane_id` in the events the worker sends.
+    pub(in crate::app) fn with_pane_id(mut self, pane_id: u64) -> Self {
+        self.pane_id = pane_id;
+        self
     }
 }
 
@@ -342,7 +419,7 @@ pub(super) fn spawn_pane_workers(
     let exit_probe = pty.child_exit_probe();
     let input_state = pty.input_sender();
     let in_tx_reply = pty.reply_sender();
-    let worker_handles = PaneVtHandles::from_pane_state(pane);
+    let worker_handles = PaneVtHandles::from_pane_state(pane).with_pane_id(pane_id);
     let redraw_proxy = proxy.clone();
 
     std::thread::Builder::new()
@@ -363,6 +440,7 @@ pub(super) fn spawn_pane_workers(
                         // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
                         // The chunk's read stamp is read before the chunk moves into the batch.
                         let read_at = bytes.read_at();
+                        worker_handles.count_output(bytes.len());
                         flush.receive(bytes.len(), Instant::now());
                         process_pane_vt_batch_and_publish(
                             &worker_handles,
@@ -767,8 +845,8 @@ pub(in crate::app) fn publish_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>
 
 // Lock order: parser -> echo slot (pre_read, post_read); inline_images -> inline_media_charge after parser releases,
 // command_events after both.
-// Ordering: cursor_visible, keyboard_input, pointer_input and the output_generation load are Relaxed:
-// self-contained words; this worker alone writes output_generation.
+// Ordering: cursor_visible, keyboard_input, pointer_input, bells, output_generation load are Relaxed;
+// self-contained words, this worker the sole writer.
 #[allow(clippy::too_many_arguments)]
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
@@ -863,6 +941,10 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         let mut clipboard_requests = Vec::new();
         let mut command_side_effects = Vec::new();
         let mut media_events = Vec::new();
+        // A batch that rings any number of times is one bell, so a ringing loop marks its tab once.
+        if events.iter().any(|event| matches!(event, VtEvent::Bell)) {
+            handles.bells.fetch_add(1, Ordering::Relaxed);
+        }
         for event in events {
             match event {
                 VtEvent::CursorVisibility(visible) => {
@@ -892,10 +974,24 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
             }
         }
 
+        // Every accepted write is its own event, in order; refusals only count toward one summary.
+        let mut attempts = ClipAttempts::default();
         for (selection, data) in clipboard_requests {
-            if let Some(event) = osc52_clipboard_write_event(selection, &data) {
-                emit_event(event);
+            attempts.total = attempts.total.saturating_add(1);
+            match osc52_decision(selection, &data) {
+                Osc52Outcome::Write(text) => {
+                    attempts.accepted = attempts.accepted.saturating_add(1);
+                    attempts.latest = None;
+                    emit_event(UserEvent::ClipboardWrite { pane_id: handles.pane_id, text });
+                }
+                Osc52Outcome::Refused(reason) => {
+                    attempts.refused = attempts.refused.saturating_add(1);
+                    attempts.latest = Some(reason);
+                }
             }
+        }
+        if attempts.total > 0 {
+            emit_event(UserEvent::ClipboardAttempts { pane_id: handles.pane_id, attempts });
         }
 
         let mut decoded_images = Vec::new();

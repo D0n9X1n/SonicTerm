@@ -362,6 +362,7 @@ fn assert_reload_revokes_path_authorization(mutate: fn(&mut Config)) {
         assert!(window.path_probe.accept(&result, Some(&key)));
         stale.push((window_id, key, result));
         window.hovered_url = Some(HoveredUrl {
+            label: None,
             cells: sonicterm_render_model::inputs::HoveredUrlCells::single(7, 2, 4, 10, true)
                 .unwrap(),
             url: "entry".into(),

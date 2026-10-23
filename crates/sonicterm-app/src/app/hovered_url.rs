@@ -20,6 +20,8 @@ pub struct HoveredUrl {
     pub cells: sonicterm_render_model::inputs::HoveredUrlCells,
     /// Complete target text retained for logging and activation feedback.
     pub url: String,
+    /// An OSC 8 link's visible text, read from its hover fragments; `None` for other targets.
+    pub label: Option<super::path_target::LinkLabel>,
 }
 
 impl HoveredUrl {

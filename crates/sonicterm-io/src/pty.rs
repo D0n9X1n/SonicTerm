@@ -8,7 +8,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc,
     },
     thread,
@@ -126,6 +126,53 @@ pub enum PtyWriterPhase {
     Stopped = 3,
 }
 
+/// User-input ordinals and their comparisons are taken modulo this (2^20).
+const INPUT_ORDINAL_MASK: u32 = (1 << 20) - 1;
+/// Admission slots, one per ordinal modulo this. At most five writes are outstanding (four queued,
+/// one taken), so five would suffice, but five does not divide 2^20: ordinal 2^20 - 1 and its wrapped
+/// successor 0 would share a slot. Eight is the next power of two, so a wrapped ordinal keeps its own.
+const INPUT_SLOTS: usize = 8;
+/// `writer_on`: the writer is between messages.
+const WRITER_ON_IDLE: u8 = 0;
+/// `writer_on`: the writer is writing user input.
+const WRITER_ON_INPUT: u8 = 1;
+/// `writer_on`: the writer is writing a parser reply.
+const WRITER_ON_REPLY: u8 = 2;
+/// `terminal`: the writer is running.
+const TERMINAL_RUNNING: u8 = 0;
+/// `terminal`: a native `write_all` failed.
+const TERMINAL_FAILED_WRITE: u8 = 1;
+/// `terminal`: a native `flush` failed.
+const TERMINAL_FAILED_FLUSH: u8 = 2;
+/// `terminal`: cancelled, closed or disconnected on purpose.
+const TERMINAL_STOPPED: u8 = 3;
+
+/// The oldest user-input write that has not completed, or why none can be judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyInputProgress {
+    /// Every admitted user-input write completed.
+    Idle,
+    /// The oldest outstanding write: its ordinal (mod 2^20), when it was admitted, and whether the
+    /// writer is busy with a parser reply ahead of it.
+    Oldest {
+        /// Ordinal of the oldest outstanding user-input write, modulo 2^20.
+        ordinal: u32,
+        /// When that write was admitted.
+        admitted_at: Instant,
+        /// The writer is writing a parser reply rather than user input.
+        on_reply: bool,
+    },
+    /// A completion raced the sample; nothing can be judged from it.
+    Raced,
+    /// The writer has stopped; `lost` admitted writes never completed.
+    Terminal {
+        /// The writer stopped on a native error, not on purpose.
+        failed: bool,
+        /// Admitted user-input writes that never completed.
+        lost: u32,
+    },
+}
+
 #[derive(Debug)]
 struct PtyWriterProgress {
     closing: std::sync::atomic::AtomicBool,
@@ -133,6 +180,19 @@ struct PtyWriterProgress {
     operation: AtomicU64,
     in_flight_bytes: AtomicUsize,
     completed_messages: AtomicU64,
+    /// Held only around one admission and once at writer exit, so ordinal order is channel order
+    /// and no admission succeeds after the writer recorded its end.
+    admission: Mutex<()>,
+    /// User-input writes admitted, wrapping; compared modulo 2^20.
+    input_admitted: AtomicU32,
+    /// User-input writes completed (flushed), wrapping; parser replies never count.
+    input_completed: AtomicU32,
+    /// Per ordinal modulo [`INPUT_SLOTS`]: `(ordinal << 44) | admitted_ms`.
+    admitted_at: [AtomicU64; INPUT_SLOTS],
+    /// What the writer is writing, for the tooltip.
+    writer_on: AtomicU8,
+    /// Whether and how the writer stopped.
+    terminal: AtomicU8,
 }
 
 impl PtyWriterProgress {
@@ -143,6 +203,80 @@ impl PtyWriterProgress {
             operation: AtomicU64::new(0),
             in_flight_bytes: AtomicUsize::new(0),
             completed_messages: AtomicU64::new(0),
+            admission: Mutex::new(()),
+            input_admitted: AtomicU32::new(0),
+            input_completed: AtomicU32::new(0),
+            admitted_at: std::array::from_fn(|_| AtomicU64::new(0)),
+            writer_on: AtomicU8::new(WRITER_ON_IDLE),
+            terminal: AtomicU8::new(TERMINAL_RUNNING),
+        }
+    }
+
+    /// Admit one user-input message: under `admission`, call `attempt(false)` once the writer has
+    /// ended so it refuses without sending; else count and stamp the ordinal before `attempt(true)`
+    /// sends, so the writer can never complete an unadmitted message, and roll back a refused send.
+    // Ordering: terminal is loaded Acquire; input_admitted is loaded Relaxed under the lock and,
+    // like admitted_at, stored Release for input_progress's Acquire loads.
+    fn admit<T>(&self, attempt: impl FnOnce(bool) -> Result<(), T>) -> Result<(), T> {
+        let _admission = self.admission.lock();
+        if self.terminal.load(Ordering::Acquire) != TERMINAL_RUNNING {
+            // When: terminal is set, the writer ended and an admission now would be lost unrecorded.
+            return attempt(false);
+        }
+        let previous = self.input_admitted.load(Ordering::Relaxed);
+        let ordinal = previous.wrapping_add(1);
+        let tag = u64::from(ordinal & INPUT_ORDINAL_MASK);
+        self.admitted_at[ordinal as usize % INPUT_SLOTS]
+            .store((tag << 44) | self.elapsed_millis(), Ordering::Release);
+        self.input_admitted.store(ordinal, Ordering::Release);
+        let sent = attempt(true);
+        if sent.is_err() {
+            // A refused send returns its ordinal, so ordinals stay in channel order.
+            self.input_admitted.store(previous, Ordering::Release);
+        }
+        sent
+    }
+
+    /// Record why the writer stopped, once, under `admission`, so no later admission succeeds.
+    // Ordering: terminal is stored Release, paired with admit's and input_progress's Acquire loads.
+    fn record_terminal(&self, cause: u8) {
+        let _admission = self.admission.lock();
+        self.terminal.store(cause, Ordering::Release);
+    }
+
+    /// The oldest outstanding user-input write, from atomics only: no queue, channel or admission lock.
+    // Ordering: terminal, input_completed, input_admitted, admitted_at and writer_on load Acquire,
+    // pairing with their Release stores.
+    fn input_progress(&self) -> PtyInputProgress {
+        let terminal = self.terminal.load(Ordering::Acquire);
+        let completed = self.input_completed.load(Ordering::Acquire);
+        let admitted = self.input_admitted.load(Ordering::Acquire);
+        let outstanding = admitted.wrapping_sub(completed) & INPUT_ORDINAL_MASK;
+        if terminal != TERMINAL_RUNNING {
+            // When: terminal is not running, every outstanding admission is lost.
+            return PtyInputProgress::Terminal {
+                failed: terminal != TERMINAL_STOPPED,
+                lost: outstanding,
+            };
+        }
+        if outstanding == 0 {
+            // When: outstanding is 0, every admitted write completed.
+            return PtyInputProgress::Idle;
+        }
+        let oldest = completed.wrapping_add(1);
+        let stamp = self.admitted_at[oldest as usize % INPUT_SLOTS].load(Ordering::Acquire);
+        let on_reply = self.writer_on.load(Ordering::Acquire) == WRITER_ON_REPLY;
+        if self.input_completed.load(Ordering::Acquire) != completed
+            || (stamp >> 44) as u32 != oldest & INPUT_ORDINAL_MASK
+        {
+            // When: input_completed moved or the slot's tag is another ordinal, the sample raced.
+            return PtyInputProgress::Raced;
+        }
+        let admitted_ms = stamp & ((1 << 44) - 1);
+        PtyInputProgress::Oldest {
+            ordinal: oldest & INPUT_ORDINAL_MASK,
+            admitted_at: self.epoch + Duration::from_millis(admitted_ms),
+            on_reply,
         }
     }
 
@@ -204,7 +338,13 @@ impl PtyInputSender {
     /// is full, or the writer has gone. The error retains the bytes so the
     /// caller can retry or report rather than losing them silently.
     pub fn send(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
-        try_queue_pty_input(&self.tx, &self.queued_bytes, bytes)
+        try_queue_pty_input(&self.tx, &self.queued_bytes, &self.writer_progress, bytes)
+    }
+
+    /// The oldest outstanding user-input write, or how the writer stopped.
+    #[must_use]
+    pub fn input_progress(&self) -> PtyInputProgress {
+        self.writer_progress.input_progress()
     }
 
     /// Whether the owning pane has begun intentional PTY teardown rather than a native writer failure.
@@ -1196,6 +1336,7 @@ fn pty_input_channel() -> (Sender<Outgoing>, Receiver<Outgoing>) {
 fn try_queue_pty_input(
     tx: &Sender<Outgoing>,
     queued_bytes: &AtomicUsize,
+    progress: &PtyWriterProgress,
     bytes: Vec<u8>,
 ) -> Result<(), PtyInputError> {
     if !pty_input_message_allowed(bytes.len()) {
@@ -1207,16 +1348,23 @@ fn try_queue_pty_input(
     // would decrement a counter that had never been incremented.
     let len = bytes.len();
     queued_bytes.fetch_add(len, Ordering::Relaxed);
-    tx.try_send(bytes).map_err(|error| {
-        // The message never entered the queue, so it is not queued memory.
-        queued_bytes.fetch_sub(len, Ordering::Relaxed);
-        match error {
+    let admitted = progress.admit(|running| {
+        if !running {
+            // When: running is false, the writer has ended, so the bytes are handed back unsent.
+            return Err(PtyInputError::WriterDisconnected(bytes));
+        }
+        tx.try_send(bytes).map_err(|error| match error {
             crossbeam_channel::TrySendError::Full(bytes) => PtyInputError::QueueFull(bytes),
             crossbeam_channel::TrySendError::Disconnected(bytes) => {
                 PtyInputError::WriterDisconnected(bytes)
             }
-        }
-    })
+        })
+    });
+    if admitted.is_err() {
+        // A refused message never entered the queue, so it is not queued memory.
+        queued_bytes.fetch_sub(len, Ordering::Relaxed);
+    }
+    admitted
 }
 
 /// Reports whether one input message fits the enforced per-message byte cap.
@@ -1650,7 +1798,13 @@ impl PtyHandle {
     /// On failure, the error retains the rejected bytes so the caller can
     /// retry or notify the user instead of silently losing terminal input.
     pub fn send_input_nonblocking(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
-        try_queue_pty_input(&self.in_tx, &self.queued_input_bytes, bytes)
+        try_queue_pty_input(&self.in_tx, &self.queued_input_bytes, &self.writer_progress, bytes)
+    }
+
+    /// The oldest outstanding user-input write, or how the writer stopped; reads atomics only.
+    #[must_use]
+    pub fn input_progress(&self) -> PtyInputProgress {
+        self.writer_progress.input_progress()
     }
 
     /// Bytes waiting in this pane's PTY input channel.
@@ -2857,7 +3011,8 @@ fn spawn_reader_thread_with(
     PtyIoThread { handle: Some(handle), done, failed: false }
 }
 
-// Ordering: queued_bytes, in_flight_bytes, completed_messages, operation use Relaxed; the channel transfers ownership.
+// Ordering: queued_bytes, in_flight_bytes, completed_messages, operation Relaxed; closing SeqCst;
+// writer_on, input_completed Release.
 fn spawn_writer_thread(
     mut writer: Box<dyn Write + Send>,
     rx: Receiver<Outgoing>,
@@ -2873,6 +3028,8 @@ fn spawn_writer_thread(
             let _active = ActivePtyIoThread::enter();
             let mut last_was_reply = false;
             let mut reply_wake = replies.wake.clone();
+            // Cancellation, closing and a disconnected input channel end the writer on purpose.
+            let mut exit = TERMINAL_STOPPED;
             loop {
                 let cancelled =
                     !matches!(cancel.try_recv(), Err(crossbeam_channel::TryRecvError::Empty));
@@ -2912,11 +3069,16 @@ fn spawn_writer_thread(
                     queued_bytes.fetch_sub(bytes.len(), Ordering::Relaxed);
                 }
                 progress.in_flight_bytes.store(bytes.len(), Ordering::Relaxed);
+                let on = if is_reply { WRITER_ON_REPLY } else { WRITER_ON_INPUT };
+                progress.writer_on.store(on, Ordering::Release);
                 progress.begin(PtyWriterPhase::Writing);
                 if let Err(e) = writer.write_all(&bytes) {
                     // When: `write_all` fails, report it unless cancellation intentionally interrupted I/O.
-                    if cancel.try_recv().is_err() {
+                    let intentional =
+                        cancel.try_recv().is_ok() || progress.closing.load(Ordering::SeqCst);
+                    if !intentional {
                         tracing::warn!("pty write error: {e}");
+                        exit = TERMINAL_FAILED_WRITE;
                     }
                     replies.fail(e);
                     break;
@@ -2924,16 +3086,26 @@ fn spawn_writer_thread(
                 progress.begin(PtyWriterPhase::Flushing);
                 if let Err(error) = writer.flush() {
                     // When: flush fails, preserve the actual native failure rather than reporting a completed write.
-                    if cancel.try_recv().is_err() {
+                    let intentional =
+                        cancel.try_recv().is_ok() || progress.closing.load(Ordering::SeqCst);
+                    if !intentional {
                         tracing::warn!(%error, "pty flush error");
+                        exit = TERMINAL_FAILED_FLUSH;
                     }
                     replies.fail(error);
                     break;
                 }
+                if !is_reply {
+                    // Only a flushed user-input message completes an admitted ordinal.
+                    progress.input_completed.fetch_add(1, Ordering::Release);
+                }
+                progress.writer_on.store(WRITER_ON_IDLE, Ordering::Release);
                 progress.completed_messages.fetch_add(1, Ordering::Relaxed);
                 progress.in_flight_bytes.store(0, Ordering::Relaxed);
                 progress.operation.store(0, Ordering::Relaxed);
             }
+            // Recorded before the queue drops, so no admission succeeds unrecorded after this point.
+            progress.record_terminal(exit);
             // Reader lifetime, not surviving producer clones, owns pending spill storage.
             drop(replies);
             progress.in_flight_bytes.store(0, Ordering::Relaxed);

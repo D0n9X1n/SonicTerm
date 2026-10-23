@@ -532,3 +532,27 @@ fn counted_prepare<Output>(
     };
     (output, sink.snapshot())
 }
+
+#[test]
+fn an_unresolved_only_wake_needs_no_face_frame() {
+    // A publication that only moves the unresolved set posts one wake; acknowledging it finds no
+    // face generation due, reports the set moved once, and not again until it moves.
+    let _lock = font_fixture_lock();
+    let (waker, calls) = recording_waker();
+    let stack = crate::lib_tests::tracked_font_stack(14.0);
+    attach_fallback_waker(Some(&stack), Some(&waker));
+    let notice = stack.fallback_notice();
+    let applied = Some((notice.id(), notice.generation()));
+    let publication = sonicterm_font::UnresolvedPublication {
+        epoch: u64::MAX,
+        unresolved: vec!['\u{378}'],
+        ..Default::default()
+    };
+    assert!(notice.publish(&publication));
+    assert_eq!(*calls.lock().unwrap(), vec![notice.id()]);
+    let mut seen = None;
+    assert!(!acknowledge_fallback_wake(Some(&stack), applied, notice.id()), "no face frame");
+    assert!(unresolved_moved(Some(&stack), notice.id(), &mut seen));
+    assert!(!unresolved_moved(Some(&stack), notice.id(), &mut seen), "already acknowledged");
+    assert!(!unresolved_moved(Some(&stack), notice.id() + 1, &mut seen), "a replaced notice");
+}

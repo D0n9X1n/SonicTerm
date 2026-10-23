@@ -40,7 +40,8 @@ pub(super) fn child_output(command: &mut std::process::Command) -> std::process:
     std::process::Output { status, stdout: stdout.join().unwrap(), stderr: stderr.join().unwrap() }
 }
 
-// Real fallback warnings preserve stage/count identity while both WARN and DEBUG exclude requested text.
+// Real fallback warnings preserve stage/count identity while both WARN and DEBUG exclude requested text;
+// a failed stage is logged with its stage, and only a request whose stages all ran warns of unresolved ones.
 #[test]
 fn fallback_resolution_diagnostics_exclude_requested_text() {
     const CHILD: &str = "SONICTERM_RESOLVER_LOG_CHILD";
@@ -65,20 +66,6 @@ fn fallback_resolution_diagnostics_exclude_requested_text() {
         }
         return;
     }
-    struct FailingLocator;
-    impl crate::locator::FontLocator for FailingLocator {
-        fn load_fonts(
-            &self,
-            _: &[config::FontAttributes],
-            _: &mut std::collections::HashSet<config::FontAttributes>,
-            _: u16,
-        ) -> anyhow::Result<Vec<ParsedFont>> {
-            Ok(Vec::new())
-        }
-        fn locate_fallback_for_codepoints(&self, _: &[char]) -> anyhow::Result<Vec<ParsedFont>> {
-            Err(anyhow::anyhow!("synthetic-secret-\u{1f600}"))
-        }
-    }
     let directory =
         std::env::temp_dir().join(format!("sonicterm-resolver-log-{}", std::process::id()));
     let guard =
@@ -87,20 +74,18 @@ fn fallback_resolution_diagnostics_exclude_requested_text() {
     for warn in [true, false] {
         let mut config = config::Config::default();
         config.warn_about_missing_glyphs = warn;
-        crate::FallbackResolveInfo {
-            timing: None,
-            no_glyphs: vec!['\u{1f600}'],
-            pending: Default::default(),
-            completion: Box::new(|| {}),
-            font_dirs: std::sync::Arc::new(crate::db::FontDatabase::new()),
-            built_in: std::sync::Arc::new(crate::db::FontDatabase::new()),
-            locator: std::sync::Arc::new(FailingLocator),
-            config: config::ConfigHandle::new(config),
-            notice: crate::FallbackNotice::new(),
-            cancel: Default::default(),
-            hooks: Default::default(),
+        let config = config::ConfigHandle::new(config);
+        let locators: [std::sync::Arc<dyn crate::locator::FontLocator + Send + Sync>; 2] =
+            [std::sync::Arc::new(FailingLocator), std::sync::Arc::new(EmptyLocator)];
+        for locator in locators {
+            fallback_request(
+                vec!['\u{1f600}'],
+                locator,
+                config.clone(),
+                crate::FallbackNotice::new(),
+            )
+            .process();
         }
-        .process();
     }
     tracing::warn!(target: "sonicterm_font::control", "resolver-positive-control");
     let path =
@@ -535,6 +520,7 @@ fn frame_shaping_skips_the_merge_while_the_worker_holds_the_pending_lock() {
     fixture.configuration.set_fallback_worker_hooks_for_test(crate::FallbackWorkerHooks {
         during_append: Some(pause(&in_append, &leave_append)),
         before_completion: Some(pause(&before_completion, &complete)),
+        ..Default::default()
     });
     let font = fixture.configuration.default_font().unwrap();
     assert_eq!(frame_glyph(&font, 'é'), 0);
@@ -726,4 +712,133 @@ fn config_changed_bumps_the_face_epoch_before_the_fallible_reload() {
     let bump = body.find("bump_face_epoch()").expect("config_changed bumps the face epoch");
     let reload = body.find("FontDatabase::with_font_dirs").expect("config_changed reloads");
     assert!(clear < bump && bump < reload, "clear, then bump, then the fallible reload");
+}
+
+/// A locator whose fallback lookup always fails.
+struct FailingLocator;
+
+impl crate::locator::FontLocator for FailingLocator {
+    fn load_fonts(
+        &self,
+        _: &[config::FontAttributes],
+        _: &mut std::collections::HashSet<config::FontAttributes>,
+        _: u16,
+    ) -> anyhow::Result<Vec<ParsedFont>> {
+        Ok(Vec::new())
+    }
+    fn locate_fallback_for_codepoints(&self, _: &[char]) -> anyhow::Result<Vec<ParsedFont>> {
+        Err(anyhow::anyhow!("synthetic-secret-\u{1f600}"))
+    }
+}
+
+/// A locator whose fallback lookup succeeds and finds nothing.
+struct EmptyLocator;
+
+impl crate::locator::FontLocator for EmptyLocator {
+    fn load_fonts(
+        &self,
+        _: &[config::FontAttributes],
+        _: &mut std::collections::HashSet<config::FontAttributes>,
+        _: u16,
+    ) -> anyhow::Result<Vec<ParsedFont>> {
+        Ok(Vec::new())
+    }
+    fn locate_fallback_for_codepoints(&self, _: &[char]) -> anyhow::Result<Vec<ParsedFont>> {
+        Ok(Vec::new())
+    }
+}
+
+/// One fallback request for `no_glyphs` through `locator` with empty font databases, at epoch 0.
+fn fallback_request(
+    no_glyphs: Vec<char>,
+    locator: std::sync::Arc<dyn crate::locator::FontLocator + Send + Sync>,
+    config: config::ConfigHandle,
+    notice: std::sync::Arc<crate::FallbackNotice>,
+) -> crate::FallbackResolveInfo {
+    crate::FallbackResolveInfo {
+        timing: None,
+        no_glyphs,
+        pending: Default::default(),
+        completion: Box::new(|| {}),
+        font_dirs: std::sync::Arc::new(crate::db::FontDatabase::new()),
+        built_in: std::sync::Arc::new(crate::db::FontDatabase::new()),
+        locator,
+        config,
+        notice,
+        cancel: Default::default(),
+        hooks: Default::default(),
+        epoch: 0,
+    }
+}
+
+#[test]
+fn an_uncovered_codepoint_is_unresolved_only_when_every_stage_ran() {
+    // U+0378 is unassigned and not private use, so no face covers it. With every stage succeeding
+    // it is unresolved; with the locator failing it is a lookup failure and never unresolved.
+    let config = config::ConfigHandle::new(config::Config::default());
+    let notice = crate::FallbackNotice::new();
+    fallback_request(
+        vec!['\u{378}'],
+        std::sync::Arc::new(EmptyLocator),
+        config.clone(),
+        notice.clone(),
+    )
+    .process();
+    assert_eq!(notice.unresolved_snapshot().codepoints, vec!['\u{378}']);
+    assert!(notice.lookup_failed().is_empty());
+
+    let failed = crate::FallbackNotice::new();
+    fallback_request(vec!['\u{378}'], std::sync::Arc::new(FailingLocator), config, failed.clone())
+        .process();
+    assert!(failed.unresolved_snapshot().codepoints.is_empty());
+    assert_eq!(failed.lookup_failed(), vec!['\u{378}']);
+    assert_eq!(failed.generation(), 0, "an unresolved-only result never bumps the face generation");
+}
+
+#[test]
+fn a_reload_racing_the_worker_publishes_nothing_for_the_old_configuration() {
+    // The worker pauses before publishing; a reload resets the notice to a newer epoch meanwhile,
+    // so the result for epoch 0 is discarded and the revision does not move.
+    let notice = crate::FallbackNotice::new();
+    let reload = notice.clone();
+    let mut request = fallback_request(
+        vec!['\u{378}'],
+        std::sync::Arc::new(EmptyLocator),
+        config::ConfigHandle::new(config::Config::default()),
+        notice.clone(),
+    );
+    request.hooks.before_unresolved_publish = Some(std::sync::Arc::new(move || reload.reset(1)));
+    request.process();
+    assert!(notice.unresolved_snapshot().codepoints.is_empty());
+    assert_eq!(notice.unresolved_revision(), 0);
+}
+
+#[test]
+fn a_real_reload_racing_the_worker_never_publishes_the_old_configurations_result() {
+    // The worker pauses after selection, before publishing U+0378; `config_changed` runs; the
+    // worker resumes. A later request in the new configuration publishes U+0379, and the worker
+    // runs requests in order, so once it has, the old one is settled: only U+0379 is unresolved.
+    let gate = Arc::new(Latch::default());
+    gate.open();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fixture = fallback_configuration("reload-race", locator(&gate, &calls));
+    let (arrived, release) = (Arc::new(Latch::default()), Arc::new(Latch::default()));
+    fixture.configuration.set_fallback_worker_hooks_for_test(crate::FallbackWorkerHooks {
+        before_unresolved_publish: Some(pause(&arrived, &release)),
+        ..Default::default()
+    });
+    let font = fixture.configuration.default_font().unwrap();
+    assert_eq!(frame_glyph(&font, '\u{378}'), 0);
+    arrived.wait();
+    fixture.configuration.config_changed(&fixture.configuration.config()).unwrap();
+    release.open();
+    let reloaded = fixture.configuration.default_font().unwrap();
+    assert_eq!(frame_glyph(&reloaded, '\u{379}'), 0);
+    let notice = fixture.configuration.fallback_notice();
+    let started = Instant::now();
+    while notice.unresolved_revision() == 0 {
+        assert!(started.elapsed() < WORKER_WAIT, "the new request never published");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(notice.unresolved_snapshot().codepoints, vec!['\u{379}']);
 }

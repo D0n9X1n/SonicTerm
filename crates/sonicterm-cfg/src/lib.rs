@@ -10,6 +10,7 @@ pub mod config;
 pub mod dimension;
 pub mod keymap;
 pub mod launch_url;
+pub mod status_line;
 pub mod theme;
 pub mod url_open;
 pub mod url_scan;

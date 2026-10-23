@@ -151,7 +151,7 @@ pub fn renderer_panel_padding_differs(old_cfg: &Config, new_cfg: &Config) -> boo
 }
 
 impl App {
-    fn refresh_all_window_minimums(&mut self) {
+    pub(super) fn refresh_all_window_minimums(&mut self) {
         for window in self.windows.values_mut() {
             super::apply_window_state_minimum(window);
         }
@@ -186,6 +186,7 @@ impl App {
                     // renderer and pane parser before OSC replies quote stale colors.
                     theme.apply_accessibility(&new_cfg.accessibility);
                     tracing::info!("reload: theme -> {}", theme.name);
+                    self.set_theme_reload_error(None);
                     if let Some(renderer) = self.main_renderer_mut() {
                         renderer.set_theme(&theme);
                     }
@@ -210,7 +211,10 @@ impl App {
                         mark_all_panes_dirty(&child.panes);
                     }
                 }
-                Err(error) => tracing::warn!("reload: theme {:?} failed: {error:#}", theme_path),
+                Err(error) => {
+                    tracing::warn!("reload: theme {:?} failed: {error:#}", theme_path);
+                    self.set_theme_reload_error(Some(&error));
+                }
             }
         }
 
@@ -545,9 +549,11 @@ impl App {
                     self.palette_pointer_capture = None;
                     self.command_palette.set_keymap(&keymap, &self.i18n);
                     self.keymap = keymap;
+                    self.set_keymap_reload_error(None);
                 }
                 Some(Err(error)) => {
-                    tracing::warn!("reload: keymap {:?} failed: {error:#}", km_path)
+                    tracing::warn!("reload: keymap {:?} failed: {error:#}", km_path);
+                    self.set_keymap_reload_error(Some(&error));
                 }
                 None => {
                     // When: `loaded` is `None` after path resolution failed, preserve the active keymap.
@@ -874,6 +880,48 @@ impl App {
     /// and keymap files it names. This is the only path that reads config
     /// after startup — there is no background watcher, so an edit takes effect
     /// when the user asks for it and not before.
+    /// Record startup load failures for the status line's `health` segment, once per process.
+    ///
+    /// Startup falls back to defaults for an unreadable config, theme or keymap. This runs the
+    /// same strict loads a reload does, against the same paths, so each failure shows per
+    /// component until that file reloads cleanly.
+    pub(super) fn record_startup_load_errors(&mut self) {
+        if !self.status_line.take_startup_check() {
+            // When: `take_startup_check` reports it already ran, a later main window adds nothing.
+            return;
+        }
+        let assets = sonicterm_cfg::assets::asset_dir();
+        let config_error = self
+            .runtime_config_path
+            .clone()
+            .or_else(Config::default_path)
+            .and_then(|path| Config::load_strict(&path).err());
+        self.set_config_reload_error(config_error.as_ref());
+        let theme_error = resolve_runtime_asset_path(
+            &self.config.theme,
+            "themes",
+            self.runtime_config_path.as_deref(),
+            &assets,
+            "wezterm",
+        )
+        .and_then(|path| Theme::load_strict(&path).map(|_| ()))
+        .err();
+        self.set_theme_reload_error(theme_error.as_ref());
+        let keymap_error = resolve_runtime_asset_path(
+            &self.config.keymap,
+            "keymaps",
+            self.runtime_config_path.as_deref(),
+            &assets,
+            sonicterm_cfg::keymap::platform_default_keymap_name(),
+        )
+        .and_then(|path| match self.keymap_loader.as_ref() {
+            Some(loader) => loader(&path).map(|_| ()),
+            None => Keymap::load_strict(&path).map(|_| ()),
+        })
+        .err();
+        self.set_keymap_reload_error(keymap_error.as_ref());
+    }
+
     pub(super) fn force_reload_config(&mut self) {
         let Some(path) = self.runtime_config_path.clone().or_else(Config::default_path) else {
             // When: neither a smoke path nor the user path exists, keep the running config.
@@ -883,9 +931,14 @@ impl App {
             Ok(cfg) => {
                 // When: load_strict parsed the file at path with no error; normalize
                 // it before any reset baseline, pool, renderer, or stored state moves.
+                self.set_config_reload_error(None);
                 self.apply_new_config(cfg);
+                self.invalidate_status_line();
             }
-            Err(error) => tracing::warn!("reload: config parse failed: {error:#}"),
+            Err(error) => {
+                tracing::warn!("reload: config parse failed: {error:#}");
+                self.set_config_reload_error(Some(&error));
+            }
         }
     }
 

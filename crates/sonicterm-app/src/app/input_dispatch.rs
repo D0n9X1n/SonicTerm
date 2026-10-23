@@ -185,7 +185,15 @@ impl App {
         ) {
             // A matching broadcast source includes
             // every receiver so each can negotiate its own keyboard encoding.
-            targets.extend(self.broadcast_receivers());
+            let (receivers, blocked) = self.broadcast_receivers_counted();
+            if let Some(window_id) = self.window_of_pane(source_pane).filter(|_| blocked > 0) {
+                // READONLY receivers were skipped; the strip names how many.
+                self.defer_pane_input(
+                    window_id,
+                    sonicterm_ui::status_line::InputState::Blocked(blocked),
+                );
+            }
+            targets.extend(receivers);
         }
         targets
     }
@@ -223,6 +231,7 @@ impl App {
                 {
                     // When: native input is unavailable, report only destination metadata and the refusal reason.
                     tracing::warn!(target: "sonicterm_app::app", ?window_id, pane_id, reason, "native keyboard input refused");
+                    self.defer_pane_input(window_id, sonicterm_ui::status_line::InputState::KeyNotSent);
                 }
                 encode_routed_key(
                     state,
@@ -308,6 +317,10 @@ impl App {
         };
         let queued =
             Self::queue_pane_input(self.event_loop_proxy.as_ref(), pane, pane_id, source, bytes);
+        if queued && source != PtyInputSource::PointerMotion {
+            // Accepted discrete input may stay outstanding; the status line checks on it later.
+            self.arm_held_input(pane_id);
+        }
         #[cfg(windows)]
         if queued && source != PtyInputSource::PointerMotion {
             // Accepted discrete input can launch a silent command; coalesced motion must not schedule process probes.

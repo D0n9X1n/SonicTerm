@@ -916,7 +916,7 @@ display with its refresh rate and scale.
 
 | ID | Workload |
 | --- | --- |
-| S1 | Idle for 60 s. |
+| S1 | Idle for 60 s. Every S1 variant but `atlas-retry` requests 250×40 cells instead of 250×70: the macOS runner clamps the window to its screen at 43 rows, so with 70 rows the ref drawing the status line lost one row to it and the pair-grid check rejected every run. 40 rows plus the strip fit unclamped, so both refs measure the same grid. |
 | S2 | Type 200 characters at 10 per second; keypress-to-present latency with its attribution coverage, split at the flush in counters runs. |
 | S3 | `yes \| head -n 2000000`, then `cat` of a 50 MB file (throughput), then 60 s idle. |
 | S4 | A visible `date` loop every 10 ms for 60 s. |
@@ -927,7 +927,7 @@ display with its refresh rate and scale.
 | S9 | The first emoji and CJK glyphs in a fresh window. |
 | S10 | Full-screen TUI redraw streams, played without DEC 2026 synchronized-output brackets. |
 | S11 | An inline Sixel image, then a switch to a media-free tab and 120 s idle. |
-| S12 | Three panes with full scrollback plus the warm window, then the window covered for 90 s and uncovered. |
+| S12 | Three panes with full scrollback plus the warm window, then the window covered for 90 s and uncovered. Requests 250×40 cells, as S1 does. |
 
 | Variant | Workload |
 | --- | --- |
@@ -941,9 +941,10 @@ display with its refresh rate and scale.
 | `S11/release` | The image, then a switch to a media-free tab until the first frame after the switch presents (5 s bound), a 65 s hold from that frame (never shortened), the `released` checkpoint, whose memory reading counts only from a sample at least 30 s after that frame (`fresh_after_unix_s`), then a switch back until a frame with an image atlas item presents (10 s bound). |
 | `S1/role-exit` | Windows only: the role's program exits 1 right after GO, which must end the run invalid; the smoke uses it. |
 | `S1/atlas-retry` | Counters set only, and refused when no counters set runs. After 70 static rows settle, 8 recovery episodes of four forced frames each: A retries an injected glyph-atlas change, B is the first presented recovery, C and D redraw the unchanged scene. `result.json` records each frame's counter deltas as `atlas_recovery`, and the comparison adds an "Atlas retry recovery" table that sums each frame's row-cache misses and hits, shaping requests and attempts over the accepted counters runs. A scene change after settling invalidates the run with a reason that names the changed field with its settled and read values (titles escaped to ASCII), or, for row text, the first differing row. Settling also waits until the App has applied two foreground samples that each name a process and were taken strictly after the final process was observed (the sentinel on Windows, a completed harness lookup naming `sleep` on macOS), the latest naming that process and the read title equal to the one it gives. A missing or cleared sample restarts the count, an unmet barrier expires the attempt at the 10 s settle bound with a reason naming the unmet condition, and a custom tab title makes the attempt invalid at once. The harness log gets one `atlas-retry evidence` line at settle and one at failure, each taken from the reading the judge saw: the compared titles and the App's applied foreground sample captured with that reading, the role's leader pid, the cumulative title and foreground counters, and the harness's own foreground lookup, labelled separately with its own time, plus the final-process lookups' count and total time and the instant the final process was observed. |
+| `S1/status-line`, `S12/status-line` | The scenario's default plan with `[status_line] enabled = true` in the scratch config; `S1/status-line` instead starts with `print`, which prints 5,000 full-width rows that are all OSC 8 links into a 10,000-row history with `history` and `size` listed; linked cells cost more than plain ones, so the byte budget trims that history below its row limit. With counters on, `History: trimmed` must appear exactly once (`status_line_history_shows`) and the strip may redraw only for a sample or that appearance. After `idle` it adds `select`, a drag that selects text, and `selected`, a hold on that selection (2 s each under `--short`, 10 s otherwise). With counters on, `select` must count the selection at least once and read at most 200,000 cells per count (`status_line_sel_counts`, `status_line_sel_cells`), and `selected` must not count again. Last, `input` types 10 characters into the shell at 10 per second and settles 1 s; with counters on, `Input: held` must never appear (`status_line_held_shows`) and the strip may redraw only for a sample, so the outstanding-work checks typing arms present nothing. Then `glyphs` clears the line and, on a POSIX role, prints U+0378 (unassigned, so no font covers it) with `printf`; a Windows role types the character. With counters on, `Glyphs:` must appear at most once (exactly once on a POSIX role, `status_line_glyph_shows`) and the strip may redraw only for a sample or that appearance. Then `held` clears the line and, on a POSIX role, runs `stty raw -echo; sleep 1; head -c 262144 >/dev/null; stty sane` and pastes 256 KiB 0.3 s later (the scratch config sets `held_after_ms = 250`), so the writer blocks behind the stalled reader; with counters on, `Input: held` must appear exactly once there and hide once `head` reads the paste. A Windows role, whose shell cannot stall its reader, only presses Enter, and any side requires `held` to appear at most once. A base without the status line ignores the table and runs the plain plan. With counters on, each hold phase is checked against the strip's idle contract from the App's `status_line_samples`, `status_line_wakes` and `status_line_redraws`: in `idle` and `uncovered` at most one sample per 2 s interval plus one, no wake without a sample, and no more strip redraws than samples plus one; `uncovered` takes at least one sample; `covered`, when the App received `Occluded(true)`, at most one sample and one wake. A broken contract makes the run invalid. A side whose App has no status line counters is not checked. |
 
 The pull-request perf pipeline runs `S2/flood`, `S6/flood`, `S6/selection-drag`,
-`S6/rest` and `S1/atlas-retry` by name on macOS and Windows; [What CI measures](#what-ci-measures) lists their shards.
+`S6/rest`, `S1/atlas-retry`, `S1/status-line` and `S12/status-line` by name on macOS and Windows; [What CI measures](#what-ci-measures) lists their shards.
 
 Every scenario's final memory checkpoint comes at least 60 s after GO, when the
 harness releases the workloads (5 s with `--short`, which the smoke uses). Most
@@ -1120,17 +1121,18 @@ its `comparison.md` opens with `**Incomplete comparison:**`. Two gaps are
 allowed: a counters set on a base that does not declare `perf-counters`, which
 still reads `n/a`, and a diagnostic declared unavailable on both sides because
 its harness API cfg is off, which runs nothing. Any other blocked side still
-fails, and a selection with nothing runnable never passes. The four macOS shards run S7, S4, S1/atlas-retry and S6/rest;
+fails, and a selection with nothing runnable never passes. The four macOS shards run S7, S4, S1/atlas-retry, S6/rest,
+S1/status-line and S12/status-line;
 S10/sync, S9, S11, S6, S1 and S5; S10, S11/release and S2/flood; and S2, S12, S3,
 S8, S6/selection-drag and S6/flood. The five Windows shards run S7; S9, S10, S6/flood,
 S6/selection-drag and S2/flood; S2, S10/sync and S6/rest; S4, S5, S11, S11/release,
 S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12 and S1/atlas-retry, which balances each
-platform's measured shard times. On each platform the shard holding S9 (macOS
+platform's measured shard times; Windows S7 also runs S1/status-line and S12/status-line. On each platform the shard holding S9 (macOS
 S9-S10sync, Windows S9-S10) also runs S9's laps set (`--laps-scenario S9 --laps-runs 2`, set by that matrix entry's
 `laps` field; the other entries pass no laps flags), and each platform's table
 gives its own `fallback_receive` verdict. A bare scenario ID selects only its default
 variant, so every variant is named explicitly. Under `--short`, `S2/flood` is
-capped at 2 runs per side, `S11/release` at 1, and `S11/gdi`, `S11/wgpu`,
+capped at 2 runs per side, `S11/release`, `S1/status-line` and `S12/status-line` at 1, and `S11/gdi`, `S11/wgpu`,
 `S1/atlas-retry` and `S6/rest` at 2. The `S2/flood` cap only keeps the pull-request comparison within 35 minutes:
 a release comparison runs it in full. With `perf-frame-texture`, S11's
 `end` checkpoint records `frame_texture_bytes`: 4 B under GDI on the head, `n/a`

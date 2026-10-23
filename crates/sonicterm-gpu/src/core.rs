@@ -49,6 +49,7 @@ use crate::device_errors::{
     run_isolated_validation, DeviceErrorSnapshot, DeviceErrorState, DeviceStateWaker, GpuFaultKind,
 };
 use sonicterm_render_model::boundary::ui::drag_chip::{DragChipOverlay, DragChipVisual};
+use sonicterm_render_model::boundary::ui::status_line::{PlacedSegment, StatusLineView};
 use sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size;
 
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
@@ -835,6 +836,8 @@ fn tab_bar_hash_with_limits(
         tab.content_width_px().map(f32::to_bits).hash(&mut hash);
         tab.custom_color.hash(&mut hash);
         tab.foreground_privileged.hash(&mut hash);
+        // A marked inactive tab draws `●`, so a mark appearing or clearing repaints the bar.
+        (index != active_index && tab.marks.is_marked()).hash(&mut hash);
         command_status_hash(&tab.command, now, index == active_index).hash(&mut hash);
     }
     hash.finish()
@@ -2382,6 +2385,15 @@ pub struct GpuRenderer {
     /// View → Toggle Tab Bar menu action; when `false`, [`Self::top_inset`]
     /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
     tab_bar_visible: bool,
+    /// Whether the status line strip between the panes and the tab bar is shown.
+    status_line_visible: bool,
+    /// Segments the strip may present; replaced by the App before a frame.
+    status_line_view: StatusLineView,
+    /// Fitted strip keyed by view pixels, width and chrome font, so an
+    /// unchanged strip is not reshaped every frame.
+    status_line_fit: Option<(u64, Vec<PlacedSegment>)>,
+    /// Hit boxes of the segments the last drawn frame presented.
+    status_line_presented: Vec<crate::status_strip::PresentedStatusSegment>,
     /// Reserved height (logical px) above the tab bar for the OS native
     /// titlebar. Kept at zero while SonicTerm uses the normal OS titlebar with a
     /// bottom-pinned tab bar.
@@ -2396,6 +2408,14 @@ pub struct GpuRenderer {
     /// frame drew as tofu or dropped, whitespace excluded. Test-only diagnostic surfaced through
     /// [`Self::last_missing_chrome`]; production code must not depend on it.
     last_missing_chrome_chars: Vec<char>,
+    /// Per pane and row slot, the tofu characters of the row presented there.
+    presented_missing: std::collections::HashMap<(u64, u16), crate::missing_glyphs::SlotMissing>,
+    /// This pass's emitted rows' tofu records, committed into `presented_missing` when it presents.
+    staged_missing: Vec<crate::missing_glyphs::StagedMissing>,
+    /// The `(notice id, unresolved revision)` the last fallback wake acknowledged.
+    acknowledged_unresolved: Option<(u64, u64)>,
+    /// The fallback notice's unresolved set as last read, with that notice's id.
+    unresolved_snapshot: Option<(u64, sonicterm_engine::UnresolvedSnapshot)>,
     /// What the last presented `Full` frame certified about missing characters, read by
     /// [`Self::completeness_checkpoint`]; only presented frames change it.
     completeness: Option<crate::completeness::Certificate<FrameKey, GlyphContentStamp>>,
@@ -3393,8 +3413,16 @@ impl GpuRenderer {
             software_frame: None,
             render_timing_label: role,
             tab_bar_visible: true,
+            status_line_visible: false,
+            status_line_view: StatusLineView::default(),
+            status_line_fit: None,
+            status_line_presented: Vec::new(),
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
+            presented_missing: std::collections::HashMap::new(),
+            staged_missing: Vec::new(),
+            unresolved_snapshot: None,
+            acknowledged_unresolved: None,
             last_missing_chrome_chars: Vec::new(),
             completeness: None,
             // `shape_cache` field deleted with the cosmic-text path.
@@ -3537,13 +3565,14 @@ impl GpuRenderer {
     /// scale_factor` separately so window padding still applies when the
     /// bar is off.
     pub fn bottom_inset(&self) -> f32 {
-        if self.tab_bar_visible {
+        let tab_bar = if self.tab_bar_visible {
             self.tab_bar_logical_height()
         } else {
             // When: `!tab_bar_visible` — the bar reserves nothing. Window
             // padding is applied separately by the caller.
             0.0
-        }
+        };
+        tab_bar + self.status_line_height()
     }
 
     /// Y offset (in raster px) at which the tab bar layout should be
@@ -3605,6 +3634,89 @@ impl GpuRenderer {
     /// Whether the tab bar is currently shown.
     pub fn tab_bar_visible(&self) -> bool {
         self.tab_bar_visible
+    }
+
+    /// Raster-px height of the status line strip; 0 while it is hidden. It
+    /// follows the font size and scale factor, so zoom and DPI changes refit it.
+    pub fn status_line_height(&self) -> f32 {
+        if self.status_line_visible {
+            crate::status_strip::status_line_height(self.font_size, self.scale_factor)
+        } else {
+            // When: `!status_line_visible`, the strip reserves no rows.
+            0.0
+        }
+    }
+
+    /// Raster-px top edge of the strip: directly above the tab bar, or at
+    /// the bottom edge when the tab bar is hidden.
+    pub fn status_line_top(&self) -> f32 {
+        (self.config.height as f32 - self.bottom_inset()).max(0.0)
+    }
+
+    /// Show or hide the strip. Returns `true` when visibility changed, so the
+    /// caller refits panes to the new bottom inset.
+    pub fn set_status_line_visible(&mut self, visible: bool) -> bool {
+        if self.status_line_visible == visible {
+            // When: `status_line_visible == visible`, the geometry is unchanged.
+            return false;
+        }
+        self.status_line_visible = visible;
+        self.status_line_fit = None;
+        self.status_line_presented.clear();
+        self.last_frame_key = None;
+        self.last_pane_layout.clear();
+        true
+    }
+
+    /// Whether the strip is shown.
+    pub fn status_line_visible(&self) -> bool {
+        self.status_line_visible
+    }
+
+    /// Replace the strip's segments. Returns `true` when its pixels change, so
+    /// the caller requests a frame; that frame damages only the strip band.
+    pub fn set_status_line_view(&mut self, view: StatusLineView) -> bool {
+        if self.status_line_view == view {
+            // When: the view is identical, there is nothing to redraw.
+            return false;
+        }
+        // A pixel change reaches the frame key as `status_hash`, which damages only the band.
+        let pixels_changed = self.status_line_view.pixel_hash != view.pixel_hash;
+        self.status_line_view = view;
+        pixels_changed
+    }
+
+    /// The segments the strip may present.
+    pub fn status_line_view(&self) -> &StatusLineView {
+        &self.status_line_view
+    }
+
+    /// The visible strip's band and the segments the last drawn frame presented; `None` while hidden.
+    pub fn status_line_hit(&self) -> Option<crate::status_strip::StripHit> {
+        self.status_line_visible.then(|| crate::status_strip::StripHit {
+            top: self.status_line_top(),
+            height: self.status_line_height(),
+            segments: self.status_line_presented.clone(),
+        })
+    }
+
+    /// Whether raster-px `y` falls inside the visible strip band.
+    pub fn status_line_contains(&self, y: f32) -> bool {
+        let top = self.status_line_top();
+        self.status_line_visible && y >= top && y < top + self.status_line_height()
+    }
+
+    /// The presented segment under raster-px `(x, y)`, from the last drawn frame.
+    pub fn status_segment_at(
+        &self,
+        x: f32,
+        y: f32,
+    ) -> Option<&crate::status_strip::PresentedStatusSegment> {
+        if !self.status_line_contains(y) {
+            // When: `(x, y)` is outside the band, no segment is under it.
+            return None;
+        }
+        crate::status_strip::segment_at(&self.status_line_presented, x)
     }
 
     /// Update the requested LCD subpixel coverage order without rebuilding fonts or atlases.
@@ -5561,15 +5673,62 @@ impl GpuRenderer {
         self.font_stack.as_ref().map(|stack| stack.fallback_notice().id())
     }
 
+    /// The distinct codepoints this window's presented terminal rows draw as tofu that no font
+    /// SonicTerm can find covers. Records whose slot no longer shows their row, or whose fonts
+    /// were replaced, are dropped first; the unresolved set is read only when its revision moved.
+    pub fn presented_missing_glyphs(
+        &mut self,
+        ignore_private_use: bool,
+    ) -> crate::missing_glyphs::MissingGlyphs {
+        let Some(stack) = self.font_stack.as_ref() else {
+            // When: font_stack is None, the renderer shapes no terminal text.
+            return Default::default();
+        };
+        let cache = &self.row_glyph_cache;
+        crate::missing_glyphs::prune_missing(
+            &mut self.presented_missing,
+            |pane_id, slot| cache.committed_slot(pane_id, slot),
+            self.applied_fonts,
+        );
+        if self.presented_missing.is_empty() {
+            // When: presented_missing is empty, no presented row drew tofu.
+            return Default::default();
+        }
+        let notice = stack.fallback_notice();
+        let revision = notice.unresolved_revision();
+        let fresh = self
+            .unresolved_snapshot
+            .as_ref()
+            .is_some_and(|(id, snapshot)| *id == notice.id() && snapshot.revision == revision);
+        if !fresh {
+            self.unresolved_snapshot = Some((notice.id(), notice.unresolved_snapshot()));
+        }
+        let unresolved = &self.unresolved_snapshot.as_ref().expect("refreshed above").1;
+        crate::missing_glyphs::count_missing(
+            self.presented_missing.values(),
+            unresolved,
+            ignore_private_use,
+        )
+    }
+
     /// Handle a delivered fallback wake for `notice_id`: acknowledge it when it is this
-    /// renderer's current notice, and return whether a frame is needed to apply its generation.
-    /// An event for an older notice touches nothing and needs no frame.
-    pub fn acknowledge_font_fallback(&mut self, notice_id: u64) -> bool {
-        frame_fonts::acknowledge_fallback_wake(
+    /// renderer's current notice, and return whether a frame must apply a new face generation and
+    /// whether only the unresolved set moved. An event for an older notice touches nothing.
+    pub fn acknowledge_font_fallback(
+        &mut self,
+        notice_id: u64,
+    ) -> crate::missing_glyphs::FallbackWake {
+        let faces_due = frame_fonts::acknowledge_fallback_wake(
             self.font_stack.as_ref(),
             self.applied_fonts,
             notice_id,
-        )
+        );
+        let unresolved_changed = frame_fonts::unresolved_moved(
+            self.font_stack.as_ref(),
+            notice_id,
+            &mut self.acknowledged_unresolved,
+        );
+        crate::missing_glyphs::FallbackWake { faces_due, unresolved_changed }
     }
 
     /// A frame's measurement and drawing take the token their preparation returned; neither reads
@@ -6235,6 +6394,11 @@ impl GpuRenderer {
                     width: self.config.width,
                     height: self.config.height,
                     tab_hash,
+                    status_hash: if self.status_line_visible {
+                        self.status_line_view.pixel_hash
+                    } else {
+                        0
+                    },
                     viewport_top_abs,
                     cursor_shape: self.cursor_shape as u8,
                     cursor_blink: self.cursor_blink,
@@ -6280,6 +6444,9 @@ impl GpuRenderer {
                 scrollbar_mode: self.scrollbar_mode,
                 degraded: self.software_render_degrade,
                 tab_bar_top: self.tab_bar_visible.then(|| self.tab_bar_y_offset()),
+                status_band: self
+                    .status_line_visible
+                    .then(|| (self.status_line_top(), self.status_line_height())),
                 scale: self.scale_factor,
                 previous_recolor: self.last_recolor,
             },
@@ -6448,6 +6615,8 @@ impl GpuRenderer {
         // layout. Cleared every frame; published into `self.last_missing_chars`
         // before render() returns.
         let mut missing_chars_this_frame: Vec<char> = Vec::new();
+        // An earlier pass that did not present left its staged records; they are not on screen.
+        self.staged_missing.clear();
         // The chrome counterpart: every chrome layout below notes its tofu into this scope, which
         // closes with the assembled frame; a frame that fails to assemble discards it on drop.
         let missing_chrome_scope = chrome_text::MissingChromeScope::enter();
@@ -6563,6 +6732,8 @@ impl GpuRenderer {
                         injected_row_glyph: self.injected_row_glyph,
                         emitted_slots: pane_emitted.as_mut(),
                         row_keys: &mut *row_keys,
+                        missing_rows: Some(&mut self.staged_missing),
+                        fonts: self.applied_fonts,
                     },
                 );
                 staged_ranges.push((pv.pane_id, pane_staged_start..self.row_ink.staged_len()));
@@ -7175,6 +7346,74 @@ impl GpuRenderer {
         // -------- Tab bar ---------------------------------------------------
         // The insertion gap below opens 8 px at the current drop slot when a
         // drag is active over this bar.
+        // -------- Status line strip ----------------------------------------
+        if self.status_line_visible {
+            // The strip is on: draw its band and fitted segments above the tab bar.
+            use std::hash::{Hash, Hasher};
+            let strip_palette = self.chrome_caches.palette.palette_for(theme);
+            let colors = crate::status_strip::StatusColors::resolve(
+                theme,
+                self.tab_active_fg,
+                self.tab_inactive_fg,
+                &strip_palette,
+            );
+            let geometry = crate::status_strip::StripGeometry {
+                top: self.status_line_top(),
+                height: self.status_line_height(),
+                screen: (sw, sh),
+                scale_factor: self.scale_factor,
+                title_raster_px: self.tab_title_font.raster_px(),
+            };
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (
+                self.status_line_view.pixel_hash,
+                sw.to_bits(),
+                geometry.text_px().to_bits(),
+                self.tab_title_font.key(),
+                self.tab_title_font.fallback_epoch(),
+            )
+                .hash(&mut hasher);
+            let fit_key = hasher.finish();
+            let mut strip_rasterizer = self.tab_title_font.stack().cloned();
+            let stale = self.status_line_fit.as_ref().is_none_or(|(key, _)| *key != fit_key);
+            if let (true, Some(stack), Some(rasterizer)) =
+                (stale, self.tab_title_font.stack(), strip_rasterizer.as_mut())
+            {
+                // The view, width or font changed: refit with the chrome font.
+                let placed = crate::status_strip::fit_strip(
+                    &self.status_line_view,
+                    &geometry,
+                    stack,
+                    rasterizer,
+                    &mut self.glyph_atlas,
+                );
+                self.status_line_fit = Some((fit_key, placed));
+            }
+            let placed: &[PlacedSegment] =
+                self.status_line_fit.as_ref().map_or(&[], |(_, placed)| placed.as_slice());
+            crate::status_strip::emit_strip(
+                placed,
+                &geometry,
+                &colors,
+                self.tab_title_font.stack(),
+                strip_rasterizer.as_mut(),
+                &mut self.glyph_atlas,
+                &mut *quads,
+                &mut *glyph_instances,
+            );
+            self.status_line_presented = placed
+                .iter()
+                .filter_map(|segment| {
+                    let view = self.status_line_view.segments.get(segment.index)?;
+                    Some(crate::status_strip::PresentedStatusSegment {
+                        id: view.id,
+                        x: segment.left,
+                        width: segment.width,
+                        click: view.click.clone(),
+                    })
+                })
+                .collect();
+        }
         // Title glyphs can reach above the padded band, so their ink is measured from here.
         let tab_glyph_start = glyph_instances.len();
         if self.tab_bar_visible {
@@ -8984,6 +9223,10 @@ impl GpuRenderer {
         );
         self.last_missing_chars = missing_chars_this_frame;
         self.last_missing_chrome_chars = missing_chrome_chars;
+        crate::missing_glyphs::commit_missing(
+            &mut self.presented_missing,
+            &mut self.staged_missing,
+        );
         self.presented_damage.record(|| PresentedDamage {
             first_frame: plan.first_frame,
             damage: plan.damage,
@@ -8998,6 +9241,15 @@ impl GpuRenderer {
             Some(plan),
             receipts,
         );
+        if !self.presented_missing.is_empty() {
+            // The slots just settled, so records of released or replaced rows go now.
+            let cache = &self.row_glyph_cache;
+            crate::missing_glyphs::prune_missing(
+                &mut self.presented_missing,
+                |pane_id, slot| cache.committed_slot(pane_id, slot),
+                self.applied_fonts,
+            );
+        }
         if self.pane_focus_flash.is_some() {
             self.request_window_redraw();
         }
@@ -10745,6 +10997,10 @@ pub(crate) struct PaneGlyphSinks<'sink> {
     pub(crate) emitted_slots: Option<&'sink mut Vec<u16>>,
     /// Reused buffer for one pane's row keys while its rows are pinned.
     pub(crate) row_keys: &'sink mut Vec<u64>,
+    /// Each emitted row's tofu record, staged until the frame presents; `None` in seam tests.
+    pub(crate) missing_rows: Option<&'sink mut Vec<crate::missing_glyphs::StagedMissing>>,
+    /// The fonts this pass shapes with, tagged on each record.
+    pub(crate) fonts: Option<(u64, u64)>,
 }
 
 /// Start one glyph assembly pass over `panes`, each a planned pane with its grid's columns:
@@ -10802,6 +11058,7 @@ pub(crate) fn assemble_pane_glyph_rows(
         let key = keys[usize::from(slot)];
         let (spans_before, tofu_before, underlines_before) =
             (frame.row_spans.len(), frame.missing_tofu.len(), frame.underlines.len());
+        let missing_before = frame.missing_chars_this_frame.len();
         let _replayed = emit_row_glyphs(
             shaping.reborrow(),
             GlyphRow {
@@ -10823,6 +11080,26 @@ pub(crate) fn assemble_pane_glyph_rows(
         if key != 0 {
             // The row exists, so its key is this slot's staged key until the frame settles.
             shaping.row_cache.stage_slot(pane_id, slot, key);
+        }
+        if let Some(missing_rows) = sinks.missing_rows.as_deref_mut() {
+            // Every emitted slot is staged, so an emptied or vanished row clears its record.
+            let drawn = &frame.missing_chars_this_frame[missing_before..];
+            let (chars, truncated) = if key == 0 {
+                (Vec::new(), false)
+            } else {
+                // When: key is nonzero, the slot shows a real row whose tofu is recorded.
+                crate::missing_glyphs::distinct_capped(drawn)
+            };
+            missing_rows.push(crate::missing_glyphs::StagedMissing {
+                pane_id,
+                slot,
+                record: crate::missing_glyphs::SlotMissing {
+                    key,
+                    fonts: sinks.fonts,
+                    chars,
+                    truncated,
+                },
+            });
         }
         // The row's ink: its glyphs' union and its tofu outlines. Its underlines join when they
         // are drawn below.

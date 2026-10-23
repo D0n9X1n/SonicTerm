@@ -251,8 +251,18 @@ pub enum UserEvent {
     /// The VT worker decodes and bounds the payload before constructing this
     /// event; native clipboard access remains confined to the app thread.
     ClipboardWrite {
+        /// The pane whose program asked for the write.
+        pane_id: u64,
         /// UTF-8 text requested by the terminal application.
         text: String,
+    },
+    /// One VT batch's OSC 52 requests, counted without payloads, after its writes; refusals
+    /// reach the App only through this summary.
+    ClipboardAttempts {
+        /// The pane whose program sent the requests.
+        pane_id: u64,
+        /// How many there were and what happened to the last one.
+        attempts: spawn_pane::ClipAttempts,
     },
     /// A local-target openability probe completed off the event-loop thread.
     PathProbeFinished(Box<path_target::PathProbeResult>),
@@ -436,7 +446,11 @@ const _: () = {
     let _: fn(&mut App, u64, ArmToken) -> EchoTimelineTakeV1 = App::take_echo_timeline_v1;
 };
 use pane_state::pane_id_at_point;
-pub use pane_state::{next_pane_id, PaneCommandEvent, PaneState};
+pub use pane_state::{
+    next_pane_id, CommandPhase, CommandQueue, LastCommand, PaneCommandEvent, PaneCommandState,
+    PaneState,
+};
+mod jobs;
 mod path_target;
 mod perf_present;
 // Pins both S10 attribution signatures here, in the parent, in every build: a gate on the methods, their
@@ -466,6 +480,7 @@ mod selection_gesture;
 pub use selection_gesture::next_click_count;
 use selection_gesture::{PointerCell, PointerGesture, PointerGestureOwner};
 mod session;
+mod status_line;
 pub(crate) use session::identity_config_normalizer;
 pub use session::{build_async_fallback_loader_for_proxy, init_tracing_public};
 mod shared_gpu;
@@ -878,6 +893,8 @@ pub struct App {
     /// `true`. Exposed via [`Self::tab_bar_visible`] so the renderer
     /// + hit-test code can read it on each frame.
     pub(super) tab_bar_visible: bool,
+    /// Status line strip: session toggles, memory sampler, reload errors and per-window pane facts.
+    pub(super) status_line: status_line::StatusLineState,
     /// Broadcast-input mode. When enabled, bytes typed into `source_pane`
     /// are mirrored into matching receiver panes after the source PTY write.
     pub(super) broadcast: BroadcastState,
@@ -1057,6 +1074,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.note_frame_user_wake();
         let started = self.frame_clock_start();
         self.do_user_event(event_loop, event);
+        self.acknowledge_tab_activations();
         self.note_frame_dispatch(frame_counters::DispatchKind::UserEvent, started);
         self.emit_frame_lines(None);
     }
@@ -1076,6 +1094,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.note_redraw_requested(win_id);
         }
         self.do_window_event(event_loop, win_id, event);
+        self.acknowledge_tab_activations();
         if let Some(started) = started {
             // the gate is on, the window's handler time is recorded.
             self.note_window_handler(win_id, started, counted);
@@ -1099,6 +1118,7 @@ impl ApplicationHandler<UserEvent> for App {
         let _dispatch = self.frame_dispatch_scope();
         let started = self.frame_clock_start();
         self.do_about_to_wait(event_loop);
+        self.acknowledge_tab_activations();
         self.note_frame_dispatch(frame_counters::DispatchKind::AboutToWait, started);
     }
 

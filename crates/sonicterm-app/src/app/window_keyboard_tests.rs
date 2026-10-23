@@ -1350,3 +1350,37 @@ fn focus_change_adds_no_pane_dirt_and_never_locks_a_peer_pane() {
         assert_eq!(dirt(&app), before, "in_child={in_child}: focus dirtied a pane");
     }
 }
+
+/// A native key refused because the pane's win32-input protocol epoch is exhausted sends nothing
+/// and records `key not sent` for the pane's window at the next status-line sync.
+#[cfg(windows)]
+#[test]
+fn real_pty_refused_native_key_records_key_not_sent() {
+    use crate::app::pty_test_support::isolated;
+    use std::sync::atomic::Ordering;
+    if isolated() {
+        return;
+    }
+    let native = native_key_downs(&[(0x41, 1 | (0x1e << 16))]).remove(0);
+    let mut config = Config::default();
+    config.status_line.enabled = true;
+    let mut app = App::new(Theme::default(), config, Keymap::default());
+    let pane_id = app.__test_seed_tab("main");
+    let main_id = app.main_window_id.unwrap();
+    let _ = app.sync_status_line(std::time::Instant::now());
+    // win32-input requested, with the protocol epoch at its last value.
+    let modes = sonicterm_vt::vt::KeyboardModes::new(false, false, false, false, 0)
+        .with_win32_input(true)
+        .bits();
+    let exhausted = u64::from(modes) | (((1u64 << 48) - 1) << 16);
+    app.pane_by_id(pane_id).unwrap().keyboard_input.store(exhausted, Ordering::Relaxed);
+    let targets = std::collections::BTreeSet::from([pane_id]);
+    let writes =
+        app.encoded_terminal_key_writes(&native, ModifiersState::empty(), &targets, None, false);
+    assert!(writes.is_empty(), "a refused key sends nothing");
+    let _ = app.sync_status_line(std::time::Instant::now());
+    assert_eq!(
+        app.__test_input_record(main_id),
+        Some(sonicterm_ui::status_line::InputState::KeyNotSent)
+    );
+}

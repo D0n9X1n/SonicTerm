@@ -393,7 +393,7 @@ impl App {
             return Vec::new();
         };
         *pane.redraw_target.lock() = Some(id);
-        let handles = super::spawn_pane::PaneVtHandles::from_pane_state(pane);
+        let handles = super::spawn_pane::PaneVtHandles::from_pane_state(pane).with_pane_id(pane_id);
         super::spawn_pane::process_pane_vt_batch_and_publish(
             &handles,
             bytes,
@@ -423,7 +423,7 @@ impl App {
     pub fn __test_pane_worker(&self, id: WindowId, pane_id: u64) -> Option<TestPaneWorker> {
         let pane = self.windows.get(&id)?.panes.get(&pane_id)?;
         *pane.redraw_target.lock() = Some(id);
-        let handles = super::spawn_pane::PaneVtHandles::from_pane_state(pane);
+        let handles = super::spawn_pane::PaneVtHandles::from_pane_state(pane).with_pane_id(pane_id);
         let flush = super::spawn_pane::OutputFlush::new(pane_id, &handles);
         Some(TestPaneWorker { handles, flush })
     }

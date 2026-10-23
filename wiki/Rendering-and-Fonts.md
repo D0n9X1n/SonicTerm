@@ -229,6 +229,29 @@ epoch, empties the chrome-run cache, and counts `font_fallback_applies`. A face
 merged during a frame can draw its real glyph while a title measured earlier in
 that frame keeps notdef's width; the next applied generation corrects it.
 
+The worker also keeps what it could not cover. When the platform locator, the
+font directories (if searched) and the built-in faces all ran without error, the
+codepoints no face covered join the notice's unresolved set; when any stage
+failed, they join a separate lookup-failed set instead, and the failure is
+logged with its stage. Codepoints a request covered leave both sets. Each set
+keeps at most 4,096 codepoints and then flags overflow. A result carries the
+face epoch it was scheduled under; `config_changed` resets the sets to the new
+epoch, so a request that finishes after a reload publishes nothing. A change
+bumps the set's revision and posts the same wake as a face publication without
+moving the generation, so it never triggers a font apply. The
+`warn_about_missing_glyphs` line counts only unresolved codepoints.
+
+The renderer keeps, per pane and row slot, the distinct tofu characters (at most
+64) of the row it presented there, tagged with the row's content key and the
+applied fonts, and commits them only when the frame presents. A partial frame
+keeps the rows it did not redraw; a slot that now shows another row, a released
+pane and a font apply drop their records. `presented_missing_glyphs`
+intersects these records with the unresolved set, which it rereads only when
+the revision moved, so tofu from a pending fallback, a glyph that rasterized
+nothing or a tile too large to place is never counted. The status line's
+`glyphs` segment shows that count; which characters are unresolved depends on
+the installed fonts and the platform locator.
+
 The renderer shapes through two frame entry points, `FontStack::shape_text_for_frame`
 and `measure_text_width_for_frame`. Each `FontStack` memoizes its face per
 bold/italic style, so a warm stack shapes without cloning a text style or hashing

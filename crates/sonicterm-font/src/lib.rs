@@ -53,7 +53,9 @@ pub mod units;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub mod fcwrap;
 
-pub use crate::fallback_notice::{FallbackNotice, FallbackWaker};
+pub use crate::fallback_notice::{
+    FallbackNotice, FallbackWaker, UnresolvedPublication, UnresolvedSnapshot, UNRESOLVED_CAP,
+};
 pub use crate::rasterizer::RasterizedGlyph;
 pub use crate::shaper::{FallbackIdx, FontMetrics, GlyphInfo};
 
@@ -130,6 +132,8 @@ pub struct FallbackWorkerHooks {
     pub during_append: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Runs after the worker releases `pending_fallback` and before it completes the notice.
     pub before_completion: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Runs after selection and before the worker publishes its unresolved codepoints.
+    pub before_unresolved_publish: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 static FONT_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
@@ -529,6 +533,8 @@ struct FallbackResolveInfo {
     /// Set when the configuration is dropped or its fonts are reset; the request is obsolete.
     cancel: Arc<AtomicBool>,
     hooks: FallbackWorkerHooks,
+    /// The face epoch this request was scheduled under; its unresolved result is tagged with it.
+    epoch: u64,
 }
 
 fn select_fallback_fonts(
@@ -589,6 +595,10 @@ impl FallbackResolveInfo {
     fn process_inner(self) {
         let requested_count = self.no_glyphs.len();
         let mut extra_handles = vec![];
+        // A failed stage means an uncovered codepoint is not known to be uncovered.
+        let mut stage_failed = false;
+        // The completion is consumed before publishing, so the cancel flag is read through this.
+        let cancel = Arc::clone(&self.cancel);
 
         log::trace!(target: "sonicterm_font::payload", "Looking for {:?} in fallback fonts", self.no_glyphs);
 
@@ -601,6 +611,7 @@ impl FallbackResolveInfo {
         }) {
             Ok(ref mut handles) => extra_handles.append(handles),
             Err(err) => {
+                stage_failed = true;
                 log::error!("font fallback resolution failed: stage=font-locator requested={requested_count} error={}", fallback_error_identity(&err));
                 log::trace!(target: "sonicterm_font::payload", "fallback error: {err:#}");
             }
@@ -616,6 +627,7 @@ impl FallbackResolveInfo {
             }) {
                 Ok(ref mut handles) => extra_handles.append(handles),
                 Err(err) => {
+                    stage_failed = true;
                     log::error!("font fallback resolution failed: stage=font_dirs requested={requested_count} error={}", fallback_error_identity(&err));
                     log::trace!(target: "sonicterm_font::payload", "fallback error: {err:#}");
                 }
@@ -631,14 +643,15 @@ impl FallbackResolveInfo {
         }) {
             Ok(ref mut handles) => extra_handles.append(handles),
             Err(err) => {
+                stage_failed = true;
                 log::error!("font fallback resolution failed: stage=built-in requested={requested_count} error={}", fallback_error_identity(&err));
                 log::trace!(target: "sonicterm_font::payload", "fallback error: {err:#}");
             }
         }
 
         let mut wanted = RangeSet::new();
-        for c in self.no_glyphs {
-            wanted.add(c as u32);
+        for c in &self.no_glyphs {
+            wanted.add(*c as u32);
         }
         log::trace!(target: "sonicterm_font::payload",
             "Fallback fonts for {wanted:?} before sorting are: {extra_handles:#?}"
@@ -678,7 +691,34 @@ impl FallbackResolveInfo {
             tracing::debug!(target: "render_timing", completion_called = false, "font fallback completion");
         }
 
-        if !wanted.is_empty() {
+        if let Some(before_publish) = &self.hooks.before_unresolved_publish {
+            before_publish();
+        }
+        let uncovered: Vec<char> = wanted.iter_values().filter_map(char::from_u32).collect();
+        let covered: Vec<char> = self
+            .no_glyphs
+            .iter()
+            .copied()
+            .filter(|codepoint| !wanted.contains(*codepoint as u32))
+            .collect();
+        let (unresolved, lookup_failed) = if stage_failed {
+            (Vec::new(), uncovered)
+        } else {
+            // When: stage_failed is false, every stage ran, so what is left is truly uncovered.
+            (uncovered, Vec::new())
+        };
+        if !cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            // A reload since scheduling cancels the request; the epoch check in `publish` catches
+            // one that lands between this check and the publication.
+            self.notice.publish(&UnresolvedPublication {
+                epoch: self.epoch,
+                unresolved,
+                lookup_failed,
+                covered,
+            });
+        }
+
+        if !wanted.is_empty() && !stage_failed {
             log::trace!(target: "sonicterm_font::payload", "unresolved font codepoints: {wanted:?}");
 
             let current_gen = self.config.generation();
@@ -825,6 +865,8 @@ impl FontConfigInner {
         fonts.clear();
         // Bumped before the fallible reload below, so no reload outcome leaves a memo valid.
         self.bump_face_epoch();
+        // The new configuration starts with no unresolved codepoints; older results are discarded.
+        self.notice.reset(self.face_epoch.get());
         self.cancel_queued_fallback();
         self.title_font.borrow_mut().take();
         self.pane_select_font.borrow_mut().take();
@@ -860,6 +902,7 @@ impl FontConfigInner {
             notice: Arc::clone(&self.notice),
             cancel: Arc::clone(&self.cancel.borrow()),
             hooks: self.hooks.borrow().clone(),
+            epoch: self.face_epoch.get(),
         };
 
         let mut fallback = self.fallback_channel.borrow_mut();

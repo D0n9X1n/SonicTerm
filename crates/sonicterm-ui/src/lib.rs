@@ -37,6 +37,7 @@ pub mod pane;
 pub mod scrollbar;
 pub mod search;
 pub mod selection;
+pub mod status_line;
 pub mod tab_spans;
 pub mod tab_title;
 pub mod tabbar_view;

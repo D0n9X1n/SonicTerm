@@ -24,9 +24,16 @@ pub(crate) struct ScenarioSpec {
 pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
     // S1/atlas-retry runs only in the counters set (perf-compare enforces it), capped at 2 short runs
     // per side; perf.yml places it in a shard with measured slack and records the projection.
+    // S1/status-line is the idle shell with the status line on, one short run per side.
     capped(
-        spec("S1", "idle shell", &["default", "gdi", "wgpu", "role-exit", "atlas-retry"], 300, 80),
-        &[("atlas-retry", 2)],
+        spec(
+            "S1",
+            "idle shell",
+            &["default", "gdi", "wgpu", "role-exit", "atlas-retry", "status-line"],
+            300,
+            80,
+        ),
+        &[("atlas-retry", 2), ("status-line", 1)],
     ),
     // S2/flood is capped at 2 short runs to keep the PR comparison within 30 minutes; a release
     // comparison is never capped, so its full-length runs remain the variant's complete evidence.
@@ -49,7 +56,11 @@ pub(crate) const SCENARIOS: &[ScenarioSpec] = &[
         spec("S11", "inline image tab switch", &["default", "gdi", "wgpu", "release"], 420, 300),
         &[("release", 1), ("gdi", 2), ("wgpu", 2)],
     ),
-    spec("S12", "covered window", &["default"], 480, 360),
+    // S12/status-line is the covered window with the status line on, one short run per side.
+    capped(
+        spec("S12", "covered window", &["default", "status-line"], 480, 360),
+        &[("status-line", 1)],
+    ),
 ];
 
 const fn spec(
@@ -207,6 +218,10 @@ pub(crate) enum Fixture {
     InlinePng,
     /// 70 distinct numbered lines, one per visible row, for S1/atlas-retry.
     AtlasRetryRows,
+    /// 5,000 full-width rows, every cell inside an OSC 8 hyperlink, for S1/status-line: linked
+    /// cells cost far more than plain ones, so this history passes the grid's byte budget and
+    /// is trimmed below its row limit.
+    LinkedHistory,
 }
 
 /// A production action that opens the next role's pane or arranges tabs before GO.
@@ -275,7 +290,59 @@ pub(crate) enum Driver {
     /// Rest the pointer on one grid cell, `(row, col)`, repeating the same `CursorMoved` at `hertz`
     /// as a resting hand's sensor does, never pressing.
     Park { row: u16, col: u16, hertz: u32 },
+    /// Each step's text as one `Ime::Commit` into the active pane at its offset, then `settle_ms`.
+    Commit { steps: &'static [CommitStep], settle_ms: u64 },
 }
+
+/// The text one commit step sends.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommitText {
+    /// This text as it is.
+    Literal(&'static str),
+    /// One character repeated, for a paste too large to spell out.
+    Repeat(char, usize),
+}
+
+/// One commit, `after_ms` after its phase started.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CommitStep {
+    /// Milliseconds after the phase starts.
+    pub(crate) after_ms: u64,
+    /// What it sends.
+    pub(crate) text: CommitText,
+}
+
+/// S1/status-line's `glyphs` on a POSIX role: clear the line and print U+0378, which no font
+/// covers, with `printf`, so the line editor's locale never decides what is drawn.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const GLYPHS_POSIX_STEPS: &[CommitStep] =
+    &[CommitStep { after_ms: 0, text: CommitText::Literal("\u{15}printf '\\315\\270\\n'\r") }];
+
+/// S1/status-line's `glyphs` on a Windows role: the character itself, which `cmd` echoes.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const GLYPHS_WINDOWS_STEPS: &[CommitStep] =
+    &[CommitStep { after_ms: 0, text: CommitText::Literal("\u{378}\r") }];
+
+/// S1/status-line's `held` on a POSIX role: clear the line, stall the reader in raw mode for 1 s,
+/// then paste 256 KiB, far past any PTY input buffer, so the writer blocks behind it until `head`
+/// drains it. The scratch config sets `held_after_ms = 250`, so the block crosses it.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const HELD_POSIX_STEPS: &[CommitStep] = &[
+    CommitStep {
+        after_ms: 0,
+        text: CommitText::Literal(
+            "\u{15}stty raw -echo; sleep 1; head -c 262144 >/dev/null; stty sane\r",
+        ),
+    },
+    CommitStep { after_ms: 300, text: CommitText::Repeat('x', 256 << 10) },
+];
+
+/// S1/status-line's `held` on a Windows role, whose shell has no raw mode to stall: Enter only.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const HELD_WINDOWS_STEPS: &[CommitStep] =
+    &[CommitStep { after_ms: 0, text: CommitText::Literal("\r") }];
 
 /// The grid row S6/rest prints the rest target's absolute path on; its pointer rests here.
 #[cfg(any(target_os = "macos", windows, test))]
@@ -295,6 +362,144 @@ pub(crate) struct HoverDeltas {
     pub(crate) detections: u64,
     pub(crate) cache_hits: u64,
     pub(crate) probes_submitted: u64,
+}
+
+/// The status line's sampling interval the scratch config leaves at its default, in ms.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const STATUS_LINE_INTERVAL_MS: u64 = 2_000;
+
+/// Cells one selection count may read; `sonicterm_ui::selection::SELECTION_EXTENT_MAX_CELLS`.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const SEL_CELLS_PER_COUNT: u64 = 200_000;
+
+/// Status line counter deltas over one phase.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StatusLineDeltas {
+    /// Memory samples taken.
+    pub(crate) samples: u64,
+    /// Due status line wakes serviced.
+    pub(crate) wakes: u64,
+    /// Strip-only redraw requests (one per window whose strip pixels changed).
+    pub(crate) redraws: u64,
+    /// Selection counts the frame passes ran.
+    pub(crate) sel_counts: u64,
+    /// Cells those counts read.
+    pub(crate) sel_cells: u64,
+    /// Times `History: trimmed` appeared.
+    pub(crate) history_shows: u64,
+    /// Times `Input: held` appeared.
+    pub(crate) held_shows: u64,
+    /// Times `Glyphs:` appeared.
+    pub(crate) glyph_shows: u64,
+}
+
+/// Whether a `status-line` phase kept the strip's idle contract, or why not.
+///
+/// `idle` and `uncovered` hold `hold_ms`: samples follow the 2 s interval with no extra wake, so
+/// at most `hold_ms / interval + 1` samples (the `+ 1` is a sample at the phase edge), and a strip
+/// redraw needs a changed sample, so redraws never exceed samples plus one. `uncovered` must take
+/// at least one sample, the resume sample. `covered`, when the App received `Occluded(true)`
+/// (`occluded`), takes at most one sample and one wake: the one that can land between the cover
+/// and its delivery. Without delivered occlusion (Windows outside the short trim) the covered
+/// phase is not checked, because the platform reports no occlusion to pause on. `select` drags a
+/// selection: it must count at least once and read at most 200,000 cells per count; `selected`
+/// holds that selection unchanged, so it must not count again. `print` floods the linked history
+/// with `history` and `size` listed: `History: trimmed` appears exactly once, and the strip redraws
+/// only for a sample or that appearance, never per output frame. `input` types into the idle shell:
+/// every accepted key arms an outstanding-work deadline, which finds the write complete, so `held`
+/// never appears and the strip redraws only for a sample. `held` pastes behind a stalled reader:
+/// `Input: held` may appear at most once on any host ([`status_line_posix_progress`] requires it).
+/// `glyphs` prints U+0378: `Glyphs:` appears at most once and the strip redraws only for a
+/// sample or that appearance, never again after the fallback worker's publication.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) fn status_line_progress(
+    phase: &str,
+    hold_ms: u64,
+    occluded: bool,
+    deltas: StatusLineDeltas,
+) -> Result<(), String> {
+    let cadence_bound = hold_ms / STATUS_LINE_INTERVAL_MS + 1;
+    match phase {
+        "covered" if occluded && (deltas.samples > 1 || deltas.wakes > 1) => Err(format!(
+            "status line sampled {} times with {} wakes while covered",
+            deltas.samples, deltas.wakes
+        )),
+        "covered" => Ok(()),
+        "uncovered" if deltas.samples == 0 => {
+            Err("status line took no sample after the window was uncovered".to_owned())
+        }
+        "idle" | "uncovered" if deltas.samples > cadence_bound || deltas.wakes > cadence_bound => {
+            Err(format!(
+                "status line sampled {} times with {} wakes in {hold_ms} ms, more than {cadence_bound}",
+                deltas.samples, deltas.wakes
+            ))
+        }
+        "idle" | "uncovered" if deltas.redraws > deltas.samples + 1 => Err(format!(
+            "status line requested {} redraws for {} samples",
+            deltas.redraws, deltas.samples
+        )),
+        "print" if deltas.history_shows != 1 => Err(format!(
+            "`History: trimmed` appeared {} times while the linked history printed, not once",
+            deltas.history_shows
+        )),
+        "print" if deltas.redraws > deltas.samples + deltas.history_shows + 1 => Err(format!(
+            "status line requested {} redraws for {} samples during output",
+            deltas.redraws, deltas.samples
+        )),
+        "select" if deltas.sel_counts == 0 => {
+            Err("the drag selected nothing the status line counted".to_owned())
+        }
+        "select" if deltas.sel_cells > deltas.sel_counts * SEL_CELLS_PER_COUNT => Err(format!(
+            "status line read {} cells in {} selection counts, more than {SEL_CELLS_PER_COUNT} each",
+            deltas.sel_cells, deltas.sel_counts
+        )),
+        "input" if deltas.held_shows > 0 => Err(format!(
+            "`Input: held` appeared {} times while typing into an idle shell",
+            deltas.held_shows
+        )),
+        "input" if deltas.redraws > deltas.samples + 1 => Err(format!(
+            "status line requested {} redraws for {} samples while typing",
+            deltas.redraws, deltas.samples
+        )),
+        "glyphs" if deltas.glyph_shows > 1 => Err(format!(
+            "`Glyphs:` appeared {} times for one uncovered character",
+            deltas.glyph_shows
+        )),
+        "glyphs" if deltas.redraws > deltas.samples + deltas.glyph_shows + 1 => Err(format!(
+            "status line requested {} redraws for {} samples and {} appearances",
+            deltas.redraws, deltas.samples, deltas.glyph_shows
+        )),
+        "held" if deltas.held_shows > 1 => Err(format!(
+            "`Input: held` appeared {} times for one stalled paste",
+            deltas.held_shows
+        )),
+        "selected" if deltas.sel_counts > 0 => Err(format!(
+            "status line recounted an unchanged selection {} times",
+            deltas.sel_counts
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The checks that hold only where the role shell is POSIX: there the 256 KiB paste in `held` blocks
+/// the writer, so `Input: held` appears exactly once, and `printf` draws U+0378, so `Glyphs:` does.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) fn status_line_posix_progress(
+    phase: &str,
+    deltas: StatusLineDeltas,
+) -> Result<(), String> {
+    match phase {
+        "held" if deltas.held_shows != 1 => Err(format!(
+            "`Input: held` appeared {} times while the reader was stalled, not once",
+            deltas.held_shows
+        )),
+        "glyphs" if deltas.glyph_shows != 1 => Err(format!(
+            "`Glyphs:` appeared {} times after U+0378 was printed, not once",
+            deltas.glyph_shows
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// What one parked S6/rest phase observed between its start and its end.
@@ -512,6 +717,8 @@ pub(crate) struct Plan {
     pub(crate) timeout_s: u64,
     /// `[terminal].scrollback` rows written to the scratch config.
     pub(crate) scrollback_rows: usize,
+    /// `[window].rows` the scratch config requests; `None` keeps the harness default.
+    pub(crate) window_rows: Option<u16>,
     /// Whether the window gets a synthetic `Focused(true)` before setup.
     pub(crate) focused: bool,
     /// Each role's workload, in role order; role 0 is the first tab's shell.
@@ -527,6 +734,18 @@ pub(crate) struct Plan {
     /// The covered-window trim experiment this plan runs, as `result.json` names it; `None` when
     /// the plan asks for no trim.
     pub(crate) trim_experiment: Option<&'static str>,
+    /// Whether the scratch config turns the status line on; its phases are checked by
+    /// [`status_line_progress`].
+    pub(crate) status_line: bool,
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+impl Plan {
+    /// Whether a role prints the linked history, the only fixture that passes the byte budget and
+    /// so shows `History: trimmed`; `print`'s trim check applies only to such a plan.
+    pub(crate) fn prints_linked_history(&self) -> bool {
+        self.roles.contains(&Workload::PrintThenShell(Fixture::LinkedHistory))
+    }
 }
 
 /// A phase of `kind` with no driver, no entry actions and no throughput figure.
@@ -603,6 +822,58 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                     PhaseEnd::DriverDone,
                 )),
                 idle,
+                end,
+            ],
+        ),
+        // status-line first prints a linked history that the byte budget trims, which shows
+        // `History: trimmed` once; then it keeps the idle default's hold, drags a selection and
+        // holds it: the drag counts each changed selection once, within the cell bound, and the
+        // held one never again.
+        ("S1", "status-line") => (
+            vec![Workload::PrintThenShell(Fixture::LinkedHistory)],
+            vec![],
+            vec![
+                print(vec![0]),
+                Step::Phase(timed("idle", PhaseKind::Hold, PhaseEnd::Hold(hold(60_000)))),
+                Step::Phase(driven(
+                    "select",
+                    PhaseKind::Sustained,
+                    Driver::Drag { hertz: 120 },
+                    PhaseEnd::Hold(if short { 2_000 } else { 10_000 }),
+                )),
+                Step::Phase(timed(
+                    "selected",
+                    PhaseKind::Hold,
+                    PhaseEnd::Hold(if short { 2_000 } else { 10_000 }),
+                )),
+                Step::Phase(driven(
+                    "input",
+                    PhaseKind::Sustained,
+                    Driver::Typing { role: 0, chars: 10, per_second: 10, settle_ms: 1_000 },
+                    PhaseEnd::DriverDone,
+                )),
+                Step::Phase(driven(
+                    "glyphs",
+                    PhaseKind::Sustained,
+                    if host == Host::Windows {
+                        Driver::Commit { steps: GLYPHS_WINDOWS_STEPS, settle_ms: 1_500 }
+                    } else {
+                        // When: host is POSIX, printf draws U+0378 whatever the shell's locale.
+                        Driver::Commit { steps: GLYPHS_POSIX_STEPS, settle_ms: 1_500 }
+                    },
+                    PhaseEnd::DriverDone,
+                )),
+                Step::Phase(driven(
+                    "held",
+                    PhaseKind::Sustained,
+                    if host == Host::Windows {
+                        Driver::Commit { steps: HELD_WINDOWS_STEPS, settle_ms: 500 }
+                    } else {
+                        // When: host is POSIX, its shell can stall the reader behind a paste.
+                        Driver::Commit { steps: HELD_POSIX_STEPS, settle_ms: 1_800 }
+                    },
+                    PhaseEnd::DriverDone,
+                )),
                 end,
             ],
         ),
@@ -855,7 +1126,18 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
         short,
         timeout_s: if short { spec.short_timeout_s } else { spec.timeout_s },
         // Only S7 asks for more history than the default; the per-pane cell budget clamps it.
-        scrollback_rows: if spec.id == "S7" { 10_000 } else { 1_000 },
+        // S1/status-line's linked history needs room to pass the byte budget below the row limit.
+        scrollback_rows: if spec.id == "S7" || (spec.id == "S1" && variant == "status-line") {
+            10_000
+        } else {
+            // When: the plan is neither S7 nor S1/status-line, the default history is enough.
+            1_000
+        },
+        // S1 and S12 carry the status line comparisons; every variant of theirs but atlas-retry,
+        // whose fixture fills 70 rows, requests a grid below the macOS runner's screen clamp with
+        // the strip on, so both refs measure the same grid and the presenter variants stay alike.
+        window_rows: (matches!(spec.id, "S1" | "S12") && variant != "atlas-retry")
+            .then_some(STRIP_SAFE_ROWS),
         focused: true,
         roles,
         setup,
@@ -872,8 +1154,15 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
             delay_ms: 30_000,
         }),
         trim_experiment: (spec.id == "S12" && short).then_some(TRIM_EXPERIMENT),
+        status_line: variant == "status-line",
     })
 }
+
+/// Grid rows the S1 and S12 status line comparisons request. The macOS runner clamps the window to
+/// its screen at 43 rows, so a 70-row request lost the strip's row only on a ref that draws it. At
+/// 13 pt the strip is under 1.4 rows, so 40 rows plus the strip fit unclamped on both refs.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const STRIP_SAFE_ROWS: u16 = 40;
 
 /// The name `result.json` gives the short S12 plan's covered-window trim experiment.
 #[cfg(any(target_os = "macos", windows, test))]

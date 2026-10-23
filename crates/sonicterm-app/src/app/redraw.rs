@@ -20,6 +20,13 @@ use winit::{event::WindowEvent, window::WindowId};
 
 use super::{App, WindowState};
 
+/// Whether a frame pass may set foreground-process probe demand: never for an output burst, and
+/// never for a frame that only redraws the status line, whose probe result could repaint the
+/// strip and so draw another frame.
+pub(super) fn sets_fg_demand(pty_burst: bool, status_only: bool) -> bool {
+    !pty_burst && !status_only
+}
+
 /// Finite owner-addressed frame causes; each has its own generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RedrawCause {
@@ -34,8 +41,9 @@ pub(super) enum RedrawCause {
     Visibility,
     DeviceRecovered,
     Topology,
+    StatusLine,
 }
-const CAUSES: usize = 11;
+const CAUSES: usize = 12;
 
 /// Captured cause generations; newer causes cannot be cleared by an older attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +108,12 @@ pub(crate) struct WindowRedrawState {
     pending: [u64; CAUSES],
     observed: [u64; CAUSES],
     pub(super) attempt_causes: Option<CauseSnapshot>,
+    /// While `frame` is listed: content frames presented and their summed CPU-side time in µs.
+    pub(super) presented_frames: Option<(u64, u64)>,
+    /// A failed or retried attempt carried content, so the retry that presents counts it.
+    retry_content: bool,
+    /// When the current attempt started collecting, on the real clock.
+    pub(super) attempt_started: Option<Instant>,
     pub(super) last_present: Option<Instant>,
     pub(super) monitor_period: Duration,
     pub(super) deferred: bool,
@@ -155,6 +169,9 @@ impl Default for WindowRedrawState {
             pending: [0; CAUSES],
             observed: [0; CAUSES],
             attempt_causes: None,
+            presented_frames: None,
+            retry_content: false,
+            attempt_started: None,
             last_present: None,
             monitor_period: Duration::from_micros(16_667),
             frame_counters: None,
@@ -209,6 +226,19 @@ impl WindowRedrawState {
             // A new surface size must reach the screen even mid-update.
             self.resize_pending = true;
         }
+    }
+
+    /// Whether the admitted attempt settles a status line change and nothing else: no other cause
+    /// is unsettled, no forced resize or surface frame is owed, and no content retry is carried.
+    pub(super) fn status_only_attempt(&self) -> bool {
+        if self.resize_pending || self.surface_recovery_pending || self.retry_content {
+            // When: resize_pending, surface_recovery_pending or retry_content is set, it is not strip-only.
+            return false;
+        }
+        let captured = self.attempt_causes.map_or(self.pending, |snapshot| snapshot.0);
+        let differs = |index: usize| captured[index] != self.observed[index];
+        differs(RedrawCause::StatusLine as usize)
+            && (0..CAUSES).all(|index| index == RedrawCause::StatusLine as usize || !differs(index))
     }
 
     /// Whether `cause` has a generation no attempt has settled yet.
@@ -270,6 +300,38 @@ impl WindowRedrawState {
             counters.record_settlement(outcome, now);
         }
         self.attempt_causes = None;
+        // Read before `observed` moves: a captured cause not yet observed was settled by this
+        // attempt. Strip, cursor-blink and retry causes alone are not content.
+        const NOT_CONTENT: [RedrawCause; 4] = [
+            RedrawCause::StatusLine,
+            RedrawCause::Cursor,
+            RedrawCause::SurfaceRetry,
+            RedrawCause::AtlasRetry,
+        ];
+        let content = self.retry_content
+            || (0..CAUSES).any(|index| {
+                NOT_CONTENT.iter().all(|cause| *cause as usize != index)
+                    && snapshot.0[index] != self.observed[index]
+            });
+        let elapsed_us =
+            self.attempt_started.take().map_or(0, |started| started.elapsed().as_micros() as u64);
+        self.retry_content = match outcome {
+            FrameSettlement::Presented => {
+                if let Some((frames, total_us)) = self.presented_frames.as_mut().filter(|_| content)
+                {
+                    *frames += 1;
+                    *total_us = total_us.saturating_add(elapsed_us);
+                }
+                false
+            }
+            // A retry re-attempts this frame; it counts only if this attempt carried content.
+            FrameSettlement::Retry(_)
+            | FrameSettlement::SurfaceRetry(_)
+            | FrameSettlement::Failed => content,
+            FrameSettlement::Cached | FrameSettlement::Settled | FrameSettlement::Stopped(_) => {
+                false
+            }
+        };
         self.observed[RedrawCause::Input as usize] = snapshot.0[RedrawCause::Input as usize];
         self.deferred = false;
         self.deferred_rule = None;
@@ -467,6 +529,8 @@ pub(super) enum DueCause {
     SurfaceProbe,
     /// The renderer's promoted image atlas has had no renderable media for 30 s; released without a frame.
     ImageAtlasRelease,
+    /// A status line sample or pending path check is due; the sync requests any frame itself.
+    StatusLine,
 }
 
 /// A headless window's stand-in for the renderer's interval release: its deadline and how often it ran.
@@ -888,9 +952,9 @@ impl App {
             return false;
         };
         let before = command_chrome(&window.tabs, now);
-        super::poll_command_events_for_child_window(window, &self.config);
+        let marked = super::poll_command_events_for_child_window(window, &self.config);
         window.tabs.clear_expired_command_badges(now);
-        before != command_chrome(&window.tabs, now)
+        marked || before != command_chrome(&window.tabs, now)
     }
 
     /// Deliver stopped-device reports without turning unchanged usable devices into redraw causes.
@@ -1124,6 +1188,8 @@ impl App {
         let window = self.windows.get_mut(&id)?;
         let snapshot = window.capture_redraw_snapshot();
         window.redraw.attempt_causes = Some(snapshot.causes);
+        // `frame` measures CPU-side time from here to settlement, on the real clock.
+        window.redraw.attempt_started = Some(Instant::now());
         if self.tab_bar_visible && window.frame_deadlines_allowed() {
             let badges = window.command_badge_due(id, now);
             for work in badges {
@@ -1305,6 +1371,7 @@ impl App {
                     let _ = self.quit_hold.on_tick(now);
                 }
                 DueCause::Memory
+                | DueCause::StatusLine
                 | DueCause::PointerMotion
                 | DueCause::GpuRecovery
                 | DueCause::Smoke => {

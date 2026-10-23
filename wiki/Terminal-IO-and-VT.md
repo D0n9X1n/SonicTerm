@@ -41,8 +41,29 @@ shell workloads pin one 64 KiB ring.
 
 Terminal input is non-blocking. Its channel holds four `Vec<u8>` messages, each
 at most 16 MiB. Oversize, full-queue, and disconnected-writer failures return a
-typed `PtyInputError` that retains the rejected bytes for retry or a visible
-notification. Production parsing yields after a reply-producing dispatch. Outside
+typed `PtyInputError` that carries the rejected bytes only so the caller can
+report their length; refused input is never retried.
+
+Each accepted user-input message gets an ordinal (modulo 2^20) under a short
+admission lock around the non-blocking send, so ordinal order is channel order.
+The writer counts a user-input message complete only after its flush succeeds;
+parser replies never touch the ordinals. Each ordinal's admission time sits in
+one of eight slots. `PtyHandle::input_progress()` reads these atomics, with no
+lock, and returns `Idle`, the oldest outstanding write (`Oldest`, with its
+admission time and whether a reply is ahead of it), `Raced` when a completion
+raced the read, or `Terminal` once the writer has stopped. On every exit the
+writer records why under the admission lock, so no later admission succeeds
+unrecorded: a native `write_all` or `flush` error is `Failed`, and every write
+admitted after the last completion is reported lost; cancellation and an
+intentional close are `Stopped`. The status line's `input` segment reads this
+progress.
+
+While a shown status line lists `out`, the VT worker adds each received chunk's
+length to the pane's output byte counter, one `Relaxed` add beside the flush
+bookkeeping; otherwise it does one `Relaxed` load and nothing more. The counter
+travels with the pane across windows.
+
+Production parsing yields after a reply-producing dispatch. Outside
 parser and side-effect locks, the VT worker submits replies to a separate FIFO:
 64 KiB of RAM followed by a private, automatically deleted temporary spill file.
 One dispatch stages less than 32 KiB, bounded by the 4 KiB raw OSC 4 input limit.
@@ -289,7 +310,13 @@ URI to 8 KiB and client id to 1 KiB.
 - **OSC 8:** preserve the full URI, including semicolons. Only `id=` is extracted
   from the parameter field; other parameters are not treated as the client id.
 - **OSC 133:** `B` emits `PromptEnd` and does not start command timing; `C` marks
-  execution start. `A`/`D` retain their existing prompt-region behavior.
+  execution start. `A`/`D` retain their existing prompt-region behavior. Each pane
+  keeps its own command state, applied in parse order on the event loop: a phase
+  (`Unknown`, `Prompt` after `A`, `B` or `D`, `Running` from `C`) and its last
+  command's end instant and duration (`D`, or an `A` that arrives while running,
+  which marks the command abandoned). No exit code is kept. A queue that dropped
+  events resets the state before its retained tail, a pane whose process exited is
+  `Unknown`, and the state moves with the pane to another tab or window.
 
 The raw OSC 4 collector retains queries beyond vte's parameter count, up to
 4 KiB, and suppresses the truncated duplicate callback. Parser-owned sequence

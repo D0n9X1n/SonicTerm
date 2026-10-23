@@ -2640,3 +2640,65 @@ fn degraded_software_keeps_its_cadence_after_a_keypress() {
         }
     }
 }
+
+/// `frame` counts presented content frames only: output, input and resize count; a strip-only or
+/// cursor-blink frame does not; a strip-only attempt that retries and then presents does not; a
+/// content attempt that retries counts once, when it presents; cached and settled never count;
+/// with recording off nothing is recorded.
+#[test]
+fn only_presented_content_frames_are_recorded() {
+    let now = Instant::now();
+    let mut state =
+        WindowRedrawState { presented_frames: Some((0, 0)), ..WindowRedrawState::default() };
+    let attempt = |state: &mut WindowRedrawState, causes: &[RedrawCause], outcome| {
+        for cause in causes {
+            state.mark(*cause);
+        }
+        let snapshot = state.snapshot();
+        state.settle(snapshot, outcome, now);
+        state.presented_frames.map_or(0, |(frames, _)| frames)
+    };
+    use FrameSettlement::{Cached, Presented, Settled};
+    assert_eq!(attempt(&mut state, &[RedrawCause::Output], Presented), 1);
+    assert_eq!(attempt(&mut state, &[RedrawCause::Input], Presented), 2);
+    assert_eq!(attempt(&mut state, &[RedrawCause::Topology], Presented), 3);
+    assert_eq!(attempt(&mut state, &[RedrawCause::StatusLine], Presented), 3, "strip only");
+    assert_eq!(attempt(&mut state, &[RedrawCause::Cursor], Presented), 3, "blink only");
+    let surface = FrameSettlement::SurfaceRetry(SurfaceRetryReason::Outdated);
+    assert_eq!(attempt(&mut state, &[RedrawCause::StatusLine], surface), 3);
+    assert_eq!(attempt(&mut state, &[], Presented), 3, "the strip's retry is not content");
+    let atlas = FrameSettlement::Retry(RedrawCause::AtlasRetry);
+    assert_eq!(attempt(&mut state, &[RedrawCause::Input], atlas), 3);
+    assert_eq!(attempt(&mut state, &[], Presented), 4, "the content attempt counts once");
+    assert_eq!(attempt(&mut state, &[], Presented), 4);
+    assert_eq!(attempt(&mut state, &[RedrawCause::Output], Cached), 4);
+    assert_eq!(attempt(&mut state, &[RedrawCause::Output], Settled), 4);
+    let mut off = WindowRedrawState::default();
+    assert_eq!(attempt(&mut off, &[RedrawCause::Output], Presented), 0);
+    assert_eq!(off.presented_frames, None);
+}
+
+/// A frame whose only unsettled cause is `StatusLine` sets no foreground-probe demand, so a
+/// probe result can never repaint the strip into another frame; any other cause, a forced
+/// resize or a burst changes that. Both frame passes route through the gate.
+#[test]
+fn a_status_only_frame_schedules_no_foreground_probe() {
+    let mut strip = WindowRedrawState::default();
+    strip.mark(RedrawCause::StatusLine);
+    assert!(strip.status_only_attempt());
+    assert!(!sets_fg_demand(false, strip.status_only_attempt()), "strip only: no probe");
+    let mut output = WindowRedrawState::default();
+    output.mark(RedrawCause::StatusLine);
+    output.mark(RedrawCause::Output);
+    assert!(!output.status_only_attempt());
+    assert!(sets_fg_demand(false, output.status_only_attempt()), "content sets demand");
+    let mut resized = WindowRedrawState { resize_pending: true, ..WindowRedrawState::default() };
+    resized.mark(RedrawCause::StatusLine);
+    assert!(!resized.status_only_attempt(), "a forced resize frame is not strip-only");
+    assert!(!WindowRedrawState::default().status_only_attempt(), "nothing pending");
+    assert!(!sets_fg_demand(true, false), "a burst never probes");
+    for source in [include_str!("window_event.rs"), include_str!("child_window_redraw.rs")] {
+        assert!(source.contains("super::redraw::sets_fg_demand(pty_burst, status_only)"));
+        assert!(!source.contains("(!pty_burst).then(|| std::sync::Arc::clone(&self.fg_probes))"));
+    }
+}

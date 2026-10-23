@@ -41,8 +41,11 @@ impl App {
             .and_then(|window| window.renderer.as_ref())
             .and_then(|renderer| renderer.tab_bar_band());
         let hold_tab_widths = self.tab_widths_held_in(win_id, tab_bar_band);
-        // A burst frame reads the cache only; other frames set demand, never probe.
-        let fg_probes = (!pty_burst).then(|| std::sync::Arc::clone(&self.fg_probes));
+        // A burst or strip-only frame reads the cache only; other frames set demand, never probe.
+        let status_only =
+            self.windows.get(&win_id).is_some_and(|child| child.redraw.status_only_attempt());
+        let fg_probes = super::redraw::sets_fg_demand(pty_burst, status_only)
+            .then(|| std::sync::Arc::clone(&self.fg_probes));
         let Some(child) = self.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so this child closed and
             // has no frame left to render.
@@ -55,7 +58,7 @@ impl App {
         // the forbidden unconditional heartbeat redraw).
         self.pending_redraw_windows.remove(&win_id);
         child.tabs.clear_expired_command_badges(Instant::now());
-        poll_command_events_for_child_window(child, config);
+        let _ = poll_command_events_for_child_window(child, config);
         crate::app::refresh_window_tab_privileges(
             &mut child.tabs,
             &child.tab_states,
@@ -128,6 +131,7 @@ impl App {
             win_id,
             frame.guards.iter().map(|(id, parser, _)| (*id, &**parser)),
         );
+        let counts_selection = self.counts_selection();
         let Some(child) = self.windows.get_mut(&win_id) else {
             // When: windows no longer contains win_id, discard its collected frame instead of presenting retained hover.
             return;
@@ -135,6 +139,8 @@ impl App {
         // An owned handle for the watched dispatch's render pair; it holds no lock or borrow.
         let render_marker = child.redraw.timeline.render_marker();
         // Reconcile, then apply the previous frame's receipts under these guards, before planning.
+        // Focused-pane facts for the status line, copied under the frame's parser guard.
+        let mut status_facts = None;
         let frame_viewports = match sources.reconcile_and_apply_receipts(child, &mut frame.guards) {
             Ok(viewports) => viewports,
             Err(why) => {
@@ -168,6 +174,23 @@ impl App {
                 active_id,
                 frame.guards[active_pos].1.grid(),
             );
+            if counts_selection {
+                // Counted under the guard already held, after validation; a cached identity is free.
+                let cells_read = super::status_line::refresh_sel_status(
+                    &mut child.sel_status,
+                    child.selection.as_ref(),
+                    child.copy_mode.as_ref(),
+                    active_id,
+                    frame.guards[active_pos].1.grid(),
+                );
+                if let (Some(cells_read), Some(counters)) =
+                    (cells_read, self.frame_counters.as_mut())
+                {
+                    // The gate is on, so the count and the cells it read are recorded.
+                    counters.status_line.sel_counts += 1;
+                    counters.status_line.sel_cells += cells_read;
+                }
+            }
             // Run the same title formatter the main window uses, so OSC 7
             // cwd and foreground-process probes flow into every window's
             // tab bar uniformly instead of leaving a child on the literal
@@ -230,6 +253,11 @@ impl App {
                 let grid = frame.guards[active_pos].1.grid();
                 (grid.cursor.row, grid.cursor.col)
             };
+            status_facts = Some(super::status_line::StatusPaneFacts::of(
+                &frame.guards[active_pos].1,
+                frame_viewports.active,
+                active_id,
+            ));
             let cursor_rect_copy = frame.guards[active_pos].2;
             let recovery_sample = self.runtime_smoke.as_ref().and_then(|smoke| {
                 smoke.recovery_marker_sample(
@@ -536,6 +564,10 @@ impl App {
             if scrollbar_needs_more_frames {
                 child.request_window_redraw();
             }
+        }
+        if let Some(facts) = status_facts {
+            // The frame copied focused-pane facts; the next loop pass refreshes the strip.
+            self.observe_status_pane(win_id, facts);
         }
     }
 }

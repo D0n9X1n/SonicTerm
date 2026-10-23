@@ -841,6 +841,7 @@ mod frame_fallback {
         fixture.stack.set_fallback_worker_hooks_for_test(sonicterm_font::FallbackWorkerHooks {
             during_append: Some(pause_hook(&entered, &release)),
             before_completion: None,
+            ..Default::default()
         });
         let mut frames = Frames::new(&fixture.stack);
         assert!(frames.begin());
@@ -869,6 +870,7 @@ mod frame_fallback {
         fixture.stack.set_fallback_worker_hooks_for_test(sonicterm_font::FallbackWorkerHooks {
             during_append: None,
             before_completion: Some(pause_hook(&entered, &release)),
+            ..Default::default()
         });
         let mut frames = Frames::new(&fixture.stack);
         assert!(frames.begin(), "frame N applies generation 0");

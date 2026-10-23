@@ -41,6 +41,7 @@ const SCROLLBACK_SEED: u64 = 0x5045_5246_0004;
 const HISTORY_SEED: u64 = 0x5045_5246_0005;
 const EMOJI_SEED: u64 = 0x5045_5246_0006;
 const FRAMES_SEED: u64 = 0x5045_5246_0007;
+const LINKED_SEED: u64 = 0x5045_5246_0008;
 /// The bulk fixture's repeated block: 8,192 lines of 128 bytes.
 const BLOCK_BYTES: usize = 1 << 20;
 const BULK_LINE_BYTES: usize = 128;
@@ -70,12 +71,24 @@ pub(crate) fn config_toml(plan: &Plan, scratch: &str, laps: bool) -> String {
 pub(crate) fn config_toml_with_shell(plan: &Plan, shell: &str, laps: bool) -> String {
     let level = if laps { "debug" } else { "info" };
     let scrollback = plan.scrollback_rows;
-    let config = format!(
-        "[window]\ncols = {GRID_COLS}\nrows = {GRID_ROWS}\n\n\
+    let rows = plan.window_rows.map_or(GRID_ROWS, usize::from);
+    let mut config = format!(
+        "[window]\ncols = {GRID_COLS}\nrows = {rows}\n\n\
          [font]\nfamily = \"{FONT_FAMILY}\"\nsize = {FONT_SIZE}\n\n\
          [logging]\nlevel = \"{level}\"\n\n\
          [terminal]\nshell = '{shell}'\nscrollback = {scrollback}\n"
     );
+    if plan.status_line {
+        // A base without the status line ignores the table, so both sides run the same config.
+        config.push_str("\n[status_line]\nenabled = true\n");
+        if plan.scenario == "S1" {
+            // S1 also lists `size`, so its output frames run with `history` and `size` both shown,
+            // and `glyphs`, so the `glyphs` phase has a segment to show.
+            config.push_str("right = [\"health\", \"glyphs\", \"history\", \"size\", \"mem\"]\n");
+            // `held` stalls its reader for 1 s, so the threshold sits well inside that stall.
+            config.push_str("\n[status_line.segment.input]\nheld_after_ms = 250\n");
+        }
+    }
     // Only the presenter variants set a mode, so every other config stays byte-identical.
     let mode = match plan.presentation {
         Presentation::Configured => return config,
@@ -232,6 +245,16 @@ fn numbered_lines(rng: &mut SeededRng, count: usize, text: &mut String) {
     }
 }
 
+/// `count` full-width lines, each wholly inside one OSC 8 hyperlink with its own target.
+fn linked_lines(rng: &mut SeededRng, count: usize, text: &mut String) {
+    for number in 1..=count {
+        let words = word_line(rng, WORDS, &format!("{number:05} "), GRID_COLS);
+        text.push_str(&format!(
+            "\x1b]8;;https://example.com/{number}\x1b\\{words}\x1b]8;;\x1b\\\n"
+        ));
+    }
+}
+
 /// 200 lines mixing wide emoji and CJK tokens with ASCII words, at most about 110 cells each.
 fn emoji_cjk_lines(text: &mut String) {
     let mut rng = SeededRng::new(EMOJI_SEED);
@@ -374,6 +397,7 @@ fn fixture_bytes(fixture: Fixture) -> Vec<u8> {
         Fixture::Sixel => return sixel_image(),
         Fixture::InlinePng => return inline_png_osc(),
         Fixture::AtlasRetryRows => text.push_str(&crate::atlas_retry::fixture_text()),
+        Fixture::LinkedHistory => linked_lines(&mut SeededRng::new(LINKED_SEED), 5_000, &mut text),
     }
     text.into_bytes()
 }
@@ -590,6 +614,7 @@ fn fixture_file_name(fixture: Fixture) -> &'static str {
         Fixture::Sixel => "image.sixel",
         Fixture::InlinePng => "inline.osc",
         Fixture::AtlasRetryRows => "atlas-retry.txt",
+        Fixture::LinkedHistory => "linked-history.txt",
     }
 }
 

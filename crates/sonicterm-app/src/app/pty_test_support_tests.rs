@@ -372,15 +372,12 @@ fn process_detail(_pid: u32) -> String {
     String::new()
 }
 
-/// An isolated child must not inherit a pipe its parent left open to children, at any descriptor
-/// number. On macOS a sibling test's pipes stay inheritable for a moment while it spawns, and an
-/// isolated child holding one would keep it open until the child exits. This probe pipe stays
-/// inheritable for the whole spawn, and a copy of it sits near the top of the descriptor range.
+/// Lines `held_pipe_report_fixture` printed in an isolated child, and the probe pipe's two
+/// descriptors there: the writer's number and a copy near the top of the usable range. Both stay
+/// inheritable for the whole spawn; `mark_close_on_exec` decides whether the child marks them.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn isolated_child_does_not_inherit_open_parent_pipes() {
+fn held_pipe_report(mark_close_on_exec: bool) -> (Vec<String>, [i32; 2]) {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::os::unix::fs::MetadataExt;
     const NAME: &str = "app::pty_test_support::pty_test_support_tests::held_pipe_report_fixture";
     let (reader, writer) = std::io::pipe().expect("probe pipe");
     let mut identities = Vec::new();
@@ -389,9 +386,8 @@ fn isolated_child_does_not_inherit_open_parent_pipes() {
             // SAFETY: `reader` and `writer` keep `descriptor` open for this whole test.
             unsafe { libc::fcntl(descriptor, libc::F_SETFD, 0) };
         assert_eq!(cleared, 0, "clear close-on-exec on the probe pipe");
-        let metadata =
-            std::fs::metadata(format!("/dev/fd/{descriptor}")).expect("probe pipe metadata");
-        identities.push(format!("{}:{}", metadata.dev(), metadata.ino()));
+        let (_, identity) = pipe_identity(descriptor).expect("probe pipe identity");
+        identities.push(identity);
     }
     let mut open_limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     let status =
@@ -408,10 +404,11 @@ fn isolated_child_does_not_inherit_open_parent_pipes() {
     let _high_copy =
         // SAFETY: `high_descriptor` is the new descriptor `F_DUPFD` returned, and only this owns it.
         unsafe { OwnedFd::from_raw_fd(high_descriptor) };
-    let result = run_test_child(NAME, Duration::from_secs(10));
+    let config = IsolationConfig { timeout: Duration::from_secs(10), ..IsolationConfig::ORDINARY };
+    let result = run_test_child_marking(NAME, config, mark_close_on_exec);
     assert!(!result.timed_out && result.status.success(), "{}", result.diagnostic());
     assert!(result.output.contains("HELD_PIPE_SCAN_DONE"), "{}", result.diagnostic());
-    let inherited: Vec<&str> = result
+    let inherited = result
         .output
         .lines()
         .map(str::trim)
@@ -421,31 +418,137 @@ fn isolated_child_does_not_inherit_open_parent_pipes() {
                 .next()
                 .is_some_and(|identity| identities.iter().any(|known| known == identity))
         })
+        .map(str::to_owned)
         .collect();
+    (inherited, [writer.as_raw_fd(), high_descriptor])
+}
+
+/// An isolated child must not inherit a pipe its parent left open to children, at any descriptor
+/// number. On macOS a sibling test's pipes stay inheritable for a moment while it spawns, and an
+/// isolated child holding one would keep it open until the child exits. This probe pipe stays
+/// inheritable for the whole spawn, and a copy of it sits near the top of the descriptor range.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn isolated_child_does_not_inherit_open_parent_pipes() {
+    let (inherited, _) = held_pipe_report(true);
     assert!(inherited.is_empty(), "the isolated child kept the probe pipe open: {inherited:?}");
 }
 
+/// The inheritance assertion can fire: without the close-on-exec hook the child reports the probe
+/// pipe, including its copy near the top of the range, so an empty report above is not vacuous.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn unmarked_child_reports_the_inherited_probe_pipe() {
+    let (inherited, [writer, high_descriptor]) = held_pipe_report(false);
+    for descriptor in [writer, high_descriptor] {
+        let prefix = format!("HELD_PIPE {descriptor} ");
+        assert!(
+            inherited.iter().any(|line| line.starts_with(&prefix)),
+            "descriptor {descriptor} missing from {inherited:?}"
+        );
+    }
+}
+
+/// The fallback walks a bound up to 2^20 and refuses anything larger, never a smaller bound.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn fallback_scans_up_to_two_to_the_twenty_and_refuses_above() {
+    assert_eq!(FallbackScan::for_bound(138_240), FallbackScan::Scan(138_240));
+    assert_eq!(FallbackScan::for_bound(1 << 20), FallbackScan::Scan(1 << 20));
+    assert_eq!(FallbackScan::for_bound((1 << 20) + 1), FallbackScan::Refuse((1 << 20) + 1));
+    assert_eq!(FallbackScan::for_bound(2_147_483_584), FallbackScan::Refuse(2_147_483_584));
+}
+
+/// With `close_range` skipped and a bound above 2^20, the spawn fails at once with the explicit
+/// `EOVERFLOW` refusal instead of walking two billion descriptor numbers.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn forced_fallback_above_the_limit_fails_the_spawn_promptly() {
+    let plan = CloseOnExecPlan {
+        try_close_range: false,
+        fallback: FallbackScan::for_bound(2_147_483_584),
+    };
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "exit 0"]).stdout(Stdio::null()).stderr(Stdio::null());
+    close_inherited_descriptors_on_exec(&mut command, plan);
+    let started = Instant::now();
+    let error = command.spawn().expect_err("the refused fallback fails the spawn");
+    assert!(started.elapsed() < Duration::from_secs(5), "refused promptly");
+    assert_eq!(error.raw_os_error(), Some(libc::EOVERFLOW));
+    let message = spawn_failure(&error, plan);
+    assert!(message.contains("2147483584") && message.contains("2^20"), "{message}");
+}
+
+/// The descriptor listing finds an open pipe, and an unreadable listing fails the fixture rather
+/// than reporting "no pipes".
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn unreadable_descriptor_listing_fails_the_fixture() {
+    use std::os::fd::AsRawFd;
+    let listing = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
+    let (reader, _writer) = std::io::pipe().expect("probe pipe");
+    let descriptors = open_descriptors(std::path::Path::new(listing)).expect("list descriptors");
+    assert!(descriptors.contains(&reader.as_raw_fd()), "{descriptors:?}");
+    let missing = std::env::temp_dir().join("sonicterm-no-such-descriptor-listing");
+    let outcome = std::panic::catch_unwind(|| report_held_pipes_listed(&missing));
+    assert!(outcome.is_err(), "an unreadable listing must panic before HELD_PIPE_SCAN_DONE");
+}
+
+/// `descriptor`'s `fstat` identity as `dev:ino` and whether it is a pipe, or `None` when it is not
+/// open. Parent and child both use `fstat`: on macOS a `/dev/fd/N` path stat names the fdesc node,
+/// not the pipe, so the two would never match.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn pipe_identity(descriptor: i32) -> Option<(bool, String)> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let borrowed =
+        // SAFETY: `ManuallyDrop` below never closes `descriptor`; `fstat` on a closed number just fails.
+        unsafe { std::fs::File::from_raw_fd(descriptor) };
+    // `ManuallyDrop` keeps the borrowed descriptor open; `metadata` is one `fstat`.
+    let file = std::mem::ManuallyDrop::new(borrowed);
+    let metadata = file.metadata().ok()?;
+    Some((metadata.file_type().is_fifo(), format!("{}:{}", metadata.dev(), metadata.ino())))
+}
+
+/// Print a `HELD_PIPE <descriptor> <dev>:<ino>` line for each of `descriptors` above stderr that is
+/// a pipe. A number closed since it was listed (the listing's own directory) is skipped.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn report_held_pipes(descriptors: impl IntoIterator<Item = i32>) {
+    for descriptor in descriptors.into_iter().filter(|descriptor| *descriptor > 2) {
+        let Some((true, identity)) = pipe_identity(descriptor) else {
+            // When: pipe_identity is None or not a pipe: closed since listing, or another file type.
+            continue;
+        };
+        println!("HELD_PIPE {descriptor} {identity}");
+    }
+}
+
+/// Report the pipes among the descriptors `listing` names, panicking when it cannot be read whole,
+/// then print the completion marker.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn report_held_pipes_listed(listing: &std::path::Path) {
+    let descriptors = open_descriptors(listing)
+        .unwrap_or_else(|error| panic!("list open descriptors in {}: {error}", listing.display()));
+    report_held_pipes(descriptors);
+    println!("HELD_PIPE_SCAN_DONE");
+}
+
 /// Report every pipe this process holds above stderr, at any descriptor number, then a completion
-/// marker. Each report line gives the descriptor number and the pipe's identity.
+/// marker. Linux lists `/proc/self/fd`, whose `fs.nr_open` can be near 2^31; macOS walks every
+/// number below `kern.maxfilesperproc`. Each report line gives the number and the pipe's identity.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 #[ignore = "fixture for inherited pipe reporting"]
 fn held_pipe_report_fixture() {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    for descriptor in 3..descriptor_table_end() {
-        let flags =
+    #[cfg(target_os = "linux")]
+    report_held_pipes_listed(std::path::Path::new("/proc/self/fd"));
+    #[cfg(target_os = "macos")]
+    {
+        let open = (3..descriptor_table_end()).filter(|descriptor| {
             // SAFETY: `F_GETFD` only reads `descriptor`'s flags, and fails harmlessly when it is closed.
-            unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
-        if flags < 0 {
-            // When: `flags` is negative, `descriptor` is not open.
-            continue;
-        }
-        let Ok(metadata) = std::fs::metadata(format!("/dev/fd/{descriptor}")) else {
-            continue;
-        };
-        if metadata.file_type().is_fifo() {
-            println!("HELD_PIPE {descriptor} {}:{}", metadata.dev(), metadata.ino());
-        }
+            unsafe { libc::fcntl(*descriptor, libc::F_GETFD) >= 0 }
+        });
+        report_held_pipes(open);
+        println!("HELD_PIPE_SCAN_DONE");
     }
-    println!("HELD_PIPE_SCAN_DONE");
 }

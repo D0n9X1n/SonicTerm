@@ -364,18 +364,31 @@ impl App {
         }
     }
 
+    /// Where an IME commit in `win_id` goes now, or `None` when the window is gone. The handler and
+    /// the status line's `ime` segment both read this, so they cannot name different owners.
+    pub(super) fn ime_route(&self, win_id: WindowId) -> Option<ImeRoute> {
+        let window = self.windows.get(&win_id)?;
+        Some(ime_route_for(window, self.command_palette_owns_input(win_id)))
+    }
+
     /// Route composition through the source window's palette, search, READONLY, or terminal owner.
     pub(super) fn handle_window_ime(&mut self, win_id: WindowId, ime_event: Ime) {
-        if self.windows.contains_key(&win_id)
+        let Some(route) = self.ime_route(win_id) else {
+            // When: ime_route is None, win_id no longer resolves; a late event must not reach another window.
+            return;
+        };
+        if route == ImeRoute::Palette
             && self.command_palette_handle_ime_in_window(win_id, &ime_event)
         {
-            // When: win_id is live and its palette consumes ime_event, no other input owner may receive it.
+            // When: route is Palette and the palette consumed ime_event, no other input owner may receive it.
             return;
         }
         let Some(window) = self.windows.get_mut(&win_id) else {
             // When: win_id no longer resolves, a late IME event must not fall back to another window.
             return;
         };
+        // A palette that declined the event leaves the remaining owners in their usual order.
+        let route = ime_route_for(window, false);
         let committed = match ime_event {
             Ime::Enabled => {
                 window.ime.handle_enabled();
@@ -394,26 +407,64 @@ impl App {
                 window.ime.take_commits()
             }
         };
-        let active_tab = window.tab_states.get(window.tabs.active_index());
-        let search_open = active_tab.is_some_and(|tab| tab.search.is_some());
-        let active_pane = active_tab.map(|tab| tab.active_pane);
-        let copy_mode = window.copy_mode.is_some();
+        let active_pane =
+            window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane);
         window.request_window_redraw();
         if committed.is_empty() {
             // When: committed is empty, composition changes require redraw but no search or PTY input.
             return;
         }
-        if search_open {
+        match route {
             // An open search owns the commit even when its pane is temporarily missing.
-            self.search_handle_ime_commit(win_id, &committed);
-        } else if !copy_mode {
-            // When: copy_mode is absent, the source window's active terminal may receive the commit.
-            if let Some(active_pane) = active_pane {
-                let bytes = committed.into_bytes();
-                self.write_to_pane(active_pane, bytes.clone(), PtyInputSource::Ime);
-                self.broadcast_from(active_pane, bytes, PtyInputSource::Ime);
+            ImeRoute::Search => {
+                self.search_handle_ime_commit(win_id, &committed);
+            }
+            ImeRoute::CopyMode => {
+                // Copy mode owns the keyboard, so the commit is dropped; the status line says so.
+                window.ime_discarded_at = Some(std::time::Instant::now());
+            }
+            ImeRoute::Pane | ImeRoute::Palette => {
+                if let Some(active_pane) = active_pane {
+                    let bytes = committed.into_bytes();
+                    self.write_to_pane(active_pane, bytes.clone(), PtyInputSource::Ime);
+                    self.broadcast_from(active_pane, bytes, PtyInputSource::Ime);
+                }
             }
         }
+    }
+}
+
+/// The input owner an IME commit in a window reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ImeRoute {
+    /// The command palette attached to this window.
+    Palette,
+    /// The active tab's open search field.
+    Search,
+    /// Copy mode: the commit is dropped.
+    CopyMode,
+    /// The active pane's PTY.
+    Pane,
+}
+
+/// The route for `window`; `palette_owns_input` says the command palette owns this window's input.
+pub(super) fn ime_route_for(
+    window: &super::window_state::WindowState,
+    palette_owns_input: bool,
+) -> ImeRoute {
+    let search_open =
+        window.tab_states.get(window.tabs.active_index()).is_some_and(|tab| tab.search.is_some());
+    if palette_owns_input {
+        ImeRoute::Palette
+    } else if search_open {
+        // When: search_open, an open search owns the commit before copy mode or the pane.
+        ImeRoute::Search
+    } else if window.copy_mode.is_some() {
+        // When: copy_mode is active, it owns the keyboard and the commit is dropped.
+        ImeRoute::CopyMode
+    } else {
+        // When: palette_owns_input, search_open and copy_mode are all off, the pane receives it.
+        ImeRoute::Pane
     }
 }
 
@@ -506,7 +557,8 @@ impl App {
         mark_all_panes_dirty(&window.panes);
         if let Some(text) = copied_text {
             // Parser and window borrows end before the shared clipboard boundary.
-            self.set_clipboard_text(text);
+            let copied = self.set_clipboard_text(text);
+            self.note_copy_result(win_id, copied);
         }
     }
 }

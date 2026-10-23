@@ -148,6 +148,28 @@ pub(super) fn acknowledge_fallback_wake(
     fallback_frame_due(applied, (notice_id, generation))
 }
 
+/// Whether `stack`'s unresolved set moved since `seen`, the `(notice id, revision)` this renderer
+/// last acknowledged, for the event's `notice_id`; records the revision read. An event for a
+/// replaced notice moves nothing. A notice never seen counts from revision 0.
+pub(super) fn unresolved_moved(
+    stack: Option<&sonicterm_engine::FontStack>,
+    notice_id: u64,
+    seen: &mut Option<(u64, u64)>,
+) -> bool {
+    let Some(notice) = stack.map(sonicterm_engine::FontStack::fallback_notice) else {
+        // When: no body stack exists, it has no unresolved set.
+        return false;
+    };
+    if notice.id() != notice_id {
+        // When: the event belongs to a replaced notice, its set is not this renderer's.
+        return false;
+    }
+    let revision = notice.unresolved_revision();
+    let previous = seen.filter(|(id, _)| *id == notice_id).map_or(0, |(_, revision)| revision);
+    *seen = Some((notice_id, revision));
+    revision != previous
+}
+
 /// Prepare one frame's fonts: apply `current` when it differs from `applied`, and return the
 /// token with what changed.
 pub(super) fn prepare_frame_fonts<Key, Preedit>(

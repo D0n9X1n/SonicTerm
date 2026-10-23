@@ -1067,7 +1067,7 @@ fn saturated_pty_input_queue_returns_the_rejected_bytes() {
     let rejected = vec![b'y'];
 
     assert!(matches!(
-        try_queue_pty_input(&tx, &queued, rejected.clone()),
+        try_queue_pty_input(&tx, &queued, &PtyWriterProgress::new(), rejected.clone()),
         Err(PtyInputError::QueueFull(bytes)) if bytes == rejected
     ));
     assert_eq!(
@@ -2149,7 +2149,7 @@ fn the_typed_send_refuses_a_full_queue_where_the_raw_channel_blocks() {
 
     assert!(
         matches!(
-            try_queue_pty_input(&tx, &AtomicUsize::new(0), vec![0u8; 8]),
+            try_queue_pty_input(&tx, &AtomicUsize::new(0), &PtyWriterProgress::new(), vec![0u8; 8]),
             Err(PtyInputError::QueueFull(_))
         ),
         "the typed path must refuse a full queue and hand the bytes back"
@@ -2181,7 +2181,7 @@ fn the_typed_send_enforces_the_message_cap_the_raw_channel_ignores() {
 
     assert!(
         matches!(
-            try_queue_pty_input(&tx, &queued, oversized.clone()),
+            try_queue_pty_input(&tx, &queued, &PtyWriterProgress::new(), oversized.clone()),
             Err(PtyInputError::MessageTooLarge(_))
         ),
         "the typed path must refuse a message above the cap"
@@ -3993,4 +3993,263 @@ fn spawn_errors_are_sanitized() {
     ));
     let error = sanitize_spawn_error(std::ffi::OsStr::new("/secret/dir/tool"), &native);
     assert_eq!(error.to_string(), "cannot run tool: permission denied");
+}
+
+/// Each admitted user-input write gets the next ordinal and its admission time; the oldest
+/// outstanding one is reported, a reply ahead of it is named, and completing all is `Idle`.
+#[test]
+fn input_progress_names_the_oldest_outstanding_write() {
+    let progress = PtyWriterProgress::new();
+    let (tx, _rx) = crossbeam_channel::bounded::<Vec<u8>>(PTY_INPUT_QUEUE_CAPACITY);
+    let queued = AtomicUsize::new(0);
+    assert_eq!(progress.input_progress(), PtyInputProgress::Idle);
+    let before = Instant::now();
+    try_queue_pty_input(&tx, &queued, &progress, b"a".to_vec()).unwrap();
+    try_queue_pty_input(&tx, &queued, &progress, b"b".to_vec()).unwrap();
+    let PtyInputProgress::Oldest { ordinal, admitted_at, on_reply } = progress.input_progress()
+    else {
+        panic!("two writes are outstanding");
+    };
+    assert_eq!((ordinal, on_reply), (1, false));
+    // Admission times are whole milliseconds since the writer's epoch.
+    assert!(admitted_at + Duration::from_millis(2) >= before && admitted_at <= Instant::now());
+    progress.input_completed.fetch_add(1, Ordering::Release);
+    progress.writer_on.store(WRITER_ON_REPLY, Ordering::Release);
+    assert!(matches!(
+        progress.input_progress(),
+        PtyInputProgress::Oldest { ordinal: 2, on_reply: true, .. }
+    ));
+    progress.input_completed.fetch_add(1, Ordering::Release);
+    assert_eq!(progress.input_progress(), PtyInputProgress::Idle);
+}
+
+/// A refused send returns its ordinal, so ordinals stay in channel order and nothing is left
+/// outstanding; a slot holding another ordinal's tag is a raced sample, judged as nothing.
+#[test]
+fn refused_admission_rolls_back_and_a_stale_slot_is_raced() {
+    let progress = PtyWriterProgress::new();
+    let (tx, _rx) = crossbeam_channel::bounded::<Vec<u8>>(1);
+    let queued = AtomicUsize::new(0);
+    try_queue_pty_input(&tx, &queued, &progress, b"a".to_vec()).unwrap();
+    assert!(matches!(
+        try_queue_pty_input(&tx, &queued, &progress, b"b".to_vec()),
+        Err(PtyInputError::QueueFull(_))
+    ));
+    assert_eq!(progress.input_admitted.load(Ordering::Acquire), 1);
+    progress.input_completed.fetch_add(1, Ordering::Release);
+    assert_eq!(progress.input_progress(), PtyInputProgress::Idle);
+    progress.input_admitted.store(2, Ordering::Release);
+    progress.admitted_at[2].store(9 << 44, Ordering::Release);
+    assert_eq!(progress.input_progress(), PtyInputProgress::Raced, "the slot holds ordinal 9");
+}
+
+/// Ordinals compare modulo 2^20, across both the 2^20 and the u32 wrap, on the right slot.
+#[test]
+fn input_ordinals_wrap_onto_their_own_slot() {
+    for start in [INPUT_ORDINAL_MASK, u32::MAX] {
+        let progress = PtyWriterProgress::new();
+        progress.input_admitted.store(start, Ordering::Release);
+        progress.input_completed.store(start, Ordering::Release);
+        let (tx, _rx) = crossbeam_channel::bounded::<Vec<u8>>(PTY_INPUT_QUEUE_CAPACITY);
+        try_queue_pty_input(&tx, &AtomicUsize::new(0), &progress, b"a".to_vec()).unwrap();
+        assert!(
+            matches!(progress.input_progress(), PtyInputProgress::Oldest { ordinal: 0, .. }),
+            "{start}"
+        );
+    }
+}
+
+/// A writer whose native write fails.
+struct FailingWriter;
+
+impl Write for FailingWriter {
+    fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("injected write failure (test-only)"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A native write failure with three writes admitted reports all three lost, and the next
+/// admission is refused as disconnected without changing that; a deliberate stop is not a failure.
+#[test]
+fn failed_writer_reports_every_admitted_write_lost() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let (sender, rx) = diagnostic_input_channel();
+    for byte in *b"abc" {
+        sender.send(vec![byte]).unwrap();
+    }
+    let (_cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let mut writer = spawn_writer_thread(
+        Box::new(FailingWriter),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+        reply_spool().1,
+    );
+    writer.finish("failing input writer");
+    let lost = PtyInputProgress::Terminal { failed: true, lost: 3 };
+    assert_eq!(sender.input_progress(), lost);
+    assert!(matches!(sender.send(vec![b'd']), Err(PtyInputError::WriterDisconnected(_))));
+    assert_eq!(sender.input_progress(), lost, "a refused admission changes nothing");
+
+    let stopped = PtyWriterProgress::new();
+    stopped.record_terminal(TERMINAL_STOPPED);
+    assert_eq!(stopped.input_progress(), PtyInputProgress::Terminal { failed: false, lost: 0 });
+}
+
+/// Wait up to two seconds for `sender`'s input progress to become `expected`.
+fn wait_for_input_progress(sender: &PtyInputSender, expected: PtyInputProgress) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while sender.input_progress() != expected {
+        assert!(Instant::now() < deadline, "input progress never became {expected:?}");
+        std::thread::yield_now();
+    }
+}
+
+/// A writer that blocks on a parser reply reports the user input queued behind it as the oldest
+/// outstanding write, with that input's own admission time and `on_reply`; the reply never takes
+/// an ordinal, so it never advances the count.
+#[test]
+fn a_reply_blocked_ahead_of_input_reports_that_inputs_age() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let (sender, rx) = diagnostic_input_channel();
+    let (replies, reply_reader) = reply_spool();
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (permit_tx, permit_rx) = crossbeam_channel::bounded(1);
+    let (cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let mut writer = spawn_writer_thread(
+        Box::new(ControlledInputWriter {
+            entered: entered_tx,
+            permit: permit_rx,
+            written: Arc::new(Mutex::new(Vec::new())),
+            block_flush: false,
+        }),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+        reply_reader,
+    );
+    replies.send(vec![9, 9]).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(sender.input_progress(), PtyInputProgress::Idle, "a reply is not user input");
+    let before = Instant::now();
+    sender.send(vec![1]).unwrap();
+    let PtyInputProgress::Oldest { ordinal, admitted_at, on_reply } = sender.input_progress()
+    else {
+        panic!("the input write is outstanding behind the reply");
+    };
+    assert_eq!((ordinal, on_reply), (1, true));
+    assert!(admitted_at + Duration::from_millis(2) >= before, "the input's own admission time");
+    permit_tx.send(true).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(matches!(
+        sender.input_progress(),
+        PtyInputProgress::Oldest { ordinal: 1, on_reply: false, .. }
+    ));
+    permit_tx.send(true).unwrap();
+    wait_for_input_progress(&sender, PtyInputProgress::Idle);
+    assert_eq!(sender.writer_progress.input_admitted.load(Ordering::Acquire), 1);
+    assert_eq!(sender.writer_progress.input_completed.load(Ordering::Acquire), 1);
+    cancel_tx.send(()).unwrap();
+    writer.finish("reply ahead of input");
+}
+
+/// Two threads admitting at once get ordinals in channel order: each send happens under the
+/// admission lock, so the ordinal it sends is the one it was admitted with, and they arrive 1..=32.
+#[test]
+fn concurrent_producers_get_ordinals_in_channel_order() {
+    let progress = Arc::new(PtyWriterProgress::new());
+    let (tx, rx) = crossbeam_channel::bounded::<u32>(64);
+    let producers: Vec<_> = (0..2)
+        .map(|_| {
+            let (progress, tx) = (Arc::clone(&progress), tx.clone());
+            std::thread::spawn(move || {
+                for _ in 0..16 {
+                    progress
+                        .admit(|running| {
+                            assert!(running);
+                            let ordinal = progress.input_admitted.load(Ordering::Relaxed);
+                            tx.try_send(ordinal).map_err(|_| ())
+                        })
+                        .unwrap();
+                }
+            })
+        })
+        .collect();
+    for producer in producers {
+        producer.join().unwrap();
+    }
+    let ordinals: Vec<u32> = rx.try_iter().collect();
+    assert_eq!(ordinals, (1..=32).collect::<Vec<_>>());
+}
+
+/// A native `flush` error is recorded as a flush failure, and every write admitted after the last
+/// completion, including one still queued, is reported lost.
+#[test]
+fn a_flush_failure_reports_failed_flush_and_its_lost_writes() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let (sender, rx) = diagnostic_input_channel();
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (permit_tx, permit_rx) = crossbeam_channel::bounded(1);
+    let (_cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let mut writer = spawn_writer_thread(
+        Box::new(ControlledInputWriter {
+            entered: entered_tx,
+            permit: permit_rx,
+            written: Arc::new(Mutex::new(Vec::new())),
+            block_flush: true,
+        }),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+        reply_spool().1,
+    );
+    sender.send(vec![1]).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(), PtyWriterPhase::Flushing);
+    sender.send(vec![2]).unwrap();
+    permit_tx.send(false).unwrap();
+    writer.finish("failing flush");
+    assert_eq!(sender.writer_progress.terminal.load(Ordering::Acquire), TERMINAL_FAILED_FLUSH);
+    assert_eq!(sender.input_progress(), PtyInputProgress::Terminal { failed: true, lost: 2 });
+}
+
+/// Cancellation that interrupts a write is a deliberate stop, not a failure, even though the
+/// interrupted write never completed.
+#[test]
+fn cancellation_is_a_stop_not_a_failure() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let (sender, rx) = diagnostic_input_channel();
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (permit_tx, permit_rx) = crossbeam_channel::bounded(1);
+    let (cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let mut writer = spawn_writer_thread(
+        Box::new(ControlledInputWriter {
+            entered: entered_tx,
+            permit: permit_rx,
+            written: Arc::new(Mutex::new(Vec::new())),
+            block_flush: false,
+        }),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+        reply_spool().1,
+    );
+    sender.send(vec![1]).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    cancel_tx.send(()).unwrap();
+    permit_tx.send(false).unwrap();
+    writer.finish("cancelled writer");
+    assert_eq!(sender.writer_progress.terminal.load(Ordering::Acquire), TERMINAL_STOPPED);
+    assert_eq!(sender.input_progress(), PtyInputProgress::Terminal { failed: false, lost: 1 });
 }

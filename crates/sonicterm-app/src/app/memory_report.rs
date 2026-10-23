@@ -875,6 +875,8 @@ pub(crate) fn report_route(action: &Action) -> ReportRoute {
         | Action::ReloadConfig
         | Action::ApplyTheme(_)
         | Action::ToggleTabBar
+        | Action::ToggleStatusLine
+        | Action::ToggleStatusLineSensitive
         | Action::EditConfigFile
         | Action::OpenKeymapFile
         | Action::CheckForUpdates

@@ -4151,8 +4151,8 @@ RESULT_STEP = "Require every comparison job to succeed"
 # Every scenario set a comparison measures: each runs in exactly one shard per platform. The named variants
 # run beside their scenario's default, since a bare ID selects only the default; S1/atlas-retry runs only
 # its counters set.
-ALL_SCENARIOS = ["S1", "S1/atlas-retry", "S2", "S2/flood", "S3", "S4", "S5", "S6", "S6/flood", "S6/selection-drag",
-                 "S6/rest", "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12"]
+ALL_SCENARIOS = ["S1", "S1/atlas-retry", "S1/status-line", "S2", "S2/flood", "S3", "S4", "S5", "S6", "S6/flood",
+                 "S6/selection-drag", "S6/rest", "S7", "S8", "S9", "S10", "S10/sync", "S11", "S12", "S12/status-line"]
 # The variants only one platform's shards add: S11/release on both (capped at 1), the presenter controls on Windows.
 PLATFORM_SCENARIOS = {"macOS": ["S11/release"], "Windows": ["S11/release", "S11/gdi", "S11/wgpu"]}
 JOB_RESULTS = ("success", "failure", "cancelled", "skipped", "")
@@ -5260,7 +5260,7 @@ class WindowsComparisonLegTests(unittest.TestCase):
         # The partition balanced from trial-2 costs (about 830 s each); a change here needs remeasuring. S6/rest
         # joined S7-S4, the shortest set, on an estimate the exact-head run must confirm.
         self.assertEqual({entry["shard"]: entry["scenarios"].split() for entry in self.matrix("compare-macos")}, {
-            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S6/rest"],
+            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S6/rest", "S1/status-line", "S12/status-line"],
             "S9-S10sync": ["S10/sync", "S9", "S11", "S6", "S1", "S5"],
             "S10-S11release": ["S10", "S11/release", "S2/flood"],
             "S2-S3-S8-S12": ["S2", "S12", "S3", "S8", "S6/selection-drag", "S6/flood"],
@@ -5325,7 +5325,8 @@ COUNTER_CONTRACT = {
              "native_request_redraw_unregistered", "ui_guard_custody_ns", "ui_guard_custodies",
              "frame_dispatch_ns", "frame_dispatches", "frame_dispatch_failed_ns", "frame_dispatches_failed",
              "hover_lookups", "hover_detections", "hover_cache_hits", "hover_rows_read", "path_probes_submitted",
-             "quick_select_rows_scanned"),
+             "quick_select_rows_scanned", "status_line_samples", "status_line_wakes", "status_line_redraws",
+             "status_line_sel_counts", "status_line_sel_cells", "status_line_history_shows"),
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced",
