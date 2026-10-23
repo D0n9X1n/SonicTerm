@@ -56,7 +56,7 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 
 macOS core shard 在 Cargo 缓存恢复后先测量真实 PTY 关闭基线，再运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、workspace doctest、host probe、
 工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本
-`cargo-llvm-cov` 发布的 Apple Silicon 预编译二进制，解包前先校验其 SHA-256（预计可省去源码构建所需的约一分钟），再运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
+`cargo-llvm-cov` 发布的 Apple Silicon 预编译二进制：由 `scripts/install-pinned-tool.sh` 安装，解包前先校验其 SHA-256（预计可省去源码构建所需的约一分钟），再运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
 artifact。
 `macos-smoke` 矩阵分别在 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release
 二进制，使用不同依赖缓存键。Intel lane 仅在推送到 `main` 时可保存依赖；Apple Silicon
@@ -184,8 +184,9 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
   上的执行覆盖率。baseline 绑定 macOS arm64 CI runner；其它 host 上的 CI 以不可比较失败，
   本地运行只打印参考性 delta，不给结论。下限数值只能根据已保留运行的已验证证据，通过经过评审的 diff 调整，
   见 [Coverage 证据与重新建立基线](Development-and-Release-zh-CN#coverage-证据与重新建立基线)。
-- `deny.toml` 记录 advisory、license、source 与 wildcard dependency policy，但没有 CI job
-  运行 `cargo deny check`。
+- `cargo deny --locked check` 在 `linux-core` job 与本地 gate 中，对所有 target 执行 `deny.toml`
+  中的 advisory、license、ban 与 source policy。审计通过不代表被忽略的 advisory 已消失：每个
+  `ignore` 条目都写明其依赖路径、上游 issue，以及可将其移除的版本。
 - AppKit、Win32、X11/Wayland、字体发现、PTY、GPU 和 installer 的真实行为仍依赖平台测试、
   package smoke、release build 与手工使用；只检查 symbol 不能证明这些边界。
 
@@ -212,6 +213,23 @@ job 中的每个 action——包括那些只做编译和打包的 job。在 rele
 字节。被允许的 job 及其准确可写 scope 列在
 `scripts/check-workflow-supply-chain.py` 的 `WRITE_BOUNDARY` 中；新增一个是对该列表的
 可审阅修改，而不是工作流里一行无人注意的改动。
+
+**工作流自身不下载任何可执行文件。** `run` 块中的任何 `curl` 或 `wget` 都会使 checker
+失败，只有 `API_READS` 中列出的那条只读 GitHub API 调用例外。`gh release download`、对任何
+工具的 `cargo binstall`、以内联源码（`-c` 或 heredoc）启动且引用 `urllib`、`urlretrieve`、
+`requests` 或 `http.client` 的 Python，以及带 `repository` 或 `run-id` 输入、从其他仓库或其他
+运行拉取的 `actions/download-artifact` 步骤同样会失败；同一次运行中先前构建的 artifact 允许
+下载。文本无法证明 shell 实际会执行什么，因此该规则不尝试判断内联安装步骤。该规则是防止常见
+失误的护栏，而不是安全边界：执意为之的工作流作者仍能以其他方式获取文件，真正的控制手段是审阅
+工作流改动。预编译工具（`cargo-deny`、`cargo-llvm-cov`）只能通过
+`bash scripts/install-pinned-tool.sh <tool>` 安装。它唯一的输入是工具名：从
+`scripts/pinned-tools.json` 读取版本、release URL 与 SHA-256，下载到新建目录，校验该文件的
+SHA-256，之后才解包并安装。安装脚本信任 runner `PATH` 上的工具（`curl`、`sha256sum` 或
+`shasum`、`tar`、`install`、`python3`）；它校验下载的文件，而不校验执行校验的工具。Checker
+要求 manifest 的每个字段：精确的 `X.Y.Z` 版本、64 位十六进制摘要、https GitHub release URL、
+取值为 `linux` 或 `macos` 的 `os`、取值为 `aarch64` 或 `x86_64` 的 `arch`、相对路径的归档
+`member`、非空的 `version_args` 以及 `version_output`，并要求每个工具都只以工具名调用该脚本安装。升级工具版本是对
+manifest 的可审阅修改。
 
 Checker 只接受为 `jobs`、`steps`、`uses` 和 `permissions` 直接写出的 block mapping。
 它会拒绝 flow mapping、显式 mapping key、anchor、alias 和 merge key，而不是尝试局部解释

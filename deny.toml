@@ -18,6 +18,24 @@ ignore = [
     "RUSTSEC-2024-0418",
     "RUSTSEC-2024-0419",
     "RUSTSEC-2024-0420",
+    # paste is unmaintained (https://github.com/dtolnay/paste). Path: image (`exr`, the OpenEXR
+    # decoder inline images accept) -> exr -> pulp -> paste, a build-time proc-macro. No safe
+    # upgrade exists; remove when exr or pulp drops paste, or if OpenEXR stops being accepted.
+    { id = "RUSTSEC-2024-0436", reason = "paste: build-time macro of exr's pulp; no safe upgrade" },
+    # ttf-parser is unmaintained (https://github.com/harfbuzz/ttf-parser/issues/217). Path, Linux
+    # only: winit -> sctk-adwaita (Wayland client-side decorations) -> ab_glyph ->
+    # owned_ttf_parser -> ttf-parser. No safe upgrade exists; remove when ab_glyph moves off
+    # ttf-parser or sctk-adwaita drops ab_glyph.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: Wayland decorations via ab_glyph; no safe upgrade" },
+    # zbus 5's zbus_names, zvariant and zvariant_derive are unmaintained
+    # (https://github.com/z-galaxy/zbus/issues/2043); zbus 6.1.0 replaces them. Path, Linux only:
+    # sonicterm-app -> ashpd 0.13.13 (requires zbus ^5.13,
+    # https://github.com/bilelmoussaoui/ashpd/issues/495) and notify-rust 4.18.2 (requires zbus ^5)
+    # -> zbus 5.19.0 -> these crates. Remove all three once compatible ashpd and notify-rust
+    # releases move to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: zbus 5 via ashpd and notify-rust; zbus 6 fixes" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: zbus 5 via ashpd and notify-rust; zbus 6 fixes" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: zbus 5 via ashpd and notify-rust; zbus 6 fixes" },
 ]
 
 [licenses]
@@ -37,6 +55,9 @@ allow = [
     "OpenSSL",
     "BSL-1.0",
     "0BSD",
+    # A permissive data license; it covers only the Mozilla root certificate list that
+    # webpki-roots bundles (ureq -> webpki-roots).
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 

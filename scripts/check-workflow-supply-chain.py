@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Reject workflow supply-chain regressions: mutable action refs and stray write grants.
+"""Reject workflow supply-chain regressions: mutable action refs, stray write grants and
+unverified downloaded executables.
 
-Two properties decay silently once they are only conventions.
+Three properties decay silently once they are only conventions.
 
 A `uses:` tag is a *pointer*, not a version. `@v2` can be retargeted at any
 commit by whoever holds the upstream repository, so a compromised or coerced
@@ -15,6 +16,18 @@ every action in every job — including the ones that merely compile and package
 Write is therefore allowed only on the specific jobs and scopes enumerated in
 `WRITE_BOUNDARY`; widening either is a reviewable edit here rather than an
 unnoticed line in a workflow.
+
+The third is what a workflow runs that no action pin covers: an executable it
+downloads itself. Text cannot prove what a shell will run, so a workflow may not
+download at all. A `curl` or `wget` in a `run` block fails, except the exact
+read-only API calls in `API_READS`, and so do `gh release download`,
+`cargo binstall`, inline Python naming a network module, and
+`actions/download-artifact` from another repository or run. This is a guardrail
+against common mistakes, not a boundary; reviewing workflow changes is the
+control. Executables come only from `scripts/install-pinned-tool.sh <tool>`,
+which takes its version, URL and SHA-256 from `scripts/pinned-tools.json`; every
+manifest field must be present and well formed, and each tool must be installed
+by that script alone.
 
 Stdlib only, and no network: the Ubuntu CI container installs a bare `python3`,
 and a gate that needs the network fails for reasons unrelated to the property
@@ -47,6 +60,48 @@ WRITE_BOUNDARY = {
     ("publish-wiki.yml", "publish"): frozenset({"contents"}),
     ("release.yml", "publish"): frozenset({"contents"}),
 }
+
+# Read-only GitHub API calls a workflow may make, as (workflow, the logical `run` line exactly).
+# Each writes no file and pipes only into a first-party reader of the JSON.
+API_READS = (
+    (
+        "release.yml",
+        'curl --fail-with-body --silent --show-error --header "Accept: application/vnd.github+json" '
+        '--header "Authorization: Bearer ${GH_TOKEN}" --header "X-GitHub-Api-Version: 2022-11-28" '
+        '"https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main'
+        '&event=push&status=success&head_sha=${RELEASE_SHA}&per_page=100" | '
+        'python3 scripts/prepare-release-assets.py check-main-ci --sha "$RELEASE_SHA"',
+    ),
+)
+# A command word that downloads, as its basename.
+DOWNLOADERS = frozenset({"curl", "wget", "curl.exe", "wget.exe", "invoke-webrequest", "iwr"})
+# The download rule is a guardrail against the common ways a workflow fetches a tool, not a proof
+# that none can; reviewing workflow changes is the control. These name the other common ways.
+GH_COMMANDS = frozenset({"gh", "gh.exe"})
+BINSTALL_COMMANDS = frozenset({"cargo-binstall", "cargo-binstall.exe"})
+# Python started with inline source: `-c` and its quote, or a heredoc and its delimiter.
+PYTHON_INLINE = re.compile(
+    r"(?<![\w.-])(?:\S*/)?python3?(?:\.\d+)?\s(?:.*?\s)?"
+    r"(?:-c\s*(?P<quote>['\"])|<<-?\s*(?P<mark>['\"]?)(?P<delimiter>\w+)(?P=mark))"
+)
+PYTHON_NETWORK = re.compile(r"\b(?:urllib|urlretrieve|requests|http\.client)\b")
+DOWNLOAD_ARTIFACT = re.compile(r"^actions/download-artifact@")
+# Inputs that point actions/download-artifact outside the current workflow run.
+FOREIGN_ARTIFACT_INPUT = re.compile(r"(?:^|[\s{,])(?:repository|run-id)\s*:")
+# A package-manager install, whose arguments name packages (such as `curl`) rather than commands.
+PACKAGE_INSTALL = re.compile(r"^(?:sudo\s+)?(?:apt-get|apt|brew|dnf|yum|apk|choco)\s+(?:-\S+\s+)*install\b")
+PACKAGE_WORD = re.compile(r"^(?:-[A-Za-z0-9-]+(?:=\S+)?|[A-Za-z0-9][A-Za-z0-9.+_-]*)$")
+SHELL_SEPARATOR = re.compile(r"\|\||&&|[|;&()`]|\$\(")
+PINNED_MANIFEST = "scripts/pinned-tools.json"
+PINNED_INSTALL = re.compile(r"^bash scripts/install-pinned-tool\.sh(?:\s+(?P<arguments>.*))?$")
+EXACT_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+# The host names scripts/install-pinned-tool.sh maps `uname` to.
+PINNED_OS = frozenset({"linux", "macos"})
+PINNED_ARCH = frozenset({"aarch64", "x86_64"})
+SHA256_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+RELEASE_URL = re.compile(
+    r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[^/]*\{version\}[^/]*/[^/]+$"
+)
 
 # Sentinel key for the inline spellings (`permissions: read-all`), which carry
 # their value on the `permissions:` line itself rather than in a nested block.
@@ -591,6 +646,227 @@ def check_permissions(path: Path, lines: list[str]) -> list[Finding]:
     return findings
 
 
+def run_blocks(lines: list[str]) -> list[list[tuple[int, str]]]:
+    """Every `run` payload as its stripped raw lines `(raw index, text)`, one list per step."""
+    structural = _structural_lines(lines)
+    blocks: list[list[tuple[int, str]]] = []
+    for position, item in enumerate(structural):
+        if item.entry is None or item.entry.key != "run":
+            continue
+        value = _split_comment(item.entry.value)[0].strip()
+        if BLOCK_SCALAR.fullmatch(value):
+            end = structural[position + 1].index if position + 1 < len(structural) else len(lines)
+            blocks.append([(index, lines[index].strip()) for index in range(item.index + 1, end)])
+        else:
+            blocks.append([(item.index, _decode_scalar(value) or "")])
+    return blocks
+
+
+def run_lines(lines: list[str]) -> list[tuple[int, str]]:
+    """Every `run` payload as logical shell lines `(raw index, text)`: comment lines dropped,
+    `\\` continuations joined, runs of whitespace collapsed to one space."""
+    logical: list[tuple[int, str]] = []
+    for raw in run_blocks(lines):
+        pending: tuple[int, str] | None = None
+        for index, text in raw:
+            if not text or (pending is None and text.startswith("#")):
+                continue
+            start, joined = pending if pending is not None else (index, "")
+            joined = " ".join(f"{joined} {text}".split())
+            if joined.endswith("\\"):
+                pending = (start, joined[:-1].rstrip())
+                continue
+            pending = None
+            logical.append((start, joined))
+        if pending is not None:
+            logical.append(pending)
+    return logical
+
+
+def _basename(word: str) -> str:
+    """A command word's basename, lowercased, without surrounding quotes."""
+    return re.split(r"[/\\]", word.strip("\"'"))[-1].lower()
+
+
+def _download_tool(text: str) -> str | None:
+    """The downloader a logical line runs in any command, outside a package install's package
+    names: `curl or wget`, `` `gh release download` `` or `` `cargo binstall` ``."""
+    for command in SHELL_SEPARATOR.split(text):
+        words = command.split()
+        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", words[0]):
+            words = words[1:]
+        if not words:
+            continue
+        head = _basename(words[0])
+        if head in GH_COMMANDS and " release download " in f" {' '.join(words[1:])} ":
+            return "`gh release download`"
+        subcommands = [word for word in words[1:] if not word.startswith("+")]
+        if head in BINSTALL_COMMANDS or (head == "cargo" and subcommands[:1] == ["binstall"]):
+            return "`cargo binstall`"
+        if PACKAGE_INSTALL.match(" ".join(words)):
+            start = next(index for index, word in enumerate(words) if word == "install") + 1
+            if all(PACKAGE_WORD.fullmatch(word) for word in words[start:]):
+                continue
+        if any(_basename(word) in DOWNLOADERS for word in words):
+            return "curl or wget"
+    return None
+
+
+def _inline_python(raw: list[tuple[int, str]]) -> list[int]:
+    """Raw indexes where Python starts with inline source (`-c` or a heredoc) that names a
+    network module. The source runs to the closing quote or the heredoc delimiter line."""
+    found: list[int] = []
+    for position, (index, text) in enumerate(raw):
+        match = PYTHON_INLINE.search(text)
+        if match is None:
+            continue
+        if match.group("quote"):
+            source = text[match.end():]
+            following = iter(raw[position + 1:])
+            while match.group("quote") not in source:
+                line = next(following, None)
+                if line is None:
+                    break
+                source += "\n" + line[1]
+            source = source.split(match.group("quote"))[0]
+        else:
+            body = []
+            for _, line in raw[position + 1:]:
+                if line == match.group("delimiter"):
+                    break
+                body.append(line)
+            source = "\n".join(body)
+        if PYTHON_NETWORK.search(source):
+            found.append(index)
+    return found
+
+
+def check_downloads(path: Path, lines: list[str]) -> list[Finding]:
+    """A workflow downloads nothing itself, except the exact read-only calls in `API_READS`."""
+    allowed = {text for workflow, text in API_READS if workflow == path.name}
+    advice = "install executables only with `bash scripts/install-pinned-tool.sh <tool>`"
+    findings = []
+    for index, text in run_lines(lines):
+        tool = _download_tool(text)
+        if tool is None or text in allowed:
+            continue
+        extra = ", or add an exact read-only call to API_READS" if tool == "curl or wget" else ""
+        findings.append(Finding(path.name, index + 1, f"downloads with {tool}; {advice}{extra}"))
+    for raw in run_blocks(lines):
+        findings.extend(
+            Finding(path.name, index + 1, "downloads with inline Python (urllib, requests or "
+                    f"http.client); {advice}")
+            for index in _inline_python(raw)
+        )
+    return findings + _foreign_artifacts(path, lines)
+
+
+def _foreign_artifacts(path: Path, lines: list[str]) -> list[Finding]:
+    """Each actions/download-artifact step with a `repository` or `run-id` input, which pulls
+    from outside this run. Same-run artifacts were built by this workflow and pass."""
+    structural = _structural_lines(lines)
+    findings = []
+    for position, item in enumerate(structural):
+        entry = item.entry
+        value = _split_comment(entry.value)[0].strip().strip("\"'") if entry else ""
+        if entry is None or entry.key != "uses" or not DOWNLOAD_ARTIFACT.match(value):
+            continue
+        # The step is the nearest sequence item at or above `uses`; it ends at the next line
+        # indented no deeper than its dash.
+        start = next(
+            (back for back in range(position, -1, -1)
+             if structural[back].entry is not None and structural[back].entry.sequence
+             and structural[back].indent <= item.indent),
+            position,
+        )
+        dash = structural[start].indent
+        end = next((structural[after].index for after in range(start + 1, len(structural))
+                    if structural[after].indent <= dash), len(lines))
+        if any(FOREIGN_ARTIFACT_INPUT.search(_split_comment(lines[index])[0])
+               for index in range(structural[start].index, end)):
+            findings.append(Finding(path.name, item.index + 1, "downloads an artifact from another "
+                                    "repository or run; download only artifacts this run built"))
+    return findings
+
+
+def _manifest(root: Path) -> tuple[dict, list[Finding]]:
+    """The pinned-tool manifest, with a finding for each malformed entry."""
+    path = root / PINNED_MANIFEST
+    if not path.exists():
+        return {}, []
+    try:
+        tools = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        return {}, [Finding(PINNED_MANIFEST, error.lineno, f"is not valid JSON: {error.msg}")]
+    if not isinstance(tools, dict):
+        return {}, [Finding(PINNED_MANIFEST, 1, "must map tool names to entries")]
+    findings = []
+    for tool, entry in tools.items():
+        entry = entry if isinstance(entry, dict) else {}
+        if not EXACT_VERSION.fullmatch(str(entry.get("version", ""))):
+            findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: version must be an exact X.Y.Z"))
+        if not SHA256_DIGEST.fullmatch(str(entry.get("sha256", ""))):
+            findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: sha256 must be 64 lowercase hex digits"))
+        if entry.get("os") not in PINNED_OS:
+            findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: os must be one of {sorted(PINNED_OS)}"))
+        if entry.get("arch") not in PINNED_ARCH:
+            findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: arch must be one of {sorted(PINNED_ARCH)}"))
+        member = entry.get("member")
+        if (not isinstance(member, str) or not member or "\n" in member or member.startswith("/")
+                or ".." in member.split("/")):
+            findings.append(Finding(PINNED_MANIFEST, 1,
+                                    f"{tool}: member must be a relative path inside the archive"))
+        arguments = entry.get("version_args")
+        if not isinstance(arguments, list) or not arguments or not all(
+            isinstance(argument, str) and argument and "\n" not in argument for argument in arguments
+        ):
+            findings.append(Finding(PINNED_MANIFEST, 1,
+                                    f"{tool}: version_args must be a non-empty list of strings"))
+        output = entry.get("version_output")
+        if not isinstance(output, str) or not output or "\n" in output:
+            findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: version_output must be a non-empty string"))
+        if not RELEASE_URL.fullmatch(str(entry.get("url", ""))):
+            findings.append(Finding(
+                PINNED_MANIFEST, 1,
+                f"{tool}: url must be a pinned https release URL "
+                "(https://github.com/<owner>/<repo>/releases/download/<tag with {version}>/<asset>)",
+            ))
+    return tools, findings
+
+
+def check_pinned_tools(root: Path, workflows: dict[str, list[str]]) -> list[Finding]:
+    """Every manifest tool is installed, and only by `bash scripts/install-pinned-tool.sh <tool>`."""
+    tools, findings = _manifest(root)
+    installed: set[str] = set()
+    for name, lines in workflows.items():
+        for index, text in run_lines(lines):
+            if "install-pinned-tool" in text:
+                match = PINNED_INSTALL.fullmatch(text)
+                arguments = (match.group("arguments") or "").split() if match else []
+                if match is None or len(arguments) != 1:
+                    findings.append(Finding(name, index + 1, "runs scripts/install-pinned-tool.sh with "
+                                            "something other than only a manifest tool name"))
+                elif arguments[0] not in tools:
+                    findings.append(Finding(name, index + 1,
+                                            f"{arguments[0]} is not in {PINNED_MANIFEST}"))
+                else:
+                    installed.add(arguments[0])
+                continue
+            for tool in tools:
+                if re.search(rf"(?<![\w-])(?:cargo\s+(?:install|binstall)\b.*\b){re.escape(tool)}(?![\w-])", text):
+                    findings.append(Finding(name, index + 1, f"{tool} is installed other than by "
+                                            "scripts/install-pinned-tool.sh"))
+        for index, line in enumerate(lines):
+            for tool in tools:
+                if re.search(r"^\s*-?\s*uses:\s*\S*install-action", line) and tool in "\n".join(lines[index:index + 4]):
+                    findings.append(Finding(name, index + 1, f"{tool} is installed other than by "
+                                            "scripts/install-pinned-tool.sh"))
+    for tool in sorted(set(tools) - installed):
+        findings.append(Finding(PINNED_MANIFEST, 1, f"{tool} is never installed by "
+                                "`bash scripts/install-pinned-tool.sh {tool}` in any workflow"))
+    return findings
+
+
 def check(root: Path) -> list[Finding]:
     """Run every workflow-shape rule over the whole workflow set."""
     paths = workflow_paths(root)
@@ -599,11 +875,16 @@ def check(root: Path) -> list[Finding]:
 
     findings: list[Finding] = []
     pins: dict[str, set[str]] = {}
+    workflow_lines: dict[str, list[str]] = {}
     for path in paths:
         lines = path.read_text(encoding="utf-8").splitlines()
         findings.extend(check_yaml_shape(path, lines))
         findings.extend(check_refs(path, lines, pins))
         findings.extend(check_permissions(path, lines))
+        findings.extend(check_downloads(path, lines))
+        workflow_lines[path.name] = lines
+
+    findings.extend(check_pinned_tools(root, workflow_lines))
 
     # One action on two SHAs means a Dependabot bump landed on some call sites
     # and not others, leaving the stragglers on the revision it moved away from.
@@ -642,7 +923,8 @@ def main() -> int:
     paths = workflow_paths(arguments.root)
     print(
         f"check-workflow-supply-chain: {len(paths)} workflows, every remote action "
-        "pinned to a commit SHA, write scoped to the publish boundary. OK."
+        "pinned to a commit SHA, write scoped to the publish boundary, no download outside "
+        "scripts/install-pinned-tool.sh. OK."
     )
     return 0
 

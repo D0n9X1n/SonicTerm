@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parent.parent
 CI_WORKFLOW = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 RELEASE = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+PINNED_TOOLS = json.loads((ROOT / "scripts/pinned-tools.json").read_text(encoding="utf-8"))
 PACKAGING_PAGES = ("Packaging.md", "Packaging-zh-CN.md")
 
 PINS = {
@@ -67,7 +69,6 @@ def require_top_level_env(workflow: str, key: str, value: str) -> None:
 def main() -> None:
     require_top_level_env(RELEASE, "CARGO_WIX_VERSION", PINS["CARGO_WIX_VERSION"])
     require_top_level_env(RELEASE, "WIX_TOOLSET_VERSION", PINS["WIX_TOOLSET_VERSION"])
-    require_top_level_env(CI_WORKFLOW, "CARGO_LLVM_COV_VERSION", PINS["CARGO_LLVM_COV_VERSION"])
 
     shadowed_release = RELEASE.replace(
         "  build-windows:\n",
@@ -100,21 +101,14 @@ def main() -> None:
         "Install WiX Toolset",
         'choco install wixtoolset --version "${{ env.WIX_TOOLSET_VERSION }}" --no-progress -y',
     )
-    # Coverage installs the pinned release's prebuilt arm64 binary, verified by digest before unpacking.
-    require_top_level_env(CI_WORKFLOW, "CARGO_LLVM_COV_SHA256", COVERAGE_TOOL_SHA256)
-    for needle in (
-        'test "$(uname -m)" = arm64',
-        "asset=cargo-llvm-cov-aarch64-apple-darwin.tar.gz",
-        "--proto '=https' --tlsv1.2",
-        "releases/download/v${CARGO_LLVM_COV_VERSION}/$asset",
-        'echo "${CARGO_LLVM_COV_SHA256}  $RUNNER_TEMP/$asset" | shasum -a 256 --check --strict',
-        'test "$(cargo llvm-cov --version)" = "cargo-llvm-cov ${CARGO_LLVM_COV_VERSION}"',
+    # Coverage installs the pinned release's prebuilt arm64 binary through the pinned-tool script,
+    # which checks the manifest's digest before it unpacks anything.
+    coverage_tool = PINNED_TOOLS["cargo-llvm-cov"]
+    if (coverage_tool["version"], coverage_tool["sha256"]) != (
+        PINS["CARGO_LLVM_COV_VERSION"], COVERAGE_TOOL_SHA256
     ):
-        require_in_step(CI_WORKFLOW, "Install cargo-llvm-cov", needle)
-    # The digest check must run before the archive is unpacked.
-    install = step_block(CI_WORKFLOW, "Install cargo-llvm-cov")
-    if install.index("shasum -a 256 --check") > install.index("tar -xzf"):
-        raise AssertionError("cargo-llvm-cov is unpacked before its digest is checked")
+        raise AssertionError(f"scripts/pinned-tools.json pins cargo-llvm-cov {coverage_tool!r}")
+    require_in_step(CI_WORKFLOW, "Install cargo-llvm-cov", "run: bash scripts/install-pinned-tool.sh cargo-llvm-cov")
     forbid(CI_WORKFLOW, "cargo install cargo-llvm-cov", "CI workflow")
     require_in_step(RELEASE, "Build and register msi asset", "--target x86_64-pc-windows-msvc")
     require_in_step(RELEASE, "Build and register msi asset", "--install-version $numericVersion")

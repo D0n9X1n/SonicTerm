@@ -91,8 +91,9 @@ The macOS core shard first measures the real PTY close baseline after Cargo
 restore, then runs source-policy checks, strict Rustdoc, the one-pass workspace
 test gate, workspace doctests, host probes, tooling tests, and real resource-baseline
 capture. Its independent coverage shard installs the pinned
-`cargo-llvm-cov` release's prebuilt Apple Silicon binary, checking its SHA-256
-before unpacking it (expected to save the minute a source build takes), then runs the deterministic logic coverage gate, and uploads its
+`cargo-llvm-cov` release's prebuilt Apple Silicon binary with
+`scripts/install-pinned-tool.sh`, which checks its SHA-256 before unpacking it
+(expected to save the minute a source build takes), then runs the deterministic logic coverage gate, and uploads its
 evidence artifact after success and after failure once the coverage step has started. The
 `macos-smoke` matrix builds shipping release binaries on macOS 14 Apple Silicon
 and macOS 15 Intel with distinct dependency-cache keys. Its Intel lane may save
@@ -269,8 +270,11 @@ gestures. See [Platform Integration](Platform-Integration).
   numbers change only in a reviewed diff from a retained run's verified
   evidence, as [Coverage evidence and rebaselining](Development-and-Release#coverage-evidence-and-rebaselining)
   describes.
-- `deny.toml` records advisory, license, source, and wildcard-dependency policy,
-  but no CI job runs `cargo deny check`.
+- `cargo deny --locked check` enforces the advisory, license, ban, and source
+  policy in `deny.toml`, in the `linux-core` job and in the local gate, for every
+  target. A green audit does not mean the ignored advisories are gone: each
+  `ignore` entry names its dependency path, its upstream issue, and the release
+  that removes it.
 - Native AppKit, Win32, X11/Wayland, font-discovery, PTY, GPU, and installer
   behavior still depends on platform tests, package smokes, release builds, and
   manual use; a symbol-only test cannot prove those boundaries.
@@ -303,6 +307,30 @@ consolidation, so a write-capable token in a build job could publish bytes
 other than the validated set. The permitted jobs and their exact writable scopes are enumerated in
 `WRITE_BOUNDARY` in `scripts/check-workflow-supply-chain.py`; adding one is a
 reviewable edit to that list, not an unnoticed line in a workflow.
+
+**A workflow downloads no executable itself.** Any `curl` or `wget` in a `run`
+block fails the checker, except the exact read-only GitHub API call listed in
+`API_READS`. So do `gh release download`, `cargo binstall` of any tool, Python
+started with inline source (`-c` or a heredoc) that names `urllib`,
+`urlretrieve`, `requests` or `http.client`, and an `actions/download-artifact`
+step with a `repository` or `run-id` input, which pulls from another repository
+or run; artifacts built earlier in the same run are allowed. Text cannot prove
+what a shell will run, so the rule does not try to judge an inline installer.
+The rule is a guardrail against common mistakes, not a security boundary: a
+determined workflow author can still fetch a file another way, and reviewing
+workflow changes is the control. Prebuilt tools (`cargo-deny`, `cargo-llvm-cov`) are
+installed only by `bash scripts/install-pinned-tool.sh <tool>`. Its only input is
+the tool name: it reads the version, release URL and SHA-256 from
+`scripts/pinned-tools.json`, downloads into a fresh directory, checks that file's
+SHA-256, and only then extracts and installs it. The installer trusts the
+runner's `PATH` utilities (`curl`, `sha256sum` or `shasum`, `tar`, `install`,
+`python3`); it verifies the downloaded file, not the tools that verify it. The
+checker requires every manifest field: an exact `X.Y.Z` version, a 64-hex
+digest, an https GitHub release URL, an `os` of `linux` or `macos`, an `arch`
+of `aarch64` or `x86_64`, a relative archive `member`, non-empty
+`version_args` and a `version_output`. It also requires each tool to be
+installed by the script with its name alone. Bumping a tool is a reviewed edit
+to the manifest.
 
 The checker accepts directly written block mappings for `jobs`, `steps`,
 `uses`, and `permissions`. It rejects flow mappings, explicit mapping keys,

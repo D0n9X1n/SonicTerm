@@ -44,7 +44,11 @@ serde.workspace = true
 serde_json = "1"
 ureq = "3"
 base64 = "0.23"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# Every decoder inline images accept (`load_from_memory` after a signature guess). AVIF is left
+# out: `avif` builds only an encoder, and TGA has no signature the guess can match.
+image = { version = "0.25", default-features = false, features = [
+    "png", "jpeg", "gif", "webp", "tiff", "dds", "bmp", "ico", "hdr", "exr", "qoi", "pnm", "ff",
+] }
 gethostname = "1.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
