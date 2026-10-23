@@ -19,19 +19,42 @@ impl App {
             // broadcast, so typing here must not fan out to the group.
             return;
         }
-        let receivers = self.broadcast_receivers();
+        let (receivers, blocked) = self.broadcast_receivers_counted();
+        if blocked > 0 {
+            // READONLY receivers were skipped; the strip names how many.
+            self.note_pane_input(
+                source_pane,
+                sonicterm_ui::status_line::InputState::Blocked(blocked),
+            );
+        }
         for pane_id in receivers {
             self.write_to_pane(pane_id, bytes.clone(), source);
         }
     }
 
     pub(crate) fn broadcast_receivers(&self) -> std::collections::BTreeSet<u64> {
+        self.broadcast_receivers_counted().0
+    }
+
+    /// The admitted broadcast receivers, and how many READONLY receivers were left out.
+    pub(crate) fn broadcast_receivers_counted(&self) -> (std::collections::BTreeSet<u64>, usize) {
         let BroadcastState::On { scope, source_pane } = self.broadcast else {
             // When: `broadcast` is not `On`, so no `scope` or `source_pane`
             // defines a group and the receiver set is empty.
             return Default::default();
         };
-        self.broadcast_receivers_for(scope, source_pane)
+        let mut receivers = self.broadcast_receivers_for(scope, source_pane);
+        let before = receivers.len();
+        receivers.retain(|pane_id| self.admits_new_user_input(*pane_id));
+        let blocked = before - receivers.len();
+        (receivers, blocked)
+    }
+
+    /// The window that holds `pane_id`, if any.
+    pub(crate) fn window_of_pane(&self, pane_id: u64) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .find_map(|(id, window)| window.panes.contains_key(&pane_id).then_some(*id))
     }
 
     /// Return render-only participants, including the live source; never use this set for PTY fan-out.
@@ -101,7 +124,6 @@ impl App {
                 }
             }
         }
-        receivers.retain(|pane_id| self.admits_new_user_input(*pane_id));
         receivers
     }
 }

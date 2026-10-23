@@ -22,8 +22,9 @@ use sonicterm_ui::selection::{
 };
 use sonicterm_ui::status_line::{
     build_view, sanitize_link_text, AlertsInput, ClipInput, ClipOutcome, ClipSource, FontInput,
-    HealthInput, ImeInput, LinkInput, MemHistory, MemInput, ModeInput, NumberStyle, PathAction,
-    ReloadFailure, RenderHealth, SegmentClick, SegmentHandler, SelInput, StatusLineInputs,
+    HealthInput, ImeInput, InputState, LinkInput, MemHistory, MemInput, ModeInput, NotSentReason,
+    NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick, SegmentHandler, SelInput,
+    StatusLineInputs,
 };
 use winit::window::WindowId;
 
@@ -148,6 +149,133 @@ pub(crate) struct StatusLineState {
     clip_write: HashMap<u64, ClipOutcome>,
     /// Per pane, when a refusal was last logged and how many batches were suppressed since.
     clip_log: HashMap<u64, (Instant, u64)>,
+    /// Per window, the latest refused, failed or blocked input, shown for `hold_secs`.
+    input: HashMap<WindowId, InputRecord>,
+    /// Per pane, the armed outstanding-work deadline and the write it shows as held.
+    held: HashMap<u64, HeldWatch>,
+    /// Input noted from a shared-borrow path (key encoding), recorded at the next sync.
+    deferred_input: std::cell::Cell<Option<(WindowId, InputState)>>,
+}
+
+/// One window's latest input refusal, failure or block; it retains no input bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InputRecord {
+    /// What happened.
+    pub(crate) state: InputState,
+    /// When it happened; the hold runs from here.
+    pub(crate) at: Instant,
+}
+
+/// One pane's armed outstanding-work deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeldWatch {
+    /// When `input_progress` is read next.
+    pub(crate) due: Instant,
+    /// Consecutive `Raced` samples since the last judged one.
+    pub(crate) raced: u8,
+    /// The held write shown: when it was admitted, whether a reply is ahead of it, bytes queued.
+    pub(crate) shown: Option<(Instant, bool, u64)>,
+}
+
+/// What one read of a pane's input progress does to its deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeldStep {
+    /// Nothing is outstanding: disarm and hide `held`.
+    Disarm,
+    /// The oldest write is past the threshold: show it and read again at `due`.
+    Show {
+        /// When that write was admitted.
+        admitted_at: Instant,
+        /// The writer is busy with a terminal reply ahead of it.
+        on_reply: bool,
+        /// The next read, at the next whole second of the age.
+        due: Instant,
+    },
+    /// The oldest write is younger than the threshold: hide `held` and read again at `due`.
+    Rearm(Instant),
+    /// The sample raced a completion: keep what is shown and read again at `due`.
+    Raced(Instant),
+    /// The writer stopped: disarm, hide `held`, and record `write failed` when this many were lost.
+    Terminal(Option<u32>),
+}
+
+/// Judge one read of a pane's input progress at `now`, with `raced` consecutive raced samples
+/// before it and `held_after` as the threshold. Every returned deadline is after `now`.
+pub(crate) fn held_step(
+    progress: sonicterm_io::pty::PtyInputProgress,
+    raced: u8,
+    now: Instant,
+    held_after: Duration,
+) -> HeldStep {
+    use sonicterm_io::pty::PtyInputProgress;
+    match progress {
+        PtyInputProgress::Idle => HeldStep::Disarm,
+        PtyInputProgress::Oldest { admitted_at, on_reply, .. } => {
+            let age = now.saturating_duration_since(admitted_at);
+            if age >= held_after {
+                // The next read lands on the next whole second of this write's age.
+                let next_secs = age.as_secs() + 1;
+                HeldStep::Show {
+                    admitted_at,
+                    on_reply,
+                    due: admitted_at + Duration::from_secs(next_secs),
+                }
+            } else {
+                // When: age is under held_after, the write may still complete before it is worth showing.
+                HeldStep::Rearm(admitted_at + held_after)
+            }
+        }
+        PtyInputProgress::Raced => {
+            let delay = if raced < 3 {
+                Duration::from_millis(50)
+            } else {
+                // When: raced already reached 3 in a row, wait a whole threshold instead.
+                held_after
+            };
+            HeldStep::Raced(now + delay)
+        }
+        PtyInputProgress::Terminal { failed, lost } => {
+            HeldStep::Terminal((failed && lost > 0).then_some(lost))
+        }
+    }
+}
+
+/// Map a refused PTY input's error text to the reason the strip shows.
+pub(crate) fn not_sent_reason(reason: &str) -> NotSentReason {
+    use sonicterm_io::pty::PtyInputError;
+    if reason == PtyInputError::QueueFull(Vec::new()).to_string() {
+        NotSentReason::Busy
+    } else if reason == PtyInputError::MessageTooLarge(Vec::new()).to_string() {
+        // When: reason is the MessageTooLarge text, the message exceeded the per-message cap.
+        NotSentReason::TooLarge
+    } else {
+        // When: reason is neither QueueFull nor MessageTooLarge, the writer has stopped.
+        NotSentReason::Closed
+    }
+}
+
+/// What a window's input segment shows: a `write failed` record beats `held`, and `held` (the
+/// oldest outstanding write among `held_panes`) beats any other record.
+pub(crate) fn input_state(
+    record: Option<InputRecord>,
+    held_panes: impl Iterator<Item = (Instant, bool, u64)>,
+    now: Instant,
+) -> Option<InputState> {
+    if let Some(record) = record.filter(|record| matches!(record.state, InputState::WriteFailed(_)))
+    {
+        // When: record is WriteFailed, the writer stopped, so nothing it held is still held.
+        return Some(record.state);
+    }
+    let oldest = held_panes.min_by_key(|(admitted_at, _, _)| *admitted_at);
+    if let Some((admitted_at, on_reply, queued_bytes)) = oldest {
+        // When: oldest is Some, a pane has a held write, shown with its own age.
+        return Some(InputState::Held {
+            secs: now.saturating_duration_since(admitted_at).as_secs(),
+            on_reply,
+            queued_bytes,
+        });
+    }
+    record.map(|record| record.state)
 }
 
 /// The latest OSC 52 batch: payload-free, so no clipboard text is retained.
@@ -715,8 +843,25 @@ impl App {
             live_tenths: (self.config.font.size * 10.0).round() as u32,
             configured_tenths: (self.configured_font_size * 10.0).round() as u32,
         });
+        if let Some((window_id, input)) = self.status_line.deferred_input.take() {
+            self.note_input(window_id, input, now);
+        }
+        self.service_held_input(now);
         let Self { windows, status_line: state, i18n, .. } = self;
         let listed = |id| state.resolved.segment(id).is_some();
+        let input_shown = listed(StatusSegmentId::Input);
+        let input_hold = Duration::from_secs(state.resolved.input.hold_secs);
+        state.input.retain(|window_id, record| {
+            input_shown && windows.contains_key(window_id) && now < record.at + input_hold
+        });
+        for wake in state
+            .input
+            .values()
+            .map(|record| record.at + input_hold)
+            .chain(state.held.values().map(|watch| watch.due))
+        {
+            next_wake = Some(next_wake.map_or(wake, |next| next.min(wake)));
+        }
         let alerts_shown = listed(StatusSegmentId::Alerts);
         let alert_settings = (visible && alerts_shown).then_some(state.resolved.alerts);
         let marked: HashMap<WindowId, Vec<(usize, sonicterm_ui::tabs::TabMarks)>> = windows
@@ -773,6 +918,7 @@ impl App {
         let mut minimums_changed = false;
         let mut redraws = 0;
         let mut history_shows = 0;
+        let mut held_shows = 0;
         for (window_id, window) in windows.iter_mut() {
             // Marks are recorded only while a shown strip lists `alerts`, renderer or not.
             window.alert_settings =
@@ -902,6 +1048,11 @@ impl App {
                 font,
                 size,
                 zoomed,
+                input: input_state(
+                    state.input.get(window_id).copied(),
+                    window.panes.keys().filter_map(|pane_id| state.held.get(pane_id)?.shown),
+                    now,
+                ),
                 clip: clip.map(|record| ClipInput {
                     outcome: record.outcome,
                     attempts: record.attempts,
@@ -940,6 +1091,12 @@ impl App {
             {
                 history_shows += 1;
             }
+            // `Input: held` appears in this window now; a growing age is the same appearance.
+            let held =
+                |inputs: &StatusLineInputs| matches!(inputs.input, Some(InputState::Held { .. }));
+            if held(&built.inputs) && previous.is_none_or(|previous| !held(&previous.inputs)) {
+                held_shows += 1;
+            }
             let view = build_view(
                 &state.resolved,
                 state.hide_sensitive,
@@ -966,8 +1123,11 @@ impl App {
             counters.wakes += u64::from(woke);
             counters.redraws += redraws;
             counters.history_shows += history_shows;
+            counters.held_shows += held_shows;
         });
-        let wake = visible.then_some(next_wake).flatten();
+        // A covered or hidden strip shows nothing a deadline could change, so it arms no wake; the
+        // sync that runs when a window turns eligible again reads every deadline that passed.
+        let wake = (visible && any_eligible).then_some(next_wake).flatten();
         self.status_line.armed_wake = wake;
         wake
     }
@@ -1095,6 +1255,114 @@ impl App {
             suppressed,
             "OSC 52 clipboard requests refused"
         );
+    }
+
+    /// Read each due pane's input progress once and apply it to that pane's deadline; drops the
+    /// deadlines of closed panes, and every deadline while no shown strip lists `input`.
+    fn service_held_input(&mut self, now: Instant) {
+        let listed = self.status_line.visible
+            && self.status_line.resolved.segment(StatusSegmentId::Input).is_some();
+        if !listed {
+            // When: listed is false, nothing shows `held`, so no deadline is kept or read.
+            self.status_line.held.clear();
+            return;
+        }
+        let held_after = Duration::from_millis(self.status_line.resolved.input.held_after_ms);
+        let Self { windows, status_line: state, .. } = self;
+        let mut failed = Vec::new();
+        state.held.retain(|pane_id, watch| {
+            let found = windows.iter().find_map(|(window_id, window)| {
+                Some((*window_id, window.panes.get(pane_id)?.pty.as_ref()?))
+            });
+            let Some((window_id, pty)) = found else {
+                // When: found is None, the pane retired or lost its writer; its deadline goes with it.
+                return false;
+            };
+            if now < watch.due {
+                // When: now is before watch.due, this pane's deadline has not fired.
+                return true;
+            }
+            match held_step(pty.input_progress(), watch.raced, now, held_after) {
+                HeldStep::Disarm => false,
+                HeldStep::Show { admitted_at, on_reply, due } => {
+                    let queued_bytes = pty.queued_input_bytes() as u64;
+                    *watch = HeldWatch {
+                        due,
+                        raced: 0,
+                        shown: Some((admitted_at, on_reply, queued_bytes)),
+                    };
+                    true
+                }
+                HeldStep::Rearm(due) => {
+                    *watch = HeldWatch { due, raced: 0, shown: None };
+                    true
+                }
+                HeldStep::Raced(due) => {
+                    watch.due = due;
+                    watch.raced = watch.raced.saturating_add(1);
+                    true
+                }
+                HeldStep::Terminal(lost) => {
+                    if let Some(lost) = lost {
+                        failed.push((window_id, lost));
+                    }
+                    false
+                }
+            }
+        });
+        for (window_id, lost) in failed {
+            self.note_input(window_id, InputState::WriteFailed(lost), now);
+        }
+    }
+
+    /// Record `input` as `window_id`'s latest input event, while a shown strip lists `input`.
+    pub(super) fn note_input(&mut self, window_id: WindowId, input: InputState, now: Instant) {
+        if !self.status_line.visible
+            || self.status_line.resolved.segment(StatusSegmentId::Input).is_none()
+        {
+            // When: visible is false or segment(StatusSegmentId::Input) is none, nothing would show the record.
+            return;
+        }
+        self.status_line.input.insert(window_id, InputRecord { state: input, at: now });
+    }
+
+    /// Record `input` for the window that holds `pane_id`; nothing when no window does.
+    pub(super) fn note_pane_input(&mut self, pane_id: u64, input: InputState) {
+        let window_id = self
+            .windows
+            .iter()
+            .find_map(|(id, window)| window.panes.contains_key(&pane_id).then_some(*id));
+        if let Some(window_id) = window_id {
+            let now = self.dispatch_now();
+            self.note_input(window_id, input, now);
+        }
+    }
+
+    /// Test seam: what `window_id`'s input segment last recorded.
+    #[cfg(test)]
+    pub(super) fn __test_input_record(&self, window_id: WindowId) -> Option<InputState> {
+        self.status_line.input.get(&window_id).map(|record| record.state)
+    }
+
+    /// Record `input` for `pane_id`'s window at the next sync, from a path that cannot borrow
+    /// the App mutably. The latest call wins.
+    pub(super) fn defer_pane_input(&self, window_id: WindowId, input: InputState) {
+        self.status_line.deferred_input.set(Some((window_id, input)));
+    }
+
+    /// Arm `pane_id`'s outstanding-work deadline after an accepted discrete write, unless one is
+    /// already armed or no shown strip lists `input`.
+    pub(super) fn arm_held_input(&mut self, pane_id: u64) {
+        if !self.status_line.visible
+            || self.status_line.resolved.segment(StatusSegmentId::Input).is_none()
+            || self.status_line.held.contains_key(&pane_id)
+        {
+            // When: the strip cannot show `held`, or pane_id already has a deadline, arm nothing.
+            return;
+        }
+        let held_after = Duration::from_millis(self.status_line.resolved.input.held_after_ms);
+        let due = self.dispatch_now() + held_after;
+        self.status_line.held.insert(pane_id, HeldWatch { due, raced: 0, shown: None });
     }
 
     /// Activate the tab whose program sent the latest OSC 52 request, in its own window, and focus

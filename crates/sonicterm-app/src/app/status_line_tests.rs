@@ -142,6 +142,23 @@ fn a_hover_an_event_clears_keeps_the_link_until_a_frame_resolves_it() {
 }
 
 #[test]
+fn a_strip_no_window_can_show_arms_no_wake() {
+    // A focus-out report while covered records input whose hold ends later; nothing can show
+    // that end, so the strip arms no wake until a window is eligible again.
+    let mut app = app_with_strip(true);
+    let window_id = app.__test_seed_child_window(&["child"]);
+    let now = Instant::now();
+    let _ = app.sync_status_line(now);
+    assert!(app.status_line.visible);
+    app.note_input(window_id, InputState::Blocked(1), now);
+    assert_eq!(app.sync_status_line(now), None, "no window has a renderer, so none is eligible");
+    assert!(
+        app.status_line.input.contains_key(&window_id),
+        "the record waits for an eligible sync"
+    );
+}
+
+#[test]
 fn home_paths_display_with_a_tilde() {
     // Paths under the home directory read `~/…`; others are shown as they are.
     let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
@@ -618,4 +635,135 @@ fn clip_records_outcomes_and_goes_to_the_source_tab() {
     app.activate_main_tab(1);
     app.activate_clip_source();
     assert_eq!(app.windows[&main_id].tabs.active_index(), 0, "the source tab");
+}
+
+/// Each progress read moves the deadline as `held` requires: idle disarms, an old write shows and
+/// reads again on its next whole second, a young one reads again at its threshold, a race retries
+/// at 50 ms three times then waits a threshold, and a stopped writer reports loss only on failure.
+#[test]
+fn held_step_judges_each_progress_read() {
+    use sonicterm_io::pty::PtyInputProgress;
+    let now = Instant::now() + Duration::from_secs(60);
+    let after = Duration::from_millis(1500);
+    assert_eq!(held_step(PtyInputProgress::Idle, 0, now, after), HeldStep::Disarm);
+    let old = now - Duration::from_millis(4200);
+    let oldest =
+        |admitted_at, on_reply| PtyInputProgress::Oldest { ordinal: 7, admitted_at, on_reply };
+    assert_eq!(
+        held_step(oldest(old, true), 2, now, after),
+        HeldStep::Show { admitted_at: old, on_reply: true, due: old + Duration::from_secs(5) }
+    );
+    let young = now - Duration::from_millis(400);
+    assert_eq!(held_step(oldest(young, false), 0, now, after), HeldStep::Rearm(young + after));
+    for raced in 0..3 {
+        assert_eq!(
+            held_step(PtyInputProgress::Raced, raced, now, after),
+            HeldStep::Raced(now + Duration::from_millis(50))
+        );
+    }
+    assert_eq!(held_step(PtyInputProgress::Raced, 3, now, after), HeldStep::Raced(now + after));
+    let stopped = |failed, lost| PtyInputProgress::Terminal { failed, lost };
+    assert_eq!(held_step(stopped(true, 3), 0, now, after), HeldStep::Terminal(Some(3)));
+    assert_eq!(held_step(stopped(true, 0), 0, now, after), HeldStep::Terminal(None));
+    assert_eq!(held_step(stopped(false, 3), 0, now, after), HeldStep::Terminal(None));
+    // No step re-arms at or before `now`, even at an exact whole-second age.
+    let exact = now - Duration::from_secs(2);
+    for step in [
+        held_step(oldest(exact, false), 0, now, after),
+        held_step(oldest(young, false), 0, now, after),
+        held_step(PtyInputProgress::Raced, 0, now, after),
+    ] {
+        let due = match step {
+            HeldStep::Show { due, .. } | HeldStep::Rearm(due) | HeldStep::Raced(due) => due,
+            other => panic!("{other:?}"),
+        };
+        assert!(due > now, "{step:?}");
+    }
+}
+
+/// `write failed` replaces `held`; `held` outranks any other record and shows the oldest pane's
+/// write with its own age; with nothing held, the record shows.
+#[test]
+fn input_display_prefers_failure_then_held_then_records() {
+    let now = Instant::now() + Duration::from_secs(60);
+    let record = |state| Some(InputRecord { state, at: now });
+    let busy = InputState::NotSent(NotSentReason::Busy);
+    let held = [(now - Duration::from_secs(2), false, 0), (now - Duration::from_secs(9), true, 5)];
+    assert_eq!(
+        input_state(record(InputState::WriteFailed(3)), held.into_iter(), now),
+        Some(InputState::WriteFailed(3))
+    );
+    assert_eq!(
+        input_state(record(busy), held.into_iter(), now),
+        Some(InputState::Held { secs: 9, on_reply: true, queued_bytes: 5 })
+    );
+    assert_eq!(input_state(record(busy), std::iter::empty(), now), Some(busy));
+    assert_eq!(input_state(None, std::iter::empty(), now), None);
+}
+
+/// The rejection event's error text maps to the reason word the strip shows.
+#[test]
+fn rejection_text_maps_to_its_reason() {
+    use sonicterm_io::pty::PtyInputError;
+    let reason = |error: PtyInputError| not_sent_reason(&error.to_string());
+    assert_eq!(reason(PtyInputError::QueueFull(vec![1])), NotSentReason::Busy);
+    assert_eq!(reason(PtyInputError::MessageTooLarge(vec![1])), NotSentReason::TooLarge);
+    assert_eq!(reason(PtyInputError::WriterDisconnected(vec![1])), NotSentReason::Closed);
+}
+
+/// A successful paste records nothing; a READONLY paste sends nothing and records `Blocked`; an
+/// encoding refusal records `paste refused` with its counts; the record ends after `hold_secs`.
+#[test]
+fn paste_outcomes_are_recorded_for_the_window() {
+    let mut app = app_with_strip(true);
+    let pane_id = app.__test_seed_tab("main");
+    let main_id = app.main_window_id.unwrap();
+    let _ = app.sync_status_line(Instant::now());
+    app.__test_enable_pty_write_log();
+    app.__test_set_memory_clipboard("ls");
+    app.paste_clipboard_for_kind(crate::app::FrontmostKind::Main);
+    assert_eq!(app.__test_pty_write_log().len(), 1);
+    assert_eq!(app.status_line.input.get(&main_id), None, "a successful paste records nothing");
+
+    app.main_mut().unwrap().copy_mode = Some(CopyModeState::read_only_at((0, 0)));
+    app.paste_clipboard_for_kind(crate::app::FrontmostKind::Main);
+    assert_eq!(app.__test_pty_write_log().len(), 1, "READONLY sends nothing");
+    assert_eq!(app.status_line.input[&main_id].state, InputState::Blocked(1));
+
+    app.main_mut().unwrap().copy_mode = None;
+    app.paste_file_paths_for_kind(
+        crate::app::FrontmostKind::Main,
+        [std::path::PathBuf::from("/tmp/a\u{7}b")],
+    );
+    let record = app.status_line.input[&main_id];
+    assert_eq!(record.state, InputState::PasteRefused { refused: 1, attempted: 1 });
+    assert!(app.__test_pty_write_log().iter().all(|(pane, _)| *pane == pane_id));
+
+    let hold = Duration::from_secs(app.status_line.resolved.input.hold_secs);
+    let _ = app.sync_status_line(record.at + hold);
+    assert_eq!(app.status_line.input.get(&main_id), None, "the hold ended");
+}
+
+/// An accepted write arms one deadline per pane, only while a shown strip lists `input`, and a
+/// pane without a writer drops its deadline at the next sync.
+#[test]
+fn accepted_writes_arm_one_deadline_per_pane() {
+    let mut app = app_with_strip(true);
+    let pane_id = app.__test_seed_tab("main");
+    let now = Instant::now();
+    let _ = app.sync_status_line(now);
+    app.arm_held_input(pane_id);
+    let due = app.status_line.held[&pane_id].due;
+    assert!(due > now);
+    app.arm_held_input(pane_id);
+    assert_eq!(app.status_line.held[&pane_id].due, due, "an armed deadline is kept");
+    // The seeded pane has no PTY, so nothing it was sent can be outstanding.
+    let _ = app.sync_status_line(now);
+    assert!(app.status_line.held.is_empty(), "a pane without a writer has nothing outstanding");
+
+    let mut off = app_with_strip(false);
+    let pane_id = off.__test_seed_tab("main");
+    let _ = off.sync_status_line(now);
+    off.arm_held_input(pane_id);
+    assert!(off.status_line.held.is_empty(), "nothing is armed while no shown strip lists `input`");
 }

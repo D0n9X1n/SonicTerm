@@ -80,6 +80,7 @@ fn protection_and_sensitivity_follow_the_catalog() {
             Seg::Health,
             Seg::Mem,
             Seg::Mode,
+            Seg::Input,
             Seg::Clip,
             Seg::Link,
             Seg::Paste,
@@ -106,7 +107,12 @@ fn default_table_is_the_developer_preset_and_off() {
     assert_eq!(resolved, parse("preset = \"developer\"\n").resolve().unwrap());
     assert_eq!(
         side_ids(&resolved, StatusSide::Left),
-        [StatusSegmentId::Mode, StatusSegmentId::Scroll, StatusSegmentId::Paste]
+        [
+            StatusSegmentId::Mode,
+            StatusSegmentId::Scroll,
+            StatusSegmentId::Input,
+            StatusSegmentId::Paste
+        ]
     );
     assert_eq!(
         side_ids(&resolved, StatusSide::Center),
@@ -277,6 +283,11 @@ fn invalid_values_fail_the_load() {
         "[status_line.segment.alerts]\nsources = [\"activity\"]\n",
         "[status_line.segment.alerts]\nsources = \"bell\"\n",
         "[status_line.segment.clip]\nhold_secs = 0\n",
+        "[status_line.segment.input]\nhold_secs = 601\n",
+        "[status_line.segment.input]\nheld_after_ms = 249\n",
+        "[status_line.segment.input]\nheld_after_ms = 60001\n",
+        "[status_line.segment.input]\nshow = \"always\"\n",
+        "[status_line.segment.input]\nclick = \"show_memory_usage\"\n",
         "[status_line.segment.clip]\nhold_secs = 601\n",
         "[status_line.segment.clip]\nshow = \"always\"\n",
         "[status_line.segment.size]\nclick = \"show_memory_usage\"\n",
@@ -416,4 +427,17 @@ fn clip_hold_resolves_and_clip_is_in_both_presets() {
     assert!(config.unknown_keys().is_empty());
     assert!(!StatusSegmentId::Clip.meta().allows_always);
     assert!(StatusSegmentId::Clip.meta().clickable);
+}
+
+#[test]
+fn input_settings_resolve_and_input_is_a_developer_default() {
+    // `input` holds a refusal 8 s and shows `held` after 1,500 ms; it is active-only and inert.
+    let defaults = StatusLineConfig::default().resolve().unwrap();
+    assert_eq!(defaults.input, InputSettings { hold_secs: 8, held_after_ms: 1500 });
+    assert_eq!(defaults.segment(StatusSegmentId::Input).unwrap().side, StatusSide::Left);
+    let config = parse("[status_line.segment.input]\nhold_secs = 3\nheld_after_ms = 250\n");
+    assert_eq!(config.resolve().unwrap().input, InputSettings { hold_secs: 3, held_after_ms: 250 });
+    assert!(config.unknown_keys().is_empty());
+    assert!(!StatusSegmentId::Input.meta().allows_always);
+    assert!(!StatusSegmentId::Input.meta().clickable);
 }

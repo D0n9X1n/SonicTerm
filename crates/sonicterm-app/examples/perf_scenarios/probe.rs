@@ -171,6 +171,7 @@ enum DriverState {
     Wheel(Wheel),
     AtlasRetry(Box<AtlasRetryDriver>),
     Park(Park),
+    Commit(Commit),
 }
 
 /// S1/atlas-retry: the episode machine, what is armed for its next frame, and the scene it settled on.
@@ -317,6 +318,30 @@ struct Sweep {
     lanes: [f64; 4],
     left: f64,
     right: f64,
+}
+
+/// A fixed-text driver: each step's text as one `Ime::Commit` at its offset, then a settle.
+struct Commit {
+    steps: &'static [scenarios::CommitStep],
+    sent: usize,
+    started: Instant,
+    settle: Duration,
+}
+
+impl Commit {
+    /// When the next step is due, or the settle's end once every step is sent.
+    fn next_due(&self) -> Instant {
+        match self.steps.get(self.sent) {
+            Some(step) => self.started + Duration::from_millis(step.after_ms),
+            None => self.settle_end(),
+        }
+    }
+
+    /// The end of the settle after the last step.
+    fn settle_end(&self) -> Instant {
+        let last_ms = self.steps.last().map_or(0, |step| step.after_ms);
+        self.started + Duration::from_millis(last_ms) + self.settle
+    }
 }
 
 /// S6/rest: the pointer resting on one cell, the same `CursorMoved` repeated at a fixed rate.
@@ -3107,6 +3132,9 @@ impl Probe {
                 DriverState::AtlasRetry(retry) => {
                     retry.machine.is_done() && retry.failure.is_none()
                 }
+                DriverState::Commit(commit) => {
+                    commit.sent >= commit.steps.len() && now >= commit.settle_end()
+                }
                 _ => true,
             },
         }
@@ -3420,6 +3448,12 @@ impl Probe {
                     point,
                 })
             }
+            Driver::Commit { steps, settle_ms } => DriverState::Commit(Commit {
+                steps,
+                sent: 0,
+                started: Instant::now(),
+                settle: Duration::from_millis(settle_ms),
+            }),
             Driver::Wheel { hertz, role } => {
                 let Some((retained, center)) = self.wheel_setup(role) else {
                     self.invalidate(event_loop, format!("no pane layout for role {role}'s wheel"));
@@ -3802,7 +3836,8 @@ impl Probe {
         let hold_ms = match phase.end {
             PhaseEnd::Hold(hold_ms) => hold_ms,
             // `print` ends on its sentinel; its checks count appearances, not a cadence.
-            _ if phase.name == "print" => 0,
+            // `print` ends on its sentinel and `input` when its typing settles; neither checks a cadence.
+            _ if matches!(phase.name, "print" | "input" | "held") => 0,
             // When: the phase neither holds nor prints, it has no cadence to check.
             _ => return None,
         };
@@ -3820,10 +3855,22 @@ impl Probe {
                 sel_counts: count("status_line_sel_counts")?,
                 sel_cells: count("status_line_sel_cells")?,
                 history_shows: count("status_line_history_shows")?,
+                // A side whose App predates the counter shows no `held` to count.
+                held_shows: count("status_line_held_shows").unwrap_or(0),
             })
         })?;
         let occluded = self.occlusion.delivered == Some(true);
-        scenarios::status_line_progress(phase.name, hold_ms, occluded, deltas).err()
+        scenarios::status_line_progress(phase.name, hold_ms, occluded, deltas)
+            .and_then(|()| {
+                if cfg!(windows) {
+                    // A Windows role's shell cannot stall its reader, so `held` need not appear.
+                    Ok(())
+                } else {
+                    // When: the role shell is POSIX, the stalled paste must show `held` once.
+                    scenarios::status_line_posix_progress(phase.name, deltas)
+                }
+            })
+            .err()
     }
 
     /// Drag endpoints at cell centers inside the grid.
@@ -3874,6 +3921,7 @@ impl Probe {
             }
             DriverState::AtlasRetry(retry) => retry.due(),
             DriverState::Park(park) => Some(park.started + park.interval * park.ticks),
+            DriverState::Commit(commit) => Some(commit.next_due()),
         }
     }
 
@@ -3890,7 +3938,29 @@ impl Probe {
             DriverState::Wheel(_) => self.inject_wheel(event_loop),
             DriverState::AtlasRetry(_) => self.drive_atlas_retry(event_loop, now),
             DriverState::Park(_) => self.inject_park(event_loop),
+            DriverState::Commit(_) => self.inject_commit(event_loop),
         }
+    }
+
+    /// Commit the next due step's text into the active pane.
+    fn inject_commit(&mut self, event_loop: &ActiveEventLoop) {
+        let DriverState::Commit(commit) = &mut self.driver else {
+            // When: driver is not Commit, there is no step to send.
+            return;
+        };
+        let steps = commit.steps;
+        let Some(step) = steps.get(commit.sent) else {
+            // When: every step is sent, the settle runs out with nothing to inject.
+            return;
+        };
+        commit.sent += 1;
+        let text = match step.text {
+            scenarios::CommitText::Literal(text) => text.to_owned(),
+            scenarios::CommitText::Repeat(character, count) => {
+                std::iter::repeat_n(character, count).collect()
+            }
+        };
+        self.window_input(event_loop, WindowEvent::Ime(Ime::Commit(text)));
     }
 
     /// Repeat the parked pointer's `CursorMoved` on the same cell.

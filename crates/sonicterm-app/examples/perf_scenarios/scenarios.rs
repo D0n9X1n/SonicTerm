@@ -290,7 +290,48 @@ pub(crate) enum Driver {
     /// Rest the pointer on one grid cell, `(row, col)`, repeating the same `CursorMoved` at `hertz`
     /// as a resting hand's sensor does, never pressing.
     Park { row: u16, col: u16, hertz: u32 },
+    /// Each step's text as one `Ime::Commit` into the active pane at its offset, then `settle_ms`.
+    Commit { steps: &'static [CommitStep], settle_ms: u64 },
 }
+
+/// The text one commit step sends.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommitText {
+    /// This text as it is.
+    Literal(&'static str),
+    /// One character repeated, for a paste too large to spell out.
+    Repeat(char, usize),
+}
+
+/// One commit, `after_ms` after its phase started.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CommitStep {
+    /// Milliseconds after the phase starts.
+    pub(crate) after_ms: u64,
+    /// What it sends.
+    pub(crate) text: CommitText,
+}
+
+/// S1/status-line's `held` on a POSIX role: clear the line, stall the reader in raw mode for 1 s,
+/// then paste 256 KiB, far past any PTY input buffer, so the writer blocks behind it until `head`
+/// drains it. The scratch config sets `held_after_ms = 250`, so the block crosses it.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const HELD_POSIX_STEPS: &[CommitStep] = &[
+    CommitStep {
+        after_ms: 0,
+        text: CommitText::Literal(
+            "\u{15}stty raw -echo; sleep 1; head -c 262144 >/dev/null; stty sane\r",
+        ),
+    },
+    CommitStep { after_ms: 300, text: CommitText::Repeat('x', 256 << 10) },
+];
+
+/// S1/status-line's `held` on a Windows role, whose shell has no raw mode to stall: Enter only.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const HELD_WINDOWS_STEPS: &[CommitStep] =
+    &[CommitStep { after_ms: 0, text: CommitText::Literal("\r") }];
 
 /// The grid row S6/rest prints the rest target's absolute path on; its pointer rests here.
 #[cfg(any(target_os = "macos", windows, test))]
@@ -336,6 +377,8 @@ pub(crate) struct StatusLineDeltas {
     pub(crate) sel_cells: u64,
     /// Times `History: trimmed` appeared.
     pub(crate) history_shows: u64,
+    /// Times `Input: held` appeared.
+    pub(crate) held_shows: u64,
 }
 
 /// Whether a `status-line` phase kept the strip's idle contract, or why not.
@@ -350,7 +393,10 @@ pub(crate) struct StatusLineDeltas {
 /// selection: it must count at least once and read at most 200,000 cells per count; `selected`
 /// holds that selection unchanged, so it must not count again. `print` floods the linked history
 /// with `history` and `size` listed: `History: trimmed` appears exactly once, and the strip redraws
-/// only for a sample or that appearance, never per output frame.
+/// only for a sample or that appearance, never per output frame. `input` types into the idle shell:
+/// every accepted key arms an outstanding-work deadline, which finds the write complete, so `held`
+/// never appears and the strip redraws only for a sample. `held` pastes behind a stalled reader:
+/// `Input: held` may appear at most once on any host ([`status_line_posix_progress`] requires it).
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn status_line_progress(
     phase: &str,
@@ -393,9 +439,37 @@ pub(crate) fn status_line_progress(
             "status line read {} cells in {} selection counts, more than {SEL_CELLS_PER_COUNT} each",
             deltas.sel_cells, deltas.sel_counts
         )),
+        "input" if deltas.held_shows > 0 => Err(format!(
+            "`Input: held` appeared {} times while typing into an idle shell",
+            deltas.held_shows
+        )),
+        "input" if deltas.redraws > deltas.samples + 1 => Err(format!(
+            "status line requested {} redraws for {} samples while typing",
+            deltas.redraws, deltas.samples
+        )),
+        "held" if deltas.held_shows > 1 => Err(format!(
+            "`Input: held` appeared {} times for one stalled paste",
+            deltas.held_shows
+        )),
         "selected" if deltas.sel_counts > 0 => Err(format!(
             "status line recounted an unchanged selection {} times",
             deltas.sel_counts
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The checks that hold only where the role shell is POSIX, which can stall its reader: there the
+/// 256 KiB paste in `held` blocks the writer, so `Input: held` must appear exactly once.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) fn status_line_posix_progress(
+    phase: &str,
+    deltas: StatusLineDeltas,
+) -> Result<(), String> {
+    match phase {
+        "held" if deltas.held_shows != 1 => Err(format!(
+            "`Input: held` appeared {} times while the reader was stalled, not once",
+            deltas.held_shows
         )),
         _ => Ok(()),
     }
@@ -744,6 +818,23 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                     "selected",
                     PhaseKind::Hold,
                     PhaseEnd::Hold(if short { 2_000 } else { 10_000 }),
+                )),
+                Step::Phase(driven(
+                    "input",
+                    PhaseKind::Sustained,
+                    Driver::Typing { role: 0, chars: 10, per_second: 10, settle_ms: 1_000 },
+                    PhaseEnd::DriverDone,
+                )),
+                Step::Phase(driven(
+                    "held",
+                    PhaseKind::Sustained,
+                    if host == Host::Windows {
+                        Driver::Commit { steps: HELD_WINDOWS_STEPS, settle_ms: 500 }
+                    } else {
+                        // When: host is POSIX, its shell can stall the reader behind a paste.
+                        Driver::Commit { steps: HELD_POSIX_STEPS, settle_ms: 1_800 }
+                    },
+                    PhaseEnd::DriverDone,
                 )),
                 end,
             ],

@@ -635,6 +635,9 @@ impl App {
             // When: `window_id` is absent, retain the diagnostic without alarming an unrelated frontmost terminal.
             return;
         };
+        let not_sent = super::status_line::not_sent_reason(&reason);
+        let now = self.dispatch_now();
+        self.note_input(window_id, sonicterm_ui::status_line::InputState::NotSent(not_sent), now);
         let kind = if Some(window_id) == self.main_window_id {
             super::FrontmostKind::Main
         } else {

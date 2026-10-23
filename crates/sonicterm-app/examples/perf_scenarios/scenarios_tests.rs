@@ -44,6 +44,9 @@ fn driver_ms(plan: &Plan, driver: Driver) -> u64 {
         }
         // The settle and 32 single-frame steps take a few frame periods each; 2 s is generous.
         Driver::AtlasRetry => 2_000,
+        Driver::Commit { steps, settle_ms } => {
+            steps.last().map_or(0, |step| step.after_ms) + settle_ms
+        }
         Driver::None | Driver::Sweep { .. } | Driver::Drag { .. } | Driver::Park { .. } => 0,
     }
 }
@@ -647,7 +650,9 @@ const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S1/default", "idle", "hold", None),
     ("S1/gdi", "idle", "hold", None),
     ("S1/role-exit", "idle", "hold", None),
+    ("S1/status-line", "held", "sustained", None),
     ("S1/status-line", "idle", "hold", None),
+    ("S1/status-line", "input", "sustained", None),
     ("S1/status-line", "print", "transition", Some("sentinel-parsed")),
     ("S1/status-line", "select", "sustained", None),
     ("S1/status-line", "selected", "hold", None),
@@ -814,7 +819,7 @@ fn status_line_variants_differ_from_default_only_by_the_strip() {
         assert_eq!(strip.roles, [Workload::PrintThenShell(Fixture::LinkedHistory)]);
         assert_eq!(strip.setup, base.setup);
         assert_eq!(strip.steps[1], base.steps[0], "the idle hold the strip's guard checks");
-        assert_eq!(names(&strip), ["print", "idle", "select", "selected", "end"]);
+        assert_eq!(names(&strip), ["print", "idle", "select", "selected", "input", "held", "end"]);
         assert_eq!(strip.scrollback_rows, 10_000);
     }
     assert!(all_plans()
@@ -834,6 +839,7 @@ fn status_line_progress_checks_each_phase() {
         sel_counts: 0,
         sel_cells: 0,
         history_shows: 0,
+        held_shows: 0,
     };
     assert!(status_line_progress("idle", 5_000, false, deltas(3, 3, 3)).is_ok());
     assert!(
@@ -879,6 +885,7 @@ fn status_line_progress_checks_the_selection_phases() {
         sel_counts,
         sel_cells,
         history_shows: 0,
+        held_shows: 0,
     };
     assert!(status_line_progress("select", 2_000, false, sel(3, 52_500)).is_ok());
     assert!(status_line_progress("select", 2_000, false, sel(0, 0)).is_err(), "nothing counted");
@@ -902,6 +909,7 @@ fn status_line_progress_checks_the_trimmed_history_print() {
         sel_counts: 0,
         sel_cells: 0,
         history_shows,
+        held_shows: 0,
     };
     assert!(status_line_progress("print", 0, false, print(2, 4, 1)).is_ok());
     assert!(status_line_progress("print", 0, false, print(2, 1, 0)).is_err(), "never trimmed");
@@ -921,4 +929,67 @@ fn only_s1_status_line_prints_the_trimmed_history() {
         assert!(!covered.roles.contains(&Workload::PrintThenShell(Fixture::LinkedHistory)));
         assert!(!plan("S1", "default", short).unwrap().prints_linked_history());
     }
+}
+
+/// `input` types into the idle shell: `held` must never appear, and the strip may redraw only for
+/// a sample, so the outstanding-work deadlines typing arms present nothing.
+#[test]
+fn status_line_progress_checks_the_typing_input_phase() {
+    let input = |samples, redraws, held_shows| StatusLineDeltas {
+        samples,
+        wakes: samples,
+        redraws,
+        sel_counts: 0,
+        sel_cells: 0,
+        history_shows: 0,
+        held_shows,
+    };
+    assert!(status_line_progress("input", 0, false, input(2, 2, 0)).is_ok());
+    assert!(status_line_progress("input", 0, false, input(2, 2, 1)).is_err(), "held while typing");
+    assert!(status_line_progress("input", 0, false, input(1, 9, 0)).is_err(), "deadline redraws");
+}
+
+/// `held` pastes 256 KiB behind a reader a POSIX shell stalls in raw mode: `Input: held` may appear
+/// at most once anywhere, and on a POSIX role exactly once; a Windows role only presses Enter.
+#[test]
+fn status_line_progress_checks_the_held_paste_phase() {
+    let held = |held_shows| StatusLineDeltas {
+        samples: 0,
+        wakes: 0,
+        redraws: 0,
+        sel_counts: 0,
+        sel_cells: 0,
+        history_shows: 0,
+        held_shows,
+    };
+    assert!(status_line_progress("held", 0, false, held(1)).is_ok());
+    assert!(status_line_progress("held", 0, false, held(0)).is_ok(), "lenient off POSIX");
+    assert!(status_line_progress("held", 0, false, held(2)).is_err(), "flapped");
+    assert!(status_line_posix_progress("held", held(1)).is_ok());
+    assert!(status_line_posix_progress("held", held(0)).is_err(), "never held");
+    assert!(status_line_posix_progress("input", held(0)).is_ok(), "only `held` is stricter");
+    assert!(matches!(
+        HELD_POSIX_STEPS[0].text,
+        CommitText::Literal(text) if text.starts_with("\u{15}stty raw -echo; sleep 1;")
+    ));
+    assert_eq!(HELD_POSIX_STEPS[1].text, CommitText::Repeat('x', 256 << 10));
+    let held_driver = |host| {
+        plan_for("S1", "status-line", true, host)
+            .unwrap()
+            .steps
+            .iter()
+            .find_map(|step| match step {
+                Step::Phase(phase) if phase.name == "held" => Some(phase.driver),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        held_driver(Host::Posix),
+        Driver::Commit { steps: HELD_POSIX_STEPS, settle_ms: 1_800 }
+    );
+    assert_eq!(
+        held_driver(Host::Windows),
+        Driver::Commit { steps: HELD_WINDOWS_STEPS, settle_ms: 500 }
+    );
 }

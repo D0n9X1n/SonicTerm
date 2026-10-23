@@ -208,6 +208,7 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
         Seg::Clip => {
             (UpdateKind::Event, format_clip, DefaultClick::Handler(SegmentHandler::ClipSource))
         }
+        Seg::Input => (UpdateKind::Event, format_input, DefaultClick::None),
         Seg::History => (
             UpdateKind::Event,
             format_history,
@@ -217,13 +218,9 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
         Seg::Size => (UpdateKind::Event, format_size, DefaultClick::None),
         Seg::Zoom => (UpdateKind::Event, format_zoom, DefaultClick::Action(Action::TogglePaneZoom)),
         Seg::Ime => (UpdateKind::Event, format_ime, DefaultClick::None),
-        Seg::Input
-        | Seg::PathCheck
-        | Seg::Cpu
-        | Seg::Frame
-        | Seg::Out
-        | Seg::TabMem
-        | Seg::Glyphs => (UpdateKind::Event, format_unavailable, DefaultClick::None),
+        Seg::PathCheck | Seg::Cpu | Seg::Frame | Seg::Out | Seg::TabMem | Seg::Glyphs => {
+            (UpdateKind::Event, format_unavailable, DefaultClick::None)
+        }
     };
     SegmentSpec { update, format, default_click }
 }
@@ -274,6 +271,48 @@ pub struct StatusLineInputs {
     pub alerts: AlertsInput,
     /// The latest OSC 52 request while it is held.
     pub clip: Option<ClipInput>,
+    /// Input SonicTerm refused or blocked, or an accepted write still outstanding.
+    pub input: Option<InputState>,
+}
+
+/// Why the input queue refused a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotSentReason {
+    /// The bounded queue had no free slot.
+    Busy,
+    /// The writer had stopped.
+    Closed,
+    /// The message exceeded the per-message cap.
+    TooLarge,
+}
+
+/// What the input segment shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputState {
+    /// The input queue refused a message.
+    NotSent(NotSentReason),
+    /// The writer stopped on a native error with this many accepted writes not delivered.
+    WriteFailed(u32),
+    /// A paste or drop was refused for `refused` of `attempted` destinations.
+    PasteRefused {
+        /// Destinations that refused it.
+        refused: usize,
+        /// Destinations it was meant for.
+        attempted: usize,
+    },
+    /// READONLY copy mode consumed the gesture; `panes` it was meant for.
+    Blocked(usize),
+    /// A native key could not be encoded and was not sent (Windows win32-input).
+    KeyNotSent,
+    /// The oldest accepted write has been outstanding this many seconds.
+    Held {
+        /// Whole seconds since it was admitted.
+        secs: u64,
+        /// The writer is busy with a terminal reply ahead of it.
+        on_reply: bool,
+        /// Bytes still queued.
+        queued_bytes: u64,
+    },
 }
 
 /// What SonicTerm did with the latest OSC 52 request.
@@ -1282,6 +1321,96 @@ fn format_alerts(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Forma
         default_click: true,
         ..FormattedSegment::plain(parts, spoken.join(". "))
     })
+}
+
+/// The input segment: input SonicTerm refused or blocked, or an accepted write that has not
+/// completed. It never claims the program is hung or waiting, and shows no input bytes.
+fn format_input(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let state = inputs.input?;
+    let cross = symbol(env.icons, "✗", "x");
+    let warn = symbol(env.icons, "⚠", "!");
+    let translate = |key: &str| env.i18n.translate(key);
+    let count = |key: &str, count: u64| {
+        env.i18n.t_args(key, Some(&[("count", &format_count(count, env.numbers))]))
+    };
+    // The outcome, its tone, an optional parenthetical dropped first, and the spoken value.
+    let (outcome, tone, detail, spoken) = match state {
+        InputState::NotSent(reason) => {
+            let key = match reason {
+                NotSentReason::Busy => "status-value-input-busy",
+                NotSentReason::Closed => "status-value-input-closed",
+                NotSentReason::TooLarge => "status-value-input-too-large",
+            };
+            let detail = translate(key);
+            let spoken = format!("{}, {detail}", translate("status-value-input-not-sent"));
+            (
+                format!("{cross} {}", translate("status-value-input-not-sent")),
+                StatusTone::Error,
+                Some(detail),
+                spoken,
+            )
+        }
+        InputState::WriteFailed(lost) => {
+            let detail = count("status-value-input-lost", u64::from(lost));
+            let spoken = format!("{}, {detail}", translate("status-value-input-write-failed"));
+            (
+                format!("{cross} {}", translate("status-value-input-write-failed")),
+                StatusTone::Error,
+                Some(detail),
+                spoken,
+            )
+        }
+        InputState::PasteRefused { refused, attempted } => {
+            let detail = (attempted > 1).then(|| format!("{refused}/{attempted}"));
+            let spoken = translate("status-value-input-paste-refused");
+            (format!("{warn} {spoken}"), StatusTone::Warn, detail, spoken)
+        }
+        InputState::Blocked(panes) => {
+            let blocked = if panes > 1 {
+                count("status-value-input-blocked-panes", panes as u64)
+            } else {
+                // When: panes is at most 1, the gesture's own pane is the one blocked.
+                translate("status-value-input-blocked")
+            };
+            let detail = translate("status-value-input-read-only");
+            let spoken = format!("{blocked}, {detail}");
+            (
+                format!("{} {blocked}", symbol(env.icons, "⊘", "-")),
+                StatusTone::Name,
+                Some(detail),
+                spoken,
+            )
+        }
+        InputState::KeyNotSent => {
+            let spoken = translate("status-value-input-key-not-sent");
+            (format!("{cross} {spoken}"), StatusTone::Error, None, spoken)
+        }
+        InputState::Held { secs, on_reply, queued_bytes } => {
+            let age = format_duration(secs);
+            let held = env.i18n.t_args("status-value-input-held", Some(&[("age", &age)]));
+            let detail = (queued_bytes >= 1 << 20).then(|| {
+                let size = format_bytes(queued_bytes, env.numbers);
+                env.i18n.t_args("status-value-input-queued", Some(&[("size", &size)]))
+            });
+            let mut spoken = held.clone();
+            if on_reply {
+                spoken = format!("{spoken}, {}", translate("status-spoken-input-behind-reply"));
+            }
+            (format!("{warn} {held}"), StatusTone::Warn, detail, spoken)
+        }
+    };
+    let mut parts = vec![name_part(env, "status-name-input"), StatusPart::new(outcome, tone)];
+    if let Some(detail) = detail {
+        let held = matches!(state, InputState::Held { .. });
+        let text = if held {
+            format!(" {} {detail}", symbol(env.icons, "·", "-"))
+        } else {
+            // When: held is false, the detail is a parenthetical.
+            format!(" ({detail})")
+        };
+        parts.push(StatusPart::new(text, tone).droppable());
+    }
+    Some(FormattedSegment::plain(parts, spoken))
 }
 
 /// The clipboard segment: what SonicTerm did with the latest OSC 52 request and which tab sent it,

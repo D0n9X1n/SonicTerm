@@ -367,6 +367,7 @@ impl StatusSegmentId {
                 self,
                 Self::Alerts
                     | Self::Clip
+                    | Self::Input
                     | Self::Link
                     | Self::Paste
                     | Self::Ime
@@ -376,13 +377,14 @@ impl StatusSegmentId {
                     | Self::Zoom
             ),
             // Paste, ime and size only explain state; a click has nothing to act on.
-            clickable: !matches!(self, Self::Paste | Self::Ime | Self::Size),
+            clickable: !matches!(self, Self::Paste | Self::Ime | Self::Size | Self::Input),
             sensitivity,
             protection,
             implemented: matches!(
                 self,
                 Self::Alerts
                     | Self::Clip
+                    | Self::Input
                     | Self::Health
                     | Self::Mem
                     | Self::Mode
@@ -550,6 +552,21 @@ impl Default for ImeSettings {
     }
 }
 
+/// Input segment settings beyond the common keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InputSettings {
+    /// Seconds a refusal or write failure stays shown.
+    pub hold_secs: u64,
+    /// An accepted write still outstanding this many milliseconds after admission shows `held`.
+    pub held_after_ms: u64,
+}
+
+impl Default for InputSettings {
+    fn default() -> Self {
+        Self { hold_secs: 8, held_after_ms: 1500 }
+    }
+}
+
 /// Clipboard segment settings beyond the common keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClipSettings {
@@ -637,6 +654,8 @@ pub struct ResolvedStatusLine {
     pub alerts: AlertsSettings,
     /// Clipboard segment settings.
     pub clip: ClipSettings,
+    /// Input segment settings.
+    pub input: InputSettings,
 }
 
 impl ResolvedStatusLine {
@@ -661,6 +680,8 @@ pub const MEM_THRESHOLD_RANGE_MIB: std::ops::RangeInclusive<u64> = 1..=1_048_576
 pub const COPIED_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=10;
 /// Bounds of the input-method segment's `hold_secs`.
 pub const HOLD_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=60;
+/// Bounds of the input segment's `held_after_ms`.
+pub const HELD_AFTER_MS_RANGE: std::ops::RangeInclusive<u64> = 250..=60_000;
 /// Bounds of the clipboard segment's `hold_secs`.
 pub const CLIP_HOLD_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=600;
 /// Bounds of the alerts segment's `min_secs`.
@@ -680,6 +701,8 @@ const SEL_KEYS: &[&str] = &["copied_secs"];
 const PASTE_KEYS: &[&str] = &["paste"];
 /// Extra keys of the input-method segment table.
 const IME_KEYS: &[&str] = &["hold_secs"];
+/// Extra keys of the input segment table.
+const INPUT_KEYS: &[&str] = &["hold_secs", "held_after_ms"];
 /// Extra keys of the clipboard segment table.
 const CLIP_KEYS: &[&str] = &["hold_secs"];
 /// Extra keys of the alerts segment table.
@@ -697,6 +720,7 @@ fn segment_keys(id: StatusSegmentId) -> &'static [&'static str] {
         StatusSegmentId::Size => SIZE_KEYS,
         StatusSegmentId::Alerts => ALERTS_KEYS,
         StatusSegmentId::Clip => CLIP_KEYS,
+        StatusSegmentId::Input => INPUT_KEYS,
         _ => &[],
     }
 }
@@ -783,6 +807,7 @@ impl StatusLineConfig {
         let mut size = SizeSettings::default();
         let mut alerts = AlertsSettings::default();
         let mut clip = ClipSettings::default();
+        let mut input = InputSettings::default();
         let mut segments = Vec::new();
         for (side, list_name, ids) in lists {
             for id in ids {
@@ -856,6 +881,9 @@ impl StatusLineConfig {
                         )?;
                 }
             }
+            if id == StatusSegmentId::Input {
+                apply_input_keys(&mut input, table).context("status_line.segment.input")?;
+            }
             if id == StatusSegmentId::Clip {
                 if let Some(value) = table.get("hold_secs") {
                     clip.hold_secs = value
@@ -903,6 +931,7 @@ impl StatusLineConfig {
             size,
             alerts,
             clip,
+            input,
         })
     }
 
@@ -995,6 +1024,25 @@ fn apply_mem_keys(mem: &mut MemSettings, table: &toml::Table) -> Result<()> {
                 .with_context(|| format!("{key} must be an integer in 1..=1048576"))?;
             *slot = mib;
         }
+    }
+    Ok(())
+}
+
+/// Apply the input segment's own keys.
+fn apply_input_keys(input: &mut InputSettings, table: &toml::Table) -> Result<()> {
+    if let Some(value) = table.get("hold_secs") {
+        input.hold_secs = value
+            .as_integer()
+            .and_then(|secs| u64::try_from(secs).ok())
+            .filter(|secs| CLIP_HOLD_SECS_RANGE.contains(secs))
+            .context("hold_secs must be an integer in 1..=600")?;
+    }
+    if let Some(value) = table.get("held_after_ms") {
+        input.held_after_ms = value
+            .as_integer()
+            .and_then(|millis| u64::try_from(millis).ok())
+            .filter(|millis| HELD_AFTER_MS_RANGE.contains(millis))
+            .context("held_after_ms must be an integer in 250..=60000")?;
     }
     Ok(())
 }

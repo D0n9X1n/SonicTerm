@@ -149,7 +149,7 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 
 | 预设 | `left` | `center` | `right` | 段默认值 |
 | --- | --- | --- | --- | --- |
-| `developer` | `mode`、`scroll`、`paste` | `link`、`sel` | `alerts`、`clip`、`health`、`history`、`mem` | — |
+| `developer` | `mode`、`scroll`、`input`、`paste` | `link`、`sel` | `alerts`、`clip`、`health`、`history`、`mem` | — |
 | `minimal` | — | — | `alerts`、`clip`、`health`、`mem` | — |
 | `diagnostics` | 同 `developer` | 同 `developer` | 同 `developer` | `mem.sparkline = true` |
 
@@ -162,6 +162,7 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 | `health` | 只在出问题时显示：每个文件最近一次失败的加载（启动时或重载时），如 `配置: ✗ 第 12 行`（以及 `主题:`、`键位:`），保留到该文件成功重载为止；`渲染: ⚠ 软件 (GDI)`、`软件适配器` 或 `软件 (强制)`；`GPU: ⚠ 恢复中`。 | 950 | 有重载错误时打开配置文件，否则无。 |
 | `mem` | SonicTerm 自身进程的内存，如 `内存: 412 MB`，使用二进制单位和三位有效数字；与上一次采样相比变化至少 1% 时显示 `↑` 或 `↓`。达到 `warn_mib` 时为琥珀色并带 `⚠`，达到 `critical_mib` 时为红色并带 `✗`。 | 900 | 打开内存占用报告。 |
 | `mode` | 标记：广播输入 `⇶ 3`（含接收窗格数）、复制模式 `复制`、程序捕获鼠标时的 `鼠标`。 | 800 | 无。 |
+| `input` | 在 `hold_secs` 内显示 SonicTerm 为本窗口中某个窗格拒绝或阻止的输入：`输入: ✗ 未发送（忙）`（窗格的输入队列已满）、`未发送（已关闭）`（其写入端已停止）、`未发送（过大）`（超过 16 MiB）、`输入: ✗ 写入失败（3 条未发送）`（写入端因系统错误停止，有这么多已接受的写入未送达）、`输入: ⚠ 粘贴被拒绝`（广播时为 `粘贴被拒绝（2/5）`：拒绝的窗格数和尝试的窗格数）、暗色的 `输入: ⊘ 已阻止（只读）`（READONLY 消耗了一次粘贴、拖放或写入；跳过广播接收窗格时为 `已阻止 2 个窗格`），或在 Windows 上的 `输入: ✗ 按键未发送`。当发往某个窗格的最早一次已接受写入未完成达到 `held_after_ms` 时，`输入: ⚠ 已等待 4s` 显示其时长，排队达到 1 MiB 时附加 `· 排队 12.0 MB`；写入完成后隐藏。`已等待` 只说明一次已接受的写入尚未完成，从不声称程序卡住或在等待；在 tmux 中，写入端写给的是 tmux。`写入失败` 取代 `已等待`，`已等待` 优先于其它记录。通知不变；不保留、绘制、记录或朗读任何输入字节。键入时每个窗格每 `held_after_ms` 最多安排一次检查，检查发现没有未完成的写入，不会重绘。 | 780 | 无。 |
 | `link` | 指针下检测到的目标：`链接: github.com/…`；OSC 8 链接的显示文本写的是另一个主机，或文本或目标带有 userinfo 时显示 `链接: ⚠ evil.example ≠ bank.example`（启发式警告，不是防欺骗保护）；显示文本触到视图的首行或末行、超过 32 个片段或 2 KiB 时显示 `链接: … · 未检查显示文本`，此时文本未被完整读取，绝不会被判定为一致；`路径: ~/proj/src · 显示` 或 `· 打开文件夹`、300 ms 后的 `· 检查中`、`✗ … · 未找到`，或带原因的 `⚠ … · 已阻止`。 | 600 | 无。 |
 | `sel` | 复制窗口选区（或复制模式范围）时会放到剪贴板上的内容大小：`选区: 3 行`，单行时为 `选区: 142 个字符`，按复制本身的规则计数（自动换行的行相连，去掉行尾填充和独立的右侧边框）。超过 50,000 行的选区，或遍历会超过 200,000 个单元格的选区，改为显示精确的行数：`选区: 12,345 行 · 计数已截断`。执行 `copy_to_clipboard` 或复制模式的 `y`/Enter 后，在 `copied_secs` 内显示 `选区: ✓ 已复制`，或红色的 `选区: ✗ 复制失败`，即使复制清除了选区也是如此。程序通过 OSC 52 进行的复制不在此显示。计数在帧处理中进行，并在选区的窗格、端点、屏幕或回滚淘汰不变时复用；对复制模式的范围，范围内任一行变化时也会重新计数。 | 520 | 复制窗口的选区；显示复制结果时无效。 |
 | `paste` | 粘贴到当前窗格不会被括起时，以琥珀色显示 `粘贴: ⚠ 未括起`：括号粘贴模式关闭、窗格处于主屏幕，且其 shell 已通过 OSC 133 报告提示符（见 [终端 IO 与 VT](Terminal-IO-and-VT-zh-CN)）。没有 OSC 133 的窗格或正在运行命令的窗格从不显示。朗读值为"粘贴未使用括号模式，可能逐行执行"：SonicTerm 无法知道 shell 会如何处理换行。`cmd.exe` 不发送 OSC 133，因此从不显示该警告，尽管它的粘贴总是逐行执行；PowerShell 只有在提示符发送 OSC 133 时才显示。 | 560 | 无。 |
@@ -178,11 +179,11 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 
 | Key | 取值 | 行为 |
 | --- | --- | --- |
-| `show` | `"always"` 或 `"active"` | `always` 保留位置并显示空闲文本（`不可用`、`底部`、`正常`、`无`）；`active` 在段没有内容时隐藏它。`alerts`、`clip`、`link`、`paste`、`ime`、`history`、`font`、`zoom` 和 `size` 只接受 `active`。 |
+| `show` | `"always"` 或 `"active"` | `always` 保留位置并显示空闲文本（`不可用`、`底部`、`正常`、`无`）；`active` 在段没有内容时隐藏它。`alerts`、`clip`、`input`、`link`、`paste`、`ime`、`history`、`font`、`zoom` 和 `size` 只接受 `active`。 |
 | `priority` | `0` 到 `1000` | 窗口变窄时，值越高保留越久。 |
 | `click` | `"default"`、`"none"` 或动作名 | `default` 执行该段自己的点击；`none` 让它不响应指针；不带参数的键位动作（如 `"show_memory_usage"`）在被点击的窗口中执行。`paste`、`ime` 和 `size` 只接受 `default` 或 `none`，二者都不响应。 |
 
-`[status_line.segment.mem]` 还接受 `show_trend`（`true`）、`sparkline`（`false`，`diagnostics` 中为 `true`：数字后面八个暗色单元，表示最近两分钟，每个单元是一个按墙钟对齐的 15 秒区间中的最大采样，在绘制单元的最小值和最大值之间缩放；只绘制已结束的区间，因此只在区间结束时变化；没有采样的时间段，例如窗口被遮挡或机器休眠，保持空白）、`warn_mib`（`1024`）和 `critical_mib`（`2048`，不小于 `warn_mib`），取值均为 `1` 到 `1048576`。`[status_line.segment.sel]` 还接受 `copied_secs`（`2`，`1` 到 `10`），即复制结果显示多久。`[status_line.segment.paste]` 接受 `paste`（`"when_off"`，默认，或 `"never"`）。`[status_line.segment.ime]` 接受 `hold_secs`（`8`，`1` 到 `60`），即复制模式警告显示多久。`[status_line.segment.size]` 接受 `hold_ms`（`1500`，`250` 到 `10000`）。`[status_line.segment.clip]` 接受 `hold_secs`（`10`，`1` 到 `600`）。`[status_line.segment.alerts]` 接受 `min_secs`（`10`，`0` 到 `86400`）和 `sources`（`["bell", "notify", "finished"]`；列出的来源较少时，其余来源关闭）。`[status_line]` 下和段表内的未知 key 会被忽略，并在每次加载时以一条列出全部未知 key 的 `sonicterm-cfg` 警告记录一次。
+`[status_line.segment.mem]` 还接受 `show_trend`（`true`）、`sparkline`（`false`，`diagnostics` 中为 `true`：数字后面八个暗色单元，表示最近两分钟，每个单元是一个按墙钟对齐的 15 秒区间中的最大采样，在绘制单元的最小值和最大值之间缩放；只绘制已结束的区间，因此只在区间结束时变化；没有采样的时间段，例如窗口被遮挡或机器休眠，保持空白）、`warn_mib`（`1024`）和 `critical_mib`（`2048`，不小于 `warn_mib`），取值均为 `1` 到 `1048576`。`[status_line.segment.sel]` 还接受 `copied_secs`（`2`，`1` 到 `10`），即复制结果显示多久。`[status_line.segment.paste]` 接受 `paste`（`"when_off"`，默认，或 `"never"`）。`[status_line.segment.ime]` 接受 `hold_secs`（`8`，`1` 到 `60`），即复制模式警告显示多久。`[status_line.segment.size]` 接受 `hold_ms`（`1500`，`250` 到 `10000`）。`[status_line.segment.clip]` 接受 `hold_secs`（`10`，`1` 到 `600`）。`[status_line.segment.input]` 接受 `hold_secs`（`8`，`1` 到 `600`），即拒绝或失败显示多久，以及 `held_after_ms`（`1500`，`250` 到 `60000`），即已接受的写入未完成多久后显示 `已等待`。`[status_line.segment.alerts]` 接受 `min_secs`（`10`，`0` 到 `86400`）和 `sources`（`["bell", "notify", "finished"]`；列出的来源较少时，其余来源关闭）。`[status_line]` 下和段表内的未知 key 会被忽略，并在每次加载时以一条列出全部未知 key 的 `sonicterm-cfg` 警告记录一次。
 
 窗口过窄时，状态栏先使用紧凑形式（内存去掉箭头和迷你图，`mode` 去掉 `鼠标`），再从中间缩短链接的路径，然后按优先级从低到高整段移除。健康错误、广播标记和链接的目标主机最后移除。
 

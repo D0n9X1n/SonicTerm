@@ -1950,7 +1950,8 @@ fn status_line_plans_turn_the_strip_on_in_the_config() {
     let with_strip = config_toml_with_shell(&strip, "/bin/sh", false);
     let without = config_toml_with_shell(&base, "/bin/sh", false);
     let table =
-        "\n[status_line]\nenabled = true\nright = [\"health\", \"history\", \"size\", \"mem\"]\n";
+        "\n[status_line]\nenabled = true\nright = [\"health\", \"history\", \"size\", \"mem\"]\n\
+                 \n[status_line.segment.input]\nheld_after_ms = 250\n";
     assert!(with_strip.ends_with(table), "{with_strip}");
     assert!(!without.contains("[status_line]"));
     // S1/status-line also keeps 10,000 history rows, so its linked history passes the byte budget.

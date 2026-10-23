@@ -81,6 +81,7 @@ fn every_catalog_id_is_registered_with_a_glyph_free_spoken_name() {
                 attempts: 1_000,
                 source: ClipSource::Tab(2),
             }),
+            input: Some(InputState::Held { secs: 4, on_reply: true, queued_bytes: 12 << 20 }),
             health: HealthInput {
                 config: Some(ReloadFailure { line: Some(12) }),
                 render: RenderHealth::SoftwareAdapter,
@@ -166,6 +167,7 @@ fn core_segments_format_as_name_value_and_chips() {
         zoomed: false,
         alerts: AlertsInput::default(),
         clip: None,
+        input: None,
     };
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3COPYMOUSE");
@@ -261,6 +263,7 @@ fn ascii_icons_change_symbols_only() {
         zoomed: false,
         alerts: AlertsInput::default(),
         clip: None,
+        input: None,
     };
     let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Sel).unwrap(), "Sel: x copy failed");
@@ -970,4 +973,64 @@ fn clip_shows_each_outcome_with_its_source() {
     }
     let read = clip_view(ClipOutcome::ReadRefused, 1_000, tab);
     assert_eq!(read.spoken.value, "clipboard read refused, 1,000 requests, from tab 2");
+}
+
+#[test]
+fn input_shows_each_state_and_never_claims_a_hang() {
+    // Each state reads `Input: …` with its tone; the parenthetical or queued figure drops first; the
+    // segment has no click. `held` states only an age.
+    let i18n = translator("en");
+    let input_view = |state| {
+        let inputs = StatusLineInputs { input: Some(state), ..idle_inputs() };
+        let view = build_view(&developer(), false, &inputs, &i18n, NumberStyle::POINT);
+        view.segments.into_iter().find(|segment| segment.id == StatusSegmentId::Input).unwrap()
+    };
+    let cases = [
+        (InputState::NotSent(NotSentReason::Busy), "Input: ✗ not sent (busy)", StatusTone::Error),
+        (
+            InputState::NotSent(NotSentReason::Closed),
+            "Input: ✗ not sent (closed)",
+            StatusTone::Error,
+        ),
+        (
+            InputState::NotSent(NotSentReason::TooLarge),
+            "Input: ✗ not sent (too large)",
+            StatusTone::Error,
+        ),
+        (InputState::WriteFailed(3), "Input: ✗ write failed (3 not sent)", StatusTone::Error),
+        (
+            InputState::PasteRefused { refused: 1, attempted: 1 },
+            "Input: ⚠ paste refused",
+            StatusTone::Warn,
+        ),
+        (
+            InputState::PasteRefused { refused: 2, attempted: 5 },
+            "Input: ⚠ paste refused (2/5)",
+            StatusTone::Warn,
+        ),
+        (InputState::Blocked(1), "Input: ⊘ blocked (read-only)", StatusTone::Name),
+        (InputState::Blocked(2), "Input: ⊘ blocked 2 panes (read-only)", StatusTone::Name),
+        (InputState::KeyNotSent, "Input: ✗ key not sent", StatusTone::Error),
+        (
+            InputState::Held { secs: 4, on_reply: false, queued_bytes: 10 },
+            "Input: ⚠ held 4s",
+            StatusTone::Warn,
+        ),
+        (
+            InputState::Held { secs: 4, on_reply: false, queued_bytes: 12 << 20 },
+            "Input: ⚠ held 4s · 12.0 MB queued",
+            StatusTone::Warn,
+        ),
+    ];
+    for (state, text, tone) in cases {
+        let segment = input_view(state);
+        assert_eq!(text_of(&segment.parts), text, "{state:?}");
+        assert_eq!(segment.parts[1].tone, tone, "{state:?}");
+        assert_eq!(segment.click, None);
+        if segment.parts.len() > 2 {
+            assert!(segment.parts[2].droppable, "the detail drops first");
+        }
+    }
+    let held = input_view(InputState::Held { secs: 4, on_reply: true, queued_bytes: 0 });
+    assert_eq!(held.spoken.value, "held 4s, behind a terminal reply");
 }

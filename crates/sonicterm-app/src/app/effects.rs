@@ -310,8 +310,20 @@ impl App {
                         .get(&id)
                         .and_then(|state| state.tab_states.get(state.tabs.active_index()))
                         .map(|tab| tab.active_pane);
-                    if let Some(pane) = pane.filter(|pane| self.admits_new_user_input(*pane)) {
-                        self.write_to_pane(pane, text.into_bytes(), PtyInputSource::StateMachine);
+                    if let Some(pane) = pane {
+                        if self.admits_new_user_input(pane) {
+                            self.write_to_pane(
+                                pane,
+                                text.into_bytes(),
+                                PtyInputSource::StateMachine,
+                            );
+                        } else {
+                            // When: admits_new_user_input refuses pane, READONLY consumed the write.
+                            self.note_pane_input(
+                                pane,
+                                sonicterm_ui::status_line::InputState::Blocked(1),
+                            );
+                        }
                     }
                 }
             }

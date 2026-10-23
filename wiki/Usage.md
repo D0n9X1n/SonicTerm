@@ -272,6 +272,13 @@ reason with the number of panes it affected, and, for an oversized paste, gives
 the size it needed and the limit. The warning never shows the paths or the
 pasted text.
 
+When the status line lists `input` (the default `developer` preset does), it
+keeps the outcome after the notification fades: `Input: ⚠ paste refused`, with
+refused and attempted panes when broadcast; `Input: ⊘ blocked (read-only)` when
+READONLY consumed the paste or drop; and `Input: ⚠ held 4s` while a paste the
+pane accepted is still waiting for its program to read it. See
+[Configuration](Configuration).
+
 In a READONLY window, pastes and file drops send nothing to the terminal. While
 search is open in either a writable or READONLY window, clipboard paste belongs
 only to that window's search query and never reaches the shell or broadcast peers.
