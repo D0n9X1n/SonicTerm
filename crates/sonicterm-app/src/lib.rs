@@ -21,6 +21,7 @@ pub mod os_drag_bridge;
 pub mod shell;
 pub mod tab_drag;
 pub mod tab_thumbnail;
+pub mod taskbar_progress;
 pub mod window_key_boundary;
 
 pub use app::{ConfigNormalizer, KeymapLoader, ThemeLoader};

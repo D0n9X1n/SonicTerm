@@ -210,8 +210,8 @@ fn every_pointer_move_and_leave_is_recorded_before_any_handler() {
     let record = source
         .find("self.record_window_pointer(win_id, &event);")
         .expect("the dispatcher records the pointer");
-    let overlay =
-        source.find("self.command_palette_handle_pointer_event(win_id, &event)").expect("overlay");
+    // The shared pointer owners (query field, palette, right button) run in one call.
+    let overlay = source.find("self.route_shared_pointer(win_id, &event)").expect("overlay");
     let child_route =
         source.find("self.handle_child_window_event(event_loop, win_id, event)").expect("child");
     assert!(record < overlay && overlay < child_route, "the pointer is recorded first");

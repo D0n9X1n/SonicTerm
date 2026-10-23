@@ -2318,3 +2318,201 @@ fn output_bytes_count_only_while_counting_is_on() {
     worker.count_output(23);
     assert_eq!(pane.output_bytes.load(Ordering::Relaxed), 123);
 }
+
+/// The events one batch of `bytes` emits through `handles`.
+fn program_batch(handles: &PaneVtHandles, bytes: &str) -> Vec<UserEvent> {
+    let mut emitted = Vec::new();
+    process_pane_vt_batch_with(
+        handles,
+        bytes.as_bytes(),
+        None,
+        &mut None,
+        &mut SyncLatch::default(),
+        |_| None,
+        |event| emitted.push(event),
+        Instant::now,
+        |_| {},
+    );
+    emitted
+}
+
+/// The progress reports `events` carry, in order.
+fn progress_reports(events: &[UserEvent]) -> Vec<Option<sonicterm_vt::vt::ProgressReport>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::ProgramProgress { report, .. } => Some(*report),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_batch_reports_its_last_progress_and_clears_only_what_it_showed() {
+    // A batch sends its latest progress once; a command end or RIS clears it only when this pane
+    // showed progress, so ordinary commands send nothing.
+    let (_pane, handles) = pane_and_worker_handles();
+    let normal = |percent| {
+        Some(sonicterm_vt::vt::ProgressReport {
+            state: sonicterm_vt::vt::ProgressState::Normal,
+            percent,
+        })
+    };
+    let first = program_batch(&handles, "\x1b]9;4;1;10\x07\x1b]9;4;1;20\x07");
+    assert_eq!(progress_reports(&first), vec![normal(20)], "only the batch's last value");
+    let ended = program_batch(&handles, "\x1b]133;D;0\x07");
+    assert_eq!(progress_reports(&ended), vec![None], "a finished command clears the bar");
+    assert!(progress_reports(&program_batch(&handles, "\x1b]133;D;0\x07")).is_empty());
+    program_batch(&handles, "\x1b]9;4;3\x07");
+    assert_eq!(progress_reports(&program_batch(&handles, "\x1bc")), vec![None], "RIS clears it");
+}
+
+#[test]
+fn a_batch_of_notifications_is_one_event_with_a_count() {
+    // A burst in one batch reaches the App as its first notification and how many followed.
+    let (_pane, handles) = pane_and_worker_handles();
+    let events = program_batch(&handles, "\x1b]9;one\x07\x1b]9;two\x07\x1b]777;notify;T;three\x07");
+    let notices: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::ProgramNotify { title, body, more, .. } => {
+                Some((title.clone(), body.clone(), *more))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices, vec![(None, "one".to_owned(), 2)]);
+}
+
+/// Names the test whose re-run, as a ConPTY child, writes program-state OSCs instead of testing.
+#[cfg(windows)]
+const PROGRAM_OSC_CHILD: &str = "SONICTERM_PROGRAM_OSC_CHILD";
+
+/// Turn VT output on for this process's console, so the OSC bytes reach ConPTY as sequences.
+#[cfg(windows)]
+fn enable_vt_output() {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{
+        GetConsoleMode, SetConsoleMode, CONSOLE_MODE, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+    };
+    let handle = HANDLE(std::io::stdout().as_raw_handle());
+    let mut mode = CONSOLE_MODE(0);
+    let read =
+        // SAFETY: `handle` is this process's live stdout console handle and `mode` outlives the call.
+        unsafe { GetConsoleMode(handle, &mut mode) };
+    if read.is_ok() {
+        let _ =
+            // SAFETY: the same live handle; a failure leaves the console mode as it was.
+            unsafe { SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) };
+    }
+}
+
+/// Write an `OSC 9;4` set, an OSC 9 and an OSC 777 notification, then the clear, 300 ms apart so
+/// each change is its own read.
+#[cfg(windows)]
+fn write_program_oscs() {
+    use std::io::Write;
+    #[cfg(windows)]
+    enable_vt_output();
+    let mut stdout = std::io::stdout().lock();
+    let writes: [&[u8]; 3] = [
+        b"\x1b]9;4;1;40\x07",
+        b"\x1b]9;build done\x07\x1b]777;notify;CI;green\x07",
+        b"\x1b]9;4;0\x07",
+    ];
+    for bytes in writes {
+        let _ = stdout.write_all(bytes);
+        let _ = stdout.flush();
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+/// OSC 9;4 progress and OSC 9 / OSC 777 notifications a real ConPTY child writes reach the pane as
+/// typed events: ConPTY forwards them, and the worker turns them into the App's events. The child is
+/// this test binary re-run under a marker; the read is bounded by a 30 s deadline.
+#[cfg(windows)]
+#[test]
+fn conpty_child_program_oscs_reach_the_pane() {
+    use crate::app::pty_test_support::isolated;
+    use sonicterm_io::pty::{CommandSpawn, PtyHandle, ShellSpawnOpts};
+    use sonicterm_vt::vt::{ProgressReport, ProgressState};
+    let name = std::thread::current().name().expect("named unit test").to_owned();
+    if std::env::var(PROGRAM_OSC_CHILD).is_ok_and(|value| value == name) {
+        // This process is the ConPTY child: it writes the sequences and ends.
+        write_program_oscs();
+        return;
+    }
+    if isolated() {
+        return;
+    }
+    // Only this isolated process runs, so setting its environment races no other test.
+    std::env::set_var(PROGRAM_OSC_CHILD, &name);
+    let spawn = CommandSpawn {
+        program: std::env::current_exe().expect("test binary path").into_os_string(),
+        args: [name.as_str(), "--exact", "--nocapture", "--test-threads=1"]
+            .map(std::ffi::OsString::from)
+            .into(),
+        cwd: std::env::temp_dir(),
+    };
+    let pty = PtyHandle::spawn_command(&spawn, 120, 40, &ShellSpawnOpts::default())
+        .expect("spawn the ConPTY child");
+    let (_pane, handles) = pane_and_worker_handles();
+    let replies = pty.reply_sender();
+    let mut latch = SyncLatch::default();
+    let mut progress = Vec::new();
+    let mut notices = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    // The clear is written last, so once it arrives every notification has too.
+    while progress.len() < 2 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(chunk) = pty.out_rx.recv_timeout(remaining) else {
+            panic!("no clear within 30 s: progress {progress:?}, notifications {notices:?}");
+        };
+        process_pane_vt_batch_with(
+            &handles,
+            &chunk,
+            None,
+            &mut None,
+            &mut latch,
+            |_| None,
+            |event| match event {
+                UserEvent::ProgramProgress { report, .. } => progress.push(report),
+                UserEvent::ProgramNotify { title, body, more, .. } => {
+                    notices.push((title, body, more));
+                }
+                // Output and other host events are not what this test waits for.
+                _ => {}
+            },
+            Instant::now,
+            |reply| {
+                let _ = replies.send(reply);
+            },
+        );
+    }
+    let set = Some(ProgressReport { state: ProgressState::Normal, percent: 40 });
+    assert_eq!(progress, vec![set, None]);
+    let total: u32 = notices.iter().map(|(_, _, more)| more + 1).sum();
+    assert_eq!(total, 2, "both notifications arrived: {notices:?}");
+    assert_eq!(notices.first().map(|notice| notice.1.as_str()), Some("build done"));
+    let ci_seen = notices.iter().any(|(title, ..)| title.as_deref() == Some("CI"));
+    assert!(
+        ci_seen || notices.len() == 1,
+        "the OSC 777 title arrives unless coalesced: {notices:?}"
+    );
+}
+
+/// A batch's first notification is the first one with text left after sanitizing: a zero-width
+/// OSC 9 before `hello` must not hide `hello`, and a blank one is never counted.
+#[test]
+fn a_batch_keeps_the_first_notification_that_sanitizes_to_text() {
+    let mut notices = ProgramNotices::default();
+    notices.push(None, "\u{200B}".to_owned());
+    notices.push(Some("\u{1b}".to_owned()), " \u{2028} ".to_owned());
+    notices.push(None, "hello".to_owned());
+    notices.push(None, "again".to_owned());
+    assert_eq!(notices.into_parts(), Some((None, "hello".to_owned(), 1)));
+    let mut blank = ProgramNotices::default();
+    blank.push(None, "\u{200B}".to_owned());
+    assert_eq!(blank.into_parts(), None, "a batch of blank notifications sends no event");
+}

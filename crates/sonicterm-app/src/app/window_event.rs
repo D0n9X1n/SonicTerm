@@ -426,20 +426,9 @@ impl App {
                 window.invalidate_path_hover();
             }
         }
-        if self.field_pointer_event(win_id, &event) {
-            // When: `field_pointer_event` owns a query-field gesture, neither the modal nor the terminal sees it.
-            return;
-        }
-        if self.command_palette_handle_pointer_event(win_id, &event) {
-            // When: `command_palette_handle_pointer_event` consumes input, keep both window handlers from receiving it.
-            if matches!(
-                event,
-                WindowEvent::MouseInput {
-                    state: ElementState::Released,
-                    button: MouseButton::Left,
-                    ..
-                }
-            ) {
+        if let Some(drain) = self.route_shared_pointer(win_id, &event) {
+            // When: `route_shared_pointer` consumed the event, neither window handler receives it.
+            if drain {
                 self.drain_pending_window_creates(event_loop);
             }
             return;
@@ -459,9 +448,7 @@ impl App {
                 // When: KeyboardInput arrives, source ownership precedes deferred creation and source redraw.
                 self.handle_window_keyboard(win_id, &event, is_synthetic);
                 self.drain_pending_window_creates(event_loop);
-                if let Some(window) = self.windows.get(&win_id) {
-                    window.request_window_redraw();
-                }
+                self.finish_window_key(win_id);
                 return;
             }
             WindowEvent::Focused(focused) => {
@@ -1244,6 +1231,47 @@ impl App {
         if let Some(timer) = timing {
             timer.finish();
         }
+    }
+}
+
+impl App {
+    /// The pointer owners main and torn-out windows share, ahead of either window's own handler:
+    /// a query-field gesture, the open palette, then the right button, which only the status line
+    /// strip handles. Returns `None` when the event goes on to the window's handler, else whether
+    /// the consuming owner was the palette taking a left release (pending windows then open).
+    /// Ask the key's window for a frame once the key is handled, unless a step of the key
+    /// already asked during this dispatch.
+    pub(in crate::app) fn finish_window_key(&mut self, win_id: WindowId) {
+        self.request_redraw_once(win_id);
+    }
+
+    pub(super) fn route_shared_pointer(
+        &mut self,
+        win_id: WindowId,
+        event: &WindowEvent,
+    ) -> Option<bool> {
+        if self.field_pointer_event(win_id, event) {
+            // When: `field_pointer_event` owns a query-field gesture, neither the modal nor the terminal sees it.
+            return Some(false);
+        }
+        if self.command_palette_handle_pointer_event(win_id, event) {
+            // When: `command_palette_handle_pointer_event` consumes input, keep both window handlers from receiving it.
+            return Some(matches!(
+                event,
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                    ..
+                }
+            ));
+        }
+        if let WindowEvent::MouseInput { state, button: MouseButton::Right, .. } = event {
+            // When: MouseButton::Right reaches no palette, only the strip handles it; the rest of
+            // right input is consumed unhandled, as before, and never reaches a pane.
+            let _ = self.handle_right_mouse_input(win_id, *state);
+            return Some(false);
+        }
+        None
     }
 }
 

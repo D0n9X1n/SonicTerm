@@ -167,6 +167,7 @@ fn palette_variant(palette: &CommandPalette) -> u8 {
         CommandPaletteMode::RenameWindow => 2,
         CommandPaletteMode::TabColor => 3,
         CommandPaletteMode::Confirm => 4,
+        CommandPaletteMode::StatusSegments => 5,
     };
     mode * 2 + u8::from(palette.tabs_only())
 }

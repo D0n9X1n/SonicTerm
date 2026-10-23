@@ -141,6 +141,8 @@ pub enum Action {
     ToggleStatusLine,
     /// Toggle hiding of sensitive status line content (screen sharing).
     ToggleStatusLineSensitive,
+    /// Open the status line checklist to choose segments for this session.
+    ChooseStatusLineSegments,
     /// Rename the active tab title body.
     RenameTab,
     /// Pick a custom accent color for the active tab.

@@ -14,6 +14,9 @@ use sonicterm_cfg::status_line::CpuScale;
 use sonicterm_cfg::status_line::{
     PasteWarning, ResolvedStatusLine, StatusLineConfig, StatusSegmentId,
 };
+use sonicterm_cfg::status_overrides::{
+    MoveDirection, StatusLineOverrides, StatusLineSave, WrittenStatusLine,
+};
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_logging::MemoryMetric;
@@ -25,7 +28,7 @@ use sonicterm_ui::status_line::{
     build_view, sanitize_link_text, AlertsInput, ClipInput, ClipOutcome, ClipSource, FontInput,
     GlyphsInput, HealthInput, ImeInput, InputState, LinkInput, MemHistory, MemInput, ModeInput,
     NotSentReason, NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick,
-    SegmentHandler, SelInput, StatusLineInputs,
+    SegmentHandler, SelInput, StatusLineInputs, StatusLineView,
 };
 use sonicterm_ui::status_line::{
     byte_rate, cpu_percent, FrameInput, Hysteresis, PathCheckInput, PresenterKind, TabMemInput,
@@ -102,17 +105,31 @@ struct BuiltFrom {
     inputs: StatusLineInputs,
 }
 
+/// Segments that first appeared in a window during one strip pass, for the status line counters.
+#[derive(Debug, Default)]
+struct StripShows {
+    /// Windows where `History: trimmed` appeared.
+    history: u64,
+    /// Windows where `Input: held` appeared.
+    held: u64,
+    /// Windows where `Glyphs:` appeared.
+    glyphs: u64,
+}
+
 /// The status line state the App owns, one per process.
 #[derive(Debug, Default)]
 pub(crate) struct StatusLineState {
-    /// Whether the strip is shown this session.
+    /// Whether the strip is shown this session: the file's value or its override.
     visible: bool,
-    /// Whether sensitive segments are hidden this session.
+    /// Whether sensitive segments are hidden this session: the file's value or its override.
     hide_sensitive: bool,
-    /// The `[status_line]` table last applied; a reload overrides a session
-    /// toggle only when the file's own value changed.
+    /// The `[status_line]` table last applied, so an unchanged table reconciles nothing.
     applied: Option<StatusLineConfig>,
-    /// The resolved table the strip draws.
+    /// The last good resolved file: the baseline overrides apply to and reconcile against.
+    file: Option<ResolvedStatusLine>,
+    /// The session's choices on top of `file`; one entry per segment at most.
+    overrides: StatusLineOverrides,
+    /// The resolved table the strip draws: `file` with `overrides` applied.
     resolved: ResolvedStatusLine,
     /// Bumped when anything other than the inputs changes the strip
     /// (toggles, config, locale), so every window rebuilds once.
@@ -769,6 +786,55 @@ fn link_input(
     (Some(link), None)
 }
 
+impl StatusLineState {
+    /// Recompute what the strip shows from `file` and the session's choices.
+    /// The strip pass's per-window step: build `window_id`'s strip from the session's effective
+    /// lists and that window's `inputs`. `None` when neither changed since the window last built,
+    /// so an unchanged pass formats nothing; `shows` counts segments that appear here now.
+    fn rebuild_window_strip(
+        &mut self,
+        window_id: WindowId,
+        inputs: StatusLineInputs,
+        i18n: &sonicterm_ui::i18n::I18n,
+        numbers: NumberStyle,
+        shows: &mut StripShows,
+    ) -> Option<StatusLineView> {
+        let built = BuiltFrom { generation: self.generation, inputs };
+        let previous = self.built.get(&window_id);
+        if previous == Some(&built) {
+            // When: `built` matches the last build, the inputs and settings are unchanged.
+            return None;
+        }
+        // `History: trimmed` appears in this window now; later trims only change its count.
+        if built.inputs.history_trimmed.is_some()
+            && previous.is_none_or(|previous| previous.inputs.history_trimmed.is_none())
+        {
+            shows.history += 1;
+        }
+        // `Input: held` appears in this window now; a growing age is the same appearance.
+        let held =
+            |inputs: &StatusLineInputs| matches!(inputs.input, Some(InputState::Held { .. }));
+        if held(&built.inputs) && previous.is_none_or(|previous| !held(&previous.inputs)) {
+            shows.held += 1;
+        }
+        // `Glyphs:` appears in this window now; a changed count is the same appearance.
+        if built.inputs.glyphs.is_some()
+            && previous.is_none_or(|previous| previous.inputs.glyphs.is_none())
+        {
+            shows.glyphs += 1;
+        }
+        let view = build_view(&self.resolved, self.hide_sensitive, &built.inputs, i18n, numbers);
+        self.built.insert(window_id, built);
+        Some(view)
+    }
+
+    fn refresh_effective(&mut self, file: &ResolvedStatusLine) {
+        self.resolved = self.overrides.effective(file);
+        self.visible = self.resolved.enabled;
+        self.hide_sensitive = self.resolved.hide_sensitive;
+    }
+}
+
 impl App {
     /// Store the focused-pane facts a frame pass copied under its parser guard.
     /// The next loop pass rebuilds the strip if they changed what it shows.
@@ -809,18 +875,137 @@ impl App {
 
     /// Toggle the strip for this session and refit every window.
     pub(super) fn toggle_status_line(&mut self) {
-        self.status_line.visible = !self.status_line.visible;
-        self.invalidate_status_line();
+        let visible = !self.status_line.visible;
+        self.change_status_choices(|overrides, file| overrides.set_enabled(file, visible));
         tracing::info!("status line visible -> {}", self.status_line.visible);
-        let _ = self.sync_status_line(Instant::now());
     }
 
     /// Toggle hiding of sensitive segments for this session (screen sharing).
     pub(super) fn toggle_status_line_sensitive(&mut self) {
-        self.status_line.hide_sensitive = !self.status_line.hide_sensitive;
-        self.invalidate_status_line();
+        let hide = !self.status_line.hide_sensitive;
+        self.change_status_choices(|overrides, file| overrides.set_hide_sensitive(file, hide));
         tracing::info!("status line hide_sensitive -> {}", self.status_line.hide_sensitive);
+    }
+
+    /// Show segment `id` if it is hidden, hide it if it is shown, for this session.
+    pub(super) fn toggle_status_segment(&mut self, id: StatusSegmentId) {
+        self.change_status_choices(|overrides, file| overrides.toggle_segment(file, id));
+    }
+
+    /// Move a shown segment to the neighbouring list, for this session.
+    pub(super) fn move_status_segment(&mut self, id: StatusSegmentId, direction: MoveDirection) {
+        self.change_status_choices(|overrides, file| overrides.move_segment(file, id, direction));
+    }
+
+    /// Drop every session choice and return to the file's resolved lists.
+    pub(super) fn reset_status_line_choices(&mut self) {
+        self.change_status_choices(|overrides, _| overrides.reset());
+    }
+
+    /// The last good resolved file and the session's choices on it, for the checklist page.
+    pub(super) fn status_line_file_and_choices(
+        &self,
+    ) -> (ResolvedStatusLine, &StatusLineOverrides) {
+        let file =
+            self.status_line.file.clone().unwrap_or_else(|| self.status_line.resolved.clone());
+        (file, &self.status_line.overrides)
+    }
+
+    /// The strip the session shows now: the current `[status_line]` table with every choice.
+    pub(in crate::app) fn current_status_line(&mut self) -> ResolvedStatusLine {
+        self.apply_status_line_config();
+        self.status_line.resolved.clone()
+    }
+
+    /// Route a right press at raster-px `(pointer_x, pointer_y)` in `window_id`. Inside the
+    /// strip it opens the checklist for that window with the pressed segment highlighted, or the
+    /// first row between segments, and returns `true`: the press never reaches a pane or a PTY.
+    pub(in crate::app) fn right_press_status_line(
+        &mut self,
+        window_id: WindowId,
+        pointer_x: f32,
+        pointer_y: f32,
+    ) -> bool {
+        let Some(strip) =
+            self.windows.get(&window_id).and_then(|window| window.status_strip.as_ref())
+        else {
+            // When: `status_strip` is None, the window presented no strip.
+            return false;
+        };
+        if !strip.contains(pointer_y) {
+            // When: `contains` is false, the press is outside the band, which handles no right press.
+            return false;
+        }
+        let pressed = strip.segment_at(pointer_x, pointer_y).map(|segment| segment.id);
+        self.open_status_segments(Some(window_id), pressed);
+        true
+    }
+
+    /// Route a right-button press or release in `window_id` at its pointer. A press inside the
+    /// strip opens the checklist; its release, and any right input outside the strip, does
+    /// nothing, as before: SonicTerm reports no right button to a pane.
+    pub(in crate::app) fn handle_right_mouse_input(
+        &mut self,
+        window_id: WindowId,
+        state: winit::event::ElementState,
+    ) -> bool {
+        if state != winit::event::ElementState::Pressed {
+            // When: state is a release, the press already decided; nothing else handles it.
+            return false;
+        }
+        let Some((pointer_x, pointer_y)) =
+            self.windows.get(&window_id).map(|window| window.cursor_pos)
+        else {
+            // When: windows lacks window_id, there is no strip to press.
+            return false;
+        };
+        self.right_press_status_line(window_id, pointer_x as f32, pointer_y as f32)
+    }
+
+    /// Ask the checklist's window for a frame after a change. Every ask goes through the
+    /// dispatch's record, so the strip pass, the checklist and the input path together ask each
+    /// terminal window at most once.
+    pub(in crate::app) fn request_checklist_redraw(&mut self) {
+        let Some(id) = self.palette_attached_window.or(self.main_window_id) else {
+            // When: palette_attached_window and main_window_id are both None, nothing hosts it.
+            return;
+        };
+        self.mark_window_redraw(id, RedrawCause::Input);
+        self.request_redraw_once(id);
+    }
+
+    /// What Save Current Settings writes: the strip the session shows, with every choice applied
+    /// to the current `[status_line]` table.
+    pub(super) fn status_line_save(&mut self) -> StatusLineSave {
+        self.apply_status_line_config();
+        StatusLineSave::from_resolved(&self.status_line.resolved)
+    }
+
+    /// Apply `change` to the session's choices, then redraw every window's strip once.
+    fn change_status_choices(
+        &mut self,
+        change: impl FnOnce(&mut StatusLineOverrides, &ResolvedStatusLine),
+    ) {
+        self.apply_status_line_config();
+        let (file, _) = self.status_line_file_and_choices();
+        change(&mut self.status_line.overrides, &file);
+        self.status_line.refresh_effective(&file);
+        self.invalidate_status_line();
         let _ = self.sync_status_line(Instant::now());
+    }
+
+    /// Adopt `written` after a save wrote it: its table becomes the applied table, so a later
+    /// reload of a different file is a real change, and its resolved lists become the baseline,
+    /// dropping every choice they now satisfy.
+    pub(super) fn adopt_saved_status_line(&mut self, written: WrittenStatusLine) {
+        let WrittenStatusLine { table, resolved } = written;
+        let previous = self.status_line.file.clone().unwrap_or_else(|| resolved.clone());
+        self.status_line.overrides.reconcile(&previous, &resolved);
+        self.config.status_line = table.clone();
+        self.status_line.applied = Some(table);
+        self.status_line.file = Some(resolved.clone());
+        self.status_line.refresh_effective(&resolved);
+        self.invalidate_status_line();
     }
 
     /// Apply a changed `[status_line]` table. A reload overrides a session
@@ -834,16 +1019,16 @@ impl App {
         }
         let previous = state.applied.replace(table.clone());
         match table.resolve() {
-            Ok(resolved) => state.resolved = resolved,
+            Ok(file) => {
+                // A reload drops only the choices whose own segment or key the file changed.
+                if let Some(before) = state.file.as_ref() {
+                    state.overrides.reconcile(before, &file);
+                }
+                state.refresh_effective(&file);
+                state.file = Some(file);
+            }
             // A table that reached here was validated at load; keep the last good one regardless.
             Err(error) => tracing::warn!("status line config rejected: {error:#}"),
-        }
-        if previous.as_ref().is_none_or(|previous| previous.enabled != table.enabled) {
-            state.visible = table.enabled;
-        }
-        if previous.as_ref().is_none_or(|previous| previous.hide_sensitive != table.hide_sensitive)
-        {
-            state.hide_sensitive = table.hide_sensitive;
         }
         if let Some(warning) = previous.is_some().then(|| table.unknown_keys_warning()).flatten() {
             // A reload left unknown keys, log them once; startup logs them from the loader.
@@ -982,7 +1167,7 @@ impl App {
             self.note_input(window_id, input, now);
         }
         self.service_held_input(now);
-        let Self { windows, status_line: state, i18n, .. } = self;
+        let Self { windows, status_line: state, i18n, dispatch_redraws, .. } = self;
         let listed = |id| state.resolved.segment(id).is_some();
         let input_shown = listed(StatusSegmentId::Input);
         let input_hold = Duration::from_secs(state.resolved.input.hold_secs);
@@ -1059,9 +1244,8 @@ impl App {
         state.built.retain(|window_id, _| windows.contains_key(window_id));
         let mut minimums_changed = false;
         let mut redraws = 0;
-        let mut history_shows = 0;
-        let mut held_shows = 0;
-        let mut glyph_shows = 0;
+        let mut shows = StripShows::default();
+        let numbers = NumberStyle::for_locale(if locale.is_empty() { "en" } else { &locale });
         for (window_id, window) in windows.iter_mut() {
             // Marks are recorded only while a shown strip lists `alerts`, renderer or not.
             window.alert_settings =
@@ -1090,7 +1274,7 @@ impl App {
                 ];
                 resize_panes_to_rects(&window.panes, &rects, cell_width, cell_height, inset);
                 window.mark_redraw(RedrawCause::Topology);
-                window.request_window_redraw();
+                dispatch_redraws.request(*window_id, window);
             }
             if !shown {
                 // When: `shown` is false, the strip is off here: no band to route, nothing to format.
@@ -1270,38 +1454,12 @@ impl App {
                     AlertsInput::default()
                 },
             };
-            let built = BuiltFrom { generation: state.generation, inputs };
-            let previous = state.built.get(window_id);
-            if previous == Some(&built) {
-                // When: `built` matches the last build, the inputs and settings are unchanged.
+            let Some(view) =
+                state.rebuild_window_strip(*window_id, inputs, i18n, numbers, &mut shows)
+            else {
+                // When: rebuild_window_strip returns None, the inputs and settings are unchanged.
                 continue;
-            }
-            // `History: trimmed` appears in this window now; later trims only change its count.
-            if built.inputs.history_trimmed.is_some()
-                && previous.is_none_or(|previous| previous.inputs.history_trimmed.is_none())
-            {
-                history_shows += 1;
-            }
-            // `Input: held` appears in this window now; a growing age is the same appearance.
-            let held =
-                |inputs: &StatusLineInputs| matches!(inputs.input, Some(InputState::Held { .. }));
-            if held(&built.inputs) && previous.is_none_or(|previous| !held(&previous.inputs)) {
-                held_shows += 1;
-            }
-            // `Glyphs:` appears in this window now; a changed count is the same appearance.
-            if built.inputs.glyphs.is_some()
-                && previous.is_none_or(|previous| previous.inputs.glyphs.is_none())
-            {
-                glyph_shows += 1;
-            }
-            let view = build_view(
-                &state.resolved,
-                state.hide_sensitive,
-                &built.inputs,
-                i18n,
-                NumberStyle::for_locale(if locale.is_empty() { "en" } else { &locale }),
-            );
-            state.built.insert(*window_id, built);
+            };
             let Some(renderer) = window.renderer.as_mut() else {
                 // When: `renderer` is gone, the window cannot show a strip.
                 continue;
@@ -1310,7 +1468,7 @@ impl App {
                 // The strip's pixels changed, draw them once.
                 window.mark_redraw(RedrawCause::StatusLine);
                 redraws += 1;
-                window.request_window_redraw();
+                dispatch_redraws.request(*window_id, window);
             }
         }
         if minimums_changed {
@@ -1319,9 +1477,9 @@ impl App {
         self.note_status_line(|counters| {
             counters.wakes += u64::from(woke);
             counters.redraws += redraws;
-            counters.history_shows += history_shows;
-            counters.held_shows += held_shows;
-            counters.glyph_shows += glyph_shows;
+            counters.history_shows += shows.history;
+            counters.held_shows += shows.held;
+            counters.glyph_shows += shows.glyphs;
         });
         // A covered or hidden strip shows nothing a deadline could change, so it arms no wake; the
         // sync that runs when a window turns eligible again reads every deadline that passed.

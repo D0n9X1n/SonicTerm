@@ -2287,6 +2287,50 @@ pub fn sanitize_display_text(text: &str, policy: SanitizePolicy, limits: Sanitiz
     ellipsize_middle_columns(&out, limits.max_columns)
 }
 
+/// `text` middle-ellipsized to at most `max_bytes` UTF-8 bytes, ellipsis included, cut on
+/// grapheme boundaries; the head keeps the extra grapheme when the halves cannot match.
+pub fn ellipsize_middle_bytes(text: &str, max_bytes: usize) -> String {
+    const ELLIPSIS: &str = "…";
+    if text.len() <= max_bytes {
+        // When: text already fits max_bytes, keep it whole.
+        return text.to_string();
+    }
+    let Some(budget) = max_bytes.checked_sub(ELLIPSIS.len()) else {
+        // When: max_bytes cannot hold even the ellipsis, nothing is shown.
+        return String::new();
+    };
+    let graphemes: Vec<&str> = text.graphemes(true).collect();
+    let (mut head, mut tail) = (0, graphemes.len());
+    let (mut head_bytes, mut tail_bytes) = (0, 0);
+    // Take graphemes from the front and the back alternately while they fit.
+    loop {
+        let take_head = head_bytes <= tail_bytes;
+        let next = if take_head {
+            graphemes.get(head)
+        } else {
+            // When: take_head is false, the back end is shorter, so it grows next.
+            graphemes.get(tail - 1)
+        };
+        let Some(next) = next.filter(|_| head < tail) else {
+            // When: next is None or head met tail; the length check above makes that unreachable.
+            break;
+        };
+        if head_bytes + tail_bytes + next.len() > budget {
+            // When: the next grapheme would pass the budget, the cut stops here.
+            break;
+        }
+        if take_head {
+            head_bytes += next.len();
+            head += 1;
+        } else {
+            // When: take_head is false, the grapheme came from the back.
+            tail_bytes += next.len();
+            tail -= 1;
+        }
+    }
+    format!("{}{ELLIPSIS}{}", graphemes[..head].concat(), graphemes[tail..].concat())
+}
+
 /// `text` middle-ellipsized to at most `max_columns` display columns, cut on
 /// grapheme boundaries.
 pub fn ellipsize_middle_columns(text: &str, max_columns: usize) -> String {

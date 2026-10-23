@@ -113,6 +113,7 @@ struct ShellRunner {
     on_resumed: Option<Box<dyn FnOnce() + Send>>,
     on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
     default_handlers: Option<Box<dyn DefaultHandlerBackend>>,
+    taskbar_progress: Option<Box<dyn crate::taskbar_progress::TaskbarProgressBackend>>,
 }
 
 impl ShellRunner {
@@ -133,6 +134,7 @@ impl ShellRunner {
             on_resumed: None,
             on_window_ready: None,
             default_handlers: None,
+            taskbar_progress: None,
         }
     }
 
@@ -176,6 +178,10 @@ impl ShellRunner {
         if let Some(backend) = self.default_handlers {
             // The platform supplied a backend; only the palette command may ever call it.
             app.set_default_handler_backend(backend);
+        }
+        if let Some(backend) = self.taskbar_progress {
+            // The platform's progress surface; it is called only after a program reports progress.
+            app.set_taskbar_progress_backend(backend);
         }
         if let Some(payload) = self.pending {
             // When: `pending` carries a startup handoff, seed its tab before the event loop starts.
@@ -362,6 +368,16 @@ impl MacShell {
         self
     }
 
+    /// Install the taskbar, Dock or launcher surface that mirrors `OSC 9;4` progress.
+    #[must_use]
+    pub fn with_taskbar_progress(
+        mut self,
+        backend: Box<dyn crate::taskbar_progress::TaskbarProgressBackend>,
+    ) -> Self {
+        self.runner.taskbar_progress = Some(backend);
+        self
+    }
+
     /// Run the event loop and report its result separately from native teardown settlement.
     pub fn run(self) -> ShellRunResult<anyhow::Error> {
         self.runner.run()
@@ -456,6 +472,16 @@ impl WindowsShell {
         self
     }
 
+    /// Install the taskbar, Dock or launcher surface that mirrors `OSC 9;4` progress.
+    #[must_use]
+    pub fn with_taskbar_progress(
+        mut self,
+        backend: Box<dyn crate::taskbar_progress::TaskbarProgressBackend>,
+    ) -> Self {
+        self.runner.taskbar_progress = Some(backend);
+        self
+    }
+
     /// Run the event loop and report its result separately from native teardown settlement.
     pub fn run(self) -> ShellRunResult<anyhow::Error> {
         self.runner.run()
@@ -539,6 +565,16 @@ impl LinuxShell {
     #[must_use]
     pub fn with_default_handlers(mut self, backend: Box<dyn DefaultHandlerBackend>) -> Self {
         self.runner.default_handlers = Some(backend);
+        self
+    }
+
+    /// Install the taskbar, Dock or launcher surface that mirrors `OSC 9;4` progress.
+    #[must_use]
+    pub fn with_taskbar_progress(
+        mut self,
+        backend: Box<dyn crate::taskbar_progress::TaskbarProgressBackend>,
+    ) -> Self {
+        self.runner.taskbar_progress = Some(backend);
         self
     }
 

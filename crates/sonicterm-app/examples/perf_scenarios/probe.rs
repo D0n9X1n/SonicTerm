@@ -440,6 +440,39 @@ fn sample_checkpoint_memory(_app: &mut App, _index: usize, _label: &str, _attemp
     false
 }
 
+/// Install the App's counting progress surface, which both compared trees define.
+#[cfg(perf_taskbar_progress_api)]
+fn install_counting_taskbar_progress(app: &mut App) {
+    app.__install_counting_taskbar_progress();
+}
+
+/// `perf_taskbar_progress_api` is off, so a tree in this comparison lacks the counting surface;
+/// no surface is installed and the `program` phase runs without its delivery checks.
+#[cfg(not(perf_taskbar_progress_api))]
+fn install_counting_taskbar_progress(_app: &mut App) {}
+
+/// What the counting surface received since the last take, timed from its first delivery.
+#[cfg(perf_taskbar_progress_api)]
+fn take_taskbar_deliveries(app: &mut App) -> Option<Vec<scenarios::Delivered>> {
+    let taken = app.__take_taskbar_progress_deliveries();
+    let first = taken.first().map(|(at, _)| *at);
+    Some(
+        taken
+            .into_iter()
+            .map(|(at, percent)| scenarios::Delivered {
+                at_ms: first.map_or(0, |first| at.duration_since(first).as_millis() as u64),
+                percent,
+            })
+            .collect(),
+    )
+}
+
+/// `perf_taskbar_progress_api` is off, so there is no record to read.
+#[cfg(not(perf_taskbar_progress_api))]
+fn take_taskbar_deliveries(_app: &mut App) -> Option<Vec<scenarios::Delivered>> {
+    None
+}
+
 /// The main renderer's attempt, presentation, row-cache and shaping counts from its window's counter
 /// record, its glyph atlas resets and its atlas dimension; `None` when any counter field is missing.
 #[cfg(feature = "perf-counters")]
@@ -1419,8 +1452,12 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     );
     // Read before the App takes the config, so the presenter record can name the configured mode.
     let software_render_mode = render_mode_text(prepared.config.appearance.software_render_mode);
-    let app =
+    let mut app =
         App::new_with_proxy(Theme::default(), prepared.config, Keymap::default(), Some(proxy));
+    if plan.status_line {
+        // A status-line run counts each taskbar delivery; no platform shell installs a surface here.
+        install_counting_taskbar_progress(&mut app);
+    }
     let mut probe = Probe {
         sentinels,
         allocation_counter,
@@ -3837,29 +3874,63 @@ impl Probe {
             PhaseEnd::Hold(hold_ms) => hold_ms,
             // `print` ends on its sentinel; its checks count appearances, not a cadence.
             // `print` ends on its sentinel and `input` when its typing settles; neither checks a cadence.
-            _ if matches!(phase.name, "print" | "input" | "glyphs" | "held") => 0,
+            _ if matches!(phase.name, "print" | "input" | "glyphs" | "held" | "program") => 0,
             // When: the phase neither holds nor prints, it has no cadence to check.
             _ => return None,
         };
         let counters_start = self.meter.as_ref().and_then(|meter| meter.counters_start.clone());
-        let deltas = counters_start.zip(self.counter_totals()).and_then(|(start, totals)| {
-            let delta = totals.delta_since(&start);
-            let count = |name: &str| match delta.get(name) {
-                Some(crate::counters::FieldValue::Count(count)) => Some(*count),
-                _ => None,
+        // `program` reads its own counters from the same start below.
+        let deltas =
+            counters_start.clone().zip(self.counter_totals()).and_then(|(start, totals)| {
+                let delta = totals.delta_since(&start);
+                let count = |name: &str| match delta.get(name) {
+                    Some(crate::counters::FieldValue::Count(count)) => Some(*count),
+                    _ => None,
+                };
+                Some(scenarios::StatusLineDeltas {
+                    samples: count("status_line_samples")?,
+                    wakes: count("status_line_wakes")?,
+                    redraws: count("status_line_redraws")?,
+                    sel_counts: count("status_line_sel_counts")?,
+                    sel_cells: count("status_line_sel_cells")?,
+                    history_shows: count("status_line_history_shows")?,
+                    // A side whose App predates the counter shows no `held` to count.
+                    held_shows: count("status_line_held_shows").unwrap_or(0),
+                    glyph_shows: count("status_line_glyph_shows").unwrap_or(0),
+                })
+            })?;
+        if phase.name == "program" {
+            // When: the phase is `program`, the program counters decide it; a base whose App
+            // predates them has none, and only the strip is checked.
+            let program = counters_start.zip(self.counter_totals()).and_then(|(start, totals)| {
+                let delta = totals.delta_since(&start);
+                let count = |name: &str| match delta.get(name) {
+                    Some(crate::counters::FieldValue::Count(count)) => Some(*count),
+                    _ => None,
+                };
+                Some(scenarios::ProgramDeltas {
+                    progress: count("program_progress_events")?,
+                    notifies: count("program_notify_events")?,
+                    toast_redraws: count("program_toast_redraws")?,
+                    deliveries: count("taskbar_progress_deliveries")?,
+                    presented: count("presented")?,
+                })
+            });
+            let delivered = take_taskbar_deliveries(&mut self.app);
+            // The phase's committed steps, each of which may present its echo, output and prompt.
+            let steps = match phase.driver {
+                scenarios::Driver::Commit { steps, .. } => steps.len() as u64,
+                _ => 0,
             };
-            Some(scenarios::StatusLineDeltas {
-                samples: count("status_line_samples")?,
-                wakes: count("status_line_wakes")?,
-                redraws: count("status_line_redraws")?,
-                sel_counts: count("status_line_sel_counts")?,
-                sel_cells: count("status_line_sel_cells")?,
-                history_shows: count("status_line_history_shows")?,
-                // A side whose App predates the counter shows no `held` to count.
-                held_shows: count("status_line_held_shows").unwrap_or(0),
-                glyph_shows: count("status_line_glyph_shows").unwrap_or(0),
-            })
-        })?;
+            return scenarios::program_phase_progress(
+                deltas,
+                program,
+                delivered.as_deref(),
+                !cfg!(windows),
+                steps,
+            )
+            .err();
+        }
         let occluded = self.occlusion.delivered == Some(true);
         scenarios::status_line_progress(phase.name, hold_ms, occluded, deltas)
             .and_then(|()| {

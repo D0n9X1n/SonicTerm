@@ -201,6 +201,18 @@ pub(super) fn notify_command_done(body: String) {
 #[cfg(not(target_os = "windows"))]
 pub(super) fn notify_command_done(_body: String) {}
 
+/// Raise a desktop notification for a program notification; only Windows has one.
+#[cfg(target_os = "windows")]
+pub(super) fn notify_program(title: &str, body: &str) {
+    if let Err(err) = notify_rust::Notification::new().summary(title).body(body).show() {
+        tracing::debug!(target: "sonicterm_app::app", ?err, "desktop notification failed");
+    }
+}
+
+/// macOS and Linux show program notifications in the app only.
+#[cfg(not(target_os = "windows"))]
+pub(super) fn notify_program(_title: &str, _body: &str) {}
+
 #[cfg(test)]
 #[path = "command_events_tests.rs"]
 mod command_events_tests;

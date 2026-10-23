@@ -719,7 +719,7 @@ fn save_action_dispatch_persists_real_file_and_shows_confirmation() {
     assert!(saved.contains("unknown_font_key = 'keep'"));
     assert!(saved.contains("size = 14"));
     assert!(saved.contains("weight_scale = 1.25"));
-    assert_eq!(app.__test_main_notification_message(), Some("Current font settings saved"));
+    assert_eq!(app.__test_main_notification_message(), Some("Current settings saved"));
     remove_test_path(&path);
 }
 
@@ -744,7 +744,7 @@ fn palette_enter_saves_once_and_targets_the_attached_child() {
     )));
 
     assert!(!app.__test_palette_open());
-    assert_eq!(app.__test_child_notification_message(child), Some("Current font settings saved"));
+    assert_eq!(app.__test_child_notification_message(child), Some("Current settings saved"));
     assert_eq!(app.__test_main_notification_message(), None);
     let saved = std::fs::read_to_string(&path).expect("read palette-enter config");
     assert_eq!(saved.matches("size = 13").count(), 1);
@@ -768,12 +768,47 @@ fn source_window_save_action_writes_once_and_targets_the_child_notification() {
 
     assert!(app.run_action_for_window(&Action::SaveCurrentSettings, child));
 
-    assert_eq!(app.__test_child_notification_message(child), Some("Current font settings saved"));
+    assert_eq!(app.__test_child_notification_message(child), Some("Current settings saved"));
     assert_eq!(app.__test_main_notification_message(), None);
     let saved = std::fs::read_to_string(&path).expect("read source-window config");
     assert_eq!(saved.matches("size = 13").count(), 1);
     assert_eq!(saved.matches("weight_scale = 1").count(), 1);
     remove_test_path(&path);
+}
+
+#[test]
+fn save_notifications_are_localized_in_every_locale() {
+    // Save reports "Current settings saved", or that the config is unchanged, in the UI language.
+    for (locale, saved, failed) in [
+        (
+            "en",
+            "Current settings saved",
+            "Unable to save current settings; existing config unchanged",
+        ),
+        (
+            "ja",
+            "現在の設定を保存しました",
+            "現在の設定を保存できません。既存の設定は変更されていません",
+        ),
+        ("zh-CN", "已保存当前设置", "无法保存当前设置；现有配置未更改"),
+    ] {
+        let success_path = temp_config_path(&format!("save-notification-{locale}"));
+        remove_test_path(&success_path);
+        let failure_path = success_path.with_extension("directory");
+        remove_test_path(&failure_path);
+        std::fs::create_dir(&failure_path).expect("create invalid directory target");
+        std::fs::write(failure_path.join("sentinel"), b"keep directory nonempty")
+            .expect("write failure sentinel");
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        app.__test_synthetic_main();
+        app.set_locale(locale);
+        app.save_current_settings_to_for_kind(&success_path, FrontmostKind::Main);
+        assert_eq!(app.__test_main_notification_message(), Some(saved), "{locale}");
+        app.save_current_settings_to_for_kind(&failure_path, FrontmostKind::Main);
+        assert_eq!(app.__test_main_notification_message(), Some(failed), "{locale}");
+        remove_test_path(&failure_path);
+        remove_test_path(&success_path);
+    }
 }
 
 #[test]
@@ -791,17 +826,17 @@ fn save_notification_helper_routes_success_and_failure_to_the_requested_kind() {
     app.__test_synthetic_main();
     let child = app.__test_seed_child_window(&["child"]);
     app.save_current_settings_to_for_kind(&success_path, FrontmostKind::Child(child));
-    assert_eq!(app.__test_child_notification_message(child), Some("Current font settings saved"));
+    assert_eq!(app.__test_child_notification_message(child), Some("Current settings saved"));
     assert_eq!(app.__test_main_notification_message(), None);
 
     app.save_current_settings_to_for_kind(&failure_path, FrontmostKind::Main);
     assert_eq!(
         app.__test_main_notification_message(),
-        Some("Unable to save current font settings; existing config unchanged")
+        Some("Unable to save current settings; existing config unchanged")
     );
     assert_eq!(
         app.__test_child_notification_message(child),
-        Some("Current font settings saved"),
+        Some("Current settings saved"),
         "failure routing must not overwrite the child's success bubble",
     );
 

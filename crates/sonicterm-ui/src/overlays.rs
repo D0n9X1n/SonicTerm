@@ -374,9 +374,11 @@ impl PaletteLayout {
         let visible = palette.visible();
         let color_choices = palette.tab_color_choices();
         let confirm_rows = palette.confirm_rows();
+        let status_rows = palette.status_segment_rows();
         let total = match palette.mode() {
             CommandPaletteMode::TabColor => color_choices.len(),
             CommandPaletteMode::Confirm => confirm_rows.len(),
+            CommandPaletteMode::StatusSegments => status_rows.len(),
             _ => visible.len(),
         };
 
@@ -404,9 +406,23 @@ impl PaletteLayout {
                     || matches!(
                         confirm_rows.get(item_index),
                         Some(crate::command_palette::ConfirmRow::Item(_))
-                    ),
+                    )
+                    || status_rows.get(item_index).is_some_and(|row| {
+                        row.kind == crate::command_palette::StatusSegmentRowKind::Heading
+                    }),
             );
             match palette.mode() {
+                CommandPaletteMode::StatusSegments => {
+                    // A checklist row shows its prepared text; a heading is drawn dimmed.
+                    row_labels.push(
+                        status_rows
+                            .get(item_index)
+                            .map(|row| row.label.clone())
+                            .unwrap_or_default(),
+                    );
+                    row_shortcuts.push(None);
+                    row_swatches.push(None);
+                }
                 CommandPaletteMode::Confirm => {
                     // A confirmation page's rows are Apply, Cancel and the dimmed affected items.
                     row_labels.push(
@@ -473,6 +489,7 @@ impl PaletteLayout {
                 CommandPaletteMode::Commands => palette.text().search_placeholder.clone(),
                 CommandPaletteMode::RenameTab => palette.text().rename_placeholder.clone(),
                 CommandPaletteMode::RenameWindow => palette.text().window_name_placeholder.clone(),
+                CommandPaletteMode::StatusSegments => palette.status_title().to_string(),
                 CommandPaletteMode::TabColor | CommandPaletteMode::Confirm => String::new(),
             })
         } else {
@@ -530,6 +547,7 @@ impl PaletteLayout {
             },
             CommandPaletteMode::TabColor => palette.text().color_footer.clone(),
             CommandPaletteMode::Confirm => palette.text().confirm_footer.clone(),
+            CommandPaletteMode::StatusSegments => palette.status_footer().to_string(),
         };
 
         Some(PaletteLayout {

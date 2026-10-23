@@ -141,6 +141,8 @@ right edge.
 | --- | --- | --- |
 | `long_command` | `false` | Enables long-command desktop notifications on Windows. macOS and Linux currently do not send this notification. |
 | `threshold_secs` | `10` | A reported command duration must be greater than this value. |
+| `osc9` | `"app"` | Where program notifications (OSC 9 text and OSC 777 `notify`) go: `"app"` shows SonicTerm's in-app notification in the pane's window, `"desktop"` also raises a desktop notification on Windows while that window is not focused (macOS and Linux behave as `"app"`, as for `long_command`), and `"off"` ignores them. Any other value fails the load. |
+| `taskbar_progress` | `true` | Mirrors `OSC 9;4` progress to the Windows taskbar, the macOS Dock badge and the Linux launcher entry; see [Platform Integration](Platform-Integration). A reload that sets `false` clears every surface at once. |
 
 #### `[status_line]`
 
@@ -207,6 +209,14 @@ When the window is too narrow, the strip first uses compact forms (memory drops 
 
 The strip is 0.6 times the tab bar's height, at least 20 logical pixels, and follows font zoom and display scale. It shares the tab bar's background, with a thin line only on its terminal side, and sits at the bottom edge when the tab bar is hidden. Turning it on or off resizes the panes; a window opened with `[window]` `rows` keeps that many rows. A press or wheel over the strip never reaches a pane or the program. It appears in terminal windows only, not in the Memory Usage report.
 
+#### Choosing segments while SonicTerm runs
+
+**Status Line: Choose Segments** (`choose_status_line_segments`), or a right-click on the strip, opens a checklist in the palette of that window. A right-click highlights the segment under the pointer, clickable or not, or the first row between segments; a right-click outside the strip does nothing, as before, and a right-click on the strip never reaches a pane or its program. On macOS a Control-click is not a right-click; use the command or a key binding. The command is allowed in READONLY panes.
+
+The checklist lists **Show status line**, **Hide sensitive segments**, every implemented segment under its group heading (Core, Pointer, Input, Display, Other tabs, Diagnostics, Program-reported; a group with no segment is not shown), and **Reset to configuration**. A shown segment has a check mark and names its list; a sensitive one is tagged `sensitive`, and `sensitive · hidden` while sensitive segments are hidden. Typing filters the segment rows by id and by localized name. Enter or a click toggles the highlighted row and keeps the page open; on a shown segment Left and Right move it to the neighbouring list (`right`, `center`, `left`), at the end of that list; Escape closes the page. Each change applies at once to every terminal window.
+
+Enabling a segment adds it to the list the active preset puts it in, else to its home list, after the file's segments on that side; disabling removes it wherever it is. Enabling a segment the file lists, after you disabled it, returns it to its place in the file: only segments the file does not list are appended. Moving a segment with Left or Right puts it at the end of the target list, even when that is the list the file gives it. These are session choices on top of the file, kept per segment, never as a copy of the lists: segments you did not touch follow the file's order, and the ones you placed follow them in the order you placed them. A reload keeps a choice unless the file changed what that choice is about: a hidden segment's choice only when the file adds or removes it, a placed segment's choice when the file adds, removes or moves it (a `preset` change counts for the segments it changes); `enabled` and `hide_sensitive` choices are dropped only when their own key changed. Reordering the file keeps every choice, a choice the file now satisfies is dropped, and a failed reload keeps everything. **Reset to configuration** drops every choice.
+
 The strip does not keep the event loop awake: memory is sampled only while a terminal window that can draw frames shows `mem`, and a window redraws only when its strip's pixels change. On the hardware path such a frame damages only the strip's band, because the strip's glyphs and missing-glyph boxes are clipped to it; software rendering (including every GDI frame) and frames with an open overlay repaint the whole window as before.
 
 #### `[logging]`
@@ -262,9 +272,9 @@ Restart SonicTerm when you need the complete native-window change, not only the
 live renderer policy. A live `subpixel_aa` change invalidates and redraws the
 presented frame without rebuilding fonts, raster tiles, or either atlas.
 
-### Saving current font settings
+### Saving current settings
 
-**Save Current Settings** changes only these two values in
+**Save Current Settings** writes the live font values in
 `~/.sonicterm/sonicterm.toml`:
 
 ```toml
@@ -274,8 +284,21 @@ weight_scale = 1.0
 ```
 
 Save writes the live font size and effective `weight_scale`, preserving comments,
-order, line endings, and every other key. It saves no theme or other runtime
-state and does not reload values that are already active.
+order, line endings, and every other key. It also writes the status line the
+session shows, compared with the file on disk under the save lock: `[status_line]`
+`enabled`, `hide_sensitive`, and `left`, `center` and `right` as explicit lists,
+each only when its value differs from what the file resolves to. `preset` and
+per-segment keys are never written, so a save that changed only the font adds no
+`[status_line]` key, and a key edited in the file since the last reload is kept
+when the session agrees with it. The saved document must load and resolve to
+exactly what the session shows, or nothing is written. A list that is already an
+array is edited in place, and Save removes items but never comments: the items that
+stay keep their comments, and every comment of a removed item is kept as its own
+line before the closing `]`, in its original order, even when the list becomes
+empty. The written `[status_line]`
+becomes the baseline for session choices, so every choice it now holds is dropped
+and a following reload changes nothing. It saves no theme or other runtime state
+and does not reload values that are already active.
 
 If the file is missing, SonicTerm creates the starter file first. A
 process-local lock and the persistent `sonicterm.toml.save.lock` sidecar prevent

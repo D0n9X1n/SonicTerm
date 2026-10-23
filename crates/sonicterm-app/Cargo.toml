@@ -91,7 +91,7 @@ pollster.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 # The close baseline identifies only its own console hosts and shell descendants from a native snapshot.
-windows = { workspace = true, features = ["Win32_System_Diagnostics_ToolHelp"] }
+windows = { workspace = true, features = ["Win32_System_Console", "Win32_System_Diagnostics_ToolHelp"] }
 
 [features]
 # Marks that this tree's App has the frame-counter API; only the perf_scenarios example reads

@@ -815,18 +815,22 @@ impl App {
         TestCurrentSettingsPathGuard
     }
 
-    /// Persist the live font size and effective monochrome-text weight to `path`.
+    /// Persist the live font size, effective monochrome-text weight and status-line choices to
+    /// `path`.
     ///
-    /// Saving changes only the two reset baselines after the atomic config write
-    /// succeeds. It deliberately does not reload config or reapply live renderers:
-    /// the values already came from the running session.
+    /// Only `[status_line]` keys whose value differs from the file on disk are written. After the
+    /// atomic config write succeeds, the two font reset baselines and the status line's file
+    /// baseline become exactly what was written, dropping every choice it now satisfies. It does
+    /// not reload config or reapply live renderers: the values already came from the session.
     pub(super) fn save_current_settings_to(&mut self, path: &Path) -> anyhow::Result<()> {
         let size = self.config.font.size;
         let weight_scale = self.config.font.effective_weight_scale();
-        Config::persist_font_runtime_values(path, size, weight_scale)
-            .with_context(|| format!("persist current font settings to {}", path.display()))?;
+        let status_line = self.status_line_save();
+        let written = Config::persist_runtime_values(path, size, weight_scale, Some(&status_line))
+            .with_context(|| format!("persist current settings to {}", path.display()))?;
         self.configured_font_size = size;
         self.configured_weight_scale = weight_scale;
+        self.adopt_saved_status_line(written);
         Ok(())
     }
 

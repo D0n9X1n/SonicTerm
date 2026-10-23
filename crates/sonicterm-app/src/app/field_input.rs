@@ -150,7 +150,7 @@ impl App {
     /// Apply field copy or paste to the palette, doing nothing for a modal, stale, hidden, or composing editor.
     fn palette_field_clipboard(&mut self, copy: bool, window_id: WindowId) {
         let editable = match self.command_palette.mode() {
-            CommandPaletteMode::Commands => true,
+            CommandPaletteMode::Commands | CommandPaletteMode::StatusSegments => true,
             CommandPaletteMode::RenameTab => self.tab_edit_target_window() == Some(window_id),
             CommandPaletteMode::RenameWindow => {
                 self.window_rename_target.and_then(|key| self.window_keys.resolve(key))

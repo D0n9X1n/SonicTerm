@@ -1954,9 +1954,12 @@ fn status_line_plans_turn_the_strip_on_in_the_config() {
                  \n[status_line.segment.input]\nheld_after_ms = 250\n";
     assert!(with_strip.ends_with(table), "{with_strip}");
     assert!(!without.contains("[status_line]"));
-    // S1/status-line also keeps 10,000 history rows, so its linked history passes the byte budget.
-    let scrollback =
-        with_strip.trim_end_matches(table).replace("scrollback = 10000", "scrollback = 1000");
+    // S1/status-line also keeps 10,000 history rows, so its linked history passes the byte budget,
+    // and turns cursor blink off, so `program`'s present bound needs no blink slack.
+    let scrollback = with_strip
+        .trim_end_matches(table)
+        .replace("scrollback = 10000", "scrollback = 1000")
+        .replace("cursor_blink = false\n", "");
     assert_eq!(scrollback, without);
     let covered = crate::scenarios::plan("S12", "status-line", true).unwrap();
     let covered = config_toml_with_shell(&covered, "/bin/sh", false);
@@ -1979,4 +1982,23 @@ fn linked_history_fixture_is_trimmed_by_the_byte_budget() {
         assert!(grid.budget_trimmed_rows() > 0, "{cols}x{rows}: never trimmed");
         assert!(grid.scrollback_len() < 10_000, "{cols}x{rows}: trimmed below the row limit");
     }
+}
+
+/// A status-line run turns cursor blink off, so `program`'s present bound needs no blink slack;
+/// every other plan's config is unchanged.
+#[test]
+fn status_line_runs_turn_cursor_blink_off() {
+    let host = if cfg!(windows) { Host::Windows } else { Host::Posix };
+    let status = crate::scenarios::plan_for("S12", "status-line", true, host).unwrap();
+    let text = config_toml_with_shell(&status, "/bin/sh", false);
+    let dir = std::env::temp_dir().join(format!("sonicterm-blink-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, &text).unwrap();
+    let config = sonicterm_cfg::config::Config::load_strict(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(text.contains("cursor_blink = false"), "{text}");
+    assert!(!config.terminal.cursor_blink, "{text}");
+    let default = crate::scenarios::plan_for("S12", "default", true, host).unwrap();
+    assert!(!config_toml_with_shell(&default, "/bin/sh", false).contains("cursor_blink"));
 }

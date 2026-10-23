@@ -223,6 +223,12 @@ HARNESS_API_CFGS = (
     HarnessApiCfg("perf_guard_spans_api", (
         ("crates/sonicterm-app/src", "App", "take_guard_correlation_v1"),
     )),
+    # S12/status-line's taskbar checks: the App's counting progress surface and its delivery record,
+    # absent before v1.3.11.
+    HarnessApiCfg("perf_taskbar_progress_api", (
+        ("crates/sonicterm-app/src", "App", "__install_counting_taskbar_progress"),
+        ("crates/sonicterm-app/src", "App", "__take_taskbar_progress_deliveries"),
+    )),
 )
 HARNESS_API_CFG_NAMES = tuple(entry.name for entry in HARNESS_API_CFGS)
 # The combined harness-API steps enable every entry at once, so one rebuild covers them all and a new entry

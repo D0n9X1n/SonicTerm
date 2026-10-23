@@ -62,6 +62,7 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "ToggleTabBar",
     "ToggleStatusLine",
     "ToggleStatusLineSensitive",
+    "ChooseStatusLineSegments",
     "RenameTab",
     "RenameWindow",
     "UpdateTabColor",
@@ -428,6 +429,12 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
             "command-toggle-status-line-sensitive",
             &["status", "privacy", "screen", "share", "hide"],
         ),
+        Action::ChooseStatusLineSegments => (
+            "ChooseStatusLineSegments",
+            Appearance,
+            "command-choose-status-line-segments",
+            &["status", "segments", "customize", "checklist", "choose"],
+        ),
         Action::RenameTab => {
             ("RenameTab", Tabs, "command-rename-tab", &["title", "name", "label", "edit"])
         }
@@ -536,7 +543,9 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         | Action::ToggleStatusLine
         | Action::ToggleStatusLineSensitive
         | Action::ToggleFullscreen => (Requirement::Window, false),
-        Action::OpenCommandPalette | Action::RenameWindow => (Requirement::Window, true),
+        Action::OpenCommandPalette | Action::RenameWindow | Action::ChooseStatusLineSegments => {
+            (Requirement::Window, true)
+        }
         Action::CloseTab
         | Action::CloseActivePaneOrTab
         | Action::RenameTab
@@ -616,6 +625,7 @@ pub fn label(action: &Action) -> String {
         Action::ToggleTabBar => "Toggle Tab Bar".into(),
         Action::ToggleStatusLine => "Toggle Status Line".into(),
         Action::ToggleStatusLineSensitive => "Toggle Status Line Sensitive Content".into(),
+        Action::ChooseStatusLineSegments => "Status Line: Choose Segments".into(),
         Action::RenameTab => "Rename Active Tab".into(),
         Action::RenameWindow => "Rename Window".into(),
         Action::UpdateTabColor => "Update Tab Color".into(),

@@ -471,6 +471,54 @@ and Wayland. [Packaging](Packaging) describes the Linux scenario argument and
 isolated evidence paths. Otherwise successful smoke with unsettled native PTY
 teardown exits `20`; an earlier fault, loss or recovery failure keeps its original code.
 
+## Program progress and notifications
+
+`OSC 9;4` progress is mirrored to each platform's progress surface while
+`[notifications] taskbar_progress` is on. The scope differs by platform:
+
+| Platform | Surface | Scope | Shows |
+| --- | --- | --- | --- |
+| Windows | `ITaskbarList3` taskbar button | Per window: each window's focused pane of its active tab | normal, error (red), indeterminate, paused (yellow), none |
+| macOS | `NSDockTile` badge | App-wide | `56%`, `!` for error, `…` indeterminate, `‖` paused; text only, since AppKit has no Dock bar without a custom tile view |
+| Linux | `com.canonical.Unity.LauncherEntry.Update` for `application://com.d0n9x1n.SonicTerm.desktop` | App-wide | `progress`, `progress-visible`, `urgent` for error; indeterminate hides the bar. Docks that implement it show it (KDE Plasma, Dash to Dock, Ubuntu Dock); with no listener it has no visible effect |
+
+On the two app-wide surfaces the shown value is the most recently updated
+active report from any pane of any terminal window. When that pane ends its
+report or closes, the next most recent shows; with none left, or no terminal
+window left, the surface clears. A disabling reload clears every surface at
+once, and quitting clears them before the App exits.
+
+Each surface has one latest-value slot, never a queue, delivered at most once
+per 250 ms with a trailing edge, so the final value always lands. A surface's
+last delivery time outlives a clear, so a value set right after a clear still
+waits for the interval. Windows and
+macOS deliver on the event loop. Linux hands the value to a dedicated thread,
+started on the first report, which reads the slot when woken and sends only the
+newest value; at shutdown it sends a final clear and drops everything it owns,
+including its D-Bus connection, before it acknowledges the stop. Shutdown waits
+at most 500 ms for that acknowledgement, then detaches the thread and logs it.
+The thread is never joined, even after it acknowledges, because its
+thread-local destructors run only as it exits.
+
+Program notifications (OSC 9 text, OSC 777 `notify`) show one toast at a time.
+Text passes the shared program-text sanitizer, then the title is capped at
+256 bytes and the body at 1 024, each middle-ellipsized on a grapheme
+boundary. Every program notification, OSC 777 included, opens with an origin
+cue naming the pane's tab, `⟨tab 3⟩`, then the title and body: `⟨tab 3⟩ CI:
+green`, or `⟨tab 3⟩ build done` for OSC 9, which has no title. The sanitizer
+replaces `⟨` `⟩` `<` `>` in program text, so a program cannot forge the cue or
+pass for SonicTerm's own message; a Windows desktop notification's title starts
+with the same cue. Of the notifications one output batch carries, the first
+with text left after sanitizing is shown and the later ones are counted; one
+that sanitizes to nothing is neither shown nor counted. A
+notification from the same pane while its toast is up, or from any pane within
+1 second of the toast appearing, opens no new toast: it adds to the toast's
+`+N more` count, which stops at `+99 more`. Only the count is kept, never the
+coalesced text, and nothing is replayed after the toast expires. Coalesced
+counts, including the count a first batch already carries, are logged at debug,
+never their text. A notification also sets the
+`notify` mark of the `alerts` segment on a background tab.
+
 ## Default-handler command
 
 One palette command, `Action::SetDefaultHandlers`, is the only path that changes a

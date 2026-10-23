@@ -72,11 +72,13 @@ pub(crate) fn config_toml_with_shell(plan: &Plan, shell: &str, laps: bool) -> St
     let level = if laps { "debug" } else { "info" };
     let scrollback = plan.scrollback_rows;
     let rows = plan.window_rows.map_or(GRID_ROWS, usize::from);
+    // A status-line run bounds presents by their causes, so the cursor must not blink there.
+    let blink = if plan.status_line { "cursor_blink = false\n" } else { "" };
     let mut config = format!(
         "[window]\ncols = {GRID_COLS}\nrows = {rows}\n\n\
          [font]\nfamily = \"{FONT_FAMILY}\"\nsize = {FONT_SIZE}\n\n\
          [logging]\nlevel = \"{level}\"\n\n\
-         [terminal]\nshell = '{shell}'\nscrollback = {scrollback}\n"
+         [terminal]\nshell = '{shell}'\nscrollback = {scrollback}\n{blink}"
     );
     if plan.status_line {
         // A base without the status line ignores the table, so both sides run the same config.

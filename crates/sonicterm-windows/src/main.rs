@@ -204,6 +204,8 @@ mod packaging_manifest;
 #[cfg(target_os = "windows")]
 mod privilege;
 mod startup;
+#[cfg(target_os = "windows")]
+mod taskbar_progress;
 // Windows-only: it resolves `software_render_mode` for the Win32 backdrop
 // decision, and nothing off-Windows consumes it.
 #[cfg(target_os = "windows")]
@@ -445,7 +447,9 @@ fn main() -> Result<std::process::ExitCode> {
                 .with_process_privilege(process_privilege)
                 .with_asset_loaders(theme_loader, keymap_loader)
                 .with_on_window_ready(on_window_ready)
-                .with_default_handlers(Box::new(default_handlers::native()));
+                .with_default_handlers(Box::new(default_handlers::native()))
+                // Each window's taskbar button shows its focused pane's `OSC 9;4` progress.
+                .with_taskbar_progress(Box::new(taskbar_progress::TaskbarButtons::default()));
             if ole_available {
                 let drag_sink =
                     // SAFETY: `ole_guard` proves successful OLE initialization on

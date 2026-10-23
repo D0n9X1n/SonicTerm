@@ -1188,3 +1188,17 @@ fn diagnostics_segments_format_their_figures() {
         assert!(!shown.unwrap_or_default().contains('≥'));
     }
 }
+
+#[test]
+fn ellipsize_middle_bytes_keeps_both_ends_on_grapheme_boundaries() {
+    // A notification part over its byte cap keeps its start and end around one ellipsis,
+    // never splitting a grapheme, and never exceeds the cap.
+    assert_eq!(ellipsize_middle_bytes("short", 10), "short");
+    let cut = ellipsize_middle_bytes("abcdefghijklmnop", 9);
+    assert!(cut.len() <= 9 && cut.starts_with("ab") && cut.ends_with('p'), "{cut}");
+    let flags = "🇯🇵".repeat(10);
+    let cut = ellipsize_middle_bytes(&flags, 20);
+    assert!(cut.len() <= 20);
+    assert!(cut.replace('…', "").chars().count().is_multiple_of(2), "no flag is split: {cut}");
+    assert_eq!(ellipsize_middle_bytes("abcdef", 2), "", "no room for the ellipsis");
+}

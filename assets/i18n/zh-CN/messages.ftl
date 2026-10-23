@@ -99,6 +99,7 @@ command-apply-theme = 应用主题：{ $name }
 command-toggle-tab-bar = 切换标签栏显示
 command-toggle-status-line = 切换状态栏显示
 command-toggle-status-line-sensitive = 切换状态栏敏感内容
+command-choose-status-line-segments = 状态栏：选择段
 command-rename-tab = 重命名当前标签页
 command-rename-window = 重命名窗口
 palette-window-name-placeholder = 窗口名称（留空重置）…
@@ -321,3 +322,33 @@ status-spoken-size = 尺寸
 status-reason-no-directory = 没有 shell 报告的目录
 status-reason-alt-screen = 备用屏幕上不解析
 status-value-label-not-checked = 未检查显示文本
+
+# Program notifications (OSC 9 / OSC 777): the tab that stands in for a missing title, and the coalesced count.
+program-notify-tab = ⟨标签页 { $tab }⟩
+program-notify-more = 另有 { $count } 条
+
+# 状态栏清单
+status-checklist-title = 输入以筛选段
+status-checklist-footer = ↑↓ 选择 · ↵ 切换 · ←→ 移动 · esc 关闭
+status-checklist-show = 显示状态栏
+status-checklist-hide-sensitive = 隐藏敏感段
+status-checklist-reset = 恢复为配置文件
+status-checklist-left = 左
+status-checklist-center = 中
+status-checklist-right = 右
+status-checklist-sensitive = 敏感
+status-checklist-hidden = 已隐藏
+status-group-core = 核心
+status-group-pointer = 指针
+status-group-input = 输入
+status-group-display = 显示
+status-group-other-tabs = 其他标签页
+status-group-diagnostics = 诊断
+status-group-program-reported = 程序报告
+status-name-health = 状态
+status-name-mode = 模式
+status-name-zoom = 缩放
+
+# Save Current Settings
+settings-saved = 已保存当前设置
+settings-save-failed = 无法保存当前设置；现有配置未更改

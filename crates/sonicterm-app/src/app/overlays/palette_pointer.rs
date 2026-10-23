@@ -1,4 +1,4 @@
-use sonicterm_ui::command_palette::{CommandPaletteMode, PaletteEntry};
+use sonicterm_ui::command_palette::{CommandPaletteMode, PaletteEntry, StatusSegmentRowKind};
 use sonicterm_ui::overlays::PaletteLayout;
 use winit::{
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
@@ -15,11 +15,21 @@ pub(in crate::app) struct PalettePointerCapture {
 
 pub(super) enum PalettePointerTarget {
     Entry(PaletteEntry),
+    /// A status line checklist row, by what it does.
+    StatusRow(StatusSegmentRowKind),
     Outside,
 }
 
 enum PalettePointerHit {
-    Row { index: usize, entry: PaletteEntry },
+    Row {
+        index: usize,
+        entry: PaletteEntry,
+    },
+    /// A status line checklist row at filtered `index`.
+    StatusRow {
+        index: usize,
+        kind: StatusSegmentRowKind,
+    },
     Outside,
     Inside,
 }
@@ -43,6 +53,12 @@ impl App {
         }
         if let Some(row) = layout.rows.iter().find(|row| row.rect.contains(pointer_x, pointer_y)) {
             // When: `row.rect` contains the pointer, retain its displayed identity before refreshing live targets.
+            if self.command_palette.mode() == CommandPaletteMode::StatusSegments {
+                // When: mode is StatusSegments, the row is named by what it does.
+                let rows = self.command_palette.status_segment_rows();
+                let kind = rows.get(row.item_index)?.kind;
+                return Some(PalettePointerHit::StatusRow { index: row.item_index, kind });
+            }
             let entry = self.command_palette.visible().get(row.item_index).copied()?.clone();
             return Some(PalettePointerHit::Row { index: row.item_index, entry });
         }
@@ -61,7 +77,10 @@ impl App {
         if capture.window_id != window_id
             || self.palette_attached_window.or(self.main_window_id) != Some(window_id)
             || !self.command_palette.is_open()
-            || self.command_palette.mode() != CommandPaletteMode::Commands
+            || !matches!(
+                self.command_palette.mode(),
+                CommandPaletteMode::Commands | CommandPaletteMode::StatusSegments
+            )
             || self.palette_ime_is_composing()
         {
             // When: `capture` no longer belongs to this open command input, cancel rather than execute across context changes.
@@ -83,6 +102,17 @@ impl App {
                     self.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
                 }
                 self.request_redraw_for_overlay(Some(window_id));
+            }
+            (
+                PalettePointerTarget::StatusRow(pressed),
+                Some(PalettePointerHit::StatusRow { index, kind }),
+            ) if pressed == kind => {
+                // The checklist row released on is the one pressed: toggle it and keep the page.
+                if self.command_palette.select_status_row(index) {
+                    self.activate_status_segment_row();
+                }
+                // The checklist's window is `window_id` here; an activation already asked once.
+                self.request_checklist_redraw();
             }
             _ => {
                 // When: `hit` no longer names `capture.target`, leave the modal open without dispatch.
@@ -153,8 +183,10 @@ impl App {
             WindowEvent::CursorEntered { .. } => true,
             WindowEvent::MouseInput { state, button, .. } => {
                 // When: `MouseInput` belongs to the modal, never forward either half of the click to a terminal.
-                if self.command_palette.mode() != CommandPaletteMode::Commands
-                    || self.palette_ime_is_composing()
+                if !matches!(
+                    self.command_palette.mode(),
+                    CommandPaletteMode::Commands | CommandPaletteMode::StatusSegments
+                ) || self.palette_ime_is_composing()
                     || *button != MouseButton::Left
                 {
                     // When: `button`, mode, or composition forbids activation, consume input without retaining a click.
@@ -172,6 +204,15 @@ impl App {
                                     window_id,
                                     target: PalettePointerTarget::Entry(entry),
                                 })
+                            }
+                            Some(PalettePointerHit::StatusRow { index, kind }) => {
+                                // A heading cannot be pressed; a row is highlighted on press.
+                                self.command_palette.select_status_row(index).then_some(
+                                    PalettePointerCapture {
+                                        window_id,
+                                        target: PalettePointerTarget::StatusRow(kind),
+                                    },
+                                )
                             }
                             Some(PalettePointerHit::Outside) => Some(PalettePointerCapture {
                                 window_id,
