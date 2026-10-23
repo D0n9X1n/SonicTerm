@@ -93,8 +93,8 @@ impl App {
         let _ = self.quit_hold.on_tick(Instant::now());
     }
 
-    /// Save the current font settings to `path` and report the result on
-    /// `kind`'s notification surface.
+    /// Save the current settings to `path` and report the result, localized, on `kind`'s
+    /// notification surface.
     pub(super) fn save_current_settings_to_for_kind(
         &mut self,
         path: &std::path::Path,
@@ -102,23 +102,25 @@ impl App {
     ) {
         match self.save_current_settings_to(path) {
             Ok(()) => {
-                tracing::info!(path = %path.display(), "saved current font settings");
+                tracing::info!(path = %path.display(), "saved current settings");
+                let message = self.i18n.translate("settings-saved");
                 self.show_notification_for_kind(
                     kind,
                     sonicterm_ui::overlays::NotificationLevel::Info,
-                    "Current font settings saved".to_string(),
+                    message,
                 );
             }
             Err(error) => {
                 tracing::warn!(
                     path = %path.display(),
                     error = %format_args!("{error:#}"),
-                    "unable to save current font settings"
+                    "unable to save current settings"
                 );
+                let message = self.i18n.translate("settings-save-failed");
                 self.show_notification_for_kind(
                     kind,
                     sonicterm_ui::overlays::NotificationLevel::Error,
-                    "Unable to save current font settings; existing config unchanged".to_string(),
+                    message,
                 );
             }
         }
@@ -134,12 +136,13 @@ impl App {
                 tracing::warn!(
                     path = "<unresolved>",
                     error = %format_args!("{error:#}"),
-                    "unable to save current font settings"
+                    "unable to save current settings"
                 );
+                let message = self.i18n.translate("settings-save-failed");
                 self.show_notification_for_kind(
                     kind,
                     sonicterm_ui::overlays::NotificationLevel::Error,
-                    "Unable to save current font settings; existing config unchanged".to_string(),
+                    message,
                 );
                 return;
             }
@@ -590,6 +593,7 @@ impl App {
             Action::ToggleTabBar => self.toggle_tab_bar(),
             Action::ToggleStatusLine => self.toggle_status_line(),
             Action::ToggleStatusLineSensitive => self.toggle_status_line_sensitive(),
+            Action::ChooseStatusLineSegments => self.open_status_segments(None, None),
             Action::RenameTab => self.start_rename_active_tab(),
             Action::RenameWindow => {
                 let target = match self.frontmost_kind() {

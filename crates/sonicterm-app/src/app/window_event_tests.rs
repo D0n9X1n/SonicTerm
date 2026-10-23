@@ -1020,7 +1020,7 @@ fn keyboard_and_modifier_transitions_preserve_path_probe_authorization() {
         .find("if matches!(\n            &event,")
         .expect("path-hover invalidation match");
     let invalidation_end = main_source[invalidation_start..]
-        .find("if self.command_palette_handle_pointer_event")
+        .find("if let Some(drain) = self.route_shared_pointer")
         .map(|offset| invalidation_start + offset)
         .expect("end of path-hover invalidation match");
     let invalidation_match = &main_source[invalidation_start..invalidation_end];

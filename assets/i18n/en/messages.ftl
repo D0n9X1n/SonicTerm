@@ -99,6 +99,7 @@ command-apply-theme = Apply Theme: { $name }
 command-toggle-tab-bar = Toggle Tab Bar
 command-toggle-status-line = Toggle Status Line
 command-toggle-status-line-sensitive = Toggle Status Line Sensitive Content
+command-choose-status-line-segments = Status Line: Choose Segments
 command-rename-tab = Rename Active Tab
 command-rename-window = Rename Window
 palette-window-name-placeholder = Window name (blank resets)…
@@ -329,3 +330,29 @@ status-value-label-not-checked = label not checked
 # Program notifications (OSC 9 / OSC 777): the tab that stands in for a missing title, and the coalesced count.
 program-notify-tab = ⟨tab { $tab }⟩
 program-notify-more = +{ $count } more
+
+# Status line checklist (Status Line: Choose Segments)
+status-checklist-title = Type to filter segments
+status-checklist-footer = ↑↓ choose · ↵ toggle · ←→ move · esc close
+status-checklist-show = Show status line
+status-checklist-hide-sensitive = Hide sensitive segments
+status-checklist-reset = Reset to configuration
+status-checklist-left = left
+status-checklist-center = center
+status-checklist-right = right
+status-checklist-sensitive = sensitive
+status-checklist-hidden = hidden
+status-group-core = Core
+status-group-pointer = Pointer
+status-group-input = Input
+status-group-display = Display
+status-group-other-tabs = Other tabs
+status-group-diagnostics = Diagnostics
+status-group-program-reported = Program-reported
+status-name-health = Health
+status-name-mode = Mode
+status-name-zoom = Zoom
+
+# Save Current Settings
+settings-saved = Current settings saved
+settings-save-failed = Unable to save current settings; existing config unchanged

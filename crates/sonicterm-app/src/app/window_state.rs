@@ -260,6 +260,21 @@ pub(crate) fn window_redraw_requests() -> u64 {
     WINDOW_REDRAW_REQUESTS.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Redraw asks per window on this test thread, keyed by the address of the window's state,
+    /// which stays put while no window is added or removed.
+    static WINDOW_REDRAW_ASKS: std::cell::RefCell<std::collections::HashMap<usize, u64>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Redraw asks made on this test thread through `window`'s `request_window_redraw`.
+#[cfg(test)]
+pub(crate) fn window_redraw_requests_for(window: &WindowState) -> u64 {
+    let key = std::ptr::from_ref(window).addr();
+    WINDOW_REDRAW_ASKS.with(|asks| asks.borrow().get(&key).copied().unwrap_or(0))
+}
+
 impl WindowState {
     /// Record a press on the tab at `tab_index` of this window's bar at `press_pos`: the
     /// pointer is down, the tab is pressed and a drag session starts, so a drag can reorder,
@@ -513,6 +528,10 @@ impl WindowState {
         // Headless test windows have no native window, so tests count the asks here.
         #[cfg(test)]
         WINDOW_REDRAW_REQUESTS.with(|count| count.set(count.get() + 1));
+        #[cfg(test)]
+        WINDOW_REDRAW_ASKS.with(|asks| {
+            *asks.borrow_mut().entry(std::ptr::from_ref(self).addr()).or_default() += 1;
+        });
         if let Some(window) = self.window.as_ref() {
             crate::app::frame_counters::request_native_redraw(window);
         }

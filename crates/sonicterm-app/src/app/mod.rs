@@ -778,6 +778,8 @@ pub struct App {
     pub(super) frame_counters: Option<frame_counters::AppFrameCounters>,
     /// Set by the first window or pane; the gate can no longer be forced on after it.
     pub(super) frame_counters_sealed: std::cell::Cell<bool>,
+    /// The windows asked for a frame in the current dispatch; see [`redraw::DispatchRedraws`].
+    pub(super) dispatch_redraws: redraw::DispatchRedraws,
     /// The token the next `arm_echo_watch` issues; starts at 1, so 0 never names an arming.
     pub(super) next_echo_arm: u64,
     /// Id of the main window. Set in `do_resumed` once the main `Window` is

@@ -491,10 +491,12 @@ Depending on changed fields, reload can:
 - update scrollback, tab width, notification settings, and key hints;
 - clear and later rebuild the warm-window pool.
 
-**Save Current Settings** writes only the live `[font].size` and effective
-`[font].weight_scale`. It does not save theme, locale, tabs, panes, or other
-runtime state. The values are already live, so save does not reload or reapply
-them.
+**Save Current Settings** writes the live `[font].size` and effective
+`[font].weight_scale`, and each `[status_line]` key (`enabled`, `hide_sensitive`,
+`left`, `center`, `right`) whose session value differs from the file on disk. It
+does not save theme, locale, tabs, panes, or other runtime state. The values are
+already live, so save does not reload or reapply them; the written `[status_line]`
+becomes the baseline that session status line choices reconcile against.
 
 Save behavior is:
 
@@ -503,14 +505,16 @@ Save behavior is:
 3. resolve a destination symlink;
 4. take an in-process path lock and a cross-process sidecar lock;
 5. strict-parse the current file and preserve LF or CRLF convention;
-6. patch only the two numeric values while preserving comments, unknown keys,
-   order, decoration, and permissions;
+6. patch the two numeric values and each `[status_line]` key whose resolved
+   value differs from the session, while preserving comments, unknown keys,
+   order, decoration, and permissions; the result must parse, validate and
+   resolve to exactly the session's status line, or nothing is written;
 7. write and `sync_all` a unique same-directory temporary file;
 8. reject an external edit detected before replacement;
 9. atomically rename or replace the destination.
 
 The operation does not claim directory-fsync or power-loss durability. Success
-updates both reset baselines and shows an Info notification. Failure leaves the
+updates both reset baselines and the status line baseline and shows an Info notification. Failure leaves the
 file, live settings, and baselines unchanged and shows an Error notification.
 
 ### Tab movement and tear-out

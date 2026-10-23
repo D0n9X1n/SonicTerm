@@ -66,6 +66,51 @@ pub enum CommandPaletteMode {
     TabColor,
     /// A confirmation page: Apply and Cancel rows above the items the change affects.
     Confirm,
+    /// The status line checklist: toggles, grouped segment rows and Reset; the query filters it.
+    StatusSegments,
+}
+
+/// What one status line checklist row does when it is activated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StatusSegmentRowKind {
+    /// A dimmed group heading; never selected.
+    Heading,
+    /// Show or hide the strip.
+    ShowStrip,
+    /// Hide or show sensitive segments.
+    HideSensitive,
+    /// Enable or disable one segment.
+    Segment(sonicterm_cfg::status_line::StatusSegmentId),
+    /// Drop every session choice.
+    Reset,
+}
+
+/// One status line checklist row as the host built it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StatusSegmentRow {
+    /// What activating the row does.
+    pub kind: StatusSegmentRowKind,
+    /// The text the row shows: check mark, label, list and tags.
+    pub label: String,
+    /// The localized segment name the query also matches; empty for other rows.
+    pub name: String,
+}
+
+impl StatusSegmentRow {
+    /// Whether the row can be highlighted and activated.
+    fn selectable(&self) -> bool {
+        self.kind != StatusSegmentRowKind::Heading
+    }
+
+    /// Whether `query` (lowercase) keeps the row: only segment rows, by id or localized name.
+    fn matches(&self, query: &str) -> bool {
+        match self.kind {
+            StatusSegmentRowKind::Segment(id) => {
+                id.as_str().contains(query) || self.name.to_lowercase().contains(query)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// One row of a confirmation page.
@@ -356,6 +401,11 @@ pub struct CommandPalette {
     /// Title and rows of the confirmation page while `mode` is `Confirm`.
     confirm_title: String,
     confirm_rows: Vec<ConfirmRow>,
+    /// Query placeholder, footer and rows of the status line checklist while `mode` is
+    /// `StatusSegments`; `items` indexes `status_rows`.
+    status_title: String,
+    status_footer: String,
+    status_rows: Vec<StatusSegmentRow>,
     window_name_error: Option<WindowNameError>,
     /// Increments on every open, so a gesture held across close and reopen is not
     /// mistaken for one in the new editor.
@@ -402,6 +452,9 @@ impl CommandPalette {
             tab_color_choices: Vec::new(),
             confirm_title: String::new(),
             confirm_rows: Vec::new(),
+            status_title: String::new(),
+            status_footer: String::new(),
+            status_rows: Vec::new(),
             window_name_error: None,
             session: 0,
         }
@@ -524,6 +577,13 @@ impl CommandPalette {
         // Caret and anchor both change what the query field paints, including same-caret reanchoring.
         self.cursor().hash(&mut hash);
         self.selection.anchor(&self.query).hash(&mut hash);
+        // A checklist toggle changes only row text (check marks, lists, tags), not the row count,
+        // so the rows, title and footer are part of what the frame shows.
+        if self.mode == CommandPaletteMode::StatusSegments {
+            self.status_title.hash(&mut hash);
+            self.status_footer.hash(&mut hash);
+            self.status_rows.hash(&mut hash);
+        }
         hash.finish()
     }
 
@@ -574,6 +634,9 @@ impl CommandPalette {
         self.mode = CommandPaletteMode::Commands;
         self.confirm_title.clear();
         self.confirm_rows.clear();
+        self.status_title.clear();
+        self.status_footer.clear();
+        self.status_rows.clear();
         self.tabs_only = false;
         self.window_name_error = None;
         self.query.clear();
@@ -601,9 +664,7 @@ impl CommandPalette {
         self.selection = TextSelection::collapsed(self.query.len());
         self.selected = 0;
         self.scroll_offset = 0;
-        if self.mode == CommandPaletteMode::Commands {
-            self.refilter();
-        }
+        self.refilter_typed();
     }
 
     /// Rebuild command bindings and localized text while retaining the current tab-target inventory.
@@ -740,9 +801,7 @@ impl CommandPalette {
         self.selection.replace(&mut self.query, character.encode_utf8(&mut [0; 4]));
         self.selected = 0;
         self.scroll_offset = 0;
-        if self.mode == CommandPaletteMode::Commands {
-            self.refilter();
-        }
+        self.refilter_typed();
     }
 
     /// Replace the selection once with a whole committed or pasted string.
@@ -788,9 +847,7 @@ impl CommandPalette {
             self.window_name_error = None;
             self.selected = 0;
             self.scroll_offset = 0;
-            if self.mode == CommandPaletteMode::Commands {
-                self.refilter();
-            }
+            self.refilter_typed();
         }
     }
 
@@ -933,6 +990,145 @@ impl CommandPalette {
         &self.confirm_rows
     }
 
+    /// Open the status line checklist with `rows`, highlighting `highlighted`'s row or else the
+    /// first selectable one. `title` is the query placeholder and `footer` the key help.
+    pub fn start_status_segments(
+        &mut self,
+        title: impl Into<String>,
+        footer: impl Into<String>,
+        rows: Vec<StatusSegmentRow>,
+        highlighted: Option<sonicterm_cfg::status_line::StatusSegmentId>,
+    ) {
+        self.session = self.session.wrapping_add(1);
+        self.open = true;
+        self.mode = CommandPaletteMode::StatusSegments;
+        self.tabs_only = false;
+        self.window_name_error = None;
+        self.query.clear();
+        self.selection = TextSelection::default();
+        self.status_title = title.into();
+        self.status_footer = footer.into();
+        self.status_rows = rows;
+        self.scroll_offset = 0;
+        self.filter_status_rows();
+        let wanted = highlighted.map(StatusSegmentRowKind::Segment);
+        self.selected = wanted
+            .and_then(|kind| {
+                self.items.iter().position(|&index| self.status_rows[index].kind == kind)
+            })
+            .unwrap_or_else(|| self.first_selectable_status_row());
+        self.ensure_selected_in_view();
+    }
+
+    /// Replace the checklist rows after a change, keeping the query and the highlighted row.
+    pub fn update_status_segments(&mut self, rows: Vec<StatusSegmentRow>) {
+        if self.mode != CommandPaletteMode::StatusSegments {
+            // When: mode is not StatusSegments, the checklist closed; there is nothing to refresh.
+            return;
+        }
+        let kept = self.selected_status_row();
+        let scroll = self.scroll_offset;
+        self.status_rows = rows;
+        self.filter_status_rows();
+        self.selected = kept
+            .and_then(|kind| {
+                self.items.iter().position(|&index| self.status_rows[index].kind == kind)
+            })
+            .unwrap_or_else(|| self.first_selectable_status_row());
+        self.scroll_offset = scroll;
+        self.ensure_selected_in_view();
+    }
+
+    /// The checklist rows the query keeps, in display order; empty in any other mode.
+    pub fn status_segment_rows(&self) -> Vec<&StatusSegmentRow> {
+        if self.mode != CommandPaletteMode::StatusSegments {
+            // When: mode is not StatusSegments, stale rows from a closed checklist must not show.
+            return Vec::new();
+        }
+        self.items.iter().filter_map(|&index| self.status_rows.get(index)).collect()
+    }
+
+    /// What the highlighted checklist row does, if the checklist is open and a row is highlighted.
+    pub fn selected_status_row(&self) -> Option<StatusSegmentRowKind> {
+        if self.mode != CommandPaletteMode::StatusSegments {
+            // When: mode is not StatusSegments, no checklist row is highlighted.
+            return None;
+        }
+        let index = *self.items.get(self.selected)?;
+        self.status_rows.get(index).filter(|row| row.selectable()).map(|row| row.kind)
+    }
+
+    /// Highlight checklist row `index` of the filtered view; a heading is never highlighted.
+    pub fn select_status_row(&mut self, index: usize) -> bool {
+        let selectable = self.mode == CommandPaletteMode::StatusSegments
+            && self
+                .items
+                .get(index)
+                .and_then(|&row| self.status_rows.get(row))
+                .is_some_and(StatusSegmentRow::selectable);
+        if selectable {
+            self.selected = index;
+            self.ensure_selected_in_view();
+        }
+        selectable
+    }
+
+    /// The checklist's query placeholder.
+    pub fn status_title(&self) -> &str {
+        &self.status_title
+    }
+
+    /// The checklist's key help.
+    pub fn status_footer(&self) -> &str {
+        &self.status_footer
+    }
+
+    /// Keep every checklist row for an empty query, else the segment rows it matches.
+    fn filter_status_rows(&mut self) {
+        let query = self.query.trim().to_lowercase();
+        self.items = (0..self.status_rows.len())
+            .filter(|&index| query.is_empty() || self.status_rows[index].matches(&query))
+            .collect();
+    }
+
+    /// The filtered index of the first selectable checklist row, or 0 when none is left.
+    fn first_selectable_status_row(&self) -> usize {
+        self.items.iter().position(|&index| self.status_rows[index].selectable()).unwrap_or(0)
+    }
+
+    /// Step the checklist highlight one selectable row forward or back, wrapping at both ends.
+    fn step_status_selection(&mut self, forward: bool) {
+        let count = self.items.len();
+        for step in 1..=count {
+            let candidate = if forward {
+                (self.selected + step) % count
+            } else {
+                // When: forward is false, step back without underflowing past the first row.
+                (self.selected + count - step % count) % count
+            };
+            if self.status_rows[self.items[candidate]].selectable() {
+                // When: the candidate row is selectable, it becomes the highlight and the search stops.
+                self.selected = candidate;
+                break;
+            }
+        }
+        self.ensure_selected_in_view();
+    }
+
+    /// Refilter after the query changed: commands, or the checklist's segment rows.
+    fn refilter_typed(&mut self) {
+        match self.mode {
+            CommandPaletteMode::Commands => self.refilter(),
+            CommandPaletteMode::StatusSegments => {
+                self.filter_status_rows();
+                self.selected = self.first_selectable_status_row();
+            }
+            _ => {
+                // When: mode edits a name or shows a fixed list, typing filters nothing.
+            }
+        }
+    }
+
     /// Whether the highlighted row of an open confirmation page is Apply.
     pub fn confirm_applies(&self) -> bool {
         self.mode == CommandPaletteMode::Confirm
@@ -982,6 +1178,11 @@ impl CommandPalette {
             self.step_confirm_selection();
             return;
         }
+        if self.mode == CommandPaletteMode::StatusSegments && !self.items.is_empty() {
+            // When: mode is StatusSegments, the step skips dimmed group headings.
+            self.step_status_selection(true);
+            return;
+        }
         if self.items.is_empty() {
             // When: `items` is empty, there is no row to highlight, so the view resets to the top.
             self.selected = 0;
@@ -1002,6 +1203,11 @@ impl CommandPalette {
         if self.mode == CommandPaletteMode::Confirm {
             // When: `mode` is `Confirm`, only the page's Apply and Cancel rows can be chosen.
             self.step_confirm_selection();
+            return;
+        }
+        if self.mode == CommandPaletteMode::StatusSegments && !self.items.is_empty() {
+            // When: mode is StatusSegments, the step skips dimmed group headings.
+            self.step_status_selection(false);
             return;
         }
         if self.items.is_empty() {
@@ -1183,6 +1389,7 @@ pub fn action_display_name(action: &Action) -> String {
         Action::ToggleTabBar => "ToggleTabBar".into(),
         Action::ToggleStatusLine => "ToggleStatusLine".into(),
         Action::ToggleStatusLineSensitive => "ToggleStatusLineSensitive".into(),
+        Action::ChooseStatusLineSegments => "ChooseStatusLineSegments".into(),
         Action::RenameTab => "RenameTab".into(),
         Action::RenameWindow => "RenameWindow".into(),
         Action::UpdateTabColor => "UpdateTabColor".into(),
@@ -1276,6 +1483,7 @@ pub fn palette_actions() -> Vec<Action> {
         Action::ToggleTabBar,
         Action::ToggleStatusLine,
         Action::ToggleStatusLineSensitive,
+        Action::ChooseStatusLineSegments,
         Action::RenameTab,
         Action::UpdateTabColor,
         // Window

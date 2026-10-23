@@ -1105,6 +1105,8 @@ impl super::App {
 
     /// Open one dispatch on the event-loop thread for this App.
     pub(super) fn frame_dispatch_scope(&self) -> DispatchScope {
+        // Each dispatch starts a fresh once-per-window redraw record.
+        self.dispatch_redraws.begin();
         DispatchScope::enter(
             self.frame_counters.as_ref().map(|counters| Arc::clone(&counters.dispatch)),
         )

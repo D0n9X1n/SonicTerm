@@ -449,9 +449,10 @@ fn reopened_palette_does_not_inherit_the_capture() {
 #[test]
 fn field_pointer_runs_before_the_palette_modal() {
     const SRC: &str = include_str!("window_event.rs");
-    let field = SRC.find("self.field_pointer_event(win_id, &event)").expect("field hook");
+    // Both run inside `route_shared_pointer`, which main and torn-out windows share.
+    let field = SRC.find("self.field_pointer_event(win_id, event)").expect("field hook");
     let modal =
-        SRC.find("self.command_palette_handle_pointer_event(win_id, &event)").expect("modal hook");
+        SRC.find("self.command_palette_handle_pointer_event(win_id, event)").expect("modal hook");
     assert!(field < modal);
 }
 

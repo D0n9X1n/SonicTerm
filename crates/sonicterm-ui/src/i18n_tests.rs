@@ -350,7 +350,7 @@ fn palette_locale_refresh_in_other_modes_preserves_rows_but_refreshes_commands()
                 palette.start_confirm("title 中文", "Apply", "Cancel", vec!["item".into()]);
                 palette.move_selection_up();
             }
-            CommandPaletteMode::Commands => unreachable!(),
+            CommandPaletteMode::Commands | CommandPaletteMode::StatusSegments => unreachable!(),
         }
         let before = (
             palette.query().to_string(),
@@ -418,7 +418,9 @@ fn palette_refreshes_preserve_reversed_text_selection() {
             }
             CommandPaletteMode::RenameTab => palette.start_rename_tab("a你🙂z"),
             CommandPaletteMode::RenameWindow => palette.start_rename_window("a你🙂z"),
-            CommandPaletteMode::TabColor | CommandPaletteMode::Confirm => unreachable!(),
+            CommandPaletteMode::TabColor
+            | CommandPaletteMode::Confirm
+            | CommandPaletteMode::StatusSegments => unreachable!(),
         }
         palette.set_cursor("a你🙂".len());
         palette.extend_to("a".len());

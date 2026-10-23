@@ -809,6 +809,43 @@ impl WindowState {
     }
 }
 
+/// The windows asked for a frame in the current event-loop dispatch, so every step a change
+/// passes through asks each window at most once per dispatch.
+#[derive(Debug, Default)]
+pub(crate) struct DispatchRedraws {
+    /// Bumped as each dispatch opens; read through `&self`, as the dispatch scope is.
+    dispatch: std::cell::Cell<u64>,
+    /// The dispatch `asked` belongs to.
+    asked_in: u64,
+    /// Windows already asked during dispatch `asked_in`.
+    asked: std::collections::HashSet<WindowId>,
+}
+
+impl DispatchRedraws {
+    /// Open a new dispatch: every window may be asked once more.
+    pub(super) fn begin(&self) {
+        self.dispatch.set(self.dispatch.get().wrapping_add(1));
+    }
+
+    /// Whether `id` is asked for the first time this dispatch; records the ask.
+    pub(super) fn first_ask(&mut self, id: WindowId) -> bool {
+        let dispatch = self.dispatch.get();
+        if self.asked_in != dispatch {
+            // A record from an earlier dispatch no longer holds.
+            self.asked_in = dispatch;
+            self.asked.clear();
+        }
+        self.asked.insert(id)
+    }
+
+    /// Ask `window` for a frame unless this dispatch already asked it.
+    pub(super) fn request(&mut self, id: WindowId, window: &WindowState) {
+        if self.first_ask(id) {
+            window.request_window_redraw();
+        }
+    }
+}
+
 impl App {
     /// Refresh a window's monitor period on the events that can change or reveal its display.
     pub(super) fn refresh_monitor_for_event(&mut self, id: WindowId, event: &WindowEvent) {
@@ -892,6 +929,14 @@ impl App {
     }
 
     /// Mark only a currently live owner; stale notifications never fall back to main.
+    /// Ask window `id` for a frame once per dispatch; a later ask in the same dispatch adds nothing.
+    pub(super) fn request_redraw_once(&mut self, id: WindowId) {
+        let Self { windows, dispatch_redraws, .. } = self;
+        if let Some(window) = windows.get(&id) {
+            dispatch_redraws.request(id, window);
+        }
+    }
+
     pub(super) fn mark_window_redraw(&mut self, id: WindowId, cause: RedrawCause) {
         if let Some(window) = self.windows.get_mut(&id) {
             window.mark_redraw(cause);

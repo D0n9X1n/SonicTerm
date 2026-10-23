@@ -198,7 +198,7 @@ super+ctrl+alt+shift+key
 | Pane | `split_right`、`split_down`、`close_pane`、`toggle_pane_zoom`、`resize_pane_left`、`resize_pane_right`、`resize_pane_up`、`resize_pane_down` |
 | 剪贴板与导航 | `copy_to_clipboard`、`paste_from_clipboard`、`enter_copy_mode`、`enter_quick_select` |
 | 字体 | `increase_font_size`、`decrease_font_size`、`reset_font_size`、`increase_font_weight`、`decrease_font_weight`、`reset_font_weight`、`save_current_settings` |
-| UI | `toggle_tab_bar`、`toggle_status_line`、`toggle_status_line_sensitive`、`rename_tab`、`update_tab_color`、`open_search`、`open_command_palette` |
+| UI | `toggle_tab_bar`、`toggle_status_line`、`toggle_status_line_sensitive`、`choose_status_line_segments`、`rename_tab`、`update_tab_color`、`open_search`、`open_command_palette` |
 | 窗口与应用 | `new_window`、`rename_window`、`move_tab_to_new_window`、`toggle_fullscreen`、`quit_app` |
 | 文件与维护 | `edit_config_file`、`open_keymap_file`、`reload_config`、`check_for_updates` |
 | Shell 导航 | `scroll_to_prev_prompt`、`scroll_to_next_prompt` |
@@ -286,8 +286,8 @@ cell 或连接所选各行的自动换行已经变化，SonicTerm 会清除过�
 | `g` / `G` | 移到顶部 / 底部 |
 | `Escape` | 退出 READONLY 模式 |
 
-READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开搜索或命令面板、重命名窗口、检查更新、保存
-当前字体设置的 keymap action。搜索框仍可编辑，也可使用已配置的粘贴快捷键；无论窗口可写还是处于
+READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开搜索或命令面板、重命名窗口、检查更新、选择状态栏段、保存
+当前设置的 keymap action。搜索框仍可编辑，也可使用已配置的粘贴快捷键；无论窗口可写还是处于
 READONLY，搜索粘贴都不会发送给任何 PTY 或广播窗格。除本地文本框接管的输入外，未在上文列出的
 其它已绑定 action 会被直接拦截，不执行，也不会发送给 PTY。
 

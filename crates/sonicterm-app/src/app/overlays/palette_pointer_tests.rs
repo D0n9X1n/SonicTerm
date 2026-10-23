@@ -190,3 +190,90 @@ fn palette_pointer_capture_does_not_cross_window_ownership() {
     assert!(app.command_palette.is_open());
     assert_eq!(app.main_tabs().unwrap().active().unwrap().id, main_tab);
 }
+
+/// A click on a checklist row toggles it on release over the same row and keeps the page open;
+/// a release over another row toggles nothing.
+#[test]
+fn palette_pointer_click_toggles_a_checklist_row_and_keeps_it_open() {
+    use sonicterm_cfg::status_line::StatusSegmentId as Seg;
+    use sonicterm_ui::command_palette::StatusSegmentRowKind as Kind;
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let child = app.__test_seed_child_window(&["work"]);
+    app.open_status_segments(Some(child), Some(Seg::Cpu));
+    let index = app.command_palette.selected();
+    let capture = |kind| super::PalettePointerCapture {
+        window_id: child,
+        target: super::PalettePointerTarget::StatusRow(kind),
+    };
+    app.palette_pointer_capture = Some(capture(Kind::Segment(Seg::Cpu)));
+    let other = super::PalettePointerHit::StatusRow { index: 0, kind: Kind::ShowStrip };
+    app.release_command_palette_pointer(child, Some(other));
+    assert!(app.current_status_line().segment(Seg::Cpu).is_none(), "released elsewhere");
+    app.palette_pointer_capture = Some(capture(Kind::Segment(Seg::Cpu)));
+    let same = super::PalettePointerHit::StatusRow { index, kind: Kind::Segment(Seg::Cpu) };
+    app.release_command_palette_pointer(child, Some(same));
+    assert!(app.current_status_line().segment(Seg::Cpu).is_some(), "the click toggled it");
+    assert!(app.command_palette.is_open());
+    assert!(app.palette_pointer_capture.is_none());
+}
+
+/// A checklist change from a click or a key, including turning the strip on or off, asks its
+/// window for exactly one frame and no other window for any, whichever steps ask on the way.
+#[test]
+fn a_checklist_click_or_key_requests_one_redraw_per_terminal_window() {
+    use crate::app::window_state::window_redraw_requests_for as asks;
+    use sonicterm_cfg::status_line::StatusSegmentId as Seg;
+    use sonicterm_ui::command_palette::StatusSegmentRowKind as Kind;
+    let mut config = Config::default();
+    config.status_line.enabled = false;
+    let mut app = App::new(Theme::default(), config, Keymap::default());
+    let child = app.__test_seed_child_window(&["work"]);
+    let main = app.main_window_id.expect("the seed made a main window");
+    app.open_status_segments(Some(child), Some(Seg::Cpu));
+    let strip_row = app
+        .command_palette
+        .status_segment_rows()
+        .iter()
+        .position(|row| row.kind == Kind::ShowStrip)
+        .expect("the checklist lists the strip row");
+    let counts = |app: &App| (asks(&app.windows[&main]), asks(&app.windows[&child]));
+    // One key dispatch: the palette's key handler, then the KeyboardInput arm's own request.
+    let key = |app: &mut App| {
+        let _dispatch = app.frame_dispatch_scope();
+        app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
+        app.finish_window_key(child);
+    };
+    // One click dispatch: the release over the row the press captured.
+    let click = |app: &mut App, kind| {
+        let _dispatch = app.frame_dispatch_scope();
+        let index = app.command_palette.selected();
+        app.palette_pointer_capture = Some(super::PalettePointerCapture {
+            window_id: child,
+            target: super::PalettePointerTarget::StatusRow(kind),
+        });
+        let hit = super::PalettePointerHit::StatusRow { index, kind };
+        app.release_command_palette_pointer(child, Some(hit));
+    };
+    let expect_one = |app: &App, trigger: &str, (main_before, child_before): (u64, u64)| {
+        let (main_after, child_after) = counts(app);
+        assert_eq!(child_after - child_before, 1, "{trigger}: the checklist's window");
+        assert_eq!(main_after - main_before, 0, "{trigger}: the other window");
+    };
+    let before = counts(&app);
+    key(&mut app);
+    expect_one(&app, "key toggling cpu", before);
+    assert!(app.current_status_line().segment(Seg::Cpu).is_some());
+    let before = counts(&app);
+    click(&mut app, Kind::Segment(Seg::Cpu));
+    expect_one(&app, "click toggling cpu", before);
+    assert!(app.current_status_line().segment(Seg::Cpu).is_none());
+    assert!(app.command_palette.select_status_row(strip_row));
+    let before = counts(&app);
+    key(&mut app);
+    expect_one(&app, "key turning the strip on", before);
+    assert!(app.current_status_line().enabled);
+    let before = counts(&app);
+    click(&mut app, Kind::ShowStrip);
+    expect_one(&app, "click turning the strip off", before);
+    assert!(!app.current_status_line().enabled);
+}

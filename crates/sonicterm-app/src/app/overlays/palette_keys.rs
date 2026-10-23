@@ -127,6 +127,47 @@ impl App {
             }
             return true;
         }
+        if self.command_palette.mode() == CommandPaletteMode::StatusSegments {
+            // When: mode is StatusSegments, Enter toggles and keeps the page open, Left and Right
+            // move a shown segment, Up and Down skip headings; other keys edit the filter query.
+            let direction = match logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    // When: logical_key is Escape, the checklist closes and its window redraws.
+                    self.request_checklist_redraw();
+                    self.command_palette.close();
+                    self.palette_attached_window = None;
+                    return true;
+                }
+                Key::Named(NamedKey::Enter) => {
+                    // When: logical_key is Enter, the highlighted row toggles and the page stays open.
+                    self.activate_status_segment_row();
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    // When: logical_key is ArrowDown, the highlight steps down past any heading.
+                    self.command_palette.move_selection_down();
+                    self.request_checklist_redraw();
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    // When: logical_key is ArrowUp, the highlight steps up past any heading.
+                    self.command_palette.move_selection_up();
+                    self.request_checklist_redraw();
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    Some(sonicterm_cfg::status_overrides::MoveDirection::Left)
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    Some(sonicterm_cfg::status_overrides::MoveDirection::Right)
+                }
+                _ => None,
+            };
+            if direction.is_some_and(|direction| self.move_status_segment_row(direction)) {
+                // When: move_status_segment_row moved a shown segment, the arrow does not also move the caret.
+                return true;
+            }
+        }
         if self.command_palette.mode()
             == sonicterm_ui::command_palette::CommandPaletteMode::TabColor
         {

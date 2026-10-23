@@ -235,7 +235,7 @@ Actions without arguments use a string. The active action names are:
 | Panes | `split_right`, `split_down`, `close_pane`, `toggle_pane_zoom`, `resize_pane_left`, `resize_pane_right`, `resize_pane_up`, `resize_pane_down` |
 | Clipboard and navigation | `copy_to_clipboard`, `paste_from_clipboard`, `enter_copy_mode`, `enter_quick_select` |
 | Font | `increase_font_size`, `decrease_font_size`, `reset_font_size`, `increase_font_weight`, `decrease_font_weight`, `reset_font_weight`, `save_current_settings` |
-| UI | `toggle_tab_bar`, `toggle_status_line`, `toggle_status_line_sensitive`, `rename_tab`, `update_tab_color`, `open_search`, `open_command_palette` |
+| UI | `toggle_tab_bar`, `toggle_status_line`, `toggle_status_line_sensitive`, `choose_status_line_segments`, `rename_tab`, `update_tab_color`, `open_search`, `open_command_palette` |
 | Window and app | `new_window`, `rename_window`, `move_tab_to_new_window`, `toggle_fullscreen`, `quit_app` |
 | Files and maintenance | `edit_config_file`, `open_keymap_file`, `reload_config`, `check_for_updates` |
 | Shell navigation | `scroll_to_prev_prompt`, `scroll_to_next_prompt` |
@@ -335,7 +335,7 @@ Terminal replies and focus reports still reach the PTY. These local controls rem
 | `Escape` | Exit READONLY mode |
 
 READONLY also permits keymap actions that switch or activate tabs, focus panes,
-open search or the command palette, rename windows, check for updates, or save current font settings.
+open search or the command palette, rename windows, check for updates, choose status line segments, or save current settings.
 Search text is still editable, including with the configured paste shortcut; in
 writable and READONLY windows alike, search paste never reaches a PTY or broadcast
 peer. Any other bound action not listed above is consumed without running or

@@ -950,3 +950,100 @@ fn confirmation_page_selects_only_apply_or_cancel() {
     assert!(palette.confirm_rows().is_empty());
     assert!(!palette.confirm_applies());
 }
+
+/// A status-segment checklist: toggles, one heading with two segments, and Reset.
+fn status_rows() -> Vec<StatusSegmentRow> {
+    use sonicterm_cfg::status_line::StatusSegmentId as Seg;
+    let row = |kind, label: &str, name: &str| StatusSegmentRow {
+        kind,
+        label: label.to_owned(),
+        name: name.to_owned(),
+    };
+    vec![
+        row(StatusSegmentRowKind::ShowStrip, "✓ Show status line", ""),
+        row(StatusSegmentRowKind::HideSensitive, "  Hide sensitive segments", ""),
+        row(StatusSegmentRowKind::Heading, "Core", ""),
+        row(StatusSegmentRowKind::Segment(Seg::Mode), "✓ Mode — left", "Mode"),
+        row(StatusSegmentRowKind::Segment(Seg::Mem), "  Speicher", "Speicher"),
+        row(StatusSegmentRowKind::Reset, "Reset to configuration", ""),
+    ]
+}
+
+#[test]
+fn status_segment_headings_are_never_selected() {
+    // Up and Down step over the dimmed group headings and wrap at both ends.
+    use sonicterm_cfg::status_line::StatusSegmentId as Seg;
+    let mut palette = CommandPalette::new();
+    palette.start_status_segments("Segments", "footer", status_rows(), None);
+    assert_eq!(palette.mode(), CommandPaletteMode::StatusSegments);
+    assert_eq!(palette.selected_status_row(), Some(StatusSegmentRowKind::ShowStrip));
+    palette.move_selection_down();
+    palette.move_selection_down();
+    assert_eq!(
+        palette.selected_status_row(),
+        Some(StatusSegmentRowKind::Segment(Seg::Mode)),
+        "the heading is skipped"
+    );
+    palette.move_selection_up();
+    assert_eq!(palette.selected_status_row(), Some(StatusSegmentRowKind::HideSensitive));
+    palette.move_selection_up();
+    palette.move_selection_up();
+    assert_eq!(palette.selected_status_row(), Some(StatusSegmentRowKind::Reset), "it wraps");
+    palette.start_status_segments("Segments", "footer", status_rows(), Some(Seg::Mem));
+    assert_eq!(palette.selected_status_row(), Some(StatusSegmentRowKind::Segment(Seg::Mem)));
+}
+
+#[test]
+fn status_segment_typing_filters_segments_by_id_and_localized_name() {
+    // A query keeps only segment rows whose id or localized name contains it, case-insensitively.
+    use sonicterm_cfg::status_line::StatusSegmentId as Seg;
+    let mut palette = CommandPalette::new();
+    palette.start_status_segments("Segments", "footer", status_rows(), None);
+    for character in "SPEI".chars() {
+        palette.input_char(character);
+    }
+    let kinds: Vec<_> = palette.status_segment_rows().iter().map(|row| row.kind).collect();
+    assert_eq!(kinds, [StatusSegmentRowKind::Segment(Seg::Mem)], "by localized name");
+    palette.set_query("mem");
+    let kinds: Vec<_> = palette.status_segment_rows().iter().map(|row| row.kind).collect();
+    assert_eq!(kinds, [StatusSegmentRowKind::Segment(Seg::Mem)], "by id");
+    assert_eq!(palette.selected_status_row(), Some(StatusSegmentRowKind::Segment(Seg::Mem)));
+    palette.set_query("");
+    assert_eq!(
+        palette.status_segment_rows().len(),
+        status_rows().len(),
+        "an empty query lists all"
+    );
+}
+
+#[test]
+fn status_segment_rows_refresh_in_place_and_close_clean() {
+    // A change rebuilds the rows without moving the highlight or the query; closing drops them.
+    use sonicterm_cfg::status_line::StatusSegmentId as Seg;
+    let mut palette = CommandPalette::new();
+    palette.start_status_segments("Segments", "footer", status_rows(), Some(Seg::Mem));
+    let mut rows = status_rows();
+    rows[4].label = "✓ Speicher — right".to_owned();
+    palette.update_status_segments(rows);
+    assert_eq!(palette.selected_status_row(), Some(StatusSegmentRowKind::Segment(Seg::Mem)));
+    assert_eq!(palette.status_segment_rows()[4].label, "✓ Speicher — right");
+    palette.close();
+    assert!(palette.status_segment_rows().is_empty());
+    assert_eq!(palette.selected_status_row(), None);
+}
+
+#[test]
+fn a_checklist_row_change_changes_the_presentation_hash() {
+    // The renderer keys the retained frame on this hash: a toggle that only changes a row's check
+    // mark or list must change it, or the open checklist keeps showing the old state.
+    let mut palette = CommandPalette::new();
+    palette.start_status_segments("Segments", "footer", status_rows(), None);
+    let before = palette.presentation_hash();
+    let mut rows = status_rows();
+    rows[0].label = "  Show status line".to_owned();
+    palette.update_status_segments(rows);
+    assert_ne!(palette.presentation_hash(), before, "a check mark changed");
+    let toggled = palette.presentation_hash();
+    palette.update_status_segments(palette.status_segment_rows().into_iter().cloned().collect());
+    assert_eq!(palette.presentation_hash(), toggled, "unchanged rows keep the hash");
+}

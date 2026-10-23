@@ -729,8 +729,13 @@ pub struct ResolvedStatusLine {
     pub icons: StatusIcons,
     /// Sampling interval of sampled segments, in milliseconds.
     pub update_interval_ms: u64,
+    /// The preset the lists started from; a session enable returns a segment to its list.
+    pub preset: StatusPreset,
     /// Every configured segment, left list first, each list in order.
     pub segments: Vec<ResolvedSegment>,
+    /// Every implemented segment no list names, with its configured keys, in catalog order, so a
+    /// segment the session enables keeps the `show`, `priority` and `click` the file gives it.
+    pub unlisted: Vec<ResolvedSegment>,
     /// Memory segment settings.
     pub mem: MemSettings,
     /// Selection segment settings.
@@ -951,6 +956,18 @@ impl StatusLineConfig {
                 });
             }
         }
+        let mut unlisted: Vec<ResolvedSegment> = StatusSegmentId::ALL
+            .into_iter()
+            .filter(|id| id.meta().implemented)
+            .filter(|id| !segments.iter().any(|segment| segment.id == *id))
+            .map(|id| ResolvedSegment {
+                id,
+                side: id.meta().home_side,
+                show: id.meta().default_show,
+                priority: id.meta().default_priority,
+                click: ClickBinding::Default,
+            })
+            .collect();
         for (key, value) in &self.segment {
             let Some(id) = StatusSegmentId::from_name(key) else {
                 // When: `key` is not a catalog id, it is an unknown key of `segment`.
@@ -961,7 +978,8 @@ impl StatusLineConfig {
                 bail!("status_line.segment.{key} must be a table");
             };
             let meta = id.meta();
-            let target = segments.iter_mut().find(|segment| segment.id == id);
+            let target =
+                segments.iter_mut().chain(unlisted.iter_mut()).find(|segment| segment.id == id);
             let mut scratch = ResolvedSegment {
                 id,
                 side: meta.home_side,
@@ -969,8 +987,8 @@ impl StatusLineConfig {
                 priority: meta.default_priority,
                 click: ClickBinding::Default,
             };
-            // A table for an unlisted segment is still validated, so a typo
-            // is caught before the segment is added to a list.
+            // A table for an unimplemented segment is still validated, so a typo is caught; an
+            // unlisted implemented one keeps its keys for a session enable.
             let resolved = target.unwrap_or(&mut scratch);
             apply_common_keys(resolved, &meta, table)
                 .with_context(|| format!("status_line.segment.{key}"))?;
@@ -1053,7 +1071,9 @@ impl StatusLineConfig {
             hide_sensitive: self.hide_sensitive,
             icons: self.icons,
             update_interval_ms: self.update_interval_ms,
+            preset: self.preset,
             segments,
+            unlisted,
             mem,
             sel,
             paste,

@@ -3502,6 +3502,21 @@ fn title_size_helper_is_used_only_for_title_stack_and_title_rendering() {
     assert!(CORE_SRC.contains("GlyphRasterVariant::TabTitle"));
 }
 
+/// The longest `status-checklist-footer` across the shipped locales, by character count.
+fn longest_checklist_footer() -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/i18n");
+    ["en", "ja", "zh-CN"]
+        .iter()
+        .filter_map(|locale| std::fs::read_to_string(root.join(locale).join("messages.ftl")).ok())
+        .filter_map(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("status-checklist-footer = "))
+                .map(str::to_owned)
+        })
+        .max_by_key(|footer| footer.chars().count())
+        .expect("every locale has a checklist footer")
+}
+
 #[test]
 fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
     // Contract: the longest localized footer fits every supported body size without compression.
@@ -3519,6 +3534,7 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
         CommandPaletteMode::RenameWindow,
         CommandPaletteMode::TabColor,
         CommandPaletteMode::Confirm,
+        CommandPaletteMode::StatusSegments,
     ] {
         let mut palette = CommandPalette::new();
         match mode {
@@ -3528,6 +3544,10 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
             CommandPaletteMode::TabColor => palette.start_tab_color_picker("tab", Vec::new()),
             CommandPaletteMode::Confirm => {
                 palette.start_confirm("title", "Apply", "Cancel", Vec::new())
+            }
+            // The checklist footer comes from the host; check the longest localized one.
+            CommandPaletteMode::StatusSegments => {
+                palette.start_status_segments("title", longest_checklist_footer(), Vec::new(), None)
             }
         }
         let layout = PaletteLayout::compute(&mut palette, 4000.0, 2400.0, 0.0, 1.0)

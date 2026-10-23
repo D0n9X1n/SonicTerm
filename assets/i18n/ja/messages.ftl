@@ -99,6 +99,7 @@ command-apply-theme = テーマを適用：{ $name }
 command-toggle-tab-bar = タブバーの表示を切り替え
 command-toggle-status-line = ステータスラインの表示を切り替え
 command-toggle-status-line-sensitive = ステータスラインの機密内容を切り替え
+command-choose-status-line-segments = ステータスライン: セグメントを選択
 command-rename-tab = 現在のタブの名前を変更
 command-rename-window = ウィンドウの名前を変更
 palette-window-name-placeholder = ウィンドウ名（空欄でリセット）…
@@ -325,3 +326,29 @@ status-value-label-not-checked = 表示文字は未確認
 # Program notifications (OSC 9 / OSC 777): the tab that stands in for a missing title, and the coalesced count.
 program-notify-tab = ⟨タブ { $tab }⟩
 program-notify-more = ほか { $count } 件
+
+# ステータスラインのチェックリスト
+status-checklist-title = 入力してセグメントを絞り込み
+status-checklist-footer = ↑↓ 選択 · ↵ 切り替え · ←→ 移動 · esc 閉じる
+status-checklist-show = ステータスラインを表示
+status-checklist-hide-sensitive = 機密セグメントを隠す
+status-checklist-reset = 設定ファイルに戻す
+status-checklist-left = 左
+status-checklist-center = 中央
+status-checklist-right = 右
+status-checklist-sensitive = 機密
+status-checklist-hidden = 非表示
+status-group-core = 基本
+status-group-pointer = ポインター
+status-group-input = 入力
+status-group-display = 表示
+status-group-other-tabs = 他のタブ
+status-group-diagnostics = 診断
+status-group-program-reported = プログラム報告
+status-name-health = 状態
+status-name-mode = モード
+status-name-zoom = ズーム
+
+# Save Current Settings
+settings-saved = 現在の設定を保存しました
+settings-save-failed = 現在の設定を保存できません。既存の設定は変更されていません
