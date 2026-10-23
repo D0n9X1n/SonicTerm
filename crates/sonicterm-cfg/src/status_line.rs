@@ -368,6 +368,7 @@ impl StatusSegmentId {
                 Self::Alerts
                     | Self::Clip
                     | Self::Input
+                    | Self::Glyphs
                     | Self::Link
                     | Self::Paste
                     | Self::Ime
@@ -385,6 +386,7 @@ impl StatusSegmentId {
                 Self::Alerts
                     | Self::Clip
                     | Self::Input
+                    | Self::Glyphs
                     | Self::Health
                     | Self::Mem
                     | Self::Mode
@@ -567,6 +569,21 @@ impl Default for InputSettings {
     }
 }
 
+/// Glyphs segment settings beyond the common keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GlyphsSettings {
+    /// The segment hides below this many missing codepoints.
+    pub min_count: u64,
+    /// Private Use Area codepoints (icon fonts such as Nerd Fonts) are not counted.
+    pub ignore_private_use: bool,
+}
+
+impl Default for GlyphsSettings {
+    fn default() -> Self {
+        Self { min_count: 1, ignore_private_use: false }
+    }
+}
+
 /// Clipboard segment settings beyond the common keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClipSettings {
@@ -656,6 +673,8 @@ pub struct ResolvedStatusLine {
     pub clip: ClipSettings,
     /// Input segment settings.
     pub input: InputSettings,
+    /// Glyphs segment settings.
+    pub glyphs: GlyphsSettings,
 }
 
 impl ResolvedStatusLine {
@@ -682,6 +701,8 @@ pub const COPIED_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=10;
 pub const HOLD_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=60;
 /// Bounds of the input segment's `held_after_ms`.
 pub const HELD_AFTER_MS_RANGE: std::ops::RangeInclusive<u64> = 250..=60_000;
+/// Bounds of the glyphs segment's `min_count`.
+pub const GLYPHS_MIN_COUNT_RANGE: std::ops::RangeInclusive<u64> = 1..=1000;
 /// Bounds of the clipboard segment's `hold_secs`.
 pub const CLIP_HOLD_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=600;
 /// Bounds of the alerts segment's `min_secs`.
@@ -703,6 +724,8 @@ const PASTE_KEYS: &[&str] = &["paste"];
 const IME_KEYS: &[&str] = &["hold_secs"];
 /// Extra keys of the input segment table.
 const INPUT_KEYS: &[&str] = &["hold_secs", "held_after_ms"];
+/// Extra keys of the glyphs segment table.
+const GLYPHS_KEYS: &[&str] = &["min_count", "ignore_private_use"];
 /// Extra keys of the clipboard segment table.
 const CLIP_KEYS: &[&str] = &["hold_secs"];
 /// Extra keys of the alerts segment table.
@@ -721,6 +744,7 @@ fn segment_keys(id: StatusSegmentId) -> &'static [&'static str] {
         StatusSegmentId::Alerts => ALERTS_KEYS,
         StatusSegmentId::Clip => CLIP_KEYS,
         StatusSegmentId::Input => INPUT_KEYS,
+        StatusSegmentId::Glyphs => GLYPHS_KEYS,
         _ => &[],
     }
 }
@@ -808,6 +832,7 @@ impl StatusLineConfig {
         let mut alerts = AlertsSettings::default();
         let mut clip = ClipSettings::default();
         let mut input = InputSettings::default();
+        let mut glyphs = GlyphsSettings::default();
         let mut segments = Vec::new();
         for (side, list_name, ids) in lists {
             for id in ids {
@@ -884,6 +909,9 @@ impl StatusLineConfig {
             if id == StatusSegmentId::Input {
                 apply_input_keys(&mut input, table).context("status_line.segment.input")?;
             }
+            if id == StatusSegmentId::Glyphs {
+                apply_glyphs_keys(&mut glyphs, table).context("status_line.segment.glyphs")?;
+            }
             if id == StatusSegmentId::Clip {
                 if let Some(value) = table.get("hold_secs") {
                     clip.hold_secs = value
@@ -932,6 +960,7 @@ impl StatusLineConfig {
             alerts,
             clip,
             input,
+            glyphs,
         })
     }
 
@@ -1043,6 +1072,22 @@ fn apply_input_keys(input: &mut InputSettings, table: &toml::Table) -> Result<()
             .and_then(|millis| u64::try_from(millis).ok())
             .filter(|millis| HELD_AFTER_MS_RANGE.contains(millis))
             .context("held_after_ms must be an integer in 250..=60000")?;
+    }
+    Ok(())
+}
+
+/// Apply the glyphs segment's own keys.
+fn apply_glyphs_keys(glyphs: &mut GlyphsSettings, table: &toml::Table) -> Result<()> {
+    if let Some(value) = table.get("min_count") {
+        glyphs.min_count = value
+            .as_integer()
+            .and_then(|count| u64::try_from(count).ok())
+            .filter(|count| GLYPHS_MIN_COUNT_RANGE.contains(count))
+            .context("min_count must be an integer in 1..=1000")?;
+    }
+    if let Some(value) = table.get("ignore_private_use") {
+        glyphs.ignore_private_use =
+            value.as_bool().context("ignore_private_use must be true or false")?;
     }
     Ok(())
 }

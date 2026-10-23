@@ -87,6 +87,7 @@ fn protection_and_sensitivity_follow_the_catalog() {
             Seg::Sel,
             Seg::Ime,
             Seg::Scroll,
+            Seg::Glyphs,
             Seg::History,
             Seg::Font,
             Seg::Zoom,
@@ -124,6 +125,7 @@ fn default_table_is_the_developer_preset_and_off() {
             StatusSegmentId::Alerts,
             StatusSegmentId::Clip,
             StatusSegmentId::Health,
+            StatusSegmentId::Glyphs,
             StatusSegmentId::History,
             StatusSegmentId::Mem
         ]
@@ -182,6 +184,7 @@ fn explicit_list_replaces_only_that_list() {
             StatusSegmentId::Alerts,
             StatusSegmentId::Clip,
             StatusSegmentId::Health,
+            StatusSegmentId::Glyphs,
             StatusSegmentId::History,
             StatusSegmentId::Mem
         ]
@@ -285,6 +288,10 @@ fn invalid_values_fail_the_load() {
         "[status_line.segment.clip]\nhold_secs = 0\n",
         "[status_line.segment.input]\nhold_secs = 601\n",
         "[status_line.segment.input]\nheld_after_ms = 249\n",
+        "[status_line.segment.glyphs]\nmin_count = 0\n",
+        "[status_line.segment.glyphs]\nmin_count = 1001\n",
+        "[status_line.segment.glyphs]\nignore_private_use = 1\n",
+        "[status_line.segment.glyphs]\nshow = \"always\"\n",
         "[status_line.segment.input]\nheld_after_ms = 60001\n",
         "[status_line.segment.input]\nshow = \"always\"\n",
         "[status_line.segment.input]\nclick = \"show_memory_usage\"\n",
@@ -440,4 +447,21 @@ fn input_settings_resolve_and_input_is_a_developer_default() {
     assert!(config.unknown_keys().is_empty());
     assert!(!StatusSegmentId::Input.meta().allows_always);
     assert!(!StatusSegmentId::Input.meta().clickable);
+}
+
+#[test]
+fn glyphs_settings_resolve_and_glyphs_is_a_developer_default() {
+    // `glyphs` counts from 1 and keeps private use by default; it is active-only and clickable.
+    let defaults = StatusLineConfig::default().resolve().unwrap();
+    assert_eq!(defaults.glyphs, GlyphsSettings { min_count: 1, ignore_private_use: false });
+    assert_eq!(defaults.segment(StatusSegmentId::Glyphs).unwrap().side, StatusSide::Right);
+    let config =
+        parse("[status_line.segment.glyphs]\nmin_count = 1000\nignore_private_use = true\n");
+    assert_eq!(
+        config.resolve().unwrap().glyphs,
+        GlyphsSettings { min_count: 1000, ignore_private_use: true }
+    );
+    assert!(config.unknown_keys().is_empty());
+    assert!(!StatusSegmentId::Glyphs.meta().allows_always);
+    assert!(StatusSegmentId::Glyphs.meta().clickable);
 }

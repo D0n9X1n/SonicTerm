@@ -137,6 +137,8 @@ pub enum SegmentHandler {
     NextAlert,
     /// Go to the tab whose program sent the latest OSC 52 request.
     ClipSource,
+    /// Show a notification listing the missing codepoints.
+    ListGlyphs,
 }
 
 /// A segment's registered `default` click.
@@ -218,7 +220,10 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
         Seg::Size => (UpdateKind::Event, format_size, DefaultClick::None),
         Seg::Zoom => (UpdateKind::Event, format_zoom, DefaultClick::Action(Action::TogglePaneZoom)),
         Seg::Ime => (UpdateKind::Event, format_ime, DefaultClick::None),
-        Seg::PathCheck | Seg::Cpu | Seg::Frame | Seg::Out | Seg::TabMem | Seg::Glyphs => {
+        Seg::Glyphs => {
+            (UpdateKind::Event, format_glyphs, DefaultClick::Handler(SegmentHandler::ListGlyphs))
+        }
+        Seg::PathCheck | Seg::Cpu | Seg::Frame | Seg::Out | Seg::TabMem => {
             (UpdateKind::Event, format_unavailable, DefaultClick::None)
         }
     };
@@ -273,6 +278,19 @@ pub struct StatusLineInputs {
     pub clip: Option<ClipInput>,
     /// Input SonicTerm refused or blocked, or an accepted write still outstanding.
     pub input: Option<InputState>,
+    /// Characters in this window's presented panes that no font SonicTerm can find covers.
+    pub glyphs: Option<GlyphsInput>,
+}
+
+/// How many distinct uncovered characters a window's presented panes draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlyphsInput {
+    /// Exactly this many.
+    Exact(u64),
+    /// A cap was hit; at least this many.
+    AtLeast(u64),
+    /// The unresolved set overflowed; no count can be proven.
+    Capped,
 }
 
 /// Why the input queue refused a message.
@@ -1321,6 +1339,38 @@ fn format_alerts(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Forma
         default_click: true,
         ..FormattedSegment::plain(parts, spoken.join(". "))
     })
+}
+
+/// The glyphs segment: distinct characters drawn as boxes because no font SonicTerm can find
+/// covers them. Dim, with `⚠`; it never shows an unproven figure.
+fn format_glyphs(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let glyphs = inputs.glyphs?;
+    let count = |key: &str, count: u64| {
+        env.i18n.t_args(key, Some(&[("count", &format_count(count, env.numbers))]))
+    };
+    let (value, spoken) = match glyphs {
+        GlyphsInput::Exact(0) => {
+            // When: glyphs is Exact(0), nothing is missing, so the segment hides.
+            return None;
+        }
+        GlyphsInput::Exact(missing) => (
+            count("status-value-glyphs-missing", missing),
+            count("status-spoken-glyphs-missing", missing),
+        ),
+        GlyphsInput::AtLeast(missing) => (
+            count("status-value-glyphs-at-least", missing),
+            count("status-spoken-glyphs-at-least", missing),
+        ),
+        GlyphsInput::Capped => (
+            env.i18n.translate("status-value-glyphs-capped"),
+            env.i18n.translate("status-value-glyphs-capped"),
+        ),
+    };
+    let parts = vec![
+        name_part(env, "status-name-glyphs"),
+        StatusPart::new(format!("{} {value}", symbol(env.icons, "⚠", "!")), StatusTone::Name),
+    ];
+    Some(FormattedSegment { default_click: true, ..FormattedSegment::plain(parts, spoken) })
 }
 
 /// The input segment: input SonicTerm refused or blocked, or an accepted write that has not

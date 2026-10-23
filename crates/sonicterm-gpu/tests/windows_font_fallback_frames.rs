@@ -361,7 +361,7 @@ fn run(active: &ActiveEventLoop) -> Result<Outcome, String> {
         if renderer.font_fallback_notice_id() != Some(notice_id) {
             return Err(String::from("the wake carried another renderer's notice"));
         }
-        if renderer.acknowledge_font_fallback(notice_id) {
+        if renderer.acknowledge_font_fallback(notice_id).faces_due {
             if retry_checked {
                 draw(&mut renderer, &mut scene, &theme, size)?;
             } else {

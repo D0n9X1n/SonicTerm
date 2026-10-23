@@ -3837,7 +3837,7 @@ impl Probe {
             PhaseEnd::Hold(hold_ms) => hold_ms,
             // `print` ends on its sentinel; its checks count appearances, not a cadence.
             // `print` ends on its sentinel and `input` when its typing settles; neither checks a cadence.
-            _ if matches!(phase.name, "print" | "input" | "held") => 0,
+            _ if matches!(phase.name, "print" | "input" | "glyphs" | "held") => 0,
             // When: the phase neither holds nor prints, it has no cadence to check.
             _ => return None,
         };
@@ -3857,6 +3857,7 @@ impl Probe {
                 history_shows: count("status_line_history_shows")?,
                 // A side whose App predates the counter shows no `held` to count.
                 held_shows: count("status_line_held_shows").unwrap_or(0),
+                glyph_shows: count("status_line_glyph_shows").unwrap_or(0),
             })
         })?;
         let occluded = self.occlusion.delivered == Some(true);

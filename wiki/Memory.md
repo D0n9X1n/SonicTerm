@@ -213,6 +213,12 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
   frame presents, and the table is shrunk once under a quarter full. The class is
   reported, never charged, with a 144 MiB envelope (twice the maximum visible
   cells in bucket-rounded table entries, plus one frame's staging);
+- missing-glyph records are not a reported class: per pane and row slot whose
+  presented row drew tofu, at most 64 distinct characters plus the row's key and
+  font tag, and one frame's staged records. A record is pruned when its frame's
+  slots settle and its slot shows another row, its pane is released or the fonts
+  change, so at most one exists per visible row. The fallback notice keeps the
+  unresolved and lookup-failed sets, each at most 4,096 codepoints;
 - `vertex_scratch_bytes` / `vertex_scratch_items`: the renderer's `UploadStaging`
   part, counted in `renderer_total_bytes`. It is the presentation pipeline's
   reused CPU vertex-assembly buffer plus, for each of the glyph and image atlas

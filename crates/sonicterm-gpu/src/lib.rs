@@ -76,6 +76,7 @@ pub mod core;
 /// Debug-only renderer statistics: buffer writes, damage, frame paths, row-cache hits and
 /// shaping requests, collected only while a renderer counts.
 pub mod frame_stats;
+pub mod missing_glyphs;
 
 /// Measures a fixture's glyph working set through the renderer's own font stacks, without a
 /// window or device, so CI can choose the glyph atlas start size.

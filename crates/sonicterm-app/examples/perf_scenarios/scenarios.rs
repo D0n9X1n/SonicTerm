@@ -314,6 +314,17 @@ pub(crate) struct CommitStep {
     pub(crate) text: CommitText,
 }
 
+/// S1/status-line's `glyphs` on a POSIX role: clear the line and print U+0378, which no font
+/// covers, with `printf`, so the line editor's locale never decides what is drawn.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const GLYPHS_POSIX_STEPS: &[CommitStep] =
+    &[CommitStep { after_ms: 0, text: CommitText::Literal("\u{15}printf '\\315\\270\\n'\r") }];
+
+/// S1/status-line's `glyphs` on a Windows role: the character itself, which `cmd` echoes.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const GLYPHS_WINDOWS_STEPS: &[CommitStep] =
+    &[CommitStep { after_ms: 0, text: CommitText::Literal("\u{378}\r") }];
+
 /// S1/status-line's `held` on a POSIX role: clear the line, stall the reader in raw mode for 1 s,
 /// then paste 256 KiB, far past any PTY input buffer, so the writer blocks behind it until `head`
 /// drains it. The scratch config sets `held_after_ms = 250`, so the block crosses it.
@@ -379,6 +390,8 @@ pub(crate) struct StatusLineDeltas {
     pub(crate) history_shows: u64,
     /// Times `Input: held` appeared.
     pub(crate) held_shows: u64,
+    /// Times `Glyphs:` appeared.
+    pub(crate) glyph_shows: u64,
 }
 
 /// Whether a `status-line` phase kept the strip's idle contract, or why not.
@@ -397,6 +410,8 @@ pub(crate) struct StatusLineDeltas {
 /// every accepted key arms an outstanding-work deadline, which finds the write complete, so `held`
 /// never appears and the strip redraws only for a sample. `held` pastes behind a stalled reader:
 /// `Input: held` may appear at most once on any host ([`status_line_posix_progress`] requires it).
+/// `glyphs` prints U+0378: `Glyphs:` appears at most once and the strip redraws only for a
+/// sample or that appearance, never again after the fallback worker's publication.
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn status_line_progress(
     phase: &str,
@@ -447,6 +462,14 @@ pub(crate) fn status_line_progress(
             "status line requested {} redraws for {} samples while typing",
             deltas.redraws, deltas.samples
         )),
+        "glyphs" if deltas.glyph_shows > 1 => Err(format!(
+            "`Glyphs:` appeared {} times for one uncovered character",
+            deltas.glyph_shows
+        )),
+        "glyphs" if deltas.redraws > deltas.samples + deltas.glyph_shows + 1 => Err(format!(
+            "status line requested {} redraws for {} samples and {} appearances",
+            deltas.redraws, deltas.samples, deltas.glyph_shows
+        )),
         "held" if deltas.held_shows > 1 => Err(format!(
             "`Input: held` appeared {} times for one stalled paste",
             deltas.held_shows
@@ -459,8 +482,8 @@ pub(crate) fn status_line_progress(
     }
 }
 
-/// The checks that hold only where the role shell is POSIX, which can stall its reader: there the
-/// 256 KiB paste in `held` blocks the writer, so `Input: held` must appear exactly once.
+/// The checks that hold only where the role shell is POSIX: there the 256 KiB paste in `held` blocks
+/// the writer, so `Input: held` appears exactly once, and `printf` draws U+0378, so `Glyphs:` does.
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn status_line_posix_progress(
     phase: &str,
@@ -470,6 +493,10 @@ pub(crate) fn status_line_posix_progress(
         "held" if deltas.held_shows != 1 => Err(format!(
             "`Input: held` appeared {} times while the reader was stalled, not once",
             deltas.held_shows
+        )),
+        "glyphs" if deltas.glyph_shows != 1 => Err(format!(
+            "`Glyphs:` appeared {} times after U+0378 was printed, not once",
+            deltas.glyph_shows
         )),
         _ => Ok(()),
     }
@@ -823,6 +850,17 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                     "input",
                     PhaseKind::Sustained,
                     Driver::Typing { role: 0, chars: 10, per_second: 10, settle_ms: 1_000 },
+                    PhaseEnd::DriverDone,
+                )),
+                Step::Phase(driven(
+                    "glyphs",
+                    PhaseKind::Sustained,
+                    if host == Host::Windows {
+                        Driver::Commit { steps: GLYPHS_WINDOWS_STEPS, settle_ms: 1_500 }
+                    } else {
+                        // When: host is POSIX, printf draws U+0378 whatever the shell's locale.
+                        Driver::Commit { steps: GLYPHS_POSIX_STEPS, settle_ms: 1_500 }
+                    },
                     PhaseEnd::DriverDone,
                 )),
                 Step::Phase(driven(

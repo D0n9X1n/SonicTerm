@@ -837,6 +837,8 @@ pub(crate) struct StatusLineCounters {
     pub(crate) history_shows: u64,
     /// Times `Input: held` appeared in a window's strip.
     pub(crate) held_shows: u64,
+    /// Times `Glyphs:` appeared in a window's strip.
+    pub(crate) glyph_shows: u64,
 }
 
 /// URL and path detection work on the event-loop thread, cumulative for the App's lifetime.
@@ -1654,6 +1656,7 @@ impl AppFrameCounters {
             ("status_line_sel_cells", self.status_line.sel_cells),
             ("status_line_history_shows", self.status_line.history_shows),
             ("status_line_held_shows", self.status_line.held_shows),
+            ("status_line_glyph_shows", self.status_line.glyph_shows),
         ] {
             record.push_count(name, value);
         }

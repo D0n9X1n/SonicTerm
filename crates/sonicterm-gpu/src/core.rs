@@ -2408,6 +2408,14 @@ pub struct GpuRenderer {
     /// frame drew as tofu or dropped, whitespace excluded. Test-only diagnostic surfaced through
     /// [`Self::last_missing_chrome`]; production code must not depend on it.
     last_missing_chrome_chars: Vec<char>,
+    /// Per pane and row slot, the tofu characters of the row presented there.
+    presented_missing: std::collections::HashMap<(u64, u16), crate::missing_glyphs::SlotMissing>,
+    /// This pass's emitted rows' tofu records, committed into `presented_missing` when it presents.
+    staged_missing: Vec<crate::missing_glyphs::StagedMissing>,
+    /// The `(notice id, unresolved revision)` the last fallback wake acknowledged.
+    acknowledged_unresolved: Option<(u64, u64)>,
+    /// The fallback notice's unresolved set as last read, with that notice's id.
+    unresolved_snapshot: Option<(u64, sonicterm_engine::UnresolvedSnapshot)>,
     /// What the last presented `Full` frame certified about missing characters, read by
     /// [`Self::completeness_checkpoint`]; only presented frames change it.
     completeness: Option<crate::completeness::Certificate<FrameKey, GlyphContentStamp>>,
@@ -3411,6 +3419,10 @@ impl GpuRenderer {
             status_line_presented: Vec::new(),
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
+            presented_missing: std::collections::HashMap::new(),
+            staged_missing: Vec::new(),
+            unresolved_snapshot: None,
+            acknowledged_unresolved: None,
             last_missing_chrome_chars: Vec::new(),
             completeness: None,
             // `shape_cache` field deleted with the cosmic-text path.
@@ -5661,15 +5673,62 @@ impl GpuRenderer {
         self.font_stack.as_ref().map(|stack| stack.fallback_notice().id())
     }
 
+    /// The distinct codepoints this window's presented terminal rows draw as tofu that no font
+    /// SonicTerm can find covers. Records whose slot no longer shows their row, or whose fonts
+    /// were replaced, are dropped first; the unresolved set is read only when its revision moved.
+    pub fn presented_missing_glyphs(
+        &mut self,
+        ignore_private_use: bool,
+    ) -> crate::missing_glyphs::MissingGlyphs {
+        let Some(stack) = self.font_stack.as_ref() else {
+            // When: font_stack is None, the renderer shapes no terminal text.
+            return Default::default();
+        };
+        let cache = &self.row_glyph_cache;
+        crate::missing_glyphs::prune_missing(
+            &mut self.presented_missing,
+            |pane_id, slot| cache.committed_slot(pane_id, slot),
+            self.applied_fonts,
+        );
+        if self.presented_missing.is_empty() {
+            // When: presented_missing is empty, no presented row drew tofu.
+            return Default::default();
+        }
+        let notice = stack.fallback_notice();
+        let revision = notice.unresolved_revision();
+        let fresh = self
+            .unresolved_snapshot
+            .as_ref()
+            .is_some_and(|(id, snapshot)| *id == notice.id() && snapshot.revision == revision);
+        if !fresh {
+            self.unresolved_snapshot = Some((notice.id(), notice.unresolved_snapshot()));
+        }
+        let unresolved = &self.unresolved_snapshot.as_ref().expect("refreshed above").1;
+        crate::missing_glyphs::count_missing(
+            self.presented_missing.values(),
+            unresolved,
+            ignore_private_use,
+        )
+    }
+
     /// Handle a delivered fallback wake for `notice_id`: acknowledge it when it is this
-    /// renderer's current notice, and return whether a frame is needed to apply its generation.
-    /// An event for an older notice touches nothing and needs no frame.
-    pub fn acknowledge_font_fallback(&mut self, notice_id: u64) -> bool {
-        frame_fonts::acknowledge_fallback_wake(
+    /// renderer's current notice, and return whether a frame must apply a new face generation and
+    /// whether only the unresolved set moved. An event for an older notice touches nothing.
+    pub fn acknowledge_font_fallback(
+        &mut self,
+        notice_id: u64,
+    ) -> crate::missing_glyphs::FallbackWake {
+        let faces_due = frame_fonts::acknowledge_fallback_wake(
             self.font_stack.as_ref(),
             self.applied_fonts,
             notice_id,
-        )
+        );
+        let unresolved_changed = frame_fonts::unresolved_moved(
+            self.font_stack.as_ref(),
+            notice_id,
+            &mut self.acknowledged_unresolved,
+        );
+        crate::missing_glyphs::FallbackWake { faces_due, unresolved_changed }
     }
 
     /// A frame's measurement and drawing take the token their preparation returned; neither reads
@@ -6556,6 +6615,8 @@ impl GpuRenderer {
         // layout. Cleared every frame; published into `self.last_missing_chars`
         // before render() returns.
         let mut missing_chars_this_frame: Vec<char> = Vec::new();
+        // An earlier pass that did not present left its staged records; they are not on screen.
+        self.staged_missing.clear();
         // The chrome counterpart: every chrome layout below notes its tofu into this scope, which
         // closes with the assembled frame; a frame that fails to assemble discards it on drop.
         let missing_chrome_scope = chrome_text::MissingChromeScope::enter();
@@ -6671,6 +6732,8 @@ impl GpuRenderer {
                         injected_row_glyph: self.injected_row_glyph,
                         emitted_slots: pane_emitted.as_mut(),
                         row_keys: &mut *row_keys,
+                        missing_rows: Some(&mut self.staged_missing),
+                        fonts: self.applied_fonts,
                     },
                 );
                 staged_ranges.push((pv.pane_id, pane_staged_start..self.row_ink.staged_len()));
@@ -9160,6 +9223,10 @@ impl GpuRenderer {
         );
         self.last_missing_chars = missing_chars_this_frame;
         self.last_missing_chrome_chars = missing_chrome_chars;
+        crate::missing_glyphs::commit_missing(
+            &mut self.presented_missing,
+            &mut self.staged_missing,
+        );
         self.presented_damage.record(|| PresentedDamage {
             first_frame: plan.first_frame,
             damage: plan.damage,
@@ -9174,6 +9241,15 @@ impl GpuRenderer {
             Some(plan),
             receipts,
         );
+        if !self.presented_missing.is_empty() {
+            // The slots just settled, so records of released or replaced rows go now.
+            let cache = &self.row_glyph_cache;
+            crate::missing_glyphs::prune_missing(
+                &mut self.presented_missing,
+                |pane_id, slot| cache.committed_slot(pane_id, slot),
+                self.applied_fonts,
+            );
+        }
         if self.pane_focus_flash.is_some() {
             self.request_window_redraw();
         }
@@ -10921,6 +10997,10 @@ pub(crate) struct PaneGlyphSinks<'sink> {
     pub(crate) emitted_slots: Option<&'sink mut Vec<u16>>,
     /// Reused buffer for one pane's row keys while its rows are pinned.
     pub(crate) row_keys: &'sink mut Vec<u64>,
+    /// Each emitted row's tofu record, staged until the frame presents; `None` in seam tests.
+    pub(crate) missing_rows: Option<&'sink mut Vec<crate::missing_glyphs::StagedMissing>>,
+    /// The fonts this pass shapes with, tagged on each record.
+    pub(crate) fonts: Option<(u64, u64)>,
 }
 
 /// Start one glyph assembly pass over `panes`, each a planned pane with its grid's columns:
@@ -10978,6 +11058,7 @@ pub(crate) fn assemble_pane_glyph_rows(
         let key = keys[usize::from(slot)];
         let (spans_before, tofu_before, underlines_before) =
             (frame.row_spans.len(), frame.missing_tofu.len(), frame.underlines.len());
+        let missing_before = frame.missing_chars_this_frame.len();
         let _replayed = emit_row_glyphs(
             shaping.reborrow(),
             GlyphRow {
@@ -10999,6 +11080,26 @@ pub(crate) fn assemble_pane_glyph_rows(
         if key != 0 {
             // The row exists, so its key is this slot's staged key until the frame settles.
             shaping.row_cache.stage_slot(pane_id, slot, key);
+        }
+        if let Some(missing_rows) = sinks.missing_rows.as_deref_mut() {
+            // Every emitted slot is staged, so an emptied or vanished row clears its record.
+            let drawn = &frame.missing_chars_this_frame[missing_before..];
+            let (chars, truncated) = if key == 0 {
+                (Vec::new(), false)
+            } else {
+                // When: key is nonzero, the slot shows a real row whose tofu is recorded.
+                crate::missing_glyphs::distinct_capped(drawn)
+            };
+            missing_rows.push(crate::missing_glyphs::StagedMissing {
+                pane_id,
+                slot,
+                record: crate::missing_glyphs::SlotMissing {
+                    key,
+                    fonts: sinks.fonts,
+                    chars,
+                    truncated,
+                },
+            });
         }
         // The row's ink: its glyphs' union and its tofu outlines. Its underlines join when they
         // are drawn below.

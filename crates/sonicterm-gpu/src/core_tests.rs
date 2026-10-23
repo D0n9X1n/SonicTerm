@@ -7175,6 +7175,8 @@ fn emit_pass_recording(
                 injected_row_glyph: None,
                 emitted_slots: Some(&mut emitted_slots),
                 row_keys: &mut Vec::new(),
+                missing_rows: None,
+                fonts: None,
             },
         )
     });
@@ -8143,6 +8145,8 @@ fn unwinding_while_row_keys_are_in_use_keeps_the_key_buffer() {
                 injected_row_glyph: None,
                 emitted_slots: None,
                 row_keys: &mut row_keys,
+                missing_rows: None,
+                fonts: None,
             },
         );
     }));
@@ -8731,4 +8735,34 @@ fn quick_select_placement_check_names_each_bypassing_site() {
     let letter_site_removed =
         COMPLIANT_PLACEMENT_FIXTURE.replace("if quick_select_hint_count > 0", "if true");
     assert_eq!(quick_select_placement_violations(&letter_site_removed).len(), 1);
+}
+
+/// A row record counts only while its slot shows the row it was made for: switching to the
+/// alternate screen stages that screen's row key, so the primary row's tofu record is pruned and
+/// no stale count is shown.
+#[test]
+fn a_screen_switch_drops_the_other_screens_tofu_record() {
+    use crate::missing_glyphs::{commit_missing, prune_missing, SlotMissing, StagedMissing};
+    let mut rig = GlyphRig::new(false);
+    let mut grid = text_grid(8, &["a\u{378}b"]);
+    rig.begin(&grid);
+    let primary = rig.emit(&grid, 0, 0);
+    assert!(primary.missing.contains(&'\u{378}'), "U+0378 draws as tofu");
+    let mut presented = std::collections::HashMap::new();
+    let stage = |key, missing: &[char]| StagedMissing {
+        pane_id: 7,
+        slot: 0,
+        record: SlotMissing { key, fonts: None, chars: missing.to_vec(), truncated: false },
+    };
+    commit_missing(&mut presented, &mut vec![stage(primary.key, &primary.missing)]);
+    rig.cache.commit_slots();
+    grid.enter_alt_screen();
+    write_row(&mut grid, 0, "alt");
+    rig.begin(&grid);
+    let alternate = rig.emit(&grid, 0, 0);
+    assert_ne!(alternate.key, primary.key);
+    rig.cache.commit_slots();
+    let cache = &rig.cache;
+    prune_missing(&mut presented, |pane_id, slot| cache.committed_slot(pane_id, slot), None);
+    assert!(presented.is_empty(), "the alternate screen shows no primary tofu");
 }

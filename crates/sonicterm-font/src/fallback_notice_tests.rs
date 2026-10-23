@@ -93,3 +93,72 @@ fn each_notice_has_its_own_id_and_events_carry_it() {
     current.complete();
     assert_eq!(*calls.lock().unwrap(), vec![old.id(), current.id()]);
 }
+
+/// One publication at epoch 0 with these sets.
+fn publication(
+    unresolved: &[char],
+    lookup_failed: &[char],
+    covered: &[char],
+) -> UnresolvedPublication {
+    UnresolvedPublication {
+        epoch: 0,
+        unresolved: unresolved.to_vec(),
+        lookup_failed: lookup_failed.to_vec(),
+        covered: covered.to_vec(),
+    }
+}
+
+#[test]
+fn an_unresolved_publication_moves_the_revision_and_wakes_once() {
+    // A change bumps the revision and posts one wake; a second change before the acknowledgement
+    // posts none; `generation` never moves; an unchanged result changes nothing.
+    let notice = FallbackNotice::new();
+    let (waker, calls) = recording_waker();
+    notice.attach_waker(waker);
+    assert!(notice.publish(&publication(&['\u{378}'], &[], &[])));
+    assert!(notice.publish(&publication(&['\u{379}'], &[], &[])));
+    assert_eq!(notice.unresolved_revision(), 2);
+    assert_eq!(calls.lock().unwrap().len(), 1, "one undelivered wake at a time");
+    assert_eq!(notice.generation(), 0);
+    assert!(!notice.publish(&publication(&['\u{378}'], &[], &[])), "nothing new");
+    let snapshot = notice.unresolved_snapshot();
+    assert_eq!(
+        (snapshot.revision, snapshot.codepoints.as_slice()),
+        (2, &['\u{378}', '\u{379}'][..])
+    );
+    assert!(snapshot.contains('\u{379}') && !snapshot.contains('a'));
+    // A later request that covers a codepoint removes it.
+    assert!(notice.publish(&publication(&[], &[], &['\u{378}'])));
+    assert_eq!(notice.unresolved_snapshot().codepoints, vec!['\u{379}']);
+}
+
+#[test]
+fn a_stale_epoch_is_discarded_and_a_failure_is_kept_apart() {
+    // After a reset to epoch 2 an epoch-1 result changes nothing; a lookup failure moves a
+    // codepoint out of the unresolved set into its own.
+    let notice = FallbackNotice::new();
+    notice.reset(2);
+    let stale = UnresolvedPublication { epoch: 1, ..publication(&['\u{378}'], &[], &[]) };
+    assert!(!notice.publish(&stale));
+    assert_eq!(notice.unresolved_revision(), 0);
+    let current = |unresolved: &[char], failed: &[char]| UnresolvedPublication {
+        epoch: 2,
+        ..publication(unresolved, failed, &[])
+    };
+    assert!(notice.publish(&current(&['\u{378}'], &[])));
+    assert!(notice.publish(&current(&[], &['\u{378}'])));
+    assert!(notice.unresolved_snapshot().codepoints.is_empty());
+    assert_eq!(notice.lookup_failed(), vec!['\u{378}']);
+}
+
+#[test]
+fn the_cap_sets_overflow() {
+    // Past UNRESOLVED_CAP distinct codepoints the set stops growing and flags overflow.
+    let notice = FallbackNotice::new();
+    let many: Vec<char> =
+        (0..=UNRESOLVED_CAP as u32).filter_map(|offset| char::from_u32(0xE000 + offset)).collect();
+    notice.publish(&publication(&many, &[], &[]));
+    let snapshot = notice.unresolved_snapshot();
+    assert_eq!(snapshot.codepoints.len(), UNRESOLVED_CAP);
+    assert!(snapshot.overflow);
+}

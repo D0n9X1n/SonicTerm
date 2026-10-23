@@ -8,6 +8,8 @@
 
 mod fontstack;
 pub use fontstack::{CellMetricsPx, FaceIdentity, FontStack, ResolvedGlyphFace};
+/// The fallback notice's unresolved set, as a renderer reads it from [`FontStack::fallback_notice`].
+pub use sonicterm_font::UnresolvedSnapshot;
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

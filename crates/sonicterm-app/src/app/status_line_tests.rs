@@ -767,3 +767,37 @@ fn accepted_writes_arm_one_deadline_per_pane() {
     off.arm_held_input(pane_id);
     assert!(off.status_line.held.is_empty(), "nothing is armed while no shown strip lists `input`");
 }
+
+/// A count below `min_count` hides the segment; a lower bound obeys it too; `count capped` has
+/// no figure to compare, so it always shows.
+#[test]
+fn glyphs_input_hides_below_min_count() {
+    use sonicterm_gpu::missing_glyphs::{MissingGlyphValue, MissingGlyphs};
+    let missing = |value| MissingGlyphs { value, sample: Vec::new() };
+    assert_eq!(glyphs_input(&missing(MissingGlyphValue::Exact(0)), 1), None);
+    assert_eq!(glyphs_input(&missing(MissingGlyphValue::Exact(3)), 1), Some(GlyphsInput::Exact(3)));
+    assert_eq!(glyphs_input(&missing(MissingGlyphValue::Exact(3)), 4), None);
+    assert_eq!(
+        glyphs_input(&missing(MissingGlyphValue::AtLeast(1000)), 5),
+        Some(GlyphsInput::AtLeast(1000))
+    );
+    assert_eq!(glyphs_input(&missing(MissingGlyphValue::Capped), 1000), Some(GlyphsInput::Capped));
+}
+
+/// The click lists the window's codepoints in one notification and writes no clipboard; a
+/// window with nothing counted shows nothing.
+#[test]
+fn glyphs_click_lists_codepoints_without_touching_the_clipboard() {
+    let mut app = app_with_strip(true);
+    app.__test_seed_tab("main");
+    let main_id = app.main_window_id.unwrap();
+    app.__test_set_memory_clipboard("kept");
+    app.list_missing_glyphs(main_id);
+    assert_eq!(app.__test_main_notification_message(), None, "nothing counted, nothing listed");
+    app.status_line.glyph_sample.insert(main_id, vec!['\u{378}', '\u{379}']);
+    app.list_missing_glyphs(main_id);
+    let message = app.__test_main_notification_message().unwrap().to_owned();
+    assert!(message.contains("U+0378") && message.contains("U+0379"), "{message}");
+    assert!(message.contains("[font].family"));
+    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("kept"));
+}

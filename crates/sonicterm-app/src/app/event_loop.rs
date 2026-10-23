@@ -686,13 +686,17 @@ impl App {
     /// Handle a fallback wake: the window's renderer acknowledges its own current notice and
     /// says whether that generation still needs applying. A closed window, a replaced notice or an
     /// applied generation does nothing.
+    /// A face publication requests the `Chrome` frame that applies it. An unresolved-only wake
+    /// requests nothing here: the status-line sync that follows this event recounts `glyphs` and
+    /// requests one `StatusLine` frame only when the shown value changed.
     pub(super) fn handle_font_fallback_ready(&mut self, window_id: WindowId, notice_id: u64) {
-        let due = self
+        let wake = self
             .windows
             .get_mut(&window_id)
             .and_then(|window| window.renderer.as_mut())
-            .is_some_and(|renderer| renderer.acknowledge_font_fallback(notice_id));
-        self.request_font_fallback_frame(window_id, due);
+            .map(|renderer| renderer.acknowledge_font_fallback(notice_id))
+            .unwrap_or_default();
+        self.request_font_fallback_frame(window_id, wake.faces_due);
     }
 
     /// Request the frame that applies a published fallback generation when `due`. A hidden,

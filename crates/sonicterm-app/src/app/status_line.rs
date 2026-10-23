@@ -22,9 +22,9 @@ use sonicterm_ui::selection::{
 };
 use sonicterm_ui::status_line::{
     build_view, sanitize_link_text, AlertsInput, ClipInput, ClipOutcome, ClipSource, FontInput,
-    HealthInput, ImeInput, InputState, LinkInput, MemHistory, MemInput, ModeInput, NotSentReason,
-    NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick, SegmentHandler, SelInput,
-    StatusLineInputs,
+    GlyphsInput, HealthInput, ImeInput, InputState, LinkInput, MemHistory, MemInput, ModeInput,
+    NotSentReason, NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick,
+    SegmentHandler, SelInput, StatusLineInputs,
 };
 use winit::window::WindowId;
 
@@ -149,6 +149,8 @@ pub(crate) struct StatusLineState {
     clip_write: HashMap<u64, ClipOutcome>,
     /// Per pane, when a refusal was last logged and how many batches were suppressed since.
     clip_log: HashMap<u64, (Instant, u64)>,
+    /// Per window, the first missing codepoints its `glyphs` count shows, for the click.
+    glyph_sample: HashMap<WindowId, Vec<char>>,
     /// Per window, the latest refused, failed or blocked input, shown for `hold_secs`.
     input: HashMap<WindowId, InputRecord>,
     /// Per pane, the armed outstanding-work deadline and the write it shows as held.
@@ -237,6 +239,23 @@ pub(crate) fn held_step(
         PtyInputProgress::Terminal { failed, lost } => {
             HeldStep::Terminal((failed && lost > 0).then_some(lost))
         }
+    }
+}
+
+/// The glyphs segment's input for `missing`, hidden below `min_count`. A capped count has no
+/// proven figure to compare, so it always shows.
+pub(crate) fn glyphs_input(
+    missing: &sonicterm_gpu::missing_glyphs::MissingGlyphs,
+    min_count: u64,
+) -> Option<GlyphsInput> {
+    use sonicterm_gpu::missing_glyphs::MissingGlyphValue;
+    match missing.value {
+        MissingGlyphValue::Exact(count) if count >= min_count => Some(GlyphsInput::Exact(count)),
+        MissingGlyphValue::AtLeast(count) if count >= min_count => {
+            Some(GlyphsInput::AtLeast(count))
+        }
+        MissingGlyphValue::Capped => Some(GlyphsInput::Capped),
+        MissingGlyphValue::Exact(_) | MissingGlyphValue::AtLeast(_) => None,
     }
 }
 
@@ -879,6 +898,9 @@ impl App {
             })
             .collect();
         let zoom_shown = listed(StatusSegmentId::Zoom);
+        let glyphs_shown = listed(StatusSegmentId::Glyphs);
+        let glyph_settings = state.resolved.glyphs;
+        state.glyph_sample.retain(|window_id, _| glyphs_shown && windows.contains_key(window_id));
         let (history_shown, font_shown, size_listed) = (
             listed(StatusSegmentId::History),
             listed(StatusSegmentId::Font),
@@ -919,6 +941,7 @@ impl App {
         let mut redraws = 0;
         let mut history_shows = 0;
         let mut held_shows = 0;
+        let mut glyph_shows = 0;
         for (window_id, window) in windows.iter_mut() {
             // Marks are recorded only while a shown strip lists `alerts`, renderer or not.
             window.alert_settings =
@@ -1015,6 +1038,28 @@ impl App {
                 // When: size_listed is false, no list has `size`, so no hold is shown or woken for.
                 None
             };
+            let glyphs = if glyphs_shown {
+                // The count reads only the renderer's presented records; it changes only when a
+                // frame presents or the fallback worker publishes, and each wake syncs here.
+                let missing = window
+                    .renderer
+                    .as_mut()
+                    .map(|renderer| {
+                        renderer.presented_missing_glyphs(glyph_settings.ignore_private_use)
+                    })
+                    .unwrap_or_default();
+                let glyphs = glyphs_input(&missing, glyph_settings.min_count);
+                if glyphs.is_some() {
+                    state.glyph_sample.insert(*window_id, missing.sample);
+                } else {
+                    // When: glyphs is None, nothing is shown, so there is nothing to list.
+                    state.glyph_sample.remove(window_id);
+                }
+                glyphs
+            } else {
+                // When: glyphs_shown is false, no list has `glyphs`, so nothing is counted.
+                None
+            };
             let Some(renderer) = window.renderer.as_ref() else {
                 // When: `renderer` is gone, the window cannot show a strip.
                 continue;
@@ -1048,6 +1093,7 @@ impl App {
                 font,
                 size,
                 zoomed,
+                glyphs,
                 input: input_state(
                     state.input.get(window_id).copied(),
                     window.panes.keys().filter_map(|pane_id| state.held.get(pane_id)?.shown),
@@ -1097,6 +1143,12 @@ impl App {
             if held(&built.inputs) && previous.is_none_or(|previous| !held(&previous.inputs)) {
                 held_shows += 1;
             }
+            // `Glyphs:` appears in this window now; a changed count is the same appearance.
+            if built.inputs.glyphs.is_some()
+                && previous.is_none_or(|previous| previous.inputs.glyphs.is_none())
+            {
+                glyph_shows += 1;
+            }
             let view = build_view(
                 &state.resolved,
                 state.hide_sensitive,
@@ -1124,6 +1176,7 @@ impl App {
             counters.redraws += redraws;
             counters.history_shows += history_shows;
             counters.held_shows += held_shows;
+            counters.glyph_shows += glyph_shows;
         });
         // A covered or hidden strip shows nothing a deadline could change, so it arms no wake; the
         // sync that runs when a window turns eligible again reads every deadline that passed.
@@ -1183,6 +1236,9 @@ impl App {
             }
             Some(SegmentClick::Handler(SegmentHandler::ClipSource)) => {
                 self.activate_clip_source();
+            }
+            Some(SegmentClick::Handler(SegmentHandler::ListGlyphs)) => {
+                self.list_missing_glyphs(window_id);
             }
             None => {
                 // When: `click` is None, a gap or inert segment was pressed; consume it and do nothing.
@@ -1254,6 +1310,38 @@ impl App {
             latest = ?attempts.latest,
             suppressed,
             "OSC 52 clipboard requests refused"
+        );
+    }
+
+    /// Show one notification in `window_id` listing the codepoints its `glyphs` count names, up to
+    /// 16, with the font hint. Only the codepoints are shown, never the text around them, and the
+    /// clipboard is not touched.
+    pub(super) fn list_missing_glyphs(&mut self, window_id: WindowId) {
+        let Some(sample) =
+            self.status_line.glyph_sample.get(&window_id).filter(|sample| !sample.is_empty())
+        else {
+            // When: glyph_sample has nothing for window_id, its strip names no codepoint.
+            return;
+        };
+        let listed = sample
+            .iter()
+            .map(|codepoint| format!("U+{:04X} {codepoint}", u32::from(*codepoint)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = format!(
+            "No font SonicTerm can find covers {listed}. Install fonts covering these \
+             characters or choose another [font].family in sonicterm.toml."
+        );
+        let kind = if Some(window_id) == self.main_window_id {
+            super::FrontmostKind::Main
+        } else {
+            // When: window_id is not the main window, the notification goes to that child.
+            super::FrontmostKind::Child(window_id)
+        };
+        self.show_notification_for_kind(
+            kind,
+            sonicterm_ui::overlays::NotificationLevel::Info,
+            message,
         );
     }
 

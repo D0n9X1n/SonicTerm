@@ -650,6 +650,7 @@ const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S1/default", "idle", "hold", None),
     ("S1/gdi", "idle", "hold", None),
     ("S1/role-exit", "idle", "hold", None),
+    ("S1/status-line", "glyphs", "sustained", None),
     ("S1/status-line", "held", "sustained", None),
     ("S1/status-line", "idle", "hold", None),
     ("S1/status-line", "input", "sustained", None),
@@ -819,7 +820,10 @@ fn status_line_variants_differ_from_default_only_by_the_strip() {
         assert_eq!(strip.roles, [Workload::PrintThenShell(Fixture::LinkedHistory)]);
         assert_eq!(strip.setup, base.setup);
         assert_eq!(strip.steps[1], base.steps[0], "the idle hold the strip's guard checks");
-        assert_eq!(names(&strip), ["print", "idle", "select", "selected", "input", "held", "end"]);
+        assert_eq!(
+            names(&strip),
+            ["print", "idle", "select", "selected", "input", "glyphs", "held", "end"]
+        );
         assert_eq!(strip.scrollback_rows, 10_000);
     }
     assert!(all_plans()
@@ -840,6 +844,7 @@ fn status_line_progress_checks_each_phase() {
         sel_cells: 0,
         history_shows: 0,
         held_shows: 0,
+        glyph_shows: 0,
     };
     assert!(status_line_progress("idle", 5_000, false, deltas(3, 3, 3)).is_ok());
     assert!(
@@ -886,6 +891,7 @@ fn status_line_progress_checks_the_selection_phases() {
         sel_cells,
         history_shows: 0,
         held_shows: 0,
+        glyph_shows: 0,
     };
     assert!(status_line_progress("select", 2_000, false, sel(3, 52_500)).is_ok());
     assert!(status_line_progress("select", 2_000, false, sel(0, 0)).is_err(), "nothing counted");
@@ -910,6 +916,7 @@ fn status_line_progress_checks_the_trimmed_history_print() {
         sel_cells: 0,
         history_shows,
         held_shows: 0,
+        glyph_shows: 0,
     };
     assert!(status_line_progress("print", 0, false, print(2, 4, 1)).is_ok());
     assert!(status_line_progress("print", 0, false, print(2, 1, 0)).is_err(), "never trimmed");
@@ -943,6 +950,7 @@ fn status_line_progress_checks_the_typing_input_phase() {
         sel_cells: 0,
         history_shows: 0,
         held_shows,
+        glyph_shows: 0,
     };
     assert!(status_line_progress("input", 0, false, input(2, 2, 0)).is_ok());
     assert!(status_line_progress("input", 0, false, input(2, 2, 1)).is_err(), "held while typing");
@@ -961,6 +969,7 @@ fn status_line_progress_checks_the_held_paste_phase() {
         sel_cells: 0,
         history_shows: 0,
         held_shows,
+        glyph_shows: 0,
     };
     assert!(status_line_progress("held", 0, false, held(1)).is_ok());
     assert!(status_line_progress("held", 0, false, held(0)).is_ok(), "lenient off POSIX");
@@ -992,4 +1001,43 @@ fn status_line_progress_checks_the_held_paste_phase() {
         held_driver(Host::Windows),
         Driver::Commit { steps: HELD_WINDOWS_STEPS, settle_ms: 500 }
     );
+}
+
+/// `glyphs` prints U+0378: `Glyphs:` appears at most once anywhere and exactly once on a POSIX
+/// role, and the strip redraws only for a sample or that appearance.
+#[test]
+fn status_line_progress_checks_the_glyphs_phase() {
+    let glyphs = |samples, redraws, glyph_shows| StatusLineDeltas {
+        samples,
+        wakes: samples,
+        redraws,
+        sel_counts: 0,
+        sel_cells: 0,
+        history_shows: 0,
+        held_shows: 0,
+        glyph_shows,
+    };
+    assert!(status_line_progress("glyphs", 0, false, glyphs(1, 2, 1)).is_ok());
+    assert!(status_line_progress("glyphs", 0, false, glyphs(1, 2, 2)).is_err(), "flapped");
+    assert!(status_line_progress("glyphs", 0, false, glyphs(1, 9, 1)).is_err(), "extra frames");
+    assert!(status_line_posix_progress("glyphs", glyphs(1, 2, 1)).is_ok());
+    assert!(status_line_posix_progress("glyphs", glyphs(1, 1, 0)).is_err(), "never shown");
+    assert!(matches!(
+        GLYPHS_POSIX_STEPS[0].text,
+        CommitText::Literal(text) if text == "\u{15}printf '\\315\\270\\n'\r"
+    ));
+    // `\315\270` is U+0378's UTF-8 encoding.
+    assert_eq!("\u{378}".as_bytes(), [0o315, 0o270]);
+}
+
+/// S1/status-line's short run keeps at least 5 s inside S1's 80 s smoke gate on both hosts, so a
+/// slow runner does not time it out; the phases are shortened, the limit is not raised.
+#[test]
+fn s1_status_line_short_keeps_headroom_inside_the_smoke_gate() {
+    let bound = find("S1").unwrap().short_timeout_s;
+    for host in [Host::Posix, Host::Windows] {
+        let plan = plan_for("S1", "status-line", true, host).unwrap();
+        let needed = seconds_after_go(&plan, true) + 60;
+        assert!(needed + 5 <= bound, "{host:?} needs {needed} s of {bound} s");
+    }
 }

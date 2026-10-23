@@ -467,6 +467,7 @@ fn resolver_wiring_records_error_outcome_without_payload() {
                 notice: crate::FallbackNotice::new(),
                 cancel: Default::default(),
                 hooks: Default::default(),
+                epoch: 0,
             };
             std::thread::spawn(move || request.process()).join().unwrap();
         });

@@ -82,8 +82,9 @@ pub(crate) fn config_toml_with_shell(plan: &Plan, shell: &str, laps: bool) -> St
         // A base without the status line ignores the table, so both sides run the same config.
         config.push_str("\n[status_line]\nenabled = true\n");
         if plan.scenario == "S1" {
-            // S1 also lists `size`, so its output frames run with `history` and `size` both shown.
-            config.push_str("right = [\"health\", \"history\", \"size\", \"mem\"]\n");
+            // S1 also lists `size`, so its output frames run with `history` and `size` both shown,
+            // and `glyphs`, so the `glyphs` phase has a segment to show.
+            config.push_str("right = [\"health\", \"glyphs\", \"history\", \"size\", \"mem\"]\n");
             // `held` stalls its reader for 1 s, so the threshold sits well inside that stall.
             config.push_str("\n[status_line.segment.input]\nheld_after_ms = 250\n");
         }

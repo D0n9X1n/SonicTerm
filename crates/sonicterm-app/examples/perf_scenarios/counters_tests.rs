@@ -128,6 +128,7 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "status_line_sel_cells",
             "status_line_history_shows",
             "status_line_held_shows",
+            "status_line_glyph_shows",
             "about_to_wait_ms",
             "user_event_ms",
             "new_events_ms",
@@ -775,6 +776,7 @@ const NEWER_SOURCES: &[&str] = &[
     "status_line_sel_cells",
     "status_line_history_shows",
     "status_line_held_shows",
+    "status_line_glyph_shows",
 ];
 
 #[test]

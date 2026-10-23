@@ -168,6 +168,7 @@ fn core_segments_format_as_name_value_and_chips() {
         alerts: AlertsInput::default(),
         clip: None,
         input: None,
+        glyphs: None,
     };
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3COPYMOUSE");
@@ -264,6 +265,7 @@ fn ascii_icons_change_symbols_only() {
         alerts: AlertsInput::default(),
         clip: None,
         input: None,
+        glyphs: None,
     };
     let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Sel).unwrap(), "Sel: x copy failed");
@@ -1033,4 +1035,34 @@ fn input_shows_each_state_and_never_claims_a_hang() {
     }
     let held = input_view(InputState::Held { secs: 4, on_reply: true, queued_bytes: 0 });
     assert_eq!(held.spoken.value, "held 4s, behind a terminal reply");
+}
+
+#[test]
+fn glyphs_shows_a_proven_count_and_never_an_unproven_one() {
+    // 0 hides; an exact count, a lower bound and `count capped` each read as such, dim with `⚠`;
+    // the spoken value has no glyphs; a click lists the codepoints.
+    let i18n = translator("en");
+    let glyphs_view = |glyphs| {
+        let inputs = StatusLineInputs { glyphs: Some(glyphs), ..idle_inputs() };
+        let view = build_view(&developer(), false, &inputs, &i18n, NumberStyle::POINT);
+        view.segments.into_iter().find(|segment| segment.id == StatusSegmentId::Glyphs)
+    };
+    assert!(glyphs_view(GlyphsInput::Exact(0)).is_none());
+    let cases = [
+        (GlyphsInput::Exact(3), "Glyphs: ⚠ 3 missing", "3 characters have no font"),
+        (
+            GlyphsInput::AtLeast(1000),
+            "Glyphs: ⚠ ≥ 1,000 missing",
+            "at least 1,000 characters have no font",
+        ),
+        (GlyphsInput::Capped, "Glyphs: ⚠ count capped", "count capped"),
+    ];
+    for (glyphs, text, spoken) in cases {
+        let segment = glyphs_view(glyphs).unwrap();
+        assert_eq!(text_of(&segment.parts), text);
+        assert!(!text.contains("999+"));
+        assert_eq!(segment.parts[1].tone, StatusTone::Name);
+        assert_eq!(segment.spoken.value, spoken);
+        assert_eq!(segment.click, Some(SegmentClick::Handler(SegmentHandler::ListGlyphs)));
+    }
 }
