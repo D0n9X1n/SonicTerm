@@ -652,8 +652,10 @@ impl App {
             }
         }
         self.poll_command_events_for_all_tabs();
-        // A burst frame reads the cache only; other frames set demand, never probe.
-        let fg_probes = (!pty_burst).then(|| std::sync::Arc::clone(&self.fg_probes));
+        // A burst or strip-only frame reads the cache only; other frames set demand, never probe.
+        let status_only = self.main().is_some_and(|window| window.redraw.status_only_attempt());
+        let fg_probes = super::redraw::sets_fg_demand(pty_burst, status_only)
+            .then(|| std::sync::Arc::clone(&self.fg_probes));
         if let Some(id) = main_id_opt {
             if let Some(window) = self.windows.get_mut(&id) {
                 crate::app::refresh_window_tab_privileges(

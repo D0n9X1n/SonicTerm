@@ -450,6 +450,7 @@ pub use pane_state::{
     next_pane_id, CommandPhase, CommandQueue, LastCommand, PaneCommandEvent, PaneCommandState,
     PaneState,
 };
+mod jobs;
 mod path_target;
 mod perf_present;
 // Pins both S10 attribution signatures here, in the parent, in every build: a gate on the methods, their

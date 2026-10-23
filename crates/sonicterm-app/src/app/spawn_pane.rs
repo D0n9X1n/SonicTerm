@@ -352,6 +352,8 @@ pub(in crate::app) struct PaneVtHandles {
     sync_deadline_word: Arc<AtomicU64>,
     sync_resets: Arc<AtomicU64>,
     output_generation: Arc<AtomicU64>,
+    output_bytes: Arc<AtomicU64>,
+    output_counting: Arc<AtomicBool>,
     output_outstanding: Arc<AtomicBool>,
     bells: Arc<AtomicU64>,
     inline_images: Arc<Mutex<Vec<InlineImage>>>,
@@ -365,6 +367,14 @@ pub(in crate::app) struct PaneVtHandles {
 }
 
 impl PaneVtHandles {
+    /// Count `len` received PTY bytes toward the `out` segment, only while it is listed.
+    // Ordering: output_counting and output_bytes are Relaxed; the sampler needs an eventual total.
+    pub(in crate::app) fn count_output(&self, len: usize) {
+        if self.output_counting.load(Ordering::Relaxed) {
+            self.output_bytes.fetch_add(len as u64, Ordering::Relaxed);
+        }
+    }
+
     /// Clone the exact pane-owned handles that its VT worker must update.
     pub(in crate::app) fn from_pane_state(pane: &PaneState) -> Self {
         Self {
@@ -378,6 +388,8 @@ impl PaneVtHandles {
             sync_deadline_word: pane.sync_deadline_word.clone(),
             sync_resets: pane.sync_resets.clone(),
             output_generation: pane.output_generation.clone(),
+            output_bytes: pane.output_bytes.clone(),
+            output_counting: pane.output_counting.clone(),
             output_outstanding: pane.output_outstanding.clone(),
             bells: pane.bells.clone(),
             inline_images: pane.inline_images.clone(),
@@ -428,6 +440,7 @@ pub(super) fn spawn_pane_workers(
                         // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
                         // The chunk's read stamp is read before the chunk moves into the batch.
                         let read_at = bytes.read_at();
+                        worker_handles.count_output(bytes.len());
                         flush.receive(bytes.len(), Instant::now());
                         process_pane_vt_batch_and_publish(
                             &worker_handles,

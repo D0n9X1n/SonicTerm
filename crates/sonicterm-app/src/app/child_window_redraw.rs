@@ -41,8 +41,11 @@ impl App {
             .and_then(|window| window.renderer.as_ref())
             .and_then(|renderer| renderer.tab_bar_band());
         let hold_tab_widths = self.tab_widths_held_in(win_id, tab_bar_band);
-        // A burst frame reads the cache only; other frames set demand, never probe.
-        let fg_probes = (!pty_burst).then(|| std::sync::Arc::clone(&self.fg_probes));
+        // A burst or strip-only frame reads the cache only; other frames set demand, never probe.
+        let status_only =
+            self.windows.get(&win_id).is_some_and(|child| child.redraw.status_only_attempt());
+        let fg_probes = super::redraw::sets_fg_demand(pty_burst, status_only)
+            .then(|| std::sync::Arc::clone(&self.fg_probes));
         let Some(child) = self.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so this child closed and
             // has no frame left to render.

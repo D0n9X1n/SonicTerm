@@ -57,6 +57,12 @@ pub struct PaneState {
     pub parser: Arc<Mutex<Parser>>,
     /// Completed nonempty VT batches; travels with this pane across window transfers.
     pub(crate) output_generation: Arc<AtomicU64>,
+    /// PTY output bytes received while `output_counting` is on; travels with the pane.
+    pub(crate) output_bytes: Arc<AtomicU64>,
+    /// Set while a shown strip lists `out`; off, the VT worker counts nothing.
+    pub(crate) output_counting: Arc<std::sync::atomic::AtomicBool>,
+    /// When the retention pass last measured and charged this pane; `None` until it has.
+    pub(crate) charged_at: Option<std::time::Instant>,
     /// Last scheduler snapshot acknowledged by this pane's owning event-loop window.
     pub(crate) observed_output_generation: u64,
     /// Whether an output event for this pane is queued and not yet serviced; the VT worker
@@ -308,6 +314,9 @@ impl PaneState {
             charges: HashMap::new(),
             parser,
             output_generation: Arc::new(AtomicU64::new(0)),
+            output_bytes: Arc::new(AtomicU64::new(0)),
+            output_counting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            charged_at: None,
             observed_output_generation: 0,
             output_outstanding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             bells: Arc::new(AtomicU64::new(0)),

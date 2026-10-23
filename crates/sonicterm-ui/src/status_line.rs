@@ -8,6 +8,7 @@
 //! entry, so a new catalog id does not compile until it is registered.
 
 use std::hash::{Hash, Hasher};
+use std::time::Duration;
 
 use sonicterm_cfg::status_line::{
     ClickBinding, MemSettings, ResolvedStatusLine, Sensitivity, ShowMode, StatusIcons,
@@ -223,9 +224,13 @@ pub fn segment_spec(id: StatusSegmentId) -> SegmentSpec {
         Seg::Glyphs => {
             (UpdateKind::Event, format_glyphs, DefaultClick::Handler(SegmentHandler::ListGlyphs))
         }
-        Seg::PathCheck | Seg::Cpu | Seg::Frame | Seg::Out | Seg::TabMem => {
-            (UpdateKind::Event, format_unavailable, DefaultClick::None)
+        Seg::Cpu => {
+            (UpdateKind::Sampled, format_cpu, DefaultClick::Action(Action::ShowMemoryUsage))
         }
+        Seg::Out => (UpdateKind::Sampled, format_out, DefaultClick::None),
+        Seg::Frame => (UpdateKind::Sampled, format_frame, DefaultClick::None),
+        Seg::PathCheck => (UpdateKind::Event, format_path_check, DefaultClick::None),
+        Seg::TabMem => (UpdateKind::Sampled, format_tab_mem, DefaultClick::None),
     };
     SegmentSpec { update, format, default_click }
 }
@@ -280,6 +285,121 @@ pub struct StatusLineInputs {
     pub input: Option<InputState>,
     /// Characters in this window's presented panes that no font SonicTerm can find covers.
     pub glyphs: Option<GlyphsInput>,
+    /// SonicTerm's own CPU use in whole percent, while shown by its hysteresis.
+    pub cpu_percent: Option<u64>,
+    /// The window's content frames over the last sample interval, and its presenter.
+    pub frame: Option<FrameInput>,
+    /// PTY output bytes per second over the last interval, while shown by its hysteresis.
+    pub out_rate: Option<u64>,
+    /// A path check that has run past `show_after_ms`, or one held after ending.
+    pub path_check: Option<PathCheckInput>,
+    /// The terminal state SonicTerm keeps for the active tab's panes, from cached charges.
+    pub tab_mem: Option<TabMemInput>,
+}
+
+/// Which presenter draws a window's frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenterKind {
+    /// wgpu on a hardware adapter.
+    Hardware,
+    /// wgpu on a CPU adapter.
+    SoftwareAdapter,
+    /// The Windows GDI software presenter.
+    Gdi,
+}
+
+/// A window's content frames over one sample interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameInput {
+    /// Content frames presented in the interval.
+    pub frames: u64,
+    /// Their mean CPU-side frame time, in microseconds.
+    pub mean_frame_us: u64,
+    /// Frames per second over the interval.
+    pub fps: u64,
+    /// The presenter.
+    pub presenter: PresenterKind,
+}
+
+/// The path-check segment's input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathCheckInput {
+    /// Whole seconds the oldest running check has run; the last age while held.
+    pub secs: u64,
+    /// It ran past `warn_after_secs`.
+    pub warn: bool,
+    /// Checks queued behind it, waiting for a worker.
+    pub queued: u64,
+}
+
+/// The tab-memory segment's input: a sum of cached per-pane charges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TabMemInput {
+    /// The sum as last sampled.
+    pub bytes: u64,
+    /// The oldest charge's age in seconds when some pane's charge is stale.
+    pub stale_secs: Option<u64>,
+}
+
+/// Show-and-hide hysteresis for a sampled figure: it appears at `min`, and hides only after
+/// `hold_samples` consecutive samples below `min × hide_permille / 1000`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Hysteresis {
+    /// Whether the figure is shown.
+    pub shown: bool,
+    /// Consecutive samples below the hide level so far.
+    below: u64,
+}
+
+impl Hysteresis {
+    /// Apply one sample of `value` and return whether the figure is shown after it.
+    pub fn step(&mut self, value: u64, min: u64, hide_permille: u64, hold_samples: u64) -> bool {
+        if value >= min {
+            // When: value reaches min, the figure shows and any run of low samples ends.
+            *self = Self { shown: true, below: 0 };
+            return true;
+        }
+        if !self.shown {
+            // When: shown is false and value is below min, it stays hidden.
+            return false;
+        }
+        let hide_level = min.saturating_mul(hide_permille) / 1000;
+        if value >= hide_level {
+            // When: value is between the hide level and min, the run of low samples resets.
+            self.below = 0;
+            return true;
+        }
+        self.below += 1;
+        if self.below > hold_samples {
+            *self = Self::default();
+        }
+        self.shown
+    }
+}
+
+/// CPU use in whole percent for `cpu` CPU time over `wall` wall time: of one core, or of all
+/// `cores` when `total`.
+pub fn cpu_percent(cpu: Duration, wall: Duration, total: bool, cores: u64) -> u64 {
+    if wall.is_zero() {
+        // When: wall is zero, no interval elapsed, so there is no rate.
+        return 0;
+    }
+    let divisor = if total {
+        wall.as_secs_f64() * cores.max(1) as f64
+    } else {
+        // When: total is false, 100% is one busy core.
+        wall.as_secs_f64()
+    };
+    (cpu.as_secs_f64() / divisor * 100.0).round() as u64
+}
+
+/// Bytes per second for `bytes` over `wall`.
+pub fn byte_rate(bytes: u64, wall: Duration) -> u64 {
+    if wall.is_zero() {
+        // When: wall is zero, no interval elapsed, so there is no rate.
+        return 0;
+    }
+    (bytes as f64 / wall.as_secs_f64()).round() as u64
 }
 
 /// How many distinct uncovered characters a window's presented panes draw.
@@ -1556,11 +1676,117 @@ fn format_zoom(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Formatt
 }
 
 /// Formatter of a catalog id whose segment has not landed: shows nothing.
-fn format_unavailable(
-    _inputs: &StatusLineInputs,
-    _env: &FormatEnv<'_>,
-) -> Option<FormattedSegment> {
-    None
+/// The `frame` segment: `Frame: 4.1 ms · GPU`, the mean CPU-side time of content frames, with the
+/// rate in the spoken value; `always` reads `idle · GPU` with no content frames.
+fn format_frame(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let frame = inputs.frame?;
+    let presenter = env.i18n.translate(match frame.presenter {
+        PresenterKind::Hardware => "status-value-presenter-gpu",
+        PresenterKind::SoftwareAdapter => "status-value-presenter-software",
+        PresenterKind::Gdi => "status-value-presenter-gdi",
+    });
+    let separator = symbol(env.icons, " · ", " - ");
+    let (value, spoken) = if frame.frames == 0 {
+        // When: frames is 0, the interval presented no content frame.
+        if env.show != ShowMode::Always {
+            // When: frames is 0 and show is active, an idle window shows nothing.
+            return None;
+        }
+        let idle = env.i18n.translate("status-value-idle");
+        (format!("{idle}{separator}{presenter}"), format!("{idle}, {presenter}"))
+    } else {
+        // When: frames is nonzero, the interval presented content.
+        let tenths = (frame.mean_frame_us + 50) / 100;
+        let millis = format!("{}{}{} ms", tenths / 10, env.numbers.decimal, tenths % 10);
+        let fps = env.i18n.t_args(
+            "status-spoken-frame-rate",
+            Some(&[("count", &format_count(frame.fps, env.numbers))]),
+        );
+        (format!("{millis}{separator}{presenter}"), format!("{millis}, {fps}, {presenter}"))
+    };
+    let parts =
+        vec![name_part(env, "status-name-frame"), StatusPart::new(value, StatusTone::Value)];
+    Some(FormattedSegment::plain(parts, spoken))
+}
+
+/// The `path_check` segment: `Path check: 3s`, amber with `⚠` past `warn_after_secs`.
+fn format_path_check(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let check = inputs.path_check?;
+    let age = format_duration(check.secs);
+    let (value, tone) = if check.warn {
+        (format!("{} {age}", symbol(env.icons, "⚠", "!")), StatusTone::Warn)
+    } else {
+        // When: warn is false, the check is still within warn_after_secs.
+        (age.clone(), StatusTone::Value)
+    };
+    let mut parts = vec![name_part(env, "status-name-path-check"), StatusPart::new(value, tone)];
+    let mut spoken = age;
+    if check.queued > 0 {
+        let queued = env.i18n.t_args(
+            "status-value-path-check-queued",
+            Some(&[("count", &format_count(check.queued, env.numbers))]),
+        );
+        spoken = format!("{spoken}, {queued}");
+        parts.push(
+            StatusPart::new(format!("{}{queued}", symbol(env.icons, " · ", " - ")), tone)
+                .droppable(),
+        );
+    }
+    Some(FormattedSegment::plain(parts, spoken))
+}
+
+/// The `cpu` segment: `CPU: 14%`; `always` reads `0%` before any figure.
+fn format_cpu(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let percent = match inputs.cpu_percent {
+        Some(percent) => percent,
+        None if env.show == ShowMode::Always => 0,
+        None => {
+            // When: cpu_percent is None and show is active, there is no figure to show.
+            return None;
+        }
+    };
+    let value = format!("{}%", format_count(percent, env.numbers));
+    let parts =
+        vec![name_part(env, "status-name-cpu"), StatusPart::new(value.clone(), StatusTone::Value)];
+    Some(FormattedSegment { default_click: true, ..FormattedSegment::plain(parts, value) })
+}
+
+/// The `out` segment: `Out: 14.0 MB/s` of PTY output before parsing.
+fn format_out(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let rate = match inputs.out_rate {
+        Some(rate) => rate,
+        None if env.show == ShowMode::Always => 0,
+        None => {
+            // When: out_rate is None and show is active, there is no rate to show.
+            return None;
+        }
+    };
+    let value = format!("{}/s", format_bytes(rate, env.numbers));
+    let parts =
+        vec![name_part(env, "status-name-out"), StatusPart::new(value.clone(), StatusTone::Value)];
+    Some(FormattedSegment::plain(parts, value))
+}
+
+/// The `tab_mem` segment: `Tab mem: 38 MB`, or `84 MB · 40s ago` when some charge is stale. It
+/// is the terminal state SonicTerm keeps, not the program's memory, and never reads `≥`.
+fn format_tab_mem(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
+    let tab = inputs.tab_mem?;
+    let size = format_bytes(tab.bytes, env.numbers);
+    let mut parts = vec![
+        name_part(env, "status-name-tab-mem"),
+        StatusPart::new(size.clone(), StatusTone::Value),
+    ];
+    let mut spoken = size;
+    if let Some(stale_secs) = tab.stale_secs {
+        let ago =
+            env.i18n.t_args("status-value-ago", Some(&[("age", &format_duration(stale_secs))]));
+        spoken = format!("{spoken}, {ago}");
+        parts.push(
+            StatusPart::new(format!("{}{ago}", symbol(env.icons, " · ", " - ")), StatusTone::Name)
+                .droppable(),
+        );
+    }
+    Some(FormattedSegment::plain(parts, spoken))
 }
 
 /// One segment ready for fitting and drawing.

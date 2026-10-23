@@ -169,6 +169,11 @@ fn core_segments_format_as_name_value_and_chips() {
         clip: None,
         input: None,
         glyphs: None,
+        cpu_percent: None,
+        frame: None,
+        out_rate: None,
+        path_check: None,
+        tab_mem: None,
     };
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3COPYMOUSE");
@@ -266,6 +271,11 @@ fn ascii_icons_change_symbols_only() {
         clip: None,
         input: None,
         glyphs: None,
+        cpu_percent: None,
+        frame: None,
+        out_rate: None,
+        path_check: None,
+        tab_mem: None,
     };
     let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Sel).unwrap(), "Sel: x copy failed");
@@ -1064,5 +1074,117 @@ fn glyphs_shows_a_proven_count_and_never_an_unproven_one() {
         assert_eq!(segment.parts[1].tone, StatusTone::Name);
         assert_eq!(segment.spoken.value, spoken);
         assert_eq!(segment.click, Some(SegmentClick::Handler(SegmentHandler::ListGlyphs)));
+    }
+}
+
+#[test]
+fn hysteresis_appears_at_the_threshold_and_hides_only_after_held_low_samples() {
+    // Appears at `min`; between 0.7× and 1× keeps showing; below 0.7× hides after
+    // `hold_samples` consecutive samples, and a sample back above resets the count.
+    let mut hysteresis = Hysteresis::default();
+    assert!(!hysteresis.step(4, 5, 700, 2));
+    assert!(hysteresis.step(5, 5, 700, 2));
+    assert!(hysteresis.step(4, 5, 700, 2), "0.8× keeps it");
+    assert!(hysteresis.step(3, 5, 700, 2), "first low sample");
+    assert!(hysteresis.step(4, 5, 700, 2), "a sample above the hide level resets the run");
+    assert!(hysteresis.step(1, 5, 700, 2));
+    assert!(hysteresis.step(1, 5, 700, 2));
+    assert!(!hysteresis.step(1, 5, 700, 2), "hidden after two held low samples");
+    let mut immediate = Hysteresis::default();
+    assert!(immediate.step(9, 5, 700, 0));
+    assert!(!immediate.step(0, 5, 700, 0), "hold_samples 0 hides at once");
+}
+
+#[test]
+fn cpu_percent_and_byte_rate_follow_their_scales() {
+    // One busy core is 100% of a core and 25% of four; an empty interval is 0.
+    let second = Duration::from_secs(1);
+    assert_eq!(cpu_percent(Duration::ZERO, second, false, 4), 0);
+    assert_eq!(cpu_percent(second, second, false, 4), 100);
+    assert_eq!(cpu_percent(second * 2, second, false, 4), 200);
+    assert_eq!(cpu_percent(second, second, true, 4), 25);
+    assert_eq!(cpu_percent(second, Duration::ZERO, false, 4), 0);
+    assert_eq!(byte_rate(1023 * 1024, second), 1023 * 1024);
+    assert_eq!(format_bytes(byte_rate(1023 * 1024, second), NumberStyle::POINT), "1023 KB");
+    assert_eq!(format_bytes(byte_rate(1_047_552 + 600, second), NumberStyle::POINT), "1.00 MB");
+}
+
+#[test]
+fn diagnostics_segments_format_their_figures() {
+    // Each diagnostics segment's text; `cpu` hides without a figure, `frame` without content
+    // frames; `path_check` warns past its limit; `tab_mem` names a stale charge's age and never
+    // uses `≥`.
+    let i18n = translator("en");
+    let config = StatusLineConfig {
+        preset: sonicterm_cfg::status_line::StatusPreset::Diagnostics,
+        ..Default::default()
+    };
+    let resolved = config.resolve().unwrap();
+    let text = |inputs: StatusLineInputs, id| {
+        let view = build_view(&resolved, false, &inputs, &i18n, NumberStyle::POINT);
+        view.segments
+            .into_iter()
+            .find(|segment| segment.id == id)
+            .map(|segment| text_of(&segment.parts))
+    };
+    let frame = |frames| FrameInput {
+        frames,
+        mean_frame_us: 4_120,
+        fps: 58,
+        presenter: PresenterKind::Gdi,
+    };
+    let tab = |bytes, stale_secs| StatusLineInputs {
+        tab_mem: Some(TabMemInput { bytes, stale_secs }),
+        ..idle_inputs()
+    };
+    let cases = [
+        (
+            StatusLineInputs { cpu_percent: Some(14), ..idle_inputs() },
+            StatusSegmentId::Cpu,
+            Some("CPU: 14%"),
+        ),
+        (StatusLineInputs { cpu_percent: None, ..idle_inputs() }, StatusSegmentId::Cpu, None),
+        (
+            StatusLineInputs { out_rate: Some(14 << 20), ..idle_inputs() },
+            StatusSegmentId::Out,
+            Some("Out: 14.0 MB/s"),
+        ),
+        (
+            StatusLineInputs { frame: Some(frame(3)), ..idle_inputs() },
+            StatusSegmentId::Frame,
+            Some("Frame: 4.1 ms · GDI"),
+        ),
+        (StatusLineInputs { frame: Some(frame(0)), ..idle_inputs() }, StatusSegmentId::Frame, None),
+        (
+            StatusLineInputs {
+                path_check: Some(PathCheckInput { secs: 3, warn: false, queued: 0 }),
+                ..idle_inputs()
+            },
+            StatusSegmentId::PathCheck,
+            Some("Path check: 3s"),
+        ),
+        (
+            StatusLineInputs {
+                path_check: Some(PathCheckInput { secs: 47, warn: true, queued: 0 }),
+                ..idle_inputs()
+            },
+            StatusSegmentId::PathCheck,
+            Some("Path check: ⚠ 47s"),
+        ),
+        (
+            StatusLineInputs {
+                path_check: Some(PathCheckInput { secs: 3, warn: false, queued: 2 }),
+                ..idle_inputs()
+            },
+            StatusSegmentId::PathCheck,
+            Some("Path check: 3s · 2 queued"),
+        ),
+        (tab(38 << 20, None), StatusSegmentId::TabMem, Some("Tab mem: 38.0 MB")),
+        (tab(84 << 20, Some(40)), StatusSegmentId::TabMem, Some("Tab mem: 84.0 MB · 40s ago")),
+    ];
+    for (inputs, id, expected) in cases {
+        let shown = text(inputs, id);
+        assert_eq!(shown.as_deref(), expected, "{id:?}");
+        assert!(!shown.unwrap_or_default().contains('≥'));
     }
 }

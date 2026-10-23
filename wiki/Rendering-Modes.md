@@ -470,6 +470,8 @@ damage.
 
 ### Diagnostics
 
+The status line's `frame` segment (only in the `diagnostics` preset) counts presented content frames per window while it is listed. At settlement, before the observed generations move, an attempt carries content when it captured a cause other than `StatusLine`, `Cursor`, `SurfaceRetry` or `AtlasRetry` that was not yet observed; a failed or retried attempt passes that on to the retry that presents. Each counted frame adds its CPU-side time, from snapshot to settlement on the real clock. Strip-only and blink-only frames, cached and settled outcomes are never counted, and with `frame` unlisted nothing is recorded. The presenter reads `GDI` only on Windows with the software degrade on. A frame whose only unsettled cause is `StatusLine`, with no forced resize or surface frame and no content retry, sets no foreground-process probe demand, so a probe result can never repaint the strip into another frame.
+
 Startup logs the adapter backend, name, device type, and
 `software_rendering=true|false`. When degradation resolves on, the app logs:
 

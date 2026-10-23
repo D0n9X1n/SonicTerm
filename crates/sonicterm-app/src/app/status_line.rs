@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use sonicterm_cfg::status_line::CpuScale;
 use sonicterm_cfg::status_line::{
     PasteWarning, ResolvedStatusLine, StatusLineConfig, StatusSegmentId,
 };
@@ -25,6 +26,9 @@ use sonicterm_ui::status_line::{
     GlyphsInput, HealthInput, ImeInput, InputState, LinkInput, MemHistory, MemInput, ModeInput,
     NotSentReason, NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick,
     SegmentHandler, SelInput, StatusLineInputs,
+};
+use sonicterm_ui::status_line::{
+    byte_rate, cpu_percent, FrameInput, Hysteresis, PathCheckInput, PresenterKind, TabMemInput,
 };
 use winit::window::WindowId;
 
@@ -151,6 +155,28 @@ pub(crate) struct StatusLineState {
     clip_log: HashMap<u64, (Instant, u64)>,
     /// Per window, the first missing codepoints its `glyphs` count shows, for the click.
     glyph_sample: HashMap<WindowId, Vec<char>>,
+    /// The previous `cpu` sample: when, and the process CPU time then.
+    cpu_last: Option<(Instant, Duration)>,
+    /// `cpu`'s show-and-hide state.
+    cpu_hysteresis: Hysteresis,
+    /// The `cpu` figure shown, while its hysteresis shows it.
+    cpu_shown: Option<u64>,
+    /// Per pane, its output byte total at the previous `out` sample.
+    out_prev: HashMap<u64, u64>,
+    /// When `out` last sampled.
+    out_last: Option<Instant>,
+    /// Per window, `out`'s show-and-hide state.
+    out_hysteresis: HashMap<WindowId, Hysteresis>,
+    /// Per window, the `out` rate shown, while its hysteresis shows it.
+    out_shown: HashMap<WindowId, Option<u64>>,
+    /// `path_check`'s hold rule.
+    path_check_hold: super::jobs::PathCheckHold,
+    /// The `path_check` display from the last sync.
+    path_check_shown: Option<PathCheckInput>,
+    /// When `frame` last sampled.
+    frame_last: Option<Instant>,
+    /// Per window, the `frame` figure of the last sample interval.
+    frame_shown: HashMap<WindowId, FrameInput>,
     /// Per window, the latest refused, failed or blocked input, shown for `hold_secs`.
     input: HashMap<WindowId, InputRecord>,
     /// Per pane, the armed outstanding-work deadline and the write it shows as held.
@@ -256,6 +282,43 @@ pub(crate) fn glyphs_input(
         }
         MissingGlyphValue::Capped => Some(GlyphsInput::Capped),
         MissingGlyphValue::Exact(_) | MissingGlyphValue::AtLeast(_) => None,
+    }
+}
+
+/// The tab-memory figure from each pane's cached charge `(bytes, charged_at)`: the plain sum when
+/// every pane was charged within two retention intervals, the sum with the oldest charge's age
+/// when some is older, and nothing when a pane was never charged, since no sum covers the tab.
+pub(crate) fn tab_mem_input(
+    panes: impl Iterator<Item = (u64, Option<Instant>)>,
+    now: Instant,
+) -> Option<TabMemInput> {
+    let fresh_for = super::retention::RETENTION_SAMPLE_INTERVAL * 2;
+    let mut bytes = 0u64;
+    let mut oldest: Option<Instant> = None;
+    for (pane_bytes, charged_at) in panes {
+        let charged_at = charged_at?;
+        bytes = bytes.saturating_add(pane_bytes);
+        oldest = Some(oldest.map_or(charged_at, |oldest| oldest.min(charged_at)));
+    }
+    let age = now.saturating_duration_since(oldest?);
+    Some(TabMemInput { bytes, stale_secs: (age > fresh_for).then_some(age.as_secs()) })
+}
+
+/// The presenter a window draws through: GDI only on Windows with the software degrade on;
+/// otherwise wgpu, on a CPU or a hardware adapter.
+pub(crate) fn presenter_kind(
+    windows: bool,
+    degraded: bool,
+    software_adapter: bool,
+) -> PresenterKind {
+    if windows && degraded {
+        PresenterKind::Gdi
+    } else if software_adapter {
+        // When: the frame is not GDI and software_adapter is set, wgpu runs on a CPU adapter.
+        PresenterKind::SoftwareAdapter
+    } else {
+        // When: neither GDI nor software_adapter, wgpu runs on a hardware adapter.
+        PresenterKind::Hardware
     }
 }
 
@@ -802,28 +865,62 @@ impl App {
                 && window.renderer.is_some()
                 && window.frame_deadlines_allowed()
         });
-        let samples_mem = visible
-            && any_eligible
-            && self.status_line.resolved.segment(StatusSegmentId::Mem).is_some();
+        let sampled =
+            |id| visible && any_eligible && self.status_line.resolved.segment(id).is_some();
+        let samples_mem = sampled(StatusSegmentId::Mem);
+        let samples_cpu = sampled(StatusSegmentId::Cpu);
+        let samples_out = sampled(StatusSegmentId::Out);
+        let samples_frame = sampled(StatusSegmentId::Frame);
+        // `tab_mem` reads cached charges; sampling only refreshes a stale charge's shown age.
+        let samples_any = samples_mem
+            || samples_cpu
+            || samples_out
+            || samples_frame
+            || sampled(StatusSegmentId::TabMem);
         let wall_ms = wall_now_ms();
         let interval_ms = self.status_line.resolved.update_interval_ms;
         let slept = self
             .status_line
             .last_sample
             .is_some_and(|last| wall_clock_jumped(last, now, wall_ms, interval_ms));
-        if !samples_mem {
-            // No visible window shows `mem`, nothing samples; resume samples at once.
+        if !samples_cpu || slept {
+            // A rate spans one interval of a live session; the first sample after this shows nothing.
+            self.status_line.cpu_last = None;
+            if !samples_cpu {
+                self.status_line.cpu_hysteresis = Hysteresis::default();
+                self.status_line.cpu_shown = None;
+            }
+        }
+        if !samples_out {
+            self.stop_out_sampling();
+        }
+        if !samples_frame {
+            self.stop_frame_sampling();
+        }
+        if !samples_any {
+            // No visible window shows a sampled segment, nothing samples; resume samples at once.
             self.status_line.next_sample = None;
         } else if slept || self.status_line.next_sample.is_none_or(|due| now >= due) {
-            // When: a sample is due, read SonicTerm's own figure once for every window.
-            let bytes = match sonicterm_logging::process_report::sample_footprint().current {
-                MemoryMetric::Bytes(bytes) => Some(bytes),
-                MemoryMetric::Unsupported => None,
-            };
-            let mem = &mut self.status_line.mem;
-            *mem = MemInput { previous_bytes: mem.bytes, bytes, history: mem.history };
-            if let Some(bytes) = bytes {
-                self.status_line.history.record(wall_ms, bytes);
+            // When: a sample is due, read each listed figure once for every window.
+            if samples_mem {
+                let bytes = match sonicterm_logging::process_report::sample_footprint().current {
+                    MemoryMetric::Bytes(bytes) => Some(bytes),
+                    MemoryMetric::Unsupported => None,
+                };
+                let mem = &mut self.status_line.mem;
+                *mem = MemInput { previous_bytes: mem.bytes, bytes, history: mem.history };
+                if let Some(bytes) = bytes {
+                    self.status_line.history.record(wall_ms, bytes);
+                }
+            }
+            if samples_cpu {
+                self.sample_cpu(now);
+            }
+            if samples_out {
+                self.sample_out(now);
+            }
+            if samples_frame {
+                self.sample_frames(now);
             }
             self.status_line.last_sample = Some((now, wall_ms));
             self.status_line.next_sample = Some(now + Duration::from_millis(interval_ms));
@@ -862,6 +959,25 @@ impl App {
             live_tenths: (self.config.font.size * 10.0).round() as u32,
             configured_tenths: (self.configured_font_size * 10.0).round() as u32,
         });
+        let path_check_listed = visible
+            && any_eligible
+            && self.status_line.resolved.segment(StatusSegmentId::PathCheck).is_some();
+        if path_check_listed {
+            // Two atomic loads; the hold rule fixes each wake when it arms it.
+            let oldest = self.path_workers.as_ref().and_then(|workers| workers.busy().oldest());
+            let waiting = self.path_workers.as_ref().map_or(0, |workers| workers.waiting());
+            let settings = self.status_line.resolved.path_check;
+            let (shown, wake) =
+                self.status_line.path_check_hold.step(oldest, waiting, now, settings);
+            self.status_line.path_check_shown = shown;
+            if let Some(wake) = wake {
+                next_wake = Some(next_wake.map_or(wake, |next| next.min(wake)));
+            }
+        } else {
+            // When: path_check_listed is false, no shown strip lists it, so it keeps no state or wake.
+            self.status_line.path_check_hold = Default::default();
+            self.status_line.path_check_shown = None;
+        }
         if let Some((window_id, input)) = self.status_line.deferred_input.take() {
             self.note_input(window_id, input, now);
         }
@@ -899,6 +1015,10 @@ impl App {
             .collect();
         let zoom_shown = listed(StatusSegmentId::Zoom);
         let glyphs_shown = listed(StatusSegmentId::Glyphs);
+        let frame_listed = listed(StatusSegmentId::Frame);
+        let path_check = state.path_check_shown.filter(|_| listed(StatusSegmentId::PathCheck));
+        let cpu_value = listed(StatusSegmentId::Cpu).then_some(state.cpu_shown).flatten();
+        let tab_mem_shown = listed(StatusSegmentId::TabMem);
         let glyph_settings = state.resolved.glyphs;
         state.glyph_sample.retain(|window_id, _| glyphs_shown && windows.contains_key(window_id));
         let (history_shown, font_shown, size_listed) = (
@@ -1038,6 +1158,26 @@ impl App {
                 // When: size_listed is false, no list has `size`, so no hold is shown or woken for.
                 None
             };
+            let tab_mem = if tab_mem_shown {
+                let leaves = window
+                    .tab_states
+                    .get(window.tabs.active_index())
+                    .map(|tab| tab.tree.leaves())
+                    .unwrap_or_default();
+                let charged =
+                    leaves.iter().filter_map(|pane_id| window.panes.get(pane_id)).map(|pane| {
+                        let bytes = pane
+                            .charges
+                            .values()
+                            .map(|charge| charge.committed_amount().bytes as u64)
+                            .sum();
+                        (bytes, pane.charged_at)
+                    });
+                tab_mem_input(charged, now)
+            } else {
+                // When: tab_mem_shown is false, no list has `tab_mem`.
+                None
+            };
             let glyphs = if glyphs_shown {
                 // The count reads only the renderer's presented records; it changes only when a
                 // frame presents or the fallback worker publishes, and each wake syncs here.
@@ -1093,6 +1233,11 @@ impl App {
                 font,
                 size,
                 zoomed,
+                cpu_percent: cpu_value,
+                frame: state.frame_shown.get(window_id).copied().filter(|_| frame_listed),
+                path_check,
+                out_rate: state.out_shown.get(window_id).copied().flatten(),
+                tab_mem,
                 glyphs,
                 input: input_state(
                     state.input.get(window_id).copied(),
@@ -1311,6 +1456,159 @@ impl App {
             suppressed,
             "OSC 52 clipboard requests refused"
         );
+    }
+
+    /// Take one `cpu` sample: CPU time over wall time since the previous one, through the
+    /// hysteresis. The first sample after enabling or resuming shows nothing.
+    fn sample_cpu(&mut self, now: Instant) {
+        let Some(cpu) = sonicterm_logging::process_report::sample_cpu_time() else {
+            // When: sample_cpu_time is None, this platform has no CPU-time query.
+            self.status_line.cpu_shown = None;
+            return;
+        };
+        let Some((at, previous_cpu)) = self.status_line.cpu_last.replace((now, cpu)) else {
+            // When: cpu_last was None, one sample gives no delta yet.
+            return;
+        };
+        let settings = self.status_line.resolved.cpu;
+        let total = match settings.scale {
+            CpuScale::Total => true,
+            CpuScale::Core => false,
+            CpuScale::Auto => cfg!(windows),
+        };
+        let cores = std::thread::available_parallelism().map_or(1, |cores| cores.get() as u64);
+        let wall = now.saturating_duration_since(at);
+        let percent = cpu_percent(cpu.saturating_sub(previous_cpu), wall, total, cores);
+        let shown = self.status_line.cpu_hysteresis.step(
+            percent,
+            settings.min_percent,
+            settings.hide_permille,
+            settings.hold_samples,
+        );
+        self.status_line.cpu_shown = shown.then_some(percent);
+    }
+
+    /// Take one `out` sample: each pane's bytes since the previous sample, keyed by pane id so a
+    /// pane moved between windows counts once, summed per window (or its focused pane) as a rate.
+    // Ordering: output_counting and output_bytes are Relaxed; a rate needs only an eventual total.
+    pub(super) fn sample_out(&mut self, now: Instant) {
+        let settings = self.status_line.resolved.out;
+        let Self { windows, status_line: state, .. } = self;
+        let mut deltas: HashMap<u64, u64> = HashMap::new();
+        for window in windows.values() {
+            for (pane_id, pane) in &window.panes {
+                pane.output_counting.store(true, std::sync::atomic::Ordering::Relaxed);
+                let total = pane.output_bytes.load(std::sync::atomic::Ordering::Relaxed);
+                let previous = state.out_prev.insert(*pane_id, total).unwrap_or(total);
+                deltas.insert(*pane_id, total.saturating_sub(previous));
+            }
+        }
+        state.out_prev.retain(|pane_id, _| deltas.contains_key(pane_id));
+        state.out_hysteresis.retain(|window_id, _| windows.contains_key(window_id));
+        state.out_shown.retain(|window_id, _| windows.contains_key(window_id));
+        let Some(at) = state.out_last.replace(now) else {
+            // When: out_last was None, this is the first sample since enabling: no rate yet.
+            return;
+        };
+        let wall = now.saturating_duration_since(at);
+        for (window_id, window) in windows.iter() {
+            let focused =
+                window.tab_states.get(window.tabs.active_index()).map(|tab| tab.active_pane);
+            let bytes: u64 = window
+                .panes
+                .keys()
+                .filter(|pane_id| !settings.pane_scope || Some(**pane_id) == focused)
+                .map(|pane_id| deltas.get(pane_id).copied().unwrap_or(0))
+                .sum();
+            let rate = byte_rate(bytes, wall);
+            let shown = state.out_hysteresis.entry(*window_id).or_default().step(
+                rate,
+                settings.min_bytes_per_sec,
+                settings.hide_permille,
+                settings.hold_samples,
+            );
+            state.out_shown.insert(*window_id, shown.then_some(rate));
+        }
+    }
+
+    /// Take one `frame` sample per window: the content frames presented since the previous
+    /// sample, their mean CPU-side time and the presenter. A window's first sample only starts
+    /// its recording.
+    fn sample_frames(&mut self, now: Instant) {
+        let previous = self.status_line.frame_last.replace(now);
+        let Self { windows, status_line: state, .. } = self;
+        state.frame_shown.retain(|window_id, _| windows.contains_key(window_id));
+        for (window_id, window) in windows.iter_mut() {
+            let recorded = window.redraw.presented_frames.replace((0, 0));
+            let (Some(at), Some((frames, total_us))) = (previous, recorded) else {
+                // When: previous or recorded is None, this window's interval starts now.
+                continue;
+            };
+            let Some(renderer) = window.renderer.as_ref() else {
+                // When: renderer is None, the window presents nothing to measure.
+                continue;
+            };
+            let wall_secs = now.saturating_duration_since(at).as_secs_f64().max(0.001);
+            let presenter = presenter_kind(
+                cfg!(windows),
+                renderer.is_software_render_degraded(),
+                renderer.is_software_rendering(),
+            );
+            state.frame_shown.insert(
+                *window_id,
+                FrameInput {
+                    frames,
+                    mean_frame_us: total_us.checked_div(frames).unwrap_or(0),
+                    fps: (frames as f64 / wall_secs).round() as u64,
+                    presenter,
+                },
+            );
+        }
+    }
+
+    /// Stop `frame`: windows stop recording and the shown figures are dropped.
+    fn stop_frame_sampling(&mut self) {
+        if self.status_line.frame_last.take().is_none() && self.status_line.frame_shown.is_empty() {
+            // When: frame_last was None and frame_shown is empty, nothing was recording.
+            return;
+        }
+        for window in self.windows.values_mut() {
+            window.redraw.presented_frames = None;
+        }
+        self.status_line.frame_shown.clear();
+    }
+
+    /// Note a submitted path probe or open, so `path_check` rechecks once its threshold passes,
+    /// even when the worker starts the call later.
+    pub(super) fn note_path_submit(&mut self) {
+        if !self.status_line.visible
+            || self.status_line.resolved.segment(StatusSegmentId::PathCheck).is_none()
+        {
+            // When: visible is false or segment(StatusSegmentId::PathCheck) is none, nothing reads it.
+            return;
+        }
+        let now = self.dispatch_now();
+        let settings = self.status_line.resolved.path_check;
+        self.status_line.path_check_hold.note_submit(now, settings);
+    }
+
+    /// Stop `out`: every pane stops counting and the per-pane totals and shown rates are dropped.
+    // Ordering: output_counting is stored Relaxed; the VT worker only needs to see it eventually.
+    pub(super) fn stop_out_sampling(&mut self) {
+        if self.status_line.out_last.is_none() && self.status_line.out_prev.is_empty() {
+            // When: out_last is None and out_prev is empty, nothing was counting.
+            return;
+        }
+        for window in self.windows.values() {
+            for pane in window.panes.values() {
+                pane.output_counting.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let state = &mut self.status_line;
+        state.out_prev.clear();
+        state.out_last = None;
+        state.out_hysteresis.clear();
+        state.out_shown.clear();
     }
 
     /// Show one notification in `window_id` listing the codepoints its `glyphs` count names, up to

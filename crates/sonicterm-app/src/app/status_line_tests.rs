@@ -801,3 +801,58 @@ fn glyphs_click_lists_codepoints_without_touching_the_clipboard() {
     assert!(message.contains("[font].family"));
     assert_eq!(app.__test_memory_clipboard().as_deref(), Some("kept"));
 }
+
+/// `tab_mem` sums cached charges: plain when every charge is fresh, with the oldest age when one
+/// is older than two retention intervals, and hidden when a pane was never charged.
+#[test]
+fn tab_mem_reads_cached_charges_with_their_freshness() {
+    let now = Instant::now() + Duration::from_secs(600);
+    let fresh = Some(now - Duration::from_secs(5));
+    let stale = Some(now - Duration::from_secs(80));
+    assert_eq!(
+        tab_mem_input([(10, fresh), (20, fresh)].into_iter(), now),
+        Some(TabMemInput { bytes: 30, stale_secs: None })
+    );
+    assert_eq!(
+        tab_mem_input([(10, fresh), (20, stale)].into_iter(), now),
+        Some(TabMemInput { bytes: 30, stale_secs: Some(80) })
+    );
+    assert_eq!(tab_mem_input([(10, fresh), (20, None)].into_iter(), now), None);
+    assert_eq!(tab_mem_input(std::iter::empty(), now), None);
+}
+
+/// `out` turns counting on, reads each pane's bytes once per interval as a rate, keeps showing
+/// through its hold, and turns counting off again when it stops.
+#[test]
+fn out_rate_counts_each_panes_bytes_once_per_interval() {
+    use std::sync::atomic::Ordering;
+    let mut app = app_with_strip(true);
+    app.config.status_line.preset = sonicterm_cfg::status_line::StatusPreset::Diagnostics;
+    let pane_id = app.__test_seed_tab("main");
+    let main_id = app.main_window_id.unwrap();
+    let now = Instant::now();
+    let _ = app.sync_status_line(now);
+    app.sample_out(now);
+    assert!(app.pane_by_id(pane_id).unwrap().output_counting.load(Ordering::Relaxed));
+    app.pane_by_id(pane_id).unwrap().output_bytes.fetch_add(3 << 20, Ordering::Relaxed);
+    app.sample_out(now + Duration::from_secs(1));
+    assert_eq!(app.status_line.out_shown[&main_id], Some(3 << 20));
+    app.sample_out(now + Duration::from_secs(2));
+    assert_eq!(app.status_line.out_shown[&main_id], Some(0), "held through the low samples");
+    app.stop_out_sampling();
+    assert!(!app.pane_by_id(pane_id).unwrap().output_counting.load(Ordering::Relaxed));
+    assert!(app.status_line.out_shown.is_empty());
+}
+
+/// GDI only on Windows with the degrade on; elsewhere wgpu on a CPU or hardware adapter.
+#[test]
+fn presenter_kind_names_the_presenter_on_each_host() {
+    assert_eq!(presenter_kind(true, true, true), PresenterKind::Gdi);
+    assert_eq!(presenter_kind(true, false, true), PresenterKind::SoftwareAdapter);
+    assert_eq!(
+        presenter_kind(false, true, true),
+        PresenterKind::SoftwareAdapter,
+        "never GDI off Windows"
+    );
+    assert_eq!(presenter_kind(false, false, false), PresenterKind::Hardware);
+}

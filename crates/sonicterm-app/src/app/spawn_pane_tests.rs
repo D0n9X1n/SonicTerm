@@ -2303,3 +2303,18 @@ fn osc52_batch_keeps_each_write_and_sends_one_summary() {
     );
     assert!(osc52_batch(b"plain output").is_empty(), "no OSC 52, no summary");
 }
+
+/// The output counter adds each received chunk's length only while `out` turned counting on.
+#[test]
+fn output_bytes_count_only_while_counting_is_on() {
+    use std::sync::atomic::Ordering;
+    let parser = sonicterm_vt::vt::Parser::new(sonicterm_grid::grid::Grid::new(10, 2));
+    let pane = PaneState::new(Arc::new(Mutex::new(parser)), None);
+    let worker = PaneVtHandles::from_pane_state(&pane);
+    worker.count_output(100);
+    assert_eq!(pane.output_bytes.load(Ordering::Relaxed), 0);
+    pane.output_counting.store(true, Ordering::Relaxed);
+    worker.count_output(100);
+    worker.count_output(23);
+    assert_eq!(pane.output_bytes.load(Ordering::Relaxed), 123);
+}

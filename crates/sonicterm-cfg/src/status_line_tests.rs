@@ -82,11 +82,16 @@ fn protection_and_sensitivity_follow_the_catalog() {
             Seg::Mode,
             Seg::Input,
             Seg::Clip,
+            Seg::PathCheck,
             Seg::Link,
             Seg::Paste,
             Seg::Sel,
             Seg::Ime,
             Seg::Scroll,
+            Seg::Cpu,
+            Seg::Frame,
+            Seg::Out,
+            Seg::TabMem,
             Seg::Glyphs,
             Seg::History,
             Seg::Font,
@@ -160,7 +165,28 @@ fn presets_resolve_to_their_implemented_lists() {
     assert!(!minimal.mem.sparkline);
     let diagnostics = parse("preset = \"diagnostics\"\n").resolve().unwrap();
     let developer = StatusLineConfig::default().resolve().unwrap();
-    assert_eq!(diagnostics.segments, developer.segments);
+    assert_eq!(side_ids(&diagnostics, StatusSide::Left), side_ids(&developer, StatusSide::Left));
+    assert_eq!(
+        side_ids(&diagnostics, StatusSide::Center),
+        side_ids(&developer, StatusSide::Center)
+    );
+    // The diagnostics segments are only in `diagnostics`, never in `developer` or `minimal`.
+    assert_eq!(
+        side_ids(&diagnostics, StatusSide::Right),
+        [
+            StatusSegmentId::Alerts,
+            StatusSegmentId::Clip,
+            StatusSegmentId::Health,
+            StatusSegmentId::Glyphs,
+            StatusSegmentId::History,
+            StatusSegmentId::Cpu,
+            StatusSegmentId::Frame,
+            StatusSegmentId::Out,
+            StatusSegmentId::PathCheck,
+            StatusSegmentId::TabMem,
+            StatusSegmentId::Mem
+        ]
+    );
     assert!(diagnostics.mem.sparkline);
     for preset in [StatusPreset::Minimal, StatusPreset::Developer, StatusPreset::Diagnostics] {
         for list in preset.lists() {
@@ -303,7 +329,17 @@ fn invalid_values_fail_the_load() {
         "[status_line.segment]\nmem = 3\n",
         "left = [\"mem\"]\n",
         "left = [\"scroll\"]\nright = [\"scroll\"]\n",
-        "right = [\"cpu\"]\n",
+        "[status_line.segment.cpu]\nscale = \"half\"\n",
+        "[status_line.segment.cpu]\nmin_percent = 1001\n",
+        "[status_line.segment.cpu]\nhide_ratio = 0.05\n",
+        "[status_line.segment.cpu]\nhold_samples = 11\n",
+        "[status_line.segment.out]\nscope = \"tab\"\n",
+        "[status_line.segment.out]\nmin_bytes_per_sec = 1023\n",
+        "[status_line.segment.path_check]\nshow = \"always\"\n",
+        "[status_line.segment.path_check]\nshow_after_ms = 99\n",
+        "[status_line.segment.path_check]\nhold_ms = 10001\n",
+        "[status_line.segment.path_check]\nwarn_after_secs = 0\n",
+        "[status_line.segment.tab_mem]\nshow = \"always\"\n",
     ] {
         assert!(parse(body).validate().is_err(), "{body}");
     }
@@ -464,4 +500,51 @@ fn glyphs_settings_resolve_and_glyphs_is_a_developer_default() {
     assert!(config.unknown_keys().is_empty());
     assert!(!StatusSegmentId::Glyphs.meta().allows_always);
     assert!(StatusSegmentId::Glyphs.meta().clickable);
+}
+
+#[test]
+fn diagnostics_settings_resolve_with_their_documented_defaults() {
+    // `cpu`, `out` and `path_check` take their own keys; `frame` and `tab_mem` take none. `cpu`,
+    // `frame` and `out` may be `always`; `path_check` and `tab_mem` only `active`.
+    let defaults = StatusLineConfig::default().resolve().unwrap();
+    assert_eq!(
+        defaults.cpu,
+        CpuSettings { scale: CpuScale::Auto, min_percent: 5, hide_permille: 700, hold_samples: 2 }
+    );
+    assert_eq!(
+        defaults.out,
+        OutSettings {
+            pane_scope: true,
+            min_bytes_per_sec: 1 << 20,
+            hide_permille: 700,
+            hold_samples: 2
+        }
+    );
+    let config = parse(
+        "[status_line.segment.cpu]\nscale = \"total\"\nmin_percent = 0\nhide_ratio = 0.5\nhold_samples = 0\n\
+         [status_line.segment.out]\nscope = \"window\"\nmin_bytes_per_sec = 1024\nhide_ratio = 1\n\
+         [status_line.segment.path_check]\nshow_after_ms = 100\nhold_ms = 0\nwarn_after_secs = 600\n\
+         [status_line.segment.frame]\nshow = \"always\"\n",
+    );
+    let resolved = config.resolve().unwrap();
+    assert_eq!(
+        resolved.cpu,
+        CpuSettings { scale: CpuScale::Total, min_percent: 0, hide_permille: 500, hold_samples: 0 }
+    );
+    assert_eq!((resolved.out.pane_scope, resolved.out.hide_permille), (false, 1000));
+    assert_eq!(
+        resolved.path_check,
+        PathCheckSettings { show_after_ms: 100, hold_ms: 0, warn_after_secs: 600 }
+    );
+    assert_eq!(
+        defaults.path_check,
+        PathCheckSettings { show_after_ms: 300, hold_ms: 1000, warn_after_secs: 10 }
+    );
+    assert!(config.unknown_keys().is_empty());
+    for id in [StatusSegmentId::Cpu, StatusSegmentId::Frame, StatusSegmentId::Out] {
+        assert!(id.meta().allows_always, "{id:?}");
+    }
+    for id in [StatusSegmentId::PathCheck, StatusSegmentId::TabMem] {
+        assert!(!id.meta().allows_always, "{id:?}");
+    }
 }

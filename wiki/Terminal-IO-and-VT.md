@@ -58,6 +58,11 @@ admitted after the last completion is reported lost; cancellation and an
 intentional close are `Stopped`. The status line's `input` segment reads this
 progress.
 
+While a shown status line lists `out`, the VT worker adds each received chunk's
+length to the pane's output byte counter, one `Relaxed` add beside the flush
+bookkeeping; otherwise it does one `Relaxed` load and nothing more. The counter
+travels with the pane across windows.
+
 Production parsing yields after a reply-producing dispatch. Outside
 parser and side-effect locks, the VT worker submits replies to a separate FIFO:
 64 KiB of RAM followed by a private, automatically deleted temporary spill file.

@@ -369,6 +369,8 @@ impl StatusSegmentId {
                     | Self::Clip
                     | Self::Input
                     | Self::Glyphs
+                    | Self::PathCheck
+                    | Self::TabMem
                     | Self::Link
                     | Self::Paste
                     | Self::Ime
@@ -387,6 +389,11 @@ impl StatusSegmentId {
                     | Self::Clip
                     | Self::Input
                     | Self::Glyphs
+                    | Self::Cpu
+                    | Self::Frame
+                    | Self::Out
+                    | Self::PathCheck
+                    | Self::TabMem
                     | Self::Health
                     | Self::Mem
                     | Self::Mode
@@ -569,6 +576,73 @@ impl Default for InputSettings {
     }
 }
 
+/// What 100% means for the `cpu` segment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum CpuScale {
+    /// `total` on Windows, `core` elsewhere, as each platform's own tool shows it.
+    #[default]
+    Auto,
+    /// 100% is one core busy; the figure can exceed 100%.
+    Core,
+    /// 100% is every logical core busy.
+    Total,
+}
+
+/// CPU segment settings beyond the common keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CpuSettings {
+    /// What 100% means.
+    pub scale: CpuScale,
+    /// The segment appears at this whole percent.
+    pub min_percent: u64,
+    /// It hides below `min_percent` times this, in thousandths (`hide_ratio` 0.7 is 700).
+    pub hide_permille: u64,
+    /// Consecutive samples below the hide level before it hides.
+    pub hold_samples: u64,
+}
+
+impl Default for CpuSettings {
+    fn default() -> Self {
+        Self { scale: CpuScale::Auto, min_percent: 5, hide_permille: 700, hold_samples: 2 }
+    }
+}
+
+/// Output-rate segment settings beyond the common keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OutSettings {
+    /// Count only the focused pane (`scope = "pane"`), else every pane of the window.
+    pub pane_scope: bool,
+    /// The segment appears at this many bytes per second.
+    pub min_bytes_per_sec: u64,
+    /// It hides below `min_bytes_per_sec` times this, in thousandths.
+    pub hide_permille: u64,
+    /// Consecutive samples below the hide level before it hides.
+    pub hold_samples: u64,
+}
+
+impl Default for OutSettings {
+    fn default() -> Self {
+        Self { pane_scope: true, min_bytes_per_sec: 1 << 20, hide_permille: 700, hold_samples: 2 }
+    }
+}
+
+/// Path-check segment settings beyond the common keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PathCheckSettings {
+    /// A check shows once it has run this many milliseconds.
+    pub show_after_ms: u64,
+    /// After every check ends, the display stays this many milliseconds.
+    pub hold_ms: u64,
+    /// A check running this many seconds shows the warning style.
+    pub warn_after_secs: u64,
+}
+
+impl Default for PathCheckSettings {
+    fn default() -> Self {
+        Self { show_after_ms: 300, hold_ms: 1000, warn_after_secs: 10 }
+    }
+}
+
 /// Glyphs segment settings beyond the common keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphsSettings {
@@ -675,6 +749,12 @@ pub struct ResolvedStatusLine {
     pub input: InputSettings,
     /// Glyphs segment settings.
     pub glyphs: GlyphsSettings,
+    /// CPU segment settings.
+    pub cpu: CpuSettings,
+    /// Output-rate segment settings.
+    pub out: OutSettings,
+    /// Path-check segment settings.
+    pub path_check: PathCheckSettings,
 }
 
 impl ResolvedStatusLine {
@@ -724,6 +804,12 @@ const PASTE_KEYS: &[&str] = &["paste"];
 const IME_KEYS: &[&str] = &["hold_secs"];
 /// Extra keys of the input segment table.
 const INPUT_KEYS: &[&str] = &["hold_secs", "held_after_ms"];
+/// Extra keys of the CPU segment table.
+const CPU_KEYS: &[&str] = &["scale", "min_percent", "hide_ratio", "hold_samples"];
+/// Extra keys of the output-rate segment table.
+const OUT_KEYS: &[&str] = &["scope", "min_bytes_per_sec", "hide_ratio", "hold_samples"];
+/// Extra keys of the path-check segment table.
+const PATH_CHECK_KEYS: &[&str] = &["show_after_ms", "hold_ms", "warn_after_secs"];
 /// Extra keys of the glyphs segment table.
 const GLYPHS_KEYS: &[&str] = &["min_count", "ignore_private_use"];
 /// Extra keys of the clipboard segment table.
@@ -745,6 +831,9 @@ fn segment_keys(id: StatusSegmentId) -> &'static [&'static str] {
         StatusSegmentId::Clip => CLIP_KEYS,
         StatusSegmentId::Input => INPUT_KEYS,
         StatusSegmentId::Glyphs => GLYPHS_KEYS,
+        StatusSegmentId::Cpu => CPU_KEYS,
+        StatusSegmentId::Out => OUT_KEYS,
+        StatusSegmentId::PathCheck => PATH_CHECK_KEYS,
         _ => &[],
     }
 }
@@ -833,6 +922,9 @@ impl StatusLineConfig {
         let mut clip = ClipSettings::default();
         let mut input = InputSettings::default();
         let mut glyphs = GlyphsSettings::default();
+        let mut cpu = CpuSettings::default();
+        let mut out = OutSettings::default();
+        let mut path_check = PathCheckSettings::default();
         let mut segments = Vec::new();
         for (side, list_name, ids) in lists {
             for id in ids {
@@ -912,6 +1004,16 @@ impl StatusLineConfig {
             if id == StatusSegmentId::Glyphs {
                 apply_glyphs_keys(&mut glyphs, table).context("status_line.segment.glyphs")?;
             }
+            if id == StatusSegmentId::Cpu {
+                apply_cpu_keys(&mut cpu, table).context("status_line.segment.cpu")?;
+            }
+            if id == StatusSegmentId::Out {
+                apply_out_keys(&mut out, table).context("status_line.segment.out")?;
+            }
+            if id == StatusSegmentId::PathCheck {
+                apply_path_check_keys(&mut path_check, table)
+                    .context("status_line.segment.path_check")?;
+            }
             if id == StatusSegmentId::Clip {
                 if let Some(value) = table.get("hold_secs") {
                     clip.hold_secs = value
@@ -961,6 +1063,9 @@ impl StatusLineConfig {
             clip,
             input,
             glyphs,
+            cpu,
+            out,
+            path_check,
         })
     }
 
@@ -1072,6 +1177,97 @@ fn apply_input_keys(input: &mut InputSettings, table: &toml::Table) -> Result<()
             .and_then(|millis| u64::try_from(millis).ok())
             .filter(|millis| HELD_AFTER_MS_RANGE.contains(millis))
             .context("held_after_ms must be an integer in 250..=60000")?;
+    }
+    Ok(())
+}
+
+/// Read `key` from `table` as an integer within `range`, if present.
+fn integer_key(
+    table: &toml::Table,
+    key: &str,
+    range: std::ops::RangeInclusive<u64>,
+) -> Result<Option<u64>> {
+    let Some(value) = table.get(key) else {
+        // When: table has no `key`, the default stays.
+        return Ok(None);
+    };
+    let integer = value
+        .as_integer()
+        .and_then(|integer| u64::try_from(integer).ok())
+        .filter(|integer| range.contains(integer))
+        .with_context(|| {
+            format!("{key} must be an integer in {}..={}", range.start(), range.end())
+        })?;
+    Ok(Some(integer))
+}
+
+/// Read `hide_ratio` (0.1..=1.0) from `table` as thousandths, if present.
+fn hide_ratio_key(table: &toml::Table) -> Result<Option<u64>> {
+    let Some(value) = table.get("hide_ratio") else {
+        // When: table has no hide_ratio, the default stays.
+        return Ok(None);
+    };
+    let ratio = value
+        .as_float()
+        .or_else(|| value.as_integer().map(|integer| integer as f64))
+        .filter(|ratio| (0.1..=1.0).contains(ratio))
+        .context("hide_ratio must be a number in 0.1..=1.0")?;
+    Ok(Some((ratio * 1000.0).round() as u64))
+}
+
+/// Apply the CPU segment's own keys.
+fn apply_cpu_keys(cpu: &mut CpuSettings, table: &toml::Table) -> Result<()> {
+    if let Some(value) = table.get("scale") {
+        cpu.scale = match value.as_str() {
+            Some("auto") => CpuScale::Auto,
+            Some("core") => CpuScale::Core,
+            Some("total") => CpuScale::Total,
+            _ => anyhow::bail!("scale must be \"auto\", \"core\" or \"total\""),
+        };
+    }
+    if let Some(percent) = integer_key(table, "min_percent", 0..=1000)? {
+        cpu.min_percent = percent;
+    }
+    if let Some(permille) = hide_ratio_key(table)? {
+        cpu.hide_permille = permille;
+    }
+    if let Some(samples) = integer_key(table, "hold_samples", 0..=10)? {
+        cpu.hold_samples = samples;
+    }
+    Ok(())
+}
+
+/// Apply the output-rate segment's own keys.
+fn apply_out_keys(out: &mut OutSettings, table: &toml::Table) -> Result<()> {
+    if let Some(value) = table.get("scope") {
+        out.pane_scope = match value.as_str() {
+            Some("pane") => true,
+            Some("window") => false,
+            _ => anyhow::bail!("scope must be \"pane\" or \"window\""),
+        };
+    }
+    if let Some(rate) = integer_key(table, "min_bytes_per_sec", 1024..=1 << 30)? {
+        out.min_bytes_per_sec = rate;
+    }
+    if let Some(permille) = hide_ratio_key(table)? {
+        out.hide_permille = permille;
+    }
+    if let Some(samples) = integer_key(table, "hold_samples", 0..=10)? {
+        out.hold_samples = samples;
+    }
+    Ok(())
+}
+
+/// Apply the path-check segment's own keys.
+fn apply_path_check_keys(path_check: &mut PathCheckSettings, table: &toml::Table) -> Result<()> {
+    if let Some(millis) = integer_key(table, "show_after_ms", 100..=5000)? {
+        path_check.show_after_ms = millis;
+    }
+    if let Some(millis) = integer_key(table, "hold_ms", 0..=10_000)? {
+        path_check.hold_ms = millis;
+    }
+    if let Some(secs) = integer_key(table, "warn_after_secs", 1..=600)? {
+        path_check.warn_after_secs = secs;
     }
     Ok(())
 }

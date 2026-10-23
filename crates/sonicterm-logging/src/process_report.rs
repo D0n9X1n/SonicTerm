@@ -61,6 +61,13 @@ pub fn local_timestamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string()
 }
 
+/// This process's own CPU time (user plus system, every thread; children excluded), or `None`
+/// where the OS has no query. The status line's `cpu` divides its change by wall time.
+#[must_use]
+pub fn sample_cpu_time() -> Option<std::time::Duration> {
+    platform::cpu_time()
+}
+
 /// Seconds since this process started, or `None` when the OS does not say.
 #[must_use]
 pub fn process_uptime_secs() -> Option<u64> {
@@ -525,6 +532,30 @@ mod platform {
         now.as_secs().checked_sub(info.pbi_start_tvsec)
     }
 
+    /// User plus system CPU time of every thread of this process, from `getrusage(RUSAGE_SELF)`.
+    pub(super) fn cpu_time() -> Option<std::time::Duration> {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        let status =
+            // SAFETY: `usage` is a writable `rusage`; `getrusage` fills it and reads nothing from it.
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        if status != 0 {
+            // When: status is nonzero, the kernel refused the query and `usage` is not filled.
+            return None;
+        }
+        let usage =
+            // SAFETY: `getrusage` returned 0, so it initialized `usage`.
+            unsafe { usage.assume_init() };
+        let micros = |time: libc::timeval| {
+            u64::try_from(time.tv_sec)
+                .ok()?
+                .checked_mul(1_000_000)?
+                .checked_add(u64::try_from(time.tv_usec).ok()?)
+        };
+        Some(std::time::Duration::from_micros(
+            micros(usage.ru_utime)?.checked_add(micros(usage.ru_stime)?)?,
+        ))
+    }
+
     /// One thread's name from its kernel thread handle.
     fn thread_name(pid: libc::c_int, handle: u64) -> Option<String> {
         let mut info: libc::proc_threadinfo =
@@ -804,6 +835,24 @@ mod platform {
         now.as_secs().checked_sub(created_secs)
     }
 
+    /// User plus kernel CPU time of every thread of this process, from `GetProcessTimes`.
+    pub(super) fn cpu_time() -> Option<std::time::Duration> {
+        let mut creation = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: `GetCurrentProcess` is a pseudo-handle needing no close; all four out-parameters are writable.
+        unsafe {
+            GetProcessTimes(GetCurrentProcess(), &mut creation, &mut exited, &mut kernel, &mut user)
+        }
+        .ok()?;
+        let ticks =
+            |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+        // FILETIME counts 100 ns ticks.
+        let total = ticks(kernel).checked_add(ticks(user))?;
+        Some(std::time::Duration::from_nanos(total.checked_mul(100)?))
+    }
+
     /// One thread's description, set by `SetThreadDescription`, if any.
     fn thread_name(thread_id: u32) -> Option<String> {
         let raw =
@@ -1010,6 +1059,30 @@ mod platform {
         system_secs.checked_sub(process_ticks / ticks_per_sec.max(1))
     }
 
+    /// User plus system CPU time of every thread of this process, from `getrusage(RUSAGE_SELF)`.
+    pub(super) fn cpu_time() -> Option<std::time::Duration> {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        let status =
+            // SAFETY: `usage` is a writable `rusage`; `getrusage` fills it and reads nothing from it.
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        if status != 0 {
+            // When: status is nonzero, the kernel refused the query and `usage` is not filled.
+            return None;
+        }
+        let usage =
+            // SAFETY: `getrusage` returned 0, so it initialized `usage`.
+            unsafe { usage.assume_init() };
+        let micros = |time: libc::timeval| {
+            u64::try_from(time.tv_sec)
+                .ok()?
+                .checked_mul(1_000_000)?
+                .checked_add(u64::try_from(time.tv_usec).ok()?)
+        };
+        Some(std::time::Duration::from_micros(
+            micros(usage.ru_utime)?.checked_add(micros(usage.ru_stime)?)?,
+        ))
+    }
+
     /// Thread names from `/proc/self/task/*/comm`; a set `cancel` reports no thread list.
     // Ordering: `cancel` is loaded Relaxed; it is a standalone stop request that publishes no other memory.
     pub(super) fn threads(cancel: &AtomicBool) -> ThreadSummary {
@@ -1078,6 +1151,11 @@ mod platform {
 
     /// No uptime query on this platform.
     pub(super) fn uptime_secs() -> Option<u64> {
+        None
+    }
+
+    /// No CPU-time query on this platform.
+    pub(super) fn cpu_time() -> Option<std::time::Duration> {
         None
     }
 

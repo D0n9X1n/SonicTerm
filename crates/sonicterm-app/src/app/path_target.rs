@@ -487,6 +487,8 @@ fn key_preserves_selection(
 struct PathProbeQueue {
     order: VecDeque<WindowId>,
     pending: HashMap<WindowId, PathProbeRequest>,
+    /// `pending.len()`, published after every change so the status line reads it without the lock.
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl PathProbeQueue {
@@ -496,6 +498,13 @@ impl PathProbeQueue {
             // A replacement keeps the window's turn; only a newly waiting window joins the back.
             self.order.push_back(window_id);
         }
+        self.publish_waiting();
+    }
+
+    /// Publish how many requests wait, for `path_check`.
+    // Ordering: waiting is stored Relaxed; the reader needs a recent count, not a happens-before.
+    fn publish_waiting(&self) {
+        self.waiting.store(self.pending.len(), std::sync::atomic::Ordering::Relaxed);
     }
 
     fn take_next(&mut self) -> Option<PathProbeRequest> {
@@ -503,6 +512,7 @@ impl PathProbeQueue {
             if let Some(request) = self.pending.remove(&window_id) {
                 // When: `pending` holds `window_id`'s newest request, serve it before
                 // any later-queued window.
+                self.publish_waiting();
                 return Some(request);
             }
         }
@@ -511,7 +521,9 @@ impl PathProbeQueue {
 
     fn cancel_window(&mut self, window_id: WindowId) -> bool {
         self.order.retain(|queued| *queued != window_id);
-        self.pending.remove(&window_id).is_some()
+        let removed = self.pending.remove(&window_id).is_some();
+        self.publish_waiting();
+        removed
     }
 }
 
@@ -525,20 +537,35 @@ impl PathProbeQueue {
 pub(super) struct PathProbeMailbox {
     queue: Arc<Mutex<PathProbeQueue>>,
     wake: Sender<()>,
+    /// The queue's published waiting count.
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl PathProbeMailbox {
     pub(super) fn new() -> (Self, Receiver<()>) {
         let (wake, receiver) = crossbeam_channel::bounded(1);
-        (Self { queue: Arc::default(), wake }, receiver)
+        let queue = PathProbeQueue::default();
+        let waiting = Arc::clone(&queue.waiting);
+        (Self { queue: Arc::new(Mutex::new(queue)), wake, waiting }, receiver)
+    }
+
+    /// Requests waiting for the worker, without taking the queue lock.
+    // Ordering: waiting is loaded Relaxed, pairing with publish_waiting's Relaxed store.
+    pub(super) fn waiting(&self) -> usize {
+        self.waiting.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Queue `request` behind other windows' waiting probes, replacing only its own window's.
     pub(super) fn submit(&self, request: PathProbeRequest) -> Result<(), TrySendError<()>> {
+        let window_id = request.key.window_id;
         lock_probe_queue(&self.queue).submit(request);
         match self.wake.try_send(()) {
             Ok(()) | Err(TrySendError::Full(())) => Ok(()),
-            Err(error @ TrySendError::Disconnected(())) => Err(error),
+            Err(error @ TrySendError::Disconnected(())) => {
+                // A stopped worker never takes the request, so it must not count as waiting.
+                lock_probe_queue(&self.queue).cancel_window(window_id);
+                Err(error)
+            }
         }
     }
 
@@ -576,10 +603,15 @@ fn run_probe_worker(
     queue: &Mutex<PathProbeQueue>,
     mut classify: impl FnMut(&Path) -> PathOpenDecision,
     mut deliver: impl FnMut(PathProbeResult) -> bool,
+    busy: Option<&super::jobs::BusySlot>,
 ) {
     while wake.recv().is_ok() {
         while let Some(request) = take_next_probe(queue) {
-            let outcome = probe_candidates(&request.key.candidates, &mut classify);
+            let outcome = {
+                // Execution only, never queue wait, counts toward `path_check`'s age.
+                let _busy = busy.map(super::jobs::BusySlot::enter);
+                probe_candidates(&request.key.candidates, &mut classify)
+            };
             let result = PathProbeResult {
                 failure: outcome.as_ref().err().copied(),
                 selection: outcome.ok(),
@@ -772,6 +804,8 @@ fn open_request_still_selected(
 pub(crate) struct PathWorkers {
     probe: PathProbeMailbox,
     open: Sender<PathOpenRequest>,
+    /// Each worker's busy slot, stamped around its blocking call.
+    busy: Arc<super::jobs::PathBusy>,
 }
 
 impl PathWorkers {
@@ -780,17 +814,26 @@ impl PathWorkers {
         proxy: winit::event_loop::EventLoopProxy<super::UserEvent>,
     ) -> io::Result<Self> {
         let (probe, wake) = PathProbeMailbox::new();
+        let busy = Arc::new(super::jobs::PathBusy::new());
+        let (probe_busy, open_busy) = (Arc::clone(&busy), Arc::clone(&busy));
         // The worker owns no wake sender, so dropping the App's mailbox ends it.
         let queue = Arc::clone(&probe.queue);
         let probe_proxy = proxy.clone();
         std::thread::Builder::new()
             .name("sonicterm-path-probe".into())
             .spawn(move || {
-                run_probe_worker(&wake, &queue, classify_local_target, |result| {
+                let deliver = |result: PathProbeResult| {
                     probe_proxy
                         .send_event(super::UserEvent::PathProbeFinished(Box::new(result)))
                         .is_ok()
-                });
+                };
+                run_probe_worker(
+                    &wake,
+                    &queue,
+                    classify_local_target,
+                    deliver,
+                    Some(&probe_busy.probe),
+                );
             })
             .map_err(|error| io::Error::other(format!("spawn path probe worker: {error}")))?;
 
@@ -799,6 +842,8 @@ impl PathWorkers {
             .name("sonicterm-path-open".into())
             .spawn(move || {
                 while let Ok(request) = open_rx.recv() {
+                    // The re-probe and the native open or reveal are this request's execution.
+                    let _busy = open_busy.open.enter();
                     let result = if open_request_still_selected(&request, classify_local_target) {
                         open_path(&request.path, request.expected_decision)
                     } else {
@@ -822,7 +867,17 @@ impl PathWorkers {
             })
             .map_err(|error| io::Error::other(format!("spawn path open worker: {error}")))?;
 
-        Ok(Self { probe, open })
+        Ok(Self { probe, open, busy })
+    }
+
+    /// Path checks waiting for a worker: queued probes plus a queued open.
+    pub(super) fn waiting(&self) -> usize {
+        self.probe.waiting() + self.open.len()
+    }
+
+    /// The workers' busy slots, which the status line's `path_check` reads.
+    pub(super) fn busy(&self) -> &super::jobs::PathBusy {
+        &self.busy
     }
 
     pub(super) fn probe(&self, request: PathProbeRequest) -> io::Result<()> {
@@ -3688,10 +3743,16 @@ impl App {
 
         if let Some(request) = probe_request {
             self.note_hover(|hover| hover.probes_submitted += 1);
-            if let Some(workers) = &self.path_workers {
-                if let Err(error) = workers.probe(request) {
-                    tracing::warn!(%error, "path openability probe unavailable");
-                }
+            let submitted = self.path_workers.as_ref().is_some_and(|workers| {
+                workers
+                    .probe(request)
+                    .inspect_err(|error| {
+                        tracing::warn!(%error, "path openability probe unavailable");
+                    })
+                    .is_ok()
+            });
+            if submitted {
+                self.note_path_submit();
             }
         }
         if let Some(window) = self.windows.get(&window_id) {
@@ -3867,7 +3928,10 @@ impl App {
                     selection.decision,
                     contenders,
                 ) {
-                    Ok(true) => true,
+                    Ok(true) => {
+                        self.note_path_submit();
+                        true
+                    }
                     Ok(false) => {
                         tracing::warn!("path open queue full; request dropped");
                         self.report_failed_target(

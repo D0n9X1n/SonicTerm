@@ -4071,6 +4071,7 @@ impl HeldProbeWorker {
                     }
                 },
                 |result| results_tx.send(result).is_ok(),
+                None,
             );
         });
         Self { mailbox, started, release, results }
@@ -4132,7 +4133,11 @@ fn hover_probe_key(app: &mut App, window: WindowId, key: &PathProbeKey) {
 /// Route an App's probe handle to `worker`; these tests never dispatch an open.
 fn install_held_worker(app: &mut App, worker: &HeldProbeWorker) {
     let (open, _) = crossbeam_channel::bounded(1);
-    app.path_workers = Some(PathWorkers { probe: worker.mailbox.clone(), open });
+    app.path_workers = Some(PathWorkers {
+        probe: worker.mailbox.clone(),
+        open,
+        busy: Arc::new(crate::app::jobs::PathBusy::new()),
+    });
 }
 
 /// A newer request from another window never displaces a waiting one;
@@ -4326,12 +4331,17 @@ fn quiet_hover_keeps_first_window_feedback_while_a_second_window_streams() {
                 classify_local_target(path)
             },
             |result| results_tx.send(result).is_ok(),
+            None,
         );
         let _ = worker_stopped_tx.send(());
     });
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let (open, _) = crossbeam_channel::bounded(1);
-    app.path_workers = Some(PathWorkers { probe: mailbox, open });
+    app.path_workers = Some(PathWorkers {
+        probe: mailbox,
+        open,
+        busy: Arc::new(crate::app::jobs::PathBusy::new()),
+    });
     let quiet = app.__test_seed_child_window(&["quiet"]);
     let peer = app.__test_seed_child_window(&["peer"]);
     app.frontmost_window = Some(quiet);
@@ -4400,7 +4410,11 @@ fn only_a_validated_current_probe_authorizes_activation() {
     let (mailbox, _wake) = PathProbeMailbox::new();
     let (open, opens) = crossbeam_channel::bounded(1);
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    app.path_workers = Some(PathWorkers { probe: mailbox.clone(), open });
+    app.path_workers = Some(PathWorkers {
+        probe: mailbox.clone(),
+        open,
+        busy: Arc::new(crate::app::jobs::PathBusy::new()),
+    });
     let window = app.__test_seed_child_window(&["activation"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
     let output = format!("\x1b]7;file://{}\x1b\\./notes.txt", root.display());
@@ -4469,7 +4483,11 @@ fn clicks_accept_a_finished_check_only_for_their_own_key() {
         let (mailbox, _wake) = PathProbeMailbox::new();
         let (open, opens) = crossbeam_channel::bounded(1);
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-        app.path_workers = Some(PathWorkers { probe: mailbox.clone(), open });
+        app.path_workers = Some(PathWorkers {
+            probe: mailbox.clone(),
+            open,
+            busy: Arc::new(crate::app::jobs::PathBusy::new()),
+        });
         let window = app.__test_seed_child_window(&["waiting"]);
         let pane = app.__test_child_pane_ids(window).unwrap()[0];
         app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(40, 3);
@@ -5513,16 +5531,34 @@ fn a_bottom_edge_target_of_a_scrolled_back_view_is_refused_without_reading_below
 
 /// An App that counts hover work, with an injected probe mailbox the test drains itself, and one
 /// child window whose pane is `cols` × `rows` cells.
-fn counted_hover_app(cols: u16, rows: u16) -> (App, WindowId, u64, PathProbeMailbox) {
+/// The injected probe mailbox and its wake receiver, kept alive so submits reach a live worker
+/// and stay queued for the test to count.
+struct HoverMailbox {
+    mailbox: PathProbeMailbox,
+    _wake: Receiver<()>,
+}
+
+impl HoverMailbox {
+    /// The next waiting request, as the worker would take it.
+    fn take_next(&self) -> Option<PathProbeRequest> {
+        self.mailbox.take_next()
+    }
+}
+
+fn counted_hover_app(cols: u16, rows: u16) -> (App, WindowId, u64, HoverMailbox) {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.force_frame_counters_on().expect("no window exists yet");
-    let (mailbox, _wake) = PathProbeMailbox::new();
+    let (mailbox, wake) = PathProbeMailbox::new();
     let (open, _) = crossbeam_channel::bounded(1);
-    app.path_workers = Some(PathWorkers { probe: mailbox.clone(), open });
+    app.path_workers = Some(PathWorkers {
+        probe: mailbox.clone(),
+        open,
+        busy: Arc::new(crate::app::jobs::PathBusy::new()),
+    });
     let window = app.__test_seed_child_window(&["hover cache"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
     app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
-    (app, window, pane, mailbox)
+    (app, window, pane, HoverMailbox { mailbox, _wake: wake })
 }
 
 /// One hover lookup of `pane`'s cell (`row`, `col`) as a frame runs it from its held parser, at
@@ -5555,8 +5591,8 @@ fn hover_counts(app: &App) -> (u64, u64, u64) {
 }
 
 /// Probe requests hover submitted since the last drain.
-fn drained_probes(mailbox: &PathProbeMailbox) -> usize {
-    std::iter::from_fn(|| mailbox.take_next()).count()
+fn drained_probes(hover: &HoverMailbox) -> usize {
+    std::iter::from_fn(|| hover.mailbox.take_next()).count()
 }
 
 /// Hold or release the platform's open modifier in `window`.
@@ -7351,4 +7387,28 @@ fn osc8_label_is_captured_with_its_completeness() {
         check,
         sonicterm_ui::status_line::LinkLabelCheck::Mismatch { label_host: "bank.example".into() }
     );
+}
+
+/// The waiting count follows the queue: one per waiting window, unchanged by a replacement, and
+/// lowered by a take or a cancel; a submit to a stopped worker leaves nothing counted.
+#[test]
+fn probe_mailbox_publishes_how_many_checks_wait() {
+    let (mailbox, wakes) = PathProbeMailbox::new();
+    let mut states: Vec<PathProbeState> = (0..3).map(|_| PathProbeState::default()).collect();
+    for (window, state) in states.iter_mut().enumerate() {
+        let key = window_probe_key(window as u64 + 1, &format!("/work/{window}"));
+        mailbox.submit(state.request(key).unwrap()).unwrap();
+    }
+    assert_eq!(mailbox.waiting(), 3);
+    states[0].invalidate();
+    mailbox.submit(states[0].request(window_probe_key(1, "/work/again")).unwrap()).unwrap();
+    assert_eq!(mailbox.waiting(), 3, "a replacement keeps the count");
+    assert!(mailbox.take_next().is_some());
+    assert_eq!(mailbox.waiting(), 2);
+    assert!(mailbox.cancel_window(WindowId::from(2_u64)));
+    assert_eq!(mailbox.waiting(), 1);
+    drop(wakes);
+    let mut stopped = PathProbeState::default();
+    assert!(mailbox.submit(stopped.request(window_probe_key(9, "/work/late")).unwrap()).is_err());
+    assert_eq!(mailbox.waiting(), 1, "a submit the stopped worker never takes is not counted");
 }

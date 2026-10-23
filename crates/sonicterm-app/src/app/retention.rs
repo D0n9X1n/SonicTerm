@@ -710,6 +710,8 @@ impl super::App {
                     continue;
                 };
                 charge_pane_retention(&self.governor, owner, &mut pane.charges, &retention);
+                // `tab_mem` reads this charge, never measures; it judges freshness by this stamp.
+                pane.charged_at = Some(Instant::now());
             }
         }
     }
