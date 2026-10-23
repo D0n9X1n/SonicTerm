@@ -16,6 +16,8 @@ use sonicterm_cfg::theme::Theme;
 
 #[cfg(any(target_os = "linux", all(unix, test)))]
 mod default_handlers;
+#[cfg(target_os = "linux")]
+mod launcher_progress;
 
 #[cfg(any(target_os = "linux", test))]
 const PACKAGED_FONT_FILES: &[&str] = &[
@@ -328,9 +330,13 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
             Box::new(|name| Theme::load_name_or_path(name, &asset_dir()));
         let keymap_loader: sonicterm_app::KeymapLoader = Box::new(Keymap::load_strict);
         // Only the palette command reaches this backend; installing it changes nothing.
-        shell = shell.with_asset_loaders(theme_loader, keymap_loader).with_default_handlers(
-            Box::new(default_handlers::LinuxDefaultHandlers::from_process_env()),
-        );
+        shell = shell
+            .with_asset_loaders(theme_loader, keymap_loader)
+            .with_default_handlers(Box::new(
+                default_handlers::LinuxDefaultHandlers::from_process_env(),
+            ))
+            // The launcher entry is signalled only after a program reports `OSC 9;4` progress.
+            .with_taskbar_progress(Box::new(launcher_progress::LauncherEntry::default()));
     }
     if let Some(recorder) = breadcrumb_recorder.clone() {
         // When: breadcrumb startup succeeded, let the app report runtime state without filesystem IO.

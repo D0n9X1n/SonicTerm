@@ -9947,6 +9947,34 @@ class HarnessCfgDetectionTests(unittest.TestCase):
                     self.assertEqual(decided, expected)
 
 
+class TaskbarProgressCfgTests(unittest.TestCase):
+    """S12/status-line's taskbar checks need the App's counting surface on both sides."""
+
+    def test_a_base_without_the_counting_surface_turns_the_taskbar_cfg_off_for_both_sides(self):
+        # The head defines both methods; a base that predates them (as 08874f7a) or has only the install
+        # leaves the cfg off for both, so the head's harness never names an App method the base lacks.
+        table = REAL_GATE.HARNESS_API_CFGS
+        entry = next(entry for entry in table if entry.name == "perf_taskbar_progress_api")
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+
+            def tree(name, methods):
+                built = root / name
+                source = built / "crates/sonicterm-app/src/program_state.rs"
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("".join(f"impl App {{\n    #[doc(hidden)]\n    pub fn {method}(&mut self) {{}}\n}}\n"
+                                          for method in methods), encoding="utf-8")
+                return built
+            every = [method for _crate, _owner, method in entry.methods]
+            head = tree("head", every)
+            cases = {"both": (tree("both", every), True), "base predates both": (tree("old", []), False),
+                     "base has only the install": (tree("install", every[:1]), False)}
+            for name, (base, expected) in cases.items():
+                with self.subTest(name):
+                    decided, _ = perf.harness_cfg_decision({"head": head, "base": base}, table)
+                    self.assertEqual("perf_taskbar_progress_api" in decided, expected)
+
+
 class AtlasRetryAvailabilityTests(CompareHarness, unittest.TestCase):
     """S1/atlas-retry is a declared diagnostic: unavailable on both sides when its harness cfg is off."""
 

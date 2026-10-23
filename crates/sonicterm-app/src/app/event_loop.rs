@@ -306,6 +306,14 @@ impl App {
                 deadline,
             });
         }
+        if let Some(deadline) = self.sync_taskbar_progress(now) {
+            // A progress value waits for its surface's trailing edge; wake to deliver it.
+            due.push(super::redraw::DueWork {
+                owner: None,
+                cause: super::redraw::DueCause::TaskbarProgress,
+                deadline,
+            });
+        }
         if let Some(deadline) = self.memory_sample_deadline() {
             due.push(super::redraw::DueWork {
                 owner: None,
@@ -560,6 +568,9 @@ impl App {
             }
             UserEvent::ClipboardAttempts { pane_id, attempts } => {
                 self.note_clip_attempts(pane_id, attempts, Instant::now());
+            }
+            event @ (UserEvent::ProgramProgress { .. } | UserEvent::ProgramNotify { .. }) => {
+                self.handle_program_event(event);
             }
             UserEvent::PathProbeFinished(result) => {
                 self.handle_path_probe_finished(*result);

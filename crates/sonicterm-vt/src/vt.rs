@@ -21,8 +21,10 @@ use sonicterm_grid::{
 use sonicterm_types::ResourceAmount;
 use vte::{Params, Perform};
 
+mod program;
 mod staging;
 
+pub use program::{ProgressReport, ProgressState, MAX_NOTIFY_BYTES};
 use staging::StagingReservation;
 pub use staging::{
     CaptureStagingPool, GUARANTEED_CONCURRENT_CAPTURES, MAX_PROCESS_CAPTURE_STAGING_BYTES,
@@ -247,6 +249,38 @@ pub const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const HYPERLINK_RECLAIM_BACKOFF_LINKS: u32 = 256;
 const MAX_RAW_OSC4_BYTES: usize = 4096;
 const MAX_SEMANTIC_OSC_BYTES: usize = 16 * 1024;
+
+/// Whether `code` is a program-state OSC (`9` or `777`) the raw capture owns.
+fn is_program_osc(code: u16) -> bool {
+    matches!(code, 9 | 777)
+}
+
+/// The program-state OSC number `prefix` names: digits then `;`, valued 9 or 777, leading zeros
+/// included. The probe holds at most its own few bytes, so this costs nothing per output byte.
+fn program_osc_number(prefix: &[u8]) -> Option<u16> {
+    let (digits, b";") = prefix.split_at(prefix.len().checked_sub(1)?) else {
+        // When: prefix does not end in `;`, the OSC number is not complete yet.
+        return None;
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        // When: digits is empty or holds a non-digit, this is no OSC number.
+        return None;
+    }
+    let value = digits.iter().fold(0u32, |value, digit| {
+        value.saturating_mul(10).saturating_add(u32::from(digit - b'0'))
+    });
+    is_program_osc(u16::try_from(value).ok()?).then_some(value as u16)
+}
+
+/// The raw capture's whole-payload bound for `code`; a longer payload is refused whole.
+fn raw_osc_cap(code: u16) -> usize {
+    if is_program_osc(code) {
+        MAX_NOTIFY_BYTES
+    } else {
+        // When: code is a title, CWD or hyperlink, the semantic bound applies.
+        MAX_SEMANTIC_OSC_BYTES
+    }
+}
 const MAX_ITERM2_METADATA_BYTES: usize = 1024;
 const ITERM2_OSC_PREFIX: &[u8; 10] = b"1337;File=";
 const OSC4_PREFIX: &[u8; 2] = b"4;";
@@ -288,6 +322,18 @@ pub enum VtEvent {
     Media(MediaEvent),
     /// DEC private mode ?25 — host should show/hide the cursor.
     CursorVisibility(bool),
+    /// OSC 9;4 — show this progress on the platform surfaces, or clear it on `None`.
+    Progress(Option<ProgressReport>),
+    /// OSC 9 text or OSC 777 `notify`, whole and unsanitized; a sequence past
+    /// [`MAX_NOTIFY_BYTES`] is refused, never cut.
+    Notify {
+        /// The OSC 777 title; OSC 9 has none.
+        title: Option<String>,
+        /// The text.
+        body: String,
+    },
+    /// RIS reset the terminal, so program-reported state (progress) is cleared.
+    ProgramStateReset,
 }
 
 /// One in-flight media capture and its claim on a staging pool.
@@ -555,8 +601,9 @@ pub struct Parser {
 enum RawOsc {
     /// Checking a bounded OSC prefix before choosing vte or media ownership.
     Probe { content: [u8; ITERM2_OSC_PREFIX.len()], content_len: u8 },
-    /// Complete title, CWD, or hyperlink payload, independent of vte's parameter count.
-    Semantic { code: u8, content: Vec<u8>, pending_esc: bool },
+    /// Complete title, CWD, hyperlink or program-state (`9`, `777`) payload, independent of vte's
+    /// parameter count.
+    Semantic { code: u16, content: Vec<u8>, pending_esc: bool },
     /// Capturing bytes after `OSC 4 ;` until BEL or ST.
     Palette { content: Vec<u8> },
     /// Streaming an iTerm2 file payload through the parser's staging reservation.
@@ -1116,15 +1163,29 @@ impl Parser {
                     self.inner = vte::Parser::new();
                     self.pending_esc = false;
                     self.raw_osc = Some(RawOsc::Semantic {
-                        code: prefix[0] - b'0',
+                        code: u16::from(prefix[0] - b'0'),
                         content: Vec::new(),
                         pending_esc: false,
                     });
                     return true;
                 }
+                if let Some(code) = program_osc_number(prefix) {
+                    // When: program_osc_number reads 9 or 777, zero-padded or not, own the program
+                    // payload so no part is lost to vte's parameter cap.
+                    self.inner = vte::Parser::new();
+                    self.pending_esc = false;
+                    self.raw_osc =
+                        Some(RawOsc::Semantic { code, content: Vec::new(), pending_esc: false });
+                    return true;
+                }
+                // A digit run with room left in the probe may still become `9;` or `777;`.
+                let digits_pending = prefix.iter().all(u8::is_ascii_digit) && index < content.len();
                 if !ITERM2_OSC_PREFIX.starts_with(prefix)
                     && !OSC4_PREFIX.starts_with(prefix)
-                    && ![b"0;", b"2;", b"7;", b"8;"].iter().any(|value| value.starts_with(prefix))
+                    && ![b"0;".as_slice(), b"2;", b"7;", b"8;"]
+                        .iter()
+                        .any(|value| value.starts_with(prefix))
+                    && !digits_pending
                 {
                     // When: prefix matches no owned OSC family, return ownership to vte.
                     return false;
@@ -1178,8 +1239,10 @@ impl Parser {
                 }
                 if byte == 0x1b {
                     pending_esc = true;
-                } else if content.len() == MAX_SEMANTIC_OSC_BYTES {
-                    // When: content reaches MAX_SEMANTIC_OSC_BYTES, refuse the whole update and swallow its remaining payload.
+                } else if byte < 0x20 && is_program_osc(code) {
+                    // When: byte is a C0 control inside a program payload, drop it as vte does in an OSC string.
+                } else if content.len() == raw_osc_cap(code) {
+                    // When: content reaches raw_osc_cap, refuse the whole update and swallow its remaining payload.
                     self.performer.invalidate_semantic_osc(code);
                     self.discarding_oversized_escape = true;
                     self.escape_family = EscapeFamily::Osc;
@@ -1634,6 +1697,19 @@ struct Performer {
 const KITTY_KBD_STACK_MAX: usize = 32;
 
 impl Performer {
+    /// Surface one parsed program-state OSC as a host event.
+    fn push_program_osc(&mut self, program: program::ProgramOsc) {
+        match program {
+            program::ProgramOsc::Progress(report) => self.events.push(VtEvent::Progress(report)),
+            program::ProgramOsc::Notify { title, body } => {
+                self.events.push(VtEvent::Notify { title, body });
+            }
+            program::ProgramOsc::Ignored => {
+                // When: program is ProgramOsc::Ignored, nothing changes.
+            }
+        }
+    }
+
     fn new(
         grid: Grid,
         reply_tx: Option<Sender<Vec<u8>>>,
@@ -1870,7 +1946,7 @@ impl Performer {
         self.last_printed_char = Some(character);
     }
 
-    fn invalidate_semantic_osc(&mut self, code: u8) {
+    fn invalidate_semantic_osc(&mut self, code: u16) {
         // When: code selects CWD or hyperlink state, revoke it; other codes preserve the prior display title.
         match code {
             7 => {
@@ -1885,7 +1961,20 @@ impl Performer {
         }
     }
 
-    fn handle_semantic_osc(&mut self, code: u8, content: &[u8]) {
+    fn handle_semantic_osc(&mut self, code: u16, content: &[u8]) {
+        if is_program_osc(code) {
+            // When: code is 9 or 777, the program grammar reads every `;`-separated part; its text
+            // is sanitized by the host, never rejected here.
+            let params: Vec<&[u8]> = content.split(|byte| *byte == b';').collect();
+            let program = if code == 9 {
+                program::parse_osc9(&params)
+            } else {
+                // When: code is 777, the payload is an OSC 777 subcommand.
+                program::parse_osc777(&params)
+            };
+            self.push_program_osc(program);
+            return;
+        }
         let Ok(text) = std::str::from_utf8(content) else {
             // When: content is invalid UTF-8, reject the update rather than replacing bytes in a path or URI.
             self.invalidate_semantic_osc(code);
@@ -2027,6 +2116,8 @@ impl Performer {
     }
 
     fn reset_terminal(&mut self) {
+        // A reset program leaves no progress behind; the host clears it.
+        self.events.push(VtEvent::ProgramStateReset);
         // RIS cancels prior held input even when Win32 was already inactive.
         self.advance_keyboard_protocol_epoch();
         self.win32_input = false;
@@ -3087,6 +3178,10 @@ impl Perform for Performer {
                 );
                 buf.extend_from_slice(terminator);
                 self.reply(&buf);
+            }
+            Some(9) | Some(777) => {
+                // Raw capture owns every OSC 9 and 777 it recognizes; one that reaches vte has a
+                // spelling it missed (a digit run past the probe, a C1 introducer) and is dropped.
             }
             Some(52) => {
                 let sel =

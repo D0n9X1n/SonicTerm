@@ -325,3 +325,7 @@ status-spoken-size = Size
 status-reason-no-directory = no shell-reported directory
 status-reason-alt-screen = not resolved on the alternate screen
 status-value-label-not-checked = label not checked
+
+# Program notifications (OSC 9 / OSC 777): the tab that stands in for a missing title, and the coalesced count.
+program-notify-tab = ⟨tab { $tab }⟩
+program-notify-more = +{ $count } more

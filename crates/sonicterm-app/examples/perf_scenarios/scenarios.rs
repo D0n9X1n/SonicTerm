@@ -314,6 +314,34 @@ pub(crate) struct CommitStep {
     pub(crate) text: CommitText,
 }
 
+/// S12/status-line's `program` on a POSIX role: set `OSC 9;4` progress to 40, then a burst of 50
+/// and 70 printed 100 ms apart, inside the 250 ms taskbar interval, so 70 reaches the surface on the
+/// interval's trailing edge; then an OSC 9 and an OSC 777 notification in one write, then the clear.
+/// The set, the burst, the notifications and the clear are 300 ms or more apart.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const PROGRAM_POSIX_STEPS: &[CommitStep] = &[
+    CommitStep { after_ms: 0, text: CommitText::Literal("\u{15}printf '\\033]9;4;1;40\\007'\r") },
+    CommitStep {
+        after_ms: 400,
+        text: CommitText::Literal(
+            "\u{15}printf '\\033]9;4;1;50\\007'; sleep 0.1; printf '\\033]9;4;1;70\\007'\r",
+        ),
+    },
+    CommitStep {
+        after_ms: 800,
+        text: CommitText::Literal(
+            "\u{15}printf '\\033]9;build done\\007\\033]777;notify;CI;green\\007'\r",
+        ),
+    },
+    CommitStep { after_ms: 1100, text: CommitText::Literal("\u{15}printf '\\033]9;4;0\\007'\r") },
+];
+
+/// S12/status-line's `program` on a Windows role, whose `cmd` cannot print ESC: Enter only, so the
+/// phase still runs and holds the strip to its contract with no program output.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const PROGRAM_WINDOWS_STEPS: &[CommitStep] =
+    &[CommitStep { after_ms: 0, text: CommitText::Literal("\r") }];
+
 /// S1/status-line's `glyphs` on a POSIX role: clear the line and print U+0378, which no font
 /// covers, with `printf`, so the line editor's locale never decides what is drawn.
 #[cfg(any(target_os = "macos", windows, test))]
@@ -480,6 +508,159 @@ pub(crate) fn status_line_progress(
         )),
         _ => Ok(()),
     }
+}
+
+/// Program-reported change counts over one phase, from the App's counters.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProgramDeltas {
+    /// `OSC 9;4` progress changes the App received.
+    pub(crate) progress: u64,
+    /// Notification batches the App received.
+    pub(crate) notifies: u64,
+    /// Redraws program toasts requested.
+    pub(crate) toast_redraws: u64,
+    /// Values the taskbar, Dock or launcher surface received.
+    pub(crate) deliveries: u64,
+    /// Frames the windows actually presented.
+    pub(crate) presented: u64,
+}
+
+/// One value the counting progress surface received during the phase.
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Delivered {
+    /// Milliseconds after the phase's first delivery.
+    pub(crate) at_ms: u64,
+    /// The percent shown, or `None` for a clear.
+    pub(crate) percent: Option<u8>,
+}
+
+/// Frames one committed step may present beyond the counted work: the typed line's echo, the
+/// command's output (the burst prints twice, 100 ms apart) and the next prompt, each of which can
+/// land in its own frame. Cursor blink is off in a status-line run, so it adds none.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const PRESENTS_PER_STEP: u64 = 6;
+
+/// The taskbar interval as the harness measures it: both delivery times are read after their
+/// dispatch began, so a held value can land a few ms short of the App's 250 ms.
+#[cfg(any(target_os = "macos", windows, test))]
+const DELIVERY_INTERVAL_MIN_MS: u64 = 240;
+
+/// Whether `program` synced once per change and redrew nothing else, or why not: no strip redraw
+/// beyond a sample, at most one toast redraw per notification batch, at most one surface delivery
+/// per progress change. `program` is `None` on a side whose App predates the program counters.
+///
+/// A POSIX role (`posix`) prints the steps, so it must also show every batch with one redraw that
+/// presented. `delivered` is the counting surface's record, `None` when the comparison's harness
+/// cannot read it (`perf_taskbar_progress_api` off): with it, the surface must receive 40, then
+/// the burst's last value 70 at least one interval after the value before it, then the clear last,
+/// with no value repeated, reordered or stale, and no two deliveries closer than the interval.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) fn program_phase_progress(
+    strip: StatusLineDeltas,
+    program: Option<ProgramDeltas>,
+    delivered: Option<&[Delivered]>,
+    posix: bool,
+    steps: u64,
+) -> Result<(), String> {
+    if strip.redraws > strip.samples + 1 {
+        return Err(format!(
+            "program: the strip redrew {} times for {} samples",
+            strip.redraws, strip.samples
+        ));
+    }
+    let Some(program) = program else {
+        // When: program is None, this side's App predates the program counters; nothing to check.
+        return Ok(());
+    };
+    if program.toast_redraws > program.notifies {
+        return Err(format!(
+            "program: {} toast redraws for {} notification batches",
+            program.toast_redraws, program.notifies
+        ));
+    }
+    if program.deliveries > program.progress {
+        return Err(format!(
+            "program: {} surface deliveries for {} progress changes",
+            program.deliveries, program.progress
+        ));
+    }
+    // Every present needs a cause: a strip redraw or sample, a toast redraw, or a committed
+    // step's echo, output and prompt. This holds on Windows too, where GDI presents count alike.
+    let present_bound = strip.redraws
+        + strip.samples
+        + program.toast_redraws
+        + steps.saturating_mul(PRESENTS_PER_STEP);
+    if program.presented > present_bound {
+        return Err(format!(
+            "program: {} frames presented, more than the {present_bound} its {} strip redraws, \
+             {} samples, {} toast redraws and {steps} steps explain",
+            program.presented, strip.redraws, strip.samples, program.toast_redraws
+        ));
+    }
+    if let Some(delivered) = delivered {
+        if delivered.len() as u64 != program.deliveries {
+            return Err(format!(
+                "program: the surface recorded {} values but {} deliveries were counted",
+                delivered.len(),
+                program.deliveries
+            ));
+        }
+    }
+    if !posix {
+        // When: posix is false, the role's `cmd` printed no program sequence to count.
+        return Ok(());
+    }
+    if program.notifies == 0 || program.toast_redraws != program.notifies {
+        return Err(format!(
+            "program: {} notification batches with {} toast redraws",
+            program.notifies, program.toast_redraws
+        ));
+    }
+    if program.presented < program.toast_redraws {
+        return Err(format!(
+            "program: {} toast redraws but only {} frames presented",
+            program.toast_redraws, program.presented
+        ));
+    }
+    // The set, 50 and 70 (one change when the burst shares a batch) and the clear.
+    if !(3..=4).contains(&program.progress) {
+        return Err(format!(
+            "program: {} progress changes, not the set, the burst and the clear",
+            program.progress
+        ));
+    }
+    let Some(delivered) = delivered else {
+        // When: delivered is None, the comparison cannot read the surface's record.
+        return Ok(());
+    };
+    delivered_sequence_problem(delivered).map_or(Ok(()), Err)
+}
+
+/// Why the counting surface's record breaks `program`'s delivery contract, if it does.
+#[cfg(any(target_os = "macos", windows, test))]
+fn delivered_sequence_problem(delivered: &[Delivered]) -> Option<String> {
+    let values: Vec<Option<u8>> = delivered.iter().map(|delivery| delivery.percent).collect();
+    let allowed = [
+        vec![Some(40), Some(50), Some(70), None],
+        // The PTY can hand 50 and 70 over in one read, so 50 never reaches the App.
+        vec![Some(40), Some(70), None],
+    ];
+    if !allowed.contains(&values) {
+        return Some(format!(
+            "program: the surface received {values:?}, not 40, the burst's 70, then the clear"
+        ));
+    }
+    if let Some(pair) =
+        delivered.windows(2).find(|pair| pair[1].at_ms < pair[0].at_ms + DELIVERY_INTERVAL_MIN_MS)
+    {
+        return Some(format!(
+            "program: deliveries at {} ms and {} ms are closer than the 250 ms interval",
+            pair[0].at_ms, pair[1].at_ms
+        ));
+    }
+    None
 }
 
 /// The checks that hold only where the role shell is POSIX: there the 256 KiB paste in `held` blocks
@@ -1091,10 +1272,8 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 end,
             ],
         ),
-        ("S12", _) => (
-            vec![Workload::PrintThenShell(Fixture::HistoryScreen); 3],
-            vec![SetupAction::SplitRight, SetupAction::SplitDown],
-            vec![
+        ("S12", _) => {
+            let mut steps = vec![
                 print(vec![0, 1, 2]),
                 Step::Checkpoint("settled"),
                 // `--short` cannot reach the 30 s scheduler, so it asks for the trim once covered.
@@ -1115,9 +1294,26 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                     vec![Act::Uncover],
                     PhaseEnd::Hold(hold(10_000)),
                 )),
-                end,
-            ],
-        ),
+            ];
+            if variant == "status-line" {
+                // The window is visible again, so program notifications and progress reach the
+                // toast and the taskbar; the default plan stays as it was.
+                let program_steps =
+                    if host == Host::Windows { PROGRAM_WINDOWS_STEPS } else { PROGRAM_POSIX_STEPS };
+                steps.push(Step::Phase(driven(
+                    "program",
+                    PhaseKind::Sustained,
+                    Driver::Commit { steps: program_steps, settle_ms: 700 },
+                    PhaseEnd::DriverDone,
+                )));
+            }
+            steps.push(end);
+            (
+                vec![Workload::PrintThenShell(Fixture::HistoryScreen); 3],
+                vec![SetupAction::SplitRight, SetupAction::SplitDown],
+                steps,
+            )
+        }
         _ => return None,
     };
     Some(Plan {

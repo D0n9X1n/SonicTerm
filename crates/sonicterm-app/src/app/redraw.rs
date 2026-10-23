@@ -531,6 +531,8 @@ pub(super) enum DueCause {
     ImageAtlasRelease,
     /// A status line sample or pending path check is due; the sync requests any frame itself.
     StatusLine,
+    /// A taskbar, Dock or launcher progress value waits for its trailing edge; never a frame.
+    TaskbarProgress,
 }
 
 /// A headless window's stand-in for the renderer's interval release: its deadline and how often it ran.
@@ -1372,6 +1374,7 @@ impl App {
                 }
                 DueCause::Memory
                 | DueCause::StatusLine
+                | DueCause::TaskbarProgress
                 | DueCause::PointerMotion
                 | DueCause::GpuRecovery
                 | DueCause::Smoke => {

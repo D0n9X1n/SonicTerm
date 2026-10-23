@@ -4,9 +4,10 @@ use sonicterm_grid::grid::{CellFlags, Color, Grid, UnderlineStyle};
 
 use super::{
     parse_osc7_cwd_snapshot, CaptureStagingPool, EscapeFamily, MediaCapture, MediaEvent,
-    MediaProtocol, MouseTracking, Osc7Cwd, Parser, PointerModes, SyncState, VtEvent,
-    GUARANTEED_CONCURRENT_CAPTURES, MAX_ESCAPE_SEQUENCE_BYTES, MAX_ITERM2_METADATA_BYTES,
-    MAX_MEDIA_PAYLOAD_BYTES, MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
+    MediaProtocol, MouseTracking, Osc7Cwd, Parser, PointerModes, ProgressReport, ProgressState,
+    SyncState, VtEvent, GUARANTEED_CONCURRENT_CAPTURES, MAX_ESCAPE_SEQUENCE_BYTES,
+    MAX_ITERM2_METADATA_BYTES, MAX_MEDIA_PAYLOAD_BYTES, MAX_NOTIFY_BYTES,
+    MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
 };
 
 // Media-capture tests stage in a private `CaptureStagingPool`, never the
@@ -3561,4 +3562,229 @@ fn other_private_mode_queries_stay_unanswered() {
         );
         assert_eq!(after, before, "{query:?} changed state");
     }
+}
+
+/// A program-state event as the tests compare it; `VtEvent` holds media and is not `PartialEq`.
+#[derive(Debug, PartialEq)]
+enum Seen {
+    Progress(Option<ProgressReport>),
+    Notify { title: Option<String>, body: String },
+    Reset,
+}
+
+/// Program-state events from `bytes`: progress, notifications and resets, in order.
+fn program_events(bytes: &[u8]) -> Vec<Seen> {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    parser
+        .advance(bytes)
+        .into_iter()
+        .filter_map(|event| match event {
+            VtEvent::Progress(report) => Some(Seen::Progress(report)),
+            VtEvent::Notify { title, body } => Some(Seen::Notify { title, body }),
+            VtEvent::ProgramStateReset => Some(Seen::Reset),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The progress report `9;4;…` yields, or `None` when the sequence is ignored.
+fn progress_of(params: &str) -> Option<Option<ProgressReport>> {
+    let events = program_events(format!("\x1b]9;4;{params}\x1b\\").as_bytes());
+    match events.as_slice() {
+        [Seen::Progress(report)] => Some(*report),
+        [] => None,
+        other => panic!("one sequence yielded {other:?}"),
+    }
+}
+
+#[test]
+fn osc9_progress_accepts_each_state_and_clamps_the_percent() {
+    // `9;4` maps state digits 0–4, clamps percents over 100, and reads a missing percent as 0.
+    let report = |state, percent| Some(Some(ProgressReport { state, percent }));
+    assert_eq!(progress_of("0"), Some(None), "0 clears");
+    assert_eq!(progress_of("1;50"), report(ProgressState::Normal, 50));
+    assert_eq!(progress_of("2;25"), report(ProgressState::Error, 25));
+    assert_eq!(progress_of("3"), report(ProgressState::Indeterminate, 0));
+    assert_eq!(progress_of("4;40"), report(ProgressState::Paused, 40));
+    assert_eq!(progress_of("1;150"), report(ProgressState::Normal, 100));
+    assert_eq!(progress_of("1"), report(ProgressState::Normal, 0));
+    assert_eq!(progress_of("1;56;extra"), report(ProgressState::Normal, 56), "extras are ignored");
+    // BEL terminates the same sequence as ST.
+    let bel = program_events(b"\x1b]9;4;1;7\x07");
+    assert_eq!(
+        bel,
+        vec![Seen::Progress(Some(ProgressReport { state: ProgressState::Normal, percent: 7 }))]
+    );
+}
+
+#[test]
+fn osc9_progress_ignores_every_malformed_form() {
+    // A malformed report leaves the state unchanged: fractions are rejected, never rounded.
+    for malformed in ["5", "12", "", "1;56.2", "1;-1", "1;+5", "1;1000", "1;"] {
+        assert_eq!(progress_of(malformed), None, "9;4;{malformed}");
+    }
+}
+
+#[test]
+fn conemu_subcommands_are_never_notifications() {
+    // `9;<1..=12>` is a ConEmu subcommand: only 4 is implemented, none falls through to text.
+    assert!(program_events(b"\x1b]9;1;100\x1b\\").is_empty());
+    assert!(program_events(b"\x1b]9;3;x\x1b\\").is_empty());
+    assert!(program_events(b"\x1b]9;12\x1b\\").is_empty());
+}
+
+#[test]
+fn plain_osc9_text_is_one_notification() {
+    // Any other first parameter is notification text, its parameters rejoined with `;`.
+    assert_eq!(
+        program_events(b"\x1b]9;hello\x1b\\"),
+        vec![Seen::Notify { title: None, body: "hello".to_owned() }]
+    );
+    assert_eq!(
+        program_events(b"\x1b]9;hello;world\x07"),
+        vec![Seen::Notify { title: None, body: "hello;world".to_owned() }]
+    );
+    assert_eq!(
+        program_events(b"\x1b]9;13 files\x07"),
+        vec![Seen::Notify { title: None, body: "13 files".to_owned() }],
+        "13 is outside the subcommand range"
+    );
+}
+
+#[test]
+fn osc777_accepts_only_notify_and_rejoins_the_body() {
+    // `777;notify;T;a;b` is title `T`, body `a;b`; other subcommands and empty ones are ignored.
+    assert_eq!(
+        program_events(b"\x1b]777;notify;T;a;b\x1b\\"),
+        vec![Seen::Notify { title: Some("T".to_owned()), body: "a;b".to_owned() }]
+    );
+    assert!(program_events(b"\x1b]777;other;x\x1b\\").is_empty());
+    assert!(program_events(b"\x1b]777;notify;;\x07").is_empty(), "empty title and body");
+    assert_eq!(
+        program_events(b"\x1b]777;notify;;body\x07"),
+        vec![Seen::Notify { title: None, body: "body".to_owned() }],
+        "an empty title is no title"
+    );
+}
+
+#[test]
+fn program_notifications_keep_every_part_past_the_parameter_cap() {
+    // vte keeps 16 parameters; an OSC 9 or OSC 777 body of 20 `;`-separated parts arrives whole.
+    let parts: Vec<String> = (0..20).map(|index| format!("p{index}")).collect();
+    let joined = parts.join(";");
+    assert_eq!(
+        program_events(format!("\x1b]777;notify;T;{joined}\x1b\\").as_bytes()),
+        vec![Seen::Notify { title: Some("T".to_owned()), body: joined.clone() }]
+    );
+    assert_eq!(
+        program_events(format!("\x1b]9;{joined}\x07").as_bytes()),
+        vec![Seen::Notify { title: None, body: joined }]
+    );
+}
+
+#[test]
+fn zero_padded_program_osc_numbers_are_captured_like_the_literal() {
+    // `OSC 0777` and `OSC 09` are 777 and 9: their payloads are captured raw past vte's
+    // 16-parameter cap, and the ConEmu subcommand rule after `09` still holds.
+    let parts: Vec<String> = (0..20).map(|index| format!("p{index}")).collect();
+    let joined = parts.join(";");
+    assert_eq!(
+        program_events(format!("\x1b]0777;notify;T;{joined}\x07").as_bytes()),
+        vec![Seen::Notify { title: Some("T".to_owned()), body: joined.clone() }]
+    );
+    assert_eq!(
+        program_events(format!("\x1b]09;{joined}\x1b\\").as_bytes()),
+        vec![Seen::Notify { title: None, body: joined }]
+    );
+    assert!(program_events(b"\x1b]09;001;100\x07").is_empty(), "a zero-padded subcommand");
+    assert_eq!(
+        program_events(b"\x1b]0009;4;1;50\x07"),
+        vec![Seen::Progress(Some(ProgressReport { state: ProgressState::Normal, percent: 50 }))]
+    );
+    // A title OSC with a zero-padded number keeps its own capture.
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let events = parser.advance(b"\x1b]02;padded\x07");
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, VtEvent::SetTitle(title) if title == "padded")));
+}
+
+#[test]
+fn program_osc_spellings_the_probe_misses_are_dropped_never_cut() {
+    // Raw capture is the only parser of OSC 9 and 777: a number spelled past its 9-digit probe
+    // falls to vte, which must emit nothing rather than a body cut at its 16-parameter cap.
+    let parts: Vec<String> = (0..20).map(|index| format!("p{index}")).collect();
+    let joined = parts.join(";");
+    let long_777 = format!("\x1b]0000000777;notify;T;{joined}\x07");
+    assert_eq!(program_events(long_777.as_bytes()), [], "a 10-digit 777");
+    assert_eq!(program_events(b"\x1b]0000000009;hello\x07"), [], "a 10-digit 9");
+    assert_eq!(program_events(b"\x1b]0000000009;4;1;50\x1b\\"), [], "no progress either");
+    // The C1 OSC introducer bypasses raw capture the same way, so it is dropped too.
+    assert_eq!(program_events(b"\x9d9;hello\x9c"), [], "C1 OSC 9");
+    // Every spelling raw capture recognizes still delivers every part and every report.
+    for number in ["777", "0777"] {
+        let events = program_events(format!("\x1b]{number};notify;T;{joined}\x07").as_bytes());
+        assert_eq!(events, [Seen::Notify { title: Some("T".to_owned()), body: joined.clone() }]);
+    }
+    for number in ["9", "09"] {
+        let events = program_events(format!("\x1b]{number};{joined}\x1b\\").as_bytes());
+        assert_eq!(events, [Seen::Notify { title: None, body: joined.clone() }], "{number}");
+    }
+    let progress =
+        || Seen::Progress(Some(ProgressReport { state: ProgressState::Normal, percent: 50 }));
+    assert_eq!(program_events(b"\x1b]9;4;1;50\x07"), [progress()], "BEL");
+    assert_eq!(program_events(b"\x1b]9;4;1;50\x1b\\"), [progress()], "ST");
+}
+
+#[test]
+fn a_whitespace_padded_notification_reaches_the_host_whole() {
+    // The parser never cuts text before the host sanitizes it: 4096 spaces then `hello` keep
+    // `hello`, which the host's whitespace collapse then shows.
+    let padded = format!("{}hello", " ".repeat(4096));
+    let events = program_events(format!("\x1b]9;{padded}\x07").as_bytes());
+    assert_eq!(events, vec![Seen::Notify { title: None, body: padded }]);
+}
+
+#[test]
+fn a_notification_past_the_raw_safety_bound_is_refused_whole() {
+    // Past MAX_NOTIFY_BYTES the sequence is swallowed: no partial text, nothing printed.
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let long = "x".repeat(MAX_NOTIFY_BYTES + 1);
+    let events = parser.advance(format!("\x1b]777;notify;T;{long}\x07after").as_bytes());
+    assert!(!events.iter().any(|event| matches!(event, VtEvent::Notify { .. })));
+    assert_eq!(row_text(&parser, 0).trim_end(), "after", "the payload is swallowed, never printed");
+}
+
+#[test]
+fn osc777_notify_requires_its_body_separator() {
+    // The grammar is `notify;<title>;<body>`: a title with no `;` after it is malformed.
+    assert!(program_events(b"\x1b]777;notify;T\x1b\\").is_empty());
+    assert!(program_events(b"\x1b]777;notify\x07").is_empty());
+    assert_eq!(
+        program_events(b"\x1b]777;notify;T;\x07"),
+        vec![Seen::Notify { title: Some("T".to_owned()), body: String::new() }],
+        "an empty body after the separator is allowed"
+    );
+}
+
+#[test]
+fn zero_padded_conemu_subcommands_are_never_notifications() {
+    // Any all-digit first parameter whose value is 1..=12 is a subcommand, leading zeros included.
+    assert!(program_events(b"\x1b]9;001;100\x1b\\").is_empty());
+    assert!(program_events(b"\x1b]9;0012\x07").is_empty());
+    assert_eq!(
+        program_events(b"\x1b]9;0004;1;50\x07"),
+        vec![Seen::Progress(Some(ProgressReport { state: ProgressState::Normal, percent: 50 }))]
+    );
+    assert_eq!(
+        program_events(b"\x1b]9;0013\x07"),
+        vec![Seen::Notify { title: None, body: "0013".to_owned() }],
+        "13 is outside the subcommand range"
+    );
+}
+
+#[test]
+fn ris_reports_a_program_state_reset() {
+    // RIS clears program-reported state on the host side; the event carries no grid change.
+    assert_eq!(program_events(b"\x1bc"), vec![Seen::Reset]);
 }

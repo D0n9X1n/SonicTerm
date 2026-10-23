@@ -348,6 +348,29 @@ pub struct NotificationsConfig {
     /// Minimum command duration, in seconds, before completion can notify.
     #[serde(default = "default_threshold_secs")]
     pub threshold_secs: u64,
+    /// Where OSC 9 and OSC 777 program notifications go.
+    pub osc9: Osc9Delivery,
+    /// Mirror `OSC 9;4` progress to the taskbar, Dock or launcher.
+    #[serde(default = "default_taskbar_progress")]
+    pub taskbar_progress: bool,
+}
+
+/// Where OSC 9 and OSC 777 program notifications go.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Osc9Delivery {
+    /// SonicTerm's in-app notification in the pane's window.
+    #[default]
+    App,
+    /// The in-app notification, plus a desktop notification on Windows while the window is not
+    /// focused; macOS and Linux behave as `app`.
+    Desktop,
+    /// Ignore program notifications.
+    Off,
+}
+
+fn default_taskbar_progress() -> bool {
+    true
 }
 
 fn default_notifications_enabled() -> bool {
@@ -383,6 +406,8 @@ impl Default for NotificationsConfig {
         Self {
             long_command: default_notifications_enabled(),
             threshold_secs: default_threshold_secs(),
+            osc9: Osc9Delivery::default(),
+            taskbar_progress: default_taskbar_progress(),
         }
     }
 }

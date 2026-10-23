@@ -264,6 +264,24 @@ pub enum UserEvent {
         /// How many there were and what happened to the last one.
         attempts: spawn_pane::ClipAttempts,
     },
+    /// A batch's `OSC 9;4` progress change for the platform progress surfaces; `None` clears.
+    ProgramProgress {
+        /// The pane whose program reported it.
+        pane_id: u64,
+        /// The active report, or `None` when the pane's progress ended.
+        report: Option<sonicterm_vt::vt::ProgressReport>,
+    },
+    /// A batch's OSC 9 or OSC 777 notifications: the first one and how many followed it.
+    ProgramNotify {
+        /// The pane whose program sent them.
+        pane_id: u64,
+        /// The OSC 777 title, unsanitized; OSC 9 has none.
+        title: Option<String>,
+        /// The first notification's text, unsanitized.
+        body: String,
+        /// Notifications in the same batch after the first.
+        more: u32,
+    },
     /// A local-target openability probe completed off the event-loop thread.
     PathProbeFinished(Box<path_target::PathProbeResult>),
     /// Native local-target failure returned to the window that initiated it.
@@ -460,6 +478,7 @@ const _: () = {
     let _: fn(&mut App, u64) = App::disarm_s10_attribution;
 };
 mod privilege;
+mod program_state;
 use privilege::refresh_window_tab_privileges;
 mod quit_hold;
 mod reaper_driver;
@@ -895,6 +914,8 @@ pub struct App {
     pub(super) tab_bar_visible: bool,
     /// Status line strip: session toggles, memory sampler, reload errors and per-window pane facts.
     pub(super) status_line: status_line::StatusLineState,
+    /// Program-reported progress for the taskbar, Dock or launcher, and the program toast.
+    pub(super) program: program_state::ProgramState,
     /// Broadcast-input mode. When enabled, bytes typed into `source_pane`
     /// are mirrored into matching receiver panes after the source PTY write.
     pub(super) broadcast: BroadcastState,
@@ -1128,6 +1149,8 @@ impl ApplicationHandler<UserEvent> for App {
         // last-window exit lands in sonicterm.log. See
         // `crates/sonicterm-logging/src/exit_trace.rs`.
         self.finish_frame_lines();
+        // Quitting leaves no progress on any platform surface.
+        self.shutdown_taskbar_progress();
         sonicterm_logging::record_loop_exiting();
     }
 }

@@ -839,6 +839,14 @@ pub(crate) struct StatusLineCounters {
     pub(crate) held_shows: u64,
     /// Times `Glyphs:` appeared in a window's strip.
     pub(crate) glyph_shows: u64,
+    /// `OSC 9;4` progress changes the App received, one per VT batch that changed it.
+    pub(crate) program_progress: u64,
+    /// OSC 9 / OSC 777 notification batches the App received.
+    pub(crate) program_notifies: u64,
+    /// Redraws a program toast requested: one per batch it opened or counted.
+    pub(crate) program_toast_redraws: u64,
+    /// Values the taskbar, Dock or launcher surface received.
+    pub(crate) taskbar_deliveries: u64,
 }
 
 /// URL and path detection work on the event-loop thread, cumulative for the App's lifetime.
@@ -1657,6 +1665,10 @@ impl AppFrameCounters {
             ("status_line_history_shows", self.status_line.history_shows),
             ("status_line_held_shows", self.status_line.held_shows),
             ("status_line_glyph_shows", self.status_line.glyph_shows),
+            ("program_progress_events", self.status_line.program_progress),
+            ("program_notify_events", self.status_line.program_notifies),
+            ("program_toast_redraws", self.status_line.program_toast_redraws),
+            ("taskbar_progress_deliveries", self.status_line.taskbar_deliveries),
         ] {
             record.push_count(name, value);
         }

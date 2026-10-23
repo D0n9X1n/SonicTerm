@@ -225,6 +225,7 @@ impl App {
             os_drag_source: None,
             tab_bar_visible: true,
             status_line: Default::default(),
+            program: Default::default(),
             broadcast: BroadcastState::Off,
             quit_hold: quit_hold::QuitHold::new(),
             on_resumed: None,

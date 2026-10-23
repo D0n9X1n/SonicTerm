@@ -612,3 +612,19 @@ fn load_strict_rejects_an_invalid_status_line_and_template_resolves() {
     assert_eq!(template.status_line, crate::status_line::StatusLineConfig::default());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn program_notification_keys_default_on_and_reject_unknown_values() {
+    // OSC 9 goes to the app and progress mirrors to the taskbar by default; a misspelled
+    // delivery fails the load rather than silently turning notifications off.
+    let defaults = NotificationsConfig::default();
+    assert_eq!(defaults.osc9, Osc9Delivery::App);
+    assert!(defaults.taskbar_progress);
+    let parsed: Config =
+        toml::from_str("[notifications]\nosc9 = \"off\"\ntaskbar_progress = false\n").unwrap();
+    assert_eq!(parsed.notifications.osc9, Osc9Delivery::Off);
+    assert!(!parsed.notifications.taskbar_progress);
+    let desktop: Config = toml::from_str("[notifications]\nosc9 = \"desktop\"\n").unwrap();
+    assert_eq!(desktop.notifications.osc9, Osc9Delivery::Desktop);
+    assert!(toml::from_str::<Config>("[notifications]\nosc9 = \"toast\"\n").is_err());
+}

@@ -3908,6 +3908,7 @@ name = "sonicterm-linux"
 version = "1.3.10"
 dependencies = [
  "anyhow",
+ "async-io",
  "libc",
  "roxmltree",
  "sonicterm-app",
@@ -3917,6 +3918,7 @@ dependencies = [
  "sonicterm-logging",
  "tempfile",
  "tracing",
+ "zbus",
 ]
 
 [[package]]

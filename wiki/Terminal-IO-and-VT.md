@@ -226,7 +226,8 @@ Current protocol support includes:
 - primary and alternate screens, application cursor keys, bracketed paste,
   focus reporting, and kitty keyboard flag set/push/pop/query;
 - OSC 0/2 titles, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
-  clipboard events, OSC 4/10/11/12 color queries, and OSC 133 prompt markers;
+  clipboard events, OSC 4/10/11/12 color queries, OSC 133 prompt markers, OSC 9;4
+  progress, and OSC 9 / OSC 777 notifications;
 - DSR, DA, XTVERSION, DECRQSS SGR, DECRQM for mode 2026, palette, and kitty keyboard replies;
 - iTerm2, kitty, and Sixel media events;
 - synchronized output (DEC 2026).
@@ -309,6 +310,28 @@ URI to 8 KiB and client id to 1 KiB.
   never authorize local relative paths or substitute another pane's directory.
 - **OSC 8:** preserve the full URI, including semicolons. Only `id=` is extracted
   from the parameter field; other parameters are not treated as the client id.
+- **OSC 9 and OSC 777:** the parser validates and bounds these; the host applies its policy.
+  - `9;<n>` whose `n` is all digits with a value in `1..=12`, leading zeros included (`001`),
+    is a ConEmu subcommand and never a notification. Only `4` is implemented; the others are
+    ignored.
+  - `9;4;<st>[;<pr>]`: `st` is one digit, `0` clear, `1` normal, `2` error, `3` indeterminate,
+    `4` paused. `pr` is one to three digits, clamped to 100; a missing `pr` is 0. Any other
+    form (a fraction, a sign, an empty value after a separator, four digits) is ignored and
+    changes nothing. Progress also clears on RIS and on OSC 133 `D`; without shell integration
+    a bar stays until the next `9;4;0`, RIS or pane close.
+  - Any other `9;<text>` is a notification whose body is the text, its parameters rejoined
+    with `;`. `777;notify;<title>;<body>` is a notification with a title; further parameters
+    rejoin the body. The `;` after the title is required, so `777;notify;T` is ignored; an
+    empty body after it is allowed. Other OSC 777 subcommands, and an empty title with an
+    empty body, are ignored.
+  - SonicTerm captures the `9;` and `777;` payloads itself, so a body with more parts than
+    vte's 16-parameter limit arrives whole. This capture is the only parser of OSC 9 and 777.
+    It accepts the number in up to 9 digits, zero-padded ones such as `09;` and `0777;`
+    included; a longer spelling, or an OSC opened by the 8-bit C1 introducer, is ignored. The parser never cuts this text: a payload over
+    16 KiB is refused whole, and the host sanitizes the complete text before its own caps.
+  - The VT worker sends one progress change per batch, a clear only when the pane showed
+    progress, and one notification event per batch carrying the first notification and a
+    count of the rest. Display and rate rules are under [Platform Integration](Platform-Integration).
 - **OSC 133:** `B` emits `PromptEnd` and does not start command timing; `C` marks
   execution start. `A`/`D` retain their existing prompt-region behavior. Each pane
   keeps its own command state, applied in parse order on the event loop: a phase

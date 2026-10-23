@@ -678,6 +678,7 @@ const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S12/status-line", "covered", "hold", None),
     ("S12/status-line", "print", "transition", Some("sentinel-parsed")),
     ("S12/status-line", "uncovered", "hold", None),
+    ("S12/status-line", "program", "sustained", None),
     ("S2/default", "idle", "hold", None),
     ("S2/default", "typing", "sustained", None),
     ("S2/flood", "idle", "hold", None),
@@ -813,7 +814,18 @@ fn status_line_variants_differ_from_default_only_by_the_strip() {
         let strip = plan("S12", "status-line", short).unwrap();
         let base = plan("S12", "default", short).unwrap();
         assert!(strip.status_line && !base.status_line);
-        assert_eq!((strip.roles, strip.setup, strip.steps), (base.roles, base.setup, base.steps));
+        // S12/status-line only adds `program` before `end`; everything else is the default plan.
+        let without_program: Vec<Step> = strip
+            .steps
+            .iter()
+            .filter(|step| !matches!(step, Step::Phase(phase) if phase.name == "program"))
+            .cloned()
+            .collect();
+        assert_eq!(without_program.len() + 1, strip.steps.len(), "exactly one program phase");
+        assert_eq!(
+            (strip.roles, strip.setup, without_program),
+            (base.roles, base.setup, base.steps)
+        );
         let strip = plan("S1", "status-line", short).unwrap();
         let base = plan("S1", "default", short).unwrap();
         assert!(strip.status_line && !base.status_line);
@@ -1040,4 +1052,191 @@ fn s1_status_line_short_keeps_headroom_inside_the_smoke_gate() {
         let needed = seconds_after_go(&plan, true) + 60;
         assert!(needed + 5 <= bound, "{host:?} needs {needed} s of {bound} s");
     }
+}
+
+/// S12/status-line ends with `program`, after `uncovered`: a POSIX role prints an `OSC 9;4` set, a
+/// burst of OSC 9 and OSC 777 notifications in one write, then the clear, each change 300 ms or more
+/// apart so the strip and the taskbar see each one. S12/default has no such phase, and S12's short
+/// run stays far inside its bound.
+#[test]
+fn s12_status_line_ends_with_the_program_phase() {
+    for host in [Host::Posix, Host::Windows] {
+        for short in [false, true] {
+            let plan = plan_for("S12", "status-line", short, host).unwrap();
+            assert_eq!(
+                phase_names(&plan),
+                ["print", "covered", "uncovered", "program"],
+                "{host:?}"
+            );
+            let default = plan_for("S12", "default", short, host).unwrap();
+            assert!(!phase_names(&default).contains(&"program"));
+            let needed = seconds_after_go(&plan, true) + 60;
+            assert!(needed <= find("S12").unwrap().short_timeout_s, "{host:?} short={short}");
+        }
+    }
+    let posix = plan_for("S12", "status-line", true, Host::Posix).unwrap();
+    let Driver::Commit { steps, .. } = phase(&posix, "program").driver else {
+        panic!("program is a commit driver");
+    };
+    let text: String = steps
+        .iter()
+        .map(|step| match step.text {
+            CommitText::Literal(text) => text.to_owned(),
+            CommitText::Repeat(character, count) => character.to_string().repeat(count),
+        })
+        .collect();
+    for sequence in [
+        r"\033]9;4;1;40\007",
+        r"\033]9;4;1;50\007'; sleep 0.1; printf '\033]9;4;1;70\007",
+        r"\033]9;build done\007",
+        r"\033]777;notify;CI;green\007",
+        r"\033]9;4;0\007",
+    ] {
+        assert!(text.contains(sequence), "{sequence} in {text}");
+    }
+    // The burst is one step, 100 ms apart inside it; the steps themselves stay 300 ms apart.
+    assert!(steps.windows(2).all(|pair| pair[1].after_ms >= pair[0].after_ms + 300));
+}
+
+/// `program` syncs once per change and redraws nothing else: a toast redraw per notification batch
+/// that a present follows, a taskbar delivery per progress change, and no strip redraw beyond the
+/// sample cadence. A POSIX role must also show the set, the burst and the clear and every batch.
+#[test]
+fn program_phase_progress_syncs_once_per_change() {
+    let strip = |samples, redraws| StatusLineDeltas {
+        samples,
+        wakes: samples,
+        redraws,
+        sel_counts: 0,
+        sel_cells: 0,
+        history_shows: 0,
+        held_shows: 0,
+        glyph_shows: 0,
+    };
+    let program = |progress, notifies, toast_redraws, deliveries, presented| {
+        Some(ProgramDeltas { progress, notifies, toast_redraws, deliveries, presented })
+    };
+    let ok = program(4, 1, 1, 4, 3);
+    assert!(program_phase_progress(strip(1, 1), ok, None, true, 4).is_ok());
+    assert!(
+        program_phase_progress(strip(1, 3), ok, None, true, 4).is_err(),
+        "strip redraws per change"
+    );
+    let extra_toasts = program(4, 1, 3, 4, 3);
+    assert!(program_phase_progress(strip(1, 1), extra_toasts, None, true, 4).is_err());
+    let extra_deliveries = program(3, 1, 1, 4, 3);
+    assert!(program_phase_progress(strip(1, 1), extra_deliveries, None, true, 4).is_err());
+    let unpresented = program(4, 1, 1, 4, 0);
+    assert!(
+        program_phase_progress(strip(1, 1), unpresented, None, true, 4).is_err(),
+        "a toast redraw request that never presented"
+    );
+    let nothing = program(0, 0, 0, 0, 0);
+    assert!(program_phase_progress(strip(1, 1), nothing, None, true, 4).is_err(), "nothing seen");
+    assert!(
+        program_phase_progress(strip(1, 1), nothing, None, false, 1).is_ok(),
+        "cmd prints none"
+    );
+    assert!(
+        program_phase_progress(strip(1, 1), None, None, true, 4).is_ok(),
+        "a base whose App predates the program counters is not checked"
+    );
+}
+
+/// Presents in `program` are bounded by the work the phase did: strip redraws and samples, toast
+/// redraws, and per committed step its echo, output and prompt. Windows, whose `cmd` prints no
+/// program sequence, is bounded the same way by its single Enter step.
+#[test]
+fn program_phase_progress_bounds_presents_by_the_work_it_did() {
+    let strip = |samples, redraws| StatusLineDeltas {
+        samples,
+        wakes: samples,
+        redraws,
+        sel_counts: 0,
+        sel_cells: 0,
+        history_shows: 0,
+        held_shows: 0,
+        glyph_shows: 0,
+    };
+    let posix = |presented| ProgramDeltas {
+        progress: 4,
+        notifies: 1,
+        toast_redraws: 1,
+        deliveries: 4,
+        presented,
+    };
+    // Four updates (one strip redraw, one sample, one toast, the progress) and four steps.
+    assert!(program_phase_progress(strip(1, 1), Some(posix(100_000)), None, true, 4).is_err());
+    let allowed = 1 + 1 + 1 + 4 * PRESENTS_PER_STEP;
+    assert!(program_phase_progress(strip(1, 1), Some(posix(allowed)), None, true, 4).is_ok());
+    assert!(program_phase_progress(strip(1, 1), Some(posix(allowed + 1)), None, true, 4).is_err());
+    let windows = |presented| ProgramDeltas {
+        progress: 0,
+        notifies: 0,
+        toast_redraws: 0,
+        deliveries: 0,
+        presented,
+    };
+    // Zero updates and no step: any present is unexplained.
+    assert!(program_phase_progress(strip(0, 0), Some(windows(1)), None, false, 0).is_err());
+    // Zero updates and the one Enter step: its echo and prompt only.
+    assert!(program_phase_progress(strip(0, 0), Some(windows(2)), None, false, 1).is_ok());
+    let past = PRESENTS_PER_STEP + 1;
+    assert!(program_phase_progress(strip(0, 0), Some(windows(past)), None, false, 1).is_err());
+    assert!(program_phase_progress(strip(0, 0), Some(windows(100_000)), None, false, 1).is_err());
+}
+
+/// The counting surface's record: 40, the burst's 70 on the trailing edge at least one interval
+/// after the value before it, then the clear last; 50 may be absent when the PTY merged the burst.
+#[test]
+fn program_phase_progress_checks_the_delivered_sequence_and_its_trailing_edge() {
+    let strip = StatusLineDeltas {
+        samples: 1,
+        wakes: 1,
+        redraws: 1,
+        sel_counts: 0,
+        sel_cells: 0,
+        history_shows: 0,
+        held_shows: 0,
+        glyph_shows: 0,
+    };
+    let delivered = |values: &[(u64, Option<u8>)]| -> Vec<Delivered> {
+        values.iter().map(|&(at_ms, percent)| Delivered { at_ms, percent }).collect()
+    };
+    let check = |values: &[(u64, Option<u8>)]| {
+        let record = delivered(values);
+        let program = ProgramDeltas {
+            progress: 4,
+            notifies: 1,
+            toast_redraws: 1,
+            deliveries: record.len() as u64,
+            presented: 2,
+        };
+        program_phase_progress(strip, Some(program), Some(&record), true, 4)
+    };
+    assert!(check(&[(0, Some(40)), (400, Some(50)), (650, Some(70)), (1100, None)]).is_ok());
+    assert!(check(&[(0, Some(40)), (500, Some(70)), (1100, None)]).is_ok(), "merged burst");
+    assert!(
+        check(&[(0, Some(40)), (400, Some(50)), (500, Some(70)), (1100, None)]).is_err(),
+        "70 delivered 100 ms after 50 skipped the interval"
+    );
+    assert!(
+        check(&[(0, Some(40)), (400, Some(50)), (1100, None)]).is_err(),
+        "the burst's last value never arrived"
+    );
+    assert!(
+        check(&[(0, Some(40)), (400, Some(50)), (650, Some(70))]).is_err(),
+        "the clear is not the final delivery"
+    );
+    assert!(
+        check(&[(0, Some(40)), (400, Some(70)), (650, Some(50)), (1100, None)]).is_err(),
+        "a stale value after the newest"
+    );
+    let mismatched =
+        ProgramDeltas { progress: 4, notifies: 1, toast_redraws: 1, deliveries: 2, presented: 2 };
+    let record = delivered(&[(0, Some(40)), (500, Some(70)), (1100, None)]);
+    assert!(
+        program_phase_progress(strip, Some(mismatched), Some(&record), true, 4).is_err(),
+        "the record and the delivery counter disagree"
+    );
 }

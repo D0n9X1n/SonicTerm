@@ -497,6 +497,8 @@ const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
     ("os_drag_bridge.rs", "tab_queue()", 2),
     ("os_drag_bridge.rs", "file_queue()", 2),
     ("os_drag.rs", "inner", 2),
+    ("taskbar_progress.rs", "slot", 2),
+    ("taskbar_progress.rs", "thread_slot", 1),
     ("app/fg_probe.rs", "map", 9),
     ("app/fg_probe.rs", "proxy", 1),
     ("app/fg_probe.rs", "worker", 3),

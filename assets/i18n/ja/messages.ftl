@@ -321,3 +321,7 @@ status-spoken-size = サイズ
 status-reason-no-directory = シェルが報告したディレクトリがありません
 status-reason-alt-screen = 代替画面では解決しません
 status-value-label-not-checked = 表示文字は未確認
+
+# Program notifications (OSC 9 / OSC 777): the tab that stands in for a missing title, and the coalesced count.
+program-notify-tab = ⟨タブ { $tab }⟩
+program-notify-more = ほか { $count } 件

@@ -362,6 +362,9 @@ pub(in crate::app) struct PaneVtHandles {
     /// This worker's echo-watch target and recorded facts, so an armed watch locks its slot once
     /// per token and once per fact.
     echo_cache: std::cell::Cell<super::echo_watch::EchoCache>,
+    /// Whether this worker last reported an active `OSC 9;4` progress, so a command end or RIS
+    /// sends a clear only when something is shown.
+    progress_shown: std::cell::Cell<bool>,
     /// The pane these handles belong to, named in the events the worker sends; 0 until set.
     pane_id: u64,
 }
@@ -396,6 +399,7 @@ impl PaneVtHandles {
             inline_media_charge: pane.inline_media_charge.clone(),
             frame_counters: pane.frame_counters.clone(),
             echo_cache: std::cell::Cell::new(super::echo_watch::EchoCache::default()),
+            progress_shown: std::cell::Cell::new(false),
             pane_id: 0,
         }
     }
@@ -404,6 +408,37 @@ impl PaneVtHandles {
     pub(in crate::app) fn with_pane_id(mut self, pane_id: u64) -> Self {
         self.pane_id = pane_id;
         self
+    }
+}
+
+/// One batch's program notifications: the first one whole, the rest only counted, so a burst
+/// reaches the App as one event and no coalesced text is kept.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(in crate::app) struct ProgramNotices {
+    first: Option<(Option<String>, String)>,
+    more: u32,
+}
+
+impl ProgramNotices {
+    /// Record one notification; one that sanitizes to no text is neither shown nor counted.
+    pub(in crate::app) fn push(&mut self, title: Option<String>, body: String) {
+        if !super::program_state::has_visible_text(title.as_deref(), &body) {
+            // When: has_visible_text is false, the App would show nothing, so the notification
+            // must not take the batch's first place or its alert mark.
+            return;
+        }
+        if self.first.is_some() {
+            // A later notification only counts; its text is never kept.
+            self.more = self.more.saturating_add(1);
+        } else {
+            // When: first is None, this is the batch's first notification, kept whole.
+            self.first = Some((title, body));
+        }
+    }
+
+    /// The first notification's title and body and how many followed, if any arrived.
+    pub(in crate::app) fn into_parts(self) -> Option<(Option<String>, String, u32)> {
+        self.first.map(|(title, body)| (title, body, self.more))
     }
 }
 
@@ -941,6 +976,9 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         let mut clipboard_requests = Vec::new();
         let mut command_side_effects = Vec::new();
         let mut media_events = Vec::new();
+        // The batch's last progress change, latest wins; `Some(None)` clears.
+        let mut progress: Option<Option<sonicterm_vt::vt::ProgressReport>> = None;
+        let mut notices = ProgramNotices::default();
         // A batch that rings any number of times is one bell, so a ringing loop marks its tab once.
         if events.iter().any(|event| matches!(event, VtEvent::Bell)) {
             handles.bells.fetch_add(1, Ordering::Relaxed);
@@ -961,6 +999,8 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                             None
                         }
                         CommandEvent::CmdEnd(_) => {
+                            // A finished command leaves no progress bar behind.
+                            progress = Some(None);
                             command_started.take().map(|started| at.duration_since(started))
                         }
                         CommandEvent::PromptStart | CommandEvent::PromptEnd => None,
@@ -968,10 +1008,25 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                     command_side_effects.push(super::PaneCommandEvent { event, at, duration });
                 }
                 VtEvent::Media(media) => media_events.push(media),
+                VtEvent::Progress(report) => progress = Some(report),
+                VtEvent::ProgramStateReset => progress = Some(None),
+                VtEvent::Notify { title, body } => notices.push(title, body),
                 VtEvent::SetTitle(_) | VtEvent::Bell | VtEvent::Hyperlink { .. } => {
                     // When: event is SetTitle, Bell, or Hyperlink, parser state already owns its effect.
                 }
             }
+        }
+
+        if let Some(report) = progress {
+            if report.is_some() || handles.progress_shown.get() {
+                // The App hears a set, or a clear of progress this pane showed; other clears are no-ops.
+                handles.progress_shown.set(report.is_some());
+                emit_event(UserEvent::ProgramProgress { pane_id: handles.pane_id, report });
+            }
+        }
+        if let Some((title, body, more)) = notices.into_parts() {
+            // One event per batch: the first notification and how many followed it.
+            emit_event(UserEvent::ProgramNotify { pane_id: handles.pane_id, title, body, more });
         }
 
         // Every accepted write is its own event, in order; refusals only count toward one summary.

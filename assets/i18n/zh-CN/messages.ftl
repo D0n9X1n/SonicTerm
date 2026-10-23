@@ -321,3 +321,7 @@ status-spoken-size = 尺寸
 status-reason-no-directory = 没有 shell 报告的目录
 status-reason-alt-screen = 备用屏幕上不解析
 status-value-label-not-checked = 未检查显示文本
+
+# Program notifications (OSC 9 / OSC 777): the tab that stands in for a missing title, and the coalesced count.
+program-notify-tab = ⟨标签页 { $tab }⟩
+program-notify-more = 另有 { $count } 条

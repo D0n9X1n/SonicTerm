@@ -129,6 +129,8 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 | --- | --- | --- |
 | `long_command` | `false` | 在 Windows 上启用长命令桌面通知。macOS 和 Linux 目前不发送此通知。 |
 | `threshold_secs` | `10` | 命令报告的耗时必须大于此值。 |
+| `osc9` | `"app"` | 程序通知（OSC 9 文本与 OSC 777 `notify`）的去向：`"app"` 在窗格所在窗口显示 SonicTerm 的应用内通知；`"desktop"` 在 Windows 上且该窗口未获得焦点时额外发出桌面通知（macOS 和 Linux 与 `"app"` 相同，和 `long_command` 一样）；`"off"` 忽略它们。其他值会导致加载失败。 |
+| `taskbar_progress` | `true` | 将 `OSC 9;4` 进度同步到 Windows 任务栏、macOS 程序坞徽标和 Linux 启动器条目；见[平台集成](Platform-Integration-zh-CN)。重新加载时设为 `false` 会立即清除所有位置。 |
 
 #### `[status_line]`
 
