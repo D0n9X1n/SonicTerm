@@ -676,6 +676,7 @@ pub(crate) struct RendererFontStacks {
     pub(crate) body: Option<sonicterm_engine::FontStack>,
     pub(crate) tab_title: Option<sonicterm_engine::FontStack>,
     pub(crate) palette_footer: Option<sonicterm_engine::FontStack>,
+    pub(crate) status_line: Option<sonicterm_engine::FontStack>,
 }
 
 pub(crate) fn renderer_font_stacks(
@@ -696,8 +697,8 @@ pub(crate) fn renderer_font_stacks(
     renderer_font_views(body, body_size)
 }
 
-/// The renderer's three stacks from `body`: the tab-title and palette-footer views share its
-/// configuration at their own sizes for a `body_size` grid font.
+/// The renderer's four stacks from `body`: the tab-title, palette-footer and status line views
+/// share its configuration at their own sizes for a `body_size` grid font.
 pub(crate) fn renderer_font_views(
     body: Option<sonicterm_engine::FontStack>,
     body_size: f32,
@@ -707,7 +708,10 @@ pub(crate) fn renderer_font_views(
     let palette_footer = body
         .as_ref()
         .map(|stack| stack.with_font_size(f64::from(palette_footer_font_size(body_size))));
-    RendererFontStacks { body, tab_title, palette_footer }
+    let status_line = body.as_ref().map(|stack| {
+        stack.with_font_size(f64::from(crate::status_strip::status_line_font_size(body_size)))
+    });
+    RendererFontStacks { body, tab_title, palette_footer, status_line }
 }
 
 fn software_block_glyph_target_rect(
@@ -2436,6 +2440,8 @@ pub struct GpuRenderer {
     tab_title_font: TabTitleFont,
     /// Native-size stack for the command-palette footer (`body - 1`).
     palette_footer_font_stack: Option<sonicterm_engine::FontStack>,
+    /// Native-size stack for status line text, at `status_strip::status_line_font_size`.
+    status_line_font_stack: Option<sonicterm_engine::FontStack>,
     /// Kept tab titles, search-overlay runs and the UI palette; reported as `chrome_cache`.
     chrome_caches: crate::chrome_cache::ChromeCaches,
     /// Whether the title and chrome-run caches keep what they shape; a test turns it off to
@@ -3440,6 +3446,7 @@ impl GpuRenderer {
                 font_stacks.tab_title,
             ),
             palette_footer_font_stack: font_stacks.palette_footer,
+            status_line_font_stack: font_stacks.status_line,
             // Seeded from the constructor theme, so the first frame derives no palette.
             chrome_caches: crate::chrome_cache::ChromeCaches::new(theme),
             chrome_reuse: true,
@@ -5289,6 +5296,7 @@ impl GpuRenderer {
                 GlyphRasterVariant::Normal => self.font_stack.as_ref(),
                 GlyphRasterVariant::TabTitle => self.tab_title_font.stack(),
                 GlyphRasterVariant::PaletteFooter => self.palette_footer_font_stack.as_ref(),
+                GlyphRasterVariant::StatusLine => self.status_line_font_stack.as_ref(),
             }
         })
     }
@@ -5469,6 +5477,8 @@ impl GpuRenderer {
         );
         self.tab_title_font.set_font(family, size, weight_scale, new_stacks.tab_title);
         self.palette_footer_font_stack = new_stacks.palette_footer;
+        self.status_line_font_stack = new_stacks.status_line;
+        self.status_line_fit = None;
         self.cell_w = new_cell_w;
         self.cell_h = new_line_h;
         self.reset_glyph_atlas_in_place("font_change");
@@ -5543,13 +5553,16 @@ impl GpuRenderer {
         self.glyph_atlas_retry_without_eviction = false;
         // Update each stack's DPI before rerasterization; failed metric lookup preserves the prior cell measurement.
         let fs_dpi = (72.0 * sf).round() as usize;
-        // Body, tab-title and footer stacks rescale in that order; the tab-title font also
+        // Body, tab-title, footer and status line stacks rescale in that order; the tab-title font also
         // records the scale, so the next width measurement shapes every title again.
         if let Some(stack) = self.font_stack.as_ref() {
             stack.change_scaling(stack.get_font_scale(), fs_dpi);
         }
         self.tab_title_font.set_scale_factor(sf, fs_dpi);
         if let Some(stack) = self.palette_footer_font_stack.as_ref() {
+            stack.change_scaling(stack.get_font_scale(), fs_dpi);
+        }
+        if let Some(stack) = self.status_line_font_stack.as_ref() {
             stack.change_scaling(stack.get_font_scale(), fs_dpi);
         }
         if let Some(stack) = self.font_stack.as_ref() {
@@ -7380,7 +7393,7 @@ impl GpuRenderer {
                 height: self.status_line_height(),
                 screen: (sw, sh),
                 scale_factor: self.scale_factor,
-                title_raster_px: self.tab_title_font.raster_px(),
+                font_raster_px: self.font_size * self.scale_factor,
             };
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             (
@@ -7392,10 +7405,10 @@ impl GpuRenderer {
             )
                 .hash(&mut hasher);
             let fit_key = hasher.finish();
-            let mut strip_rasterizer = self.tab_title_font.stack().cloned();
+            let mut strip_rasterizer = self.status_line_font_stack.clone();
             let stale = self.status_line_fit.as_ref().is_none_or(|(key, _)| *key != fit_key);
             if let (true, Some(stack), Some(rasterizer)) =
-                (stale, self.tab_title_font.stack(), strip_rasterizer.as_mut())
+                (stale, self.status_line_font_stack.as_ref(), strip_rasterizer.as_mut())
             {
                 // The view, width or font changed: refit with the chrome font.
                 let placed = crate::status_strip::fit_strip(
@@ -7413,7 +7426,7 @@ impl GpuRenderer {
                 placed,
                 &geometry,
                 &colors,
-                self.tab_title_font.stack(),
+                self.status_line_font_stack.as_ref(),
                 strip_rasterizer.as_mut(),
                 &mut self.glyph_atlas,
                 &mut *quads,

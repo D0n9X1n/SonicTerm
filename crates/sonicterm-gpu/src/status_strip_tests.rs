@@ -16,6 +16,30 @@ fn height_is_sixty_percent_of_the_tab_bar_with_a_floor_and_scales() {
     }
 }
 
+/// A strip geometry at `scale_factor` whose terminal font rasters at `font_pt` logical points.
+fn geometry_for_font(font_pt: f32, scale_factor: f32) -> StripGeometry {
+    StripGeometry {
+        top: 0.0,
+        height: status_line_height(13.0, scale_factor),
+        screen: (800.0 * scale_factor, 600.0 * scale_factor),
+        scale_factor,
+        font_raster_px: font_pt * scale_factor,
+    }
+}
+
+/// Contract: strip text is exactly 60% of the live terminal font size, scaled by DPI, never under
+/// the 1 pt FreeType draws at; the strip's stack is built at the same size.
+#[test]
+fn strip_text_is_sixty_percent_of_the_terminal_font_size() {
+    assert!((geometry_for_font(13.0, 1.0).text_px() - 7.8).abs() < 1e-4, "13 pt gives 7.8");
+    assert!((geometry_for_font(13.5, 2.0).text_px() - 16.2).abs() < 1e-4, "13.5 pt at 2×");
+    // A Cmd+= zoom changes the live size, and the strip follows it.
+    assert!((geometry_for_font(16.0, 1.0).text_px() - 9.6).abs() < 1e-4, "a zoomed 16 pt");
+    assert!((geometry_for_font(1.0, 1.0).text_px() - 1.0).abs() < 1e-4, "the 1 pt floor at 1×");
+    assert!((status_line_font_size(13.0) - 7.8).abs() < 1e-4);
+    assert!((status_line_font_size(13.5) - 8.1).abs() < 1e-4);
+}
+
 #[test]
 fn contrast_ratio_matches_wcag_extremes() {
     // Black on white is 21:1 and a color against itself is 1:1.
@@ -73,7 +97,7 @@ fn strip_ink_never_leaves_its_band() {
         height: 12.0,
         screen: (400.0, 200.0),
         scale_factor: 1.0,
-        title_raster_px: 30.0,
+        font_raster_px: 40.0,
     };
     let placed = vec![PlacedSegment {
         index: 0,
@@ -249,4 +273,211 @@ fn committed_strip_readers(core: &str) {
         assert!(!body.contains("status_line_top()"), "{reader} reads live geometry");
         assert!(body.contains("status_line_layouts.presented()"), "{reader}");
     }
+}
+
+/// Ink height of `text` drawn alone through the strip with `stack`, at a 13 px terminal font.
+fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) -> f32 {
+    use sonicterm_render_model::boundary::ui::status_line::PlacedPart;
+    let mut raster = stack.clone();
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let geometry = StripGeometry {
+        top: 100.0,
+        height: 40.0,
+        screen: (400.0, 200.0),
+        scale_factor: 1.0,
+        font_raster_px: 13.0,
+    };
+    let part = PlacedPart { text: text.into(), tone: StatusTone::Value, left: 10.0, width: 80.0 };
+    let placed = vec![PlacedSegment { index: 0, left: 10.0, width: 80.0, parts: vec![part] }];
+    let theme = sonicterm_render_model::boundary::cfg::theme::Theme::default();
+    let palette = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(&theme);
+    let colors = StatusColors::resolve(&theme, ChromeColor::WHITE, ChromeColor::WHITE, &palette);
+    let (mut quads, mut glyphs) = (Vec::new(), Vec::new());
+    emit_strip(
+        &placed,
+        &geometry,
+        &colors,
+        Some(stack),
+        Some(&mut raster),
+        &mut atlas,
+        &mut quads,
+        &mut glyphs,
+    );
+    glyphs
+        .iter()
+        .map(|glyph| crate::cursor::ndc_rect_px(glyph.rect, 400.0, 200.0).3)
+        .fold(0.0, f32::max)
+}
+
+/// The strip draws at its own size: a native stack at `status_line_font_size`, sharing the body
+/// configuration, so its capitals are smaller than the tab title's, not tab-title tiles placed
+/// on a smaller baseline. The renderer builds, rescales and routes that stack.
+#[test]
+fn the_strip_draws_with_its_own_smaller_stack() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let body = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
+        &[("Rec Mono St.Helens", false)],
+        vec![assets],
+        13.0,
+        72,
+        1.0,
+    )
+    .unwrap();
+    let stacks = crate::core::renderer_font_views(Some(body), 13.0);
+    let title = stacks.tab_title.expect("a tab-title stack");
+    let strip = stacks.status_line.expect("a strip stack");
+    assert!(strip.shares_configuration_with(&title), "one configuration, one font database");
+    assert!((status_line_font_size(13.0) - 7.8).abs() < 1e-4, "60% of 13 pt");
+    let (strip_h, title_h) = (strip_ink_height(&strip, "H"), strip_ink_height(&title, "H"));
+    // 7.8 pt against 14 pt: the strip's capitals are drawn shorter, whole pixels apart.
+    assert!(strip_h > 0.0 && strip_h < title_h, "strip H {strip_h} vs title H {title_h}");
+    let core = include_str!("core.rs").replace("\r\n", "\n");
+    assert!(core.contains("let mut strip_rasterizer = self.status_line_font_stack.clone();"));
+    assert!(core.contains("self.status_line_font_stack = new_stacks.status_line;"));
+    assert!(core.contains("if let Some(stack) = self.status_line_font_stack.as_ref() {"));
+    assert!(core.contains("GlyphRasterVariant::StatusLine => self.status_line_font_stack.as_ref()"));
+}
+
+/// Drawn `H` height over the text size the geometry reports, for a `body_pt` terminal font at
+/// `scale`, on the bundled font's strip stack.
+fn cap_over_text_px(body_pt: f32, scale: f32) -> f32 {
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let dpi = (72.0 * scale).round() as usize;
+    let body = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
+        &[("Rec Mono St.Helens", false)],
+        vec![assets],
+        f64::from(body_pt),
+        dpi,
+        1.0,
+    )
+    .unwrap();
+    let stack = crate::core::renderer_font_views(Some(body), body_pt).status_line.unwrap();
+    let text_px = geometry_for_font(body_pt, scale).text_px();
+    let (ink_h, _) =
+        drawn_h(&stack, &mut GlyphAtlas::new(512, 512), GlyphRasterVariant::StatusLine, text_px);
+    ink_h / text_px
+}
+
+/// FreeType never rasterizes under 1 pt, so at a 1 pt terminal font the strip's stack and its
+/// geometry both use 1 pt: the drawn capital keeps the proportion it has at a normal size,
+/// instead of standing taller than the text size the geometry centers and fits by.
+#[test]
+fn a_tiny_strip_size_is_the_size_freetype_draws() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!((status_line_font_size(1.0) - 1.0).abs() < 1e-4, "the stack asks for 1 pt");
+    assert!((geometry_for_font(1.0, 2.0).text_px() - 2.0).abs() < 1e-4, "1 pt at 2×");
+    let (normal, tiny) = (cap_over_text_px(13.0, 8.0), cap_over_text_px(1.0, 8.0));
+    assert!((tiny - normal).abs() < 0.15, "cap/text {tiny} at 1 pt vs {normal} at 13 pt");
+}
+
+/// Draw `H` with `stack` as raster role `variant` at `size_px` into `atlas`; returns its ink
+/// height and atlas UV rect.
+fn drawn_h(
+    stack: &sonicterm_engine::FontStack,
+    atlas: &mut GlyphAtlas,
+    variant: GlyphRasterVariant,
+    size_px: f32,
+) -> (f32, [f32; 4]) {
+    let mut raster = stack.clone();
+    let run = chrome_text::layout_with_raster_variant(
+        stack,
+        &mut raster,
+        atlas,
+        "H",
+        ChromeColor::WHITE,
+        ChromeAttrs { bold: false, italic: false },
+        size_px,
+        size_px,
+        (0.0, 100.0),
+        (400.0, 200.0),
+        None,
+        variant,
+    );
+    let glyph = run.glyphs.first().expect("H draws");
+    (crate::cursor::ndc_rect_px(glyph.rect, 400.0, 200.0).3, glyph.uv)
+}
+
+/// The strip's tiles share the renderer's one atlas with the tab title's, keyed apart by raster
+/// role, so they never alias. A glyph key carries no size, so a warm atlas would keep serving
+/// old-size strip tiles after a zoom or a DPI change; both changes reset the atlas and rebuild or
+/// rescale the strip's stack, and a fresh atlas then rasterizes the strip at the new size.
+#[test]
+fn the_strip_rasterizes_anew_after_zoom_and_dpi_changes() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let views_at = |body_pt: f32| {
+        let body = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
+            &[("Rec Mono St.Helens", false)],
+            vec![assets.clone()],
+            f64::from(body_pt),
+            72,
+            1.0,
+        )
+        .unwrap();
+        crate::core::renderer_font_views(Some(body), body_pt)
+    };
+    let strip_px = |body_pt: f32| status_line_font_size(body_pt);
+    let views = views_at(13.0);
+    let (strip, title) = (views.status_line.unwrap(), views.tab_title.unwrap());
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let (strip_h, strip_uv) =
+        drawn_h(&strip, &mut atlas, GlyphRasterVariant::StatusLine, strip_px(13.0));
+    let (title_h, title_uv) = drawn_h(&title, &mut atlas, GlyphRasterVariant::TabTitle, 14.0);
+    let roles: std::collections::HashSet<GlyphRasterVariant> = atlas
+        .resident_tile_keys()
+        .into_iter()
+        .filter(|key| key.ch == 'H' || key.glyph_id != 0)
+        .map(|key| key.raster_variant)
+        .collect();
+    assert!(
+        roles.contains(&GlyphRasterVariant::StatusLine)
+            && roles.contains(&GlyphRasterVariant::TabTitle)
+    );
+    assert_ne!(strip_uv, title_uv, "one atlas, two tiles: the strip never reads a title tile");
+    assert!(strip_h < title_h, "strip H {strip_h} vs title H {title_h}");
+    // Zoom to 20 pt: the warm atlas would still serve the 7.8 pt tile, which is why it is reset.
+    let zoomed = views_at(20.0).status_line.unwrap();
+    let (stale_h, _) = drawn_h(&zoomed, &mut atlas, GlyphRasterVariant::StatusLine, strip_px(20.0));
+    assert_eq!(stale_h, strip_h, "a glyph key has no size, so only a reset drops the old tile");
+    let mut reset = GlyphAtlas::new(1024, 1024);
+    let (zoomed_h, _) =
+        drawn_h(&zoomed, &mut reset, GlyphRasterVariant::StatusLine, strip_px(20.0));
+    assert!(
+        zoomed_h > strip_h,
+        "after the reset the strip draws at 12 pt: {zoomed_h} vs {strip_h}"
+    );
+    // A DPI change to 2× rescales the strip's stack; a fresh atlas draws it twice as tall.
+    strip.change_scaling(strip.get_font_scale(), 144);
+    let mut rescaled = GlyphAtlas::new(1024, 1024);
+    let (double_h, _) =
+        drawn_h(&strip, &mut rescaled, GlyphRasterVariant::StatusLine, strip_px(13.0) * 2.0);
+    assert!((double_h - 2.0 * strip_h).abs() <= 2.0, "2× draws {double_h} vs {strip_h} at 1×");
+    // The renderer resets the atlas on both changes and rebuilds or rescales the strip's stack.
+    let core = include_str!("core.rs").replace("\r\n", "\n");
+    // The body of a renderer method, up to its closing brace.
+    let method = |signature: &str| {
+        let start = core.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
+        core[start..start + core[start..].find("\n    }\n").unwrap()].to_owned()
+    };
+    // `set_font` builds the new stacks and adopts them, which resets the atlas.
+    let set_font = method("    pub fn set_font(");
+    assert!(set_font.contains("self.adopt_font_stacks("));
+    let adopt = method("    fn adopt_font_stacks(");
+    assert!(adopt.contains("self.reset_glyph_atlas_in_place(\"font_change\");"));
+    assert!(adopt.contains("self.status_line_font_stack = new_stacks.status_line;"));
+    let rescale = method("    fn rebuild_for_sf(");
+    assert!(rescale.contains("self.reset_glyph_atlas_in_place(\"dpi_change\");"));
+    assert!(
+        rescale.contains(
+            "if let Some(stack) = self.status_line_font_stack.as_ref() {\n            stack.change_scaling("
+        ),
+        "the DPI change rescales the strip's stack"
+    );
 }

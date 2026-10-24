@@ -522,16 +522,19 @@ that is derived again on every request and never kept.
 
 Font, theme, scale, pane identity, atlas reset, or atlas content-identity changes
 invalidate the affected entries. A font or DPI change rebuilds the body, footer,
-and tab-title font stacks together and invalidates the shared glyph atlas:
+tab-title and status line font stacks together and invalidates the shared glyph atlas:
 
 - terminal text, command-palette query/results, and ordinary chrome use the
   configured body size;
 - command-palette footer and category/availability subtitles use `max(body - 1, 1)`;
-- tab titles use `body + 1`.
+- tab titles use `body + 1`;
+- status line text uses `max(0.6 × body, 1)`, 60% of the live terminal font size (7.8 pt at
+  the 13 pt default), so a zoom changes it with the terminal text; 1 pt is the smallest size
+  FreeType rasterizes, so the strip never asks for less.
 
-All three stacks use the same family, DPI, and weight scale. Native raster-role
-tags keep their atlas entries distinct, so a footer or tab title does not scale
-a cached body bitmap.
+All four stacks use the same family, DPI, and weight scale. Native raster-role
+tags keep their atlas entries distinct, so a footer, tab title or status line
+does not scale a cached body bitmap.
 
 The quad cache holds about four times total visible rows and clears at capacity
 or on a geometry change; the glyph cache bounds itself by the per-pane quotas and

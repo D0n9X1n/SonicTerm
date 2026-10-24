@@ -24,8 +24,11 @@ use crate::quad::{px_to_ndc, QuadInstance};
 const HEIGHT_SHARE: f32 = 0.6;
 /// Smallest strip height, in logical px.
 const MIN_HEIGHT_LOGICAL: f32 = 20.0;
-/// Strip type size as a share of the tab title size, so it reads as secondary.
-const TEXT_SHARE: f32 = 0.9;
+/// Strip type size as a share of the live terminal font size.
+const TEXT_SHARE: f32 = 0.6;
+/// Smallest strip type size, in logical pt: FreeType raises any character size under 1 pt to
+/// 1 pt, so the stack and the geometry both use the size it really draws.
+const MIN_TEXT_PT: f32 = 1.0;
 /// Contrast a caution or failure color needs against the strip background.
 const MIN_CONTRAST: f32 = 3.0;
 
@@ -202,14 +205,22 @@ pub struct StripGeometry {
     pub screen: (f32, f32),
     /// Display scale factor.
     pub scale_factor: f32,
-    /// Tab title raster size the strip text is derived from.
-    pub title_raster_px: f32,
+    /// The terminal font's live raster size, which the strip text is 60% of.
+    pub font_raster_px: f32,
+}
+
+/// The strip's native font size in logical points for a `body_font_size` live terminal font:
+/// exactly 60% of it. Times the display scale it is [`StripGeometry::text_px`], so the strip's
+/// stack rasterizes at exactly the size it draws.
+pub fn status_line_font_size(body_font_size: f32) -> f32 {
+    (body_font_size * TEXT_SHARE).max(MIN_TEXT_PT)
 }
 
 impl StripGeometry {
-    /// The strip's text raster size.
+    /// The strip's text raster size: 60% of the live terminal font size, at least 1 pt at the
+    /// display scale, which is what [`status_line_font_size`] asks the stack for.
     pub fn text_px(&self) -> f32 {
-        (self.title_raster_px * TEXT_SHARE).max(1.0)
+        (self.font_raster_px * TEXT_SHARE).max(MIN_TEXT_PT * self.scale_factor.max(0.5)).max(1.0)
     }
 
     /// Fit metrics for this geometry.
@@ -247,7 +258,7 @@ pub fn fit_strip(
             (0.0, 0.0),
             geometry.screen,
             None,
-            GlyphRasterVariant::TabTitle,
+            GlyphRasterVariant::StatusLine,
         )
         .width_px
     })
@@ -324,7 +335,7 @@ pub fn emit_strip(
             (text_x.round(), baseline),
             geometry.screen,
             None,
-            GlyphRasterVariant::TabTitle,
+            GlyphRasterVariant::StatusLine,
         );
         glyphs.extend(run.glyphs);
         // Missing-glyph boxes are quads, which the glyph clip below does not reach.
