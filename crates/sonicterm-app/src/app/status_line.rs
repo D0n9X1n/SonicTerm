@@ -35,7 +35,7 @@ use sonicterm_ui::status_line::{
 };
 use winit::window::WindowId;
 
-use super::path_target::{PathKind, PathOpenDecision, ProbeStatus};
+use super::path_target::{open_modifier_in, PathKind, PathOpenDecision, ProbeStatus};
 use super::redraw::RedrawCause;
 use super::window_keyboard::{ime_route_for, ImeRoute};
 use super::window_state::WindowState;
@@ -732,9 +732,10 @@ pub(crate) fn waits_on_gpu_recovery(recovering: bool, stopped: bool, accepts_wor
     recovering && (stopped || !accepts_work)
 }
 
-/// The link segment's input for `window`: the last built `previous` while an event has cleared
-/// the hover and no frame has re-detected it, so a clear the next frame undoes never redraws the
-/// strip; otherwise [`link_input`].
+/// The link segment's input for `window`: nothing unless the platform's open modifier (Cmd on
+/// macOS, Ctrl elsewhere) is held, so ordinary hovering adds no strip noise; the last built
+/// `previous` while an event has cleared the hover and no frame has re-detected it, so a clear
+/// the next frame undoes never redraws the strip; otherwise [`link_input`].
 pub(crate) fn strip_link(
     window: &WindowState,
     window_id: WindowId,
@@ -743,6 +744,11 @@ pub(crate) fn strip_link(
     now: Instant,
     i18n: &sonicterm_ui::i18n::I18n,
 ) -> (Option<LinkInput>, Option<Instant>) {
+    if !open_modifier_in(window.modifiers) {
+        // When: open_modifier_in(window.modifiers) is false, show nothing and restart any pending check.
+        pending_since.remove(&window_id);
+        return (None, None);
+    }
     match previous {
         // While hover_unresolved is set, the redraw its clear requested re-detects the target.
         Some(previous) if window.hover_unresolved => (previous.clone(), None),

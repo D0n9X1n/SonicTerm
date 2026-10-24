@@ -3811,13 +3811,7 @@ impl App {
     pub(super) fn open_modifier_held(&self, window_id: WindowId) -> bool {
         let modifiers =
             self.windows.get(&window_id).map(|window| window.modifiers).unwrap_or_default();
-        if cfg!(target_os = "macos") {
-            // When: `target_os` is macOS, Cmd is the platform-native target activation modifier.
-            modifiers.super_key()
-        } else {
-            // When: `target_os` is not macOS, Ctrl is the platform-native target activation modifier.
-            modifiers.control_key()
-        }
+        open_modifier_in(modifiers)
     }
 
     pub(super) fn activate_target_at(
@@ -3950,6 +3944,18 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// Whether `modifiers` holds the platform's target open modifier: Cmd on macOS, Ctrl elsewhere.
+/// The underline preview, the click and the status line's link segment all use this one rule.
+pub(super) fn open_modifier_in(modifiers: winit::keyboard::ModifiersState) -> bool {
+    if cfg!(target_os = "macos") {
+        // When: `target_os` is macOS, Cmd is the platform-native target activation modifier.
+        modifiers.super_key()
+    } else {
+        // When: `target_os` is not macOS, Ctrl is the platform-native target activation modifier.
+        modifiers.control_key()
     }
 }
 

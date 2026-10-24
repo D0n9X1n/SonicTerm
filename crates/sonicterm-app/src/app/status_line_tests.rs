@@ -107,13 +107,18 @@ fn pane_facts_are_kept_only_while_the_strip_is_shown() {
     assert!(app.status_line.pane_facts.is_empty(), "facts of a closed window are dropped");
 }
 
-#[test]
-fn a_hover_an_event_clears_keeps_the_link_until_a_frame_resolves_it() {
-    // An IME commit clears the hover and the next frame re-detects the same URL; the strip must
-    // keep the link across that gap, or each keystroke redraws it twice for an unchanged pixel.
+/// The platform's target open modifier: Cmd on macOS, Ctrl elsewhere.
+fn open_modifier() -> winit::keyboard::ModifiersState {
+    if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    }
+}
+
+/// Seed `window_id` with a resolved hover over `https://example.com`.
+fn seed_hovered_url(app: &mut App, window_id: WindowId) {
     use sonicterm_render_model::inputs::{HoveredUrlCells, HoveredUrlSpan};
-    let mut app = app_with_strip(true);
-    let window_id = app.__test_seed_child_window(&["child"]);
     let span = HoveredUrlSpan { row: 0, start_col: 0, end_col: 19 };
     let cells = HoveredUrlCells::new(1, [span], false).expect("one span");
     app.windows.get_mut(&window_id).unwrap().hovered_url =
@@ -122,6 +127,49 @@ fn a_hover_an_event_clears_keeps_the_link_until_a_frame_resolves_it() {
             url: "https://example.com".to_owned(),
             label: None,
         });
+}
+
+/// Contract: the link segment shows a hovered target only while the open modifier (Cmd on
+/// macOS, Ctrl elsewhere) is held, and hides again when it is released, so plain hovering adds
+/// no strip noise. A pending path check restarts when the modifier goes up.
+#[test]
+fn the_link_segment_shows_only_while_the_open_modifier_is_held() {
+    let mut app = app_with_strip(true);
+    let window_id = app.__test_seed_child_window(&["child"]);
+    seed_hovered_url(&mut app, window_id);
+    let now = Instant::now();
+    let mut pending = HashMap::new();
+    pending.insert(window_id, (std::path::PathBuf::from("/tmp/x"), now));
+    let (hidden, wake) =
+        strip_link(&app.windows[&window_id], window_id, None, &mut pending, now, &app.i18n);
+    assert_eq!(hidden, None, "a plain hover shows no link");
+    assert_eq!(wake, None);
+    assert!(!pending.contains_key(&window_id), "a pending check restarts on release");
+    app.windows.get_mut(&window_id).unwrap().modifiers = open_modifier();
+    let (shown, _) =
+        strip_link(&app.windows[&window_id], window_id, None, &mut pending, now, &app.i18n);
+    assert!(shown.is_some(), "holding the open modifier shows the hovered link");
+    // The other platform's modifier alone never shows it.
+    let other = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::CONTROL
+    } else {
+        winit::keyboard::ModifiersState::SUPER
+    };
+    app.windows.get_mut(&window_id).unwrap().modifiers = other;
+    let (other_shown, _) =
+        strip_link(&app.windows[&window_id], window_id, Some(&shown), &mut pending, now, &app.i18n);
+    assert_eq!(other_shown, None, "only the platform's open modifier shows the link");
+}
+
+#[test]
+fn a_hover_an_event_clears_keeps_the_link_until_a_frame_resolves_it() {
+    // An IME commit clears the hover and the next frame re-detects the same URL; the strip must
+    // keep the link across that gap, or each keystroke redraws it twice for an unchanged pixel.
+    // The open modifier is held, since the segment shows nothing without it.
+    let mut app = app_with_strip(true);
+    let window_id = app.__test_seed_child_window(&["child"]);
+    seed_hovered_url(&mut app, window_id);
+    app.windows.get_mut(&window_id).unwrap().modifiers = open_modifier();
     let now = Instant::now();
     let mut pending = HashMap::new();
     let (shown, _) =
