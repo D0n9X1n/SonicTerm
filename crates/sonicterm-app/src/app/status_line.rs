@@ -1368,8 +1368,11 @@ impl App {
             };
             // Only terminal windows carry the strip; the Memory Usage report never does.
             let shown = visible && window.role == super::WindowRole::Terminal;
-            if renderer.set_status_line_visible(shown) {
-                // When: `set_status_line_visible` flipped visibility, refit panes to the new bottom inset.
+            // Both setters run, position first, so a reload that moves and shows the strip
+            // refits the panes once.
+            let moved = renderer.set_status_line_position(state.resolved.position);
+            if renderer.set_status_line_visible(shown) | moved {
+                // When: `set_status_line_visible` or `moved` changed the insets, refit panes once.
                 minimums_changed = true;
                 state.built.remove(window_id);
                 let rects = App::compute_pane_rects_for(window);

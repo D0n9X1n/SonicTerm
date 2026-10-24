@@ -2389,8 +2389,10 @@ pub struct GpuRenderer {
     /// View → Toggle Tab Bar menu action; when `false`, [`Self::top_inset`]
     /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
     tab_bar_visible: bool,
-    /// Whether the status line strip between the panes and the tab bar is shown.
+    /// Whether the status line strip is shown.
     status_line_visible: bool,
+    /// The window edge the strip sits on: above the panes, or between them and the tab bar.
+    status_line_position: sonicterm_render_model::boundary::cfg::status_line::StatusPosition,
     /// Segments the strip may present; replaced by the App before a frame.
     status_line_view: StatusLineView,
     /// Fitted strip keyed by view pixels, width and chrome font, so an
@@ -3424,6 +3426,7 @@ impl GpuRenderer {
             render_timing_label: role,
             tab_bar_visible: true,
             status_line_visible: false,
+            status_line_position: Default::default(),
             status_line_view: StatusLineView::default(),
             status_line_fit: None,
             status_line_layouts: Default::default(),
@@ -3567,8 +3570,12 @@ impl GpuRenderer {
     /// scale the grid was reporting one fewer row than the window could fit,
     /// leaving a dead strip below the last painted row that showed the
     /// surface clear color instead of vim's bg.
+    ///
+    /// A strip at the top sits between the titlebar band and the top padding, so its height is
+    /// reserved here too.
     pub fn top_inset(&self) -> f32 {
         (self.titlebar_inset + self.padding_top) * self.scale_factor
+            + self.status_line_placement().reserved_top
     }
 
     /// Bottom inset reserved below the grid for the bottom-pinned tab bar,
@@ -3584,7 +3591,24 @@ impl GpuRenderer {
             // padding is applied separately by the caller.
             0.0
         };
-        tab_bar + self.status_line_height()
+        tab_bar + self.status_line_placement().reserved_bottom
+    }
+
+    /// The strip's band and the height it reserves on its edge, from the current geometry.
+    fn status_line_placement(&self) -> crate::status_strip::StripPlacement {
+        let tab_bar = if self.tab_bar_visible {
+            self.tab_bar_logical_height()
+        } else {
+            // When: `!tab_bar_visible`, a bottom strip sits on the window's bottom edge.
+            0.0
+        };
+        crate::status_strip::strip_placement(
+            self.status_line_position,
+            self.config.height as f32,
+            self.titlebar_inset * self.scale_factor,
+            tab_bar,
+            self.status_line_height(),
+        )
     }
 
     /// Y offset (in raster px) at which the tab bar layout should be
@@ -3659,14 +3683,37 @@ impl GpuRenderer {
         }
     }
 
-    /// Raster-px top edge of the strip: directly above the tab bar, or at
-    /// the bottom edge when the tab bar is hidden.
+    /// Raster-px top edge of the strip: below the titlebar band at the top; at the bottom,
+    /// directly above the tab bar, or on the bottom edge when the tab bar is hidden.
     pub fn status_line_top(&self) -> f32 {
-        (self.config.height as f32 - self.bottom_inset()).max(0.0)
+        self.status_line_placement().top
+    }
+
+    /// Move the strip to `position`. Returns `true` when a shown strip moved, so the caller
+    /// refits panes to the new insets once; a hidden strip reserves nothing and moves nothing.
+    pub fn set_status_line_position(
+        &mut self,
+        position: sonicterm_render_model::boundary::cfg::status_line::StatusPosition,
+    ) -> bool {
+        if self.status_line_position == position {
+            // When: `status_line_position == position`, the strip stays where it is.
+            return false;
+        }
+        self.status_line_position = position;
+        if !self.status_line_visible {
+            // When: `!status_line_visible`, no band or inset changes until it is shown.
+            return false;
+        }
+        // The presented layout stays: the old band is on screen until a frame at the new edge
+        // presents, and that frame's stage and settle replace it.
+        self.status_line_fit = None;
+        self.last_frame_key = None;
+        self.last_pane_layout.clear();
+        true
     }
 
     /// Show or hide the strip. Returns `true` when visibility changed, so the
-    /// caller refits panes to the new bottom inset.
+    /// caller refits panes to the new insets.
     pub fn set_status_line_visible(&mut self, visible: bool) -> bool {
         if self.status_line_visible == visible {
             // When: `status_line_visible == visible`, the geometry is unchanged.
@@ -7379,7 +7426,7 @@ impl GpuRenderer {
         // drag is active over this bar.
         // -------- Status line strip ----------------------------------------
         if self.status_line_visible {
-            // The strip is on: draw its band and fitted segments above the tab bar.
+            // The strip is on: draw its band and fitted segments on its edge.
             use std::hash::{Hash, Hasher};
             let strip_palette = self.chrome_caches.palette.palette_for(theme);
             let colors = crate::status_strip::StatusColors::resolve(
@@ -7391,6 +7438,7 @@ impl GpuRenderer {
             let geometry = crate::status_strip::StripGeometry {
                 top: self.status_line_top(),
                 height: self.status_line_height(),
+                position: self.status_line_position,
                 screen: (sw, sh),
                 scale_factor: self.scale_factor,
                 font_raster_px: self.font_size * self.scale_factor,

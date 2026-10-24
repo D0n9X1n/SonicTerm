@@ -403,7 +403,7 @@ tracing subscriber，只能在下次进程启动时生效。
 - 清空预热窗口池，并在之后逐步重建。
 
 **Save Current Settings** 写当前 `[font].size` 和有效的 `[font].weight_scale`，以及会话值与磁盘文件不同的
-每个 `[status_line]` key（`enabled`、`hide_sensitive`、`left`、`center`、`right`）。
+每个 `[status_line]` key（`enabled`、`hide_sensitive`、`position`、`left`、`center`、`right`）。
 它不保存主题、语言、标签页、窗格或其它运行时状态。这些值已经生效，因此保存不会重载或
 重新应用它们；写入的 `[status_line]` 成为会话状态栏选择的对照基线。
 

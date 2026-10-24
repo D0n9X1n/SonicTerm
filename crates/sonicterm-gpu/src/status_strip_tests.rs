@@ -21,6 +21,7 @@ fn geometry_for_font(font_pt: f32, scale_factor: f32) -> StripGeometry {
     StripGeometry {
         top: 0.0,
         height: status_line_height(13.0, scale_factor),
+        position: StatusPosition::Bottom,
         screen: (800.0 * scale_factor, 600.0 * scale_factor),
         scale_factor,
         font_raster_px: font_pt * scale_factor,
@@ -95,6 +96,7 @@ fn strip_ink_never_leaves_its_band() {
     let geometry = StripGeometry {
         top: 100.0,
         height: 12.0,
+        position: StatusPosition::Bottom,
         screen: (400.0, 200.0),
         scale_factor: 1.0,
         font_raster_px: 40.0,
@@ -283,6 +285,7 @@ fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) -> f32 {
     let geometry = StripGeometry {
         top: 100.0,
         height: 40.0,
+        position: StatusPosition::Bottom,
         screen: (400.0, 200.0),
         scale_factor: 1.0,
         font_raster_px: 13.0,
@@ -480,4 +483,57 @@ fn the_strip_rasterizes_anew_after_zoom_and_dpi_changes() {
         ),
         "the DPI change rescales the strip's stack"
     );
+}
+
+/// The body of renderer method `signature` in `core`, up to its closing brace.
+fn renderer_method<'source>(core: &'source str, signature: &str) -> &'source str {
+    let start = core.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
+    &core[start..start + core[start..].find("\n    }\n").unwrap()]
+}
+
+/// Moving a shown strip keeps the presented layout, so routing and accessibility keep the band
+/// still on screen until a frame at the new edge presents; only hiding the strip drops it. Both
+/// insets read the placement, so the pane area follows the position.
+#[test]
+fn moving_the_strip_keeps_the_presented_layout_until_a_frame_presents() {
+    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let moved = renderer_method(&core, "pub fn set_status_line_position(");
+    assert!(!moved.contains("status_line_layouts.clear()"), "a move drops the presented strip");
+    assert!(moved.contains("last_frame_key = None"), "a move forces the next frame");
+    let hidden = renderer_method(&core, "pub fn set_status_line_visible(");
+    assert!(hidden.contains("status_line_layouts.clear()"), "hiding drops the strip");
+    for inset in ["pub fn top_inset(", "pub fn bottom_inset("] {
+        assert!(renderer_method(&core, inset).contains("status_line_placement()"), "{inset}");
+    }
+}
+
+/// At either position the band sits on its edge, reserves exactly its height there, and the pane
+/// area left between the insets never overlaps it.
+#[test]
+fn the_band_reserves_its_own_edge_and_never_overlaps_the_panes() {
+    let (surface_h, titlebar_px, tab_bar_px, strip_h) = (600.0, 28.0, 40.0, 23.0);
+    let top = strip_placement(StatusPosition::Top, surface_h, titlebar_px, tab_bar_px, strip_h);
+    assert_eq!(top, StripPlacement { top: 28.0, reserved_top: 23.0, reserved_bottom: 0.0 });
+    let bottom =
+        strip_placement(StatusPosition::Bottom, surface_h, titlebar_px, tab_bar_px, strip_h);
+    assert_eq!(bottom, StripPlacement { top: 537.0, reserved_top: 0.0, reserved_bottom: 23.0 });
+    for placement in [top, bottom] {
+        let panes_top = titlebar_px + placement.reserved_top;
+        let panes_bottom = surface_h - tab_bar_px - placement.reserved_bottom;
+        let band = placement.top..placement.top + strip_h;
+        assert!(band.end <= panes_top || band.start >= panes_bottom, "{placement:?}");
+        assert!(panes_bottom - panes_top == surface_h - titlebar_px - tab_bar_px - strip_h);
+    }
+    let hidden = strip_placement(StatusPosition::Top, surface_h, titlebar_px, tab_bar_px, 0.0);
+    assert_eq!((hidden.reserved_top, hidden.reserved_bottom), (0.0, 0.0), "a hidden strip");
+    let no_tab_bar = strip_placement(StatusPosition::Bottom, surface_h, 0.0, 0.0, strip_h);
+    assert_eq!(no_tab_bar.top, 577.0, "with the tab bar hidden the band sits on the bottom edge");
+}
+
+/// The hairline sits on the band's terminal side: its bottom edge at the top, its top edge at
+/// the bottom.
+#[test]
+fn the_hairline_sits_on_the_terminal_side() {
+    assert_eq!(hairline_top(StatusPosition::Top, 28.0, 23.0, 2.0), 49.0);
+    assert_eq!(hairline_top(StatusPosition::Bottom, 537.0, 23.0, 2.0), 537.0);
 }

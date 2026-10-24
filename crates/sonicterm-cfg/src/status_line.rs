@@ -475,6 +475,28 @@ pub enum StatusIcons {
     Nerd,
 }
 
+/// Which window edge the strip sits on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusPosition {
+    /// The top content edge, above the panes and below any titlebar band.
+    #[default]
+    Top,
+    /// The bottom content edge, between the panes and the tab bar.
+    Bottom,
+}
+
+impl StatusPosition {
+    /// The config spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+}
+
 /// What a click on a segment does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClickBinding {
@@ -771,6 +793,8 @@ pub struct ResolvedStatusLine {
     pub hide_sensitive: bool,
     /// Symbol set.
     pub icons: StatusIcons,
+    /// The window edge the strip sits on.
+    pub position: StatusPosition,
     /// Sampling interval of sampled segments, in milliseconds.
     pub update_interval_ms: u64,
     /// The preset the lists started from; a session enable returns a segment to its list.
@@ -910,6 +934,8 @@ pub struct StatusLineConfig {
     pub right: Option<Vec<StatusSegmentId>>,
     /// Symbol set.
     pub icons: StatusIcons,
+    /// The window edge the strip sits on; an unknown value fails the load.
+    pub position: StatusPosition,
     /// Hide every sensitive segment or part (screen sharing).
     pub hide_sensitive: bool,
     /// Sampling interval of sampled segments, `500..=60000` ms.
@@ -935,6 +961,7 @@ impl Default for StatusLineConfig {
             center: None,
             right: None,
             icons: StatusIcons::Unicode,
+            position: StatusPosition::Top,
             hide_sensitive: false,
             update_interval_ms: 2000,
             segment: toml::Table::new(),
@@ -1129,6 +1156,7 @@ impl StatusLineConfig {
             enabled: self.enabled,
             hide_sensitive: self.hide_sensitive,
             icons: self.icons,
+            position: self.position,
             update_interval_ms: self.update_interval_ms,
             preset: self.preset,
             segments,

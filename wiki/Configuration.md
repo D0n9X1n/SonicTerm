@@ -146,7 +146,7 @@ right edge.
 
 #### `[status_line]`
 
-The status line is a strip between the panes and the tab bar that shows SonicTerm's own state: what it detected under the pointer, which input modes are on, how far the focused pane is scrolled back, problems with SonicTerm itself, and its own memory. It shows only what SonicTerm knows and the shell prompt, tmux or the program cannot report. It is off by default.
+The status line is a strip at the top or bottom of the window that shows SonicTerm's own state: what it detected under the pointer, which input modes are on, how far the focused pane is scrolled back, problems with SonicTerm itself, and its own memory. It shows only what SonicTerm knows and the shell prompt, tmux or the program cannot report. It is off by default.
 
 | Key | Default | Behavior |
 | --- | --- | --- |
@@ -155,6 +155,7 @@ The status line is a strip between the panes and the tab bar that shows SonicTer
 | `left`, `center`, `right` | the preset's lists | Each list, when present, replaces that list of the preset. An id outside the catalog, an id listed twice, or an id this build does not implement fails the load. |
 | `icons` | `"unicode"` | Symbols only: `"unicode"`, `"ascii"` or `"nerd"`. `nerd` uses the whole Unicode set, since this build defines no Nerd Font symbols for its segments; there is no per-glyph fallback. Segments have no tooltips; each has a plain-words spoken name and value for assistive technology. |
 | `hide_sensitive` | `false` | Hides every sensitive segment, such as the link under the pointer, for screen sharing. **Toggle Status Line Sensitive Content** (`toggle_status_line_sensitive`) changes it for the session. |
+| `position` | `"top"` | The window edge the strip sits on: `"top"`, above the panes, or `"bottom"`, between the panes and the tab bar. Any other value fails the load. |
 | `update_interval_ms` | `2000` | Sampling interval of sampled segments (memory), `500` to `60000`. |
 
 A reload applies `enabled` or `hide_sensitive` only when that key's value in the file changed, so a session toggle survives unrelated reloads.
@@ -207,7 +208,7 @@ Each `[status_line.segment.<id>]` table takes:
 
 When the window is too narrow, the strip first uses compact forms (memory drops its arrow and sparkline, `mode` drops `MOUSE`), then shortens a link's path in the middle, then drops whole segments, lowest priority first. Health errors, the broadcast chip and a link's destination host go last.
 
-The strip is 0.6 times the tab bar's height, at least 20 logical pixels, and follows font zoom and display scale. It shares the tab bar's background, with a thin line only on its terminal side, and sits at the bottom edge when the tab bar is hidden. Turning it on or off resizes the panes; a window opened with `[window]` `rows` keeps that many rows. A press or wheel over the strip never reaches a pane or the program. It appears in terminal windows only, not in the Memory Usage report.
+The strip is 0.6 times the tab bar's height, at least 20 logical pixels, and follows font zoom and display scale. It shares the tab bar's background, with a thin line only on its terminal side. With `position = "top"` (the default) it sits above the panes, below the macOS titlebar band, and its line is on its lower edge; with `"bottom"` it sits between the panes and the tab bar, on the bottom edge when the tab bar is hidden, and its line is on its upper edge. Torn-out windows place it the same way. Turning it on or off, or a reload that changes `position`, resizes the panes once; a window opened with `[window]` `rows` keeps that many rows. A press or wheel over the strip never reaches a pane or the program. It appears in terminal windows only, not in the Memory Usage report.
 
 #### Choosing segments while SonicTerm runs
 
@@ -296,7 +297,7 @@ weight_scale = 1.0
 Save writes the live font size and effective `weight_scale`, preserving comments,
 order, line endings, and every other key. It also writes the status line the
 session shows, compared with the file on disk under the save lock: `[status_line]`
-`enabled`, `hide_sensitive`, and `left`, `center` and `right` as explicit lists,
+`enabled`, `hide_sensitive`, `position`, and `left`, `center` and `right` as explicit lists,
 each only when its value differs from what the file resolves to. `preset` and
 per-segment keys are never written, so a save that changed only the font adds no
 `[status_line]` key, and a key edited in the file since the last reload is kept

@@ -286,6 +286,8 @@ pub struct StatusLineSave {
     pub enabled: bool,
     /// Whether sensitive segments are hidden.
     pub hide_sensitive: bool,
+    /// The window edge the strip sits on.
+    pub position: crate::status_line::StatusPosition,
     /// The `left`, `center` and `right` lists, in order.
     pub lists: [Vec<StatusSegmentId>; 3],
 }
@@ -304,6 +306,7 @@ impl StatusLineSave {
         Self {
             enabled: resolved.enabled,
             hide_sensitive: resolved.hide_sensitive,
+            position: resolved.position,
             lists: [side(StatusSide::Left), side(StatusSide::Center), side(StatusSide::Right)],
         }
     }

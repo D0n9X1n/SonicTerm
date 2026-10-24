@@ -580,3 +580,17 @@ fn accessibility_keys_validate_and_unknown_ones_are_reported() {
     let unknown_id = "[status_line]\n[status_line.accessibility]\nannounce = [\"bel\"]\n";
     assert!(toml::from_str::<crate::config::Config>(unknown_id).is_err());
 }
+
+/// `position` defaults to `top`, reads `bottom`, and an unknown value fails the load.
+#[test]
+fn position_defaults_to_top_and_rejects_unknown_values() {
+    assert_eq!(StatusLineConfig::default().resolve().unwrap().position, StatusPosition::Top);
+    assert_eq!(
+        parse("position = \"bottom\"\n").resolve().unwrap().position,
+        StatusPosition::Bottom
+    );
+    assert_eq!(parse("position = \"top\"\n").position, StatusPosition::Top);
+    let config =
+        |body: &str| toml::from_str::<crate::config::Config>(&format!("[status_line]\n{body}"));
+    assert!(config("position = \"left\"\n").is_err(), "an unknown position fails the load");
+}

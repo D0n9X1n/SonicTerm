@@ -1252,3 +1252,55 @@ fn mem_without_graphics_leaves_other_sources_alone() {
     let none = GraphicsMemory::unavailable(GraphicsSource::None);
     assert_eq!(mem_without_graphics(footprint, &none), footprint);
 }
+
+/// A strip placed at the top, under a 28 px titlebar band, takes presses inside its band only:
+/// the titlebar above it and the old bottom place both stay outside.
+#[test]
+fn a_right_press_hits_the_strip_at_the_top() {
+    use sonicterm_cfg::status_line::StatusPosition;
+    use sonicterm_gpu::status_strip::strip_placement;
+    let placement = strip_placement(StatusPosition::Top, 600.0, 28.0, 40.0, 23.0);
+    let mut app = app_with_strip(true);
+    let child = app.__test_seed_child_window(&["work"]);
+    let strip = sonicterm_gpu::status_strip::StripHit { top: placement.top, ..strip_over_top() };
+    app.windows.get_mut(&child).unwrap().status_strip = Some(strip);
+    assert!(!app.right_press_status_line(child, 50.0, 10.0), "in the titlebar band");
+    assert!(!app.right_press_status_line(child, 50.0, 580.0), "where the bottom strip was");
+    assert!(app.right_press_status_line(child, 50.0, 35.0), "inside the top band");
+    assert!(app.command_palette.is_open());
+}
+
+/// App tests hold no renderer, so this pins the sync call site: every window's renderer gets the
+/// resolved position before its visibility, and either change refits the panes once. The
+/// renderer side (insets, kept layout, the band after a present) is tested in the GPU crate.
+#[test]
+fn sync_moves_each_renderer_strip_before_refitting_once() {
+    let source = include_str!("status_line.rs").replace("\r\n", "\n");
+    let moved = source
+        .find("let moved = renderer.set_status_line_position(state.resolved.position);")
+        .expect("sync hands each renderer the resolved position");
+    let refit = source
+        .find("if renderer.set_status_line_visible(shown) | moved {")
+        .expect("a move or a visibility change refits, with both setters always run");
+    assert!(moved < refit, "the position is set before visibility decides the refit");
+    let block = &source[refit..refit + source[refit..].find("            }\n").unwrap()];
+    assert_eq!(block.matches("resize_panes_to_rects(").count(), 1, "one refit");
+}
+
+/// A reload that changes `position` moves the strip: the session takes the file's new position,
+/// and Save Current Settings then carries it.
+#[test]
+fn reload_switches_the_strip_position() {
+    use sonicterm_cfg::status_line::StatusPosition;
+    let mut app = app_with_strip(true);
+    let now = Instant::now();
+    let _ = app.sync_status_line(now);
+    assert_eq!(app.status_line.resolved.position, StatusPosition::Top, "top by default");
+    app.config.status_line.position = StatusPosition::Bottom;
+    let _ = app.sync_status_line(now);
+    assert_eq!(app.status_line.resolved.position, StatusPosition::Bottom);
+    assert_eq!(app.status_line_save().position, StatusPosition::Bottom);
+    app.config.status_line.position = StatusPosition::Top;
+    let _ = app.sync_status_line(now);
+    assert_eq!(app.status_line.resolved.position, StatusPosition::Top, "and back");
+}

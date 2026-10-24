@@ -1,12 +1,14 @@
 //! Status line strip: its height, colors and drawing.
 //!
-//! The strip sits between the panes and the tab bar (at the bottom edge when
-//! the tab bar is hidden), shares the tab bar's `bg_base` background, and has
-//! a hairline only on its terminal side. Segments come from
+//! The strip sits at the top content edge, above the panes and below any
+//! titlebar band, or with `position = "bottom"` between the panes and the tab
+//! bar (at the bottom edge when the tab bar is hidden). It shares the tab bar's
+//! `bg_base` background and has a hairline only on its terminal side. Segments come from
 //! `sonicterm-ui::status_line` as a [`StatusLineView`]; this module measures
 //! and fits them with the chrome font, then emits ordinary quads and glyphs,
 //! so the GDI software path composites the strip unchanged.
 
+use sonicterm_render_model::boundary::cfg::status_line::StatusPosition;
 use sonicterm_render_model::boundary::cfg::theme::Theme;
 use sonicterm_render_model::boundary::ui::status_line::{
     fit, FitMetrics, PlacedSegment, SegmentClick, StatusLineView, StatusTone,
@@ -37,6 +39,48 @@ const MIN_CONTRAST: f32 = 3.0;
 pub fn status_line_height(font_size: f32, scale_factor: f32) -> f32 {
     let logical = (tab_bar_height(font_size) * HEIGHT_SHARE).max(MIN_HEIGHT_LOGICAL);
     (logical * scale_factor).round()
+}
+
+/// Where the strip sits and what it reserves, in raster px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StripPlacement {
+    /// Top edge of the band.
+    pub top: f32,
+    /// Height reserved above the panes, below the titlebar band.
+    pub reserved_top: f32,
+    /// Height reserved below the panes, above the tab bar.
+    pub reserved_bottom: f32,
+}
+
+/// Place a strip of `strip_h` raster px at `position` on a `surface_h` surface whose titlebar
+/// band is `titlebar_px` and whose tab bar is `tab_bar_px` (0 while hidden). A hidden strip has
+/// `strip_h` 0 and reserves nothing.
+pub fn strip_placement(
+    position: StatusPosition,
+    surface_h: f32,
+    titlebar_px: f32,
+    tab_bar_px: f32,
+    strip_h: f32,
+) -> StripPlacement {
+    match position {
+        StatusPosition::Top => {
+            StripPlacement { top: titlebar_px, reserved_top: strip_h, reserved_bottom: 0.0 }
+        }
+        StatusPosition::Bottom => StripPlacement {
+            top: (surface_h - tab_bar_px - strip_h).max(0.0),
+            reserved_top: 0.0,
+            reserved_bottom: strip_h,
+        },
+    }
+}
+
+/// Top edge of the hairline `thickness` px thick on the band's terminal side: the band's bottom
+/// edge at the top of the window, its top edge at the bottom.
+pub fn hairline_top(position: StatusPosition, top: f32, height: f32, thickness: f32) -> f32 {
+    match position {
+        StatusPosition::Top => top + height - thickness,
+        StatusPosition::Bottom => top,
+    }
 }
 
 /// WCAG relative luminance of a linear-sRGB color.
@@ -201,6 +245,8 @@ pub struct StripGeometry {
     pub top: f32,
     /// Height, raster px.
     pub height: f32,
+    /// The window edge the band sits on, which puts its hairline on the terminal side.
+    pub position: StatusPosition,
     /// Surface size, raster px.
     pub screen: (f32, f32),
     /// Display scale factor.
@@ -284,8 +330,10 @@ pub fn emit_strip(
         color: colors.background,
         ..Default::default()
     });
+    let thickness = scale.round().max(1.0);
+    let hairline = hairline_top(geometry.position, geometry.top, geometry.height, thickness);
     quads.push(QuadInstance {
-        rect: px_to_ndc(0.0, geometry.top, screen_w, scale.round().max(1.0), screen_w, screen_h),
+        rect: px_to_ndc(0.0, hairline, screen_w, thickness, screen_w, screen_h),
         color: colors.hairline,
         ..Default::default()
     });
