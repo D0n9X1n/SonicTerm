@@ -3604,7 +3604,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-app"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -3654,7 +3654,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-app-core"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "bytes",
  "smallvec",
@@ -3664,7 +3664,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-block-glyph"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "anyhow",
  "bitflags 2.13.2",
@@ -3675,7 +3675,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-cfg"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "anyhow",
  "percent-encoding",
@@ -3692,7 +3692,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-engine"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "anyhow",
  "log",
@@ -3704,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-font"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "anyhow",
  "cairo-rs 0.22.9",
@@ -3738,7 +3738,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-font-config"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "bitflags 2.13.2",
  "lazy_static",
@@ -3748,7 +3748,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-fontconfig"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "libc",
  "pkg-config",
@@ -3756,7 +3756,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-freetype"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "cc",
  "fixed",
@@ -3764,7 +3764,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-gpu"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3788,7 +3788,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-grid"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "sonicterm-types",
  "unicode-width",
@@ -3796,7 +3796,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-harfbuzz"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "cc",
  "sonicterm-freetype",
@@ -3804,7 +3804,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-io"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3822,7 +3822,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-linux"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "anyhow",
  "async-io",
@@ -3840,7 +3840,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-logging"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "chrono",
  "enum-map",
@@ -3859,7 +3859,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-mac"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -3885,7 +3885,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-render-model"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "sonicterm-cfg",
  "sonicterm-grid",
@@ -3895,7 +3895,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-resource"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "enum-map",
  "parking_lot",
@@ -3904,7 +3904,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-text"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "bytemuck",
  "sonicterm-types",
@@ -3913,7 +3913,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-types"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "bitflags 2.13.2",
  "enum-map",
@@ -3923,7 +3923,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-ui"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "fluent-bundle",
  "fluent-langneg",
@@ -3945,7 +3945,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-vt"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "crossbeam-channel",
  "memchr",
@@ -3957,7 +3957,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-windows"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "anyhow",
  "muda",
