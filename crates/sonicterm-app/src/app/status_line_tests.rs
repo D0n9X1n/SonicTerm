@@ -1193,3 +1193,62 @@ fn presenter_kind_names_the_presenter_on_each_host() {
     );
     assert_eq!(presenter_kind(false, false, false), PresenterKind::Hardware);
 }
+
+/// A macOS graphics reading whose charged figure is `charged`.
+fn task_vm_graphics(charged: MemoryMetric) -> sonicterm_logging::graphics_memory::GraphicsMemory {
+    use sonicterm_logging::graphics_memory::{GraphicsMemory, GraphicsSource};
+    let mut reading = GraphicsMemory::unavailable(GraphicsSource::TaskVmInfo);
+    reading.footprint = charged;
+    reading.nofootprint = MemoryMetric::Bytes(7 << 20);
+    reading
+}
+
+/// `mem` subtracts only the graphics the footprint is charged with, never the uncharged figure.
+#[test]
+fn mem_subtracts_the_graphics_charged_to_the_footprint() {
+    let graphics = task_vm_graphics(MemoryMetric::Bytes(40 << 20));
+    assert_eq!(
+        mem_without_graphics(MemoryMetric::Bytes(100 << 20), &graphics),
+        MemoryMetric::Bytes(60 << 20)
+    );
+}
+
+/// A graphics figure larger than the footprint (two samples taken apart) floors `mem` at zero.
+#[test]
+fn mem_without_graphics_never_goes_below_zero() {
+    let graphics = task_vm_graphics(MemoryMetric::Bytes(120 << 20));
+    assert_eq!(
+        mem_without_graphics(MemoryMetric::Bytes(100 << 20), &graphics),
+        MemoryMetric::Bytes(0)
+    );
+}
+
+/// An unsupported footprint stays unsupported; an unsupported graphics figure keeps the footprint.
+#[test]
+fn mem_without_graphics_keeps_unsupported_and_missing_graphics() {
+    let graphics = task_vm_graphics(MemoryMetric::Bytes(40 << 20));
+    assert_eq!(
+        mem_without_graphics(MemoryMetric::Unsupported, &graphics),
+        MemoryMetric::Unsupported
+    );
+    let unread = task_vm_graphics(MemoryMetric::Unsupported);
+    assert_eq!(
+        mem_without_graphics(MemoryMetric::Bytes(100 << 20), &unread),
+        MemoryMetric::Bytes(100 << 20)
+    );
+}
+
+/// DXGI does not say how much of Windows private commit is video memory, and other sources offer
+/// no figure, so neither changes `mem`.
+#[test]
+fn mem_without_graphics_leaves_other_sources_alone() {
+    use sonicterm_logging::graphics_memory::{GraphicsMemory, GraphicsSource};
+    let mut dxgi = GraphicsMemory::unavailable(GraphicsSource::Dxgi);
+    dxgi.dedicated = MemoryMetric::Bytes(30 << 20);
+    dxgi.shared = MemoryMetric::Bytes(20 << 20);
+    dxgi.footprint = MemoryMetric::Bytes(10 << 20);
+    let footprint = MemoryMetric::Bytes(100 << 20);
+    assert_eq!(mem_without_graphics(footprint, &dxgi), footprint);
+    let none = GraphicsMemory::unavailable(GraphicsSource::None);
+    assert_eq!(mem_without_graphics(footprint, &none), footprint);
+}

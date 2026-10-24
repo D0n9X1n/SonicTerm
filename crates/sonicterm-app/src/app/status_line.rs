@@ -19,6 +19,7 @@ use sonicterm_cfg::status_overrides::{
 };
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
+use sonicterm_logging::graphics_memory::{GraphicsMemory, GraphicsSource};
 use sonicterm_logging::MemoryMetric;
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::selection::{
@@ -316,6 +317,25 @@ pub(crate) fn tab_mem_input(
     }
     let age = now.saturating_duration_since(oldest?);
     Some(TabMemInput { bytes, stale_secs: (age > fresh_for).then_some(age.as_secs()) })
+}
+
+/// The `mem` figure: the process footprint minus the graphics memory the OS charges to it.
+///
+/// Only macOS separates that part: its `task_info` graphics ledger names the bytes charged to
+/// the physical footprint, which are subtracted, flooring at zero because the two figures are
+/// read apart. DXGI reports Windows video memory by segment group, not as a share of private
+/// commit, and Linux has no graphics figure, so those footprints are kept. An unsupported
+/// footprint stays unsupported.
+pub(crate) fn mem_without_graphics(
+    footprint: MemoryMetric,
+    graphics: &GraphicsMemory,
+) -> MemoryMetric {
+    match (footprint, graphics.source, graphics.footprint) {
+        (MemoryMetric::Bytes(bytes), GraphicsSource::TaskVmInfo, MemoryMetric::Bytes(charged)) => {
+            MemoryMetric::Bytes(bytes.saturating_sub(charged))
+        }
+        _ => footprint,
+    }
 }
 
 /// The presenter a window draws through: GDI only on Windows with the software degrade on;
@@ -1168,7 +1188,10 @@ impl App {
         } else if slept || self.status_line.next_sample.is_none_or(|due| now >= due) {
             // When: a sample is due, read each listed figure once for every window.
             if samples_mem {
-                let bytes = match sonicterm_logging::process_report::sample_footprint().current {
+                // Only the macOS ledger is subtracted, so no DXGI adapter is queried here.
+                let footprint = sonicterm_logging::process_report::sample_footprint().current;
+                let graphics = sonicterm_logging::graphics_memory::sample(None);
+                let bytes = match mem_without_graphics(footprint, &graphics) {
                     MemoryMetric::Bytes(bytes) => Some(bytes),
                     MemoryMetric::Unsupported => None,
                 };
