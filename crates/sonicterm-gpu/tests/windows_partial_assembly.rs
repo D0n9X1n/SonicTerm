@@ -1291,36 +1291,38 @@ fn moved_strip_routes_until_presented(
     Ok(())
 }
 
-/// The strip's distinct resident strikes, in thousandths of a raster pixel, and whether a strip
-/// glyph was drawn as missing chrome on the last frame.
-fn strip_strikes(renderer: &GpuRenderer) -> (std::collections::BTreeSet<u64>, bool) {
-    use sonicterm_types::GlyphRasterVariant;
-    let (identities, _unresolved) = renderer.__test_resident_tile_identities();
-    let strikes = identities
-        .keys()
-        .filter(|identity| identity.raster_variant == GlyphRasterVariant::StatusLine)
-        .map(|identity| identity.source.strike_px_milli)
-        .collect();
-    (strikes, !renderer.last_missing_chrome().is_empty())
+/// The strip tiles `renderer`'s atlas holds, each as `(glyph, width, height)` of its atlas rect.
+fn strip_tiles(renderer: &GpuRenderer) -> Vec<(sonicterm_types::GlyphKey, u32, u32)> {
+    renderer.__test_resident_tile_sizes(sonicterm_types::GlyphRasterVariant::StatusLine)
 }
 
-/// The strike the strip must draw at: its text size at the live font size and `font_scale`, in
-/// raster pixels at the renderer's DPI, in thousandths.
-fn expected_strip_strike(renderer: &GpuRenderer, font_scale: f32) -> u64 {
-    let size_pt =
-        sonicterm_gpu::status_strip::status_line_font_size(renderer.font_size(), font_scale);
-    let dpi = (72.0 * renderer.scale_factor()).round().max(1.0);
-    (f64::from(size_pt) * f64::from(dpi) / 72.0 * 1000.0).round() as u64
+/// The strip showing `view`, presented by a cold renderer built at `family`, `size_pt`,
+/// `scale_factor` and `font_scale`: the tiles a renderer that never drew another size holds.
+fn cold_strip_tiles(
+    active: &ActiveEventLoop,
+    view: &sonicterm_render_model::boundary::ui::status_line::StatusLineView,
+    (family, size_pt, scale_factor, font_scale): (&str, f32, f32, f32),
+) -> Result<Vec<(sonicterm_types::GlyphKey, u32, u32)>, String> {
+    let (window, mut cold) = wgpu_renderer(active)?;
+    cold.set_font(family, size_pt, 1.0, 1.0);
+    cold.set_scale_factor(scale_factor);
+    cold.set_status_line_font_scale(font_scale);
+    cold.set_status_line_view(view.clone());
+    cold.set_status_line_visible(true);
+    let mut scene = single(&layout(&cold, &window));
+    present(&mut cold, &mut scene)?;
+    check(cold.last_missing_chrome().is_empty(), "the cold strip drew every glyph")?;
+    Ok(strip_tiles(&cold))
 }
 
 /// Through the real renderer: a warm strip, then a zoom, a DPI change and a `font_scale` change.
-/// After each, the next presented frame draws the strip at exactly the new size, and every strip
-/// tile resident in the atlas has that one strike, so no tile of an earlier size is resident or
-/// drawn.
+/// After each, every strip tile resident in the atlas has the atlas-rect size a cold renderer
+/// built at that final size draws for the same text, and no other strip tile is resident, so a
+/// tile of an earlier size can neither stay resident nor be drawn.
 fn strip_rasterizes_anew_after_size_changes(
     renderer: &mut GpuRenderer,
     layout: &Layout,
-    _active: &ActiveEventLoop,
+    active: &ActiveEventLoop,
 ) -> Result<(), String> {
     use sonicterm_render_model::boundary::cfg::status_line::{StatusSegmentId, StatusSide};
     use sonicterm_render_model::boundary::ui::status_line::{
@@ -1340,20 +1342,25 @@ fn strip_rasterizes_anew_after_size_changes(
         spoken: SpokenSegment::default(),
     }]);
     let mut scene = single(layout);
-    renderer.set_status_line_view(view);
+    renderer.set_status_line_view(view.clone());
     renderer.set_status_line_visible(true);
-    let mut seen = Vec::new();
+    let mut previous: Option<Vec<(sonicterm_types::GlyphKey, u32, u32)>> = None;
     let mut step = |renderer: &mut GpuRenderer, label: &str, font_scale: f32| {
         present(renderer, &mut scene)?;
-        let (strikes, missing) = strip_strikes(renderer);
-        let expected = expected_strip_strike(renderer, font_scale);
-        check(!missing, &format!("{label}: the strip drew a glyph as missing"))?;
         check(
-            strikes.len() == 1 && strikes.contains(&expected),
-            &format!("{label}: strip strikes {strikes:?}, expected only {expected}"),
+            renderer.last_missing_chrome().is_empty(),
+            &format!("{label}: the strip drew a glyph as missing"),
         )?;
-        check(!seen.contains(&expected), &format!("{label}: {expected} repeats an earlier size"))?;
-        seen.push(expected);
+        let mut live = strip_tiles(renderer);
+        check(!live.is_empty(), &format!("{label}: the strip holds tiles"))?;
+        let target = (family, renderer.font_size(), renderer.scale_factor(), font_scale);
+        let cold = cold_strip_tiles(active, &view, target)?;
+        sonicterm_gpu::status_strip::compare_strip_tile_sizes(&live, &cold)
+            .map_err(|error| format!("{label}: {error}"))?;
+        // Each change must reach the tiles, or the comparison above proved nothing about it.
+        live.sort_by_key(|(key, width, height)| (key.ch, key.weight_bold, *width, *height));
+        check(previous.as_ref() != Some(&live), &format!("{label}: the tiles kept their size"))?;
+        previous = Some(live);
         Ok::<(), String>(())
     };
     step(renderer, "warm", default_scale)?;
