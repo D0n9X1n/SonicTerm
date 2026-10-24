@@ -154,6 +154,43 @@ pub struct PresentedStatusSegment {
     pub click: Option<SegmentClick>,
 }
 
+/// The strip a frame placed and the one the last presented frame showed, each whole: band top,
+/// height and segment rects. Assembly stages; only a presented frame commits, so routing and
+/// accessibility never see an undrawn band or layout.
+#[derive(Debug, Clone, Default)]
+pub struct StripLayouts {
+    /// Placed by the frame being assembled; `None` once settled or when no strip was placed.
+    staged: Option<StripHit>,
+    /// What the last presented frame drew; `None` before one did or while the strip is hidden.
+    presented: Option<StripHit>,
+}
+
+impl StripLayouts {
+    /// Record the strip the frame being assembled placed.
+    pub fn stage(&mut self, strip: StripHit) {
+        self.staged = Some(strip);
+    }
+
+    /// Settle the staged strip at the presenter's outcome: commit it when the frame presented,
+    /// discard it otherwise.
+    pub fn settle(&mut self, presented: bool) {
+        if let Some(staged) = self.staged.take().filter(|_| presented) {
+            self.presented = Some(staged);
+        }
+    }
+
+    /// Drop both strips, as hiding the strip does.
+    pub fn clear(&mut self) {
+        self.staged = None;
+        self.presented = None;
+    }
+
+    /// The strip the last presented frame drew.
+    pub fn presented(&self) -> Option<&StripHit> {
+        self.presented.as_ref()
+    }
+}
+
 /// Where the strip is and how it is drawn this frame.
 #[derive(Debug, Clone, Copy)]
 pub struct StripGeometry {
@@ -321,6 +358,36 @@ pub fn emit_strip(
         screen_w,
         screen_h,
     );
+}
+
+/// Thickness in raster px of the keyboard focus ring at display scale `scale`: two logical pixels,
+/// never under one raster pixel, twice as thick with `[accessibility] strong_focus`.
+pub fn focus_ring_thickness(scale: f32, strong: bool) -> f32 {
+    let base = (2.0 * scale).max(1.0);
+    if strong {
+        base * 2.0
+    } else {
+        // When: `strong` is false, the ring keeps its base thickness.
+        base
+    }
+}
+
+/// The focus ring's four edges as `[left, top, width, height]` raster-px rects, inside the box
+/// `left..left + width` by `top..top + height`; an edge never exceeds half the box.
+pub fn focus_ring_rects(
+    left: f32,
+    width: f32,
+    top: f32,
+    height: f32,
+    thickness: f32,
+) -> [[f32; 4]; 4] {
+    let edge = thickness.min(width / 2.0).min(height / 2.0).max(0.0);
+    [
+        [left, top, width, edge],
+        [left, top + height - edge, width, edge],
+        [left, top, edge, height],
+        [left + width - edge, top, edge, height],
+    ]
 }
 
 /// The strip band and the segments the last drawn frame presented, in raster px; what pointer

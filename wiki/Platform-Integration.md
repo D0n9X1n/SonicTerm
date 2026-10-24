@@ -213,6 +213,15 @@ with bundle-relative imports, plus licenses and provenance. Its minimum macOS
 version reflects the actual executable/library deployment targets, not merely
 the packaging host's architecture. See [Packaging](Packaging) for verification.
 
+### Accessibility
+
+Every terminal window gets an accesskit adapter on winit's view, installed while
+the window is still hidden, before its first show; the Memory Usage report window
+gets none. VoiceOver reaches it through NSAccessibility. The adapter adds only
+accessibility methods to the view, which is also the IME text-input client and
+the source of tab drags; neither path changes. Until VoiceOver connects the
+adapter builds nothing. See [Usage](Usage) for what the status line exposes.
+
 ## Windows
 
 ### Process and HWND lifecycle
@@ -315,6 +324,13 @@ a CPU BGRA frame in `crates/sonicterm-gpu/src/software_frame.rs`. The Windows-on
 does not use retained GPU damage as a second presentation policy.
 `crates/sonicterm-windows/src/software_presenter.rs` holds configuration decisions,
 not frame composition or native blits.
+
+### Accessibility
+
+Narrator and NVDA reach each terminal window's accesskit adapter through UI
+Automation (`WM_GETOBJECT`). The adapter is installed before the window is first
+shown and is independent of the presenter, so it behaves the same on wgpu and on
+the GDI software path.
 
 ## Linux
 
@@ -471,6 +487,14 @@ and Wayland. [Packaging](Packaging) describes the Linux scenario argument and
 isolated evidence paths. Otherwise successful smoke with unsettled native PTY
 teardown exits `20`; an earlier fault, loss or recovery failure keeps its original code.
 
+### Accessibility
+
+Orca reaches each terminal window's accesskit adapter through AT-SPI over D-Bus,
+the same on X11 and on Wayland. The adapter runs on the `async-io` executor that
+the desktop portal already uses, so no tokio runtime is added. With no
+accessibility bus on the session, the adapter stays dormant and SonicTerm runs
+unchanged.
+
 ## Program progress and notifications
 
 `OSC 9;4` progress is mirrored to each platform's progress surface while
@@ -592,6 +616,7 @@ pending, never changed; a later result for that run is ignored.
 | Package format | `.app` in per-architecture `.dmg` | x64 WiX `.msi` | x86_64 `.deb` and `.tar.gz` |
 | Signing | ad-hoc bundle signature | unsigned | unsigned |
 | Default-handler command | `NSWorkspace` setters for claimed types and schemes | opens Settings › Default apps | `xdg-mime` for shell-script MIME types |
+| Accessibility | accesskit over NSAccessibility (VoiceOver) | accesskit over UI Automation (Narrator, NVDA) | accesskit over AT-SPI (Orca); dormant without an accessibility bus |
 
 ## Code map
 

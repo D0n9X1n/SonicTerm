@@ -456,6 +456,8 @@ impl App {
             }
         };
         window.set_ime_allowed(true);
+        // A dormant adapter must exist before the spare is first shown at tear-out.
+        self.install_accessibility(event_loop, &window);
         let settings = self.warm_renderer_settings();
         let shared_gpu = self.shared_gpu_context();
         let mut renderer = match shared_gpu.map_or_else(
@@ -867,6 +869,8 @@ impl App {
                 })?;
                 let create_window_ms = create_start.elapsed().as_secs_f32() * 1000.0;
                 window.set_ime_allowed(true);
+                // A dormant adapter must exist before the destination is first shown.
+                self.install_accessibility(event_loop, &window);
                 let shared_gpu = self.shared_gpu_context();
                 let renderer_settings = self.tear_out_renderer_settings("child");
                 let renderer_start = Instant::now();

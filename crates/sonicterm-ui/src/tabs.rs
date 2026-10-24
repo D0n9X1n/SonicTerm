@@ -66,6 +66,17 @@ impl CommandStatus {
     }
 }
 
+/// Which kind of mark a tab newly got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MarkKind {
+    /// A program rang the bell.
+    Bell,
+    /// A program posted a notification.
+    Notify,
+    /// A command finished after this many seconds, recorded when the tab got the mark.
+    Finished(u64),
+}
+
 /// Why a tab needs the user, set while it is not the active tab and cleared when it is visited.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct TabMarks {
@@ -262,6 +273,10 @@ pub struct TabBar {
     /// `(tab_min_width, tab_max_width)` in logical pixels, as the last
     /// `refresh_content_widths` pass laid the bar out with them; `None` until then.
     laid_out_limits: Option<(f32, f32)>,
+    /// Bumped by each mark a tab newly gets.
+    mark_seq: u64,
+    /// The tab and kind of the newest mark.
+    last_mark: Option<(TabId, MarkKind)>,
 }
 
 impl TabBar {
@@ -614,9 +629,33 @@ impl TabBar {
             // When: no tab has index, there is nothing to mark.
             return false;
         };
-        let was_marked = tab.marks.is_marked();
+        let before = tab.marks;
         update(&mut tab.marks);
-        !was_marked && tab.marks.is_marked()
+        let after = tab.marks;
+        // The newest mark is recorded where it is set, the most specific kind first.
+        let newly = if let (None, Some(secs)) = (before.finished_secs, after.finished_secs) {
+            Some(MarkKind::Finished(secs))
+        } else if !before.notify && after.notify {
+            // When: `notify` newly set and no finish did, the notification is the new mark.
+            Some(MarkKind::Notify)
+        } else if !before.bell && after.bell {
+            // When: only `bell` newly set, the bell is the new mark.
+            Some(MarkKind::Bell)
+        } else {
+            // When: neither `finished_secs`, `notify` nor `bell` newly set, nothing is recorded.
+            None
+        };
+        if let Some(kind) = newly {
+            let id = tab.id;
+            self.mark_seq += 1;
+            self.last_mark = Some((id, kind));
+        }
+        !before.is_marked() && after.is_marked()
+    }
+
+    /// How many marks tabs have newly got, and the tab and kind of the newest.
+    pub fn last_mark(&self) -> (u64, Option<(TabId, MarkKind)>) {
+        (self.mark_seq, self.last_mark)
     }
 
     /// Index of the tab with `id`, if the bar holds it.

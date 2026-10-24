@@ -192,6 +192,8 @@ impl App {
             frame_counters: super::frame_counters::AppFrameCounters::from_tracing(),
             frame_counters_sealed: std::cell::Cell::new(false),
             dispatch_redraws: super::redraw::DispatchRedraws::default(),
+            accessibility_tree_builds: 0,
+            accessibility: Default::default(),
             next_echo_arm: 1,
             main_window_id: None,
             frontmost_window: None,
@@ -264,6 +266,7 @@ impl App {
         if let Some(previous_id) = self.main_window_id.take() {
             self.cancel_window_rename(previous_id);
             self.cancel_tab_edit(previous_id);
+            self.accessibility.remove(&previous_id);
             if let Some(mut previous) = self.windows.remove(&previous_id) {
                 self.retire_window_counters(previous_id, &mut previous);
                 for pane in std::mem::take(&mut previous.panes).into_values() {

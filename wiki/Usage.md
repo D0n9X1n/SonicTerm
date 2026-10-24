@@ -286,6 +286,34 @@ If its active pane is temporarily unavailable, the query is unchanged and the pa
 is consumed; see Search retained output. On Linux X11, if any dropped file name is
 not valid UTF-8, the drop delivers no files.
 
+### The status line with a keyboard or screen reader
+
+Bind `focus_status_line` (see [Keybindings](Keybindings)) to move keyboard focus
+to the status line: arrows move between segments, Enter clicks one, and Escape
+returns to the terminal; nothing you type there reaches the shell.
+
+Screen readers (VoiceOver on macOS, Narrator and NVDA on Windows, Orca on Linux)
+read each visible segment as a button when it can be clicked and as a label
+otherwise, named in plain words such as "Memory 412 MB rising", with
+"Warning:" or "Error:" in front when it warns. Moving a screen reader to a
+segment never activates it; activating it clicks it like the mouse, through the
+same READONLY rules, in that segment's window. A request runs only while the
+window still exposes the segment it named with the same pane and action, and no
+reload or resize came between; otherwise it is dropped.
+The tree's segments are the ones the last presented frame drew; their names come
+from the current values, so memory and CPU stay current while the window is
+covered. Health warnings and new tab alerts are announced, even while the strip
+is off; what is already wrong when a screen reader connects is not announced. A
+segment announces at most once per `announce_min_interval_ms`, and a change
+inside that interval waits and is said when it ends, errors first; a later change
+replaces it, so only the current state is said, and a reload that removes a
+segment from `announce` drops what it had waiting. Figures such
+as memory and CPU are read when you move to them but never announced. With
+`hide_sensitive` on, sensitive segments are not in the tree at all. Nothing is
+built for the accessibility tree until a screen reader connects, and the tree is
+built once per event-loop pass, never while a frame is drawn. `[status_line.accessibility]`
+in [Configuration](Configuration) controls exposure and announcements.
+
 ### Terminal multiplexers
 
 tmux, rmux, GNU screen and Zellij decide which links, working directories, keys

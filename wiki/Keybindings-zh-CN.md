@@ -198,11 +198,22 @@ super+ctrl+alt+shift+key
 | Pane | `split_right`、`split_down`、`close_pane`、`toggle_pane_zoom`、`resize_pane_left`、`resize_pane_right`、`resize_pane_up`、`resize_pane_down` |
 | 剪贴板与导航 | `copy_to_clipboard`、`paste_from_clipboard`、`enter_copy_mode`、`enter_quick_select` |
 | 字体 | `increase_font_size`、`decrease_font_size`、`reset_font_size`、`increase_font_weight`、`decrease_font_weight`、`reset_font_weight`、`save_current_settings` |
-| UI | `toggle_tab_bar`、`toggle_status_line`、`toggle_status_line_sensitive`、`choose_status_line_segments`、`rename_tab`、`update_tab_color`、`open_search`、`open_command_palette` |
+| UI | `toggle_tab_bar`、`toggle_status_line`、`toggle_status_line_sensitive`、`choose_status_line_segments`、`focus_status_line`、`rename_tab`、`update_tab_color`、`open_search`、`open_command_palette` |
 | 窗口与应用 | `new_window`、`rename_window`、`move_tab_to_new_window`、`toggle_fullscreen`、`quit_app` |
 | 文件与维护 | `edit_config_file`、`open_keymap_file`、`reload_config`、`check_for_updates` |
 | Shell 导航 | `scroll_to_prev_prompt`、`scroll_to_next_prompt` |
 | 诊断 | `show_memory_usage`、`copy_memory_report` |
+
+`focus_status_line`（命令面板：“聚焦状态栏”）默认未绑定，并在 READONLY 下允许，因为它只
+移动焦点。它聚焦窗口状态栏中第一个可点击的段，没有可点击的段时聚焦第一个段；状态栏关闭或
+为空时不做任何事。状态栏拥有焦点时，Left 和 Right 在段之间移动，Home 和 End 跳到第一个和
+最后一个，Enter 或 Space 像鼠标点击一样点击该段，Escape 或 Tab 把焦点还给终端。其它按键
+同样归还焦点，且不会发送到终端；按住按键时的重复输入只对方向键、Home 和 End 移动焦点，其余不起
+作用；退出仍然可用。获得焦点时会结束正在进行的输入法组字；之后预编辑被抑制，组字提交被丢弃并归还
+焦点。窗口失去焦点、切换标签页、关闭状态栏、获得焦点的段消失、在状态栏外按下任意鼠标键或打开段清单
+时，焦点也会结束。点击某个段会先归还焦点再执行其动作，因此它打开的编辑框、命令面板或浮层会立即
+接收按键和输入法。重新加载的 `strong_focus` 会作用于已画出的焦点环。获得焦点
+的段周围画有焦点环；`[accessibility] strong_focus` 会将其加粗一倍。
 
 `show_memory_usage` 与 `copy_memory_report` 默认未绑定。在内存占用报告窗口中，macOS 上
 `Cmd+Shift+C`、Windows 和 Linux 上 `Alt+Shift+C` 复制整份报告，`R` 重新采样，`Esc` 关闭

@@ -174,6 +174,13 @@ AppKit/CoreText 解析同一份文件。安装包在 `Contents/Frameworks` 中�
 动态库依赖，使用 bundle 内相对加载路径，并附带许可证和来源清单。最低 macOS 版本反映
 可执行文件/库的实际部署目标，而不只是打包主机架构。验证方式见[打包](Packaging-zh-CN)。
 
+### 辅助功能
+
+每个终端窗口在窗口仍隐藏、首次显示之前，于 winit 的 view 上安装一个 accesskit 适配器；内存占用
+报告窗口没有适配器。VoiceOver 通过 NSAccessibility 访问它。适配器只为该 view 增加辅助功能方法，
+而该 view 同时是输入法文本输入客户端和标签页拖动的来源；这两条路径都不变。VoiceOver 连接之前
+适配器不构建任何内容。状态栏公开的内容见[用法](Usage-zh-CN)。
+
 ## Windows
 
 ### 进程与 HWND 生命周期
@@ -255,6 +262,11 @@ Windows 上启用软件渲染降级时，`sonicterm-gpu` 在
 `software_windows.rs` 桥接层通过 GDI 呈现完整帧；这条路径不把保留式 GPU 损伤区域
 作为第二套呈现策略。`crates/sonicterm-windows/src/software_presenter.rs` 负责配置决策，
 不负责帧合成或原生 blit。
+
+### 辅助功能
+
+讲述人与 NVDA 通过 UI Automation（`WM_GETOBJECT`）访问每个终端窗口的 accesskit 适配器。适配器在
+窗口首次显示之前安装，并且与呈现器无关，因此在 wgpu 与 GDI 软件路径上表现相同。
 
 ## Linux
 
@@ -370,6 +382,12 @@ Wayland 上的两种 Linux 包布局中运行三个场景。[打包](Packaging-z
 隔离证据路径。其它阶段成功但原生 PTY 清理未完成时退出码为 `20`；更早的故障、设备丢失或恢复失败
 保留原退出码。
 
+### 辅助功能
+
+Orca 通过 D-Bus 上的 AT-SPI 访问每个终端窗口的 accesskit 适配器，在 X11 与 Wayland 上相同。适配器
+运行在桌面 portal 已在使用的 `async-io` 执行器上，因此不会引入 tokio 运行时。会话中没有辅助功能
+总线时，适配器保持休眠，SonicTerm 照常运行。
+
 ## 程序进度与通知
 
 `[notifications] taskbar_progress` 开启时，`OSC 9;4` 进度会同步到各平台的进度显示位置。
@@ -461,6 +479,7 @@ flowchart TD
 | 安装包格式 | 各架构 `.dmg` 中的 `.app` | x64 WiX `.msi` | x86_64 `.deb` 与 `.tar.gz` |
 | 签名 | ad-hoc bundle 签名 | 未签名 | 未签名 |
 | 默认处理程序命令 | 对声明的类型和 scheme 调用 `NSWorkspace` setter | 打开“设置 › 默认应用” | 对 shell 脚本 MIME 类型运行 `xdg-mime` |
+| 辅助功能 | accesskit 经 NSAccessibility（VoiceOver） | accesskit 经 UI Automation（讲述人、NVDA） | accesskit 经 AT-SPI（Orca）；无辅助功能总线时休眠 |
 
 ## 源码索引
 

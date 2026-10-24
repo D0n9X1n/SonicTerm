@@ -177,6 +177,13 @@ pub enum UserEvent {
     /// inspects it and routes to `App::transfer_tab` or
     /// `App::cancel_drag_session` accordingly.
     DragEnded,
+    /// An assistive technology asked a terminal window's adapter for its tree, an action, or to stop.
+    Accessibility {
+        /// The window whose adapter asked.
+        window_id: WindowId,
+        /// What it asked.
+        request: AccessibilityRequest,
+    },
     /// Request a frame of this window unconditionally, after command maintenance. The
     /// application itself no longer sends it; harnesses and tests do.
     RequestRedraw(WindowId),
@@ -348,6 +355,8 @@ pub enum UserEvent {
     },
 }
 
+mod accessibility;
+pub use accessibility::AccessibilityRequest;
 mod broadcast;
 mod child_tabs;
 mod child_window;
@@ -780,6 +789,11 @@ pub struct App {
     pub(super) frame_counters_sealed: std::cell::Cell<bool>,
     /// The windows asked for a frame in the current dispatch; see [`redraw::DispatchRedraws`].
     pub(super) dispatch_redraws: redraw::DispatchRedraws,
+    /// Trees sent to assistive technology since start; stays 0 while none is connected.
+    pub(super) accessibility_tree_builds: u64,
+    /// Each terminal window's adapter and strip focus by window id, warm spares included.
+    pub(super) accessibility:
+        std::collections::HashMap<WindowId, accessibility::WindowAccessibility>,
     /// The token the next `arm_echo_watch` issues; starts at 1, so 0 never names an arming.
     pub(super) next_echo_arm: u64,
     /// Id of the main window. Set in `do_resumed` once the main `Window` is

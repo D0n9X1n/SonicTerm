@@ -143,6 +143,8 @@ pub enum Action {
     ToggleStatusLineSensitive,
     /// Open the status line checklist to choose segments for this session.
     ChooseStatusLineSegments,
+    /// Move keyboard focus to the status line, so its segments can be read and activated.
+    FocusStatusLine,
     /// Rename the active tab title body.
     RenameTab,
     /// Pick a custom accent color for the active tab.

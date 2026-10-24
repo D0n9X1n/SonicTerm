@@ -133,6 +133,7 @@ const CONTRACT: &[(&str, &[&str])] = &[
             "program_notify_events",
             "program_toast_redraws",
             "taskbar_progress_deliveries",
+            "status_line_tree_builds",
             "about_to_wait_ms",
             "user_event_ms",
             "new_events_ms",
@@ -785,6 +786,7 @@ const NEWER_SOURCES: &[&str] = &[
     "program_notify_events",
     "program_toast_redraws",
     "taskbar_progress_deliveries",
+    "status_line_tree_builds",
 ];
 
 #[test]

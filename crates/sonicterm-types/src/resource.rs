@@ -118,6 +118,9 @@ pub enum ResourceClass {
     RegistryMetadata,
     /// Work and native handles owned by the bounded reaper.
     ReaperWork,
+    /// A terminal window's retained accessibility model: its exposed segments, announcement and
+    /// announcement queue, bounded by the strip's segment count.
+    AccessibilityTree,
 }
 
 /// Why each [`ResourceClass`] is or is not charged in production.
@@ -328,6 +331,8 @@ impl ResourceClass {
             Self::MuxSubscriber => ClassCoverage::SubsystemAbsent,
             // App::retire_pane creates one charged PtyTransport unit through ReaperDriver::retire.
             Self::ReaperWork => ClassCoverage::Charged,
+            // App::flush_accessibility charges each connected window's model to its window owner.
+            Self::AccessibilityTree => ClassCoverage::Charged,
             // Owner records are the ledger's own storage. Charging them to a
             // ledger class would make the ledger account for itself, and the
             // recursion has no fixed point.
@@ -443,6 +448,9 @@ impl ResourceClass {
 
             // App::retire_pane charges this item to a unique process-root PtyTransport, not its former pane owner.
             Self::ReaperWork => PaneSeamTerm::ChargedToAnotherOwnerKind,
+
+            // App::flush_accessibility charges this to the terminal window's owner, never a pane.
+            Self::AccessibilityTree => PaneSeamTerm::ChargedToAnotherOwnerKind,
 
             // No subsystem charges these: subscriber owners are absent, registry storage is ledger-owned,
             // font faces have no shared owner, and GPU surface memory has no driver-reported size.

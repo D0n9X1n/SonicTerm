@@ -1390,6 +1390,7 @@ pub fn action_display_name(action: &Action) -> String {
         Action::ToggleStatusLine => "ToggleStatusLine".into(),
         Action::ToggleStatusLineSensitive => "ToggleStatusLineSensitive".into(),
         Action::ChooseStatusLineSegments => "ChooseStatusLineSegments".into(),
+        Action::FocusStatusLine => "FocusStatusLine".into(),
         Action::RenameTab => "RenameTab".into(),
         Action::RenameWindow => "RenameWindow".into(),
         Action::UpdateTabColor => "UpdateTabColor".into(),
@@ -1484,6 +1485,7 @@ pub fn palette_actions() -> Vec<Action> {
         Action::ToggleStatusLine,
         Action::ToggleStatusLineSensitive,
         Action::ChooseStatusLineSegments,
+        Action::FocusStatusLine,
         Action::RenameTab,
         Action::UpdateTabColor,
         // Window

@@ -718,6 +718,50 @@ pub struct ResolvedSegment {
     pub click: ClickBinding,
 }
 
+/// The `[status_line.accessibility]` table as written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatusAccessibilityConfig {
+    /// Expose the strip to assistive technology; adapters are installed regardless.
+    pub expose: bool,
+    /// Catalog ids allowed to announce.
+    pub announce: Vec<StatusSegmentId>,
+    /// At most one announcement per segment within this many milliseconds, `1000..=60000`.
+    pub announce_min_interval_ms: u64,
+    /// Unknown keys, kept and reported.
+    #[serde(flatten, skip_serializing_if = "toml::Table::is_empty")]
+    pub extra: toml::Table,
+}
+
+impl Default for StatusAccessibilityConfig {
+    fn default() -> Self {
+        Self {
+            expose: true,
+            announce: vec![StatusSegmentId::Health, StatusSegmentId::Alerts],
+            announce_min_interval_ms: 5000,
+            extra: toml::Table::new(),
+        }
+    }
+}
+
+impl StatusAccessibilityConfig {
+    /// Whether the table holds only defaults, so a serialized config omits it.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `[status_line.accessibility]` after validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAccessibility {
+    /// Expose the strip to assistive technology.
+    pub expose: bool,
+    /// Catalog ids allowed to announce.
+    pub announce: Vec<StatusSegmentId>,
+    /// Minimum milliseconds between two announcements of one segment.
+    pub announce_min_interval_ms: u64,
+}
+
 /// The `[status_line]` table resolved into what the strip draws.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedStatusLine {
@@ -760,6 +804,8 @@ pub struct ResolvedStatusLine {
     pub out: OutSettings,
     /// Path-check segment settings.
     pub path_check: PathCheckSettings,
+    /// What assistive technology is given.
+    pub accessibility: ResolvedAccessibility,
 }
 
 impl ResolvedStatusLine {
@@ -796,6 +842,8 @@ pub const MIN_SECS_RANGE: std::ops::RangeInclusive<u64> = 0..=86_400;
 pub const HOLD_MS_RANGE: std::ops::RangeInclusive<u64> = 250..=10_000;
 /// Highest accepted segment priority.
 pub const MAX_PRIORITY: u16 = 1000;
+/// Allowed `[status_line.accessibility] announce_min_interval_ms`, in milliseconds.
+pub const ANNOUNCE_MIN_INTERVAL_RANGE_MS: std::ops::RangeInclusive<u64> = 1000..=60_000;
 
 /// Keys every segment table accepts.
 const COMMON_KEYS: &[&str] = &["show", "priority", "click"];
@@ -870,6 +918,9 @@ pub struct StatusLineConfig {
     /// ids survive and can be reported instead of failing the load.
     #[serde(skip_serializing_if = "toml::Table::is_empty")]
     pub segment: toml::Table,
+    /// `[status_line.accessibility]`: exposure and announcements.
+    #[serde(skip_serializing_if = "StatusAccessibilityConfig::is_default")]
+    pub accessibility: StatusAccessibilityConfig,
     /// Unknown keys directly under `[status_line]`, kept and reported.
     #[serde(flatten, skip_serializing_if = "toml::Table::is_empty")]
     pub extra: toml::Table,
@@ -887,6 +938,7 @@ impl Default for StatusLineConfig {
             hide_sensitive: false,
             update_interval_ms: 2000,
             segment: toml::Table::new(),
+            accessibility: StatusAccessibilityConfig::default(),
             extra: toml::Table::new(),
         }
     }
@@ -1058,6 +1110,13 @@ impl StatusLineConfig {
                 }
             }
         }
+        let interval = self.accessibility.announce_min_interval_ms;
+        if !ANNOUNCE_MIN_INTERVAL_RANGE_MS.contains(&interval) {
+            // The interval is outside 1000..=60000, so announcements would flood or never repeat.
+            bail!(
+                "status_line.accessibility.announce_min_interval_ms must be in 1000..=60000, got {interval}"
+            );
+        }
         if mem.critical_mib < mem.warn_mib {
             // `critical_mib < warn_mib`, the red level would sit below the amber one.
             bail!(
@@ -1086,6 +1145,11 @@ impl StatusLineConfig {
             cpu,
             out,
             path_check,
+            accessibility: ResolvedAccessibility {
+                expose: self.accessibility.expose,
+                announce: self.accessibility.announce.clone(),
+                announce_min_interval_ms: interval,
+            },
         })
     }
 
@@ -1095,6 +1159,9 @@ impl StatusLineConfig {
     pub fn unknown_keys(&self) -> Vec<String> {
         let mut unknown: Vec<String> =
             self.extra.keys().map(|key| format!("status_line.{key}")).collect();
+        unknown.extend(
+            self.accessibility.extra.keys().map(|key| format!("status_line.accessibility.{key}")),
+        );
         for (key, value) in &self.segment {
             let Some(id) = StatusSegmentId::from_name(key) else {
                 // When: `key` names no catalog id, the whole table is unknown.

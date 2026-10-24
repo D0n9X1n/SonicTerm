@@ -133,7 +133,7 @@ right edge.
 | --- | --- | --- |
 | `high_contrast` | `false` | Replaces the active theme foreground and background with `#ffffff` and `#000000`. |
 | `reduced_motion` | `false` | Parsed and retained, but currently has no presentation effect. |
-| `strong_focus` | `false` | Parsed and retained, but currently has no presentation effect. |
+| `strong_focus` | `false` | Doubles the thickness of the keyboard focus ring drawn around the focused status line segment. |
 
 #### `[notifications]`
 
@@ -218,6 +218,16 @@ The checklist lists **Show status line**, **Hide sensitive segments**, every imp
 Enabling a segment adds it to the list the active preset puts it in, else to its home list, after the file's segments on that side; disabling removes it wherever it is. Enabling a segment the file lists, after you disabled it, returns it to its place in the file: only segments the file does not list are appended. Moving a segment with Left or Right puts it at the end of the target list, even when that is the list the file gives it. These are session choices on top of the file, kept per segment, never as a copy of the lists: segments you did not touch follow the file's order, and the ones you placed follow them in the order you placed them. A reload keeps a choice unless the file changed what that choice is about: a hidden segment's choice only when the file adds or removes it, a placed segment's choice when the file adds, removes or moves it (a `preset` change counts for the segments it changes); `enabled` and `hide_sensitive` choices are dropped only when their own key changed. Reordering the file keeps every choice, a choice the file now satisfies is dropped, and a failed reload keeps everything. **Reset to configuration** drops every choice.
 
 The strip does not keep the event loop awake: memory is sampled only while a terminal window that can draw frames shows `mem`, and a window redraws only when its strip's pixels change. On the hardware path such a frame damages only the strip's band, because the strip's glyphs and missing-glyph boxes are clipped to it; software rendering (including every GDI frame) and frames with an open overlay repaint the whole window as before.
+
+#### `[status_line.accessibility]`
+
+| Key | Default | Behavior |
+| --- | --- | --- |
+| `expose` | `true` | Exposes the strip to screen readers. The accessibility adapter is installed in every terminal window regardless; with `false` the window's tree has no status line group, and turning it back on restores the group without a new window. |
+| `announce` | `["health", "alerts"]` | Catalog ids allowed to announce through the announcement node. `health` announces when it enters a warning or an error and once when it clears; `alerts` announces a new bell, notification or finished-command mark. Other segments never announce, and `mem`, `cpu` and the other figures are never live. |
+| `announce_min_interval_ms` | `5000` | At most one announcement per segment in this many milliseconds, `1000` to `60000`; identical text is never repeated. |
+
+An unknown id in `announce` or an interval out of range fails the load. Unknown keys in the table are ignored and named in the `[status_line]` unknown-keys warning.
 
 #### `[logging]`
 

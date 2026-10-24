@@ -240,6 +240,24 @@ action = "copy_memory_report"
     }
 }
 
+/// Contract: `focus_status_line` deserializes from its snake_case name for a user binding, and no
+/// bundled keymap binds it, because it has no default binding.
+#[test]
+fn focus_status_line_parses_and_has_no_default_binding() {
+    let source = "[meta]\nname = \"test\"\nversion = \"1\"\n\n[[binding]]\nkeys = \"alt+shift+s\"\naction = \"focus_status_line\"\n";
+    let keymap: Keymap = toml::from_str(source).expect("focus_status_line should deserialize");
+    assert_eq!(keymap.lookup("alt+shift+s"), Some(&Action::FocusStatusLine));
+    for text in [
+        include_str!("../../../assets/keymaps/sonicterm.toml"),
+        include_str!("../../../assets/keymaps/sonicterm-macos.toml"),
+        include_str!("../../../assets/keymaps/sonicterm-windows.toml"),
+        include_str!("../../../assets/keymaps/sonicterm-linux.toml"),
+    ] {
+        let bundled: Keymap = toml::from_str(text).expect("bundled keymap parses");
+        assert!(bundled.bindings.iter().all(|binding| binding.action.0 != Action::FocusStatusLine));
+    }
+}
+
 /// `bundled_default()` (the runtime fallback) parses for the host platform.
 #[test]
 fn bundled_default_parses() {

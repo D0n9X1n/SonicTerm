@@ -178,6 +178,9 @@ pub(crate) struct StatusLineState {
     cpu_hysteresis: Hysteresis,
     /// The `cpu` figure shown, while its hysteresis shows it.
     cpu_shown: Option<u64>,
+    /// Tests: the render health every window reports, as a renderer would.
+    #[cfg(test)]
+    pub(super) render_override: Option<RenderHealth>,
     /// Per pane, its output byte total at the previous `out` sample.
     out_prev: HashMap<u64, u64>,
     /// When `out` last sampled.
@@ -679,6 +682,41 @@ pub(crate) fn classify_render(
 }
 
 /// How this window's frames are rendered.
+/// The tabs of `window` that carry a mark, numbered from 1.
+fn marked_tabs(window: &WindowState) -> Vec<(usize, sonicterm_ui::tabs::TabMarks)> {
+    window
+        .tabs
+        .tabs()
+        .iter()
+        .enumerate()
+        .filter(|(_, tab)| tab.marks.is_marked())
+        .map(|(index, tab)| (index + 1, tab.marks))
+        .collect()
+}
+
+/// `window`'s health: reload failures, how it renders, and whether it waits on GPU recovery.
+fn window_health(
+    state: &StatusLineState,
+    window: &WindowState,
+    gpu_recovering: bool,
+) -> HealthInput {
+    let renderer = window.renderer.as_ref();
+    let render = renderer.map(render_health).unwrap_or_default();
+    #[cfg(test)]
+    let render = state.render_override.unwrap_or(render);
+    HealthInput {
+        config: state.config_error,
+        theme: state.theme_error,
+        keymap: state.keymap_error,
+        render,
+        gpu_recovering: waits_on_gpu_recovery(
+            gpu_recovering,
+            window.redraw.stopped_generation.is_some(),
+            renderer.is_some_and(GpuRenderer::device_accepts_gpu_work),
+        ),
+    }
+}
+
 fn render_health(renderer: &GpuRenderer) -> RenderHealth {
     classify_render(
         cfg!(windows),
@@ -849,7 +887,11 @@ impl App {
             }
         }
         if let Some(window) = self.windows.get_mut(&window_id) {
-            window.status_strip = window.renderer.as_ref().and_then(GpuRenderer::status_line_hit);
+            if let Some(renderer) = window.renderer.as_ref() {
+                // The renderer commits a strip layout only when its frame presented; routing and
+                // the next accessibility flush read it. No tree is built on this redraw path.
+                window.status_strip = renderer.status_line_hit();
+            }
         }
     }
 
@@ -869,6 +911,78 @@ impl App {
     }
 
     /// Rebuild every window's strip on the next pass (locale or theme change).
+    /// Whether the strip is shown this session.
+    pub(super) fn status_line_shown(&self) -> bool {
+        self.status_line.visible
+    }
+
+    /// Whether sensitive segments are hidden this session.
+    pub(super) fn status_hide_sensitive(&self) -> bool {
+        self.status_line.hide_sensitive
+    }
+
+    /// `[status_line.accessibility]` as resolved.
+    pub(super) fn status_accessibility(
+        &self,
+    ) -> &sonicterm_cfg::status_line::ResolvedAccessibility {
+        &self.status_line.resolved.accessibility
+    }
+
+    /// The inputs `window_id`'s accessibility tree is named from: the strip pass's last inputs,
+    /// with the App-owned values (memory, CPU, health, alert marks) read now, so they stay current
+    /// while the strip is off or the window is covered, parked or device-stopped.
+    pub(super) fn accessible_inputs(&self, window_id: WindowId) -> Option<StatusLineInputs> {
+        let window = self.windows.get(&window_id)?;
+        let state = &self.status_line;
+        let mut inputs =
+            state.built.get(&window_id).map(|built| built.inputs.clone()).unwrap_or_default();
+        inputs.mem = state.mem;
+        inputs.cpu_percent = state.cpu_shown;
+        let gpu_recovering = self.gpu_recovery_snapshot().is_some_and(|snapshot| {
+            !matches!(snapshot.phase, sonicterm_gpu::recovery::RecoveryPhase::Active)
+        });
+        inputs.health = window_health(state, window, gpu_recovering);
+        inputs.alerts = AlertsInput {
+            tabs: marked_tabs(window),
+            other_windows: self
+                .windows
+                .iter()
+                .filter(|(other, other_window)| {
+                    **other != window_id && !marked_tabs(other_window).is_empty()
+                })
+                .count(),
+        };
+        Some(inputs)
+    }
+
+    /// Format `ids` over `inputs` with each segment's own formatter, whether or not the strip
+    /// lists it, so a spoken name never depends on the visual list.
+    pub(super) fn accessible_view(
+        &self,
+        ids: &[StatusSegmentId],
+        inputs: &StatusLineInputs,
+    ) -> StatusLineView {
+        let state = &self.status_line;
+        let mut resolved = state.resolved.clone();
+        for id in ids {
+            if resolved.segment(*id).is_none() {
+                if let Some(unlisted) =
+                    state.resolved.unlisted.iter().find(|segment| segment.id == *id)
+                {
+                    resolved.segments.push(unlisted.clone());
+                }
+            }
+        }
+        let locale = self.config.locale.as_str();
+        let numbers = NumberStyle::for_locale(if locale.is_empty() { "en" } else { locale });
+        build_view(&resolved, state.hide_sensitive, inputs, &self.i18n, numbers)
+    }
+
+    /// The strip settings generation, bumped by every toggle, reload and locale change.
+    pub(super) fn status_generation(&self) -> u64 {
+        self.status_line.generation
+    }
+
     pub(super) fn invalidate_status_line(&mut self) {
         self.status_line.generation = self.status_line.generation.wrapping_add(1);
     }
@@ -1050,8 +1164,13 @@ impl App {
                 && window.renderer.is_some()
                 && window.frame_deadlines_allowed()
         });
-        let sampled =
-            |id| visible && any_eligible && self.status_line.resolved.segment(id).is_some();
+        // A connected assistive technology hears memory and CPU while no window can draw.
+        let listening = self.accessibility.values().any(|state| state.active);
+        let sampled = |id| {
+            visible
+                && (any_eligible || listening)
+                && self.status_line.resolved.segment(id).is_some()
+        };
         let samples_mem = sampled(StatusSegmentId::Mem);
         let samples_cpu = sampled(StatusSegmentId::Cpu);
         let samples_out = sampled(StatusSegmentId::Out);
@@ -1167,7 +1286,14 @@ impl App {
             self.note_input(window_id, input, now);
         }
         self.service_held_input(now);
-        let Self { windows, status_line: state, i18n, dispatch_redraws, .. } = self;
+        let Self { windows, status_line: state, i18n, dispatch_redraws, accessibility, .. } = self;
+        // An assistive technology hears new alert marks even while no shown strip lists `alerts`.
+        let alerts_announced = state
+            .resolved
+            .accessibility
+            .announce
+            .contains(&StatusSegmentId::Alerts)
+            .then_some(state.resolved.alerts);
         let listed = |id| state.resolved.segment(id).is_some();
         let input_shown = listed(StatusSegmentId::Input);
         let input_hold = Duration::from_secs(state.resolved.input.hold_secs);
@@ -1247,9 +1373,12 @@ impl App {
         let mut shows = StripShows::default();
         let numbers = NumberStyle::for_locale(if locale.is_empty() { "en" } else { &locale });
         for (window_id, window) in windows.iter_mut() {
-            // Marks are recorded only while a shown strip lists `alerts`, renderer or not.
-            window.alert_settings =
-                alert_settings.filter(|_| window.role == super::WindowRole::Terminal);
+            // Marks are recorded while a shown strip lists `alerts`, or a connected assistive
+            // technology announces them, renderer or not.
+            let listening = accessibility.get(window_id).is_some_and(|access| access.active);
+            window.alert_settings = alert_settings
+                .or(alerts_announced.filter(|_| listening))
+                .filter(|_| window.role == super::WindowRole::Terminal);
             let Some(renderer) = window.renderer.as_mut() else {
                 // When: a test-seeded entry has no renderer, it has no strip.
                 continue;
@@ -1483,7 +1612,7 @@ impl App {
         });
         // A covered or hidden strip shows nothing a deadline could change, so it arms no wake; the
         // sync that runs when a window turns eligible again reads every deadline that passed.
-        let wake = (visible && any_eligible).then_some(next_wake).flatten();
+        let wake = (visible && (any_eligible || listening)).then_some(next_wake).flatten();
         self.status_line.armed_wake = wake;
         wake
     }
@@ -1511,43 +1640,53 @@ impl App {
         pointer_x: f32,
         pointer_y: f32,
     ) -> bool {
-        let Some(strip) =
-            self.windows.get(&window_id).and_then(|window| window.status_strip.as_ref())
-        else {
-            // When: `status_strip` is None, the window presented no strip.
+        let hit = self.windows.get(&window_id).and_then(|window| window.status_strip.as_ref()).map(
+            |strip| {
+                let click = strip
+                    .segment_at(pointer_x, pointer_y)
+                    .and_then(|segment| segment.click.clone());
+                (strip.contains(pointer_y), click)
+            },
+        );
+        let Some((true, click)) = hit else {
+            // When: `hit` is None or outside the band, the press is outside the strip: strip focus
+            // ends and routing continues.
+            self.end_status_focus(window_id);
             return false;
         };
-        if !strip.contains(pointer_y) {
-            // When: `contains` is false, the press is outside the band and routing continues.
-            return false;
+        if let Some(click) = click {
+            self.run_status_click(window_id, click);
         }
-        let click =
-            strip.segment_at(pointer_x, pointer_y).and_then(|segment| segment.click.clone());
+        true
+    }
+
+    /// Run a presented segment's click for `window_id`: a mouse press, Enter or Space in strip
+    /// focus, or an assistive technology's `Click`, through one dispatcher.
+    pub(super) fn run_status_click(&mut self, window_id: WindowId, click: SegmentClick) {
+        // Focus leaves the strip first, so an editor, palette or overlay the click opens owns the
+        // keyboard and IME at once, whichever input clicked.
+        self.end_status_focus(window_id);
         match click {
-            Some(SegmentClick::Action(action)) => {
+            SegmentClick::Action(action) => {
                 // When: the segment's click is an `Action`, run it for the pressed window.
                 let _ = self.run_action_for_window(&action, window_id);
             }
-            Some(SegmentClick::Handler(SegmentHandler::ScrollToBottom)) => {
+            SegmentClick::Handler(SegmentHandler::ScrollToBottom) => {
                 self.scroll_window_to_bottom(window_id);
             }
-            Some(SegmentClick::Handler(SegmentHandler::AcknowledgeHistory)) => {
+            SegmentClick::Handler(SegmentHandler::AcknowledgeHistory) => {
                 self.acknowledge_history(window_id);
             }
-            Some(SegmentClick::Handler(SegmentHandler::NextAlert)) => {
+            SegmentClick::Handler(SegmentHandler::NextAlert) => {
                 self.activate_next_alert(window_id);
             }
-            Some(SegmentClick::Handler(SegmentHandler::ClipSource)) => {
+            SegmentClick::Handler(SegmentHandler::ClipSource) => {
                 self.activate_clip_source();
             }
-            Some(SegmentClick::Handler(SegmentHandler::ListGlyphs)) => {
+            SegmentClick::Handler(SegmentHandler::ListGlyphs) => {
                 self.list_missing_glyphs(window_id);
             }
-            None => {
-                // When: `click` is None, a gap or inert segment was pressed; consume it and do nothing.
-            }
         }
-        true
     }
 
     /// Record the native result of an accepted OSC 52 write from `pane_id`, `bytes` long.

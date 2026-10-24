@@ -713,3 +713,20 @@ fn marked_tab_content_draws_a_dot() {
     assert_eq!(content.display_text(), "\u{25CF} #2 tab");
     assert!(!TabContent::of(&bar.tabs()[1], now, true, false).marked);
 }
+
+/// Each newly set mark is recorded where it is set, with its tab and kind and a sequence number, so
+/// a reader of the bar never compares remembered marks; a mark already set records nothing.
+#[test]
+fn each_new_mark_is_recorded_with_its_tab_and_kind() {
+    let mut bar = marked_bar(4);
+    assert_eq!(bar.last_mark(), (0, None));
+    bar.mark(2, |marks| marks.bell = true);
+    let ringing = bar.tabs()[2].id;
+    assert_eq!(bar.last_mark(), (1, Some((ringing, MarkKind::Bell))));
+    bar.mark(2, |marks| marks.bell = true);
+    assert_eq!(bar.last_mark().0, 1, "a mark already set is not new");
+    bar.mark(2, |marks| marks.finished_secs = Some(4));
+    assert_eq!(bar.last_mark(), (2, Some((ringing, MarkKind::Finished(4)))));
+    bar.mark(0, |marks| marks.notify = true);
+    assert_eq!(bar.last_mark().0, 2, "the active tab takes no mark");
+}

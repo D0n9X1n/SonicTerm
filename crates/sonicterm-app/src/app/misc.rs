@@ -655,6 +655,8 @@ impl App {
             }
         };
         window.set_ime_allowed(true);
+        // A dormant adapter must exist before the window is first shown.
+        self.install_accessibility(event_loop, &window);
 
         let settings = sonicterm_gpu::core::RendererSettings {
             font_family: &self.config.font.family,

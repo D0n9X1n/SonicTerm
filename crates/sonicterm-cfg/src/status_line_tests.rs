@@ -548,3 +548,35 @@ fn diagnostics_settings_resolve_with_their_documented_defaults() {
         assert!(!id.meta().allows_always, "{id:?}");
     }
 }
+
+#[test]
+fn accessibility_defaults_expose_the_strip_and_announce_health_and_alerts() {
+    // `[status_line.accessibility]` is optional: its defaults expose the strip to assistive
+    // technology and announce only health and alerts, at most once per segment every 5 s.
+    let resolved = StatusLineConfig::default().resolve().unwrap();
+    assert!(resolved.accessibility.expose);
+    assert_eq!(resolved.accessibility.announce, [StatusSegmentId::Health, StatusSegmentId::Alerts]);
+    assert_eq!(resolved.accessibility.announce_min_interval_ms, 5000);
+}
+
+#[test]
+fn accessibility_keys_validate_and_unknown_ones_are_reported() {
+    // Every key is read; an interval outside 1000..=60000 or an unknown segment id fails the
+    // load, and an unknown key inside the table is ignored and named in the warning.
+    let config = parse(
+        "[status_line.accessibility]\nexpose = false\nannounce = [\"mem\"]\n\
+         announce_min_interval_ms = 1000\nvoice = \"loud\"\n",
+    );
+    let resolved = config.resolve().unwrap();
+    assert!(!resolved.accessibility.expose);
+    assert_eq!(resolved.accessibility.announce, [StatusSegmentId::Mem]);
+    assert_eq!(resolved.accessibility.announce_min_interval_ms, 1000);
+    assert_eq!(config.unknown_keys(), ["status_line.accessibility.voice"]);
+    for interval in [999, 60_001] {
+        let body = format!("[status_line.accessibility]\nannounce_min_interval_ms = {interval}\n");
+        let error = parse(&body).resolve().unwrap_err().to_string();
+        assert!(error.contains("announce_min_interval_ms"), "{error}");
+    }
+    let unknown_id = "[status_line]\n[status_line.accessibility]\nannounce = [\"bel\"]\n";
+    assert!(toml::from_str::<crate::config::Config>(unknown_id).is_err());
+}

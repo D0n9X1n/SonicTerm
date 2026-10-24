@@ -378,6 +378,8 @@ impl App {
         win_id: WindowId,
         event: WindowEvent,
     ) {
+        // accesskit needs every window event before the App handles it, a warm spare's included.
+        self.forward_accessibility_event(win_id, &event);
         if self.is_warm_window_id(win_id) {
             // When: win_id is an unpromoted warm window, it owns no input scheduling state.
             return;
@@ -1250,6 +1252,11 @@ impl App {
         win_id: WindowId,
         event: &WindowEvent,
     ) -> Option<bool> {
+        if matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, .. }) {
+            // Any press outside the strip ends strip focus before a field, the palette, a toast or
+            // a pane handles it.
+            self.end_status_focus_outside(win_id);
+        }
         if self.field_pointer_event(win_id, event) {
             // When: `field_pointer_event` owns a query-field gesture, neither the modal nor the terminal sees it.
             return Some(false);

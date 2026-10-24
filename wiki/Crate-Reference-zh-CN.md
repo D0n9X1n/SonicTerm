@@ -390,6 +390,11 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 `sonicterm-render-model`、`sonicterm-resource`、`sonicterm-text`、
 `sonicterm-types`、`sonicterm-ui`、`sonicterm-vt`。
 
+**辅助功能依赖：** `accesskit` 0.25.1 与 `accesskit_winit` 0.34.1，关闭默认 feature，启用
+`accesskit_unix`、`async-io` 和 `rwh_06`。它们引入 `accesskit_macos`、`accesskit_windows`（使用
+workspace 的 `windows` 0.62）和 `accesskit_unix`（使用 `zbus` 5 与 `async-io` 执行器，不含 tokio）。
+`accesskit_winit` 通过 workspace patch 解析到内置的 winit。
+
 **macOS 依赖：** `objc2`、`objc2-foundation`、`objc2-app-kit` 和 `objc2-quartz-core`，已经通过其他
 crate 存在于 lockfile 中，用于每窗口的 `NSView.displayLink` 及其 tick target（`src/app/display_link.rs`）。
 

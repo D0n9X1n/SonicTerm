@@ -306,6 +306,15 @@ impl App {
                 deadline,
             });
         }
+        // Accessibility trees are built here, once per dispatch after its redraws, never in one.
+        if let Some(deadline) = self.flush_accessibility(now) {
+            // A queued announcement becomes ready; wake to deliver it.
+            due.push(super::redraw::DueWork {
+                owner: None,
+                cause: super::redraw::DueCause::StatusLine,
+                deadline,
+            });
+        }
         if let Some(deadline) = self.sync_taskbar_progress(now) {
             // A progress value waits for its surface's trailing edge; wake to deliver it.
             due.push(super::redraw::DueWork {
@@ -515,6 +524,9 @@ impl App {
                 // When: DragEnded arrives; handle_os_drag_ended routes the drop
                 // internally and returns the outcome only for tests to assert on.
                 let _ = self.handle_os_drag_ended();
+            }
+            UserEvent::Accessibility { window_id, request } => {
+                self.handle_accessibility_request(window_id, request);
             }
             UserEvent::RequestRedraw(window_id) => {
                 self.service_output_event(OutputEvent::Explicit(window_id), Instant::now());
@@ -877,6 +889,8 @@ impl App {
         // Enable IME so CJK input methods (Pinyin, Japanese, Korean…) can
         // deliver preedit + commit events instead of raw keystrokes.
         window.set_ime_allowed(true);
+        // A dormant adapter must exist before the window is first shown.
+        self.install_accessibility(event_loop, &window);
         super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
         let dpi_scale = f64::from(window_dpi(&window));
 

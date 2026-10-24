@@ -675,6 +675,7 @@ const PHASE_KINDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("S12/default", "covered", "hold", None),
     ("S12/default", "print", "transition", Some("sentinel-parsed")),
     ("S12/default", "uncovered", "hold", None),
+    ("S12/status-line", "accessibility", "hold", None),
     ("S12/status-line", "covered", "hold", None),
     ("S12/status-line", "print", "transition", Some("sentinel-parsed")),
     ("S12/status-line", "uncovered", "hold", None),
@@ -814,18 +815,21 @@ fn status_line_variants_differ_from_default_only_by_the_strip() {
         let strip = plan("S12", "status-line", short).unwrap();
         let base = plan("S12", "default", short).unwrap();
         assert!(strip.status_line && !base.status_line);
-        // S12/status-line only adds `program` before `end`; everything else is the default plan.
-        let without_program: Vec<Step> = strip
+        // S12/status-line only adds `program` and `accessibility` before `end`; everything else is
+        // the default plan.
+        let added = ["program", "accessibility"];
+        let without_added: Vec<Step> = strip
             .steps
             .iter()
-            .filter(|step| !matches!(step, Step::Phase(phase) if phase.name == "program"))
+            .filter(|step| !matches!(step, Step::Phase(phase) if added.contains(&phase.name)))
             .cloned()
             .collect();
-        assert_eq!(without_program.len() + 1, strip.steps.len(), "exactly one program phase");
         assert_eq!(
-            (strip.roles, strip.setup, without_program),
-            (base.roles, base.setup, base.steps)
+            without_added.len() + 2,
+            strip.steps.len(),
+            "one program and one accessibility phase"
         );
+        assert_eq!((strip.roles, strip.setup, without_added), (base.roles, base.setup, base.steps));
         let strip = plan("S1", "status-line", short).unwrap();
         let base = plan("S1", "default", short).unwrap();
         assert!(strip.status_line && !base.status_line);
@@ -857,6 +861,7 @@ fn status_line_progress_checks_each_phase() {
         history_shows: 0,
         held_shows: 0,
         glyph_shows: 0,
+        tree_builds: 0,
     };
     assert!(status_line_progress("idle", 5_000, false, deltas(3, 3, 3)).is_ok());
     assert!(
@@ -904,6 +909,7 @@ fn status_line_progress_checks_the_selection_phases() {
         history_shows: 0,
         held_shows: 0,
         glyph_shows: 0,
+        tree_builds: 0,
     };
     assert!(status_line_progress("select", 2_000, false, sel(3, 52_500)).is_ok());
     assert!(status_line_progress("select", 2_000, false, sel(0, 0)).is_err(), "nothing counted");
@@ -929,6 +935,7 @@ fn status_line_progress_checks_the_trimmed_history_print() {
         history_shows,
         held_shows: 0,
         glyph_shows: 0,
+        tree_builds: 0,
     };
     assert!(status_line_progress("print", 0, false, print(2, 4, 1)).is_ok());
     assert!(status_line_progress("print", 0, false, print(2, 1, 0)).is_err(), "never trimmed");
@@ -963,6 +970,7 @@ fn status_line_progress_checks_the_typing_input_phase() {
         history_shows: 0,
         held_shows,
         glyph_shows: 0,
+        tree_builds: 0,
     };
     assert!(status_line_progress("input", 0, false, input(2, 2, 0)).is_ok());
     assert!(status_line_progress("input", 0, false, input(2, 2, 1)).is_err(), "held while typing");
@@ -982,6 +990,7 @@ fn status_line_progress_checks_the_held_paste_phase() {
         history_shows: 0,
         held_shows,
         glyph_shows: 0,
+        tree_builds: 0,
     };
     assert!(status_line_progress("held", 0, false, held(1)).is_ok());
     assert!(status_line_progress("held", 0, false, held(0)).is_ok(), "lenient off POSIX");
@@ -1028,6 +1037,7 @@ fn status_line_progress_checks_the_glyphs_phase() {
         history_shows: 0,
         held_shows: 0,
         glyph_shows,
+        tree_builds: 0,
     };
     assert!(status_line_progress("glyphs", 0, false, glyphs(1, 2, 1)).is_ok());
     assert!(status_line_progress("glyphs", 0, false, glyphs(1, 2, 2)).is_err(), "flapped");
@@ -1054,18 +1064,18 @@ fn s1_status_line_short_keeps_headroom_inside_the_smoke_gate() {
     }
 }
 
-/// S12/status-line ends with `program`, after `uncovered`: a POSIX role prints an `OSC 9;4` set, a
+/// S12/status-line runs `program` after `uncovered`, then `accessibility`: a POSIX role prints an `OSC 9;4` set, a
 /// burst of OSC 9 and OSC 777 notifications in one write, then the clear, each change 300 ms or more
 /// apart so the strip and the taskbar see each one. S12/default has no such phase, and S12's short
 /// run stays far inside its bound.
 #[test]
-fn s12_status_line_ends_with_the_program_phase() {
+fn s12_status_line_runs_the_program_phase() {
     for host in [Host::Posix, Host::Windows] {
         for short in [false, true] {
             let plan = plan_for("S12", "status-line", short, host).unwrap();
             assert_eq!(
                 phase_names(&plan),
-                ["print", "covered", "uncovered", "program"],
+                ["print", "covered", "uncovered", "program", "accessibility"],
                 "{host:?}"
             );
             let default = plan_for("S12", "default", short, host).unwrap();
@@ -1112,6 +1122,7 @@ fn program_phase_progress_syncs_once_per_change() {
         history_shows: 0,
         held_shows: 0,
         glyph_shows: 0,
+        tree_builds: 0,
     };
     let program = |progress, notifies, toast_redraws, deliveries, presented| {
         Some(ProgramDeltas { progress, notifies, toast_redraws, deliveries, presented })
@@ -1157,6 +1168,7 @@ fn program_phase_progress_bounds_presents_by_the_work_it_did() {
         history_shows: 0,
         held_shows: 0,
         glyph_shows: 0,
+        tree_builds: 0,
     };
     let posix = |presented| ProgramDeltas {
         progress: 4,
@@ -1199,6 +1211,7 @@ fn program_phase_progress_checks_the_delivered_sequence_and_its_trailing_edge() 
         history_shows: 0,
         held_shows: 0,
         glyph_shows: 0,
+        tree_builds: 0,
     };
     let delivered = |values: &[(u64, Option<u8>)]| -> Vec<Delivered> {
         values.iter().map(|&(at_ms, percent)| Delivered { at_ms, percent }).collect()
@@ -1239,4 +1252,93 @@ fn program_phase_progress_checks_the_delivered_sequence_and_its_trailing_edge() 
         program_phase_progress(strip, Some(mismatched), Some(&record), true, 4).is_err(),
         "the record and the delivery counter disagree"
     );
+}
+
+/// S12/status-line ends with `accessibility`, a hold after `program`; S12/default has none. The
+/// hold adds 5 s to the short nominal schedule and 10 s to the full one, inside S12's bounds.
+#[test]
+fn s12_status_line_ends_with_the_accessibility_hold() {
+    for host in [Host::Posix, Host::Windows] {
+        for (short, hold_s) in [(true, 5), (false, 10)] {
+            let plan = plan_for("S12", "status-line", short, host).unwrap();
+            assert_eq!(phase_names(&plan).last(), Some(&"accessibility"), "{host:?}");
+            assert_eq!(phase(&plan, "accessibility").end, PhaseEnd::Hold(hold_s * 1_000));
+            // The same plan without the hold: the hold alone adds its seconds to the schedule.
+            let mut without = plan.clone();
+            without.steps.retain(
+                |step| !matches!(step, Step::Phase(phase) if phase.name == "accessibility"),
+            );
+            let nominal_s = seconds_after_go(&plan, true);
+            assert_eq!(
+                nominal_s,
+                seconds_after_go(&without, true) + hold_s,
+                "{host:?} short={short}"
+            );
+            let default = plan_for("S12", "default", short, host).unwrap();
+            assert!(!phase_names(&default).contains(&"accessibility"));
+            let spec = find("S12").unwrap();
+            let bound = if short { spec.short_timeout_s } else { spec.timeout_s };
+            assert!(nominal_s + 60 <= bound, "{host:?} short={short}");
+        }
+    }
+}
+
+/// `accessibility` keeps the idle contract and fails on any tree built without an assistive
+/// technology.
+#[test]
+fn accessibility_phase_builds_no_tree_and_keeps_the_idle_bounds() {
+    let deltas = |samples, redraws, tree_builds| StatusLineDeltas {
+        samples,
+        wakes: samples,
+        redraws,
+        sel_counts: 0,
+        sel_cells: 0,
+        history_shows: 0,
+        held_shows: 0,
+        glyph_shows: 0,
+        tree_builds,
+    };
+    assert!(status_line_progress("accessibility", 5_000, false, deltas(3, 3, 0)).is_ok());
+    let built = status_line_progress("accessibility", 5_000, false, deltas(3, 3, 1)).unwrap_err();
+    assert!(built.contains("accessibility trees"), "{built}");
+    assert!(
+        status_line_progress("accessibility", 5_000, false, deltas(3, 5, 0)).is_err(),
+        "extra frames"
+    );
+    assert!(
+        status_line_progress("accessibility", 5_000, false, deltas(9, 9, 0)).is_err(),
+        "extra wakes"
+    );
+}
+
+/// `accessibility` bounds actual presents, from any path, by the strip's own redraws plus one
+/// slack frame for the `program` toast expiring inside the hold and one in flight at its start; a
+/// base whose App predates the counter is not checked.
+#[test]
+fn accessibility_phase_bounds_presents_by_strip_redraws() {
+    assert!(accessibility_phase_presents(3, Some(3 + ACCESSIBILITY_PRESENT_SLACK)).is_ok());
+    let extra = accessibility_phase_presents(3, Some(4 + ACCESSIBILITY_PRESENT_SLACK)).unwrap_err();
+    assert!(extra.contains("presented"), "{extra}");
+    assert!(accessibility_phase_presents(0, Some(100)).is_err(), "presents with no cause");
+    assert!(accessibility_phase_presents(3, None).is_ok());
+}
+
+/// `program` settles past the held-input watch its last keystroke arms (`held_after_ms` after
+/// admission), so the watch fires inside `program` and never adds a wake to the `accessibility`
+/// hold that follows, whose cadence bound stays as it is.
+#[test]
+fn program_settles_past_the_held_input_watch_it_arms() {
+    let held_after_ms = sonicterm_cfg::status_line::InputSettings::default().held_after_ms;
+    for host in [Host::Posix, Host::Windows] {
+        for short in [false, true] {
+            let plan = plan_for("S12", "status-line", short, host).unwrap();
+            let Driver::Commit { settle_ms, .. } = phase(&plan, "program").driver else {
+                panic!("program is a commit driver");
+            };
+            assert!(
+                settle_ms >= held_after_ms + STATUS_LINE_INTERVAL_MS / 4,
+                "{host:?} short={short}: settle {settle_ms} ms, watch at {held_after_ms} ms"
+            );
+        }
+    }
 }

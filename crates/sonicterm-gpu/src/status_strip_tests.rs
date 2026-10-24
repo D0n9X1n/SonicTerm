@@ -154,3 +154,99 @@ fn strip_colors_reach_three_to_one_on_dark_and_light_themes() {
     assert_eq!(colors.warn, hex_to_chrome_color("#202020"), "warn falls back to the foreground");
     assert_eq!(colors.error, hex_to_chrome_color("#b00020"), "a passing red is kept");
 }
+
+/// The focus ring is four edges inside the focused segment's box, filling the band's height; it is
+/// at least one pixel thick, scales with the display, and doubles under `strong_focus`.
+#[test]
+fn focus_ring_frames_the_segment_and_strong_focus_doubles_it() {
+    assert_eq!(focus_ring_thickness(1.0, false), 2.0);
+    assert_eq!(focus_ring_thickness(1.0, true), 4.0);
+    assert_eq!(focus_ring_thickness(2.0, false), 4.0);
+    assert_eq!(focus_ring_thickness(2.0, true), 8.0);
+    assert_eq!(focus_ring_thickness(0.25, false), 1.0, "never thinner than one pixel");
+    let rects = focus_ring_rects(50.0, 30.0, 100.0, 12.0, 2.0);
+    assert_eq!(
+        rects,
+        [
+            [50.0, 100.0, 30.0, 2.0],
+            [50.0, 110.0, 30.0, 2.0],
+            [50.0, 100.0, 2.0, 12.0],
+            [78.0, 100.0, 2.0, 12.0],
+        ]
+    );
+    for [left, top, width, height] in rects {
+        assert!(left >= 50.0 && left + width <= 80.0 && top >= 100.0 && top + height <= 112.0);
+    }
+    // A segment narrower than two edges still gets a ring that stays inside it.
+    let narrow = focus_ring_rects(10.0, 3.0, 0.0, 12.0, 2.0);
+    assert!(narrow.iter().all(|[left, _, width, _]| *left >= 10.0 && left + width <= 13.0));
+}
+
+#[test]
+fn a_strip_layout_is_committed_only_when_its_frame_presents() {
+    // Assembly stages the whole strip it placed (band top, height and segment rects); pointer
+    // routing and accessibility read only what a presented frame showed. A frame that fails or
+    // presents nothing, after a resize, DPI or font change, keeps the previous strip whole.
+    use sonicterm_render_model::boundary::cfg::status_line::StatusSegmentId;
+    let segment = |id, left_px| PresentedStatusSegment { id, x: left_px, width: 40.0, click: None };
+    let strip = |top, height, segments| StripHit { top, height, segments };
+    let mut layouts = StripLayouts::default();
+    layouts.stage(strip(500.0, 20.0, vec![segment(StatusSegmentId::Mem, 0.0)]));
+    assert_eq!(layouts.presented(), None, "staged is not on screen");
+    layouts.settle(true);
+    let shown = strip(500.0, 20.0, vec![segment(StatusSegmentId::Mem, 0.0)]);
+    assert_eq!(layouts.presented(), Some(&shown));
+    // A resize or DPI change moves the band and scales the segments; the frame fails.
+    layouts.stage(strip(980.0, 40.0, vec![segment(StatusSegmentId::Mem, 0.0)]));
+    layouts.settle(false);
+    assert_eq!(layouts.presented(), Some(&shown), "band and segments stay the presented ones");
+    assert!(
+        layouts.presented().unwrap().contains(510.0)
+            && !layouts.presented().unwrap().contains(990.0)
+    );
+    layouts.settle(true);
+    assert_eq!(layouts.presented(), Some(&shown), "a discarded stage never commits later");
+    layouts.stage(strip(500.0, 20.0, vec![segment(StatusSegmentId::Cpu, 50.0)]));
+    layouts.clear();
+    layouts.settle(true);
+    assert_eq!(layouts.presented(), None, "hiding the strip clears both");
+    // The renderer reads band and segments only from the committed unit, never live geometry.
+    let core = include_str!("core.rs");
+    assert!(!core.contains("self.status_line_presented = placed"));
+    assert!(core.contains("self.status_line_layouts.stage("));
+    assert!(core.contains("self.status_line_layouts.settle("));
+    committed_strip_checkout(core);
+}
+
+/// The committed-strip check on `core` as checked out, with LF or, on Windows, CRLF line endings;
+/// the fixtures build both forms from its LF text.
+fn committed_strip_checkout(core: &str) {
+    committed_strip_fixtures(core);
+}
+
+#[test]
+fn the_committed_strip_check_holds_on_a_crlf_checkout() {
+    // A Windows checkout gives `include_str!` CRLF text; the check on it must pass as on LF.
+    let crlf = include_str!("core.rs").replace("\r\n", "\n").replace('\n', "\r\n");
+    committed_strip_checkout(&crlf);
+}
+
+/// Run the committed-strip check on an LF and a CRLF fixture of `source`, both built from its
+/// LF form, so a source already checked out with CRLF never gains a doubled `\r`.
+fn committed_strip_fixtures(source: &str) {
+    let normalized = source.replace("\r\n", "\n");
+    committed_strip_readers(&normalized);
+    committed_strip_readers(&normalized.replace('\n', "\r\n"));
+}
+
+/// `status_line_hit` and `status_line_contains` in `core` read the committed strip, never live
+/// geometry.
+fn committed_strip_readers(core: &str) {
+    let core = core.replace("\r\n", "\n");
+    for reader in ["pub fn status_line_hit(", "pub fn status_line_contains("] {
+        let start = core.find(reader).unwrap();
+        let body = &core[start..start + core[start..].find("\n    }\n").unwrap()];
+        assert!(!body.contains("status_line_top()"), "{reader} reads live geometry");
+        assert!(body.contains("status_line_layouts.presented()"), "{reader}");
+    }
+}

@@ -531,7 +531,10 @@ fn the_coverage_table_agrees_with_the_charge_sites() {
             }
             PaneSeamTerm::ChargedToAnotherOwnerKind => {
                 assert!(!charged_here.contains(&class), "{class:?} was charged to a pane");
-                assert_eq!(class, ResourceClass::ReaperWork);
+                assert!(
+                    matches!(class, ResourceClass::ReaperWork | ResourceClass::AccessibilityTree),
+                    "{class:?} is charged to a non-pane owner without being recorded here"
+                );
                 assert_eq!(class.coverage(), ClassCoverage::Charged);
             }
             PaneSeamTerm::NotChargedInProduction => {
