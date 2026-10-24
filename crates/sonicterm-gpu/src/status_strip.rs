@@ -1,15 +1,18 @@
 //! Status line strip: its height, colors and drawing.
 //!
-//! The strip sits between the panes and the tab bar (at the bottom edge when
-//! the tab bar is hidden), shares the tab bar's `bg_base` background, and has
-//! a hairline only on its terminal side. Segments come from
+//! The strip sits at the top content edge, above the panes and below any
+//! titlebar band, or with `position = "bottom"` between the panes and the tab
+//! bar (at the bottom edge when the tab bar is hidden). It shares the tab bar's
+//! `bg_base` background and has a hairline only on its terminal side. Segments come from
 //! `sonicterm-ui::status_line` as a [`StatusLineView`]; this module measures
 //! and fits them with the chrome font, then emits ordinary quads and glyphs,
 //! so the GDI software path composites the strip unchanged.
 
+use sonicterm_render_model::boundary::cfg::status_line::{StatusFontScale, StatusPosition};
 use sonicterm_render_model::boundary::cfg::theme::Theme;
 use sonicterm_render_model::boundary::ui::status_line::{
-    fit, FitMetrics, PlacedSegment, SegmentClick, StatusLineView, StatusTone,
+    fit, separators, FitMetrics, PlacedPart, PlacedSegment, SegmentClick, StatusLineView,
+    StatusTone, SEGMENT_SEPARATOR,
 };
 use sonicterm_render_model::boundary::ui::tabbar_view::tab_bar_height;
 use sonicterm_text::glyph_atlas::{GlyphAtlas, Rasterizer};
@@ -24,8 +27,9 @@ use crate::quad::{px_to_ndc, QuadInstance};
 const HEIGHT_SHARE: f32 = 0.6;
 /// Smallest strip height, in logical px.
 const MIN_HEIGHT_LOGICAL: f32 = 20.0;
-/// Strip type size as a share of the tab title size, so it reads as secondary.
-const TEXT_SHARE: f32 = 0.9;
+/// Smallest strip type size, in logical pt: FreeType raises any character size under 1 pt to
+/// 1 pt, so the stack and the geometry both use the size it really draws.
+const MIN_TEXT_PT: f32 = 1.0;
 /// Contrast a caution or failure color needs against the strip background.
 const MIN_CONTRAST: f32 = 3.0;
 
@@ -34,6 +38,48 @@ const MIN_CONTRAST: f32 = 3.0;
 pub fn status_line_height(font_size: f32, scale_factor: f32) -> f32 {
     let logical = (tab_bar_height(font_size) * HEIGHT_SHARE).max(MIN_HEIGHT_LOGICAL);
     (logical * scale_factor).round()
+}
+
+/// Where the strip sits and what it reserves, in raster px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StripPlacement {
+    /// Top edge of the band.
+    pub top: f32,
+    /// Height reserved above the panes, below the titlebar band.
+    pub reserved_top: f32,
+    /// Height reserved below the panes, above the tab bar.
+    pub reserved_bottom: f32,
+}
+
+/// Place a strip of `strip_h` raster px at `position` on a `surface_h` surface whose titlebar
+/// band is `titlebar_px` and whose tab bar is `tab_bar_px` (0 while hidden). A hidden strip has
+/// `strip_h` 0 and reserves nothing.
+pub fn strip_placement(
+    position: StatusPosition,
+    surface_h: f32,
+    titlebar_px: f32,
+    tab_bar_px: f32,
+    strip_h: f32,
+) -> StripPlacement {
+    match position {
+        StatusPosition::Top => {
+            StripPlacement { top: titlebar_px, reserved_top: strip_h, reserved_bottom: 0.0 }
+        }
+        StatusPosition::Bottom => StripPlacement {
+            top: (surface_h - tab_bar_px - strip_h).max(0.0),
+            reserved_top: 0.0,
+            reserved_bottom: strip_h,
+        },
+    }
+}
+
+/// Top edge of the hairline `thickness` px thick on the band's terminal side: the band's bottom
+/// edge at the top of the window, its top edge at the bottom.
+pub fn hairline_top(position: StatusPosition, top: f32, height: f32, thickness: f32) -> f32 {
+    match position {
+        StatusPosition::Top => top + height - thickness,
+        StatusPosition::Bottom => top,
+    }
 }
 
 /// WCAG relative luminance of a linear-sRGB color.
@@ -86,14 +132,13 @@ pub struct StatusColors {
     pub warn: ChromeColor,
     /// Failure: `ansi.red`, or `foreground` under 3:1.
     pub error: ChromeColor,
+    /// Mode chip text: the active tab title color, or `foreground` under 3:1. A chip has no
+    /// background of its own, so its text is checked against the strip like the cautions.
+    pub chip: ChromeColor,
     /// Strip background (linear premultiplied).
     pub background: [f32; 4],
     /// Hairline between the terminal and the strip.
     pub hairline: [f32; 4],
-    /// Chip background.
-    pub chip: [f32; 4],
-    /// Background of a chip that needs attention.
-    pub chip_warn: [f32; 4],
 }
 
 impl StatusColors {
@@ -112,6 +157,7 @@ impl StatusColors {
             background,
         );
         Self {
+            chip: readable_or(tab_active_fg, foreground, background),
             value: tab_active_fg,
             name: tab_inactive_fg,
             warn,
@@ -122,11 +168,6 @@ impl StatusColors {
             ),
             background,
             hairline: palette.border_subtle,
-            chip: palette.bg_active,
-            chip_warn: crate::color::hex_to_premultiplied_rgba(
-                theme.colors.ansi.yellow.0.as_str(),
-                0.18,
-            ),
         }
     }
 
@@ -134,7 +175,8 @@ impl StatusColors {
     fn text(&self, tone: StatusTone) -> ChromeColor {
         match tone {
             StatusTone::Name => self.name,
-            StatusTone::Value | StatusTone::Chip => self.value,
+            StatusTone::Value => self.value,
+            StatusTone::Chip => self.chip,
             StatusTone::Warn | StatusTone::ChipWarn => self.warn,
             StatusTone::Error => self.error,
         }
@@ -198,18 +240,112 @@ pub struct StripGeometry {
     pub top: f32,
     /// Height, raster px.
     pub height: f32,
+    /// The window edge the band sits on, which puts its hairline on the terminal side.
+    pub position: StatusPosition,
     /// Surface size, raster px.
     pub screen: (f32, f32),
     /// Display scale factor.
     pub scale_factor: f32,
-    /// Tab title raster size the strip text is derived from.
-    pub title_raster_px: f32,
+    /// The terminal font's live raster size, which the strip text is 60% of.
+    pub font_raster_px: f32,
+    /// `[status_line] font_scale`: the strip text's share of that size.
+    pub font_scale: f32,
+    /// Cap height of the strip font at [`Self::text_px`], raster px; see [`strip_cap_height`].
+    pub cap_height: f32,
+}
+
+/// The cap height the strip centers by, from the drawn capital's ink box when there is one:
+/// `drawn` is its `(top, height)` relative to the baseline, so the result is twice its center's
+/// height above the baseline. Ink that reaches below the baseline therefore lowers it instead of
+/// shifting the capitals a whole pixel. Without a drawn capital it is the font's own measurement
+/// `reported`, and without either, 0.7 × `text_px`.
+pub fn resolve_cap_height(drawn: Option<(f32, f32)>, reported: Option<f32>, text_px: f32) -> f32 {
+    match (drawn, reported) {
+        (Some((top, height)), _) => -(2.0 * top + height),
+        (None, Some(reported)) => reported,
+        (None, None) => text_px * 0.7,
+    }
+}
+
+/// The cap height for `text_px`: `kept` when it was measured at that size, otherwise `measure`'s
+/// answer. Returns the `(text size bits, cap height)` the renderer keeps, so the same size is
+/// measured once and a new size never reuses another size's value.
+pub fn kept_cap_height(
+    kept: Option<(u32, f32)>,
+    text_px: f32,
+    measure: impl FnOnce() -> f32,
+) -> (u32, f32) {
+    let bits = text_px.to_bits();
+    match kept {
+        Some((kept_bits, cap_height)) if kept_bits == bits => (bits, cap_height),
+        _ => (bits, measure()),
+    }
+}
+
+/// The strip font's cap height at `text_px`, in raster px: a capital `H` rasterized through the
+/// strip on baseline 0 and measured by its ink box, so it describes exactly what the strip draws
+/// on every rasterizer. The font's own measurement is used when no `H` is drawn.
+pub fn strip_cap_height(
+    font_stack: &sonicterm_engine::FontStack,
+    rasterizer: &mut impl Rasterizer,
+    atlas: &mut GlyphAtlas,
+    text_px: f32,
+) -> f32 {
+    let screen = (text_px * 4.0, text_px * 4.0);
+    let reference = chrome_text::layout_with_raster_variant(
+        font_stack,
+        rasterizer,
+        atlas,
+        "H",
+        ChromeColor::WHITE,
+        ChromeAttrs { bold: false, italic: false },
+        text_px,
+        text_px,
+        (0.0, 0.0),
+        screen,
+        None,
+        GlyphRasterVariant::StatusLine,
+    );
+    let drawn = reference.glyphs.first().map(|glyph| {
+        let (_, ink_top, _, ink_height) =
+            crate::cursor::ndc_rect_px(glyph.rect, screen.0, screen.1);
+        (ink_top, ink_height)
+    });
+    let reported = font_stack.cap_height_raster_px().map(|cap_height| cap_height as f32);
+    resolve_cap_height(drawn, reported, text_px)
+}
+
+/// The strip's text baseline: capitals centered in the band area outside the hairline, so the
+/// baseline is that area's top plus half of its height and the cap height together.
+pub fn strip_baseline(geometry: &StripGeometry) -> f32 {
+    let thickness = geometry.scale_factor.max(0.5).round().max(1.0);
+    let area_top = match geometry.position {
+        StatusPosition::Top => geometry.top,
+        StatusPosition::Bottom => geometry.top + thickness,
+    };
+    let area_h = (geometry.height - thickness).max(0.0);
+    area_top + (area_h + geometry.cap_height) / 2.0
+}
+
+/// The default `[status_line] font_scale`, 0.8.
+pub fn default_font_scale() -> f32 {
+    StatusFontScale::DEFAULT.as_f32()
+}
+
+/// The strip's native font size in logical points for a `body_font_size` live terminal font at
+/// `font_scale`, never under 1 pt. Times the display scale it is [`StripGeometry::text_px`], so
+/// the strip's stack rasterizes at exactly the size it draws.
+pub fn status_line_font_size(body_font_size: f32, font_scale: f32) -> f32 {
+    (body_font_size * font_scale).max(MIN_TEXT_PT)
 }
 
 impl StripGeometry {
-    /// The strip's text raster size.
+    /// The strip's text raster size: `font_scale` × the live terminal font size, at least 1 pt at
+    /// the display scale, which is what [`status_line_font_size`] asks the stack for.
     pub fn text_px(&self) -> f32 {
-        (self.title_raster_px * TEXT_SHARE).max(1.0)
+        (self.font_raster_px * self.font_scale)
+            .max(MIN_TEXT_PT * self.scale_factor.max(0.5))
+            .max(1.0)
     }
 
     /// Fit metrics for this geometry.
@@ -219,22 +355,31 @@ impl StripGeometry {
             width: self.screen.0,
             edge_pad: 12.0 * scale,
             segment_gap: 20.0 * scale,
-            chip_pad: 5.0 * scale,
-            chip_gap: 4.0 * scale,
+            separator_width: 0.0,
         }
     }
 }
 
-/// Fit `view` into the strip, measuring each run with the chrome font.
+/// A fitted strip: the presented segments and the `|` between adjacent ones of a list. Only the
+/// segments are hit boxes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FittedStrip {
+    /// The presented segments, in view order.
+    pub segments: Vec<PlacedSegment>,
+    /// The separators between them; drawn, never routed or read aloud.
+    pub separators: Vec<PlacedPart>,
+}
+
+/// Fit `view` into the strip, measuring each run and the separator with the chrome font.
 pub fn fit_strip(
     view: &StatusLineView,
     geometry: &StripGeometry,
     font_stack: &sonicterm_engine::FontStack,
     rasterizer: &mut impl Rasterizer,
     atlas: &mut GlyphAtlas,
-) -> Vec<PlacedSegment> {
+) -> FittedStrip {
     let text_px = geometry.text_px();
-    fit(view, &geometry.fit_metrics(), |text| {
+    let mut measure = |text: &str| {
         chrome_text::layout_with_raster_variant(
             font_stack,
             rasterizer,
@@ -247,17 +392,23 @@ pub fn fit_strip(
             (0.0, 0.0),
             geometry.screen,
             None,
-            GlyphRasterVariant::TabTitle,
+            GlyphRasterVariant::StatusLine,
         )
         .width_px
-    })
+    };
+    let metrics =
+        FitMetrics { separator_width: measure(SEGMENT_SEPARATOR), ..geometry.fit_metrics() };
+    let segments = fit(view, &metrics, measure);
+    let separators = separators(view, &segments, &metrics);
+    FittedStrip { segments, separators }
 }
 
-/// Emit the strip's band, hairline, chip backgrounds and glyphs. Glyphs are
+/// Emit the strip's band, hairline and glyphs; chips are colored text with no background. Glyphs are
 /// clipped to the band so no ink lands outside it.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_strip(
     placed: &[PlacedSegment],
+    separators: &[PlacedPart],
     geometry: &StripGeometry,
     colors: &StatusColors,
     font_stack: Option<&sonicterm_engine::FontStack>,
@@ -273,8 +424,10 @@ pub fn emit_strip(
         color: colors.background,
         ..Default::default()
     });
+    let thickness = scale.round().max(1.0);
+    let hairline = hairline_top(geometry.position, geometry.top, geometry.height, thickness);
     quads.push(QuadInstance {
-        rect: px_to_ndc(0.0, geometry.top, screen_w, scale.round().max(1.0), screen_w, screen_h),
+        rect: px_to_ndc(0.0, hairline, screen_w, thickness, screen_w, screen_h),
         color: colors.hairline,
         ..Default::default()
     });
@@ -283,35 +436,10 @@ pub fn emit_strip(
         return;
     };
     let text_px = geometry.text_px();
-    let baseline =
-        geometry.top + ((geometry.height - text_px * 1.2) / 2.0).max(0.0) + text_px * 0.95;
-    let chip_inset = (3.0 * scale).min(geometry.height / 4.0);
-    let chip_pad = geometry.fit_metrics().chip_pad;
+    let baseline = strip_baseline(geometry);
     let first_glyph = glyphs.len();
-    for part in placed.iter().flat_map(|segment| &segment.parts) {
-        let text_x = if part.tone.is_chip() {
-            // A chip, paint its rounded background and inset the text by its padding.
-            let chip_h = (geometry.height - 2.0 * chip_inset).max(1.0);
-            let background =
-                if part.tone == StatusTone::ChipWarn { colors.chip_warn } else { colors.chip };
-            quads.push(QuadInstance::rounded(
-                px_to_ndc(
-                    part.left,
-                    geometry.top + chip_inset,
-                    part.width,
-                    chip_h,
-                    screen_w,
-                    screen_h,
-                ),
-                background,
-                [part.width, chip_h],
-                3.0 * scale,
-            ));
-            part.left + chip_pad
-        } else {
-            // When: `is_chip` is false for the part's tone, its text starts at `part.left`.
-            part.left
-        };
+    for part in placed.iter().flat_map(|segment| &segment.parts).chain(separators) {
+        // A chip has no background: its tone colors its text and `is_chip` makes it bold.
         let run = chrome_text::layout_with_raster_variant(
             font_stack,
             rasterizer,
@@ -321,10 +449,10 @@ pub fn emit_strip(
             ChromeAttrs { bold: part.tone.is_chip(), italic: false },
             text_px,
             text_px,
-            (text_x.round(), baseline),
+            (part.left.round(), baseline),
             geometry.screen,
             None,
-            GlyphRasterVariant::TabTitle,
+            GlyphRasterVariant::StatusLine,
         );
         glyphs.extend(run.glyphs);
         // Missing-glyph boxes are quads, which the glyph clip below does not reach.

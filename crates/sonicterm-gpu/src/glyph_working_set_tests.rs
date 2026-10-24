@@ -618,3 +618,38 @@ fn a_face_source_is_named_by_its_file() {
     assert_eq!(face_file_name(r"C:\Windows\Fonts\seguiemj.ttf"), "seguiemj.ttf");
     assert_eq!(face_file_name("builtin:last-resort"), "builtin:last-resort");
 }
+
+/// The status line is measured as it draws: at its own size, regular and bold (chips) only, since
+/// the strip never asks for an italic face, so its role adds no tiles the renderer cannot place.
+#[test]
+fn the_status_line_is_measured_in_the_styles_it_draws() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let size = 14.0;
+    let set = measure_glyph_working_set(
+        &["hello world"],
+        &["shell"],
+        "Rec Mono St.Helens",
+        size,
+        72,
+        &packaged_fonts(),
+    )
+    .expect("the packaged family loads");
+    let strip: Vec<_> = set
+        .tile_keys
+        .iter()
+        .filter(|key| key.raster_variant == GlyphRasterVariant::StatusLine)
+        .collect();
+    assert!(strip.iter().any(|key| !key.weight_bold), "regular strip text is measured");
+    assert!(strip.iter().any(|key| key.weight_bold), "bold chips are measured");
+    assert!(strip.iter().all(|key| !key.italic), "the strip never draws italic");
+    let strip_size = set
+        .variant_sizes
+        .iter()
+        .find(|(variant, _)| *variant == GlyphRasterVariant::StatusLine)
+        .map(|(_, pt)| *pt);
+    let default_size =
+        crate::status_strip::status_line_font_size(size, crate::status_strip::default_font_scale());
+    assert_eq!(strip_size, Some(default_size));
+}

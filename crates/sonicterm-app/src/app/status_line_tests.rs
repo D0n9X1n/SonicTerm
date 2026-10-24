@@ -107,13 +107,18 @@ fn pane_facts_are_kept_only_while_the_strip_is_shown() {
     assert!(app.status_line.pane_facts.is_empty(), "facts of a closed window are dropped");
 }
 
-#[test]
-fn a_hover_an_event_clears_keeps_the_link_until_a_frame_resolves_it() {
-    // An IME commit clears the hover and the next frame re-detects the same URL; the strip must
-    // keep the link across that gap, or each keystroke redraws it twice for an unchanged pixel.
+/// The platform's target open modifier: Cmd on macOS, Ctrl elsewhere.
+fn open_modifier() -> winit::keyboard::ModifiersState {
+    if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    }
+}
+
+/// Seed `window_id` with a resolved hover over `https://example.com`.
+fn seed_hovered_url(app: &mut App, window_id: WindowId) {
     use sonicterm_render_model::inputs::{HoveredUrlCells, HoveredUrlSpan};
-    let mut app = app_with_strip(true);
-    let window_id = app.__test_seed_child_window(&["child"]);
     let span = HoveredUrlSpan { row: 0, start_col: 0, end_col: 19 };
     let cells = HoveredUrlCells::new(1, [span], false).expect("one span");
     app.windows.get_mut(&window_id).unwrap().hovered_url =
@@ -122,22 +127,84 @@ fn a_hover_an_event_clears_keeps_the_link_until_a_frame_resolves_it() {
             url: "https://example.com".to_owned(),
             label: None,
         });
-    let now = Instant::now();
-    let mut pending = HashMap::new();
-    let (shown, _) =
-        strip_link(&app.windows[&window_id], window_id, None, &mut pending, now, &app.i18n);
+}
+
+/// Contract: the link segment shows a hovered target only while the open modifier (Cmd on
+/// macOS, Ctrl elsewhere) is held, and hides again when it is released, so plain hovering adds
+/// no strip noise. The other platform's modifier alone never shows it.
+#[test]
+fn the_link_segment_shows_only_while_the_open_modifier_is_held() {
+    let mut app = app_with_strip(true);
+    let window_id = app.__test_seed_child_window(&["child"]);
+    seed_hovered_url(&mut app, window_id);
+    let hidden = strip_link(&app.windows[&window_id], None, &app.i18n);
+    assert_eq!(hidden, None, "a plain hover shows no link");
+    app.windows.get_mut(&window_id).unwrap().modifiers = open_modifier();
+    let shown = strip_link(&app.windows[&window_id], None, &app.i18n);
+    assert!(shown.is_some(), "holding the open modifier shows the hovered link");
+    let other = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::CONTROL
+    } else {
+        winit::keyboard::ModifiersState::SUPER
+    };
+    app.windows.get_mut(&window_id).unwrap().modifiers = other;
+    let other_shown = strip_link(&app.windows[&window_id], Some(&shown), &app.i18n);
+    assert_eq!(other_shown, None, "only the platform's open modifier shows the link");
+}
+
+/// Contract: for a local path the segment reports only a failed detection (not found or
+/// blocked). A path that resolved is already underlined and one still being checked has
+/// nothing to say, so neither adds strip text.
+#[test]
+fn a_path_shows_only_when_detection_fails() {
+    let app = app_with_strip(true);
+    let path = std::path::Path::new("/tmp/project/src");
+    assert_eq!(path_failure(ProbeStatus::Pending(path), &app.i18n), None, "checking is silent");
+    for kind in
+        [super::super::path_target::PathKind::File, super::super::path_target::PathKind::Directory]
+    {
+        let resolved = ProbeStatus::Selected(path, PathOpenDecision::Openable(kind));
+        assert_eq!(path_failure(resolved, &app.i18n), None, "a resolved {kind:?} is silent");
+    }
+    let source = ProbeStatus::Selected(path, PathOpenDecision::SourceReveal);
+    assert_eq!(path_failure(source, &app.i18n), None, "a revealable source is silent");
+    let missing = ProbeStatus::Selected(path, PathOpenDecision::Missing);
+    assert!(matches!(path_failure(missing, &app.i18n), Some(LinkInput::NotFound { .. })));
+    let failed_missing = ProbeStatus::Failed(path, "path-error-missing");
+    assert!(matches!(path_failure(failed_missing, &app.i18n), Some(LinkInput::NotFound { .. })));
+    let blocked = ProbeStatus::Selected(path, PathOpenDecision::Blocked);
+    assert!(matches!(path_failure(blocked, &app.i18n), Some(LinkInput::Blocked { .. })));
+    for status in [
+        ProbeStatus::Failed(path, "path-error-blocked"),
+        ProbeStatus::NoDirectory(path),
+        ProbeStatus::AltScreen(path),
+    ] {
+        assert!(
+            matches!(path_failure(status, &app.i18n), Some(LinkInput::Blocked { .. })),
+            "{status:?}"
+        );
+    }
+}
+
+#[test]
+fn a_hover_an_event_clears_keeps_the_link_until_a_frame_resolves_it() {
+    // An IME commit clears the hover and the next frame re-detects the same URL; the strip must
+    // keep the link across that gap, or each keystroke redraws it twice for an unchanged pixel.
+    // The open modifier is held, since the segment shows nothing without it.
+    let mut app = app_with_strip(true);
+    let window_id = app.__test_seed_child_window(&["child"]);
+    seed_hovered_url(&mut app, window_id);
+    app.windows.get_mut(&window_id).unwrap().modifiers = open_modifier();
+    let shown = strip_link(&app.windows[&window_id], None, &app.i18n);
     assert!(shown.is_some(), "a resolved hover shows its link");
     app.windows.get_mut(&window_id).unwrap().invalidate_path_hover();
     assert!(app.windows[&window_id].hover_unresolved);
-    let (held, wake) =
-        strip_link(&app.windows[&window_id], window_id, Some(&shown), &mut pending, now, &app.i18n);
+    let held = strip_link(&app.windows[&window_id], Some(&shown), &app.i18n);
     assert_eq!(held, shown, "a cleared hover the next frame re-detects keeps the strip unchanged");
-    assert_eq!(wake, None);
     // The headless window has no grid under the pointer, so this lookup resolves to no target.
     app.refresh_target_hover(window_id);
     assert!(!app.windows[&window_id].hover_unresolved);
-    let (resolved, _) =
-        strip_link(&app.windows[&window_id], window_id, Some(&shown), &mut pending, now, &app.i18n);
+    let resolved = strip_link(&app.windows[&window_id], Some(&shown), &app.i18n);
     assert_eq!(resolved, None, "a frame that finds no target hides the link");
 }
 
@@ -320,13 +387,13 @@ fn every_ask_in_one_dispatch_reaches_a_window_once() {
 
 #[test]
 fn the_strip_pass_asks_for_frames_only_through_the_dispatch_record() {
-    // Headless windows have no renderer, so the strip pass's own asks are pinned by source: both
-    // the layout and the content ask go through the record, never straight to the window.
+    // Headless windows have no renderer, so the strip pass's own asks are pinned by source: the
+    // layout, text-size and content asks all go through the record, never straight to the window.
     let source = include_str!("status_line.rs").replace("\r\n", "\n");
     let start = source.find("pub(super) fn sync_status_line(").expect("the strip pass");
     let body = &source[start..];
     let body = &body[..body.find("\n    }\n").expect("its end")];
-    assert_eq!(body.matches("dispatch_redraws.request(*window_id, window)").count(), 2);
+    assert_eq!(body.matches("dispatch_redraws.request(*window_id, window)").count(), 3);
     assert!(!body.contains("request_window_redraw()"), "{body}");
 }
 
@@ -1125,4 +1192,256 @@ fn presenter_kind_names_the_presenter_on_each_host() {
         "never GDI off Windows"
     );
     assert_eq!(presenter_kind(false, false, false), PresenterKind::Hardware);
+}
+
+/// A macOS graphics reading whose charged figure is `charged`.
+fn task_vm_graphics(charged: MemoryMetric) -> sonicterm_logging::graphics_memory::GraphicsMemory {
+    use sonicterm_logging::graphics_memory::{GraphicsMemory, GraphicsSource};
+    let mut reading = GraphicsMemory::unavailable(GraphicsSource::TaskVmInfo);
+    reading.footprint = charged;
+    reading.nofootprint = MemoryMetric::Bytes(7 << 20);
+    reading
+}
+
+/// `mem` subtracts only the graphics the footprint is charged with, never the uncharged figure.
+#[test]
+fn mem_subtracts_the_graphics_charged_to_the_footprint() {
+    let graphics = task_vm_graphics(MemoryMetric::Bytes(40 << 20));
+    assert_eq!(
+        mem_without_graphics(MemoryMetric::Bytes(100 << 20), &graphics),
+        MemoryMetric::Bytes(60 << 20)
+    );
+}
+
+/// A graphics figure larger than the footprint (two samples taken apart) floors `mem` at zero.
+#[test]
+fn mem_without_graphics_never_goes_below_zero() {
+    let graphics = task_vm_graphics(MemoryMetric::Bytes(120 << 20));
+    assert_eq!(
+        mem_without_graphics(MemoryMetric::Bytes(100 << 20), &graphics),
+        MemoryMetric::Bytes(0)
+    );
+}
+
+/// An unsupported footprint stays unsupported; an unsupported graphics figure keeps the footprint.
+#[test]
+fn mem_without_graphics_keeps_unsupported_and_missing_graphics() {
+    let graphics = task_vm_graphics(MemoryMetric::Bytes(40 << 20));
+    assert_eq!(
+        mem_without_graphics(MemoryMetric::Unsupported, &graphics),
+        MemoryMetric::Unsupported
+    );
+    let unread = task_vm_graphics(MemoryMetric::Unsupported);
+    assert_eq!(
+        mem_without_graphics(MemoryMetric::Bytes(100 << 20), &unread),
+        MemoryMetric::Bytes(100 << 20)
+    );
+}
+
+/// DXGI does not say how much of Windows private commit is video memory, and other sources offer
+/// no figure, so neither changes `mem`.
+#[test]
+fn mem_without_graphics_leaves_other_sources_alone() {
+    use sonicterm_logging::graphics_memory::{GraphicsMemory, GraphicsSource};
+    let mut dxgi = GraphicsMemory::unavailable(GraphicsSource::Dxgi);
+    dxgi.dedicated = MemoryMetric::Bytes(30 << 20);
+    dxgi.shared = MemoryMetric::Bytes(20 << 20);
+    dxgi.footprint = MemoryMetric::Bytes(10 << 20);
+    let footprint = MemoryMetric::Bytes(100 << 20);
+    assert_eq!(mem_without_graphics(footprint, &dxgi), footprint);
+    let none = GraphicsMemory::unavailable(GraphicsSource::None);
+    assert_eq!(mem_without_graphics(footprint, &none), footprint);
+}
+
+/// A strip placed at the top, under a 28 px titlebar band, takes presses inside its band only:
+/// the titlebar above it and the old bottom place both stay outside.
+#[test]
+fn a_right_press_hits_the_strip_at_the_top() {
+    use sonicterm_cfg::status_line::StatusPosition;
+    use sonicterm_gpu::status_strip::strip_placement;
+    let placement = strip_placement(StatusPosition::Top, 600.0, 28.0, 40.0, 23.0);
+    let mut app = app_with_strip(true);
+    let child = app.__test_seed_child_window(&["work"]);
+    let strip = sonicterm_gpu::status_strip::StripHit { top: placement.top, ..strip_over_top() };
+    app.windows.get_mut(&child).unwrap().status_strip = Some(strip);
+    assert!(!app.right_press_status_line(child, 50.0, 10.0), "in the titlebar band");
+    assert!(!app.right_press_status_line(child, 50.0, 580.0), "where the bottom strip was");
+    assert!(app.right_press_status_line(child, 50.0, 35.0), "inside the top band");
+    assert!(app.command_palette.is_open());
+}
+
+/// App tests hold no renderer, so this pins the sync call site: every window's renderer gets the
+/// resolved position before its visibility, and either change refits the panes once. The
+/// renderer side (insets, kept layout, the band after a present) is tested in the GPU crate.
+#[test]
+fn sync_moves_each_renderer_strip_before_refitting_once() {
+    let source = include_str!("status_line.rs").replace("\r\n", "\n");
+    let moved = source
+        .find("let moved = strip.set_position(state.resolved.position);")
+        .expect("sync hands each renderer the resolved position");
+    let visible = source
+        .find("let refit = strip.set_visible(shown) | moved;")
+        .expect("a move or a visibility change refits, with both setters always run");
+    assert!(moved < visible, "the position is set before visibility decides the refit");
+    let refit = source.find("            if refit {").expect("the refit");
+    let block = &source[refit..refit + source[refit..].find("\n            }\n").unwrap()];
+    assert_eq!(block.matches("resize_panes_to_rects(").count(), 1, "one refit");
+}
+
+/// A reload that changes `position` moves the strip: the session takes the file's new position,
+/// and Save Current Settings then carries it.
+#[test]
+fn reload_switches_the_strip_position() {
+    use sonicterm_cfg::status_line::StatusPosition;
+    let mut app = app_with_strip(true);
+    let now = Instant::now();
+    let _ = app.sync_status_line(now);
+    assert_eq!(app.status_line.resolved.position, StatusPosition::Top, "top by default");
+    app.config.status_line.position = StatusPosition::Bottom;
+    let _ = app.sync_status_line(now);
+    assert_eq!(app.status_line.resolved.position, StatusPosition::Bottom);
+    assert_eq!(app.status_line_save().position, StatusPosition::Bottom);
+    app.config.status_line.position = StatusPosition::Top;
+    let _ = app.sync_status_line(now);
+    assert_eq!(app.status_line.resolved.position, StatusPosition::Top, "and back");
+}
+
+/// Seed a main and a child window and give each a recording stand-in for its renderer's strip
+/// setters; returns both ids, main first.
+fn seed_recorded_windows(app: &mut App) -> [WindowId; 2] {
+    let child = app.__test_seed_child_window(&["work"]);
+    let main = app.main_window_id.expect("the seed made a main window");
+    for id in [main, child] {
+        let window = app.windows.get_mut(&id).expect("a seeded window");
+        window.test_strip_settings = Some(super::TestStripSettings::default());
+    }
+    [main, child]
+}
+
+/// What the sync handed window `id`'s strip.
+fn recorded_strip(app: &App, id: WindowId) -> super::TestStripSettings {
+    app.windows[&id].test_strip_settings.clone().expect("a recorded window")
+}
+
+/// A reload that changes `font_scale` reaches every window's renderer: each window's strip is
+/// handed the file's new scale and asked for one frame, with nothing else changed.
+#[test]
+fn reload_changes_the_strip_font_scale_in_every_window() {
+    use crate::app::window_state::window_redraw_requests_for as asks;
+    use sonicterm_cfg::status_line::StatusFontScale;
+    let path = scratch_config("reload-font-scale", "[status_line]\nenabled = true\n");
+    let mut app =
+        App::new(Theme::default(), Config::load_strict(&path).unwrap(), Keymap::default());
+    app.runtime_config_path = Some(path.clone());
+    let windows = seed_recorded_windows(&mut app);
+    {
+        let _dispatch = app.frame_dispatch_scope();
+        let _ = app.sync_status_line(Instant::now());
+    }
+    for id in windows {
+        let strip = recorded_strip(&app, id);
+        assert!(strip.visible, "the strip is shown in every window");
+        assert!((strip.font_scale - 0.8).abs() < 1e-6, "{strip:?}");
+    }
+    let before = windows.map(|id| asks(&app.windows[&id]));
+    std::fs::write(&path, "[status_line]\nenabled = true\nfont_scale = 0.6\n").unwrap();
+    app.force_reload_config();
+    {
+        let _dispatch = app.frame_dispatch_scope();
+        let _ = app.sync_status_line(Instant::now());
+    }
+    assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::from_f64(0.6).unwrap());
+    for (index, id) in windows.into_iter().enumerate() {
+        let strip = recorded_strip(&app, id);
+        assert!((strip.font_scale - 0.6).abs() < 1e-6, "window {index}: {strip:?}");
+        assert_eq!(asks(&app.windows[&id]) - before[index], 1, "window {index} redraws once");
+    }
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// Each palette action changes the live value and the strip geometry that follows from it, and
+/// hands it to every window's renderer strip: Move to Top/Bottom moves the band, Larger/Smaller
+/// step the text by 0.05 within 0.3..=1.0, and Reset returns it to 0.8.
+#[test]
+fn status_line_palette_actions_change_the_live_strip() {
+    use sonicterm_cfg::keymap::Action;
+    use sonicterm_cfg::status_line::{StatusFontScale, StatusPosition};
+    use sonicterm_gpu::status_strip::{status_line_font_size, strip_placement};
+    let mut app = app_with_strip(true);
+    let windows = seed_recorded_windows(&mut app);
+    let _ = app.sync_status_line(Instant::now());
+    // Every window's renderer strip holds the session's position, text size and visibility.
+    let every_window_follows = |app: &App, action: &str| {
+        for id in windows {
+            let strip = recorded_strip(app, id);
+            let resolved = &app.status_line.resolved;
+            assert_eq!(strip.position, resolved.position, "{action}: {strip:?}");
+            assert!(
+                (strip.font_scale - resolved.font_scale.as_f32()).abs() < 1e-6,
+                "{action}: {strip:?}"
+            );
+            assert!(strip.visible, "{action}: {strip:?}");
+        }
+    };
+    let band_top =
+        |app: &App| strip_placement(app.status_line.resolved.position, 600.0, 28.0, 40.0, 23.0).top;
+    let text_pt =
+        |app: &App| status_line_font_size(13.0, app.status_line.resolved.font_scale.as_f32());
+    assert_eq!(band_top(&app), 28.0);
+    assert!(app.run_action(&Action::StatusLinePositionBottom));
+    every_window_follows(&app, "Move to Bottom");
+    assert_eq!(app.status_line.resolved.position, StatusPosition::Bottom);
+    assert_eq!(band_top(&app), 537.0, "the band moves to the bottom edge");
+    assert!(app.run_action(&Action::StatusLinePositionTop));
+    every_window_follows(&app, "Move to Top");
+    assert_eq!(band_top(&app), 28.0);
+    assert!(app.run_action(&Action::IncreaseStatusLineFontScale));
+    every_window_follows(&app, "Larger Text");
+    assert!((app.status_line.resolved.font_scale.as_f32() - 0.85).abs() < 1e-6);
+    assert!((text_pt(&app) - 11.05).abs() < 1e-4, "the strip text grows");
+    for _ in 0..20 {
+        app.run_action(&Action::IncreaseStatusLineFontScale);
+    }
+    assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::MAX, "clamped at 1.0");
+    for _ in 0..30 {
+        app.run_action(&Action::DecreaseStatusLineFontScale);
+    }
+    assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::MIN, "clamped at 0.3");
+    every_window_follows(&app, "Smaller Text");
+    assert!(app.run_action(&Action::ResetStatusLineFontScale));
+    every_window_follows(&app, "Reset Text Size");
+    assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::DEFAULT);
+}
+
+/// Save Current Settings writes what the session shows, each key only where it differs from the
+/// file: `enabled` after the toggle, `position` and `font_scale` after their actions; a reload of
+/// the written file shows the same strip with no choice left.
+#[test]
+fn a_save_round_trips_the_toggle_position_and_text_size() {
+    use sonicterm_cfg::keymap::Action;
+    use sonicterm_cfg::status_line::{StatusFontScale, StatusPosition};
+    let path = scratch_config("palette-save", "# mine\n");
+    let mut app =
+        App::new(Theme::default(), Config::load_strict(&path).unwrap(), Keymap::default());
+    let _ = app.sync_status_line(Instant::now());
+    app.save_current_settings_to(&path).expect("save");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("status_line"), "nothing differs, nothing is written: {text}");
+    assert!(app.run_action(&Action::ToggleStatusLine));
+    assert!(app.run_action(&Action::StatusLinePositionBottom));
+    assert!(app.run_action(&Action::DecreaseStatusLineFontScale));
+    let shown = app.status_line.resolved.clone();
+    app.save_current_settings_to(&path).expect("save");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("enabled = true"), "{text}");
+    assert!(text.contains("position = \"bottom\""), "{text}");
+    assert!(text.contains("font_scale = 0.75"), "{text}");
+    assert!(app.status_line.overrides.is_empty(), "the save satisfied every choice");
+    app.runtime_config_path = Some(path.clone());
+    app.force_reload_config();
+    let _ = app.sync_status_line(Instant::now());
+    assert_eq!(app.status_line.resolved, shown, "the reload shows what was saved");
+    assert_eq!(app.status_line.resolved.position, StatusPosition::Bottom);
+    assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::DEFAULT.stepped(-1));
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

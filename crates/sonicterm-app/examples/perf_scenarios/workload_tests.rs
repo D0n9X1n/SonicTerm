@@ -1176,7 +1176,8 @@ fn missing_required_chrome(
 /// oracle is complete. For S9's and S12's working sets at scale 1 and 2 the
 /// constant is at least this platform's need, where a measurement that drew any glyph as tofu
 /// needs the maximum, and the live helper measurement equals this platform's recorded `helper`
-/// row when one exists. Prints each figure so CI's output can become the table's rows.
+/// row when one exists. Prints each figure so CI's output can become the table's rows; every
+/// failure is collected and the step fails once at the end, so one run prints every row.
 #[test]
 #[ignore = "measures with the real font stack; CI runs it in its own step"]
 fn glyph_atlas_working_set() {
@@ -1188,37 +1189,67 @@ fn glyph_atlas_working_set() {
     };
     let font_dirs =
         vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
-    let size: f32 = FONT_SIZE.parse().expect("the scenario font size");
+    // Every check below records its failure here instead of stopping, so one CI run prints every
+    // row; the step fails once, after the last row, naming all of them.
+    let mut failures: Vec<String> = Vec::new();
+    let size: f32 = FONT_SIZE.parse().unwrap_or_else(|_| {
+        failures.push(format!("the scenario font size {FONT_SIZE} is not a number"));
+        13.0
+    });
     let fixtures = [("S9", Fixture::EmojiCjk), ("S12", Fixture::HistoryScreen)];
     let titles = ["zsh", "perf_scenarios", "S12 covered window"];
     let platform = platform_name();
     for (scale, dpi, constant) in [(1, 72, START_ATLAS_DIM_1X), (2, 144, START_ATLAS_DIM_2X)] {
-        let table = validate_table_start(scale, constant)
-            .unwrap_or_else(|error| panic!("{scale}x start {constant} fails validation: {error}"));
-        println!("glyph_atlas_start scale={scale} constant={constant} verdict={}", table.verdict);
+        match validate_table_start(scale, constant) {
+            Ok(table) => println!(
+                "glyph_atlas_start scale={scale} constant={constant} verdict={}",
+                table.verdict
+            ),
+            Err(error) => {
+                failures.push(format!("{scale}x start {constant} fails validation: {error}"))
+            }
+        }
         if SIZING_ORACLE_COMPLETE {
             // When: SIZING_ORACLE_COMPLETE is set, the constant must equal the recorded rows' rule.
-            let ruled = ruled_start(scale, START_SIZE_INPUTS, SIZING_ORACLE_COMPLETE)
-                .unwrap_or_else(|error| panic!("{scale}x has no ruled start: {error}"));
-            println!(
-                "glyph_atlas_start scale={scale} constant={constant} ruled={} validated={}",
-                ruled.dim,
-                ruled.dim == constant
-            );
-            assert_eq!(
-                constant, ruled.dim,
-                "{scale}x constant against the rule: {}",
-                ruled.verdict
-            );
+            match ruled_start(scale, START_SIZE_INPUTS, SIZING_ORACLE_COMPLETE) {
+                Ok(ruled) => {
+                    println!(
+                        "glyph_atlas_start scale={scale} constant={constant} ruled={} validated={}",
+                        ruled.dim,
+                        ruled.dim == constant
+                    );
+                    if constant != ruled.dim {
+                        // When: the constant differs from ruled.dim, the shipped start breaks the rule.
+                        failures.push(format!(
+                            "{scale}x constant {constant} against the rule {}: {}",
+                            ruled.dim, ruled.verdict
+                        ));
+                    }
+                }
+                Err(error) => failures.push(format!("{scale}x has no ruled start: {error}")),
+            }
         }
         let mut local = Vec::new();
         for (name, fixture) in fixtures {
             let bytes = fixture_bytes(fixture);
             let text = String::from_utf8_lossy(&bytes);
             let lines: Vec<&str> = text.lines().collect();
-            let set =
-                measure_glyph_working_set(&lines, &titles, FONT_FAMILY, size, dpi, &font_dirs)
-                    .expect("the packaged scenario family loads");
+            let set = match measure_glyph_working_set(
+                &lines,
+                &titles,
+                FONT_FAMILY,
+                size,
+                dpi,
+                &font_dirs,
+            ) {
+                Ok(set) => set,
+                Err(error) => {
+                    // When: the measurement errs, this fixture prints no row; the others still do.
+                    failures
+                        .push(format!("{platform} {name} at {scale}x did not measure: {error}"));
+                    continue;
+                }
+            };
             // Reviewed exceptions apply here, where each failure still names its face; unresolved
             // characters and oversize required tiles always count.
             let raster = normalize_raster_failures(platform, &set.raster_failed, RASTER_EXCEPTIONS);
@@ -1276,13 +1307,13 @@ fn glyph_atlas_working_set() {
                 recorded.map_or_else(|| "none".to_owned(), |row| row.provenance.describe());
             match check {
                 HelperCheck::Matches | HelperCheck::MaximumOnly => {}
-                HelperCheck::Drifted(reason) => panic!(
+                HelperCheck::Drifted(reason) => failures.push(format!(
                     "{name} at {scale}x drifted from its recorded helper row ({provenance}): {reason}"
-                ),
-                HelperCheck::Refused(reason) => panic!(
+                )),
+                HelperCheck::Refused(reason) => failures.push(format!(
                     "glyph_atlas_working_set refused: {platform} {name} at {scale}x (recorded row: \
                      {provenance}): {reason}"
-                ),
+                )),
             }
             local.push(RuleInput {
                 label: format!("{platform} {scale}x {name} helper"),
@@ -1291,14 +1322,43 @@ fn glyph_atlas_working_set() {
                 incomplete_glyphs,
             });
         }
-        let need = start_rule(&local).expect("two measured inputs");
-        println!(
-            "glyph_atlas_working_set platform={platform} scale={scale} need={} constant={constant} \
-             verdict={}",
-            need.dim, need.verdict
-        );
-        assert!(constant >= need.dim, "{scale}x needs {} but starts at {constant}", need.dim);
+        match start_rule(&local) {
+            Ok(need) => {
+                println!(
+                    "glyph_atlas_working_set platform={platform} scale={scale} need={} \
+                     constant={constant} verdict={}",
+                    need.dim, need.verdict
+                );
+                if constant < need.dim {
+                    // When: constant is below need.dim, this platform's working set overflows it.
+                    failures.push(format!("{scale}x needs {} but starts at {constant}", need.dim));
+                }
+            }
+            Err(error) => failures.push(format!("{scale}x has no measured need: {error}")),
+        }
     }
+    if !failures.is_empty() {
+        // When: any check failed, the step fails once with every failure after every row.
+        panic!("glyph_atlas_working_set: {} failures:\n{}", failures.len(), failures.join("\n"));
+    }
+}
+
+/// One run of the working-set step always prints every row: no check panics or asserts while the
+/// fixtures and scales are still being measured; every failure is collected and the step panics
+/// once, after the last row, naming all of them.
+#[test]
+fn the_working_set_step_prints_every_row_before_its_one_panic() {
+    let source = include_str!("workload_tests.rs").replace("\r\n", "\n");
+    let start = source.find("fn glyph_atlas_working_set() {").expect("the step");
+    let body = &source[start..];
+    let body = &body[..body.find("\n}\n").expect("its end")];
+    for check in ["assert!(", "assert_eq!(", ".expect(", ".unwrap()"] {
+        assert!(!body.contains(check), "{check} would stop the step before every row prints");
+    }
+    assert_eq!(body.matches("panic!(").count(), 1, "one panic");
+    let panic = body.find("panic!(").unwrap();
+    let last_row = body.rfind("println!(").expect("rows are printed");
+    assert!(last_row < panic, "the panic follows every printed row");
 }
 
 /// The working-set step tells an incomplete live measurement apart from sizing drift. A complete

@@ -522,16 +522,20 @@ that is derived again on every request and never kept.
 
 Font, theme, scale, pane identity, atlas reset, or atlas content-identity changes
 invalidate the affected entries. A font or DPI change rebuilds the body, footer,
-and tab-title font stacks together and invalidates the shared glyph atlas:
+tab-title and status line font stacks together and invalidates the shared glyph atlas:
 
 - terminal text, command-palette query/results, and ordinary chrome use the
   configured body size;
 - command-palette footer and category/availability subtitles use `max(body - 1, 1)`;
-- tab titles use `body + 1`.
+- tab titles use `body + 1`;
+- status line text uses `max(font_scale × body, 1)`, `[status_line] font_scale` (0.8 by
+  default) of the live terminal font size (10.4 pt at the 13 pt default), so a zoom changes it
+  with the terminal text; 1 pt is the smallest size FreeType rasterizes, so the strip never asks
+  for less. A `font_scale` change rebuilds the strip's stack and resets the shared atlas.
 
-All three stacks use the same family, DPI, and weight scale. Native raster-role
-tags keep their atlas entries distinct, so a footer or tab title does not scale
-a cached body bitmap.
+All four stacks use the same family, DPI, and weight scale. Native raster-role
+tags keep their atlas entries distinct, so a footer, tab title or status line
+does not scale a cached body bitmap.
 
 The quad cache holds about four times total visible rows and clears at capacity
 or on a geometry change; the glyph cache bounds itself by the per-pane quotas and
@@ -566,7 +570,7 @@ renderable media is promoted, and is demoted back to the placeholder when idle.
 A shelf packer reuses freed rectangles before extending shelves. Keys include font slot, glyph id,
 character, style, and native raster role.
 
-Measurement-based sizing of the normal start is not complete.
+The normal start is sized from recorded CI measurements.
 `sonicterm_text::start_size_inputs::validate_table_start` checks both start
 constants, in its unit test and in the `glyph-atlas-working-set` step. It
 always accepts 2048, which saves nothing, so an empty or incomplete
@@ -595,16 +599,35 @@ step prints the raw failures, the approved ones with their reasons and the
 unapproved rest; only the unapproved count enters `incomplete_glyphs`. The
 list is empty, so every raster failure still selects 2048.
 
-`SIZING_ORACLE_COMPLETE` is false, and recorded rows alone cannot lower a start.
-The Windows real-renderer coverage test waits for a presented frame whose
+`SIZING_ORACLE_COMPLETE` is true, and recorded rows alone still cannot lower a
+start: `ruled_start` needs every required input at the scale. The Windows real-renderer coverage test waits for a presented frame whose
 terminal rows and chrome report no missing glyph. Both reports include a shaped
 glyph that drew nothing (refused by the atlas, rasterized nothing, or too large
 to place) and a tab title that never shaped. The test then checks that every
 resident tile is in the helper's set at the same raster size and, for S9, that
 representative emoji and CJK codepoints from the fixture's last line are
 resident real tiles at both scales. It proves only the glyphs that frame
-requested, not every glyph the helper measures. The guard stays false until
-these checks pass on Windows CI and the measured rows are recorded.
+requested, not every glyph the helper measures. The guard was set once these
+checks passed on Windows CI and the measured rows were recorded.
+
+Each row in `START_SIZE_INPUTS` carries its provenance: run id, attempt,
+measured commit, side, pull request, set, and the CI job and log line it was
+copied from. `check_provenance` (run by `every_recorded_row_keeps_its_provenance`)
+holds every row of one source to one run, attempt and commit, and refuses rows
+mixed from two runs. Perf-end rows come from a Performance comparison's base
+side. Helper and Windows real-renderer rows come either from a `push` CI run on
+`main` or from a `pull_request` CI run on the exact head commit that changes the
+working set; a `pull_request` row names its pull request and no other row does.
+The working-set step compares each live helper measurement with its row
+exactly, so a change that moves a helper's fit, largest tile or tofu count fails
+until the rows are re-recorded. To re-record, let CI run on the head that
+changes the working set, then copy every `glyph_atlas_working_set ...
+source=helper` line (and, when the real renderer changed, every
+`source=real_renderer` line) with its job id and log line into the table,
+setting that source's run, attempt, commit, side and pull request together. The
+step prints every row before it fails, once, naming every drift, so one run
+yields a complete helper set. A real-renderer row is printed by a later step of
+its job, which does not run once an earlier step of that job fails.
 
 Insertion follows these rules:
 

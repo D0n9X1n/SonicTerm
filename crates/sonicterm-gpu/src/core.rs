@@ -49,7 +49,9 @@ use crate::device_errors::{
     run_isolated_validation, DeviceErrorSnapshot, DeviceErrorState, DeviceStateWaker, GpuFaultKind,
 };
 use sonicterm_render_model::boundary::ui::drag_chip::{DragChipOverlay, DragChipVisual};
-use sonicterm_render_model::boundary::ui::status_line::{PlacedSegment, StatusLineView};
+use sonicterm_render_model::boundary::ui::status_line::{
+    PlacedPart, PlacedSegment, StatusLineView,
+};
 use sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size;
 
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
@@ -676,6 +678,7 @@ pub(crate) struct RendererFontStacks {
     pub(crate) body: Option<sonicterm_engine::FontStack>,
     pub(crate) tab_title: Option<sonicterm_engine::FontStack>,
     pub(crate) palette_footer: Option<sonicterm_engine::FontStack>,
+    pub(crate) status_line: Option<sonicterm_engine::FontStack>,
 }
 
 pub(crate) fn renderer_font_stacks(
@@ -696,8 +699,8 @@ pub(crate) fn renderer_font_stacks(
     renderer_font_views(body, body_size)
 }
 
-/// The renderer's three stacks from `body`: the tab-title and palette-footer views share its
-/// configuration at their own sizes for a `body_size` grid font.
+/// The renderer's four stacks from `body`: the tab-title, palette-footer and status line views
+/// share its configuration at their own sizes for a `body_size` grid font.
 pub(crate) fn renderer_font_views(
     body: Option<sonicterm_engine::FontStack>,
     body_size: f32,
@@ -707,7 +710,13 @@ pub(crate) fn renderer_font_views(
     let palette_footer = body
         .as_ref()
         .map(|stack| stack.with_font_size(f64::from(palette_footer_font_size(body_size))));
-    RendererFontStacks { body, tab_title, palette_footer }
+    let status_line = body.as_ref().map(|stack| {
+        stack.with_font_size(f64::from(crate::status_strip::status_line_font_size(
+            body_size,
+            crate::status_strip::default_font_scale(),
+        )))
+    });
+    RendererFontStacks { body, tab_title, palette_footer, status_line }
 }
 
 fn software_block_glyph_target_rect(
@@ -2385,13 +2394,19 @@ pub struct GpuRenderer {
     /// View → Toggle Tab Bar menu action; when `false`, [`Self::top_inset`]
     /// returns 0 and the tab bar draw block in [`Self::render`] is skipped.
     tab_bar_visible: bool,
-    /// Whether the status line strip between the panes and the tab bar is shown.
+    /// Whether the status line strip is shown.
     status_line_visible: bool,
+    /// The window edge the strip sits on: above the panes, or between them and the tab bar.
+    status_line_position: sonicterm_render_model::boundary::cfg::status_line::StatusPosition,
+    /// `[status_line] font_scale`: the strip text's share of the live terminal font size.
+    status_line_font_scale: f32,
     /// Segments the strip may present; replaced by the App before a frame.
     status_line_view: StatusLineView,
     /// Fitted strip keyed by view pixels, width and chrome font, so an
     /// unchanged strip is not reshaped every frame.
-    status_line_fit: Option<(u64, Vec<PlacedSegment>)>,
+    status_line_fit: Option<(u64, crate::status_strip::FittedStrip)>,
+    /// The strip font's cap height, keyed by the text size it was measured at (`f32` bits).
+    status_line_cap_height: Option<(u32, f32)>,
     /// Hit boxes of the segments the last drawn frame presented.
     status_line_layouts: crate::status_strip::StripLayouts,
     /// The segment keyboard focus is on and whether `strong_focus` doubles its ring; `None` draws
@@ -2436,6 +2451,8 @@ pub struct GpuRenderer {
     tab_title_font: TabTitleFont,
     /// Native-size stack for the command-palette footer (`body - 1`).
     palette_footer_font_stack: Option<sonicterm_engine::FontStack>,
+    /// Native-size stack for status line text, at `status_strip::status_line_font_size`.
+    status_line_font_stack: Option<sonicterm_engine::FontStack>,
     /// Kept tab titles, search-overlay runs and the UI palette; reported as `chrome_cache`.
     chrome_caches: crate::chrome_cache::ChromeCaches,
     /// Whether the title and chrome-run caches keep what they shape; a test turns it off to
@@ -3418,8 +3435,11 @@ impl GpuRenderer {
             render_timing_label: role,
             tab_bar_visible: true,
             status_line_visible: false,
+            status_line_position: Default::default(),
+            status_line_font_scale: crate::status_strip::default_font_scale(),
             status_line_view: StatusLineView::default(),
             status_line_fit: None,
+            status_line_cap_height: None,
             status_line_layouts: Default::default(),
             status_line_focus: None,
             titlebar_inset: 0.0,
@@ -3440,6 +3460,7 @@ impl GpuRenderer {
                 font_stacks.tab_title,
             ),
             palette_footer_font_stack: font_stacks.palette_footer,
+            status_line_font_stack: font_stacks.status_line,
             // Seeded from the constructor theme, so the first frame derives no palette.
             chrome_caches: crate::chrome_cache::ChromeCaches::new(theme),
             chrome_reuse: true,
@@ -3560,8 +3581,12 @@ impl GpuRenderer {
     /// scale the grid was reporting one fewer row than the window could fit,
     /// leaving a dead strip below the last painted row that showed the
     /// surface clear color instead of vim's bg.
+    ///
+    /// A strip at the top sits between the titlebar band and the top padding, so its height is
+    /// reserved here too.
     pub fn top_inset(&self) -> f32 {
         (self.titlebar_inset + self.padding_top) * self.scale_factor
+            + self.status_line_placement().reserved_top
     }
 
     /// Bottom inset reserved below the grid for the bottom-pinned tab bar,
@@ -3577,7 +3602,24 @@ impl GpuRenderer {
             // padding is applied separately by the caller.
             0.0
         };
-        tab_bar + self.status_line_height()
+        tab_bar + self.status_line_placement().reserved_bottom
+    }
+
+    /// The strip's band and the height it reserves on its edge, from the current geometry.
+    fn status_line_placement(&self) -> crate::status_strip::StripPlacement {
+        let tab_bar = if self.tab_bar_visible {
+            self.tab_bar_logical_height()
+        } else {
+            // When: `!tab_bar_visible`, a bottom strip sits on the window's bottom edge.
+            0.0
+        };
+        crate::status_strip::strip_placement(
+            self.status_line_position,
+            self.config.height as f32,
+            self.titlebar_inset * self.scale_factor,
+            tab_bar,
+            self.status_line_height(),
+        )
     }
 
     /// Y offset (in raster px) at which the tab bar layout should be
@@ -3652,14 +3694,65 @@ impl GpuRenderer {
         }
     }
 
-    /// Raster-px top edge of the strip: directly above the tab bar, or at
-    /// the bottom edge when the tab bar is hidden.
+    /// Raster-px top edge of the strip: below the titlebar band at the top; at the bottom,
+    /// directly above the tab bar, or on the bottom edge when the tab bar is hidden.
     pub fn status_line_top(&self) -> f32 {
-        (self.config.height as f32 - self.bottom_inset()).max(0.0)
+        self.status_line_placement().top
+    }
+
+    /// Set the strip text's share of the live terminal font size. Returns `true` when it changed:
+    /// the strip's stack is rebuilt at the new size and the atlas reset, since a glyph key carries
+    /// no size, so the caller redraws. The strip's height and the panes do not change.
+    pub fn set_status_line_font_scale(&mut self, font_scale: f32) -> bool {
+        if (self.status_line_font_scale - font_scale).abs() < f32::EPSILON {
+            // When: `font_scale` equals `status_line_font_scale`, the strip keeps its stack and tiles.
+            return false;
+        }
+        self.status_line_font_scale = font_scale;
+        self.rebuild_status_line_stack();
+        self.status_line_fit = None;
+        self.status_line_cap_height = None;
+        self.reset_glyph_atlas_in_place("status_line_font_scale");
+        self.glyph_atlas_retry_without_eviction = false;
+        self.row_glyph_cache.invalidate_all();
+        self.last_frame_key = None;
+        true
+    }
+
+    /// Rebuild the strip's stack from the body stack at the renderer's scale; no body stack, no
+    /// strip stack.
+    fn rebuild_status_line_stack(&mut self) {
+        let size =
+            crate::status_strip::status_line_font_size(self.font_size, self.status_line_font_scale);
+        self.status_line_font_stack =
+            self.font_stack.as_ref().map(|body| body.with_font_size(f64::from(size)));
+    }
+
+    /// Move the strip to `position`. Returns `true` when a shown strip moved, so the caller
+    /// refits panes to the new insets once; a hidden strip reserves nothing and moves nothing.
+    pub fn set_status_line_position(
+        &mut self,
+        position: sonicterm_render_model::boundary::cfg::status_line::StatusPosition,
+    ) -> bool {
+        if self.status_line_position == position {
+            // When: `status_line_position == position`, the strip stays where it is.
+            return false;
+        }
+        self.status_line_position = position;
+        if !self.status_line_visible {
+            // When: `!status_line_visible`, no band or inset changes until it is shown.
+            return false;
+        }
+        // The presented layout stays: the old band is on screen until a frame at the new edge
+        // presents, and that frame's stage and settle replace it.
+        self.status_line_fit = None;
+        self.last_frame_key = None;
+        self.last_pane_layout.clear();
+        true
     }
 
     /// Show or hide the strip. Returns `true` when visibility changed, so the
-    /// caller refits panes to the new bottom inset.
+    /// caller refits panes to the new insets.
     pub fn set_status_line_visible(&mut self, visible: bool) -> bool {
         if self.status_line_visible == visible {
             // When: `status_line_visible == visible`, the geometry is unchanged.
@@ -5289,6 +5382,7 @@ impl GpuRenderer {
                 GlyphRasterVariant::Normal => self.font_stack.as_ref(),
                 GlyphRasterVariant::TabTitle => self.tab_title_font.stack(),
                 GlyphRasterVariant::PaletteFooter => self.palette_footer_font_stack.as_ref(),
+                GlyphRasterVariant::StatusLine => self.status_line_font_stack.as_ref(),
             }
         })
     }
@@ -5469,6 +5563,11 @@ impl GpuRenderer {
         );
         self.tab_title_font.set_font(family, size, weight_scale, new_stacks.tab_title);
         self.palette_footer_font_stack = new_stacks.palette_footer;
+        self.status_line_font_stack = new_stacks.status_line;
+        // The views are built at the default scale; the strip keeps the renderer's own.
+        self.rebuild_status_line_stack();
+        self.status_line_fit = None;
+        self.status_line_cap_height = None;
         self.cell_w = new_cell_w;
         self.cell_h = new_line_h;
         self.reset_glyph_atlas_in_place("font_change");
@@ -5543,13 +5642,16 @@ impl GpuRenderer {
         self.glyph_atlas_retry_without_eviction = false;
         // Update each stack's DPI before rerasterization; failed metric lookup preserves the prior cell measurement.
         let fs_dpi = (72.0 * sf).round() as usize;
-        // Body, tab-title and footer stacks rescale in that order; the tab-title font also
+        // Body, tab-title, footer and status line stacks rescale in that order; the tab-title font also
         // records the scale, so the next width measurement shapes every title again.
         if let Some(stack) = self.font_stack.as_ref() {
             stack.change_scaling(stack.get_font_scale(), fs_dpi);
         }
         self.tab_title_font.set_scale_factor(sf, fs_dpi);
         if let Some(stack) = self.palette_footer_font_stack.as_ref() {
+            stack.change_scaling(stack.get_font_scale(), fs_dpi);
+        }
+        if let Some(stack) = self.status_line_font_stack.as_ref() {
             stack.change_scaling(stack.get_font_scale(), fs_dpi);
         }
         if let Some(stack) = self.font_stack.as_ref() {
@@ -7366,7 +7468,7 @@ impl GpuRenderer {
         // drag is active over this bar.
         // -------- Status line strip ----------------------------------------
         if self.status_line_visible {
-            // The strip is on: draw its band and fitted segments above the tab bar.
+            // The strip is on: draw its band and fitted segments on its edge.
             use std::hash::{Hash, Hasher};
             let strip_palette = self.chrome_caches.palette.palette_for(theme);
             let colors = crate::status_strip::StatusColors::resolve(
@@ -7375,12 +7477,15 @@ impl GpuRenderer {
                 self.tab_inactive_fg,
                 &strip_palette,
             );
-            let geometry = crate::status_strip::StripGeometry {
+            let mut geometry = crate::status_strip::StripGeometry {
                 top: self.status_line_top(),
                 height: self.status_line_height(),
+                position: self.status_line_position,
                 screen: (sw, sh),
                 scale_factor: self.scale_factor,
-                title_raster_px: self.tab_title_font.raster_px(),
+                font_raster_px: self.font_size * self.scale_factor,
+                font_scale: self.status_line_font_scale,
+                cap_height: 0.0,
             };
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             (
@@ -7392,28 +7497,48 @@ impl GpuRenderer {
             )
                 .hash(&mut hasher);
             let fit_key = hasher.finish();
-            let mut strip_rasterizer = self.tab_title_font.stack().cloned();
+            let mut strip_rasterizer = self.status_line_font_stack.clone();
+            let text_px = geometry.text_px();
+            // The cap height is measured once per text size and kept.
+            let kept = crate::status_strip::kept_cap_height(
+                self.status_line_cap_height,
+                text_px,
+                || match (self.status_line_font_stack.as_ref(), strip_rasterizer.as_mut()) {
+                    (Some(stack), Some(rasterizer)) => crate::status_strip::strip_cap_height(
+                        stack,
+                        rasterizer,
+                        &mut self.glyph_atlas,
+                        text_px,
+                    ),
+                    _ => text_px * 0.7,
+                },
+            );
+            self.status_line_cap_height = Some(kept);
+            geometry.cap_height = kept.1;
             let stale = self.status_line_fit.as_ref().is_none_or(|(key, _)| *key != fit_key);
             if let (true, Some(stack), Some(rasterizer)) =
-                (stale, self.tab_title_font.stack(), strip_rasterizer.as_mut())
+                (stale, self.status_line_font_stack.as_ref(), strip_rasterizer.as_mut())
             {
                 // The view, width or font changed: refit with the chrome font.
-                let placed = crate::status_strip::fit_strip(
+                let fitted = crate::status_strip::fit_strip(
                     &self.status_line_view,
                     &geometry,
                     stack,
                     rasterizer,
                     &mut self.glyph_atlas,
                 );
-                self.status_line_fit = Some((fit_key, placed));
+                self.status_line_fit = Some((fit_key, fitted));
             }
-            let placed: &[PlacedSegment] =
-                self.status_line_fit.as_ref().map_or(&[], |(_, placed)| placed.as_slice());
+            let (placed, separators): (&[PlacedSegment], &[PlacedPart]) =
+                self.status_line_fit.as_ref().map_or((&[], &[]), |(_, fitted)| {
+                    (fitted.segments.as_slice(), fitted.separators.as_slice())
+                });
             crate::status_strip::emit_strip(
                 placed,
+                separators,
                 &geometry,
                 &colors,
-                self.tab_title_font.stack(),
+                self.status_line_font_stack.as_ref(),
                 strip_rasterizer.as_mut(),
                 &mut self.glyph_atlas,
                 &mut *quads,

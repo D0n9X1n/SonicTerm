@@ -141,6 +141,16 @@ pub enum Action {
     ToggleStatusLine,
     /// Toggle hiding of sensitive status line content (screen sharing).
     ToggleStatusLineSensitive,
+    /// Move the status line to the top edge for this session.
+    StatusLinePositionTop,
+    /// Move the status line to the bottom edge for this session.
+    StatusLinePositionBottom,
+    /// Make the status line text 0.05 larger, up to 1.0 of the terminal font size.
+    IncreaseStatusLineFontScale,
+    /// Make the status line text 0.05 smaller, down to 0.3 of the terminal font size.
+    DecreaseStatusLineFontScale,
+    /// Return the status line text to 0.8 of the terminal font size.
+    ResetStatusLineFontScale,
     /// Open the status line checklist to choose segments for this session.
     ChooseStatusLineSegments,
     /// Move keyboard focus to the status line, so its segments can be read and activated.

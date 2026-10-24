@@ -604,6 +604,15 @@ impl App {
             }
             Action::ToggleStatusLine => self.toggle_status_line(),
             Action::ToggleStatusLineSensitive => self.toggle_status_line_sensitive(),
+            Action::StatusLinePositionTop => {
+                self.move_status_line(sonicterm_cfg::status_line::StatusPosition::Top)
+            }
+            Action::StatusLinePositionBottom => {
+                self.move_status_line(sonicterm_cfg::status_line::StatusPosition::Bottom)
+            }
+            Action::IncreaseStatusLineFontScale => self.step_status_line_font_scale(1),
+            Action::DecreaseStatusLineFontScale => self.step_status_line_font_scale(-1),
+            Action::ResetStatusLineFontScale => self.reset_status_line_font_scale(),
             Action::ChooseStatusLineSegments => self.open_status_segments(None, None),
             Action::RenameTab => self.start_rename_active_tab(),
             Action::RenameWindow => {

@@ -1247,6 +1247,131 @@ fn atlas_change(
     retry_is_full(renderer, &mut scene, record, "atlas change")
 }
 
+/// A strip moved from the top to the bottom keeps routing to the band still on screen when the
+/// frame at the new edge fails to present; the next presented frame commits the bottom band,
+/// and the insets reserve it there, so no pane area overlaps it.
+fn moved_strip_routes_until_presented(
+    renderer: &mut GpuRenderer,
+    layout: &Layout,
+    _active: &ActiveEventLoop,
+) -> Result<(), String> {
+    use sonicterm_render_model::boundary::cfg::status_line::StatusPosition;
+    let mut scene = single(layout);
+    renderer.set_status_line_position(StatusPosition::Top);
+    renderer.set_status_line_visible(true);
+    present(renderer, &mut scene)?;
+    let top = renderer.status_line_hit().ok_or("the top strip presented")?;
+    let top_end = top.top + top.height;
+    check(
+        top_end <= renderer.top_inset() + 0.5,
+        &format!("the panes start at {} below the top band ending {top_end}", renderer.top_inset()),
+    )?;
+    check(renderer.set_status_line_position(StatusPosition::Bottom), "a shown strip moves")?;
+    renderer.__fail_next_present();
+    let outcome = frame(renderer, &mut scene);
+    check(matches!(outcome, PresentOutcome::Failed(_)), &format!("Failed: {outcome:?}"))?;
+    let kept = renderer.status_line_hit().ok_or("the failed frame keeps the presented strip")?;
+    check(kept.top == top.top, &format!("still the top band: {} vs {}", kept.top, top.top))?;
+    present(renderer, &mut scene)?;
+    let bottom = renderer.status_line_hit().ok_or("the bottom strip presented")?;
+    let surface_h = layout.pane.h as f32;
+    check(bottom.top > top.top, &format!("the band moved down: {}", bottom.top))?;
+    let panes_bottom = surface_h - renderer.bottom_inset();
+    check(
+        bottom.top >= panes_bottom - 0.5,
+        &format!("panes end at {panes_bottom} above the band at {}", bottom.top),
+    )?;
+    check(
+        renderer.top_inset() < top_end,
+        &format!("the top inset {} gave the strip's rows back", renderer.top_inset()),
+    )?;
+    renderer.set_status_line_visible(false);
+    renderer.set_status_line_position(StatusPosition::Top);
+    present(renderer, &mut scene)?;
+    Ok(())
+}
+
+/// The strip's distinct resident strikes, in thousandths of a raster pixel, and whether a strip
+/// glyph was drawn as missing chrome on the last frame.
+fn strip_strikes(renderer: &GpuRenderer) -> (std::collections::BTreeSet<u64>, bool) {
+    use sonicterm_types::GlyphRasterVariant;
+    let (identities, _unresolved) = renderer.__test_resident_tile_identities();
+    let strikes = identities
+        .keys()
+        .filter(|identity| identity.raster_variant == GlyphRasterVariant::StatusLine)
+        .map(|identity| identity.source.strike_px_milli)
+        .collect();
+    (strikes, !renderer.last_missing_chrome().is_empty())
+}
+
+/// The strike the strip must draw at: its text size at the live font size and `font_scale`, in
+/// raster pixels at the renderer's DPI, in thousandths.
+fn expected_strip_strike(renderer: &GpuRenderer, font_scale: f32) -> u64 {
+    let size_pt =
+        sonicterm_gpu::status_strip::status_line_font_size(renderer.font_size(), font_scale);
+    let dpi = (72.0 * renderer.scale_factor()).round().max(1.0);
+    (f64::from(size_pt) * f64::from(dpi) / 72.0 * 1000.0).round() as u64
+}
+
+/// Through the real renderer: a warm strip, then a zoom, a DPI change and a `font_scale` change.
+/// After each, the next presented frame draws the strip at exactly the new size, and every strip
+/// tile resident in the atlas has that one strike, so no tile of an earlier size is resident or
+/// drawn.
+fn strip_rasterizes_anew_after_size_changes(
+    renderer: &mut GpuRenderer,
+    layout: &Layout,
+    _active: &ActiveEventLoop,
+) -> Result<(), String> {
+    use sonicterm_render_model::boundary::cfg::status_line::{StatusSegmentId, StatusSide};
+    use sonicterm_render_model::boundary::ui::status_line::{
+        SpokenSegment, StatusLineView, StatusPart, StatusSegmentView, StatusTone,
+    };
+    let default_scale = sonicterm_gpu::status_strip::default_font_scale();
+    let (family, size_pt, scale_factor) =
+        ("Rec Mono St.Helens", renderer.font_size(), renderer.scale_factor());
+    let view = StatusLineView::new(vec![StatusSegmentView {
+        id: StatusSegmentId::Mode,
+        side: StatusSide::Left,
+        priority: 500,
+        protected: true,
+        parts: vec![StatusPart::new("HELLO", StatusTone::Value)],
+        compact: None,
+        click: None,
+        spoken: SpokenSegment::default(),
+    }]);
+    let mut scene = single(layout);
+    renderer.set_status_line_view(view);
+    renderer.set_status_line_visible(true);
+    let mut seen = Vec::new();
+    let mut step = |renderer: &mut GpuRenderer, label: &str, font_scale: f32| {
+        present(renderer, &mut scene)?;
+        let (strikes, missing) = strip_strikes(renderer);
+        let expected = expected_strip_strike(renderer, font_scale);
+        check(!missing, &format!("{label}: the strip drew a glyph as missing"))?;
+        check(
+            strikes.len() == 1 && strikes.contains(&expected),
+            &format!("{label}: strip strikes {strikes:?}, expected only {expected}"),
+        )?;
+        check(!seen.contains(&expected), &format!("{label}: {expected} repeats an earlier size"))?;
+        seen.push(expected);
+        Ok::<(), String>(())
+    };
+    step(renderer, "warm", default_scale)?;
+    renderer.set_font(family, size_pt + 4.0, 1.0, 1.0);
+    step(renderer, "zoom", default_scale)?;
+    renderer.set_scale_factor(scale_factor * 2.0);
+    step(renderer, "DPI", default_scale)?;
+    check(renderer.set_status_line_font_scale(0.5), "a new font_scale changes the strip")?;
+    step(renderer, "font_scale", 0.5)?;
+    renderer.set_status_line_font_scale(default_scale);
+    renderer.set_scale_factor(scale_factor);
+    renderer.set_font(family, size_pt, 1.0, 1.0);
+    renderer.set_status_line_visible(false);
+    renderer.set_status_line_view(StatusLineView::default());
+    present(renderer, &mut scene)?;
+    Ok(())
+}
+
 /// Tests 8b, 18 and 21: a submission that fails validation after the retained draw stops the
 /// device; the frame is `RenderingUnavailable`, commits no record, receipt or partial frame and
 /// clears the key. After recovery onto a new device, the first frame is `Full`.
@@ -1739,7 +1864,7 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
     settle_fallback(&mut renderer, &layout)?;
     let mut failures = Vec::new();
     // Recovery rebinds the device and degrading switches presenters, so those run last.
-    let cases: [(&str, Case); 12] = [
+    let cases: [(&str, Case); 14] = [
         ("pixel parity", pixel_parity),
         ("emission and upload", emission_and_upload_shrink),
         ("overhanging records", overhanging_records),
@@ -1750,6 +1875,8 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
         ("warm glyph rows match a cold renderer", warm_rows_match_a_cold_renderer),
         ("GDI warm and cold frames", gdi_warm_and_cold_frames_match),
         ("row ink grows and shrinks", row_ink_grows_and_shrinks),
+        ("moved strip routes until presented", moved_strip_routes_until_presented),
+        ("strip rasterizes anew after size changes", strip_rasterizes_anew_after_size_changes),
         ("submission failure", submission_failure),
         ("degraded is never partial", degraded_is_never_partial),
     ];

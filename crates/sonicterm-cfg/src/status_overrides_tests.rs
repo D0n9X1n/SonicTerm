@@ -255,3 +255,26 @@ fn a_session_enabled_segment_keeps_its_configured_keys() {
         Some(7)
     );
 }
+
+/// The session can move the strip and resize its text; an override equal to the file is not kept,
+/// and a reload that changes the file's own value drops it.
+#[test]
+fn position_and_font_scale_overrides_apply_and_reconcile() {
+    use crate::status_line::{StatusFontScale, StatusPosition};
+    let base = file("enabled = true\n");
+    let mut overrides = StatusLineOverrides::default();
+    overrides.set_position(&base, StatusPosition::Bottom);
+    overrides.set_font_scale(&base, StatusFontScale::DEFAULT.stepped(1));
+    let shown = overrides.effective(&base);
+    assert_eq!(shown.position, StatusPosition::Bottom);
+    assert_eq!(shown.font_scale, StatusFontScale::DEFAULT.stepped(1));
+    assert!(!overrides.is_empty());
+    overrides.set_position(&base, StatusPosition::Top);
+    overrides.set_font_scale(&base, StatusFontScale::DEFAULT);
+    assert!(overrides.is_empty(), "choices equal to the file are not kept");
+    overrides.set_font_scale(&base, StatusFontScale::MIN);
+    let edited = file("enabled = true\nfont_scale = 0.9\n");
+    overrides.reconcile(&base, &edited);
+    assert_eq!(overrides.effective(&edited).font_scale, StatusFontScale::from_f64(0.9).unwrap());
+    assert!(overrides.is_empty(), "the file's own change wins");
+}

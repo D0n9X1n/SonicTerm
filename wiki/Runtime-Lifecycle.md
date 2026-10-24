@@ -492,7 +492,7 @@ Depending on changed fields, reload can:
 - clear and later rebuild the warm-window pool.
 
 **Save Current Settings** writes the live `[font].size` and effective
-`[font].weight_scale`, and each `[status_line]` key (`enabled`, `hide_sensitive`,
+`[font].weight_scale`, and each `[status_line]` key (`enabled`, `hide_sensitive`, `position`, `font_scale`,
 `left`, `center`, `right`) whose session value differs from the file on disk. It
 does not save theme, locale, tabs, panes, or other runtime state. The values are
 already live, so save does not reload or reapply them; the written `[status_line]`

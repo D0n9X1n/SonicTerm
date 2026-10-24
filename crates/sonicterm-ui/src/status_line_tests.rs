@@ -25,7 +25,7 @@ fn columns(text: &str) -> f32 {
 
 /// Fit metrics with no padding or gaps, so widths are plain column counts.
 fn tight(width: f32) -> FitMetrics {
-    FitMetrics { width, edge_pad: 0.0, segment_gap: 1.0, chip_pad: 0.0, chip_gap: 0.0 }
+    FitMetrics { width, edge_pad: 0.0, segment_gap: 1.0, separator_width: 0.0 }
 }
 
 /// Inputs with a 412 MiB memory figure and nothing else to say.
@@ -66,7 +66,7 @@ fn every_catalog_id_is_registered_with_a_glyph_free_spoken_name() {
             paste_raw: true,
             ime: Some(ImeInput::DiscardedInCopyMode),
             history_trimmed: Some(1_280),
-            font: Some(FontInput { live_tenths: 135, configured_tenths: 140 }),
+            font: Some(FontInput::from_sizes(13.5, 14.0)),
             size: Some((120, 40)),
             zoomed: true,
             alerts: AlertsInput {
@@ -176,7 +176,9 @@ fn core_segments_format_as_name_value_and_chips() {
         tab_mem: None,
     };
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
-    assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3COPYMOUSE");
+    assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3 COPY MOUSE");
+    let mode = view.segments.iter().find(|segment| segment.id == StatusSegmentId::Mode).unwrap();
+    assert_eq!(text_of(mode.compact.as_ref().unwrap()), "⇶ 3 COPY", "MOUSE drops with its space");
     assert_eq!(shown(&view, StatusSegmentId::Scroll).unwrap(), "Scroll: ↑ 12,345");
     assert_eq!(
         shown(&view, StatusSegmentId::Health).unwrap(),
@@ -494,20 +496,22 @@ fn center_is_centered_and_shifts_between_the_sides() {
 }
 
 #[test]
-fn chips_take_padding_and_gaps() {
-    // Chip parts include their background padding, with a gap between adjacent chips.
+fn chips_measure_as_their_text() {
+    // A chip has no background, so it takes exactly its text's width, like any value; the space
+    // part between two chips is the only thing that separates them.
     let mut view = fit_view(&[(StatusSegmentId::Mode, StatusSide::Left, 800, false, "COPY")]);
     view.segments[0].parts[0].tone = StatusTone::Chip;
+    view.segments[0].parts.push(StatusPart::new(" ", StatusTone::Name));
     view.segments[0].parts.push(StatusPart::new("MOUSE", StatusTone::Chip));
     let metrics =
-        FitMetrics { width: 100.0, edge_pad: 2.0, segment_gap: 3.0, chip_pad: 1.0, chip_gap: 4.0 };
+        FitMetrics { width: 100.0, edge_pad: 2.0, segment_gap: 3.0, separator_width: 0.0 };
     let placed = fit(&view, &metrics, columns);
     assert_eq!(
         placed[0].parts[0],
-        PlacedPart { text: "COPY".into(), tone: StatusTone::Chip, left: 2.0, width: 6.0 }
+        PlacedPart { text: "COPY".into(), tone: StatusTone::Chip, left: 2.0, width: 4.0 }
     );
-    assert_eq!(placed[0].parts[1].left, 12.0);
-    assert_eq!(placed[0].width, 17.0);
+    assert_eq!((placed[0].parts[2].left, placed[0].parts[2].width), (7.0, 5.0));
+    assert_eq!(placed[0].width, 10.0);
 }
 
 #[test]
@@ -833,23 +837,20 @@ fn paste_and_ime_show_only_problems() {
 
 #[test]
 fn history_font_and_size_show_only_active_display() {
-    // `history` warns after a budget trim and acknowledges on click; `font` shows only a size that
-    // differs from the configured one and resets on click; `size` shows the grid and is inert.
+    // `history` warns after a budget trim and acknowledges on click; `font`, which the developer
+    // preset lists, shows the live size as a percent of the configured one only when that is not
+    // 100% and resets on click; opt-in `size` shows the grid and is inert.
     let i18n = translator("en");
     let mut resolved = developer();
-    for id in [StatusSegmentId::Font, StatusSegmentId::Size] {
-        resolved.segments.push(ResolvedSegment {
-            id,
-            side: StatusSide::Right,
-            show: ShowMode::Active,
-            priority: id.meta().default_priority,
-            click: ClickBinding::Default,
-        });
-    }
-    let unchanged = StatusLineInputs {
-        font: Some(FontInput { live_tenths: 140, configured_tenths: 140 }),
-        ..idle_inputs()
-    };
+    resolved.segments.push(ResolvedSegment {
+        id: StatusSegmentId::Size,
+        side: StatusSide::Right,
+        show: ShowMode::Active,
+        priority: StatusSegmentId::Size.meta().default_priority,
+        click: ClickBinding::Default,
+    });
+    let unchanged =
+        StatusLineInputs { font: Some(FontInput::from_sizes(14.0, 14.0)), ..idle_inputs() };
     let quiet = build_view(&resolved, false, &unchanged, &i18n, NumberStyle::POINT);
     for id in [StatusSegmentId::History, StatusSegmentId::Font, StatusSegmentId::Size] {
         assert_eq!(shown(&quiet, id), None, "{id:?}");
@@ -860,7 +861,7 @@ fn history_font_and_size_show_only_active_display() {
     };
     let busy = StatusLineInputs {
         history_trimmed: Some(1_280),
-        font: Some(FontInput { live_tenths: 160, configured_tenths: 140 }),
+        font: Some(FontInput::from_sizes(16.0, 14.0)),
         size: Some((120, 40)),
         ..idle_inputs()
     };
@@ -870,19 +871,26 @@ fn history_font_and_size_show_only_active_display() {
     assert_eq!(history.spoken.value, "trimmed, 1,280 rows dropped by the memory budget");
     assert_eq!(history.click, Some(SegmentClick::Handler(SegmentHandler::AcknowledgeHistory)));
     let font = by_id(&busy, StatusSegmentId::Font);
-    assert_eq!(text_of(&font.parts), "Font: 16pt (+2)");
-    assert_eq!(font.spoken.value, "16 points, 2 larger than configured");
+    assert_eq!(text_of(&font.parts), "Scale: 114%");
+    assert_eq!(font.spoken.name, "Font scale");
+    assert_eq!(font.spoken.value, "114 percent");
     assert_eq!(font.click, Some(SegmentClick::Action(Action::ResetFontSize)));
     let size = by_id(&busy, StatusSegmentId::Size);
     assert_eq!((text_of(&size.parts).as_str(), size.click.clone()), ("Size: 120×40", None));
     assert_eq!(size.spoken.value, "120 columns by 40 rows");
-    let smaller = StatusLineInputs {
-        font: Some(FontInput { live_tenths: 135, configured_tenths: 140 }),
-        ..idle_inputs()
-    };
+    let smaller =
+        StatusLineInputs { font: Some(FontInput::from_sizes(13.5, 14.0)), ..idle_inputs() };
     let font = by_id(&smaller, StatusSegmentId::Font);
-    assert_eq!(text_of(&font.parts), "Font: 13.5pt (\u{2212}0.5)");
-    assert_eq!(font.spoken.value, "13.5 points, 0.5 smaller than configured");
+    assert_eq!(text_of(&font.parts), "Scale: 96%");
+    assert_eq!(font.spoken.value, "96 percent");
+    // 161 tenths over 140 is the maintainer's 115%; a change that rounds to 100% stays hidden.
+    let target =
+        StatusLineInputs { font: Some(FontInput::from_sizes(16.1, 14.0)), ..idle_inputs() };
+    assert_eq!(text_of(&by_id(&target, StatusSegmentId::Font).parts), "Scale: 115%");
+    let rounded =
+        StatusLineInputs { font: Some(FontInput::from_sizes(140.1, 140.0)), ..idle_inputs() };
+    let rounded = build_view(&resolved, false, &rounded, &i18n, NumberStyle::POINT);
+    assert_eq!(shown(&rounded, StatusSegmentId::Font), None, "100% is hidden");
     // `zoom` is opt-in: a chip with no name while a split pane is zoomed, toggling zoom on click.
     let mut zoom_table = developer();
     zoom_table.segments.push(ResolvedSegment {
@@ -1403,4 +1411,137 @@ fn the_hash_ignores_color_and_clickable_segments_are_buttons() {
         assert!(segment.width > 0.0, "{:?} has bounds", segment.id);
     }
     assert_eq!((inert_strip.segments[1].left_px, inert_strip.segments[1].width), (100.0, 80.0));
+}
+
+/// The percent comes from the real sizes, not sizes rounded to tenths first: 13.34 pt zoomed by
+/// one point to 14.34 pt is 107.5%, shown as 107%, where tenths (143 / 133) would give 108%.
+#[test]
+fn font_scale_uses_the_unrounded_sizes() {
+    let font = FontInput::from_sizes(14.34, 13.34);
+    let inputs = StatusLineInputs { font: Some(font), ..idle_inputs() };
+    let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
+    assert_eq!(shown(&view, StatusSegmentId::Font).unwrap(), "Scale: 107%");
+    assert_eq!(FontInput::from_sizes(13.0, 0.0).scale_percent, None, "no scale of a zero size");
+}
+
+/// Two segments on each side and one in the center, with a 2-column gap and a 1-column `|`.
+fn separated_view() -> (StatusLineView, FitMetrics) {
+    use StatusSegmentId as Seg;
+    let view = fit_view(&[
+        (Seg::Mode, StatusSide::Left, 800, false, "aa"),
+        (Seg::Scroll, StatusSide::Left, 400, false, "bb"),
+        (Seg::Link, StatusSide::Center, 600, false, "cc"),
+        (Seg::Health, StatusSide::Right, 950, false, "dd"),
+        (Seg::Mem, StatusSide::Right, 900, false, "ee"),
+    ]);
+    (view, FitMetrics { width: 40.0, edge_pad: 0.0, segment_gap: 2.0, separator_width: 1.0 })
+}
+
+/// Each separator is a `|` in the name tone that sits between two presented segments of one group
+/// and overlaps neither; returns the side of each, for counting.
+fn separator_sides(
+    view: &StatusLineView,
+    placed: &[PlacedSegment],
+    found: &[PlacedPart],
+) -> Vec<StatusSide> {
+    found
+        .iter()
+        .map(|separator| {
+            assert_eq!((separator.text.as_str(), separator.tone), ("|", StatusTone::Name));
+            let center = separator.left + separator.width / 2.0;
+            let before =
+                placed.iter().filter(|segment| segment.left + segment.width <= separator.left);
+            let after =
+                placed.iter().filter(|segment| segment.left >= separator.left + separator.width);
+            let before = before.max_by(|first, second| first.left.total_cmp(&second.left)).unwrap();
+            let after = after.min_by(|first, second| first.left.total_cmp(&second.left)).unwrap();
+            let side = view.segments[before.index].side;
+            assert_eq!(side, view.segments[after.index].side, "a separator never joins two groups");
+            let gap_center = (before.left + before.width + after.left) / 2.0;
+            assert!(
+                (center - gap_center).abs() < 1e-4,
+                "centered in its gap: {center} {gap_center}"
+            );
+            side
+        })
+        .collect()
+}
+
+/// A `|` sits between adjacent shown segments of a group, centered in their gap; none at a group
+/// edge or between groups, and a group of one has none.
+#[test]
+fn separators_sit_only_between_adjacent_segments_of_a_group() {
+    let (view, metrics) = separated_view();
+    let placed = fit(&view, &metrics, columns);
+    assert_eq!(placed.len(), 5);
+    let found = separators(&view, &placed, &metrics);
+    assert_eq!(separator_sides(&view, &placed, &found), [StatusSide::Left, StatusSide::Right]);
+    // Left: `aa` 0..2, the 3-column gap holds `|` at 3, `bb` 5..7.
+    assert_eq!((found[0].left, placed[1].left), (3.0, 5.0));
+}
+
+/// Fitting counts each separator, so dropping a segment drops its separator and leaves no doubled
+/// or dangling `|`.
+#[test]
+fn dropping_a_segment_drops_its_separator() {
+    let (view, mut metrics) = separated_view();
+    // Everything needs 7 + 2 + 7 columns plus two 2-column gaps between groups: 20.
+    metrics.width = 20.0;
+    assert_eq!(fit(&view, &metrics, columns).len(), 5, "the separators fit exactly");
+    metrics.width = 19.0;
+    let placed = fit(&view, &metrics, columns);
+    use StatusSegmentId as Seg;
+    assert_eq!(presented(&view, &placed), [Seg::Mode, Seg::Link, Seg::Health, Seg::Mem]);
+    let found = separators(&view, &placed, &metrics);
+    assert_eq!(
+        separator_sides(&view, &placed, &found),
+        [StatusSide::Right],
+        "left has one segment"
+    );
+}
+
+/// A separator is no segment's hit box: a press on it finds nothing.
+#[test]
+fn a_press_on_a_separator_hits_no_segment() {
+    let (view, metrics) = separated_view();
+    let placed = fit(&view, &metrics, columns);
+    for separator in separators(&view, &placed, &metrics) {
+        let center = separator.left + separator.width / 2.0;
+        let hit = placed
+            .iter()
+            .find(|segment| center >= segment.left && center < segment.left + segment.width);
+        assert_eq!(hit, None, "{center}");
+    }
+}
+
+/// A segment that fitting empties is not shown: `mode` with only `MOUSE` loses it to its compact
+/// form, and then neither a `|` nor a separator gap is left before `Mem: 412 MB`.
+#[test]
+fn a_segment_fitting_empties_takes_no_separator() {
+    use StatusSegmentId as Seg;
+    let mut resolved = developer();
+    resolved.segments = [Seg::Mode, Seg::Mem]
+        .into_iter()
+        .map(|id| ResolvedSegment {
+            id,
+            side: StatusSide::Left,
+            show: if id == Seg::Mem { ShowMode::Always } else { ShowMode::Active },
+            priority: id.meta().default_priority,
+            click: ClickBinding::Default,
+        })
+        .collect();
+    let inputs = StatusLineInputs {
+        mode: ModeInput { mouse_captured: true, ..Default::default() },
+        ..idle_inputs()
+    };
+    let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
+    let metrics =
+        |width| FitMetrics { width, edge_pad: 0.0, segment_gap: 2.0, separator_width: 1.0 };
+    let wide = fit(&view, &metrics(19.0), columns);
+    assert_eq!(presented(&view, &wide), [Seg::Mode, Seg::Mem], "MOUSE | Mem: 412 MB fits in 19");
+    assert_eq!(separators(&view, &wide, &metrics(19.0)).len(), 1);
+    let narrow = fit(&view, &metrics(14.0), columns);
+    assert_eq!(presented(&view, &narrow), [Seg::Mem], "the emptied mode is not shown");
+    assert!(separators(&view, &narrow, &metrics(14.0)).is_empty(), "no dangling `|`");
+    assert_eq!(narrow[0].left, 0.0, "no separator width reserved before Mem");
 }

@@ -235,6 +235,9 @@ const CHROME_SYMBOLS: &str = "·↑↓↵—✓✗";
 /// Every style face a cell or chrome run can request.
 const STYLES: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
 
+/// The style faces the status line draws: regular text and bold chips, never italic.
+const STRIP_STYLES: [(bool, bool); 2] = [(false, false), (true, false)];
+
 /// Measure the working set of `texts` (body) and `chrome_texts` (tab titles) at `size` points and
 /// `dpi`, using `family` from the system and `font_dirs`. An incomplete measurement is an `Err`.
 ///
@@ -278,6 +281,8 @@ fn measure_with_stacks(
     let body = stacks.body.ok_or(WorkingSetError::BodyStackUnavailable)?;
     let tab_size = sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size(size);
     let footer_size = palette_footer_font_size(size);
+    let strip_size =
+        crate::status_strip::status_line_font_size(size, crate::status_strip::default_font_scale());
     let mut body_text: String = texts.concat();
     body_text.push_str(&printable_ascii());
     body_text.push('…');
@@ -299,9 +304,15 @@ fn measure_with_stacks(
     // A fixed maximum atlas never grows, so the replay sees every tile the sources produce.
     let mut atlas = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);
     let px_per_pt = dpi as f32 / 72.0;
-    let mut surfaces = vec![(&body, size, GlyphRasterVariant::Normal, body_text.as_str())];
+    let mut surfaces: Vec<(
+        &sonicterm_engine::FontStack,
+        f32,
+        GlyphRasterVariant,
+        &str,
+        &[(bool, bool)],
+    )> = vec![(&body, size, GlyphRasterVariant::Normal, body_text.as_str(), &STYLES)];
     if let Some(stack) = stacks.tab_title.as_ref() {
-        surfaces.push((stack, tab_size, GlyphRasterVariant::TabTitle, tab_text.as_str()));
+        surfaces.push((stack, tab_size, GlyphRasterVariant::TabTitle, tab_text.as_str(), &STYLES));
     }
     if let Some(stack) = stacks.palette_footer.as_ref() {
         surfaces.push((
@@ -309,15 +320,27 @@ fn measure_with_stacks(
             footer_size,
             GlyphRasterVariant::PaletteFooter,
             footer_text.as_str(),
+            &STYLES,
+        ));
+    }
+    // The status line draws ASCII names and values with the chrome symbols at its own size, in
+    // the regular face and bold for chips only, so only those faces are measured.
+    if let Some(stack) = stacks.status_line.as_ref() {
+        surfaces.push((
+            stack,
+            strip_size,
+            GlyphRasterVariant::StatusLine,
+            footer_text.as_str(),
+            &STRIP_STYLES,
         ));
     }
     let mut variant_sizes = Vec::new();
     let mut accounted = Accounted::default();
-    for (stack, point_size, variant, text) in surfaces {
+    for (stack, point_size, variant, text, styles) in surfaces {
         variant_sizes.push((variant, point_size));
         let raster_px = point_size * px_per_pt;
         let mut raster = stack.clone();
-        for (bold, italic) in STYLES {
+        for &(bold, italic) in styles {
             // Wait for fallback discovery before the frame-path layout: the stack's loaded face
             // for this style and size is shared, so the layout below shapes the faces discovery
             // published instead of notdef, and the atlas holds real tiles rather than tofu.
@@ -371,6 +394,7 @@ fn measure_with_stacks(
         GlyphRasterVariant::Normal => Some(&body),
         GlyphRasterVariant::TabTitle => stacks.tab_title.as_ref(),
         GlyphRasterVariant::PaletteFooter => stacks.palette_footer.as_ref(),
+        GlyphRasterVariant::StatusLine => stacks.status_line.as_ref(),
     });
     // A tofu tile names no face, so only a real glyph without an identity is a failure.
     let unidentified: Vec<GlyphKey> = unresolved

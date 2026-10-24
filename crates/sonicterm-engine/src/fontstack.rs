@@ -398,6 +398,14 @@ impl FontStack {
             .ok_or_else(|| anyhow::anyhow!("tracked font fixture {family:?} lacks {character:?}"))
     }
 
+    /// Cap height of the default font at this stack's size, in raster px: the ink height of a
+    /// capital, as the font crate measured it when it selected the size. `None` when the font
+    /// gives none (no `I` to measure) or the default font fails to load.
+    pub fn cap_height_raster_px(&self) -> Option<f64> {
+        let metrics = self.font_config.default_font_metrics_at_size(self.font_size_pt).ok()?;
+        metrics.cap_height.map(|height| height.get()).filter(|height| *height > 0.0)
+    }
+
     /// Return cell metrics for the default font, projected into the
     /// renderer-facing [`CellMetricsPx`] (raster px). Wezterm's
     /// `FontMetrics` already lives in raster px, so this is a plain

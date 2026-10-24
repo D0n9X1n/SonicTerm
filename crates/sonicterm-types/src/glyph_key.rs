@@ -17,6 +17,8 @@ pub enum GlyphRasterVariant {
     PaletteFooter,
     /// Tab titles rendered natively one logical pixel larger.
     TabTitle,
+    /// Status line text rendered natively at the strip's own, smaller size.
+    StatusLine,
 }
 
 /// Stable identity of an atlas glyph tile.
