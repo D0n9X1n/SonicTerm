@@ -27,24 +27,20 @@ use sonicterm_ui::selection::{
 use sonicterm_ui::status_line::{
     build_view, sanitize_link_text, AlertsInput, ClipInput, ClipOutcome, ClipSource, FontInput,
     GlyphsInput, HealthInput, ImeInput, InputState, LinkInput, MemHistory, MemInput, ModeInput,
-    NotSentReason, NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick,
-    SegmentHandler, SelInput, StatusLineInputs, StatusLineView,
+    NotSentReason, NumberStyle, ReloadFailure, RenderHealth, SegmentClick, SegmentHandler,
+    SelInput, StatusLineInputs, StatusLineView,
 };
 use sonicterm_ui::status_line::{
     byte_rate, cpu_percent, FrameInput, Hysteresis, PathCheckInput, PresenterKind, TabMemInput,
 };
 use winit::window::WindowId;
 
-use super::path_target::{open_modifier_in, PathKind, PathOpenDecision, ProbeStatus};
+use super::path_target::{open_modifier_in, PathOpenDecision, ProbeStatus};
 use super::redraw::RedrawCause;
 use super::window_keyboard::{ime_route_for, ImeRoute};
 use super::window_state::WindowState;
 use super::CommandPhase;
 use super::{resize_panes_to_rects, App};
-
-/// A path check still running after this long is shown as `checking`;
-/// faster checks never flicker through it.
-const PENDING_SHOW_AFTER: Duration = Duration::from_millis(300);
 
 /// Focused-pane facts copied in the frame pass, which already holds the
 /// pane's parser guard, so the status line timer never reads a parser.
@@ -146,8 +142,6 @@ pub(crate) struct StatusLineState {
     keymap_error: Option<ReloadFailure>,
     /// Focused-pane facts per window, from the last frame pass.
     pane_facts: HashMap<WindowId, StatusPaneFacts>,
-    /// The pending path under each window's pointer and when it was first seen.
-    pending_since: HashMap<WindowId, (std::path::PathBuf, Instant)>,
     /// What each window's strip was last built from.
     built: HashMap<WindowId, BuiltFrom>,
     /// Whether startup load failures were already recorded.
@@ -738,96 +732,57 @@ pub(crate) fn waits_on_gpu_recovery(recovering: bool, stopped: bool, accepts_wor
 /// the next frame undoes never redraws the strip; otherwise [`link_input`].
 pub(crate) fn strip_link(
     window: &WindowState,
-    window_id: WindowId,
     previous: Option<&Option<LinkInput>>,
-    pending_since: &mut HashMap<WindowId, (std::path::PathBuf, Instant)>,
-    now: Instant,
     i18n: &sonicterm_ui::i18n::I18n,
-) -> (Option<LinkInput>, Option<Instant>) {
+) -> Option<LinkInput> {
     if !open_modifier_in(window.modifiers) {
-        // When: open_modifier_in(window.modifiers) is false, show nothing and restart any pending check.
-        pending_since.remove(&window_id);
-        return (None, None);
+        // When: open_modifier_in(window.modifiers) is false, the segment shows nothing.
+        return None;
     }
     match previous {
         // While hover_unresolved is set, the redraw its clear requested re-detects the target.
-        Some(previous) if window.hover_unresolved => (previous.clone(), None),
-        _ => link_input(window, window_id, pending_since, now, i18n),
+        Some(previous) if window.hover_unresolved => previous.clone(),
+        _ => link_input(window, i18n),
     }
 }
 
-/// The link segment's input for `window`, and when a pending check becomes
-/// worth showing.
-fn link_input(
-    window: &WindowState,
-    window_id: WindowId,
-    pending_since: &mut HashMap<WindowId, (std::path::PathBuf, Instant)>,
-    now: Instant,
-    i18n: &sonicterm_ui::i18n::I18n,
-) -> (Option<LinkInput>, Option<Instant>) {
+/// The link segment's input for `window`: a hovered URL, or a local path only when detection
+/// failed. A path that resolved is already underlined, and one still being checked has nothing
+/// to report yet, so neither adds strip text.
+fn link_input(window: &WindowState, i18n: &sonicterm_ui::i18n::I18n) -> Option<LinkInput> {
     let Some(status) = window.path_probe.status() else {
         // When: `path_probe` has no status, no local path is under the pointer; a hovered URL is the only link.
-        pending_since.remove(&window_id);
-        let link = window.hovered_url.as_ref().map(|hovered| {
+        return window.hovered_url.as_ref().map(|hovered| {
             let label = hovered.label.as_ref().map(|label| (label.text.as_str(), label.complete));
             LinkInput::from_hover(&hovered.url, label)
         });
-        return (link, None);
     };
+    path_failure(status, i18n)
+}
+
+/// The strip text for a path whose detection failed, or `None` when it resolved or is still
+/// being checked.
+fn path_failure(status: ProbeStatus<'_>, i18n: &sonicterm_ui::i18n::I18n) -> Option<LinkInput> {
     let blocked = |path: &std::path::Path, key: &str| LinkInput::Blocked {
         path: display_path(path),
         reason: i18n.translate(key),
     };
-    let link = match status {
-        ProbeStatus::Pending(path) => {
-            // When: `Pending`, validation is running; it shows only after 300 ms.
-            let since = match pending_since.get(&window_id) {
-                Some((pending, since)) if pending == path => *since,
-                _ => {
-                    pending_since.insert(window_id, (path.to_path_buf(), now));
-                    now
-                }
-            };
-            let show_at = since + PENDING_SHOW_AFTER;
-            if now < show_at {
-                // When: `now` is before `show_at`, show nothing yet and wake at `show_at`.
-                return (None, Some(show_at));
-            }
-            return (Some(LinkInput::Checking { path: display_path(path) }), None);
-        }
-        ProbeStatus::Selected(path, decision) => {
-            let action = match decision {
-                PathOpenDecision::Openable(PathKind::Directory) => Some(PathAction::OpenFolder),
-                PathOpenDecision::Openable(PathKind::File) | PathOpenDecision::SourceReveal => {
-                    Some(PathAction::Reveal)
-                }
-                #[cfg(any(target_os = "macos", test))]
-                PathOpenDecision::Revealable(kind) => {
-                    // When: `Revealable` on macOS, a folder opens and a file is selected in Finder.
-                    Some(match kind {
-                        PathKind::Directory => PathAction::OpenFolder,
-                        PathKind::File => PathAction::Reveal,
-                    })
-                }
-                PathOpenDecision::Blocked | PathOpenDecision::Missing => None,
-            };
-            match (action, decision) {
-                (Some(action), _) => LinkInput::Path { path: display_path(path), action },
-                (None, PathOpenDecision::Missing) => {
-                    LinkInput::NotFound { path: display_path(path) }
-                }
-                (None, _) => blocked(path, "path-error-blocked"),
-            }
-        }
+    match status {
+        // A check still running, or a path that resolved to an action, is not a failure.
+        ProbeStatus::Pending(_) => None,
+        ProbeStatus::Selected(path, decision) => match decision {
+            PathOpenDecision::Missing => Some(LinkInput::NotFound { path: display_path(path) }),
+            PathOpenDecision::Blocked => Some(blocked(path, "path-error-blocked")),
+            // An openable or revealable path is already underlined, so it adds no strip text.
+            _ => None,
+        },
         ProbeStatus::Failed(path, "path-error-missing") => {
-            LinkInput::NotFound { path: display_path(path) }
+            Some(LinkInput::NotFound { path: display_path(path) })
         }
-        ProbeStatus::Failed(path, reason) => blocked(path, reason),
-        ProbeStatus::NoDirectory(path) => blocked(path, "status-reason-no-directory"),
-        ProbeStatus::AltScreen(path) => blocked(path, "status-reason-alt-screen"),
-    };
-    pending_since.remove(&window_id);
-    (Some(link), None)
+        ProbeStatus::Failed(path, reason) => Some(blocked(path, reason)),
+        ProbeStatus::NoDirectory(path) => Some(blocked(path, "status-reason-no-directory")),
+        ProbeStatus::AltScreen(path) => Some(blocked(path, "status-reason-alt-screen")),
+    }
 }
 
 impl StatusLineState {
@@ -1372,7 +1327,6 @@ impl App {
         let sel_shown = state.resolved.segment(StatusSegmentId::Sel).is_some();
         let copied_for = Duration::from_secs(state.resolved.sel.copied_secs);
         state.pane_facts.retain(|window_id, _| windows.contains_key(window_id));
-        state.pending_since.retain(|window_id, _| windows.contains_key(window_id));
         state.built.retain(|window_id, _| windows.contains_key(window_id));
         let mut minimums_changed = false;
         let mut redraws = 0;
@@ -1417,11 +1371,7 @@ impl App {
                 continue;
             }
             let previous_link = state.built.get(window_id).map(|built| &built.inputs.link);
-            let (link, link_wake) =
-                strip_link(window, *window_id, previous_link, &mut state.pending_since, now, i18n);
-            if let Some(wake) = link_wake {
-                next_wake = Some(next_wake.map_or(wake, |next| next.min(wake)));
-            }
+            let link = strip_link(window, previous_link, i18n);
             let sel = if sel_shown {
                 let has_selection =
                     window.copy_mode.as_ref().and_then(CopyModeState::selected_range).is_some()

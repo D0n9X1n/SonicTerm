@@ -131,34 +131,59 @@ fn seed_hovered_url(app: &mut App, window_id: WindowId) {
 
 /// Contract: the link segment shows a hovered target only while the open modifier (Cmd on
 /// macOS, Ctrl elsewhere) is held, and hides again when it is released, so plain hovering adds
-/// no strip noise. A pending path check restarts when the modifier goes up.
+/// no strip noise. The other platform's modifier alone never shows it.
 #[test]
 fn the_link_segment_shows_only_while_the_open_modifier_is_held() {
     let mut app = app_with_strip(true);
     let window_id = app.__test_seed_child_window(&["child"]);
     seed_hovered_url(&mut app, window_id);
-    let now = Instant::now();
-    let mut pending = HashMap::new();
-    pending.insert(window_id, (std::path::PathBuf::from("/tmp/x"), now));
-    let (hidden, wake) =
-        strip_link(&app.windows[&window_id], window_id, None, &mut pending, now, &app.i18n);
+    let hidden = strip_link(&app.windows[&window_id], None, &app.i18n);
     assert_eq!(hidden, None, "a plain hover shows no link");
-    assert_eq!(wake, None);
-    assert!(!pending.contains_key(&window_id), "a pending check restarts on release");
     app.windows.get_mut(&window_id).unwrap().modifiers = open_modifier();
-    let (shown, _) =
-        strip_link(&app.windows[&window_id], window_id, None, &mut pending, now, &app.i18n);
+    let shown = strip_link(&app.windows[&window_id], None, &app.i18n);
     assert!(shown.is_some(), "holding the open modifier shows the hovered link");
-    // The other platform's modifier alone never shows it.
     let other = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::CONTROL
     } else {
         winit::keyboard::ModifiersState::SUPER
     };
     app.windows.get_mut(&window_id).unwrap().modifiers = other;
-    let (other_shown, _) =
-        strip_link(&app.windows[&window_id], window_id, Some(&shown), &mut pending, now, &app.i18n);
+    let other_shown = strip_link(&app.windows[&window_id], Some(&shown), &app.i18n);
     assert_eq!(other_shown, None, "only the platform's open modifier shows the link");
+}
+
+/// Contract: for a local path the segment reports only a failed detection (not found or
+/// blocked). A path that resolved is already underlined and one still being checked has
+/// nothing to say, so neither adds strip text.
+#[test]
+fn a_path_shows_only_when_detection_fails() {
+    let app = app_with_strip(true);
+    let path = std::path::Path::new("/tmp/project/src");
+    assert_eq!(path_failure(ProbeStatus::Pending(path), &app.i18n), None, "checking is silent");
+    for kind in
+        [super::super::path_target::PathKind::File, super::super::path_target::PathKind::Directory]
+    {
+        let resolved = ProbeStatus::Selected(path, PathOpenDecision::Openable(kind));
+        assert_eq!(path_failure(resolved, &app.i18n), None, "a resolved {kind:?} is silent");
+    }
+    let source = ProbeStatus::Selected(path, PathOpenDecision::SourceReveal);
+    assert_eq!(path_failure(source, &app.i18n), None, "a revealable source is silent");
+    let missing = ProbeStatus::Selected(path, PathOpenDecision::Missing);
+    assert!(matches!(path_failure(missing, &app.i18n), Some(LinkInput::NotFound { .. })));
+    let failed_missing = ProbeStatus::Failed(path, "path-error-missing");
+    assert!(matches!(path_failure(failed_missing, &app.i18n), Some(LinkInput::NotFound { .. })));
+    let blocked = ProbeStatus::Selected(path, PathOpenDecision::Blocked);
+    assert!(matches!(path_failure(blocked, &app.i18n), Some(LinkInput::Blocked { .. })));
+    for status in [
+        ProbeStatus::Failed(path, "path-error-blocked"),
+        ProbeStatus::NoDirectory(path),
+        ProbeStatus::AltScreen(path),
+    ] {
+        assert!(
+            matches!(path_failure(status, &app.i18n), Some(LinkInput::Blocked { .. })),
+            "{status:?}"
+        );
+    }
 }
 
 #[test]
@@ -170,22 +195,16 @@ fn a_hover_an_event_clears_keeps_the_link_until_a_frame_resolves_it() {
     let window_id = app.__test_seed_child_window(&["child"]);
     seed_hovered_url(&mut app, window_id);
     app.windows.get_mut(&window_id).unwrap().modifiers = open_modifier();
-    let now = Instant::now();
-    let mut pending = HashMap::new();
-    let (shown, _) =
-        strip_link(&app.windows[&window_id], window_id, None, &mut pending, now, &app.i18n);
+    let shown = strip_link(&app.windows[&window_id], None, &app.i18n);
     assert!(shown.is_some(), "a resolved hover shows its link");
     app.windows.get_mut(&window_id).unwrap().invalidate_path_hover();
     assert!(app.windows[&window_id].hover_unresolved);
-    let (held, wake) =
-        strip_link(&app.windows[&window_id], window_id, Some(&shown), &mut pending, now, &app.i18n);
+    let held = strip_link(&app.windows[&window_id], Some(&shown), &app.i18n);
     assert_eq!(held, shown, "a cleared hover the next frame re-detects keeps the strip unchanged");
-    assert_eq!(wake, None);
     // The headless window has no grid under the pointer, so this lookup resolves to no target.
     app.refresh_target_hover(window_id);
     assert!(!app.windows[&window_id].hover_unresolved);
-    let (resolved, _) =
-        strip_link(&app.windows[&window_id], window_id, Some(&shown), &mut pending, now, &app.i18n);
+    let resolved = strip_link(&app.windows[&window_id], Some(&shown), &app.i18n);
     assert_eq!(resolved, None, "a frame that finds no target hides the link");
 }
 
