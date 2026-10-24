@@ -275,23 +275,35 @@ fn the_test_process_finds_itself() {
 }
 
 /// Contract: a spawned child appears among this process's descendants with a name, and once it
-/// has exited and been reaped its pid samples as absent. The `Child` is dropped before sampling,
-/// so no handle of ours keeps the exited process object alive on Windows either.
+/// has exited and been reaped its pid samples as absent, or as another process when the OS reused
+/// the pid. The helper's start token is read from the snapshot that lists it, so its identity is
+/// the process this test spawned. The `Child` is dropped before sampling, so no handle of ours
+/// keeps the exited process object alive on Windows either.
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 #[test]
 fn a_spawned_child_is_listed_and_an_exited_one_is_absent() {
     let mut child = spawn_helper();
     let child_pid = child.id();
     let cancel = AtomicBool::new(false);
-    let trees = sample_trees(&[(std::process::id(), None)], &cancel);
-    let found = trees[0].processes.iter().find(|process| process.pid == child_pid).cloned();
+    // One snapshot lists the helper and reads its start token; the block releases it before exit.
+    let (found, started) = {
+        let table = platform::table(&cancel).expect("a live process table");
+        let roots = [(std::process::id(), None)];
+        let trees = walk_roots(&table, &roots, MAX_DESCENDANTS_PER_ROOT, &cancel);
+        let found = trees[0].processes.iter().find(|process| process.pid == child_pid).cloned();
+        (found, table.start_token(child_pid))
+    };
     drop(child.stdin.take());
     let _ = child.wait();
     drop(child);
     let found = found.expect("spawned helper listed as a descendant");
     assert_eq!(found.depth, 1);
     assert!(!found.name.is_empty());
-    assert!(sample_process(child_pid).is_none(), "an exited, reaped child samples as absent");
+    let started = started.expect("the helper's start token, read while it was alive");
+    let after = platform::table(&cancel).expect("a live process table");
+    if let Err(still_listed) = exited_process_is_gone(&after, child_pid, started) {
+        panic!("an exited, reaped child samples as absent: {still_listed}");
+    }
 }
 
 /// Contract: on Windows an exited child whose `Child` still holds its process handle samples as
@@ -376,4 +388,40 @@ fn cpu_time_is_monotone_and_advances_over_a_busy_loop() {
     let after = sample_cpu_time().unwrap();
     assert!(after >= before);
     assert!(after > before, "50 ms of spinning adds CPU time");
+}
+
+/// Whether `pid`, a process this test saw alive with start token `started`, is gone from `table`
+/// after it exited: absent, or listed with another start token. The error names what the table
+/// still reports, so a failure on CI says which mechanism kept the process listed.
+fn exited_process_is_gone(table: &dyn ProcessTable, pid: u32, started: u64) -> Result<(), String> {
+    let Some(name) = table.name(pid) else {
+        // When: `name` is None, the table no longer lists `pid`.
+        return Ok(());
+    };
+    let now = table.start_token(pid);
+    if now.is_some_and(|token| token != started) {
+        // When: `now` differs from `started`, the OS reused the pid for an unrelated process at
+        // once (Windows does), so the process this test spawned is gone.
+        return Ok(());
+    }
+    let listed_by = if cfg!(windows) {
+        "Tool Help listed the pid and has_exited found its handle unsignaled, or OpenProcess failed"
+    } else {
+        "the OS process table still listed the pid"
+    };
+    Err(format!(
+        "pid {pid} ({name:?}) still listed after exit: start token before {started}, after {now:?}; \
+         {listed_by}"
+    ))
+}
+
+/// Contract: after a process exits, its pid listed again with another start token is a reused pid
+/// and counts as gone; the same pid with the same start token is the same process and does not.
+#[test]
+fn a_reused_pid_is_gone_and_the_same_process_is_not() {
+    let table = FakeTable::new(HashMap::from([(42, ("unrelated", 999, vec![], 0))]));
+    assert_eq!(exited_process_is_gone(&table, 42, 500), Ok(()), "another start token: reused");
+    let error = exited_process_is_gone(&table, 42, 999).expect_err("the same process is listed");
+    assert!(error.contains("unrelated") && error.contains("999"), "{error}");
+    assert_eq!(exited_process_is_gone(&FakeTable::new(HashMap::new()), 42, 500), Ok(()), "absent");
 }
