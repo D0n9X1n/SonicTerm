@@ -982,6 +982,30 @@ impl App {
         tracing::info!("status line hide_sensitive -> {}", self.status_line.hide_sensitive);
     }
 
+    /// Move the strip to `position` in every window for this session; the panes refit once.
+    pub(super) fn move_status_line(
+        &mut self,
+        position: sonicterm_cfg::status_line::StatusPosition,
+    ) {
+        self.change_status_choices(|overrides, file| overrides.set_position(file, position));
+        tracing::info!("status line position -> {}", position.as_str());
+    }
+
+    /// Make the strip's text `steps` steps of 0.05 larger (negative: smaller) in every window for
+    /// this session, within 0.3..=1.0.
+    pub(super) fn step_status_line_font_scale(&mut self, steps: i16) {
+        let scale = self.status_line.resolved.font_scale.stepped(steps);
+        self.change_status_choices(|overrides, file| overrides.set_font_scale(file, scale));
+        tracing::info!("status line font_scale -> {}", scale.as_f32());
+    }
+
+    /// Return the strip's text to the default 0.8 in every window for this session.
+    pub(super) fn reset_status_line_font_scale(&mut self) {
+        let scale = sonicterm_cfg::status_line::StatusFontScale::DEFAULT;
+        self.change_status_choices(|overrides, file| overrides.set_font_scale(file, scale));
+        tracing::info!("status line font_scale -> {}", scale.as_f32());
+    }
+
     /// Show segment `id` if it is hidden, hide it if it is shown, for this session.
     pub(super) fn toggle_status_segment(&mut self, id: StatusSegmentId) {
         self.change_status_choices(|overrides, file| overrides.toggle_segment(file, id));

@@ -1358,3 +1358,90 @@ fn reload_changes_the_strip_font_scale_in_every_window() {
     }
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
+
+/// Each palette action changes the live value and the strip geometry that follows from it, and
+/// hands it to every window's renderer strip: Move to Top/Bottom moves the band, Larger/Smaller
+/// step the text by 0.05 within 0.3..=1.0, and Reset returns it to 0.8.
+#[test]
+fn status_line_palette_actions_change_the_live_strip() {
+    use sonicterm_cfg::keymap::Action;
+    use sonicterm_cfg::status_line::{StatusFontScale, StatusPosition};
+    use sonicterm_gpu::status_strip::{status_line_font_size, strip_placement};
+    let mut app = app_with_strip(true);
+    let windows = seed_recorded_windows(&mut app);
+    let _ = app.sync_status_line(Instant::now());
+    // Every window's renderer strip holds the session's position, text size and visibility.
+    let every_window_follows = |app: &App, action: &str| {
+        for id in windows {
+            let strip = recorded_strip(app, id);
+            let resolved = &app.status_line.resolved;
+            assert_eq!(strip.position, resolved.position, "{action}: {strip:?}");
+            assert!(
+                (strip.font_scale - resolved.font_scale.as_f32()).abs() < 1e-6,
+                "{action}: {strip:?}"
+            );
+            assert!(strip.visible, "{action}: {strip:?}");
+        }
+    };
+    let band_top =
+        |app: &App| strip_placement(app.status_line.resolved.position, 600.0, 28.0, 40.0, 23.0).top;
+    let text_pt =
+        |app: &App| status_line_font_size(13.0, app.status_line.resolved.font_scale.as_f32());
+    assert_eq!(band_top(&app), 28.0);
+    assert!(app.run_action(&Action::StatusLinePositionBottom));
+    every_window_follows(&app, "Move to Bottom");
+    assert_eq!(app.status_line.resolved.position, StatusPosition::Bottom);
+    assert_eq!(band_top(&app), 537.0, "the band moves to the bottom edge");
+    assert!(app.run_action(&Action::StatusLinePositionTop));
+    every_window_follows(&app, "Move to Top");
+    assert_eq!(band_top(&app), 28.0);
+    assert!(app.run_action(&Action::IncreaseStatusLineFontScale));
+    every_window_follows(&app, "Larger Text");
+    assert!((app.status_line.resolved.font_scale.as_f32() - 0.85).abs() < 1e-6);
+    assert!((text_pt(&app) - 11.05).abs() < 1e-4, "the strip text grows");
+    for _ in 0..20 {
+        app.run_action(&Action::IncreaseStatusLineFontScale);
+    }
+    assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::MAX, "clamped at 1.0");
+    for _ in 0..30 {
+        app.run_action(&Action::DecreaseStatusLineFontScale);
+    }
+    assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::MIN, "clamped at 0.3");
+    every_window_follows(&app, "Smaller Text");
+    assert!(app.run_action(&Action::ResetStatusLineFontScale));
+    every_window_follows(&app, "Reset Text Size");
+    assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::DEFAULT);
+}
+
+/// Save Current Settings writes what the session shows, each key only where it differs from the
+/// file: `enabled` after the toggle, `position` and `font_scale` after their actions; a reload of
+/// the written file shows the same strip with no choice left.
+#[test]
+fn a_save_round_trips_the_toggle_position_and_text_size() {
+    use sonicterm_cfg::keymap::Action;
+    use sonicterm_cfg::status_line::{StatusFontScale, StatusPosition};
+    let path = scratch_config("palette-save", "# mine\n");
+    let mut app =
+        App::new(Theme::default(), Config::load_strict(&path).unwrap(), Keymap::default());
+    let _ = app.sync_status_line(Instant::now());
+    app.save_current_settings_to(&path).expect("save");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("status_line"), "nothing differs, nothing is written: {text}");
+    assert!(app.run_action(&Action::ToggleStatusLine));
+    assert!(app.run_action(&Action::StatusLinePositionBottom));
+    assert!(app.run_action(&Action::DecreaseStatusLineFontScale));
+    let shown = app.status_line.resolved.clone();
+    app.save_current_settings_to(&path).expect("save");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("enabled = true"), "{text}");
+    assert!(text.contains("position = \"bottom\""), "{text}");
+    assert!(text.contains("font_scale = 0.75"), "{text}");
+    assert!(app.status_line.overrides.is_empty(), "the save satisfied every choice");
+    app.runtime_config_path = Some(path.clone());
+    app.force_reload_config();
+    let _ = app.sync_status_line(Instant::now());
+    assert_eq!(app.status_line.resolved, shown, "the reload shows what was saved");
+    assert_eq!(app.status_line.resolved.position, StatusPosition::Bottom);
+    assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::DEFAULT.stepped(-1));
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}

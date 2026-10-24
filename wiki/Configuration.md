@@ -157,6 +157,9 @@ The status line is a strip at the top or bottom of the window that shows SonicTe
 | `hide_sensitive` | `false` | Hides every sensitive segment, such as the link under the pointer, for screen sharing. **Toggle Status Line Sensitive Content** (`toggle_status_line_sensitive`) changes it for the session. |
 | `position` | `"top"` | The window edge the strip sits on: `"top"`, above the panes, or `"bottom"`, between the panes and the tab bar. Any other value fails the load. |
 | `font_scale` | `0.8` | The strip's text size as a share of the live terminal font size, `0.3` to `1.0`, used exactly as written; it follows a Cmd+= zoom and the display scale. Any other value fails the load. The strip's height does not change, and the font family is the terminal's. |
+
+The command palette changes the strip for the session in every window, as **Toggle Status Line** does: **Status Line: Move to Top** (`status_line_position_top`) and **Status Line: Move to Bottom** (`status_line_position_bottom`) move it and refit the panes once; **Status Line: Larger Text** (`increase_status_line_font_scale`) and **Status Line: Smaller Text** (`decrease_status_line_font_scale`) step `font_scale` to the next multiple of 0.05 within 0.3 to 1.0; **Status Line: Reset Text Size** (`reset_status_line_font_scale`) returns it to 0.8. Each action can be bound in the keymap. **Save Current Settings** writes `enabled`, `position` and `font_scale` by the rule in [Saving current settings](#saving-current-settings): a key already in the file is updated in place, even to its default, and an absent key is written only when the session differs from its default.
+
 | `update_interval_ms` | `2000` | Sampling interval of sampled segments (memory), `500` to `60000`. |
 
 A reload applies `enabled` or `hide_sensitive` only when that key's value in the file changed, so a session toggle survives unrelated reloads.

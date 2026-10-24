@@ -877,6 +877,11 @@ pub(crate) fn report_route(action: &Action) -> ReportRoute {
         | Action::ToggleTabBar
         | Action::ToggleStatusLine
         | Action::ToggleStatusLineSensitive
+        | Action::StatusLinePositionTop
+        | Action::StatusLinePositionBottom
+        | Action::IncreaseStatusLineFontScale
+        | Action::DecreaseStatusLineFontScale
+        | Action::ResetStatusLineFontScale
         | Action::ChooseStatusLineSegments
         | Action::EditConfigFile
         | Action::OpenKeymapFile

@@ -145,6 +145,9 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 | `hide_sensitive` | `false` | 隐藏所有敏感段（例如指针下的链接），用于屏幕共享。**切换状态栏敏感内容**（`toggle_status_line_sensitive`）在本次会话中切换它。 |
 | `position` | `"top"` | 状态栏所在的窗口边缘：`"top"` 位于窗格上方，`"bottom"` 位于窗格与标签栏之间。其他值会导致加载失败。 |
 | `font_scale` | `0.8` | 状态栏文字大小占实时终端字号的比例，`0.3` 到 `1.0`，按所写的值原样使用；随 Cmd+= 缩放和显示缩放变化。其他值会导致加载失败。状态栏高度不变，字体族与终端相同。 |
+
+命令面板与 **切换状态栏显示** 一样，在本次会话中修改所有窗口的状态栏：**状态栏：移到顶部**（`status_line_position_top`）和 **状态栏：移到底部**（`status_line_position_bottom`）移动它，并只调整一次窗格大小；**状态栏：放大文字**（`increase_status_line_font_scale`）和 **状态栏：缩小文字**（`decrease_status_line_font_scale`）把 `font_scale` 调到 0.3 到 1.0 之间下一个 0.05 的倍数；**状态栏：重置文字大小**（`reset_status_line_font_scale`）将它恢复为 0.8。每个动作都可以在键位中绑定。**保存当前设置** 按 [保存当前设置](#保存当前设置) 中的规则写入 `enabled`、`position` 和 `font_scale`：文件中已有的 key 就地更新，即使新值是默认值；文件中没有的 key 只在会话值与其默认值不同时才写入。
+
 | `update_interval_ms` | `2000` | 采样段（内存）的采样间隔，`500` 到 `60000`。 |
 
 重载只在文件中 `enabled` 或 `hide_sensitive` 的值本身改变时才应用它们，因此会话中的切换在无关的重载后仍然保留。
