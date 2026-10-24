@@ -156,6 +156,8 @@ impl App {
             test_pane_viewport: None,
             #[cfg(test)]
             test_image_atlas_release: None,
+            #[cfg(test)]
+            test_strip_settings: None,
         };
         self.insert_window_registered(id, child);
         self.accessibility.insert(id, Default::default());
@@ -724,6 +726,8 @@ impl App {
             test_pane_viewport: None,
             #[cfg(test)]
             test_image_atlas_release: None,
+            #[cfg(test)]
+            test_strip_settings: None,
         };
         self.insert_window_registered(id, main);
         self.accessibility.insert(id, Default::default());

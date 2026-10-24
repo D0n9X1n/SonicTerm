@@ -387,13 +387,13 @@ fn every_ask_in_one_dispatch_reaches_a_window_once() {
 
 #[test]
 fn the_strip_pass_asks_for_frames_only_through_the_dispatch_record() {
-    // Headless windows have no renderer, so the strip pass's own asks are pinned by source: both
-    // the layout and the content ask go through the record, never straight to the window.
+    // Headless windows have no renderer, so the strip pass's own asks are pinned by source: the
+    // layout, text-size and content asks all go through the record, never straight to the window.
     let source = include_str!("status_line.rs").replace("\r\n", "\n");
     let start = source.find("pub(super) fn sync_status_line(").expect("the strip pass");
     let body = &source[start..];
     let body = &body[..body.find("\n    }\n").expect("its end")];
-    assert_eq!(body.matches("dispatch_redraws.request(*window_id, window)").count(), 2);
+    assert_eq!(body.matches("dispatch_redraws.request(*window_id, window)").count(), 3);
     assert!(!body.contains("request_window_redraw()"), "{body}");
 }
 
@@ -1277,13 +1277,14 @@ fn a_right_press_hits_the_strip_at_the_top() {
 fn sync_moves_each_renderer_strip_before_refitting_once() {
     let source = include_str!("status_line.rs").replace("\r\n", "\n");
     let moved = source
-        .find("let moved = renderer.set_status_line_position(state.resolved.position);")
+        .find("let moved = strip.set_position(state.resolved.position);")
         .expect("sync hands each renderer the resolved position");
-    let refit = source
-        .find("if renderer.set_status_line_visible(shown) | moved {")
+    let visible = source
+        .find("let refit = strip.set_visible(shown) | moved;")
         .expect("a move or a visibility change refits, with both setters always run");
-    assert!(moved < refit, "the position is set before visibility decides the refit");
-    let block = &source[refit..refit + source[refit..].find("            }\n").unwrap()];
+    assert!(moved < visible, "the position is set before visibility decides the refit");
+    let refit = source.find("            if refit {").expect("the refit");
+    let block = &source[refit..refit + source[refit..].find("\n            }\n").unwrap()];
     assert_eq!(block.matches("resize_panes_to_rects(").count(), 1, "one refit");
 }
 
@@ -1303,4 +1304,57 @@ fn reload_switches_the_strip_position() {
     app.config.status_line.position = StatusPosition::Top;
     let _ = app.sync_status_line(now);
     assert_eq!(app.status_line.resolved.position, StatusPosition::Top, "and back");
+}
+
+/// Seed a main and a child window and give each a recording stand-in for its renderer's strip
+/// setters; returns both ids, main first.
+fn seed_recorded_windows(app: &mut App) -> [WindowId; 2] {
+    let child = app.__test_seed_child_window(&["work"]);
+    let main = app.main_window_id.expect("the seed made a main window");
+    for id in [main, child] {
+        let window = app.windows.get_mut(&id).expect("a seeded window");
+        window.test_strip_settings = Some(super::TestStripSettings::default());
+    }
+    [main, child]
+}
+
+/// What the sync handed window `id`'s strip.
+fn recorded_strip(app: &App, id: WindowId) -> super::TestStripSettings {
+    app.windows[&id].test_strip_settings.clone().expect("a recorded window")
+}
+
+/// A reload that changes `font_scale` reaches every window's renderer: each window's strip is
+/// handed the file's new scale and asked for one frame, with nothing else changed.
+#[test]
+fn reload_changes_the_strip_font_scale_in_every_window() {
+    use crate::app::window_state::window_redraw_requests_for as asks;
+    use sonicterm_cfg::status_line::StatusFontScale;
+    let path = scratch_config("reload-font-scale", "[status_line]\nenabled = true\n");
+    let mut app =
+        App::new(Theme::default(), Config::load_strict(&path).unwrap(), Keymap::default());
+    app.runtime_config_path = Some(path.clone());
+    let windows = seed_recorded_windows(&mut app);
+    {
+        let _dispatch = app.frame_dispatch_scope();
+        let _ = app.sync_status_line(Instant::now());
+    }
+    for id in windows {
+        let strip = recorded_strip(&app, id);
+        assert!(strip.visible, "the strip is shown in every window");
+        assert!((strip.font_scale - 0.8).abs() < 1e-6, "{strip:?}");
+    }
+    let before = windows.map(|id| asks(&app.windows[&id]));
+    std::fs::write(&path, "[status_line]\nenabled = true\nfont_scale = 0.6\n").unwrap();
+    app.force_reload_config();
+    {
+        let _dispatch = app.frame_dispatch_scope();
+        let _ = app.sync_status_line(Instant::now());
+    }
+    assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::from_f64(0.6).unwrap());
+    for (index, id) in windows.into_iter().enumerate() {
+        let strip = recorded_strip(&app, id);
+        assert!((strip.font_scale - 0.6).abs() < 1e-6, "window {index}: {strip:?}");
+        assert_eq!(asks(&app.windows[&id]) - before[index], 1, "window {index} redraws once");
+    }
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

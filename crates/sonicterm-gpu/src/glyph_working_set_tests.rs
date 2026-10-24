@@ -649,5 +649,7 @@ fn the_status_line_is_measured_in_the_styles_it_draws() {
         .iter()
         .find(|(variant, _)| *variant == GlyphRasterVariant::StatusLine)
         .map(|(_, pt)| *pt);
-    assert_eq!(strip_size, Some(crate::status_strip::status_line_font_size(size)));
+    let default_size =
+        crate::status_strip::status_line_font_size(size, crate::status_strip::default_font_scale());
+    assert_eq!(strip_size, Some(default_size));
 }

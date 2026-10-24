@@ -228,6 +228,10 @@ pub struct WindowState {
     /// collection and servicing without a GPU.
     #[cfg(test)]
     pub(crate) test_image_atlas_release: Option<redraw::TestImageAtlasRelease>,
+    /// Test-only stand-in for the renderer's strip setters on a headless window, so a test sees
+    /// what the status line sync handed this window.
+    #[cfg(test)]
+    pub(crate) test_strip_settings: Option<super::status_line::TestStripSettings>,
 }
 
 /// How much grid dirt a completed topology change marks.

@@ -8,7 +8,7 @@
 //! and fits them with the chrome font, then emits ordinary quads and glyphs,
 //! so the GDI software path composites the strip unchanged.
 
-use sonicterm_render_model::boundary::cfg::status_line::StatusPosition;
+use sonicterm_render_model::boundary::cfg::status_line::{StatusFontScale, StatusPosition};
 use sonicterm_render_model::boundary::cfg::theme::Theme;
 use sonicterm_render_model::boundary::ui::status_line::{
     fit, separators, FitMetrics, PlacedPart, PlacedSegment, SegmentClick, StatusLineView,
@@ -27,8 +27,6 @@ use crate::quad::{px_to_ndc, QuadInstance};
 const HEIGHT_SHARE: f32 = 0.6;
 /// Smallest strip height, in logical px.
 const MIN_HEIGHT_LOGICAL: f32 = 20.0;
-/// Strip type size as a share of the live terminal font size.
-const TEXT_SHARE: f32 = 0.6;
 /// Smallest strip type size, in logical pt: FreeType raises any character size under 1 pt to
 /// 1 pt, so the stack and the geometry both use the size it really draws.
 const MIN_TEXT_PT: f32 = 1.0;
@@ -250,6 +248,8 @@ pub struct StripGeometry {
     pub scale_factor: f32,
     /// The terminal font's live raster size, which the strip text is 60% of.
     pub font_raster_px: f32,
+    /// `[status_line] font_scale`: the strip text's share of that size.
+    pub font_scale: f32,
     /// Cap height of the strip font at [`Self::text_px`], raster px; see [`strip_cap_height`].
     pub cap_height: f32,
 }
@@ -327,18 +327,25 @@ pub fn strip_baseline(geometry: &StripGeometry) -> f32 {
     area_top + (area_h + geometry.cap_height) / 2.0
 }
 
-/// The strip's native font size in logical points for a `body_font_size` live terminal font:
-/// exactly 60% of it. Times the display scale it is [`StripGeometry::text_px`], so the strip's
-/// stack rasterizes at exactly the size it draws.
-pub fn status_line_font_size(body_font_size: f32) -> f32 {
-    (body_font_size * TEXT_SHARE).max(MIN_TEXT_PT)
+/// The default `[status_line] font_scale`, 0.8.
+pub fn default_font_scale() -> f32 {
+    StatusFontScale::DEFAULT.as_f32()
+}
+
+/// The strip's native font size in logical points for a `body_font_size` live terminal font at
+/// `font_scale`, never under 1 pt. Times the display scale it is [`StripGeometry::text_px`], so
+/// the strip's stack rasterizes at exactly the size it draws.
+pub fn status_line_font_size(body_font_size: f32, font_scale: f32) -> f32 {
+    (body_font_size * font_scale).max(MIN_TEXT_PT)
 }
 
 impl StripGeometry {
-    /// The strip's text raster size: 60% of the live terminal font size, at least 1 pt at the
-    /// display scale, which is what [`status_line_font_size`] asks the stack for.
+    /// The strip's text raster size: `font_scale` × the live terminal font size, at least 1 pt at
+    /// the display scale, which is what [`status_line_font_size`] asks the stack for.
     pub fn text_px(&self) -> f32 {
-        (self.font_raster_px * TEXT_SHARE).max(MIN_TEXT_PT * self.scale_factor.max(0.5)).max(1.0)
+        (self.font_raster_px * self.font_scale)
+            .max(MIN_TEXT_PT * self.scale_factor.max(0.5))
+            .max(1.0)
     }
 
     /// Fit metrics for this geometry.

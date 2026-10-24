@@ -711,7 +711,10 @@ pub(crate) fn renderer_font_views(
         .as_ref()
         .map(|stack| stack.with_font_size(f64::from(palette_footer_font_size(body_size))));
     let status_line = body.as_ref().map(|stack| {
-        stack.with_font_size(f64::from(crate::status_strip::status_line_font_size(body_size)))
+        stack.with_font_size(f64::from(crate::status_strip::status_line_font_size(
+            body_size,
+            crate::status_strip::default_font_scale(),
+        )))
     });
     RendererFontStacks { body, tab_title, palette_footer, status_line }
 }
@@ -2395,6 +2398,8 @@ pub struct GpuRenderer {
     status_line_visible: bool,
     /// The window edge the strip sits on: above the panes, or between them and the tab bar.
     status_line_position: sonicterm_render_model::boundary::cfg::status_line::StatusPosition,
+    /// `[status_line] font_scale`: the strip text's share of the live terminal font size.
+    status_line_font_scale: f32,
     /// Segments the strip may present; replaced by the App before a frame.
     status_line_view: StatusLineView,
     /// Fitted strip keyed by view pixels, width and chrome font, so an
@@ -3431,6 +3436,7 @@ impl GpuRenderer {
             tab_bar_visible: true,
             status_line_visible: false,
             status_line_position: Default::default(),
+            status_line_font_scale: crate::status_strip::default_font_scale(),
             status_line_view: StatusLineView::default(),
             status_line_fit: None,
             status_line_cap_height: None,
@@ -3692,6 +3698,34 @@ impl GpuRenderer {
     /// directly above the tab bar, or on the bottom edge when the tab bar is hidden.
     pub fn status_line_top(&self) -> f32 {
         self.status_line_placement().top
+    }
+
+    /// Set the strip text's share of the live terminal font size. Returns `true` when it changed:
+    /// the strip's stack is rebuilt at the new size and the atlas reset, since a glyph key carries
+    /// no size, so the caller redraws. The strip's height and the panes do not change.
+    pub fn set_status_line_font_scale(&mut self, font_scale: f32) -> bool {
+        if (self.status_line_font_scale - font_scale).abs() < f32::EPSILON {
+            // When: `font_scale` equals `status_line_font_scale`, the strip keeps its stack and tiles.
+            return false;
+        }
+        self.status_line_font_scale = font_scale;
+        self.rebuild_status_line_stack();
+        self.status_line_fit = None;
+        self.status_line_cap_height = None;
+        self.reset_glyph_atlas_in_place("status_line_font_scale");
+        self.glyph_atlas_retry_without_eviction = false;
+        self.row_glyph_cache.invalidate_all();
+        self.last_frame_key = None;
+        true
+    }
+
+    /// Rebuild the strip's stack from the body stack at the renderer's scale; no body stack, no
+    /// strip stack.
+    fn rebuild_status_line_stack(&mut self) {
+        let size =
+            crate::status_strip::status_line_font_size(self.font_size, self.status_line_font_scale);
+        self.status_line_font_stack =
+            self.font_stack.as_ref().map(|body| body.with_font_size(f64::from(size)));
     }
 
     /// Move the strip to `position`. Returns `true` when a shown strip moved, so the caller
@@ -5530,6 +5564,8 @@ impl GpuRenderer {
         self.tab_title_font.set_font(family, size, weight_scale, new_stacks.tab_title);
         self.palette_footer_font_stack = new_stacks.palette_footer;
         self.status_line_font_stack = new_stacks.status_line;
+        // The views are built at the default scale; the strip keeps the renderer's own.
+        self.rebuild_status_line_stack();
         self.status_line_fit = None;
         self.status_line_cap_height = None;
         self.cell_w = new_cell_w;
@@ -7448,6 +7484,7 @@ impl GpuRenderer {
                 screen: (sw, sh),
                 scale_factor: self.scale_factor,
                 font_raster_px: self.font_size * self.scale_factor,
+                font_scale: self.status_line_font_scale,
                 cap_height: 0.0,
             };
             let mut hasher = std::collections::hash_map::DefaultHasher::new();

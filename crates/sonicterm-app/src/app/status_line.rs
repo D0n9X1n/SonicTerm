@@ -1360,17 +1360,25 @@ impl App {
             window.alert_settings = alert_settings
                 .or(alerts_announced.filter(|_| listening))
                 .filter(|_| window.role == super::WindowRole::Terminal);
-            let Some(renderer) = window.renderer.as_mut() else {
-                // When: a test-seeded entry has no renderer, it has no strip.
-                continue;
-            };
             // Only terminal windows carry the strip; the Memory Usage report never does.
             let shown = visible && window.role == super::WindowRole::Terminal;
+            let Some(strip) = strip_settings(window) else {
+                // When: strip_settings finds no renderer (a test-seeded entry), there is no strip.
+                continue;
+            };
             // Both setters run, position first, so a reload that moves and shows the strip
             // refits the panes once.
-            let moved = renderer.set_status_line_position(state.resolved.position);
-            if renderer.set_status_line_visible(shown) | moved {
-                // When: `set_status_line_visible` or `moved` changed the insets, refit panes once.
+            let moved = strip.set_position(state.resolved.position);
+            // A new text size keeps the strip's height, so it redraws without a refit.
+            let rescaled = strip.set_font_scale(state.resolved.font_scale.as_f32());
+            let refit = strip.set_visible(shown) | moved;
+            if rescaled {
+                // The strip's text size changed and its tiles were dropped, so it redraws.
+                window.mark_redraw(RedrawCause::StatusLine);
+                dispatch_redraws.request(*window_id, window);
+            }
+            if refit {
+                // When: `set_visible` or `moved` changed the insets, refit panes once.
                 minimums_changed = true;
                 state.built.remove(window_id);
                 let rects = App::compute_pane_rects_for(window);
@@ -1392,6 +1400,10 @@ impl App {
             if !shown {
                 // When: `shown` is false, the strip is off here: no band to route, nothing to format.
                 window.status_strip = None;
+                continue;
+            }
+            if window.renderer.is_none() {
+                // When: the renderer is none, a test stand-in took the setters; nothing is drawn.
                 continue;
             }
             let previous_link = state.built.get(window_id).map(|built| &built.inputs.link);
@@ -2122,6 +2134,88 @@ impl App {
             window.mark_redraw(RedrawCause::Input);
             window.request_window_redraw();
         }
+    }
+}
+
+/// The strip setters of `window`'s renderer, or of a headless test window's stand-in.
+fn strip_settings(window: &mut WindowState) -> Option<&mut dyn StripSettings> {
+    if let Some(renderer) = window.renderer.as_mut() {
+        // When: the window has a renderer, its own setters change the strip.
+        return Some(renderer);
+    }
+    #[cfg(test)]
+    if let Some(recorder) = window.test_strip_settings.as_mut() {
+        // When: a headless test window holds a stand-in, it records what the sync handed it.
+        return Some(recorder);
+    }
+    None
+}
+
+/// The strip setters the sync pass hands each window's renderer. Each returns `true` when it
+/// changed what the strip draws, as the renderer's own setters do.
+trait StripSettings {
+    /// Move the strip; `true` when a shown strip moved.
+    fn set_position(&mut self, position: sonicterm_cfg::status_line::StatusPosition) -> bool;
+    /// Size the strip's text; `true` when the size changed.
+    fn set_font_scale(&mut self, font_scale: f32) -> bool;
+    /// Show or hide the strip; `true` when its visibility changed.
+    fn set_visible(&mut self, visible: bool) -> bool;
+}
+
+impl StripSettings for GpuRenderer {
+    fn set_position(&mut self, position: sonicterm_cfg::status_line::StatusPosition) -> bool {
+        self.set_status_line_position(position)
+    }
+
+    fn set_font_scale(&mut self, font_scale: f32) -> bool {
+        self.set_status_line_font_scale(font_scale)
+    }
+
+    fn set_visible(&mut self, visible: bool) -> bool {
+        self.set_status_line_visible(visible)
+    }
+}
+
+/// Test-only stand-in for a headless window's renderer strip: it keeps what the sync pass handed
+/// it, with the renderer's change rules, so a test sees each window's update without a GPU.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TestStripSettings {
+    pub(crate) position: sonicterm_cfg::status_line::StatusPosition,
+    pub(crate) font_scale: f32,
+    pub(crate) visible: bool,
+}
+
+#[cfg(test)]
+impl Default for TestStripSettings {
+    fn default() -> Self {
+        Self {
+            position: sonicterm_cfg::status_line::StatusPosition::default(),
+            font_scale: sonicterm_gpu::status_strip::default_font_scale(),
+            visible: false,
+        }
+    }
+}
+
+#[cfg(test)]
+impl StripSettings for TestStripSettings {
+    fn set_position(&mut self, position: sonicterm_cfg::status_line::StatusPosition) -> bool {
+        let moved = self.position != position;
+        self.position = position;
+        // As the renderer: a hidden strip reserves nothing, so moving it changes no inset.
+        moved && self.visible
+    }
+
+    fn set_font_scale(&mut self, font_scale: f32) -> bool {
+        let changed = (self.font_scale - font_scale).abs() >= f32::EPSILON;
+        self.font_scale = font_scale;
+        changed
+    }
+
+    fn set_visible(&mut self, visible: bool) -> bool {
+        let changed = self.visible != visible;
+        self.visible = visible;
+        changed
     }
 }
 

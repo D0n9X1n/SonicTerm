@@ -528,9 +528,10 @@ tab-title and status line font stacks together and invalidates the shared glyph 
   configured body size;
 - command-palette footer and category/availability subtitles use `max(body - 1, 1)`;
 - tab titles use `body + 1`;
-- status line text uses `max(0.6 × body, 1)`, 60% of the live terminal font size (7.8 pt at
-  the 13 pt default), so a zoom changes it with the terminal text; 1 pt is the smallest size
-  FreeType rasterizes, so the strip never asks for less.
+- status line text uses `max(font_scale × body, 1)`, `[status_line] font_scale` (0.8 by
+  default) of the live terminal font size (10.4 pt at the 13 pt default), so a zoom changes it
+  with the terminal text; 1 pt is the smallest size FreeType rasterizes, so the strip never asks
+  for less. A `font_scale` change rebuilds the strip's stack and resets the shared atlas.
 
 All four stacks use the same family, DPI, and weight scale. Native raster-role
 tags keep their atlas entries distinct, so a footer, tab title or status line

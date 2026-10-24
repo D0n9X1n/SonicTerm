@@ -602,3 +602,54 @@ fn position_defaults_to_top_and_rejects_unknown_values() {
         |body: &str| toml::from_str::<crate::config::Config>(&format!("[status_line]\n{body}"));
     assert!(config("position = \"left\"\n").is_err(), "an unknown position fails the load");
 }
+
+/// `font_scale` defaults to 0.8, reads any value in 0.3..=1.0 exactly, and a value outside
+/// that range, or not a number, fails the load like `update_interval_ms` does.
+#[test]
+fn font_scale_defaults_to_eighty_percent_and_rejects_out_of_range() {
+    let defaults = StatusLineConfig::default().resolve().unwrap();
+    assert_eq!(defaults.font_scale, StatusFontScale::DEFAULT);
+    assert!((defaults.font_scale.as_f32() - 0.8).abs() < 1e-6);
+    let parsed = parse("font_scale = 0.65\n").resolve().unwrap();
+    assert!((parsed.font_scale.as_f32() - 0.65).abs() < 1e-6);
+    assert!((parse("font_scale = 1\n").resolve().unwrap().font_scale.as_f32() - 1.0).abs() < 1e-6);
+    for body in ["font_scale = 0.29\n", "font_scale = 1.01\n", "font_scale = nan\n"] {
+        assert!(parse(body).resolve().is_err(), "{body}");
+    }
+    let config =
+        |body: &str| toml::from_str::<crate::config::Config>(&format!("[status_line]\n{body}"));
+    assert!(config("font_scale = 2.0\n").unwrap().status_line.validate().is_err());
+}
+
+/// The scale steps by 0.05 and stays in 0.3..=1.0.
+#[test]
+fn font_scale_steps_and_clamps() {
+    let scale = StatusFontScale::DEFAULT;
+    assert!((scale.stepped(1).as_f32() - 0.85).abs() < 1e-6);
+    assert!((scale.stepped(-1).as_f32() - 0.75).abs() < 1e-6);
+    assert_eq!(StatusFontScale::MAX.stepped(1), StatusFontScale::MAX);
+    assert_eq!(StatusFontScale::MIN.stepped(-1), StatusFontScale::MIN);
+}
+
+/// A configured `font_scale` is validated and used exactly as written: `Config::load_strict`
+/// refuses 0.299 and 1.001 instead of rounding them into range, and keeps 0.333 as 0.333.
+#[test]
+fn a_configured_font_scale_is_validated_and_kept_unrounded() {
+    let dir =
+        std::env::temp_dir().join(format!("sonicterm-font-scale-exact-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sonicterm.toml");
+    let load = |value: &str| {
+        std::fs::write(&path, format!("[status_line]\nfont_scale = {value}\n")).unwrap();
+        crate::config::Config::load_strict(&path)
+    };
+    for outside in ["0.299", "1.001"] {
+        assert!(load(outside).is_err(), "{outside} is outside 0.3..=1.0 and fails the load");
+    }
+    let resolved = load("0.333").unwrap().status_line.resolve().unwrap();
+    assert_eq!(resolved.font_scale.as_f64(), 0.333, "the configured multiplier is used exactly");
+    // Only a palette step snaps: from 0.333 it lands on the 0.05 multiples beside it.
+    assert_eq!(resolved.font_scale.stepped(1).as_f64(), 0.35);
+    assert_eq!(resolved.font_scale.stepped(-1).as_f64(), 0.3);
+    let _ = std::fs::remove_dir_all(dir);
+}
