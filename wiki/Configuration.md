@@ -164,7 +164,7 @@ Presets in this build:
 
 | Preset | `left` | `center` | `right` | Segment defaults |
 | --- | --- | --- | --- | --- |
-| `developer` | `mode`, `scroll`, `input`, `paste` | `link`, `sel` | `alerts`, `clip`, `health`, `glyphs`, `history`, `mem` | — |
+| `developer` | `mode`, `font`, `scroll`, `input`, `paste` | `link`, `sel` | `alerts`, `clip`, `health`, `glyphs`, `history`, `mem` | — |
 | `minimal` | — | — | `alerts`, `clip`, `health`, `mem` | — |
 | `diagnostics` | as `developer` | as `developer` | `alerts`, `clip`, `health`, `glyphs`, `history`, `cpu`, `frame`, `out`, `path_check`, `tab_mem`, `mem` | `mem.sparkline = true` |
 
@@ -190,7 +190,7 @@ Every segment except `mem` shows only while it has something to say, so an idle 
 | `ime` | Only an input-method problem: `IME: ⚠ discarded (copy mode)` for `hold_secs` after copy mode dropped a commit, or `IME: → search` / `IME: → palette` while a composition will commit to the search field or the command palette instead of the pane. An ordinary composition into the pane shows nothing. Where the platform reports no composition events (some Wayland setups), only the copy-mode warning can appear. Not in a preset. | 500 | None. |
 | `scroll` | `Scroll: ↑ 340` while the focused pane is scrolled back. | 400 | Returns the pane to the bottom. |
 | `history` | `History: trimmed` in amber after SonicTerm dropped rows from the focused pane's scrollback because its history passed the grid's memory budget; the spoken value gives the row count. Scrolling past the `[terminal] scrollback` limit, a clear, a resize or a lowered limit never shows it. It stays until a click on it or a program clears scrollback (`CSI 3 J`, as `clear` does in most shells), and shows again after a later trim. SonicTerm has no clear-scrollback action, so those are the two ways to acknowledge it. | 300 | Acknowledges the trim. |
-| `font` | Opt-in. `Font: 16pt (+2)` or `Font: 13.5pt (−0.5)` while the live font size differs from the configured size; hidden when they match. The size is app-wide, so every window shows the same value. | 280 | Resets the font size (`reset_font_size`). |
+| `font` | `Scale: 115%`: the live font size as a percent of the configured size, rounded to a whole percent, shown only while that is not 100%. The spoken value is "115 percent". Every preset that lists `scroll` puts it directly before `scroll`, so a zoomed, scrolled-back pane in copy mode reads `COPY  Scale: 115%  Scroll: ↑ 340`. The size is app-wide, so every window shows the same value. | 280 | Resets the font size (`reset_font_size`). |
 | `zoom` | Opt-in. A `ZOOM` chip (bold text in the active tab title color, or the theme foreground under 3:1, no background), with no name, while a split pane of the active tab is zoomed to fill it. | 260 | Toggles pane zoom (`toggle_pane_zoom`). |
 | `size` | Opt-in. `Size: 120×40`, the focused pane's columns and rows, for `hold_ms` after its grid was resized (a window resize, a split, a font-size or display-scale change). A pane's first frame, a new tab, a restored session, a tear-out and a focus change to another pane show nothing. | 80 | None. |
 

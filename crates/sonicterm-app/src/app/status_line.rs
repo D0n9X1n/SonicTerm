@@ -1243,10 +1243,8 @@ impl App {
             .is_open()
             .then(|| self.palette_attached_window.or(self.main_window_id))
             .flatten();
-        let font = (self.config.font.size != self.configured_font_size).then(|| FontInput {
-            live_tenths: (self.config.font.size * 10.0).round() as u32,
-            configured_tenths: (self.configured_font_size * 10.0).round() as u32,
-        });
+        let font = (self.config.font.size != self.configured_font_size)
+            .then(|| FontInput::from_sizes(self.config.font.size, self.configured_font_size));
         let path_check_listed = visible
             && any_eligible
             && self.status_line.resolved.segment(StatusSegmentId::PathCheck).is_some();

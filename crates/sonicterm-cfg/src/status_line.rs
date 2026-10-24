@@ -430,7 +430,7 @@ impl StatusPreset {
     /// The preset's catalog lists, before filtering to implemented ids.
     fn catalog_lists(self) -> [&'static [StatusSegmentId]; 3] {
         use StatusSegmentId as Seg;
-        const DEV_LEFT: &[Seg] = &[Seg::Mode, Seg::Scroll, Seg::Input, Seg::Paste];
+        const DEV_LEFT: &[Seg] = &[Seg::Mode, Seg::Font, Seg::Scroll, Seg::Input, Seg::Paste];
         const DEV_CENTER: &[Seg] = &[Seg::Link, Seg::Sel];
         const DEV_RIGHT: &[Seg] =
             &[Seg::Alerts, Seg::Clip, Seg::Health, Seg::Glyphs, Seg::History, Seg::Mem];

@@ -66,7 +66,7 @@ fn every_catalog_id_is_registered_with_a_glyph_free_spoken_name() {
             paste_raw: true,
             ime: Some(ImeInput::DiscardedInCopyMode),
             history_trimmed: Some(1_280),
-            font: Some(FontInput { live_tenths: 135, configured_tenths: 140 }),
+            font: Some(FontInput::from_sizes(13.5, 14.0)),
             size: Some((120, 40)),
             zoomed: true,
             alerts: AlertsInput {
@@ -836,23 +836,20 @@ fn paste_and_ime_show_only_problems() {
 
 #[test]
 fn history_font_and_size_show_only_active_display() {
-    // `history` warns after a budget trim and acknowledges on click; `font` shows only a size that
-    // differs from the configured one and resets on click; `size` shows the grid and is inert.
+    // `history` warns after a budget trim and acknowledges on click; `font`, which the developer
+    // preset lists, shows the live size as a percent of the configured one only when that is not
+    // 100% and resets on click; opt-in `size` shows the grid and is inert.
     let i18n = translator("en");
     let mut resolved = developer();
-    for id in [StatusSegmentId::Font, StatusSegmentId::Size] {
-        resolved.segments.push(ResolvedSegment {
-            id,
-            side: StatusSide::Right,
-            show: ShowMode::Active,
-            priority: id.meta().default_priority,
-            click: ClickBinding::Default,
-        });
-    }
-    let unchanged = StatusLineInputs {
-        font: Some(FontInput { live_tenths: 140, configured_tenths: 140 }),
-        ..idle_inputs()
-    };
+    resolved.segments.push(ResolvedSegment {
+        id: StatusSegmentId::Size,
+        side: StatusSide::Right,
+        show: ShowMode::Active,
+        priority: StatusSegmentId::Size.meta().default_priority,
+        click: ClickBinding::Default,
+    });
+    let unchanged =
+        StatusLineInputs { font: Some(FontInput::from_sizes(14.0, 14.0)), ..idle_inputs() };
     let quiet = build_view(&resolved, false, &unchanged, &i18n, NumberStyle::POINT);
     for id in [StatusSegmentId::History, StatusSegmentId::Font, StatusSegmentId::Size] {
         assert_eq!(shown(&quiet, id), None, "{id:?}");
@@ -863,7 +860,7 @@ fn history_font_and_size_show_only_active_display() {
     };
     let busy = StatusLineInputs {
         history_trimmed: Some(1_280),
-        font: Some(FontInput { live_tenths: 160, configured_tenths: 140 }),
+        font: Some(FontInput::from_sizes(16.0, 14.0)),
         size: Some((120, 40)),
         ..idle_inputs()
     };
@@ -873,19 +870,26 @@ fn history_font_and_size_show_only_active_display() {
     assert_eq!(history.spoken.value, "trimmed, 1,280 rows dropped by the memory budget");
     assert_eq!(history.click, Some(SegmentClick::Handler(SegmentHandler::AcknowledgeHistory)));
     let font = by_id(&busy, StatusSegmentId::Font);
-    assert_eq!(text_of(&font.parts), "Font: 16pt (+2)");
-    assert_eq!(font.spoken.value, "16 points, 2 larger than configured");
+    assert_eq!(text_of(&font.parts), "Scale: 114%");
+    assert_eq!(font.spoken.name, "Font scale");
+    assert_eq!(font.spoken.value, "114 percent");
     assert_eq!(font.click, Some(SegmentClick::Action(Action::ResetFontSize)));
     let size = by_id(&busy, StatusSegmentId::Size);
     assert_eq!((text_of(&size.parts).as_str(), size.click.clone()), ("Size: 120×40", None));
     assert_eq!(size.spoken.value, "120 columns by 40 rows");
-    let smaller = StatusLineInputs {
-        font: Some(FontInput { live_tenths: 135, configured_tenths: 140 }),
-        ..idle_inputs()
-    };
+    let smaller =
+        StatusLineInputs { font: Some(FontInput::from_sizes(13.5, 14.0)), ..idle_inputs() };
     let font = by_id(&smaller, StatusSegmentId::Font);
-    assert_eq!(text_of(&font.parts), "Font: 13.5pt (\u{2212}0.5)");
-    assert_eq!(font.spoken.value, "13.5 points, 0.5 smaller than configured");
+    assert_eq!(text_of(&font.parts), "Scale: 96%");
+    assert_eq!(font.spoken.value, "96 percent");
+    // 161 tenths over 140 is the maintainer's 115%; a change that rounds to 100% stays hidden.
+    let target =
+        StatusLineInputs { font: Some(FontInput::from_sizes(16.1, 14.0)), ..idle_inputs() };
+    assert_eq!(text_of(&by_id(&target, StatusSegmentId::Font).parts), "Scale: 115%");
+    let rounded =
+        StatusLineInputs { font: Some(FontInput::from_sizes(140.1, 140.0)), ..idle_inputs() };
+    let rounded = build_view(&resolved, false, &rounded, &i18n, NumberStyle::POINT);
+    assert_eq!(shown(&rounded, StatusSegmentId::Font), None, "100% is hidden");
     // `zoom` is opt-in: a chip with no name while a split pane is zoomed, toggling zoom on click.
     let mut zoom_table = developer();
     zoom_table.segments.push(ResolvedSegment {
@@ -1406,4 +1410,15 @@ fn the_hash_ignores_color_and_clickable_segments_are_buttons() {
         assert!(segment.width > 0.0, "{:?} has bounds", segment.id);
     }
     assert_eq!((inert_strip.segments[1].left_px, inert_strip.segments[1].width), (100.0, 80.0));
+}
+
+/// The percent comes from the real sizes, not sizes rounded to tenths first: 13.34 pt zoomed by
+/// one point to 14.34 pt is 107.5%, shown as 107%, where tenths (143 / 133) would give 108%.
+#[test]
+fn font_scale_uses_the_unrounded_sizes() {
+    let font = FontInput::from_sizes(14.34, 13.34);
+    let inputs = StatusLineInputs { font: Some(font), ..idle_inputs() };
+    let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
+    assert_eq!(shown(&view, StatusSegmentId::Font).unwrap(), "Scale: 107%");
+    assert_eq!(FontInput::from_sizes(13.0, 0.0).scale_percent, None, "no scale of a zero size");
 }

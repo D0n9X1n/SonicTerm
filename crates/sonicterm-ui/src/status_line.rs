@@ -504,13 +504,24 @@ pub struct AlertsInput {
 /// Tab numbers the alerts segment lists before it counts the rest.
 const ALERT_TABS_SHOWN: usize = 4;
 
-/// The live and configured font sizes, in tenths of a point so the inputs stay comparable.
+/// The live font size as a scale of the configured size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontInput {
-    /// The live size.
-    pub live_tenths: u32,
-    /// The configured size.
-    pub configured_tenths: u32,
+    /// The live size as a whole percent of the configured size, rounded half up from the real
+    /// sizes; `None` for a zero configured size, which has no scale.
+    pub scale_percent: Option<u32>,
+}
+
+impl FontInput {
+    /// The scale of `live` points over `configured` points, from the sizes themselves, not from
+    /// sizes rounded first, so 14.34 over 13.34 is 107%.
+    pub fn from_sizes(live: f32, configured: f32) -> Self {
+        let scale_percent = (configured > 0.0)
+            .then(|| (f64::from(live) / f64::from(configured) * 100.0).round())
+            .filter(|percent| percent.is_finite() && *percent >= 0.0)
+            .map(|percent| percent.min(f64::from(u32::MAX)) as u32);
+        Self { scale_percent }
+    }
 }
 
 /// What the input-method segment shows; it appears only for a problem.
@@ -1350,15 +1361,6 @@ fn format_ime(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Formatte
     Some(FormattedSegment::plain(parts, env.i18n.translate(spoken_key)))
 }
 
-/// `tenths` of a point as `16` or `13.5`, with the locale's decimal separator.
-fn format_tenths(tenths: u32, style: NumberStyle) -> String {
-    let whole = format_count(u64::from(tenths / 10), style);
-    match tenths % 10 {
-        0 => whole,
-        fraction => format!("{whole}{}{fraction}", style.decimal),
-    }
-}
-
 /// The history segment: `History: trimmed` after the byte budget dropped rows from the focused
 /// pane's scrollback, until the trim is acknowledged.
 fn format_history(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
@@ -1372,22 +1374,17 @@ fn format_history(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Form
     Some(FormattedSegment { default_click: true, ..FormattedSegment::plain(parts, spoken) })
 }
 
-/// The font segment: `Font: 16pt (+2)` while the live size differs from the configured size.
+/// The font segment: `Scale: 115%`, the live font size as a percent of the configured size,
+/// shown only while that percent is not 100.
 fn format_font(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
-    let font = inputs.font.filter(|font| font.live_tenths != font.configured_tenths)?;
-    let live = format_tenths(font.live_tenths, env.numbers);
-    let (sign, spoken_key, delta) = if font.live_tenths > font.configured_tenths {
-        ("+", "status-spoken-font-larger", font.live_tenths - font.configured_tenths)
-    } else {
-        // When: live_tenths is below configured_tenths, the delta is a reduction.
-        ("\u{2212}", "status-spoken-font-smaller", font.configured_tenths - font.live_tenths)
-    };
-    let delta = format_tenths(delta, env.numbers);
+    let percent =
+        inputs.font.and_then(|font| font.scale_percent).filter(|percent| *percent != 100)?;
+    let value = format_count(u64::from(percent), env.numbers);
     let parts = vec![
         name_part(env, "status-name-font"),
-        StatusPart::new(format!("{live}pt ({sign}{delta})"), StatusTone::Value),
+        StatusPart::new(format!("{value}%"), StatusTone::Value),
     ];
-    let spoken = env.i18n.t_args(spoken_key, Some(&[("size", &live), ("delta", &delta)]));
+    let spoken = env.i18n.t_args("status-value-font-scale", Some(&[("percent", &value)]));
     Some(FormattedSegment { default_click: true, ..FormattedSegment::plain(parts, spoken) })
 }
 

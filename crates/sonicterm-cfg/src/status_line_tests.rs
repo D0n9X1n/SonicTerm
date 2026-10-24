@@ -115,6 +115,7 @@ fn default_table_is_the_developer_preset_and_off() {
         side_ids(&resolved, StatusSide::Left),
         [
             StatusSegmentId::Mode,
+            StatusSegmentId::Font,
             StatusSegmentId::Scroll,
             StatusSegmentId::Input,
             StatusSegmentId::Paste
@@ -152,6 +153,11 @@ fn presets_resolve_to_their_implemented_lists() {
     // Each preset lists only ids this build implements; diagnostics turns the sparkline on.
     let minimal = parse("preset = \"minimal\"\n").resolve().unwrap();
     assert!(side_ids(&minimal, StatusSide::Left).is_empty());
+    // Every preset that lists `scroll` puts the font scale directly before it.
+    let diagnostics = parse("preset = \"diagnostics\"\n").resolve().unwrap();
+    let left = side_ids(&diagnostics, StatusSide::Left);
+    let scroll = left.iter().position(|id| *id == StatusSegmentId::Scroll).unwrap();
+    assert_eq!(left[scroll - 1], StatusSegmentId::Font, "{left:?}");
     assert!(side_ids(&minimal, StatusSide::Center).is_empty());
     assert_eq!(
         side_ids(&minimal, StatusSide::Right),
@@ -422,14 +428,16 @@ fn paste_and_ime_keys_resolve() {
 
 #[test]
 fn size_hold_and_display_segments_resolve() {
-    // `size` holds 1500 ms by default; `font` and `size` are opt-in, `history` is a developer default.
+    // `size` holds 1500 ms by default and is opt-in; `history` and `font` are developer defaults.
     let defaults = StatusLineConfig::default().resolve().unwrap();
     assert_eq!(defaults.size, SizeSettings { hold_ms: 1500 });
     assert!(defaults.segment(StatusSegmentId::History).is_some());
-    assert!(defaults.segment(StatusSegmentId::Font).is_none());
+    assert!(defaults.segment(StatusSegmentId::Font).is_some());
     assert!(defaults.segment(StatusSegmentId::Size).is_none());
-    let config =
-        parse("right = [\"font\", \"size\"]\n[status_line.segment.size]\nhold_ms = 3000\n");
+    // `font` is in the preset's left list, so a file that moves it replaces that list too.
+    let config = parse(
+        "left = [\"mode\"]\nright = [\"font\", \"size\"]\n[status_line.segment.size]\nhold_ms = 3000\n",
+    );
     let resolved = config.resolve().unwrap();
     assert_eq!(resolved.size, SizeSettings { hold_ms: 3000 });
     assert_eq!(
