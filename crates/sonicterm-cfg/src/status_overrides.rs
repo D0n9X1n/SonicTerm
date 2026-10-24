@@ -38,6 +38,8 @@ pub enum MoveDirection {
 pub struct StatusLineOverrides {
     enabled: Option<bool>,
     hide_sensitive: Option<bool>,
+    position: Option<crate::status_line::StatusPosition>,
+    font_scale: Option<crate::status_line::StatusFontScale>,
     segments: BTreeMap<StatusSegmentId, SegmentOverride>,
 }
 
@@ -85,7 +87,11 @@ impl StatusLineOverrides {
 
     /// Whether any override is held.
     pub fn is_empty(&self) -> bool {
-        self.enabled.is_none() && self.hide_sensitive.is_none() && self.segments.is_empty()
+        self.enabled.is_none()
+            && self.hide_sensitive.is_none()
+            && self.position.is_none()
+            && self.font_scale.is_none()
+            && self.segments.is_empty()
     }
 
     /// Drop every override.
@@ -103,11 +109,31 @@ impl StatusLineOverrides {
         self.hide_sensitive = (hide != file.hide_sensitive).then_some(hide);
     }
 
+    /// Move the strip to `position`; an override equal to `file` is not kept.
+    pub fn set_position(
+        &mut self,
+        file: &ResolvedStatusLine,
+        position: crate::status_line::StatusPosition,
+    ) {
+        self.position = (position != file.position).then_some(position);
+    }
+
+    /// Size the strip's text at `font_scale`; an override equal to `file` is not kept.
+    pub fn set_font_scale(
+        &mut self,
+        file: &ResolvedStatusLine,
+        font_scale: crate::status_line::StatusFontScale,
+    ) {
+        self.font_scale = (font_scale != file.font_scale).then_some(font_scale);
+    }
+
     /// The lists and toggles the strip shows: `file` with every override applied.
     pub fn effective(&self, file: &ResolvedStatusLine) -> ResolvedStatusLine {
         let mut shown = file.clone();
         shown.enabled = self.enabled.unwrap_or(file.enabled);
         shown.hide_sensitive = self.hide_sensitive.unwrap_or(file.hide_sensitive);
+        shown.position = self.position.unwrap_or(file.position);
+        shown.font_scale = self.font_scale.unwrap_or(file.font_scale);
         let configured = |id: StatusSegmentId| -> Option<ResolvedSegment> {
             file.segments
                 .iter()
@@ -224,6 +250,13 @@ impl StatusLineOverrides {
         }
         if self.hide_sensitive == Some(new.hide_sensitive) {
             self.hide_sensitive = None;
+        }
+        // A file that changed its own position or text size wins over the session's choice.
+        if previous.position != new.position || self.position == Some(new.position) {
+            self.position = None;
+        }
+        if previous.font_scale != new.font_scale || self.font_scale == Some(new.font_scale) {
+            self.font_scale = None;
         }
         let (before, after) = (file_state(previous), file_state(new));
         self.segments.retain(|id, choice| match choice {
