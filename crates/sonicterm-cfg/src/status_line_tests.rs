@@ -115,6 +115,7 @@ fn default_table_is_the_developer_preset_and_off() {
         side_ids(&resolved, StatusSide::Left),
         [
             StatusSegmentId::Mode,
+            StatusSegmentId::Font,
             StatusSegmentId::Scroll,
             StatusSegmentId::Input,
             StatusSegmentId::Paste
@@ -152,6 +153,11 @@ fn presets_resolve_to_their_implemented_lists() {
     // Each preset lists only ids this build implements; diagnostics turns the sparkline on.
     let minimal = parse("preset = \"minimal\"\n").resolve().unwrap();
     assert!(side_ids(&minimal, StatusSide::Left).is_empty());
+    // Every preset that lists `scroll` puts the font scale directly before it.
+    let diagnostics = parse("preset = \"diagnostics\"\n").resolve().unwrap();
+    let left = side_ids(&diagnostics, StatusSide::Left);
+    let scroll = left.iter().position(|id| *id == StatusSegmentId::Scroll).unwrap();
+    assert_eq!(left[scroll - 1], StatusSegmentId::Font, "{left:?}");
     assert!(side_ids(&minimal, StatusSide::Center).is_empty());
     assert_eq!(
         side_ids(&minimal, StatusSide::Right),
@@ -422,14 +428,16 @@ fn paste_and_ime_keys_resolve() {
 
 #[test]
 fn size_hold_and_display_segments_resolve() {
-    // `size` holds 1500 ms by default; `font` and `size` are opt-in, `history` is a developer default.
+    // `size` holds 1500 ms by default and is opt-in; `history` and `font` are developer defaults.
     let defaults = StatusLineConfig::default().resolve().unwrap();
     assert_eq!(defaults.size, SizeSettings { hold_ms: 1500 });
     assert!(defaults.segment(StatusSegmentId::History).is_some());
-    assert!(defaults.segment(StatusSegmentId::Font).is_none());
+    assert!(defaults.segment(StatusSegmentId::Font).is_some());
     assert!(defaults.segment(StatusSegmentId::Size).is_none());
-    let config =
-        parse("right = [\"font\", \"size\"]\n[status_line.segment.size]\nhold_ms = 3000\n");
+    // `font` is in the preset's left list, so a file that moves it replaces that list too.
+    let config = parse(
+        "left = [\"mode\"]\nright = [\"font\", \"size\"]\n[status_line.segment.size]\nhold_ms = 3000\n",
+    );
     let resolved = config.resolve().unwrap();
     assert_eq!(resolved.size, SizeSettings { hold_ms: 3000 });
     assert_eq!(
@@ -579,4 +587,46 @@ fn accessibility_keys_validate_and_unknown_ones_are_reported() {
     }
     let unknown_id = "[status_line]\n[status_line.accessibility]\nannounce = [\"bel\"]\n";
     assert!(toml::from_str::<crate::config::Config>(unknown_id).is_err());
+}
+
+/// `position` defaults to `top`, reads `bottom`, and an unknown value fails the load.
+#[test]
+fn position_defaults_to_top_and_rejects_unknown_values() {
+    assert_eq!(StatusLineConfig::default().resolve().unwrap().position, StatusPosition::Top);
+    assert_eq!(
+        parse("position = \"bottom\"\n").resolve().unwrap().position,
+        StatusPosition::Bottom
+    );
+    assert_eq!(parse("position = \"top\"\n").position, StatusPosition::Top);
+    let config =
+        |body: &str| toml::from_str::<crate::config::Config>(&format!("[status_line]\n{body}"));
+    assert!(config("position = \"left\"\n").is_err(), "an unknown position fails the load");
+}
+
+/// `font_scale` defaults to 0.8, reads any value in 0.3..=1.0 to hundredths, and a value outside
+/// that range, or not a number, fails the load like `update_interval_ms` does.
+#[test]
+fn font_scale_defaults_to_eighty_percent_and_rejects_out_of_range() {
+    let defaults = StatusLineConfig::default().resolve().unwrap();
+    assert_eq!(defaults.font_scale, StatusFontScale::DEFAULT);
+    assert!((defaults.font_scale.as_f32() - 0.8).abs() < 1e-6);
+    let parsed = parse("font_scale = 0.65\n").resolve().unwrap();
+    assert!((parsed.font_scale.as_f32() - 0.65).abs() < 1e-6);
+    assert!((parse("font_scale = 1\n").resolve().unwrap().font_scale.as_f32() - 1.0).abs() < 1e-6);
+    for body in ["font_scale = 0.29\n", "font_scale = 1.01\n", "font_scale = nan\n"] {
+        assert!(parse(body).resolve().is_err(), "{body}");
+    }
+    let config =
+        |body: &str| toml::from_str::<crate::config::Config>(&format!("[status_line]\n{body}"));
+    assert!(config("font_scale = 2.0\n").unwrap().status_line.validate().is_err());
+}
+
+/// The scale steps by 0.05 and stays in 0.3..=1.0.
+#[test]
+fn font_scale_steps_and_clamps() {
+    let scale = StatusFontScale::DEFAULT;
+    assert!((scale.stepped(1).as_f32() - 0.85).abs() < 1e-6);
+    assert!((scale.stepped(-1).as_f32() - 0.75).abs() < 1e-6);
+    assert_eq!(StatusFontScale::MAX.stepped(1), StatusFontScale::MAX);
+    assert_eq!(StatusFontScale::MIN.stepped(-1), StatusFontScale::MIN);
 }

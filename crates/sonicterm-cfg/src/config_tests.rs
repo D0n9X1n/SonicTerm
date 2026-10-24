@@ -970,3 +970,44 @@ fn a_status_line_save_keeps_crlf_and_unknown_keys_and_refuses_a_concurrent_chang
     assert_eq!(std::fs::read(&path).unwrap(), concurrent);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Save writes `position` only when the session's differs from the file's, and a reload then
+/// shows the saved position.
+#[test]
+fn a_status_line_save_writes_position_only_when_it_differs() {
+    use crate::status_line::StatusPosition;
+    let dir = font_persist_test_dir("status-position");
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, "[status_line]\nenabled = true\n").unwrap();
+    let unchanged = session_save(&path, |_, _| {});
+    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&unchanged)).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("position"), "the file's position is not written: {text}");
+    let mut moved = unchanged.clone();
+    moved.position = StatusPosition::Bottom;
+    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&moved)).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("position = \"bottom\""), "{text}");
+    assert_eq!(reloaded_lists(&path), moved, "the reload shows the saved position");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Save writes `font_scale` only when the session's differs from the file's, as `0.85`, and a
+/// reload shows it.
+#[test]
+fn a_status_line_save_writes_font_scale_only_when_it_differs() {
+    use crate::status_line::StatusFontScale;
+    let dir = font_persist_test_dir("status-font-scale");
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, "[status_line]\nenabled = true\n").unwrap();
+    let unchanged = session_save(&path, |_, _| {});
+    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&unchanged)).unwrap();
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("font_scale"));
+    let mut larger = unchanged.clone();
+    larger.font_scale = StatusFontScale::DEFAULT.stepped(1);
+    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&larger)).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("font_scale = 0.85"), "{text}");
+    assert_eq!(reloaded_lists(&path), larger, "the reload shows the saved scale");
+    let _ = std::fs::remove_dir_all(dir);
+}

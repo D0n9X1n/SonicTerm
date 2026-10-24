@@ -1247,6 +1247,50 @@ fn atlas_change(
     retry_is_full(renderer, &mut scene, record, "atlas change")
 }
 
+/// A strip moved from the top to the bottom keeps routing to the band still on screen when the
+/// frame at the new edge fails to present; the next presented frame commits the bottom band,
+/// and the insets reserve it there, so no pane area overlaps it.
+fn moved_strip_routes_until_presented(
+    renderer: &mut GpuRenderer,
+    layout: &Layout,
+    _active: &ActiveEventLoop,
+) -> Result<(), String> {
+    use sonicterm_render_model::boundary::cfg::status_line::StatusPosition;
+    let mut scene = single(layout);
+    renderer.set_status_line_position(StatusPosition::Top);
+    renderer.set_status_line_visible(true);
+    present(renderer, &mut scene)?;
+    let top = renderer.status_line_hit().ok_or("the top strip presented")?;
+    let top_end = top.top + top.height;
+    check(
+        top_end <= renderer.top_inset() + 0.5,
+        &format!("the panes start at {} below the top band ending {top_end}", renderer.top_inset()),
+    )?;
+    check(renderer.set_status_line_position(StatusPosition::Bottom), "a shown strip moves")?;
+    renderer.__fail_next_present();
+    let outcome = frame(renderer, &mut scene);
+    check(matches!(outcome, PresentOutcome::Failed(_)), &format!("Failed: {outcome:?}"))?;
+    let kept = renderer.status_line_hit().ok_or("the failed frame keeps the presented strip")?;
+    check(kept.top == top.top, &format!("still the top band: {} vs {}", kept.top, top.top))?;
+    present(renderer, &mut scene)?;
+    let bottom = renderer.status_line_hit().ok_or("the bottom strip presented")?;
+    let surface_h = layout.pane.h as f32;
+    check(bottom.top > top.top, &format!("the band moved down: {}", bottom.top))?;
+    let panes_bottom = surface_h - renderer.bottom_inset();
+    check(
+        bottom.top >= panes_bottom - 0.5,
+        &format!("panes end at {panes_bottom} above the band at {}", bottom.top),
+    )?;
+    check(
+        renderer.top_inset() < top_end,
+        &format!("the top inset {} gave the strip's rows back", renderer.top_inset()),
+    )?;
+    renderer.set_status_line_visible(false);
+    renderer.set_status_line_position(StatusPosition::Top);
+    present(renderer, &mut scene)?;
+    Ok(())
+}
+
 /// Tests 8b, 18 and 21: a submission that fails validation after the retained draw stops the
 /// device; the frame is `RenderingUnavailable`, commits no record, receipt or partial frame and
 /// clears the key. After recovery onto a new device, the first frame is `Full`.
@@ -1739,7 +1783,7 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
     settle_fallback(&mut renderer, &layout)?;
     let mut failures = Vec::new();
     // Recovery rebinds the device and degrading switches presenters, so those run last.
-    let cases: [(&str, Case); 12] = [
+    let cases: [(&str, Case); 13] = [
         ("pixel parity", pixel_parity),
         ("emission and upload", emission_and_upload_shrink),
         ("overhanging records", overhanging_records),
@@ -1750,6 +1794,7 @@ fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
         ("warm glyph rows match a cold renderer", warm_rows_match_a_cold_renderer),
         ("GDI warm and cold frames", gdi_warm_and_cold_frames_match),
         ("row ink grows and shrinks", row_ink_grows_and_shrinks),
+        ("moved strip routes until presented", moved_strip_routes_until_presented),
         ("submission failure", submission_failure),
         ("degraded is never partial", degraded_is_never_partial),
     ];

@@ -3452,7 +3452,8 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
     let helper = &CORE_SRC[helper_start..helper_end];
     assert_eq!(helper.matches("try_new_full_with_weight_and_font_dirs(").count(), 1);
     assert!(helper.contains("font_dirs"));
-    assert_eq!(helper.matches("with_font_size(").count(), 2);
+    // Tab title, palette footer and status line are sibling views of the one body stack.
+    assert_eq!(helper.matches("with_font_size(").count(), 3);
 
     // Platform locators can accept a family without resolving it on a CI host;
     // the tracked asset fixture makes the native-size metric assertion real.
@@ -3489,6 +3490,7 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
     for assignment in [
         "self.tab_title_font.set_font(family, size, weight_scale, new_stacks.tab_title);",
         "self.palette_footer_font_stack = new_stacks.palette_footer;",
+        "self.status_line_font_stack = new_stacks.status_line;",
     ] {
         assert!(set_font.contains(assignment), "missing stack replacement: {assignment}");
     }

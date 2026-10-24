@@ -19,6 +19,7 @@ use sonicterm_cfg::status_overrides::{
 };
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
+use sonicterm_logging::graphics_memory::{GraphicsMemory, GraphicsSource};
 use sonicterm_logging::MemoryMetric;
 use sonicterm_ui::copy_mode::CopyModeState;
 use sonicterm_ui::selection::{
@@ -27,24 +28,20 @@ use sonicterm_ui::selection::{
 use sonicterm_ui::status_line::{
     build_view, sanitize_link_text, AlertsInput, ClipInput, ClipOutcome, ClipSource, FontInput,
     GlyphsInput, HealthInput, ImeInput, InputState, LinkInput, MemHistory, MemInput, ModeInput,
-    NotSentReason, NumberStyle, PathAction, ReloadFailure, RenderHealth, SegmentClick,
-    SegmentHandler, SelInput, StatusLineInputs, StatusLineView,
+    NotSentReason, NumberStyle, ReloadFailure, RenderHealth, SegmentClick, SegmentHandler,
+    SelInput, StatusLineInputs, StatusLineView,
 };
 use sonicterm_ui::status_line::{
     byte_rate, cpu_percent, FrameInput, Hysteresis, PathCheckInput, PresenterKind, TabMemInput,
 };
 use winit::window::WindowId;
 
-use super::path_target::{PathKind, PathOpenDecision, ProbeStatus};
+use super::path_target::{open_modifier_in, PathOpenDecision, ProbeStatus};
 use super::redraw::RedrawCause;
 use super::window_keyboard::{ime_route_for, ImeRoute};
 use super::window_state::WindowState;
 use super::CommandPhase;
 use super::{resize_panes_to_rects, App};
-
-/// A path check still running after this long is shown as `checking`;
-/// faster checks never flicker through it.
-const PENDING_SHOW_AFTER: Duration = Duration::from_millis(300);
 
 /// Focused-pane facts copied in the frame pass, which already holds the
 /// pane's parser guard, so the status line timer never reads a parser.
@@ -146,8 +143,6 @@ pub(crate) struct StatusLineState {
     keymap_error: Option<ReloadFailure>,
     /// Focused-pane facts per window, from the last frame pass.
     pane_facts: HashMap<WindowId, StatusPaneFacts>,
-    /// The pending path under each window's pointer and when it was first seen.
-    pending_since: HashMap<WindowId, (std::path::PathBuf, Instant)>,
     /// What each window's strip was last built from.
     built: HashMap<WindowId, BuiltFrom>,
     /// Whether startup load failures were already recorded.
@@ -322,6 +317,25 @@ pub(crate) fn tab_mem_input(
     }
     let age = now.saturating_duration_since(oldest?);
     Some(TabMemInput { bytes, stale_secs: (age > fresh_for).then_some(age.as_secs()) })
+}
+
+/// The `mem` figure: the process footprint minus the graphics memory the OS charges to it.
+///
+/// Only macOS separates that part: its `task_info` graphics ledger names the bytes charged to
+/// the physical footprint, which are subtracted, flooring at zero because the two figures are
+/// read apart. DXGI reports Windows video memory by segment group, not as a share of private
+/// commit, and Linux has no graphics figure, so those footprints are kept. An unsupported
+/// footprint stays unsupported.
+pub(crate) fn mem_without_graphics(
+    footprint: MemoryMetric,
+    graphics: &GraphicsMemory,
+) -> MemoryMetric {
+    match (footprint, graphics.source, graphics.footprint) {
+        (MemoryMetric::Bytes(bytes), GraphicsSource::TaskVmInfo, MemoryMetric::Bytes(charged)) => {
+            MemoryMetric::Bytes(bytes.saturating_sub(charged))
+        }
+        _ => footprint,
+    }
 }
 
 /// The presenter a window draws through: GDI only on Windows with the software degrade on;
@@ -732,96 +746,63 @@ pub(crate) fn waits_on_gpu_recovery(recovering: bool, stopped: bool, accepts_wor
     recovering && (stopped || !accepts_work)
 }
 
-/// The link segment's input for `window`: the last built `previous` while an event has cleared
-/// the hover and no frame has re-detected it, so a clear the next frame undoes never redraws the
-/// strip; otherwise [`link_input`].
+/// The link segment's input for `window`: nothing unless the platform's open modifier (Cmd on
+/// macOS, Ctrl elsewhere) is held, so ordinary hovering adds no strip noise; the last built
+/// `previous` while an event has cleared the hover and no frame has re-detected it, so a clear
+/// the next frame undoes never redraws the strip; otherwise [`link_input`].
 pub(crate) fn strip_link(
     window: &WindowState,
-    window_id: WindowId,
     previous: Option<&Option<LinkInput>>,
-    pending_since: &mut HashMap<WindowId, (std::path::PathBuf, Instant)>,
-    now: Instant,
     i18n: &sonicterm_ui::i18n::I18n,
-) -> (Option<LinkInput>, Option<Instant>) {
+) -> Option<LinkInput> {
+    if !open_modifier_in(window.modifiers) {
+        // When: open_modifier_in(window.modifiers) is false, the segment shows nothing.
+        return None;
+    }
     match previous {
         // While hover_unresolved is set, the redraw its clear requested re-detects the target.
-        Some(previous) if window.hover_unresolved => (previous.clone(), None),
-        _ => link_input(window, window_id, pending_since, now, i18n),
+        Some(previous) if window.hover_unresolved => previous.clone(),
+        _ => link_input(window, i18n),
     }
 }
 
-/// The link segment's input for `window`, and when a pending check becomes
-/// worth showing.
-fn link_input(
-    window: &WindowState,
-    window_id: WindowId,
-    pending_since: &mut HashMap<WindowId, (std::path::PathBuf, Instant)>,
-    now: Instant,
-    i18n: &sonicterm_ui::i18n::I18n,
-) -> (Option<LinkInput>, Option<Instant>) {
+/// The link segment's input for `window`: a hovered URL, or a local path only when detection
+/// failed. A path that resolved is already underlined, and one still being checked has nothing
+/// to report yet, so neither adds strip text.
+fn link_input(window: &WindowState, i18n: &sonicterm_ui::i18n::I18n) -> Option<LinkInput> {
     let Some(status) = window.path_probe.status() else {
         // When: `path_probe` has no status, no local path is under the pointer; a hovered URL is the only link.
-        pending_since.remove(&window_id);
-        let link = window.hovered_url.as_ref().map(|hovered| {
+        return window.hovered_url.as_ref().map(|hovered| {
             let label = hovered.label.as_ref().map(|label| (label.text.as_str(), label.complete));
             LinkInput::from_hover(&hovered.url, label)
         });
-        return (link, None);
     };
+    path_failure(status, i18n)
+}
+
+/// The strip text for a path whose detection failed, or `None` when it resolved or is still
+/// being checked.
+fn path_failure(status: ProbeStatus<'_>, i18n: &sonicterm_ui::i18n::I18n) -> Option<LinkInput> {
     let blocked = |path: &std::path::Path, key: &str| LinkInput::Blocked {
         path: display_path(path),
         reason: i18n.translate(key),
     };
-    let link = match status {
-        ProbeStatus::Pending(path) => {
-            // When: `Pending`, validation is running; it shows only after 300 ms.
-            let since = match pending_since.get(&window_id) {
-                Some((pending, since)) if pending == path => *since,
-                _ => {
-                    pending_since.insert(window_id, (path.to_path_buf(), now));
-                    now
-                }
-            };
-            let show_at = since + PENDING_SHOW_AFTER;
-            if now < show_at {
-                // When: `now` is before `show_at`, show nothing yet and wake at `show_at`.
-                return (None, Some(show_at));
-            }
-            return (Some(LinkInput::Checking { path: display_path(path) }), None);
-        }
-        ProbeStatus::Selected(path, decision) => {
-            let action = match decision {
-                PathOpenDecision::Openable(PathKind::Directory) => Some(PathAction::OpenFolder),
-                PathOpenDecision::Openable(PathKind::File) | PathOpenDecision::SourceReveal => {
-                    Some(PathAction::Reveal)
-                }
-                #[cfg(any(target_os = "macos", test))]
-                PathOpenDecision::Revealable(kind) => {
-                    // When: `Revealable` on macOS, a folder opens and a file is selected in Finder.
-                    Some(match kind {
-                        PathKind::Directory => PathAction::OpenFolder,
-                        PathKind::File => PathAction::Reveal,
-                    })
-                }
-                PathOpenDecision::Blocked | PathOpenDecision::Missing => None,
-            };
-            match (action, decision) {
-                (Some(action), _) => LinkInput::Path { path: display_path(path), action },
-                (None, PathOpenDecision::Missing) => {
-                    LinkInput::NotFound { path: display_path(path) }
-                }
-                (None, _) => blocked(path, "path-error-blocked"),
-            }
-        }
+    match status {
+        // A check still running, or a path that resolved to an action, is not a failure.
+        ProbeStatus::Pending(_) => None,
+        ProbeStatus::Selected(path, decision) => match decision {
+            PathOpenDecision::Missing => Some(LinkInput::NotFound { path: display_path(path) }),
+            PathOpenDecision::Blocked => Some(blocked(path, "path-error-blocked")),
+            // An openable or revealable path is already underlined, so it adds no strip text.
+            _ => None,
+        },
         ProbeStatus::Failed(path, "path-error-missing") => {
-            LinkInput::NotFound { path: display_path(path) }
+            Some(LinkInput::NotFound { path: display_path(path) })
         }
-        ProbeStatus::Failed(path, reason) => blocked(path, reason),
-        ProbeStatus::NoDirectory(path) => blocked(path, "status-reason-no-directory"),
-        ProbeStatus::AltScreen(path) => blocked(path, "status-reason-alt-screen"),
-    };
-    pending_since.remove(&window_id);
-    (Some(link), None)
+        ProbeStatus::Failed(path, reason) => Some(blocked(path, reason)),
+        ProbeStatus::NoDirectory(path) => Some(blocked(path, "status-reason-no-directory")),
+        ProbeStatus::AltScreen(path) => Some(blocked(path, "status-reason-alt-screen")),
+    }
 }
 
 impl StatusLineState {
@@ -999,6 +980,30 @@ impl App {
         let hide = !self.status_line.hide_sensitive;
         self.change_status_choices(|overrides, file| overrides.set_hide_sensitive(file, hide));
         tracing::info!("status line hide_sensitive -> {}", self.status_line.hide_sensitive);
+    }
+
+    /// Move the strip to `position` in every window for this session; the panes refit once.
+    pub(super) fn move_status_line(
+        &mut self,
+        position: sonicterm_cfg::status_line::StatusPosition,
+    ) {
+        self.change_status_choices(|overrides, file| overrides.set_position(file, position));
+        tracing::info!("status line position -> {}", position.as_str());
+    }
+
+    /// Make the strip's text `steps` steps of 0.05 larger (negative: smaller) in every window for
+    /// this session, within 0.3..=1.0.
+    pub(super) fn step_status_line_font_scale(&mut self, steps: i16) {
+        let scale = self.status_line.resolved.font_scale.stepped(steps);
+        self.change_status_choices(|overrides, file| overrides.set_font_scale(file, scale));
+        tracing::info!("status line font_scale -> {}", scale.as_f32());
+    }
+
+    /// Return the strip's text to the default 0.8 in every window for this session.
+    pub(super) fn reset_status_line_font_scale(&mut self) {
+        let scale = sonicterm_cfg::status_line::StatusFontScale::DEFAULT;
+        self.change_status_choices(|overrides, file| overrides.set_font_scale(file, scale));
+        tracing::info!("status line font_scale -> {}", scale.as_f32());
     }
 
     /// Show segment `id` if it is hidden, hide it if it is shown, for this session.
@@ -1207,7 +1212,10 @@ impl App {
         } else if slept || self.status_line.next_sample.is_none_or(|due| now >= due) {
             // When: a sample is due, read each listed figure once for every window.
             if samples_mem {
-                let bytes = match sonicterm_logging::process_report::sample_footprint().current {
+                // Only the macOS ledger is subtracted, so no DXGI adapter is queried here.
+                let footprint = sonicterm_logging::process_report::sample_footprint().current;
+                let graphics = sonicterm_logging::graphics_memory::sample(None);
+                let bytes = match mem_without_graphics(footprint, &graphics) {
                     MemoryMetric::Bytes(bytes) => Some(bytes),
                     MemoryMetric::Unsupported => None,
                 };
@@ -1259,10 +1267,8 @@ impl App {
             .is_open()
             .then(|| self.palette_attached_window.or(self.main_window_id))
             .flatten();
-        let font = (self.config.font.size != self.configured_font_size).then(|| FontInput {
-            live_tenths: (self.config.font.size * 10.0).round() as u32,
-            configured_tenths: (self.configured_font_size * 10.0).round() as u32,
-        });
+        let font = (self.config.font.size != self.configured_font_size)
+            .then(|| FontInput::from_sizes(self.config.font.size, self.configured_font_size));
         let path_check_listed = visible
             && any_eligible
             && self.status_line.resolved.segment(StatusSegmentId::PathCheck).is_some();
@@ -1366,7 +1372,6 @@ impl App {
         let sel_shown = state.resolved.segment(StatusSegmentId::Sel).is_some();
         let copied_for = Duration::from_secs(state.resolved.sel.copied_secs);
         state.pane_facts.retain(|window_id, _| windows.contains_key(window_id));
-        state.pending_since.retain(|window_id, _| windows.contains_key(window_id));
         state.built.retain(|window_id, _| windows.contains_key(window_id));
         let mut minimums_changed = false;
         let mut redraws = 0;
@@ -1385,8 +1390,13 @@ impl App {
             };
             // Only terminal windows carry the strip; the Memory Usage report never does.
             let shown = visible && window.role == super::WindowRole::Terminal;
-            if renderer.set_status_line_visible(shown) {
-                // When: `set_status_line_visible` flipped visibility, refit panes to the new bottom inset.
+            // Both setters run, position first, so a reload that moves and shows the strip
+            // refits the panes once.
+            let moved = renderer.set_status_line_position(state.resolved.position);
+            // A new text size keeps the strip's height, so it redraws without a refit.
+            let rescaled = renderer.set_status_line_font_scale(state.resolved.font_scale.as_f32());
+            if renderer.set_status_line_visible(shown) | moved {
+                // When: `set_status_line_visible` or `moved` changed the insets, refit panes once.
                 minimums_changed = true;
                 state.built.remove(window_id);
                 let rects = App::compute_pane_rects_for(window);
@@ -1405,17 +1415,18 @@ impl App {
                 window.mark_redraw(RedrawCause::Topology);
                 dispatch_redraws.request(*window_id, window);
             }
+            if rescaled {
+                // The strip's text size changed and its tiles were dropped, so it redraws.
+                window.mark_redraw(RedrawCause::StatusLine);
+                dispatch_redraws.request(*window_id, window);
+            }
             if !shown {
                 // When: `shown` is false, the strip is off here: no band to route, nothing to format.
                 window.status_strip = None;
                 continue;
             }
             let previous_link = state.built.get(window_id).map(|built| &built.inputs.link);
-            let (link, link_wake) =
-                strip_link(window, *window_id, previous_link, &mut state.pending_since, now, i18n);
-            if let Some(wake) = link_wake {
-                next_wake = Some(next_wake.map_or(wake, |next| next.min(wake)));
-            }
+            let link = strip_link(window, previous_link, i18n);
             let sel = if sel_shown {
                 let has_selection =
                     window.copy_mode.as_ref().and_then(CopyModeState::selected_range).is_some()

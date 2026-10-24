@@ -62,6 +62,11 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "ToggleTabBar",
     "ToggleStatusLine",
     "ToggleStatusLineSensitive",
+    "StatusLinePositionTop",
+    "StatusLinePositionBottom",
+    "IncreaseStatusLineFontScale",
+    "DecreaseStatusLineFontScale",
+    "ResetStatusLineFontScale",
     "ChooseStatusLineSegments",
     "FocusStatusLine",
     "RenameTab",
@@ -436,6 +441,36 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
             "command-toggle-status-line-sensitive",
             &["status", "privacy", "screen", "share", "hide"],
         ),
+        Action::StatusLinePositionTop => (
+            "StatusLinePositionTop",
+            Appearance,
+            "command-status-line-position-top",
+            &["status", "top", "position", "move"],
+        ),
+        Action::StatusLinePositionBottom => (
+            "StatusLinePositionBottom",
+            Appearance,
+            "command-status-line-position-bottom",
+            &["status", "bottom", "position", "move"],
+        ),
+        Action::IncreaseStatusLineFontScale => (
+            "IncreaseStatusLineFontScale",
+            Appearance,
+            "command-increase-status-line-font-scale",
+            &["status", "font", "size", "larger", "bigger"],
+        ),
+        Action::DecreaseStatusLineFontScale => (
+            "DecreaseStatusLineFontScale",
+            Appearance,
+            "command-decrease-status-line-font-scale",
+            &["status", "font", "size", "smaller"],
+        ),
+        Action::ResetStatusLineFontScale => (
+            "ResetStatusLineFontScale",
+            Appearance,
+            "command-reset-status-line-font-scale",
+            &["status", "font", "size", "reset", "default"],
+        ),
         Action::ChooseStatusLineSegments => (
             "ChooseStatusLineSegments",
             Appearance,
@@ -549,6 +584,11 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         | Action::ToggleTabBar
         | Action::ToggleStatusLine
         | Action::ToggleStatusLineSensitive
+        | Action::StatusLinePositionTop
+        | Action::StatusLinePositionBottom
+        | Action::IncreaseStatusLineFontScale
+        | Action::DecreaseStatusLineFontScale
+        | Action::ResetStatusLineFontScale
         | Action::ToggleFullscreen => (Requirement::Window, false),
         Action::OpenCommandPalette
         | Action::RenameWindow
@@ -633,6 +673,11 @@ pub fn label(action: &Action) -> String {
         Action::ToggleTabBar => "Toggle Tab Bar".into(),
         Action::ToggleStatusLine => "Toggle Status Line".into(),
         Action::ToggleStatusLineSensitive => "Toggle Status Line Sensitive Content".into(),
+        Action::StatusLinePositionTop => "Status Line: Move to Top".into(),
+        Action::StatusLinePositionBottom => "Status Line: Move to Bottom".into(),
+        Action::IncreaseStatusLineFontScale => "Status Line: Larger Text".into(),
+        Action::DecreaseStatusLineFontScale => "Status Line: Smaller Text".into(),
+        Action::ResetStatusLineFontScale => "Status Line: Reset Text Size".into(),
         Action::ChooseStatusLineSegments => "Status Line: Choose Segments".into(),
         Action::FocusStatusLine => "Focus Status Line".into(),
         Action::RenameTab => "Rename Active Tab".into(),

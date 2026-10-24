@@ -1116,3 +1116,26 @@ fn memo_skips_resolution_and_every_warmed_sibling_misses_after_a_shared_change()
         }
     }
 }
+
+/// The bundled font reports a cap height of its own: below the cell height, and scaling with
+/// the stack's size, so the strip centers on the font's measurement, not the `H` fallback.
+#[test]
+fn bundled_font_reports_a_cap_height_that_follows_its_size() {
+    let at = |size: f64| {
+        FontStack::try_new_with_font_dirs_for_test(
+            &[(DEFAULT_FONT_FAMILY, false)],
+            vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+            size,
+            72,
+            1.0,
+        )
+        .unwrap()
+    };
+    let (small, large) = (at(9.6), at(19.2));
+    let small_cap = small.cap_height_raster_px().expect("the bundled font has a cap height");
+    let large_cap = large.cap_height_raster_px().expect("at every size");
+    let cell_h = small.cell_metrics_raster_px().unwrap().cell_h;
+    assert!(small_cap > 0.0 && small_cap < cell_h, "cap {small_cap} vs cell {cell_h}");
+    assert!(large_cap > small_cap * 1.6, "{large_cap} follows the size from {small_cap}");
+    println!("cap height: {small_cap} px at 9.6 pt, {large_cap} px at 19.2 pt");
+}

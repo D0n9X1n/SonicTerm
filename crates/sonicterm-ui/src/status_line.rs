@@ -43,14 +43,14 @@ pub enum StatusTone {
     Warn,
     /// Red failure.
     Error,
-    /// A mode chip on a tinted background.
+    /// A mode chip: bold text in the value color, with no background.
     Chip,
-    /// A mode chip that needs attention (broadcast input).
+    /// A mode chip that needs attention (broadcast input): bold text in the caution color.
     ChipWarn,
 }
 
 impl StatusTone {
-    /// Whether the part is drawn as a chip with its own background.
+    /// Whether the part is a mode chip, drawn bold in its color with no background.
     pub fn is_chip(self) -> bool {
         matches!(self, Self::Chip | Self::ChipWarn)
     }
@@ -504,13 +504,24 @@ pub struct AlertsInput {
 /// Tab numbers the alerts segment lists before it counts the rest.
 const ALERT_TABS_SHOWN: usize = 4;
 
-/// The live and configured font sizes, in tenths of a point so the inputs stay comparable.
+/// The live font size as a scale of the configured size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontInput {
-    /// The live size.
-    pub live_tenths: u32,
-    /// The configured size.
-    pub configured_tenths: u32,
+    /// The live size as a whole percent of the configured size, rounded half up from the real
+    /// sizes; `None` for a zero configured size, which has no scale.
+    pub scale_percent: Option<u32>,
+}
+
+impl FontInput {
+    /// The scale of `live` points over `configured` points, from the sizes themselves, not from
+    /// sizes rounded first, so 14.34 over 13.34 is 107%.
+    pub fn from_sizes(live: f32, configured: f32) -> Self {
+        let scale_percent = (configured > 0.0)
+            .then(|| (f64::from(live) / f64::from(configured) * 100.0).round())
+            .filter(|percent| percent.is_finite() && *percent >= 0.0)
+            .map(|percent| percent.min(f64::from(u32::MAX)) as u32);
+        Self { scale_percent }
+    }
 }
 
 /// What the input-method segment shows; it appears only for a problem.
@@ -1069,12 +1080,19 @@ fn format_mode(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Formatt
         spoken.push(env.i18n.t_args("status-spoken-broadcast", Some(&[("count", &count_text)])));
     }
     if mode.copy {
+        // A space separates chips now that no background sets them apart.
+        if !parts.is_empty() {
+            parts.push(StatusPart::new(" ", StatusTone::Name));
+        }
         parts.push(StatusPart::new(env.i18n.translate("status-chip-copy"), StatusTone::Chip));
         spoken.push(env.i18n.translate("status-spoken-copy-mode"));
     }
     let compact = parts.clone();
     if mode.mouse_captured {
-        // A program captured the mouse, explain why clicks go to it.
+        // A program captured the mouse, explain why clicks go to it; its space drops with it.
+        if !parts.is_empty() {
+            parts.push(StatusPart::new(" ", StatusTone::Name).droppable());
+        }
         parts.push(
             StatusPart::new(env.i18n.translate("status-chip-mouse"), StatusTone::Chip).droppable(),
         );
@@ -1343,15 +1361,6 @@ fn format_ime(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Formatte
     Some(FormattedSegment::plain(parts, env.i18n.translate(spoken_key)))
 }
 
-/// `tenths` of a point as `16` or `13.5`, with the locale's decimal separator.
-fn format_tenths(tenths: u32, style: NumberStyle) -> String {
-    let whole = format_count(u64::from(tenths / 10), style);
-    match tenths % 10 {
-        0 => whole,
-        fraction => format!("{whole}{}{fraction}", style.decimal),
-    }
-}
-
 /// The history segment: `History: trimmed` after the byte budget dropped rows from the focused
 /// pane's scrollback, until the trim is acknowledged.
 fn format_history(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
@@ -1365,22 +1374,17 @@ fn format_history(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Form
     Some(FormattedSegment { default_click: true, ..FormattedSegment::plain(parts, spoken) })
 }
 
-/// The font segment: `Font: 16pt (+2)` while the live size differs from the configured size.
+/// The font segment: `Scale: 115%`, the live font size as a percent of the configured size,
+/// shown only while that percent is not 100.
 fn format_font(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<FormattedSegment> {
-    let font = inputs.font.filter(|font| font.live_tenths != font.configured_tenths)?;
-    let live = format_tenths(font.live_tenths, env.numbers);
-    let (sign, spoken_key, delta) = if font.live_tenths > font.configured_tenths {
-        ("+", "status-spoken-font-larger", font.live_tenths - font.configured_tenths)
-    } else {
-        // When: live_tenths is below configured_tenths, the delta is a reduction.
-        ("\u{2212}", "status-spoken-font-smaller", font.configured_tenths - font.live_tenths)
-    };
-    let delta = format_tenths(delta, env.numbers);
+    let percent =
+        inputs.font.and_then(|font| font.scale_percent).filter(|percent| *percent != 100)?;
+    let value = format_count(u64::from(percent), env.numbers);
     let parts = vec![
         name_part(env, "status-name-font"),
-        StatusPart::new(format!("{live}pt ({sign}{delta})"), StatusTone::Value),
+        StatusPart::new(format!("{value}%"), StatusTone::Value),
     ];
-    let spoken = env.i18n.t_args(spoken_key, Some(&[("size", &live), ("delta", &delta)]));
+    let spoken = env.i18n.t_args("status-value-font-scale", Some(&[("percent", &value)]));
     Some(FormattedSegment { default_click: true, ..FormattedSegment::plain(parts, spoken) })
 }
 
@@ -1911,14 +1915,51 @@ pub struct FitMetrics {
     pub edge_pad: f32,
     /// Space between segments and between lists.
     pub segment_gap: f32,
-    /// Horizontal padding inside a chip's background.
-    pub chip_pad: f32,
-    /// Space between two adjacent chips.
-    pub chip_gap: f32,
+    /// Width of the `|` drawn between two adjacent segments of one list; it widens only those gaps.
+    pub separator_width: f32,
 }
 
-/// One placed part. For a chip, `x` and `width` cover its background and
-/// the text starts `chip_pad` further right.
+impl FitMetrics {
+    /// The gap between two adjacent segments of one list: the segment gap with the separator in it.
+    fn in_group_gap(&self) -> f32 {
+        self.segment_gap + self.separator_width
+    }
+}
+
+/// The text of the separator drawn between adjacent segments of one list.
+pub const SEGMENT_SEPARATOR: &str = "|";
+
+/// The separators between adjacent presented segments of each list, left list first: a `|` in the
+/// name tone centered in each gap. None goes at a list's edge or between lists, and none is a hit
+/// box, so a press on one finds no segment.
+pub fn separators(
+    view: &StatusLineView,
+    placed: &[PlacedSegment],
+    metrics: &FitMetrics,
+) -> Vec<PlacedPart> {
+    let mut found = Vec::new();
+    for side in [StatusSide::Left, StatusSide::Center, StatusSide::Right] {
+        let mut group: Vec<&PlacedSegment> = placed
+            .iter()
+            .filter(|segment| {
+                view.segments.get(segment.index).is_some_and(|view| view.side == side)
+            })
+            .collect();
+        group.sort_by(|first, second| first.left.total_cmp(&second.left));
+        for pair in group.windows(2) {
+            let (gap_start, gap_end) = (pair[0].left + pair[0].width, pair[1].left);
+            found.push(PlacedPart {
+                text: SEGMENT_SEPARATOR.to_string(),
+                tone: StatusTone::Name,
+                left: (gap_start + gap_end) / 2.0 - metrics.separator_width / 2.0,
+                width: metrics.separator_width,
+            });
+        }
+    }
+    found
+}
+
+/// One placed part; its text starts at `left` and spans `width`, chips included.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacedPart {
     /// Text to draw.
@@ -1927,7 +1968,7 @@ pub struct PlacedPart {
     pub tone: StatusTone,
     /// Left edge.
     pub left: f32,
-    /// Width including chip padding.
+    /// Width of its text.
     pub width: f32,
 }
 
@@ -1957,19 +1998,15 @@ struct FitSlot {
 }
 
 impl FitSlot {
-    /// Width of the slot's parts with chip padding and gaps.
-    fn width(&self, metrics: &FitMetrics) -> f32 {
-        let mut total = 0.0;
-        for (position, (part, width)) in self.parts.iter().zip(&self.part_widths).enumerate() {
-            total += width;
-            if part.tone.is_chip() {
-                total += 2.0 * metrics.chip_pad;
-                if position > 0 && self.parts[position - 1].tone.is_chip() {
-                    total += metrics.chip_gap;
-                }
-            }
-        }
-        total
+    /// Width of the slot's parts: the sum of their text widths.
+    fn width(&self) -> f32 {
+        self.part_widths.iter().sum()
+    }
+
+    /// Whether fitting left the slot nothing to draw, so it is not shown, takes no gap and gets
+    /// no separator.
+    fn is_blank(&self) -> bool {
+        self.parts.iter().all(|part| part.text.trim().is_empty())
     }
 }
 
@@ -2021,10 +2058,12 @@ pub fn fit(
         let widths: Vec<f32> = slots
             .iter()
             .filter(|slot| slot.active && slot.side == side)
-            .map(|slot| slot.width(metrics))
+            .map(|slot| slot.width())
             .collect();
-        (!widths.is_empty())
-            .then(|| widths.iter().sum::<f32>() + metrics.segment_gap * (widths.len() - 1) as f32)
+        // Segments of one list are a separator gap apart, so a dropped segment takes its `|` along.
+        (!widths.is_empty()).then(|| {
+            widths.iter().sum::<f32>() + metrics.in_group_gap() * (widths.len() - 1) as f32
+        })
     };
     loop {
         let groups: Vec<f32> = [StatusSide::Left, StatusSide::Center, StatusSide::Right]
@@ -2048,6 +2087,7 @@ pub fn fit(
             let compact = slot.compact.take().unwrap_or_default();
             slot.part_widths = compact.iter().map(|part| measure(&part.text)).collect();
             slot.parts = compact;
+            slot.active = !slot.is_blank();
             continue;
         }
         let Some(slot) = slots.iter_mut().filter(|slot| slot.active).min_by_key(|slot| slot.rank)
@@ -2063,6 +2103,7 @@ pub fn fit(
             // When: a droppable detail is left, drop it before the whole segment.
             slot.parts.remove(position);
             slot.part_widths.remove(position);
+            slot.active = !slot.is_blank();
             continue;
         }
         slot.active = false;
@@ -2144,50 +2185,48 @@ fn place(slots: &[FitSlot], metrics: &FitMetrics) -> Vec<PlacedSegment> {
     let mut pen = metrics.edge_pad;
     let mut left_end = None;
     for slot in active(StatusSide::Left) {
-        placed.push(place_slot(slot, pen, metrics));
-        pen += slot.width(metrics);
+        placed.push(place_slot(slot, pen));
+        pen += slot.width();
         left_end = Some(pen);
-        pen += metrics.segment_gap;
+        pen += metrics.in_group_gap();
     }
     let mut pen = metrics.width - metrics.edge_pad;
     let mut right_start = None;
     for slot in active(StatusSide::Right).collect::<Vec<_>>().into_iter().rev() {
-        pen -= slot.width(metrics);
-        placed.push(place_slot(slot, pen, metrics));
+        pen -= slot.width();
+        placed.push(place_slot(slot, pen));
         right_start = Some(pen);
-        pen -= metrics.segment_gap;
+        pen -= metrics.in_group_gap();
     }
     let center: Vec<&FitSlot> = active(StatusSide::Center).collect();
     if !center.is_empty() {
-        let total = center.iter().map(|slot| slot.width(metrics)).sum::<f32>()
-            + metrics.segment_gap * (center.len() - 1) as f32;
+        let total = center.iter().map(|slot| slot.width()).sum::<f32>()
+            + metrics.in_group_gap() * (center.len() - 1) as f32;
         let low = left_end.map_or(metrics.edge_pad, |end| end + metrics.segment_gap);
         let high = right_start
             .map_or(metrics.width - metrics.edge_pad, |start| start - metrics.segment_gap)
             - total;
         let mut pen = ((metrics.width - total) / 2.0).clamp(low, high.max(low));
         for slot in center {
-            placed.push(place_slot(slot, pen, metrics));
-            pen += slot.width(metrics) + metrics.segment_gap;
+            placed.push(place_slot(slot, pen));
+            pen += slot.width() + metrics.in_group_gap();
         }
     }
     placed.sort_by_key(|segment| segment.index);
     placed
 }
 
-/// Place one slot's parts from `origin`.
-fn place_slot(slot: &FitSlot, origin: f32, metrics: &FitMetrics) -> PlacedSegment {
+/// Place one slot's parts from `origin`, each directly after the one before it.
+fn place_slot(slot: &FitSlot, origin: f32) -> PlacedSegment {
     let mut pen = origin;
     let mut parts = Vec::with_capacity(slot.parts.len());
-    for (position, (part, text_width)) in slot.parts.iter().zip(&slot.part_widths).enumerate() {
-        let mut width = *text_width;
-        if part.tone.is_chip() {
-            if position > 0 && slot.parts[position - 1].tone.is_chip() {
-                pen += metrics.chip_gap;
-            }
-            width += 2.0 * metrics.chip_pad;
-        }
-        parts.push(PlacedPart { text: part.text.clone(), tone: part.tone, left: pen, width });
+    for (part, width) in slot.parts.iter().zip(&slot.part_widths) {
+        parts.push(PlacedPart {
+            text: part.text.clone(),
+            tone: part.tone,
+            left: pen,
+            width: *width,
+        });
         pen += width;
     }
     PlacedSegment { index: slot.index, left: origin, width: pen - origin, parts }
