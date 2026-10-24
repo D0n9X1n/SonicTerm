@@ -154,8 +154,9 @@ fn light_fixture() -> sonicterm_render_model::boundary::cfg::theme::Theme {
     theme
 }
 
-/// On the default theme and a light fixture, values, names, cautions and failures each reach
-/// 3:1 against `bg_base`; the light fixture's failing yellow falls back to the foreground.
+/// On the default theme and a light fixture, values, names, cautions, failures and both chip
+/// tones each reach 3:1 against `bg_base`; the light fixture's failing yellow falls back to the
+/// foreground.
 #[test]
 fn strip_colors_reach_three_to_one_on_dark_and_light_themes() {
     use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
@@ -167,7 +168,14 @@ fn strip_colors_reach_three_to_one_on_dark_and_light_themes() {
         let active = hex_to_chrome_color(theme.colors.tab.active_fg.0.as_str());
         let inactive = hex_to_chrome_color(theme.colors.tab.inactive_fg.0.as_str());
         let colors = StatusColors::resolve(&theme, active, inactive, &palette);
-        for tone in [StatusTone::Value, StatusTone::Name, StatusTone::Warn, StatusTone::Error] {
+        for tone in [
+            StatusTone::Value,
+            StatusTone::Name,
+            StatusTone::Warn,
+            StatusTone::Error,
+            StatusTone::Chip,
+            StatusTone::ChipWarn,
+        ] {
             let ratio = contrast_ratio(colors.text(tone), colors.background);
             assert!(ratio >= MIN_CONTRAST, "{name} {tone:?}: {ratio}");
         }
@@ -179,6 +187,28 @@ fn strip_colors_reach_three_to_one_on_dark_and_light_themes() {
     let colors = StatusColors::resolve(&light, ChromeColor::WHITE, ChromeColor::WHITE, &palette);
     assert_eq!(colors.warn, hex_to_chrome_color("#202020"), "warn falls back to the foreground");
     assert_eq!(colors.error, hex_to_chrome_color("#b00020"), "a passing red is kept");
+}
+
+/// A chip is text on the strip background, so an active-tab color under 3:1 there falls back to
+/// the theme foreground: white tab text on the light fixture, black tab text on a black strip.
+#[test]
+fn chip_text_falls_back_when_the_active_tab_color_fails() {
+    use sonicterm_render_model::boundary::cfg::theme::Hex;
+    use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
+    let light = light_fixture();
+    let palette = UiPalette::from_theme(&light);
+    let colors = StatusColors::resolve(&light, ChromeColor::WHITE, ChromeColor::WHITE, &palette);
+    assert_eq!(colors.text(StatusTone::Chip), hex_to_chrome_color("#202020"));
+    let mut black = sonicterm_render_model::boundary::cfg::theme::Theme::default();
+    black.colors.background = Hex("#000000".into());
+    black.colors.foreground = Hex("#d0d0d0".into());
+    let palette = UiPalette::from_theme(&black);
+    let tab_text = hex_to_chrome_color("#000000");
+    let colors = StatusColors::resolve(&black, tab_text, tab_text, &palette);
+    assert!(contrast_ratio(tab_text, colors.background) < MIN_CONTRAST, "fixture must fail");
+    let chip = colors.text(StatusTone::Chip);
+    assert!(contrast_ratio(chip, colors.background) >= MIN_CONTRAST, "COPY is readable: {chip:?}");
+    assert_eq!(chip, hex_to_chrome_color("#d0d0d0"), "it falls back to the foreground");
 }
 
 /// The focus ring is four edges inside the focused segment's box, filling the band's height; it is
@@ -536,4 +566,70 @@ fn the_band_reserves_its_own_edge_and_never_overlaps_the_panes() {
 fn the_hairline_sits_on_the_terminal_side() {
     assert_eq!(hairline_top(StatusPosition::Top, 28.0, 23.0, 2.0), 49.0);
     assert_eq!(hairline_top(StatusPosition::Bottom, 537.0, 23.0, 2.0), 537.0);
+}
+
+/// Draw one part of `tone` on a 400 × 200 surface with `theme`; returns its quads, glyphs and
+/// the resolved colors.
+fn emit_one_part(
+    tone: StatusTone,
+    theme: &sonicterm_render_model::boundary::cfg::theme::Theme,
+) -> (Vec<QuadInstance>, Vec<GlyphInstance>, StatusColors) {
+    use sonicterm_render_model::boundary::ui::status_line::PlacedPart;
+    use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stack = chrome_stack();
+    let mut raster = stack.clone();
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let geometry = StripGeometry {
+        top: 100.0,
+        height: 24.0,
+        position: StatusPosition::Bottom,
+        screen: (400.0, 200.0),
+        scale_factor: 1.0,
+        font_raster_px: 13.0,
+    };
+    let part = PlacedPart { text: "MOUSE".into(), tone, left: 10.0, width: 50.0 };
+    let placed = vec![PlacedSegment { index: 0, left: 10.0, width: 50.0, parts: vec![part] }];
+    let palette = UiPalette::from_theme(theme);
+    // White values: the default theme's active tab color is its yellow, which would hide the
+    // difference between the value and warn colors this test compares.
+    let colors = StatusColors::resolve(theme, ChromeColor::WHITE, ChromeColor::WHITE, &palette);
+    let (mut quads, mut glyphs) = (Vec::new(), Vec::new());
+    emit_strip(
+        &placed,
+        &geometry,
+        &colors,
+        Some(&stack),
+        Some(&mut raster),
+        &mut atlas,
+        &mut quads,
+        &mut glyphs,
+    );
+    (quads, glyphs, colors)
+}
+
+/// A mode chip draws no background: only the band and its hairline are quads, and its text
+/// starts at the part's left edge. A warn chip's glyphs take the warn color, with the strip's
+/// 3:1 fallback, on a dark and a light theme. A plain chip takes the value color where that is
+/// readable (white on the dark theme) and the foreground where it is not (white on the light one).
+#[test]
+fn chips_draw_colored_text_without_a_background() {
+    let dark = sonicterm_render_model::boundary::cfg::theme::Theme::default();
+    for theme in [dark, light_fixture()] {
+        let (chip_quads, chip_glyphs, _) = emit_one_part(StatusTone::Chip, &theme);
+        assert_eq!(chip_quads.len(), 2, "band and hairline only");
+        let (left, ..) = crate::cursor::ndc_rect_px(chip_glyphs[0].rect, 400.0, 200.0);
+        assert!(left < 14.0, "the text starts at the part's edge, not inset: {left}");
+        let (warn_quads, warn_glyphs, colors) = emit_one_part(StatusTone::ChipWarn, &theme);
+        assert_eq!(warn_quads.len(), 2, "a warn chip has no background either");
+        let (_, plain_warn, _) = emit_one_part(StatusTone::Warn, &theme);
+        let (_, value, _) = emit_one_part(StatusTone::Value, &theme);
+        assert_eq!(warn_glyphs[0].color, plain_warn[0].color, "the warn color");
+        assert_ne!(colors.warn, colors.value);
+        assert_ne!(warn_glyphs[0].color, value[0].color, "not the value color");
+        let readable = colors.chip == colors.value;
+        assert_eq!(chip_glyphs[0].color == value[0].color, readable, "{:?}", colors.chip);
+    }
 }

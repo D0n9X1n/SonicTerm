@@ -43,14 +43,14 @@ pub enum StatusTone {
     Warn,
     /// Red failure.
     Error,
-    /// A mode chip on a tinted background.
+    /// A mode chip: bold text in the value color, with no background.
     Chip,
-    /// A mode chip that needs attention (broadcast input).
+    /// A mode chip that needs attention (broadcast input): bold text in the caution color.
     ChipWarn,
 }
 
 impl StatusTone {
-    /// Whether the part is drawn as a chip with its own background.
+    /// Whether the part is a mode chip, drawn bold in its color with no background.
     pub fn is_chip(self) -> bool {
         matches!(self, Self::Chip | Self::ChipWarn)
     }
@@ -1069,12 +1069,19 @@ fn format_mode(inputs: &StatusLineInputs, env: &FormatEnv<'_>) -> Option<Formatt
         spoken.push(env.i18n.t_args("status-spoken-broadcast", Some(&[("count", &count_text)])));
     }
     if mode.copy {
+        // A space separates chips now that no background sets them apart.
+        if !parts.is_empty() {
+            parts.push(StatusPart::new(" ", StatusTone::Name));
+        }
         parts.push(StatusPart::new(env.i18n.translate("status-chip-copy"), StatusTone::Chip));
         spoken.push(env.i18n.translate("status-spoken-copy-mode"));
     }
     let compact = parts.clone();
     if mode.mouse_captured {
-        // A program captured the mouse, explain why clicks go to it.
+        // A program captured the mouse, explain why clicks go to it; its space drops with it.
+        if !parts.is_empty() {
+            parts.push(StatusPart::new(" ", StatusTone::Name).droppable());
+        }
         parts.push(
             StatusPart::new(env.i18n.translate("status-chip-mouse"), StatusTone::Chip).droppable(),
         );
@@ -1911,14 +1918,9 @@ pub struct FitMetrics {
     pub edge_pad: f32,
     /// Space between segments and between lists.
     pub segment_gap: f32,
-    /// Horizontal padding inside a chip's background.
-    pub chip_pad: f32,
-    /// Space between two adjacent chips.
-    pub chip_gap: f32,
 }
 
-/// One placed part. For a chip, `x` and `width` cover its background and
-/// the text starts `chip_pad` further right.
+/// One placed part; its text starts at `left` and spans `width`, chips included.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacedPart {
     /// Text to draw.
@@ -1927,7 +1929,7 @@ pub struct PlacedPart {
     pub tone: StatusTone,
     /// Left edge.
     pub left: f32,
-    /// Width including chip padding.
+    /// Width of its text.
     pub width: f32,
 }
 
@@ -1957,19 +1959,9 @@ struct FitSlot {
 }
 
 impl FitSlot {
-    /// Width of the slot's parts with chip padding and gaps.
-    fn width(&self, metrics: &FitMetrics) -> f32 {
-        let mut total = 0.0;
-        for (position, (part, width)) in self.parts.iter().zip(&self.part_widths).enumerate() {
-            total += width;
-            if part.tone.is_chip() {
-                total += 2.0 * metrics.chip_pad;
-                if position > 0 && self.parts[position - 1].tone.is_chip() {
-                    total += metrics.chip_gap;
-                }
-            }
-        }
-        total
+    /// Width of the slot's parts: the sum of their text widths.
+    fn width(&self) -> f32 {
+        self.part_widths.iter().sum()
     }
 }
 
@@ -2021,7 +2013,7 @@ pub fn fit(
         let widths: Vec<f32> = slots
             .iter()
             .filter(|slot| slot.active && slot.side == side)
-            .map(|slot| slot.width(metrics))
+            .map(|slot| slot.width())
             .collect();
         (!widths.is_empty())
             .then(|| widths.iter().sum::<f32>() + metrics.segment_gap * (widths.len() - 1) as f32)
@@ -2144,22 +2136,22 @@ fn place(slots: &[FitSlot], metrics: &FitMetrics) -> Vec<PlacedSegment> {
     let mut pen = metrics.edge_pad;
     let mut left_end = None;
     for slot in active(StatusSide::Left) {
-        placed.push(place_slot(slot, pen, metrics));
-        pen += slot.width(metrics);
+        placed.push(place_slot(slot, pen));
+        pen += slot.width();
         left_end = Some(pen);
         pen += metrics.segment_gap;
     }
     let mut pen = metrics.width - metrics.edge_pad;
     let mut right_start = None;
     for slot in active(StatusSide::Right).collect::<Vec<_>>().into_iter().rev() {
-        pen -= slot.width(metrics);
-        placed.push(place_slot(slot, pen, metrics));
+        pen -= slot.width();
+        placed.push(place_slot(slot, pen));
         right_start = Some(pen);
         pen -= metrics.segment_gap;
     }
     let center: Vec<&FitSlot> = active(StatusSide::Center).collect();
     if !center.is_empty() {
-        let total = center.iter().map(|slot| slot.width(metrics)).sum::<f32>()
+        let total = center.iter().map(|slot| slot.width()).sum::<f32>()
             + metrics.segment_gap * (center.len() - 1) as f32;
         let low = left_end.map_or(metrics.edge_pad, |end| end + metrics.segment_gap);
         let high = right_start
@@ -2167,27 +2159,25 @@ fn place(slots: &[FitSlot], metrics: &FitMetrics) -> Vec<PlacedSegment> {
             - total;
         let mut pen = ((metrics.width - total) / 2.0).clamp(low, high.max(low));
         for slot in center {
-            placed.push(place_slot(slot, pen, metrics));
-            pen += slot.width(metrics) + metrics.segment_gap;
+            placed.push(place_slot(slot, pen));
+            pen += slot.width() + metrics.segment_gap;
         }
     }
     placed.sort_by_key(|segment| segment.index);
     placed
 }
 
-/// Place one slot's parts from `origin`.
-fn place_slot(slot: &FitSlot, origin: f32, metrics: &FitMetrics) -> PlacedSegment {
+/// Place one slot's parts from `origin`, each directly after the one before it.
+fn place_slot(slot: &FitSlot, origin: f32) -> PlacedSegment {
     let mut pen = origin;
     let mut parts = Vec::with_capacity(slot.parts.len());
-    for (position, (part, text_width)) in slot.parts.iter().zip(&slot.part_widths).enumerate() {
-        let mut width = *text_width;
-        if part.tone.is_chip() {
-            if position > 0 && slot.parts[position - 1].tone.is_chip() {
-                pen += metrics.chip_gap;
-            }
-            width += 2.0 * metrics.chip_pad;
-        }
-        parts.push(PlacedPart { text: part.text.clone(), tone: part.tone, left: pen, width });
+    for (part, width) in slot.parts.iter().zip(&slot.part_widths) {
+        parts.push(PlacedPart {
+            text: part.text.clone(),
+            tone: part.tone,
+            left: pen,
+            width: *width,
+        });
         pen += width;
     }
     PlacedSegment { index: slot.index, left: origin, width: pen - origin, parts }

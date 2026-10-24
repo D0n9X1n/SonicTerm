@@ -25,7 +25,7 @@ fn columns(text: &str) -> f32 {
 
 /// Fit metrics with no padding or gaps, so widths are plain column counts.
 fn tight(width: f32) -> FitMetrics {
-    FitMetrics { width, edge_pad: 0.0, segment_gap: 1.0, chip_pad: 0.0, chip_gap: 0.0 }
+    FitMetrics { width, edge_pad: 0.0, segment_gap: 1.0 }
 }
 
 /// Inputs with a 412 MiB memory figure and nothing else to say.
@@ -176,7 +176,9 @@ fn core_segments_format_as_name_value_and_chips() {
         tab_mem: None,
     };
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
-    assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3COPYMOUSE");
+    assert_eq!(shown(&view, StatusSegmentId::Mode).unwrap(), "⇶ 3 COPY MOUSE");
+    let mode = view.segments.iter().find(|segment| segment.id == StatusSegmentId::Mode).unwrap();
+    assert_eq!(text_of(mode.compact.as_ref().unwrap()), "⇶ 3 COPY", "MOUSE drops with its space");
     assert_eq!(shown(&view, StatusSegmentId::Scroll).unwrap(), "Scroll: ↑ 12,345");
     assert_eq!(
         shown(&view, StatusSegmentId::Health).unwrap(),
@@ -494,20 +496,21 @@ fn center_is_centered_and_shifts_between_the_sides() {
 }
 
 #[test]
-fn chips_take_padding_and_gaps() {
-    // Chip parts include their background padding, with a gap between adjacent chips.
+fn chips_measure_as_their_text() {
+    // A chip has no background, so it takes exactly its text's width, like any value; the space
+    // part between two chips is the only thing that separates them.
     let mut view = fit_view(&[(StatusSegmentId::Mode, StatusSide::Left, 800, false, "COPY")]);
     view.segments[0].parts[0].tone = StatusTone::Chip;
+    view.segments[0].parts.push(StatusPart::new(" ", StatusTone::Name));
     view.segments[0].parts.push(StatusPart::new("MOUSE", StatusTone::Chip));
-    let metrics =
-        FitMetrics { width: 100.0, edge_pad: 2.0, segment_gap: 3.0, chip_pad: 1.0, chip_gap: 4.0 };
+    let metrics = FitMetrics { width: 100.0, edge_pad: 2.0, segment_gap: 3.0 };
     let placed = fit(&view, &metrics, columns);
     assert_eq!(
         placed[0].parts[0],
-        PlacedPart { text: "COPY".into(), tone: StatusTone::Chip, left: 2.0, width: 6.0 }
+        PlacedPart { text: "COPY".into(), tone: StatusTone::Chip, left: 2.0, width: 4.0 }
     );
-    assert_eq!(placed[0].parts[1].left, 12.0);
-    assert_eq!(placed[0].width, 17.0);
+    assert_eq!((placed[0].parts[2].left, placed[0].parts[2].width), (7.0, 5.0));
+    assert_eq!(placed[0].width, 10.0);
 }
 
 #[test]

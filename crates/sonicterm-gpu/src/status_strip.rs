@@ -133,14 +133,13 @@ pub struct StatusColors {
     pub warn: ChromeColor,
     /// Failure: `ansi.red`, or `foreground` under 3:1.
     pub error: ChromeColor,
+    /// Mode chip text: the active tab title color, or `foreground` under 3:1. A chip has no
+    /// background of its own, so its text is checked against the strip like the cautions.
+    pub chip: ChromeColor,
     /// Strip background (linear premultiplied).
     pub background: [f32; 4],
     /// Hairline between the terminal and the strip.
     pub hairline: [f32; 4],
-    /// Chip background.
-    pub chip: [f32; 4],
-    /// Background of a chip that needs attention.
-    pub chip_warn: [f32; 4],
 }
 
 impl StatusColors {
@@ -159,6 +158,7 @@ impl StatusColors {
             background,
         );
         Self {
+            chip: readable_or(tab_active_fg, foreground, background),
             value: tab_active_fg,
             name: tab_inactive_fg,
             warn,
@@ -169,11 +169,6 @@ impl StatusColors {
             ),
             background,
             hairline: palette.border_subtle,
-            chip: palette.bg_active,
-            chip_warn: crate::color::hex_to_premultiplied_rgba(
-                theme.colors.ansi.yellow.0.as_str(),
-                0.18,
-            ),
         }
     }
 
@@ -181,7 +176,8 @@ impl StatusColors {
     fn text(&self, tone: StatusTone) -> ChromeColor {
         match tone {
             StatusTone::Name => self.name,
-            StatusTone::Value | StatusTone::Chip => self.value,
+            StatusTone::Value => self.value,
+            StatusTone::Chip => self.chip,
             StatusTone::Warn | StatusTone::ChipWarn => self.warn,
             StatusTone::Error => self.error,
         }
@@ -272,13 +268,7 @@ impl StripGeometry {
     /// Fit metrics for this geometry.
     pub fn fit_metrics(&self) -> FitMetrics {
         let scale = self.scale_factor.max(0.5);
-        FitMetrics {
-            width: self.screen.0,
-            edge_pad: 12.0 * scale,
-            segment_gap: 20.0 * scale,
-            chip_pad: 5.0 * scale,
-            chip_gap: 4.0 * scale,
-        }
+        FitMetrics { width: self.screen.0, edge_pad: 12.0 * scale, segment_gap: 20.0 * scale }
     }
 }
 
@@ -310,7 +300,7 @@ pub fn fit_strip(
     })
 }
 
-/// Emit the strip's band, hairline, chip backgrounds and glyphs. Glyphs are
+/// Emit the strip's band, hairline and glyphs; chips are colored text with no background. Glyphs are
 /// clipped to the band so no ink lands outside it.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_strip(
@@ -344,33 +334,9 @@ pub fn emit_strip(
     let text_px = geometry.text_px();
     let baseline =
         geometry.top + ((geometry.height - text_px * 1.2) / 2.0).max(0.0) + text_px * 0.95;
-    let chip_inset = (3.0 * scale).min(geometry.height / 4.0);
-    let chip_pad = geometry.fit_metrics().chip_pad;
     let first_glyph = glyphs.len();
     for part in placed.iter().flat_map(|segment| &segment.parts) {
-        let text_x = if part.tone.is_chip() {
-            // A chip, paint its rounded background and inset the text by its padding.
-            let chip_h = (geometry.height - 2.0 * chip_inset).max(1.0);
-            let background =
-                if part.tone == StatusTone::ChipWarn { colors.chip_warn } else { colors.chip };
-            quads.push(QuadInstance::rounded(
-                px_to_ndc(
-                    part.left,
-                    geometry.top + chip_inset,
-                    part.width,
-                    chip_h,
-                    screen_w,
-                    screen_h,
-                ),
-                background,
-                [part.width, chip_h],
-                3.0 * scale,
-            ));
-            part.left + chip_pad
-        } else {
-            // When: `is_chip` is false for the part's tone, its text starts at `part.left`.
-            part.left
-        };
+        // A chip has no background: its tone colors its text and `is_chip` makes it bold.
         let run = chrome_text::layout_with_raster_variant(
             font_stack,
             rasterizer,
@@ -380,7 +346,7 @@ pub fn emit_strip(
             ChromeAttrs { bold: part.tone.is_chip(), italic: false },
             text_px,
             text_px,
-            (text_x.round(), baseline),
+            (part.left.round(), baseline),
             geometry.screen,
             None,
             GlyphRasterVariant::StatusLine,
