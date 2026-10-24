@@ -25,6 +25,7 @@ fn geometry_for_font(font_pt: f32, scale_factor: f32) -> StripGeometry {
         screen: (800.0 * scale_factor, 600.0 * scale_factor),
         scale_factor,
         font_raster_px: font_pt * scale_factor,
+        cap_height: 7.0 * scale_factor,
     }
 }
 
@@ -89,7 +90,9 @@ fn chrome_stack() -> sonicterm_engine::FontStack {
 #[test]
 fn strip_ink_never_leaves_its_band() {
     use sonicterm_render_model::boundary::ui::status_line::PlacedPart;
-    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK.lock().unwrap();
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let stack = chrome_stack();
     let mut raster = stack.clone();
     let mut atlas = GlyphAtlas::new(1024, 1024);
@@ -100,6 +103,7 @@ fn strip_ink_never_leaves_its_band() {
         screen: (400.0, 200.0),
         scale_factor: 1.0,
         font_raster_px: 40.0,
+        cap_height: 7.0,
     };
     let placed = vec![PlacedSegment {
         index: 0,
@@ -319,6 +323,7 @@ fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) -> f32 {
         screen: (400.0, 200.0),
         scale_factor: 1.0,
         font_raster_px: 13.0,
+        cap_height: 7.0,
     };
     let part = PlacedPart { text: text.into(), tone: StatusTone::Value, left: 10.0, width: 80.0 };
     let placed = vec![PlacedSegment { index: 0, left: 10.0, width: 80.0, parts: vec![part] }];
@@ -589,6 +594,7 @@ fn emit_one_part(
         screen: (400.0, 200.0),
         scale_factor: 1.0,
         font_raster_px: 13.0,
+        cap_height: 7.0,
     };
     let part = PlacedPart { text: "MOUSE".into(), tone, left: 10.0, width: 50.0 };
     let placed = vec![PlacedSegment { index: 0, left: 10.0, width: 50.0, parts: vec![part] }];
@@ -632,4 +638,141 @@ fn chips_draw_colored_text_without_a_background() {
         let readable = colors.chip == colors.value;
         assert_eq!(chip_glyphs[0].color == value[0].color, readable, "{:?}", colors.chip);
     }
+}
+
+/// How far the capitals' ink center sits from the center of the band area outside the hairline,
+/// in raster px, for "Mem" drawn on the bundled chrome font at `position` and `scale`.
+fn capital_centering_error(position: StatusPosition, scale: f32) -> f32 {
+    use sonicterm_render_model::boundary::ui::status_line::PlacedPart;
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let dpi = (72.0 * scale).round() as usize;
+    let body = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
+        &[("Rec Mono St.Helens", false)],
+        vec![assets],
+        13.0,
+        dpi,
+        1.0,
+    )
+    .unwrap();
+    let stack = crate::core::renderer_font_views(Some(body), 13.0).status_line.unwrap();
+    let mut raster = stack.clone();
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let screen = (800.0 * scale, 600.0 * scale);
+    let height = status_line_height(13.0, scale);
+    let top = match position {
+        StatusPosition::Top => 28.0 * scale,
+        StatusPosition::Bottom => screen.1 - height,
+    };
+    let geometry = test_strip_geometry(position, top, height, screen, scale, &stack);
+    let part = PlacedPart { text: "Mem".into(), tone: StatusTone::Value, left: 10.0, width: 80.0 };
+    let placed = vec![PlacedSegment { index: 0, left: 10.0, width: 80.0, parts: vec![part] }];
+    let theme = sonicterm_render_model::boundary::cfg::theme::Theme::default();
+    let palette = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(&theme);
+    let colors = StatusColors::resolve(&theme, ChromeColor::WHITE, ChromeColor::WHITE, &palette);
+    let (mut quads, mut glyphs) = (Vec::new(), Vec::new());
+    emit_strip(
+        &placed,
+        &geometry,
+        &colors,
+        Some(&stack),
+        Some(&mut raster),
+        &mut atlas,
+        &mut quads,
+        &mut glyphs,
+    );
+    // The first glyph is the capital `M`; lowercase letters stop at the x-height.
+    let (_, ink_top, _, ink_h) = crate::cursor::ndc_rect_px(glyphs[0].rect, screen.0, screen.1);
+    let thickness = scale.round().max(1.0);
+    let (area_top, area_h) = match position {
+        StatusPosition::Top => (top, height - thickness),
+        StatusPosition::Bottom => (top + thickness, height - thickness),
+    };
+    (ink_top + ink_h / 2.0) - (area_top + area_h / 2.0)
+}
+
+/// Capitals sit centered in the band area outside the hairline, within one raster pixel, at
+/// either position and at 1× and 2×, on the bundled chrome font.
+#[test]
+fn capitals_are_centered_in_the_band_outside_the_hairline() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for position in [StatusPosition::Top, StatusPosition::Bottom] {
+        for scale in [1.0, 2.0] {
+            let error = capital_centering_error(position, scale);
+            assert!(error.abs() <= 1.0, "{position:?} at {scale}×: off by {error} px");
+        }
+    }
+}
+
+/// A strip geometry for the centering test, with the cap height the renderer would keep for it.
+fn test_strip_geometry(
+    position: StatusPosition,
+    top: f32,
+    height: f32,
+    screen: (f32, f32),
+    scale: f32,
+    stack: &sonicterm_engine::FontStack,
+) -> StripGeometry {
+    let mut geometry = StripGeometry {
+        top,
+        height,
+        position,
+        screen,
+        scale_factor: scale,
+        font_raster_px: 13.0 * scale,
+        cap_height: 0.0,
+    };
+    let mut raster = stack.clone();
+    let mut atlas = GlyphAtlas::new(256, 256);
+    geometry.cap_height = strip_cap_height(stack, &mut raster, &mut atlas, geometry.text_px());
+    geometry
+}
+
+/// The cap height centers the drawn capital's ink box: twice its center's height above the
+/// baseline. Ink that sits on the baseline gives its top; ink a pixel below it (as Windows draws)
+/// gives one less, so the center never shifts a whole pixel. Without a drawn capital the font's
+/// own measurement is used, and without either, 0.7 × the text size.
+#[test]
+fn the_cap_height_centers_the_drawn_capital_and_falls_back_in_order() {
+    assert_eq!(resolve_cap_height(Some((-8.0, 8.0)), Some(5.0), 10.0), 8.0, "ink on the baseline");
+    assert_eq!(resolve_cap_height(Some((-8.0, 9.0)), Some(5.0), 10.0), 7.0, "ink below it");
+    assert_eq!(resolve_cap_height(None, Some(5.0), 10.0), 5.0, "the font's own measurement");
+    assert_eq!(resolve_cap_height(None, None, 10.0), 7.0, "no capital and no metric");
+}
+
+/// On the bundled font the strip centers on its drawn `H`: the kept cap height is twice the
+/// drawn ink center's height above the baseline.
+#[test]
+fn the_strip_measures_its_drawn_capital() {
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stack = chrome_stack();
+    let mut raster = stack.clone();
+    let mut atlas = GlyphAtlas::new(256, 256);
+    let text_px = 13.0;
+    let cap = strip_cap_height(&stack, &mut raster, &mut atlas, text_px);
+    let (ink_h, _) =
+        drawn_h(&stack, &mut GlyphAtlas::new(256, 256), GlyphRasterVariant::StatusLine, text_px);
+    assert!(cap > 0.0 && cap <= ink_h, "cap {cap} vs drawn H {ink_h}");
+}
+
+/// The renderer keeps one cap height per text size: the same size reuses it without measuring,
+/// and a new size measures again, so a zoom or DPI change never centers on a stale value.
+#[test]
+fn the_kept_cap_height_follows_the_text_size() {
+    let measured = std::cell::Cell::new(0);
+    let measure = |value: f32| {
+        measured.set(measured.get() + 1);
+        value
+    };
+    let kept = kept_cap_height(None, 13.0, || measure(9.0));
+    assert_eq!((kept.1, measured.get()), (9.0, 1));
+    let again = kept_cap_height(Some(kept), 13.0, || measure(99.0));
+    assert_eq!((again.1, measured.get()), (9.0, 1), "the same size is not measured again");
+    let zoomed = kept_cap_height(Some(again), 16.0, || measure(11.0));
+    assert_eq!((zoomed.1, measured.get()), (11.0, 2), "a new size measures anew");
+    let back = kept_cap_height(Some(zoomed), 13.0, || measure(9.0));
+    assert_eq!((back.1, measured.get()), (9.0, 3), "never the other size's stale value");
 }

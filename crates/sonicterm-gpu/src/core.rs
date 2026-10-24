@@ -2398,6 +2398,8 @@ pub struct GpuRenderer {
     /// Fitted strip keyed by view pixels, width and chrome font, so an
     /// unchanged strip is not reshaped every frame.
     status_line_fit: Option<(u64, Vec<PlacedSegment>)>,
+    /// The strip font's cap height, keyed by the text size it was measured at (`f32` bits).
+    status_line_cap_height: Option<(u32, f32)>,
     /// Hit boxes of the segments the last drawn frame presented.
     status_line_layouts: crate::status_strip::StripLayouts,
     /// The segment keyboard focus is on and whether `strong_focus` doubles its ring; `None` draws
@@ -3429,6 +3431,7 @@ impl GpuRenderer {
             status_line_position: Default::default(),
             status_line_view: StatusLineView::default(),
             status_line_fit: None,
+            status_line_cap_height: None,
             status_line_layouts: Default::default(),
             status_line_focus: None,
             titlebar_inset: 0.0,
@@ -5526,6 +5529,7 @@ impl GpuRenderer {
         self.palette_footer_font_stack = new_stacks.palette_footer;
         self.status_line_font_stack = new_stacks.status_line;
         self.status_line_fit = None;
+        self.status_line_cap_height = None;
         self.cell_w = new_cell_w;
         self.cell_h = new_line_h;
         self.reset_glyph_atlas_in_place("font_change");
@@ -7435,13 +7439,14 @@ impl GpuRenderer {
                 self.tab_inactive_fg,
                 &strip_palette,
             );
-            let geometry = crate::status_strip::StripGeometry {
+            let mut geometry = crate::status_strip::StripGeometry {
                 top: self.status_line_top(),
                 height: self.status_line_height(),
                 position: self.status_line_position,
                 screen: (sw, sh),
                 scale_factor: self.scale_factor,
                 font_raster_px: self.font_size * self.scale_factor,
+                cap_height: 0.0,
             };
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             (
@@ -7454,6 +7459,23 @@ impl GpuRenderer {
                 .hash(&mut hasher);
             let fit_key = hasher.finish();
             let mut strip_rasterizer = self.status_line_font_stack.clone();
+            let text_px = geometry.text_px();
+            // The cap height is measured once per text size and kept.
+            let kept = crate::status_strip::kept_cap_height(
+                self.status_line_cap_height,
+                text_px,
+                || match (self.status_line_font_stack.as_ref(), strip_rasterizer.as_mut()) {
+                    (Some(stack), Some(rasterizer)) => crate::status_strip::strip_cap_height(
+                        stack,
+                        rasterizer,
+                        &mut self.glyph_atlas,
+                        text_px,
+                    ),
+                    _ => text_px * 0.7,
+                },
+            );
+            self.status_line_cap_height = Some(kept);
+            geometry.cap_height = kept.1;
             let stale = self.status_line_fit.as_ref().is_none_or(|(key, _)| *key != fit_key);
             if let (true, Some(stack), Some(rasterizer)) =
                 (stale, self.status_line_font_stack.as_ref(), strip_rasterizer.as_mut())
