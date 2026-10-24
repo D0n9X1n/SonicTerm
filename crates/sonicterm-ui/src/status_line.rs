@@ -1915,6 +1915,48 @@ pub struct FitMetrics {
     pub edge_pad: f32,
     /// Space between segments and between lists.
     pub segment_gap: f32,
+    /// Width of the `|` drawn between two adjacent segments of one list; it widens only those gaps.
+    pub separator_width: f32,
+}
+
+impl FitMetrics {
+    /// The gap between two adjacent segments of one list: the segment gap with the separator in it.
+    fn in_group_gap(&self) -> f32 {
+        self.segment_gap + self.separator_width
+    }
+}
+
+/// The text of the separator drawn between adjacent segments of one list.
+pub const SEGMENT_SEPARATOR: &str = "|";
+
+/// The separators between adjacent presented segments of each list, left list first: a `|` in the
+/// name tone centered in each gap. None goes at a list's edge or between lists, and none is a hit
+/// box, so a press on one finds no segment.
+pub fn separators(
+    view: &StatusLineView,
+    placed: &[PlacedSegment],
+    metrics: &FitMetrics,
+) -> Vec<PlacedPart> {
+    let mut found = Vec::new();
+    for side in [StatusSide::Left, StatusSide::Center, StatusSide::Right] {
+        let mut group: Vec<&PlacedSegment> = placed
+            .iter()
+            .filter(|segment| {
+                view.segments.get(segment.index).is_some_and(|view| view.side == side)
+            })
+            .collect();
+        group.sort_by(|first, second| first.left.total_cmp(&second.left));
+        for pair in group.windows(2) {
+            let (gap_start, gap_end) = (pair[0].left + pair[0].width, pair[1].left);
+            found.push(PlacedPart {
+                text: SEGMENT_SEPARATOR.to_string(),
+                tone: StatusTone::Name,
+                left: (gap_start + gap_end) / 2.0 - metrics.separator_width / 2.0,
+                width: metrics.separator_width,
+            });
+        }
+    }
+    found
 }
 
 /// One placed part; its text starts at `left` and spans `width`, chips included.
@@ -1959,6 +2001,12 @@ impl FitSlot {
     /// Width of the slot's parts: the sum of their text widths.
     fn width(&self) -> f32 {
         self.part_widths.iter().sum()
+    }
+
+    /// Whether fitting left the slot nothing to draw, so it is not shown, takes no gap and gets
+    /// no separator.
+    fn is_blank(&self) -> bool {
+        self.parts.iter().all(|part| part.text.trim().is_empty())
     }
 }
 
@@ -2012,8 +2060,10 @@ pub fn fit(
             .filter(|slot| slot.active && slot.side == side)
             .map(|slot| slot.width())
             .collect();
-        (!widths.is_empty())
-            .then(|| widths.iter().sum::<f32>() + metrics.segment_gap * (widths.len() - 1) as f32)
+        // Segments of one list are a separator gap apart, so a dropped segment takes its `|` along.
+        (!widths.is_empty()).then(|| {
+            widths.iter().sum::<f32>() + metrics.in_group_gap() * (widths.len() - 1) as f32
+        })
     };
     loop {
         let groups: Vec<f32> = [StatusSide::Left, StatusSide::Center, StatusSide::Right]
@@ -2037,6 +2087,7 @@ pub fn fit(
             let compact = slot.compact.take().unwrap_or_default();
             slot.part_widths = compact.iter().map(|part| measure(&part.text)).collect();
             slot.parts = compact;
+            slot.active = !slot.is_blank();
             continue;
         }
         let Some(slot) = slots.iter_mut().filter(|slot| slot.active).min_by_key(|slot| slot.rank)
@@ -2052,6 +2103,7 @@ pub fn fit(
             // When: a droppable detail is left, drop it before the whole segment.
             slot.parts.remove(position);
             slot.part_widths.remove(position);
+            slot.active = !slot.is_blank();
             continue;
         }
         slot.active = false;
@@ -2136,7 +2188,7 @@ fn place(slots: &[FitSlot], metrics: &FitMetrics) -> Vec<PlacedSegment> {
         placed.push(place_slot(slot, pen));
         pen += slot.width();
         left_end = Some(pen);
-        pen += metrics.segment_gap;
+        pen += metrics.in_group_gap();
     }
     let mut pen = metrics.width - metrics.edge_pad;
     let mut right_start = None;
@@ -2144,12 +2196,12 @@ fn place(slots: &[FitSlot], metrics: &FitMetrics) -> Vec<PlacedSegment> {
         pen -= slot.width();
         placed.push(place_slot(slot, pen));
         right_start = Some(pen);
-        pen -= metrics.segment_gap;
+        pen -= metrics.in_group_gap();
     }
     let center: Vec<&FitSlot> = active(StatusSide::Center).collect();
     if !center.is_empty() {
         let total = center.iter().map(|slot| slot.width()).sum::<f32>()
-            + metrics.segment_gap * (center.len() - 1) as f32;
+            + metrics.in_group_gap() * (center.len() - 1) as f32;
         let low = left_end.map_or(metrics.edge_pad, |end| end + metrics.segment_gap);
         let high = right_start
             .map_or(metrics.width - metrics.edge_pad, |start| start - metrics.segment_gap)
@@ -2157,7 +2209,7 @@ fn place(slots: &[FitSlot], metrics: &FitMetrics) -> Vec<PlacedSegment> {
         let mut pen = ((metrics.width - total) / 2.0).clamp(low, high.max(low));
         for slot in center {
             placed.push(place_slot(slot, pen));
-            pen += slot.width() + metrics.segment_gap;
+            pen += slot.width() + metrics.in_group_gap();
         }
     }
     placed.sort_by_key(|segment| segment.index);

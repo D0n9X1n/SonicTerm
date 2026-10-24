@@ -11,7 +11,8 @@
 use sonicterm_render_model::boundary::cfg::status_line::StatusPosition;
 use sonicterm_render_model::boundary::cfg::theme::Theme;
 use sonicterm_render_model::boundary::ui::status_line::{
-    fit, FitMetrics, PlacedSegment, SegmentClick, StatusLineView, StatusTone,
+    fit, separators, FitMetrics, PlacedPart, PlacedSegment, SegmentClick, StatusLineView,
+    StatusTone, SEGMENT_SEPARATOR,
 };
 use sonicterm_render_model::boundary::ui::tabbar_view::tab_bar_height;
 use sonicterm_text::glyph_atlas::{GlyphAtlas, Rasterizer};
@@ -343,20 +344,35 @@ impl StripGeometry {
     /// Fit metrics for this geometry.
     pub fn fit_metrics(&self) -> FitMetrics {
         let scale = self.scale_factor.max(0.5);
-        FitMetrics { width: self.screen.0, edge_pad: 12.0 * scale, segment_gap: 20.0 * scale }
+        FitMetrics {
+            width: self.screen.0,
+            edge_pad: 12.0 * scale,
+            segment_gap: 20.0 * scale,
+            separator_width: 0.0,
+        }
     }
 }
 
-/// Fit `view` into the strip, measuring each run with the chrome font.
+/// A fitted strip: the presented segments and the `|` between adjacent ones of a list. Only the
+/// segments are hit boxes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FittedStrip {
+    /// The presented segments, in view order.
+    pub segments: Vec<PlacedSegment>,
+    /// The separators between them; drawn, never routed or read aloud.
+    pub separators: Vec<PlacedPart>,
+}
+
+/// Fit `view` into the strip, measuring each run and the separator with the chrome font.
 pub fn fit_strip(
     view: &StatusLineView,
     geometry: &StripGeometry,
     font_stack: &sonicterm_engine::FontStack,
     rasterizer: &mut impl Rasterizer,
     atlas: &mut GlyphAtlas,
-) -> Vec<PlacedSegment> {
+) -> FittedStrip {
     let text_px = geometry.text_px();
-    fit(view, &geometry.fit_metrics(), |text| {
+    let mut measure = |text: &str| {
         chrome_text::layout_with_raster_variant(
             font_stack,
             rasterizer,
@@ -372,7 +388,12 @@ pub fn fit_strip(
             GlyphRasterVariant::StatusLine,
         )
         .width_px
-    })
+    };
+    let metrics =
+        FitMetrics { separator_width: measure(SEGMENT_SEPARATOR), ..geometry.fit_metrics() };
+    let segments = fit(view, &metrics, measure);
+    let separators = separators(view, &segments, &metrics);
+    FittedStrip { segments, separators }
 }
 
 /// Emit the strip's band, hairline and glyphs; chips are colored text with no background. Glyphs are
@@ -380,6 +401,7 @@ pub fn fit_strip(
 #[allow(clippy::too_many_arguments)]
 pub fn emit_strip(
     placed: &[PlacedSegment],
+    separators: &[PlacedPart],
     geometry: &StripGeometry,
     colors: &StatusColors,
     font_stack: Option<&sonicterm_engine::FontStack>,
@@ -409,7 +431,7 @@ pub fn emit_strip(
     let text_px = geometry.text_px();
     let baseline = strip_baseline(geometry);
     let first_glyph = glyphs.len();
-    for part in placed.iter().flat_map(|segment| &segment.parts) {
+    for part in placed.iter().flat_map(|segment| &segment.parts).chain(separators) {
         // A chip has no background: its tone colors its text and `is_chip` makes it bold.
         let run = chrome_text::layout_with_raster_variant(
             font_stack,

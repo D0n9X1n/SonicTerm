@@ -49,7 +49,9 @@ use crate::device_errors::{
     run_isolated_validation, DeviceErrorSnapshot, DeviceErrorState, DeviceStateWaker, GpuFaultKind,
 };
 use sonicterm_render_model::boundary::ui::drag_chip::{DragChipOverlay, DragChipVisual};
-use sonicterm_render_model::boundary::ui::status_line::{PlacedSegment, StatusLineView};
+use sonicterm_render_model::boundary::ui::status_line::{
+    PlacedPart, PlacedSegment, StatusLineView,
+};
 use sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size;
 
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
@@ -2397,7 +2399,7 @@ pub struct GpuRenderer {
     status_line_view: StatusLineView,
     /// Fitted strip keyed by view pixels, width and chrome font, so an
     /// unchanged strip is not reshaped every frame.
-    status_line_fit: Option<(u64, Vec<PlacedSegment>)>,
+    status_line_fit: Option<(u64, crate::status_strip::FittedStrip)>,
     /// The strip font's cap height, keyed by the text size it was measured at (`f32` bits).
     status_line_cap_height: Option<(u32, f32)>,
     /// Hit boxes of the segments the last drawn frame presented.
@@ -7481,19 +7483,22 @@ impl GpuRenderer {
                 (stale, self.status_line_font_stack.as_ref(), strip_rasterizer.as_mut())
             {
                 // The view, width or font changed: refit with the chrome font.
-                let placed = crate::status_strip::fit_strip(
+                let fitted = crate::status_strip::fit_strip(
                     &self.status_line_view,
                     &geometry,
                     stack,
                     rasterizer,
                     &mut self.glyph_atlas,
                 );
-                self.status_line_fit = Some((fit_key, placed));
+                self.status_line_fit = Some((fit_key, fitted));
             }
-            let placed: &[PlacedSegment] =
-                self.status_line_fit.as_ref().map_or(&[], |(_, placed)| placed.as_slice());
+            let (placed, separators): (&[PlacedSegment], &[PlacedPart]) =
+                self.status_line_fit.as_ref().map_or((&[], &[]), |(_, fitted)| {
+                    (fitted.segments.as_slice(), fitted.separators.as_slice())
+                });
             crate::status_strip::emit_strip(
                 placed,
+                separators,
                 &geometry,
                 &colors,
                 self.status_line_font_stack.as_ref(),

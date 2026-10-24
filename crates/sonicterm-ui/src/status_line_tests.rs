@@ -25,7 +25,7 @@ fn columns(text: &str) -> f32 {
 
 /// Fit metrics with no padding or gaps, so widths are plain column counts.
 fn tight(width: f32) -> FitMetrics {
-    FitMetrics { width, edge_pad: 0.0, segment_gap: 1.0 }
+    FitMetrics { width, edge_pad: 0.0, segment_gap: 1.0, separator_width: 0.0 }
 }
 
 /// Inputs with a 412 MiB memory figure and nothing else to say.
@@ -503,7 +503,8 @@ fn chips_measure_as_their_text() {
     view.segments[0].parts[0].tone = StatusTone::Chip;
     view.segments[0].parts.push(StatusPart::new(" ", StatusTone::Name));
     view.segments[0].parts.push(StatusPart::new("MOUSE", StatusTone::Chip));
-    let metrics = FitMetrics { width: 100.0, edge_pad: 2.0, segment_gap: 3.0 };
+    let metrics =
+        FitMetrics { width: 100.0, edge_pad: 2.0, segment_gap: 3.0, separator_width: 0.0 };
     let placed = fit(&view, &metrics, columns);
     assert_eq!(
         placed[0].parts[0],
@@ -1421,4 +1422,126 @@ fn font_scale_uses_the_unrounded_sizes() {
     let view = build_view(&developer(), false, &inputs, &translator("en"), NumberStyle::POINT);
     assert_eq!(shown(&view, StatusSegmentId::Font).unwrap(), "Scale: 107%");
     assert_eq!(FontInput::from_sizes(13.0, 0.0).scale_percent, None, "no scale of a zero size");
+}
+
+/// Two segments on each side and one in the center, with a 2-column gap and a 1-column `|`.
+fn separated_view() -> (StatusLineView, FitMetrics) {
+    use StatusSegmentId as Seg;
+    let view = fit_view(&[
+        (Seg::Mode, StatusSide::Left, 800, false, "aa"),
+        (Seg::Scroll, StatusSide::Left, 400, false, "bb"),
+        (Seg::Link, StatusSide::Center, 600, false, "cc"),
+        (Seg::Health, StatusSide::Right, 950, false, "dd"),
+        (Seg::Mem, StatusSide::Right, 900, false, "ee"),
+    ]);
+    (view, FitMetrics { width: 40.0, edge_pad: 0.0, segment_gap: 2.0, separator_width: 1.0 })
+}
+
+/// Each separator is a `|` in the name tone that sits between two presented segments of one group
+/// and overlaps neither; returns the side of each, for counting.
+fn separator_sides(
+    view: &StatusLineView,
+    placed: &[PlacedSegment],
+    found: &[PlacedPart],
+) -> Vec<StatusSide> {
+    found
+        .iter()
+        .map(|separator| {
+            assert_eq!((separator.text.as_str(), separator.tone), ("|", StatusTone::Name));
+            let center = separator.left + separator.width / 2.0;
+            let before =
+                placed.iter().filter(|segment| segment.left + segment.width <= separator.left);
+            let after =
+                placed.iter().filter(|segment| segment.left >= separator.left + separator.width);
+            let before = before.max_by(|first, second| first.left.total_cmp(&second.left)).unwrap();
+            let after = after.min_by(|first, second| first.left.total_cmp(&second.left)).unwrap();
+            let side = view.segments[before.index].side;
+            assert_eq!(side, view.segments[after.index].side, "a separator never joins two groups");
+            let gap_center = (before.left + before.width + after.left) / 2.0;
+            assert!(
+                (center - gap_center).abs() < 1e-4,
+                "centered in its gap: {center} {gap_center}"
+            );
+            side
+        })
+        .collect()
+}
+
+/// A `|` sits between adjacent shown segments of a group, centered in their gap; none at a group
+/// edge or between groups, and a group of one has none.
+#[test]
+fn separators_sit_only_between_adjacent_segments_of_a_group() {
+    let (view, metrics) = separated_view();
+    let placed = fit(&view, &metrics, columns);
+    assert_eq!(placed.len(), 5);
+    let found = separators(&view, &placed, &metrics);
+    assert_eq!(separator_sides(&view, &placed, &found), [StatusSide::Left, StatusSide::Right]);
+    // Left: `aa` 0..2, the 3-column gap holds `|` at 3, `bb` 5..7.
+    assert_eq!((found[0].left, placed[1].left), (3.0, 5.0));
+}
+
+/// Fitting counts each separator, so dropping a segment drops its separator and leaves no doubled
+/// or dangling `|`.
+#[test]
+fn dropping_a_segment_drops_its_separator() {
+    let (view, mut metrics) = separated_view();
+    // Everything needs 7 + 2 + 7 columns plus two 2-column gaps between groups: 20.
+    metrics.width = 20.0;
+    assert_eq!(fit(&view, &metrics, columns).len(), 5, "the separators fit exactly");
+    metrics.width = 19.0;
+    let placed = fit(&view, &metrics, columns);
+    use StatusSegmentId as Seg;
+    assert_eq!(presented(&view, &placed), [Seg::Mode, Seg::Link, Seg::Health, Seg::Mem]);
+    let found = separators(&view, &placed, &metrics);
+    assert_eq!(
+        separator_sides(&view, &placed, &found),
+        [StatusSide::Right],
+        "left has one segment"
+    );
+}
+
+/// A separator is no segment's hit box: a press on it finds nothing.
+#[test]
+fn a_press_on_a_separator_hits_no_segment() {
+    let (view, metrics) = separated_view();
+    let placed = fit(&view, &metrics, columns);
+    for separator in separators(&view, &placed, &metrics) {
+        let center = separator.left + separator.width / 2.0;
+        let hit = placed
+            .iter()
+            .find(|segment| center >= segment.left && center < segment.left + segment.width);
+        assert_eq!(hit, None, "{center}");
+    }
+}
+
+/// A segment that fitting empties is not shown: `mode` with only `MOUSE` loses it to its compact
+/// form, and then neither a `|` nor a separator gap is left before `Mem: 412 MB`.
+#[test]
+fn a_segment_fitting_empties_takes_no_separator() {
+    use StatusSegmentId as Seg;
+    let mut resolved = developer();
+    resolved.segments = [Seg::Mode, Seg::Mem]
+        .into_iter()
+        .map(|id| ResolvedSegment {
+            id,
+            side: StatusSide::Left,
+            show: if id == Seg::Mem { ShowMode::Always } else { ShowMode::Active },
+            priority: id.meta().default_priority,
+            click: ClickBinding::Default,
+        })
+        .collect();
+    let inputs = StatusLineInputs {
+        mode: ModeInput { mouse_captured: true, ..Default::default() },
+        ..idle_inputs()
+    };
+    let view = build_view(&resolved, false, &inputs, &translator("en"), NumberStyle::POINT);
+    let metrics =
+        |width| FitMetrics { width, edge_pad: 0.0, segment_gap: 2.0, separator_width: 1.0 };
+    let wide = fit(&view, &metrics(19.0), columns);
+    assert_eq!(presented(&view, &wide), [Seg::Mode, Seg::Mem], "MOUSE | Mem: 412 MB fits in 19");
+    assert_eq!(separators(&view, &wide, &metrics(19.0)).len(), 1);
+    let narrow = fit(&view, &metrics(14.0), columns);
+    assert_eq!(presented(&view, &narrow), [Seg::Mem], "the emptied mode is not shown");
+    assert!(separators(&view, &narrow, &metrics(14.0)).is_empty(), "no dangling `|`");
+    assert_eq!(narrow[0].left, 0.0, "no separator width reserved before Mem");
 }

@@ -122,6 +122,7 @@ fn strip_ink_never_leaves_its_band() {
     let (mut quads, mut glyphs) = (Vec::new(), Vec::new());
     emit_strip(
         &placed,
+        &[],
         &geometry,
         &colors,
         Some(&stack),
@@ -333,6 +334,7 @@ fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) -> f32 {
     let (mut quads, mut glyphs) = (Vec::new(), Vec::new());
     emit_strip(
         &placed,
+        &[],
         &geometry,
         &colors,
         Some(stack),
@@ -605,6 +607,7 @@ fn emit_one_part(
     let (mut quads, mut glyphs) = (Vec::new(), Vec::new());
     emit_strip(
         &placed,
+        &[],
         &geometry,
         &colors,
         Some(&stack),
@@ -672,6 +675,7 @@ fn capital_centering_error(position: StatusPosition, scale: f32) -> f32 {
     let (mut quads, mut glyphs) = (Vec::new(), Vec::new());
     emit_strip(
         &placed,
+        &[],
         &geometry,
         &colors,
         Some(&stack),
@@ -775,4 +779,77 @@ fn the_kept_cap_height_follows_the_text_size() {
     assert_eq!((zoomed.1, measured.get()), (11.0, 2), "a new size measures anew");
     let back = kept_cap_height(Some(zoomed), 13.0, || measure(9.0));
     assert_eq!((back.1, measured.get()), (9.0, 3), "never the other size's stale value");
+}
+
+/// Two adjacent segments of one list get one measured `|` between them, drawn in the name color
+/// between their hit boxes, never inside either.
+#[test]
+fn the_strip_draws_a_separator_between_adjacent_segments() {
+    use sonicterm_render_model::boundary::cfg::status_line::{StatusSegmentId, StatusSide};
+    use sonicterm_render_model::boundary::ui::status_line::{
+        SpokenSegment, StatusPart, StatusSegmentView,
+    };
+    use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stack = chrome_stack();
+    let mut raster = stack.clone();
+    let mut atlas = GlyphAtlas::new(1024, 1024);
+    let segment = |id, text: &str| StatusSegmentView {
+        id,
+        side: StatusSide::Left,
+        priority: 500,
+        protected: false,
+        parts: vec![StatusPart::new(text, StatusTone::Value)],
+        compact: None,
+        click: None,
+        spoken: SpokenSegment::default(),
+    };
+    let view = StatusLineView::new(vec![
+        segment(StatusSegmentId::Mode, "COPY"),
+        segment(StatusSegmentId::Scroll, "Scroll"),
+    ]);
+    let geometry = StripGeometry {
+        top: 100.0,
+        height: 24.0,
+        position: StatusPosition::Bottom,
+        screen: (400.0, 200.0),
+        scale_factor: 1.0,
+        font_raster_px: 26.0,
+        cap_height: 7.0,
+    };
+    let fitted = fit_strip(&view, &geometry, &stack, &mut raster, &mut atlas);
+    assert_eq!((fitted.segments.len(), fitted.separators.len()), (2, 1));
+    let (first, second, separator) =
+        (&fitted.segments[0], &fitted.segments[1], &fitted.separators[0]);
+    assert!(separator.width > 0.0, "the `|` is measured");
+    assert!(first.left + first.width < separator.left, "{first:?} {separator:?}");
+    assert!(separator.left + separator.width < second.left, "{separator:?} {second:?}");
+    let theme = sonicterm_render_model::boundary::cfg::theme::Theme::default();
+    let palette = UiPalette::from_theme(&theme);
+    let name = hex_to_chrome_color("#808080");
+    let colors = StatusColors::resolve(&theme, ChromeColor::WHITE, name, &palette);
+    let (mut quads, mut glyphs) = (Vec::new(), Vec::new());
+    emit_strip(
+        &fitted.segments,
+        &fitted.separators,
+        &geometry,
+        &colors,
+        Some(&stack),
+        Some(&mut raster),
+        &mut atlas,
+        &mut quads,
+        &mut glyphs,
+    );
+    assert_eq!(glyphs.len(), "COPY".len() + "Scroll".len() + 1, "the `|` is drawn once");
+    let bar = glyphs
+        .iter()
+        .find(|glyph| {
+            let (left, _, width, _) = crate::cursor::ndc_rect_px(glyph.rect, 400.0, 200.0);
+            let center = left + width / 2.0;
+            center > first.left + first.width && center < second.left
+        })
+        .expect("a glyph between the segments");
+    assert_ne!(bar.color, glyphs[0].color, "the `|` is in the name color, not the value color");
 }
