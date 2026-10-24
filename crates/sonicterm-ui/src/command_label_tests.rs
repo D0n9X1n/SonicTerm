@@ -86,6 +86,7 @@ fn command_context_requirements_and_readonly_policy_are_explicit() {
                 | Action::OpenCommandPalette
                 | Action::RenameWindow
                 | Action::ChooseStatusLineSegments
+                | Action::FocusStatusLine
         );
         assert_eq!(descriptor(&action).read_only_allowed, expected, "{action:?}");
         assert_eq!(
@@ -165,4 +166,17 @@ fn pretty_keys_preserves_plus_and_unknown_tokens() {
     assert_eq!(pretty_keys(""), "");
     let expected = if cfg!(target_os = "macos") { "HyperSpace" } else { "Hyper+Space" };
     assert_eq!(pretty_keys("hyper+space"), expected);
+}
+
+/// `focus_status_line` is a window command labelled "Focus Status Line" in the palette, and READONLY
+/// allows it because it only moves keyboard focus.
+#[test]
+fn focus_status_line_is_a_read_only_window_command() {
+    let entry = descriptor(&Action::FocusStatusLine);
+    assert_eq!(entry.id, "FocusStatusLine");
+    assert_eq!(entry.label_key, "command-focus-status-line");
+    assert!(entry.read_only_allowed);
+    assert_eq!(entry.requirement, CommandRequirement::Window);
+    assert!(all_actions().contains(&Action::FocusStatusLine));
+    assert_eq!(crate::i18n::test_translator("en").translate(entry.label_key), "Focus Status Line");
 }

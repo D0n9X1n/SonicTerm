@@ -336,6 +336,12 @@ pub(crate) const PROGRAM_POSIX_STEPS: &[CommitStep] = &[
     CommitStep { after_ms: 1100, text: CommitText::Literal("\u{15}printf '\\033]9;4;0\\007'\r") },
 ];
 
+/// How long `program` settles after its last step: past the held-input watch that step's keystroke
+/// arms (`held_after_ms`, 1500 ms by default) with a quarter interval to spare, so the watch wakes
+/// inside `program` and never adds a sampleless wake to the `accessibility` hold that follows.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const PROGRAM_SETTLE_MS: u64 = 2_000;
+
 /// S12/status-line's `program` on a Windows role, whose `cmd` cannot print ESC: Enter only, so the
 /// phase still runs and holds the strip to its contract with no program output.
 #[cfg(any(target_os = "macos", windows, test))]
@@ -420,6 +426,8 @@ pub(crate) struct StatusLineDeltas {
     pub(crate) held_shows: u64,
     /// Times `Glyphs:` appeared.
     pub(crate) glyph_shows: u64,
+    /// Accessibility trees sent; 0 on a side whose App predates the counter.
+    pub(crate) tree_builds: u64,
 }
 
 /// Whether a `status-line` phase kept the strip's idle contract, or why not.
@@ -440,6 +448,8 @@ pub(crate) struct StatusLineDeltas {
 /// `Input: held` may appear at most once on any host ([`status_line_posix_progress`] requires it).
 /// `glyphs` prints U+0378: `Glyphs:` appears at most once and the strip redraws only for a
 /// sample or that appearance, never again after the fallback worker's publication.
+/// `accessibility` holds with every terminal window's adapter installed and dormant and no
+/// assistive technology: it keeps the idle cadence and redraw bound and builds no tree.
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn status_line_progress(
     phase: &str,
@@ -457,13 +467,19 @@ pub(crate) fn status_line_progress(
         "uncovered" if deltas.samples == 0 => {
             Err("status line took no sample after the window was uncovered".to_owned())
         }
-        "idle" | "uncovered" if deltas.samples > cadence_bound || deltas.wakes > cadence_bound => {
+        "accessibility" if deltas.tree_builds > 0 => Err(format!(
+            "{} accessibility trees were built with no assistive technology connected",
+            deltas.tree_builds
+        )),
+        "idle" | "uncovered" | "accessibility"
+            if deltas.samples > cadence_bound || deltas.wakes > cadence_bound =>
+        {
             Err(format!(
                 "status line sampled {} times with {} wakes in {hold_ms} ms, more than {cadence_bound}",
                 deltas.samples, deltas.wakes
             ))
         }
-        "idle" | "uncovered" if deltas.redraws > deltas.samples + 1 => Err(format!(
+        "idle" | "uncovered" | "accessibility" if deltas.redraws > deltas.samples + 1 => Err(format!(
             "status line requested {} redraws for {} samples",
             deltas.redraws, deltas.samples
         )),
@@ -556,6 +572,33 @@ const DELIVERY_INTERVAL_MIN_MS: u64 = 240;
 /// cannot read it (`perf_taskbar_progress_api` off): with it, the surface must receive 40, then
 /// the burst's last value 70 at least one interval after the value before it, then the clear last,
 /// with no value repeated, reordered or stale, and no two deliveries closer than the interval.
+/// Presents `accessibility` allows beyond its strip redraws: the `program` toast expiring inside the
+/// hold, and one frame already in flight when the hold began.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const ACCESSIBILITY_PRESENT_SLACK: u64 = 2;
+
+/// `accessibility` holds with every adapter dormant: every present, from any path, is one the strip
+/// asked for or the slack allows. `presented` is `None` for a base whose App predates the counter.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) fn accessibility_phase_presents(
+    redraws: u64,
+    presented: Option<u64>,
+) -> Result<(), String> {
+    let Some(presented) = presented else {
+        // When: `presented` is None, the base has no counter to check.
+        return Ok(());
+    };
+    let allowed = redraws + ACCESSIBILITY_PRESENT_SLACK;
+    if presented > allowed {
+        // When: `presented` exceeds `allowed`, a path other than the strip drew frames.
+        return Err(format!(
+            "{presented} frames presented during `accessibility`, more than the strip's {redraws} \
+             redraws allow ({allowed})"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn program_phase_progress(
     strip: StatusLineDeltas,
@@ -1303,8 +1346,16 @@ pub(crate) fn plan_for(id: &str, variant: &str, short: bool, host: Host) -> Opti
                 steps.push(Step::Phase(driven(
                     "program",
                     PhaseKind::Sustained,
-                    Driver::Commit { steps: program_steps, settle_ms: 700 },
+                    Driver::Commit { steps: program_steps, settle_ms: PROGRAM_SETTLE_MS },
                     PhaseEnd::DriverDone,
+                )));
+                // Every terminal window holds a dormant accessibility adapter: with no assistive
+                // technology the strip must build no tree and present no extra frame. It follows
+                // `program`, so the toast that phase raised has already been drawn.
+                steps.push(Step::Phase(timed(
+                    "accessibility",
+                    PhaseKind::Hold,
+                    PhaseEnd::Hold(hold(10_000)),
                 )));
             }
             steps.push(end);

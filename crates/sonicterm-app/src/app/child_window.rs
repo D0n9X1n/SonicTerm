@@ -169,6 +169,8 @@ pub fn child_window_dpi_changed_handles_no_renderer(child: &mut WindowState, dpi
 impl App {
     /// Release a child through the same pane, owner, registry, renderer, and PTY boundary.
     pub(super) fn close_child_window(&mut self, win_id: WindowId) -> bool {
+        // The adapter goes before the native window it hooks.
+        self.accessibility.remove(&win_id);
         let Some(mut removed) = self.windows.remove(&win_id) else {
             // When: `windows.remove(&win_id)` is `None`, no child resources remain to release.
             return false;

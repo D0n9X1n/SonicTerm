@@ -903,6 +903,7 @@ pub(crate) fn report_route(action: &Action) -> ReportRoute {
         | Action::UpdateTabColor
         | Action::RenameWindow
         | Action::MoveTabToNewWindow
+        | Action::FocusStatusLine
         | Action::ScrollToPrevPrompt
         | Action::ScrollToNextPrompt => ReportRoute::Consume,
     }

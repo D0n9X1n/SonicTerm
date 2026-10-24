@@ -3879,6 +3879,14 @@ impl Probe {
             _ => return None,
         };
         let counters_start = self.meter.as_ref().and_then(|meter| meter.counters_start.clone());
+        // Every present in the phase, from any path; `accessibility` bounds it by strip redraws.
+        let presented =
+            counters_start.clone().zip(self.counter_totals()).and_then(|(start, totals)| {
+                match totals.delta_since(&start).get("presented") {
+                    Some(crate::counters::FieldValue::Count(count)) => Some(*count),
+                    _ => None,
+                }
+            });
         // `program` reads its own counters from the same start below.
         let deltas =
             counters_start.clone().zip(self.counter_totals()).and_then(|(start, totals)| {
@@ -3897,6 +3905,8 @@ impl Probe {
                     // A side whose App predates the counter shows no `held` to count.
                     held_shows: count("status_line_held_shows").unwrap_or(0),
                     glyph_shows: count("status_line_glyph_shows").unwrap_or(0),
+                    // A side whose App predates accessibility builds no tree to count.
+                    tree_builds: count("status_line_tree_builds").unwrap_or(0),
                 })
             })?;
         if phase.name == "program" {
@@ -3933,6 +3943,14 @@ impl Probe {
         }
         let occluded = self.occlusion.delivered == Some(true);
         scenarios::status_line_progress(phase.name, hold_ms, occluded, deltas)
+            .and_then(|()| {
+                if phase.name == "accessibility" {
+                    scenarios::accessibility_phase_presents(deltas.redraws, presented)
+                } else {
+                    // When: any other phase, presents are bounded by its own checks.
+                    Ok(())
+                }
+            })
             .and_then(|()| {
                 if cfg!(windows) {
                     // A Windows role's shell cannot stall its reader, so `held` need not appear.

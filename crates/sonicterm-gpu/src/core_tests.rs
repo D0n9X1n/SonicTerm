@@ -161,8 +161,14 @@ fn production_frame_decisions_use_one_plan_and_preserve_retry_boundaries() {
     assert!(render.contains("plan.damage"));
     assert!(render.contains("pv.planned.content_clip"));
     assert!(render.contains("pv.planned.rows()"));
-    // The frame finishes once, and only after its presenter reports `Presented`.
-    let handoff = render.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
+    // The frame finishes once, and only after its presenter reports `Presented`; the strip layout
+    // settles at the presenter's outcome, before an error propagates.
+    let presented = render.find("self.present_frame(&layers, &mut gpu_timing);").unwrap();
+    let settled = render
+        .find("self.status_line_layouts.settle(matches!(outcome, Ok(PresentOutcome::Presented)));")
+        .unwrap();
+    let handoff = render.find("let outcome = outcome?;").unwrap();
+    assert!(presented < settled && settled < handoff);
     let guard = render[handoff..].find("PresentOutcome::Presented)").unwrap() + handoff;
     let finish = render.find("self.finish_successful_frame(").unwrap();
     assert_eq!(render.matches("self.finish_successful_frame(").count(), 1);
@@ -1104,7 +1110,7 @@ fn atlas_frame_detector_production_capture_and_retry_precede_presentation() {
         .find("if atlas_changed_during_frame(pass.atlas_stamp_at_start, pass.atlas_stamp_now)")
         .unwrap();
     let retry = source[guard..].find("return Err(Assembled::AtlasRetry {").unwrap() + guard;
-    let present = source.find("self.present_frame(&layers, &mut gpu_timing)?;").unwrap();
+    let present = source.find("let outcome = outcome?;").unwrap();
     let acknowledge = source.find("self.finish_successful_frame(").unwrap();
     assert!(start < guard && guard < retry && retry < present && present < acknowledge);
     assert!(source.contains("let atlas_evictions_at_frame_start = self.glyph_atlas.evictions();"));

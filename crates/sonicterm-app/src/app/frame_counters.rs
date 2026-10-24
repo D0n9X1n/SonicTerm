@@ -847,6 +847,8 @@ pub(crate) struct StatusLineCounters {
     pub(crate) program_toast_redraws: u64,
     /// Values the taskbar, Dock or launcher surface received.
     pub(crate) taskbar_deliveries: u64,
+    /// Accessibility trees sent; stays 0 while no assistive technology is connected.
+    pub(crate) tree_builds: u64,
 }
 
 /// URL and path detection work on the event-loop thread, cumulative for the App's lifetime.
@@ -1671,6 +1673,7 @@ impl AppFrameCounters {
             ("program_notify_events", self.status_line.program_notifies),
             ("program_toast_redraws", self.status_line.program_toast_redraws),
             ("taskbar_progress_deliveries", self.status_line.taskbar_deliveries),
+            ("status_line_tree_builds", self.status_line.tree_builds),
         ] {
             record.push_count(name, value);
         }

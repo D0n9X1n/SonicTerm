@@ -2393,7 +2393,11 @@ pub struct GpuRenderer {
     /// unchanged strip is not reshaped every frame.
     status_line_fit: Option<(u64, Vec<PlacedSegment>)>,
     /// Hit boxes of the segments the last drawn frame presented.
-    status_line_presented: Vec<crate::status_strip::PresentedStatusSegment>,
+    status_line_layouts: crate::status_strip::StripLayouts,
+    /// The segment keyboard focus is on and whether `strong_focus` doubles its ring; `None` draws
+    /// no ring.
+    status_line_focus:
+        Option<(sonicterm_render_model::boundary::cfg::status_line::StatusSegmentId, bool)>,
     /// Reserved height (logical px) above the tab bar for the OS native
     /// titlebar. Kept at zero while SonicTerm uses the normal OS titlebar with a
     /// bottom-pinned tab bar.
@@ -3416,7 +3420,8 @@ impl GpuRenderer {
             status_line_visible: false,
             status_line_view: StatusLineView::default(),
             status_line_fit: None,
-            status_line_presented: Vec::new(),
+            status_line_layouts: Default::default(),
+            status_line_focus: None,
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
             presented_missing: std::collections::HashMap::new(),
@@ -3662,7 +3667,7 @@ impl GpuRenderer {
         }
         self.status_line_visible = visible;
         self.status_line_fit = None;
-        self.status_line_presented.clear();
+        self.status_line_layouts.clear();
         self.last_frame_key = None;
         self.last_pane_layout.clear();
         true
@@ -3686,6 +3691,21 @@ impl GpuRenderer {
         pixels_changed
     }
 
+    /// Draw the keyboard focus ring on segment `focus`, doubled when its flag is set, or no ring
+    /// for `None`. Returns `true` when the ring changed, so the caller requests a frame.
+    pub fn set_status_line_focus(
+        &mut self,
+        focus: Option<(sonicterm_render_model::boundary::cfg::status_line::StatusSegmentId, bool)>,
+    ) -> bool {
+        if self.status_line_focus == focus {
+            // When: `status_line_focus == focus`, the ring is unchanged and nothing redraws.
+            return false;
+        }
+        self.status_line_focus = focus;
+        self.last_frame_key = None;
+        true
+    }
+
     /// The segments the strip may present.
     pub fn status_line_view(&self) -> &StatusLineView {
         &self.status_line_view
@@ -3693,17 +3713,14 @@ impl GpuRenderer {
 
     /// The visible strip's band and the segments the last drawn frame presented; `None` while hidden.
     pub fn status_line_hit(&self) -> Option<crate::status_strip::StripHit> {
-        self.status_line_visible.then(|| crate::status_strip::StripHit {
-            top: self.status_line_top(),
-            height: self.status_line_height(),
-            segments: self.status_line_presented.clone(),
-        })
+        // The band and segments are the committed unit, never the live geometry of a later resize.
+        self.status_line_layouts.presented().filter(|_| self.status_line_visible).cloned()
     }
 
     /// Whether raster-px `y` falls inside the visible strip band.
     pub fn status_line_contains(&self, y: f32) -> bool {
-        let top = self.status_line_top();
-        self.status_line_visible && y >= top && y < top + self.status_line_height()
+        self.status_line_visible
+            && self.status_line_layouts.presented().is_some_and(|strip| strip.contains(y))
     }
 
     /// The presented segment under raster-px `(x, y)`, from the last drawn frame.
@@ -3716,7 +3733,8 @@ impl GpuRenderer {
             // When: `(x, y)` is outside the band, no segment is under it.
             return None;
         }
-        crate::status_strip::segment_at(&self.status_line_presented, x)
+        let strip = self.status_line_layouts.presented()?;
+        crate::status_strip::segment_at(&strip.segments, x)
     }
 
     /// Update the requested LCD subpixel coverage order without rebuilding fonts or atlases.
@@ -7401,7 +7419,40 @@ impl GpuRenderer {
                 &mut *quads,
                 &mut *glyph_instances,
             );
-            self.status_line_presented = placed
+            let focused_box = self.status_line_focus.and_then(|(id, strong)| {
+                placed.iter().find_map(|segment| {
+                    let view = self.status_line_view.segments.get(segment.index)?;
+                    (view.id == id).then_some((segment.left, segment.width, strong))
+                })
+            });
+            if let Some((left, width, strong)) = focused_box {
+                // The keyboard focus ring frames the focused segment inside the band.
+                let thickness =
+                    crate::status_strip::focus_ring_thickness(geometry.scale_factor, strong);
+                let color = crate::color::chrome_color_to_linear_rgba(colors.value);
+                for [ring_x, ring_y, ring_w, ring_h] in crate::status_strip::focus_ring_rects(
+                    left,
+                    width,
+                    geometry.top,
+                    geometry.height,
+                    thickness,
+                ) {
+                    quads.push(crate::quad::QuadInstance {
+                        rect: crate::quad::px_to_ndc(
+                            ring_x,
+                            ring_y,
+                            ring_w,
+                            ring_h,
+                            sw,
+                            geometry.screen.1,
+                        ),
+                        color,
+                        ..Default::default()
+                    });
+                }
+            }
+            // Staged only: the presenter's outcome decides whether this layout is ever on screen.
+            let staged = placed
                 .iter()
                 .filter_map(|segment| {
                     let view = self.status_line_view.segments.get(segment.index)?;
@@ -7413,6 +7464,11 @@ impl GpuRenderer {
                     })
                 })
                 .collect();
+            self.status_line_layouts.stage(crate::status_strip::StripHit {
+                top: geometry.top,
+                height: geometry.height,
+                segments: staged,
+            });
         }
         // Title glyphs can reach above the padded band, so their ink is measured from here.
         let tab_glyph_start = glyph_instances.len();
@@ -9104,10 +9160,15 @@ impl GpuRenderer {
             },
         };
         if std::mem::take(&mut self.fault_present_error) {
-            // When: `fault_present_error` is armed, the presenter call fails as a real `Err` would.
+            // When: `fault_present_error` is armed, the presenter call fails as a real `Err` would,
+            // and the frame's staged strip is discarded with it.
+            self.status_line_layouts.settle(false);
             return Err(anyhow!("injected presentation failure"));
         }
-        let outcome = self.present_frame(&layers, &mut gpu_timing)?;
+        let outcome = self.present_frame(&layers, &mut gpu_timing);
+        // Only a presented frame's strip is what the user sees and may be routed or read aloud.
+        self.status_line_layouts.settle(matches!(outcome, Ok(PresentOutcome::Presented)));
+        let outcome = outcome?;
         // Only a presented frame's field geometry is what the user sees and may be hit-tested.
         self.presented_fields
             .settle(field_candidates, matches!(outcome, PresentOutcome::Presented));

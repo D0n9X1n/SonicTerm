@@ -158,6 +158,7 @@ impl App {
             test_image_atlas_release: None,
         };
         self.insert_window_registered(id, child);
+        self.accessibility.insert(id, Default::default());
         id
     }
 
@@ -606,6 +607,7 @@ impl App {
     /// `false` otherwise.
     #[doc(hidden)]
     pub fn __test_remove_window(&mut self, id: WindowId) -> bool {
+        self.accessibility.remove(&id);
         self.release_window_owner(id);
         self.windows.remove(&id).is_some()
     }
@@ -724,6 +726,7 @@ impl App {
             test_image_atlas_release: None,
         };
         self.insert_window_registered(id, main);
+        self.accessibility.insert(id, Default::default());
         self.main_window_id = Some(id);
     }
 

@@ -591,6 +591,17 @@ impl App {
             Action::ResetFontWeight => self.reset_font_weight(),
             Action::ApplyTheme(name) => self.apply_theme_by_name(name),
             Action::ToggleTabBar => self.toggle_tab_bar(),
+            Action::FocusStatusLine => {
+                let target = match self.frontmost_kind() {
+                    FrontmostKind::Child(id) => Some(id),
+                    FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                        self.main_window_id
+                    }
+                };
+                if let Some(target) = target {
+                    self.focus_status_line(target);
+                }
+            }
             Action::ToggleStatusLine => self.toggle_status_line(),
             Action::ToggleStatusLineSensitive => self.toggle_status_line_sensitive(),
             Action::ChooseStatusLineSegments => self.open_status_segments(None, None),

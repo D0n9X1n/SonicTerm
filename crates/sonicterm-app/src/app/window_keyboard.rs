@@ -91,6 +91,13 @@ impl App {
             }
             return;
         }
+        let quit = key_event_to_string(event, modifiers)
+            .is_some_and(|chord| is_quit_chord(&chord, self.keymap.lookup(&chord)));
+        if !quit && self.status_focus_key(win_id, &event.logical_key, event.repeat) {
+            // When: `status_focus_key` consumed the key, the strip owns focus: a held key's repeat
+            // never reaches a pane through a retained route, and only quit passes through.
+            return;
+        }
         if let Some(mut targets) = self.windows.get(&win_id).and_then(|window| {
             terminal_repeat_targets(&window.pty_pressed_keys, event.physical_key, event.repeat)
         }) {
@@ -293,6 +300,10 @@ impl App {
             // When: win_id is gone, late focus cannot publish reducer state or touch another terminal.
             return;
         }
+        if !focused {
+            // Losing focus ends strip focus, so the next keys go to the terminal.
+            self.end_status_focus(win_id);
+        }
         if Some(win_id) == self.main_window_id {
             // Only main contributes this compatibility observation; live child focus stays in WindowState.
             let window = sonicterm_types::WindowKey::new(0);
@@ -373,6 +384,10 @@ impl App {
 
     /// Route composition through the source window's palette, search, READONLY, or terminal owner.
     pub(super) fn handle_window_ime(&mut self, win_id: WindowId, ime_event: Ime) {
+        if self.status_focus_ime(win_id, &ime_event) {
+            // When: `status_focus_ime` consumed it, the strip owns focus and no composition reaches a pane.
+            return;
+        }
         let Some(route) = self.ime_route(win_id) else {
             // When: ime_route is None, win_id no longer resolves; a late event must not reach another window.
             return;

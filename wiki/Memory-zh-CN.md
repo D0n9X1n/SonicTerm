@@ -154,6 +154,12 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 `total_bytes` 是八项之和，`largest_seam` 指出最大项。`session retention` 行会对所有
 已采样窗格汇总同样字段。
 
+状态栏的辅助功能状态不属于窗格分项。屏幕阅读器连接期间，每个终端窗口保留已公开的段、播报文本、
+每段至多一条排队的播报、每段上次说出的文本，以及已公开段的请求目标，大小均受段数限制。它不保留状态栏
+的格式化副本，也不记录标签页标记：标签栏为每个新出现的标记计数，窗口只保留上次读到的计数。该模型按已分配
+存储以 `AccessibilityTree` 计入窗口的 owner，哈希表使用共享的表估算；阅读器断开时该模型被释放、计费结束，
+窗口关闭时同样如此。accesskit 自身的树镜像属于第三方，不在账本内，同样受节点数限制。
+
 为性能检查点采集的 `memory snapshot` 行包含同样字段，另加四个标注：`checkpoint_index`、
 `checkpoint_label`、`checkpoint_attempt` 与 `checkpoint_complete`（没有窗格被锁占用且每个窗格都已采样）。
 采集它不会改变周期性采样所做的任何事：不运行保留量处理、回收或裁剪，也不重置采样节奏。在带裁剪钩子的构建中，它还包含 `trimmed`、`trim_source` 与 `trim_seq`。

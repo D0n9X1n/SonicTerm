@@ -188,6 +188,18 @@ One pane report contains eight disjoint seams:
 `total_bytes` is their sum. `largest_seam` names the largest part. A
 `session retention` line sums the same fields across sampled panes.
 
+The status line's accessibility state is not a pane seam. While a screen reader is
+connected, each terminal window keeps its exposed segments, the announcement text,
+at most one queued announcement per segment, the last text each segment said, and
+the request targets of the exposed segments, all bounded by the segment count. It
+keeps no formatted copy of the strip and no record of tab marks: the tab bar counts
+each mark a tab newly gets, and the window keeps only the count it last read. That
+model is charged as `AccessibilityTree` to the window's owner as allocated storage,
+hash tables through the shared table estimate; when the reader disconnects the
+model is freed and the charge ends, as it does when the window closes. accesskit's
+own mirror of the tree is third-party, outside the ledger, and bounded by the same
+node count.
+
 A `memory snapshot` line taken for a perf checkpoint carries the same fields plus
 four tags: `checkpoint_index`, `checkpoint_label`, `checkpoint_attempt`, and
 `checkpoint_complete` (no pane contended and every pane sampled). Taking it

@@ -195,6 +195,7 @@ pub(crate) const FIELDS: &[FieldSpec] = &[
     count(Section::App, "program_notify_events"),
     count(Section::App, "program_toast_redraws"),
     count(Section::App, "taskbar_progress_deliveries"),
+    count(Section::App, "status_line_tree_builds"),
     histogram(Section::App, "about_to_wait_ms", Unit::Millis, "about_to_wait"),
     histogram(Section::App, "user_event_ms", Unit::Millis, "user_event"),
     histogram(Section::App, "new_events_ms", Unit::Millis, "new_events"),

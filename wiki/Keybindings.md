@@ -235,11 +235,28 @@ Actions without arguments use a string. The active action names are:
 | Panes | `split_right`, `split_down`, `close_pane`, `toggle_pane_zoom`, `resize_pane_left`, `resize_pane_right`, `resize_pane_up`, `resize_pane_down` |
 | Clipboard and navigation | `copy_to_clipboard`, `paste_from_clipboard`, `enter_copy_mode`, `enter_quick_select` |
 | Font | `increase_font_size`, `decrease_font_size`, `reset_font_size`, `increase_font_weight`, `decrease_font_weight`, `reset_font_weight`, `save_current_settings` |
-| UI | `toggle_tab_bar`, `toggle_status_line`, `toggle_status_line_sensitive`, `choose_status_line_segments`, `rename_tab`, `update_tab_color`, `open_search`, `open_command_palette` |
+| UI | `toggle_tab_bar`, `toggle_status_line`, `toggle_status_line_sensitive`, `choose_status_line_segments`, `focus_status_line`, `rename_tab`, `update_tab_color`, `open_search`, `open_command_palette` |
 | Window and app | `new_window`, `rename_window`, `move_tab_to_new_window`, `toggle_fullscreen`, `quit_app` |
 | Files and maintenance | `edit_config_file`, `open_keymap_file`, `reload_config`, `check_for_updates` |
 | Shell navigation | `scroll_to_prev_prompt`, `scroll_to_next_prompt` |
 | Diagnostics | `show_memory_usage`, `copy_memory_report` |
+
+`focus_status_line` (palette: "Focus Status Line") has no default binding and is
+allowed in READONLY, because it only moves focus. It focuses the first clickable
+segment of the window's status line, or the first segment when none is clickable,
+and does nothing while the strip is off or empty. While the strip has focus,
+Left and Right move between segments, Home and End go to the first and last,
+Enter or Space clicks the segment as a mouse click would, and Escape or Tab
+returns focus to the terminal. Any other key also returns focus and is not sent
+to the terminal, and a held key's repeat moves focus only for an arrow, Home or
+End and otherwise does nothing; quit still works. Taking focus ends an IME
+composition in progress; preedit is then suppressed, and a composition commit is
+discarded and returns focus. Focus also ends when the window loses focus, the tab
+changes, the strip turns off, the focused segment disappears, any mouse button is
+pressed outside the strip, or the segment checklist opens. Clicking a segment
+returns focus before its action runs, so an editor, palette or overlay it opens
+receives keys and IME at once. A reload of `strong_focus` applies to a ring
+already drawn. A ring marks the focused segment; `[accessibility] strong_focus` doubles it.
 
 `show_memory_usage` and `copy_memory_report` are unbound by default. Inside the
 Memory Usage report window, `Cmd+Shift+C` on macOS or `Alt+Shift+C` on Windows

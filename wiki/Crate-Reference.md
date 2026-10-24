@@ -444,6 +444,12 @@ answer separate from the original application result.
 `sonicterm-render-model`, `sonicterm-resource`, `sonicterm-text`,
 `sonicterm-types`, `sonicterm-ui`, `sonicterm-vt`.
 
+**Accessibility dependencies:** `accesskit` 0.25.1 and `accesskit_winit` 0.34.1
+with default features off and `accesskit_unix`, `async-io` and `rwh_06` on. They
+bring `accesskit_macos`, `accesskit_windows` (on `windows` 0.62, the workspace's
+version) and `accesskit_unix` (on `zbus` 5 with the `async-io` executor, no
+tokio). `accesskit_winit` resolves to the vendored winit through the workspace patch.
+
 **macOS dependencies:** `objc2`, `objc2-foundation`, `objc2-app-kit` and
 `objc2-quartz-core`, already in the lockfile through other crates, for the
 per-window `NSView.displayLink` and its tick target (`src/app/display_link.rs`).
