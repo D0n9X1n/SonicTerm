@@ -5356,6 +5356,26 @@ impl GpuRenderer {
         )
     }
 
+    /// Test hook: every resident tile of raster role `variant` as `(key, width, height)`, the
+    /// pixel size of its atlas rect, read from the atlas itself rather than through a font stack,
+    /// so a stale tile reports the size it was drawn at.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __test_resident_tile_sizes(
+        &self,
+        variant: GlyphRasterVariant,
+    ) -> Vec<(sonicterm_types::GlyphKey, u32, u32)> {
+        self.glyph_atlas
+            .resident_tile_keys()
+            .into_iter()
+            .filter(|key| key.raster_variant == variant)
+            .filter_map(|key| {
+                let [width, height] = self.glyph_atlas.get(key)?.px_size;
+                Some((key, width, height))
+            })
+            .collect()
+    }
+
     /// Test hook: the keys of every glyph tile resident in the atlas, sentinels excluded, so a
     /// native test can compare them with the working-set helper's key set.
     #[doc(hidden)]

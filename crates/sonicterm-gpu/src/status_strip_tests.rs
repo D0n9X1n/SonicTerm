@@ -895,3 +895,25 @@ fn the_renderer_rebuilds_the_strip_at_its_scale() {
     assert!(adopt.contains("self.rebuild_status_line_stack();"), "a font change keeps the scale");
     assert!(core.contains("font_scale: self.status_line_font_scale,"));
 }
+
+/// A stale strip tile is rejected: after a resize the live atlas still holds `H` at its old size
+/// and an `X` the cold renderer never draws, so comparing with a cold renderer at the new size
+/// names both, the stale size and the extra glyph.
+#[test]
+fn strip_tile_sizes_reject_a_stale_tile() {
+    let cold = [('H', 12, 16), ('E', 11, 16)];
+    let live = [('H', 9, 12), ('E', 11, 16), ('X', 9, 12)];
+    let error = compare_strip_tile_sizes(&live, &cold).expect_err("a stale tile is rejected");
+    assert!(error.contains("'H'") && error.contains("9x12") && error.contains("12x16"), "{error}");
+    assert!(error.contains("'X'"), "a glyph only the live atlas holds: {error}");
+    let missing = [('H', 12, 16)];
+    assert!(compare_strip_tile_sizes(&missing, &cold).is_err(), "a glyph the live atlas lacks");
+}
+
+/// Fresh strip tiles are accepted: the same glyphs at the same sizes match in any order.
+#[test]
+fn strip_tile_sizes_accept_fresh_tiles() {
+    let cold = [('H', 12, 16), ('E', 11, 16), ('L', 10, 16)];
+    let live = [('L', 10, 16), ('H', 12, 16), ('E', 11, 16)];
+    assert_eq!(compare_strip_tile_sizes(&live, &cold), Ok(()));
+}

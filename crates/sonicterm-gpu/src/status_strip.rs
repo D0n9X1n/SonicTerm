@@ -547,6 +547,48 @@ pub fn segment_at(presented: &[PresentedStatusSegment], x: f32) -> Option<&Prese
     presented.iter().find(|segment| x >= segment.x && x < segment.x + segment.width)
 }
 
+/// Compare the strip tiles a resized renderer holds, `live`, with those of a cold renderer built at
+/// the same final size drawing the same text, `cold`, each as `(glyph, tile width, tile height)`.
+///
+/// # Errors
+/// Every glyph whose tile size differs, and every glyph only one side holds.
+#[doc(hidden)]
+pub fn compare_strip_tile_sizes<Glyph>(
+    live: &[(Glyph, u32, u32)],
+    cold: &[(Glyph, u32, u32)],
+) -> Result<(), String>
+where
+    Glyph: std::hash::Hash + Eq + std::fmt::Debug,
+{
+    /// Each glyph's tile size, keyed by the glyph.
+    fn sizes<Glyph: std::hash::Hash + Eq>(
+        tiles: &[(Glyph, u32, u32)],
+    ) -> std::collections::HashMap<&Glyph, [u32; 2]> {
+        tiles.iter().map(|(glyph, width, height)| (glyph, [*width, *height])).collect()
+    }
+    let (live, cold) = (sizes(live), sizes(cold));
+    // A glyph both sides hold at different sizes is a stale tile; one only the live atlas holds is
+    // a leftover; one only the cold renderer holds was never redrawn.
+    let resized = cold.iter().filter_map(|(glyph, [cold_w, cold_h])| {
+        let [live_w, live_h] = live.get(glyph)?;
+        ([*live_w, *live_h] != [*cold_w, *cold_h]).then(|| {
+            format!("{glyph:?} is {live_w}x{live_h}, a cold renderer draws {cold_w}x{cold_h}")
+        })
+    });
+    let absent = cold
+        .keys()
+        .filter(|glyph| !live.contains_key(*glyph))
+        .map(|glyph| format!("{glyph:?} is not resident; a cold renderer draws it"));
+    let leftover = live
+        .keys()
+        .filter(|glyph| !cold.contains_key(*glyph))
+        .map(|glyph| format!("{glyph:?} is resident, but a cold renderer never draws it"));
+    let mut problems: Vec<String> = resized.chain(absent).chain(leftover).collect();
+    // Hash order varies from run to run, so the report is sorted to read the same each time.
+    problems.sort();
+    problems.is_empty().then_some(()).ok_or_else(|| problems.join("; "))
+}
+
 #[cfg(test)]
 #[path = "status_strip_tests.rs"]
 mod status_strip_tests;
