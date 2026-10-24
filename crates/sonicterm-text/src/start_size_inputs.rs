@@ -42,8 +42,11 @@ pub struct Provenance {
     pub attempt: u32,
     /// The commit the measurement ran on, full SHA.
     pub measured_sha: &'static str,
-    /// `base` for a Performance comparison's base side, `push` for a push CI run.
+    /// `base` for a Performance comparison's base side, `push` for a push CI run on `main`, and
+    /// `pull_request` for a pull-request CI run on the exact head that changed the working set.
     pub side: &'static str,
+    /// The pull request a `pull_request` run measured; `None` for every other side.
+    pub pull_request: Option<u32>,
     /// The observation set: `timed`, `laps` or `counters` for a perf row, `working-set-step` for a
     /// helper row, and the gate step whose test run printed it for a real-renderer row.
     pub set: &'static str,
@@ -52,12 +55,16 @@ pub struct Provenance {
 }
 
 impl Provenance {
-    /// One line naming the run, attempt, commit, side, set and origin, for a failure message.
+    /// One line naming the run, attempt, commit, side, pull request, set and origin, for a failure
+    /// message.
     #[must_use]
     pub fn describe(&self) -> String {
+        let side = self
+            .pull_request
+            .map_or_else(|| self.side.to_owned(), |number| format!("{} #{number}", self.side));
         format!(
-            "run {} attempt {} at {} ({} {}) {}",
-            self.run_id, self.attempt, self.measured_sha, self.side, self.set, self.origin
+            "run {} attempt {} at {} ({side} {}) {}",
+            self.run_id, self.attempt, self.measured_sha, self.set, self.origin
         )
     }
 }
@@ -88,10 +95,16 @@ pub struct StartSizeInput {
 
 /// The Performance comparison whose base side measured the perf-end rows.
 pub const PERF_END_RUN_ID: u64 = 37_525_311_953;
-/// The push CI run that measured the helper and real-renderer rows.
+/// The push CI run that measured the real-renderer rows.
 pub const PUSH_RUN_ID: u64 = 37_517_293_271;
-/// The commit both runs measured: the perf comparison's base side and the push CI's head.
+/// The commit the perf comparison's base side and the push CI run measured.
 pub const MEASURED_SHA: &str = "865acccd18a6e09cf7126dfc6f65830729fd71b7";
+/// The pull-request CI run whose working-set step measured the helper rows.
+pub const HELPER_RUN_ID: u64 = 40_075_489_870;
+/// The pull request that run measured: the change that added the status line's own raster size.
+pub const HELPER_PULL_REQUEST: u32 = 1689;
+/// The exact pull-request head the helper run measured.
+pub const HELPER_MEASURED_SHA: &str = "22c1a5231195bde8c6f5f0208cbeec4b1bb5cad3";
 
 /// A perf-end row: the visible renderer's atlas at a certified `end` checkpoint of an accepted
 /// base-side attempt, at scale 1, which fit the 256 floor with every required glyph drawn.
@@ -118,6 +131,7 @@ const fn perf_row(
             attempt: 1,
             measured_sha: MEASURED_SHA,
             side: "base",
+            pull_request: None,
             set,
             origin,
         },
@@ -144,10 +158,11 @@ const fn helper_row(
         incomplete_glyphs: 0,
         packed_pixels,
         provenance: Provenance {
-            run_id: PUSH_RUN_ID,
+            run_id: HELPER_RUN_ID,
             attempt: 1,
-            measured_sha: MEASURED_SHA,
-            side: "push",
+            measured_sha: HELPER_MEASURED_SHA,
+            side: "pull_request",
+            pull_request: Some(HELPER_PULL_REQUEST),
             set: "working-set-step",
             origin,
         },
@@ -179,10 +194,55 @@ const fn real_row(
             attempt: 1,
             measured_sha: MEASURED_SHA,
             side: "push",
+            pull_request: None,
             set,
             origin,
         },
     }
+}
+
+/// Check the one-run rule over `rows`: every row of one source comes from one run, attempt and
+/// commit. Perf-end rows come from a comparison's `base` side; helper and real-renderer rows from a
+/// `push` run on `main` or a `pull_request` run on the head that changed the working set. A
+/// `pull_request` row names its pull request and no other row does. Sources may differ in run.
+///
+/// # Errors
+/// The first row that breaks the rule, named with its provenance.
+pub fn check_provenance(rows: &[StartSizeInput]) -> Result<(), String> {
+    let mut first_of_source: Vec<(InputSource, Provenance)> = Vec::new();
+    for row in rows {
+        let provenance = row.provenance;
+        let perf = matches!(row.source, InputSource::PerfS9End | InputSource::PerfS12End);
+        // A perf-end row comes only from a comparison's base side; the others from a CI run.
+        let side_allowed = (perf && provenance.side == "base")
+            || (!perf && matches!(provenance.side, "push" | "pull_request"));
+        if !side_allowed {
+            // When: side_allowed is false, the row's side cannot have measured its source.
+            return Err(format!("{:?} row from side {}: {row:?}", row.source, provenance.side));
+        }
+        if (provenance.side == "pull_request") != provenance.pull_request.is_some() {
+            // When: a pull_request row names no pull request, or another side names one.
+            return Err(format!("only a pull_request row names a pull request: {row:?}"));
+        }
+        let run =
+            |of: &Provenance| (of.run_id, of.attempt, of.measured_sha, of.side, of.pull_request);
+        let Some((source, first)) =
+            first_of_source.iter().find(|(source, _)| *source == row.source)
+        else {
+            // When: find returns none, this is the source's first row, so it names the source's run.
+            first_of_source.push((row.source, provenance));
+            continue;
+        };
+        if run(first) != run(&provenance) {
+            // When: the source's first row names another run, the set mixes two runs.
+            return Err(format!(
+                "{source:?} rows come from two runs: {} and {}",
+                first.describe(),
+                provenance.describe()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Every measured input: 32 perf-end rows (macOS and Windows, S9 and S12, every accepted base-side
@@ -480,15 +540,16 @@ pub const START_SIZE_INPUTS: &[StartSizeInput] = &[
         14212,
         r"D:\a\_temp\perf-comparison\runs\S9-default\timed\09-base checkpoint 0 end",
     ),
-    // Helper: the glyph-atlas-working-set step on each platform.
-    helper_row("macos", 1, "S9", 1024, [23, 20], 172851, "job 112453387360 line 8841"),
-    helper_row("macos", 1, "S12", 1024, [23, 16], 136073, "job 112453387360 line 8842"),
-    helper_row("macos", 2, "S9", 2048, [45, 31], 617572, "job 112453387360 line 8845"),
-    helper_row("macos", 2, "S12", 1024, [45, 31], 521016, "job 112453387360 line 8846"),
-    helper_row("windows", 1, "S9", 1024, [24, 16], 181969, "job 112454017976 line 15228"),
-    helper_row("windows", 1, "S12", 1024, [24, 16], 154061, "job 112454017976 line 15229"),
-    helper_row("windows", 2, "S9", 2048, [46, 31], 639557, "job 112454017976 line 15232"),
-    helper_row("windows", 2, "S12", 1024, [46, 31], 537991, "job 112454017976 line 15233"),
+    // Helper: the glyph-atlas-working-set step on each platform, from the pull-request run on the
+    // head that gave the status line its own raster size.
+    helper_row("macos", 1, "S9", 1024, [23, 20], 181370, "job 120817805823 line 10187"),
+    helper_row("macos", 1, "S12", 1024, [23, 16], 144592, "job 120817805823 line 10188"),
+    helper_row("macos", 2, "S9", 2048, [45, 31], 650168, "job 120817805823 line 10192"),
+    helper_row("macos", 2, "S12", 2048, [45, 31], 553612, "job 120817805823 line 10197"),
+    helper_row("windows", 1, "S9", 1024, [24, 16], 191012, "job 120817925706 line 993"),
+    helper_row("windows", 1, "S12", 1024, [24, 16], 163104, "job 120817925706 line 994"),
+    helper_row("windows", 2, "S9", 2048, [46, 31], 671793, "job 120817925706 line 998"),
+    helper_row("windows", 2, "S12", 2048, [46, 31], 570227, "job 120817925706 line 999"),
     // Real renderer: Windows test 17, once per test invocation that ran it.
     real_row(1, "S9", 256, [16, 15], 13847, "workspace-crates", "job 112454017976 line 11453"),
     real_row(2, "S9", 512, [30, 29], 48156, "workspace-crates", "job 112454017976 line 11458"),

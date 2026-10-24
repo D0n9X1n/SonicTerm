@@ -46,10 +46,15 @@ cargo build -p sonicterm-text
   `start_size_inputs::ruled_start` over `START_SIZE_INPUTS` at its scale; a unit
   test checks the equality, because `validate_table_start` accepts the maximum
   unconditionally. Warm spares start at `MIN_ATLAS_DIM`. The table holds 64 CI
-  rows, each with its `Provenance` (run, attempt, measured SHA, side, set and
-  origin): 32 perf-end rows from a Performance comparison's base side, 8 helper
-  rows and 24 Windows real-renderer rows from one push CI run, kept apart by
-  `source`. `SIZING_ORACLE_COMPLETE` is true; `ruled_start` still refuses a
+  rows, each with its `Provenance` (run, attempt, measured SHA, side, pull
+  request, set and origin): 32 perf-end rows from a Performance comparison's
+  base side, 8 helper rows and 24 Windows real-renderer rows, kept apart by
+  `source`. `check_provenance` holds each source's rows to one run, attempt and
+  commit; helper and real-renderer rows come from a `push` run on `main` or a
+  `pull_request` run on the exact head that changed the working set, which
+  names its PR. To re-record, copy the `glyph_atlas_working_set` lines of one
+  run with their job ids and log lines; the working-set step prints every row
+  before it fails once, and its drift check stays exact. `SIZING_ORACLE_COMPLETE` is true; `ruled_start` still refuses a
   scale missing any `required_inputs` row, and a row with nonzero
   `incomplete_glyphs` always selects 2048. Changing a start constant means new
   rows and the rule's new answer, never an edited constant alone. `RASTER_EXCEPTIONS` (empty) exempts a raster
