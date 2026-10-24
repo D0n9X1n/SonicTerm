@@ -497,6 +497,57 @@ impl StatusPosition {
     }
 }
 
+/// The strip's text size as a share of the live terminal font size, kept in hundredths so the
+/// resolved table stays comparable: 0.3 to 1.0, 0.8 by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct StatusFontScale(u8);
+
+impl StatusFontScale {
+    /// The default, 0.8.
+    pub const DEFAULT: Self = Self(80);
+    /// The smallest scale, 0.3.
+    pub const MIN: Self = Self(30);
+    /// The largest scale, 1.0.
+    pub const MAX: Self = Self(100);
+    /// One Larger or Smaller Text step, in hundredths.
+    const STEP: i16 = 5;
+
+    /// `value` rounded to hundredths, or `None` outside 0.3..=1.0 or not a number.
+    #[must_use]
+    pub fn from_f64(value: f64) -> Option<Self> {
+        let hundredths = (value * 100.0).round();
+        (value.is_finite()
+            && (f64::from(Self::MIN.0)..=f64::from(Self::MAX.0)).contains(&hundredths))
+        .then_some(Self(hundredths as u8))
+    }
+
+    /// The scale as a share, 0.3 to 1.0.
+    #[must_use]
+    pub fn as_f32(self) -> f32 {
+        f32::from(self.0) / 100.0
+    }
+
+    /// The scale as a share, for writing back to the file.
+    #[must_use]
+    pub fn as_f64(self) -> f64 {
+        f64::from(self.0) / 100.0
+    }
+
+    /// The scale `steps` steps of 0.05 larger (negative: smaller), clamped to 0.3..=1.0.
+    #[must_use]
+    pub fn stepped(self, steps: i16) -> Self {
+        let raw = (i16::from(self.0) + steps * Self::STEP)
+            .clamp(i16::from(Self::MIN.0), i16::from(Self::MAX.0));
+        Self(raw as u8)
+    }
+}
+
+impl Default for StatusFontScale {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// What a click on a segment does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClickBinding {
@@ -795,6 +846,8 @@ pub struct ResolvedStatusLine {
     pub icons: StatusIcons,
     /// The window edge the strip sits on.
     pub position: StatusPosition,
+    /// The strip's text size as a share of the live terminal font size.
+    pub font_scale: StatusFontScale,
     /// Sampling interval of sampled segments, in milliseconds.
     pub update_interval_ms: u64,
     /// The preset the lists started from; a session enable returns a segment to its list.
@@ -936,6 +989,8 @@ pub struct StatusLineConfig {
     pub icons: StatusIcons,
     /// The window edge the strip sits on; an unknown value fails the load.
     pub position: StatusPosition,
+    /// The strip's text size as a share of the live terminal font size, `0.3..=1.0`.
+    pub font_scale: f64,
     /// Hide every sensitive segment or part (screen sharing).
     pub hide_sensitive: bool,
     /// Sampling interval of sampled segments, `500..=60000` ms.
@@ -962,6 +1017,7 @@ impl Default for StatusLineConfig {
             right: None,
             icons: StatusIcons::Unicode,
             position: StatusPosition::Top,
+            font_scale: StatusFontScale::DEFAULT.as_f64(),
             hide_sensitive: false,
             update_interval_ms: 2000,
             segment: toml::Table::new(),
@@ -988,6 +1044,10 @@ impl StatusLineConfig {
                 self.update_interval_ms
             );
         }
+        let Some(font_scale) = StatusFontScale::from_f64(self.font_scale) else {
+            // `font_scale` is outside 0.3..=1.0 or not a number, so no strip size follows from it.
+            bail!("status_line.font_scale must be in 0.3..=1.0, got {}", self.font_scale);
+        };
         let [preset_left, preset_center, preset_right] = self.preset.lists();
         let lists = [
             (StatusSide::Left, "left", self.left.clone().unwrap_or(preset_left)),
@@ -1157,6 +1217,7 @@ impl StatusLineConfig {
             hide_sensitive: self.hide_sensitive,
             icons: self.icons,
             position: self.position,
+            font_scale,
             update_interval_ms: self.update_interval_ms,
             preset: self.preset,
             segments,

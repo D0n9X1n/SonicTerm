@@ -281,7 +281,8 @@ fn measure_with_stacks(
     let body = stacks.body.ok_or(WorkingSetError::BodyStackUnavailable)?;
     let tab_size = sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size(size);
     let footer_size = palette_footer_font_size(size);
-    let strip_size = crate::status_strip::status_line_font_size(size);
+    let strip_size =
+        crate::status_strip::status_line_font_size(size, crate::status_strip::default_font_scale());
     let mut body_text: String = texts.concat();
     body_text.push_str(&printable_ascii());
     body_text.push('…');

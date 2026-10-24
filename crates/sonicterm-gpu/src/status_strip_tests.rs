@@ -25,21 +25,23 @@ fn geometry_for_font(font_pt: f32, scale_factor: f32) -> StripGeometry {
         screen: (800.0 * scale_factor, 600.0 * scale_factor),
         scale_factor,
         font_raster_px: font_pt * scale_factor,
+        font_scale: default_font_scale(),
         cap_height: 7.0 * scale_factor,
     }
 }
 
-/// Contract: strip text is exactly 60% of the live terminal font size, scaled by DPI, never under
-/// the 1 pt FreeType draws at; the strip's stack is built at the same size.
+/// Contract: at the default `font_scale` strip text is exactly 80% of the live terminal font
+/// size, scaled by DPI, never under the 1 pt FreeType draws at; the strip's stack is built at the
+/// same size.
 #[test]
-fn strip_text_is_sixty_percent_of_the_terminal_font_size() {
-    assert!((geometry_for_font(13.0, 1.0).text_px() - 7.8).abs() < 1e-4, "13 pt gives 7.8");
-    assert!((geometry_for_font(13.5, 2.0).text_px() - 16.2).abs() < 1e-4, "13.5 pt at 2×");
+fn strip_text_is_its_scale_of_the_terminal_font_size() {
+    assert!((geometry_for_font(13.0, 1.0).text_px() - 10.4).abs() < 1e-4, "13 pt gives 10.4");
+    assert!((geometry_for_font(13.5, 2.0).text_px() - 21.6).abs() < 1e-4, "13.5 pt at 2×");
     // A Cmd+= zoom changes the live size, and the strip follows it.
-    assert!((geometry_for_font(16.0, 1.0).text_px() - 9.6).abs() < 1e-4, "a zoomed 16 pt");
+    assert!((geometry_for_font(16.0, 1.0).text_px() - 12.8).abs() < 1e-4, "a zoomed 16 pt");
     assert!((geometry_for_font(1.0, 1.0).text_px() - 1.0).abs() < 1e-4, "the 1 pt floor at 1×");
-    assert!((status_line_font_size(13.0) - 7.8).abs() < 1e-4);
-    assert!((status_line_font_size(13.5) - 8.1).abs() < 1e-4);
+    assert!((status_line_font_size(13.0, default_font_scale()) - 10.4).abs() < 1e-4);
+    assert!((status_line_font_size(13.5, default_font_scale()) - 10.8).abs() < 1e-4);
 }
 
 #[test]
@@ -103,6 +105,7 @@ fn strip_ink_never_leaves_its_band() {
         screen: (400.0, 200.0),
         scale_factor: 1.0,
         font_raster_px: 40.0,
+        font_scale: 0.6,
         cap_height: 7.0,
     };
     let placed = vec![PlacedSegment {
@@ -324,6 +327,7 @@ fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) -> f32 {
         screen: (400.0, 200.0),
         scale_factor: 1.0,
         font_raster_px: 13.0,
+        font_scale: default_font_scale(),
         cap_height: 7.0,
     };
     let part = PlacedPart { text: text.into(), tone: StatusTone::Value, left: 10.0, width: 80.0 };
@@ -370,9 +374,9 @@ fn the_strip_draws_with_its_own_smaller_stack() {
     let title = stacks.tab_title.expect("a tab-title stack");
     let strip = stacks.status_line.expect("a strip stack");
     assert!(strip.shares_configuration_with(&title), "one configuration, one font database");
-    assert!((status_line_font_size(13.0) - 7.8).abs() < 1e-4, "60% of 13 pt");
+    assert!((status_line_font_size(13.0, default_font_scale()) - 10.4).abs() < 1e-4, "80% of 13");
     let (strip_h, title_h) = (strip_ink_height(&strip, "H"), strip_ink_height(&title, "H"));
-    // 7.8 pt against 14 pt: the strip's capitals are drawn shorter, whole pixels apart.
+    // 10.4 pt against 14 pt: the strip's capitals are drawn shorter, whole pixels apart.
     assert!(strip_h > 0.0 && strip_h < title_h, "strip H {strip_h} vs title H {title_h}");
     let core = include_str!("core.rs").replace("\r\n", "\n");
     assert!(core.contains("let mut strip_rasterizer = self.status_line_font_stack.clone();"));
@@ -409,9 +413,10 @@ fn a_tiny_strip_size_is_the_size_freetype_draws() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert!((status_line_font_size(1.0) - 1.0).abs() < 1e-4, "the stack asks for 1 pt");
+    assert!((status_line_font_size(1.0, default_font_scale()) - 1.0).abs() < 1e-4, "1 pt");
     assert!((geometry_for_font(1.0, 2.0).text_px() - 2.0).abs() < 1e-4, "1 pt at 2×");
-    let (normal, tiny) = (cap_over_text_px(13.0, 8.0), cap_over_text_px(1.0, 8.0));
+    // At 16× a 1 pt capital is 16 px tall, so one pixel of rounding moves the ratio by under 0.07.
+    let (normal, tiny) = (cap_over_text_px(13.0, 16.0), cap_over_text_px(1.0, 16.0));
     assert!((tiny - normal).abs() < 0.15, "cap/text {tiny} at 1 pt vs {normal} at 13 pt");
 }
 
@@ -463,7 +468,7 @@ fn the_strip_rasterizes_anew_after_zoom_and_dpi_changes() {
         .unwrap();
         crate::core::renderer_font_views(Some(body), body_pt)
     };
-    let strip_px = |body_pt: f32| status_line_font_size(body_pt);
+    let strip_px = |body_pt: f32| status_line_font_size(body_pt, default_font_scale());
     let views = views_at(13.0);
     let (strip, title) = (views.status_line.unwrap(), views.tab_title.unwrap());
     let mut atlas = GlyphAtlas::new(1024, 1024);
@@ -491,7 +496,7 @@ fn the_strip_rasterizes_anew_after_zoom_and_dpi_changes() {
         drawn_h(&zoomed, &mut reset, GlyphRasterVariant::StatusLine, strip_px(20.0));
     assert!(
         zoomed_h > strip_h,
-        "after the reset the strip draws at 12 pt: {zoomed_h} vs {strip_h}"
+        "after the reset the strip draws at 16 pt: {zoomed_h} vs {strip_h}"
     );
     // A DPI change to 2× rescales the strip's stack; a fresh atlas draws it twice as tall.
     strip.change_scaling(strip.get_font_scale(), 144);
@@ -596,6 +601,7 @@ fn emit_one_part(
         screen: (400.0, 200.0),
         scale_factor: 1.0,
         font_raster_px: 13.0,
+        font_scale: default_font_scale(),
         cap_height: 7.0,
     };
     let part = PlacedPart { text: "MOUSE".into(), tone, left: 10.0, width: 50.0 };
@@ -725,6 +731,7 @@ fn test_strip_geometry(
         screen,
         scale_factor: scale,
         font_raster_px: 13.0 * scale,
+        font_scale: default_font_scale(),
         cap_height: 0.0,
     };
     let mut raster = stack.clone();
@@ -817,6 +824,7 @@ fn the_strip_draws_a_separator_between_adjacent_segments() {
         screen: (400.0, 200.0),
         scale_factor: 1.0,
         font_raster_px: 26.0,
+        font_scale: default_font_scale(),
         cap_height: 7.0,
     };
     let fitted = fit_strip(&view, &geometry, &stack, &mut raster, &mut atlas);
@@ -852,4 +860,38 @@ fn the_strip_draws_a_separator_between_adjacent_segments() {
         })
         .expect("a glyph between the segments");
     assert_ne!(bar.color, glyphs[0].color, "the `|` is in the name color, not the value color");
+}
+
+/// Strip text is `font_scale` × the live terminal font size, 0.8 by default, with the same 1 pt
+/// floor; the stack the renderer builds for a scale asks for the same size the geometry reports.
+#[test]
+fn strip_text_follows_its_font_scale() {
+    assert!((default_font_scale() - 0.8).abs() < 1e-6);
+    let mut geometry = geometry_for_font(13.0, 1.0);
+    assert!((geometry.text_px() - 10.4).abs() < 1e-4, "0.8 × 13 pt by default");
+    geometry.font_scale = 0.65;
+    assert!((geometry.text_px() - 8.45).abs() < 1e-4);
+    assert!((status_line_font_size(13.0, 0.65) - 8.45).abs() < 1e-4);
+    assert!((status_line_font_size(1.0, 0.3) - 1.0).abs() < 1e-4, "never under 1 pt");
+}
+
+/// A scale change rebuilds the strip's stack at the new size from the body stack and resets the
+/// atlas, since a glyph key carries no size; a font change rebuilds it at the renderer's scale,
+/// and every frame's geometry carries that scale.
+#[test]
+fn the_renderer_rebuilds_the_strip_at_its_scale() {
+    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let method = |signature: &str| {
+        let start = core.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
+        core[start..start + core[start..].find("\n    }\n").unwrap()].to_owned()
+    };
+    let set = method("    pub fn set_status_line_font_scale(");
+    assert!(set.contains("self.rebuild_status_line_stack();"));
+    assert!(set.contains("self.reset_glyph_atlas_in_place(\"status_line_font_scale\");"));
+    assert!(set.contains("self.row_glyph_cache.invalidate_all();"));
+    let rebuild = method("    fn rebuild_status_line_stack(");
+    assert!(rebuild.contains("status_line_font_size(self.font_size, self.status_line_font_scale)"));
+    let adopt = method("    fn adopt_font_stacks(");
+    assert!(adopt.contains("self.rebuild_status_line_stack();"), "a font change keeps the scale");
+    assert!(core.contains("font_scale: self.status_line_font_scale,"));
 }

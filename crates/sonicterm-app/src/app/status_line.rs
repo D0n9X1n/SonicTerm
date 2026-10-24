@@ -1369,6 +1369,8 @@ impl App {
             // Both setters run, position first, so a reload that moves and shows the strip
             // refits the panes once.
             let moved = renderer.set_status_line_position(state.resolved.position);
+            // A new text size keeps the strip's height, so it redraws without a refit.
+            let rescaled = renderer.set_status_line_font_scale(state.resolved.font_scale.as_f32());
             if renderer.set_status_line_visible(shown) | moved {
                 // When: `set_status_line_visible` or `moved` changed the insets, refit panes once.
                 minimums_changed = true;
@@ -1387,6 +1389,11 @@ impl App {
                 ];
                 resize_panes_to_rects(&window.panes, &rects, cell_width, cell_height, inset);
                 window.mark_redraw(RedrawCause::Topology);
+                dispatch_redraws.request(*window_id, window);
+            }
+            if rescaled {
+                // The strip's text size changed and its tiles were dropped, so it redraws.
+                window.mark_redraw(RedrawCause::StatusLine);
                 dispatch_redraws.request(*window_id, window);
             }
             if !shown {

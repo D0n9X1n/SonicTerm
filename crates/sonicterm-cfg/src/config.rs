@@ -692,7 +692,7 @@ impl Config {
     ///
     /// Under the save lock it reads and strictly parses the file on disk, resolves its
     /// `[status_line]`, and writes only the keys whose value differs from the session: `enabled`,
-    /// `hide_sensitive`, `position`, and each of `left`, `center` and `right` as an explicit list. `preset` and
+    /// `hide_sensitive`, `position`, `font_scale`, and each of `left`, `center` and `right` as an explicit list. `preset` and
     /// per-segment keys are never written. The rendered document must parse and resolve to exactly
     /// the session's values before it replaces the file. Returns the written `[status_line]`,
     /// resolved, as the new baseline.
@@ -917,6 +917,9 @@ fn patch_status_line_values(
     }
     if save.position != disk_save.position {
         changes.push(("position", save.position.as_str().into()));
+    }
+    if save.font_scale != disk_save.font_scale {
+        changes.push(("font_scale", save.font_scale.as_f64().into()));
     }
     let lists: Vec<(&str, &[crate::status_line::StatusSegmentId])> = ["left", "center", "right"]
         .into_iter()
@@ -1566,6 +1569,8 @@ threshold_secs = 10
 enabled = false
 # Window edge: "top" (above the panes) or "bottom" (above the tab bar).
 position = "top"
+# Text size as a share of the terminal font size, 0.3-1.0.
+font_scale = 0.8
 # Presets: "minimal", "developer", or "diagnostics".
 preset = "developer"
 # Symbols: "unicode", "ascii", or "nerd".

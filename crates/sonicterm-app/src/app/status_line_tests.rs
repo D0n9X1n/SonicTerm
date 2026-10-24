@@ -387,13 +387,13 @@ fn every_ask_in_one_dispatch_reaches_a_window_once() {
 
 #[test]
 fn the_strip_pass_asks_for_frames_only_through_the_dispatch_record() {
-    // Headless windows have no renderer, so the strip pass's own asks are pinned by source: both
-    // the layout and the content ask go through the record, never straight to the window.
+    // Headless windows have no renderer, so the strip pass's own asks are pinned by source: the
+    // layout, text-size and content asks all go through the record, never straight to the window.
     let source = include_str!("status_line.rs").replace("\r\n", "\n");
     let start = source.find("pub(super) fn sync_status_line(").expect("the strip pass");
     let body = &source[start..];
     let body = &body[..body.find("\n    }\n").expect("its end")];
-    assert_eq!(body.matches("dispatch_redraws.request(*window_id, window)").count(), 2);
+    assert_eq!(body.matches("dispatch_redraws.request(*window_id, window)").count(), 3);
     assert!(!body.contains("request_window_redraw()"), "{body}");
 }
 
@@ -1303,4 +1303,25 @@ fn reload_switches_the_strip_position() {
     app.config.status_line.position = StatusPosition::Top;
     let _ = app.sync_status_line(now);
     assert_eq!(app.status_line.resolved.position, StatusPosition::Top, "and back");
+}
+
+/// A reload that changes `font_scale` reaches the session, and the sync hands every renderer the
+/// resolved scale and redraws a window whose strip text changed size (the renderer side is tested
+/// in the GPU crate).
+#[test]
+fn reload_changes_the_strip_font_scale() {
+    use sonicterm_cfg::status_line::StatusFontScale;
+    let mut app = app_with_strip(true);
+    let now = Instant::now();
+    let _ = app.sync_status_line(now);
+    assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::DEFAULT);
+    app.config.status_line.font_scale = 0.6;
+    let _ = app.sync_status_line(now);
+    assert_eq!(app.status_line.resolved.font_scale, StatusFontScale::from_f64(0.6).unwrap());
+    let source = include_str!("status_line.rs").replace("\r\n", "\n");
+    assert!(source.contains(
+        "let rescaled = renderer.set_status_line_font_scale(state.resolved.font_scale.as_f32());"
+    ));
+    let redraw = source.find("if rescaled {").expect("a rescaled strip redraws");
+    assert!(source[redraw..].contains("window.mark_redraw(RedrawCause::StatusLine);"));
 }

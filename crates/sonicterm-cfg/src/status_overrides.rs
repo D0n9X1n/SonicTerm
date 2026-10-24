@@ -288,6 +288,8 @@ pub struct StatusLineSave {
     pub hide_sensitive: bool,
     /// The window edge the strip sits on.
     pub position: crate::status_line::StatusPosition,
+    /// The strip's text size as a share of the terminal font size.
+    pub font_scale: crate::status_line::StatusFontScale,
     /// The `left`, `center` and `right` lists, in order.
     pub lists: [Vec<StatusSegmentId>; 3],
 }
@@ -307,6 +309,7 @@ impl StatusLineSave {
             enabled: resolved.enabled,
             hide_sensitive: resolved.hide_sensitive,
             position: resolved.position,
+            font_scale: resolved.font_scale,
             lists: [side(StatusSide::Left), side(StatusSide::Center), side(StatusSide::Right)],
         }
     }

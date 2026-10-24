@@ -156,6 +156,7 @@ The status line is a strip at the top or bottom of the window that shows SonicTe
 | `icons` | `"unicode"` | Symbols only: `"unicode"`, `"ascii"` or `"nerd"`. `nerd` uses the whole Unicode set, since this build defines no Nerd Font symbols for its segments; there is no per-glyph fallback. Segments have no tooltips; each has a plain-words spoken name and value for assistive technology. |
 | `hide_sensitive` | `false` | Hides every sensitive segment, such as the link under the pointer, for screen sharing. **Toggle Status Line Sensitive Content** (`toggle_status_line_sensitive`) changes it for the session. |
 | `position` | `"top"` | The window edge the strip sits on: `"top"`, above the panes, or `"bottom"`, between the panes and the tab bar. Any other value fails the load. |
+| `font_scale` | `0.8` | The strip's text size as a share of the live terminal font size, `0.3` to `1.0`; it follows a Cmd+= zoom and the display scale. Any other value fails the load. The strip's height does not change, and the font family is the terminal's. |
 | `update_interval_ms` | `2000` | Sampling interval of sampled segments (memory), `500` to `60000`. |
 
 A reload applies `enabled` or `hide_sensitive` only when that key's value in the file changed, so a session toggle survives unrelated reloads.
@@ -299,7 +300,7 @@ weight_scale = 1.0
 Save writes the live font size and effective `weight_scale`, preserving comments,
 order, line endings, and every other key. It also writes the status line the
 session shows, compared with the file on disk under the save lock: `[status_line]`
-`enabled`, `hide_sensitive`, `position`, and `left`, `center` and `right` as explicit lists,
+`enabled`, `hide_sensitive`, `position`, `font_scale`, and `left`, `center` and `right` as explicit lists,
 each only when its value differs from what the file resolves to. `preset` and
 per-segment keys are never written, so a save that changed only the font adds no
 `[status_line]` key, and a key edited in the file since the last reload is kept
