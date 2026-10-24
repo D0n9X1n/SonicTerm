@@ -93,10 +93,10 @@ Control 和 Alt 显示为 `Ctrl`、`Alt`。字面 `+` 按键会保留，例如 `
 以及 READONLY 限制都会显示原因。复制要求非空选区，且所选单元格及连接各行的自动换行仍然匹配；
 解析器忙时暂时禁用复制，而不阻塞 UI。同值重绘保留有效选区，除非它改变了自动换行连接所选各行的位置。
 
-**关于 SonicTerm** 仅作为面板条目提供，没有默认快捷键。搜索 `about`、`SonicTerm`、
-`version` 或本地化关键词（例如“关于”“版本”），选择 **关于 SonicTerm** 结果后按 Enter。
-这会关闭面板，并在原窗口已有的绿色通知中显示 `SonicTerm <version>`，包括预发布后缀。通知会替换当前气泡，并在五秒后自动
-关闭，也可点击其关闭按钮。READONLY 模式下也可使用，不会向终端发送输入。
+**关于 SonicTerm** 没有默认快捷键。在面板中搜索 `about`、`SonicTerm`、`version` 或本地化关键词
+（例如“关于”“版本”），从应用菜单中选择，或绑定 `show_about`。它会打开“关于”窗口，已打开时则聚焦该窗口；
+显示内容见[使用](Usage-zh-CN)。在窗口中，macOS 上 `Cmd+Shift+C`、Windows 和 Linux 上 `Alt+Shift+C`
+复制这些行，`R` 重新读取，`Esc` 关闭。READONLY 模式下也可使用，不会向终端发送输入。
 
 **将 SonicTerm 设为默认…** 仅作为面板命令提供，没有默认快捷键；内置键位表从不绑定它。
 它的标签在各系统上写明会更改什么：macOS 为 **将 SonicTerm 设为脚本、可执行文件和终端链接的默认打开方式…**，
@@ -202,7 +202,7 @@ super+ctrl+alt+shift+key
 | 窗口与应用 | `new_window`、`rename_window`、`move_tab_to_new_window`、`toggle_fullscreen`、`quit_app` |
 | 文件与维护 | `edit_config_file`、`open_keymap_file`、`reload_config`、`check_for_updates` |
 | Shell 导航 | `scroll_to_prev_prompt`、`scroll_to_next_prompt` |
-| 诊断 | `show_memory_usage`、`copy_memory_report` |
+| 诊断 | `show_memory_usage`、`copy_memory_report`、`show_about` |
 
 `focus_status_line`（命令面板：“聚焦状态栏”）默认未绑定，并在 READONLY 下允许，因为它只
 移动焦点。它聚焦窗口状态栏中第一个可点击的段，没有可点击的段时聚焦第一个段；状态栏关闭或

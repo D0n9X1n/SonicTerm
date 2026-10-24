@@ -47,11 +47,37 @@ The command palette is the quickest way to discover actions:
 - macOS: `Cmd+Shift+P`
 - Windows and Linux: `Alt+Shift+P`
 
-Search **About SonicTerm** or **version**, select the **About SonicTerm** result,
-and press Enter to close the palette and show `SonicTerm <version>` in the green notification in that
-window. The version comes from the running build. The notification replaces any
-current bubble and closes after five seconds or with its close button. The command
-works in READONLY mode and does not query releases online or send input to the shell.
+Search **About SonicTerm** or **version** and press Enter, or choose **About
+SonicTerm** in the app menu on macOS or the SonicTerm menu on Windows, to open the
+About window. Opening it again focuses the window that is already open. It shows:
+
+- the version, with the build commit and its date;
+- the OS name, version and architecture;
+- the renderer: GPU, software or GDI, with the adapter and graphics API the renderer
+  selected;
+- the font family and live size;
+- the active theme and keymap: after a reload that named one that does not load, the one
+  still in use, with that reload's error;
+- the config file and whether it loaded, the last load error, or that it is missing;
+- the log folder.
+
+Paths under your home folder are shown with `~`. **[ Copy ]**, or `Cmd+Shift+C` on
+macOS and `Alt+Shift+C` on Windows and Linux, copies those rows as plain text, and a
+notification says whether the clipboard accepted them. `R` reads the facts again, and
+`Esc` or `Cmd+W` closes the window. The button stays inside the window's width, laid out
+again whenever the pane's size changes, in width or height (a window resize, font zoom or
+reset, reload or display scale change), and a click works where it is drawn, also after long rows wrap or
+the view scrolls. The rows
+are plain text in the window's pane, so they can be selected, searched and copied, and a
+screen reader reads each row as its label and value, then **Copy** as a button it can
+press. The window has no shell, works in READONLY mode and never queries releases
+online.
+
+The build commit and date come from the Git checkout when SonicTerm is built: the
+short commit and that commit's date in UTC, so every platform stamps the same date
+for the same commit. A build outside a checkout can set `SONICTERM_BUILD_COMMIT` and
+`SONICTERM_BUILD_DATE`, and `SOURCE_DATE_EPOCH` sets the date; when neither is known
+the version row shows the version alone.
 
 Search **Memory Usage** (or `memory`, `ram`, `footprint`) and press Enter to open
 a report of where SonicTerm's memory goes: OS figures, each renderer and pane,

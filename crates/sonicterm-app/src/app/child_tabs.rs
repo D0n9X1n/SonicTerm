@@ -50,12 +50,10 @@ impl App {
                     // Close the governor owners before the state drops.
                     self.release_owners_of(&mut removed);
                     self.release_child_window_registries(win_id);
-                    let was_report = removed.role == crate::app::WindowRole::MemoryReport;
+                    let removed_role = removed.role;
                     drop(removed);
-                    if was_report {
-                        // Its tab closed the Memory Usage report, so stop its sampler and repair focus.
-                        self.forget_memory_report_window(win_id);
-                    }
+                    // A closed report window stops its own work and gives focus back.
+                    self.forget_report_window(removed_role, win_id);
                     tracing::info!(
                         target: "sonicterm_app::app::child_window",
                         "child window reaped after drag-merge; remaining children={}",

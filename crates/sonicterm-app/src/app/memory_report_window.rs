@@ -39,7 +39,7 @@ use super::{App, PaneState, TabState, UserEvent, WindowRole, WindowState};
 
 /// Grid size of a headless report pane, which has no renderer to measure.
 #[cfg(test)]
-const HEADLESS_GRID: (u16, u16) = (100, 40);
+pub(super) const HEADLESS_GRID: (u16, u16) = (100, 40);
 
 /// App-level state of the Memory Usage report.
 #[derive(Debug, Default)]
@@ -127,26 +127,52 @@ impl App {
     /// Build the native window and its renderer, then install and fill the report pane.
     fn create_memory_report_window(&mut self, event_loop: &ActiveEventLoop) {
         let title = self.i18n.translate("memory-report-window-title");
-        let request = self.window_request(self.main_window_id);
+        let inner_size = self.window_request(self.main_window_id).inner_size;
+        let Some((window, renderer, cells)) =
+            self.build_report_window(event_loop, &title, "memory-report", inner_size)
+        else {
+            // When: build_report_window failed, it logged why and the terminals keep running.
+            return;
+        };
+        self.install_memory_report_window(
+            window.id(),
+            Some(window.clone()),
+            Some(renderer),
+            cells,
+            title,
+        );
+        window.set_visible(true);
+        crate::app::frame_counters::request_native_redraw(&window);
+    }
+
+    /// Create a hidden, undecorated-drop report window titled `title` and its renderer, sized to
+    /// `inner_size`. `None` when the window, its renderer or its first size fails, after logging.
+    pub(super) fn build_report_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        title: &str,
+        role: &'static str,
+        inner_size: winit::dpi::LogicalSize<f64>,
+    ) -> Option<(Arc<Window>, GpuRenderer, (u16, u16))> {
         let attrs = super::with_app_icon(super::with_backdrop_transparency(
             super::with_integrated_titlebar(
                 Window::default_attributes()
-                    .with_title(title.clone())
+                    .with_title(title)
                     .with_visible(false)
                     .with_decorations(true)
-                    .with_inner_size(request.inner_size),
+                    .with_inner_size(inner_size),
             ),
             self.config.appearance.backdrop,
             self.config.appearance.software_render_mode,
         ));
-        // The report accepts no drops, so it is never registered as a native drop target.
+        // A report accepts no drops, so it is never registered as a native drop target.
         let attrs = self.native_drop_attributes(attrs);
         let window = match event_loop.create_window(attrs) {
             Ok(created) => Arc::new(created),
             Err(error) => {
                 // When: `create_window` returned an `error`, keep the terminals running and log why.
-                tracing::error!("memory report: create_window failed: {error}");
-                return;
+                tracing::error!("{role}: create_window failed: {error}");
+                return None;
             }
         };
         window.set_ime_allowed(true);
@@ -170,7 +196,7 @@ impl App {
                 panel_padding: self.config.appearance.panel_padding,
                 software_render_mode: self.config.appearance.software_render_mode,
             },
-            role: "memory-report",
+            role,
             glyph_atlas_start: sonicterm_gpu::core::GlyphAtlasStart::Normal,
         };
         let renderer_result = self.shared_gpu_context().map_or_else(
@@ -189,8 +215,8 @@ impl App {
             Ok(renderer) => renderer,
             Err(error) => {
                 // When: `renderer_result` is an `error`, drop the hidden window instead of showing a blank one.
-                tracing::error!("memory report: renderer init failed: {error}");
-                return;
+                tracing::error!("{role}: renderer init failed: {error}");
+                return None;
             }
         };
         if !self.configure_child_renderer(
@@ -199,20 +225,11 @@ impl App {
             super::tear_out::ChildRendererOrigin::Fresh,
         ) {
             // When: the surface size was rejected, the grid would be unusable, so drop the window.
-            tracing::error!("memory report: initial window size rejected");
-            return;
+            tracing::error!("{role}: initial window size rejected");
+            return None;
         }
-        let window_id = window.id();
         let cells = renderer.cells();
-        self.install_memory_report_window(
-            window_id,
-            Some(window.clone()),
-            Some(renderer),
-            cells,
-            title,
-        );
-        window.set_visible(true);
-        crate::app::frame_counters::request_native_redraw(&window);
+        Some((window, renderer, cells))
     }
 
     /// Insert a report window with one PTY-less pane, make it frontmost, and fill it.
@@ -221,11 +238,31 @@ impl App {
         window_id: WindowId,
         window: Option<Arc<Window>>,
         renderer: Option<GpuRenderer>,
-        (cols, rows): (u16, u16),
+        cells: (u16, u16),
         title: String,
     ) {
+        self.install_report_pane(
+            ReportPane { window_id, window, renderer, cells, title },
+            WindowRole::MemoryReport,
+            REPORT_HISTORY_ROWS,
+        );
+        // A new window starts from a blank report, never an older window's text.
+        self.memory_report.last_text = None;
+        self.memory_report.current = None;
+        self.refresh_memory_report();
+    }
+
+    /// Insert a window of report `role` holding one PTY-less pane with `history_rows` of history,
+    /// and make it frontmost. Shared by the Memory Usage report and the About window.
+    pub(super) fn install_report_pane(
+        &mut self,
+        pane: ReportPane,
+        role: WindowRole,
+        history_rows: usize,
+    ) {
+        let ReportPane { window_id, window, renderer, cells: (cols, rows), title } = pane;
         let mut grid = Grid::new(cols, rows);
-        grid.set_scrollback_limit(REPORT_HISTORY_ROWS);
+        grid.set_scrollback_limit(history_rows);
         let parser = Arc::new(Mutex::new(Parser::new_with_staging_pool(
             grid,
             None,
@@ -243,6 +280,7 @@ impl App {
         let mut tabs = TabBar::new();
         tabs.push(Tab::new(title.clone()));
         let state = report_window_state(
+            role,
             window,
             renderer,
             tabs,
@@ -252,10 +290,6 @@ impl App {
         );
         self.insert_window_registered(window_id, state);
         self.frontmost_window = Some(window_id);
-        // A new window starts from a blank report, never an older window's text.
-        self.memory_report.last_text = None;
-        self.memory_report.current = None;
-        self.refresh_memory_report();
     }
 
     /// Take a fresh sample: counted figures now, OS figures from the one sampling worker.
@@ -407,6 +441,12 @@ impl App {
             // When: `memory_report_window_id` is None, the report window closed and no pane can show the text.
             return false;
         };
+        self.feed_report_pane(report_id, text)
+    }
+
+    /// Replace the pane of report window `report_id` with `text`, scrolled to its first line, and
+    /// drop its retained frame. Returns whether a pane received the text.
+    pub(super) fn feed_report_pane(&mut self, report_id: WindowId, text: &str) -> bool {
         let scrollbar = self.config.appearance.scrollbar;
         let Some(window) = self.windows.get_mut(&report_id) else {
             // When: the window vanished between the lookup and the borrow.
@@ -487,6 +527,11 @@ impl App {
     /// `reap_empty_child` (tab close button); `finish_session` cancels sampling directly.
     pub(super) fn forget_memory_report_window(&mut self, removed: WindowId) {
         self.cancel_memory_report_sampling();
+        self.repair_focus_after_report(removed);
+    }
+
+    /// Move focus off removed report window `removed` to the terminal window actions redirect to.
+    pub(super) fn repair_focus_after_report(&mut self, removed: WindowId) {
         if self.frontmost_window != Some(removed) {
             // When: `frontmost_window` is another window, focus does not need repairing.
             return;
@@ -520,19 +565,20 @@ impl App {
             .or(main)
     }
 
-    /// Route an action whose source is the report window.
+    /// Route an action whose source is a report window: Memory Usage or About.
     ///
     /// `from_cached_focus` is true when the caller is the cached-frontmost dispatcher, whose
     /// scroll arm reads only the main window; a scroll from there takes the explicit-source path,
     /// which scrolls the report's own pane. Returns `Some(handled)` when the report consumed,
     /// closed on, or redirected the action, or `None` when it runs on the report normally.
-    pub(super) fn gate_memory_report_action(
+    pub(super) fn gate_report_action(
         &mut self,
         action: &Action,
         source: Option<WindowId>,
         from_cached_focus: bool,
     ) -> Option<bool> {
-        let report_id = source.filter(|id| self.is_memory_report_window(*id))?;
+        let report_id = source
+            .filter(|id| self.windows.get(id).is_some_and(|window| window.role.is_report()))?;
         let route = report_route(action);
         let scroll_via_cached_focus = from_cached_focus && matches!(action, Action::Scroll(_));
         match route {
@@ -542,7 +588,8 @@ impl App {
             }
             ReportRoute::Local => None,
             ReportRoute::CloseReport => {
-                self.close_memory_report_window();
+                // Close the report the action came from, the Memory Usage report or About.
+                self.close_child_window(report_id);
                 Some(true)
             }
             ReportRoute::Consume => Some(true),
@@ -788,8 +835,23 @@ fn summarize_renderer(
     }
 }
 
-/// The report window's state: one tab, one PTY-less pane, its title as the window name.
+/// A report window's native parts before its pane is installed.
+pub(super) struct ReportPane {
+    /// The window's identity, real or synthetic.
+    pub(super) window_id: WindowId,
+    /// The native window; `None` in headless tests.
+    pub(super) window: Option<Arc<Window>>,
+    /// Its renderer; `None` in headless tests.
+    pub(super) renderer: Option<GpuRenderer>,
+    /// The pane's size, columns then rows.
+    pub(super) cells: (u16, u16),
+    /// The window and tab title.
+    pub(super) title: String,
+}
+
+/// A report window's state: one tab, one PTY-less pane, its title as the window name.
 fn report_window_state(
+    role: WindowRole,
     window: Option<Arc<Window>>,
     renderer: Option<GpuRenderer>,
     tabs: TabBar,
@@ -803,7 +865,7 @@ fn report_window_state(
         // Registered when the window is inserted.
         owner: None,
         pending_receipts: Vec::new(),
-        role: WindowRole::MemoryReport,
+        role,
         custom_window_name: title,
         window,
         renderer,

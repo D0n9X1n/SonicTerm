@@ -124,8 +124,9 @@ back when the context belongs with the original session again.
   [Run a command from a launcher](wiki/Usage.md#run-a-command-from-a-launcher) and
   [Choose SonicTerm as the default](wiki/Usage.md#choose-sonicterm-as-the-default).
 - **Command palette first** — commands are searchable and display shortcuts from
-  your current keymap config. **About SonicTerm** shows the running app's version
-  in a green notification.
+  your current keymap config. **About SonicTerm** opens a window with the version,
+  build commit and date, OS, renderer, font, theme, keymap, config and log paths,
+  and a Copy button.
 - **Config is just files** — `~/.sonicterm/sonicterm.toml`, plus editable
   `themes/` and `keymaps/` examples seeded on first launch.
 - **Bundled typography** — `Rec Mono St.Helens` ships with the app and is

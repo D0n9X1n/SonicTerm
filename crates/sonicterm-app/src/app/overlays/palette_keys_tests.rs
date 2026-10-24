@@ -77,41 +77,34 @@ fn modified_backspace_never_falls_through_to_plain_palette_deletion() {
     }
 }
 
-/// About uses the originating window's green notification even if focus moves before activation.
+/// About opens the About window from whichever window the palette was opened in, even if focus
+/// moves before activation, and shows no notification.
 #[test]
-fn about_palette_shows_compiled_version_in_source_window_notification() {
+fn about_palette_opens_the_about_window() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let main = app.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["child"]);
     for (owner, other) in [(main, child), (child, main)] {
+        app.about.open_requested = false;
         app.__test_set_frontmost_window(Some(owner));
         app.run_action_for_window(&Action::OpenCommandPalette, owner);
         app.__test_set_palette_query("About SonicTerm");
         assert_eq!(app.command_palette.current(), Some(&PaletteEntry::About));
         app.__test_set_frontmost_window(Some(other));
-        let before = std::time::Instant::now();
         assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter)));
-        let after = std::time::Instant::now();
         assert!(!app.command_palette.is_open());
         assert_eq!(app.palette_attached_window, None);
-        assert_eq!(app.frontmost_window, Some(other));
-        let bubble = app.windows[&owner].notification.as_ref().expect("About notification");
-        assert_eq!(bubble.level, sonicterm_ui::overlays::NotificationLevel::Info);
-        assert_eq!(bubble.message, format!("SonicTerm {}", env!("CARGO_PKG_VERSION")));
-        let expires = bubble.expires_at.expect("standard notification expiry");
-        assert!(expires >= before + std::time::Duration::from_secs(5));
-        assert!(expires <= after + std::time::Duration::from_secs(5));
-        assert!(app.windows[&other].notification.is_none());
-        assert!(app.__test_drain_pty_writes().is_empty());
-        app.expire_notifications(expires);
+        assert!(app.about.open_requested, "the About window opens on the next event-loop turn");
         assert!(app.windows[&owner].notification.is_none());
+        assert!(app.__test_drain_pty_writes().is_empty());
     }
 }
 
-/// About remains available in READONLY and releases the palette without changing terminal mode or input.
+/// About remains available in READONLY and opens the About window without changing terminal mode
+/// or input.
 #[test]
-fn about_palette_notification_preserves_readonly_and_reopens_normally() {
+fn about_palette_preserves_readonly_and_reopens_normally() {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_seed_tab("main");
     let window_id = app.main_window_id.unwrap();
@@ -130,10 +123,8 @@ fn about_palette_notification_preserves_readonly_and_reopens_normally() {
     assert_eq!(app.command_palette.current(), Some(&PaletteEntry::About));
     app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
     assert!(!app.command_palette.is_open());
-    assert_eq!(
-        app.__test_main_notification_message(),
-        Some(format!("SonicTerm {}", env!("CARGO_PKG_VERSION")).as_str())
-    );
+    assert!(app.about.open_requested);
+    assert_eq!(app.__test_main_notification_message(), None);
     assert!(app.windows[&window_id].copy_mode.as_ref().unwrap().is_read_only());
     assert!(app.__test_drain_pty_writes().is_empty());
     app.run_action_for_window(&Action::OpenCommandPalette, window_id);

@@ -865,6 +865,7 @@ pub(crate) fn report_route(action: &Action) -> ReportRoute {
         | Action::OpenCommandPalette
         | Action::ShowMemoryUsage
         | Action::CopyMemoryReport
+        | Action::ShowAbout
         | Action::ToggleFullscreen
         | Action::QuitApp => ReportRoute::Local,
         Action::CloseTab | Action::ClosePane | Action::CloseActivePaneOrTab => {

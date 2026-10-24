@@ -10,7 +10,10 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(clippy::min_ident_chars)]
 
+// `build.rs` includes this file; the library compiles it only to test it.
 pub mod app;
+#[cfg(test)]
+mod build_watch;
 pub mod default_handlers;
 pub mod launch_cli;
 pub mod launch_queue;

@@ -31,6 +31,7 @@ sonicterm-io.workspace = true
 sonicterm-text.workspace = true
 sonicterm-gpu.workspace = true
 sonicterm-ui.workspace = true
+unicode-width.workspace = true
 sonicterm-render-model.workspace = true
 winit.workspace = true
 raw-window-handle.workspace = true

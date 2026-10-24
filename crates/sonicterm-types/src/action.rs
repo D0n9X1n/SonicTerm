@@ -204,6 +204,8 @@ pub enum Action {
     ShowMemoryUsage,
     /// Copy the whole Memory Usage report text to the clipboard.
     CopyMemoryReport,
+    /// Open the About window, or focus and refresh it when it is already open.
+    ShowAbout,
 
     // System integration
     /// Show the file and link handlers SonicTerm can claim, and change them only after

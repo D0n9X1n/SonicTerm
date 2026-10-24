@@ -635,6 +635,17 @@ removes it (the close action, the native close button, its tab's close button)
 runs one teardown that cancels any unfinished OS sample, drops the report text,
 and returns focus to a terminal window; `finish_session` cancels the sample too.
 
+The About window is a `WindowRole::About` entry built the same way: created at the
+next `drain_pending_window_creates` after `show_about`, focused instead of
+duplicated, with one PTY-less pane. `WindowRole::is_report` covers both report
+roles, so it has the same exclusions: no window number, never a tab drop target,
+tear-out source, broadcast receiver or native drop target, and it never keeps the
+app alive. Every path that removes it drops its text and returns focus to a
+terminal window. It runs no background work. It gets an accessibility adapter before it
+is first shown; while a screen reader is connected, its tree has one node per row and
+the Copy button, sent again only when the rows change. The Memory Usage report has no
+adapter.
+
 When an action sets `pending_exit`, `about_to_wait` clears it and calls
 `ActiveEventLoop::exit`. With no active terminal window, normal last-window
 policy also reaches this path.

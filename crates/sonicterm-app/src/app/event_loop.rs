@@ -306,6 +306,9 @@ impl App {
                 deadline,
             });
         }
+        // A font, reload or DPI change resized the About pane without a frame yet: lay it out again,
+        // so its rows and its accessibility tree both follow the new width.
+        self.relayout_about_if_resized();
         // Accessibility trees are built here, once per dispatch after its redraws, never in one.
         if let Some(deadline) = self.flush_accessibility(now) {
             // A queued announcement becomes ready; wake to deliver it.

@@ -181,12 +181,9 @@ impl App {
         }
         self.release_owners_of(&mut removed);
         self.release_child_window_registries(win_id);
-        let was_report = removed.role == crate::app::WindowRole::MemoryReport;
+        let removed_role = removed.role;
         drop(removed);
-        if was_report {
-            // The Memory Usage report closed, so stop its sampler and repair focus.
-            self.forget_memory_report_window(win_id);
-        }
+        self.forget_report_window(removed_role, win_id);
         true
     }
 
