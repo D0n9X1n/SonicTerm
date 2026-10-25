@@ -531,6 +531,8 @@ impl App {
                         "reload: keymap {:?} resolution failed: {error:#}",
                         new_cfg.keymap
                     );
+                    // The active keymap stays; its failed replacement is reported like a bad file.
+                    self.set_keymap_reload_error(Some(&error));
                     None
                 }
             };
@@ -581,8 +583,8 @@ impl App {
             let limit = new_cfg.terminal.scrollback;
             tracing::info!("live-reload: scrollback -> {limit} rows");
             for child in self.windows.values_mut() {
-                if child.role == super::WindowRole::MemoryReport {
-                    // When: `child.role` is MemoryReport, its history is sized to the report, not the setting.
+                if child.role.is_report() {
+                    // When: `child.role` is a report, its history is sized to the report, not the setting.
                     continue;
                 }
                 for pane in child.panes.values_mut() {

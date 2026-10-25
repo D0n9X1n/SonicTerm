@@ -89,8 +89,8 @@ impl App {
     ) -> std::collections::BTreeSet<u64> {
         let mut receivers = std::collections::BTreeSet::new();
         for window in self.windows.values() {
-            if window.role == WindowRole::MemoryReport {
-                // When: the window is the Memory Usage report, its pane has no shell and is never a receiver.
+            if window.role.is_report() {
+                // When: the window is a report (Memory Usage or About), its pane has no shell and is never a receiver.
                 continue;
             }
             match scope {

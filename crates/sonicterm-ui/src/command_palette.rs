@@ -1384,6 +1384,7 @@ pub fn action_display_name(action: &Action) -> String {
         Action::ReloadConfig => "ReloadConfig".into(),
         Action::ShowMemoryUsage => "ShowMemoryUsage".into(),
         Action::CopyMemoryReport => "CopyMemoryReport".into(),
+        Action::ShowAbout => "ShowAbout".into(),
         Action::SetDefaultHandlers => "SetDefaultHandlers".into(),
         Action::ApplyTheme(name) => format!("ApplyTheme({name})"),
         Action::ToggleTabBar => "ToggleTabBar".into(),
@@ -1435,6 +1436,8 @@ fn scroll_name(scroll: ScrollAction) -> &'static str {
 pub fn all_actions() -> Vec<Action> {
     let mut actions = palette_actions();
     actions.push(Action::ApplyTheme("wezterm".into()));
+    // The palette lists About as its own entry, so the action is bindable but not listed twice.
+    actions.push(Action::ShowAbout);
     actions
 }
 

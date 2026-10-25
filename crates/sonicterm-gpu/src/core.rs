@@ -1152,6 +1152,19 @@ fn read_only_badge_rect(sw: f32, sh: f32, scale: f32, content_w: f32) -> (f32, f
     (x, y, w, h)
 }
 
+/// The display name of graphics API `backend`, as the About window shows it.
+#[must_use]
+pub fn backend_display_name(backend: wgpu::Backend) -> &'static str {
+    match backend {
+        wgpu::Backend::Metal => "Metal",
+        wgpu::Backend::Dx12 => "DirectX 12",
+        wgpu::Backend::Vulkan => "Vulkan",
+        wgpu::Backend::Gl => "OpenGL",
+        wgpu::Backend::BrowserWebGpu => "WebGPU",
+        wgpu::Backend::Noop => "none",
+    }
+}
+
 /// Classify a wgpu adapter as a software (CPU) rasterizer.
 ///
 /// True when the adapter is a CPU device, or its name matches a known
@@ -5012,6 +5025,14 @@ impl GpuRenderer {
     #[must_use]
     pub fn __graphics_ledger_handle(&self) -> crate::graphics_ledger::GraphicsLedgerHandle {
         self.graphics_ledger.clone()
+    }
+
+    /// The adapter this renderer selected and its graphics API, as `(name, API)`, such as
+    /// `("Apple M4 Max", "Metal")`. The name is empty when the platform reports none.
+    #[must_use]
+    pub fn adapter_summary(&self) -> (String, &'static str) {
+        let info = self.adapter.get_info();
+        (info.name, backend_display_name(info.backend))
     }
 
     /// The adapter's PCI vendor and device ids while this renderer presents through DX12 rather

@@ -20,6 +20,18 @@ pub enum WindowRole {
     /// It never keeps the app alive, is never a tab drop target or broadcast
     /// receiver, and redirects terminal actions to a terminal window.
     MemoryReport,
+    /// The About window: one tab, one pane with no PTY, showing the build and runtime facts.
+    ///
+    /// Like the Memory Usage report, it never keeps the app alive, is never a tab drop target or
+    /// broadcast receiver, and redirects terminal actions to a terminal window.
+    About,
+}
+
+impl WindowRole {
+    /// Whether this is a PTY-less report window (Memory Usage or About) rather than a terminal.
+    pub fn is_report(self) -> bool {
+        matches!(self, Self::MemoryReport | Self::About)
+    }
 }
 
 #[derive(Debug, Clone)]

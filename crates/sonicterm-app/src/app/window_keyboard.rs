@@ -220,6 +220,13 @@ impl App {
                     self.handle_memory_report_key(win_id, &chords, event.repeat);
                     return;
                 }
+                if self.is_about_window(win_id) {
+                    // When: win_id is the About window, its own keys and the gate handle the press,
+                    // and nothing is encoded because its pane has no shell.
+                    let chords = key_event_to_strings(event, modifiers);
+                    self.handle_about_key(win_id, &chords, event.repeat);
+                    return;
+                }
             }
             None => {
                 // When: win_id disappeared, do not substitute another input owner.

@@ -154,6 +154,15 @@ const KIND_ROOT: u64 = 1 << 32;
 const KIND_STRIP: u64 = 2 << 32;
 const KIND_ANNOUNCEMENT: u64 = 3 << 32;
 const KIND_SEGMENT: u64 = 4 << 32;
+const KIND_ABOUT_ROW: u64 = 5 << 32;
+const KIND_ABOUT_COPY: u64 = 6 << 32;
+/// The About window's Copy button.
+pub(crate) const ABOUT_COPY_NODE: NodeId = NodeId(TERMINAL_WINDOW | KIND_ABOUT_COPY);
+
+/// The About window's row `index`, counted from the version row.
+pub(crate) fn about_row_node(index: usize) -> NodeId {
+    NodeId(TERMINAL_WINDOW | KIND_ABOUT_ROW | index as u64)
+}
 /// The window node.
 pub(crate) const ROOT_NODE: NodeId = NodeId(TERMINAL_WINDOW | KIND_ROOT);
 /// The status line group.
@@ -571,6 +580,41 @@ pub(crate) fn build_tree(inputs: &TreeInputs<'_>) -> TreeUpdate {
     }
 }
 
+/// Build the About window's tree: the window titled `title`, one label node per report row in
+/// order, read as `label: value`, then the Copy button labelled from `copy`, which can be pressed.
+pub(crate) fn build_about_tree(title: &str, rows: &[(String, String)], copy: &str) -> TreeUpdate {
+    let mut nodes = Vec::with_capacity(rows.len() + 2);
+    let mut children = Vec::with_capacity(rows.len() + 1);
+    for (index, (label, value)) in rows.iter().enumerate() {
+        let mut node = Node::new(Role::Label);
+        node.set_label(format!("{label}: {value}"));
+        node.set_value(value.clone());
+        node.add_action(AccessAction::Focus);
+        children.push(about_row_node(index));
+        nodes.push((about_row_node(index), node));
+    }
+    let mut button = Node::new(Role::Button);
+    // The drawn label is bracketed, `[ Copy ]`; a screen reader says only the word.
+    button.set_label(copy.trim().trim_start_matches('[').trim_end_matches(']').trim().to_owned());
+    button.add_action(AccessAction::Focus);
+    button.add_action(AccessAction::Click);
+    children.push(ABOUT_COPY_NODE);
+    nodes.push((ABOUT_COPY_NODE, button));
+    let mut root = Node::new(Role::Window);
+    root.set_label(title.to_owned());
+    root.set_children(children);
+    nodes.push((ROOT_NODE, root));
+    TreeUpdate {
+        nodes,
+        tree: Some(TreeInfo {
+            toolkit_name: Some("SonicTerm".to_owned()),
+            ..TreeInfo::new(ROOT_NODE)
+        }),
+        tree_id: TreeId::ROOT,
+        focus: ROOT_NODE,
+    }
+}
+
 /// The health segment's severity in `view`, from its tones.
 pub(crate) fn health_severity(view: &StatusLineView) -> Severity {
     let Some(health) = view.segments.iter().find(|segment| segment.id == StatusSegmentId::Health)
@@ -714,10 +758,74 @@ impl App {
         wake
     }
 
+    /// Send About window `window_id`'s tree while a reader is connected and its rows changed.
+    fn flush_about_accessibility(&mut self, window_id: WindowId) {
+        let title = self
+            .windows
+            .get(&window_id)
+            .map(|window| window.custom_window_name.clone())
+            .unwrap_or_default();
+        let Some((rows, copy)) = self
+            .about
+            .view
+            .as_ref()
+            .map(|view| (view.accessible.clone(), view.button_label.clone()))
+        else {
+            // When: view is None, About shows nothing yet, so there is no tree to send.
+            return;
+        };
+        let Some(state) = self.accessibility.get_mut(&window_id).filter(|state| state.active)
+        else {
+            // When: no reader is connected (`active` is false), no tree is built.
+            return;
+        };
+        let mut hasher = DefaultHasher::new();
+        (&title, &rows, &copy).hash(&mut hasher);
+        let hash = hasher.finish();
+        if state.sent_hash == Some(hash) {
+            // When: sent_hash matches, the reader already has these rows.
+            return;
+        }
+        state.sent_hash = Some(hash);
+        state.send(build_about_tree(&title, &rows, &copy));
+    }
+
+    /// Answer a request to About window `window_id`: a connection sends its tree on the next flush,
+    /// and a press on Copy copies; its rows are text, so nothing else runs.
+    fn handle_about_accessibility_request(
+        &mut self,
+        window_id: WindowId,
+        request: AccessibilityRequest,
+    ) {
+        match request {
+            AccessibilityRequest::InitialTree | AccessibilityRequest::Deactivated => {
+                // A reader connected or left: the next flush sends a full tree, or none.
+                if let Some(state) = self.accessibility.get_mut(&window_id) {
+                    state.active = request == AccessibilityRequest::InitialTree;
+                    state.sent_hash = None;
+                }
+            }
+            AccessibilityRequest::Click { node, .. } if node == ABOUT_COPY_NODE.0 => {
+                // When: the press is on the Copy node, copy as the button does.
+                let _ = self.copy_about();
+            }
+            AccessibilityRequest::Click { .. }
+            | AccessibilityRequest::Focus { .. }
+            | AccessibilityRequest::Other => {
+                // When: the request names a row or another action, the rows are text and run nothing.
+            }
+        }
+    }
+
     /// Bring `window_id` up to date: end strip focus that no longer points at a presented segment
     /// of the same tab, and while an assistive technology is connected queue and deliver
     /// announcements from the current inputs, and send a full tree when what it reads changed.
     fn flush_window_accessibility(&mut self, window_id: WindowId, now: Instant) -> Option<Instant> {
+        if self.is_about_window(window_id) {
+            // When: window_id is the About window, its tree is the report rows, not a status line.
+            self.flush_about_accessibility(window_id);
+            return None;
+        }
         let shown = self.status_line_shown();
         let settings = self.status_accessibility().clone();
         let Some(window) = self.windows.get(&window_id) else {
@@ -965,6 +1073,11 @@ impl App {
         window_id: WindowId,
         request: AccessibilityRequest,
     ) {
+        if self.is_about_window(window_id) {
+            // When: window_id is the About window, its requests act on its rows and Copy.
+            self.handle_about_accessibility_request(window_id, request);
+            return;
+        }
         match request {
             AccessibilityRequest::InitialTree => {
                 // When: `request` is `InitialTree`, an assistive technology connected: what is

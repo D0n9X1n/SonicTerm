@@ -135,6 +135,7 @@ command-prev-prompt = Scroll to Previous Prompt
 command-next-prompt = Scroll to Next Prompt
 command-reload-config = Reload Config
 command-show-memory-usage = Memory Usage
+command-show-about = About SonicTerm
 command-copy-memory-report = Copy Memory Report
 command-set-default-handlers-mac = Set SonicTerm as Default for Scripts, Executables and Terminal Links…
 command-set-default-handlers-linux = Set SonicTerm as Default for Shell Scripts…
@@ -181,6 +182,26 @@ palette-command-footer =
     } · ↑↓ navigate · ↵ run · esc close
 memory-report-window-title = Memory Usage
 memory-report-copied = Copied the memory report
+about-window-title = About SonicTerm
+about-version = Version
+about-system = System
+about-renderer = Renderer
+about-font = Font
+about-theme = Theme
+about-keymap = Keymap
+about-config = Config
+about-logs = Logs
+about-renderer-gpu = GPU
+about-renderer-software = Software
+about-renderer-software-forced = Software (forced)
+about-renderer-gdi = GDI (software)
+about-renderer-not-started = not started
+about-config-loaded = loaded
+about-config-missing = not found, using defaults
+about-copy-button = [ Copy ]
+about-hint = { $copy } copies · Esc closes
+about-copied = Copied About details
+about-copy-failed = Could not copy About details
 
 # Status line strip: names are dim labels, values follow them; spoken text has no symbols.
 status-name-mem = Mem

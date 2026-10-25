@@ -107,13 +107,13 @@ leaves Copy disabled rather than blocking the UI. Same-value repaints preserve
 valid selections unless they change where automatic wrapping joins the selected
 rows.
 
-**About SonicTerm** is a palette-only entry with no default shortcut. Search
-`about`, `SonicTerm`, `version`, or their localized equivalents, then select the
-**About SonicTerm** result and press Enter. This closes the palette and shows
-`SonicTerm <version>`, including any prerelease suffix, in
-the originating window's existing green notification. It replaces any current
-bubble and closes after five seconds or with its close button. The command is
-available in READONLY mode and does not send input to the terminal.
+**About SonicTerm** has no default shortcut. Search `about`, `SonicTerm`,
+`version`, or their localized equivalents in the palette, choose it from the app
+menu, or bind `show_about`. It opens the About window, or focuses it when it is
+already open; see [Usage](Usage) for what it shows. Inside it, `Cmd+Shift+C` on
+macOS or `Alt+Shift+C` on Windows and Linux copies the rows, `R` reads them again,
+and `Esc` closes it. It is available in READONLY mode and does not send input to
+the terminal.
 
 **Set SonicTerm as Default…** is a palette-only command with no default
 shortcut; the bundled keymaps never bind it. Its label names what it changes on
@@ -239,7 +239,7 @@ Actions without arguments use a string. The active action names are:
 | Window and app | `new_window`, `rename_window`, `move_tab_to_new_window`, `toggle_fullscreen`, `quit_app` |
 | Files and maintenance | `edit_config_file`, `open_keymap_file`, `reload_config`, `check_for_updates` |
 | Shell navigation | `scroll_to_prev_prompt`, `scroll_to_next_prompt` |
-| Diagnostics | `show_memory_usage`, `copy_memory_report` |
+| Diagnostics | `show_memory_usage`, `copy_memory_report`, `show_about` |
 
 `focus_status_line` (palette: "Focus Status Line") has no default binding and is
 allowed in READONLY, because it only moves focus. It focuses the first clickable

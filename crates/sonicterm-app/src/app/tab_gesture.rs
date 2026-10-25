@@ -14,7 +14,7 @@ use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use winit::window::WindowId;
 
 use super::child_window::resize_visible_panes_in_child;
-use super::{App, WindowRole, WindowState};
+use super::{App, WindowState};
 use crate::tab_drag::{DragAction, DragSession};
 
 /// What a left press on a tab bar does.
@@ -71,8 +71,8 @@ impl WindowState {
             None => TabPress::Miss,
             Some(TabHit::Activate(tab_index)) => {
                 // When: TabHit::Activate selects `tab_index`; a terminal window also records the press for a drag.
-                if self.role == WindowRole::MemoryReport {
-                    // When: `self.role` is MemoryReport, its tab cannot be dragged or torn out.
+                if self.role.is_report() {
+                    // When: `self.role` is a report window, its tab cannot be dragged or torn out.
                     return TabPress::Activate(tab_index);
                 }
                 self.begin_tab_press(window_id, tab_index, pointer);

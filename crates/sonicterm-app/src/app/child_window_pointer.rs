@@ -486,6 +486,23 @@ impl App {
                         .or(geometry_pane)
                         .map(|pane_id| PointerCell { pane_id, row, col })
                 });
+                let about_copy = child.role == super::WindowRole::About
+                    && pointer_cell.is_some_and(|cell| {
+                        self.about.view.as_ref().is_some_and(|view| {
+                            super::about_window::about_button_hit(
+                                child,
+                                &view.button_label,
+                                cell.row,
+                                cell.col,
+                            )
+                        })
+                    });
+                if about_copy {
+                    // When: about_copy holds, the press is on the About window's Copy button, not the text.
+                    child.mouse_down = false;
+                    let _ = self.copy_about();
+                    return;
+                }
                 if let Some(pointer_cell) = pointer_cell {
                     // When: `pointer_cell` resolves a rendered grid cell, route focus and press through its exact pane.
                     let PointerCell { pane_id, row, col } = pointer_cell;

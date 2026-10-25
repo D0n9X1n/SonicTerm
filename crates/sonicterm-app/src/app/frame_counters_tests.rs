@@ -533,6 +533,8 @@ const NON_PARSER_LOCKS: &[(&str, &str, usize)] = &[
 
 /// Every pane-parser lock the event-loop thread takes, by file; each goes through lock_parser.
 const PANE_PARSER_LOCKS: &[(&str, usize)] = &[
+    // The About pane's column count, read for its layout and for the resize check, and its text feed.
+    ("app/about_window.rs", 3),
     ("app/child_tabs.rs", 1),
     ("app/child_window.rs", 2),
     ("app/child_window_pointer.rs", 1),

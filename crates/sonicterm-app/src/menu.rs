@@ -110,7 +110,7 @@ pub fn blueprint() -> MenuBlueprint {
                     title: "About SonicTerm",
                     key: "",
                     mods: None,
-                    binding: System("orderFrontStandardAboutPanel:"),
+                    binding: Action(sonicterm_cfg::keymap::Action::ShowAbout),
                 },
                 sep(),
                 Item {
@@ -262,3 +262,7 @@ pub fn blueprint() -> MenuBlueprint {
         },
     ]
 }
+
+#[cfg(test)]
+#[path = "menu_tests.rs"]
+mod menu_tests;

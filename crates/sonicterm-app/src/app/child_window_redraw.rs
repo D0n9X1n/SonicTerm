@@ -33,6 +33,11 @@ impl App {
         scrollbar_motion: ScrollbarMotion,
         broadcast_participants: &BTreeSet<u64>,
     ) {
+        if self.is_about_window(win_id) {
+            // A pane resized by zoom, reload, DPI or the window is laid out again before this frame
+            // collects it, so Copy is never drawn cut at the edge.
+            self.relayout_about_if_resized();
+        }
         // The bar holds its widths while a tab gesture runs in any window or this window's own
         // pointer rests on it.
         let tab_bar_band = self

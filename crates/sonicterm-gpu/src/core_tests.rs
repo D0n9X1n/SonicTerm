@@ -8794,3 +8794,13 @@ fn a_screen_switch_drops_the_other_screens_tofu_record() {
     prune_missing(&mut presented, |pane_id, slot| cache.committed_slot(pane_id, slot), None);
     assert!(presented.is_empty(), "the alternate screen shows no primary tofu");
 }
+
+/// The About window names each graphics API the way its platform does, so the renderer row reads
+/// `Metal` or `DirectX 12`, never wgpu's lowercase identifiers.
+#[test]
+fn graphics_apis_have_display_names() {
+    assert_eq!(backend_display_name(wgpu::Backend::Metal), "Metal");
+    assert_eq!(backend_display_name(wgpu::Backend::Dx12), "DirectX 12");
+    assert_eq!(backend_display_name(wgpu::Backend::Vulkan), "Vulkan");
+    assert_eq!(backend_display_name(wgpu::Backend::Gl), "OpenGL");
+}

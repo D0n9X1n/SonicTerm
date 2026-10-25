@@ -438,6 +438,8 @@ pub mod invariants;
 mod key_encoding;
 mod keyboard_protocol;
 pub use keyboard_protocol::HeldKey;
+mod about;
+mod about_window;
 mod keymap_dispatch;
 mod locale;
 mod media;
@@ -668,6 +670,8 @@ pub struct App {
     pub(super) pending_new_window: Option<WindowRequest>,
     /// The Memory Usage report's pending open, refresh generation and last rendered text.
     pub(super) memory_report: memory_report_window::MemoryReportState,
+    /// The About window's pending open, shown text and last config load error.
+    pub(super) about: about_window::AboutState,
     /// Deferred in-process tab tear-out request from either drag/drop or the
     /// Move Tab to New Window action. Drained only while an ActiveEventLoop is
     /// available so every path uses the same native-window constructor.
@@ -1018,14 +1022,14 @@ impl App {
         }
         window.refresh_monitor_period();
         let owner_prepared = window.owner.is_some();
-        if window.role == WindowRole::MemoryReport {
-            // The Memory Usage report's title is its name, and it takes no window number,
+        if window.role.is_report() {
+            // A report window's title is its name, and it takes no window number,
             // so terminal windows keep consecutive numbers.
             if let Some(native) = &window.window {
                 native.set_title(&window.custom_window_name);
             }
         } else {
-            // When: `window.role` is not MemoryReport, intern a window number and compose the numbered title.
+            // When: `window.role` is not a report, intern a window number and compose the numbered title.
             let key = self.window_keys.intern(id);
             if let Some(native) = &window.window {
                 native.set_title(&compose_window_title(key, &window.custom_window_name));

@@ -41,6 +41,12 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/memory_report.rs`, `memory_report_window.rs` - the Memory Usage report: its text model, the
   report-window action gate and keys, the PTY-less report window, and its off-thread OS sample.
   `WindowRole::MemoryReport` never counts as a terminal window, drop target or broadcast receiver.
+- `src/app/about.rs`, `about_window.rs` - the About window: its pure content model (rows laid out
+  for the pane's width, copy text, accessible rows) and the window that opens, fills, copies and
+  closes it. A Copy click is hit-tested on the drawn row through the current view. `WindowRole::About`
+  shares the report window builder, pane, gate and exclusions (`WindowRole::is_report`) and has its
+  own accessibility tree (`build_about_tree`). `build.rs` stamps `SONICTERM_BUILD_COMMIT` and
+  `SONICTERM_BUILD_DATE` from Git, watching the paths `src/build_watch.rs` lists.
 - `src/app/redraw.rs` - owner-local causes, pre-lock output snapshots, outcome settlement,
   structural/device suppression, and typed due-owner service.
 - `src/app/visible_frame.rs` - validated visible-only frame handles, deadline-bounded parser guards,

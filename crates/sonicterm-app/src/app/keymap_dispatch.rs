@@ -226,8 +226,8 @@ impl App {
             FrontmostKind::Child(id) => Some(id),
             FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => None,
         };
-        if let Some(handled) = self.gate_memory_report_action(action, report_source, true) {
-            // When: the frontmost window is the Memory Usage report and the gate closed, consumed or redirected the action.
+        if let Some(handled) = self.gate_report_action(action, report_source, true) {
+            // When: the frontmost window is a report window and the gate closed, consumed or redirected the action.
             return handled;
         }
         match action {
@@ -709,6 +709,7 @@ impl App {
                 self.toggle_fullscreen_for(self.frontmost_kind());
             }
             Action::ShowMemoryUsage => self.show_memory_usage(),
+            Action::ShowAbout => self.show_about(),
             Action::SetDefaultHandlers => self.start_default_handlers(),
             Action::CopyMemoryReport => {
                 // When: action is CopyMemoryReport, copy the report text; a missing report or refused clipboard is a no-op.

@@ -3645,6 +3645,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
  "ureq",
  "wgpu",
  "windows",

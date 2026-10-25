@@ -879,16 +879,20 @@ impl App {
     /// Record a reload result for the config file; only its own success clears it.
     pub(super) fn set_config_reload_error(&mut self, error: Option<&anyhow::Error>) {
         self.status_line.config_error = error.map(reload_failure);
+        // The About window's Config row shows the message itself.
+        self.about.config_error = error.map(|error| format!("{error:#}"));
     }
 
     /// Record a reload result for the theme; only its own success clears it.
     pub(super) fn set_theme_reload_error(&mut self, error: Option<&anyhow::Error>) {
         self.status_line.theme_error = error.map(reload_failure);
+        self.about.theme_error = error.map(|error| format!("{error:#}"));
     }
 
     /// Record a reload result for the keymap; only its own success clears it.
     pub(super) fn set_keymap_reload_error(&mut self, error: Option<&anyhow::Error>) {
         self.status_line.keymap_error = error.map(reload_failure);
+        self.about.keymap_error = error.map(|error| format!("{error:#}"));
     }
 
     /// Rebuild every window's strip on the next pass (locale or theme change).
