@@ -1319,15 +1319,21 @@ fn cold_strip_tiles(
 /// After each, every strip tile resident in the atlas has the atlas-rect size a cold renderer
 /// built at that final size draws for the same text, and no other strip tile is resident, so a
 /// tile of an earlier size can neither stay resident nor be drawn.
+///
+/// It runs on its own renderer and window: the font, scale and strip changes and the cold
+/// renderers it builds must not reach the shared renderer the failure cases after it rely on.
 fn strip_rasterizes_anew_after_size_changes(
-    renderer: &mut GpuRenderer,
-    layout: &Layout,
+    _shared: &mut GpuRenderer,
+    _shared_layout: &Layout,
     active: &ActiveEventLoop,
 ) -> Result<(), String> {
     use sonicterm_render_model::boundary::cfg::status_line::{StatusSegmentId, StatusSide};
     use sonicterm_render_model::boundary::ui::status_line::{
         SpokenSegment, StatusLineView, StatusPart, StatusSegmentView, StatusTone,
     };
+    let (window, mut owned) = wgpu_renderer(active)?;
+    let renderer = &mut owned;
+    let own_layout = layout(renderer, &window);
     let default_scale = sonicterm_gpu::status_strip::default_font_scale();
     let (family, size_pt, scale_factor) =
         ("Rec Mono St.Helens", renderer.font_size(), renderer.scale_factor());
@@ -1341,7 +1347,7 @@ fn strip_rasterizes_anew_after_size_changes(
         click: None,
         spoken: SpokenSegment::default(),
     }]);
-    let mut scene = single(layout);
+    let mut scene = single(&own_layout);
     renderer.set_status_line_view(view.clone());
     renderer.set_status_line_visible(true);
     let mut previous: Option<Vec<(sonicterm_types::GlyphKey, u32, u32)>> = None;
@@ -1370,12 +1376,6 @@ fn strip_rasterizes_anew_after_size_changes(
     step(renderer, "DPI", default_scale)?;
     check(renderer.set_status_line_font_scale(0.5), "a new font_scale changes the strip")?;
     step(renderer, "font_scale", 0.5)?;
-    renderer.set_status_line_font_scale(default_scale);
-    renderer.set_scale_factor(scale_factor);
-    renderer.set_font(family, size_pt, 1.0, 1.0);
-    renderer.set_status_line_visible(false);
-    renderer.set_status_line_view(StatusLineView::default());
-    present(renderer, &mut scene)?;
     Ok(())
 }
 
