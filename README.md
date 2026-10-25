@@ -47,6 +47,18 @@ and reload settings without leaving the terminal.
 
 ![SonicTerm command palette editing config](assets/screenshots/command-palette-config.png)
 
+### Status line
+
+An optional strip at the top of each window, or at the bottom, shows what only
+SonicTerm knows: mode chips such as `MOUSE` while a program captures the mouse,
+SonicTerm's own CPU, frame time and memory, scrollback position, the selection
+size, clipboard writes, refused input and missing glyphs. Segments hide until
+they have something to say. Turn it on with `[status_line] enabled = true` or
+**Toggle Status Line**, and move it, resize its text or choose segments from the
+command palette. See [status line settings](wiki/Configuration.md#status_line).
+
+![SonicTerm status line above tmux panes](assets/screenshots/status-line.png)
+
 ### Split panes built for AI CLIs and real terminal apps
 
 SonicTerm supports multiple panes, per-pane PTYs, tab titles, Nerd Font icons,
