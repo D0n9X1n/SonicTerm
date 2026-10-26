@@ -680,7 +680,7 @@ mod record;
 use record::log_line;
 
 #[cfg(test)]
-use dispatch::{current_tally, pending_native_capacity, pending_native_requests};
+use dispatch::current_tally;
 
 #[cfg(test)]
 pub(crate) use dispatch::flush_clock_reads;

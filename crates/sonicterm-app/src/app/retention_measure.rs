@@ -121,3 +121,7 @@ pub(super) fn add(left: ResourceAmount, right: ResourceAmount) -> ResourceAmount
         items: left.items.saturating_add(right.items),
     }
 }
+
+#[cfg(test)]
+#[path = "retention_measure_tests.rs"]
+mod retention_measure_tests;

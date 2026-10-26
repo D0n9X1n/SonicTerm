@@ -204,7 +204,8 @@ fn recovery_watchdog_before_first_probe_tick_keeps_recovery_boundary() {
     let log = capture_timeout(|| state.fail_from_watchdog(Instant::now()));
     assert_eq!(state.outcome(), Some(Err(RuntimeSmokeFailure::GpuDeviceRecovery)));
     assert!(log.contains("cause=\"watchdog\""));
-    assert!(include_str!("event_loop.rs").contains("smoke.fail_from_watchdog(Instant::now())"));
+    assert!(concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"))
+        .contains("smoke.fail_from_watchdog(Instant::now())"));
 }
 
 /// Same-text shell commands must add a marker row, not merely rediscover a prior output row.
@@ -473,7 +474,7 @@ fn frame_scenario_skips_warm_phases_and_uses_real_render_attempts() {
         main[begin..].find("smoke.note_render_attempt()").unwrap()
             < main[begin..].find(".lap(\"render\")").unwrap()
     );
-    let idle = include_str!("event_loop.rs");
+    let idle = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
     assert!(idle.contains("self.new_tab(\"runtime smoke warm child\")"));
     assert!(idle.contains("self.drive_gpu_fault_smoke(Instant::now())"));
     let shell = include_str!("../shell.rs");

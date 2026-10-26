@@ -60,7 +60,7 @@ fn every_native_creation_selects_drop_ownership_before_create_window() {
     // Main, warm, tear-out, and NewWindow must choose one owner before winit registers its default target.
     // The files split from event_loop.rs and tear_out.rs create no window, so their counts are zero.
     for (source, creations) in [
-        (include_str!("event_loop.rs"), 1),
+        (concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs")), 1),
         (include_str!("event_loop/windows.rs"), 0),
         (
             concat!(
@@ -107,7 +107,7 @@ fn every_native_creation_selects_drop_ownership_before_create_window() {
 #[test]
 fn drop_registration_precedes_irreversible_destination_effects() {
     // Registration refusal cannot spawn a new shell or strand a detached tab in an unusable destination.
-    let startup = include_str!("event_loop.rs");
+    let startup = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
     let startup = &startup[startup.find("pub(super) fn do_resumed(").unwrap()..];
     assert!(
         startup.find("register_window_with_os_drag_backend").unwrap()

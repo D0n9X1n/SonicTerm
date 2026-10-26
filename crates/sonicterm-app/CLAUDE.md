@@ -7,8 +7,9 @@ PTY thread wiring, redraw scheduling, explicit config reload, overlays, tab
 drag/tear-out, and the platform shell abstractions.
 
 ## Key files
-- `src/app/mod.rs` - `App`, `UserEvent`, the winit handler, and the window-registration
-  chokepoint. Window, pane, session, input, and effect orchestration live in
+- `src/app/mod.rs` - `App` and the window-registration
+  chokepoint. `user_event.rs` owns typed events and `application_handler.rs` forwards callbacks.
+  Window, pane, session, input, and effect orchestration live in
   `window_state.rs`, `window_registry.rs`, `pane_state.rs`, `session.rs`,
   `input_dispatch.rs`, and `effects.rs`.
 - `src/app/window_event.rs` - `WindowEvent` dispatch, main redraw, shared pointer/wheel helpers.
@@ -17,7 +18,8 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/window_pointer.rs` - main-window cursor, wheel and left-button handlers.
 - `src/app/splitter_input.rs` - main and child pane-divider hit-tests, hover and drag.
 - `src/app/keymap_dispatch.rs` - action execution and READONLY whitelist.
-- `src/app/event_loop.rs` - window creation and window-ready hooks.
+- `src/app/event_loop.rs` - window creation and window-ready hooks; `event_loop_wait.rs` owns
+  due-work deadlines and wait servicing.
 - `src/app/spawn_pane.rs` - PTY thread pump and redraw coalescing.
 - `src/app/echo_watch.rs` - the per-pane S2 echo watch the perf harness arms and takes.
 - `src/app/reaper_driver.rs` - one App-owned native PTY teardown driver and retained transport custody.

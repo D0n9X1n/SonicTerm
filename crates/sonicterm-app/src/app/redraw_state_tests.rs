@@ -461,12 +461,12 @@ fn command_badge_role_capture_and_wait_fold_preserve_due_order() {
         let render = source.find("r.render_releasing(").unwrap();
         assert!(poll < capture && capture < render);
     }
-    let source = include_str!("event_loop.rs");
-    let about = source.split_once("pub(super) fn do_about_to_wait(").unwrap().1;
+    let source = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
+    let about = source.split_once("pub(in crate::app) fn do_about_to_wait(").unwrap().1;
     let fold = about.find("self.refresh_frame_due_work_at(now)").unwrap();
     let arm = about.find("self.redraw_due = due").unwrap();
     assert!(fold < arm, "the real event loop must preserve captured elapsed deadlines");
-    let refresh = source.split_once("pub(super) fn refresh_frame_due_work_at(").unwrap().1;
+    let refresh = source.split_once("pub(in crate::app) fn refresh_frame_due_work_at(").unwrap().1;
     assert!(
         refresh.find("self.service_redraw_due(now)").unwrap()
             < refresh.find("self.frame_due_work_at(now)").unwrap()

@@ -457,6 +457,14 @@ effect ordering, and state machine. Live window/tab/pane topology remains in
 
 ### `sonicterm-app`
 
+`app/user_event.rs` holds typed events and `app/application_handler.rs` forwards native callbacks;
+`app/mod.rs` retains App ownership and registration. `app/event_loop_wait.rs` owns due-work and
+wait servicing. The perf workload keeps deterministic fixtures and native role execution in
+`workload_fixtures.rs` and `workload_native.rs`; test-only working-set/renderer fixtures stay
+in the original harness executable. Native integration case modules under `tests/support/`
+retain their original test target, allocator and event-loop owner.
+
+
 **Role:** cross-platform winit orchestration for windows, renderers, tabs,
 panes, PTYs/parsers, input, config reload, redraw, overlays, tab transfer,
 bounded target probes, and native direct-open dispatch. One `ReaperDriver` owns

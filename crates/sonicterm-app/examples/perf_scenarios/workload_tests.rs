@@ -1,20 +1,22 @@
 //! Pins the generated role scripts, fixture bytes, nonce choice and scratch configuration.
 
-use std::collections::BTreeMap;
-use std::sync::OnceLock;
-use std::time::Duration;
+pub(super) use std::collections::BTreeMap;
+pub(super) use std::sync::OnceLock;
+pub(super) use std::time::Duration;
 
 use super::*;
-use crate::scenarios::{all_plans, all_plans_on, plan, plan_for, Host, Workload, BUILD_HOST};
+pub(super) use crate::scenarios::{
+    all_plans, all_plans_on, plan, plan_for, Host, Workload, BUILD_HOST,
+};
 
 /// FIPS 180-4 SHA-256, used only here to pin script and fixture bytes.
-struct Sha256 {
-    state: [u32; 8],
-    pending: Vec<u8>,
-    total_len: u64,
+pub(super) struct Sha256 {
+    pub(super) state: [u32; 8],
+    pub(super) pending: Vec<u8>,
+    pub(super) total_len: u64,
 }
 
-const ROUND_CONSTANTS: [u32; 64] = [
+pub(super) const ROUND_CONSTANTS: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
     0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
@@ -26,7 +28,7 @@ const ROUND_CONSTANTS: [u32; 64] = [
 ];
 
 impl Sha256 {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             state: [
                 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
@@ -37,7 +39,7 @@ impl Sha256 {
         }
     }
 
-    fn update(&mut self, mut bytes: &[u8]) {
+    pub(super) fn update(&mut self, mut bytes: &[u8]) {
         self.total_len += bytes.len() as u64;
         if !self.pending.is_empty() {
             let take = (64 - self.pending.len()).min(bytes.len());
@@ -55,7 +57,7 @@ impl Sha256 {
         self.pending.extend_from_slice(remainder);
     }
 
-    fn compress(&mut self, block: &[u8; 64]) {
+    pub(super) fn compress(&mut self, block: &[u8; 64]) {
         let mut schedule = [0_u32; 64];
         for (word, bytes) in schedule.iter_mut().zip(block.as_chunks::<4>().0) {
             *word = u32::from_be_bytes(*bytes);
@@ -99,7 +101,7 @@ impl Sha256 {
         }
     }
 
-    fn finish(mut self) -> String {
+    pub(super) fn finish(mut self) -> String {
         let bit_len = self.total_len.wrapping_mul(8);
         let mut tail = std::mem::take(&mut self.pending);
         tail.push(0x80);
@@ -118,14 +120,14 @@ impl Sha256 {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hasher.finish()
 }
 
 /// Hashes a fixture exactly as `write_under` lays it out on disk.
-fn fixture_sha256(fixtures: &[FixtureFile]) -> String {
+pub(super) fn fixture_sha256(fixtures: &[FixtureFile]) -> String {
     let mut hasher = Sha256::new();
     for fixture in fixtures {
         match &fixture.body {
@@ -140,11 +142,11 @@ fn fixture_sha256(fixtures: &[FixtureFile]) -> String {
     hasher.finish()
 }
 
-const SCRATCH: &str = "/tmp/perf-test";
-const NONCE: &str = "0123456789abcdef";
+pub(super) const SCRATCH: &str = "/tmp/perf-test";
+pub(super) const NONCE: &str = "0123456789abcdef";
 
 #[test]
-fn sha256_matches_published_vectors() {
+pub(super) fn sha256_matches_published_vectors() {
     // The fixture pins below are only as good as this hasher, so it is checked against FIPS 180-4.
     let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     assert_eq!(sha256_hex(b""), empty);
@@ -162,25 +164,8 @@ fn sha256_matches_published_vectors() {
     assert_eq!(hasher.finish(), million_a);
 }
 
-#[test]
-fn seeded_rng_matches_reference_splitmix64() {
-    // Every fixture derives from this generator; the values come from an independent implementation.
-    let mut zero = SeededRng::new(0);
-    assert_eq!(
-        [zero.next_u64(), zero.next_u64(), zero.next_u64()],
-        [0xe220a8397b1dcdaf, 0x6e789e6aa1b965f4, 0x06c45d188009454f]
-    );
-    let mut other = SeededRng::new(1_234_567);
-    assert_eq!(
-        [other.next_u64(), other.next_u64(), other.next_u64()],
-        [0x599ed017fb08fc85, 0x2c73f08458540fa5, 0x883ebce5a3f27c77]
-    );
-    let mut bounded = SeededRng::new(7);
-    assert!((0..1_000).all(|_| bounded.below(36) < 36));
-}
-
 /// The whole generated script for S1, so a reader sees the protocol each role follows.
-const IDLE_SCRIPT: &str = r##"#!/bin/sh
+pub(super) const IDLE_SCRIPT: &str = r##"#!/bin/sh
 # perf_scenarios S1 default: generated role script; it ignores its arguments.
 scratch='/tmp/perf-test'
 role=0
@@ -204,7 +189,7 @@ esac
 "##;
 
 /// SHA-256 of every plan's role script, keyed `<scenario> <variant> <full|short>`.
-const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
+pub(super) const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
     ("S1 atlas-retry full", "719bfe93ca100bd8aa7c88d5a70421df8ffa0797387baf8e55d3430d8ed85159"),
     ("S1 atlas-retry short", "3ad8edf1efd44fbb434cdfcbf10a67bf9a0df05843e650e69a5699514a1ca12f"),
     ("S1 default full", "fac6505124bd493744dbb8738cebcdbab4969fb56cba37c3bf4e74f4446b1ef9"),
@@ -264,7 +249,7 @@ const ROLE_SCRIPT_PINS: &[(&str, &str)] = &[
 ];
 
 /// SHA-256 of every distinct fixture, keyed by file and length or by frame set.
-const FIXTURE_PINS: &[(&str, &str)] = &[
+pub(super) const FIXTURE_PINS: &[(&str, &str)] = &[
     ("bulk.txt 5242880", "1c45218ab8edc05eb5964253bffd8809540e4b0f0e19c3918b821be59818a5c7"),
     ("bulk.txt 52428800", "6329aefe7c851b9410cf38309a0c5279e508b928f5cbb86610c8767f0b5f6d7e"),
     ("atlas-retry.txt 3430", "9d6de336ba30247c36ca1c68bc7217727464395eb0870f437cebce368f26ef39"),
@@ -297,16 +282,16 @@ const FIXTURE_PINS: &[(&str, &str)] = &[
     ("search.txt 17500", "3b7beea9b0581d1dcb96b3d10a1c3d879b7189051c1c1aff3b4d3a5187b62eba"),
 ];
 
-fn render_pins(pins: &BTreeMap<String, String>) -> String {
+pub(super) fn render_pins(pins: &BTreeMap<String, String>) -> String {
     pins.iter().map(|(key, value)| format!("    ({key:?}, {value:?}),\n")).collect()
 }
 
-fn plan_key(plan: &crate::scenarios::Plan) -> String {
+pub(super) fn plan_key(plan: &crate::scenarios::Plan) -> String {
     format!("{} {} {}", plan.scenario, plan.variant, if plan.short { "short" } else { "full" })
 }
 
 /// Every distinct fixture set across all plans: one file, or one ordered frame sequence.
-fn fixture_sets() -> &'static BTreeMap<String, Vec<FixtureFile>> {
+pub(super) fn fixture_sets() -> &'static BTreeMap<String, Vec<FixtureFile>> {
     static SETS: OnceLock<BTreeMap<String, Vec<FixtureFile>>> = OnceLock::new();
     SETS.get_or_init(|| {
         let mut sets = BTreeMap::new();
@@ -329,141 +314,7 @@ fn fixture_sets() -> &'static BTreeMap<String, Vec<FixtureFile>> {
     })
 }
 
-#[test]
-fn idle_role_script_is_pinned_line_for_line() {
-    // The anchor, session record, acknowledgement and GO handshake are the cleanup contract.
-    let idle = plan("S1", "default", false).unwrap();
-    assert_eq!(role_script(&idle, SCRATCH, NONCE), IDLE_SCRIPT);
-}
-
-#[test]
-fn every_role_script_is_pinned() {
-    // A changed script changes what a scenario measures, so every plan's script is pinned.
-    let actual: BTreeMap<String, String> = all_plans()
-        .iter()
-        .map(|plan| (plan_key(plan), sha256_hex(role_script(plan, SCRATCH, NONCE).as_bytes())))
-        .collect();
-    let expected: BTreeMap<String, String> =
-        ROLE_SCRIPT_PINS.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect();
-    assert_eq!(actual, expected, "ROLE_SCRIPT_PINS:\n{}", render_pins(&actual));
-}
-
-#[test]
-fn every_fixture_is_pinned() {
-    // Fixtures are generated, never stored, so their bytes are pinned by hash.
-    let actual: BTreeMap<String, String> =
-        fixture_sets().iter().map(|(key, files)| (key.clone(), fixture_sha256(files))).collect();
-    let expected: BTreeMap<String, String> =
-        FIXTURE_PINS.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect();
-    assert_eq!(actual, expected, "FIXTURE_PINS:\n{}", render_pins(&actual));
-}
-
-#[test]
-fn fixtures_never_contain_protocol_text() {
-    // A fixture holding a sentinel, a READY line or the prompt would end a phase early.
-    for (key, files) in fixture_sets() {
-        for file in files {
-            for needle in [&b"PERF_DONE"[..], b"READY", PROMPT.as_bytes()] {
-                assert!(!file.contains(needle), "{key} {} holds {needle:?}", file.relative_path);
-            }
-        }
-    }
-}
-
-#[test]
-fn bulk_fixture_is_whole_printable_lines_of_the_requested_size() {
-    // S3 counts its bytes, so the 50 MiB (5 MiB short) fixture must be exactly that long.
-    for (short, mebibytes) in [(false, 50), (true, 5)] {
-        let flood = plan("S3", "default", short).unwrap();
-        let files = fixtures(&flood);
-        let [bulk] = files.as_slice() else { panic!("S3 writes one fixture") };
-        assert_eq!(bulk.relative_path, "bulk.txt");
-        assert_eq!(bulk.byte_len(), mebibytes << 20);
-        let FixtureBody::Repeated { block, count } = &bulk.body else { panic!("bulk repeats") };
-        assert_eq!((block.len(), *count), (1 << 20, mebibytes));
-        assert_eq!(block.last(), Some(&b'\n'));
-        for line in block[..block.len() - 1].split(|byte| *byte == b'\n') {
-            assert_eq!(line.len(), 127);
-            assert!(line.iter().all(|byte| (0x20..=0x7e).contains(byte)));
-        }
-    }
-}
-
-#[test]
-fn frame_fixtures_enter_and_leave_the_alternate_screen() {
-    // S10 plays full-screen streams; sync wraps every frame in DEC 2026 brackets and nothing else does.
-    for (variant, synchronized) in [("default", false), ("sync", true)] {
-        let stream = plan("S10", variant, true).unwrap();
-        let frames: Vec<_> = fixtures(&stream)
-            .into_iter()
-            .map(|fixture| {
-                let FixtureBody::Bytes(bytes) = fixture.body else { panic!("frames are bytes") };
-                (fixture.relative_path, bytes)
-            })
-            .collect();
-        assert_eq!(frames.len(), 300);
-        for (index, (path, bytes)) in frames.iter().enumerate() {
-            assert_eq!(*path, format!("frames/{index}"));
-            let bracketed = bytes.starts_with(b"\x1b[?2026h") && bytes.ends_with(b"\x1b[?2026l");
-            assert_eq!(bracketed, synchronized, "{variant} frame {index}");
-            let inner = if synchronized { &bytes[8..bytes.len() - 8] } else { &bytes[..] };
-            assert!(!inner.windows(7).any(|window| window == b"\x1b[?2026"), "nested bracket");
-        }
-        let first = &frames[0].1[if synchronized { 8 } else { 0 }..];
-        assert!(first.starts_with(b"\x1b[?1049h\x1b[?7l\x1b[2J"));
-        let last = &frames[299].1;
-        let last = &last[..last.len() - if synchronized { 8 } else { 0 }];
-        assert!(last.ends_with(b"\x1b[?7h\x1b[?1049l"));
-    }
-}
-
-#[test]
-fn sixel_fixture_arrives_as_one_capture() {
-    // S11 waits for a registered image, so its fixture must be one complete Sixel DCS.
-    use sonicterm_grid::grid::Grid;
-    use sonicterm_vt::vt::{CaptureStagingPool, MediaProtocol, Parser, VtEvent};
-    let image = plan_for("S11", "default", false, Host::Posix).unwrap();
-    let files = fixtures(&image);
-    let [sixel] = files.as_slice() else { panic!("S11 writes one fixture") };
-    let FixtureBody::Bytes(bytes) = &sixel.body else { panic!("sixel is bytes") };
-    let mut parser =
-        Parser::new_with_staging_pool(Grid::new(250, 70), None, CaptureStagingPool::new());
-    let media: Vec<_> = parser
-        .advance(bytes)
-        .into_iter()
-        .filter_map(|event| match event {
-            VtEvent::Media(media) => Some(media),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(media.len(), 1);
-    assert_eq!(media[0].protocol, MediaProtocol::Sixel);
-    assert!(media[0].data.contains(&b'#') && media[0].data.len() > 100);
-}
-
-#[test]
-fn nonce_avoids_every_fixture_including_repeated_seams() {
-    // The sentinel nonce must occur nowhere in a fixture, even across a repeated block's seam.
-    let mut rng = SeededRng::new(42);
-    let first = format!("{:016x}", rng.next_u64());
-    let second = format!("{:016x}", rng.next_u64());
-    let clean =
-        FixtureFile { relative_path: "clean.txt".into(), body: FixtureBody::Bytes(b"x".to_vec()) };
-    assert_eq!(choose_nonce(42, std::slice::from_ref(&clean)), first);
-    let body = FixtureBody::Bytes(format!("a{first}b").into_bytes());
-    let colliding = FixtureFile { relative_path: "collide.txt".into(), body };
-    assert_eq!(choose_nonce(42, &[clean, colliding]), second);
-    let (head, tail) = first.split_at(8);
-    let block = format!("{tail}----{head}").into_bytes();
-    let seam = FixtureFile {
-        relative_path: "seam.txt".into(),
-        body: FixtureBody::Repeated { block, count: 2 },
-    };
-    assert!(seam.contains(first.as_bytes()));
-    assert_eq!(choose_nonce(42, &[seam]), second);
-}
-
-fn scratch_dir(label: &str) -> std::path::PathBuf {
+pub(super) fn scratch_dir(label: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("perf-scenarios-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -471,23 +322,7 @@ fn scratch_dir(label: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn written_fixtures_match_their_pins() {
-    // `write_under` must lay out exactly the bytes the pins hash, including repeated blocks.
-    let dir = scratch_dir("fixtures");
-    for (scenario, variant, short) in
-        [("S9", "default", false), ("S3", "default", true), ("S10", "sync", true)]
-    {
-        for fixture in fixtures(&plan(scenario, variant, short).unwrap()) {
-            fixture.write_under(&dir).unwrap();
-            let written = std::fs::read(dir.join(&fixture.relative_path)).unwrap();
-            assert_eq!(sha256_hex(&written), fixture_sha256(std::slice::from_ref(&fixture)));
-        }
-    }
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn scratch_config_loads_strictly_with_pinned_values() {
+pub(super) fn scratch_config_loads_strictly_with_pinned_values() {
     // The run's config is explicit, so a later default change cannot alter a scenario.
     use sonicterm_logging::config::LogLevel;
     let dir = scratch_dir("config");
@@ -514,7 +349,7 @@ fn scratch_config_loads_strictly_with_pinned_values() {
 }
 
 #[test]
-fn protocol_lines_match_what_the_probe_scans_for() {
+pub(super) fn protocol_lines_match_what_the_probe_scans_for() {
     // The probe matches these exact lines in the grid; the script must print the same text.
     assert_eq!(PROMPT, "perf$ ");
     assert_eq!(sentinel_line(2, NONCE), "PERF_DONE 2 0123456789abcdef");
@@ -527,7 +362,7 @@ fn protocol_lines_match_what_the_probe_scans_for() {
 
 #[cfg(unix)]
 #[test]
-fn every_role_script_parses_as_posix_sh() {
+pub(super) fn every_role_script_parses_as_posix_sh() {
     // A script that does not parse would leave its pane without a role, so each one must parse.
     let dir = scratch_dir("scripts");
     for plan in all_plans() {
@@ -540,7 +375,7 @@ fn every_role_script_parses_as_posix_sh() {
 }
 
 #[test]
-fn a_laps_run_without_counters_keeps_render_timing_and_drops_frame_counters() {
+pub(super) fn a_laps_run_without_counters_keeps_render_timing_and_drops_frame_counters() {
     // --laps selects Debug for render_timing, but Debug also opens the App's counter gate; a run
     // without --counters must admit the laps targets and turn the frame_counters target off.
     let filter = logging_filter(true, false).expect("a laps run without counters needs a filter");
@@ -554,7 +389,7 @@ fn a_laps_run_without_counters_keeps_render_timing_and_drops_frame_counters() {
 }
 
 #[test]
-fn program_steps_mirror_posix_workload_lines() {
+pub(super) fn program_steps_mirror_posix_workload_lines() {
     // The Windows program performs these steps, so they must be exactly what the POSIX script runs.
     for plan in all_plans() {
         let bound_s = plan.timeout_s + ANCHOR_MARGIN_S;
@@ -570,7 +405,7 @@ fn program_steps_mirror_posix_workload_lines() {
 }
 
 #[test]
-fn program_yes_writes_what_yes_piped_to_head_writes() {
+pub(super) fn program_yes_writes_what_yes_piped_to_head_writes() {
     // S3 credits two bytes a `yes` line, including across the program's 64 KiB buffer seam.
     for lines in [0_u32, 1, 32_769] {
         let mut written = Vec::new();
@@ -580,7 +415,7 @@ fn program_yes_writes_what_yes_piped_to_head_writes() {
 }
 
 /// Renders a single-quoted `printf` format the way POSIX `printf` does for `%s` and `\n` only.
-fn render_printf(format: &str, args: &[&str]) -> String {
+pub(super) fn render_printf(format: &str, args: &[&str]) -> String {
     let mut args = args.iter();
     format
         .replace(r"\n", "\n")
@@ -594,13 +429,13 @@ fn render_printf(format: &str, args: &[&str]) -> String {
 }
 
 /// The quoted format of a `printf '<format>' …` script line.
-fn printf_format(line: &str) -> &str {
+pub(super) fn printf_format(line: &str) -> &str {
     let rest = line.trim().strip_prefix("printf '").expect("a printf line");
     &rest[..rest.find('\'').expect("a closing quote")]
 }
 
 #[test]
-fn program_protocol_lines_match_the_role_script() {
+pub(super) fn program_protocol_lines_match_the_role_script() {
     // The probe scans for the same READY and sentinel bytes whichever side printed them.
     let three_roles = plan("S12", "default", false).unwrap();
     let bound_s = three_roles.timeout_s + ANCHOR_MARGIN_S;
@@ -622,7 +457,7 @@ fn program_protocol_lines_match_the_role_script() {
 }
 
 #[test]
-fn date_line_matches_posix_date_in_utc() {
+pub(super) fn date_line_matches_posix_date_in_utc() {
     // S4 streams `date` output; the program's UTC line keeps the C-locale `date` shape.
     assert_eq!(date_line(0), "Thu Jan  1 00:00:00 UTC 1970");
     assert_eq!(date_line(1_709_210_096), "Thu Feb 29 12:34:56 UTC 2024");
@@ -631,7 +466,7 @@ fn date_line_matches_posix_date_in_utc() {
 }
 
 #[test]
-fn program_spec_round_trips_and_rebuilds_the_plan() {
+pub(super) fn program_spec_round_trips_and_rebuilds_the_plan() {
     // The program rebuilds its plan from `program.json`, so the spec must name the same plan.
     for original in all_plans_on(BUILD_HOST) {
         let spec = parse_program_json(&program_json(&original, NONCE)).unwrap();
@@ -657,7 +492,7 @@ fn program_spec_round_trips_and_rebuilds_the_plan() {
 }
 
 #[test]
-fn windows_config_names_the_harness_as_the_shell() {
+pub(super) fn windows_config_names_the_harness_as_the_shell() {
     // On Windows the harness binary is the shell, and the POSIX config's bytes stay as they were.
     let dir = scratch_dir("windows-config");
     let idle = plan("S1", "default", false).unwrap();
@@ -677,7 +512,7 @@ fn windows_config_names_the_harness_as_the_shell() {
 }
 
 #[test]
-fn cmd_prompt_renders_the_shared_prompt() {
+pub(super) fn cmd_prompt_renders_the_shared_prompt() {
     // S2 waits for `PROMPT`; cmd.exe expands `$$` to `$` and `$S` to a space.
     let mut rendered = String::new();
     let mut chars = CMD_PROMPT.chars();
@@ -696,20 +531,20 @@ fn cmd_prompt_renders_the_shared_prompt() {
 }
 
 /// Unix seconds the fake host's clock starts at: 2024-02-29 12:34:56 UTC.
-const FAKE_START_S: u64 = 1_709_210_096;
+pub(super) const FAKE_START_S: u64 = 1_709_210_096;
 
 /// A host whose clock advances only by the sleeps it records; it never really sleeps.
-struct FakeHost {
+pub(super) struct FakeHost {
     /// Every sleep requested and granted, in order.
-    sleeps: Vec<Duration>,
+    pub(super) sleeps: Vec<Duration>,
     /// Sleeps granted before the next one fails, which is how a test ends an endless step.
-    sleeps_allowed: usize,
+    pub(super) sleeps_allowed: usize,
     /// How many times the idle shell ran.
-    shells: usize,
+    pub(super) shells: usize,
 }
 
 impl FakeHost {
-    fn new(sleeps_allowed: usize) -> Self {
+    pub(super) fn new(sleeps_allowed: usize) -> Self {
         Self { sleeps: Vec::new(), sleeps_allowed, shells: 0 }
     }
 }
@@ -739,7 +574,7 @@ impl ProgramHost for FakeHost {
 }
 
 /// A writer whose every write fails, as a closed console would.
-struct FailingWriter;
+pub(super) struct FailingWriter;
 
 impl Write for FailingWriter {
     fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
@@ -753,7 +588,7 @@ impl Write for FailingWriter {
 
 /// A scratch directory laid out as `prepare_scratch` lays it out on Windows, with `plan`'s
 /// fixtures, `program.json` and every planned role's ack; `go_written` adds every go file too.
-fn program_dir(label: &str, plan: &Plan, go_written: bool) -> std::path::PathBuf {
+pub(super) fn program_dir(label: &str, plan: &Plan, go_written: bool) -> std::path::PathBuf {
     let dir = scratch_dir(label);
     for sub in ["workload/fixtures", "roles", "sessions", "acks", "go", "done"] {
         std::fs::create_dir_all(dir.join(sub)).unwrap();
@@ -773,7 +608,7 @@ fn program_dir(label: &str, plan: &Plan, go_written: bool) -> std::path::PathBuf
 
 /// What `role`'s POSIX script prints after it is acknowledged, derived from the workload alone:
 /// READY, the workload's bytes with each fixture once and in order, then the sentinel.
-fn expected_role_output(plan: &Plan, role: usize) -> Vec<u8> {
+pub(super) fn expected_role_output(plan: &Plan, role: usize) -> Vec<u8> {
     let files = fixtures(plan);
     let file_bytes = |name: &str| -> Vec<u8> {
         let file = files.iter().find(|file| file.relative_path == name).expect("a planned fixture");
@@ -803,146 +638,8 @@ fn expected_role_output(plan: &Plan, role: usize) -> Vec<u8> {
     expected
 }
 
-#[test]
-fn run_steps_writes_nothing_between_ready_and_go() {
-    // The probe writes GO only after it finds READY, so nothing may follow READY until GO exists.
-    let flood = plan("S3", "default", true).unwrap();
-    let waiting = program_dir("ready-waiting", &flood, false);
-    let mut host = FakeHost::new(20);
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    assert_eq!(
-        run_steps(&waiting, &mut host, &mut out, &mut err),
-        1,
-        "the fake host ends the wait"
-    );
-    assert_eq!(out, b"READY 0\n");
-    assert_eq!(host.sleeps, vec![Duration::from_millis(50); 20], "go/0 is polled every 50 ms");
-    // The session record names the role and this process, as the comparison script reads it.
-    let record = std::fs::read_to_string(waiting.join("sessions/0.json")).unwrap();
-    let record: serde_json::Value = serde_json::from_str(&record).unwrap();
-    assert_eq!(record["role"], 0);
-    assert_eq!(record["program_pid"], std::process::id());
-    std::fs::remove_dir_all(&waiting).unwrap();
-    // Once GO exists, the workload follows READY directly.
-    let started = program_dir("ready-go", &flood, true);
-    let mut host = FakeHost::new(usize::MAX);
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    assert_eq!(run_steps(&started, &mut host, &mut out, &mut err), 0);
-    assert!(out.starts_with(b"READY 0\ny\ny\n"));
-    assert!(out == expected_role_output(&flood, 0), "S3 output differs");
-    std::fs::remove_dir_all(&started).unwrap();
-}
-
-#[test]
-fn run_steps_plays_each_fixture_in_order() {
-    // Every role prints what its POSIX script prints, each fixture once, in order, then its sentinel.
-    let plans = all_plans_on(BUILD_HOST).into_iter().filter(|plan| {
-        plan.short && !fixtures(plan).is_empty() && !plan.roles.contains(&Workload::DateLoop)
-    });
-    for plan in plans {
-        let key = plan_key(&plan);
-        let dir = program_dir(&format!("play-{}", key.replace(' ', "-")), &plan, true);
-        for role in 0..plan.roles.len() {
-            let expected = expected_role_output(&plan, role);
-            let mut host = FakeHost::new(usize::MAX);
-            let (mut out, mut err) = (Vec::new(), Vec::new());
-            let code = run_steps(&dir, &mut host, &mut out, &mut err);
-            assert_eq!(code, 0, "{key} role {role}: {}", String::from_utf8_lossy(&err));
-            // A writer that repeated a fixture would print more than one copy of each.
-            assert_eq!(out.len(), expected.len(), "{key} role {role} length");
-            assert!(out == expected, "{key} role {role} bytes differ");
-            let finished = plan.roles[role] != Workload::IdleShell;
-            assert_eq!(dir.join(format!("done/{role}")).exists(), finished, "{key} role {role}");
-            if let Workload::PrintThenSleep(_) = plan.roles[role] {
-                let bound = Duration::from_secs(plan.timeout_s + ANCHOR_MARGIN_S);
-                assert_eq!(host.sleeps.last(), Some(&bound), "{key} role {role} sleeps the bound");
-                assert_eq!(host.shells, 0);
-            } else {
-                assert_eq!(host.shells, 1, "{key} role {role} ends in the idle shell");
-            }
-        }
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-}
-
-#[test]
-fn run_steps_writes_the_frames_of_both_s10_variants() {
-    // S10 plays its frame files in order, each once and paced 16 ms; only `sync` brackets them.
-    for (variant, synchronized) in [("default", false), ("sync", true)] {
-        let stream = plan("S10", variant, true).unwrap();
-        let dir = program_dir(&format!("frames-{variant}"), &stream, true);
-        let mut host = FakeHost::new(usize::MAX);
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        assert_eq!(run_steps(&dir, &mut host, &mut out, &mut err), 0);
-        let mut rest = out.strip_prefix(b"READY 0\n".as_slice()).expect("READY comes first");
-        let frames = fixtures(&stream);
-        assert_eq!(frames.len(), 300);
-        for (index, frame) in frames.iter().enumerate() {
-            let FixtureBody::Bytes(bytes) = &frame.body else { panic!("frames are bytes") };
-            assert_eq!(frame.relative_path, format!("frames/{index}"));
-            assert!(rest.len() >= bytes.len(), "{variant} output ends before frame {index}");
-            let (head, tail) = rest.split_at(bytes.len());
-            assert!(head == bytes.as_slice(), "{variant} frame {index} differs");
-            let bracketed = head.starts_with(b"\x1b[?2026h") && head.ends_with(b"\x1b[?2026l");
-            assert_eq!(bracketed, synchronized, "{variant} frame {index} brackets");
-            rest = tail;
-        }
-        assert_eq!(rest, format!("{}\n", sentinel_line(0, NONCE)).as_bytes());
-        assert_eq!(host.sleeps, vec![Duration::from_millis(16); 300]);
-        assert_eq!(host.shells, 1);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-}
-
-#[test]
-fn run_steps_date_loop_ends_each_line() {
-    // S4 streams one `date` line every 10 ms, each ending in LF; the fake host ends the loop.
-    let stream = plan("S4", "default", true).unwrap();
-    let dir = program_dir("date-loop", &stream, true);
-    let mut host = FakeHost::new(3);
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    assert_eq!(run_steps(&dir, &mut host, &mut out, &mut err), 1, "the loop never ends by itself");
-    let line = date_line(FAKE_START_S);
-    let text = String::from_utf8(out).unwrap();
-    assert_eq!(text, format!("READY 0\n{line}\n{line}\n{line}\n{line}\n"));
-    assert_eq!(host.sleeps, vec![Duration::from_millis(10); 3]);
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn run_steps_unplanned_role_only_sleeps_the_bound() {
-    // An extra pane follows the handshake like the script's `*)` branch, then prints nothing more.
-    let idle = plan("S1", "default", true).unwrap();
-    let dir = program_dir("unplanned", &idle, true);
-    std::fs::create_dir(dir.join("roles/0")).unwrap();
-    std::fs::write(dir.join("acks/1"), "").unwrap();
-    std::fs::write(dir.join("go/1"), "").unwrap();
-    let mut host = FakeHost::new(usize::MAX);
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    assert_eq!(run_steps(&dir, &mut host, &mut out, &mut err), 0);
-    assert_eq!(out, b"READY 1\n");
-    assert_eq!(host.sleeps, vec![Duration::from_secs(idle.timeout_s + ANCHOR_MARGIN_S)]);
-    assert_eq!(host.shells, 0);
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn program_returns_1_on_a_write_error() {
-    // A program that cannot write stops at once with one line naming the error, ending its role.
-    let idle = plan("S1", "default", true).unwrap();
-    let dir = program_dir("write-error", &idle, true);
-    let mut host = FakeHost::new(usize::MAX);
-    let mut err = Vec::new();
-    assert_eq!(run_steps(&dir, &mut host, &mut FailingWriter, &mut err), 1);
-    let text = String::from_utf8(err).unwrap();
-    assert_eq!(text.lines().count(), 1, "{text}");
-    assert!(text.ends_with('\n') && text.contains("console closed"), "{text}");
-    assert_eq!(host.shells, 0, "nothing runs after the failed write");
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
 /// Bitwise CRC-32 (IEEE), written apart from the fixture's, so the check is independent of it.
-fn reference_crc32(bytes: &[u8]) -> u32 {
+pub(super) fn reference_crc32(bytes: &[u8]) -> u32 {
     let mut crc = u32::MAX;
     for byte in bytes {
         crc ^= u32::from(*byte);
@@ -954,7 +651,7 @@ fn reference_crc32(bytes: &[u8]) -> u32 {
 }
 
 #[test]
-fn inline_png_fixture_decodes_and_fits_one_osc() {
+pub(super) fn inline_png_fixture_decodes_and_fits_one_osc() {
     // Windows S11 prints one OSC 1337 inline PNG, since Sixel never arrives through ConPTY.
     let image = plan_for("S11", "default", false, Host::Windows).unwrap();
     let files = fixtures(&image);
@@ -1016,7 +713,7 @@ fn inline_png_fixture_decodes_and_fits_one_osc() {
 }
 
 #[test]
-fn presenter_variants_set_only_their_mode() {
+pub(super) fn presenter_variants_set_only_their_mode() {
     // gdi forces the software presenter, wgpu forbids it, and every other config stays byte-identical.
     use sonicterm_cfg::config::{Config, SoftwareRenderMode};
     let dir = scratch_dir("presenter-config");
@@ -1043,907 +740,27 @@ fn presenter_variants_set_only_their_mode() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
-
-#[test]
-fn role_exit_program_exits_1_after_go() {
-    // S1/role-exit's program exits 1 as soon as GO exists, printing nothing after READY, not even an error.
-    let exiting = plan("S1", "role-exit", true).unwrap();
-    let dir = program_dir("role-exit", &exiting, true);
-    let mut host = FakeHost::new(usize::MAX);
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    assert_eq!(run_steps(&dir, &mut host, &mut out, &mut err), 1);
-    assert_eq!(out, b"READY 0\n");
-    assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
-    assert_eq!((host.shells, host.sleeps.len()), (0, 0));
-    assert!(!dir.join("done/0").exists());
-    assert_eq!(program_steps(Workload::ExitAfterGo), [ProgramStep::ExitAfterGo]);
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// The running platform's name as `START_SIZE_INPUTS` rows record it.
-fn platform_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        // When: neither macos nor windows matches, the platform has no recorded rows.
-        "linux"
-    }
-}
-
-/// One working-set measurement as the parseable row CI output is recorded from: `key=value`
-/// fields after a fixed prefix, in the order `START_SIZE_INPUTS` rows are keyed, with `source`
-/// naming what measured it (`helper` or `real_renderer`). `fit` is `FitOutcome::label`, which
-/// the helper and the renderer's `GlyphAtlasFacts::fit` both produce. `incomplete_glyphs`
-/// counts required glyphs the measurement drew as tofu; a nonzero count makes the row ineligible
-/// to select a start below the maximum.
-#[allow(clippy::too_many_arguments)]
-fn working_set_row(
-    platform: &str,
-    scale: u32,
-    fixture: &str,
-    source: &str,
-    fit: &str,
-    max_tile: [u32; 2],
-    packed_pixels: u64,
-    incomplete_glyphs: usize,
-) -> String {
-    format!(
-        "glyph_atlas_working_set platform={platform} scale={scale} fixture={fixture} \
-         source={source} fit={fit} max_tile={}x{} packed_pixels={packed_pixels} \
-         incomplete_glyphs={incomplete_glyphs}",
-        max_tile[0], max_tile[1]
-    )
-}
-
-/// A helper measurement's sizing figures: its fit outcome, its largest tile and how many required
-/// glyphs it drew as tofu after reviewed exceptions.
-type HelperFigures = (sonicterm_text::glyph_atlas::FitOutcome, [u32; 2], usize);
-
-/// How the working-set step judges one live helper measurement against its recorded row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum HelperCheck {
-    /// Complete, and equal to its recorded row (or no row is recorded).
-    Matches,
-    /// Complete, but its sizing figures differ from the recorded row; the message names both.
-    Drifted(String),
-    /// Some required glyph was not drawn, so the measurement cannot validate the recorded rows or a
-    /// start below the maximum; the message names the refusal and the missing evidence.
-    Refused(String),
-    /// Some required glyph was not drawn, but there is no recorded row and the start is already the
-    /// maximum, which the conservative rule selects for an incomplete measurement anyway.
-    MaximumOnly,
-}
-
-/// Judge `live` against `recorded`, the helper row recorded for the same platform, scale and
-/// fixture. `start_below_maximum` says whether the shipped start at this scale is below the maximum;
-/// `evidence` describes the measurement's missing glyphs for a refusal.
-fn check_helper(
-    recorded: Option<HelperFigures>,
-    live: HelperFigures,
-    start_below_maximum: bool,
-    evidence: &str,
-) -> HelperCheck {
-    let incomplete_glyphs = live.2;
-    if incomplete_glyphs > 0 {
-        // When: incomplete_glyphs is nonzero the figures describe less than the working set.
-        if recorded.is_some() || start_below_maximum {
-            // When: a recorded row or a smaller start depends on this measurement, it is refused.
-            return HelperCheck::Refused(format!(
-                "incomplete measurement: {incomplete_glyphs} required glyphs were not drawn, so it \
-                 cannot validate the recorded helper row or a start below the maximum; {evidence}"
-            ));
-        }
-        return HelperCheck::MaximumOnly;
-    }
-    match recorded {
-        Some(row) if row != live => {
-            HelperCheck::Drifted(format!("recorded {row:?}, live {live:?}"))
-        }
-        _ => HelperCheck::Matches,
-    }
-}
-
-/// Whether fallback is complete: the frame presented, and neither its terminal rows nor its
-/// chrome (tab titles, palette, footer) drew a character as tofu.
-fn fallback_settled(presented: bool, terminal_missing: &[char], chrome_missing: &[char]) -> bool {
-    presented && terminal_missing.is_empty() && chrome_missing.is_empty()
-}
-
-/// The palette footer's key-hint symbols the coverage test requires as `PaletteFooter` tiles.
-const REQUIRED_FOOTER_SYMBOLS: &str = "·↑↓↵";
-/// The tab title the coverage test requires as `TabTitle` tiles; short enough never to truncate.
-const REQUIRED_TITLE_TEXT: &str = "zsh";
-
-/// Each required chrome character with no real resident tile at its raster variant, as
-/// `(variant, character)`. Missing sentinels are not resident, so a symbol drawn as tofu is listed.
-fn missing_required_chrome(
-    resident: &std::collections::HashSet<sonicterm_types::GlyphKey>,
-) -> Vec<(sonicterm_types::GlyphRasterVariant, char)> {
-    use sonicterm_types::GlyphRasterVariant;
-    let required = REQUIRED_FOOTER_SYMBOLS
-        .chars()
-        .map(|symbol| (GlyphRasterVariant::PaletteFooter, symbol))
-        .chain(REQUIRED_TITLE_TEXT.chars().map(|symbol| (GlyphRasterVariant::TabTitle, symbol)));
-    required
-        .filter(|&(variant, symbol)| {
-            !resident.iter().any(|key| key.raster_variant == variant && key.ch == symbol)
-        })
-        .collect()
-}
-
-/// 12c, run by CI on each platform: each start constant passes `validate_table_start`, the same
-/// validation the unit tests use, and equals `ruled_start` over the recorded rows once the sizing
-/// oracle is complete. For S9's and S12's working sets at scale 1 and 2 the
-/// constant is at least this platform's need, where a measurement that drew any glyph as tofu
-/// needs the maximum, and the live helper measurement equals this platform's recorded `helper`
-/// row when one exists. Prints each figure so CI's output can become the table's rows; every
-/// failure is collected and the step fails once at the end, so one run prints every row.
-#[test]
-#[ignore = "measures with the real font stack; CI runs it in its own step"]
-fn glyph_atlas_working_set() {
-    use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
-    use sonicterm_text::glyph_atlas::{ATLAS_DIM, START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
-    use sonicterm_text::recording_image::{drift_policy, DriftVerdict, HostImage};
-    use sonicterm_text::start_size_inputs::{
-        normalize_raster_failures, ruled_start, start_rule, validate_table_start, InputSource,
-        RuleInput, RASTER_EXCEPTIONS, SIZING_ORACLE_COMPLETE, START_SIZE_INPUTS,
-    };
-    let font_dirs =
-        vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
-    // Every check below records its failure here instead of stopping, so one CI run prints every
-    // row; the step fails once, after the last row, naming all of them.
-    let mut failures: Vec<String> = Vec::new();
-    let size: f32 = FONT_SIZE.parse().unwrap_or_else(|_| {
-        failures.push(format!("the scenario font size {FONT_SIZE} is not a number"));
-        13.0
-    });
-    let fixtures = [("S9", Fixture::EmojiCjk), ("S12", Fixture::HistoryScreen)];
-    let titles = ["zsh", "perf_scenarios", "S12 covered window"];
-    let platform = platform_name();
-    // The rows hold exactly on their recording image and on every CI host; elsewhere drift is advisory.
-    let policy = drift_policy(platform, &HostImage::from_env());
-    if let Some(note) = policy.note() {
-        println!("glyph_atlas_working_set note: {note}");
-    }
-    for (scale, dpi, constant) in [(1, 72, START_ATLAS_DIM_1X), (2, 144, START_ATLAS_DIM_2X)] {
-        match validate_table_start(scale, constant) {
-            Ok(table) => println!(
-                "glyph_atlas_start scale={scale} constant={constant} verdict={}",
-                table.verdict
-            ),
-            Err(error) => {
-                failures.push(format!("{scale}x start {constant} fails validation: {error}"))
-            }
-        }
-        if SIZING_ORACLE_COMPLETE {
-            // When: SIZING_ORACLE_COMPLETE is set, the constant must equal the recorded rows' rule.
-            match ruled_start(scale, START_SIZE_INPUTS, SIZING_ORACLE_COMPLETE) {
-                Ok(ruled) => {
-                    println!(
-                        "glyph_atlas_start scale={scale} constant={constant} ruled={} validated={}",
-                        ruled.dim,
-                        ruled.dim == constant
-                    );
-                    if constant != ruled.dim {
-                        // When: the constant differs from ruled.dim, the shipped start breaks the rule.
-                        failures.push(format!(
-                            "{scale}x constant {constant} against the rule {}: {}",
-                            ruled.dim, ruled.verdict
-                        ));
-                    }
-                }
-                Err(error) => failures.push(format!("{scale}x has no ruled start: {error}")),
-            }
-        }
-        let mut local = Vec::new();
-        for (name, fixture) in fixtures {
-            let bytes = fixture_bytes(fixture);
-            let text = String::from_utf8_lossy(&bytes);
-            let lines: Vec<&str> = text.lines().collect();
-            let set = match measure_glyph_working_set(
-                &lines,
-                &titles,
-                FONT_FAMILY,
-                size,
-                dpi,
-                &font_dirs,
-            ) {
-                Ok(set) => set,
-                Err(error) => {
-                    // When: the measurement errs, this fixture prints no row; the others still do.
-                    failures
-                        .push(format!("{platform} {name} at {scale}x did not measure: {error}"));
-                    continue;
-                }
-            };
-            // Reviewed exceptions apply here, where each failure still names its face; unresolved
-            // characters and oversize required tiles always count.
-            let raster = normalize_raster_failures(platform, &set.raster_failed, RASTER_EXCEPTIONS);
-            let incomplete_glyphs = sonicterm_text::start_size_inputs::incomplete_glyphs(
-                set.unresolved_chars.len(),
-                set.oversize_required.len(),
-                &raster,
-            );
-            println!(
-                "{}",
-                working_set_row(
-                    platform,
-                    scale,
-                    name,
-                    "helper",
-                    &set.fit_outcome.label(),
-                    set.max_tile_dims,
-                    set.packed_pixels,
-                    incomplete_glyphs
-                )
-            );
-            if incomplete_glyphs > 0 || !raster.raw.is_empty() {
-                // When: a required tile is tofu on this host, say which, apart from the row: the raw
-                // raster failures, those a reviewed exception approved with its reason, and the rest.
-                println!(
-                    "glyph_atlas_working_set_tofu platform={platform} scale={scale} fixture={name} \
-                     unresolved={:?} oversize_required={:?} raster_failed={} matched={:?} \
-                     unapproved={:?}",
-                    set.unresolved_chars,
-                    set.oversize_required,
-                    raster.raw.len(),
-                    raster.matched,
-                    raster.unapproved
-                );
-            }
-            let recorded = START_SIZE_INPUTS.iter().find(|row| {
-                row.platform == platform
-                    && row.scale == scale
-                    && row.fixture == name
-                    && row.source == InputSource::Helper
-            });
-            // An incomplete measurement is refused before the drift check, with the failed face,
-            // glyph, style and strike of every unapproved raster failure; it never passes.
-            let evidence = format!(
-                "unresolved={:?} oversize_required={:?} unapproved={:?}",
-                set.unresolved_chars, set.oversize_required, raster.unapproved
-            );
-            let check = check_helper(
-                recorded.map(|row| (row.outcome, row.max_tile, row.incomplete_glyphs)),
-                (set.fit_outcome, set.max_tile_dims, incomplete_glyphs),
-                constant < ATLAS_DIM,
-                &evidence,
-            );
-            let provenance =
-                recorded.map_or_else(|| "none".to_owned(), |row| row.provenance.describe());
-            // A refusal fails on every host; only a dimension drift depends on the host image.
-            let drift = match check {
-                HelperCheck::Matches | HelperCheck::MaximumOnly => None,
-                HelperCheck::Drifted(reason) => Some(format!(
-                    "{name} at {scale}x drifted from its recorded helper row ({provenance}): {reason}"
-                )),
-                HelperCheck::Refused(reason) => {
-                    failures.push(format!(
-                        "glyph_atlas_working_set refused: {platform} {name} at {scale}x (recorded row: \
-                         {provenance}): {reason}"
-                    ));
-                    None
-                }
-            };
-            match policy.judge(drift.as_deref()) {
-                DriftVerdict::Holds => {}
-                DriftVerdict::Advisory(advisory) => {
-                    println!("glyph_atlas_working_set advisory: {advisory}")
-                }
-                DriftVerdict::Fails(failure) => failures.push(failure),
-            }
-            // CI seals these rows only after this test returns successfully, including every drift check.
-            if let Err(error) = crate::workload::glyph_oracle::export(name, dpi, &set) {
-                failures.push(format!("{name}@{scale}: oracle export: {error}"));
-            }
-            local.push(RuleInput {
-                label: format!("{platform} {scale}x {name} helper"),
-                outcome: set.fit_outcome,
-                max_tile: set.max_tile_dims,
-                incomplete_glyphs,
-            });
-        }
-        match start_rule(&local) {
-            Ok(need) => {
-                println!(
-                    "glyph_atlas_working_set platform={platform} scale={scale} need={} \
-                     constant={constant} verdict={}",
-                    need.dim, need.verdict
-                );
-                if constant < need.dim {
-                    // When: constant is below need.dim, this platform's working set overflows it.
-                    failures.push(format!("{scale}x needs {} but starts at {constant}", need.dim));
-                }
-            }
-            Err(error) => failures.push(format!("{scale}x has no measured need: {error}")),
-        }
-    }
-    if !failures.is_empty() {
-        // When: any check failed, the step fails once with every failure after every row.
-        panic!("glyph_atlas_working_set: {} failures:\n{}", failures.len(), failures.join("\n"));
-    }
-}
-
-/// One run of the working-set step always prints every row: no check panics or asserts while the
-/// fixtures and scales are still being measured; every failure is collected and the step panics
-/// once, after the last row, naming all of them.
-#[test]
-fn the_working_set_step_prints_every_row_before_its_one_panic() {
-    let source = include_str!("workload_tests.rs").replace("\r\n", "\n");
-    let start = source.find("fn glyph_atlas_working_set() {").expect("the step");
-    let body = &source[start..];
-    let body = &body[..body.find("\n}\n").expect("its end")];
-    for check in ["assert!(", "assert_eq!(", ".expect(", ".unwrap()"] {
-        assert!(!body.contains(check), "{check} would stop the step before every row prints");
-    }
-    assert_eq!(body.matches("panic!(").count(), 1, "one panic");
-    let panic = body.find("panic!(").unwrap();
-    let last_row = body.rfind("println!(").expect("rows are printed");
-    assert!(last_row < panic, "the panic follows every printed row");
-}
-
-/// The working-set step tells an incomplete live measurement apart from sizing drift. A complete
-/// measurement equal to its row matches, and one whose figures changed is drift. A measurement that
-/// drew a required glyph as tofu is refused before any comparison, because its fit and largest tile
-/// describe a smaller set than the working set; it is never reported as drift and never passes.
-#[test]
-fn an_incomplete_helper_measurement_is_refused_before_the_drift_check() {
-    use sonicterm_text::glyph_atlas::FitOutcome;
-    let row = (FitOutcome::Fits(1024), [23, 20], 0);
-    assert_eq!(check_helper(Some(row), row, true, "none"), HelperCheck::Matches);
-    let drifted = (FitOutcome::Fits(2048), [23, 20], 0);
-    let HelperCheck::Drifted(reason) = check_helper(Some(row), drifted, true, "none") else {
-        panic!("a complete measurement with other figures is drift");
-    };
-    assert!(reason.contains("Fits(2048)"), "{reason}");
-    // The figures also differ here, but the missing glyphs decide: refusal, not drift.
-    let incomplete = (FitOutcome::Fits(1024), [23, 16], 60);
-    for (recorded, below) in [(Some(row), true), (Some(row), false), (None, true)] {
-        let HelperCheck::Refused(reason) = check_helper(recorded, incomplete, below, "U+1F600")
-        else {
-            panic!("an incomplete measurement was not refused ({recorded:?}, below {below})");
-        };
-        assert!(reason.contains("60 required glyphs") && reason.contains("U+1F600"), "{reason}");
-    }
-    // With no recorded row and the start already the maximum, the conservative rule decides.
-    assert_eq!(check_helper(None, incomplete, false, "U+1F600"), HelperCheck::MaximumOnly);
-}
-
-/// Representative S9 emoji and CJK scalars, taken from the fixture's last line, which the real
-/// renderer's viewport shows at both scales (the cursor sits on the row below it). Test 17 checks
-/// that a resident body tile draws each with pixels, whatever fallback face drew it.
-const S9_REPRESENTATIVE_CODEPOINTS: [char; 6] = ['😀', '🍣', '🌏', '漢', '字', 'あ'];
-
-/// Every representative codepoint is drawn by S9: each appears on the fixture's last line, so the
-/// frozen list cannot drift from the fixture it stands for.
-#[test]
-fn the_s9_representative_codepoints_are_on_the_fixtures_last_line() {
-    let bytes = fixture_bytes(crate::scenarios::Fixture::EmojiCjk);
-    let text = String::from_utf8(bytes).expect("the S9 fixture is UTF-8");
-    let last = text.lines().rev().find(|line| !line.trim().is_empty()).expect("a last line");
-    let absent: Vec<char> = S9_REPRESENTATIVE_CODEPOINTS
-        .iter()
-        .copied()
-        .filter(|codepoint| !last.contains(*codepoint))
-        .collect();
-    assert!(absent.is_empty(), "not on the last line {last:?}: {absent:?}");
-}
-
-/// The working-set step and the real-renderer coverage test print their measurements through one
-/// formatter, so a single `key=value` parser reads both and the rows can become `START_SIZE_INPUTS`
-/// entries: the same keys in the same order, told apart only by `source`. Both kinds carry
-/// `incomplete_glyphs`, the count that makes a row ineligible to select a smaller start.
-#[test]
-fn working_set_rows_share_one_parseable_format() {
-    use sonicterm_text::glyph_atlas::FitOutcome;
-    let parse = |line: &str| -> Vec<(String, String)> {
-        let fields = line.strip_prefix("glyph_atlas_working_set ").expect("the row prefix");
-        fields
-            .split(' ')
-            .map(|field| {
-                let (key, value) = field.split_once('=').expect("a key=value field");
-                (key.to_owned(), value.to_owned())
-            })
-            .collect()
-    };
-    let helper = parse(&working_set_row(
-        "windows",
-        1,
-        "S9",
-        "helper",
-        &FitOutcome::Fits(512).label(),
-        [18, 24],
-        9000,
-        3,
-    ));
-    let real = parse(&working_set_row(
-        "windows",
-        2,
-        "S12",
-        "real_renderer",
-        &FitOutcome::FitsWithoutHeadroom.label(),
-        [40, 48],
-        123_456,
-        0,
-    ));
-    let keys =
-        |row: &[(String, String)]| row.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
-    assert_eq!(
-        keys(&helper),
-        [
-            "platform",
-            "scale",
-            "fixture",
-            "source",
-            "fit",
-            "max_tile",
-            "packed_pixels",
-            "incomplete_glyphs"
-        ]
-    );
-    assert_eq!(keys(&helper), keys(&real));
-    assert_eq!(helper[3].1, "helper");
-    assert_eq!(real[3].1, "real_renderer");
-    assert_eq!((real[4].1.as_str(), real[5].1.as_str()), ("no_headroom", "40x48"));
-    assert_eq!((helper[7].1.as_str(), real[7].1.as_str()), ("3", "0"));
-}
-
-/// Fallback is complete only on a presented frame whose terminal rows and chrome both drew no
-/// tofu: a footer still waiting on its fallback face keeps the check waiting even though the
-/// terminal rows are complete, which a terminal-only check would have accepted.
-#[test]
-fn fallback_settles_only_when_rows_and_chrome_drew_no_tofu() {
-    assert!(fallback_settled(true, &[], &[]));
-    assert!(!fallback_settled(true, &[], &['↵']), "a footer awaiting its face is not settled");
-    assert!(!fallback_settled(true, &['界'], &[]));
-    assert!(!fallback_settled(false, &[], &[]), "a frame that did not present proves nothing");
-}
-
-/// The coverage test compares tiles only after the chrome it exercises is resident: every footer
-/// key-hint symbol under `PaletteFooter` and the short tab title under `TabTitle`, each as a real
-/// tile (missing sentinels are not resident). A symbol drawn only at another variant still counts
-/// as missing.
-#[test]
-fn required_chrome_symbols_are_checked_per_raster_variant() {
-    use sonicterm_types::{GlyphKey, GlyphRasterVariant};
-    // Any real shaped key stands in for a resident tile; only the character and variant matter.
-    let key = |symbol: char, variant| {
-        GlyphKey::shaped(symbol, 1, 7, false, false).with_raster_variant(variant)
-    };
-    let mut resident: std::collections::HashSet<GlyphKey> = REQUIRED_FOOTER_SYMBOLS
-        .chars()
-        .map(|symbol| key(symbol, GlyphRasterVariant::PaletteFooter))
-        .chain(REQUIRED_TITLE_TEXT.chars().map(|symbol| key(symbol, GlyphRasterVariant::TabTitle)))
-        .collect();
-    assert!(missing_required_chrome(&resident).is_empty());
-    resident.remove(&key('↵', GlyphRasterVariant::PaletteFooter));
-    resident.insert(key('↵', GlyphRasterVariant::Normal));
-    assert_eq!(missing_required_chrome(&resident), vec![(GlyphRasterVariant::PaletteFooter, '↵')]);
-}
-
-/// Open the command palette so the main frame draws it: no window is named frontmost, which routes
-/// the palette to main (no attached window). Naming the seeded main key would misroute it, since the
-/// attached native window carries another id. Fails when the palette is not open on main.
-fn open_palette_on_main_frame(app: &mut sonicterm_app::app::App) -> Result<(), String> {
-    app.__test_set_frontmost_window(None);
-    if !app.run_action(&sonicterm_cfg::keymap::Action::OpenCommandPalette) {
-        // When: run_action refuses the action, the palette cannot be measured.
-        return Err("the palette open action was refused".to_owned());
-    }
-    if !app.__test_palette_open() {
-        // When: the action ran but the palette is closed, nothing draws a footer.
-        return Err("the palette is not open".to_owned());
-    }
-    match app.__test_palette_attached_window() {
-        None => Ok(()),
-        // When: an attached window is named, the main frame does not draw the palette.
-        Some(window_id) => {
-            Err(format!("the palette attached to {window_id:?}, not the main frame"))
-        }
-    }
-}
-
-/// The real-renderer coverage test seeds its main window under a synthetic key and then attaches a
-/// native window with another id, so naming that key frontmost reads as a torn-out child and the
-/// palette attaches there: the main frame never draws it, and no footer key becomes resident. The
-/// shared setup must open the palette on the main frame (no attached window), on every host.
-#[test]
-fn the_coverage_setup_opens_the_palette_on_the_main_frame() {
-    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
-    let fresh = || {
-        let mut app =
-            sonicterm_app::app::App::new(Theme::default(), Config::default(), Keymap::default());
-        app.__test_seed_tab("zsh");
-        app
-    };
-    // The mechanism: the seeded main key named frontmost routes the palette away from main.
-    let mut misrouted = fresh();
-    let main = misrouted.__test_main_window_id().expect("a seeded main window");
-    misrouted.__test_set_frontmost_window(Some(main));
-    assert!(misrouted.run_action(&sonicterm_cfg::keymap::Action::OpenCommandPalette));
-    assert_eq!(misrouted.__test_palette_attached_window(), Some(main));
-    // The setup the coverage test uses draws it on the main frame.
-    let mut app = fresh();
-    open_palette_on_main_frame(&mut app).expect("the palette opens on the main frame");
-    assert!(app.__test_palette_open());
-    assert_eq!(app.__test_palette_attached_window(), None);
-}
-
-/// The working-set helper against the real renderer, compared by tile identity rather than by
-/// configuration-local glyph keys: the S9 and S12 fixtures drawn on a Windows
-/// window with the tab bar and three titles, the cursor and the command palette open with its
-/// footer and detail rows, at scale 1 and 2. It lives beside the fixtures it draws.
-///
-/// What it proves: the completion wait needs a presented frame whose terminal rows and chrome
-/// report no missing glyph, and both reports now include a shaped glyph that drew nothing (refused,
-/// rasterized nothing, or too large to place) and a tab title that never shaped. Every resident
-/// tile is in the helper's set at the same raster size, and for S9 each representative emoji and
-/// CJK codepoint is a resident real tile. It does not prove that every glyph the helper measures
-/// was drawn, only the glyphs this frame requested. These checks passed on Windows CI and their
-/// rows are recorded, which is what completes the sizing oracle and lets a start constant drop
-/// below 2048.
-#[cfg(target_os = "windows")]
-mod real_renderer_coverage {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    use sonicterm_app::app::App;
-    use sonicterm_cfg::config::{Config, ScrollbarMode, SoftwareRenderMode};
-    use sonicterm_cfg::keymap::Keymap;
-    use sonicterm_cfg::theme::Theme;
-    use sonicterm_gpu::core::{GlyphAtlasStart, GpuRenderer, RendererSettings, SurfaceAppearance};
-    use sonicterm_gpu::glyph_working_set::{
-        measure_glyph_working_set, representative_gaps, representative_identities, TileIdentity,
-    };
-    use winit::application::ApplicationHandler;
-    use winit::dpi::PhysicalSize;
-    use winit::event::WindowEvent;
-    use winit::event_loop::{ActiveEventLoop, EventLoop};
-    use winit::platform::windows::EventLoopBuilderExtWindows;
-    use winit::window::{Window, WindowId};
-
-    use super::super::{fixture_bytes, FONT_FAMILY, FONT_SIZE};
-    use crate::scenarios::Fixture;
-
-    /// The tab titles the harness measures with.
-    const TITLES: [&str; 3] = ["zsh", "perf_scenarios", "S12 covered window"];
-
-    struct Probe {
-        outcome: Option<Result<(), String>>,
-    }
-
-    impl ApplicationHandler for Probe {
-        fn resumed(&mut self, active: &ActiveEventLoop) {
-            // winit allows one event loop per process, so every case runs inside this one.
-            self.outcome = Some(run_cases(active));
-            active.exit();
-        }
-
-        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
-    }
-
-    fn check(condition: bool, message: &str) -> Result<(), String> {
-        if condition {
-            Ok(())
-        } else {
-            Err(message.to_owned())
-        }
-    }
-
-    /// Whether this host enumerates no wgpu adapter at all, established apart from renderer
-    /// construction. That is the only limitation that turns a failed wgpu renderer into a skip.
-    fn host_has_no_adapter() -> bool {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty()
-    }
-
-    /// The app's font directory, so the renderer and the helper load the same faces.
-    fn font_dirs() -> Vec<PathBuf> {
-        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")]
-    }
-
-    /// A wgpu renderer (WARP on the hosted runner) at `scale` on its own window, with the tab bar
-    /// on. `Ok(None)` only when the host enumerates no adapter; any other error fails.
-    fn renderer(
-        active: &ActiveEventLoop,
-        scale: f32,
-        size_pt: f32,
-    ) -> Result<Option<(Arc<Window>, GpuRenderer)>, String> {
-        let window = Arc::new(
-            active
-                .create_window(
-                    Window::default_attributes()
-                        .with_visible(true)
-                        .with_inner_size(PhysicalSize::new(1000, 640))
-                        .with_title("SonicTerm working-set coverage"),
-                )
-                .map_err(|error| error.to_string())?,
-        );
-        let dirs = font_dirs();
-        let created = GpuRenderer::new(
-            window.clone(),
-            active,
-            &Theme::default(),
-            RendererSettings {
-                font_family: FONT_FAMILY,
-                font_dirs: &dirs,
-                font_size: size_pt,
-                line_height_mult: 1.2,
-                font_weight_scale: 1.0,
-                subpixel_aa: Default::default(),
-                padding: [0.0; 4],
-                appearance: SurfaceAppearance {
-                    backdrop: Default::default(),
-                    opacity: 1.0,
-                    scrollbar: ScrollbarMode::Never,
-                    panel_padding: 0.0,
-                    software_render_mode: SoftwareRenderMode::Off,
-                },
-                role: "working-set-coverage",
-                glyph_atlas_start: GlyphAtlasStart::Normal,
-            },
-        );
-        let mut renderer = match created {
-            Ok(renderer) => renderer,
-            Err(error) if host_has_no_adapter() => {
-                // When: the host enumerates no adapter, report the capability, not a pass.
-                println!("capability=HOST_INCAPABLE case=working-set-coverage reason={error}");
-                return Ok(None);
-            }
-            Err(error) => {
-                // When: an adapter exists, so the construction error is a defect.
-                return Err(format!("wgpu renderer construction failed with an adapter: {error}"));
-            }
-        };
-        renderer.set_scale_factor(scale);
-        renderer.set_tab_bar_visible(true);
-        renderer.set_cursor_blink(false);
-        Ok(Some((window, renderer)))
-    }
-
-    /// How long a case may wait for a presented frame whose rows and chrome draw no tofu.
-    const FALLBACK_DEADLINE: Duration = Duration::from_secs(15);
-
-    /// Dispatch the real main-window redraw with pacing open until a dispatch presents a frame
-    /// (the renderer's successful-frame count advances) and that frame drew no tofu in its terminal
-    /// rows (`last_missing_tofu()`) or its chrome (`last_missing_chrome()`: titles, palette rows,
-    /// query and footer), so every fallback face has landed. Fails at the deadline with what was
-    /// still missing.
-    fn settle(
-        app: &mut App,
-        active: &ActiveEventLoop,
-        id: WindowId,
-        case: &str,
-    ) -> Result<(), String> {
-        let started = Instant::now();
-        let mut presented_any = false;
-        let mut last_missing = Vec::new();
-        let mut last_chrome_missing = Vec::new();
-        while started.elapsed() < FALLBACK_DEADLINE {
-            let before = app
-                .__test_window_renderer_mut(id)
-                .map(|renderer| renderer.successful_frame_count())
-                .ok_or("the window has a renderer")?;
-            app.__test_set_window_last_render(id, Instant::now() - Duration::from_secs(1));
-            ApplicationHandler::window_event(app, active, id, WindowEvent::RedrawRequested);
-            let renderer = app.__test_window_renderer_mut(id).ok_or("the window has a renderer")?;
-            let presented = renderer.successful_frame_count() > before;
-            presented_any |= presented;
-            last_missing = renderer.last_missing_tofu().to_vec();
-            last_chrome_missing = renderer.last_missing_chrome().to_vec();
-            if super::fallback_settled(presented, &last_missing, &last_chrome_missing) {
-                // When: the frame presented with no row or chrome tofu, fallback is complete.
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        Err(format!(
-            "{case}: no presented frame without tofu within {FALLBACK_DEADLINE:?} \
-             (any frame presented: {presented_any}; terminal rows still missing: \
-             {last_missing:?}; chrome still missing: {last_chrome_missing:?})"
-        ))
-    }
-
-    /// Test 17 for one fixture at one scale: the renderer draws the fixture, three titles, the
-    /// cursor and the open palette until a presented frame draws no tofu in its rows or chrome.
-    /// It then holds every required footer symbol and title character as a real tile, prints its
-    /// atlas as a `source=real_renderer` row, every resident tile resolves to an identity (face,
-    /// glyph, strike, variant and flags), each identity is in the helper's set with the same
-    /// raster size, and for S9 a resident body tile draws each representative codepoint with pixels.
-    fn covered(
-        active: &ActiveEventLoop,
-        name: &str,
-        fixture: Fixture,
-        scale: f32,
-    ) -> Result<(), String> {
-        let case = format!("{name}@{scale}");
-        let size_pt: f32 = FONT_SIZE.parse().map_err(|_| "the scenario font size")?;
-        let Some((window, renderer)) = renderer(active, scale, size_pt)? else {
-            return Ok(());
-        };
-        let mut config = Config::default();
-        config.font.family = FONT_FAMILY.into();
-        config.font.size = size_pt;
-        config.appearance.software_render_mode = SoftwareRenderMode::Off;
-        config.locale = "en".into();
-        let mut app = App::new(Theme::default(), config, Keymap::default());
-        let bytes = fixture_bytes(fixture);
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        // A pty's ONLCR turns each LF into CR LF before the parser sees it.
-        let terminal_bytes = text.replace('\n', "\r\n").into_bytes();
-        for title in TITLES {
-            let pane = app.__test_seed_tab(title);
-            check(app.__test_advance_pane_parser(pane, &terminal_bytes), "fixture written")?;
-        }
-        let id = app.__test_main_window_id().ok_or("no main window")?;
-        check(app.__test_attach_window_renderer(id, window, renderer), "renderer attached")?;
-        super::open_palette_on_main_frame(&mut app).map_err(|error| format!("{case}: {error}"))?;
-        settle(&mut app, active, id, &case)?;
-        let renderer = app.__test_window_renderer_mut(id).ok_or("the window has a renderer")?;
-        let resident = renderer.__test_resident_tile_keys();
-        let absent = super::missing_required_chrome(&resident);
-        check(absent.is_empty(), &format!("{case}: required chrome not resident: {absent:?}"))?;
-        let facts = renderer.glyph_atlas_facts();
-        // The renderer's own missing-glyph reports, which include shaped glyphs that drew nothing.
-        let incomplete_glyphs =
-            renderer.last_missing_tofu().len() + renderer.last_missing_chrome().len();
-        print_row(&super::working_set_row(
-            super::platform_name(),
-            scale as u32,
-            name,
-            "real_renderer",
-            &facts.fit,
-            facts.max_tile,
-            facts.packed_pixels,
-            incomplete_glyphs,
-        ));
-        let (identities, unresolved) = renderer.__test_resident_tile_identities();
-        check(
-            unresolved.is_empty(),
-            &format!("{case}: resident keys with no face identity: {unresolved:?}"),
-        )?;
-        let lines: Vec<&str> = text.lines().collect();
-        let dpi = (72.0 * scale).round() as usize;
-        if name == "S9" {
-            // When: the fixture is S9, its representative emoji and CJK must be real resident tiles.
-            let body_tiles = renderer.__test_resident_body_tiles();
-            let sizes: Vec<_> = body_tiles.iter().map(|(key, size, _)| (*key, *size)).collect();
-            let gaps = representative_gaps(&super::S9_REPRESENTATIVE_CODEPOINTS, &sizes);
-            // Diagnostics only: shaping a codepoint alone may pick another fallback face than the frame.
-            let alone = representative_identities(
-                &super::S9_REPRESENTATIVE_CODEPOINTS,
-                FONT_FAMILY,
-                size_pt,
-                dpi,
-                &font_dirs(),
-            );
-            let label = |identity: Option<&TileIdentity>| {
-                identity.map_or_else(
-                    || "unresolved".to_owned(),
-                    |identity| {
-                        format!(
-                            "{} glyph {}",
-                            identity.source.face.source, identity.source.glyph_id
-                        )
-                    },
-                )
-            };
-            for (codepoint, isolated) in &alone {
-                let drawn: Vec<String> = body_tiles
-                    .iter()
-                    .filter(|(key, _, _)| key.ch == *codepoint)
-                    .map(|(_, _, identity)| label(identity.as_ref()))
-                    .collect();
-                println!(
-                    "glyph_atlas_representative fixture=S9 scale={scale} codepoint={codepoint} \
-                     drawn={drawn:?} alone={}",
-                    label(isolated.as_ref())
-                );
-            }
-            check(
-                gaps.is_empty(),
-                &format!("{case}: representative codepoints not drawn: {gaps:?}"),
-            )?;
-        }
-        // Only helper work is shared; every suite still proves its own resident identities and sizes.
-        let helper = match crate::workload::glyph_oracle::load(name, dpi)? {
-            Some(tiles) => tiles,
-            None => {
-                let measured = measure_glyph_working_set(
-                    &lines,
-                    &TITLES,
-                    FONT_FAMILY,
-                    size_pt,
-                    dpi,
-                    &font_dirs(),
-                )
-                .map_err(|error| {
-                    format!("{case}: the helper measurement is incomplete: {error}")
-                })?;
-                crate::workload::glyph_oracle::identities(&measured.tile_identities)?
-            }
-        };
-        let identities = crate::workload::glyph_oracle::identities(&identities)?;
-        let missing: Vec<&String> =
-            identities.keys().filter(|identity| !helper.contains_key(*identity)).take(20).collect();
-        check(
-            missing.is_empty(),
-            &format!("{case}: resident tiles the helper missed: {missing:?}"),
-        )?;
-        let resized: Vec<(&String, [u32; 2], [u32; 2])> = identities
-            .iter()
-            .filter_map(|(identity, size)| {
-                let measured = helper[identity];
-                (measured != *size).then_some((identity, *size, measured))
-            })
-            .take(20)
-            .collect();
-        check(
-            resized.is_empty(),
-            &format!("{case}: raster sizes differ (identity, renderer, helper): {resized:?}"),
-        )
-    }
-
-    /// Write one measurement row straight to stdout. CI runs this test without `--nocapture`, and
-    /// libtest captures only the print macros, so a direct write keeps the row in the job's log.
-    fn print_row(row: &str) {
-        use std::io::Write;
-        let mut stdout = std::io::stdout().lock();
-        // A row that cannot be written loses only evidence; the coverage assertions still run.
-        let _ = writeln!(stdout, "{row}").and_then(|()| stdout.flush());
-    }
-
-    fn run_cases(active: &ActiveEventLoop) -> Result<(), String> {
-        let mut failures = Vec::new();
-        for (name, fixture) in [("S9", Fixture::EmojiCjk), ("S12", Fixture::HistoryScreen)] {
-            for scale in [1.0, 2.0] {
-                if let Err(error) = covered(active, name, fixture, scale) {
-                    failures.push(error);
-                }
-            }
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
-        }
-    }
-
-    /// Once fallback completes on a presented frame, the helper's identity set covers every tile
-    /// the real renderer holds for S9 and S12 with the tab bar, titles, cursor and an open
-    /// palette, at scale 1 and 2, with the same raster sizes, and S9's representative emoji and CJK
-    /// are resident real tiles; the module comment states what this proves and what it does not.
-    #[test]
-    fn the_helper_covers_the_real_renderer() {
-        let event_loop =
-            EventLoop::builder().with_any_thread(true).build().expect("Windows event loop");
-        let mut probe = Probe { outcome: None };
-        event_loop.run_app(&mut probe).expect("working-set coverage event loop");
-        probe.outcome.expect("resumed runs").unwrap_or_else(|error| panic!("{error}"));
-    }
-}
-
 /// The grid width the row-run fixtures are written for.
-const ROW_RUN_COLS: usize = 250;
+pub(super) const ROW_RUN_COLS: usize = 250;
 
 /// Cells `text` occupies: every non-ASCII character in the row-run fixtures is a wide CJK
 /// character, so it takes two cells.
-fn fixture_cells(text: &str) -> usize {
+pub(super) fn fixture_cells(text: &str) -> usize {
     text.chars().map(|character| if character.is_ascii() { 1 } else { 2 }).sum()
 }
 
 /// One expected run: `(text, bold, italic, ascii_fast)`.
-type ExpectedRun = (String, bool, bool, bool);
+pub(super) type ExpectedRun = (String, bool, bool, bool);
 
 /// The runs body row `row` (1-based screen row) must cut into at update `update`, stated from
 /// the fixture contract rather than from the generator: the shaped CJK segments, the plain-digit
 /// field that stays ASCII-fast, then the default-style blank padding to column 250 as its own
 /// normal ASCII-fast run.
-fn expected_row_runs(workload: RowRunWorkload, row: u16, update: u32) -> Vec<ExpectedRun> {
+pub(super) fn expected_row_runs(
+    workload: RowRunWorkload,
+    row: u16,
+    update: u32,
+) -> Vec<ExpectedRun> {
     let mut runs: Vec<ExpectedRun> = match workload {
         RowRunWorkload::Powerline => vec![
             ("用户 主机 ".to_owned(), true, false, false),
@@ -1993,7 +810,7 @@ fn expected_row_runs(workload: RowRunWorkload, row: u16, update: u32) -> Vec<Exp
 /// any nine consecutive updates; its digit and padding runs are asserted exactly above but are
 /// not part of that check.
 #[test]
-fn row_run_workloads_cut_into_the_contract_runs() {
+pub(super) fn row_run_workloads_cut_into_the_contract_runs() {
     use sonicterm_grid::grid::Grid;
     use sonicterm_vt::vt::{CaptureStagingPool, Parser};
     // The body is screen rows 2 to 69, stated here rather than taken from the generator's range.
@@ -2032,39 +849,9 @@ fn row_run_workloads_cut_into_the_contract_runs() {
     }
 }
 
-/// The Windows program plays S6/rest as the POSIX script does: it creates the rest target, prints
-/// the URL and the target's absolute path above the sentinel, then sets the scroll region and
-/// streams date lines inside it until the host stops it.
-#[test]
-fn run_steps_prints_the_rest_fixture_then_streams_inside_its_region() {
-    let rest = plan("S6", "rest", true).unwrap();
-    let dir = program_dir("rest-stream", &rest, true);
-    let mut host = FakeHost::new(2);
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    assert_ne!(run_steps(&dir, &mut host, &mut out, &mut err), 0, "the fake host ends the stream");
-    let target = dir.join("workload").join(REST_TARGET_NAME);
-    assert!(target.exists(), "the rest target file is created before its path is printed");
-    let fixture = format!(
-        "READY 0\n\x1b[H\x1b[2J{REST_URL}\n{}\n\n{}\n\x1b[{}r\x1b[999;1H",
-        target.display(),
-        sentinel_line(0, NONCE),
-        crate::scenarios::REST_REGION_TOP
-    );
-    let text = String::from_utf8(out).unwrap();
-    assert!(text.starts_with(&fixture), "{text:?}");
-    let streamed = &text[fixture.len()..];
-    assert_eq!(
-        streamed.lines().count(),
-        3,
-        "one date line before each granted sleep and the failed one"
-    );
-    assert!(streamed.lines().all(|line| line.ends_with("UTC 1970") || line.contains("UTC")));
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
 /// Only a `status-line` plan's scratch config turns the status line on.
 #[test]
-fn status_line_plans_turn_the_strip_on_in_the_config() {
+pub(super) fn status_line_plans_turn_the_strip_on_in_the_config() {
     let strip = crate::scenarios::plan("S1", "status-line", true).unwrap();
     let base = crate::scenarios::plan("S1", "default", true).unwrap();
     let with_strip = config_toml_with_shell(&strip, "/bin/sh", false);
@@ -2090,7 +877,7 @@ fn status_line_plans_turn_the_strip_on_in_the_config() {
 /// 237 x 40 grid the macOS runner measures, with the 10,000-row limit, so S1/status-line's `print`
 /// really trims rows below the row limit.
 #[test]
-fn linked_history_fixture_is_trimmed_by_the_byte_budget() {
+pub(super) fn linked_history_fixture_is_trimmed_by_the_byte_budget() {
     let bytes = fixture_bytes(crate::scenarios::Fixture::LinkedHistory);
     let crlf = String::from_utf8(bytes).unwrap().replace('\n', "\r\n");
     for (cols, rows) in [(GRID_COLS as u16, crate::scenarios::STRIP_SAFE_ROWS), (237, 40)] {
@@ -2107,7 +894,7 @@ fn linked_history_fixture_is_trimmed_by_the_byte_budget() {
 /// A status-line run turns cursor blink off, so `program`'s present bound needs no blink slack;
 /// every other plan's config is unchanged.
 #[test]
-fn status_line_runs_turn_cursor_blink_off() {
+pub(super) fn status_line_runs_turn_cursor_blink_off() {
     let host = if cfg!(windows) { Host::Windows } else { Host::Posix };
     let status = crate::scenarios::plan_for("S12", "status-line", true, host).unwrap();
     let text = config_toml_with_shell(&status, "/bin/sh", false);
@@ -2122,3 +909,6 @@ fn status_line_runs_turn_cursor_blink_off() {
     let default = crate::scenarios::plan_for("S12", "default", true, host).unwrap();
     assert!(!config_toml_with_shell(&default, "/bin/sh", false).contains("cursor_blink"));
 }
+
+#[path = "workload_working_set.rs"]
+mod working_set;

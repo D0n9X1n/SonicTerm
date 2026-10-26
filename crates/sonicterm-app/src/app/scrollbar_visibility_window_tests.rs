@@ -251,7 +251,7 @@ fn every_scrollbar_retarget_caller_wakes_its_window() {
         "update_and_collect(",
     ];
     const OWN_FRAME: [(&str, &str); 3] = [
-        ("app/event_loop.rs", "expire_due_idle("),
+        ("app/event_loop_wait.rs", "expire_due_idle("),
         ("app/window_event.rs", "update_and_collect("),
         ("app/child_window_redraw.rs", "update_and_collect("),
     ];

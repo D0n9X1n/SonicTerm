@@ -262,9 +262,13 @@ pub(super) fn the_boundaries_sit_at_their_anchors() {
             "the order is documented at the enter anchor"
         );
     }
-    for (checkout, source) in
-        ["LF", "CRLF"].into_iter().zip(line_ending_variants(include_str!("mod.rs")))
-    {
+    for (checkout, source) in ["LF", "CRLF"].into_iter().zip(line_ending_variants(concat!(
+        include_str!("mod.rs"),
+        "\n",
+        include_str!("application_handler.rs"),
+        "\n",
+        include_str!("user_event.rs")
+    ))) {
         let source = source.replace("\r\n", "\n");
         let handler = &source[source.find("fn window_event(&mut self").expect("outer handler")..];
         let end = handler.find("\n    }\n");

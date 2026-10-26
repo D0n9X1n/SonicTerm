@@ -877,14 +877,21 @@ fn display_link_sources_keep_their_contracts() {
     assert!(fired.contains("generation.load(Ordering::Acquire)"), "{fired}");
     assert!(!fired.contains("App"), "the tick target never touches the App: {fired}");
 
-    let registry = code_of(include_str!("mod.rs"));
+    let registry = code_of(concat!(
+        include_str!("mod.rs"),
+        "\n",
+        include_str!("application_handler.rs"),
+        "\n",
+        include_str!("user_event.rs")
+    ));
     let insert = body_of(&registry, "pub(super) fn insert_window_registered(");
     let refresh = insert.find("refresh_monitor_period()").expect("the period is read");
     let install = insert.find("install_native_display_link(id)").expect("the link is installed");
     assert!(refresh < install, "the link takes the period just read: {insert}");
 
-    let event_loop = code_of(include_str!("event_loop.rs"));
-    let wait = body_of(&event_loop, "pub(super) fn do_about_to_wait(");
+    let event_loop =
+        code_of(concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs")));
+    let wait = body_of(&event_loop, "pub(in crate::app) fn do_about_to_wait(");
     let collect = wait.find("refresh_frame_due_work_at(").expect("deadlines are collected");
     let sync = wait.find("sync_display_links(").expect("links are reconciled");
     let arm = wait.find("set_control_flow(").expect("the wake is armed");

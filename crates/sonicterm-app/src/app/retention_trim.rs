@@ -104,3 +104,7 @@ impl super::super::App {
         self.trim_window_if_eligible(window_id, now, TrimRule::IgnoreAge)
     }
 }
+
+#[cfg(test)]
+#[path = "retention_trim_tests.rs"]
+mod retention_trim_tests;

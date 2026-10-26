@@ -868,7 +868,10 @@ fn device_stop_and_degrade_writers_invalidate_link_pacing() {
     assert!(stop_branch.contains("invalidate_link_pacing()"), "{stop_branch}");
     for (name, source) in [
         ("config_apply.rs", include_str!("config_apply.rs")),
-        ("event_loop.rs", include_str!("event_loop.rs")),
+        (
+            "event_loop.rs",
+            concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs")),
+        ),
         ("gpu_recovery.rs", include_str!("gpu_recovery.rs")),
     ] {
         assert!(source.contains("set_software_render_degrade("), "{name} uses the setter");

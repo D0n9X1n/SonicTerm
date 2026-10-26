@@ -362,7 +362,10 @@ fn every_window_constructor_starts_both_clocks_together() {
     assert!(app.windows.contains_key(&child));
     // The native constructors cannot run headless, so their literals are pinned by source.
     for (name, source) in [
-        ("event_loop.rs", include_str!("event_loop.rs")),
+        (
+            "event_loop.rs",
+            concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs")),
+        ),
         (
             "misc.rs",
             concat!(

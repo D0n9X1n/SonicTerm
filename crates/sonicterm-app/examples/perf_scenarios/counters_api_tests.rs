@@ -319,6 +319,9 @@ fn every_atlas_retry_api_call_in_the_harness_is_behind_its_cfg() {
         }
         scanned += 1;
         let source = std::fs::read_to_string(&entry_path).unwrap();
+        if source.starts_with("#![cfg(test)]") {
+            continue;
+        }
         let found = ungated_calls(&source, ATLAS_RETRY_GATE, ATLAS_RETRY_CALLS);
         assert!(found.is_empty(), "{name}: {found:#?}");
     }
@@ -388,6 +391,9 @@ fn every_attribution_api_call_in_the_harness_is_behind_its_cfg() {
         }
         scanned += 1;
         let source = std::fs::read_to_string(&entry_path).unwrap();
+        if source.starts_with("#![cfg(test)]") {
+            continue;
+        }
         let found = ungated_calls(&source, ATTRIBUTION_GATE, ATTRIBUTION_CALLS);
         assert!(found.is_empty(), "{name}: {found:#?}");
     }
@@ -418,6 +424,9 @@ fn every_completeness_api_call_in_the_harness_is_behind_its_cfg() {
         }
         scanned += 1;
         let source = std::fs::read_to_string(&entry_path).unwrap();
+        if source.starts_with("#![cfg(test)]") {
+            continue;
+        }
         let found = ungated_calls(&source, COMPLETENESS_GATE, COMPLETENESS_CALLS);
         assert!(found.is_empty(), "{name}: {found:#?}");
     }
@@ -446,6 +455,9 @@ fn every_dispatch_timeline_api_call_in_the_harness_is_behind_its_cfg() {
         }
         scanned += 1;
         let source = std::fs::read_to_string(&entry_path).unwrap();
+        if source.starts_with("#![cfg(test)]") {
+            continue;
+        }
         let found = ungated_calls(&source, DISPATCH_TIMELINE_GATE, DISPATCH_TIMELINE_CALLS);
         assert!(found.is_empty(), "{name}: {found:#?}");
     }
@@ -474,6 +486,9 @@ fn every_echo_timeline_api_call_in_the_harness_is_behind_its_cfg() {
         }
         scanned += 1;
         let source = std::fs::read_to_string(&entry_path).unwrap();
+        if source.starts_with("#![cfg(test)]") {
+            continue;
+        }
         let found = ungated_calls(&source, TIMELINE_GATE, TIMELINE_CALLS);
         assert!(found.is_empty(), "{name}: {found:#?}");
     }
@@ -502,6 +517,9 @@ fn every_guard_spans_api_call_in_the_harness_is_behind_its_cfg() {
         }
         scanned += 1;
         let source = std::fs::read_to_string(&entry_path).unwrap();
+        if source.starts_with("#![cfg(test)]") {
+            continue;
+        }
         let found = ungated_calls(&source, GUARD_SPANS_GATE, GUARD_SPANS_CALLS);
         assert!(found.is_empty(), "{name}: {found:#?}");
     }

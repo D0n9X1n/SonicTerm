@@ -251,7 +251,7 @@ fn the_memory_only_marker_does_not_survive_the_wake_it_describes() {
 /// Each stopped renderer gets a native boundary for its one-time report; usable replacements recover only once.
 #[test]
 fn gpu_device_state_change_checks_each_owner_without_repeating_a_usable_recovery_request() {
-    let source = include_str!("event_loop.rs");
+    let source = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
     let legacy = source.split_once("UserEvent::GpuDeviceStateChanged => {").unwrap().1;
     let legacy = legacy.split_once("UserEvent::GpuDeviceGenerationChanged").unwrap().0;
     assert!(legacy.contains("self.request_device_state_redraws();"));

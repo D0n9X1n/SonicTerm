@@ -525,3 +525,7 @@ impl super::super::App {
         self.emit_frame_lines_at(window, Instant::now());
     }
 }
+
+#[cfg(test)]
+#[path = "frame_counters_record_tests.rs"]
+mod frame_counters_record_tests;

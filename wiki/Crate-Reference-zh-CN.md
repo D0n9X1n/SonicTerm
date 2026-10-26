@@ -404,6 +404,13 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 
 ### `sonicterm-app`
 
+`app/user_event.rs` 保存类型化事件，`app/application_handler.rs` 转发原生回调；
+`app/mod.rs` 保留 App 所有权与注册入口。`app/event_loop_wait.rs` 负责到期待办及等待服务。
+性能工作负载把确定性夹具与原生角色执行分别放在 `workload_fixtures.rs` 和 `workload_native.rs`；
+仅测试使用的工作集与渲染器夹具仍属于原来的 harness 可执行文件。`tests/support/` 中的原生集成
+用例模块保留原有测试目标、分配器及事件循环所有者。
+
+
 **职责：** 跨平台 winit 编排，管理窗口、渲染器、标签页、窗格、PTY/解析器、
 输入、配置重载、重绘、覆盖层、标签页转移、有界目标探测和原生直接打开。一个
 `ReaperDriver` 负责全部 PTY 回收运行。`retire_pane` 将原生托管移至唯一的进程直属

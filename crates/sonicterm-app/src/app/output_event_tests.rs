@@ -413,8 +413,11 @@ fn builder_scan_sees_only_real_constructions() {
 /// `PaneOutput` is built only by the VT worker in `spawn_pane.rs` and no `RequestRedraw` is built.
 #[test]
 fn output_arms_route_only_through_the_service_and_only_the_worker_builds_pane_output() {
-    let (_, event_loop) =
-        crate::app::source_scan_support::code_views(include_str!("event_loop.rs"));
+    let (_, event_loop) = crate::app::source_scan_support::code_views(concat!(
+        include_str!("event_loop.rs"),
+        "\n",
+        include_str!("event_loop_wait.rs")
+    ));
     for variant in ["UserEvent::RequestRedraw", "UserEvent::PaneOutput"] {
         let start = event_loop.find(variant).unwrap_or_else(|| panic!("{variant} arm"));
         let arrow = start + event_loop[start..].find("=>").unwrap() + 2;

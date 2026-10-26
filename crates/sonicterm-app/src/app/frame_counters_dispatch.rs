@@ -219,3 +219,7 @@ pub(crate) fn consume_flush(slot: &AtomicU64, now_ns: u64) -> Option<u64> {
     let flushed_at_ns = slot.swap(0, Ordering::Acquire);
     (flushed_at_ns != 0).then(|| now_ns.saturating_sub(flushed_at_ns))
 }
+
+#[cfg(test)]
+#[path = "frame_counters_dispatch_tests.rs"]
+mod frame_counters_dispatch_tests;

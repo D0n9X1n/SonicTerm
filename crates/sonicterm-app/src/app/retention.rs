@@ -897,6 +897,3 @@ pub fn log_pane_retention(label: &str, retention: &PaneRetention) {
         "pane retention"
     );
 }
-
-#[cfg(test)]
-use trim::trim_eligibility;

@@ -281,7 +281,16 @@ fn assert_watch_methods_ungated(source: &str, mod_source: &str) {
 /// and the `mod perf_present` declaration in `app/mod.rs`.
 #[test]
 fn the_attribution_watch_methods_are_never_cfg_gated() {
-    assert_watch_methods_ungated(include_str!("perf_present.rs"), include_str!("mod.rs"));
+    assert_watch_methods_ungated(
+        include_str!("perf_present.rs"),
+        concat!(
+            include_str!("mod.rs"),
+            "\n",
+            include_str!("application_handler.rs"),
+            "\n",
+            include_str!("user_event.rs")
+        ),
+    );
 }
 
 /// A Windows checkout with CRLF line endings reads the same as an LF one: the check finds the impl's
@@ -291,7 +300,13 @@ fn the_gate_check_reads_a_crlf_checkout_as_an_lf_one() {
     let crlf = |source: &str| source.replace("\r\n", "\n").replace('\n', "\r\n");
     assert_watch_methods_ungated(
         &crlf(include_str!("perf_present.rs")),
-        &crlf(include_str!("mod.rs")),
+        &crlf(concat!(
+            include_str!("mod.rs"),
+            "\n",
+            include_str!("application_handler.rs"),
+            "\n",
+            include_str!("user_event.rs")
+        )),
     );
 }
 

@@ -709,7 +709,7 @@ pub(super) fn opens_function(line: &str) -> bool {
     let indent = line.len() - line.trim_start().len();
     let trimmed = line.trim_start();
     indent <= 4
-        && ["fn ", "pub fn ", "pub(crate) fn ", "pub(super) fn "]
+        && ["fn ", "pub fn ", "pub(crate) fn ", "pub(super) fn ", "pub(in crate::app) fn "]
             .iter()
             .any(|prefix| trimmed.starts_with(prefix))
 }

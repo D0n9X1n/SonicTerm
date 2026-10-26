@@ -344,7 +344,16 @@ fn the_window_label_identifies_which_renderer_the_line_is_about() {
 #[test]
 fn window_pane_removals_use_the_renderer_cache_chokepoint() {
     let sources = [
-        ("mod.rs", include_str!("mod.rs")),
+        (
+            "mod.rs",
+            concat!(
+                include_str!("mod.rs"),
+                "\n",
+                include_str!("application_handler.rs"),
+                "\n",
+                include_str!("user_event.rs")
+            ),
+        ),
         ("window_state.rs", include_str!("window_state.rs")),
         ("broadcast.rs", include_str!("broadcast.rs")),
         ("command_events.rs", include_str!("command_events.rs")),

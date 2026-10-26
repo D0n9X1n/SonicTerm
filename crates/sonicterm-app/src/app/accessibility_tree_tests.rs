@@ -27,7 +27,7 @@ fn every_terminal_creation_path_installs_one_adapter_before_first_show() {
     let install = "self.install_accessibility(event_loop, &window)";
     for (source, function, show) in [
         (
-            include_str!("event_loop.rs"),
+            concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs")),
             "pub(super) fn do_resumed(",
             Some("window.set_visible(true)"),
         ),
@@ -159,8 +159,11 @@ fn no_redraw_path_builds_a_tree() {
         "pub(super) fn observe_status_pane("
     )
     .contains("accessibility("));
-    assert!(body(include_str!("event_loop.rs"), "pub(super) fn do_about_to_wait(")
-        .contains("self.flush_accessibility(now)"));
+    assert!(body(
+        concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs")),
+        "pub(in crate::app) fn do_about_to_wait("
+    )
+    .contains("self.flush_accessibility(now)"));
 }
 
 #[test]

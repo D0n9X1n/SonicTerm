@@ -6,45 +6,15 @@
 //! `set_control_flow`.
 
 use super::*;
-use crate::app::quit_hold::QUIT_CONFIRM_DURATION;
+pub(super) use crate::app::quit_hold::QUIT_CONFIRM_DURATION;
 #[cfg(windows)]
-use crate::app::FOREGROUND_PROCESS_TTL;
-use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
-
-/// Recovery maintenance never requests a frame or suppresses a coincident or delayed owner deadline.
-#[test]
-fn recovery_wakes_preserve_due_owner_frames_without_an_idle_heartbeat() {
-    use crate::app::redraw::{DueCause, DueWork};
-    for frame_offset in [Duration::ZERO, Duration::from_millis(10)] {
-        let mut app = app_with_main_window();
-        let owner = app.main_window_id.unwrap();
-        let now = Instant::now();
-        let frame_at = now + frame_offset;
-        app.redraw_due = vec![
-            DueWork { owner: None, cause: DueCause::GpuRecovery, deadline: now },
-            DueWork { owner: Some(owner), cause: DueCause::Frame, deadline: frame_at },
-        ];
-        app.service_redraw_due(now);
-        assert_eq!(app.windows[&owner].redraw.request_in_flight, frame_offset.is_zero());
-        app.service_redraw_due(frame_at + Duration::from_millis(1));
-        assert!(app.windows[&owner].redraw.request_in_flight);
-        assert!(app.redraw_due.is_empty());
-    }
-    let mut app = app_with_main_window();
-    let owner = app.main_window_id.unwrap();
-    let now = Instant::now();
-    app.request_device_state_redraws();
-    assert!(!app.windows[&owner].redraw.request_in_flight);
-    app.redraw_due.push(DueWork { owner: None, cause: DueCause::GpuRecovery, deadline: now });
-    app.service_redraw_due(now);
-    assert!(!app.windows[&owner].redraw.request_in_flight);
-    assert!(app.redraw_due.is_empty());
-}
+pub(super) use crate::app::FOREGROUND_PROCESS_TTL;
+pub(super) use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 
 /// Native drop callbacks stay window-local and form one atomic path list at the event-loop's wait boundary.
 #[cfg(windows)]
 #[test]
-fn real_pty_winit_drop_turns_batch_each_window() {
+pub(super) fn real_pty_winit_drop_turns_batch_each_window() {
     use crate::app::{
         mod_tests::{input_test_windows, PtySubmissions},
         pty_test_support::isolated,
@@ -121,12 +91,12 @@ fn real_pty_winit_drop_turns_batch_each_window() {
 
 /// Software-render + IME-composing frame period, the widest gap between a
 /// frame boundary and any other contributor.
-const COMPOSE_PERIOD: Duration = crate::app::SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD;
+pub(super) const COMPOSE_PERIOD: Duration = crate::app::SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD;
 
 #[test]
-fn resumed_retires_previous_main_before_installing_its_replacement() {
+pub(super) fn resumed_retires_previous_main_before_installing_its_replacement() {
     // Real window creation must use the same retirement path as the owned-PTY replacement regression.
-    let source = include_str!("event_loop.rs");
+    let source = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
     let (_, resumed) = source.split_once("pub(super) fn do_resumed(").unwrap();
     let retire = resumed.find("self.retire_previous_main()").unwrap();
     let install = resumed.find("self.main_window_id = Some(main_id)").unwrap();
@@ -134,9 +104,9 @@ fn resumed_retires_previous_main_before_installing_its_replacement() {
 }
 
 #[test]
-fn macos_tabbing_policy_precedes_hooks_and_native_window_creation() {
+pub(super) fn macos_tabbing_policy_precedes_hooks_and_native_window_creation() {
     // Source wiring protects startup order; macOS native smoke separately exercises the AppKit property.
-    let source = include_str!("event_loop.rs");
+    let source = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
     let (_, resumed) = source.split_once("pub(super) fn do_resumed(").unwrap();
     let setter = resumed.find("event_loop.set_allows_automatic_window_tabbing(false)").unwrap();
     let hook = resumed.find("self.on_resumed.take()").unwrap();
@@ -148,9 +118,9 @@ fn macos_tabbing_policy_precedes_hooks_and_native_window_creation() {
 }
 
 #[test]
-fn macos_tabbing_smoke_checks_the_process_property_before_window_creation() {
+pub(super) fn macos_tabbing_smoke_checks_the_process_property_before_window_creation() {
     // Restrict failure assertions to the policy block, not the later window-creation error handler.
-    let source = include_str!("event_loop.rs");
+    let source = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
     let (_, resumed) = source.split_once("pub(super) fn do_resumed(").unwrap();
     let setter = resumed.find("event_loop.set_allows_automatic_window_tabbing(false)").unwrap();
     let hook = resumed.find("self.on_resumed.take()").unwrap();
@@ -164,7 +134,7 @@ fn macos_tabbing_smoke_checks_the_process_property_before_window_creation() {
 
 /// The hard window floor rounds fractional physical geometry upward.
 #[test]
-fn minimum_terminal_inner_size_preserves_thirty_by_ten_cells() {
+pub(super) fn minimum_terminal_inner_size_preserves_thirty_by_ten_cells() {
     let size = crate::app::minimum_terminal_inner_size(8.25, 17.5, 3.2, 4.1, 6.4, 25.3, 2.2);
 
     assert_eq!(size.width, 255);
@@ -175,7 +145,7 @@ fn minimum_terminal_inner_size_preserves_thirty_by_ten_cells() {
 
 /// DPI transitions preserve logical size while applying the new physical minimum.
 #[test]
-fn dpi_transition_size_preserves_logical_geometry_and_minimum() {
+pub(super) fn dpi_transition_size_preserves_logical_geometry_and_minimum() {
     let low_to_high = crate::app::dpi_transition_inner_size(
         winit::dpi::PhysicalSize::new(800, 600),
         1.0,
@@ -197,7 +167,7 @@ fn dpi_transition_size_preserves_logical_geometry_and_minimum() {
 
 /// Main and child scale handlers synchronously commit the same transition policy.
 #[test]
-fn main_and_child_scale_handlers_use_inner_size_writer() {
+pub(super) fn main_and_child_scale_handlers_use_inner_size_writer() {
     let main = concat!(
         include_str!("window_event.rs"),
         "\n",
@@ -221,7 +191,7 @@ fn main_and_child_scale_handlers_use_inner_size_writer() {
 
 /// Each language file names both requirements for explicit rmux application passthrough.
 #[test]
-fn rmux_osc52_documentation_enables_clipboard_and_passthrough() {
+pub(super) fn rmux_osc52_documentation_enables_clipboard_and_passthrough() {
     for (language, internals) in [
         ("English", include_str!("../../../../wiki/Architecture-Internals.md")),
         ("Chinese", include_str!("../../../../wiki/Architecture-Internals-zh-CN.md")),
@@ -233,8 +203,8 @@ fn rmux_osc52_documentation_enables_clipboard_and_passthrough() {
 
 /// Every terminal-window constructor installs the shared live-renderer floor.
 #[test]
-fn all_terminal_window_creation_paths_apply_the_minimum() {
-    let main = include_str!("event_loop.rs");
+pub(super) fn all_terminal_window_creation_paths_apply_the_minimum() {
+    let main = concat!(include_str!("event_loop.rs"), "\n", include_str!("event_loop_wait.rs"));
     let tear_out = concat!(
         include_str!("tear_out.rs"),
         "\n",
@@ -251,7 +221,7 @@ fn all_terminal_window_creation_paths_apply_the_minimum() {
 
 /// DPI, font, padding, and tab-bar changes all refresh native minimums.
 #[test]
-fn live_metric_change_paths_refresh_the_minimum() {
+pub(super) fn live_metric_change_paths_refresh_the_minimum() {
     let main_events = concat!(
         include_str!("window_event.rs"),
         "\n",
@@ -268,7 +238,7 @@ fn live_metric_change_paths_refresh_the_minimum() {
     assert!(config.matches("refresh_all_window_minimums();").count() >= 3);
 }
 
-fn app_with_main_window() -> App {
+pub(super) fn app_with_main_window() -> App {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_synthetic_main();
     app
@@ -276,7 +246,7 @@ fn app_with_main_window() -> App {
 
 /// Put the main window on the software + IME-composing frame cadence, so its
 /// deferred-redraw boundary sits `COMPOSE_PERIOD` after `last_render`.
-fn arm_pending_redraw_composing(app: &mut App, last_render: Instant) {
+pub(super) fn arm_pending_redraw_composing(app: &mut App, last_render: Instant) {
     app.software_render_degrade = true;
     app.pending_redraw = true;
     app.main_mut().unwrap().redraw.deferred = true;
@@ -288,25 +258,7 @@ fn arm_pending_redraw_composing(app: &mut App, last_render: Instant) {
 }
 
 #[test]
-fn contended_redraw_after_idle_arms_a_future_deadline_without_faking_a_frame() {
-    // A failed collection after idle needs a future retry, not the expired successful-frame deadline.
-    let mut app = app_with_main_window();
-    let now = Instant::now();
-    let previous = now - Duration::from_secs(1);
-    app.main_mut().unwrap().last_render = previous;
-    app.main_mut().unwrap().stream_clock = previous;
-
-    app.defer_redraw_on_lock_contention(true);
-
-    assert!(app.wake_deadline(None).unwrap() > now);
-    assert_eq!(app.main().unwrap().last_render, previous);
-    assert_eq!(app.main().unwrap().stream_clock, previous, "contention moves neither clock");
-    assert!(app.pending_redraw);
-    assert!(app.__test_input_dirty());
-}
-
-#[test]
-fn contention_retry_is_nonstarving_per_window_across_frame_policies() {
+pub(super) fn contention_retry_is_nonstarving_per_window_across_frame_policies() {
     // Repeated input cannot bypass or postpone a due collection; coherent collection releases only the contention floor.
     for software in [false, true] {
         for composing in [false, true] {
@@ -365,40 +317,7 @@ fn contention_retry_is_nonstarving_per_window_across_frame_policies() {
 }
 
 #[test]
-fn quit_confirmation_deadline_survives_a_pending_main_window_redraw() {
-    // A Cmd+Q confirmation armed just under its full window ago: it expires
-    // shortly, well before the next frame boundary.
-    let now = Instant::now();
-    let mut app = app_with_main_window();
-    let armed_at = now - (QUIT_CONFIRM_DURATION - Duration::from_millis(10));
-    let quit_deadline = match app.quit_hold.on_press(armed_at, false) {
-        crate::app::quit_hold::QuitHoldAction::ShowPrompt { deadline } => deadline,
-        other => panic!("first press must arm the confirmation, got {other:?}"),
-    };
-
-    // A redraw deferred for vsync pacing, rendered `now`.
-    arm_pending_redraw_composing(&mut app, now);
-    let frame_boundary = now + COMPOSE_PERIOD;
-
-    // The two are unambiguously apart: quit expires ~10ms out, the frame
-    // boundary ~83ms out.
-    assert!(
-        quit_deadline < frame_boundary,
-        "test setup: quit deadline must precede the frame boundary"
-    );
-
-    // A deadline is a "wake no later than" bound, so the earliest contributor
-    // wins. Taking the frame boundary here would let the confirmation window
-    // outlive its due instant by up to one frame period.
-    assert_eq!(
-        app.wake_deadline(None),
-        Some(quit_deadline),
-        "pending redraw must min-fold with the quit deadline, not replace it"
-    );
-}
-
-#[test]
-fn notification_expiry_survives_a_pending_main_window_redraw() {
+pub(super) fn notification_expiry_survives_a_pending_main_window_redraw() {
     // Same shape for the other contributor computed before the redraw branch:
     // a notification expiring before the next frame boundary.
     let now = Instant::now();
@@ -414,7 +333,7 @@ fn notification_expiry_survives_a_pending_main_window_redraw() {
 }
 
 #[test]
-fn pending_main_window_redraw_wins_when_it_is_the_earliest() {
+pub(super) fn pending_main_window_redraw_wins_when_it_is_the_earliest() {
     // The fold is a minimum, not a demotion: when the frame boundary is the
     // earliest contributor it is still the one that gets scheduled.
     let now = Instant::now();
@@ -433,7 +352,7 @@ fn pending_main_window_redraw_wins_when_it_is_the_earliest() {
 }
 
 #[test]
-fn no_armed_contributor_parks_the_loop() {
+pub(super) fn no_armed_contributor_parks_the_loop() {
     // Nothing armed: `None` is what makes `do_about_to_wait` choose
     // `ControlFlow::Wait` and drive no wakes at all while idle.
     let app = app_with_main_window();
@@ -442,7 +361,7 @@ fn no_armed_contributor_parks_the_loop() {
 
 #[cfg(windows)]
 #[test]
-fn foreground_probe_output_activity_debounces_until_quiet() {
+pub(super) fn foreground_probe_output_activity_debounces_until_quiet() {
     // Protect streaming output from triggering one process-table walk per 500 ms frame.
     let start = Instant::now();
     let mut app = app_with_main_window();
@@ -458,28 +377,7 @@ fn foreground_probe_output_activity_debounces_until_quiet() {
 
 #[cfg(windows)]
 #[test]
-fn foreground_probe_input_deadline_is_not_postponed_by_output() {
-    // Protect a silent gsudo launch from losing its probe behind a continuing output burst.
-    let start = Instant::now();
-    let mut app = app_with_main_window();
-
-    app.arm_foreground_probe_after_input(start);
-    app.arm_foreground_probe_after_output(start + Duration::from_millis(400));
-
-    let wake = app.foreground_schedule.activity_wake.expect("input arms a probe wake");
-    assert_eq!(wake.due, start + FOREGROUND_PROCESS_TTL);
-    assert!(wake.fixed);
-
-    app.arm_foreground_probe_after_input(start + Duration::from_millis(450));
-    assert_eq!(
-        app.foreground_schedule.activity_wake.expect("later input rearms the fixed wake").due,
-        start + Duration::from_millis(450) + FOREGROUND_PROCESS_TTL
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn foreground_probe_rearms_only_for_per_tab_warning_in_regular_process() {
+pub(super) fn foreground_probe_rearms_only_for_per_tab_warning_in_regular_process() {
     // Protect clear-on-return polling without reviving idle or globally elevated heartbeat redraws.
     let now = Instant::now();
     let mut app = app_with_main_window();
@@ -498,49 +396,12 @@ fn foreground_probe_rearms_only_for_per_tab_warning_in_regular_process() {
     assert!(app.foreground_schedule.warning_wake.is_none());
 }
 
-#[cfg(windows)]
-#[test]
-fn due_foreground_probe_forces_shell_return_refresh() {
-    // Protect a silent command return from retaining its per-tab warning after the cache TTL.
-    let start = Instant::now();
-    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    let pane_id = app.__test_seed_tab("#1 pwsh");
-    let main_id = app.main_window_id.expect("synthetic main window");
-    let window = app.windows.get_mut(&main_id).expect("synthetic main state");
-    window.panes.get_mut(&pane_id).expect("synthetic pane").fg_proc_cache = Some((
-        start,
-        Some(sonicterm_io::proc_info::ForegroundProcess { name: "gsudo".into(), privileged: true }),
-    ));
-    assert!(window.tabs.set_foreground_privileged(0, true));
-    app.finish_foreground_process_probe(start, true);
-
-    let due = start + FOREGROUND_PROCESS_TTL;
-    let changed = app.refresh_foreground_privileges_if_due(due);
-
-    assert_eq!(changed, vec![main_id]);
-    assert!(!app.windows[&main_id].tabs.tabs()[0].foreground_privileged);
-    assert!(app.foreground_schedule.warning_wake.is_none());
-}
-
-#[cfg(windows)]
-#[test]
-fn foreground_probe_only_wake_yields_to_frame_deadlines() {
-    // Protect timer-only samples from repainting unless no frame is already due at that instant.
-    let now = Instant::now();
-    let probe = now + Duration::from_millis(500);
-    let memory = now + Duration::from_secs(30);
-
-    assert!(wake_is_foreground_probe_only(None, Some(probe), Some(memory)));
-    assert!(wake_is_foreground_probe_only(None, Some(probe), Some(probe)));
-    assert!(!wake_is_foreground_probe_only(Some(probe), Some(probe), Some(memory)));
-    assert!(!wake_is_foreground_probe_only(
-        Some(now + Duration::from_millis(100)),
-        Some(probe),
-        Some(memory)
-    ));
-}
-
-fn arm_snap_scrollbar(app: &mut App, window_id: WindowId, pane_id: u64, active: Instant) {
+pub(super) fn arm_snap_scrollbar(
+    app: &mut App,
+    window_id: WindowId,
+    pane_id: u64,
+    active: Instant,
+) {
     use crate::app::scrollbar_visibility::{note_activity, retarget, ScrollbarVisState};
     let mut state = ScrollbarVisState::new(active);
     note_activity(&mut state, active);
@@ -549,32 +410,9 @@ fn arm_snap_scrollbar(app: &mut App, window_id: WindowId, pane_id: u64, active: 
     app.windows.get_mut(&window_id).expect("synthetic window").scrollbar_vis.insert(pane_id, state);
 }
 
-/// Degraded main and child scrollbars contribute their earliest one-shot deadline.
-#[test]
-fn snap_scrollbars_join_the_render_wake_minimum() {
-    let now = Instant::now();
-    let mut app = app_with_main_window();
-    app.software_render_degrade = true;
-    app.config.appearance.scrollbar = sonicterm_cfg::config::ScrollbarMode::Auto;
-    let main_id = crate::app::synthetic_main_window_id();
-    let child_id = app.__test_seed_child_window(&["child"]);
-    let child_pane = app.__test_child_active_pane(child_id).expect("child pane");
-    arm_snap_scrollbar(&mut app, main_id, 1, now);
-    arm_snap_scrollbar(&mut app, child_id, child_pane, now - Duration::from_millis(200));
-    let child_deadline = now - Duration::from_millis(200)
-        + Duration::from_millis(crate::app::scrollbar_visibility::IDLE_HIDE_MS);
-
-    assert_eq!(app.wake_deadline(None), Some(child_deadline));
-    assert_eq!(
-        app.wake_deadline(Some(now + Duration::from_millis(10))),
-        Some(now + Duration::from_millis(10)),
-        "an earlier notification must remain ahead of scrollbar expiration"
-    );
-}
-
 /// Expiration mutates only due windows and removes their stale deadline.
 #[test]
-fn snap_expiration_returns_only_affected_windows() {
+pub(super) fn snap_expiration_returns_only_affected_windows() {
     let now = Instant::now();
     let mut app = app_with_main_window();
     app.software_render_degrade = true;
@@ -602,29 +440,13 @@ fn snap_expiration_returns_only_affected_windows() {
     );
 }
 
-/// The Windows OSC 52 repair participates in the event-loop wake fold.
-#[cfg(target_os = "windows")]
-#[test]
-fn pending_osc52_reassertion_arms_its_deadline() {
-    let mut app = app_with_main_window();
-    app.__test_set_memory_clipboard("old");
-    app.handle_clipboard_write("Copilot selection".into());
-    let due = app
-        .pending_osc52_reassert
-        .as_ref()
-        .expect("successful OSC 52 write arms a reassertion")
-        .due;
-
-    assert_eq!(app.wake_deadline(None), Some(due));
-}
-
 /// Drive a run of frames and return the gap between each consecutive pair.
 ///
 /// Each iteration asks the pacing path for the next wake, then advances
 /// `last_render` to it — which is what the render path does when that wake
 /// fires. The returned gaps are therefore the cadence the loop would actually
 /// run at, not a restatement of the constant that produced it.
-fn measure_frame_gaps(app: &mut App, frames: usize, start: Instant) -> Vec<Duration> {
+pub(super) fn measure_frame_gaps(app: &mut App, frames: usize, start: Instant) -> Vec<Duration> {
     let mut gaps = Vec::with_capacity(frames);
     let mut last = start;
     for _ in 0..frames {
@@ -655,7 +477,7 @@ fn measure_frame_gaps(app: &mut App, frames: usize, start: Instant) -> Vec<Durat
 /// at the frame period with nothing in the final 21 seconds; an average hides
 /// exactly the shape that matters.
 #[test]
-fn a_120hz_monitor_is_slowed_to_the_software_cap() {
+pub(super) fn a_120hz_monitor_is_slowed_to_the_software_cap() {
     const HZ_120: Duration = Duration::from_micros(8_333);
     let mut app = app_with_main_window();
     app.software_render_degrade = true;
@@ -686,7 +508,7 @@ fn a_120hz_monitor_is_slowed_to_the_software_cap() {
 /// software cap unconditionally would satisfy the cap assertion and silently
 /// cap a machine with a real GPU at 40 fps.
 #[test]
-fn a_120hz_monitor_is_untouched_on_the_hardware_path() {
+pub(super) fn a_120hz_monitor_is_untouched_on_the_hardware_path() {
     const HZ_120: Duration = Duration::from_micros(8_333);
     let mut app = app_with_main_window();
     app.software_render_degrade = false;
@@ -711,7 +533,7 @@ fn a_120hz_monitor_is_untouched_on_the_hardware_path() {
 /// normal, composing, normal — because a stuck cap is only visible as a
 /// transition that fails to come back.
 #[test]
-fn the_ime_compose_drop_engages_and_then_releases() {
+pub(super) fn the_ime_compose_drop_engages_and_then_releases() {
     const HZ_120: Duration = Duration::from_micros(8_333);
     let mut app = app_with_main_window();
     app.software_render_degrade = true;
@@ -760,7 +582,7 @@ fn the_ime_compose_drop_engages_and_then_releases() {
 /// the software path adds at most 25 ms and the compose path at most ~83 ms.
 /// Measured through the pacing path rather than restated from the constants.
 #[test]
-fn a_deferred_keystroke_waits_at_most_one_frame_period() {
+pub(super) fn a_deferred_keystroke_waits_at_most_one_frame_period() {
     const HZ_120: Duration = Duration::from_micros(8_333);
     let mut app = app_with_main_window();
     app.software_render_degrade = true;
@@ -797,4 +619,4 @@ fn a_deferred_keystroke_waits_at_most_one_frame_period() {
 
 #[path = "test_hooks_event_loop_launch_fixture.rs"]
 mod test_hooks_event_loop_launch_fixture;
-use test_hooks_event_loop_launch_fixture::*;
+pub(super) use test_hooks_event_loop_launch_fixture::*;

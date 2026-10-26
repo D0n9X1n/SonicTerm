@@ -199,3 +199,7 @@ impl AtomicHistogram {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "frame_counters_histogram_tests.rs"]
+mod frame_counters_histogram_tests;
