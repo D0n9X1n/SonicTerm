@@ -1,11 +1,11 @@
 use super::*;
 
 /// Linear-sRGB opaque black and white backgrounds.
-const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-const WHITE_BG: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+pub(super) const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+pub(super) const WHITE_BG: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 #[test]
-fn height_is_sixty_percent_of_the_tab_bar_with_a_floor_and_scales() {
+pub(super) fn height_is_sixty_percent_of_the_tab_bar_with_a_floor_and_scales() {
     // 0.6 × the tab bar (font × 2 + 12, 36 px floor), at least 20 logical px, scaled by DPI.
     assert_eq!(status_line_height(13.0, 1.0), 23.0);
     assert_eq!(status_line_height(13.0, 2.0), 46.0);
@@ -17,7 +17,7 @@ fn height_is_sixty_percent_of_the_tab_bar_with_a_floor_and_scales() {
 }
 
 /// A strip geometry at `scale_factor` whose terminal font rasters at `font_pt` logical points.
-fn geometry_for_font(font_pt: f32, scale_factor: f32) -> StripGeometry {
+pub(super) fn geometry_for_font(font_pt: f32, scale_factor: f32) -> StripGeometry {
     StripGeometry {
         top: 0.0,
         height: status_line_height(13.0, scale_factor),
@@ -30,29 +30,15 @@ fn geometry_for_font(font_pt: f32, scale_factor: f32) -> StripGeometry {
     }
 }
 
-/// Contract: at the default `font_scale` strip text is exactly 80% of the live terminal font
-/// size, scaled by DPI, never under the 1 pt FreeType draws at; the strip's stack is built at the
-/// same size.
 #[test]
-fn strip_text_is_its_scale_of_the_terminal_font_size() {
-    assert!((geometry_for_font(13.0, 1.0).text_px() - 10.4).abs() < 1e-4, "13 pt gives 10.4");
-    assert!((geometry_for_font(13.5, 2.0).text_px() - 21.6).abs() < 1e-4, "13.5 pt at 2×");
-    // A Cmd+= zoom changes the live size, and the strip follows it.
-    assert!((geometry_for_font(16.0, 1.0).text_px() - 12.8).abs() < 1e-4, "a zoomed 16 pt");
-    assert!((geometry_for_font(1.0, 1.0).text_px() - 1.0).abs() < 1e-4, "the 1 pt floor at 1×");
-    assert!((status_line_font_size(13.0, default_font_scale()) - 10.4).abs() < 1e-4);
-    assert!((status_line_font_size(13.5, default_font_scale()) - 10.8).abs() < 1e-4);
-}
-
-#[test]
-fn contrast_ratio_matches_wcag_extremes() {
+pub(super) fn contrast_ratio_matches_wcag_extremes() {
     // Black on white is 21:1 and a color against itself is 1:1.
     assert!((contrast_ratio(ChromeColor::rgb(0, 0, 0), WHITE_BG) - 21.0).abs() < 0.01);
     assert!((contrast_ratio(ChromeColor::WHITE, WHITE_BG) - 1.0).abs() < 0.01);
 }
 
 #[test]
-fn caution_colors_fall_back_below_three_to_one() {
+pub(super) fn caution_colors_fall_back_below_three_to_one() {
     // A yellow that fails 3:1 on a light strip falls back to the foreground; one that passes is kept.
     let yellow = ChromeColor::rgb(0xF0, 0xE0, 0x40);
     let foreground = ChromeColor::rgb(0x20, 0x20, 0x20);
@@ -61,7 +47,7 @@ fn caution_colors_fall_back_below_three_to_one() {
 }
 
 #[test]
-fn segment_hit_test_uses_half_open_bounds() {
+pub(super) fn segment_hit_test_uses_half_open_bounds() {
     // A press inside a segment's bounds finds it; the gap between segments finds nothing.
     use sonicterm_render_model::boundary::cfg::status_line::StatusSegmentId;
     let presented = [
@@ -75,7 +61,7 @@ fn segment_hit_test_uses_half_open_bounds() {
 }
 
 /// A Rec Mono fixture chrome font stack for drawing tests.
-fn chrome_stack() -> sonicterm_engine::FontStack {
+pub(super) fn chrome_stack() -> sonicterm_engine::FontStack {
     let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../sonicterm-font/test-fonts/rec-mono");
     sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
@@ -91,7 +77,7 @@ fn chrome_stack() -> sonicterm_engine::FontStack {
 /// Tall text (CJK, emoji, a combining stack and a missing glyph) drawn at a size larger than the
 /// band leaves no glyph or box ink outside the band, so the strip needs no damage ink padding.
 #[test]
-fn strip_ink_never_leaves_its_band() {
+pub(super) fn strip_ink_never_leaves_its_band() {
     use sonicterm_render_model::boundary::ui::status_line::PlacedPart;
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
@@ -150,7 +136,9 @@ fn strip_ink_never_leaves_its_band() {
 }
 
 /// Run `work` inside a frame-stats counting scope and return its output with the counters it moved.
-fn counted<Output>(work: impl FnOnce() -> Output) -> (Output, crate::frame_stats::FrameStats) {
+pub(super) fn counted<Output>(
+    work: impl FnOnce() -> Output,
+) -> (Output, crate::frame_stats::FrameStats) {
     let sink = crate::frame_stats::FrameStatsSink::default();
     let output = {
         let _collect = crate::frame_stats::CollectGuard::enter(Some(&sink));
@@ -160,7 +148,7 @@ fn counted<Output>(work: impl FnOnce() -> Output) -> (Output, crate::frame_stats
 }
 
 /// A strip of one value part, one chip part and one separator at 12 px text.
-fn two_part_strip(
+pub(super) fn two_part_strip(
 ) -> (Vec<PlacedSegment>, Vec<sonicterm_render_model::boundary::ui::status_line::PlacedPart>) {
     use sonicterm_render_model::boundary::ui::status_line::PlacedPart;
     let part = |text: &str, tone, left| PlacedPart { text: text.into(), tone, left, width: 80.0 };
@@ -177,7 +165,7 @@ fn two_part_strip(
 }
 
 #[test]
-fn an_unchanged_strip_draws_again_without_shaping() {
+pub(super) fn an_unchanged_strip_draws_again_without_shaping() {
     // The strip's parts are kept as prepared runs keyed by text, bold, stack, size and DPI, so a
     // second present of an unchanged view shapes nothing and draws the same glyphs.
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
@@ -226,7 +214,7 @@ fn an_unchanged_strip_draws_again_without_shaping() {
 }
 
 /// A light fixture theme (every bundled theme is dark) whose yellow fails 3:1 on the strip.
-fn light_fixture() -> sonicterm_render_model::boundary::cfg::theme::Theme {
+pub(super) fn light_fixture() -> sonicterm_render_model::boundary::cfg::theme::Theme {
     use sonicterm_render_model::boundary::cfg::theme::{Appearance, Hex};
     let mut theme = sonicterm_render_model::boundary::cfg::theme::Theme {
         appearance: Appearance::Light,
@@ -245,7 +233,7 @@ fn light_fixture() -> sonicterm_render_model::boundary::cfg::theme::Theme {
 /// tones each reach 3:1 against `bg_base`; the light fixture's failing yellow falls back to the
 /// foreground.
 #[test]
-fn strip_colors_reach_three_to_one_on_dark_and_light_themes() {
+pub(super) fn strip_colors_reach_three_to_one_on_dark_and_light_themes() {
     use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
     for (name, theme) in [
         ("default", sonicterm_render_model::boundary::cfg::theme::Theme::default()),
@@ -279,7 +267,7 @@ fn strip_colors_reach_three_to_one_on_dark_and_light_themes() {
 /// A chip is text on the strip background, so an active-tab color under 3:1 there falls back to
 /// the theme foreground: white tab text on the light fixture, black tab text on a black strip.
 #[test]
-fn chip_text_falls_back_when_the_active_tab_color_fails() {
+pub(super) fn chip_text_falls_back_when_the_active_tab_color_fails() {
     use sonicterm_render_model::boundary::cfg::theme::Hex;
     use sonicterm_render_model::boundary::ui::ui_tokens::UiPalette;
     let light = light_fixture();
@@ -301,7 +289,7 @@ fn chip_text_falls_back_when_the_active_tab_color_fails() {
 /// The focus ring is four edges inside the focused segment's box, filling the band's height; it is
 /// at least one pixel thick, scales with the display, and doubles under `strong_focus`.
 #[test]
-fn focus_ring_frames_the_segment_and_strong_focus_doubles_it() {
+pub(super) fn focus_ring_frames_the_segment_and_strong_focus_doubles_it() {
     assert_eq!(focus_ring_thickness(1.0, false), 2.0);
     assert_eq!(focus_ring_thickness(1.0, true), 4.0);
     assert_eq!(focus_ring_thickness(2.0, false), 4.0);
@@ -326,7 +314,7 @@ fn focus_ring_frames_the_segment_and_strong_focus_doubles_it() {
 }
 
 #[test]
-fn a_strip_layout_is_committed_only_when_its_frame_presents() {
+pub(super) fn a_strip_layout_is_committed_only_when_its_frame_presents() {
     // Assembly stages the whole strip it placed (band top, height and segment rects); pointer
     // routing and accessibility read only what a presented frame showed. A frame that fails or
     // presents nothing, after a resize, DPI or font change, keeps the previous strip whole.
@@ -363,12 +351,12 @@ fn a_strip_layout_is_committed_only_when_its_frame_presents() {
 
 /// The committed-strip check on `core` as checked out, with LF or, on Windows, CRLF line endings;
 /// the fixtures build both forms from its LF text.
-fn committed_strip_checkout(core: &str) {
+pub(super) fn committed_strip_checkout(core: &str) {
     committed_strip_fixtures(core);
 }
 
 #[test]
-fn the_committed_strip_check_holds_on_a_crlf_checkout() {
+pub(super) fn the_committed_strip_check_holds_on_a_crlf_checkout() {
     // A Windows checkout gives `include_str!` CRLF text; the check on it must pass as on LF.
     let crlf = crate::core::CORE_SOURCE.replace("\r\n", "\n").replace('\n', "\r\n");
     committed_strip_checkout(&crlf);
@@ -376,7 +364,7 @@ fn the_committed_strip_check_holds_on_a_crlf_checkout() {
 
 /// Run the committed-strip check on an LF and a CRLF fixture of `source`, both built from its
 /// LF form, so a source already checked out with CRLF never gains a doubled `\r`.
-fn committed_strip_fixtures(source: &str) {
+pub(super) fn committed_strip_fixtures(source: &str) {
     let normalized = source.replace("\r\n", "\n");
     committed_strip_readers(&normalized);
     committed_strip_readers(&normalized.replace('\n', "\r\n"));
@@ -384,7 +372,7 @@ fn committed_strip_fixtures(source: &str) {
 
 /// `status_line_hit` and `status_line_contains` in `core` read the committed strip, never live
 /// geometry.
-fn committed_strip_readers(core: &str) {
+pub(super) fn committed_strip_readers(core: &str) {
     let core = core.replace("\r\n", "\n");
     for reader in ["pub fn status_line_hit(", "pub fn status_line_contains("] {
         let start = core.find(reader).unwrap();
@@ -395,7 +383,7 @@ fn committed_strip_readers(core: &str) {
 }
 
 /// Ink height of `text` drawn alone through the strip with `stack`, at a 13 px terminal font.
-fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) -> f32 {
+pub(super) fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) -> f32 {
     use sonicterm_render_model::boundary::ui::status_line::PlacedPart;
     let mut raster = stack.clone();
     let mut atlas = GlyphAtlas::new(1024, 1024);
@@ -438,7 +426,7 @@ fn strip_ink_height(stack: &sonicterm_engine::FontStack, text: &str) -> f32 {
 /// configuration, so its capitals are smaller than the tab title's, not tab-title tiles placed
 /// on a smaller baseline. The renderer builds, rescales and routes that stack.
 #[test]
-fn the_strip_draws_with_its_own_smaller_stack() {
+pub(super) fn the_strip_draws_with_its_own_smaller_stack() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -469,7 +457,7 @@ fn the_strip_draws_with_its_own_smaller_stack() {
 
 /// Drawn `H` height over the text size the geometry reports, for a `body_pt` terminal font at
 /// `scale`, on the bundled font's strip stack.
-fn cap_over_text_px(body_pt: f32, scale: f32) -> f32 {
+pub(super) fn cap_over_text_px(body_pt: f32, scale: f32) -> f32 {
     let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../sonicterm-font/test-fonts/rec-mono");
     let dpi = (72.0 * scale).round() as usize;
@@ -492,7 +480,7 @@ fn cap_over_text_px(body_pt: f32, scale: f32) -> f32 {
 /// geometry both use 1 pt: the drawn capital keeps the proportion it has at a normal size,
 /// instead of standing taller than the text size the geometry centers and fits by.
 #[test]
-fn a_tiny_strip_size_is_the_size_freetype_draws() {
+pub(super) fn a_tiny_strip_size_is_the_size_freetype_draws() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -505,7 +493,7 @@ fn a_tiny_strip_size_is_the_size_freetype_draws() {
 
 /// Draw `H` with `stack` as raster role `variant` at `size_px` into `atlas`; returns its ink
 /// height and atlas UV rect.
-fn drawn_h(
+pub(super) fn drawn_h(
     stack: &sonicterm_engine::FontStack,
     atlas: &mut GlyphAtlas,
     variant: GlyphRasterVariant,
@@ -535,7 +523,7 @@ fn drawn_h(
 /// old-size strip tiles after a zoom or a DPI change; both changes reset the atlas and rebuild or
 /// rescale the strip's stack, and a fresh atlas then rasterizes the strip at the new size.
 #[test]
-fn the_strip_rasterizes_anew_after_zoom_and_dpi_changes() {
+pub(super) fn the_strip_rasterizes_anew_after_zoom_and_dpi_changes() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -612,7 +600,7 @@ fn the_strip_rasterizes_anew_after_zoom_and_dpi_changes() {
 }
 
 /// The body of renderer method `signature` in `core`, up to its closing brace.
-fn renderer_method<'source>(core: &'source str, signature: &str) -> &'source str {
+pub(super) fn renderer_method<'source>(core: &'source str, signature: &str) -> &'source str {
     let start = core.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
     &core[start..start + core[start..].find("\n    }\n").unwrap()]
 }
@@ -621,7 +609,7 @@ fn renderer_method<'source>(core: &'source str, signature: &str) -> &'source str
 /// still on screen until a frame at the new edge presents; only hiding the strip drops it. Both
 /// insets read the placement, so the pane area follows the position.
 #[test]
-fn moving_the_strip_keeps_the_presented_layout_until_a_frame_presents() {
+pub(super) fn moving_the_strip_keeps_the_presented_layout_until_a_frame_presents() {
     let core = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     let moved = renderer_method(&core, "pub fn set_status_line_position(");
     assert!(!moved.contains("status_line_layouts.clear()"), "a move drops the presented strip");
@@ -636,7 +624,7 @@ fn moving_the_strip_keeps_the_presented_layout_until_a_frame_presents() {
 /// At either position the band sits on its edge, reserves exactly its height there, and the pane
 /// area left between the insets never overlaps it.
 #[test]
-fn the_band_reserves_its_own_edge_and_never_overlaps_the_panes() {
+pub(super) fn the_band_reserves_its_own_edge_and_never_overlaps_the_panes() {
     let (surface_h, titlebar_px, tab_bar_px, strip_h) = (600.0, 28.0, 40.0, 23.0);
     let top = strip_placement(StatusPosition::Top, surface_h, titlebar_px, tab_bar_px, strip_h);
     assert_eq!(top, StripPlacement { top: 28.0, reserved_top: 23.0, reserved_bottom: 0.0 });
@@ -659,14 +647,14 @@ fn the_band_reserves_its_own_edge_and_never_overlaps_the_panes() {
 /// The hairline sits on the band's terminal side: its bottom edge at the top, its top edge at
 /// the bottom.
 #[test]
-fn the_hairline_sits_on_the_terminal_side() {
+pub(super) fn the_hairline_sits_on_the_terminal_side() {
     assert_eq!(hairline_top(StatusPosition::Top, 28.0, 23.0, 2.0), 49.0);
     assert_eq!(hairline_top(StatusPosition::Bottom, 537.0, 23.0, 2.0), 537.0);
 }
 
 /// Draw one part of `tone` on a 400 × 200 surface with `theme`; returns its quads, glyphs and
 /// the resolved colors.
-fn emit_one_part(
+pub(super) fn emit_one_part(
     tone: StatusTone,
     theme: &sonicterm_render_model::boundary::cfg::theme::Theme,
 ) -> (Vec<QuadInstance>, Vec<GlyphInstance>, StatusColors) {
@@ -716,7 +704,7 @@ fn emit_one_part(
 /// 3:1 fallback, on a dark and a light theme. A plain chip takes the value color where that is
 /// readable (white on the dark theme) and the foreground where it is not (white on the light one).
 #[test]
-fn chips_draw_colored_text_without_a_background() {
+pub(super) fn chips_draw_colored_text_without_a_background() {
     let dark = sonicterm_render_model::boundary::cfg::theme::Theme::default();
     for theme in [dark, light_fixture()] {
         let (chip_quads, chip_glyphs, _) = emit_one_part(StatusTone::Chip, &theme);
@@ -737,7 +725,7 @@ fn chips_draw_colored_text_without_a_background() {
 
 /// How far the capitals' ink center sits from the center of the band area outside the hairline,
 /// in raster px, for "Mem" drawn on the bundled chrome font at `position` and `scale`.
-fn capital_centering_error(position: StatusPosition, scale: f32) -> f32 {
+pub(super) fn capital_centering_error(position: StatusPosition, scale: f32) -> f32 {
     use sonicterm_render_model::boundary::ui::status_line::PlacedPart;
     let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../sonicterm-font/test-fonts/rec-mono");
@@ -789,23 +777,8 @@ fn capital_centering_error(position: StatusPosition, scale: f32) -> f32 {
     (ink_top + ink_h / 2.0) - (area_top + area_h / 2.0)
 }
 
-/// Capitals sit centered in the band area outside the hairline, within one raster pixel, at
-/// either position and at 1× and 2×, on the bundled chrome font.
-#[test]
-fn capitals_are_centered_in_the_band_outside_the_hairline() {
-    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for position in [StatusPosition::Top, StatusPosition::Bottom] {
-        for scale in [1.0, 2.0] {
-            let error = capital_centering_error(position, scale);
-            assert!(error.abs() <= 1.0, "{position:?} at {scale}×: off by {error} px");
-        }
-    }
-}
-
 /// A strip geometry for the centering test, with the cap height the renderer would keep for it.
-fn test_strip_geometry(
+pub(super) fn test_strip_geometry(
     position: StatusPosition,
     top: f32,
     height: f32,
@@ -829,58 +802,10 @@ fn test_strip_geometry(
     geometry
 }
 
-/// The cap height centers the drawn capital's ink box: twice its center's height above the
-/// baseline. Ink that sits on the baseline gives its top; ink a pixel below it (as Windows draws)
-/// gives one less, so the center never shifts a whole pixel. Without a drawn capital the font's
-/// own measurement is used, and without either, 0.7 × the text size.
-#[test]
-fn the_cap_height_centers_the_drawn_capital_and_falls_back_in_order() {
-    assert_eq!(resolve_cap_height(Some((-8.0, 8.0)), Some(5.0), 10.0), 8.0, "ink on the baseline");
-    assert_eq!(resolve_cap_height(Some((-8.0, 9.0)), Some(5.0), 10.0), 7.0, "ink below it");
-    assert_eq!(resolve_cap_height(None, Some(5.0), 10.0), 5.0, "the font's own measurement");
-    assert_eq!(resolve_cap_height(None, None, 10.0), 7.0, "no capital and no metric");
-}
-
-/// On the bundled font the strip centers on its drawn `H`: the kept cap height is twice the
-/// drawn ink center's height above the baseline.
-#[test]
-fn the_strip_measures_its_drawn_capital() {
-    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let stack = chrome_stack();
-    let mut raster = stack.clone();
-    let mut atlas = GlyphAtlas::new(256, 256);
-    let text_px = 13.0;
-    let cap = strip_cap_height(&stack, &mut raster, &mut atlas, text_px);
-    let (ink_h, _) =
-        drawn_h(&stack, &mut GlyphAtlas::new(256, 256), GlyphRasterVariant::StatusLine, text_px);
-    assert!(cap > 0.0 && cap <= ink_h, "cap {cap} vs drawn H {ink_h}");
-}
-
-/// The renderer keeps one cap height per text size: the same size reuses it without measuring,
-/// and a new size measures again, so a zoom or DPI change never centers on a stale value.
-#[test]
-fn the_kept_cap_height_follows_the_text_size() {
-    let measured = std::cell::Cell::new(0);
-    let measure = |value: f32| {
-        measured.set(measured.get() + 1);
-        value
-    };
-    let kept = kept_cap_height(None, 13.0, || measure(9.0));
-    assert_eq!((kept.1, measured.get()), (9.0, 1));
-    let again = kept_cap_height(Some(kept), 13.0, || measure(99.0));
-    assert_eq!((again.1, measured.get()), (9.0, 1), "the same size is not measured again");
-    let zoomed = kept_cap_height(Some(again), 16.0, || measure(11.0));
-    assert_eq!((zoomed.1, measured.get()), (11.0, 2), "a new size measures anew");
-    let back = kept_cap_height(Some(zoomed), 13.0, || measure(9.0));
-    assert_eq!((back.1, measured.get()), (9.0, 3), "never the other size's stale value");
-}
-
 /// Two adjacent segments of one list get one measured `|` between them, drawn in the name color
 /// between their hit boxes, never inside either.
 #[test]
-fn the_strip_draws_a_separator_between_adjacent_segments() {
+pub(super) fn the_strip_draws_a_separator_between_adjacent_segments() {
     use sonicterm_render_model::boundary::cfg::status_line::{StatusSegmentId, StatusSide};
     use sonicterm_render_model::boundary::ui::status_line::{
         SpokenSegment, StatusPart, StatusSegmentView,
@@ -953,24 +878,11 @@ fn the_strip_draws_a_separator_between_adjacent_segments() {
     assert_ne!(bar.color, glyphs[0].color, "the `|` is in the name color, not the value color");
 }
 
-/// Strip text is `font_scale` × the live terminal font size, 0.8 by default, with the same 1 pt
-/// floor; the stack the renderer builds for a scale asks for the same size the geometry reports.
-#[test]
-fn strip_text_follows_its_font_scale() {
-    assert!((default_font_scale() - 0.8).abs() < 1e-6);
-    let mut geometry = geometry_for_font(13.0, 1.0);
-    assert!((geometry.text_px() - 10.4).abs() < 1e-4, "0.8 × 13 pt by default");
-    geometry.font_scale = 0.65;
-    assert!((geometry.text_px() - 8.45).abs() < 1e-4);
-    assert!((status_line_font_size(13.0, 0.65) - 8.45).abs() < 1e-4);
-    assert!((status_line_font_size(1.0, 0.3) - 1.0).abs() < 1e-4, "never under 1 pt");
-}
-
 /// A scale change rebuilds the strip's stack at the new size from the body stack and resets the
 /// atlas, since a glyph key carries no size; a font change rebuilds it at the renderer's scale,
 /// and every frame's geometry carries that scale.
 #[test]
-fn the_renderer_rebuilds_the_strip_at_its_scale() {
+pub(super) fn the_renderer_rebuilds_the_strip_at_its_scale() {
     let core = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     let method = |signature: &str| {
         let start = core.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
@@ -991,7 +903,7 @@ fn the_renderer_rebuilds_the_strip_at_its_scale() {
 /// and an `X` the cold renderer never draws, so comparing with a cold renderer at the new size
 /// names both, the stale size and the extra glyph.
 #[test]
-fn strip_tile_sizes_reject_a_stale_tile() {
+pub(super) fn strip_tile_sizes_reject_a_stale_tile() {
     let cold = [('H', 12, 16), ('E', 11, 16)];
     let live = [('H', 9, 12), ('E', 11, 16), ('X', 9, 12)];
     let error = compare_strip_tile_sizes(&live, &cold).expect_err("a stale tile is rejected");
@@ -1003,7 +915,7 @@ fn strip_tile_sizes_reject_a_stale_tile() {
 
 /// Fresh strip tiles are accepted: the same glyphs at the same sizes match in any order.
 #[test]
-fn strip_tile_sizes_accept_fresh_tiles() {
+pub(super) fn strip_tile_sizes_accept_fresh_tiles() {
     let cold = [('H', 12, 16), ('E', 11, 16), ('L', 10, 16)];
     let live = [('L', 10, 16), ('H', 12, 16), ('E', 11, 16)];
     assert_eq!(compare_strip_tile_sizes(&live, &cold), Ok(()));
