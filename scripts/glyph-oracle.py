@@ -24,6 +24,22 @@ def command(root, *arguments):
     return result.stdout
 
 
+# The one definition of the harness's pinned family, and the cfg line that selects each platform's.
+WORKLOAD = Path("crates/sonicterm-app/examples/perf_scenarios/workload.rs")
+PLATFORM_CFG = {"win32": "#[cfg(windows)]", "darwin": '#[cfg(target_os = "macos")]'}
+
+
+def pinned_family(root, platform=sys.platform):
+    """The family the perf harness pins on `platform`, read from its one definition in workload.rs."""
+    if platform not in PLATFORM_CFG:
+        raise ValueError(f"no pinned harness family for {platform}")
+    lines = (root / WORKLOAD).read_text(encoding="utf-8").splitlines()
+    for cfg_line, const_line in zip(lines, lines[1:]):
+        if cfg_line.strip() == PLATFORM_CFG[platform] and const_line.startswith("const FONT_FAMILY: &str = "):
+            return const_line.split('"')[1]
+    raise ValueError(f"workload.rs pins no FONT_FAMILY for {platform}")
+
+
 def digest_files(root, names):
     """Length-framed paths and bytes prevent concatenation ambiguity; missing files fail closed."""
     digest = hashlib.sha256()
@@ -34,7 +50,7 @@ def digest_files(root, names):
     return digest.hexdigest()
 
 
-def identity(root, attempt):
+def identity(root, attempt, family):
     """Hash tracked source bytes, bundled fonts, and every system/user font, not image labels alone."""
     tracked = command(root, "git", "ls-files", "-z").decode().rstrip("\0").split("\0")
     names = {name: os.environ[name] for name in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_REPOSITORY", "ImageOS", "ImageVersion")}
@@ -75,19 +91,19 @@ def identity(root, attempt):
             "source": digest_files(root, tracked), "fonts": fonts, "font_registrations": registrations,
             "rustc": command(root, "rustc", "-vV").decode(),
             "cargo": command(root, "cargo", "-V").decode(),
-            "rows": list(ROWS), "font_family": "Rec Mono St.Helens", "font_size_pt": 13.0,
+            "rows": list(ROWS), "font_family": family, "font_size_pt": 13.0,
             "dpi": [72, 144]}
 
 
-def validate_rows(directory):
-    """All four complete rows are mandatory; no partial producer can be published."""
+def validate_rows(directory, family):
+    """All four complete rows are mandatory, each bound to `family`; no partial producer can be published."""
     files = {}
     for name in ROWS:
         data = (directory / name).read_bytes()
         row = json.loads(data)
         fixture, dpi = name.removesuffix(".json").split("-")
         if not isinstance(row, dict) or row.get("schema") != 1 or row.get("fixture") != fixture or row.get("dpi") != int(dpi) \
-                or row.get("family") != "Rec Mono St.Helens" or row.get("size") != "13.0" \
+                or row.get("family") != family or row.get("size") != "13.0" \
                 or not isinstance(row.get("tiles"), dict) or not row["tiles"] or any(not isinstance(size, list) or len(size) != 2
                     or any(type(value) is not int or value <= 0 for value in size)
                     for size in row["tiles"].values()):
@@ -96,13 +112,13 @@ def validate_rows(directory):
     return files
 
 
-def verify(directory, expected_identity, expected_digest):
+def verify(directory, expected_identity, expected_digest, family):
     """Verify the out-of-band manifest digest, exact provenance and every payload hash."""
     raw = (directory / "manifest.json").read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected_digest:
         raise ValueError("oracle manifest digest mismatch")
     manifest = json.loads(raw)
-    if manifest != {"identity": expected_identity, "files": validate_rows(directory)}:
+    if manifest != {"identity": expected_identity, "files": validate_rows(directory, family)}:
         raise ValueError("oracle source/font/image/toolchain/run/attempt or payload mismatch")
 
 
@@ -115,20 +131,22 @@ def main():
         directory = Path(os.environ["SONICTERM_GLYPH_ORACLE_EXPORT"] if args.mode != "verify"
                          else os.environ["SONICTERM_GLYPH_ORACLE_DIR"])
         attempt = os.environ["GITHUB_RUN_ATTEMPT"] if args.mode != "verify" else os.environ["ORACLE_ATTEMPT"]
-        bound = identity(root, attempt)
+        family = pinned_family(root)
+        bound = identity(root, attempt, family)
         if args.mode == "prepare":
             directory.mkdir(parents=True, exist_ok=False)
             (directory / "identity.json").write_text(json.dumps(bound), encoding="utf-8")
         elif args.mode == "seal":
             if json.loads((directory / "identity.json").read_text(encoding="utf-8")) != bound:
                 raise ValueError("producer inputs changed during measurement")
-            raw = json.dumps({"identity": bound, "files": validate_rows(directory)}, sort_keys=True).encode()
+            raw = json.dumps({"identity": bound, "files": validate_rows(directory, family)},
+                             sort_keys=True).encode()
             (directory / "manifest.json").write_bytes(raw)
             with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
                 output.write(f"digest={hashlib.sha256(raw).hexdigest()}\nattempt={attempt}\n")
         else:
             digest = os.environ["ORACLE_DIGEST"]
-            verify(directory, bound, digest)
+            verify(directory, bound, digest, family)
             with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
                 output.write(f"SONICTERM_GLYPH_ORACLE_DIGEST={digest}\n")
     except (ValueError, OSError, KeyError) as error:
