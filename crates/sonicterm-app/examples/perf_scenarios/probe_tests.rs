@@ -1,13 +1,13 @@
 //! Pins the phase boundaries: each phase's counter delta covers exactly its own span, and work
 //! between phases (the gap, checkpoints, progress writes) is credited to no phase.
 
-use std::cell::Cell;
+pub(super) use std::cell::Cell;
 
 use super::*;
-use crate::counters::{FieldValue, Section, SourceValue};
+pub(super) use crate::counters::{FieldValue, Section, SourceValue};
 
 /// Totals whose only supported field is `attempts`, standing in for an App snapshot.
-fn totals_with_attempts(attempts: u64) -> CounterTotals {
+pub(super) fn totals_with_attempts(attempts: u64) -> CounterTotals {
     let mut totals = CounterTotals::unsupported();
     let read = |name: &str| {
         if name == "attempts" {
@@ -22,7 +22,7 @@ fn totals_with_attempts(attempts: u64) -> CounterTotals {
 }
 
 /// The attempts a finished phase was credited with.
-fn credited(record: &PhaseRecord) -> u64 {
+pub(super) fn credited(record: &PhaseRecord) -> u64 {
     let counters = record.frame_counters.as_ref().expect("a counting phase");
     match counters.get("attempts") {
         Some(FieldValue::Count(attempts)) => *attempts,
@@ -30,159 +30,52 @@ fn credited(record: &PhaseRecord) -> u64 {
     }
 }
 
-#[test]
-fn a_publication_inside_a_phase_is_credited_to_that_phase() {
-    // The meter snapshots at its start and its finish; what is published between them is the
-    // phase's, however the counter stood before it began.
-    let published = Cell::new(4_u64);
-    let meter = PhaseMeter::start(
-        "typing",
-        crate::scenarios::PhaseKind::Sustained,
-        None,
-        false,
-        Some(totals_with_attempts(published.get())),
-        None,
-    );
-    published.set(published.get() + 3);
-    let record = meter.finish(
-        Some(totals_with_attempts(published.get())),
-        crate::transition::Completion::default(),
-    );
-    assert_eq!(credited(&record), 3);
-}
-
-#[test]
-fn a_publication_in_the_gap_between_phases_is_credited_to_neither() {
-    // Checkpoints and the progress write run between one phase's finish snapshot and the next
-    // phase's start snapshot, so whatever they publish appears in no phase's delta.
-    let published = Cell::new(0_u64);
-    let first = PhaseMeter::start(
-        "first",
-        crate::scenarios::PhaseKind::Sustained,
-        None,
-        false,
-        Some(totals_with_attempts(published.get())),
-        None,
-    );
-    published.set(published.get() + 2);
-    let first = first.finish(
-        Some(totals_with_attempts(published.get())),
-        crate::transition::Completion::default(),
-    );
-    published.set(published.get() + 5);
-    let second = PhaseMeter::start(
-        "second",
-        crate::scenarios::PhaseKind::Sustained,
-        None,
-        false,
-        Some(totals_with_attempts(published.get())),
-        None,
-    );
-    published.set(published.get() + 1);
-    let second = second.finish(
-        Some(totals_with_attempts(published.get())),
-        crate::transition::Completion::default(),
-    );
-    assert_eq!((credited(&first), credited(&second)), (2, 1));
-    assert_eq!(published.get() - credited(&first) - credited(&second), 5, "the gap's work");
-}
-
 /// The body of `source`'s method `name`, up to the next method.
-fn method_in(source: &str, name: &str) -> String {
+pub(super) fn method_in(source: &str, name: &str) -> String {
     // A CRLF checkout is read as LF, so method ends match either way.
     let source = source.replace("\r\n", "\n");
     // A generic method's name is followed by its parameters' `<`, an ordinary one's by `(`.
     let start = ["(", "<"]
         .iter()
-        .find_map(|opener| source.find(&format!("    fn {name}{opener}")))
+        .find_map(|opener| source.find(&format!("fn {name}{opener}")))
         .unwrap_or_else(|| panic!("{name}"));
-    let rest = &source[start + 4..];
-    rest[..rest.find("\n    fn ").unwrap_or(rest.len())].to_owned()
+    let rest = &source[start..];
+    rest[..rest.find("\n    }\n").expect("method closing brace") + "\n    }".len()].to_owned()
 }
 
 /// The body of probe.rs's method `name`, up to the next method.
-fn method(name: &str) -> String {
-    method_in(include_str!("probe.rs"), name)
-}
-
-#[test]
-fn checkpoint_and_progress_work_falls_between_phase_snapshots() {
-    // A phase's finish snapshot is taken before its progress write, a checkpoint records
-    // progress with no phase open, and a phase's start snapshot is the last thing before its
-    // meter opens, after the GO writes. The routes' finalization lives in their finalize_* functions.
-    for ending in ["finalize_phase", "finalize_startup"] {
-        let body = method(ending);
-        let finish = body.find("self.finish_meter();").unwrap_or_else(|| panic!("{ending}"));
-        let progress = body.find("self.record_progress();").unwrap_or_else(|| panic!("{ending}"));
-        assert!(finish < progress, "{ending} writes progress inside its phase");
-    }
-    let finish = method("finish_meter");
-    let snapshot = finish.find("let counters_end = self.counter_totals();").expect("end snapshot");
-    assert!(snapshot < finish.find("meter.finish(counters_end, completion)").expect("finish"));
-    let begin = method("begin_phase");
-    let go_write = begin.find("self.release_roles(").expect("GO write");
-    let snapshot =
-        begin.find("let counters_start = self.counter_totals();").expect("start snapshot");
-    let opened = begin.find("self.meter = Some(PhaseMeter::start(").expect("meter opens");
-    assert!(go_write < snapshot && snapshot < opened);
-    assert!(!begin[snapshot..opened].contains("record_progress"));
-    let advance = method("advance_steps");
-    let checkpoint = advance.find("Step::Checkpoint(label) => {").expect("checkpoint step");
-    let progress =
-        checkpoint + advance[checkpoint..].find("self.record_progress();").expect("progress");
-    assert!(!advance[checkpoint..progress].contains("PhaseMeter::start"));
-}
-
-#[test]
-fn boundary_scans_read_a_crlf_checkout_as_they_read_an_lf_one() {
-    // Windows CI checks sources out with CRLF line ends; the method bodies the boundary scan
-    // reads must be the same either way.
-    let lf_source = include_str!("probe.rs").replace("\r\n", "\n");
-    let crlf_source = lf_source.replace('\n', "\r\n");
-    for name in ["end_phase", "end_startup", "finish_meter", "begin_phase", "advance_steps"] {
-        assert_eq!(method_in(&crlf_source, name), method_in(&lf_source, name), "{name}");
-    }
-}
-
-#[test]
-fn a_pending_barrier_and_an_anchored_hold_set_the_phase_deadline() {
-    // The probe's wake includes each pending barrier's bound, and a hold anchored to an earlier phase
-    // ends from that phase's end; a met barrier adds no deadline.
-    let act = Instant::now();
-    let barrier = FrameBarrier::new(act, 0, waits::MEDIA_FREE_WAIT, false);
-    assert_eq!(
-        barrier_phase_deadline(&PhaseEnd::MediaFree, Some(&barrier), act, None),
-        Some(act + waits::MEDIA_FREE_WAIT)
-    );
-    let mut met = barrier;
-    met.observe(act, 1, 0);
-    assert_eq!(barrier_phase_deadline(&PhaseEnd::MediaFree, Some(&met), act, None), None);
-    let hold = PhaseEnd::HoldFrom { anchor: "media-free", hold_ms: 65_000 };
-    let late_start = act + Duration::from_secs(40);
-    assert_eq!(
-        barrier_phase_deadline(&hold, None, late_start, Some(act)),
-        Some(act + Duration::from_secs(65))
-    );
-    assert_eq!(
-        barrier_phase_deadline(&PhaseEnd::Hold(1), None, act, None),
-        None,
-        "not a barrier phase"
-    );
-}
-
-#[test]
-fn the_end_checkpoint_carries_the_frame_texture_only_with_the_feature() {
-    // With `perf-frame-texture` the `end` checkpoint reads width x height x 4 from the renderer's
-    // frame texture; any other checkpoint, and a build without the feature, records nothing.
-    let expected = cfg!(feature = "perf-frame-texture").then_some(1920 * 1080 * 4);
-    assert_eq!(checkpoint_frame_texture_bytes("end", Some((1920, 1080))), expected);
-    assert_eq!(checkpoint_frame_texture_bytes("released", Some((1920, 1080))), None);
-    assert_eq!(checkpoint_frame_texture_bytes("end", None), None);
+pub(super) fn method(name: &str) -> String {
+    method_in(
+        concat!(
+            include_str!("probe.rs"),
+            "\n",
+            include_str!("probe_api.rs"),
+            "\n",
+            include_str!("probe_atlas.rs"),
+            "\n",
+            include_str!("probe_bootstrap.rs"),
+            "\n",
+            include_str!("probe_callbacks.rs"),
+            "\n",
+            include_str!("probe_checkpoint.rs"),
+            "\n",
+            include_str!("probe_input.rs"),
+            "\n",
+            include_str!("probe_occlusion.rs"),
+            "\n",
+            include_str!("probe_phases.rs"),
+            "\n",
+            include_str!("probe_sampling.rs"),
+            "\n",
+            include_str!("probe_scan.rs")
+        ),
+        name,
+    )
 }
 
 /// A headless probe running S11/release's phase `name`, its meter open and its barrier started at `act`,
 /// with the renderer readings stubbed at `frames` presented and an empty image atlas.
-fn release_probe(name: &str, act: Instant, frames: u64) -> (Probe, PhaseSpec) {
+pub(super) fn release_probe(name: &str, act: Instant, frames: u64) -> (Probe, PhaseSpec) {
     let plan = scenarios::plan_for("S11", "release", false, Host::Posix).expect("S11/release");
     let (index, phase) = plan
         .steps
@@ -222,88 +115,12 @@ fn release_probe(name: &str, act: Instant, frames: u64) -> (Probe, PhaseSpec) {
 }
 
 /// The image atlas reading of a promoted atlas: its full capacity, holding `items` images.
-fn promoted_atlas(items: usize) -> ResourceAmount {
+pub(super) fn promoted_atlas(items: usize) -> ResourceAmount {
     ResourceAmount { bytes: 2048 * 2048 * 4, items }
 }
 
-#[test]
-fn the_media_free_barrier_baselines_the_renderers_frame_count_at_its_act() {
-    // The barrier's baseline is the renderer's presented-frame count when the act runs: frames that
-    // presented before it (7 here) never end the phase; the first frame the renderer reports after it does.
-    let act = Instant::now();
-    let (mut probe, phase) = release_probe("media-free", act, 7);
-    probe.observe_barrier_frame(act + Duration::from_millis(10));
-    assert!(!probe.phase_done(&phase, act + Duration::from_millis(10)), "no frame after the act");
-    probe.test_readings = Some((8, ResourceAmount::default()));
-    probe.observe_barrier_frame(act + Duration::from_millis(20));
-    assert!(probe.phase_done(&phase, act + Duration::from_millis(20)), "the next frame ends it");
-}
-
-#[test]
-fn the_reshow_barrier_reads_image_atlas_items_never_its_capacity() {
-    // A re-show frame whose image atlas has its capacity but holds no image does not end the phase; the
-    // first frame whose atlas holds an item does.
-    let act = Instant::now();
-    let (mut probe, phase) = release_probe("reshow", act, 40);
-    probe.test_readings = Some((41, promoted_atlas(0)));
-    probe.observe_barrier_frame(act + Duration::from_millis(16));
-    assert!(!probe.phase_done(&phase, act + Duration::from_millis(16)), "capacity alone");
-    probe.test_readings = Some((42, promoted_atlas(1)));
-    probe.observe_barrier_frame(act + Duration::from_millis(33));
-    assert!(probe.phase_done(&phase, act + Duration::from_millis(33)), "an item ends it");
-}
-
-#[test]
-fn an_expired_barrier_invalidates_the_run_even_with_a_late_frame() {
-    // With no qualifying frame by the bound the step loop gets an invalid reason, and a frame the
-    // renderer reports exactly at the bound neither ends the phase nor clears the reason.
-    let act = Instant::now();
-    for (name, bound) in [("media-free", waits::MEDIA_FREE_WAIT), ("reshow", waits::RESHOW_WAIT)] {
-        let (mut probe, phase) = release_probe(name, act, 0);
-        let just_before = act + bound - Duration::from_millis(1);
-        assert_eq!(probe.expired_barrier_reason(&phase, just_before), None, "{name}");
-        probe.test_readings = Some((1, promoted_atlas(1)));
-        probe.observe_barrier_frame(act + bound);
-        assert!(!probe.phase_done(&phase, act + bound), "{name}: a late frame is not counted");
-        let reason = probe.expired_barrier_reason(&phase, act + bound).expect("expired");
-        assert!(reason.contains(&format!("{} s", bound.as_secs())), "{name}: {reason}");
-    }
-    // The step loop checks expiry, and invalidates with its reason, before asking whether the phase ended.
-    let advance = method("advance_steps");
-    let expiry = advance.find("self.expired_barrier_reason(phase,").expect("expiry check");
-    let invalid =
-        expiry + advance[expiry..].find("self.invalidate(event_loop, reason)").expect("invalid");
-    assert!(
-        invalid < advance.find("if !self.phase_done(phase, Instant::now())").expect("done check")
-    );
-}
-
-#[test]
-fn a_pending_barrier_is_the_probes_next_wake_and_a_met_one_is_not() {
-    // The barrier's bound joins the probe's own wake, so an expiry is noticed without other events; once
-    // a qualifying frame has presented the wake falls back to the run deadline.
-    let act = Instant::now();
-    let (mut probe, _phase) = release_probe("media-free", act, 3);
-    assert_eq!(probe.next_deadline(act), Some(act + waits::MEDIA_FREE_WAIT));
-    probe.test_readings = Some((4, ResourceAmount::default()));
-    probe.observe_barrier_frame(act + Duration::from_millis(5));
-    assert_eq!(probe.next_deadline(act + Duration::from_millis(5)), Some(probe.run_deadline));
-}
-
-#[test]
-fn dispatch_and_phase_start_drive_the_barrier() {
-    // Every presenting dispatch reports to the barrier, and a phase starts its barrier before its act.
-    let forward = method("forward");
-    let advanced = forward.find("if advanced {").expect("advanced branch");
-    assert!(forward[advanced..].contains("self.observe_barrier_frame(ended);"));
-    let begin = method("begin_phase");
-    let start =
-        begin.find("self.start_barrier(&phase.end, Instant::now());").expect("barrier start");
-    assert!(start < begin.find("for act in &phase.enter {").expect("acts"));
-}
-
 /// The run deadline the checkpoint fixture's wakes are bounded by; far past every checkpoint wake.
-const FIXTURE_RUN_DEADLINE: Duration = Duration::from_secs(60);
+pub(super) const FIXTURE_RUN_DEADLINE: Duration = Duration::from_secs(60);
 
 /// One checkpoint driven through the probe's production checkpoint path on a fake clock: a private
 /// scratch directory for its request and footprint files, the pending state and records the probe
@@ -312,24 +129,24 @@ const FIXTURE_RUN_DEADLINE: Duration = Duration::from_secs(60);
 /// Each turn runs `checkpoint_turn` with an injected clock and file check, then moves the plan step
 /// on exactly when `plan_moves_on` says so, as `Probe::advance_checkpoint` and the step loop do.
 /// Its wake is `steps_wake`, the function `Probe::next_deadline` uses while steps run.
-struct CheckpointRun {
-    scratch: PathBuf,
-    start: Instant,
+pub(super) struct CheckpointRun {
+    pub(super) scratch: PathBuf,
+    pub(super) start: Instant,
     managed: bool,
     sampling: bool,
     /// The fake clock every decision reads; shared, so a sampler reads the time a decision saw.
     clock: std::rc::Rc<Cell<Instant>>,
     /// When set, the next `.done` existence check moves the clock here, as slow I/O would.
-    jump_on_done: Cell<Option<Instant>>,
-    pending: Option<PendingCheckpoint>,
-    records: Vec<CheckpointRecord>,
+    pub(super) jump_on_done: Cell<Option<Instant>>,
+    pub(super) pending: Option<PendingCheckpoint>,
+    pub(super) records: Vec<CheckpointRecord>,
     /// The plan step the probe is on: 0 until the checkpoint moves the plan on.
-    plan_step: usize,
-    sampler_calls: u32,
+    pub(super) plan_step: usize,
+    pub(super) sampler_calls: u32,
 }
 
 impl CheckpointRun {
-    fn new(name: &str, managed: bool) -> Self {
+    pub(super) fn new(name: &str, managed: bool) -> Self {
         let scratch = std::env::temp_dir().join(format!(
             "sonicterm-checkpoint-{name}-{}-{}",
             std::process::id(),
@@ -351,18 +168,18 @@ impl CheckpointRun {
         }
     }
 
-    fn at(&self, millis: u64) -> Instant {
+    pub(super) fn at(&self, millis: u64) -> Instant {
         self.start + Duration::from_millis(millis)
     }
 
     /// The fake clock's time, in ms from the start.
-    fn now_ms(&self) -> u64 {
+    pub(super) fn now_ms(&self) -> u64 {
         self.clock.get().saturating_duration_since(self.start).as_millis() as u64
     }
 
     /// One turn at checkpoint `ordinal` (`label`) starting at `millis`, with `sample` answering
     /// each attempt (index, label, attempt) with whether it measured every pane.
-    fn turn_with(
+    pub(super) fn turn_with(
         &mut self,
         ordinal: usize,
         label: &'static str,
@@ -415,7 +232,7 @@ impl CheckpointRun {
 
     /// One turn at checkpoint `ordinal` (`label`) at `millis`; `complete` answers each attempt from
     /// the clock's time, in ms, when the attempt is taken.
-    fn turn_at(
+    pub(super) fn turn_at(
         &mut self,
         ordinal: usize,
         label: &'static str,
@@ -429,23 +246,27 @@ impl CheckpointRun {
         })
     }
 
-    fn turn(&mut self, millis: u64, complete: impl Fn(u64) -> bool) -> CheckpointOutcome {
+    pub(super) fn turn(
+        &mut self,
+        millis: u64,
+        complete: impl Fn(u64) -> bool,
+    ) -> CheckpointOutcome {
         self.turn_at(0, "end", millis, complete)
     }
 
     /// The probe's next wake at `millis` while it runs its steps, with no phase wake of its own.
-    fn wake(&self, millis: u64) -> Instant {
+    pub(super) fn wake(&self, millis: u64) -> Instant {
         steps_wake(self.pending.as_ref(), self.at(millis), [], self.start + FIXTURE_RUN_DEADLINE)
     }
 
     /// Answer the footprint request as the comparison script does: the JSON, then `.done`.
-    fn answer_footprint(&self, stem: &str) {
+    pub(super) fn answer_footprint(&self, stem: &str) {
         std::fs::write(self.scratch.join(format!("checkpoints/{stem}.json")), b"{}").expect("json");
         std::fs::write(self.scratch.join(format!("checkpoints/{stem}.done")), b"").expect("done");
     }
 
     /// Request files written so far.
-    fn requests(&self) -> usize {
+    pub(super) fn requests(&self) -> usize {
         std::fs::read_dir(self.scratch.join("checkpoints"))
             .expect("scratch")
             .filter(|entry| {
@@ -457,7 +278,7 @@ impl CheckpointRun {
     }
 
     /// The request's text, to show a re-entry did not rewrite it.
-    fn request_text(&self, stem: &str) -> String {
+    pub(super) fn request_text(&self, stem: &str) -> String {
         std::fs::read_to_string(self.scratch.join(format!("checkpoints/{stem}.request")))
             .expect("request")
     }
@@ -470,286 +291,14 @@ impl Drop for CheckpointRun {
     }
 }
 
-#[test]
-fn an_early_footprint_waits_for_a_complete_sample() {
-    // The footprint is answered at 10 ms while the first sample was partial: the step holds, wakes
-    // by the retry at 50 ms rather than at the run deadline, and advances at 50 ms with the
-    // footprint recorded. One record and one request however many turns.
-    let mut run = CheckpointRun::new("early-footprint", true);
-    let partial_until_50 = |millis: u64| millis >= 50;
-    assert_eq!(run.turn(0, partial_until_50), CheckpointOutcome::Wait);
-    let request = run.request_text("0-end");
-    run.answer_footprint("0-end");
-    assert_eq!(run.turn(10, partial_until_50), CheckpointOutcome::Wait);
-    assert!(run.wake(10) <= run.at(50), "wakes for the retry, not at the run deadline");
-    assert_eq!(run.plan_step, 0, "the plan holds while the sample is partial");
-    assert_eq!(run.turn(50, partial_until_50), CheckpointOutcome::Advance);
-    assert_eq!(run.plan_step, 1, "the plan moves on once, at 50 ms");
-    assert_eq!(run.records.len(), 1);
-    assert_eq!(run.records[0].footprint_file.as_deref(), Some("checkpoints/0-end.json"));
-    assert_eq!(run.records[0].sampling, Some("complete"));
-    assert_eq!(run.records[0].attempts, Some(2));
-    assert_eq!((run.requests(), run.request_text("0-end")), (1, request));
-}
-
-#[test]
-fn an_unmanaged_checkpoint_waits_for_its_sampling() {
-    // No footprint: the step still waits for a complete sample, waking within 50 ms each turn, and
-    // advances at 100 ms when the third attempt is complete.
-    let mut run = CheckpointRun::new("unmanaged", false);
-    let complete_from_100 = |millis: u64| millis >= 100;
-    for millis in [0, 50] {
-        assert_eq!(run.turn(millis, complete_from_100), CheckpointOutcome::Wait);
-        assert!(run.wake(millis) <= run.at(millis + 50), "wakes within 50 ms at {millis} ms");
-        assert_eq!(run.plan_step, 0, "the plan holds at {millis} ms");
-    }
-    assert_eq!(run.turn(100, complete_from_100), CheckpointOutcome::Advance);
-    assert_eq!(run.plan_step, 1);
-    assert_eq!((run.records.len(), run.requests()), (1, 1));
-    assert_eq!(run.records[0].footprint_file, None);
-}
-
-#[test]
-fn an_unmanaged_checkpoint_advances_when_ten_attempts_run_out() {
-    // A sampler that never completes and turns every 50 ms: the tenth attempt, at 450 ms, exhausts
-    // sampling and the step advances in that same turn, before the 500 ms deadline.
-    let mut run = CheckpointRun::new("count-limit", false);
-    for millis in (0..450).step_by(50) {
-        assert_eq!(run.turn(millis, |_| false), CheckpointOutcome::Wait, "{millis} ms");
-        assert!(run.wake(millis) <= run.at(millis + 50), "wakes within 50 ms at {millis} ms");
-    }
-    assert_eq!(run.plan_step, 0);
-    assert_eq!(run.turn(450, |_| false), CheckpointOutcome::Advance);
-    assert_eq!(run.plan_step, 1, "the plan moves on at 450 ms, not at the run deadline");
-    assert_eq!(run.sampler_calls, 10);
-    assert_eq!(run.records[0].sampling, Some("exhausted"));
-    assert_eq!(run.records[0].last_attempt_complete, Some(false));
-}
-
-#[test]
-fn a_complete_sample_waits_for_the_footprint() {
-    // The first sample is complete; the footprint arrives at 300 ms. The step polls every 50 ms,
-    // takes no further sample, and advances at the first poll that sees the answer.
-    let mut run = CheckpointRun::new("sample-first", true);
-    for millis in (0..300).step_by(50) {
-        assert_eq!(run.turn(millis, |_| true), CheckpointOutcome::Wait, "{millis} ms");
-        assert_eq!(run.wake(millis), run.at(millis + 50), "polls every 50 ms");
-    }
-    run.answer_footprint("0-end");
-    assert_eq!(run.turn(300, |_| true), CheckpointOutcome::Advance);
-    assert_eq!(run.sampler_calls, 1);
-    assert_eq!(run.requests(), 1);
-}
-
-#[test]
-fn exhausted_sampling_with_an_answered_footprint_advances_and_an_expired_one_invalidates() {
-    // Exhausted sampling does not hold an answered checkpoint; a footprint that never answers
-    // within its wait ends the run invalid, as before sampling existed.
-    let mut answered = CheckpointRun::new("exhausted-answered", true);
-    answered.answer_footprint("0-end");
-    for millis in (0..450).step_by(50) {
-        assert_eq!(answered.turn(millis, |_| false), CheckpointOutcome::Wait);
-    }
-    assert_eq!(answered.turn(450, |_| false), CheckpointOutcome::Advance);
-    assert_eq!(answered.records[0].sampling, Some("exhausted"));
-
-    let mut expired = CheckpointRun::new("expired", true);
-    assert_eq!(expired.turn(0, |_| true), CheckpointOutcome::Wait);
-    match expired.turn(1_000, |_| true) {
-        CheckpointOutcome::Invalid(reason) => assert!(reason.contains("no .done"), "{reason}"),
-        other => panic!("an expired footprint must invalidate, got {other:?}"),
-    }
-}
-
-#[test]
-fn a_pending_checkpoint_of_another_identity_invalidates_and_the_next_gets_its_own_record() {
-    // A checkpoint pending for index 0 when the plan reaches index 1 would mix two checkpoints, so
-    // the run is invalid. A fresh run's two checkpoints each get their own record and request.
-    let mut run = CheckpointRun::new("identity", false);
-    assert_eq!(run.turn_at(0, "settled", 0, |_| false), CheckpointOutcome::Wait);
-    match run.turn_at(1, "end", 10, |_| false) {
-        CheckpointOutcome::Invalid(reason) => {
-            assert!(reason.contains("checkpoint identity changed"), "{reason}")
-        }
-        other => panic!("a changed identity must invalidate, got {other:?}"),
-    }
-
-    let mut fresh = CheckpointRun::new("identity-fresh", false);
-    assert_eq!(fresh.turn_at(0, "settled", 0, |_| true), CheckpointOutcome::Advance);
-    assert_eq!(fresh.turn_at(1, "end", 100, |_| true), CheckpointOutcome::Advance);
-    let indices: Vec<_> = fresh.records.iter().map(|record| (record.index, record.label)).collect();
-    assert_eq!(indices, [(0, "settled"), (1, "end")]);
-    assert_eq!(fresh.requests(), 2);
-}
-
-#[test]
-fn delayed_turns_exhaust_sampling_at_its_deadline_without_a_late_sample() {
-    // Turns delayed to 0, 120, 240, 360 and 480 ms take five partial attempts; the wake after the
-    // fifth is the 500 ms deadline, not the 530 ms retry. A turn at the deadline, or a late one at
-    // 610 ms, exhausts sampling without a sixth sample and advances; the run deadline is not involved.
-    for last_turn in [500, 610] {
-        let mut run = CheckpointRun::new(&format!("deadline-{last_turn}"), false);
-        for millis in [0, 120, 240, 360, 480] {
-            assert_eq!(run.turn(millis, |_| false), CheckpointOutcome::Wait);
-        }
-        assert_eq!(run.wake(480), run.at(500));
-        assert_eq!(run.plan_step, 0);
-        assert_eq!(run.turn(last_turn, |_| true), CheckpointOutcome::Advance, "at {last_turn} ms");
-        assert_eq!(run.plan_step, 1);
-        assert_eq!(run.sampler_calls, 5, "no sixth sample at {last_turn} ms");
-        assert_eq!(run.records[0].sampling, Some("exhausted"));
-        assert_eq!(run.records[0].attempts, Some(5));
-        assert_eq!(run.records[0].last_attempt_complete, Some(false));
-    }
-}
-
-#[test]
-fn a_build_without_the_hook_advances_without_sampling() {
-    // With no hook the checkpoint has no sampling: an unmanaged step advances in its first turn and
-    // its record carries none of the sampling fields. The constant follows the build's feature.
-    let scratch = CheckpointRun::new("unsupported", false);
-    let read_clock = || scratch.start;
-    let exists = |path: &Path| path.exists();
-    let site = CheckpointSite {
-        scratch: &scratch.scratch,
-        managed: false,
-        sampling: false,
-        footprint_wait: Duration::from_secs(1),
-        clock: &read_clock,
-        exists: &exists,
-    };
-    let step = CheckpointStep {
-        ordinal: 0,
-        label: "end",
-        unix_s: 1_000.0,
-        fresh_after_unix_s: None,
-        frame_texture_bytes: None,
-        completeness: None,
-    };
-    let (mut pending, mut records) = (None, Vec::new());
-    let outcome = checkpoint_turn(&mut pending, &mut records, &site, &step, |_, _, _| {
-        panic!("a build without the hook never samples")
-    });
-    assert_eq!(outcome, CheckpointOutcome::Advance);
-    assert_eq!((records[0].sampling, records[0].attempts), (None, None));
-    assert_eq!(CHECKPOINT_MEMORY, cfg!(feature = "perf-hook-checkpoint-memory"));
-}
-
-#[test]
-fn a_turn_whose_footprint_check_passes_the_deadline_takes_no_sample() {
-    // The decision to sample reads the clock after the turn's file checks. Attempt 1 at 0 ms is
-    // partial; a re-entry starts at 490 ms, inside the window, but its `.done` check takes until
-    // 610 ms. The sampler (which would answer complete) is not called: sampling is exhausted with
-    // one attempt. With `.done` present that same turn advances; without it the step waits and
-    // advances once the footprint is answered.
-    for answered_in_time in [true, false] {
-        let mut run = CheckpointRun::new(&format!("late-check-{answered_in_time}"), true);
-        assert_eq!(run.turn(0, |_| false), CheckpointOutcome::Wait);
-        if answered_in_time {
-            run.answer_footprint("0-end");
-        }
-        run.jump_on_done.set(Some(run.at(610)));
-        let outcome = run.turn(490, |_| true);
-        assert_eq!(run.now_ms(), 610, "precondition: the `.done` check moved the clock");
-        assert_eq!(run.sampler_calls, 1, "no sample after the window, answered {answered_in_time}");
-        assert_eq!(run.records[0].sampling, Some("exhausted"));
-        assert_eq!(run.records[0].attempts, Some(1));
-        if answered_in_time {
-            assert_eq!(outcome, CheckpointOutcome::Advance);
-        } else {
-            assert_eq!(outcome, CheckpointOutcome::Wait);
-            assert_eq!(run.plan_step, 0);
-            run.answer_footprint("0-end");
-            assert_eq!(run.turn(650, |_| true), CheckpointOutcome::Advance);
-            assert_eq!(run.sampler_calls, 1);
-        }
-        assert_eq!(run.plan_step, 1);
-    }
-}
-
-#[test]
-fn a_first_sample_after_slow_checkpoint_io_opens_its_window_at_that_sample() {
-    // The sampling window opens at its first attempt, not when the turn began. The first turn
-    // starts at 0 ms, but its `.done` check takes until 610 ms, so the first sample is taken at
-    // 610 ms and the deadline is 610 + 500 ms. Every sample, partial or complete, is taken before
-    // the deadline in force; none is authorized against a deadline that had already passed.
-    for complete in [true, false] {
-        let mut run = CheckpointRun::new(&format!("late-first-{complete}"), true);
-        run.jump_on_done.set(Some(run.at(610)));
-        let taken = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let turn = |run: &mut CheckpointRun, millis: u64| {
-            let taken = std::rc::Rc::clone(&taken);
-            let outcome = run.turn(millis, move |sampled_ms| {
-                taken.borrow_mut().push(sampled_ms);
-                complete
-            });
-            if let Some(sampling) = run.pending.as_ref().and_then(|pending| pending.sampling) {
-                assert_eq!(sampling.deadline, run.at(1_110), "the window opens at 610 ms");
-            }
-            outcome
-        };
-        assert_eq!(turn(&mut run, 0), CheckpointOutcome::Wait);
-        assert_eq!(
-            taken.borrow().first(),
-            Some(&610),
-            "the first sample is taken at the fresh time"
-        );
-        // The footprint is answered before its own 1 s wait ends, so only sampling holds the step.
-        run.answer_footprint("0-end");
-        if complete {
-            assert_eq!(turn(&mut run, 650), CheckpointOutcome::Advance);
-            assert_eq!(run.records[0].sampling, Some("complete"));
-            assert_eq!(run.records[0].attempts, Some(1));
-        } else {
-            // Retries every 50 ms from 660 ms; the tenth attempt, at 1060 ms, exhausts sampling.
-            for millis in (660..=1_010).step_by(50) {
-                assert_eq!(turn(&mut run, millis), CheckpointOutcome::Wait, "{millis} ms");
-            }
-            assert_eq!(turn(&mut run, 1_060), CheckpointOutcome::Advance);
-            assert_eq!(run.records[0].sampling, Some("exhausted"));
-            assert_eq!(run.records[0].attempts, Some(10));
-        }
-        assert!(
-            taken.borrow().iter().all(|&sampled_ms| sampled_ms < 1_110),
-            "every sample precedes its deadline: {:?}",
-            taken.borrow()
-        );
-        assert_eq!(run.sampler_calls as usize, taken.borrow().len());
-    }
-}
-
-#[test]
-fn with_nothing_pending_the_steps_wake_is_the_soonest_phase_wake() {
-    // `steps_wake` is what `Probe::next_deadline` uses during steps: with no pending checkpoint it is
-    // the soonest phase wake, or the run deadline when there is none, never later than that deadline.
-    let start = Instant::now();
-    let deadline = start + FIXTURE_RUN_DEADLINE;
-    let at = |millis: u64| start + Duration::from_millis(millis);
-    assert_eq!(steps_wake(None, start, [Some(at(300)), None, Some(at(120))], deadline), at(120));
-    assert_eq!(steps_wake(None, start, [None, None], deadline), deadline);
-    assert_eq!(
-        steps_wake(None, start, [Some(deadline + Duration::from_secs(1))], deadline),
-        deadline
-    );
-}
-
-#[test]
-fn only_an_advanced_checkpoint_moves_the_plan_on() {
-    // The step loop starts the next phase only when `plan_moves_on` holds: a waiting or invalid
-    // checkpoint keeps the plan where it is.
-    assert!(plan_moves_on(&CheckpointOutcome::Advance));
-    assert!(!plan_moves_on(&CheckpointOutcome::Wait));
-    assert!(!plan_moves_on(&CheckpointOutcome::Invalid("stopped".into())));
-}
-
 /// The golden runs `scripts/perf-compare_tests.py` reads: each case's `result.json` from the
 /// production serializer and the `memory` log lines the App's hook emitted, under the build's key.
-const CHECKPOINT_FIXTURE: &str = "../../scripts/perf-compare_checkpoint_fixture.json";
+pub(super) const CHECKPOINT_FIXTURE: &str = "../../scripts/perf-compare_checkpoint_fixture.json";
 
 /// A `tracing` writer that keeps everything written to it, so a test can read the log lines the
 /// production format layer produced.
 #[derive(Clone, Default)]
-struct LogSink(Arc<parking_lot::Mutex<Vec<u8>>>);
+pub(super) struct LogSink(Arc<parking_lot::Mutex<Vec<u8>>>);
 
 impl std::io::Write for LogSink {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -771,21 +320,21 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogSink {
 }
 
 /// One fixture case: its turns as (ms, expected outcome is Advance), and what its record must say.
-struct FixtureCase {
-    name: &'static str,
+pub(super) struct FixtureCase {
+    pub(super) name: &'static str,
     managed: bool,
     turns: &'static [(u64, bool)],
     /// When set, the `.done` check of the turn at this ms moves the clock to the second time.
     jump: Option<(u64, u64)>,
     /// Answer the footprint before the turn at this ms.
     answer_before: Option<u64>,
-    attempts: Option<u32>,
+    pub(super) attempts: Option<u32>,
 }
 
 /// The cases a build with the hook writes: late exhaustion by count of turns, by a stale clock, by a
 /// single turn at 600 ms, and at or after the deadline after five partial attempts.
 #[cfg(feature = "perf-hook-checkpoint-memory")]
-const FIXTURE_CASES: &[FixtureCase] = &[
+pub(super) const FIXTURE_CASES: &[FixtureCase] = &[
     FixtureCase {
         name: "eight-attempts",
         managed: false,
@@ -840,7 +389,7 @@ const FIXTURE_CASES: &[FixtureCase] = &[
 
 /// The case a build without the hook writes: its checkpoint advances at once, unsampled.
 #[cfg(not(feature = "perf-hook-checkpoint-memory"))]
-const FIXTURE_CASES: &[FixtureCase] = &[FixtureCase {
+pub(super) const FIXTURE_CASES: &[FixtureCase] = &[FixtureCase {
     name: "unsupported",
     managed: false,
     turns: &[(0, true)],
@@ -850,7 +399,7 @@ const FIXTURE_CASES: &[FixtureCase] = &[FixtureCase {
 }];
 
 /// `result.json` for one fixture run: a valid S1 run with one phase and the probe's checkpoints.
-fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
+pub(super) fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
     RunResult {
         harness_hash: Some("ab".repeat(32)),
         scenario: "S1",
@@ -924,7 +473,7 @@ fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
 
 /// Run `case` through the probe's checkpoint path with the real App hook as the sampler, one of
 /// two panes' parser held so every sample is partial. Returns `result.json` and the log lines.
-fn run_fixture_case(case: &FixtureCase) -> (serde_json::Value, Vec<String>) {
+pub(super) fn run_fixture_case(case: &FixtureCase) -> (serde_json::Value, Vec<String>) {
     use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
     let sink = LogSink::default();
     // The production file layer's format: no ANSI, RFC 3339 UTC stamps, `target: fields`.
@@ -974,7 +523,7 @@ fn run_fixture_case(case: &FixtureCase) -> (serde_json::Value, Vec<String>) {
 
 /// The message marker `parse_memory_line` looks for, read from the comparison script itself, so a
 /// rename on either side changes what the fixture test compares.
-fn memory_marker() -> String {
+pub(super) fn memory_marker() -> String {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/perf-compare.py");
     let source = std::fs::read_to_string(&script).expect("perf-compare.py").replace("\r\n", "\n");
     let line = source
@@ -986,7 +535,7 @@ fn memory_marker() -> String {
 
 /// The shape of a leading log stamp: `utc` for the fmt layer's `YYYY-MM-DDTHH:MM:SS[.frac]Z`, which
 /// `parse_utc_stamp` reads, else `other`.
-fn stamp_shape(line: &str) -> &'static str {
+pub(super) fn stamp_shape(line: &str) -> &'static str {
     let stamp = line.split_whitespace().next().unwrap_or("");
     let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
     let utc = stamp.strip_suffix('Z').is_some_and(|body| {
@@ -1019,7 +568,7 @@ fn stamp_shape(line: &str) -> &'static str {
 /// The comparable part of a log line: what `parse_memory_line` needs to keep it (the message
 /// marker, a UTC stamp, and the shape of each required total), and its checkpoint tags and pane
 /// counts. Byte figures and times vary by host, so only their shapes are compared.
-fn log_projection(line: &str, marker: &str) -> Vec<String> {
+pub(super) fn log_projection(line: &str, marker: &str) -> Vec<String> {
     let field = |name: &str| {
         let prefix = format!("{name}=");
         line.split_whitespace()
@@ -1060,146 +609,9 @@ fn log_projection(line: &str, marker: &str) -> Vec<String> {
     projection
 }
 
-/// The golden checkpoint runs the comparison script reads come from this build's own code: the
-/// production checkpoint path, the App's hook (one pane held, so samples are partial), the
-/// production log format and the production `result.json` serializer. Each late-exhaustion case
-/// ends exhausted with its attempt count and a partial last attempt; a build without the hook
-/// reports `checkpoint_memory = "unsupported"`. Every line written keeps what `parse_memory_line`
-/// needs (the script's own message marker, a UTC stamp, the required totals), and the comparison
-/// with the committed fixture includes that structure, so a renamed message or a dropped total
-/// fails here. `SONICTERM_WRITE_CHECKPOINT_FIXTURE=1` rewrites this build's half of the fixture;
-/// otherwise the committed fixture must match what the build produces.
-#[test]
-fn the_checkpoint_fixture_matches_what_this_build_writes() {
-    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(CHECKPOINT_FIXTURE);
-    let build_key = crate::record::checkpoint_memory_support();
-    let mut produced = serde_json::Map::new();
-    for case in FIXTURE_CASES {
-        let (result, logs) = run_fixture_case(case);
-        assert_eq!(result["checkpoint_memory"], build_key, "{}", case.name);
-        // Every line this build writes must be one the comparison's parser keeps.
-        let marker = memory_marker();
-        for line in &logs {
-            let projection = log_projection(line, &marker);
-            assert_eq!(
-                &projection[..4],
-                [
-                    "marker:true",
-                    "stamp:utc",
-                    "renderer_total_bytes:count",
-                    "session_total_bytes:count"
-                ],
-                "{}: a memory line the parser would drop: {line}",
-                case.name
-            );
-        }
-        let tagged = logs.iter().filter(|line| line.contains("checkpoint_index=")).count();
-        assert_eq!(tagged, case.attempts.unwrap_or(0) as usize, "one tagged line per attempt");
-        produced.insert(case.name.to_owned(), serde_json::json!({"result": result, "logs": logs}));
-    }
-    let mut fixture: serde_json::Map<String, serde_json::Value> =
-        std::fs::read_to_string(&fixture_path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-    if std::env::var_os("SONICTERM_WRITE_CHECKPOINT_FIXTURE").is_some() {
-        fixture.insert(build_key.to_owned(), serde_json::Value::Object(produced));
-        let text = serde_json::to_string_pretty(&fixture).expect("fixture serializes") + "\n";
-        std::fs::write(&fixture_path, text).expect("fixture written");
-        return;
-    }
-    let committed = fixture
-        .get(build_key)
-        .and_then(serde_json::Value::as_object)
-        .unwrap_or_else(|| panic!("no `{build_key}` runs in {}", fixture_path.display()));
-    assert_eq!(
-        committed.keys().collect::<Vec<_>>(),
-        produced.keys().collect::<Vec<_>>(),
-        "the fixture's cases"
-    );
-    let marker = memory_marker();
-    for (name, run) in &produced {
-        // The fixture is recorded with the attribution cfg off, as the comparison's fixture builds are; a build
-        // with the cfg on writes its own cfg, and every other field must still match.
-        let mut expected = committed[name]["result"].clone();
-        assert_eq!(
-            expected["s10_attribution_api"], false,
-            "{name}: the fixture is recorded with the cfg off"
-        );
-        expected["s10_attribution_api"] = serde_json::Value::Bool(crate::attribution::API_ENABLED);
-        assert_eq!(expected, run["result"], "{name}: result.json");
-        let lines = |value: &serde_json::Value| -> Vec<Vec<String>> {
-            value["logs"]
-                .as_array()
-                .expect("logs")
-                .iter()
-                .map(|line| log_projection(line.as_str().expect("line"), &marker))
-                .collect()
-        };
-        assert_eq!(lines(&committed[name]), lines(run), "{name}: memory lines");
-    }
-}
-
-#[test]
-fn startup_records_the_presenter_on_every_host() {
-    // macOS results need the presenter to show whether a run stayed on the hardware path.
-    let source = include_str!("probe.rs").replace("\r\n", "\n");
-    let start = source.find("fn end_startup(").expect("end_startup exists");
-    let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
-    assert!(body.contains("self.presenter = self.presenter_record();"), "{body}");
-    assert!(!body.contains("cfg!(windows)"), "no host gate: {body}");
-    let start = source.find("fn presenter_record(&self)").expect("presenter_record exists");
-    let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
-    assert!(body.contains("presenter_record_for("), "{body}");
-}
-
-#[test]
-fn atlas_readings_join_the_latest_record_of_their_checkpoint_in_attempt_order() {
-    // Each sampling attempt's atlas reading belongs to the checkpoint that attempt sampled, and only to
-    // its latest record, so perf-compare can pair a memory sample with the reading of the same attempt.
-    let reading = |attempt| AtlasReading {
-        attempt,
-        main_window: None,
-        counted_glyph_atlas_growths: None,
-        closed_glyph_atlas_growths: None,
-    };
-    let mut records = vec![
-        CheckpointRecord { index: 0, label: "settled", ..CheckpointRecord::default() },
-        CheckpointRecord { index: 1, label: "end", ..CheckpointRecord::default() },
-    ];
-    attach_atlas_readings(&mut records, vec![(1, reading(1)), (1, reading(2))]);
-    assert!(records[0].atlas_readings.is_empty());
-    let attempts: Vec<u32> = records[1].atlas_readings.iter().map(|found| found.attempt).collect();
-    assert_eq!(attempts, [1, 2]);
-}
-
-/// A phase meter hands the update count it started with to the record it finishes.
-#[test]
-fn a_phase_meter_records_the_update_count_it_started_with() {
-    assert_eq!(
-        PhaseMeter::start(
-            "stream",
-            crate::scenarios::PhaseKind::Sustained,
-            None,
-            false,
-            None,
-            Some(300)
-        )
-        .finish(None, crate::transition::Completion::default())
-        .updates,
-        Some(300)
-    );
-    assert_eq!(
-        PhaseMeter::start("idle", crate::scenarios::PhaseKind::Sustained, None, false, None, None)
-            .finish(None, crate::transition::Completion::default())
-            .updates,
-        None
-    );
-}
-
 /// A probe for `scenario`/`variant` whose App forces the counter gate on and holds one counting
 /// pane, typing into that pane from row 0, column 0 under the grid's current identity.
-fn typing_probe(scenario: &'static str, variant: &'static str) -> (Probe, u64) {
+pub(super) fn typing_probe(scenario: &'static str, variant: &'static str) -> (Probe, u64) {
     use crate::record::prompt_identity;
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.force_frame_counters_on().expect("no window or pane yet");
@@ -1241,7 +653,7 @@ fn typing_probe(scenario: &'static str, variant: &'static str) -> (Probe, u64) {
 }
 
 /// Settle the open sample from a presenting dispatch observed now, with snapshots read now.
-fn credit_now(probe: &mut Probe) {
+pub(super) fn credit_now(probe: &mut Probe) {
     let started = Instant::now();
     let snapshot = probe.echo_snapshot();
     probe.attribute(
@@ -1251,306 +663,9 @@ fn credit_now(probe: &mut Probe) {
     );
 }
 
-/// Closing a sample that no frame was credited with takes its armed watch, so the worker stops
-/// paying for it: a later take of the same token finds it already taken.
-#[cfg(feature = "perf-echo-trace")]
-#[test]
-fn closing_an_unattributed_sample_disarms_its_watch() {
-    use sonicterm_app::app::TakeOutcome;
-    let (mut probe, pane) = typing_probe("S2", "default");
-    assert_eq!(probe.open_typing_sample(Instant::now), Some('a'));
-    let ArmState::Armed(token) = probe.open_sample.as_ref().expect("open").arm else {
-        panic!("precondition: S2/default arms its sample");
-    };
-    probe.close_sample(UnattributedReason::NoCandidate);
-    assert_eq!(probe.app.take_echo_watch(pane, token), TakeOutcome::AlreadyTaken);
-    assert_eq!(probe.samples.last().map(|sample| sample.split_reason), Some("not-credited"));
-}
-
-/// With the feature, S2/default and S2/flood both arm their samples, so both sides of a comparison pay
-/// the same watch cost; no other scenario is in scope.
-#[cfg(feature = "perf-echo-trace")]
-#[test]
-fn open_typing_sample_arms_for_s2_default_and_flood() {
-    for variant in ["default", "flood"] {
-        let (mut probe, _) = typing_probe("S2", variant);
-        probe.open_typing_sample(Instant::now);
-        let arm = probe.open_sample.as_ref().expect("open").arm;
-        assert!(matches!(arm, ArmState::Armed(_)), "{variant}");
-    }
-    assert!(!crate::record::split_in_scope("S3", "default"));
-    assert!(!crate::record::split_in_scope("S1", "flood"));
-}
-
-/// S2/flood still credits its samples exactly as before and is now in the timeline's scope: without
-/// the feature its split reads `unsupported` and its timeline `unavailable` (`cfg-off`); with it the
-/// sample is armed and carries a timeline.
-#[test]
-fn s2_flood_attributes_as_before_and_carries_a_timeline() {
-    let (mut probe, pane) = typing_probe("S2", "flood");
-    assert_eq!(probe.open_typing_sample(Instant::now), Some('a'));
-    let main = sonicterm_app::app::synthetic_main_window_id();
-    probe.app.__test_publish_pane_output(main, pane, b"a");
-    credit_now(&mut probe);
-    let sample = probe.samples.last().expect("a credited sample");
-    assert_eq!(sample.reason, crate::record::CREDITED);
-    assert!(sample.latency_ms.is_some());
-    let timeline = sample.echo_timeline.expect("an in-scope credited sample has a timeline");
-    if cfg!(feature = "perf-echo-trace") {
-        assert_ne!(sample.split_reason, "unsupported", "the sample was armed");
-    } else {
-        // When: the build has no echo trace, nothing is armed and the timeline is cfg-off.
-        assert_eq!((sample.split, sample.split_reason), (None, "unsupported"));
-        assert_eq!(timeline.reason, Some("cfg-off"));
-    }
-}
-
-/// A resize on the event loop after the echo appeared, which the worker never sees, changes the
-/// grid's size generation; the harness's own snapshots catch it and the split is refused.
-#[cfg(feature = "perf-echo-trace")]
-#[test]
-fn a_harness_snapshot_identity_change_reads_row_identity_changed() {
-    let (mut probe, pane) = typing_probe("S2", "default");
-    probe.open_typing_sample(Instant::now);
-    let main = sonicterm_app::app::synthetic_main_window_id();
-    probe.app.__test_publish_pane_output(main, pane, b"a");
-    let generation = |probe: &Probe| {
-        let panes = probe.app.main_panes().expect("main");
-        panes[&pane].parser.lock().grid().size_generation()
-    };
-    let before = generation(&probe);
-    // 80 x 30 cells: more rows, the same columns, so row 0 keeps the echo.
-    let outer = sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 600.0);
-    assert!(probe.app.__test_set_main_pane_viewport(outer, 10.0, 20.0));
-    probe.app.__test_resize_visible_panes();
-    assert_ne!(generation(&probe), before, "precondition: the resize changed the grid's size");
-    credit_now(&mut probe);
-    let sample = probe.samples.last().expect("a credited sample");
-    assert_eq!(sample.reason, crate::record::CREDITED, "the attribution itself is unchanged");
-    assert_eq!(sample.split_reason, "row-identity-changed");
-}
-
-/// Without the feature the adapter reports `Unsupported` itself, so the run is an untrimmed
-/// baseline; with it the App's real rules apply, and an uncovered window is skipped with no trim
-/// number.
-#[test]
-fn the_trim_adapter_reports_what_this_build_can_do() {
-    let (mut probe, _pane) = typing_probe("S12", "default");
-    let main = sonicterm_app::app::synthetic_main_window_id();
-    let expected = if cfg!(feature = "perf-hook-trim") {
-        TrimHookOutcome::Skipped
-    } else {
-        TrimHookOutcome::Unsupported
-    };
-    assert_eq!(trim_covered(&mut probe.app, main), (expected, None));
-}
-
-/// A requested trim waits while the App is not covered, lapses as `not-reached` when the hold
-/// ends first, and is called exactly once on the first turn the App holds `Occluded(true)`.
-#[test]
-fn a_requested_trim_is_called_once_after_the_cover_is_delivered() {
-    let (mut probe, _pane) = typing_probe("S12", "default");
-    probe.main_id = Some(sonicterm_app::app::synthetic_main_window_id());
-
-    probe.trim_pending = true;
-    probe.service_trim(false);
-    assert!(probe.trim_pending, "no occlusion delivered yet, so the trim waits");
-    probe.service_trim(true);
-    assert_eq!((probe.trim_pending, probe.trim_hook), (false, TrimHookOutcome::NotReached));
-
-    probe.trim_pending = true;
-    probe.occlusion.delivered = Some(true);
-    probe.service_trim(false);
-    assert!(!probe.trim_pending, "the hook was called");
-    assert_ne!(probe.trim_hook, TrimHookOutcome::NotReached);
-    let called = probe.trim_hook;
-    probe.service_trim(true);
-    assert_eq!(probe.trim_hook, called, "a second turn calls nothing");
-}
-
-/// The cover act only opens the cover; the trim act asks for the trim, the turn handler services
-/// it after any overdue occlusion is delivered, and the end of a phase lapses one still waiting.
-/// The trim step never touches the plan's stage.
-#[test]
-fn the_trim_act_is_serviced_after_delivery_and_lapses_with_its_phase() {
-    let perform = method("perform");
-    assert!(perform.contains("Act::Cover => self.cover(event_loop),"), "{perform}");
-    assert!(perform.contains("Act::TrimCovered => self.request_trim(event_loop),"));
-    let turn = method("about_to_wait_turn");
-    let overdue = turn.find("self.deliver_overdue_occlusion(").expect("overdue delivery");
-    let service = turn.find("self.service_trim(false);").expect("trim service");
-    assert!(overdue < service, "the trim sees an occlusion delivered on the same turn");
-    assert!(method("end_phase").contains("self.service_trim(true);"));
-    assert!(!method("service_trim").contains("stage"), "the trim never changes the plan's steps");
-}
-
-/// Only a main-window redraw feeds a phase's presentation trace: a native dispatch that presents still
-/// counts as a presented frame, but neither starts the trace nor counts as a nonpresenting redraw.
-#[test]
-fn only_main_window_redraws_feed_the_presentation_trace() {
-    let mut meter =
-        PhaseMeter::start("open", crate::scenarios::PhaseKind::Transition, None, false, None, None);
-    let start = meter.started;
-    let at = |offset_ms: u64| start + std::time::Duration::from_millis(offset_ms);
-    meter.observe_dispatch(Dispatch::Native, at(1), at(2), (0, 1), None);
-    meter.observe_dispatch(Dispatch::Harness, at(2), at(3), (1, 1), None);
-    meter.observe_dispatch(Dispatch::Redraw, at(4), at(5), (1, 1), None);
-    meter.observe_dispatch(Dispatch::Redraw, at(6), at(8), (1, 2), None);
-    meter.observe_dispatch(Dispatch::Redraw, at(9), at(10), (2, 2), None);
-    meter.observe_dispatch(Dispatch::Redraw, at(11), at(12), (2, 4), None);
-    let record = meter.finish(None, crate::transition::Completion::default());
-    assert_eq!((record.presented_frames, record.redraw_requested), (4, 4));
-    assert_eq!((record.first_present_ms, record.last_present_ms), (Some(8.0), Some(12.0)));
-    assert_eq!((record.first_present_seq, record.last_present_seq), (Some(2), Some(4)));
-    assert_eq!((record.present_missing, record.nonpresenting_redraws), (None, 2));
-}
-
-/// A phase whose redraws never presented records `no-presentation` and every redraw as nonpresenting.
-#[test]
-fn a_phase_without_a_presenting_redraw_records_no_presentation() {
-    let mut meter =
-        PhaseMeter::start("hold", crate::scenarios::PhaseKind::Hold, None, false, None, None);
-    let start = meter.started;
-    meter.observe_dispatch(Dispatch::Redraw, start, start, (3, 3), None);
-    let record = meter.finish(None, crate::transition::Completion::default());
-    assert_eq!(record.present_missing, Some("no-presentation"));
-    assert_eq!((record.first_present_ms, record.first_present_seq), (None, None));
-    assert_eq!(record.nonpresenting_redraws, 1);
-    let written = serde_json::to_value(&record).expect("a phase record serializes");
-    assert!(written.get("first_present_ms").is_none(), "{written}");
-    assert_eq!(written["present_missing"], "no-presentation");
-}
-
-/// `forward` feeds the meter from its own readings around the dispatch: the dispatch kind, its span
-/// and the presented counts before and after it.
-#[test]
-fn forward_feeds_the_meter_from_its_dispatch_readings() {
-    let forward = method("forward");
-    // Compare without whitespace, so rustfmt's line wrapping does not decide the result.
-    let compact: String = forward.chars().filter(|glyph| !glyph.is_whitespace()).collect();
-    let adapter = compact.find("dispatch(&mutself.app,event_loop);").expect("forward dispatches");
-    let fed = compact
-        .find("meter.observe_dispatch(kind,started,ended,(frames_before,frames_after),allocations")
-        .expect("forward feeds the meter");
-    assert!(adapter < fed);
-}
-
-/// The real `forward` feeds its meter: a main-window redraw that presents nothing counts as a redraw and a
-/// nonpresenting redraw, so the phase records `no-presentation`. The loop is generic, so a unit stands in for it.
-#[test]
-fn a_forwarded_redraw_reaches_the_phases_presentation_trace() {
-    let act = Instant::now();
-    let (mut probe, _phase) = release_probe("media-free", act, 7);
-    let redraw = Invocation::of(InvocationKind::WindowEvent { redraw: true }, None, false);
-    probe.forward(&(), Dispatch::Redraw, redraw, |_app, _loop| {});
-    let record = probe
-        .meter
-        .take()
-        .expect("the phase is open")
-        .finish(None, crate::transition::Completion::default());
-    assert_eq!((record.redraw_requested, record.nonpresenting_redraws), (1, 1));
-    assert_eq!(record.present_missing, Some("no-presentation"));
-}
-
-/// A transition that presents exactly one frame records that frame as both its first and last presentation.
-#[test]
-fn a_one_frame_transition_records_one_presentation_as_first_and_last() {
-    let mut meter = PhaseMeter::start(
-        "image",
-        crate::scenarios::PhaseKind::Transition,
-        Some(crate::scenarios::Endpoint::ImageRegisteredThenPresented),
-        false,
-        None,
-        None,
-    );
-    let start = meter.started;
-    let at = |offset_ms: u64| start + std::time::Duration::from_millis(offset_ms);
-    meter.observe_dispatch(Dispatch::Redraw, at(30), at(40), (5, 6), None);
-    let completion = crate::transition::Completion { elapsed_ms: Some(40.0), missing: None };
-    let record = meter.finish(None, completion);
-    assert_eq!((record.first_present_ms, record.last_present_ms), (Some(40.0), Some(40.0)));
-    assert_eq!((record.first_present_seq, record.last_present_seq), (Some(6), Some(6)));
-    assert_eq!((record.presented_frames, record.nonpresenting_redraws), (1, 0));
-    assert_eq!(record.completion_ms, Some(40.0));
-}
-
-/// A sentinel transition completes on its parsed sentinel even when no redraw presented: completion and
-/// `no-presentation` are recorded together, so completion never implies a presented frame.
-#[test]
-fn a_sentinel_completion_without_a_presentation_records_both() {
-    let mut meter = PhaseMeter::start(
-        "print",
-        crate::scenarios::PhaseKind::Transition,
-        Some(crate::scenarios::Endpoint::SentinelParsed),
-        false,
-        None,
-        None,
-    );
-    let start = meter.started;
-    meter.observe_dispatch(Dispatch::Native, start, start, (2, 2), None);
-    let completion = crate::transition::Completion { elapsed_ms: Some(12.5), missing: None };
-    let record = meter.finish(None, completion);
-    assert_eq!((record.completion_ms, record.completion_missing), (Some(12.5), None));
-    assert_eq!((record.present_missing, record.presented_frames), (Some("no-presentation"), 0));
-}
-
-/// A hold with no dispatch at all records no presentation and no nonpresenting redraw.
-#[test]
-fn a_no_draw_hold_records_no_presentation_and_no_redraws() {
-    let meter =
-        PhaseMeter::start("idle", crate::scenarios::PhaseKind::Hold, None, false, None, None);
-    let record = meter.finish(None, crate::transition::Completion::default());
-    assert_eq!(
-        (record.present_missing, record.redraw_requested, record.nonpresenting_redraws),
-        (Some("no-presentation"), 0, 0)
-    );
-    assert_eq!((record.completion_ms, record.completion_missing), (None, None));
-}
-
-/// The presentation trace is kept directly, not derived from the bounded slow-dispatch list: with more redraws
-/// than SLOW_DISPATCH_LIMIT, the first and last presentations are still the phase's first and last.
-#[test]
-fn the_trace_outlives_the_slow_dispatch_limit() {
-    let mut meter = PhaseMeter::start(
-        "stream",
-        crate::scenarios::PhaseKind::Sustained,
-        None,
-        false,
-        None,
-        None,
-    );
-    let start = meter.started;
-    let redraw_count = crate::record::SLOW_DISPATCH_LIMIT as u64 * 3;
-    for index in 0..redraw_count {
-        let ended = start + std::time::Duration::from_millis(index * 10 + 5);
-        meter.observe_dispatch(Dispatch::Redraw, ended, ended, (index, index + 1), None);
-    }
-    let record = meter.finish(None, crate::transition::Completion::default());
-    assert_eq!(record.slow_dispatches.len(), crate::record::SLOW_DISPATCH_LIMIT);
-    assert_eq!(record.dispatch_count, redraw_count);
-    let last_ms = ((redraw_count - 1) * 10 + 5) as f64;
-    assert_eq!((record.first_present_ms, record.last_present_ms), (Some(5.0), Some(last_ms)));
-    assert_eq!((record.first_present_seq, record.last_present_seq), (Some(1), Some(redraw_count)));
-}
-
-/// The atlas-retry failure line is built only from the reading the machine kept when it refused it: the
-/// failure path and the logger never reread the scene or the App's foreground cache, so a result applied
-/// after the refusal cannot reach the line.
-#[test]
-fn the_atlas_retry_failure_line_never_rereads_the_app() {
-    for name in ["drive_atlas_retry", "log_atlas_retry_evidence"] {
-        let body = method(name);
-        for reread in ["atlas_retry_scene(", "atlas_retry_cached(", "fg_proc_cache", "main_panes("]
-        {
-            assert!(!body.contains(reread), "{name} rereads `{reread}`");
-        }
-    }
-    assert!(method("drive_atlas_retry").contains("failure_observation(&retry.machine)"));
-}
-
 /// A settling scene titled `title`: what the driver's tests feed, with no fixture rows, so only the
 /// barrier and the counts decide what each dispatch does.
-fn retry_scene(title: &str) -> Scene {
+pub(super) fn retry_scene(title: &str) -> Scene {
     Scene {
         title: title.to_owned(),
         fallback: (1, 0, 0),
@@ -1561,7 +676,10 @@ fn retry_scene(title: &str) -> Scene {
 }
 
 /// A reading of `retry_scene(title)` on both sides, with `cached` applied on each.
-fn retry_reading(title: &str, cached: Option<atlas_retry::AppliedSample>) -> SceneReading {
+pub(super) fn retry_reading(
+    title: &str,
+    cached: Option<atlas_retry::AppliedSample>,
+) -> SceneReading {
     SceneReading {
         before: Some(retry_scene(title)),
         after: Some(retry_scene(title)),
@@ -1571,7 +689,11 @@ fn retry_reading(title: &str, cached: Option<atlas_retry::AppliedSample>) -> Sce
 }
 
 /// An applied sample taken `offset_ms` after `start`, naming `process`.
-fn applied(start: Instant, offset_ms: u64, process: Option<&str>) -> atlas_retry::AppliedSample {
+pub(super) fn applied(
+    start: Instant,
+    offset_ms: u64,
+    process: Option<&str>,
+) -> atlas_retry::AppliedSample {
     atlas_retry::AppliedSample {
         sampled_at: start + Duration::from_millis(offset_ms),
         process: process.map(str::to_owned),
@@ -1580,7 +702,7 @@ fn applied(start: Instant, offset_ms: u64, process: Option<&str>) -> atlas_retry
 
 /// A driver settling from `start`, its final process `sleep` observed at `start + 100 ms`, expecting
 /// the F489 title: the barrier the driver tests run against.
-fn barred_driver(start: Instant) -> AtlasRetryDriver {
+pub(super) fn barred_driver(start: Instant) -> AtlasRetryDriver {
     let mut driver =
         AtlasRetryDriver::new(start, atlas_retry::FinalLookup::new("sleep".to_owned()));
     driver.machine.set_barrier(atlas_retry::Barrier {
@@ -1593,323 +715,18 @@ fn barred_driver(start: Instant) -> AtlasRetryDriver {
 }
 
 /// The counts of a forwarded `RequestRedraw`, which attempts no frame.
-fn no_attempt() -> Counts {
+pub(super) fn no_attempt() -> Counts {
     Counts::default()
 }
 
 /// The counts of one steady settling frame.
-fn one_frame() -> Counts {
+pub(super) fn one_frame() -> Counts {
     Counts { attempts: 1, presented: 1, ..Counts::default() }
-}
-
-/// The production demand sequence, through the `AtlasRetryDriver` methods `Probe` calls, repeated while
-/// the barrier is unmet: Arm, `take_request` consumes the request, the forwarded `RequestRedraw` is
-/// observed with zero attempts, then the `RedrawRequested` frame with one. The request callback never
-/// rearms itself, each settling frame asks for exactly one more redraw, so requests are settling frames
-/// plus the first, and the drive is due at the arm while a request waits and at the settle deadline
-/// otherwise. The fake 500 ms foreground schedule is fixture input, not App scheduling.
-#[test]
-fn the_request_callback_does_not_rearm_itself_and_settling_frames_keep_demand() {
-    let start = Instant::now();
-    let mut driver = barred_driver(start);
-    assert_eq!(driver.due(), Some(start), "the first settling redraw is requested at once");
-    let (mut requests, mut frames) = (0_u32, 0_u32);
-    for round in 0..40_u64 {
-        let now = start + Duration::from_millis(200 + 200 * round);
-        // The stale shell stays applied, resampled every 500 ms, so the barrier never meets.
-        let cached = applied(start, 100 + 500 * (round * 200 / 500 + 1), Some("bash"));
-        let reading = retry_reading("#1 \u{E760} shell", Some(cached));
-        assert!(driver.take_request(), "round {round}: one request is pending");
-        requests += 1;
-        assert!(!driver.take_request(), "a request is consumed once");
-        assert_eq!(driver.due(), Some(start + atlas_retry::SETTLE_BOUND));
-        assert_eq!(driver.observe(Some(no_attempt()), &reading, now), None);
-        assert!(!driver.take_request(), "round {round}: the request callback did not rearm");
-        assert_eq!(driver.observe(Some(one_frame()), &reading, now), Some(Arm::Redraw));
-        frames += 1;
-        assert_eq!(driver.due(), Some(now), "due from the arm while the request waits");
-    }
-    assert!(driver.take_request());
-    requests += 1;
-    assert_eq!(
-        requests,
-        frames + 1,
-        "no busy loop: one request per settling frame, plus the first"
-    );
-    assert!(!driver.machine.settled());
-}
-
-/// A zero-attempt dispatch still applies its foreground readings before it returns: a cleared sample
-/// between two qualifying results resets the history without rearming, so one later valid result is
-/// insufficient and nothing settles.
-#[test]
-fn a_zero_attempt_none_between_qualifying_results_resets_without_rearming() {
-    let start = Instant::now();
-    let mut driver = barred_driver(start);
-    assert!(driver.take_request());
-    let title = "#1 \u{F489} shell";
-    let first = retry_reading(title, Some(applied(start, 200, Some("sleep"))));
-    let now = start + Duration::from_millis(210);
-    assert_eq!(driver.observe(Some(one_frame()), &first, now), Some(Arm::Redraw));
-    assert!(driver.take_request());
-    let cleared = retry_reading(title, Some(applied(start, 300, None)));
-    let now = start + Duration::from_millis(310);
-    assert_eq!(driver.observe(Some(no_attempt()), &cleared, now), None);
-    assert!(!driver.take_request(), "the zero-attempt dispatch did not rearm");
-    let second = retry_reading(title, Some(applied(start, 700, Some("sleep"))));
-    for step in 0..5_u64 {
-        let now = start + Duration::from_millis(710 + 16 * step);
-        assert_eq!(driver.observe(Some(one_frame()), &second, now), Some(Arm::Redraw));
-        assert!(driver.take_request());
-    }
-    assert!(
-        !driver.machine.settled(),
-        "the None reset the history, so one valid result is too few"
-    );
-}
-
-/// The final-process lookup accepts only the expected name: `sleep` on macOS and the harness binary's
-/// normalized basename on Windows. The stale shell (`bash`), `sh`, `cat` and no process do not qualify,
-/// and a refused name sets no T.
-#[test]
-fn the_final_process_lookup_accepts_only_the_expected_name() {
-    assert_eq!(final_process_name(false, None), "sleep");
-    let harness = std::path::Path::new(r"C:\runner\target\release\examples\Perf_Scenarios.EXE");
-    assert_eq!(final_process_name(true, Some(harness)), "perf_scenarios");
-    assert_eq!(final_process_name(false, Some(harness)), "sleep");
-    for (expected, name, accepted) in [
-        ("sleep", Some("sleep"), true),
-        ("sleep", Some("bash"), false),
-        ("sleep", Some("sh"), false),
-        ("sleep", Some("cat"), false),
-        ("sleep", None, false),
-        ("perf_scenarios", Some("perf_scenarios"), true),
-        ("perf_scenarios", Some("sleep"), false),
-    ] {
-        let lookup = atlas_retry::FinalLookup::new(expected.to_owned());
-        assert_eq!(lookup.accepts(name), accepted, "{expected} against {name:?}");
-    }
-    let start = Instant::now();
-    let deadline = Some(start + atlas_retry::SETTLE_BOUND);
-    let mut lookup = atlas_retry::FinalLookup::new("sleep".to_owned());
-    assert!(lookup.begin(start, deadline));
-    assert!(!lookup.finish(Some("bash"), start, start, deadline));
-    assert_eq!(lookup.found_at(), None);
-}
-
-/// At the production deadline wake, a zero-attempt dispatch completes at the settle bound before the drive
-/// can call `expire`. The failure it records must still name the unmet barrier condition after its
-/// "completed past its bound" prefix, and the dispatch neither rearms nor settles the scene.
-#[test]
-fn a_zero_attempt_dispatch_at_the_settle_deadline_names_the_unmet_barrier() {
-    let start = Instant::now();
-    let mut driver = barred_driver(start);
-    assert!(driver.take_request());
-    let stale = retry_reading("#1 \u{E760} shell", Some(applied(start, 200, Some("bash"))));
-    let now = start + Duration::from_millis(210);
-    assert_eq!(driver.observe(Some(one_frame()), &stale, now), Some(Arm::Redraw));
-    assert!(driver.take_request());
-    let deadline = start + atlas_retry::SETTLE_BOUND;
-    assert_eq!(driver.due(), Some(deadline), "the settle deadline is the next wake");
-    assert_eq!(driver.observe(Some(no_attempt()), &stale, deadline), None);
-    assert!(!driver.take_request(), "the late dispatch did not rearm");
-    // An ended machine is no longer settling, so the test reads the recorded scene, not `settled()`.
-    assert!(driver.machine.scene().is_none(), "no scene was settled");
-    assert_eq!(
-        driver.failure.as_deref(),
-        Some(
-            "settle (steady 0): completed past its bound; barrier unmet: 1 qualifying foreground \
-             observation after the final process (need 2), latest cached \"bash\""
-        )
-    );
-}
-
-/// Windows fixes S1/atlas-retry's T at the sentinel the print phase saw, expecting the harness binary's
-/// basename, and makes no lookup; macOS expects `sleep` and has no T until its own lookup finds it.
-#[test]
-fn the_final_process_search_is_fixed_at_the_sentinel_on_windows_only() {
-    let sentinel_at = Instant::now();
-    let harness = std::path::Path::new(r"C:\runner\target\release\examples\perf_scenarios.exe");
-    let windows = final_lookup_for(true, Some(harness), Some(sentinel_at));
-    assert_eq!((windows.expected(), windows.found_at()), ("perf_scenarios", Some(sentinel_at)));
-    let macos = final_lookup_for(false, Some(harness), Some(sentinel_at));
-    assert_eq!((macos.expected(), macos.found_at()), ("sleep", None));
-    let unseen = final_lookup_for(true, Some(harness), None);
-    assert_eq!(unseen.found_at(), None, "no sentinel seen leaves T unset");
-}
-
-/// The production `Probe::atlas_retry_barrier` reads the App's active tab: with no custom title it
-/// expects the title the App derives for the final process, and with one it reports a fixture problem
-/// instead of an expected title.
-#[test]
-fn the_probe_barrier_expects_the_apps_title_and_refuses_a_custom_one() {
-    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
-    app.__test_seed_tab("atlas");
-    let plan = scenarios::plan_for("S1", "atlas-retry", false, Host::Posix).expect("listed plan");
-    let request = RunArgs {
-        scenario: "S1",
-        variant: "atlas-retry",
-        managed: false,
-        short: false,
-        laps: false,
-        counters: true,
-        harness_hash: None,
-        scratch: String::from("unused"),
-        capture_delivery: false,
-    };
-    let now = Instant::now();
-    let mut probe =
-        Probe::new(app, plan, request, PathBuf::from("unused"), now + Duration::from_secs(3600));
-    let barrier = probe.atlas_retry_barrier("sleep", Some(now));
-    assert_eq!(barrier.final_at, Some(now));
-    assert_eq!(barrier.expected_title.as_deref(), Some("#1 \u{F489} shell"));
-    assert_eq!(barrier.fixture_problem, None);
-    probe.app.main_mut().expect("seeded main").tabs.set_active_custom_title("manual");
-    let barrier = probe.atlas_retry_barrier("sleep", Some(now));
-    assert_eq!(barrier.fixture_problem.as_deref(), Some(r#"the tab has a custom title "manual""#));
-    assert_eq!(barrier.expected_title, None);
-}
-
-/// Every way an S2 sample closes records what its dispatch timeline came to: the next injection's
-/// close, a credited dispatch and an explicit close. A build with the cfg calls the App's stub, which
-/// answers `not-recorded` with the gate on; a build without it never calls the App and records
-/// `unavailable`. No close leaves `not-taken`, and an unarmed sample allocates no recorder storage.
-#[test]
-fn every_close_path_records_the_samples_dispatch_timeline() {
-    let expected = if cfg!(perf_dispatch_timeline_api) { "not-recorded" } else { "unavailable" };
-    let (mut probe, pane) = typing_probe("S2", "flood");
-    assert_eq!(probe.open_typing_sample(Instant::now), Some('a'));
-    assert_eq!(probe.open_typing_sample(Instant::now), Some('b'));
-    let main = sonicterm_app::app::synthetic_main_window_id();
-    probe.app.__test_publish_pane_output(main, pane, b"ab");
-    credit_now(&mut probe);
-    assert_eq!(probe.open_typing_sample(Instant::now), Some('c'));
-    probe.close_sample(UnattributedReason::NoCandidate);
-    let recorded: Vec<(&str, &str)> =
-        probe.samples.iter().map(|sample| (sample.reason, sample.dispatch_timeline)).collect();
-    assert_eq!(
-        recorded,
-        [
-            ("no-candidate", expected),
-            (crate::record::CREDITED, expected),
-            ("no-candidate", expected),
-        ]
-    );
-    assert!(probe.open_sample.is_none());
-    #[cfg(perf_dispatch_timeline_api)]
-    assert!(probe.timeline_storage.is_none(), "the stub never arms, so nothing is allocated");
-}
-
-/// The injection path arms the timeline after the previous sample closes and before the injection
-/// instant is read; every way out of an open sample (`close_sample` and the credited branch of
-/// `attribute`) closes its timeline, and no other method takes the open sample.
-#[test]
-fn the_timeline_is_armed_before_injection_and_taken_on_every_close() {
-    let open = method("open_typing_sample");
-    let close = open.find("self.close_sample(").expect("the previous sample closes");
-    let arm = open.find("SampleTimeline::arm(").expect("the timeline arms");
-    let read = open.find("let injected = clock();").expect("the injection instant is read");
-    assert!(close < arm && arm < read, "close, then arm, then read the injection instant");
-    let source = include_str!("probe.rs").replace("\r\n", "\n");
-    assert_eq!(
-        source.matches("self.open_sample.take()").count(),
-        2,
-        "only the two close paths take it"
-    );
-    for name in ["close_sample", "attribute"] {
-        let body = method(name);
-        assert!(body.contains("self.open_sample.take()"), "{name}");
-        assert!(
-            body.contains("sample.timeline.close(&mut self.app, &mut self.timeline_storage)"),
-            "{name}"
-        );
-    }
-}
-
-/// Every `ApplicationHandler` callback runs its body inside its outer-callback record, and `forward`
-/// records each invocation from its own readings around the dispatch, so App dispatches join to the
-/// callback and invocation that carried them.
-#[test]
-fn every_callback_and_forward_records_its_timeline_parenting() {
-    let source = include_str!("probe.rs").replace("\r\n", "\n");
-    let start =
-        source.find("impl ApplicationHandler<UserEvent> for Probe {").expect("the handler impl");
-    let handlers = &source[start..start + source[start..].find("\n}\n").expect("its end")];
-    for (name, kind) in [
-        ("resumed", "Resumed"),
-        ("window_event", "WindowEvent"),
-        ("user_event", "UserEvent"),
-        ("new_events", "NewEvents"),
-        ("about_to_wait", "AboutToWait"),
-    ] {
-        let body = method_in(handlers, name);
-        let enter = body.find(&format!("self.outer_enter(OuterKind::{kind});")).expect(name);
-        let turn = body.find(&format!("self.{name}_turn(")).expect(name);
-        let exit = body.find("self.outer_exit();").expect(name);
-        assert!(enter < turn && turn < exit, "{name}: enter, body, exit");
-    }
-    let forward: String =
-        method("forward").chars().filter(|glyph| !glyph.is_whitespace()).collect();
-    let entered =
-        forward.find("sample.timeline.enter_invocation(invocation,started);").expect("entry");
-    let dispatched = forward.find("dispatch(&mutself.app,event_loop);").expect("dispatch");
-    let returned = forward.find("sample.timeline.exit_invocation(ended);").expect("return");
-    assert!(entered < dispatched && dispatched < returned);
-}
-
-/// The production handoff, through `attribute`: a controlled record whose App return precedes the
-/// credited forward's end binds its unique pair, keeps the original latency, and decomposes into the
-/// seven parts and both tail sub-parts, with a nonzero App-return-to-credited-end gap. It enters at
-/// `attribute` with the forward's `started` and `ended`; it is not a run of `Probe::forward` or of a
-/// native presenting dispatch, which has no headless source.
-#[test]
-fn the_production_handoff_credits_the_forward_and_its_end() {
-    use crate::record::{
-        AppearanceFacts, Delivery, DeliveryFacts, PublicationFacts, PublicationWindow, TraceFacts,
-    };
-    let (mut probe, pane) = typing_probe("S2", "default");
-    let base = Instant::now();
-    let (record, credited) = crate::timeline::fixture_at(base);
-    assert_eq!(probe.open_typing_sample(|| credited.injected), Some('a'));
-    let at = |offset_ns: u64| base + Duration::from_nanos(offset_ns);
-    let facts = TraceFacts {
-        shown: true,
-        identity_changed: false,
-        pre_present: false,
-        lost: false,
-        appearance: Some(AppearanceFacts { generation: 5, parsed_at: at(200), sync_open: false }),
-        publication: Some(PublicationFacts {
-            published_at: at(500),
-            window: PublicationWindow::Main,
-            coalesced: false,
-        }),
-        delivery: Some(DeliveryFacts { outcome: Delivery::Sent, decided_at: at(510) }),
-    };
-    probe.test_take = Some((EchoOutcome::Taken(facts), TimelineTake::Recorded(record)));
-    let main = sonicterm_app::app::synthetic_main_window_id();
-    probe.app.__test_publish_pane_output(main, pane, b"a");
-    let snapshot = probe.echo_snapshot();
-    let observation =
-        DispatchObservation { before: snapshot, after: probe.echo_snapshot(), advanced: true };
-    probe.attribute(&observation, credited.forward_started, credited.ended);
-    let sample = probe.samples.last().expect("a credited sample");
-    assert_eq!(sample.latency_ms, Some(0.0014), "injection to the credited end, 1400 ns");
-    assert_eq!(sample.split_reason, crate::record::SPLIT);
-    let timeline = sample.echo_timeline.expect("an in-scope credited sample has a timeline");
-    assert_eq!(timeline.ordering, Some(crate::timeline::OrderingStatus::Ordered));
-    assert_eq!(timeline.credited_dispatch_seq, Some(1), "the unique pair inside the forward");
-    let parts = timeline.parts.expect("ordered");
-    assert_eq!(parts.additive_ns.iter().sum::<u64>(), 1400);
-    assert_eq!(
-        parts.render_exit_to_dispatch_return_ns + parts.dispatch_return_to_credited_end_ns,
-        parts.additive_ns[6]
-    );
-    assert_eq!(parts.dispatch_return_to_credited_end_ns, 100, "App return 1400, credited end 1500");
 }
 
 /// A headless probe whose finalization clock steps one second a read from `act`, whose transport is recorded,
 /// and whose scratch is a fresh directory; the recorded calls are shared with the test.
-fn guard_probe(
+pub(super) fn guard_probe(
     name: &str,
     act: Instant,
 ) -> (Probe, PhaseSpec, std::rc::Rc<std::cell::RefCell<Vec<GuardTransportCall>>>, ScratchDir) {
@@ -1929,13 +746,13 @@ fn guard_probe(
 
 /// A test's own scratch directory: unique to this process and this fixture, whatever the label, and removed
 /// when dropped, an unwinding test included.
-struct ScratchDir {
-    path: PathBuf,
+pub(super) struct ScratchDir {
+    pub(super) path: PathBuf,
 }
 
 impl ScratchDir {
     /// A fresh directory named for `label`, this process and a per-process counter.
-    fn new(label: &str) -> Self {
+    pub(super) fn new(label: &str) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         // Ordering: Relaxed suffices; NEXT only hands out distinct numbers and orders no other memory.
         let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1953,79 +770,8 @@ impl Drop for ScratchDir {
     }
 }
 
-/// Two fixtures with one label get distinct directories, and each is removed when dropped, also on unwind.
-#[test]
-fn guard_probe_scratch_is_unique_and_removed_even_on_unwind() {
-    let first = ScratchDir::new("media-free");
-    let second = ScratchDir::new("media-free");
-    assert_ne!(first.path, second.path, "two fixtures with one label share no directory");
-    let (first_path, second_path) = (first.path.clone(), second.path.clone());
-    drop(first);
-    assert!(!first_path.exists(), "removed when dropped");
-    let unwound = std::panic::catch_unwind(move || {
-        let held = second;
-        std::fs::write(held.path.join("progress.json"), b"{}").unwrap();
-        panic!("the test unwinds while it holds the directory");
-    });
-    assert!(unwound.is_err());
-    assert!(!second_path.exists(), "removed while unwinding");
-}
-
-/// H1b at runtime: startup's finalization transports phase 0 exactly once, after its counter end was latched,
-/// and a later run finalization with no open meter transports nothing more.
-#[test]
-fn startup_finalization_transports_once_after_its_endpoints() {
-    let act = Instant::now();
-    let (mut probe, _phase, calls, _scratch) = guard_probe("media-free", act);
-    probe.finalize_startup();
-    {
-        let calls = calls.borrow();
-        assert_eq!(calls.len(), 1);
-        let call = calls[0];
-        assert_eq!(call.phase_index, 0);
-        assert!(
-            call.started <= call.counters_end_at && call.counters_end_at < call.transport_started,
-            "{call:?}"
-        );
-    }
-    assert!(probe.finalize_run(Status::Valid, None));
-    assert_eq!(calls.borrow().len(), 1, "a run end with no open phase claims no transport");
-}
-
-/// H1 at runtime: a normal phase end latches the counter end and the phase end before its one transport.
-#[test]
-fn a_normal_phase_end_transports_once_after_its_endpoints() {
-    let act = Instant::now();
-    let (mut probe, phase, calls, _scratch) = guard_probe("media-free", act);
-    assert_eq!(probe.finalize_phase(&phase), None);
-    let calls = calls.borrow();
-    assert_eq!(calls.len(), 1);
-    let ended_at = probe.phase_ends.last().unwrap().1;
-    let call = calls[0];
-    assert!(
-        call.counters_end_at < ended_at && ended_at < call.transport_started,
-        "{call:?} ended {ended_at:?}"
-    );
-}
-
-/// H1c at runtime: a phase end that finds a delivery problem returns before its transport, and the finish it
-/// hands off to transports that phase exactly once; a second finish changes nothing.
-#[test]
-fn an_early_phase_end_hands_its_one_transport_to_finish() {
-    let act = Instant::now();
-    let (mut probe, phase, calls, _scratch) = guard_probe("reshow", act);
-    probe.forced_delivery_problem = Some("ConPTY dropped a line".to_owned());
-    assert_eq!(probe.finalize_phase(&phase).as_deref(), Some("ConPTY dropped a line"));
-    assert!(calls.borrow().is_empty(), "the phase end itself does not transport");
-    assert!(probe.finalize_run(Status::Blocked, Some("ConPTY dropped a line".to_owned())));
-    assert_eq!(calls.borrow().len(), 1);
-    assert_eq!(calls.borrow()[0].phase_index, 0);
-    assert!(!probe.finalize_run(Status::Blocked, None));
-    assert_eq!(calls.borrow().len(), 1, "exactly one transport");
-}
-
 /// A drag lagging its schedule, pressed mid-cycle, with its phase ending at `deadline`.
-fn lagging_drag(deadline: Instant, quiet_from: Option<Instant>) -> Drag {
+pub(super) fn lagging_drag(deadline: Instant, quiet_from: Option<Instant>) -> Drag {
     Drag {
         interval: Duration::from_millis(8),
         started: deadline - Duration::from_secs(2),
@@ -2041,23 +787,8 @@ fn lagging_drag(deadline: Instant, quiet_from: Option<Instant>) -> Drag {
     }
 }
 
-#[test]
-fn a_status_line_drag_goes_quiet_before_its_phase_ends() {
-    // A lagging drag would still be moving at the deadline, so its last selection change could
-    // present in `selected`; in the quiet tail it only releases the held press, then stops.
-    let deadline = Instant::now();
-    let quiet_from = deadline - STATUS_LINE_DRAG_SETTLE;
-    let mut drag = lagging_drag(deadline, Some(quiet_from));
-    assert_eq!(drag.next_motion(quiet_from), Some(DragMotion::Release));
-    assert!(!drag.pressed && drag.finished);
-    assert_eq!(drag.next_motion(deadline), None, "nothing changes the selection after the release");
-    // Without a quiet tail (S6), the same lagging drag keeps its schedule and moves.
-    let mut scheduled = lagging_drag(deadline, None);
-    assert!(matches!(scheduled.next_motion(quiet_from), Some(DragMotion::Move(_))));
-}
-
 /// A meter fed `presenting` 1 ms presenting redraws, then non-presenting 0.1 ms ones up to 100.
-fn meter_with_mix(presenting: usize) -> PhaseRecord {
+pub(super) fn meter_with_mix(presenting: usize) -> PhaseRecord {
     let mut meter = PhaseMeter::start(
         "typing",
         crate::scenarios::PhaseKind::Sustained,
@@ -2080,89 +811,14 @@ fn meter_with_mix(presenting: usize) -> PhaseRecord {
 }
 
 /// The middle value of `values`, the upper one for an even count.
-fn median_of(values: &[f64]) -> f64 {
+pub(super) fn median_of(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
     sorted[sorted.len() / 2]
 }
 
-#[test]
-fn split_dispatch_medians_hold_when_the_presenting_share_crosses_half() {
-    // The pooled median jumps between the cheap and the presenting cluster when the presenting share
-    // crosses 50%; the medians recorded per cluster do not move.
-    let mostly_cheap = meter_with_mix(49);
-    let mostly_presenting = meter_with_mix(51);
-    assert!(median_of(&mostly_cheap.dispatch_ms) < 0.2, "pooled: the cheap cluster");
-    assert!(median_of(&mostly_presenting.dispatch_ms) > 0.9, "pooled: the presenting cluster");
-    for record in [&mostly_cheap, &mostly_presenting] {
-        assert!((median_of(&record.dispatch_presenting_ms) - 1.0).abs() < 1e-9);
-        assert!((median_of(&record.dispatch_nonpresenting_ms) - 0.1).abs() < 1e-9);
-    }
-    assert_eq!(mostly_presenting.dispatch_presenting_ms.len(), 51);
-}
-
-#[test]
-fn output_published_while_go_is_released_still_starts_the_output_diagnostic() {
-    // A role can print, and its worker publish the batch, before the probe resumes from releasing GO.
-    // The first-output baseline must predate that output, so the batch is still noted as the first output
-    // and the frame drawing it times the output-to-present diagnostic.
-    let (mut probe, pane) = typing_probe("S8", "default");
-    probe.role_panes = vec![pane];
-    let main = sonicterm_app::app::synthetic_main_window_id();
-    probe
-        .release_roles(true, |released, _role| {
-            // The released role printed and its worker published the batch before the probe resumed.
-            let _ = released.app.__test_publish_pane_output(main, pane, b"printed\r\n");
-            Ok(())
-        })
-        .expect("every role released");
-    assert!(probe.go_cursors.iter().all(Option::is_some), "the role pane has a baseline");
-    let mut meter = PhaseMeter::start(
-        "print",
-        crate::scenarios::PhaseKind::Transition,
-        None,
-        false,
-        None,
-        None,
-    );
-    meter.present.await_output(0.0);
-    probe.meter = Some(meter);
-    // The batch's output event reaches the probe once it resumes; the frame drawing it presents next.
-    probe.note_first_output();
-    let mut meter = probe.meter.take().expect("the print meter");
-    let started = Instant::now();
-    meter.observe_dispatch(
-        Dispatch::Redraw,
-        started,
-        started + Duration::from_millis(1),
-        (0, 1),
-        None,
-    );
-    let record = meter.finish(None, crate::transition::Completion::default());
-    assert!(record.first_present_ms.is_some(), "the output's frame is the first present");
-    assert_eq!(record.present_missing, None);
-    assert!(record.go_to_first_output_ms.is_some(), "the output is noted");
-    assert!(record.first_output_to_present_ms.is_some(), "its frame times the diagnostic");
-}
-
-#[cfg(unix)]
-#[test]
-fn the_go_fifos_are_removed_when_the_run_ends() {
-    // GO releases POSIX roles through FIFOs; once `run` returns, on any path, none is left in the scratch,
-    // so nothing that later copies, archives or hashes the scratch meets a named pipe.
-    let scratch = std::env::temp_dir().join(format!("sonicterm-go-fifos-{}", std::process::id()));
-    std::fs::create_dir_all(scratch.join("go")).expect("go directory");
-    let made = std::process::Command::new("mkfifo").arg(scratch.join("go/0")).status();
-    assert!(made.is_ok_and(|status| status.success()), "mkfifo");
-    std::fs::write(scratch.join("go/1"), b"").expect("plain marker");
-    drop(GoFifos { scratch: scratch.clone(), roles: 2 });
-    assert!(std::fs::symlink_metadata(scratch.join("go/0")).is_err(), "the FIFO is removed");
-    assert!(scratch.join("go/1").is_file(), "a plain marker is left alone");
-    let _ = std::fs::remove_dir_all(&scratch);
-}
-
 /// A print meter, as `begin_phase` opens one for the phase that releases the roles, placed on `probe`.
-fn open_print_meter(probe: &mut Probe) {
+pub(super) fn open_print_meter(probe: &mut Probe) {
     probe.meter = Some(PhaseMeter::start(
         "print",
         crate::scenarios::PhaseKind::Transition,
@@ -2177,7 +833,7 @@ fn open_print_meter(probe: &mut Probe) {
 }
 
 /// One presenting main-window redraw, observed now, advancing the presented count by one.
-fn present_one_frame(probe: &mut Probe, presented_after: u64) {
+pub(super) fn present_one_frame(probe: &mut Probe, presented_after: u64) {
     let meter = probe.meter.as_mut().expect("an open meter");
     let started = Instant::now();
     meter.observe_dispatch(
@@ -2187,50 +843,4 @@ fn present_one_frame(probe: &mut Probe, presented_after: u64) {
         (presented_after - 1, presented_after),
         None,
     );
-}
-
-#[test]
-fn a_print_phase_whose_only_frame_precedes_the_output_records_its_first_present() {
-    // Replays a base run the validator rejected: the phase's only frame presents before the roles' first
-    // output, then the output lands and the scan sees the sentinel before another frame or output event.
-    // The first present is that frame, the first after GO; the output diagnostics stay empty.
-    let (mut probe, pane) = typing_probe("S8", "default");
-    probe.role_panes = vec![pane];
-    probe.release_roles(true, |_, _| Ok(())).expect("every role released");
-    open_print_meter(&mut probe);
-    // The frame's redraw arrives while no role has printed yet.
-    probe.note_first_output();
-    present_one_frame(&mut probe, 1);
-    let main = sonicterm_app::app::synthetic_main_window_id();
-    let _ = probe.app.__test_publish_pane_output(main, pane, b"printed\r\n");
-    let record = probe.meter.take().expect("the print meter").finish(None, Default::default());
-    assert!(record.first_present_ms.is_some(), "the frame after GO is the first present");
-    assert_eq!(record.present_missing, None, "so the validator's trace is complete");
-    let json = serde_json::to_value(&record).expect("serializable");
-    for key in ["go_to_first_output_ms", "first_output_to_present_ms"] {
-        assert!(json.get(key).is_none(), "{key} is absent, never null or zero");
-    }
-}
-
-#[test]
-fn output_landing_between_the_check_and_the_frame_still_records_the_first_present() {
-    // The redraw's cursor check runs before the App collects the frame, so output can land after the check
-    // and still be drawn. The frame is the first present; the output is noted only at the event after it,
-    // so no frame follows it and only its GO-to-output time is recorded.
-    let (mut probe, pane) = typing_probe("S8", "default");
-    probe.role_panes = vec![pane];
-    probe.release_roles(true, |_, _| Ok(())).expect("every role released");
-    open_print_meter(&mut probe);
-    probe.note_first_output();
-    let main = sonicterm_app::app::synthetic_main_window_id();
-    let _ = probe.app.__test_publish_pane_output(main, pane, b"printed\r\n");
-    present_one_frame(&mut probe, 1);
-    // The batch's output event reaches the probe after the frame; then the scan sees the sentinel.
-    probe.note_first_output();
-    let record = probe.meter.take().expect("the print meter").finish(None, Default::default());
-    assert!(record.first_present_ms.is_some(), "the frame drawing the output is the first present");
-    assert_eq!(record.present_missing, None);
-    let json = serde_json::to_value(&record).expect("serializable");
-    assert!(json.get("go_to_first_output_ms").is_some_and(serde_json::Value::is_number));
-    assert!(json.get("first_output_to_present_ms").is_none(), "no frame followed the noted output");
 }
