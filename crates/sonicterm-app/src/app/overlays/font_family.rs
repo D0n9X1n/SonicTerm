@@ -28,25 +28,43 @@ impl App {
         // The palette names its main-window attachment `None`, as every other page does.
         self.palette_attached_window = attached.filter(|id| Some(*id) != self.main_window_id);
         let current = self.config.font.family.clone();
+        let (title, rows) = self.font_family_page(&current);
+        let footer = self.i18n.translate("font-picker-footer");
+        self.command_palette.start_font_family(title, footer, rows, &current);
+        self.font_picker_original = Some(current);
+        self.request_redraw_for_overlay(self.palette_attached_window);
+    }
+
+    /// The picker's title and rows from the catalog, with `current` marked. Before the catalog is
+    /// ready only `current` is listed, under the loading title.
+    fn font_family_page(&self, current: &str) -> (String, Vec<FontFamilyRow>) {
         let (mut families, title_key) = match &self.font_catalog {
             FontCatalog::Ready(families) => (families.clone(), "font-picker-title"),
             FontCatalog::Idle | FontCatalog::Loading => (Vec::new(), "font-picker-loading"),
         };
-        if !families.iter().any(|family| family.eq_ignore_ascii_case(&current)) {
+        if !families.iter().any(|family| family.eq_ignore_ascii_case(current)) {
             // The live family is listed even when the catalog lacks it, so it can be kept.
-            families.insert(0, current.clone());
+            families.insert(0, current.to_owned());
         }
         let rows = families
             .into_iter()
             .map(|family| {
-                let mark = if family.eq_ignore_ascii_case(&current) { "✓ " } else { "  " };
+                let mark = if family.eq_ignore_ascii_case(current) { "✓ " } else { "  " };
                 FontFamilyRow { label: format!("{mark}{family}"), family }
             })
             .collect();
-        let title = self.i18n.translate(title_key);
-        let footer = self.i18n.translate("font-picker-footer");
-        self.command_palette.start_font_family(title, footer, rows, &current);
-        self.font_picker_original = Some(current);
+        (self.i18n.translate(title_key), rows)
+    }
+
+    /// Rebuild an open picker's title and rows from the catalog in place, keeping the typed filter
+    /// and the highlighted family; the family it opened with stays marked.
+    pub(in crate::app) fn refresh_font_family_picker(&mut self) {
+        let Some(current) = self.font_picker_original.clone() else {
+            // When: `font_picker_original` is None, no picker is open, so nothing is refreshed.
+            return;
+        };
+        let (title, rows) = self.font_family_page(&current);
+        self.command_palette.update_font_family(title, rows);
         self.request_redraw_for_overlay(self.palette_attached_window);
     }
 

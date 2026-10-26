@@ -1159,6 +1159,25 @@ impl CommandPalette {
         self.font_rows.get(index).map(|row| row.family.as_str())
     }
 
+    /// Replace the picker's title and rows in place, keeping the typed filter and, when it is
+    /// still listed, the highlighted family; does nothing once the picker has closed.
+    pub fn update_font_family(&mut self, title: impl Into<String>, rows: Vec<FontFamilyRow>) {
+        if self.mode != CommandPaletteMode::FontFamily {
+            // When: mode is not FontFamily, the picker closed; there is nothing to refresh.
+            return;
+        }
+        let kept = self.selected_font_family().map(str::to_owned);
+        self.font_title = title.into();
+        self.font_rows = rows;
+        self.filter_font_rows();
+        self.selected = kept
+            .and_then(|family| {
+                self.items.iter().position(|&index| self.font_rows[index].family == family)
+            })
+            .unwrap_or(0);
+        self.ensure_selected_in_view();
+    }
+
     /// Highlight picker row `index` of the filtered view.
     pub fn select_font_row(&mut self, index: usize) -> bool {
         let selectable = self.mode == CommandPaletteMode::FontFamily && index < self.items.len();

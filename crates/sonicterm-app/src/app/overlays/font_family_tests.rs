@@ -68,3 +68,21 @@ fn picker_labels_exist_in_every_locale() {
         }
     }
 }
+
+/// A picker opened while the catalog loads lists only the live family under the loading title;
+/// when the report lands, the open picker shows the catalog in place, keeping the typed filter
+/// and the highlighted family.
+#[test]
+fn an_open_picker_fills_in_when_the_catalog_lands() {
+    let (mut app, child) = picker_app("Menlo");
+    app.font_catalog = FontCatalog::Loading;
+    assert!(app.run_action_for_window(&Action::ChooseFontFamily, child));
+    assert_eq!(labels(&app), ["✓ Menlo"]);
+    app.command_palette.input_str("e");
+    let catalog = vec!["Menlo".to_string(), "Monaco".to_string(), "Rec Mono".to_string()];
+    app.adopt_font_catalog_from(&["Menlo"], catalog, true);
+    assert_eq!(labels(&app), ["✓ Menlo", "  Rec Mono"]);
+    assert_eq!(app.command_palette.query(), "e");
+    assert_eq!(app.command_palette.selected_font_family(), Some("Menlo"));
+    assert_eq!(app.command_palette.font_title(), app.i18n.translate("font-picker-title"));
+}

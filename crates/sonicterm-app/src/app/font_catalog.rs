@@ -131,6 +131,8 @@ impl App {
             "font catalog ready"
         );
         self.font_catalog = FontCatalog::Ready(families);
+        // A picker opened while the catalog loaded now lists it.
+        self.refresh_font_family_picker();
     }
 }
 
