@@ -77,39 +77,6 @@ struct ShaderUniform {
     projection: [[f32; 4]; 4],
 }
 
-/// Create the shader-uniform buffer without initial contents.
-///
-/// `draw_frame` writes the uniform before every draw, so no initial contents
-/// are needed. A plain `create_buffer` also keeps an invalid descriptor a
-/// contained wgpu error: `create_buffer_init` maps the new buffer and panics
-/// through `expect` when that buffer is invalid.
-fn create_uniform_buffer(device: &wgpu::Device, usage: wgpu::BufferUsages) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("sonic-wezterm-uniform"),
-        size: std::mem::size_of::<ShaderUniform>() as u64,
-        usage,
-        mapped_at_creation: false,
-    })
-}
-
-/// Create an unmapped index buffer holding `index_capacity` indices.
-///
-/// Every index buffer goes through here, at creation and at growth. A plain
-/// `create_buffer` keeps an invalid descriptor a contained wgpu error, where
-/// `create_buffer_init` would map the new buffer and panic on an invalid one.
-fn create_index_buffer(
-    device: &wgpu::Device,
-    index_capacity: u64,
-    usage: wgpu::BufferUsages,
-) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("sonic-wezterm-present-indices"),
-        size: index_capacity * std::mem::size_of::<u32>() as u64,
-        usage,
-        mapped_at_creation: false,
-    })
-}
-
 /// The primitive layers of one frame, in painter order after the optional reset.
 pub(crate) struct PipelineLayers<'frame> {
     /// Opaque terminal and chrome quads.
@@ -124,61 +91,8 @@ pub(crate) struct PipelineLayers<'frame> {
     pub overlay_glyphs: &'frame [GlyphInstance],
 }
 
-/// Append one frame's vertices to `out` and return how many belong to the reset quad.
-///
-/// Degenerate primitives push nothing, so the returned count and `out.len()` are the
-/// only sources for draw ranges.
-pub(crate) fn assemble_vertices(
-    out: &mut Vec<Vertex>,
-    reset: Option<&QuadInstance>,
-    layers: &PipelineLayers<'_>,
-    surface_w: f32,
-    surface_h: f32,
-    subpixel_aa: SubpixelAaMode,
-) -> usize {
-    push_quad_instances(out, reset.map(std::slice::from_ref).unwrap_or(&[]), surface_w, surface_h);
-    let reset_vertices = out.len();
-    push_quad_instances(out, layers.quads, surface_w, surface_h);
-    push_image_instances(out, layers.images, surface_w, surface_h);
-    push_glyph_instances(out, layers.glyphs, surface_w, surface_h, subpixel_aa);
-    push_quad_instances(out, layers.overlay_quads, surface_w, surface_h);
-    push_glyph_instances(out, layers.overlay_glyphs, surface_w, surface_h, subpixel_aa);
-    reset_vertices
-}
-
-/// Index ranges for the reset draw and the main draw, from emitted vertex counts only.
-pub(crate) fn draw_index_ranges(
-    reset_vertices: usize,
-    total_vertices: usize,
-) -> (std::ops::Range<u32>, std::ops::Range<u32>) {
-    let reset_indices = (reset_vertices / VERTICES_PER_QUAD * INDICES_PER_QUAD) as u32;
-    let total_indices = (total_vertices / VERTICES_PER_QUAD * INDICES_PER_QUAD) as u32;
-    (0..reset_indices, reset_indices..total_indices)
-}
-
 /// Scratch capacity, in bytes, below which the vertex scratch is never shrunk.
 const SCRATCH_RELEASE_FLOOR_BYTES: usize = 1024 * 1024;
-
-/// Shrink `scratch` after a frame that used `used_vertices` of it.
-///
-/// A capacity over four times the frame's use and over 1 MiB is cut to twice that use,
-/// so one large frame does not pin its peak for the window's life. A frame that used no
-/// vertices therefore releases a scratch over 1 MiB entirely; a smaller one is kept.
-/// Contents are kept.
-pub(crate) fn release_scratch_excess(scratch: &mut Vec<Vertex>, used_vertices: usize) {
-    release_excess(scratch, used_vertices);
-}
-
-/// Shrink any reused `scratch` after a pass that used `used` of its elements, by the vertex
-/// scratch's rule: a capacity over four times the use and over 1 MiB is cut to twice the use.
-/// Contents are kept.
-pub(crate) fn release_excess<T>(scratch: &mut Vec<T>, used: usize) {
-    let capacity_bytes = scratch.capacity().saturating_mul(std::mem::size_of::<T>());
-    if scratch.capacity() > used.saturating_mul(4) && capacity_bytes > SCRATCH_RELEASE_FLOOR_BYTES {
-        // The scratch is both oversized for this pass and large in absolute terms.
-        scratch.shrink_to(used.saturating_mul(2));
-    }
-}
 
 /// Draw calls in one present-buffer observation window; windows do not overlap.
 pub(crate) const SHRINK_WINDOW_CALLS: u32 = 600;
@@ -192,29 +106,6 @@ pub(crate) struct ShrinkWindow {
     calls: u32,
     /// The most quads any draw in the current window used.
     peak_quads: u64,
-}
-
-impl ShrinkWindow {
-    /// Record one draw of `used_quads` against a buffer holding `capacity_quads`; at the end of a
-    /// window, return the quad capacity to shrink to, `max(initial_quads, next_pow2(2 × peak))`,
-    /// when the buffer is over four times the window's peak and over `initial_quads`.
-    pub(crate) fn observe(
-        &mut self,
-        used_quads: u64,
-        capacity_quads: u64,
-        initial_quads: u64,
-    ) -> Option<u64> {
-        self.calls += 1;
-        self.peak_quads = self.peak_quads.max(used_quads);
-        if self.calls < SHRINK_WINDOW_CALLS {
-            // When: `calls` has not reached the window length, keep observing.
-            return None;
-        }
-        let peak = self.peak_quads;
-        *self = Self::default();
-        let oversized = capacity_quads > peak.saturating_mul(4) && capacity_quads > initial_quads;
-        oversized.then(|| initial_quads.max(peak.saturating_mul(2).max(1).next_power_of_two()))
-    }
 }
 
 /// One clipped image draw with its original packed-atlas sampling boundary.
@@ -411,87 +302,6 @@ impl WeztermPipeline {
         }
     }
 
-    /// Report this pipeline's three buffers to `ledger` now, and every later recreation or growth.
-    pub(crate) fn attach_graphics_ledger(
-        &mut self,
-        ledger: crate::graphics_ledger::GraphicsLedgerHandle,
-    ) {
-        ledger.replace(
-            crate::graphics_ledger::GraphicsSlot::PresentUniform,
-            std::mem::size_of::<ShaderUniform>() as u64,
-            1,
-        );
-        self.graphics_ledger = Some(ledger);
-        self.record_vertex_request();
-        self.record_index_request();
-    }
-
-    /// Record the vertex buffer's requested bytes in the attached ledger, if any.
-    fn record_vertex_request(&self) {
-        if let Some(ledger) = &self.graphics_ledger {
-            ledger.replace(
-                crate::graphics_ledger::GraphicsSlot::PresentVertices,
-                self.vertex_capacity * std::mem::size_of::<Vertex>() as u64,
-                1,
-            );
-        }
-    }
-
-    /// Record the index buffer's requested bytes in the attached ledger, if any.
-    fn record_index_request(&self) {
-        if let Some(ledger) = &self.graphics_ledger {
-            ledger.replace(
-                crate::graphics_ledger::GraphicsSlot::PresentIndices,
-                self.index_capacity * std::mem::size_of::<u32>() as u64,
-                1,
-            );
-        }
-    }
-
-    /// Bytes both present buffers request from the device.
-    pub(crate) fn present_buffer_bytes(&self) -> u64 {
-        self.vertex_capacity * std::mem::size_of::<Vertex>() as u64
-            + self.index_capacity * std::mem::size_of::<u32>() as u64
-    }
-
-    /// Recreate both present buffers to hold exactly `quads` quads; the new index buffer holds
-    /// no pattern yet, so the next draw writes it.
-    fn recreate_buffers(&mut self, device: &wgpu::Device, quads: u64) {
-        let vertex_capacity = quads * VERTICES_PER_QUAD as u64;
-        let index_capacity = quads * INDICES_PER_QUAD as u64;
-        self.vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("sonic-wezterm-present-vertices"),
-            size: vertex_capacity * std::mem::size_of::<Vertex>() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.index_buf = create_index_buffer(device, index_capacity, INDEX_BUFFER_USAGE);
-        self.vertex_capacity = vertex_capacity;
-        self.index_capacity = index_capacity;
-        self.index_pattern_quads = 0;
-        self.record_vertex_request();
-        self.record_index_request();
-    }
-
-    /// Return both present buffers to their initial size and empty the vertex scratch, for a
-    /// covered window's trim; returns the device bytes the buffers no longer request.
-    pub(crate) fn reset_to_initial(&mut self, device: &wgpu::Device) -> u64 {
-        let before = self.present_buffer_bytes();
-        self.recreate_buffers(device, self.initial_quads);
-        self.shrink_window = ShrinkWindow::default();
-        self.vertex_scratch = Vec::new();
-        before.saturating_sub(self.present_buffer_bytes())
-    }
-
-    /// CPU storage held by the reusable vertex scratch: its capacity in bytes, one item.
-    pub(crate) fn vertex_scratch_retained(&self) -> ResourceAmount {
-        let capacity = self.vertex_scratch.capacity();
-        ResourceAmount {
-            bytes: capacity.saturating_mul(std::mem::size_of::<Vertex>()),
-            items: usize::from(capacity > 0),
-        }
-    }
-
     /// Image-atlas layout: one sRGB view and one linear sampler.
     pub(crate) fn image_bind_group_layout(&self) -> &wgpu::BindGroupLayout {
         &self.image_bind_group_layout
@@ -580,267 +390,6 @@ impl WeztermPipeline {
         pass.set_pipeline(pipeline);
         pass.draw_indexed(main_range, 0, 0..1);
     }
-
-    /// Write the index pattern for the buffer's whole quad capacity when the buffer does
-    /// not hold it yet (the first frame and the first after growth); return the bytes written.
-    ///
-    /// Runs inside the renderer's device-error boundary like every other frame write.
-    fn upload_index_pattern(&mut self, queue: &wgpu::Queue) -> usize {
-        let quad_capacity = self.index_capacity / INDICES_PER_QUAD as u64;
-        if self.index_pattern_quads >= quad_capacity {
-            // When: `index_pattern_quads` already covers `quad_capacity`; every draw range is a prefix.
-            return 0;
-        }
-        let pattern = build_indices(quad_capacity as usize);
-        let pattern_bytes: &[u8] = bytemuck::cast_slice(&pattern);
-        queue.write_buffer(&self.index_buf, 0, pattern_bytes);
-        self.index_pattern_quads = quad_capacity;
-        pattern_bytes.len()
-    }
-
-    /// Feed one draw of `used_quads` to the shrink window and recreate both buffers at the size it
-    /// asks for. The target is at least twice the window's peak, so it holds this draw too.
-    fn shrink_if_oversized(&mut self, device: &wgpu::Device, used_quads: u64) {
-        let capacity_quads = (self.vertex_capacity / VERTICES_PER_QUAD as u64)
-            .min(self.index_capacity / INDICES_PER_QUAD as u64);
-        if let Some(quads) =
-            self.shrink_window.observe(used_quads, capacity_quads, self.initial_quads)
-        {
-            // The window closed with the buffers oversized, so both are recreated smaller.
-            self.recreate_buffers(device, quads);
-        }
-    }
-
-    /// Grow the vertex buffer to hold `vertices` vertices and the index buffer to hold
-    /// `indices` indices, doubling each; a grown index buffer holds no pattern yet.
-    fn ensure_capacity(&mut self, device: &wgpu::Device, vertices: u64, indices: u64) {
-        if vertices > self.vertex_capacity {
-            let mut cap = self.vertex_capacity.max(1);
-            while cap < vertices {
-                cap *= 2;
-            }
-            self.vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("sonic-wezterm-present-vertices"),
-                size: cap * std::mem::size_of::<Vertex>() as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.vertex_capacity = cap;
-            self.record_vertex_request();
-        }
-        if indices > self.index_capacity {
-            let mut cap = self.index_capacity.max(1);
-            while cap < indices {
-                cap *= 2;
-            }
-            self.index_buf = create_index_buffer(device, cap, INDEX_BUFFER_USAGE);
-            self.index_capacity = cap;
-            self.index_pattern_quads = 0;
-            self.record_index_request();
-        }
-    }
-}
-
-fn push_image_instances(out: &mut Vec<Vertex>, images: &[ImageInstance], sw: f32, sh: f32) {
-    for image in images {
-        let [x, y, w, h] = image.rect_px;
-        if w <= 0.0 || h <= 0.0 {
-            // When: `w` or `h` is empty, no image fragments can be produced.
-            continue;
-        }
-        let [u0, v0, u1, v1] = image.uv;
-        let tex = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
-        push_rect_vertices(
-            out,
-            x,
-            y,
-            w,
-            h,
-            sw,
-            sh,
-            [1.0; 4],
-            IS_IMAGE,
-            tex,
-            [image.sample_uv; VERTICES_PER_QUAD],
-        );
-    }
-}
-
-fn push_glyph_instances(
-    out: &mut Vec<Vertex>,
-    glyphs: &[GlyphInstance],
-    sw: f32,
-    sh: f32,
-    subpixel_aa: SubpixelAaMode,
-) {
-    for g in glyphs {
-        let Some((x, y, w, h)) = ndc_rect_to_pixels(g.rect, sw, sh) else {
-            // When: ndc_rect_to_pixels returns None the surface has zero extent, so this
-            // glyph is dropped instead of scaled against a zero-sized frame.
-            continue;
-        };
-        if w <= 0.0 || h <= 0.0 {
-            // When: w or h is not positive the quad is degenerate or inverted, adding no
-            // fragments while still consuming vertices and indices in the batch.
-            continue;
-        }
-        let color = g.color;
-        let has_color = if g.flags[0] >= 0.5 {
-            IS_COLOR_EMOJI
-        } else if g.flags[1] >= 0.5 {
-            // When: `g.flags[1]` marks a subpixel mask, `subpixel_aa` selects its presentation classification.
-            match subpixel_aa {
-                SubpixelAaMode::Off => IS_GLYPH,
-                SubpixelAaMode::Rgb => IS_SUBPIXEL_RGB,
-                SubpixelAaMode::Bgr => IS_SUBPIXEL_BGR,
-            }
-        } else {
-            // When: no flags bit is set, so the glyph is monochrome: atlas alpha is coverage
-            // and the shader scales fg_color by it, then applies foreground_text_hsb.
-            IS_GLYPH
-        };
-        let [u0, v0, u1, v1] = g.uv;
-        let tex = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
-        push_rect_vertices(
-            out,
-            x,
-            y,
-            w,
-            h,
-            sw,
-            sh,
-            color,
-            has_color,
-            tex,
-            [[0.0; 4]; VERTICES_PER_QUAD],
-        );
-    }
-}
-
-fn push_quad_instances(out: &mut Vec<Vertex>, quads: &[QuadInstance], sw: f32, sh: f32) {
-    for q in quads {
-        let Some((x, y, w, h)) = ndc_rect_to_pixels(q.rect, sw, sh) else {
-            // When: ndc_rect_to_pixels returns None the surface has zero extent, so this
-            // quad is dropped instead of scaled against a zero-sized frame.
-            continue;
-        };
-        if w <= 0.0 || h <= 0.0 {
-            // When: w or h is not positive the quad is degenerate or inverted, adding no
-            // fragments while still consuming vertices and indices in the batch.
-            continue;
-        }
-        let kind = if q.line_thickness_px > 0.0 {
-            IS_LINE
-        } else if q.radius_px > 0.0 {
-            // When: radius_px is positive the shader evaluates a rounded-rect distance
-            // field, so the corners stay antialiased instead of squared off.
-            IS_ROUNDED_RECT
-        } else {
-            // When: neither line_thickness_px nor radius_px is set the quad is a plain
-            // fill, so the shader emits fg_color with no distance-field pass.
-            IS_SOLID_COLOR
-        };
-        let size = if q.size_px[0] > 0.0 && q.size_px[1] > 0.0 {
-            q.size_px
-        } else {
-            // When: size_px is unset the pixel extent w and h stand in, keeping the
-            // distance field in the same units the vertices were built from.
-            [w, h]
-        };
-        let local = [
-            [-size[0] * 0.5, -size[1] * 0.5],
-            [size[0] * 0.5, -size[1] * 0.5],
-            [-size[0] * 0.5, size[1] * 0.5],
-            [size[0] * 0.5, size[1] * 0.5],
-        ];
-        let params = [
-            [size[0], size[1], q.radius_px, q.line_thickness_px],
-            [size[0], size[1], q.radius_px, q.line_thickness_px],
-            [size[0], size[1], q.radius_px, q.line_thickness_px],
-            [size[0], size[1], q.radius_px, q.line_thickness_px],
-        ];
-        push_rect_vertices(out, x, y, w, h, sw, sh, q.color, kind, local, params);
-        if kind == IS_LINE {
-            let n = out.len();
-            for v in &mut out[n - VERTICES_PER_QUAD..n] {
-                v.alt_color = [q.line_a[0], q.line_a[1], q.line_b[0], q.line_b[1]];
-                v.mix_value = q.line_thickness_px;
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_rect_vertices(
-    out: &mut Vec<Vertex>,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    sw: f32,
-    sh: f32,
-    color: [f32; 4],
-    has_color: f32,
-    tex: [[f32; 2]; 4],
-    params: [[f32; 4]; 4],
-) {
-    let left = x - sw * 0.5;
-    let right = x + w - sw * 0.5;
-    let top = y - sh * 0.5;
-    let bottom = y + h - sh * 0.5;
-    let positions = [[left, top], [right, top], [left, bottom], [right, bottom]];
-    for i in 0..VERTICES_PER_QUAD {
-        out.push(Vertex {
-            position: positions[i],
-            tex: tex[i],
-            fg_color: color,
-            alt_color: params[i],
-            hsv: [1.0, 1.0, 1.0],
-            has_color,
-            mix_value: 0.0,
-        });
-    }
-}
-
-pub(crate) fn ndc_rect_to_pixels(rect: [f32; 4], sw: f32, sh: f32) -> Option<(f32, f32, f32, f32)> {
-    if sw <= 0.0 || sh <= 0.0 {
-        // When: sw or sh is not positive the surface has no pixel extent and no NDC
-        // mapping exists, so every caller skips the primitive instead of scaling by zero.
-        return None;
-    }
-    let x = (rect[0] + 1.0) * 0.5 * sw;
-    let w = rect[2] * 0.5 * sw;
-    let h = rect[3] * 0.5 * sh;
-    let top_ndc = rect[1] + rect[3];
-    let y = (1.0 - top_ndc) * 0.5 * sh;
-    Some((x, y, w, h))
-}
-
-fn build_indices(quad_count: usize) -> Vec<u32> {
-    let mut out = Vec::with_capacity(quad_count * INDICES_PER_QUAD);
-    for q in 0..quad_count {
-        let base = (q * VERTICES_PER_QUAD) as u32;
-        out.extend_from_slice(&[
-            base + V_TOP_LEFT,
-            base + V_TOP_RIGHT,
-            base + V_BOT_LEFT,
-            base + V_TOP_RIGHT,
-            base + V_BOT_LEFT,
-            base + V_BOT_RIGHT,
-        ]);
-    }
-    out
-}
-
-fn orthographic_projection(sw: f32, sh: f32) -> [[f32; 4]; 4] {
-    // Matches WezTerm's pixel-space projection:
-    // left=-w/2, right=w/2, bottom=h/2, top=-h/2.
-    [
-        [2.0 / sw, 0.0, 0.0, 0.0],
-        [0.0, -2.0 / sh, 0.0, 0.0],
-        [0.0, 0.0, -1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
 }
 
 fn premultiplied_alpha_blend() -> wgpu::BlendState {
@@ -1045,3 +594,15 @@ fn shader_source(dual_source: bool) -> String {
 #[cfg(test)]
 #[path = "wezterm_pipeline_tests.rs"]
 mod wezterm_pipeline_tests;
+
+#[path = "wezterm_pipeline_vertices.rs"]
+mod vertices;
+pub(crate) use vertices::{assemble_vertices, draw_index_ranges};
+use vertices::{build_indices, orthographic_projection};
+#[path = "wezterm_pipeline_buffers.rs"]
+mod buffers;
+use buffers::{create_index_buffer, create_uniform_buffer};
+pub(crate) use buffers::{release_excess, release_scratch_excess};
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) use vertices::ndc_rect_to_pixels;

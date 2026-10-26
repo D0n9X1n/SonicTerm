@@ -286,7 +286,16 @@ const SOURCES: [(&str, &str); 5] = [
     ("present.rs", include_str!("present.rs")),
     ("rebind.rs", include_str!("rebind.rs")),
     ("atlas_lifecycle.rs", include_str!("atlas_lifecycle.rs")),
-    ("wezterm_pipeline.rs", include_str!("wezterm_pipeline.rs")),
+    (
+        "wezterm_pipeline.rs",
+        concat!(
+            include_str!("wezterm_pipeline.rs"),
+            "\n",
+            include_str!("wezterm_pipeline_buffers.rs"),
+            "\n",
+            include_str!("wezterm_pipeline_vertices.rs")
+        ),
+    ),
 ];
 
 /// Every missing ledger hook in `sources` (core, present, rebind, atlas lifecycle, pipeline).
