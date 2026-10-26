@@ -5326,7 +5326,9 @@ COUNTER_CONTRACT = {
              "frame_dispatch_ns", "frame_dispatches", "frame_dispatch_failed_ns", "frame_dispatches_failed",
              "hover_lookups", "hover_detections", "hover_cache_hits", "hover_rows_read", "path_probes_submitted",
              "quick_select_rows_scanned", "status_line_samples", "status_line_wakes", "status_line_redraws",
-             "status_line_sel_counts", "status_line_sel_cells", "status_line_history_shows"),
+             "status_line_sel_counts", "status_line_sel_cells", "status_line_history_shows",
+             "status_line_full_passes", "startup_window_ns", "startup_adapter_install_ns", "startup_renderer_ns",
+             "startup_load_checks_ns", "startup_pane_spawn_ns"),
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),
     "vt": (("parse_bytes", "batches", "flushes", "flushes_untargeted", "flushes_coalesced",
@@ -12352,6 +12354,65 @@ class EchoAttributionLoaderTests(unittest.TestCase):
                                 "windows"])
         self.assertEqual((len(args.echo_attribution), args.echo_control, args.echo_platform),
                          (2, [["C5", "c"]], "windows"))
+
+
+
+@unittest.skipUnless(hasattr(os, "mkfifo"), "named pipes are POSIX only")
+class ScratchKeepingTests(unittest.TestCase):
+    def test_a_go_fifo_is_recorded_by_name_and_not_copied(self) -> None:
+        # The harness releases a POSIX role through a FIFO at go/<role>. Keeping the scratch must not read
+        # or copy it (copytree fails on a named pipe); it is listed by name and the rest is still kept.
+        with tempfile.TemporaryDirectory() as temp:
+            scratch, kept = Path(temp) / "scratch", Path(temp) / "kept"
+            for name in ("result.json", "logs/sonicterm.log.2026-10-26", "go/1.port"):
+                (scratch / name).parent.mkdir(parents=True, exist_ok=True)
+                (scratch / name).write_text("x", encoding="utf-8")
+            os.mkfifo(scratch / "go" / "0")
+            perf._keep_scratch(scratch, kept)
+            for name in ("result.json", "logs/sonicterm.log.2026-10-26", "go/1.port"):
+                self.assertTrue((kept / name).is_file(), name)
+            self.assertFalse(os.path.lexists(kept / "go" / "0"), "the FIFO itself is never copied")
+            record = json.loads((kept / perf.SPECIAL_FILES_RECORD).read_text(encoding="utf-8"))
+            self.assertEqual(record, [{"path": "go/0", "kind": "fifo"}])
+
+
+
+class OutputDiagnosticTests(unittest.TestCase):
+    def problems(self, **fields):
+        """What validate_result reports for one transition phase carrying `fields`, under phase kinds."""
+        result = valid_result(phases=[transition_phase(40.0, **fields)])
+        return perf.validate_result(result, HARNESS_HASH, 0, phase_kinds=1)
+
+    def test_output_diagnostics_are_optional_and_checked_only_when_present(self):
+        # A print phase's GO-to-first-output and first-output-to-present diagnostics may be absent on either ref,
+        # which is never a schema problem; when present they must be finite and non-negative.
+        self.assertEqual(self.problems(), [])
+        self.assertEqual(self.problems(go_to_first_output_ms=8.5, first_output_to_present_ms=4.0), [])
+        self.assertEqual(self.problems(go_to_first_output_ms=8.5), [])
+        self.assertIn("phase 'image' field go_to_first_output_ms has the wrong type",
+                      self.problems(go_to_first_output_ms=-1.0))
+        self.assertIn("phase 'image' field first_output_to_present_ms has the wrong type",
+                      self.problems(first_output_to_present_ms=float("nan")))
+
+    def test_output_diagnostics_are_rows_with_their_run_count_and_never_metrics(self):
+        # The comparison shows each diagnostic with how many accepted runs recorded it; a run without it is
+        # counted, never failed, and no diagnostic becomes a run metric, so no flag or regression list reads it.
+        base = side_with(kind_outcome(transition_phase(40.0, go_to_first_output_ms=8.0, first_output_to_present_ms=5.0),
+                                      evidence="/e/01-base"),
+                         kind_outcome(transition_phase(42.0), evidence="/e/04-base"))
+        head = side_with(kind_outcome(transition_phase(30.0, go_to_first_output_ms=6.0), evidence="/e/02-head"),
+                         kind_outcome(transition_phase(31.0, go_to_first_output_ms=7.0), evidence="/e/03-head"))
+        rows = perf.comparison_rows("S8/default", base, head)
+        self.assertEqual(row_for(rows, "image GO to first output (ms)")[2:4],
+                         ["8.00 (8.00–8.00), recorded in 1 of 2 runs", "6.50 (6.00–7.00), recorded in 2 of 2 runs"])
+        self.assertEqual(row_for(rows, "image first output to present (ms)")[2:4],
+                         ["5.00 (5.00–5.00), recorded in 1 of 2 runs", "n/a, recorded in 0 of 2 runs"])
+        for outcome in base.outcomes + head.outcomes:
+            metric_names = [name for name, _unit, _kind in perf.run_metrics(outcome)]
+            self.assertFalse(any("first output" in name for name in metric_names), metric_names)
+        plain = side_with(kind_outcome(transition_phase(40.0), evidence="/e/01-base"))
+        names = [row[1] for row in perf.comparison_rows("S8/default", plain, plain)]
+        self.assertFalse(any("first output" in name for name in names), "no run recorded one, so no row")
 
 
 if __name__ == "__main__":

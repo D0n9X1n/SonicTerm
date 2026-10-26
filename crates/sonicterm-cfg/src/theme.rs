@@ -250,6 +250,24 @@ impl Theme {
         ]
     }
 
+    /// Same as [`Self::load_name_or_default`], also returning the strict load's error, so startup
+    /// can report its fallback without reading the file again.
+    pub fn load_name_reporting(theme: &str, asset_dir: &Path) -> (Self, Option<anyhow::Error>) {
+        let path = Self::resolve_path(theme, asset_dir);
+        // A failed load runs startup on the default theme and keeps the error to show.
+        match Self::load_strict(&path) {
+            Ok(loaded) => (loaded, None),
+            Err(error) => {
+                tracing::warn!(
+                    target: "sonicterm-cfg",
+                    "theme TOML parse failed at {}: {error}; falling back to defaults",
+                    path.display()
+                );
+                (Self::default(), Some(error))
+            }
+        }
+    }
+
     /// Strict load of a theme from a TOML file at `path`.
     pub fn load_strict(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;

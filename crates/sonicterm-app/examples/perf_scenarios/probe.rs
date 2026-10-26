@@ -149,6 +149,10 @@ struct PhaseMeter {
     presented_frames: u64,
     redraw_requested: u64,
     dispatch_ms: Vec<f64>,
+    /// The redraw dispatches that presented a frame, in ms.
+    dispatch_presenting_ms: Vec<f64>,
+    /// The redraw dispatches that presented nothing, in ms.
+    dispatch_nonpresenting_ms: Vec<f64>,
     /// The phase's longest dispatches with their spans, bounded.
     slow_dispatches: SlowDispatches,
     present_interval_ms: Vec<f64>,
@@ -843,6 +847,11 @@ struct Probe {
     /// Windows: every pane exit before the run finished, so a pane that joins the roles later is judged.
     exited_panes: Vec<(u64, Option<bool>)>,
     go_at: Option<Instant>,
+    /// Each role's cursor (absolute row, column) when GO released it, for the first-output check.
+    go_cursors: Vec<Option<(u64, u16)>>,
+    /// The GO FIFOs written at release, held open so a role that opens its FIFO later still reads GO.
+    #[cfg(unix)]
+    go_signals: Vec<std::fs::File>,
     sentinel_roles: Vec<usize>,
     sentinel_seen: Vec<Option<Instant>>,
     /// Each role's READY row, lifetime-absolute, kept from the scan that first found it.
@@ -1022,6 +1031,8 @@ impl Probe {
         };
         match arrival {
             Arrival::Redraw => {
+                // An output event the worker suppressed still shows in the grid by the redraw that draws it.
+                self.note_first_output();
                 let kind = if is_main { Dispatch::Redraw } else { Dispatch::Native };
                 let redraw = InvocationKind::WindowEvent { redraw: true };
                 self.forward(
@@ -1061,6 +1072,10 @@ impl Probe {
     fn user_event_turn(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         if self.stage == Stage::Done {
             return;
+        }
+        if matches!(event, UserEvent::PaneOutput { .. }) {
+            // A batch was published; a role's first one after GO is the phase's output diagnostic.
+            self.note_first_output();
         }
         let unexpected = match &event {
             UserEvent::MenuAction => Some("a menu action"),
@@ -1365,6 +1380,33 @@ impl Watchdog {
     }
 }
 
+/// The GO FIFOs of a POSIX run, removed when `run` returns on any path, so nothing that later copies,
+/// archives or hashes the scratch meets a named pipe.
+#[cfg(unix)]
+struct GoFifos {
+    /// The run's scratch directory.
+    scratch: PathBuf,
+    /// How many roles the plan has; each one's `go/<role>` may be a FIFO.
+    roles: usize,
+}
+
+// Lifecycle: GoFifos unlinks each role's GO FIFO when `run` returns on any path; an open handle stays valid.
+#[cfg(unix)]
+impl Drop for GoFifos {
+    fn drop(&mut self) {
+        use std::os::unix::fs::FileTypeExt;
+        for role in 0..self.roles {
+            let marker = self.scratch.join(format!("go/{role}"));
+            let fifo =
+                std::fs::symlink_metadata(&marker).is_ok_and(|meta| meta.file_type().is_fifo());
+            if fifo {
+                // A failed removal leaves the FIFO, which the comparison's scratch copy records and skips.
+                let _ = std::fs::remove_file(&marker);
+            }
+        }
+    }
+}
+
 // Lifecycle: Watchdog disarms by dropping its sender, then joins its thread, so no abort outlives the run.
 impl Drop for Watchdog {
     fn drop(&mut self) {
@@ -1407,6 +1449,9 @@ pub(crate) fn run(request: &RunArgs, allocation_counter: Option<fn() -> u64>) ->
     // exists yet: logging starts in `prepare_scratch` and the watchdog after it.
     #[cfg(windows)]
     std::env::set_var(workload::SCRATCH_ENV, &scratch);
+    // Created before the FIFOs are, so every return below, refusals included, removes them.
+    #[cfg(unix)]
+    let _go_fifos = GoFifos { scratch: scratch.clone(), roles: plan.roles.len() };
     let prepared = match prepare_scratch(&plan, request, &scratch) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -1568,6 +1613,16 @@ fn prepare_scratch(plan: &Plan, request: &RunArgs, scratch: &Path) -> Result<Pre
         std::fs::create_dir_all(scratch.join(dir))
             .map_err(|error| format!("create {dir}: {error}"))?;
     }
+    #[cfg(unix)]
+    for role in 0..plan.roles.len() {
+        // Each role script blocks reading its GO FIFO, so GO releases it at once, with no poll.
+        let marker = scratch.join(format!("go/{role}"));
+        let made = std::process::Command::new("mkfifo").arg(&marker).status();
+        if !made.as_ref().is_ok_and(std::process::ExitStatus::success) {
+            // When: mkfifo is missing or failed, the run cannot release its roles without a poll.
+            return Err(format!("mkfifo {}: {made:?}", marker.display()));
+        }
+    }
     let config_path = scratch.join("config/sonicterm.toml");
     std::fs::write(&config_path, scratch_config_text(plan, request)?)
         .map_err(|error| format!("write the config: {error}"))?;
@@ -1662,6 +1717,8 @@ impl PhaseMeter {
             presented_frames: 0,
             redraw_requested: 0,
             dispatch_ms: Vec::new(),
+            dispatch_presenting_ms: Vec::new(),
+            dispatch_nonpresenting_ms: Vec::new(),
             slow_dispatches: SlowDispatches::default(),
             present_interval_ms: Vec::new(),
             allocations: counting.then(Vec::new),
@@ -1696,6 +1753,13 @@ impl PhaseMeter {
             self.redraw_requested += 1;
             let duration_ms = ms_between(started, ended);
             self.dispatch_ms.push(duration_ms);
+            // Each redraw is also kept by whether it presented, so a mix shift cannot move them.
+            if advanced {
+                self.dispatch_presenting_ms.push(duration_ms);
+            } else {
+                // When: the redraw advanced no presented count, it is a non-presenting dispatch.
+                self.dispatch_nonpresenting_ms.push(duration_ms);
+            }
             // The span in Unix seconds, from the phase's own start, so a log stamp can be matched to it.
             let start_unix_s =
                 self.start_unix_s + started.saturating_duration_since(self.started).as_secs_f64();
@@ -1742,8 +1806,12 @@ impl PhaseMeter {
             first_present_seq: self.present.first.map(|(_, count)| count),
             last_present_seq: self.present.last.map(|(_, count)| count),
             present_missing: self.present.missing(),
+            go_to_first_output_ms: self.present.output_diagnostics().0,
+            first_output_to_present_ms: self.present.output_diagnostics().1,
             nonpresenting_redraws: self.present.nonpresenting,
             dispatch_ms: self.dispatch_ms,
+            dispatch_presenting_ms: self.dispatch_presenting_ms,
+            dispatch_nonpresenting_ms: self.dispatch_nonpresenting_ms,
             slow_dispatches,
             dispatch_count,
             present_interval_ms: self.present_interval_ms,
@@ -1872,6 +1940,9 @@ impl Probe {
             park_entry: None,
             exited_panes: Vec::new(),
             go_at: None,
+            go_cursors: Vec::new(),
+            #[cfg(unix)]
+            go_signals: Vec::new(),
             sentinel_roles: Vec::new(),
             sentinel_seen: vec![None; roles],
             ready_rows: vec![None; roles],
@@ -2195,6 +2266,77 @@ impl Probe {
         let pane = self.role_pane(role)?;
         let parser = pane.parser.try_lock()?;
         Some(read(parser.grid()))
+    }
+
+    /// Role `role`'s cursor as (absolute row, column), read under its parser lock.
+    fn role_cursor(&self, role: usize) -> Option<(u64, u16)> {
+        let pane = self.role_pane(role)?;
+        let parser = pane.parser.lock();
+        let grid = parser.grid();
+        Some((grid.cursor_absolute_row(), grid.cursor.col))
+    }
+
+    /// Note the roles' first output after GO for the phase's diagnostics: the first dispatch at which a
+    /// role's cursor has moved from where GO found it.
+    fn note_first_output(&mut self) {
+        let awaiting = self.meter.as_ref().is_some_and(|meter| meter.present.awaits_output());
+        if !awaiting {
+            // When: no phase awaits its first output, there is nothing to time.
+            return;
+        }
+        let moved = self
+            .go_cursors
+            .iter()
+            .enumerate()
+            .any(|(role, at_go)| at_go.is_some() && self.role_cursor(role) != *at_go);
+        if !moved {
+            // When: no role's cursor moved since GO, the output so far was read before GO.
+            return;
+        }
+        if let Some(meter) = self.meter.as_mut() {
+            let offset_ms = ms_between(meter.started, Instant::now());
+            meter.present.note_output(offset_ms);
+        }
+    }
+
+    /// Release every role at GO through `release`, then stamp GO. When the phase awaits its roles' first
+    /// output, each role's cursor is read first, before any role is released, as the baseline that output
+    /// moves: a released role can print, and its worker publish, before this method returns.
+    fn release_roles(
+        &mut self,
+        awaits_output: bool,
+        mut release: impl FnMut(&mut Self, usize) -> std::io::Result<()>,
+    ) -> Result<(), String> {
+        self.go_cursors = if awaits_output {
+            (0..self.plan.roles.len()).map(|role| self.role_cursor(role)).collect()
+        } else {
+            Vec::new()
+        };
+        for role in 0..self.plan.roles.len() {
+            release(self, role)
+                .map_err(|error| format!("cannot write GO for role {role}: {error}"))?;
+        }
+        self.go_at = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Release role `role`: on Unix, write its GO FIFO, which the role script blocks reading, and hold it
+    /// open; elsewhere, connect to the port its program role waits on, then write its GO marker.
+    fn release_role(&mut self, role: usize) -> std::io::Result<()> {
+        let marker = self.scratch.join(format!("go/{role}"));
+        #[cfg(unix)]
+        {
+            // Read-write, so the open never waits for a reader and the line stays buffered for one.
+            let mut fifo = std::fs::OpenOptions::new().read(true).write(true).open(&marker)?;
+            std::io::Write::write_all(&mut fifo, b"go\n")?;
+            self.go_signals.push(fifo);
+        }
+        #[cfg(not(unix))]
+        {
+            crate::workload::connect_go(&self.scratch, role)?;
+            std::fs::write(&marker, b"")?;
+        }
+        Ok(())
     }
 
     fn role_pane(&self, role: usize) -> Option<&PaneState> {
@@ -3011,17 +3153,16 @@ impl Probe {
                 return;
             }
         }
-        if self.go_at.is_none() {
-            for role in 0..self.plan.roles.len() {
-                if let Err(error) = std::fs::write(self.scratch.join(format!("go/{role}")), b"") {
-                    self.invalidate(
-                        event_loop,
-                        format!("cannot write GO for role {role}: {error}"),
-                    );
-                    return;
-                }
+        let releasing = self.go_at.is_none();
+        let awaits_output = releasing
+            && matches!(phase.kind, scenarios::PhaseKind::Transition)
+            && matches!(phase.end, PhaseEnd::Sentinels(_));
+        if releasing {
+            if let Err(reason) = self.release_roles(awaits_output, Self::release_role) {
+                // When: a role's GO could not be written, the run cannot measure what it prints.
+                self.invalidate(event_loop, reason);
+                return;
             }
-            self.go_at = Some(Instant::now());
             tracing::info!(target: LOG_TARGET, roles = self.plan.roles.len(), "perf_scenarios GO");
         }
         tracing::info!(target: LOG_TARGET, phase = phase.name, "perf_scenarios phase started");
@@ -3035,6 +3176,16 @@ impl Probe {
             counters_start,
             phase.updates,
         ));
+        if awaits_output {
+            // When: this phase released the roles to print, it records their first output after GO against
+            // the cursors `release_roles` read, as diagnostics; its first present stays the first after GO.
+            let go_lead_ms = self.go_at.map_or(0.0, |go_at| {
+                self.meter.as_ref().map_or(0.0, |meter| ms_between(go_at, meter.started))
+            });
+            if let Some(meter) = self.meter.as_mut() {
+                meter.present.await_output(go_lead_ms);
+            }
+        }
         self.sentinel_roles = match &phase.end {
             PhaseEnd::Sentinels(roles) => roles.clone(),
             _ => Vec::new(),

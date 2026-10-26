@@ -214,7 +214,7 @@ fn main() -> Result<std::process::ExitCode> {
     }
 
     let mut cfg_warnings: Vec<String> = Vec::new();
-    let config = load_config(&mut cfg_warnings);
+    let (config, config_error) = load_config(&mut cfg_warnings);
     let log_cfg = config.logging.clone();
     sonicterm_logging::cleanup_log_files(&sonicterm_logging::log_dir(), &log_cfg);
     let _log_guard = sonicterm_logging::init(&log_cfg).ok();
@@ -238,8 +238,13 @@ fn main() -> Result<std::process::ExitCode> {
         })
         .map(|_| ())
         .unwrap_or_else(|error| tracing::warn!("failed to spawn artifact cleanup: {error}"));
-    let theme = load_theme(&config.theme);
-    let keymap = load_keymap(&config.keymap);
+    let (theme, theme_error) = load_theme(&config.theme);
+    let (keymap, keymap_error) = load_keymap(&config.keymap);
+    let startup_loads = sonicterm_app::StartupLoads {
+        config: config_error,
+        theme: theme_error,
+        keymap: keymap_error,
+    };
     // Initial load is infallible; hot-reload loaders use
     // strict variants so user-visible errors are surfaced after startup.
     let theme_loader: sonicterm_app::ThemeLoader =
@@ -299,6 +304,7 @@ fn main() -> Result<std::process::ExitCode> {
         );
         let mut shell = sonicterm_app::shell::MacShell::new(machine, theme, config, keymap)
             .with_process_privilege(process_privilege)
+            .with_startup_loads(startup_loads)
             .with_asset_loaders(theme_loader, keymap_loader)
             .with_os_drag_sink(os_drag_mac::MacOsDragSink::arc())
             .with_os_drag_backend(tab_drag_os::MacOsTabDragBackend::boxed())
@@ -330,12 +336,12 @@ fn main() -> Result<std::process::ExitCode> {
         // macOS via Cargo.toml's `[target]` table; this branch only
         // exists so `cargo check --workspace` on non-Mac hosts still
         // type-checks the bin. Unused bindings:
-        let _ = (theme, config, keymap, theme_loader, keymap_loader);
+        let _ = (theme, config, keymap, theme_loader, keymap_loader, startup_loads);
         unreachable!("sonicterm-mac binary built for non-macOS target")
     }
 }
 
-fn load_config(warnings: &mut Vec<String>) -> Config {
+fn load_config(warnings: &mut Vec<String>) -> (Config, Option<anyhow::Error>) {
     match Config::default_path() {
         Some(path) => {
             if let Err(error) = Config::ensure_user_config_file(&path) {
@@ -344,18 +350,18 @@ fn load_config(warnings: &mut Vec<String>) -> Config {
                     path.display()
                 ));
             }
-            Config::load_or_default_collecting(&path, warnings)
+            Config::load_or_default_reporting(&path, warnings)
         }
-        None => Config::default(),
+        None => (Config::default(), None),
     }
 }
 
-fn load_theme(name: &str) -> Theme {
-    Theme::load_name_or_default(name, &asset_dir())
+fn load_theme(name: &str) -> (Theme, Option<anyhow::Error>) {
+    Theme::load_name_reporting(name, &asset_dir())
 }
 
-fn load_keymap(name: &str) -> Keymap {
-    Keymap::load_name_or_default(name, &asset_dir())
+fn load_keymap(name: &str) -> (Keymap, Option<anyhow::Error>) {
+    Keymap::load_name_reporting(name, &asset_dir())
 }
 
 #[cfg(test)]

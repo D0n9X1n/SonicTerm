@@ -2633,6 +2633,8 @@ SLOW_DISPATCH_KEYS = ("start_unix_s", "end_unix_s", "ms")
 _PHASE_FIELDS = {
     "cpu_user_s": _is_number, "cpu_system_s": _is_number, "presented_frames": _is_int,
     "redraw_requested": _is_int, "dispatch_ms": _numbers, "present_interval_ms": _numbers,
+    "dispatch_presenting_ms": _numbers, "dispatch_nonpresenting_ms": _numbers,
+    "go_to_first_output_ms": _finite_non_negative, "first_output_to_present_ms": _finite_non_negative,
     "allocations_per_frame": lambda value: value is None or _numbers(value),
     "slow_dispatches": lambda value: isinstance(value, list) and all(
         isinstance(item, dict) and all(_finite_non_negative(item.get(key)) for key in SLOW_DISPATCH_KEYS)
@@ -2684,7 +2686,11 @@ FRAME_COUNTER_FIELDS = {
              # selection counts, the cells they read and `History: trimmed` appearances; App counters, so a
              # base older than them shows n/a.
              "status_line_samples", "status_line_wakes", "status_line_redraws", "status_line_sel_counts",
-             "status_line_sel_cells", "status_line_history_shows"),
+             "status_line_sel_cells", "status_line_history_shows",
+             # Full status line passes (0 while the strip is hidden and unheard) and the main window's
+             # startup step times from the wgpu adapter to its first pane; a base older shows n/a.
+             "status_line_full_passes", "startup_window_ns", "startup_adapter_install_ns", "startup_renderer_ns",
+             "startup_load_checks_ns", "startup_pane_spawn_ns"),
             # fg_probe_* is the retired event-loop probe, a real 0 on a head that probes on the worker.
             ("about_to_wait_ms", "user_event_ms", "new_events_ms", "ui_parser_wait_us", "fg_probe_us",
              "fg_worker_probe_us")),
@@ -2902,7 +2908,7 @@ def _phase_duration_problems(phase: dict) -> list[str]:
     """A phase-kinds phase's durations: every dispatch and present interval and both CPU times finite and at least
     zero, and its end no earlier than its start. A harness without the capability keeps its looser checks."""
     name, problems = phase.get("name"), []
-    for key in ("dispatch_ms", "present_interval_ms"):
+    for key in ("dispatch_ms", "dispatch_presenting_ms", "dispatch_nonpresenting_ms", "present_interval_ms"):
         values = phase.get(key)
         if isinstance(values, list) and not all(_finite_non_negative(value) for value in values):
             problems.append(f"phase {name!r} {key} holds a value that is not finite and non-negative "
@@ -5436,22 +5442,62 @@ def format_guard_verdict(verdict: Mapping[str, object]) -> str:
             f"{verdict['observed_overlap_sections']} sections, {verdict['observed_overlapping_spans']} spans")
 
 
+# The kept scratch's list of special files (the GO FIFOs a POSIX run releases its roles through, or any
+# socket or device) left out of the copy, by path relative to the scratch and kind.
+SPECIAL_FILES_RECORD = "special-files.json"
+
+
+def _special_kind(path: Path) -> str | None:
+    """The kind of a special file at `path`, which cannot be copied: `fifo`, `socket` or `device`; else None."""
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return None
+    if stat.S_ISFIFO(mode):
+        return "fifo"
+    if stat.S_ISSOCK(mode):
+        return "socket"
+    if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+        return "device"
+    return None
+
+
 def _keep_scratch(scratch: Path, kept: Path) -> None:
     """Copy a run's result, logs and records into its evidence; the scratch's fixtures are left out.
 
     `progress.json`, which the harness rewrites after each completed phase, is kept so a killed run
     still shows its earlier phases; it is evidence only, never read as a result or for the table.
+    A special file is never opened or copied (copytree fails on a named pipe, and reading one blocks); it
+    is listed by name in `SPECIAL_FILES_RECORD`, written only when there is one.
     """
     kept.mkdir()
+    skipped: list[dict[str, str]] = []
+
+    def leave_special(directory: str, names: list[str]) -> set[str]:
+        """copytree's ignore hook: record and leave out each special file among `names`."""
+        left = set()
+        for name in names:
+            kind = _special_kind(Path(directory) / name)
+            if kind is not None:
+                left.add(name)
+                skipped.append({"path": (Path(directory) / name).relative_to(scratch).as_posix(), "kind": kind})
+        return left
+
     for name in ("result.json", "progress.json", "harness.pid", "logs", "sessions", "acks", "checkpoints", "go",
                  GUARD_SIDECAR_DIR):
         source = scratch / name
         if source.is_symlink():
             continue
-        if source.is_dir():
-            shutil.copytree(source, kept / name, symlinks=True)
+        kind = _special_kind(source)
+        if kind is not None:
+            skipped.append({"path": name, "kind": kind})
+        elif source.is_dir():
+            shutil.copytree(source, kept / name, symlinks=True, ignore=leave_special)
         elif source.is_file():
             shutil.copy2(source, kept / name)
+    if skipped:
+        record = sorted(skipped, key=lambda entry: entry["path"])
+        (kept / SPECIAL_FILES_RECORD).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
 
 def execute_run(plan: RunPlan, host: Host, evidence: Path) -> RunOutcome:
@@ -5764,7 +5810,11 @@ def run_metrics(outcome: RunOutcome) -> dict[tuple[str, str, str], object]:
             metrics[(f"{name} redraws requested", "per s", "run")] = phase["redraw_requested"] / wall_s
         if _is_number(phase.get("cpu_user_s")) and _is_number(phase.get("cpu_system_s")):
             metrics[(f"{name} CPU", "s", "run")] = phase["cpu_user_s"] + phase["cpu_system_s"]
-        for key, label in (("dispatch_ms", "dispatch"), ("present_interval_ms", "present interval")):
+        # The pooled dispatch rows stay; the presenting and non-presenting ones are each one cluster, so a
+        # shift in the presenting share moves neither (a harness without them shows n/a).
+        for key, label in (("dispatch_ms", "dispatch"), ("dispatch_presenting_ms", "presenting dispatch"),
+                           ("dispatch_nonpresenting_ms", "non-presenting dispatch"),
+                           ("present_interval_ms", "present interval")):
             if _numbers(phase.get(key)):
                 metrics[(f"{name} {label}", "ms", "frame")] = phase[key]
         if _numbers(phase.get("allocations_per_frame")):
@@ -6342,6 +6392,43 @@ def transition_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str
     return rows
 
 
+# A print phase's optional output diagnostics: ms from GO to its roles' first output, and from that output to the
+# first frame presented after it. Either may be absent on either ref; the table shows how many runs recorded each,
+# and they are never run metrics, so no flag or regression list reads them.
+OUTPUT_DIAGNOSTICS = (("go_to_first_output_ms", "GO to first output"),
+                      ("first_output_to_present_ms", "first output to present"))
+
+
+def _diagnostic_cell(side: SideRuns, name: str, key: str) -> tuple[str, float | None]:
+    """A side's cell for diagnostic `key` of transition `name`: the median and range of the accepted runs that
+    recorded it and how many did, and the median for the change column."""
+    if side.blocked or side.failed or not side.outcomes:
+        return _missing_cell(side), None
+    values = [phase[key] for outcome in side.outcomes
+              if (phase := _transition_phase(outcome, name)) is not None and _finite_non_negative(phase.get(key))]
+    summary = run_summary(values)
+    text = "n/a" if summary is None else f"{summary.median:.2f} ({summary.minimum:.2f}–{summary.maximum:.2f})"
+    return f"{text}, recorded in {len(values)} of {len(side.outcomes)} runs", None if summary is None else summary.median
+
+
+def diagnostic_rows(label: str, base: SideRuns, head: SideRuns) -> list[list[str]]:
+    """One row per output diagnostic any accepted run of either side recorded, with each side's run count."""
+    rows = []
+    for key, title in OUTPUT_DIAGNOSTICS:
+        names: list[str] = []
+        for side in (base, head):
+            for outcome in side.outcomes:
+                for phase in (outcome.result or {}).get("phases") or []:
+                    if isinstance(phase, dict) and phase.get("kind") == "transition" and key in phase \
+                            and phase.get("name") not in names:
+                        names.append(phase.get("name"))
+        for name in names:
+            (base_cell, base_median), (head_cell, head_median) = (_diagnostic_cell(base, name, key),
+                                                                  _diagnostic_cell(head, name, key))
+            rows.append([label, f"{name} {title} (ms)", base_cell, head_cell, percent_change(base_median, head_median)])
+    return rows
+
+
 # --- Candidate flags ------------------------------------------------------------------------
 
 # Bumped whenever a flag metric, statistic or rule changes; perf-flags.py refuses runs whose versions differ.
@@ -6473,6 +6560,7 @@ def comparison_rows(label: str, base: SideRuns, head: SideRuns,
     rows = _rows(label, base, head, run_metrics, include)
     if include is None:
         rows.extend(transition_rows(label, base, head))
+        rows.extend(diagnostic_rows(label, base, head))
     coverage = [latency_coverage(side) for side in (base, head)]
     if include is None and any(coverage):
         cells = [_missing_cell(side) if side.blocked or pair is None else

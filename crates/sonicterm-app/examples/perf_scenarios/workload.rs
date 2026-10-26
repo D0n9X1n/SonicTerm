@@ -645,7 +645,7 @@ pub(crate) fn role_script(plan: &Plan, scratch: &str, nonce: &str) -> String {
         r#"mv "$scratch/sessions/$role.json.tmp" "$scratch/sessions/$role.json""#.to_owned(),
         r#"while [ ! -e "$scratch/acks/$role" ]; do sleep 0.05; done"#.to_owned(),
         r#"printf 'READY %s\n' "$role""#.to_owned(),
-        r#"while [ ! -e "$scratch/go/$role" ]; do sleep 0.05; done"#.to_owned(),
+        r#"if [ -p "$scratch/go/$role" ]; then read -r _go < "$scratch/go/$role"; else while [ ! -e "$scratch/go/$role" ]; do sleep 0.05; done; fi"#.to_owned(),
         r#"case "$role" in"#.to_owned(),
     ] {
         script.push_str(&line);
@@ -957,6 +957,15 @@ pub(crate) trait ProgramHost {
     fn sleep(&mut self, duration: Duration) -> std::io::Result<()>;
     /// Whether `path` exists.
     fn exists(&self, path: &Path) -> bool;
+    /// Prepare to be released by GO, before READY is printed; a host that cannot block polls instead.
+    fn arm_go(&mut self, _scratch: &Path, _role: usize) {}
+    /// Wait until GO releases the role whose marker is `marker`.
+    fn wait_go(&mut self, marker: &Path) -> Result<(), String>
+    where
+        Self: Sized,
+    {
+        wait_for(self, marker)
+    }
     /// Runs the idle shell at the fixed prompt and waits for it to exit.
     fn run_shell(&mut self) -> std::io::Result<()>;
 }
@@ -1020,11 +1029,12 @@ fn run_role(
     };
     write_session(&run)?;
     wait_for(host, &scratch.join(format!("acks/{}", run.role)))?;
+    host.arm_go(scratch, run.role);
     writeln!(out, "{}", ready_line(run.role))
         .and_then(|()| out.flush())
         .map_err(|error| format!("write READY: {error}"))?;
     // Nothing is printed until GO, so the READY row is the last row before the workload.
-    wait_for(host, &scratch.join(format!("go/{}", run.role)))?;
+    host.wait_go(&scratch.join(format!("go/{}", run.role)))?;
     // An unplanned pane neither prints nor prompts, like the role script's `*)` branch.
     let steps = plan
         .roles
@@ -1063,6 +1073,21 @@ fn write_session(run: &RoleRun<'_>) -> Result<(), String> {
     std::fs::write(&temporary, record)
         .and_then(|()| std::fs::rename(&temporary, &path))
         .map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+/// Connect to the port role `role`'s program published when it armed GO, releasing its accept; a role
+/// that published none polls for the marker, so there is nothing to connect to.
+#[cfg(windows)]
+pub(crate) fn connect_go(scratch: &Path, role: usize) -> std::io::Result<()> {
+    let Ok(text) = std::fs::read_to_string(scratch.join(format!("go/{role}.port"))) else {
+        // When: the role published no port, it polls for the marker instead.
+        return Ok(());
+    };
+    let port: u16 = text
+        .trim()
+        .parse()
+        .map_err(|error| std::io::Error::other(format!("GO port {text:?}: {error}")))?;
+    std::net::TcpStream::connect(("127.0.0.1", port)).map(drop)
 }
 
 /// Polls `path` every 50 ms until it exists.
@@ -1157,7 +1182,10 @@ fn run_step(
 
 /// The real host: the system clock, real sleeps, the file system and `cmd.exe`.
 #[cfg(windows)]
-struct NativeHost;
+struct NativeHost {
+    /// The loopback listener GO connects to, bound by `arm_go`; `None` waits for the marker by poll.
+    go_listener: Option<std::net::TcpListener>,
+}
 
 #[cfg(windows)]
 impl ProgramHost for NativeHost {
@@ -1176,6 +1204,37 @@ impl ProgramHost for NativeHost {
         path.exists()
     }
 
+    /// Bind a loopback port and publish it beside the GO marker, so GO releases a blocking accept.
+    fn arm_go(&mut self, scratch: &Path, role: usize) {
+        let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", 0)) else {
+            // When: no loopback port can be bound, GO is awaited by poll.
+            return;
+        };
+        let Ok(port) = listener.local_addr().map(|address| address.port()) else {
+            // When: the bound port cannot be read, GO is awaited by poll.
+            return;
+        };
+        let staged = scratch.join(format!("go/{role}.port.tmp"));
+        let published = std::fs::write(&staged, port.to_string())
+            .and_then(|()| std::fs::rename(&staged, scratch.join(format!("go/{role}.port"))));
+        if published.is_ok() {
+            // When: the port file is in place, the harness connects to it before writing the marker.
+            self.go_listener = Some(listener);
+        }
+    }
+
+    /// Block in accept until GO connects; a marker already written (a replay) releases at once.
+    fn wait_go(&mut self, marker: &Path) -> Result<(), String> {
+        match self.go_listener.take() {
+            Some(_) if marker.exists() => Ok(()),
+            Some(listener) => listener
+                .accept()
+                .map(|_| ())
+                .map_err(|error| format!("wait for GO on {}: {error}", marker.display())),
+            None => wait_for(self, marker),
+        }
+    }
+
     /// `cmd.exe /d`, skipping AutoRun commands, at `PROMPT=perf$$$S`, on the inherited console.
     fn run_shell(&mut self) -> std::io::Result<()> {
         let shell = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
@@ -1190,7 +1249,12 @@ impl ProgramHost for NativeHost {
 pub(crate) fn run_program(scratch: &Path) -> u8 {
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
-    run_steps(scratch, &mut NativeHost, &mut stdout.lock(), &mut stderr.lock())
+    run_steps(
+        scratch,
+        &mut NativeHost { go_listener: None },
+        &mut stdout.lock(),
+        &mut stderr.lock(),
+    )
 }
 
 /// The three row-run workloads' screens: a fixed bold title on row 1, 68 patterned body rows

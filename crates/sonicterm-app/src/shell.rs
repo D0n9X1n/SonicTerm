@@ -114,6 +114,7 @@ struct ShellRunner {
     on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
     default_handlers: Option<Box<dyn DefaultHandlerBackend>>,
     taskbar_progress: Option<Box<dyn crate::taskbar_progress::TaskbarProgressBackend>>,
+    startup_loads: Option<crate::app::StartupLoads>,
 }
 
 impl ShellRunner {
@@ -135,6 +136,7 @@ impl ShellRunner {
             on_window_ready: None,
             default_handlers: None,
             taskbar_progress: None,
+            startup_loads: None,
         }
     }
 
@@ -163,6 +165,9 @@ impl ShellRunner {
         }
         app.theme_loader = self.theme_loader;
         app.keymap_loader = self.keymap_loader;
+        if let Some(loads) = self.startup_loads {
+            app.set_startup_loads(loads);
+        }
         if let Some(sink) = self.os_drag_sink {
             app.os_drag_sink = Some(sink);
         }
@@ -301,6 +306,14 @@ impl MacShell {
         self
     }
 
+    /// Pass the App the outcomes of the startup config, theme and keymap loads, so the status line
+    /// shows a fallback without reading those files again.
+    #[must_use]
+    pub fn with_startup_loads(mut self, loads: crate::app::StartupLoads) -> Self {
+        self.runner.startup_loads = Some(loads);
+        self
+    }
+
     /// Install loaders used by live theme and keymap reload.
     #[must_use]
     pub fn with_asset_loaders(
@@ -412,6 +425,14 @@ impl WindowsShell {
         self
     }
 
+    /// Pass the App the outcomes of the startup config, theme and keymap loads, so the status line
+    /// shows a fallback without reading those files again.
+    #[must_use]
+    pub fn with_startup_loads(mut self, loads: crate::app::StartupLoads) -> Self {
+        self.runner.startup_loads = Some(loads);
+        self
+    }
+
     /// Install loaders used by live theme and keymap reload.
     #[must_use]
     pub fn with_asset_loaders(
@@ -513,6 +534,14 @@ impl LinuxShell {
     #[must_use]
     pub fn with_process_privilege(mut self, privilege: ProcessPrivilege) -> Self {
         self.runner.process_privilege = privilege;
+        self
+    }
+
+    /// Pass the App the outcomes of the startup config, theme and keymap loads, so the status line
+    /// shows a fallback without reading those files again.
+    #[must_use]
+    pub fn with_startup_loads(mut self, loads: crate::app::StartupLoads) -> Self {
+        self.runner.startup_loads = Some(loads);
         self
     }
 

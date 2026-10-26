@@ -868,6 +868,7 @@ impl App {
             self.config.appearance.software_render_mode,
         ));
         let attrs = self.native_drop_attributes(attrs);
+        let window_started = std::time::Instant::now();
         let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -893,7 +894,10 @@ impl App {
         // deliver preedit + commit events instead of raw keystrokes.
         window.set_ime_allowed(true);
         // A dormant adapter must exist before the window is first shown.
+        self.note_startup(window_started, |spans| &mut spans.window_ns);
+        let install_started = std::time::Instant::now();
         self.install_accessibility(event_loop, &window);
+        self.note_startup(install_started, |spans| &mut spans.adapter_install_ns);
         super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
         let dpi_scale = f64::from(window_dpi(&window));
 
@@ -919,6 +923,7 @@ impl App {
             }
         }
 
+        let renderer_started = std::time::Instant::now();
         let renderer_result = GpuRenderer::new(
             window.clone(),
             event_loop,
@@ -1048,6 +1053,7 @@ impl App {
                 Err(error) => tracing::warn!("on_window_ready: no raw handle: {error}"),
             }
         }
+        self.note_startup(renderer_started, |spans| &mut spans.renderer_ns);
         renderer.set_titlebar_inset(0.0);
         let _ = super::apply_terminal_window_minimum(&window, &mut renderer);
         // Apply the user's `tab_close_button_color` from sonicterm.toml
@@ -1063,7 +1069,9 @@ impl App {
         // the authoritative source for `main_window_id`.
         self.retire_previous_main();
         self.main_window_id = Some(main_id);
+        let checks_started = std::time::Instant::now();
         self.record_startup_load_errors();
+        self.note_startup(checks_started, |spans| &mut spans.load_checks_ns);
         // Both pacing clocks start at one instant, so neither paces a new window differently.
         let created_at = std::time::Instant::now();
         let shadow = super::WindowState {
@@ -1134,7 +1142,9 @@ impl App {
         if let Some(smoke) = self.runtime_smoke.as_mut() {
             smoke.begin_pty();
         }
+        let spawn_started = std::time::Instant::now();
         self.seed_initial_tabs();
+        self.note_startup(spawn_started, |spans| &mut spans.pane_spawn_ns);
         if self.runtime_smoke.is_some()
             && (!self.smoke_check_native_title(&window, "#1 SonicTerm")
                 || !self.smoke_exercise_window_name(main_id))

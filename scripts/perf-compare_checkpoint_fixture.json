@@ -57,6 +57,8 @@
               1.0,
               2.0
             ],
+            "dispatch_nonpresenting_ms": [],
+            "dispatch_presenting_ms": [],
             "end_unix_s": 1000.0,
             "first_present_ms": 16.6,
             "first_present_seq": 1,
@@ -147,6 +149,8 @@
               1.0,
               2.0
             ],
+            "dispatch_nonpresenting_ms": [],
+            "dispatch_presenting_ms": [],
             "end_unix_s": 1000.0,
             "first_present_ms": 16.6,
             "first_present_seq": 1,
@@ -240,6 +244,8 @@
               1.0,
               2.0
             ],
+            "dispatch_nonpresenting_ms": [],
+            "dispatch_presenting_ms": [],
             "end_unix_s": 1000.0,
             "first_present_ms": 16.6,
             "first_present_seq": 1,
@@ -326,6 +332,8 @@
               1.0,
               2.0
             ],
+            "dispatch_nonpresenting_ms": [],
+            "dispatch_presenting_ms": [],
             "end_unix_s": 1000.0,
             "first_present_ms": 16.6,
             "first_present_seq": 1,
@@ -412,6 +420,8 @@
               1.0,
               2.0
             ],
+            "dispatch_nonpresenting_ms": [],
+            "dispatch_presenting_ms": [],
             "end_unix_s": 1000.0,
             "first_present_ms": 16.6,
             "first_present_seq": 1,
@@ -496,6 +506,8 @@
               1.0,
               2.0
             ],
+            "dispatch_nonpresenting_ms": [],
+            "dispatch_presenting_ms": [],
             "end_unix_s": 1000.0,
             "first_present_ms": 16.6,
             "first_present_seq": 1,

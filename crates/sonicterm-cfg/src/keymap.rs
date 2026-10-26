@@ -229,6 +229,22 @@ impl Keymap {
         Self::load_strict(&path)
     }
 
+    /// Same as [`Self::load_name_or_default`], also returning the strict load's error, so startup
+    /// can report its fallback without reading the file again.
+    pub fn load_name_reporting(keymap: &str, asset_dir: &Path) -> (Self, Option<anyhow::Error>) {
+        // A failed load runs startup on the platform defaults and keeps the error to show.
+        match Self::load_name_or_path(keymap, asset_dir) {
+            Ok(loaded) => (loaded, None),
+            Err(error) => {
+                tracing::warn!(
+                    target: "sonicterm-cfg",
+                    "keymap {keymap:?} failed: {error:#}; falling back to platform defaults"
+                );
+                (Self::default(), Some(error))
+            }
+        }
+    }
+
     /// Infallible name/path loader. Falls back to bundled platform default.
     pub fn load_name_or_default(keymap: &str, asset_dir: &Path) -> Self {
         match Self::load_name_or_path(keymap, asset_dir) {

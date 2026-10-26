@@ -665,6 +665,28 @@ impl Config {
         }
     }
 
+    /// Same as [`Self::load_or_default_collecting`], also returning the strict load's error, so
+    /// startup can report its fallback without reading the file again.
+    pub fn load_or_default_reporting(
+        path: &Path,
+        warnings: &mut Vec<String>,
+    ) -> (Self, Option<anyhow::Error>) {
+        // When: `load_strict(path)` errors, startup runs on defaults and keeps the error to show.
+        match Self::load_strict(path) {
+            Ok(cfg) => {
+                warnings.extend(cfg.status_line.unknown_keys_warning());
+                (cfg, None)
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "config TOML parse failed at {}: {error}; falling back to defaults",
+                    path.display()
+                ));
+                (Self::default(), Some(error))
+            }
+        }
+    }
+
     /// Persist runtime font size and weight without rewriting unrelated TOML.
     ///
     /// This validates and reparses the current disk document before atomically

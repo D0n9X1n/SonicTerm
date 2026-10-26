@@ -818,6 +818,8 @@ pub(crate) struct AppFrameCounters {
     pub(crate) hover: HoverCounters,
     /// Status line samples, timer wakes and strip-only redraw requests.
     pub(crate) status_line: StatusLineCounters,
+    /// The main window's startup step times.
+    pub(crate) startup: StartupSpans,
 }
 
 /// Status line work on the event-loop thread, cumulative for the App's lifetime.
@@ -849,6 +851,24 @@ pub(crate) struct StatusLineCounters {
     pub(crate) taskbar_deliveries: u64,
     /// Accessibility trees sent; stays 0 while no assistive technology is connected.
     pub(crate) tree_builds: u64,
+    /// Syncs that ran the full per-window pass; stays 0 while the strip is hidden and unheard.
+    pub(crate) full_passes: u64,
+}
+
+/// Time the main window's startup steps took between the wgpu adapter and its first pane, in ns, so
+/// a startup regression in that interval names its step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StartupSpans {
+    /// Creating the native window.
+    pub(crate) window_ns: u64,
+    /// Installing the dormant accessibility adapter.
+    pub(crate) adapter_install_ns: u64,
+    /// Creating the renderer, its surface and its font stacks.
+    pub(crate) renderer_ns: u64,
+    /// Recording the startup load failures for the status line.
+    pub(crate) load_checks_ns: u64,
+    /// Seeding the first tab and launching its pane.
+    pub(crate) pane_spawn_ns: u64,
 }
 
 /// URL and path detection work on the event-loop thread, cumulative for the App's lifetime.
@@ -916,6 +936,7 @@ impl AppFrameCounters {
             correlation: super::guard_correlation::GuardCorrelation::new(),
             hover: HoverCounters::default(),
             status_line: StatusLineCounters::default(),
+            startup: StartupSpans::default(),
         }
     }
 
@@ -1003,6 +1024,19 @@ impl super::App {
         if let Some(counters) = self.frame_counters.as_mut() {
             // The gate is on, so the status line work is counted.
             update(&mut counters.status_line);
+        }
+    }
+
+    /// Add the time since `started` to the startup step `step` picks, when the gate is on.
+    pub(super) fn note_startup(
+        &mut self,
+        started: Instant,
+        step: impl FnOnce(&mut StartupSpans) -> &mut u64,
+    ) {
+        if let Some(counters) = self.frame_counters.as_mut() {
+            // The gate is on, so the step's time is recorded.
+            let elapsed_ns = Instant::now().saturating_duration_since(started).as_nanos();
+            *step(&mut counters.startup) += u64::try_from(elapsed_ns).unwrap_or(u64::MAX);
         }
     }
 
@@ -1674,6 +1708,12 @@ impl AppFrameCounters {
             ("program_toast_redraws", self.status_line.program_toast_redraws),
             ("taskbar_progress_deliveries", self.status_line.taskbar_deliveries),
             ("status_line_tree_builds", self.status_line.tree_builds),
+            ("status_line_full_passes", self.status_line.full_passes),
+            ("startup_window_ns", self.startup.window_ns),
+            ("startup_adapter_install_ns", self.startup.adapter_install_ns),
+            ("startup_renderer_ns", self.startup.renderer_ns),
+            ("startup_load_checks_ns", self.startup.load_checks_ns),
+            ("startup_pane_spawn_ns", self.startup.pane_spawn_ns),
         ] {
             record.push_count(name, value);
         }

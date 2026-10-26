@@ -198,6 +198,11 @@ pub(crate) struct StatusLineState {
     held: HashMap<u64, HeldWatch>,
     /// Input noted from a shared-borrow path (key encoding), recorded at the next sync.
     deferred_input: std::cell::Cell<Option<(WindowId, InputState)>>,
+    /// The last full pass showed the strip or served a reader, so a hidden, unheard sync still
+    /// owes one pass to take that down. `false` at start: nothing has been set up yet.
+    full_sync_owed: bool,
+    /// A pane retired since the last sync, so the per-pane records are pruned once.
+    pub(super) panes_retired: bool,
 }
 
 /// One window's latest input refusal, failure or block; it retains no input bytes.
@@ -1166,6 +1171,17 @@ impl App {
     /// window whose strip pixels changed.
     pub(super) fn sync_status_line(&mut self, now: Instant) -> Option<Instant> {
         self.apply_status_line_config();
+        if std::mem::take(&mut self.status_line.panes_retired) {
+            // A pane retired since the last sync, so its per-pane records go now, shown or not.
+            self.forget_retired_panes();
+        }
+        if self.status_line_settled_hidden() {
+            // When: `status_line_settled_hidden()` holds, the sync has nothing to change; hidden input
+            // is never recorded, so a deferred one is dropped.
+            self.status_line.deferred_input.set(None);
+            return None;
+        }
+        self.note_status_line(|counters| counters.full_passes += 1);
         let woke = self.status_line.armed_wake.take().is_some_and(|armed| now >= armed);
         let visible = self.status_line.visible;
         let any_eligible = self.windows.values().any(|window| {
@@ -1348,13 +1364,8 @@ impl App {
             listed(StatusSegmentId::Size),
         );
         let font = font.filter(|_| font_shown);
-        let live_panes: std::collections::HashSet<u64> =
-            windows.values().flat_map(|window| window.panes.keys().copied()).collect();
-        state.history_ack.retain(|pane_id, _| live_panes.contains(pane_id));
-        state.size_seen.retain(|pane_id, _| live_panes.contains(pane_id));
+        // Per-pane records are pruned when a pane retires (`forget_retired_panes`), not here.
         state.size_shown.retain(|window_id, _| windows.contains_key(window_id));
-        state.clip_write.retain(|pane_id, _| live_panes.contains(pane_id));
-        state.clip_log.retain(|pane_id, _| live_panes.contains(pane_id));
         let clip_hold = Duration::from_secs(state.resolved.clip.hold_secs);
         if state.clip.is_some_and(|record| now >= record.last_at + clip_hold) {
             // The hold ended, so the record is dropped and nothing wakes for it again.
@@ -1634,7 +1645,31 @@ impl App {
         // sync that runs when a window turns eligible again reads every deadline that passed.
         let wake = (visible && (any_eligible || listening)).then_some(next_wake).flatten();
         self.status_line.armed_wake = wake;
+        // A shown strip or a served reader leaves state a later hidden, unheard sync must take down.
+        self.status_line.full_sync_owed = visible || listening;
         wake
+    }
+
+    /// Whether a sync has nothing to do: the strip is hidden, no assistive technology listens, no
+    /// input is held, and the last full pass already took down whatever a shown strip set up.
+    fn status_line_settled_hidden(&self) -> bool {
+        let state = &self.status_line;
+        !state.visible
+            && !state.full_sync_owed
+            && state.held.is_empty()
+            && !self.accessibility.values().any(|access| access.active)
+    }
+
+    /// Drop the per-pane records of panes no window holds any more, after a retirement.
+    fn forget_retired_panes(&mut self) {
+        let Self { windows, status_line: state, .. } = self;
+        let live =
+            |pane_id: &u64| windows.values().any(|window| window.panes.contains_key(pane_id));
+        state.history_ack.retain(|pane_id, _| live(pane_id));
+        state.size_seen.retain(|pane_id, _| live(pane_id));
+        state.clip_write.retain(|pane_id, _| live(pane_id));
+        state.clip_log.retain(|pane_id, _| live(pane_id));
+        state.held.retain(|pane_id, _| live(pane_id));
     }
 
     /// Whether the frame pass counts selections: the strip is shown and lists `sel`.

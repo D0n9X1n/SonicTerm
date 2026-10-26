@@ -1215,8 +1215,18 @@ pub(crate) struct PhaseRecord {
     pub(crate) present_missing: Option<&'static str>,
     /// Main-window redraws that did not advance the presented count.
     pub(crate) nonpresenting_redraws: u64,
+    /// Diagnostic only: ms from GO to the roles' first output, when the phase released them and saw it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) go_to_first_output_ms: Option<f64>,
+    /// Diagnostic only: ms from that output to the first frame presented after it, when one did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) first_output_to_present_ms: Option<f64>,
     /// Each `RedrawRequested` dispatch's duration, in ms.
     pub(crate) dispatch_ms: Vec<f64>,
+    /// The `dispatch_ms` values whose redraw presented a frame.
+    pub(crate) dispatch_presenting_ms: Vec<f64>,
+    /// The `dispatch_ms` values whose redraw presented nothing.
+    pub(crate) dispatch_nonpresenting_ms: Vec<f64>,
     /// The phase's SLOW_DISPATCH_LIMIT longest dispatches with their spans, longest first.
     pub(crate) slow_dispatches: Vec<SlowDispatch>,
     /// Every `RedrawRequested` dispatch of the phase, whether or not it was kept as slow.

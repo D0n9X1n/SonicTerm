@@ -120,7 +120,7 @@ fn checkpoint_and_progress_work_falls_between_phase_snapshots() {
     let snapshot = finish.find("let counters_end = self.counter_totals();").expect("end snapshot");
     assert!(snapshot < finish.find("meter.finish(counters_end, completion)").expect("finish"));
     let begin = method("begin_phase");
-    let go_write = begin.find("go/{role}").expect("GO write");
+    let go_write = begin.find("self.release_roles(").expect("GO write");
     let snapshot =
         begin.find("let counters_start = self.counter_totals();").expect("start snapshot");
     let opened = begin.find("self.meter = Some(PhaseMeter::start(").expect("meter opens");
@@ -899,6 +899,10 @@ fn fixture_result(checkpoints: Vec<CheckpointRecord>) -> RunResult {
             present_missing: None,
             nonpresenting_redraws: 10,
             dispatch_ms: vec![1.0, 2.0],
+            dispatch_presenting_ms: Vec::new(),
+            dispatch_nonpresenting_ms: Vec::new(),
+            go_to_first_output_ms: None,
+            first_output_to_present_ms: None,
             slow_dispatches: Vec::new(),
             dispatch_count: 2,
             present_interval_ms: vec![16.6],
@@ -2050,4 +2054,183 @@ fn a_status_line_drag_goes_quiet_before_its_phase_ends() {
     // Without a quiet tail (S6), the same lagging drag keeps its schedule and moves.
     let mut scheduled = lagging_drag(deadline, None);
     assert!(matches!(scheduled.next_motion(quiet_from), Some(DragMotion::Move(_))));
+}
+
+/// A meter fed `presenting` 1 ms presenting redraws, then non-presenting 0.1 ms ones up to 100.
+fn meter_with_mix(presenting: usize) -> PhaseRecord {
+    let mut meter = PhaseMeter::start(
+        "typing",
+        crate::scenarios::PhaseKind::Sustained,
+        None,
+        false,
+        None,
+        None,
+    );
+    let started = meter.started;
+    let mut frames = 0_u64;
+    for index in 0..100 {
+        let shows = index < presenting;
+        let micros = if shows { 1_000 } else { 100 };
+        let ended = started + Duration::from_micros(micros);
+        let after = frames + u64::from(shows);
+        meter.observe_dispatch(Dispatch::Redraw, started, ended, (frames, after), None);
+        frames = after;
+    }
+    meter.finish(None, crate::transition::Completion::default())
+}
+
+/// The middle value of `values`, the upper one for an even count.
+fn median_of(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[sorted.len() / 2]
+}
+
+#[test]
+fn split_dispatch_medians_hold_when_the_presenting_share_crosses_half() {
+    // The pooled median jumps between the cheap and the presenting cluster when the presenting share
+    // crosses 50%; the medians recorded per cluster do not move.
+    let mostly_cheap = meter_with_mix(49);
+    let mostly_presenting = meter_with_mix(51);
+    assert!(median_of(&mostly_cheap.dispatch_ms) < 0.2, "pooled: the cheap cluster");
+    assert!(median_of(&mostly_presenting.dispatch_ms) > 0.9, "pooled: the presenting cluster");
+    for record in [&mostly_cheap, &mostly_presenting] {
+        assert!((median_of(&record.dispatch_presenting_ms) - 1.0).abs() < 1e-9);
+        assert!((median_of(&record.dispatch_nonpresenting_ms) - 0.1).abs() < 1e-9);
+    }
+    assert_eq!(mostly_presenting.dispatch_presenting_ms.len(), 51);
+}
+
+#[test]
+fn output_published_while_go_is_released_still_starts_the_output_diagnostic() {
+    // A role can print, and its worker publish the batch, before the probe resumes from releasing GO.
+    // The first-output baseline must predate that output, so the batch is still noted as the first output
+    // and the frame drawing it times the output-to-present diagnostic.
+    let (mut probe, pane) = typing_probe("S8", "default");
+    probe.role_panes = vec![pane];
+    let main = sonicterm_app::app::synthetic_main_window_id();
+    probe
+        .release_roles(true, |released, _role| {
+            // The released role printed and its worker published the batch before the probe resumed.
+            let _ = released.app.__test_publish_pane_output(main, pane, b"printed\r\n");
+            Ok(())
+        })
+        .expect("every role released");
+    assert!(probe.go_cursors.iter().all(Option::is_some), "the role pane has a baseline");
+    let mut meter = PhaseMeter::start(
+        "print",
+        crate::scenarios::PhaseKind::Transition,
+        None,
+        false,
+        None,
+        None,
+    );
+    meter.present.await_output(0.0);
+    probe.meter = Some(meter);
+    // The batch's output event reaches the probe once it resumes; the frame drawing it presents next.
+    probe.note_first_output();
+    let mut meter = probe.meter.take().expect("the print meter");
+    let started = Instant::now();
+    meter.observe_dispatch(
+        Dispatch::Redraw,
+        started,
+        started + Duration::from_millis(1),
+        (0, 1),
+        None,
+    );
+    let record = meter.finish(None, crate::transition::Completion::default());
+    assert!(record.first_present_ms.is_some(), "the output's frame is the first present");
+    assert_eq!(record.present_missing, None);
+    assert!(record.go_to_first_output_ms.is_some(), "the output is noted");
+    assert!(record.first_output_to_present_ms.is_some(), "its frame times the diagnostic");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_go_fifos_are_removed_when_the_run_ends() {
+    // GO releases POSIX roles through FIFOs; once `run` returns, on any path, none is left in the scratch,
+    // so nothing that later copies, archives or hashes the scratch meets a named pipe.
+    let scratch = std::env::temp_dir().join(format!("sonicterm-go-fifos-{}", std::process::id()));
+    std::fs::create_dir_all(scratch.join("go")).expect("go directory");
+    let made = std::process::Command::new("mkfifo").arg(scratch.join("go/0")).status();
+    assert!(made.is_ok_and(|status| status.success()), "mkfifo");
+    std::fs::write(scratch.join("go/1"), b"").expect("plain marker");
+    drop(GoFifos { scratch: scratch.clone(), roles: 2 });
+    assert!(std::fs::symlink_metadata(scratch.join("go/0")).is_err(), "the FIFO is removed");
+    assert!(scratch.join("go/1").is_file(), "a plain marker is left alone");
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// A print meter, as `begin_phase` opens one for the phase that releases the roles, placed on `probe`.
+fn open_print_meter(probe: &mut Probe) {
+    probe.meter = Some(PhaseMeter::start(
+        "print",
+        crate::scenarios::PhaseKind::Transition,
+        None,
+        false,
+        None,
+        None,
+    ));
+    if let Some(meter) = probe.meter.as_mut() {
+        meter.present.await_output(0.0);
+    }
+}
+
+/// One presenting main-window redraw, observed now, advancing the presented count by one.
+fn present_one_frame(probe: &mut Probe, presented_after: u64) {
+    let meter = probe.meter.as_mut().expect("an open meter");
+    let started = Instant::now();
+    meter.observe_dispatch(
+        Dispatch::Redraw,
+        started,
+        started + Duration::from_millis(1),
+        (presented_after - 1, presented_after),
+        None,
+    );
+}
+
+#[test]
+fn a_print_phase_whose_only_frame_precedes_the_output_records_its_first_present() {
+    // Replays a base run the validator rejected: the phase's only frame presents before the roles' first
+    // output, then the output lands and the scan sees the sentinel before another frame or output event.
+    // The first present is that frame, the first after GO; the output diagnostics stay empty.
+    let (mut probe, pane) = typing_probe("S8", "default");
+    probe.role_panes = vec![pane];
+    probe.release_roles(true, |_, _| Ok(())).expect("every role released");
+    open_print_meter(&mut probe);
+    // The frame's redraw arrives while no role has printed yet.
+    probe.note_first_output();
+    present_one_frame(&mut probe, 1);
+    let main = sonicterm_app::app::synthetic_main_window_id();
+    let _ = probe.app.__test_publish_pane_output(main, pane, b"printed\r\n");
+    let record = probe.meter.take().expect("the print meter").finish(None, Default::default());
+    assert!(record.first_present_ms.is_some(), "the frame after GO is the first present");
+    assert_eq!(record.present_missing, None, "so the validator's trace is complete");
+    let json = serde_json::to_value(&record).expect("serializable");
+    for key in ["go_to_first_output_ms", "first_output_to_present_ms"] {
+        assert!(json.get(key).is_none(), "{key} is absent, never null or zero");
+    }
+}
+
+#[test]
+fn output_landing_between_the_check_and_the_frame_still_records_the_first_present() {
+    // The redraw's cursor check runs before the App collects the frame, so output can land after the check
+    // and still be drawn. The frame is the first present; the output is noted only at the event after it,
+    // so no frame follows it and only its GO-to-output time is recorded.
+    let (mut probe, pane) = typing_probe("S8", "default");
+    probe.role_panes = vec![pane];
+    probe.release_roles(true, |_, _| Ok(())).expect("every role released");
+    open_print_meter(&mut probe);
+    probe.note_first_output();
+    let main = sonicterm_app::app::synthetic_main_window_id();
+    let _ = probe.app.__test_publish_pane_output(main, pane, b"printed\r\n");
+    present_one_frame(&mut probe, 1);
+    // The batch's output event reaches the probe after the frame; then the scan sees the sentinel.
+    probe.note_first_output();
+    let record = probe.meter.take().expect("the print meter").finish(None, Default::default());
+    assert!(record.first_present_ms.is_some(), "the frame drawing the output is the first present");
+    assert_eq!(record.present_missing, None);
+    let json = serde_json::to_value(&record).expect("serializable");
+    assert!(json.get("go_to_first_output_ms").is_some_and(serde_json::Value::is_number));
+    assert!(json.get("first_output_to_present_ms").is_none(), "no frame followed the noted output");
 }

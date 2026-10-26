@@ -357,6 +357,7 @@ pub enum UserEvent {
 
 mod accessibility;
 pub use accessibility::AccessibilityRequest;
+pub use config_apply::StartupLoads;
 mod broadcast;
 mod child_tabs;
 mod child_window;
@@ -934,6 +935,8 @@ pub struct App {
     pub(super) tab_bar_visible: bool,
     /// Status line strip: session toggles, memory sampler, reload errors and per-window pane facts.
     pub(super) status_line: status_line::StatusLineState,
+    /// Startup config, theme and keymap load outcomes, until the first main window records them.
+    pub(super) startup_loads: Option<config_apply::StartupLoads>,
     /// Program-reported progress for the taskbar, Dock or launcher, and the program toast.
     pub(super) program: program_state::ProgramState,
     /// Broadcast-input mode. When enabled, bytes typed into `source_pane`

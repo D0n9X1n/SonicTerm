@@ -107,6 +107,72 @@ fn pane_facts_are_kept_only_while_the_strip_is_shown() {
     assert!(app.status_line.pane_facts.is_empty(), "facts of a closed window are dropped");
 }
 
+/// The full-pass count the frame counters recorded so far.
+fn full_passes(app: &App) -> u64 {
+    app.frame_counters.as_ref().map_or(0, |counters| counters.status_line.full_passes)
+}
+
+#[test]
+fn a_hidden_unheard_strip_skips_the_full_pass() {
+    // While no window shows the strip and no reader listens, each dispatch's sync does no per-window
+    // work; showing it runs the pass, and the hide that follows runs one more to take the strip down.
+    let mut app = app_with_strip(false);
+    app.force_frame_counters_on().expect("no window or pane exists yet");
+    let now = Instant::now();
+    for _ in 0..3 {
+        assert_eq!(app.sync_status_line(now), None);
+    }
+    assert_eq!(full_passes(&app), 0, "hidden with no reader, no sync runs the full pass");
+    // A toggle syncs once itself.
+    app.toggle_status_line();
+    let _ = app.sync_status_line(now);
+    let _ = app.sync_status_line(now);
+    assert_eq!(full_passes(&app), 3, "a shown strip runs the pass every sync");
+    app.toggle_status_line();
+    assert_eq!(full_passes(&app), 4, "the hide's own sync runs one pass to take the strip down");
+    let _ = app.sync_status_line(now);
+    let _ = app.sync_status_line(now);
+    assert_eq!(full_passes(&app), 4, "then the hidden strip is settled");
+}
+
+#[test]
+fn a_reader_keeps_the_full_pass_while_the_strip_is_hidden() {
+    // A connected assistive technology hears alerts and samples with the strip hidden, so its sync
+    // runs the full pass; once it disconnects, one more pass clears what it set up.
+    let mut app = app_with_strip(false);
+    app.force_frame_counters_on().expect("no window or pane exists yet");
+    let mut reader = crate::app::accessibility::WindowAccessibility::default();
+    reader.active = true;
+    app.accessibility.insert(WindowId::dummy(), reader);
+    let now = Instant::now();
+    let _ = app.sync_status_line(now);
+    assert_eq!(full_passes(&app), 1);
+    app.accessibility.clear();
+    let _ = app.sync_status_line(now);
+    let _ = app.sync_status_line(now);
+    assert_eq!(full_passes(&app), 2, "the pass after the reader leaves is the last");
+}
+
+#[test]
+fn retiring_a_pane_forgets_its_status_records() {
+    // A retired pane's records are dropped at the next sync even while the strip is hidden and that
+    // sync skips the full pass, so closed panes leave nothing behind.
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.force_frame_counters_on().expect("no window or pane exists yet");
+    let pane_id = app.__test_seed_tab("source");
+    let main_id = app.main_window_id.unwrap();
+    app.note_clip_write(pane_id, 5, true);
+    app.status_line.history_ack.insert(pane_id, 7);
+    app.status_line.size_seen.insert(pane_id, 1);
+    let pane = app.windows.get_mut(&main_id).and_then(|window| window.remove_pane(pane_id));
+    app.retire_pane(pane.expect("the seeded pane"));
+    let _ = app.sync_status_line(Instant::now());
+    assert_eq!(full_passes(&app), 0, "the strip is hidden, so the prune runs without the pass");
+    assert!(!app.status_line.clip_write.contains_key(&pane_id), "clip result is forgotten");
+    assert!(!app.status_line.history_ack.contains_key(&pane_id), "history ack is forgotten");
+    assert!(!app.status_line.size_seen.contains_key(&pane_id), "size record is forgotten");
+}
+
 /// The platform's target open modifier: Cmd on macOS, Ctrl elsewhere.
 fn open_modifier() -> winit::keyboard::ModifiersState {
     if cfg!(target_os = "macos") {
@@ -513,17 +579,24 @@ fn home_paths_display_with_a_tilde() {
 /// A config that failed to load at startup shows in `health` the same way a failed reload does,
 /// and the check runs once per process.
 #[test]
-fn startup_load_errors_are_recorded_once_per_component() {
+fn startup_load_errors_come_from_the_startup_loads() {
+    // The strip shows what startup loaded, read once then: a config fixed on disk before the check
+    // still shows its startup failure until it reloads, and the check runs only once.
     let dir = std::env::temp_dir().join(format!("sonicterm-status-startup-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("sonicterm.toml");
     std::fs::write(&path, "[status_line]\nupdate_interval_ms = 1\n").unwrap();
+    let mut warnings = Vec::new();
+    let (_, config_error) = Config::load_or_default_reporting(&path, &mut warnings);
+    assert!(config_error.is_some(), "an invalid table fails the startup load");
+    std::fs::write(&path, "").unwrap();
     let mut app = app_with_strip(true);
     app.runtime_config_path = Some(path.clone());
+    app.set_startup_loads(crate::app::StartupLoads { config: config_error, ..Default::default() });
     app.record_startup_load_errors();
-    assert!(app.status_line.config_error.is_some(), "an invalid table is a startup config error");
-    assert_eq!(app.status_line.theme_error, None, "the bundled theme loads");
-    std::fs::write(&path, "").unwrap();
+    assert!(app.status_line.config_error.is_some(), "the startup failure shows, not a reread");
+    assert_eq!(app.status_line.theme_error, None, "the theme loaded at startup");
+    app.set_startup_loads(crate::app::StartupLoads::default());
     app.record_startup_load_errors();
     assert!(app.status_line.config_error.is_some(), "the check runs only once");
     let _ = std::fs::remove_dir_all(dir);

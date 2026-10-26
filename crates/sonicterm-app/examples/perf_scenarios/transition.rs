@@ -43,7 +43,8 @@ pub(crate) const NO_PRESENTATION: &str = "no-presentation";
 
 /// A phase's presentation trace from its main-window `RedrawRequested` dispatches: the first and last that
 /// advanced the main renderer's presented count, each as (ms from the phase's start to the dispatch's end, the
-/// presented count after it), and how many redraws did not advance it.
+/// presented count after it), and how many redraws did not advance it. A phase that releases the roles also
+/// records, as diagnostics only, when their first output after GO arrived and the first frame after it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct PresentTrace {
     /// The first presenting redraw.
@@ -52,6 +53,13 @@ pub(crate) struct PresentTrace {
     pub(crate) last: Option<(f64, u64)>,
     /// Redraws that did not advance the presented count.
     pub(crate) nonpresenting: u64,
+    /// `None` when the phase records no output diagnostics; `Some(None)` while the roles' first output after
+    /// GO is awaited; `Some(Some(ms))` once it arrived, `ms` after the phase's start.
+    output: Option<Option<f64>>,
+    /// The first frame presented after that output, in ms after it.
+    after_output: Option<f64>,
+    /// How long before the phase's start GO was written, in ms.
+    go_lead_ms: f64,
 }
 
 impl PresentTrace {
@@ -62,9 +70,41 @@ impl PresentTrace {
             Some(count) => {
                 self.first.get_or_insert((offset_ms, count));
                 self.last = Some((offset_ms, count));
+                if let Some(Some(output_ms)) = self.output {
+                    // A frame presented once the roles' first output was noted; the first one times the diagnostic.
+                    self.after_output.get_or_insert((offset_ms - output_ms).max(0.0));
+                }
             }
             None => self.nonpresenting += 1,
         }
+    }
+
+    /// Record the roles' first output after GO, written `go_lead_ms` before the phase started, as diagnostics;
+    /// the phase's first present is unchanged.
+    pub(crate) fn await_output(&mut self, go_lead_ms: f64) {
+        self.output = Some(None);
+        self.go_lead_ms = go_lead_ms;
+    }
+
+    /// Whether the phase still awaits its roles' first output after GO.
+    pub(crate) fn awaits_output(&self) -> bool {
+        self.output == Some(None)
+    }
+
+    /// The roles' first output after GO arrived `offset_ms` after the phase's start; the first frame presented
+    /// after it is timed from it.
+    pub(crate) fn note_output(&mut self, offset_ms: f64) {
+        if self.awaits_output() {
+            // When: the output was awaited, this is the first one, so the clock starts here.
+            self.output = Some(Some(offset_ms));
+        }
+    }
+
+    /// The output diagnostics: ms from GO to the roles' first output, and from that output to the first frame
+    /// presented after it. Either is `None` when the phase never saw it; neither is ever a measured metric.
+    pub(crate) fn output_diagnostics(&self) -> (Option<f64>, Option<f64>) {
+        let go_to_output = self.output.flatten().map(|output_ms| output_ms + self.go_lead_ms);
+        (go_to_output, self.after_output)
     }
 
     /// Why the phase records no presentation: `no-presentation` when no redraw presented, else None.

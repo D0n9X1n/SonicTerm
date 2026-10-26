@@ -773,7 +773,28 @@ the columns Scenario, Metric (unit), Baseline, PR, and Change.
   `first_present_ms`, `last_present_ms`, `first_present_seq` and
   `last_present_seq` (ms from the phase's start, and the presented count) when it
   presented a frame, else `present_missing: "no-presentation"`, plus
-  `nonpresenting_redraws`. Deferred redraws come only from the counters runs'
+  `nonpresenting_redraws`. `first_present_ms` is the first frame presented
+  after GO. The phase that releases the roles to print (a transition that ends
+  on sentinels) also records two optional diagnostics:
+  `go_to_first_output_ms`, from GO to the first dispatch at which a role's
+  cursor has moved from where it was when GO was written, and
+  `first_output_to_present_ms`, from that output to the first frame presented
+  after it. Either is absent when the phase did not see it, which is never a
+  schema problem; the table shows how many runs recorded each, and no flag
+  reads them. GO
+  releases each role without a poll: a POSIX role blocks reading its
+  `go/<role>` FIFO, and a Windows program role blocks accepting on a loopback
+  port it publishes in `go/<role>.port`. Every phase also records
+  `dispatch_presenting_ms` and `dispatch_nonpresenting_ms`, its redraw
+  dispatches split by whether they presented, held to the same duration rule;
+  the table adds `presenting dispatch` and `non-presenting dispatch` rows beside
+  the pooled `dispatch` rows, so a shift in the presenting share moves neither
+  (a harness without them shows n/a). The counters runs' App section adds
+  `status_line_full_passes` (0 while the strip is hidden and no assistive
+  technology listens) and the main window's startup step times from the wgpu
+  adapter to its first pane: `startup_window_ns`, `startup_adapter_install_ns`,
+  `startup_renderer_ns`, `startup_load_checks_ns` and `startup_pane_spawn_ns`.
+  Deferred redraws come only from the counters runs'
   admission counters. Every duration (`dispatch_ms`, `present_interval_ms`,
   `cpu_user_s`, `cpu_system_s`) must be finite and at least zero, and no phase
   may end before it starts. The comparison refuses a list whose capabilities

@@ -507,7 +507,17 @@ PR 与 Change。
   `completion_missing` 之一，其他种类两者都不带。每个阶段还记录来自主窗口 `RedrawRequested` 派发的呈现
   轨迹：呈现过帧时记录 `first_present_ms`、`last_present_ms`、`first_present_seq` 与
   `last_present_seq`（自阶段开始的毫秒数，以及呈现计数），否则记录 `present_missing: "no-presentation"`；
-  另外记录 `nonpresenting_redraws`。延迟的重绘只来自计数器运行的准入计数器。列表的能力含有未知键或值时，
+  另外记录 `nonpresenting_redraws`。`first_present_ms` 是 GO 之后呈现的第一帧。释放各角色开始打印的阶段
+  （以哨兵结束的 transition）另外记录两项可选诊断：`go_to_first_output_ms`，从 GO 到某个角色的光标离开写入 GO
+  时位置的首次派发；`first_output_to_present_ms`，从该输出到其后呈现的第一帧。阶段没有观察到时该项缺失，
+  这从不是模式问题；表格显示有多少次运行记录了每一项，且没有标记读取它们。GO 释放各角色时不轮询：POSIX 角色阻塞读取自己的 `go/<role>` FIFO，Windows 程序角色
+  阻塞在它写入 `go/<role>.port` 的回环端口上等待连接。每个阶段还记录 `dispatch_presenting_ms` 与
+  `dispatch_nonpresenting_ms`，即按是否呈现拆分的重绘派发，适用同样的时长规则；表格在合并的 `dispatch`
+  行旁加入 `presenting dispatch` 与 `non-presenting dispatch` 行，因此呈现占比的变化不会移动其中任何一行
+  （没有这两项的测试工具显示 n/a）。计数器运行的 App 部分加入 `status_line_full_passes`（状态栏隐藏且没有
+  辅助技术监听时为 0），以及主窗口从 wgpu 适配器到第一个窗格的启动步骤时间：`startup_window_ns`、
+  `startup_adapter_install_ns`、`startup_renderer_ns`、`startup_load_checks_ns` 与 `startup_pane_spawn_ns`。
+  延迟的重绘只来自计数器运行的准入计数器。列表的能力含有未知键或值时，
   对比拒绝该列表；每个时长（`dispatch_ms`、`present_interval_ms`、`cpu_user_s`、`cpu_system_s`）都必须
   有限且不小于零，且阶段不能在开始之前结束；具备该能力的测试工具的结果违反上述任一规则时，对比拒绝该
   结果；不具备该能力的 head 沿用旧的阶段约定。

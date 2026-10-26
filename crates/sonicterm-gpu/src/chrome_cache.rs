@@ -479,6 +479,8 @@ pub enum ChromeStack {
     TabTitle,
     /// The palette-footer stack.
     PaletteFooter,
+    /// The status line strip's stack.
+    StatusLine,
 }
 
 /// What a kept chrome run depends on besides its text: style, sizes and the stack.
@@ -541,7 +543,7 @@ pub(crate) enum ChromeRunHandle {
 
 /// Constant or slowly changing chrome runs, kept in a fixed table of [`CHROME_RUN_SLOTS`] slots
 /// and found by a linear scan on key and text. The search overlay looks its icon and label up
-/// here, so a warm overlay shapes neither.
+/// here, and the status line strip its parts, so a warm overlay or unchanged strip shapes nothing.
 #[derive(Debug, Default)]
 pub(crate) struct ChromeRunCache {
     slots: Option<Box<[Option<ChromeRunEntry>; CHROME_RUN_SLOTS]>>,
@@ -777,7 +779,7 @@ pub(crate) const CHROME_CACHE_ENVELOPE_BYTES: usize =
 pub(crate) struct ChromeCaches {
     /// Tab titles by position.
     pub(crate) titles: TitleCache,
-    /// Search-overlay runs.
+    /// Search-overlay and status line strip runs.
     pub(crate) runs: ChromeRunCache,
     /// The UI palette.
     pub(crate) palette: PaletteCache,

@@ -229,6 +229,7 @@ impl App {
             os_drag_source: None,
             tab_bar_visible: true,
             status_line: Default::default(),
+            startup_loads: None,
             program: Default::default(),
             broadcast: BroadcastState::Off,
             quit_hold: quit_hold::QuitHold::new(),
@@ -300,6 +301,8 @@ impl App {
 
     pub(super) fn retire_pane(&mut self, mut pane: PaneState) {
         *pane.redraw_target.lock() = None;
+        // The pane already left its window; the next status line sync prunes its records.
+        self.status_line.panes_retired = true;
         if let Some(counters) = pane.frame_counters.as_ref() {
             // A watched pane's retirement disarms it and frees its diagnostic buffers now, whatever
             // worker handles survive, and ends a window timeline it owned.

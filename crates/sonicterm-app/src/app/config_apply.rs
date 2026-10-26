@@ -150,6 +150,18 @@ pub fn renderer_panel_padding_differs(old_cfg: &Config, new_cfg: &Config) -> boo
     (old_cfg.appearance.panel_padding - new_cfg.appearance.panel_padding).abs() > f32::EPSILON
 }
 
+/// The outcomes of the startup config, theme and keymap loads, which fell back to defaults on
+/// failure; the status line shows each failure until that file reloads cleanly.
+#[derive(Debug, Default)]
+pub struct StartupLoads {
+    /// The config file's load error, when startup fell back to defaults.
+    pub config: Option<anyhow::Error>,
+    /// The theme's load error, when startup fell back to the default theme.
+    pub theme: Option<anyhow::Error>,
+    /// The keymap's load error, when startup fell back to the platform defaults.
+    pub keymap: Option<anyhow::Error>,
+}
+
 impl App {
     pub(super) fn refresh_all_window_minimums(&mut self) {
         for window in self.windows.values_mut() {
@@ -884,50 +896,28 @@ impl App {
             child.request_window_redraw();
         }
     }
-    /// Re-read `sonicterm.toml` from disk and apply it, along with the theme
-    /// and keymap files it names. This is the only path that reads config
-    /// after startup — there is no background watcher, so an edit takes effect
-    /// when the user asks for it and not before.
-    /// Record startup load failures for the status line's `health` segment, once per process.
+    /// Record the startup config, theme and keymap load failures the shell passed in, once.
     ///
-    /// Startup falls back to defaults for an unreadable config, theme or keymap. This runs the
-    /// same strict loads a reload does, against the same paths, so each failure shows per
+    /// Startup falls back to defaults for an unreadable config, theme or keymap. The outcomes are
+    /// the loads startup actually ran, so no file is read again here, and each failure shows per
     /// component until that file reloads cleanly.
     pub(super) fn record_startup_load_errors(&mut self) {
         if !self.status_line.take_startup_check() {
             // When: `take_startup_check` reports it already ran, a later main window adds nothing.
             return;
         }
-        let assets = sonicterm_cfg::assets::asset_dir();
-        let config_error = self
-            .runtime_config_path
-            .clone()
-            .or_else(Config::default_path)
-            .and_then(|path| Config::load_strict(&path).err());
-        self.set_config_reload_error(config_error.as_ref());
-        let theme_error = resolve_runtime_asset_path(
-            &self.config.theme,
-            "themes",
-            self.runtime_config_path.as_deref(),
-            &assets,
-            "wezterm",
-        )
-        .and_then(|path| Theme::load_strict(&path).map(|_| ()))
-        .err();
-        self.set_theme_reload_error(theme_error.as_ref());
-        let keymap_error = resolve_runtime_asset_path(
-            &self.config.keymap,
-            "keymaps",
-            self.runtime_config_path.as_deref(),
-            &assets,
-            sonicterm_cfg::keymap::platform_default_keymap_name(),
-        )
-        .and_then(|path| match self.keymap_loader.as_ref() {
-            Some(loader) => loader(&path).map(|_| ()),
-            None => Keymap::load_strict(&path).map(|_| ()),
-        })
-        .err();
-        self.set_keymap_reload_error(keymap_error.as_ref());
+        let Some(loads) = self.startup_loads.take() else {
+            // When: `startup_loads` is None (smoke runs, tests passed no outcomes), there is nothing to show.
+            return;
+        };
+        self.set_config_reload_error(loads.config.as_ref());
+        self.set_theme_reload_error(loads.theme.as_ref());
+        self.set_keymap_reload_error(loads.keymap.as_ref());
+    }
+
+    /// Keep the startup load outcomes until the first main window records them.
+    pub(crate) fn set_startup_loads(&mut self, loads: StartupLoads) {
+        self.startup_loads = Some(loads);
     }
 
     pub(super) fn force_reload_config(&mut self) {

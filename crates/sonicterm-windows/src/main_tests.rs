@@ -265,9 +265,9 @@ fn no_caller_hardcodes_the_detection_argument() {
 #[test]
 fn windows_defaults_and_asset_loaders() {
     assert_eq!(super::windows_default_config().keymap, "sonicterm-windows");
-    assert_eq!(super::load_keymap("sonicterm-windows").meta.name, "sonicterm-windows-default");
-    assert_eq!(super::load_theme("nord").name, "Nord");
+    assert_eq!(super::load_keymap("sonicterm-windows").0.meta.name, "sonicterm-windows-default");
+    assert_eq!(super::load_theme("nord").0.name, "Nord");
     let fallback = sonicterm_cfg::keymap::Keymap::default().meta.name;
-    assert_eq!(super::load_keymap("no-such-keymap").meta.name, fallback);
-    assert_eq!(super::load_theme("no-such-theme"), sonicterm_cfg::theme::Theme::default());
+    assert_eq!(super::load_keymap("no-such-keymap").0.meta.name, fallback);
+    assert_eq!(super::load_theme("no-such-theme").0, sonicterm_cfg::theme::Theme::default());
 }

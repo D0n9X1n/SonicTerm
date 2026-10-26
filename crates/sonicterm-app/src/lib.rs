@@ -27,7 +27,7 @@ pub mod tab_thumbnail;
 pub mod taskbar_progress;
 pub mod window_key_boundary;
 
-pub use app::{ConfigNormalizer, KeymapLoader, ThemeLoader};
+pub use app::{ConfigNormalizer, KeymapLoader, StartupLoads, ThemeLoader};
 
 /// Privilege observed for the SonicTerm process at native startup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
