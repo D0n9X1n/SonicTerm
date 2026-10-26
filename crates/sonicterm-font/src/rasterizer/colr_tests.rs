@@ -171,6 +171,46 @@ fn sweep_follows_a_y_flipping_transform() {
     assert_eq!(pixel_rgba(&surface, 48, 48), [255, 255, 0, 255]);
 }
 
+/// Under a shear, the user-space clip's bounding box mapped back to device space spans thousands of pixels; the
+/// sweep still covers the real 64 px clip. The centre sits at device (32, 32), so a pixel right of it and below
+/// is just short of half a turn (green) and one right of it and above just short of a full turn (yellow).
+#[test]
+fn sweep_covers_the_clip_under_a_shearing_transform() {
+    let surface = ImageSurface::create(Format::ARgb32, 64, 64).expect("create test surface");
+    let context = Context::new(&surface).expect("create test context");
+    context.set_matrix(Matrix::new(1., 0., 40., 1., 0., 0.));
+
+    paint_sweep_gradient(&context, 32. - 40. * 32., 32., 0., PI_TIMES_2, four_band_color_line())
+        .expect("paint sweep");
+
+    assert_eq!(opaque_pixel_count(&surface), 64 * 64, "the sweep must cover the whole clip");
+    assert_eq!(pixel_rgba(&surface, 48, 48), [0, 255, 0, 255]);
+    assert_eq!(pixel_rgba(&surface, 48, 16), [255, 255, 0, 255]);
+}
+
+/// A quarter-turn rotation of the transform turns the bands with it: user angle 0 points down in device space, so
+/// red lies below-left of the centre, green above-left, blue above-right and yellow below-right.
+#[test]
+fn sweep_turns_with_a_rotating_transform() {
+    let surface = ImageSurface::create(Format::ARgb32, 64, 64).expect("create test surface");
+    let context = Context::new(&surface).expect("create test context");
+    context.translate(32., 32.);
+    context.rotate(FRAC_PI_2);
+
+    paint_sweep_gradient(&context, 0., 0., 0., PI_TIMES_2, four_band_color_line())
+        .expect("paint sweep");
+
+    assert_eq!(opaque_pixel_count(&surface), 64 * 64);
+    for ((column, row), expected) in [
+        ((16, 48), [255, 0, 0, 255]),
+        ((16, 16), [0, 255, 0, 255]),
+        ((48, 16), [0, 0, 255, 255]),
+        ((48, 48), [255, 255, 0, 255]),
+    ] {
+        assert_eq!(pixel_rgba(&surface, column, row), expected, "pixel ({column}, {row})");
+    }
+}
+
 /// The sweep paints only inside the current clip; the pixels outside it stay transparent.
 #[test]
 fn sweep_paints_only_inside_the_clip() {

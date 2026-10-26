@@ -241,7 +241,8 @@ const PI_TIMES_2: f64 = std::f64::consts::PI * 2.;
 /// The colour a COLRv1 sweep gradient gives each angle around its centre.
 ///
 /// A stop sits at `start_angle + offset * (end_angle - start_angle)`, and the stops are kept in angle order.
-/// Between two stops the colour is interpolated on premultiplied channels. Pad clamps an angle to the first or
+/// Between two stops the colour is interpolated on premultiplied channels of the encoded sRGB values, as the
+/// linear and radial gradients' Cairo patterns do, rather than in linear light. Pad clamps an angle to the first or
 /// last stop; Reflect mirrors every other repeat of the stop span; Repeat, and any other extend, repeats it.
 /// Angles are measured in user space from the positive x axis towards positive y, the way Cairo turns.
 struct SweepColors {
@@ -336,9 +337,10 @@ fn premultiplied_argb(color: SrgbaTuple) -> u32 {
 
 /// Paint a COLRv1 sweep gradient over the current clip.
 ///
-/// Cairo has no sweep-gradient primitive. Each device pixel of the current clip's extents is mapped back to
-/// user space and takes the colour `SweepColors` gives its angle around `(center_x, center_y)`; the raster
-/// is then painted as an image source under the clip. Computing every pixel's colour directly keeps the
+/// Cairo has no sweep-gradient primitive. Each device pixel of the current clip's device-space extents is mapped
+/// back through the inverse transform to user space and takes the colour `SweepColors` gives its angle around
+/// `(center_x, center_y)`; the raster is then painted under the identity transform, inside the clip, so any
+/// transform, including a shear or rotation, leaves the covered pixels those of the clip. Computing every pixel's colour directly keeps the
 /// result independent of Cairo's mesh rasterizer, which some Cairo builds (Ubuntu 26.04's 1.18.4) draw with
 /// whole quadrants wrong. A color line left with no usable stop, a non-finite centre or angle, a zero-span
 /// Repeat or Reflect line, a singular transform, and a clip covering no pixel paint nothing.
@@ -364,20 +366,17 @@ pub fn paint_sweep_gradient(
         return Ok(());
     };
 
-    let (clip_left, clip_top, clip_right, clip_bottom) = context.clip_extents()?;
-    let corners = [
-        (clip_left, clip_top),
-        (clip_right, clip_top),
-        (clip_left, clip_bottom),
-        (clip_right, clip_bottom),
-    ]
-    .map(|(corner_x, corner_y)| user_to_device.transform_point(corner_x, corner_y));
-    let device_left = corners.iter().map(|corner| corner.0).fold(f64::INFINITY, f64::min).floor();
-    let device_top = corners.iter().map(|corner| corner.1).fold(f64::INFINITY, f64::min).floor();
-    let device_right =
-        corners.iter().map(|corner| corner.0).fold(f64::NEG_INFINITY, f64::max).ceil();
-    let device_bottom =
-        corners.iter().map(|corner| corner.1).fold(f64::NEG_INFINITY, f64::max).ceil();
+    // The clip's extents are read in device space: under a shear or rotation, the user-space extents mapped back
+    // to device space can be far larger than the clip, and the raster cap would then cut away the clip itself.
+    context.save()?;
+    context.identity_matrix();
+    let extents = context.clip_extents();
+    context.restore()?;
+    let (clip_left, clip_top, clip_right, clip_bottom) = extents?;
+    let device_left = clip_left.floor();
+    let device_top = clip_top.floor();
+    let device_right = clip_right.ceil();
+    let device_bottom = clip_bottom.ceil();
     if ![device_left, device_top, device_right, device_bottom].iter().all(|edge| edge.is_finite()) {
         // When: a clip edge has no finite device position, so the raster has no extent to cover.
         return Ok(());
