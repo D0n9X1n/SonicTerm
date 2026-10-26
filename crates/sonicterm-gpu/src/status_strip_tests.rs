@@ -74,9 +74,10 @@ fn segment_hit_test_uses_half_open_bounds() {
     assert_eq!(segment_at(&presented, 5.0), None);
 }
 
-/// A packaged chrome font stack for drawing tests.
+/// A Rec Mono fixture chrome font stack for drawing tests.
 fn chrome_stack() -> sonicterm_engine::FontStack {
-    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono");
     sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
         &[("Rec Mono St.Helens", false)],
         vec![assets],
@@ -441,7 +442,8 @@ fn the_strip_draws_with_its_own_smaller_stack() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono");
     let body = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
         &[("Rec Mono St.Helens", false)],
         vec![assets],
@@ -468,7 +470,8 @@ fn the_strip_draws_with_its_own_smaller_stack() {
 /// Drawn `H` height over the text size the geometry reports, for a `body_pt` terminal font at
 /// `scale`, on the bundled font's strip stack.
 fn cap_over_text_px(body_pt: f32, scale: f32) -> f32 {
-    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono");
     let dpi = (72.0 * scale).round() as usize;
     let body = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
         &[("Rec Mono St.Helens", false)],
@@ -536,7 +539,8 @@ fn the_strip_rasterizes_anew_after_zoom_and_dpi_changes() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono");
     let views_at = |body_pt: f32| {
         let body = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
             &[("Rec Mono St.Helens", false)],
@@ -735,7 +739,8 @@ fn chips_draw_colored_text_without_a_background() {
 /// in raster px, for "Mem" drawn on the bundled chrome font at `position` and `scale`.
 fn capital_centering_error(position: StatusPosition, scale: f32) -> f32 {
     use sonicterm_render_model::boundary::ui::status_line::PlacedPart;
-    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono");
     let dpi = (72.0 * scale).round() as usize;
     let body = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
         &[("Rec Mono St.Helens", false)],

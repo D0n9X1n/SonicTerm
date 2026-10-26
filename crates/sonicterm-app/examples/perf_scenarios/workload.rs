@@ -27,8 +27,17 @@ pub(crate) const SCRATCH_ENV: &str = "SONICTERM_PERF_SCRATCH";
 const GRID_COLS: usize = 250;
 /// Configured grid height in cells.
 const GRID_ROWS: usize = 70;
-/// Today's `FontConfig` defaults, written out so a later default change cannot alter a scenario.
-const FONT_FAMILY: &str = "Rec Mono St.Helens";
+/// The scenario's text face, written out so a later default change cannot alter a scenario: the
+/// platform's own monospace family, which every hosted runner has. Windows pins Consolas rather
+/// than the Cascadia Mono default, because not every Windows image ships Cascadia Mono.
+#[cfg(target_os = "macos")]
+const FONT_FAMILY: &str = "Menlo";
+/// The scenario's text face on Windows, present on every Windows release.
+#[cfg(windows)]
+const FONT_FAMILY: &str = "Consolas";
+/// The scenario's text face elsewhere: the face fontconfig resolves for `monospace`.
+#[cfg(not(any(target_os = "macos", windows)))]
+const FONT_FAMILY: &str = "monospace";
 /// Today's default font size in points, as TOML.
 const FONT_SIZE: &str = "13.0";
 /// How long the cleanup anchor outlives the run's own deadline, in seconds.
@@ -1261,7 +1270,7 @@ pub(crate) fn run_program(scratch: &Path) -> u8 {
 /// (rows 2-69) and a fixed normal footer on row 70, redrawn whole by every update.
 ///
 /// Body rows mix bold, normal and italic segments; colour alternates per update but never
-/// splits a run. Segments meant to shape carry CJK characters from the bundled faces; the
+/// splits a run. Segments meant to shape carry CJK characters from the text face's fallback; the
 /// changing fields meant not to shape are plain digits and spaces. Each body row ends after its
 /// last segment, and the rest of the row is default-style blank cells. Only the tests use them
 /// in this change; registering them as scenario variants comes with their diagnostic.

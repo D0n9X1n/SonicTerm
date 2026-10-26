@@ -90,9 +90,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-for font in Regular Italic Bold BoldItalic; do
-    test -f "$APP/Contents/Resources/assets/fonts/RecMonoSt.Helens-${font}.ttf"
-done
+# The bundled symbols font and its license; the text face is the system's Menlo.
+test -f "$APP/Contents/Resources/assets/fonts/SymbolsNerdFontMono-Regular.ttf"
+test -f "$APP/Contents/Resources/assets/fonts/LICENSE-SymbolsNerdFont.txt"
 
 python3 "$ROOT/scripts/macos-bundle.py" bundle "$APP" --max-minimum-macos "$MAX_MINIMUM"
 mkdir -p "$APP/Contents/Resources/licenses"

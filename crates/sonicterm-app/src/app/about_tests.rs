@@ -38,7 +38,7 @@ fn mac_facts() -> AboutFacts {
             adapter: "Apple M4 Max".into(),
             backend: "Metal".into(),
         },
-        font_family: "Rec Mono St.Helens".into(),
+        font_family: "Menlo".into(),
         font_size_pt: 13.5,
         theme: "apollo".into(),
         theme_error: None,
@@ -60,7 +60,7 @@ fn the_about_rows_render_from_fixed_facts() {
 SonicTerm 1.3.11 (a17ee368, 2026-10-24)
 macOS 27.0 · arm64
 Renderer   GPU · Apple M4 Max (Metal)
-Font       Rec Mono St.Helens 13.5 pt
+Font       Menlo 13.5 pt
 Theme      apollo   Keymap  sonicterm-macos
 Config     ~/.sonicterm/sonicterm.toml  ✓ loaded
 Logs       ~/.sonicterm/logs
@@ -126,7 +126,7 @@ fn the_copy_text_is_the_report_rows_only() {
 SonicTerm 1.3.11 (a17ee368, 2026-10-24)
 macOS 27.0 · arm64
 Renderer   GPU · Apple M4 Max (Metal)
-Font       Rec Mono St.Helens 13.5 pt
+Font       Menlo 13.5 pt
 Theme      apollo   Keymap  sonicterm-macos
 Config     ~/.sonicterm/sonicterm.toml  ✓ loaded
 Logs       ~/.sonicterm/logs

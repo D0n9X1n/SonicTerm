@@ -1,15 +1,15 @@
 use super::*;
 
-/// The packaged family, so the test does not depend on the host's fonts.
-fn packaged_fonts() -> Vec<PathBuf> {
-    vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")]
+/// The Rec Mono fixture family, so the test does not depend on the host's fonts.
+fn rec_mono_fonts() -> Vec<PathBuf> {
+    vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono")]
 }
 
-/// The body stack the renderer builds for the packaged family at 14 pt and 72 dpi.
-fn packaged_body() -> sonicterm_engine::FontStack {
-    renderer_font_stacks("Rec Mono St.Helens", 14.0, 72, 1.0, &packaged_fonts())
+/// The body stack the renderer builds for the Rec Mono fixture family at 14 pt and 72 dpi.
+fn rec_mono_body() -> sonicterm_engine::FontStack {
+    renderer_font_stacks("Rec Mono St.Helens", 14.0, 72, 1.0, &rec_mono_fonts())
         .body
-        .expect("the packaged family loads")
+        .expect("the Rec Mono fixture family loads")
 }
 
 /// An ASCII fixture's working set holds palette-footer keys drawn at max(body − 1, 1) and
@@ -27,9 +27,9 @@ fn the_working_set_covers_the_footer_and_tab_title_at_their_own_sizes() {
         "Rec Mono St.Helens",
         size,
         72,
-        &packaged_fonts(),
+        &rec_mono_fonts(),
     )
-    .expect("the packaged family loads");
+    .expect("the Rec Mono fixture family loads");
     let has = |variant| set.tile_keys.iter().any(|key| key.raster_variant == variant);
     assert!(has(GlyphRasterVariant::PaletteFooter), "footer keys are measured");
     assert!(has(GlyphRasterVariant::TabTitle), "tab-title keys are measured");
@@ -66,9 +66,9 @@ fn the_working_set_covers_the_footer_separator() {
         "Rec Mono St.Helens",
         14.0,
         72,
-        &packaged_fonts(),
+        &rec_mono_fonts(),
     )
-    .expect("the packaged family loads");
+    .expect("the Rec Mono fixture family loads");
     assert!(
         set.tile_keys
             .iter()
@@ -147,7 +147,7 @@ impl sonicterm_font::locator::FontLocator for SystemEmojiLocator {
 }
 
 /// Representative CJK and emoji text, measured cold, is resident as real shaped glyphs with
-/// nonempty rasters in the body strike, not as tofu. The packaged family covers CJK itself
+/// nonempty rasters in the body strike, not as tofu. The Rec Mono fixture family covers CJK itself
 /// (slot 0); emoji resolve only through the fallback worker, which the locator answers with the
 /// platform's system color-emoji face (a nonzero slot), so the host's user-installed fonts cannot
 /// change the outcome. Linux runners ship no color-emoji face, so the test is macOS and Windows.
@@ -160,12 +160,12 @@ fn a_cold_measurement_holds_real_cjk_and_emoji_tiles() {
     let size = 14.0;
     let body = sonicterm_engine::FontStack::try_new_with_locator_for_test(
         "Rec Mono St.Helens",
-        packaged_fonts(),
+        rec_mono_fonts(),
         std::sync::Arc::new(SystemEmojiLocator),
         f64::from(size),
         72,
     )
-    .expect("the packaged family loads");
+    .expect("the Rec Mono fixture family loads");
     let stacks = crate::core::renderer_font_views(Some(body), size);
     let set = measure_with_stacks(
         &["中文 漢字 \u{1F600}\u{1F680}"],
@@ -175,7 +175,7 @@ fn a_cold_measurement_holds_real_cjk_and_emoji_tiles() {
         72,
         blocking_warm_up,
     )
-    .expect("the packaged family loads");
+    .expect("the Rec Mono fixture family loads");
     // (character, whether only a fallback face covers it)
     for (character, needs_fallback) in
         [('中', false), ('漢', false), ('\u{1F600}', true), ('\u{1F680}', true)]
@@ -230,7 +230,7 @@ fn a_tile_identity_is_the_same_face_and_strike_whatever_slot_holds_it() {
     let primary = |size| {
         sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
             &[("Rec Mono St.Helens", false)],
-            packaged_fonts(),
+            rec_mono_fonts(),
             size,
             96,
             1.0,
@@ -261,7 +261,7 @@ fn a_failing_warm_up_rejects_the_measurement() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let size = 14.0;
-    let stacks = renderer_font_stacks("Rec Mono St.Helens", size, 72, 1.0, &packaged_fonts());
+    let stacks = renderer_font_stacks("Rec Mono St.Helens", size, 72, 1.0, &rec_mono_fonts());
     let failing_bold = |stack: &sonicterm_engine::FontStack, text: &str, bold, italic| {
         if bold {
             // When: the style is bold, the fake shaper fails as a broken face would.
@@ -287,25 +287,25 @@ fn a_failing_warm_up_rejects_the_measurement() {
 /// A warm-up that reports a real glyph for a cluster the frame path still draws as notdef did not
 /// wait for that fallback face, so the atlas would hold tofu for a glyph the renderer later draws
 /// for real: the measurement is rejected rather than counted. The warm-up here answers from the
-/// packaged family, which covers é, so it never asks the cold fixture stack to discover its fallback.
+/// Rec Mono fixture family, which covers é, so it never asks the cold fixture stack to discover its fallback.
 #[test]
 fn a_fallback_the_warm_up_did_not_wait_for_rejects_the_measurement() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let fixture = crate::lib_tests::fallback_stack("working-set-pending");
-    let packaged = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
+    let rec_mono = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
         &[("Rec Mono St.Helens", false)],
-        packaged_fonts(),
+        rec_mono_fonts(),
         14.0,
         96,
         1.0,
     )
-    .expect("the packaged family loads");
+    .expect("the Rec Mono fixture family loads");
     let size = 14.0;
     let stacks = crate::core::renderer_font_views(Some(fixture.stack.clone()), size);
     let not_waiting = |_stack: &sonicterm_engine::FontStack, text: &str, bold, italic| {
-        blocking_warm_up(&packaged, text, bold, italic)
+        blocking_warm_up(&rec_mono, text, bold, italic)
     };
     let outcome = measure_with_stacks(&["é"], &["shell"], stacks, size, 96, not_waiting);
     assert!(
@@ -340,7 +340,7 @@ fn raster_failures_are_listed_and_unplaced_tiles_are_rejected() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let stack = packaged_body();
+    let stack = rec_mono_body();
     let mut atlas = GlyphAtlas::new(64, 64);
     let shaped = GlyphKey::shaped('\u{1F1EF}', 2, 2687, false, false);
     let notdef = GlyphKey::with_slot('\u{E000}', 0, false, false);
@@ -417,9 +417,9 @@ fn the_tab_title_set_holds_every_program_icon_at_both_scales() {
             "Rec Mono St.Helens",
             14.0,
             dpi,
-            &packaged_fonts(),
+            &rec_mono_fonts(),
         )
-        .expect("the packaged family loads");
+        .expect("the Rec Mono fixture family loads");
         let tab_title_real = |icon: char| {
             set.tile_keys.iter().any(|key| {
                 key.ch == icon
@@ -467,7 +467,7 @@ fn an_oversize_required_tile_is_listed_as_incomplete() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let stack = packaged_body();
+    let stack = rec_mono_body();
     let mut atlas = GlyphAtlas::new(8, 8);
     let oversize = GlyphKey::shaped('用', 1, 4242, false, false);
     let _info = atlas.get_or_insert(oversize, &mut LargeTiles);
@@ -494,7 +494,7 @@ fn a_representative_codepoint_resolves_to_its_real_tile_identity() {
         "Rec Mono St.Helens",
         14.0,
         72,
-        &packaged_fonts(),
+        &rec_mono_fonts(),
     );
     assert_eq!(resolved.len(), 2);
     let (character, identity) = &resolved[0];
@@ -542,9 +542,9 @@ fn a_representative_codepoint_without_a_real_tile_resolves_to_nothing() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let stack = renderer_font_stacks("Rec Mono St.Helens", 14.0, 72, 1.0, &packaged_fonts())
+    let stack = renderer_font_stacks("Rec Mono St.Helens", 14.0, 72, 1.0, &rec_mono_fonts())
         .body
-        .expect("the packaged family loads");
+        .expect("the Rec Mono fixture family loads");
     let mut roomy = GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM);
     assert!(codepoint_identity(&stack, &mut roomy, '中').is_some(), "a placed tile resolves");
     let mut tiny = GlyphAtlas::new(8, 8);
@@ -570,9 +570,9 @@ fn a_raster_failure_resolves_to_its_face_content_glyph_and_strike() {
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let stack = renderer_font_stacks("Rec Mono St.Helens", 14.0, 72, 1.0, &packaged_fonts())
+    let stack = renderer_font_stacks("Rec Mono St.Helens", 14.0, 72, 1.0, &rec_mono_fonts())
         .body
-        .expect("the packaged family loads");
+        .expect("the Rec Mono fixture family loads");
     let (key, _) = shaped_tile(
         &stack,
         &mut GlyphAtlas::new(ATLAS_DIM, ATLAS_DIM),
@@ -633,9 +633,9 @@ fn the_status_line_is_measured_in_the_styles_it_draws() {
         "Rec Mono St.Helens",
         size,
         72,
-        &packaged_fonts(),
+        &rec_mono_fonts(),
     )
-    .expect("the packaged family loads");
+    .expect("the Rec Mono fixture family loads");
     let strip: Vec<_> = set
         .tile_keys
         .iter()

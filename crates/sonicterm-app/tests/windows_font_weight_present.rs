@@ -587,7 +587,8 @@ fn setup_scale_case(
     scale: f32,
     prepared: RecoveredContext,
 ) -> Result<ScaleCase, String> {
-    let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let fonts =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono");
     let theme = Theme::default();
     let mut config = Config::default();
     config.font.size = 14.5;

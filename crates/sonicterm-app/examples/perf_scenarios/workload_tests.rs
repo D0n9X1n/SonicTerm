@@ -504,7 +504,7 @@ fn scratch_config_loads_strictly_with_pinned_values() {
         .unwrap();
         let config = sonicterm_cfg::config::Config::load_strict(&path).unwrap();
         assert_eq!((config.window.cols, config.window.rows), (250, rows));
-        assert_eq!((config.font.family.as_str(), config.font.size), ("Rec Mono St.Helens", 13.0));
+        assert_eq!((config.font.family.as_str(), config.font.size), (FONT_FAMILY, 13.0));
         assert_eq!(config.logging.level, level);
         assert_eq!(config.terminal.shell, Some(format!("{scratch}/workload/role.sh")));
         assert_eq!(config.terminal.scrollback, scrollback);
@@ -667,10 +667,12 @@ fn windows_config_names_the_harness_as_the_shell() {
     let config = sonicterm_cfg::config::Config::load_strict(&path).unwrap();
     assert_eq!(config.terminal.shell.as_deref(), Some(harness));
     std::fs::remove_dir_all(&dir).unwrap();
-    let posix = "[window]\ncols = 250\nrows = 40\n\n\
-                 [font]\nfamily = \"Rec Mono St.Helens\"\nsize = 13.0\n\n\
-                 [logging]\nlevel = \"info\"\n\n\
-                 [terminal]\nshell = '/tmp/perf-test/workload/role.sh'\nscrollback = 1000\n";
+    let posix = format!(
+        "[window]\ncols = 250\nrows = 40\n\n\
+         [font]\nfamily = \"{FONT_FAMILY}\"\nsize = 13.0\n\n\
+         [logging]\nlevel = \"info\"\n\n\
+         [terminal]\nshell = '/tmp/perf-test/workload/role.sh'\nscrollback = 1000\n"
+    );
     assert_eq!(config_toml(&idle, SCRATCH, false), posix);
 }
 
@@ -1622,7 +1624,7 @@ mod real_renderer_coverage {
         pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty()
     }
 
-    /// The packaged scenario fonts, so the renderer and the helper load the same faces.
+    /// The app's font directory, so the renderer and the helper load the same faces.
     fn font_dirs() -> Vec<PathBuf> {
         vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")]
     }
@@ -1886,7 +1888,7 @@ mod real_renderer_coverage {
 const ROW_RUN_COLS: usize = 250;
 
 /// Cells `text` occupies: every non-ASCII character in the row-run fixtures is a wide CJK
-/// character from the bundled faces, so it takes two cells.
+/// character, so it takes two cells.
 fn fixture_cells(text: &str) -> usize {
     text.chars().map(|character| if character.is_ascii() { 1 } else { 2 }).sum()
 }

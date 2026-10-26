@@ -309,7 +309,8 @@ fn renderer_in_mode(
             )
             .map_err(|error| error.to_string())?,
     );
-    let font_dirs = [PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    let font_dirs =
+        [PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono")];
     let settings = RendererSettings {
         font_family: "Rec Mono St.Helens",
         font_dirs: &font_dirs,
@@ -1472,7 +1473,7 @@ fn degraded_is_never_partial(
     check(damage.damage == damage.surface, &format!("degraded damage is the surface: {damage:?}"))
 }
 
-/// A grid holding only unique, non-blank rows of packaged ASCII and block glyphs, so a cold
+/// A grid holding only unique, non-blank rows of Rec Mono fixture ASCII and block glyphs, so a cold
 /// renderer's frame misses on every emitted row and no row can hit another's entry.
 fn unique_grid(cols: u16, rows: u16) -> Grid {
     let mut grid = Grid::new(cols, rows);

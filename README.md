@@ -141,8 +141,9 @@ back when the context belongs with the original session again.
   and a Copy button.
 - **Config is just files** — `~/.sonicterm/sonicterm.toml`, plus editable
   `themes/` and `keymaps/` examples seeded on first launch.
-- **Bundled typography** — `Rec Mono St.Helens` ships with the app and is
-  Nerd-Font-patched, so icons and prompt glyphs work out of the box.
+- **System typography, bundled icons** — text uses the platform's own monospace
+  face (Menlo, Cascadia Mono or Consolas, or fontconfig's `monospace`), and the
+  bundled Symbols Nerd Font Mono supplies Powerline and Nerd Font icons out of the box.
 - **WezTerm-inspired behavior** — terminal, font, keymap, and rendering details
   follow WezTerm-proven semantics where SonicTerm has absorbed them.
 

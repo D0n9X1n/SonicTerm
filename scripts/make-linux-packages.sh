@@ -67,8 +67,8 @@ install -m 0644 \
   "$payload/share/icons/hicolor/256x256/apps/$identity.png"
 install -m 0644 "$root/LICENSE" "$payload/LICENSE"
 install -m 0644 \
-  "$root/crates/sonicterm-linux/resources/LICENSE-Rec-Mono-OFL-1.1" \
-  "$payload/LICENSE-Rec-Mono-OFL-1.1"
+  "$root/assets/fonts/LICENSE-SymbolsNerdFont.txt" \
+  "$payload/LICENSE-SymbolsNerdFont-MIT"
 install -m 0644 "$root/crates/sonicterm-winit/LICENSE" "$payload/LICENSE-winit-Apache-2.0"
 install -m 0644 "$root/README.md" "$payload/README.md"
 find "$payload" -type d -exec chmod 0755 {} +
@@ -76,9 +76,7 @@ find "$payload" -type f ! -path "$payload/sonicterm" -exec chmod 0644 {} +
 find "$payload" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} + 2>/dev/null || \
   find "$payload" -exec touch -h -t "$(date -u -r "$SOURCE_DATE_EPOCH" +%Y%m%d%H%M.%S)" {} +
 
-for face in Regular Bold Italic BoldItalic; do
-  test -f "$payload/assets/fonts/RecMonoSt.Helens-${face}.ttf"
-done
+test -f "$payload/assets/fonts/SymbolsNerdFontMono-Regular.ttf"
 test -f "$payload/assets/keymaps/sonicterm-linux.toml"
 test -f "$payload/assets/themes/wezterm.toml"
 test -f "$payload/assets/i18n/en/messages.ftl"
@@ -152,8 +150,8 @@ install -m 0644 "$payload/share/metainfo/$identity.metainfo.xml" \
 install -m 0644 "$payload/share/icons/hicolor/256x256/apps/$identity.png" \
   "$deb_root/usr/share/icons/hicolor/256x256/apps/$identity.png"
 install -m 0644 "$payload/LICENSE" "$deb_root/usr/share/doc/sonicterm/copyright"
-install -m 0644 "$payload/LICENSE-Rec-Mono-OFL-1.1" \
-  "$deb_root/usr/share/doc/sonicterm/LICENSE-Rec-Mono-OFL-1.1"
+install -m 0644 "$payload/LICENSE-SymbolsNerdFont-MIT" \
+  "$deb_root/usr/share/doc/sonicterm/LICENSE-SymbolsNerdFont-MIT"
 install -m 0644 "$payload/LICENSE-winit-Apache-2.0" \
   "$deb_root/usr/share/doc/sonicterm/LICENSE-winit-Apache-2.0"
 install -m 0644 "$payload/README.md" "$deb_root/usr/share/doc/sonicterm/README.md"

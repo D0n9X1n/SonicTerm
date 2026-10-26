@@ -1060,3 +1060,19 @@ fn a_status_line_save_leaves_absent_keys_absent_at_their_defaults() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A fresh config names the host's own monospace family, never a bundled font, so an
+/// unconfigured install renders with a face the platform already provides.
+#[test]
+fn default_font_family_is_the_platform_monospace() {
+    let expected = if cfg!(target_os = "macos") {
+        "Menlo"
+    } else if cfg!(windows) {
+        "Cascadia Mono"
+    } else {
+        "monospace"
+    };
+    assert_eq!(DEFAULT_FONT_FAMILY, expected);
+    assert_eq!(FontConfig::default().family, expected);
+    assert_eq!(Config::default().font.family, expected);
+}

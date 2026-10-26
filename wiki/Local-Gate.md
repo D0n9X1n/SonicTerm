@@ -249,8 +249,8 @@ The separate `doc-resource-features` step is required because
 `test-util` is the workspace's only optional feature and `cargo doc` builds no
 dev-dependencies. Workspace Clippy and tests already compile `test-util`
 through `sonicterm-logging`'s dev-dependency on it. The font stack has no
-optional vendor features: St.Helens is a normal tracked asset and other fallback
-faces come from native discovery.
+optional vendor features: the bundled symbols font is a normal tracked asset,
+and text and other fallback faces come from native discovery.
 `check-workspace-crates.sh` first runs the native-source verifier unit tests,
 its offline integrity check, and portable macOS bundle tests, then runs one fail-complete
 `cargo test --workspace --lib --bins --tests --no-fail-fast` command for default

@@ -101,8 +101,9 @@ SonicTerm.app/Contents/
 的文档类型（脚本：`public.shell-script` 和 `com.apple.terminal.shell-script`；Unix
 可执行文件：`public.unix-executable`），以及一个 `CFBundleURLTypes` 条目
 `com.d0n9x1n.sonicterm.terminal-links`，声明 `ssh` 和 `x-man-page` scheme。不声明
-`telnet`。这些声明只让 SonicTerm 成为可选项；安装不会更改任何默认 handler。四个未经修改的 Rec Mono 字体
-仅保存一次，运行时和 AppKit/CoreText 共用同一路径。
+`telnet`。这些声明只让 SonicTerm 成为可选项；安装不会更改任何默认 handler。内置的 Symbols Nerd Font
+Mono 及其 MIT 许可证仅保存一次，运行时和 AppKit/CoreText 共用同一路径。正文字体使用系统自带的 Menlo，
+因此不打包正文字体。
 
 `scripts/macos-bundle.py` 从已安装的 Homebrew keg 递归收集可执行文件依赖的非系统 dylib，
 核对架构，将加载路径改为 bundle 内相对路径，并移除构建主机的 rpath。安装包附带必需的
@@ -125,8 +126,8 @@ config/log 根目录，保留 `HOME`，移除继承的 `NO_COLOR`，并要求原
 Apple Silicon 与 Intel CI lane 还会在各自原生主机生成 DMG，然后运行
 `python3 scripts/test-macos-package.py --dmg <image> --state-dir <new-directory>`。
 验证器将只读挂载镜像中的 app 复制到临时安装路径，检查签名和依赖清单，再针对子进程
-拒绝 Homebrew 文件读取，运行应用和 Cairo 绘制。原生 LaunchServices 探针核对四个字体
-URL 均指向 bundle，避免误用系统中已安装的同名字体。它验证基本 Cairo 渐变像素，不是
+拒绝 Homebrew 文件读取，运行应用和 Cairo 绘制。原生 LaunchServices 探针核对内置符号字体的
+URL 指向 bundle，避免误用系统中已安装的同名字体。它验证基本 Cairo 渐变像素，不是
 完整的 COLR 字形测试。只有 `open -W` 在建立等待前进程已退出时产生的精确
 `kevent`/“No such process” 错误，且本次新报告已以唯一、完整的通过判定结束，才会被接受；
 其他启动失败和超时仍使验证失败。同一可执行文件分别使用单份/重复字体生成 UDZO 镜像，报告实际
@@ -281,7 +282,7 @@ SonicTerm-<tag>-linux-x86_64/
 ├── share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
 ├── share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
 ├── LICENSE
-├── LICENSE-Rec-Mono-OFL-1.1
+├── LICENSE-SymbolsNerdFont-MIT
 ├── LICENSE-winit-Apache-2.0
 └── README.md
 ```
@@ -296,13 +297,14 @@ Debian package 为 `SonicTerm-<tag>-linux-x86_64.deb`，安装到：
 /usr/share/man/man1/sonicterm.1.gz
 /usr/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
 /usr/share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
-/usr/share/doc/sonicterm/{copyright,LICENSE-Rec-Mono-OFL-1.1,LICENSE-winit-Apache-2.0,README.md}
+/usr/share/doc/sonicterm/{copyright,LICENSE-SymbolsNerdFont-MIT,LICENSE-winit-Apache-2.0,README.md}
 ```
 
 Builder 会检查 x86_64 ELF，并拒绝高于 2.35 的 GLIBC requirement。`dpkg-shlibdeps`
 推导已链接的 `Depends`；脚本还会加入 `libxkbcommon-x11-0`，因为 winit 在 X11 下动态
 加载它。便携归档的主机在使用 X11 时必须提供 `libxkbcommon-x11.so.0`。打包脚本会验证
-四个 Rec Mono 字体，以及主题、键位、图标、英文和简体中文 catalog。
+内置符号字体，以及主题、键位、图标、英文和简体中文 catalog。正文字体使用 fontconfig 的
+`monospace`，因此安装包不携带正文字体。
 
 Debian man page 用 `gzip -n -9` 压缩，因此不含文件名和时间戳，并以 `0644` 权限安装。
 终端条目声明启动器参数；隐藏的 open-script 条目以草稿方式打开 shell 脚本。见

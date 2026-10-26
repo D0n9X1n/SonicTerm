@@ -1039,8 +1039,8 @@ fn renderer(
     shared: Option<&App>,
     role: &'static str,
 ) -> Result<GpuRenderer, String> {
-    let font_dirs =
-        [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    let font_dirs = [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono")];
     let settings = RendererSettings {
         font_family: &config.font.family,
         font_dirs: &font_dirs,

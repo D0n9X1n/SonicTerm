@@ -147,7 +147,8 @@ fn renderer(
             )
             .map_err(|error| error.to_string())?,
     );
-    let font_dirs = [PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    let font_dirs =
+        [PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono")];
     let settings = RendererSettings {
         font_family: "Rec Mono St.Helens",
         font_dirs: &font_dirs,
@@ -683,7 +684,8 @@ fn renderer_reuses_titles_and_clears_on_face_replacement(
     check(after.2 == before.2, "a warm assembly of ASCII rows and kept titles shapes nothing")?;
     check(pixels(&mut renderer)? == warm_pixels, "the reused titles draw the same pixels")?;
 
-    let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let fonts =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono");
     let adopted = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
         &[("Rec Mono St.Helens", false)],
         vec![fonts],

@@ -386,7 +386,7 @@ fn lua_fallback_reports_bitmap_synthesis_palette_alias_and_non_default_options()
 }
 
 fn tracked_font_path(file: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts").join(file)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-fonts/rec-mono").join(file)
 }
 
 fn parse_from_disk(path: &std::path::Path) -> ParsedFont {
@@ -482,7 +482,7 @@ fn computing_coverage_never_holds_the_lock_a_clone_needs() {
     let handle = FontDataHandle {
         source: FontDataSource::OnDisk(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+                .join("test-fonts/rec-mono/RecMonoSt.Helens-Regular.ttf"),
         ),
         index: 0,
         variation: 0,

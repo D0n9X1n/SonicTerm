@@ -205,9 +205,10 @@ tab-transfer path.
 
 ### App resources
 
-The bundle reads runtime assets from `Contents/Resources/assets`. Its four
-`Rec Mono St.Helens` faces are stored only in `assets/fonts`;
-`ATSApplicationFontsPath=assets/fonts` lets AppKit/CoreText resolve the same files.
+The bundle reads runtime assets from `Contents/Resources/assets`. Its bundled
+Symbols Nerd Font Mono is stored only in `assets/fonts`;
+`ATSApplicationFontsPath=assets/fonts` lets AppKit/CoreText resolve the same file.
+The text face is the system's Menlo.
 The package contains Cairo's non-system dylib closure in `Contents/Frameworks`
 with bundle-relative imports, plus licenses and provenance. Its minimum macOS
 version reflects the actual executable/library deployment targets, not merely
@@ -359,10 +360,11 @@ Automatic shell selection chooses the first executable candidate in this order:
 Explicit shell configuration wins.
 
 A portable package resolves the executable-adjacent `assets/`; a Debian install
-resolves `/usr/share/sonicterm/assets`. Startup verifies all four bundled Rec
-Mono faces, passes their directory to `FontStack` before native Fontconfig
-discovery, and retains that directory across font reloads. Native fallback
-remains available.
+resolves `/usr/share/sonicterm/assets`. Startup verifies the bundled Symbols
+Nerd Font Mono, passes its directory to `FontStack` before native Fontconfig
+discovery, and retains that directory across font reloads. The text face is
+fontconfig's `monospace` unless `[font] family` names another installed family.
+Native fallback remains available.
 
 ### Terminal launchers
 

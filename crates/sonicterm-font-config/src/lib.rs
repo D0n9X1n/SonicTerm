@@ -284,6 +284,27 @@ impl Display for FreeTypeLoadFlags {
     }
 }
 
+/// The host's own monospace families, in preference order, that stand in for the text face
+/// when no configured family is installed.
+///
+/// macOS ships Menlo; current Windows ships Cascadia Mono and every release ships Consolas;
+/// elsewhere fontconfig resolves the `monospace` alias to the system's chosen face. SonicTerm
+/// bundles no text face, so every entry names one the platform already provides.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_MONOSPACE_FAMILIES: &[&str] = &["Menlo"];
+/// The host's own monospace families, in preference order, that stand in for the text face
+/// when no configured family is installed.
+#[cfg(windows)]
+pub const DEFAULT_MONOSPACE_FAMILIES: &[&str] = &["Cascadia Mono", "Consolas"];
+/// The host's own monospace families, in preference order, that stand in for the text face
+/// when no configured family is installed.
+#[cfg(not(any(target_os = "macos", windows)))]
+pub const DEFAULT_MONOSPACE_FAMILIES: &[&str] = &["monospace"];
+
+/// The family of the font SonicTerm bundles in its asset directory for Powerline and Nerd Font
+/// icons. It follows every text face in each fallback chain, ahead of system fallback.
+pub const BUNDLED_SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FontAttributes {
     pub family: String,
@@ -318,7 +339,7 @@ impl FontAttributes {
 impl Default for FontAttributes {
     fn default() -> Self {
         Self {
-            family: "JetBrains Mono".into(),
+            family: DEFAULT_MONOSPACE_FAMILIES[0].into(),
             weight: FontWeight::default(),
             stretch: FontStretch::default(),
             style: FontStyle::default(),
@@ -474,21 +495,20 @@ impl TextStyle {
 
     /// Return the configured fonts followed by the implicit fallback chain.
     ///
-    /// The default family is appended when the user's list does not already
-    /// contain it, then an emoji font and a symbol font, so codepoints outside
-    /// the configured fonts still resolve. Appended entries are marked as
-    /// fallbacks and are searched only after every configured font misses.
+    /// Each platform default monospace family the list does not already name is appended, then an
+    /// emoji font and the bundled symbols font, so a missing configured family still gets the
+    /// host's own text face and codepoints outside the configured fonts still resolve. Appended
+    /// entries are marked as fallbacks and are searched only after every configured font misses.
     pub fn font_with_fallback(&self) -> Vec<FontAttributes> {
         let mut font = self.font.clone();
-        let mut default_font = FontAttributes::default();
-
-        if !font.contains(&default_font) {
-            default_font.is_fallback = true;
-            font.push(default_font);
+        for family in DEFAULT_MONOSPACE_FAMILIES {
+            if !font.iter().any(|attr| attr.family == *family) {
+                font.push(FontAttributes::new_fallback(family));
+            }
         }
 
         font.push(FontAttributes::new_fallback("Noto Color Emoji"));
-        font.push(FontAttributes::new_fallback("Symbols Nerd Font Mono"));
+        font.push(FontAttributes::new_fallback(BUNDLED_SYMBOLS_FAMILY));
         font
     }
 }

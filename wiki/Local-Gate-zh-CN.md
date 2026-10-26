@@ -165,7 +165,7 @@ gate 会使一致性检查失败。
 必须单独运行 `doc-resource-features` 步骤：`test-util` 是 workspace 唯一的
 optional feature，而 `cargo doc` 不构建 dev-dependency。`sonicterm-logging` 以
 dev-dependency 使用 `test-util`，因此 workspace Clippy 和测试已经编译它。字体栈没有可选
-vendor feature：St.Helens 是普通的已跟踪资源，其它回退字体来自原生平台发现。
+vendor feature：内置符号字体是普通的已跟踪资源，正文字体和其它回退字体来自原生平台发现。
 `check-workspace-crates.sh` 先运行原生源码验证器的单元测试、离线完整性检查和可跨平台运行的
 macOS bundle 测试，再对默认
 feature 运行一次 fail-complete 的 `cargo test --workspace --lib --bins --tests --no-fail-fast`；

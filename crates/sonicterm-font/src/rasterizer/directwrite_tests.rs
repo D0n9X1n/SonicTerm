@@ -6,7 +6,7 @@ fn tracked_rasterizer(style: &str) -> DirectWriteRasterizer {
     let handle = FontDataHandle {
         source: FontDataSource::OnDisk(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("../../assets/fonts/RecMonoSt.Helens-{style}.ttf")),
+                .join(format!("test-fonts/rec-mono/RecMonoSt.Helens-{style}.ttf")),
         ),
         index: 0,
         variation: 0,

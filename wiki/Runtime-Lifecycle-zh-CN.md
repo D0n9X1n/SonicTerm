@@ -44,7 +44,7 @@ macOS 和 Linux 会在读取配置前安装 panic 与退出诊断。Windows 先�
   原生菜单；一次性 window-ready 钩子仅为初始窗口调用 `setTabbingMode: 2`。
 - Windows 在界面线程初始化 OLE。HWND 出现后才安装 DWM 背景和 `muda` 菜单。原生标签页
   拖动注册也在同一界面线程完成。
-- Linux 把不支持的材质背景改为不透明，并预检四个包内 Rec Mono 字体文件。所有平台的
+- Linux 把不支持的材质背景改为不透明，并预检包内的 Symbols Nerd Font Mono 字体文件。所有平台的
   `--runtime-smoke` 都使用分开的临时 config/log 根目录、30 秒应用内证明期限和 45 秒完整
   进程树看门狗。
 

@@ -168,9 +168,9 @@ macOS 的操作系统交接后端把序列化 `TabPayload` 写入 general NSPast
 
 ### App 资源
 
-Bundle 从 `Contents/Resources/assets` 读取运行时资源。四个 `Rec Mono St.Helens`
-字体仅保存在 `assets/fonts`，通过 `ATSApplicationFontsPath=assets/fonts` 让
-AppKit/CoreText 解析同一份文件。安装包在 `Contents/Frameworks` 中包含 Cairo 的非系统
+Bundle 从 `Contents/Resources/assets` 读取运行时资源。内置的 Symbols Nerd Font Mono
+仅保存在 `assets/fonts`，通过 `ATSApplicationFontsPath=assets/fonts` 让
+AppKit/CoreText 解析同一份文件。正文字体使用系统自带的 Menlo。安装包在 `Contents/Frameworks` 中包含 Cairo 的非系统
 动态库依赖，使用 bundle 内相对加载路径，并附带许可证和来源清单。最低 macOS 版本反映
 可执行文件/库的实际部署目标，而不只是打包主机架构。验证方式见[打包](Packaging-zh-CN)。
 
@@ -290,8 +290,9 @@ backdrop 或跨进程标签页拖放。Linux shell 会在共享 app runner 上�
 passwd shell、最后 `/bin/sh`。显式 shell 配置优先。
 
 便携包使用 executable 相邻的 `assets/`；Debian 安装使用
-`/usr/share/sonicterm/assets`。启动时会检查四个内置 Rec Mono 字体，把字体目录在原生
-Fontconfig discovery 前传给 `FontStack`，并在字体重载时继续保留。原生 fallback 仍可用。
+`/usr/share/sonicterm/assets`。启动时会检查内置的 Symbols Nerd Font Mono，把字体目录在原生
+Fontconfig discovery 前传给 `FontStack`，并在字体重载时继续保留。除非 `[font] family`
+指定了另一个已安装的字体族，正文字体使用 fontconfig 的 `monospace`。原生 fallback 仍可用。
 
 ### 终端启动器
 

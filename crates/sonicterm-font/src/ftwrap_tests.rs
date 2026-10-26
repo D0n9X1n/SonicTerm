@@ -93,7 +93,7 @@ fn face_remains_valid_after_creating_library_drops() {
     let handle = FontDataHandle {
         source: FontDataSource::OnDisk(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+                .join("test-fonts/rec-mono/RecMonoSt.Helens-Regular.ttf"),
         ),
         index: 0,
         variation: 0,
@@ -527,7 +527,7 @@ fn outline_points(ops: &[DrawOp]) -> Vec<(f32, f32)> {
 #[test]
 fn colr_contours_load_unscaled_and_untransformed_at_every_size_and_shear() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf");
+        .join("test-fonts/rec-mono/RecMonoSt.Helens-Regular.ttf");
     let handle = FontDataHandle {
         source: FontDataSource::OnDisk(path),
         index: 0,

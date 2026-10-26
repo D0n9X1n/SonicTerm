@@ -123,8 +123,12 @@ fn configured_font_diagnostics_use_sonicterm_guidance_without_hiding_errors() {
     const MISSING: &str = "SonicTerm Missing Diagnostic Primary";
     const OTHER: &str = "SonicTerm Missing Diagnostic Style";
     const FALLBACK: &str = "SonicTerm Missing Diagnostic Fallback";
-    const PACKAGED: &str = "Rec Mono St.Helens";
+    const REC_MONO: &str = "Rec Mono St.Helens";
     const URL: &str = "https://github.com/D0n9X1n/SonicTerm/wiki/Configuration";
+    /// How a diagnostic names the family it failed to load; the replacement it names differs.
+    fn reported_identity(family: &str) -> String {
+        format!("{family:?} (weight=")
+    }
     // These targets must survive a font capture; a replacement filter can silently drop them from files and crash history.
     const RETAINED_WARNINGS: [&str; 5] = [
         "font-capture-exit-control",
@@ -176,12 +180,15 @@ fn configured_font_diagnostics_use_sonicterm_guidance_without_hiding_errors() {
             assert_eq!(errors.iter().filter(|line| line.contains(MISSING)).count(), 2);
             assert_eq!(errors.iter().filter(|line| line.contains(OTHER)).count(), 1);
             assert_eq!(errors.iter().filter(|line| line.contains(FALLBACK)).count(), 1);
-            assert!(errors.iter().all(|line| !line.contains(PACKAGED)));
+            assert!(errors.iter().all(|line| !line.contains(&reported_identity(REC_MONO))));
+            let default_family = reported_identity(config::DEFAULT_MONOSPACE_FAMILIES[0]);
+            assert!(errors.iter().all(|line| !line.contains(&default_family)), "{stderr}");
             let primary = errors
                 .iter()
                 .find(|line| line.contains(MISSING) && line.contains("Regular"))
                 .unwrap();
             assert!(primary.contains("configured primary font"), "{primary}");
+            assert!(primary.contains(&format!("Using \"{REC_MONO}\" instead")), "{primary}");
             assert!(
                 primary.contains("weight=\"Regular\"")
                     && primary.contains("stretch=Normal")
@@ -222,16 +229,19 @@ fn configured_font_diagnostics_use_sonicterm_guidance_without_hiding_errors() {
     let primary = config::FontAttributes::new(MISSING);
     let mut settings = config::Config::default();
     settings.font_locator = config::FontLocatorSelection::ConfigDirsOnly;
-    settings.font_dirs = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
+    settings.font_dirs =
+        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-fonts/rec-mono")];
     settings.font.font = vec![
         primary.clone(),
         config::FontAttributes::new_fallback(FALLBACK),
-        config::FontAttributes::new_fallback(PACKAGED),
+        config::FontAttributes::new_fallback(REC_MONO),
     ];
     let settings = config::ConfigHandle::new(settings);
     let fonts = crate::FontConfigInner::new(Some(settings.clone()), 72).unwrap();
     let (_, handles) = fonts.resolve_font_helper(&settings.font, &settings, 14).unwrap();
-    assert_eq!(handles.first().unwrap().names().family, PACKAGED);
+    assert_eq!(handles.first().unwrap().names().family, REC_MONO);
+    // A repeat at another size, as a zoom or a scale change does, reports the same miss only once.
+    fonts.resolve_font_helper(&settings.font, &settings, 18).unwrap();
     for synthetic in [settings.font.make_bold(), settings.font.make_italic()] {
         fonts.resolve_font_helper(&synthetic, &settings, 14).unwrap();
     }
@@ -241,16 +251,25 @@ fn configured_font_diagnostics_use_sonicterm_guidance_without_hiding_errors() {
         config::FontAttributes { weight: config::FontWeight::BOLD, ..primary },
         config::FontAttributes::new(OTHER),
         config::FontAttributes::new(FALLBACK),
-        config::FontAttributes::new(PACKAGED),
+        config::FontAttributes::new(REC_MONO),
     ];
     for requested in requests {
         let style = config::TextStyle {
-            font: vec![requested, config::FontAttributes::new_fallback(PACKAGED)],
+            font: vec![requested, config::FontAttributes::new_fallback(REC_MONO)],
             foreground: None,
         };
         let (_, handles) = fonts.resolve_font_helper(&style, &settings, 14).unwrap();
-        assert_eq!(handles.first().unwrap().names().family, PACKAGED);
+        assert_eq!(handles.first().unwrap().names().family, REC_MONO);
     }
+    // A platform default the host lacks, such as Cascadia Mono on an older Windows, is no user error.
+    let default_missing = config::TextStyle {
+        font: vec![
+            config::FontAttributes::new(config::DEFAULT_MONOSPACE_FAMILIES[0]),
+            config::FontAttributes::new_fallback(REC_MONO),
+        ],
+        foreground: None,
+    };
+    fonts.resolve_font_helper(&default_missing, &settings, 14).unwrap();
     let dump =
         sonicterm_logging::crash::__test_write_dump(&directory.join("dump"), "synthetic").unwrap();
     let history = std::fs::read_to_string(dump).unwrap();
@@ -278,7 +297,7 @@ fn configured_font_diagnostics_use_sonicterm_guidance_without_hiding_errors() {
             assert!(!captured
                 .lines()
                 .filter(|line| line.contains("Unable to load"))
-                .any(|line| line.contains(PACKAGED)));
+                .any(|line| line.contains(&reported_identity(REC_MONO))));
         } else {
             assert!(!captured.contains("configured-font-error-positive-control"));
             assert!(!captured.contains("Unable to load"));
@@ -295,7 +314,7 @@ fn fallback_fixture(coverage_chars: &[char], is_math_font: bool) -> ParsedFont {
     let handle = FontDataHandle {
         source: FontDataSource::OnDisk(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+                .join("test-fonts/rec-mono/RecMonoSt.Helens-Regular.ttf"),
         ),
         index: 0,
         variation: 0,

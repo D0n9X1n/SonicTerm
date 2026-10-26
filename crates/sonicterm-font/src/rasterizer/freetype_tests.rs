@@ -881,7 +881,7 @@ fn colr_sweep_gradient_quadrants_match_harfbuzz() {
 #[test]
 fn outline_glyphs_leave_the_harfbuzz_painter_unbuilt() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf");
+        .join("test-fonts/rec-mono/RecMonoSt.Helens-Regular.ttf");
     let handle = crate::locator::FontDataHandle {
         source: crate::locator::FontDataSource::OnDisk(path),
         index: 0,

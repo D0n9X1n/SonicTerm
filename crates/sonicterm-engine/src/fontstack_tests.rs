@@ -1,6 +1,9 @@
 use super::*;
 use std::path::Path;
 
+/// The family of the test-only Rec Mono St.Helens fixture in `sonicterm-font/test-fonts/rec-mono`.
+const REC_MONO_FAMILY: &str = "Rec Mono St.Helens";
+
 // The Windows color face must reach the atlas as artwork, unchanged by monochrome weight settings.
 #[cfg(windows)]
 #[test]
@@ -11,7 +14,8 @@ fn native_color_face_preserves_artwork_across_weights() {
             14.5,
             72,
             scale,
-            &[PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+            &[PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../sonicterm-font/test-fonts/rec-mono")],
         )
         .unwrap()
     };
@@ -54,8 +58,10 @@ fn blank_color_raster_survives_fontstack_and_atlas() {
         }
     }
     let stack = FontStack::try_new_with_font_dirs_for_test(
-        &[(DEFAULT_FONT_FAMILY, false)],
-        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+        &[(REC_MONO_FAMILY, false)],
+        vec![
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono")
+        ],
         14.0,
         72,
         1.0,
@@ -176,26 +182,22 @@ fn explicit_config_records_requested_font_size() {
 }
 
 #[test]
-fn production_font_dirs_resolve_all_packaged_rec_mono_styles() {
-    // Protect packaged startup and live reload without disabling native fallback discovery.
-    let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+fn font_dirs_resolve_all_rec_mono_fixture_styles() {
+    // Configured font directories resolve every style directly while native fallback discovery stays on.
+    let fonts =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono");
     let config = build_config_with_font_dirs(
-        DEFAULT_FONT_FAMILY,
+        REC_MONO_FAMILY,
         14.0,
-        FALLBACK_FAMILIES,
+        &fallback_families(REC_MONO_FAMILY),
         std::slice::from_ref(&fonts),
     );
     assert_eq!(config.font_locator, config::FontLocatorSelection::default());
     assert_eq!(config.font_dirs, vec![fonts.clone()]);
 
-    let stack = FontStack::try_new_full_with_weight_and_font_dirs(
-        DEFAULT_FONT_FAMILY,
-        14.0,
-        72,
-        1.0,
-        &[fonts],
-    )
-    .expect("tracked packaged fonts must build the production stack");
+    let stack =
+        FontStack::try_new_full_with_weight_and_font_dirs(REC_MONO_FAMILY, 14.0, 72, 1.0, &[fonts])
+            .expect("tracked Rec Mono fixture fonts must build the production stack");
 
     for (bold, italic, expected_file) in [
         (false, false, "RecMonoSt.Helens-Regular.ttf"),
@@ -203,16 +205,16 @@ fn production_font_dirs_resolve_all_packaged_rec_mono_styles() {
         (false, true, "RecMonoSt.Helens-Italic.ttf"),
         (true, true, "RecMonoSt.Helens-BoldItalic.ttf"),
     ] {
-        let font = stack.font_for_style(bold, italic).expect("packaged style must resolve");
+        let font = stack.font_for_style(bold, italic).expect("fixture style must resolve");
         let primary = font.clone_handles().into_iter().next().expect("configured face");
         assert_eq!(primary.handle.origin, sonicterm_font::locator::FontOrigin::FontDirs);
-        assert_eq!(primary.names().family, DEFAULT_FONT_FAMILY);
+        assert_eq!(primary.names().family, REC_MONO_FAMILY);
         assert_eq!(
             primary.handle.path_str().as_deref().map(Path::new).and_then(Path::file_name),
             Some(expected_file.as_ref())
         );
-        assert!(!primary.synthesize_bold, "packaged bold face must be selected directly");
-        assert!(!primary.synthesize_italic, "packaged italic face must be selected directly");
+        assert!(!primary.synthesize_bold, "fixture bold face must be selected directly");
+        assert!(!primary.synthesize_italic, "fixture italic face must be selected directly");
     }
 }
 
@@ -253,16 +255,12 @@ fn change_scaling_rescales_cell_metrics_with_dpi() {
 /// The Windows fallback stack emits real OpenType mark positioning for the renderer to preserve.
 #[cfg(target_os = "windows")]
 #[test]
-fn packaged_shaper_emits_nonzero_mark_offsets() {
-    let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
-    let stack = FontStack::try_new_full_with_weight_and_font_dirs(
-        DEFAULT_FONT_FAMILY,
-        15.0,
-        96,
-        1.0,
-        &[fonts],
-    )
-    .expect("packaged font stack");
+fn rec_mono_shaper_emits_nonzero_mark_offsets() {
+    let fonts =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono");
+    let stack =
+        FontStack::try_new_full_with_weight_and_font_dirs(REC_MONO_FAMILY, 15.0, 96, 1.0, &[fonts])
+            .expect("Rec Mono fixture stack");
     let glyphs = stack.shape_text("مُحَمَّد").expect("Arabic marks shape through fallback");
 
     assert!(
@@ -533,8 +531,9 @@ fn erosion_keeps_tile_geometry_and_subpixel_alpha_consistent() {
 fn weight_conversion_preserves_geometry_and_color_artwork() {
     let make_stack = |scale| {
         FontStack::try_new_with_font_dirs_for_test(
-            &[(DEFAULT_FONT_FAMILY, false)],
-            vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+            &[(REC_MONO_FAMILY, false)],
+            vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../sonicterm-font/test-fonts/rec-mono")],
             14.5,
             72,
             scale,
@@ -590,8 +589,10 @@ fn weight_conversion_preserves_geometry_and_color_artwork() {
 #[test]
 fn bold_counters_survive_weight_two_at_current_raster_size() {
     let mut stack = FontStack::try_new_with_font_dirs_for_test(
-        &[(DEFAULT_FONT_FAMILY, false)],
-        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+        &[(REC_MONO_FAMILY, false)],
+        vec![
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono")
+        ],
         14.5,
         72,
         2.0,
@@ -660,7 +661,7 @@ mod frame_fallback {
             let handle = FontDataHandle {
                 source: FontDataSource::OnDisk(
                     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+                        .join("../sonicterm-font/test-fonts/rec-mono/RecMonoSt.Helens-Regular.ttf"),
                 ),
                 index: 0,
                 variation: 0,
@@ -971,7 +972,8 @@ mod frame_fallback {
 /// is the loaded face's raster size in thousandths of a pixel (14 pt at 96 DPI is 18.667 px).
 #[test]
 fn a_character_key_and_its_shaped_key_resolve_to_one_face_and_strike() {
-    let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let fonts =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono");
     let stack = FontStack::try_new_with_font_dirs_for_test(
         &[("Rec Mono St.Helens", false)],
         vec![fonts],
@@ -1004,10 +1006,10 @@ fn a_character_key_and_its_shaped_key_resolve_to_one_face_and_strike() {
 #[test]
 fn a_resolved_face_content_is_the_digest_of_its_file_bytes() {
     use sonicterm_text::face_content::{face_content_id, FaceNamespace};
-    let stack = packaged_rec_mono_stack();
+    let stack = rec_mono_stack();
     let key = GlyphKey::new('a', false, false);
     let resolved = stack.resolved_glyph_face(key).expect("the character resolves");
-    let bytes = std::fs::read(&resolved.face.source).expect("the packaged face file reads");
+    let bytes = std::fs::read(&resolved.face.source).expect("the fixture face file reads");
     assert_eq!(
         stack.resolved_face_content(key),
         Some(face_content_id(FaceNamespace::File, &bytes)),
@@ -1016,9 +1018,10 @@ fn a_resolved_face_content_is_the_digest_of_its_file_bytes() {
     assert_eq!(stack.resolved_face_content(GlyphKey::shaped('a', 200, 1, false, false)), None);
 }
 
-/// A deterministic stack over the packaged Rec Mono faces, independent of host fonts.
-fn packaged_rec_mono_stack() -> FontStack {
-    let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+/// A deterministic stack over the Rec Mono fixture faces, independent of host fonts.
+fn rec_mono_stack() -> FontStack {
+    let fonts =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono");
     FontStack::try_new_with_font_dirs_for_test(
         &[("Rec Mono St.Helens", false)],
         vec![fonts],
@@ -1051,7 +1054,7 @@ fn style_faces_match_todays_resolution() {
     // The memo changes how often a face is resolved, never which face: every style returns the
     // configuration's own `Rc`, a face replacement returns a new one, and a native-size view
     // resolves at its own size.
-    let stack = packaged_rec_mono_stack();
+    let stack = rec_mono_stack();
     for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
         let memoized = stack.font_for_style(bold, italic).unwrap();
         assert!(std::rc::Rc::ptr_eq(&memoized, &todays_face(&stack, bold, italic)));
@@ -1076,7 +1079,7 @@ fn memo_skips_resolution_and_every_warmed_sibling_misses_after_a_shared_change()
     // A warm stack shapes without resolving its face again, and a face replacement made through
     // any sibling (a clone or a native-size view sharing the configuration) makes every warmed
     // sibling resolve exactly once at its next lookup and return the new face.
-    let stack = packaged_rec_mono_stack();
+    let stack = rec_mono_stack();
     let resolves = || stack.font_config.resolve_count_for_test();
     stack.shape_text_for_frame("abc", false, false).unwrap();
     let warm = resolves();
@@ -1117,14 +1120,15 @@ fn memo_skips_resolution_and_every_warmed_sibling_misses_after_a_shared_change()
     }
 }
 
-/// The bundled font reports a cap height of its own: below the cell height, and scaling with
+/// The Rec Mono fixture reports a cap height of its own: below the cell height, and scaling with
 /// the stack's size, so the strip centers on the font's measurement, not the `H` fallback.
 #[test]
-fn bundled_font_reports_a_cap_height_that_follows_its_size() {
+fn rec_mono_fixture_reports_a_cap_height_that_follows_its_size() {
     let at = |size: f64| {
         FontStack::try_new_with_font_dirs_for_test(
-            &[(DEFAULT_FONT_FAMILY, false)],
-            vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+            &[(REC_MONO_FAMILY, false)],
+            vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../sonicterm-font/test-fonts/rec-mono")],
             size,
             72,
             1.0,
@@ -1138,4 +1142,60 @@ fn bundled_font_reports_a_cap_height_that_follows_its_size() {
     assert!(small_cap > 0.0 && small_cap < cell_h, "cap {small_cap} vs cell {cell_h}");
     assert!(large_cap > small_cap * 1.6, "{large_cap} follows the size from {small_cap}");
     println!("cap height: {small_cap} px at 9.6 pt, {large_cap} px at 19.2 pt");
+}
+
+/// The app's font directory: the bundled symbols font production passes to every stack.
+fn bundled_font_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")
+}
+
+/// A Nerd Font icon the platform's default monospace face lacks resolves from the bundled
+/// symbols font in the app's font directory, ahead of any host-installed copy or system
+/// fallback, for the body stack and the chrome views built from it.
+#[test]
+fn nerd_icon_resolves_from_the_bundled_symbols_font_under_the_default_family() {
+    let bundled = bundled_font_dir()
+        .join("SymbolsNerdFontMono-Regular.ttf")
+        .canonicalize()
+        .expect("the bundled symbols font is tracked");
+    let stack = FontStack::try_new_full_with_weight_and_font_dirs(
+        DEFAULT_FONT_FAMILY,
+        14.0,
+        72,
+        1.0,
+        &[bundled_font_dir()],
+    )
+    .expect("the default family builds a stack");
+    for view in [stack.clone(), stack.with_font_size(11.0)] {
+        // U+F07B (nf-fa-folder) and U+F0001 (nf-md) sit outside every platform default face.
+        for icon in ['\u{F07B}', '\u{F0001}'] {
+            let resolved = view
+                .resolved_glyph_face(GlyphKey::new(icon, false, false))
+                .unwrap_or_else(|| panic!("{icon:?} resolves to a face"));
+            assert_eq!(Path::new(&resolved.face.source), bundled, "{icon:?}: {resolved:?}");
+            assert_ne!(resolved.glyph_id, 0, "{icon:?} is a real glyph, not notdef");
+        }
+    }
+}
+
+/// A configured family the host does not have falls back to the platform's default monospace
+/// face for text and cell metrics, never to the symbols or emoji fallback that follows it.
+#[test]
+fn a_missing_configured_family_falls_back_to_the_default_monospace_face() {
+    let primary_family = |family: &str| {
+        let stack = FontStack::try_new_full_with_weight_and_font_dirs(
+            family,
+            14.0,
+            72,
+            1.0,
+            &[bundled_font_dir()],
+        )
+        .expect("a stack builds even when its family is missing");
+        let font = stack.font_for_style(false, false).expect("the regular style resolves");
+        let handles = font.clone_handles();
+        handles.first().expect("some face loads").names().family.clone()
+    };
+    let default_family = primary_family(DEFAULT_FONT_FAMILY);
+    assert_ne!(default_family, "Symbols Nerd Font Mono");
+    assert_eq!(primary_family("SonicTermNoSuchFamily-5D1C"), default_family);
 }

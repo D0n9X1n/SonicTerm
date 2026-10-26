@@ -54,8 +54,8 @@ Platform startup adds these steps:
 - Windows initializes OLE on the UI thread. DWM backdrop and the `muda` menu are
   installed after an HWND exists. Native tab drag registration uses the same
   UI thread.
-- Linux forces unsupported material backdrops to opaque and preflights all four
-  packaged Rec Mono font faces. On every platform, `--runtime-smoke` uses
+- Linux forces unsupported material backdrops to opaque and preflights the
+  packaged Symbols Nerd Font Mono. On every platform, `--runtime-smoke` uses
   separate scratch config/log roots, a 30-second in-app proof deadline, and a
   45-second process-tree watchdog.
 

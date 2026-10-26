@@ -1,63 +1,43 @@
 # Bundled Fonts
 
-SonicTerm ships exactly one monospaced font family:
+SonicTerm bundles no text face. The terminal and its chrome draw with the
+platform's own monospace family unless `[font] family` names another one:
 
-**Rec Mono St.Helens** — the brand default referenced by
-`sonicterm_cfg::config::DEFAULT_FONT_FAMILY`. Four variants are committed
-directly to this directory:
+| Platform | Default family |
+| --- | --- |
+| macOS | Menlo |
+| Windows | Cascadia Mono, then Consolas when Cascadia Mono is not installed |
+| Linux | the face fontconfig resolves for `monospace` |
 
-- `RecMonoSt.Helens-Regular.ttf`
-- `RecMonoSt.Helens-Italic.ttf`
-- `RecMonoSt.Helens-Bold.ttf`
-- `RecMonoSt.Helens-BoldItalic.ttf`
+The one bundled font is an icon font:
 
-Each file's name table declares the family `"Rec Mono St.Helens"` (with the
-dot) — that's the exact string the config uses.
+- `SymbolsNerdFontMono-Regular.ttf` — family `"Symbols Nerd Font Mono"`, from
+  [Nerd Fonts](https://github.com/ryanoasis/nerd-fonts) v3.5.1
+  (`NerdFontsSymbolsOnly`), SHA-256
+  `fe471e538392f51910faab985fa8e192a39dd3426125edd15b71b3680df0e749`.
+- `LICENSE-SymbolsNerdFont.txt` — the MIT license that release ships with it.
 
-## How SonicTerm finds these faces
+## How SonicTerm finds this font
 
-The app passes this directory to its font stack as a font directory
-(`asset_dir().join("fonts")` in `crates/sonicterm-app/src/app/session.rs`), so the
-faces load without being installed on the system.
+The app passes this directory to every font stack as a font directory
+(`asset_dir().join("fonts")` in `crates/sonicterm-app/src/app/session.rs`), so
+the font loads without being installed on the system. On macOS the bundle's
+`ATSApplicationFontsPath` also registers it with CoreText.
 
-`FontDatabase::with_font_dirs` (`crates/sonicterm-font/src/db.rs`) walks each
-font directory, parses every file FreeType can read, and indexes each face by
-its path and full name. To resolve a request, `FontDatabase::resolve` keeps the
-faces whose family, full name, PostScript name, path, or alias matches the
-requested family, and `ParsedFont::best_matching_index` picks among them by
-stretch, style, and weight.
-
-A face's style starts from FreeType's italic flag; the words `italic`,
-`kursiv`, or `oblique` in its full name refine it. Its weight comes from the
-OS/2 `usWeightClass`. The committed files declare:
-
-| File | `usWeightClass` | Italic bit |
-| --- | --- | --- |
-| `RecMonoSt.Helens-Regular.ttf` | 400 | clear |
-| `RecMonoSt.Helens-Italic.ttf` | 400 | set |
-| `RecMonoSt.Helens-Bold.ttf` | 600 | clear |
-| `RecMonoSt.Helens-BoldItalic.ttf` | 600 | set |
-
-Nothing renames or rewrites these values when the faces load.
-
-## Provisioning
-
-Rec Mono St.Helens is committed in-tree (no fetch step needed).
-
-The bundled `RecMonoSt.Helens-*.ttf` files are **Nerd-Font-patched**,
-so Powerline + Nerd Font icon coverage works out of the box with no
-system install required. Covered codepoint ranges include Powerline
-separators (U+E0B0–U+E0BF), the Nerd Font PUA block
-(U+E000–U+F8FF), and Material Design icons (U+F0001+). Characters the
-bundled faces do not cover, such as CJK and emoji, come from fallback
-faces found through the platform's native font discovery.
+Every style's fallback chain is the configured family, then the platform
+default families above, then Noto Color Emoji and Symbols Nerd Font Mono, and
+only then system fallback. Powerline separators (U+E0A0–U+E0D7), the Nerd Font
+private-use icons (U+E000–U+F8FF), and Material Design icons (U+F0001 and up)
+therefore resolve from this file even when the text face lacks them. A copy
+of the same family in this directory wins over an installed copy, because
+configured font directories are searched before native discovery.
 
 ## License
 
-Rec Mono St.Helens     — SIL Open Font License 1.1 — built from
-                         MOSconfig/recursive-code-config v1.2.2
-                         (https://github.com/MOSconfig/recursive-code-config)
+Symbols Nerd Font Mono — MIT License (see `LICENSE-SymbolsNerdFont.txt`).
+The icon sets the font aggregates keep their upstream licenses, which the
+Nerd Fonts repository lists.
 
-The SIL OFL 1.1 permits bundling and redistribution provided the license
-text accompanies the font files. Upstream license files are preserved in
-the source repository linked above.
+Tests that need a fixed, host-independent text face use a subset of Rec Mono
+St.Helens under `crates/sonicterm-font/test-fonts/rec-mono/`. That fixture is
+never packaged.

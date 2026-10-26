@@ -65,7 +65,7 @@ fn bundled_font_handle() -> FontDataHandle {
     FontDataHandle {
         source: FontDataSource::OnDisk(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+                .join("test-fonts/rec-mono/RecMonoSt.Helens-Regular.ttf"),
         ),
         index: 0,
         variation: 0,

@@ -44,7 +44,7 @@ top-level unknown keys but loses comments, formatting, and nested unknown keys.
 
 | Key | Default | Behavior |
 | --- | --- | --- |
-| `family` | `"Rec Mono St.Helens"` | Primary font family. Missing glyphs use the fallback chain. |
+| `family` | platform monospace | Primary font family. The default is the platform's own monospace face: `"Menlo"` on macOS, `"Cascadia Mono"` on Windows (Consolas where Cascadia Mono is not installed), and fontconfig's `"monospace"` on Linux. SonicTerm bundles no text face. A family that is not installed falls back to that default, and the log names the miss and the face used instead once per process. Missing glyphs use the fallback chain, which reaches the bundled Symbols Nerd Font Mono for Powerline and Nerd Font icons before system fallback. |
 | `size` | `13` | Font size in points. |
 | `line_height` | `1.3` | Line-height multiplier. |
 | `weight_scale` | `1.0` | Post-selection weight for all monochrome glyphs, including bold, italic, and fallback faces. Valid values are `0.5..=5.0`; other values become `1.0`. At a fixed size/DPI, cell metrics, bitmap dimensions, bearings, and advances do not change. Color artwork is unchanged. |

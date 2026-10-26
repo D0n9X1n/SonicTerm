@@ -53,7 +53,8 @@ padding 不变。受资源限制而行数较少的网格不吸收整行的未使
 ### 字体发现与匹配
 
 `sonicterm-engine::FontStack` 把 `sonicterm-font` 适配给渲染器。默认主字体族是
-`Rec Mono St.Helens`。匹配会考虑字体族、样式、字重、字宽、字体面索引、变体和码点
+平台自带的等宽字体：macOS 为 Menlo，Windows 为 Cascadia Mono，Linux 为 fontconfig 的
+`monospace`。SonicTerm 不内置正文字体。匹配会考虑字体族、样式、字重、字宽、字体面索引、变体和码点
 覆盖范围。可变字体元数据损坏、缺失或越界时，会回退到基础 OS/2 字重与字宽，不会中止应用。
 
 平台字体发现隐藏在 `FontLocator` 之后：
@@ -62,13 +63,28 @@ padding 不变。受资源限制而行数较少的网格不吸收整行的未使
 - Windows 使用 DirectWrite/GDI 描述信息并提取原始字体；
 - 其它 Unix 系统使用 Fontconfig，并把候选限制为等宽、双宽或字符单元字体。
 
-配置主字体之后，代码内置回退列表依次尝试 JetBrains Mono、Symbols Nerd Font Mono 和
-Noto Color Emoji。已加载字体都不覆盖某码点时，后台解析器查找平台字体并追加到该 `FontStack`。自动解析会把带 OpenType `MATH` 表的字体排在
+配置主字体之后，代码内置回退列表（`sonicterm-font-config` 中的
+`config::DEFAULT_MONOSPACE_FAMILIES`）先尝试主字体以外的每个平台默认等宽字体（Menlo；
+Cascadia Mono，然后 Consolas；或 `monospace`），再尝试内置的 Symbols Nerd Font Mono 和
+Noto Color Emoji。终端正文以及标签页标题、命令面板页脚和状态行视图共用这条回退链，因为它们都是同一个正文字体栈的视图。
+
+```mermaid
+flowchart LR
+    primary["配置的字体族"] --> defaults["平台默认等宽字体"]
+    defaults --> symbols["内置 Symbols Nerd Font Mono"]
+    symbols --> emoji["Noto Color Emoji"]
+    emoji --> system["后台系统回退"]
+```
+
+配置的字体族未安装时，由第一个能加载的平台默认字体提供正文和单元格度量，绝不会由符号字体或
+emoji 字体提供。日志以 error 级别记录缺失的字体族和实际使用的字体，每个进程只记录一次；缺失的是平台默认字体时
+（例如没有 Cascadia Mono 的 Windows 版本），改为以 info 级别记录一次。配置的字体目录先于原生发现被搜索，
+因此内置的符号字体文件优先于系统中安装的同名字体。已加载字体都不覆盖某码点时，后台解析器查找平台字体并追加到该 `FontStack`。自动解析会把带 OpenType `MATH` 表的字体排在
 文本字体之后，但不会排除它；没有文本字体覆盖时，数学字体仍可提供该码点。在 `[font]`
 中显式指定的字体族始终优先，不受 `MATH` 表影响。
 
-字体重载后，已打包字体目录仍会附着在可见和预热渲染器上。Linux 包不会把随附的四个
-Rec Mono face 安装到系统，因此必须保留这些目录。
+字体重载后，已打包字体目录仍会附着在可见和预热渲染器上。每个安装包都在其中携带内置的
+Symbols Nerd Font Mono，且不会把它安装到系统。
 
 ### 标签页进程图标
 
@@ -104,7 +120,7 @@ U+F07B，否则使用终端字形 U+F489。
 窗口通过 GPU 和 Windows 软件渲染路径绘制同一个进程级状态。此标签页界面元素不会修改
 可执行文件资源、原生窗口图标、任务栏、Dock、应用切换器或软件包图标。
 
-以下是内置 Rec Mono 字体提供的私用区码点：
+以下是内置 Symbols Nerd Font Mono 提供的私用区码点：
 
 | 应用 | 精确别名 | 内置字形名称 | 码点 |
 | --- | --- | --- | --- |

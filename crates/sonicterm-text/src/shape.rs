@@ -16,7 +16,7 @@
 use sonicterm_types::{Cell, CellFlags};
 
 /// Characters that commonly participate in programming ligatures across
-/// the fonts SonicTerm ships (Rec Mono St.Helens, JetBrains Mono). If a
+/// common coding fonts (Cascadia, Fira Code, JetBrains Mono, Recursive). If a
 /// run contains ANY of these, the ASCII fast path must defer to the
 /// shaper so contextual GSUB substitutions (`=>`, `!=`, `>=`, `->`,
 /// `<-`, `::`, `||`, `&&`, etc.) actually render as the composed

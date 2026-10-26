@@ -11,7 +11,7 @@ use config::{
 };
 use diagnostic_timing::{RequestTiming, Timing};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::AtomicBool;
@@ -1171,16 +1171,32 @@ impl FontConfigInner {
         let attributes = style.font_with_fallback();
 
         let (handles, loaded) = self.resolve_font_helper_impl(&attributes, pixel_size)?;
+        // The first loaded face supplies text and cell metrics, so it is the one a miss falls back to.
+        let replacement = match handles.first() {
+            Some(face) => format!("Using {:?} instead", face.names().family),
+            None => "No replacement face loaded".to_string(),
+        };
 
         for attr in &attributes {
             if !attr.is_synthetic && !attr.is_fallback && !loaded.contains(attr) {
-                let is_primary = config.font.font.iter().any(|a| !a.is_fallback && a == attr);
-                let derived_from_primary =
-                    config.font.font.iter().any(|a| !a.is_fallback && a.family == attr.family);
+                // When: `loaded` lacks a configured, nonsynthetic `attr`, report that miss once per process.
                 let identity = format!(
                     "{:?} (weight={}, stretch={}, style={})",
                     attr.family, attr.weight, attr.stretch, attr.style
                 );
+                if config::DEFAULT_MONOSPACE_FAMILIES.contains(&attr.family.as_str()) {
+                    // When: `DEFAULT_MONOSPACE_FAMILIES` contains `attr.family`, the next default stands in; log at info, not as an error.
+                    let message = format!(
+                        "Platform default font {identity} is not installed. {replacement}."
+                    );
+                    if first_report(&message) {
+                        log::info!("{message}");
+                    }
+                    continue;
+                }
+                let is_primary = config.font.font.iter().any(|a| !a.is_fallback && a == attr);
+                let derived_from_primary =
+                    config.font.font.iter().any(|a| !a.is_fallback && a.family == attr.family);
                 let explanation = if is_primary {
                     format!("Unable to load the configured primary font {identity}")
                 } else if derived_from_primary {
@@ -1193,12 +1209,15 @@ impl FontConfigInner {
                     format!("Unable to load the requested font {identity}")
                 };
 
-                config::show_error(&format!(
-                    "{explanation}. Fallback fonts are being used instead, and text \
-                     may not render as intended. Check [font].family in sonicterm.toml \
-                     and ensure the font is available to SonicTerm. See \
+                let message = format!(
+                    "{explanation}. {replacement}, and text may not render as intended. \
+                     Check [font].family in sonicterm.toml and ensure the font is available \
+                     to SonicTerm. See \
                      https://github.com/D0n9X1n/SonicTerm/wiki/Configuration for font configuration."
-                ));
+                );
+                if first_report(&message) {
+                    config::show_error(&message);
+                }
             }
         }
 
@@ -1545,6 +1564,18 @@ impl FontConfiguration {
     pub fn list_system_fonts(&self) -> anyhow::Result<Vec<ParsedFont>> {
         self.inner.locator.enumerate_all_fonts()
     }
+}
+
+/// Font diagnostics already reported in this process, so a miss that every resize, zoom, or new
+/// window repeats reaches the log once.
+static REPORTED_FONT_DIAGNOSTICS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Whether `message` is reported for the first time in this process; records it either way.
+fn first_report(message: &str) -> bool {
+    REPORTED_FONT_DIAGNOSTICS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(message.to_owned())
 }
 
 #[cfg(test)]

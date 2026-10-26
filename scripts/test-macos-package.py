@@ -27,12 +27,10 @@ GATE_SPEC = importlib.util.spec_from_file_location("package_attachment_gate", RO
 GATE = importlib.util.module_from_spec(GATE_SPEC)
 sys.modules[GATE_SPEC.name] = GATE
 GATE_SPEC.loader.exec_module(GATE)
-FACES = {
-    "Regular": "RecMonoSt.Helens",
-    "Italic": "RecMonoSt.Helens-Italic",
-    "Bold": "RecMonoSt.Helens-Bold",
-    "BoldItalic": "RecMonoSt.Helens-BoldItalic",
-}
+# Bundled font files and their PostScript names; the text face comes from macOS itself.
+FONTS = {"SymbolsNerdFontMono-Regular.ttf": "SymbolsNFM"}
+FONT_LICENSE = "LICENSE-SymbolsNerdFont.txt"
+PROBE_PASSED = f"RESULT fonts={len(FONTS)}/{len(FONTS)} cairo=PASS verdict=PASS"
 DENY_BREW = '(version 1) (allow default) (deny file-read* (subpath "/opt/homebrew") (subpath "/usr/local"))'
 
 # Commands share a 420 s deadline from entry, independent of workflow timeout settings.
@@ -425,8 +423,7 @@ def run_font_probe(probe: Path, state: Path, cairo: Path) -> None:
         text = report.read_text()
         lines = text.splitlines()
         verdicts = [line for line in lines if line.startswith("RESULT ")]
-        passed = "RESULT fonts=4/4 cairo=PASS verdict=PASS"
-        if verdicts != [passed] or lines[-1] != passed or not text.endswith("\n"):
+        if verdicts != [PROBE_PASSED] or lines[-1] != PROBE_PASSED or not text.endswith("\n"):
             raise RuntimeError("native registration or Cairo gradient report has no unique final passing verdict: " + text)
         if wait_race:
             # open can lose its kevent target after the short-lived probe has flushed a complete verdict and exited.
@@ -445,12 +442,12 @@ def validate(app: Path, state: Path, dmg: Path | None, max_minimum: str) -> None
     if info.get("ATSApplicationFontsPath") != "assets/fonts":
         raise RuntimeError("native registration does not use the canonical font directory")
     fonts = app / "Contents/Resources/assets/fonts"
-    expected = {fonts / f"RecMonoSt.Helens-{face}.ttf" for face in FACES}
+    expected = {fonts / name for name in FONTS}
     if set(app.rglob("*.ttf")) != expected:
         raise RuntimeError("package must contain exactly one copy of each required font")
-    for font in expected:
-        if font.read_bytes() != (ROOT / "assets/fonts" / font.name).read_bytes():
-            raise RuntimeError(f"packaged font changed: {font.name}")
+    for font in [*expected, fonts / FONT_LICENSE]:
+        if not font.is_file() or font.read_bytes() != (ROOT / "assets/fonts" / font.name).read_bytes():
+            raise RuntimeError(f"packaged font file missing or changed: {font.name}")
     # A denied read must fail before trusting a sandboxed successful launch as isolation evidence.
     protected = [str(path) for path in (Path("/opt/homebrew"), Path("/usr/local")) if path.is_dir()]
     if not protected:
@@ -478,8 +475,7 @@ def validate(app: Path, state: Path, dmg: Path | None, max_minimum: str) -> None
     info["CFBundleIdentifier"] = "org.sonicterm.packageprobe." + uuid.uuid4().hex
     info["LSUIElement"] = True
     info["ProbeExpectedFontsPath"] = "assets/fonts"
-    info["ProbeFonts"] = [{"File": f"RecMonoSt.Helens-{face}.ttf", "PostScriptName": name}
-                          for face, name in FACES.items()]
+    info["ProbeFonts"] = [{"File": file_name, "PostScriptName": name} for file_name, name in FONTS.items()]
     (probe / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
     run(["/usr/bin/codesign", "--force", "--sign", "-", str(probe)], state, "probe-sign")
     cairo = probe / "Contents/Frameworks/libcairo.2.dylib"
@@ -487,12 +483,13 @@ def validate(app: Path, state: Path, dmg: Path | None, max_minimum: str) -> None
         state, "isolated-cairo", 20)
     run_font_probe(probe, state, cairo)
     result = {"app_bytes": size(app), "font_bytes": sum(font_file.stat().st_size for font_file in expected),
-              "font_files": 4, "framework_bytes": size(app / "Contents/Frameworks"),
+              "font_files": len(FONTS), "framework_bytes": size(app / "Contents/Frameworks"),
               "dmg_bytes": dmg.stat().st_size if dmg else None,
               "architecture": run(["/usr/bin/lipo", "-archs", str(executable)], state, "architecture").decode().strip(),
               "runtime_homebrew_denied": True, "cairo_homebrew_denied": True,
               "minimum_macos": info["LSMinimumSystemVersion"],
-              "native_fonts": "4/4", "cairo_gradient": "PASS", "colr_glyph": "not exercised by probe"}
+              "native_fonts": f"{len(FONTS)}/{len(FONTS)}", "cairo_gradient": "PASS",
+              "colr_glyph": "not exercised by probe"}
     result.update(measure_font_savings(app, state))
     (state / "package-evidence.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))

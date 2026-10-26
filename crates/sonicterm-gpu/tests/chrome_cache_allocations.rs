@@ -69,9 +69,10 @@ fn allocations_of<Output>(work: impl FnOnce() -> Output) -> (Output, usize) {
     (output, COUNTED_ALLOCATIONS.load(Ordering::Relaxed) - before)
 }
 
-/// The packaged Rec Mono stack, independent of host fonts.
-fn packaged_stack() -> FontStack {
-    let fonts = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+/// The Rec Mono fixture stack, independent of host fonts.
+fn rec_mono_stack() -> FontStack {
+    let fonts = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono");
     FontStack::try_new_with_font_dirs_for_test(
         &[("Rec Mono St.Helens", false)],
         vec![fonts],
@@ -79,7 +80,7 @@ fn packaged_stack() -> FontStack {
         72,
         1.0,
     )
-    .expect("the packaged fonts build a stack")
+    .expect("the Rec Mono fixture fonts build a stack")
 }
 
 const SCREEN: (f32, f32) = (1200.0, 200.0);
@@ -89,7 +90,7 @@ const ORIGIN: (f32, f32) = (10.0, 40.0);
 fn warm_hits_allocate_no_glyphs() {
     // Each warm cache draw allocates exactly what laying out an already-held run of the same
     // text allocates, so the lookup, the key compare and the kept run add no allocation.
-    let stack = packaged_stack();
+    let stack = rec_mono_stack();
     let mut raster = stack.clone();
     for (text, variant, is_title) in [
         ("shell ~/src", GlyphRasterVariant::TabTitle, true),
@@ -114,7 +115,7 @@ fn warm_hits_allocate_no_glyphs() {
         // The warm draw shapes, keeps the run and fills the atlas.
         let _ = draw(&mut seam, &mut atlas, &mut raster);
         let held = ChromeShapedRun::shape(&stack, text, ChromeAttrs::default(), 15.0, 15.0)
-            .expect("the packaged font shapes the sample");
+            .expect("the Rec Mono fixture shapes the sample");
         let lay_out_held = |atlas: &mut GlyphAtlas, raster: &mut FontStack| {
             layout_prepared(&held, raster, atlas, ChromeColor::WHITE, ORIGIN, SCREEN, None, variant)
         };

@@ -7,7 +7,9 @@
 #![warn(clippy::min_ident_chars)]
 
 mod fontstack;
-pub use fontstack::{CellMetricsPx, FaceIdentity, FontStack, ResolvedGlyphFace};
+pub use fontstack::{
+    CellMetricsPx, FaceIdentity, FontStack, ResolvedGlyphFace, DEFAULT_FONT_FAMILY,
+};
 /// The fallback notice's unresolved set, as a renderer reads it from [`FontStack::fallback_notice`].
 pub use sonicterm_font::UnresolvedSnapshot;
 

@@ -62,7 +62,9 @@ terminal cell. Resize, DPI, font, and padding changes invalidate the old layout.
 ### Font discovery and matching
 
 `sonicterm-engine::FontStack` adapts `sonicterm-font` to the renderer. The
-configured primary family defaults to `Rec Mono St.Helens`. Matching includes
+configured primary family defaults to the platform's own monospace face: Menlo
+on macOS, Cascadia Mono on Windows, and fontconfig's `monospace` on Linux.
+SonicTerm bundles no text face. Matching includes
 family, style, weight, stretch, face index, variation, and codepoint coverage.
 Malformed, missing, or out-of-range variable-font metadata falls back to the
 base OS/2 weight and width instead of aborting.
@@ -74,8 +76,28 @@ Platform discovery stays behind `FontLocator`:
 - other Unix systems use Fontconfig and restrict candidates to monospaced,
   dual-width, or character-cell faces.
 
-After the configured primary family, the code-owned fallback list tries
-JetBrains Mono, Symbols Nerd Font Mono, and Noto Color Emoji. If no loaded face
+After the configured primary family, the code-owned fallback list
+(`config::DEFAULT_MONOSPACE_FAMILIES` in `sonicterm-font-config`) tries every
+platform default monospace family the primary is not (Menlo; Cascadia Mono, then
+Consolas; or `monospace`), then the bundled Symbols Nerd Font Mono and Noto Color
+Emoji. Terminal text and the tab-title, palette-footer, and status-line views
+share that chain, because they are views of one body stack.
+
+```mermaid
+flowchart LR
+    primary["Configured family"] --> defaults["Platform default monospace families"]
+    defaults --> symbols["Bundled Symbols Nerd Font Mono"]
+    symbols --> emoji["Noto Color Emoji"]
+    emoji --> system["Background system fallback"]
+```
+
+When the configured family is not installed, the first platform default that
+loads supplies text and cell metrics, never the symbols or emoji font. The log
+names the missing family and the face used instead at error level, once per
+process; a missing platform default, such as Cascadia Mono on a Windows release
+without it, is logged once at info level instead. Because configured font
+directories are searched before native discovery, the bundled symbols file wins
+over an installed copy of the same family. If no loaded face
 covers a codepoint, a background resolver finds a
 platform font and appends it to that `FontStack`. Automatic resolution ranks a
 font containing an OpenType `MATH` table after text fonts. It does not exclude
@@ -83,8 +105,8 @@ that font: it may still supply a codepoint no text font covers. A family named
 explicitly in `[font]` remains authoritative whether or not it contains `MATH`.
 
 Packaged font directories remain attached to live and warm renderers across
-font reloads. This is required for Linux packages, which carry all four bundled
-Rec Mono faces without installing them system-wide.
+font reloads. Every package carries the bundled Symbols Nerd Font Mono there
+without installing it system-wide.
 
 ### Tab-title process icons
 
@@ -135,7 +157,8 @@ process-level state through both GPU and Windows software rendering. This tab
 chrome does not modify executable resources, native window icons, taskbar, Dock,
 application-switcher, or package icons.
 
-These are Private Use Area codepoints supplied by the bundled Rec Mono faces:
+These are Private Use Area codepoints supplied by the bundled Symbols Nerd Font
+Mono:
 
 | Application | Exact aliases | Bundled glyph identity | Codepoint |
 | --- | --- | --- | --- |

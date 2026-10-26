@@ -9,7 +9,8 @@ use super::*;
 fn chrome_layout_counts_its_shaping_and_rasterizing_in_the_open_attempt_once() {
     use crate::frame_stats::{test_clock, FrameStatsSink, RenderScope};
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK.lock().unwrap();
-    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono");
     let stack = FontStack::try_new_with_font_dirs_for_test(
         &[("Rec Mono St.Helens", false)],
         vec![assets],
@@ -63,7 +64,8 @@ fn chrome_layout_counts_its_shaping_and_rasterizing_in_the_open_attempt_once() {
 fn notification_reuses_regular_weighted_glyphs() {
     use sonicterm_text::glyph_atlas::Rasterizer;
     let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK.lock().unwrap();
-    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sonicterm-font/test-fonts/rec-mono");
     for weight in [0.75, 1.0, 1.5] {
         let stack = FontStack::try_new_with_font_dirs_for_test(
             &[("Rec Mono St.Helens", false)],

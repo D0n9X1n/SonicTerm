@@ -475,19 +475,23 @@ impl Default for Config {
     }
 }
 
-/// Default font family. "Rec Mono St.Helens" is the brand default the project
-/// ships with. All four variants
-/// (Regular, Italic, Bold, BoldItalic) are bundled in `assets/fonts/` as
-/// `RecMonoSt.Helens-*.ttf`, built from MOSconfig/recursive-code-config
-/// v1.2.2 and distributed under the SIL Open Font License 1.1. The
-/// bundled files' name tables declare the family `"Rec Mono St.Helens"`
-/// (with the dot) — that's the exact name to use here. When the family is
-/// missing the renderer falls through to the system mono chain. The
-/// bundled `Rec Mono St.Helens` TTFs are Nerd-Font-patched, so Powerline
-/// (U+E0B0–U+E0BF) and Nerd Font PUA (U+E000–U+F8FF) glyphs resolve in
-/// the primary slot without needing a system Nerd Font install. Users can
-/// override via `[font] family = "..."` in `sonicterm.toml`.
-pub const DEFAULT_FONT_FAMILY: &str = "Rec Mono St.Helens";
+/// Default font family: the platform's own monospace face, so an unconfigured install renders
+/// with a family the host already provides. SonicTerm bundles no text face.
+///
+/// macOS uses Menlo. Windows asks for Cascadia Mono, and the font stack falls back to Consolas
+/// where Cascadia Mono is not installed. Linux and other Unix systems ask fontconfig for its
+/// `monospace` alias. Matches `sonicterm_engine::DEFAULT_FONT_FAMILY`; this crate does not
+/// depend on the font stack, so the value is repeated here. Powerline and Nerd Font icons come
+/// from the bundled `assets/fonts/SymbolsNerdFontMono-Regular.ttf` in every fallback chain.
+/// Users override the family with `[font] family = "..."` in `sonicterm.toml`.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_FONT_FAMILY: &str = "Menlo";
+/// Default font family: the platform's own monospace face (Cascadia Mono on Windows).
+#[cfg(windows)]
+pub const DEFAULT_FONT_FAMILY: &str = "Cascadia Mono";
+/// Default font family: the face fontconfig resolves for its `monospace` alias.
+#[cfg(not(any(target_os = "macos", windows)))]
+pub const DEFAULT_FONT_FAMILY: &str = "monospace";
 
 impl Default for FontConfig {
     fn default() -> Self {
@@ -1449,7 +1453,8 @@ tab_min_width = {tab_min_width}
 tab_max_width = {tab_max_width}
 
 [font]
-# Font family and metrics. SonicTerm ships "Rec Mono St.Helens" by default.
+# Font family and metrics. The default is the platform's own monospace face:
+# Menlo on macOS, Cascadia Mono (or Consolas) on Windows, fontconfig's monospace on Linux.
 family = "{font_family}"
 # Font size in logical pixels.
 size = {font_size}

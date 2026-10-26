@@ -62,7 +62,7 @@ class PackageTests(unittest.TestCase):
 
             def launch(command, *_args):
                 self.assertIn("[package-check] start probe-launch timeout=25s", stderr.flushed)
-                (state / "native-fonts-cairo.log").write_text("RESULT fonts=0/4 cairo=FAIL verdict=FAIL\n")
+                (state / "native-fonts-cairo.log").write_text("RESULT fonts=0/1 cairo=FAIL verdict=FAIL\n")
                 return subprocess.CompletedProcess(command, 0, b"", b"")
 
             with contextlib.redirect_stderr(stderr), patch.object(tool.RUNNER, "run_command", side_effect=launch):
@@ -94,7 +94,7 @@ class PackageTests(unittest.TestCase):
                     self.assertEqual(command[:5], ["/usr/bin/open", "-n", "-g", "-W", str(state / "Probe.app")])
                     self.assertEqual(timeout, 25)
                     self.assertNotIn("NO_COLOR", environment)
-                    report.write_text("START pid=123\nRESULT fonts=4/4 cairo=PASS verdict=PASS\n")
+                    report.write_text("START pid=123\nRESULT fonts=1/1 cairo=PASS verdict=PASS\n")
                     return subprocess.CompletedProcess(command, code, b"", error)
                 progress = FlushedStream()
                 with contextlib.redirect_stderr(progress), patch.object(tool.RUNNER, "run_command", side_effect=launch):
@@ -112,7 +112,7 @@ class PackageTests(unittest.TestCase):
             with self.subTest(code=code, output=output, error=error), tempfile.TemporaryDirectory() as directory:
                 state = Path(directory)
                 def launch(command, *_args):
-                    (state / "native-fonts-cairo.log").write_text("RESULT fonts=4/4 cairo=PASS verdict=PASS\n")
+                    (state / "native-fonts-cairo.log").write_text("RESULT fonts=1/1 cairo=PASS verdict=PASS\n")
                     return subprocess.CompletedProcess(command, code, output, error)
                 progress = FlushedStream()
                 with contextlib.redirect_stderr(progress), patch.object(tool.RUNNER, "run_command", side_effect=launch):
@@ -123,10 +123,10 @@ class PackageTests(unittest.TestCase):
 
     def test_font_probe_requires_one_complete_fresh_passing_verdict(self):
         # Missing, partial, conflicting, and stale reports must never turn a launch into success.
-        passed = "RESULT fonts=4/4 cairo=PASS verdict=PASS\n"
+        passed = "RESULT fonts=1/1 cairo=PASS verdict=PASS\n"
         diagnostic = b"Unable to block on applications (initial call to kevent() failed: No such process)\n"
-        for text in [None, "START pid=123\n", "RESULT fonts=3/4 cairo=PASS verdict=FAIL\n",
-                     passed + passed, passed + "RESULT fonts=0/4 cairo=FAIL verdict=FAIL\n",
+        for text in [None, "START pid=123\n", "RESULT fonts=0/1 cairo=PASS verdict=FAIL\n",
+                     passed + passed, passed + "RESULT fonts=0/1 cairo=FAIL verdict=FAIL\n",
                      passed + "unfinished\n"]:
             for code in [0, 1]:
                 with self.subTest(text=text, code=code), tempfile.TemporaryDirectory() as directory:
@@ -168,8 +168,8 @@ class PackageTests(unittest.TestCase):
             app = state / "original.app"
             fonts = app / "Contents/Resources/assets/fonts"
             fonts.mkdir(parents=True)
-            for face in tool.FACES:
-                (fonts / f"RecMonoSt.Helens-{face}.ttf").write_bytes(face.encode())
+            for name in tool.FONTS:
+                (fonts / name).write_bytes(name.encode())
             executable = app / "Contents/MacOS/sonicterm-mac"
             executable.parent.mkdir()
             executable.write_bytes(b"same executable")
@@ -189,8 +189,8 @@ class PackageTests(unittest.TestCase):
             with patch.object(tool, "run", side_effect=fake_run), \
                     patch.object(tool, "run_capture", side_effect=fake_capture):
                 result = tool.measure_font_savings(app, state)
-            self.assertEqual(result["font_dmg_saved_bytes"], 4)
-            self.assertEqual(len(list(app.rglob("*.ttf"))), 4)
+            self.assertEqual(result["font_dmg_saved_bytes"], 1)
+            self.assertEqual(len(list(app.rglob("*.ttf"))), 1)
             self.assertFalse((state / "measurement").exists())
             images = [call for call in calls if call[0] == "/usr/bin/hdiutil"]
             self.assertEqual(images[0][images[0].index("-srcfolder") + 1], images[1][images[1].index("-srcfolder") + 1])
@@ -206,7 +206,7 @@ class PackageTests(unittest.TestCase):
                     patch.object(tool.RUNNER, "run_command", side_effect=scripted_hdiutil(created, outcomes)), \
                     patch.object(tool, "sleep") as sleep:
                 result = tool.measure_font_savings(measurement_app(state), state)
-            self.assertEqual(result["font_dmg_saved_bytes"], 4)
+            self.assertEqual(result["font_dmg_saved_bytes"], 1)
             self.assertEqual(len(created), 3)
             sleep.assert_called_once_with(tool.BUSY_RETRY_WAIT_SECONDS)
             self.assertIn("[package-check] retry single-measurement attempt=2/3 after: "
@@ -384,7 +384,7 @@ class PackageTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, b"", b"")
 
             def launch(command, _cwd, _timeout, _environment):
-                (state / "native-fonts-cairo.log").write_text("RESULT fonts=4/4 cairo=PASS verdict=PASS\n")
+                (state / "native-fonts-cairo.log").write_text("RESULT fonts=1/1 cairo=PASS verdict=PASS\n")
                 return subprocess.CompletedProcess(command, 0, b"", b"")
 
             limit = 1000.0 - tool.CLEANUP_RESERVE_SECONDS - tool.VALIDATION_SUPERVISION_SECONDS
@@ -1099,8 +1099,8 @@ def measurement_app(state: Path) -> Path:
     app = state / "original.app"
     fonts = app / "Contents/Resources/assets/fonts"
     fonts.mkdir(parents=True)
-    for face in tool.FACES:
-        (fonts / f"RecMonoSt.Helens-{face}.ttf").write_bytes(face.encode())
+    for name in tool.FONTS:
+        (fonts / name).write_bytes(name.encode())
     executable = app / "Contents/MacOS/sonicterm-mac"
     executable.parent.mkdir()
     executable.write_bytes(b"same executable")
