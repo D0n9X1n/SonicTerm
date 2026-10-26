@@ -1185,7 +1185,7 @@ fn missing_required_chrome(
 fn glyph_atlas_working_set() {
     use sonicterm_gpu::glyph_working_set::measure_glyph_working_set;
     use sonicterm_text::glyph_atlas::{ATLAS_DIM, START_ATLAS_DIM_1X, START_ATLAS_DIM_2X};
-    use sonicterm_text::recording_image::{drift_policy, DriftPolicy, HostImage};
+    use sonicterm_text::recording_image::{drift_policy, DriftVerdict, HostImage};
     use sonicterm_text::start_size_inputs::{
         normalize_raster_failures, ruled_start, start_rule, validate_table_start, InputSource,
         RuleInput, RASTER_EXCEPTIONS, SIZING_ORACLE_COMPLETE, START_SIZE_INPUTS,
@@ -1202,10 +1202,10 @@ fn glyph_atlas_working_set() {
     let fixtures = [("S9", Fixture::EmojiCjk), ("S12", Fixture::HistoryScreen)];
     let titles = ["zsh", "perf_scenarios", "S12 covered window"];
     let platform = platform_name();
-    // The rows hold exactly only on the image they were recorded on; CI on another image fails.
+    // The rows hold exactly on their recording image and on every CI host; elsewhere drift is advisory.
     let policy = drift_policy(platform, &HostImage::from_env());
-    if let DriftPolicy::Rerecord(reason) = &policy {
-        failures.push(reason.clone());
+    if let Some(note) = policy.note() {
+        println!("glyph_atlas_working_set note: {note}");
     }
     for (scale, dpi, constant) in [(1, 72, START_ATLAS_DIM_1X), (2, 144, START_ATLAS_DIM_2X)] {
         match validate_table_start(scale, constant) {
@@ -1313,19 +1313,26 @@ fn glyph_atlas_working_set() {
             );
             let provenance =
                 recorded.map_or_else(|| "none".to_owned(), |row| row.provenance.describe());
-            match check {
-                HelperCheck::Matches | HelperCheck::MaximumOnly => {}
-                HelperCheck::Drifted(reason) if policy == DriftPolicy::Advisory => println!(
-                    "glyph_atlas_working_set advisory: {name} at {scale}x differs from its recorded \
-                     helper row, recorded on another image ({provenance}): {reason}"
-                ),
-                HelperCheck::Drifted(reason) => failures.push(format!(
+            // A refusal fails on every host; only a dimension drift depends on the host image.
+            let drift = match check {
+                HelperCheck::Matches | HelperCheck::MaximumOnly => None,
+                HelperCheck::Drifted(reason) => Some(format!(
                     "{name} at {scale}x drifted from its recorded helper row ({provenance}): {reason}"
                 )),
-                HelperCheck::Refused(reason) => failures.push(format!(
-                    "glyph_atlas_working_set refused: {platform} {name} at {scale}x (recorded row: \
-                     {provenance}): {reason}"
-                )),
+                HelperCheck::Refused(reason) => {
+                    failures.push(format!(
+                        "glyph_atlas_working_set refused: {platform} {name} at {scale}x (recorded row: \
+                         {provenance}): {reason}"
+                    ));
+                    None
+                }
+            };
+            match policy.judge(drift.as_deref()) {
+                DriftVerdict::Holds => {}
+                DriftVerdict::Advisory(advisory) => {
+                    println!("glyph_atlas_working_set advisory: {advisory}")
+                }
+                DriftVerdict::Fails(failure) => failures.push(failure),
             }
             // CI seals these rows only after this test returns successfully, including every drift check.
             if let Err(error) = crate::workload::glyph_oracle::export(name, dpi, &set) {

@@ -58,9 +58,11 @@ cargo build -p sonicterm-text
   run with their job ids and log lines; the working-set step prints every row
   before it fails once, and its drift check is exact on the image the rows were recorded on
   (`recording_image::RECORDING_IMAGES`: runner image, `ImageVersion` and `RUNNER_ARCH` per
-  platform). On CI another image fails the step with "re-record the helper rows on <image>"; a
-  local host on another image prints differences as advisory. Completeness, unapproved raster
-  failures and the live fit stay mandatory everywhere. Re-recording also updates the image. `SIZING_ORACLE_COMPLETE` is true; `ruled_start` still refuses a
+  platform; a host matches on `ImageVersion` and case-insensitive `RUNNER_ARCH`). On CI it is
+  exact on any image: a difference fails with "re-record the helper rows on <host image>" and
+  names the recording image, while identical rows on another image pass with a note. Off CI
+  another image prints differences as advisory. Completeness, unapproved raster failures and the
+  live fit stay mandatory everywhere. Re-recording also updates the image. `SIZING_ORACLE_COMPLETE` is true; `ruled_start` still refuses a
   scale missing any `required_inputs` row, and a row with nonzero
   `incomplete_glyphs` always selects 2048. Changing a start constant means new
   rows and the rule's new answer, never an edited constant alone. `RASTER_EXCEPTIONS` (empty) exempts a raster

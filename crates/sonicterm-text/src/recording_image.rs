@@ -44,7 +44,7 @@ pub struct HostImage {
     /// `RUNNER_ARCH`, set only on a CI runner.
     pub arch: Option<String>,
     /// Whether `GITHUB_ACTIONS` is `true`.
-    pub ci: bool,
+    pub on_ci: bool,
 }
 
 impl HostImage {
@@ -56,7 +56,7 @@ impl HostImage {
             os: var("ImageOS"),
             version: var("ImageVersion"),
             arch: var("RUNNER_ARCH"),
-            ci: var("GITHUB_ACTIONS").as_deref() == Some("true"),
+            on_ci: var("GITHUB_ACTIONS").as_deref() == Some("true"),
         }
     }
 }
@@ -68,8 +68,58 @@ pub enum DriftPolicy {
     Exact,
     /// A local host on another image: a difference prints as advisory.
     Advisory,
-    /// A CI host on another image: the step fails, naming the image to re-record on.
-    Rerecord(String),
+    /// A CI host on another image: the rows are still compared exactly, and a difference fails
+    /// naming both images.
+    AnotherImage {
+        /// The host's image, as `ImageOS ImageVersion RUNNER_ARCH`.
+        host: String,
+        /// The recording image, with the job whose log names it.
+        recorded: String,
+    },
+}
+
+/// The outcome of comparing one helper measurement with its recorded row under a [`DriftPolicy`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DriftVerdict {
+    /// The measurement matches its row.
+    Holds,
+    /// The measurement differs on a host the rows cannot vouch for; print it.
+    Advisory(String),
+    /// The measurement differs where the rows must hold; fail the step.
+    Fails(String),
+}
+
+impl DriftPolicy {
+    /// The image mismatch to print once on a CI host on another image, where identical rows pass.
+    #[must_use]
+    pub fn note(&self) -> Option<String> {
+        match self {
+            Self::AnotherImage { host, recorded } => Some(format!(
+                "the helper rows were recorded on {recorded}; this host is {host}, so they are \
+                 compared exactly here too"
+            )),
+            Self::Exact | Self::Advisory => None,
+        }
+    }
+
+    /// Judge one helper row: `drift` says how the live measurement differs from its row, and is
+    /// `None` when they match.
+    #[must_use]
+    pub fn judge(&self, drift: Option<&str>) -> DriftVerdict {
+        let Some(drift) = drift else {
+            // When: `drift` is None the live measurement matches its row, which holds on any image.
+            return DriftVerdict::Holds;
+        };
+        match self {
+            Self::Exact => DriftVerdict::Fails(drift.to_owned()),
+            Self::Advisory => {
+                DriftVerdict::Advisory(format!("{drift}; the rows were recorded on another image"))
+            }
+            Self::AnotherImage { host, recorded } => DriftVerdict::Fails(format!(
+                "re-record the helper rows on {host}: {drift}; the rows were recorded on {recorded}"
+            )),
+        }
+    }
 }
 
 /// The drift policy for `platform` on `host`. Completeness, raster failures and the live fit stay
@@ -84,22 +134,18 @@ pub fn drift_policy(platform: &str, host: &HostImage) -> DriftPolicy {
         && host.arch.as_deref().is_some_and(|arch| arch.eq_ignore_ascii_case(recorded.arch));
     if same_image {
         DriftPolicy::Exact
-    } else if host.ci {
-        // When: `host.ci` is set on another image, the rows cannot vouch for it until re-recorded.
+    } else if host.on_ci {
+        // When: `host.on_ci` is set on another image, rows still compare exactly; a difference names both images.
         let named = |value: &Option<String>| value.clone().unwrap_or_else(|| "?".to_owned());
-        DriftPolicy::Rerecord(format!(
-            "re-record the helper rows on {} {} {}: the {platform} rows were recorded on {} {} {} \
-             (job {})",
-            named(&host.os),
-            named(&host.version),
-            named(&host.arch),
-            recorded.image,
-            recorded.version,
-            recorded.arch,
-            recorded.job
-        ))
+        DriftPolicy::AnotherImage {
+            host: format!("{} {} {}", named(&host.os), named(&host.version), named(&host.arch)),
+            recorded: format!(
+                "{} {} {} (job {})",
+                recorded.image, recorded.version, recorded.arch, recorded.job
+            ),
+        }
     } else {
-        // When: neither `same_image` nor `host.ci`, a local host on another image gets advisories.
+        // When: neither `same_image` nor `host.on_ci`, a local host on another image gets advisories.
         DriftPolicy::Advisory
     }
 }

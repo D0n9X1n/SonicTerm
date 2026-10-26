@@ -657,9 +657,12 @@ The working-set step compares each live helper measurement with its row
 exactly, so a change that moves a helper's fit, largest tile or tofu count fails
 until the rows are re-recorded. The rows are bound to the runner image they were
 recorded on (`RECORDING_IMAGES` in `sonicterm-text`'s `recording_image.rs`: image,
-`ImageVersion` and `RUNNER_ARCH` per platform), and the comparison is exact only
-there. On CI (`GITHUB_ACTIONS=true`) any other image fails the step with
-"re-record the helper rows on <image>". A local host, which has no runner image,
+`ImageVersion` and `RUNNER_ARCH` per platform). A host is on that image when its
+`ImageVersion` matches and its `RUNNER_ARCH` matches regardless of case; `ImageOS`
+is not compared. There, and on every CI runner (`GITHUB_ACTIONS=true`), the
+comparison is exact. On CI a difference fails the step with "re-record the helper
+rows on <host image>" and names the recording image; identical rows on another
+image pass and print the image mismatch as a note. Off CI, a host on another image
 prints the differences as advisory. Completeness (`incomplete_glyphs` 0), no
 unapproved raster failure and a live fit within the start constant stay mandatory
 on every host. Re-recording also updates the recorded image. To re-record, let CI run on the head that
