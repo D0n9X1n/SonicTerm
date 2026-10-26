@@ -709,8 +709,15 @@ impl Config {
     where
         F: FnOnce(&Path) -> Result<()>,
     {
-        Self::persist_runtime_values_before_commit(path, size, weight_scale, None, before_commit)
-            .map(|_| ())
+        Self::persist_runtime_values_before_commit(
+            path,
+            size,
+            weight_scale,
+            None,
+            None,
+            before_commit,
+        )
+        .map(|_| ())
     }
 
     /// Whether config `text` names `[font] family`. Text that does not parse counts as naming one,
@@ -734,18 +741,21 @@ impl Config {
     /// explicit list. A key in the file is updated in place, even to its default; an absent key is
     /// written only when the session differs from its default. `preset` and
     /// per-segment keys are never written. The rendered document must parse and resolve to exactly
-    /// the session's values before it replaces the file. Returns the written `[status_line]`,
-    /// resolved, as the new baseline.
+    /// the session's values before it replaces the file. With `family`, `[font] family` follows
+    /// the same rule against the family the session started with. Returns the written
+    /// `[status_line]`, resolved, as the new baseline.
     pub fn persist_runtime_values(
         path: &Path,
         size: f32,
         weight_scale: f32,
+        family: Option<FamilySave<'_>>,
         status_line: Option<&crate::status_overrides::StatusLineSave>,
     ) -> Result<crate::status_overrides::WrittenStatusLine> {
         Self::persist_runtime_values_before_commit(
             path,
             size,
             weight_scale,
+            family,
             status_line,
             |_| Ok(()),
         )
@@ -755,6 +765,7 @@ impl Config {
         path: &Path,
         size: f32,
         weight_scale: f32,
+        family: Option<FamilySave<'_>>,
         status_line: Option<&crate::status_overrides::StatusLineSave>,
         before_commit: F,
     ) -> Result<crate::status_overrides::WrittenStatusLine>
@@ -781,6 +792,9 @@ impl Config {
             .with_context(|| format!("format-preserving parse config at {destination:?}"))?;
 
         patch_font_runtime_values(&mut document, size, weight_scale)?;
+        if let Some(family) = family {
+            patch_font_family(&mut document, family)?;
+        }
         if let Some(save) = status_line {
             let disk = on_disk
                 .status_line
@@ -904,6 +918,50 @@ fn apply_line_ending(mut rendered: String, line_ending: LineEnding) -> String {
         rendered = rendered.replace('\n', "\r\n");
     }
     rendered
+}
+
+/// The session's font family for Save, beside the family the session started with.
+///
+/// Save writes `[font] family` when the file already names one, updating it in place, or when
+/// `live` differs from `baseline`; an absent key whose value never changed stays absent.
+#[derive(Debug, Clone, Copy)]
+pub struct FamilySave<'a> {
+    /// The live family.
+    pub live: &'a str,
+    /// The family the session started with.
+    pub baseline: &'a str,
+}
+
+/// Write `[font] family` by the Save rule: a key in the file is updated in place, keeping its
+/// decor; an absent key is written only when the live family differs from the starting one.
+fn patch_font_family(document: &mut DocumentMut, family: FamilySave<'_>) -> Result<()> {
+    let present = document
+        .get("font")
+        .and_then(Item::as_table_like)
+        .is_some_and(|font| font.contains_key("family"));
+    if !present && family.live == family.baseline {
+        // When: the key is absent and the family never changed, Save adds nothing.
+        return Ok(());
+    }
+    if document.get("font").is_none() {
+        document.insert("font", Item::Table(Table::new()));
+    }
+    let font = document
+        .get_mut("font")
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| anyhow::anyhow!("font must be a table or inline table"))?;
+    let mut replacement = toml_edit::value(family.live);
+    if let Some(existing) = font.get_mut("family") {
+        // The file names `family`: its value changes in place and keeps its comments.
+        if let (Some(old), Some(new)) = (existing.as_value(), replacement.as_value_mut()) {
+            *new.decor_mut() = old.decor().clone();
+        }
+        *existing = replacement;
+    } else {
+        // When: `font.get_mut("family")` is None, the family changed, so only that key is inserted.
+        font.insert("family", replacement);
+    }
+    Ok(())
 }
 
 fn patch_font_runtime_values(

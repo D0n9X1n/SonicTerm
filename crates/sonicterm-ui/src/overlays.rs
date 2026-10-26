@@ -375,10 +375,12 @@ impl PaletteLayout {
         let color_choices = palette.tab_color_choices();
         let confirm_rows = palette.confirm_rows();
         let status_rows = palette.status_segment_rows();
+        let font_rows = palette.font_family_rows();
         let total = match palette.mode() {
             CommandPaletteMode::TabColor => color_choices.len(),
             CommandPaletteMode::Confirm => confirm_rows.len(),
             CommandPaletteMode::StatusSegments => status_rows.len(),
+            CommandPaletteMode::FontFamily => font_rows.len(),
             _ => visible.len(),
         };
 
@@ -419,6 +421,14 @@ impl PaletteLayout {
                             .get(item_index)
                             .map(|row| row.label.clone())
                             .unwrap_or_default(),
+                    );
+                    row_shortcuts.push(None);
+                    row_swatches.push(None);
+                }
+                CommandPaletteMode::FontFamily => {
+                    // A picker row shows its family, marked when it is the live one.
+                    row_labels.push(
+                        font_rows.get(item_index).map(|row| row.label.clone()).unwrap_or_default(),
                     );
                     row_shortcuts.push(None);
                     row_swatches.push(None);
@@ -490,6 +500,7 @@ impl PaletteLayout {
                 CommandPaletteMode::RenameTab => palette.text().rename_placeholder.clone(),
                 CommandPaletteMode::RenameWindow => palette.text().window_name_placeholder.clone(),
                 CommandPaletteMode::StatusSegments => palette.status_title().to_string(),
+                CommandPaletteMode::FontFamily => palette.font_title().to_string(),
                 CommandPaletteMode::TabColor | CommandPaletteMode::Confirm => String::new(),
             })
         } else {
@@ -548,6 +559,7 @@ impl PaletteLayout {
             CommandPaletteMode::TabColor => palette.text().color_footer.clone(),
             CommandPaletteMode::Confirm => palette.text().confirm_footer.clone(),
             CommandPaletteMode::StatusSegments => palette.status_footer().to_string(),
+            CommandPaletteMode::FontFamily => palette.font_footer().to_string(),
         };
 
         Some(PaletteLayout {

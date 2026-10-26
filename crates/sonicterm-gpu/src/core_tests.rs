@@ -3512,18 +3512,17 @@ fn title_size_helper_is_used_only_for_title_stack_and_title_rendering() {
 }
 
 /// The longest `status-checklist-footer` across the shipped locales, by character count.
-fn longest_checklist_footer() -> String {
+fn longest_localized_footer(key: &str) -> String {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/i18n");
+    let prefix = format!("{key} = ");
     ["en", "ja", "zh-CN"]
         .iter()
         .filter_map(|locale| std::fs::read_to_string(root.join(locale).join("messages.ftl")).ok())
         .filter_map(|text| {
-            text.lines()
-                .find_map(|line| line.strip_prefix("status-checklist-footer = "))
-                .map(str::to_owned)
+            text.lines().find_map(|line| line.strip_prefix(prefix.as_str())).map(str::to_owned)
         })
         .max_by_key(|footer| footer.chars().count())
-        .expect("every locale has a checklist footer")
+        .expect("every locale has the footer")
 }
 
 #[test]
@@ -3544,6 +3543,7 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
         CommandPaletteMode::TabColor,
         CommandPaletteMode::Confirm,
         CommandPaletteMode::StatusSegments,
+        CommandPaletteMode::FontFamily,
     ] {
         let mut palette = CommandPalette::new();
         match mode {
@@ -3555,9 +3555,19 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
                 palette.start_confirm("title", "Apply", "Cancel", Vec::new())
             }
             // The checklist footer comes from the host; check the longest localized one.
-            CommandPaletteMode::StatusSegments => {
-                palette.start_status_segments("title", longest_checklist_footer(), Vec::new(), None)
-            }
+            CommandPaletteMode::StatusSegments => palette.start_status_segments(
+                "title",
+                longest_localized_footer("status-checklist-footer"),
+                Vec::new(),
+                None,
+            ),
+            // The font picker footer also comes from the host.
+            CommandPaletteMode::FontFamily => palette.start_font_family(
+                "title",
+                longest_localized_footer("font-picker-footer"),
+                Vec::new(),
+                "",
+            ),
         }
         let layout = PaletteLayout::compute(&mut palette, 4000.0, 2400.0, 0.0, 1.0)
             .expect("open palette has layout");

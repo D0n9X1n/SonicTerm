@@ -168,6 +168,37 @@ impl App {
                 return true;
             }
         }
+        if self.command_palette.mode() == CommandPaletteMode::FontFamily {
+            // When: mode is FontFamily, arrows preview the highlighted family, Enter keeps it and
+            // Escape restores the font the picker opened with; other keys edit the filter.
+            match logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    // When: logical_key is Escape, the picker closes and the font comes back.
+                    self.close_font_family_picker(false);
+                    return true;
+                }
+                Key::Named(NamedKey::Enter) => {
+                    // When: logical_key is Enter, the highlighted family stays for the session.
+                    self.close_font_family_picker(true);
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    // When: logical_key is ArrowDown, the next family applies live.
+                    self.command_palette.move_selection_down();
+                    self.preview_font_family();
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    // When: logical_key is ArrowUp, the previous family applies live.
+                    self.command_palette.move_selection_up();
+                    self.preview_font_family();
+                    return true;
+                }
+                _ => {
+                    // When: logical_key is any other key, it edits the filter query below.
+                }
+            }
+        }
         if self.command_palette.mode()
             == sonicterm_ui::command_palette::CommandPaletteMode::TabColor
         {

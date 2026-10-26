@@ -657,7 +657,7 @@ fn a_font_only_save_adds_no_status_line_keys() {
     let path = dir.join("sonicterm.toml");
     std::fs::write(&path, "# mine\n[font]\nsize = 13\nweight_scale = 1\n").unwrap();
     let save = session_save(&path, |_, _| {});
-    Config::persist_runtime_values(&path, 14.0, 1.0, Some(&save)).unwrap();
+    Config::persist_runtime_values(&path, 14.0, 1.0, None, Some(&save)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(!text.contains("status_line"), "{text}");
     assert!(text.starts_with("# mine\n") && text.contains("size = 14"));
@@ -678,7 +678,7 @@ fn a_save_writes_only_the_lists_that_differ_and_reloads_to_what_was_shown() {
         overrides.move_segment(file, Seg::Cpu, MoveDirection::Left);
         overrides.move_segment(file, Seg::Cpu, MoveDirection::Left);
     });
-    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&save)).unwrap();
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&save)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("# keep me") && text.contains("preset = \"diagnostics\""), "{text}");
     assert!(text.contains("left = [") && text.contains("right = ["), "{text}");
@@ -702,7 +702,7 @@ fn a_save_after_an_outside_edit_writes_only_what_still_differs() {
         overrides.set_hide_sensitive(file, true);
     });
     std::fs::write(&path, "[status_line]\nright = [\"health\", \"cpu\"] # edited\n").unwrap();
-    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&save)).unwrap();
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&save)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("right = [\"health\", \"cpu\"] # edited"), "{text}");
     assert!(text.contains("hide_sensitive = true"), "{text}");
@@ -723,7 +723,7 @@ fn a_status_line_save_edits_a_commented_list_in_place() {
         overrides.toggle_segment(file, Seg::Mem);
         overrides.toggle_segment(file, Seg::Cpu);
     });
-    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&save)).unwrap();
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&save)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("    # always first\n    \"health\","), "{text}");
     assert!(!text.contains("\"mem\""), "the removed item is gone: {text}");
@@ -744,7 +744,7 @@ fn a_status_line_save_keeps_the_comment_on_the_line_before_a_removed_item() {
         "[status_line]\nright = [\n  \"mem\", # KEEP: explains memory\n  \"health\",\n]\n";
     std::fs::write(&path, original).unwrap();
     let save = session_save(&path, |overrides, file| overrides.toggle_segment(file, Seg::Health));
-    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&save)).unwrap();
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&save)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("right = [\n  \"mem\", # KEEP: explains memory\n]\n"), "{text}");
     assert_eq!(reloaded_lists(&path), save);
@@ -761,7 +761,7 @@ fn a_status_line_save_keeps_the_list_wide_note_after_a_removed_last_item() {
     let original = "[status_line]\nright = [\n  \"health\", # health\n  \"mem\" # memory\n  # KEEP: list-wide note\n] # outside\n";
     std::fs::write(&path, original).unwrap();
     let save = session_save(&path, |overrides, file| overrides.toggle_segment(file, Seg::Mem));
-    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&save)).unwrap();
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&save)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     let expected =
         "right = [\n  \"health\" # health\n  # memory\n  # KEEP: list-wide note\n] # outside\n";
@@ -931,13 +931,13 @@ fn a_save_that_would_not_load_or_reads_a_broken_file_changes_nothing() {
     std::fs::write(&path, "[status_line]\nright = [\"health\"]\n").unwrap();
     let mut save = session_save(&path, |_, _| {});
     save.lists[0].push(Seg::Health);
-    assert!(Config::persist_runtime_values(&path, 13.0, 1.0, Some(&save)).is_err());
+    assert!(Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&save)).is_err());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "[status_line]\nright = [\"health\"]\n");
     std::fs::write(&path, "[status_line\nbroken").unwrap();
     let save = crate::status_overrides::StatusLineSave::from_resolved(
         &crate::status_line::StatusLineConfig::default().resolve().unwrap(),
     );
-    assert!(Config::persist_runtime_values(&path, 13.0, 1.0, Some(&save)).is_err());
+    assert!(Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&save)).is_err());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "[status_line\nbroken");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -950,7 +950,7 @@ fn a_status_line_save_keeps_crlf_and_unknown_keys_and_refuses_a_concurrent_chang
     let path = dir.join("sonicterm.toml");
     std::fs::write(&path, "future_key = 1\r\n[status_line]\r\nenabled = false\r\n").unwrap();
     let save = session_save(&path, |overrides, file| overrides.set_enabled(file, true));
-    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&save)).unwrap();
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&save)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("future_key = 1\r\n") && text.contains("enabled = true\r\n"), "{text:?}");
     assert!(!text.replace("\r\n", "").contains('\n'), "LF stays CRLF: {text:?}");
@@ -960,6 +960,7 @@ fn a_status_line_save_keeps_crlf_and_unknown_keys_and_refuses_a_concurrent_chang
         &path,
         13.0,
         1.0,
+        None,
         Some(&save),
         |destination| {
             std::fs::write(destination, concurrent)
@@ -980,12 +981,12 @@ fn a_status_line_save_writes_position_only_when_it_differs() {
     let path = dir.join("sonicterm.toml");
     std::fs::write(&path, "[status_line]\nenabled = true\n").unwrap();
     let unchanged = session_save(&path, |_, _| {});
-    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&unchanged)).unwrap();
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&unchanged)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(!text.contains("position"), "the file's position is not written: {text}");
     let mut moved = unchanged.clone();
     moved.position = StatusPosition::Bottom;
-    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&moved)).unwrap();
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&moved)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("position = \"bottom\""), "{text}");
     assert_eq!(reloaded_lists(&path), moved, "the reload shows the saved position");
@@ -1001,11 +1002,11 @@ fn a_status_line_save_writes_font_scale_only_when_it_differs() {
     let path = dir.join("sonicterm.toml");
     std::fs::write(&path, "[status_line]\nenabled = true\n").unwrap();
     let unchanged = session_save(&path, |_, _| {});
-    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&unchanged)).unwrap();
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&unchanged)).unwrap();
     assert!(!std::fs::read_to_string(&path).unwrap().contains("font_scale"));
     let mut larger = unchanged.clone();
     larger.font_scale = StatusFontScale::DEFAULT.stepped(1);
-    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&larger)).unwrap();
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&larger)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("font_scale = 0.85"), "{text}");
     assert_eq!(reloaded_lists(&path), larger, "the reload shows the saved scale");
@@ -1028,7 +1029,7 @@ fn a_status_line_save_updates_present_keys_in_place_even_to_their_defaults() {
     let defaults = crate::status_overrides::StatusLineSave::from_resolved(
         &crate::status_line::StatusLineConfig::default().resolve().unwrap(),
     );
-    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&defaults)).unwrap();
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&defaults)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(
         text.contains(
@@ -1053,7 +1054,7 @@ fn a_status_line_save_leaves_absent_keys_absent_at_their_defaults() {
     let defaults = crate::status_overrides::StatusLineSave::from_resolved(
         &crate::status_line::StatusLineConfig::default().resolve().unwrap(),
     );
-    Config::persist_runtime_values(&path, 13.0, 1.0, Some(&defaults)).unwrap();
+    Config::persist_runtime_values(&path, 13.0, 1.0, None, Some(&defaults)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     for key in ["enabled", "position", "font_scale"] {
         assert!(!text.contains(key), "{key} stays absent at its default: {text}");
@@ -1088,4 +1089,23 @@ fn only_a_named_family_sets_the_font_family() {
     assert!(Config::sets_font_family("[font\nfamily = "));
     let template: Config = toml::from_str(&default_config_template()).unwrap();
     assert_eq!(template.font.family, DEFAULT_FONT_FAMILY);
+}
+
+/// Save writes `[font] family` by the Save rule: an absent key stays absent while the family is
+/// the one the session started with, a changed family is added, and a key in the file is updated
+/// in place even back to the starting family.
+#[test]
+fn save_writes_the_font_family_by_the_save_rule() {
+    let dir = std::env::temp_dir().join(format!("sonicterm-save-family-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sonicterm.toml");
+    std::fs::write(&path, "[font]\nsize = 13.0\n").unwrap();
+    let family = |live: &'static str, baseline: &'static str| Some(FamilySave { live, baseline });
+    Config::persist_runtime_values(&path, 13.0, 1.0, family("Menlo", "Menlo"), None).unwrap();
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("family"));
+    Config::persist_runtime_values(&path, 13.0, 1.0, family("Monaco", "Menlo"), None).unwrap();
+    assert_eq!(Config::load_strict(&path).unwrap().font.family, "Monaco");
+    Config::persist_runtime_values(&path, 13.0, 1.0, family("Menlo", "Menlo"), None).unwrap();
+    assert_eq!(Config::load_strict(&path).unwrap().font.family, "Menlo");
+    std::fs::remove_dir_all(&dir).unwrap();
 }

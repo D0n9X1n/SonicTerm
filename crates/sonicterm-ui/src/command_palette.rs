@@ -68,6 +68,17 @@ pub enum CommandPaletteMode {
     Confirm,
     /// The status line checklist: toggles, grouped segment rows and Reset; the query filters it.
     StatusSegments,
+    /// The font family picker: installed monospace families; the query filters them.
+    FontFamily,
+}
+
+/// One font picker row: the family it applies and the text it shows, which marks the live one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FontFamilyRow {
+    /// The family the row applies.
+    pub family: String,
+    /// The row's text: the family, marked when it is the live one.
+    pub label: String,
 }
 
 /// What one status line checklist row does when it is activated.
@@ -406,6 +417,11 @@ pub struct CommandPalette {
     status_title: String,
     status_footer: String,
     status_rows: Vec<StatusSegmentRow>,
+    /// Query placeholder, footer and rows of the font picker while `mode` is `FontFamily`;
+    /// `items` indexes `font_rows`.
+    font_title: String,
+    font_footer: String,
+    font_rows: Vec<FontFamilyRow>,
     window_name_error: Option<WindowNameError>,
     /// Increments on every open, so a gesture held across close and reopen is not
     /// mistaken for one in the new editor.
@@ -455,6 +471,9 @@ impl CommandPalette {
             status_title: String::new(),
             status_footer: String::new(),
             status_rows: Vec::new(),
+            font_title: String::new(),
+            font_footer: String::new(),
+            font_rows: Vec::new(),
             window_name_error: None,
             session: 0,
         }
@@ -584,6 +603,12 @@ impl CommandPalette {
             self.status_footer.hash(&mut hash);
             self.status_rows.hash(&mut hash);
         }
+        // A picker reopened after the live family moved changes only row text.
+        if self.mode == CommandPaletteMode::FontFamily {
+            self.font_title.hash(&mut hash);
+            self.font_footer.hash(&mut hash);
+            self.font_rows.hash(&mut hash);
+        }
         hash.finish()
     }
 
@@ -637,6 +662,9 @@ impl CommandPalette {
         self.status_title.clear();
         self.status_footer.clear();
         self.status_rows.clear();
+        self.font_title.clear();
+        self.font_footer.clear();
+        self.font_rows.clear();
         self.tabs_only = false;
         self.window_name_error = None;
         self.query.clear();
@@ -1083,6 +1111,84 @@ impl CommandPalette {
         &self.status_footer
     }
 
+    /// Open the font family picker with `rows`, highlighting `current`'s row or else the first.
+    /// `title` is the query placeholder and `footer` the key help.
+    pub fn start_font_family(
+        &mut self,
+        title: impl Into<String>,
+        footer: impl Into<String>,
+        rows: Vec<FontFamilyRow>,
+        current: &str,
+    ) {
+        self.session = self.session.wrapping_add(1);
+        self.open = true;
+        self.mode = CommandPaletteMode::FontFamily;
+        self.tabs_only = false;
+        self.window_name_error = None;
+        self.query.clear();
+        self.selection = TextSelection::default();
+        self.font_title = title.into();
+        self.font_footer = footer.into();
+        self.font_rows = rows;
+        self.scroll_offset = 0;
+        self.filter_font_rows();
+        self.selected = self
+            .items
+            .iter()
+            .position(|&index| self.font_rows[index].family.eq_ignore_ascii_case(current))
+            .unwrap_or(0);
+        self.ensure_selected_in_view();
+    }
+
+    /// The picker rows the query keeps, in display order; empty in any other mode.
+    pub fn font_family_rows(&self) -> Vec<&FontFamilyRow> {
+        if self.mode != CommandPaletteMode::FontFamily {
+            // When: mode is not FontFamily, stale rows from a closed picker must not show.
+            return Vec::new();
+        }
+        self.items.iter().filter_map(|&index| self.font_rows.get(index)).collect()
+    }
+
+    /// The highlighted picker family, if the picker is open and a row is highlighted.
+    pub fn selected_font_family(&self) -> Option<&str> {
+        if self.mode != CommandPaletteMode::FontFamily {
+            // When: mode is not FontFamily, no picker row is highlighted.
+            return None;
+        }
+        let index = *self.items.get(self.selected)?;
+        self.font_rows.get(index).map(|row| row.family.as_str())
+    }
+
+    /// Highlight picker row `index` of the filtered view.
+    pub fn select_font_row(&mut self, index: usize) -> bool {
+        let selectable = self.mode == CommandPaletteMode::FontFamily && index < self.items.len();
+        if selectable {
+            self.selected = index;
+            self.ensure_selected_in_view();
+        }
+        selectable
+    }
+
+    /// The font picker's query placeholder.
+    pub fn font_title(&self) -> &str {
+        &self.font_title
+    }
+
+    /// The font picker's key help.
+    pub fn font_footer(&self) -> &str {
+        &self.font_footer
+    }
+
+    /// Keep every picker row for an empty query, else the families containing it, without case.
+    fn filter_font_rows(&mut self) {
+        let query = self.query.trim().to_lowercase();
+        self.items = (0..self.font_rows.len())
+            .filter(|&index| {
+                query.is_empty() || self.font_rows[index].family.to_lowercase().contains(&query)
+            })
+            .collect();
+    }
+
     /// Keep every checklist row for an empty query, else the segment rows it matches.
     fn filter_status_rows(&mut self) {
         let query = self.query.trim().to_lowercase();
@@ -1122,6 +1228,10 @@ impl CommandPalette {
             CommandPaletteMode::StatusSegments => {
                 self.filter_status_rows();
                 self.selected = self.first_selectable_status_row();
+            }
+            CommandPaletteMode::FontFamily => {
+                self.filter_font_rows();
+                self.selected = 0;
             }
             _ => {
                 // When: mode edits a name or shows a fixed list, typing filters nothing.
@@ -1369,6 +1479,7 @@ pub fn action_display_name(action: &Action) -> String {
         Action::DecreaseFontWeight => "DecreaseFontWeight".into(),
         Action::ResetFontWeight => "ResetFontWeight".into(),
         Action::SaveCurrentSettings => "SaveCurrentSettings".into(),
+        Action::ChooseFontFamily => "ChooseFontFamily".into(),
         Action::NewWindow => "NewWindow".into(),
         Action::MoveTabToNewWindow => "MoveTabToNewWindow".into(),
         Action::ToggleFullscreen => "ToggleFullscreen".into(),
@@ -1488,6 +1599,7 @@ pub fn palette_actions() -> Vec<Action> {
         Action::DecreaseFontWeight,
         Action::ResetFontWeight,
         Action::SaveCurrentSettings,
+        Action::ChooseFontFamily,
         // UI chrome
         Action::ToggleTabBar,
         Action::ToggleStatusLine,

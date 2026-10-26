@@ -61,6 +61,15 @@ blending. Every other combination—including Mica, Acrylic, Tabbed, opacity bel
 and blue coverage to matching display channels; `bgr` swaps red and blue.
 For shaping and fallback details, see [Rendering and Fonts](Rendering-and-Fonts).
 
+**Font: Choose Family…** (`choose_font_family`) lists the installed monospace
+families from the font catalog in the palette, with the live family marked `✓`;
+typing filters them. Moving the highlight with the arrow keys applies the
+highlighted family live to every window, Enter or a click keeps it for the session,
+and Escape or a click outside restores the family the picker opened with. Rows are
+drawn in the palette's own face; the terminal text previews the family. Before the
+catalog is ready the picker lists only the live family. **Save Current Settings**
+writes `[font] family` by the rule in [Saving current settings](#saving-current-settings).
+
 #### `[window]`
 
 | Key | Default | Behavior |
@@ -290,6 +299,10 @@ live renderer policy. A live `subpixel_aa` change invalidates and redraws the
 presented frame without rebuilding fonts, raster tiles, or either atlas.
 
 ### Saving current settings
+
+Save also writes `[font] family` when the file already names one, updating it in
+place, or when the live family differs from the one the session started with, as
+**Font: Choose Family…** changes it; an unchanged family is not added.
 
 **Save Current Settings** writes the live font values in
 `~/.sonicterm/sonicterm.toml`:

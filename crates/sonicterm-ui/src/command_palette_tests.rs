@@ -1047,3 +1047,25 @@ fn a_checklist_row_change_changes_the_presentation_hash() {
     palette.update_status_segments(palette.status_segment_rows().into_iter().cloned().collect());
     assert_eq!(palette.presentation_hash(), toggled, "unchanged rows keep the hash");
 }
+
+/// The font picker highlights the live family, filters by the typed query without case, and
+/// closes back to the command list with its rows gone.
+#[test]
+fn font_family_picker_filters_and_highlights_the_live_family() {
+    let mut palette = CommandPalette::new();
+    let rows: Vec<FontFamilyRow> = ["Consolas", "Menlo", "Monaco"]
+        .iter()
+        .map(|family| FontFamilyRow { family: (*family).into(), label: format!("  {family}") })
+        .collect();
+    palette.start_font_family("Type to filter fonts", "footer", rows, "Monaco");
+    assert_eq!(palette.mode(), CommandPaletteMode::FontFamily);
+    assert_eq!(palette.selected_font_family(), Some("Monaco"));
+    palette.input_str("MEN");
+    let kept: Vec<&str> =
+        palette.font_family_rows().iter().map(|row| row.family.as_str()).collect();
+    assert_eq!(kept, ["Menlo"]);
+    assert_eq!(palette.selected_font_family(), Some("Menlo"));
+    palette.close();
+    assert_eq!(palette.mode(), CommandPaletteMode::Commands);
+    assert!(palette.font_family_rows().is_empty());
+}

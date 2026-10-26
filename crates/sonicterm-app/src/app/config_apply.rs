@@ -857,10 +857,21 @@ impl App {
         let size = self.config.font.size;
         let weight_scale = self.config.font.effective_weight_scale();
         let status_line = self.status_line_save();
-        let written = Config::persist_runtime_values(path, size, weight_scale, Some(&status_line))
-            .with_context(|| format!("persist current settings to {}", path.display()))?;
+        let family = sonicterm_cfg::config::FamilySave {
+            live: &self.config.font.family,
+            baseline: &self.configured_font_family,
+        };
+        let written = Config::persist_runtime_values(
+            path,
+            size,
+            weight_scale,
+            Some(family),
+            Some(&status_line),
+        )
+        .with_context(|| format!("persist current settings to {}", path.display()))?;
         self.configured_font_size = size;
         self.configured_weight_scale = weight_scale;
+        self.configured_font_family = self.config.font.family.clone();
         self.adopt_saved_status_line(written);
         Ok(())
     }

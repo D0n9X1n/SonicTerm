@@ -634,6 +634,8 @@ pub struct App {
     pub(super) configured_font_family: String,
     /// Installed monospace families, enumerated once per process off the UI thread.
     pub(super) font_catalog: font_catalog::FontCatalog,
+    /// The live family when the font picker opened, restored when the picker is cancelled.
+    pub(super) font_picker_original: Option<String>,
     pub(super) keymap: Keymap,
     // The main window holds no state of its own here. Its renderer, tabs,
     // tab states, panes, selection, modifiers, copy mode, last render, cursor

@@ -87,6 +87,7 @@ fn command_context_requirements_and_readonly_policy_are_explicit() {
                 | Action::OpenCommandPalette
                 | Action::RenameWindow
                 | Action::ChooseStatusLineSegments
+                | Action::ChooseFontFamily
                 | Action::FocusStatusLine
         );
         assert_eq!(descriptor(&action).read_only_allowed, expected, "{action:?}");
