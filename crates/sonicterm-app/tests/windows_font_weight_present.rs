@@ -591,6 +591,8 @@ fn setup_scale_case(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sonicterm-font/test-fonts/rec-mono");
     let theme = Theme::default();
     let mut config = Config::default();
+    // The row checks expect 2 and 7 to share a top, as the fixture's outlines do (both reach 720 of
+    // 1000 units); Cascadia Mono's round 2 overshoots its 7, which windows_digit_tops checks.
     // The fixture directory alone does not select it: the default family is the host's own face.
     config.font.family = "Rec Mono St.Helens".into();
     config.font.size = 14.5;

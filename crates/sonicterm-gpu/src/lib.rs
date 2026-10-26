@@ -82,6 +82,8 @@ pub mod missing_glyphs;
 /// window or device, so CI can choose the glyph atlas start size.
 #[doc(hidden)]
 pub mod glyph_working_set;
+/// A glyph's ink top predicted from its outline, for native layout tests.
+pub mod outline_ink;
 
 /// The perf-end glyph completeness checkpoint: what a presented `Full` frame certified, and whether it
 /// still describes the scene and atlas.
