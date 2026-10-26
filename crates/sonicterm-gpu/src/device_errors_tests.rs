@@ -390,7 +390,7 @@ enum GateBinding {
 }
 
 const RECOVERY_RENDERER_SOURCES: [&str; 5] = [
-    include_str!("core.rs"),
+    crate::core::CORE_SOURCE,
     include_str!("present.rs"),
     include_str!("rebind.rs"),
     include_str!("recovery_context.rs"),

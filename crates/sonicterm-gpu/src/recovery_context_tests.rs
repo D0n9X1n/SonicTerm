@@ -89,7 +89,7 @@ fn startup_request_prepares_surface_without_device_negotiation() {
 // A completed request supplies its own window and surface; finishing must not repeat negotiation or surface creation.
 #[test]
 fn prepared_startup_uses_existing_constructor_and_window() {
-    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let source = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     let start = source.find("pub fn finish_startup(").expect("prepared startup entry");
     let end = source[start..].find("\n    }\n").expect("finish startup body") + start;
     let finish = &source[start..end];

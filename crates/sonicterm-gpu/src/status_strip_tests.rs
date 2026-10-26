@@ -354,7 +354,7 @@ fn a_strip_layout_is_committed_only_when_its_frame_presents() {
     layouts.settle(true);
     assert_eq!(layouts.presented(), None, "hiding the strip clears both");
     // The renderer reads band and segments only from the committed unit, never live geometry.
-    let core = include_str!("core.rs");
+    let core = crate::core::CORE_SOURCE;
     assert!(!core.contains("self.status_line_presented = placed"));
     assert!(core.contains("self.status_line_layouts.stage("));
     assert!(core.contains("self.status_line_layouts.settle("));
@@ -370,7 +370,7 @@ fn committed_strip_checkout(core: &str) {
 #[test]
 fn the_committed_strip_check_holds_on_a_crlf_checkout() {
     // A Windows checkout gives `include_str!` CRLF text; the check on it must pass as on LF.
-    let crlf = include_str!("core.rs").replace("\r\n", "\n").replace('\n', "\r\n");
+    let crlf = crate::core::CORE_SOURCE.replace("\r\n", "\n").replace('\n', "\r\n");
     committed_strip_checkout(&crlf);
 }
 
@@ -460,7 +460,7 @@ fn the_strip_draws_with_its_own_smaller_stack() {
     let (strip_h, title_h) = (strip_ink_height(&strip, "H"), strip_ink_height(&title, "H"));
     // 10.4 pt against 14 pt: the strip's capitals are drawn shorter, whole pixels apart.
     assert!(strip_h > 0.0 && strip_h < title_h, "strip H {strip_h} vs title H {title_h}");
-    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let core = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     assert!(core.contains("let mut strip_rasterizer = self.status_line_font_stack.clone();"));
     assert!(core.contains("self.status_line_font_stack = new_stacks.status_line;"));
     assert!(core.contains("if let Some(stack) = self.status_line_font_stack.as_ref() {"));
@@ -589,7 +589,7 @@ fn the_strip_rasterizes_anew_after_zoom_and_dpi_changes() {
         drawn_h(&strip, &mut rescaled, GlyphRasterVariant::StatusLine, strip_px(13.0) * 2.0);
     assert!((double_h - 2.0 * strip_h).abs() <= 2.0, "2× draws {double_h} vs {strip_h} at 1×");
     // The renderer resets the atlas on both changes and rebuilds or rescales the strip's stack.
-    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let core = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     // The body of a renderer method, up to its closing brace.
     let method = |signature: &str| {
         let start = core.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
@@ -598,10 +598,10 @@ fn the_strip_rasterizes_anew_after_zoom_and_dpi_changes() {
     // `set_font` builds the new stacks and adopts them, which resets the atlas.
     let set_font = method("    pub fn set_font(");
     assert!(set_font.contains("self.adopt_font_stacks("));
-    let adopt = method("    fn adopt_font_stacks(");
+    let adopt = method("    pub(super) fn adopt_font_stacks(");
     assert!(adopt.contains("self.reset_glyph_atlas_in_place(\"font_change\");"));
     assert!(adopt.contains("self.status_line_font_stack = new_stacks.status_line;"));
-    let rescale = method("    fn rebuild_for_sf(");
+    let rescale = method("    pub(super) fn rebuild_for_sf(");
     assert!(rescale.contains("self.reset_glyph_atlas_in_place(\"dpi_change\");"));
     assert!(
         rescale.contains(
@@ -622,7 +622,7 @@ fn renderer_method<'source>(core: &'source str, signature: &str) -> &'source str
 /// insets read the placement, so the pane area follows the position.
 #[test]
 fn moving_the_strip_keeps_the_presented_layout_until_a_frame_presents() {
-    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let core = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     let moved = renderer_method(&core, "pub fn set_status_line_position(");
     assert!(!moved.contains("status_line_layouts.clear()"), "a move drops the presented strip");
     assert!(moved.contains("last_frame_key = None"), "a move forces the next frame");
@@ -971,7 +971,7 @@ fn strip_text_follows_its_font_scale() {
 /// and every frame's geometry carries that scale.
 #[test]
 fn the_renderer_rebuilds_the_strip_at_its_scale() {
-    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let core = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     let method = |signature: &str| {
         let start = core.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
         core[start..start + core[start..].find("\n    }\n").unwrap()].to_owned()
@@ -980,9 +980,9 @@ fn the_renderer_rebuilds_the_strip_at_its_scale() {
     assert!(set.contains("self.rebuild_status_line_stack();"));
     assert!(set.contains("self.reset_glyph_atlas_in_place(\"status_line_font_scale\");"));
     assert!(set.contains("self.row_glyph_cache.invalidate_all();"));
-    let rebuild = method("    fn rebuild_status_line_stack(");
+    let rebuild = method("    pub(super) fn rebuild_status_line_stack(");
     assert!(rebuild.contains("status_line_font_size(self.font_size, self.status_line_font_scale)"));
-    let adopt = method("    fn adopt_font_stacks(");
+    let adopt = method("    pub(super) fn adopt_font_stacks(");
     assert!(adopt.contains("self.rebuild_status_line_stack();"), "a font change keeps the scale");
     assert!(core.contains("font_scale: self.status_line_font_scale,"));
 }

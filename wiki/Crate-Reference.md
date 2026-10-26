@@ -438,6 +438,13 @@ maps it back to its `Result<()>`.
 
 **Read:** `src/{core,present,frame_plan,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_frame,software_windows}.rs`.
 
+`core.rs` retains the renderer owner and public paths. Private `core_*` siblings own
+constructors, surface policy, settings, frame lifecycle and row emission. `core_assemble.rs`
+keeps the scratch lease, plan, timing boundaries, missing-chrome scope, retry exits and receipts;
+its `core_assemble_*` helpers borrow geometry and scratch and emit in the existing painter order.
+The test-only `core_source.rs` corpus includes every extracted renderer phase so source guards
+and their mutation controls still cover device-gate reachability.
+
 ### `sonicterm-app-core`
 
 **Role:** backend-free `AppIntent`, `AppEffect`, `AppState`, reducer, stable

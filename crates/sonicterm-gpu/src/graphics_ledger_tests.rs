@@ -282,7 +282,7 @@ fn check_installs_record(
 
 /// The production sources the hook guard reads, in [`hook_violations`] order.
 const SOURCES: [(&str, &str); 5] = [
-    ("core.rs", include_str!("core.rs")),
+    ("core.rs", crate::core::CORE_SOURCE),
     ("present.rs", include_str!("present.rs")),
     ("rebind.rs", include_str!("rebind.rs")),
     ("atlas_lifecycle.rs", include_str!("atlas_lifecycle.rs")),

@@ -387,6 +387,12 @@ FreeType 名称、尺寸与库/流操作放在私有 `ftwrap_*` 同级文件中�
 
 **阅读：** `src/{core,present,frame_plan,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_frame,software_windows}.rs`。
 
+`core.rs` 保留渲染器所有者与公开路径。私有 `core_*` 同级文件负责构造、surface 策略、
+设置、帧生命周期和行发射。`core_assemble.rs` 保留暂存租约、计划、计时边界、界面缺字作用域、
+重试出口和回执；`core_assemble_*` 辅助方法借用几何与暂存数据，按原有绘制顺序发射。
+仅测试使用的 `core_source.rs` 汇集每个拆出的渲染阶段，因此源代码守卫及其变异测试
+仍覆盖设备门控可达性。
+
 ### `sonicterm-app-core`
 
 **职责：** 不依赖后端的 `AppIntent`、`AppEffect`、`AppState`、reducer、稳定的

@@ -630,8 +630,13 @@ pub(super) fn production_sources() -> Vec<(String, String)> {
             if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
                 continue;
             }
+            let source = std::fs::read_to_string(&path).expect("read source file");
+            // A file-level test gate excludes only test fixtures, never a renderer phase.
+            if source.starts_with("#![cfg(test)]\n") || source.starts_with("#![cfg(test)]\r\n") {
+                continue;
+            }
             let relative = path.strip_prefix(&src).expect("under src").display().to_string();
-            files.push((relative, std::fs::read_to_string(&path).expect("read source file")));
+            files.push((relative, source));
         }
     }
     files.sort();

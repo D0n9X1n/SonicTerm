@@ -17,7 +17,7 @@ fn renderer_gpu_work_goes_through_the_gate() {
     let sources: Vec<&str> = files.iter().map(|(_, text)| text.as_str()).collect();
     let violations = gate_violations(&sources);
     assert!(violations.is_empty(), "device-gate violations: {violations:?}");
-    let core = code_only(include_str!("core.rs"));
+    let core = code_only(crate::core::CORE_SOURCE);
     let drop_block = block_after(&core, "impl Drop for GpuRenderer {");
     assert!(
         handle_uses(&drop_block).is_empty() && !drop_block.contains("wgpu::"),
@@ -48,7 +48,7 @@ fn production_code_avoids_fatal_wgpu_paths() {
 #[test]
 fn structural_checks_reject_seeded_defects() {
     let renderer = [
-        include_str!("core.rs"),
+        crate::core::CORE_SOURCE,
         include_str!("present.rs"),
         include_str!("rebind.rs"),
         include_str!("recovery_context.rs"),
@@ -86,6 +86,21 @@ fn structural_checks_reject_seeded_defects() {
     let gated_body = format!("let Some(_s) = {gate} else {{ return; }}; {submit}");
     let gated = seeded("seeded_gated", gated_body.as_str());
     assert_eq!(gate_violations(&[gated.as_str()]), Vec::<String>::new());
+    // An extracted phase is still in the transitive assembly graph, not a source-scan blind spot.
+    let phase = include_str!("core_assemble_glyph_rows.rs");
+    let anchor = phase.find("pub(super) fn assemble_glyph_rows(").expect("real phase");
+    let body = anchor + phase[anchor..].find('{').expect("phase body") + 1;
+    let mut seeded_phase = phase.to_owned();
+    seeded_phase.insert_str(body, " self.queue.submit(None); ");
+    let seeded_renderer = renderer.replace(phase, &seeded_phase);
+    assert_ne!(seeded_renderer, renderer, "the complete corpus contains the real phase");
+    let violations = gate_violations(&[&seeded_renderer]);
+    for method in ["assemble_glyph_rows", "assemble_frame"] {
+        assert!(
+            violations.iter().any(|violation| violation.contains(method)),
+            "{method}: {violations:?}"
+        );
+    }
     let missing = gate_violations(&["fn unrelated() {}"]);
     assert_eq!(missing, vec!["no `impl GpuRenderer` block".to_owned()]);
 }
@@ -95,7 +110,7 @@ fn structural_checks_reject_seeded_defects() {
 #[test]
 fn structural_checks_are_identical_for_lf_and_crlf() {
     let core = [
-        include_str!("core.rs"),
+        crate::core::CORE_SOURCE,
         include_str!("present.rs"),
         include_str!("rebind.rs"),
         include_str!("recovery_context.rs"),
@@ -124,7 +139,7 @@ fn structural_checks_are_identical_for_lf_and_crlf() {
 #[test]
 fn constructor_and_gate_arguments_cannot_bypass_containment() {
     let core = [
-        include_str!("core.rs"),
+        crate::core::CORE_SOURCE,
         include_str!("present.rs"),
         include_str!("rebind.rs"),
         include_str!("recovery_context.rs"),
@@ -164,7 +179,7 @@ fn constructor_and_gate_arguments_cannot_bypass_containment() {
 #[test]
 fn presentation_delegates_and_presenters_remain_in_the_gate_graph() {
     let renderer = [
-        include_str!("core.rs"),
+        crate::core::CORE_SOURCE,
         include_str!("present.rs"),
         include_str!("rebind.rs"),
         include_str!("recovery_context.rs"),
@@ -224,7 +239,7 @@ fn device_negotiation_has_one_bootstrap_path() {
         requests,
         ["recovery_context.rs: .request_adapter(", "recovery_context.rs: .request_device("]
     );
-    let core = squeeze(&code_only(include_str!("core.rs")));
+    let core = squeeze(&code_only(crate::core::CORE_SOURCE));
     assert_eq!(core.matches("recovery_context::negotiate_device(&instance,&surface)").count(), 1);
     let context = include_str!("recovery_context.rs");
     let run = "negotiate_device(&surface.instance,&surface.surface)";

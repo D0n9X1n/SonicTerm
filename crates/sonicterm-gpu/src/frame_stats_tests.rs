@@ -160,7 +160,7 @@ pub(super) fn a_frame_counts_as_software_only_where_the_software_presenter_runs(
     assert_eq!(presents_software(true), cfg!(target_os = "windows"));
     assert!(!presents_software(false));
     // The presenter and the frame count read the same predicate.
-    assert!(presenter_predicate_is_shared(include_str!("present.rs"), include_str!("core.rs")));
+    assert!(presenter_predicate_is_shared(include_str!("present.rs"), crate::core::CORE_SOURCE));
 }
 
 /// Every non-test Rust source under `dir`, recursively, as `(path, text)`.
@@ -392,7 +392,7 @@ pub(super) fn every_renderer_entry_point_that_can_shape_opens_a_collection_scope
         assert!(scoped.contains(entry_point), "{entry_point} opens no scope: {scoped:?}");
     }
     // The compatibility wrapper opens no scope of its own: it reaches the one `render_releasing` opens.
-    let core = include_str!("core.rs").replace("\r\n", "\n");
+    let core = crate::core::CORE_SOURCE.replace("\r\n", "\n");
     let wrapper = core.split_once("    pub fn render_with_outcome(").expect("wrapper").1;
     let wrapper = wrapper.split_once("\n    }\n").expect("wrapper body").0;
     assert!(
@@ -427,7 +427,7 @@ pub(super) fn every_renderer_redraw_request_goes_through_the_counting_helper() {
     crate_sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources);
     let found = renderer_redraw_requests(&sources);
     assert_eq!(found.len(), 1, "{found:#?}");
-    let core = code_only(&to_lf(include_str!("core.rs")));
+    let core = code_only(&to_lf(crate::core::CORE_SOURCE));
     let helper = core.find("fn request_window_redraw(").expect("counting helper");
     let body = &core[block_at(&core, helper).expect("helper body")];
     assert!(body.contains(".request_redraw()") && body.contains("note_native_request()"), "{body}");
@@ -497,7 +497,7 @@ pub(super) fn assembly_buckets_use_the_microsecond_bounds_with_a_value_at_a_boun
 
 /// core.rs with all whitespace removed, so rustfmt's wrapping never hides a call.
 pub(super) fn core_code() -> String {
-    to_lf(include_str!("core.rs")).split_whitespace().collect()
+    to_lf(crate::core::CORE_SOURCE).split_whitespace().collect()
 }
 
 #[test]
@@ -664,7 +664,7 @@ pub(super) fn source_scans_read_a_crlf_checkout_as_they_read_an_lf_one() {
     // Windows CI checks sources out with CRLF line ends. Each scan, fed a CRLF copy of its real
     // input, must reach the answer it reaches on the LF copy; every scan that differs is listed.
     let mut differs = Vec::new();
-    let (present, core) = (include_str!("present.rs"), include_str!("core.rs"));
+    let (present, core) = (include_str!("present.rs"), crate::core::CORE_SOURCE);
     assert!(presenter_predicate_is_shared(&to_lf(present), &to_lf(core)));
     if !presenter_predicate_is_shared(&to_crlf(present), &to_crlf(core)) {
         differs.push("presenter_predicate_is_shared");

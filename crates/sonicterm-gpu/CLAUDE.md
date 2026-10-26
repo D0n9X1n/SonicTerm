@@ -7,7 +7,12 @@ GDI presentation. `TextPipeline` remains a callable compatibility pipeline, not
 the production glyph path.
 
 ## Key files
-- `core.rs` - renderer owner, frame assembly, surface lifecycle.
+- `core.rs` - renderer owner and compatibility exports; private `core_*` siblings hold its
+  constructors, settings, surface, row emission and frame lifecycle methods.
+- `core_assemble.rs` - CPU assembly coordinator, scratch lease, retry decisions and receipts;
+  `core_assemble_*` phases emit in the same painter order through borrowed `core_assembly_context`.
+- `core_source.rs` - test-only complete renderer source corpus for structural contracts;
+  extracted phases remain in the device-gate reachability graph.
 - `atlas_lifecycle.rs` - private atlas reset, promotion/demotion, gated upload rebuild and retry settlement.
 - `device_errors.rs` - per-device wgpu error and loss state, the GPU-work gate,
   the frame-outcome decision, and the test fault kinds.

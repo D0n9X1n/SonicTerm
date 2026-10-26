@@ -295,7 +295,7 @@ fn envelopes_and_the_staging_report_include_the_rect_lists() {
         envelope_bytes(sonicterm_types::ResourceClass::UploadStaging),
         2 * atlas_bytes + 2 * 2 * 2 * MAX_ATLAS_ENTRIES * rect_bytes
     );
-    let core: String = include_str!("core.rs").split_whitespace().collect();
+    let core: String = crate::core::CORE_SOURCE.split_whitespace().collect();
     assert!(core.contains("vertex_scratch:self.upload_staging_retained(),"));
     let report = core.split_once("fnupload_staging_retained(&self)").unwrap().1;
     let report = report.split_once("pubfninvalidate_pane_caches").expect("next method").0;
