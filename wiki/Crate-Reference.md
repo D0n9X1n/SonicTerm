@@ -300,6 +300,10 @@ The palette separates metadata, presentation, and execution:
 
 **Read:** `src/{tabs,pane,command_palette,command_label,search,selection,copy_mode,ime,overlays,i18n}.rs`.
 
+`command_palette.rs` retains its state owner and public paths. Private siblings
+`command_palette_modes.rs`, `command_palette_presentation.rs`, and
+`command_palette_actions.rs` hold typed modes, cached phrases, and canonical actions.
+
 ### `sonicterm-render-model`
 
 **Role:** renderer-neutral pane, geometry, overlay, and input bundles. It

@@ -260,6 +260,10 @@ macOS 文本编辑通过 AppKit attributed-string 纯字符串单词边界 API �
 
 **阅读：** `src/{tabs,pane,command_palette,command_label,search,selection,copy_mode,ime,overlays,i18n}.rs`。
 
+`command_palette.rs` 保留状态所有者及公开路径。私有同级文件 `command_palette_modes.rs`、
+`command_palette_presentation.rs` 和 `command_palette_actions.rs` 分别负责类型化模式、
+缓存短语和规范动作目录。
+
 ### `sonicterm-render-model`
 
 **职责：** 与具体渲染器无关的窗格、几何、覆盖层和输入数据。它通过
