@@ -46,8 +46,17 @@ fn render(app: &mut App, active: &ActiveEventLoop, id: WindowId) {
     }
 }
 
-fn pixels(app: &App, id: WindowId) -> Vec<[u8; 4]> {
-    (60..115)
+/// The rows a one-line link preview covers, from below the hovered row 0 to past the bubble's end,
+/// so the sample follows the face's cell height rather than fixed pixel rows.
+fn preview_rows(cell_h: f32, scale: f32) -> std::ops::Range<u32> {
+    // The bubble starts a 16 px gap below the pointer, which sits half a cell down, and is one
+    // 1.4 em line plus 8 px padding above and below tall, so it ends within 64 px of row 0's bottom.
+    let first = cell_h.ceil() as u32;
+    first..first + (64.0 * scale).ceil() as u32
+}
+
+fn pixels(app: &App, id: WindowId, rows: &std::ops::Range<u32>) -> Vec<[u8; 4]> {
+    rows.clone()
         .flat_map(|y| (25..250).map(move |x| (x, y)))
         .map(|(x, y)| app.__test_window_software_frame_pixel_bgra(id, x, y).unwrap())
         .collect()
@@ -98,6 +107,8 @@ fn exercise(active: &ActiveEventLoop, main: bool) {
     renderer.set_tab_bar_visible(false);
     renderer.set_cursor_blink(false);
     let (cw, ch) = renderer.cell_size();
+    // The preview draws below the hovered row; sample those rows at this face's cell height.
+    let rows = preview_rows(ch, window.scale_factor() as f32);
     // Real fallback shaping must fit the entire policy message, not a terminal-cell estimate.
     let message = "Filepath or original target copied to clipboard.\nCannot open target: Path is inaccessible or blocked by safety policy";
     let layout = renderer.notification_layout(message, (640.0, 360.0), 0);
@@ -137,7 +148,7 @@ fn exercise(active: &ActiveEventLoop, main: bool) {
         },
     );
     render(&mut app, active, id);
-    let baseline = pixels(&app, id);
+    let baseline = pixels(&app, id, &rows);
     ApplicationHandler::window_event(
         &mut app,
         active,
@@ -145,7 +156,7 @@ fn exercise(active: &ActiveEventLoop, main: bool) {
         WindowEvent::ModifiersChanged(ModifiersState::CONTROL.into()),
     );
     render(&mut app, active, id);
-    let shown = pixels(&app, id);
+    let shown = pixels(&app, id, &rows);
     assert_ne!(shown, baseline, "stationary Ctrl must paint the labeled destination");
     ApplicationHandler::window_event(
         &mut app,
@@ -154,10 +165,14 @@ fn exercise(active: &ActiveEventLoop, main: bool) {
         WindowEvent::ModifiersChanged(ModifiersState::empty().into()),
     );
     render(&mut app, active, id);
-    assert_eq!(pixels(&app, id), baseline, "modifier release restores covered terminal pixels");
+    assert_eq!(
+        pixels(&app, id, &rows),
+        baseline,
+        "modifier release restores covered terminal pixels"
+    );
     put(&mut app, "https://example.com/", "https://example.com/");
     render(&mut app, active, id);
-    let matching = pixels(&app, id);
+    let matching = pixels(&app, id, &rows);
     ApplicationHandler::window_event(
         &mut app,
         active,
@@ -165,7 +180,7 @@ fn exercise(active: &ActiveEventLoop, main: bool) {
         WindowEvent::ModifiersChanged(ModifiersState::CONTROL.into()),
     );
     render(&mut app, active, id);
-    assert_ne!(pixels(&app, id), matching, "an exact URL label still shows the destination");
+    assert_ne!(pixels(&app, id, &rows), matching, "an exact URL label still shows the destination");
     ApplicationHandler::window_event(
         &mut app,
         active,
@@ -178,7 +193,7 @@ fn exercise(active: &ActiveEventLoop, main: bool) {
         b"\x1b[H\x1b[2Khttps://example.com/?a=1&b=2"
     ));
     render(&mut app, active, id);
-    let plain = pixels(&app, id);
+    let plain = pixels(&app, id, &rows);
     ApplicationHandler::window_event(
         &mut app,
         active,
@@ -186,10 +201,10 @@ fn exercise(active: &ActiveEventLoop, main: bool) {
         WindowEvent::ModifiersChanged(ModifiersState::CONTROL.into()),
     );
     render(&mut app, active, id);
-    assert_ne!(pixels(&app, id), plain, "plain URL queries show a destination too");
+    assert_ne!(pixels(&app, id, &rows), plain, "plain URL queries show a destination too");
     put(&mut app, "https://example.com/docs", "Docs");
     render(&mut app, active, id);
-    assert_ne!(pixels(&app, id), baseline, "PTY replacement refreshes a stationary preview");
+    assert_ne!(pixels(&app, id, &rows), baseline, "PTY replacement refreshes a stationary preview");
     ApplicationHandler::window_event(
         &mut app,
         active,
@@ -197,7 +212,7 @@ fn exercise(active: &ActiveEventLoop, main: bool) {
         WindowEvent::CursorLeft { device_id: DeviceId::dummy() },
     );
     render(&mut app, active, id);
-    assert_eq!(pixels(&app, id), baseline, "departure must not resurrect preview on redraw");
+    assert_eq!(pixels(&app, id, &rows), baseline, "departure must not resurrect preview on redraw");
 
     // Only the space's underline attribute changes between these three presentations.
     let space_pixels = |app: &App| {
