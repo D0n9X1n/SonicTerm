@@ -861,3 +861,71 @@ fn a_real_reload_racing_the_worker_never_publishes_the_old_configurations_result
     }
     assert_eq!(notice.unresolved_snapshot().codepoints, vec!['\u{379}']);
 }
+
+/// A stand-in fontconfig that answers every configured family with the Rec Mono fixture, tagged
+/// as a substitution for the requested name, as fontconfig does for a family it lacks.
+struct SubstitutingLocator;
+
+impl crate::locator::FontLocator for SubstitutingLocator {
+    fn load_fonts(
+        &self,
+        fonts_selection: &[config::FontAttributes],
+        loaded: &mut std::collections::HashSet<config::FontAttributes>,
+        _pixel_size: u16,
+    ) -> anyhow::Result<Vec<ParsedFont>> {
+        let mut fonts = vec![];
+        for attr in fonts_selection.iter().filter(|attr| !attr.is_fallback) {
+            let handle = FontDataHandle {
+                source: FontDataSource::OnDisk(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("test-fonts/rec-mono/RecMonoSt.Helens-Regular.ttf"),
+                ),
+                index: 0,
+                variation: 0,
+                origin: FontOrigin::FontConfigMatch(attr.family.clone()),
+                coverage: None,
+            };
+            fonts.push(ParsedFont::from_locator(&handle)?);
+            loaded.insert(attr.clone());
+        }
+        Ok(fonts)
+    }
+
+    fn locate_fallback_for_codepoints(
+        &self,
+        _codepoints: &[char],
+    ) -> anyhow::Result<Vec<ParsedFont>> {
+        Ok(vec![])
+    }
+}
+
+/// fontconfig answers a family it lacks with its own best match tagged with the requested name,
+/// so the name check accepts it. The resolver still reports that the configured family is not
+/// installed and names the face used instead; a generic alias such as `monospace` is exempt.
+#[test]
+fn a_fontconfig_substitution_for_a_missing_family_is_reported() {
+    const MISSING: &str = "SonicTerm Substituted Diagnostic Family";
+    let reported = |family: &str| {
+        crate::REPORTED_FONT_DIAGNOSTICS.lock().unwrap().iter().any(|message| {
+            message.contains(&format!("{family:?} (weight="))
+                && message.contains("Using \"Rec Mono St.Helens\" instead")
+        })
+    };
+    let resolve = |family: &str| {
+        let mut settings = config::Config::default();
+        settings.font.font = vec![config::FontAttributes::new(family)];
+        let settings = config::ConfigHandle::new(settings);
+        let fonts = crate::FontConfigInner::with_locator(
+            settings.clone(),
+            72,
+            Arc::new(SubstitutingLocator),
+        )
+        .unwrap();
+        let (_, handles) = fonts.resolve_font_helper(&settings.font, &settings, 14).unwrap();
+        handles.first().unwrap().names().family.clone()
+    };
+    assert_eq!(resolve(MISSING), "Rec Mono St.Helens");
+    assert!(reported(MISSING), "the substitution is reported");
+    assert_eq!(resolve("monospace"), "Rec Mono St.Helens");
+    assert!(!reported("monospace"), "an alias resolving to another face is not a miss");
+}

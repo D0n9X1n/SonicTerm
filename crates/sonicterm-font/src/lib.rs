@@ -1179,46 +1179,55 @@ impl FontConfigInner {
         };
 
         for attr in &attributes {
-            if !attr.is_synthetic && !attr.is_fallback && !loaded.contains(attr) {
-                // When: `loaded` lacks a configured, nonsynthetic `attr`, report that miss once per process.
-                let identity = format!(
-                    "{:?} (weight={}, stretch={}, style={})",
-                    attr.family, attr.weight, attr.stretch, attr.style
-                );
-                if config::DEFAULT_MONOSPACE_FAMILIES.contains(&attr.family.as_str()) {
-                    // When: `DEFAULT_MONOSPACE_FAMILIES` contains `attr.family`, the next default stands in; log at info, not as an error.
-                    let message = format!(
-                        "Platform default font {identity} is not installed. {replacement}."
-                    );
-                    if first_report(&message) {
-                        log::info!("{message}");
-                    }
-                    continue;
+            if attr.is_synthetic || attr.is_fallback {
+                // When: `attr` is synthetic or a fallback, a miss there is expected and never reported.
+                continue;
+            }
+            let using = if !loaded.contains(attr) {
+                replacement.clone()
+            } else if let Some(face) = fontconfig_substitute(attr, &handles) {
+                // When: `fontconfig_substitute` finds another family under `attr`'s name, it is not installed.
+                format!("Using {:?} instead", face.names().family)
+            } else {
+                // When: `attr` loaded under its own name, there is no miss to report.
+                continue;
+            };
+            let identity = format!(
+                "{:?} (weight={}, stretch={}, style={})",
+                attr.family, attr.weight, attr.stretch, attr.style
+            );
+            if config::DEFAULT_MONOSPACE_FAMILIES.contains(&attr.family.as_str()) {
+                // When: `DEFAULT_MONOSPACE_FAMILIES` contains `attr.family`, the next default stands in; log at info, not as an error.
+                let message =
+                    format!("Platform default font {identity} is not installed. {using}.");
+                if first_report(&message) {
+                    log::info!("{message}");
                 }
-                let is_primary = config.font.font.iter().any(|a| !a.is_fallback && a == attr);
-                let derived_from_primary =
-                    config.font.font.iter().any(|a| !a.is_fallback && a.family == attr.family);
-                let explanation = if is_primary {
-                    format!("Unable to load the configured primary font {identity}")
-                } else if derived_from_primary {
-                    // When: derived_from_primary matches a non-fallback family, identify the unmatched variant without blaming a fallback.
-                    format!(
+                continue;
+            }
+            let is_primary = config.font.font.iter().any(|a| !a.is_fallback && a == attr);
+            let derived_from_primary =
+                config.font.font.iter().any(|a| !a.is_fallback && a.family == attr.family);
+            let explanation = if is_primary {
+                format!("Unable to load the configured primary font {identity}")
+            } else if derived_from_primary {
+                // When: derived_from_primary matches a non-fallback family, identify the unmatched variant without blaming a fallback.
+                format!(
                         "Unable to load a font variant derived from the configured primary font: {identity}"
                     )
-                } else {
-                    // When: neither is_primary nor derived_from_primary matches, the request is not the configured primary selection.
-                    format!("Unable to load the requested font {identity}")
-                };
+            } else {
+                // When: neither is_primary nor derived_from_primary matches, the request is not the configured primary selection.
+                format!("Unable to load the requested font {identity}")
+            };
 
-                let message = format!(
-                    "{explanation}. {replacement}, and text may not render as intended. \
+            let message = format!(
+                    "{explanation}. {using}, and text may not render as intended. \
                      Check [font].family in sonicterm.toml and ensure the font is available \
                      to SonicTerm. See \
                      https://github.com/D0n9X1n/SonicTerm/wiki/Configuration for font configuration."
                 );
-                if first_report(&message) {
-                    config::show_error(&message);
-                }
+            if first_report(&message) {
+                config::show_error(&message);
             }
         }
 
@@ -1565,6 +1574,30 @@ impl FontConfiguration {
     pub fn list_system_fonts(&self) -> anyhow::Result<Vec<ParsedFont>> {
         self.inner.locator.enumerate_all_fonts()
     }
+}
+
+/// Generic family names fontconfig resolves to a configured face; that is the alias working, not a
+/// missing family.
+const GENERIC_FAMILIES: [&str; 8] =
+    ["monospace", "mono", "sans-serif", "sans", "serif", "system-ui", "emoji", "math"];
+
+/// The face fontconfig substituted for `attr`: one tagged with `attr`'s family whose real family,
+/// full name, PostScript name and aliases all differ from it. `None` for a generic alias.
+fn fontconfig_substitute<'a>(
+    attr: &config::FontAttributes,
+    handles: &'a [ParsedFont],
+) -> Option<&'a ParsedFont> {
+    if GENERIC_FAMILIES.iter().any(|alias| alias.eq_ignore_ascii_case(&attr.family)) {
+        // When: `attr.family` is a generic alias, resolving it to another face is expected.
+        return None;
+    }
+    handles.iter().find(|face| {
+        matches!(&face.handle.origin,
+            crate::locator::FontOrigin::FontConfigMatch(requested) if *requested == attr.family)
+            && !face.names().family.eq_ignore_ascii_case(&attr.family)
+            && !face.matches_full_or_ps_name(attr)
+            && !face.matches_alias(attr)
+    })
 }
 
 /// Font diagnostics already reported in this process, so a miss that every resize, zoom, or new
