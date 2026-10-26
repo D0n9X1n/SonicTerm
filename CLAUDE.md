@@ -366,7 +366,7 @@ a reproduction.
     (`S2/flood` 2, `S1/atlas-retry` 2, `S6/rest` 2, `S11/release` 1, `S1/status-line` 1 and
     `S12/status-line` 1 on both platforms, `S11/gdi` and `S11/wgpu` 2 on Windows),
     its rows read `(runs N of M)`, and release runs are uncapped. One macOS job
-    builds both refs once; four macOS
+    builds both refs once; three macOS
     shards measure its binaries, bound to the run, attempt and manifest digest;
     five Windows shards each build; every comparison passes `--require-base`; and
     the `Performance comparison result` job passes only when all of them did.

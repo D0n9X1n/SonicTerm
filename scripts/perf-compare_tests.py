@@ -5247,9 +5247,9 @@ class WindowsComparisonLegTests(unittest.TestCase):
         return load_perf_workflow()["jobs"][job_id]["strategy"]["matrix"]["include"]
 
     def test_every_scenario_runs_once_per_platform(self):
-        # Each platform's shards partition the common scenario sets plus its own S11 variants. macOS runs four
-        # shards, one per macOS slot that reaches perf; Windows keeps five.
-        for job_id, platform_name, runner, counts in (("compare-macos", "macOS", "macos-14", (4,)),
+        # Each platform's shards partition the common scenario sets plus its own S11 variants. macOS runs three
+        # shards, one per macOS slot that reaches perf beside CI's two macOS jobs; Windows keeps five.
+        for job_id, platform_name, runner, counts in (("compare-macos", "macOS", "macos-14", (3,)),
                                                        ("compare-windows", "Windows", "windows-latest", (5,))):
             with self.subTest(job=job_id):
                 entries = self.matrix(job_id)
@@ -5263,18 +5263,26 @@ class WindowsComparisonLegTests(unittest.TestCase):
         shard = next(entry for entry in self.matrix("compare-windows") if entry["shard"] == "S4-S5-S11")
         self.assertEqual(shard["scenarios"].split()[:6], ["S4", "S5", "S11"] + PLATFORM_SCENARIOS["Windows"])
 
-    def test_the_macos_shards_are_the_reviewed_four_set_partition(self):
-        # S7 sheds rest and startup; S12/default and S6/flood leave the late-starting set. Exact-head
-        # CI must measure this partition including runner queues against the unchanged 35-minute budget.
+    def test_the_macos_shards_are_the_reviewed_three_set_partition(self):
+        # Three sets of about 19 min from measured per-variant times: S7 leads the first, S12 joins the S9 set and S2
+        # the release set. Exact-head CI must measure it including runner queues against the 35-minute budget.
         self.assertEqual({entry["shard"]: entry["scenarios"].split() for entry in self.matrix("compare-macos")}, {
-            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S12/status-line"],
-            "S9-S10sync": ["S10/sync", "S9", "S11", "S6", "S1", "S5", "S6/rest", "S1/status-line"],
-            "S10-S11release": ["S10", "S11/release", "S2/flood", "S12", "S6/flood"],
-            "S2-S3-S8-S12": ["S2", "S3", "S8", "S6/selection-drag"],
+            "S7-S4": ["S7", "S4", "S1/atlas-retry", "S12/status-line", "S3", "S8", "S6/selection-drag"],
+            "S9-S10sync": ["S10/sync", "S9", "S11", "S6", "S1", "S5", "S6/rest", "S1/status-line", "S12"],
+            "S10-S11release": ["S10", "S11/release", "S2", "S2/flood", "S6/flood"],
         })
 
+    def test_the_cell_layout_reader_names_the_shard_that_holds_s12(self):
+        # The cell-layout decision reads S12/default runs only from the shards CELL_LAYOUT_SHARDS names, so on each
+        # platform the one matrix entry that runs S12 must be among them.
+        for job_id, platform_name in (("compare-macos", "macOS"), ("compare-windows", "Windows")):
+            with self.subTest(job=job_id):
+                holders = [entry["shard"] for entry in self.matrix(job_id) if "S12" in entry["scenarios"].split()]
+                self.assertEqual(len(holders), 1, holders)
+                self.assertIn(holders[0], perf.CELL_LAYOUT_SHARDS[platform_name])
+
     def test_the_atlas_retry_variant_runs_in_the_shard_its_projection_names(self):
-        # S1/atlas-retry runs where its shard has room: macOS S7-S4 in the four-set partition, and Windows
+        # S1/atlas-retry runs where its shard has room: macOS S7-S4 in the three-set partition, and Windows
         # S1-S3-S6-S8-S12, since Windows S4-S5-S11 was critical once.
         for job_id, shard_name in (("compare-macos", "S7-S4"), ("compare-windows", "S1-S3-S6-S8-S12")):
             with self.subTest(job=job_id):
@@ -8336,7 +8344,7 @@ class CellLayoutArtifactTests(unittest.TestCase):
     turns unreadable files into named invalid runs instead of failing."""
 
     def test_each_platform_reads_only_its_own_s12_shard(self):
-        # macOS reads its four-shard S2-S3-S8-S12 and its earlier S1-S3-S6-S8-S12; Windows reads only its own
+        # macOS reads S2-S3-S8-S12 among its S12 shards and its earlier S1-S3-S6-S8-S12; Windows reads only its own
         # S1-S3-S6-S8-S12, never the macOS name; a timing.json naming another shard is a named problem.
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)

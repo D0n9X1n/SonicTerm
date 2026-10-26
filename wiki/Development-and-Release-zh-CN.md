@@ -758,9 +758,8 @@ job 完成。被取代、被取消或被跳过的运行从不算作成功。
 每个 CI 对比都通过 `--require-base` 让 base 与 head 适用同样的标准：base 无法构建、无法列出场景或无法凑满某组的有效运行时，
 该分片失败，其 `comparison.md` 以 `**Incomplete comparison:**` 开头。允许两种缺口：base 未声明 `perf-counters` 时的计数器组，
 它仍显示 `n/a`；以及因 harness API cfg 关闭而被声明为两侧都不可用的诊断，它不运行任何内容。其他任何被阻止的一侧仍会失败，
-没有可运行内容的选择也永远不会通过。四个 macOS 分片运行 S7、S4、S1/atlas-retry 与 S12/status-line；
-S10/sync、S9、S11、S6、S1、S5、S6/rest 与 S1/status-line；S10、S11/release、S2/flood、S12 与 S6/flood；
-以及 S2、S3、S8 与 S6/selection-drag。五个 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
+没有可运行内容的选择也永远不会通过。三个 macOS 分片运行 S7、S4、S1/atlas-retry、S12/status-line、S3、S8 与 S6/selection-drag；
+S10/sync、S9、S11、S6、S1、S5、S6/rest、S1/status-line 与 S12；以及 S10、S11/release、S2、S2/flood 与 S6/flood。五个 Windows 分片运行 S7；S9、S10、S6/flood、S6/selection-drag 与 S2/flood；
 S2、S10/sync 与 S6/rest；S4、S5、S11、S11/release、S11/gdi 与 S11/wgpu；以及 S1、S3、S6、S8、S12 与 S1/atlas-retry，其中 macOS 分配根据实测阶段成本重新均衡，35 分钟余量仍由 exact-head 计时验证；Windows 的 S7 还运行 S1/status-line 与 S12/status-line。
 各平台包含 S9 的分片（macOS 的 S9-S10sync，Windows 的 S9-S10）还运行 S9 的 lap 组（`--laps-scenario S9 --laps-runs 2`，由该矩阵条目的 `laps` 字段设置；其他条目不传
 lap 选项），每个平台的对比表给出各自的 `fallback_receive` 结论。

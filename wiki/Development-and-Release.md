@@ -1153,9 +1153,9 @@ its `comparison.md` opens with `**Incomplete comparison:**`. Two gaps are
 allowed: a counters set on a base that does not declare `perf-counters`, which
 still reads `n/a`, and a diagnostic declared unavailable on both sides because
 its harness API cfg is off, which runs nothing. Any other blocked side still
-fails, and a selection with nothing runnable never passes. The four macOS shards run S7, S4, S1/atlas-retry and S12/status-line;
-S10/sync, S9, S11, S6, S1, S5, S6/rest and S1/status-line;
-S10, S11/release, S2/flood, S12 and S6/flood; and S2, S3, S8 and S6/selection-drag.
+fails, and a selection with nothing runnable never passes. The three macOS shards run S7, S4, S1/atlas-retry, S12/status-line,
+S3, S8 and S6/selection-drag; S10/sync, S9, S11, S6, S1, S5, S6/rest, S1/status-line and S12;
+and S10, S11/release, S2, S2/flood and S6/flood.
 The five Windows shards run S7; S9, S10, S6/flood,
 S6/selection-drag and S2/flood; S2, S10/sync and S6/rest; S4, S5, S11, S11/release,
 S11/gdi and S11/wgpu; and S1, S3, S6, S8, S12 and S1/atlas-retry, with the macOS partition rebalanced from measured phase costs; exact-head timing still verifies the 35-minute margin; Windows S7 also runs S1/status-line and S12/status-line. On each platform the shard holding S9 (macOS

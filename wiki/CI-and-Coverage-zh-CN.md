@@ -121,11 +121,13 @@ Windows 缓存分为 `check-windows-latest`（`windows-checks` 写入）、`test
 缓存策略不变。编译器及环境哈希仍启用；静态检查归档不能再占据测试 codegen key。
 重叠的 main run 仍可能竞争保存同一不可变 key。
 
-四个 macOS perf shard 保留 artifact 名称，每个场景恰好运行一次：`S7-S4` 保留 S7、S4、
-atlas-retry 及 S12/status-line；`S9-S10sync` 增加 S6/rest 和 S1/status-line；`S10-S11release` 增加 S12/default
-及 S6/flood；`S2-S3-S8-S12` 移除这两项。PR 的 35 分钟预算包含
-排队时间。不增加与 perf 竞争 runner 的 macOS job；余量由 exact-head CI 计时验证，而不是
-本地估算。运行次数、计数器、S9 laps 与发布测量长度均不变。
+三个 macOS perf shard 保留 artifact 名称，每个场景恰好运行一次，按 run 40344066083
+的各变体实测时间分为约 19 分钟的三组：`S7-S4` 运行 S7、S4、atlas-retry、S12/status-line、S3、S8 与
+S6/selection-drag；`S9-S10sync` 运行 S10/sync、S9、S11、S6、S1、S5、S6/rest、S1/status-line 与 S12；
+`S10-S11release` 运行 S10、S11/release、S2、S2/flood 与 S6/flood。三组在二进制产物就绪时同时开始：
+本仓库同时最多运行五个 macOS job，CI 占用其中两个（同时运行 aarch64 smoke 的 core gates，以及 Intel
+smoke）。PR 的 35 分钟预算包含排队时间；余量由 exact-head CI 计时验证，而不是本地估算。运行次数、
+计数器、S9 laps 与发布测量长度均不变。
 
 兼容且成功的 `main` job 必须先填充 key，后续 run 才可能命中；编译器或依赖变化仍可能
 导致 miss。缓存复用可减少依赖编译，不能缩短托管 runner 的排队时间。冷缓存构建以及
