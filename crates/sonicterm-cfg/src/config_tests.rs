@@ -1076,3 +1076,16 @@ fn default_font_family_is_the_platform_monospace() {
     assert_eq!(FontConfig::default().family, expected);
     assert_eq!(Config::default().font.family, expected);
 }
+
+/// Only text that names `[font] family` sets it: the starter template leaves the family to the
+/// platform default, and text that does not parse counts as setting one.
+#[test]
+fn only_a_named_family_sets_the_font_family() {
+    assert!(!Config::sets_font_family(&default_config_template()));
+    assert!(!Config::sets_font_family(""));
+    assert!(!Config::sets_font_family("[font]\nsize = 14.0\n"));
+    assert!(Config::sets_font_family("[font]\nfamily = \"Monaco\"\n"));
+    assert!(Config::sets_font_family("[font\nfamily = "));
+    let template: Config = toml::from_str(&default_config_template()).unwrap();
+    assert_eq!(template.font.family, DEFAULT_FONT_FAMILY);
+}

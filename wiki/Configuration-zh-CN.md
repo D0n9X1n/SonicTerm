@@ -41,7 +41,7 @@ serializer 则只保留顶层未知 key，不保留注释、格式或嵌套未�
 
 | Key | 默认值 | 行为 |
 | --- | --- | --- |
-| `family` | 平台等宽字体 | 主字体族。默认值是平台自带的等宽字体：macOS 为 `"Menlo"`，Windows 为 `"Cascadia Mono"`（未安装时使用 Consolas），Linux 为 fontconfig 的 `"monospace"`。SonicTerm 不内置正文字体。未安装的字体族会回退到该默认字体，日志在每个进程中只记录一次缺失的字体和实际使用的字体。缺失的字符使用回退链；回退链在系统回退之前先使用内置的 Symbols Nerd Font Mono 显示 Powerline 和 Nerd Font 图标。 |
+| `family` | 平台等宽字体 | 主字体族。默认值是平台自带的等宽字体：macOS 为 `"Menlo"`，Windows 为 `"Cascadia Mono"`（未安装时使用 Consolas），Linux 为 fontconfig 的 `"monospace"`。SonicTerm 不内置正文字体。初始配置文件把 `family` 注释掉。启动时 SonicTerm 在工作线程中枚举已安装的等宽字体族，首帧不会等待；配置未指定字体族时，第一个已安装的平台默认字体成为本次会话的字体族，在执行 **保存当前设置** 之前不会写入任何内容。未安装的字体族会回退到该默认字体，日志在每个进程中只记录一次缺失的字体和实际使用的字体。缺失的字符使用回退链；回退链在系统回退之前先使用内置的 Symbols Nerd Font Mono 显示 Powerline 和 Nerd Font 图标。 |
 | `size` | `13` | 字号，单位为 point。 |
 | `line_height` | `1.3` | 行高倍率。 |
 | `weight_scale` | `1.0` | 选定字体后统一调整所有单色字形的粗细，包括粗体、斜体和回退字体。有效范围是 `0.5..=5.0`；其它值会变成 `1.0`。固定字号和 DPI 时，单元格度量、位图尺寸、bearing 与推进量不变。彩色图像内容不变。 |

@@ -172,6 +172,7 @@ impl App {
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
         let new_cfg = Self::normalize_config(&self.config_normalizer, new_cfg);
         self.configured_font_size = new_cfg.font.size;
+        self.configured_font_family = new_cfg.font.family.clone();
         self.configured_weight_scale = new_cfg.font.effective_weight_scale();
         // Config is only applied on an explicit user reload, so it must
         // render immediately rather than at the next vsync deadline.
@@ -762,6 +763,21 @@ impl App {
     }
     pub(super) fn set_font_size(&mut self, size: f32) {
         self.config.font.size = size;
+        self.apply_live_font();
+        tracing::info!("font size -> {size}pt");
+    }
+
+    /// Switch the live font family in every window for this session, without saving it.
+    pub(super) fn set_font_family(&mut self, family: &str) {
+        self.config.font.family = family.to_owned();
+        self.apply_live_font();
+        tracing::info!("font family -> {family}");
+    }
+
+    /// Rebuild every renderer's font from the live `[font]` values and refit each window's panes
+    /// to the new cell size.
+    fn apply_live_font(&mut self) {
+        let size = self.config.font.size;
         let family = self.config.font.family.clone();
         let line_h = self.config.font.line_height;
         let weight_scale = self.config.font.effective_weight_scale();
@@ -805,7 +821,6 @@ impl App {
             }
             child.request_window_redraw();
         }
-        tracing::info!("font size -> {size}pt");
     }
 
     /// Resolve SonicTerm's standard user-config path for saving current settings.

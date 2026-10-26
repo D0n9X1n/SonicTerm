@@ -33,6 +33,7 @@ pub enum Direction {
     RightToLeft,
 }
 
+pub mod catalog;
 mod diagnostic_timing;
 mod fallback_notice;
 mod font_bytes;

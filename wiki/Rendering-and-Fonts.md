@@ -104,6 +104,16 @@ font containing an OpenType `MATH` table after text fonts. It does not exclude
 that font: it may still supply a codepoint no text font covers. A family named
 explicitly in `[font]` remains authoritative whether or not it contains `MATH`.
 
+Once the first main window exists, a `sonicterm-font-catalog` worker
+enumerates the installed font files through the platform locator and keeps each
+family whose first face sets every ASCII letter and digit with one shared advance.
+The advances are measured because some monospace faces, such as Monaco, leave the
+`isFixedPitch` flag clear; icon fonts lack the letters and stay out. The first
+frame never waits for the worker. It logs `font catalog ready` at info level with
+the session's family and the number of monospace families. On a start whose config
+names no family, the first installed platform default becomes the session family,
+in memory only; nothing is written until the user saves.
+
 Packaged font directories remain attached to live and warm renderers across
 font reloads. Every package carries the bundled Symbols Nerd Font Mono there
 without installing it system-wide.

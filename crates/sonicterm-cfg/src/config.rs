@@ -713,6 +713,18 @@ impl Config {
             .map(|_| ())
     }
 
+    /// Whether config `text` names `[font] family`. Text that does not parse counts as naming one,
+    /// so a broken file is never taken for a fresh install whose family may be chosen for it.
+    pub fn sets_font_family(text: &str) -> bool {
+        match text.parse::<toml::Table>() {
+            Ok(table) => table
+                .get("font")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|font| font.contains_key("family")),
+            Err(_) => true,
+        }
+    }
+
     /// Persist the runtime font values and, with `status_line`, the session's `[status_line]`
     /// state, without rewriting unrelated TOML.
     ///
@@ -1453,9 +1465,10 @@ tab_min_width = {tab_min_width}
 tab_max_width = {tab_max_width}
 
 [font]
-# Font family and metrics. The default is the platform's own monospace face:
+# Font family and metrics. Unset, SonicTerm uses the platform's own monospace face:
 # Menlo on macOS, Cascadia Mono (or Consolas) on Windows, fontconfig's monospace on Linux.
-family = "{font_family}"
+# Name another installed monospace family to use it instead.
+# family = "{font_family}"
 # Font size in logical pixels.
 size = {font_size}
 # Line-height multiplier. 1.1 is close to WezTerm's default terminal spacing.

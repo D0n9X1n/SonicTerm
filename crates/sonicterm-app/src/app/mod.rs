@@ -215,6 +215,13 @@ pub enum UserEvent {
     ClearShapeCache,
     /// The foreground-probe worker stored results, or stopped; drain its result map.
     ForegroundProbeReady,
+    /// The font catalog worker enumerated the installed monospace families.
+    FontCatalogReady {
+        /// Installed monospace families, sorted.
+        families: Vec<String>,
+        /// Whether the config file names `[font] family`; a fresh install's does not.
+        family_configured: bool,
+    },
     /// A font fallback worker published faces for `notice_id`, the notice of the body stack in
     /// `window_id`'s renderer. The handler acknowledges it and requests a frame only when that
     /// generation is not applied yet; an event for a replaced notice does nothing.
@@ -406,6 +413,7 @@ mod event_loop;
 mod fg_probe;
 mod field_input;
 mod field_pointer;
+mod font_catalog;
 mod frame_counters;
 mod guard_correlation;
 pub use guard_correlation::{
@@ -620,6 +628,12 @@ pub struct App {
     /// same rule as [`Self::configured_font_size`]: `ResetFontWeight` returns
     /// here, and only an explicit reload moves it.
     pub(super) configured_weight_scale: f32,
+    /// Font family this session started with: the loaded config's `[font] family`, or the platform
+    /// default the font catalog adopted when the config names none. Only an explicit reload, or a
+    /// save, moves it after that.
+    pub(super) configured_font_family: String,
+    /// Installed monospace families, enumerated once per process off the UI thread.
+    pub(super) font_catalog: font_catalog::FontCatalog,
     pub(super) keymap: Keymap,
     // The main window holds no state of its own here. Its renderer, tabs,
     // tab states, panes, selection, modifiers, copy mode, last render, cursor

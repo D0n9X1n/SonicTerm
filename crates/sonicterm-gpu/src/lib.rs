@@ -101,6 +101,12 @@ pub use frame_plan::{__replacement_plans_noop, ReplacementShape};
 #[doc(hidden)]
 pub use row_runs::__row_shape_runs;
 
+/// Installed monospace font families from the platform locator; slow, so callers run it on a
+/// worker thread.
+pub use sonicterm_engine::installed_monospace_families;
+/// The platform's default monospace families, in preference order.
+pub use sonicterm_engine::DEFAULT_MONOSPACE_FAMILIES;
+
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;

@@ -545,6 +545,9 @@ impl App {
                 self.handle_font_fallback_ready(window_id, notice_id);
             }
             UserEvent::ForegroundProbeReady => self.drain_foreground_probe_results(Instant::now()),
+            UserEvent::FontCatalogReady { families, family_configured } => {
+                self.adopt_font_catalog(families, family_configured);
+            }
             UserEvent::GpuDeviceStateChanged => {
                 self.request_device_state_redraws();
                 self.service_gpu_recovery(event_loop, Instant::now());
@@ -1072,6 +1075,7 @@ impl App {
         let checks_started = std::time::Instant::now();
         self.record_startup_load_errors();
         self.note_startup(checks_started, |spans| &mut spans.load_checks_ns);
+        self.start_font_catalog();
         // Both pacing clocks start at one instant, so neither paces a new window differently.
         let created_at = std::time::Instant::now();
         let shadow = super::WindowState {

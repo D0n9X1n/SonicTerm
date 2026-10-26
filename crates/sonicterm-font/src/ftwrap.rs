@@ -568,6 +568,29 @@ impl Face {
         }
     }
 
+    /// The horizontal advance of `character` in font units, or `None` when the face has no glyph
+    /// for it or the glyph does not load.
+    // `FT_Pos` stores `i64` on Unix but `i32` on Windows, so the `i64::from` is needed there.
+    #[allow(clippy::useless_conversion)]
+    pub fn unscaled_advance(&mut self, character: char) -> Option<i64> {
+        let glyph_index =
+            // SAFETY: `self.face` is a live, initialized face; the lookup only reads its charmap.
+            unsafe { FT_Get_Char_Index(self.face, character as FT_ULong) };
+        if glyph_index == 0 {
+            // When: `glyph_index` is 0, the face has no glyph for `character`.
+            return None;
+        }
+        // SAFETY: `self.face` is live and exclusively borrowed; an unscaled load writes only its
+        // glyph slot, which is read before the borrow ends.
+        unsafe {
+            if !succeeded(FT_Load_Glyph(self.face, glyph_index, FT_LOAD_NO_SCALE as FT_Int32)) {
+                // When: `FT_Load_Glyph` fails, the glyph has no advance to report.
+                return None;
+            }
+            Some(i64::from((*(*self.face).glyph).advance.x.font_units()))
+        }
+    }
+
     /// Reports whether FreeType marks this face as italic.
     pub fn italic(&self) -> bool {
         // SAFETY: `self.face` is a live pointer to an initialized `FT_FaceRec_`.

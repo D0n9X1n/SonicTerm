@@ -7,9 +7,14 @@
 #![warn(clippy::min_ident_chars)]
 
 mod fontstack;
+/// The platform's default monospace families, in preference order; the first is
+/// [`DEFAULT_FONT_FAMILY`].
+pub use config::DEFAULT_MONOSPACE_FAMILIES;
 pub use fontstack::{
     CellMetricsPx, FaceIdentity, FontStack, ResolvedGlyphFace, DEFAULT_FONT_FAMILY,
 };
+/// Installed monospace font families from the platform locator; slow, so it runs on a worker thread.
+pub use sonicterm_font::catalog::installed_monospace_families;
 /// The fallback notice's unresolved set, as a renderer reads it from [`FontStack::fallback_notice`].
 pub use sonicterm_font::UnresolvedSnapshot;
 
