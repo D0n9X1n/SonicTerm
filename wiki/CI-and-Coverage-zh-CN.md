@@ -62,9 +62,11 @@ resource baseline 采集。必需的 `tooling` job 在 Ubuntu 上运行 Rust 版
 工作集测量留在 macos-core，复用已编译 harness，避免增加 macOS 冷构建及与 perf 竞争 runner。独立的 coverage shard 安装固定版本
 `cargo-llvm-cov` 发布的 Apple Silicon 预编译二进制：由 `scripts/install-pinned-tool.sh` 安装，解包前先校验其 SHA-256（预计可省去源码构建所需的约一分钟），再运行确定性 logic coverage gate，并在 coverage 步骤开始后，于成功和失败后上传证据
 artifact。
-`macos-smoke` 矩阵分别在 macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release
-二进制，使用不同依赖缓存键。Intel lane 仅在推送到 `main` 时可保存依赖；Apple Silicon
-lane 只恢复缓存。
+原生运行时 smoke 分别在 macOS 14 Apple Silicon（作为 `macos-core` 末尾的步骤）和 macOS 15
+Intel（单分支的 `macos-smoke` 矩阵）上构建 release 二进制，使用不同依赖缓存键。Intel lane
+仅在推送到 `main` 时可保存依赖；Apple Silicon lane 共用 `macos-core` 的缓存条目。它不单独占用
+job，是因为本仓库同时最多运行五个 macOS job，单独的分支会占用一个性能对比分片等待的槽位。这些
+步骤排在 core gates 之后，因此前面的 core gate 失败时会跳过它们；Intel lane 仍独立报告结果。
 在 release 构建之前，两个 lane 先构建并运行原生分屏选择 fixture（[原生分屏选择](Local-Gate-zh-CN#原生分屏选择)），
 再运行性能场景 smoke，它检查对比工具本身而不计时（[性能场景 smoke](Local-Gate-zh-CN#性能场景-smoke)）；
 任一 smoke 失败时，job 会上传其证据。release 构建之后，两个 lane 都要求原始二进制的有界 smoke 成功，

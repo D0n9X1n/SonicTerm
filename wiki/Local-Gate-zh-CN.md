@@ -239,8 +239,8 @@ fixture 的 App 条目，只尝试一次生产绘制。本地按下和释放阶�
 后续阶段超时则报告失败。这些结果都不能满足原生验收。
 
 macOS 通过进程主线程上的 example 执行同一个 fixture。普通工作区测试和覆盖率不会运行
-这个 example，因此 macOS 本地 gate 显式构建并运行它。两个必需的 `macos-smoke` CI
-矩阵分支在 release 构建与打包之前执行相同命令，不设置 CI job 或步骤的超时覆盖项。本地 example 构建
+这个 example，因此 macOS 本地 gate 显式构建并运行它。两个必需的 CI lane（`macos-core`
+中的 Apple Silicon 与 `macos-smoke` 中的 Intel）在 release 构建与打包之前执行相同命令，不设置 CI job 或步骤的超时覆盖项。本地 example 构建
 仍保留 25 分钟上限；选择测试的运行时上限独立设置且保持不变。macOS fixture 将
 `new_events` 和 `about_to_wait` 转发给 App，在用例截止时间之外保留 App 更早的期限或
 轮询请求；延迟重试由 App 负责，而不是由 fixture 循环请求重绘。该 fixture 禁用无关的
@@ -374,7 +374,7 @@ runner 上，或缺少这两个值中的任何一个时，smoke 保持完整的�
 用例每个最多重试 3 次。这 100 秒是每次运行的 `run_step` 截止时间。在 smoke 之外，该截止时间比 harness
 自己的截止时间晚 30 秒，正好在 harness 的 watchdog 将要中止 harness 的时刻或之前。smoke 把它限制为
 100 秒，因此对于在 `--short` 下截止时间为 80 秒的 S1 与 S3，它比该截止时间晚 20 秒。两个必需的
-`macos-smoke` CI 矩阵分支在原生分屏选择之后、release 构建之前运行相同命令，不设置 CI job 或步骤的超时
+CI lane（`macos-core` 中的 Apple Silicon 与 `macos-smoke` 中的 Intel）在原生分屏选择之后、release 构建之前运行相同命令，不设置 CI job 或步骤的超时
 覆盖项。该步骤一旦加上 `if:` 或 `continue-on-error:`，或移出这一位置，CI 一致性检查就会失败。
 
 smoke 在 CI 中失败时，job 会上传其证据。Windows smoke 在交付回放经过重试后通过时，同样保留其证据，

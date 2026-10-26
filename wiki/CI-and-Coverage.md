@@ -101,9 +101,14 @@ macOS build or competing with perf for another runner slot. Its independent cove
 `scripts/install-pinned-tool.sh`, which checks its SHA-256 before unpacking it
 (expected to save the minute a source build takes), then runs the deterministic logic coverage gate, and uploads its
 evidence artifact after success and after failure once the coverage step has started. The
-`macos-smoke` matrix builds shipping release binaries on macOS 14 Apple Silicon
-and macOS 15 Intel with distinct dependency-cache keys. Its Intel lane may save
-dependencies only on a push to `main`; the Apple Silicon lane restores only.
+native runtime smoke builds shipping release binaries on macOS 14 Apple Silicon,
+as steps at the end of `macos-core`, and on macOS 15 Intel, in the one-leg
+`macos-smoke` matrix, with distinct dependency-cache keys. The Intel lane may save
+dependencies only on a push to `main`; the Apple Silicon lane shares `macos-core`'s
+cache entry. It has no job of its own because the repository runs at most five macOS
+jobs at once, and a separate leg would hold a slot the perf comparison's shards wait
+for. Those steps follow the core gates, so an earlier core-gate failure skips them;
+the Intel lane still reports on its own.
 Before the release build, both lanes build and run the native split-selection
 fixture ([Native split selection](Local-Gate#native-split-selection)), then the
 performance scenario smoke, which checks the comparison tooling without timing

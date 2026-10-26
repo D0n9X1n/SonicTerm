@@ -216,6 +216,105 @@ jobs:
           path: target/v1.2.0-baseline/evidence-macos-14
           if-no-files-found: error
 
+      # The Apple Silicon native smoke runs here rather than in its own job: the repository has five
+      # concurrent macOS slots, and a separate leg would hold one the perf comparison's shards wait for.
+      # The Intel smoke stays in macos-smoke on its own image. 14.0 is the declared Apple Silicon
+      # deployment floor, asserted as a ceiling, as in macos-smoke's matrix.
+      - name: Install native dependencies
+        run: brew install cairo pkg-config
+
+      - name: Build macOS native selection fixture
+        run: cargo build --locked -p sonicterm-app --example native_split_selection
+
+      - name: Require macOS native split selection
+        run: python3 scripts/native-selection-smoke.py
+
+      - name: Require macOS perf scenario smoke
+        run: python3 scripts/perf-compare.py --smoke
+
+      - name: Build macOS release binary for runtime smoke
+        run: cargo build --release -p sonicterm-mac
+
+      - name: Require macOS native runtime smoke
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-smoke-aarch64" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-smoke-aarch64.log" \
+            -- target/release/sonicterm-mac --runtime-smoke
+
+      - name: Require macOS GPU frame-validation smoke
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 --scenario frame-validation \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-aarch64" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-frame-validation-smoke-aarch64.log" \
+            -- target/release/sonicterm-mac --runtime-smoke
+
+      - name: Require macOS GPU device-recovery smoke
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 --scenario device-recovery \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-device-recovery-smoke-aarch64" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-device-recovery-smoke-aarch64.log" \
+            -- target/release/sonicterm-mac --runtime-smoke
+
+      # As in macos-smoke: the relocated, self-contained bundle is what a user opens, packaged with
+      # hdiutil and the tracked icon.
+      - name: Package macOS dmg for validation
+        env:
+          SONICTERM_MAX_MACOS_MINIMUM: "14.0"
+        run: bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci mac-aarch64
+
+      - name: Validate packaged macOS dmg
+        run: |
+          python3 scripts/test-macos-package.py \
+            --dmg "dist/SonicTerm-ci-mac-aarch64.dmg" \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-package-aarch64" \
+            --max-minimum-macos "14.0"
+
+      - name: Upload macOS package evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # Evidence and logs only; the validated .dmg is a CI-local build, not a release asset.
+          name: sonicterm-macos-package-evidence-aarch64-${{ github.sha }}
+          path: ${{ runner.temp }}/sonicterm-macos-package-aarch64/package-evidence.json
+          if-no-files-found: ignore
+
+      - name: Upload macOS native selection evidence
+        if: ${{ failure() && env.SONICTERM_SELECTION_LOG_DIR != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonicterm-macos-selection-aarch64-${{ github.sha }}
+          path: ${{ env.SONICTERM_SELECTION_LOG_DIR }}
+          if-no-files-found: error
+
+      - name: Upload macOS perf scenario smoke evidence
+        if: ${{ failure() && env.SONICTERM_PERF_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonicterm-macos-perf-smoke-aarch64-${{ github.sha }}
+          path: ${{ env.SONICTERM_PERF_EVIDENCE_DIR }}
+          if-no-files-found: error
+
+      - name: Upload macOS native smoke logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonicterm-macos-smoke-logs-aarch64-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/sonicterm-macos-smoke-aarch64.log
+            ${{ runner.temp }}/sonicterm-macos-frame-validation-smoke-aarch64.log
+            ${{ runner.temp }}/sonicterm-macos-device-recovery-smoke-aarch64.log
+            ${{ runner.temp }}/sonicterm-macos-smoke-aarch64/logs/**
+            ${{ runner.temp }}/sonicterm-macos-frame-validation-smoke-aarch64/logs/**
+            ${{ runner.temp }}/sonicterm-macos-device-recovery-smoke-aarch64/logs/**
+            ${{ runner.temp }}/sonicterm-macos-package-aarch64/**
+            dist/*.dmg.creation-*/*.log
+            dist/*.dmg.creation-*/result.json
+          if-no-files-found: ignore
+
   macos-coverage:
     name: macOS logic coverage
     runs-on: macos-14
@@ -265,9 +364,9 @@ jobs:
     name: macOS native runtime smoke (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
-      # Both legs must report: Intel and Apple Silicon resolve different Cairo
-      # and font binaries, so one architecture's result cannot stand in for the
-      # other's, and a cancelled sibling would hide which one regressed.
+      # The Intel leg only: Apple Silicon runs the same steps in macos-core.
+      # Intel and Apple Silicon resolve different Cairo and font binaries, so
+      # one architecture's result cannot stand in for the other's.
       fail-fast: false
       matrix:
         include:
@@ -275,9 +374,6 @@ jobs:
           # asserted as a ceiling rather than read back from the build. A newer
           # SDK or a Homebrew bottle raising LC_BUILD_VERSION must fail the gate
           # and be decided deliberately, never raise the shipped floor silently.
-          - runner: macos-14
-            arch: aarch64
-            minimum: "14.0"
           - runner: macos-15-intel
             arch: x86_64
             minimum: "15.0"
@@ -292,7 +388,7 @@ jobs:
       - name: Restore Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # Keyed by runner: an x86_64 leg restoring the aarch64 target
+          # Keyed by runner: the x86_64 leg restoring macos-core's aarch64 target
           # directory would rebuild anyway, and would poison the shared entry.
           shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-${{ matrix.runner }}
           add-job-id-key: false
