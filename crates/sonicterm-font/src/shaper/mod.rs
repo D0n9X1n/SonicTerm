@@ -3,6 +3,7 @@ use crate::units::PixelLength;
 use crate::{Direction, Presentation};
 use std::ops::Range;
 
+mod fallback_misses;
 pub mod harfbuzz;
 
 /// Holds information about a shaped glyph

@@ -1,4 +1,5 @@
 use crate::parser::ParsedFont;
+use crate::shaper::fallback_misses::FallbackMisses;
 use crate::shaper::{FallbackIdx, FontMetrics, FontShaper, GlyphInfo, PresentationWidth};
 use crate::units::*;
 use crate::{ftwrap, hbwrap as harfbuzz};
@@ -112,9 +113,8 @@ struct MetricsKey {
 pub struct HarfbuzzShaper {
     handles: Vec<ParsedFont>,
     fonts: Vec<RefCell<Option<FontPair>>>,
-    /// Per slot, the characters its face drew nothing for when it was unloaded; a run of only these
-    /// does not reopen it.
-    misses: Vec<RefCell<std::collections::HashSet<char>>>,
+    /// The characters each slot's face cannot draw, recorded when it is unloaded.
+    misses: FallbackMisses,
     lib: ftwrap::Library,
     metrics: RefCell<HashMap<MetricsKey, FontMetrics>>,
     features: Vec<harfbuzz::hb_feature_t>,
@@ -169,7 +169,7 @@ impl HarfbuzzShaper {
             fonts.push(RefCell::new(None));
         }
 
-        let misses = (0..handles.len()).map(|_| RefCell::new(Default::default())).collect();
+        let misses = FallbackMisses::new(handles.len());
         let lang = harfbuzz::language_from_string("en")?;
 
         let features: Vec<harfbuzz::hb_feature_t> = config
@@ -189,15 +189,11 @@ impl HarfbuzzShaper {
         })
     }
 
-    /// Whether fallback slot `font_idx` is unloaded and its face already drew nothing for every
-    /// character of `run`, so opening it again would only shape notdef.
+    /// Whether fallback slot `font_idx` is unloaded and its face cannot draw any character of `run`,
+    /// so opening it again would only shape notdef.
     fn known_miss(&self, font_idx: FallbackIdx, run: &str) -> bool {
         let unloaded = self.fonts.get(font_idx).is_some_and(|slot| slot.borrow().is_none());
-        let missed = self.misses.get(font_idx).is_some_and(|misses| {
-            let misses = misses.borrow();
-            !run.is_empty() && run.chars().all(|character| misses.contains(&character))
-        });
-        font_idx > 0 && unloaded && missed
+        font_idx > 0 && unloaded && self.misses.misses_all(font_idx, run)
     }
 
     fn load_fallback(
@@ -669,10 +665,10 @@ impl HarfbuzzShaper {
                         "Shaper didn't resolve glyphs from {:?}, so unload it",
                         self.handles[font_idx]
                     );
-                    opt_pair.borrow_mut().take();
-                    // A later run of only these characters skips the face instead of reopening it.
-                    if let Some(misses) = self.misses.get(font_idx) {
-                        misses.borrow_mut().extend(text[range.clone()].chars());
+                    let unloaded = opt_pair.borrow_mut().take();
+                    // A run of only characters this face cannot draw then skips it.
+                    if let Some(pair) = unloaded {
+                        self.misses.record(font_idx, &pair.face, &text[range.clone()]);
                     }
                 } else if let Some(pair) = &mut *opt_pair.borrow_mut() {
                     // When: opt_pair still holds a face that did resolve glyphs,

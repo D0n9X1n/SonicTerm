@@ -136,3 +136,46 @@ fn a_fallback_that_drew_nothing_is_not_reopened_for_the_same_characters() {
         "the base and the fallback open once each"
     );
 }
+
+/// The bundled Symbols Nerd Font Mono, which has no CJK.
+fn symbols_handle() -> FontDataHandle {
+    FontDataHandle {
+        source: FontDataSource::OnDisk(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/fonts/SymbolsNerdFontMono-Regular.ttf"),
+        ),
+        ..bundled_font_handle()
+    }
+}
+
+/// A base a fallback draws stays drawable after it shaped beside a combining mark that fallback
+/// lacks. Rec Mono drew no complete cluster for 一 + U+035C, yet 一 alone must still shape from
+/// it, exactly as a fresh shaper shapes it.
+#[test]
+fn a_base_shaped_beside_an_unsupported_mark_stays_drawable() {
+    let shaper = || {
+        let symbols = ParsedFont::from_locator(&symbols_handle()).unwrap();
+        let rec_mono = ParsedFont::from_locator(&bundled_font_handle()).unwrap();
+        let config = config::ConfigHandle::new(config::Config::default());
+        HarfbuzzShaper::new(&config, &[symbols, rec_mono]).unwrap()
+    };
+    let glyphs = |shaper: &HarfbuzzShaper, text: &str| {
+        let mut missing = Vec::new();
+        let shaped = shaper
+            .shape(text, 12.0, 96, &mut missing, None, Direction::LeftToRight, None, None)
+            .unwrap();
+        shaped.iter().map(|glyph| (glyph.glyph_pos, glyph.font_idx)).collect::<Vec<_>>()
+    };
+    let fresh = glyphs(&shaper(), "\u{4e00}");
+    assert!(
+        fresh.iter().any(|(glyph, font)| *glyph != 0 && *font == 1),
+        "Rec Mono draws 一: {fresh:?}"
+    );
+    let used = shaper();
+    glyphs(&used, "\u{4e00}\u{035c}");
+    assert_eq!(
+        glyphs(&used, "\u{4e00}"),
+        fresh,
+        "一 after the mark run shapes as on a fresh shaper"
+    );
+}
