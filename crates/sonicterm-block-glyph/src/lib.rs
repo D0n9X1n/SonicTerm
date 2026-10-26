@@ -3,7 +3,8 @@
 //
 // `glue` holds the substitution-boundary types (Bitmap, BgraPixel,
 // Point/Rect/Size, and the `BitmapImage` trait). `customglyph` is a
-// verbatim paste of wezterm-gui/src/customglyph.rs, with
+// preserved geometry from wezterm-gui/src/customglyph.rs, split into family
+// maps and a rasterization module, with
 // `use crate::glue::{BitmapImage, Bitmap as Image, Point, Rect, Size,
 // BgraPixel as SrgbaPixel}` for the substitution.
 //
