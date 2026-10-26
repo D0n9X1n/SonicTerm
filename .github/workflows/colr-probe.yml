@@ -1,0 +1,97 @@
+# TEMPORARY, removed before #1715's PR merges: reproduces the COLR sweep difference under current Linux Cairo.
+# Each job prints the sweep probe's per-quadrant differences and uploads the bitmaps it rendered.
+name: COLR sweep probe
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-ubuntu-latest:
+    name: COLR sweep probe (ubuntu-latest host)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install native dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libcairo2-dev libfontconfig1-dev libwayland-dev libx11-dev \
+            libxcb1-dev libxkbcommon-dev
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+
+      - name: Report native library versions
+        continue-on-error: true
+        run: dpkg-query -W libcairo2 libpixman-1-0 libfreetype6 libfontconfig1
+
+      # Relative to the crate directory, where cargo runs the test.
+      - name: Run the sweep probe
+        env:
+          SONICTERM_COLR_PROBE_DIR: colr-probe
+        run: cargo test -p sonicterm-font --lib colr_sweep_probe -- --ignored --nocapture
+
+      - name: Run the COLR tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: cargo test -p sonicterm-font --lib colr_
+
+      - name: Upload probe bitmaps
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: colr-probe-ubuntu-latest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: crates/sonicterm-font/colr-probe
+          if-no-files-found: ignore
+
+  probe-ubuntu-2404:
+    name: COLR sweep probe (ubuntu:24.04 container)
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - name: Install runner and native dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libcairo2-dev libfontconfig1-dev libwayland-dev libx11-dev \
+            libxcb1-dev libxkbcommon-dev
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+
+      - name: Report native library versions
+        continue-on-error: true
+        run: dpkg-query -W libcairo2 libpixman-1-0 libfreetype6 libfontconfig1
+
+      - name: Run the sweep probe
+        env:
+          SONICTERM_COLR_PROBE_DIR: colr-probe
+        run: cargo test -p sonicterm-font --lib colr_sweep_probe -- --ignored --nocapture
+
+      - name: Run the COLR tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: cargo test -p sonicterm-font --lib colr_
+
+      - name: Upload probe bitmaps
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: colr-probe-ubuntu-2404-${{ github.run_id }}-${{ github.run_attempt }}
+          path: crates/sonicterm-font/colr-probe
+          if-no-files-found: ignore

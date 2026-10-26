@@ -876,6 +876,154 @@ fn colr_sweep_gradient_quadrants_match_harfbuzz() {
     }
 }
 
+// TEMPORARY, removed before #1715's PR merges: a diagnostic probe, not a contract. It prints what the FreeType
+// walker and HarfBuzz draw for the sweep fixture per quadrant, and what the shared Cairo sweep mesh draws with no
+// glyph clip, and writes every bitmap as a PAM image to SONICTERM_COLR_PROBE_DIR for CI to upload.
+#[test]
+#[ignore = "diagnostic probe for the Cairo 1.18 sweep difference; run with --ignored --nocapture"]
+fn colr_sweep_probe() {
+    let output_dir = std::env::var_os("SONICTERM_COLR_PROBE_DIR").map(std::path::PathBuf::from);
+    if let Some(directory) = &output_dir {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    println!("cairo {}", cairo::version_string());
+    let (center_x, center_y, start_angle, end_angle, color_line) =
+        fixture_walker_ops(GLYPH_SWEEP, 13.0)
+            .into_iter()
+            .find_map(|op| match op {
+                PaintOp::PaintSweepGradient {
+                    center_x,
+                    center_y,
+                    start_angle,
+                    end_angle,
+                    color_line,
+                } => Some((center_x, center_y, start_angle, end_angle, color_line)),
+                _ => None,
+            })
+            .expect("the fixture's sweep glyph records a sweep gradient");
+    println!(
+        "walker sweep: centre ({center_x}, {center_y}), angles {start_angle}..{end_angle} rad, extend {:?}, \
+         stops {:?}",
+        color_line.extend, color_line.color_stops
+    );
+    for size_px in [13.0, 26.0, 52.0] {
+        let scale = size_px / FIXTURE_UNITS_PER_EM;
+        let centre_px = 800.0 * scale;
+        let glyph = fixture_colr_glyph(GLYPH_SWEEP, size_px, false);
+        let reference = fixture_harfbuzz_glyph(GLYPH_SWEEP, size_px);
+        for (label, bitmap) in [("walker", &glyph), ("harfbuzz", &reference)] {
+            println!(
+                "{size_px}px {label}: {}x{} at bearing ({}, {})",
+                bitmap.width,
+                bitmap.height,
+                bitmap.bearing_x.get(),
+                bitmap.bearing_y.get()
+            );
+            for (offset_x, offset_y) in
+                [(450.0, 450.0), (-450.0, 450.0), (-450.0, -450.0), (450.0, -450.0)]
+            {
+                let (x_px, y_px) = ((800.0 + offset_x) * scale, (800.0 + offset_y) * scale);
+                println!("  sample ({offset_x}, {offset_y}): {:?}", pixel_at(bitmap, x_px, y_px));
+            }
+            if let Some(directory) = &output_dir {
+                write_probe_pam(
+                    &directory.join(format!("{label}-{size_px}px.pam")),
+                    bitmap.width,
+                    bitmap.height,
+                    &bitmap.data,
+                );
+            }
+        }
+        // Quadrants 0..4 run counterclockwise from upper right, about the sweep centre; each pixel of the walker's
+        // bitmap is compared with the reference pixel covering the same device point.
+        let mut max_difference = [0u32; 4];
+        let mut difference_sum = [0u64; 4];
+        let mut pixel_count = [0u64; 4];
+        let mut walker_sum = [[0u64; 4]; 4];
+        let mut reference_sum = [[0u64; 4]; 4];
+        for row in 0..glyph.height {
+            for column in 0..glyph.width {
+                let (x_px, y_px) = (
+                    glyph.bearing_x.get() + column as f64 + 0.5,
+                    glyph.bearing_y.get() - row as f64 - 0.5,
+                );
+                let Some((reference_rgba, _)) = pixel_at(&reference, x_px, y_px) else {
+                    continue;
+                };
+                let at = (row * glyph.width + column) * 4;
+                let quadrant = match (x_px >= centre_px, y_px >= centre_px) {
+                    (true, true) => 0,
+                    (false, true) => 1,
+                    (false, false) => 2,
+                    (true, false) => 3,
+                };
+                for (channel, (&value, &reference_value)) in
+                    glyph.data[at..at + 4].iter().zip(reference_rgba.iter()).enumerate()
+                {
+                    let difference = u32::from(value.abs_diff(reference_value));
+                    max_difference[quadrant] = max_difference[quadrant].max(difference);
+                    difference_sum[quadrant] += u64::from(difference);
+                    walker_sum[quadrant][channel] += u64::from(value);
+                    reference_sum[quadrant][channel] += u64::from(reference_value);
+                }
+                pixel_count[quadrant] += 1;
+            }
+        }
+        for quadrant in 0..4 {
+            let count = pixel_count[quadrant].max(1);
+            println!(
+                "  quadrant {quadrant}: {} px, max difference {}, mean difference {:.2}, walker mean {:?}, \
+                 harfbuzz mean {:?}",
+                pixel_count[quadrant],
+                max_difference[quadrant],
+                difference_sum[quadrant] as f64 / (count * 4) as f64,
+                walker_sum[quadrant].map(|sum| sum / count),
+                reference_sum[quadrant].map(|sum| sum / count)
+            );
+        }
+    }
+    // The shared sweep mesh on a plain 64 px surface, with no glyph clip: centre (32, 32), the walker's angles and stops.
+    let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 64, 64).unwrap();
+    let context = cairo::Context::new(&surface).unwrap();
+    let painted = crate::rasterizer::colr::paint_sweep_gradient(
+        &context,
+        32.0,
+        32.0,
+        f64::from(start_angle),
+        f64::from(end_angle),
+        color_line,
+    );
+    println!("direct mesh: paint {painted:?}, context {:?}", context.status());
+    drop(context);
+    surface.flush();
+    let stride = surface.stride() as usize;
+    let data = surface.data().unwrap();
+    let mut rgba = Vec::with_capacity(64 * 64 * 4);
+    for row in 0..64 {
+        for column in 0..64 {
+            let at = row * stride + column * 4;
+            rgba.extend_from_slice(&[data[at + 2], data[at + 1], data[at], data[at + 3]]);
+        }
+    }
+    for (column, row) in [(48usize, 16usize), (16, 16), (16, 48), (48, 48)] {
+        let at = (row * 64 + column) * 4;
+        println!("  direct ({column}, {row}): {:?}", &rgba[at..at + 4]);
+    }
+    if let Some(directory) = &output_dir {
+        write_probe_pam(&directory.join("direct-mesh-64px.pam"), 64, 64, &rgba);
+    }
+}
+
+// TEMPORARY with colr_sweep_probe: writes an RGBA bitmap as a PAM image.
+fn write_probe_pam(path: &std::path::Path, width: usize, height: usize, rgba: &[u8]) {
+    let mut bytes = format!(
+        "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+    )
+    .into_bytes();
+    bytes.extend_from_slice(rgba);
+    std::fs::write(path, bytes).unwrap();
+}
+
 /// Plain outline glyphs never build the HarfBuzz painter, so a font with no SVG or
 /// COLRv1 glyph never pays for HarfBuzz face and font state.
 #[test]
