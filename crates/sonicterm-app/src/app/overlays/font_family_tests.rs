@@ -86,3 +86,25 @@ fn an_open_picker_fills_in_when_the_catalog_lands() {
     assert_eq!(app.command_palette.selected_font_family(), Some("Menlo"));
     assert_eq!(app.command_palette.font_title(), app.i18n.translate("font-picker-title"));
 }
+
+/// Previewing a family and cancelling with Escape restores the font every renderer is asked for,
+/// keeping a zoomed size, and leaves the strip's session `font_scale` alone. App unit tests have
+/// no headless renderer, so this checks the request `apply_live_font` hands each window's renderer.
+#[test]
+fn preview_and_cancel_keep_the_zoom_and_strip_scale() {
+    use crate::app::config_apply::LiveFontRequest;
+    let (mut app, child) = picker_app("Menlo");
+    app.run_action_for_window(&Action::IncreaseFontSize, child);
+    app.run_action_for_window(&Action::DecreaseStatusLineFontScale, child);
+    let zoomed = app.live_font_request();
+    let strip_scale = app.current_status_line().font_scale.as_f32();
+    assert!(zoomed.size > Config::default().font.size, "the font is zoomed");
+    assert!((strip_scale - 0.8).abs() > 1e-3, "the strip scale is off its default");
+    assert!(app.run_action_for_window(&Action::ChooseFontFamily, child));
+    app.command_palette_handle_logical_key(&Key::Named(NamedKey::ArrowDown));
+    let previewing = LiveFontRequest { family: "Monaco".into(), ..zoomed.clone() };
+    assert_eq!(app.live_font_request(), previewing);
+    app.command_palette_handle_logical_key(&Key::Named(NamedKey::Escape));
+    assert_eq!(app.live_font_request(), zoomed);
+    assert_eq!(app.current_status_line().font_scale.as_f32(), strip_scale);
+}

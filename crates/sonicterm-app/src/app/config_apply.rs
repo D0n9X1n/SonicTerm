@@ -774,13 +774,21 @@ impl App {
         tracing::info!("font family -> {family}");
     }
 
+    /// The font `apply_live_font` hands every window's renderer: the live `[font]` values.
+    pub(super) fn live_font_request(&self) -> LiveFontRequest {
+        LiveFontRequest {
+            family: self.config.font.family.clone(),
+            size: self.config.font.size,
+            line_height: self.config.font.line_height,
+            weight_scale: self.config.font.effective_weight_scale(),
+        }
+    }
+
     /// Rebuild every renderer's font from the live `[font]` values and refit each window's panes
     /// to the new cell size.
     fn apply_live_font(&mut self) {
-        let size = self.config.font.size;
-        let family = self.config.font.family.clone();
-        let line_h = self.config.font.line_height;
-        let weight_scale = self.config.font.effective_weight_scale();
+        let LiveFontRequest { family, size, line_height: line_h, weight_scale } =
+            self.live_font_request();
         if let Some(renderer) = self.main_renderer_mut() {
             renderer.set_font(&family, size, line_h, weight_scale);
         }
@@ -984,3 +992,16 @@ impl App {
 #[cfg(test)]
 #[path = "config_apply_tests.rs"]
 mod config_apply_tests;
+
+/// The font every window's renderer is asked for after a live font change.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct LiveFontRequest {
+    /// The live family.
+    pub(super) family: String,
+    /// The live size in points, including zoom.
+    pub(super) size: f32,
+    /// The line-height multiplier.
+    pub(super) line_height: f32,
+    /// The effective monochrome weight scale.
+    pub(super) weight_scale: f32,
+}
