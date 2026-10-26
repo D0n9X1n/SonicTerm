@@ -1044,20 +1044,32 @@ class SessionRunnerTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 30)
         grandchild = int(pid_file.read_text(encoding="utf-8"))
 
-        def alive():
+        def state():
+            """The grandchild's process state: None once it is gone, else its /proc state letter, or ? without /proc."""
             try:
                 os.kill(grandchild, 0)
             except ProcessLookupError:
-                return False
-            return True
+                return None
+            try:
+                stat = Path(f"/proc/{grandchild}/stat").read_text(encoding="utf-8")
+            except OSError:
+                return "?"
+            # The state follows the parenthesized command name, which may itself hold spaces or parentheses.
+            return stat.rsplit(")", 1)[1].split()[0]
 
-        # The killed grandchild is reparented and reaped by its new parent; allow a moment for that.
+        def alive():
+            # A killed grandchild reparented to a container's PID 1 that never reaps it stays a zombie (Z): it has
+            # exited and holds no pipe, so it counts as killed.
+            return state() not in (None, "Z")
+
+        # The killed grandchild is reparented and reaped, or left a zombie, by its new parent; allow a moment for that.
         deadline = time.monotonic() + 5
         while alive() and time.monotonic() < deadline:
             time.sleep(0.05)
         if alive():
+            survived = state()
             os.kill(grandchild, signal.SIGKILL)
-            self.fail(f"grandchild {grandchild} survived the harness timeout")
+            self.fail(f"grandchild {grandchild} survived the harness timeout (state {survived})")
 
 
 class RebaselineProvenanceTests(unittest.TestCase):
