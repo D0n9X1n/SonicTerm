@@ -1251,9 +1251,10 @@ rules.
 
 ## Coverage evidence and rebaselining
 
-The per-crate floor is enforced only on the macOS arm64 CI runner, and CI tracks
-the stable Rust channel, so a new stable release or runner image can move a
-crate's measured coverage with no source change. Each coverage run therefore
+The per-crate floor is enforced only in the `linux-coverage` job's x86_64 Linux
+container, and the macOS-only floor only on the macOS 14 arm64 runner. CI tracks
+the stable Rust channel, so a new stable release, runner image or container
+image can move measured coverage with no source change. Each coverage run therefore
 keeps its evidence, and a floor changes only from a retained run's verified
 evidence.
 

@@ -313,9 +313,10 @@ gestures. See [Platform Integration](Platform-Integration).
 - `rust-logic-coverage.sh` requires 80% line coverage only for its selected
   deterministic subset. Its ignore regex excludes 9 whole crates, including
   `sonicterm-app` and `sonicterm-gpu`, plus named native/controller files in
-  other crates. CI runs it only on macOS, although the local runner also selects
-  it on Linux. A green percentage does not cover native windows, real PTYs, GPU
-  surfaces, generated FFI, installers, or Windows-only logic.
+  other crates. CI runs it on Linux, in the `linux-coverage` job's `ubuntu:22.04`
+  container; the local runner selects it on macOS and Linux. A green percentage
+  does not cover native windows, real PTYs, GPU surfaces, generated FFI,
+  installers, or macOS-only and Windows-only logic.
 - The same run reports its profiles again without the ignore regex and prints
   line coverage for every workspace member, and `scripts/coverage-floor.py`
   holds each measured crate to its entry in `scripts/coverage-baseline.json`.
@@ -326,13 +327,23 @@ gestures. See [Platform Integration](Platform-Integration).
   lines. Test, vendored, generated, and build-script code is excluded with
   printed counts; a crate with no eligible line prints `not measured` with its
   reason. The floor catches regressions, not low coverage: a crate that stays
-  low still passes. The `sonicterm-windows` and `sonicterm-linux` rows measure
-  code compiled on macOS, not execution on those platforms. The baseline is
-  keyed to the macOS arm64 CI runner; CI on another host fails as not
-  comparable, and local runs print informational deltas without a verdict. Floor
-  numbers change only in a reviewed diff from a retained run's verified
-  evidence, as [Coverage evidence and rebaselining](Development-and-Release#coverage-evidence-and-rebaselining)
+  low still passes. Every row measures code compiled on Linux: macOS-only font
+  discovery, PTY and IO paths, logging, and the `sonicterm-mac` binary compile
+  out and are not measured, and the `sonicterm-mac` and `sonicterm-windows` rows
+  measure only what compiles there, not execution on those platforms. The
+  baseline is keyed to the `linux-coverage` job's x86_64 Linux container; CI on
+  another host fails as not comparable, and local runs print informational
+  deltas without a verdict. Floor numbers change only in a reviewed diff from a
+  retained run's verified evidence, as [Coverage evidence and rebaselining](Development-and-Release#coverage-evidence-and-rebaselining)
   describes.
+- `scripts/macos-logic-coverage.sh` in `macos-core` holds the macOS-only logic in
+  the 80% subset, the AppKit word boundary in `sonicterm-ui`'s `text_edit.rs` and
+  the macOS arms of `command_label.rs`, to per-file floors in the baseline's
+  `macos` section. CI enforces them only on the macOS 14 arm64 runner, and they
+  change only from a verified `macos-core` record. The run instruments
+  `sonicterm-ui` alone, so macOS-only code in other crates has no floor, and a
+  file floor misses a loss smaller than the 1.0 percentage point tolerance, such
+  as one macOS arm of `command_label.rs`.
 - `cargo deny --locked check` enforces the advisory, license, ban, and source
   policy in `deny.toml`, in the `linux-core` job and in the local gate, for every
   target. A green audit does not mean the ignored advisories are gone: each

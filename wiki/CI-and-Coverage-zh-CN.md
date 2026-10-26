@@ -216,8 +216,9 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
   能够编译与执行的 target。
 - `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
   regex 完全排除 9 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate
-  中点名的原生/控制器文件。CI 只在 macOS 上运行它，但本地 runner 在 Linux 上也会选择它。
-  Coverage 通过不能证明原生窗口、真实 PTY、GPU surface、生成 FFI、installer 或 Windows-only logic。
+  中点名的原生/控制器文件。CI 在 Linux 上、`linux-coverage` job 的 `ubuntu:22.04` 容器中运行它；
+  本地 runner 在 macOS 与 Linux 上都会选择它。Coverage 通过不能证明原生窗口、真实 PTY、GPU surface、
+  生成 FFI、installer，或 macOS-only 与 Windows-only logic。
 - 同一次运行还不带 ignore regex 重新报告同一批 profile，打印每个 workspace member 的
   line coverage，并由 `scripts/coverage-floor.py` 把每个已测量 crate 与
   `scripts/coverage-baseline.json` 中的条目比较。crate 比条目低 1.0 个百分点以上或
@@ -225,10 +226,16 @@ Unicode 文件交付、精确目标身份及清理；它们不合成或验证物
   有条目的 crate 不再被测量、member 既未测量也未声明，或已声明的 crate 开始报告代码行。
   测试、vendored、生成与 build script 代码会被排除并打印计数；没有可计入行的 crate 显示为
   `not measured` 及其原因。该下限只拦截回归，不拦截低覆盖率：一直偏低的 crate 仍会通过。
-  `sonicterm-windows` 与 `sonicterm-linux` 两行测量的是在 macOS 上编译的代码，不是这些平台
-  上的执行覆盖率。baseline 绑定 macOS arm64 CI runner；其它 host 上的 CI 以不可比较失败，
-  本地运行只打印参考性 delta，不给结论。下限数值只能根据已保留运行的已验证证据，通过经过评审的 diff 调整，
-  见 [Coverage 证据与重新建立基线](Development-and-Release-zh-CN#coverage-证据与重新建立基线)。
+  每一行测量的都是在 Linux 上编译的代码：macOS 专用的字体发现、PTY 与 IO 路径、日志以及
+  `sonicterm-mac` 二进制不参与编译，因此不被测量；`sonicterm-mac` 与 `sonicterm-windows` 两行只测量能在
+  Linux 上编译的部分，不是这些平台上的执行覆盖率。baseline 绑定 `linux-coverage` job 的 x86_64 Linux
+  容器；其它 host 上的 CI 以不可比较失败，本地运行只打印参考性 delta，不给结论。下限数值只能根据已保留运行的
+  已验证证据，通过经过评审的 diff 调整，见 [Coverage 证据与重新建立基线](Development-and-Release-zh-CN#coverage-证据与重新建立基线)。
+- `macos-core` 中的 `scripts/macos-logic-coverage.sh` 按 baseline 的 `macos` 段，为 80% 子集中的 macOS
+  专用逻辑（`sonicterm-ui` 的 `text_edit.rs` 中的 AppKit 单词边界，以及 `command_label.rs` 的 macOS 分支）
+  设置逐文件下限。CI 只在 macOS 14 arm64 runner 上强制执行这些下限，且只能根据经过验证的 `macos-core`
+  记录修改。该运行只对 `sonicterm-ui` 插桩，因此其它 crate 中的 macOS 专用代码没有下限；文件下限也无法发现
+  小于 1.0 个百分点容差的损失，例如 `command_label.rs` 的单个 macOS 分支。
 - `cargo deny --locked check` 在 `linux-core` job 与本地 gate 中，对所有 target 执行 `deny.toml`
   中的 advisory、license、ban 与 source policy。审计通过不代表被忽略的 advisory 已消失：每个
   `ignore` 条目都写明其依赖路径、上游 issue，以及可将其移除的版本。

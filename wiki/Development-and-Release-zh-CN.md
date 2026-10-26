@@ -813,8 +813,9 @@ smoke 的失败规则见[本地 gate](Local-Gate-zh-CN#性能场景-smoke)。
 
 ## Coverage 证据与重新建立基线
 
-per-crate 下限只在 macOS arm64 CI runner 上强制执行，而 CI 跟随 stable Rust channel，因此新的
-stable 版本或 runner 镜像可能在源码不变时改变 crate 的测量覆盖率。所以每次 coverage 运行都会保留
+per-crate 下限只在 `linux-coverage` job 的 x86_64 Linux 容器中强制执行，macOS 专用下限只在 macOS 14
+arm64 runner 上强制执行。CI 跟随 stable Rust channel，因此新的 stable 版本、runner 镜像或容器镜像可能在
+源码不变时改变测量覆盖率。所以每次 coverage 运行都会保留
 证据，下限只能根据已保留运行的已验证证据调整。
 
 ### 证据 artifact
