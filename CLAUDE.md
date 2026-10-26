@@ -153,7 +153,8 @@ python3 scripts/local-gate.py
 | `release-assets-tests` | `bash scripts/test-release-assets.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `linux-core` |
 | `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-tests-workspace`, `linux-core` |
 | `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `tooling`, `windows-tests-workspace`, `linux-core` |
-| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `macos-coverage` |
+| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `linux-coverage` |
+| `macos-logic-coverage` | `scripts/macos-logic-coverage.sh` | macOS | `local` | `rust`, `llvm-cov` | `macos-core` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests-runtime` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests-workspace` |
 | `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`, `native` | `windows-tests-runtime` |
@@ -254,6 +255,10 @@ Before trusting a green run:
   9 of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`, so
   a passing subset figure says nothing about code in those crates. The per-crate
   floor in `scripts/coverage-baseline.json` catches regressions, not low coverage.
+  CI measures it on Linux (`linux-coverage`), so those floors do not measure
+  macOS-only code; `macos-logic-coverage.sh` in `macos-core` holds only the
+  macOS-only logic inside the subset (`sonicterm-ui`'s `text_edit.rs` and
+  `command_label.rs`) to the baseline's `macos` section.
 - Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS, so a
   Windows-gated test file that would fail to *compile* still reports `ok`
   locally. The optional `windows-target` step narrows that gap by linting and

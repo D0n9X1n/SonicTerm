@@ -315,48 +315,22 @@ jobs:
             dist/*.dmg.creation-*/result.json
           if-no-files-found: ignore
 
-  macos-coverage:
-    name: macOS logic coverage
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
-        with:
-          toolchain: stable
-
-      - name: Restore Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-instrumented-macos-14
-          add-job-id-key: false
-          cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      # The pinned release's prebuilt arm64 binary saves the minute a source build takes. The script takes its
-      # version, URL and SHA-256 from scripts/pinned-tools.json and checks the digest before it unpacks anything.
-      - name: Install cargo-llvm-cov
+      # Linux logic coverage cannot see the macOS-only logic in the 80% subset (sonicterm-ui's AppKit word
+      # boundary and macOS arms), so this runner holds it to the baseline's macos section.
+      - name: Install cargo-llvm-cov for macOS-only coverage
         run: bash scripts/install-pinned-tool.sh cargo-llvm-cov
 
-      # The pull-request head reaches provenance through env; the runner supplies other run metadata.
-      - name: Run Rust logic coverage gate
-        id: coverage
-        shell: bash
-        env:
-          COVERAGE_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: scripts/rust-logic-coverage.sh
+      - name: Run macOS-only logic coverage
+        id: macos_coverage
+        run: scripts/macos-logic-coverage.sh
 
-      # One artifact per run attempt whose coverage step started, after success
-      # and after failure: the provenance record, plus measurement/ with the
-      # report and inventory once they are published. A failure before the
-      # coverage step leaves no artifact; its job log is the only diagnostic.
-      - name: Upload coverage evidence
-        if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
+      # The report a reviewer re-records the macos section from, after success and after failure.
+      - name: Upload macOS-only coverage report
+        if: ${{ !cancelled() && steps.macos_coverage.conclusion != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rust-logic-coverage-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/rust-logic-coverage-evidence
+          name: macos-logic-coverage-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/macos-logic-coverage/coverage-summary.json
           retention-days: 90
           if-no-files-found: error
 
@@ -497,7 +471,7 @@ jobs:
   macos:
     name: macos-14 / unit tests
     runs-on: ubuntu-latest
-    needs: [macos-core, macos-coverage, macos-smoke, tooling]
+    needs: [macos-core, macos-smoke, tooling]
     if: always()
     steps:
       - name: Verify macOS shards
@@ -505,10 +479,9 @@ jobs:
         env:
           TOOLING: ${{ needs.tooling.result }}
           CORE: ${{ needs.macos-core.result }}
-          COVERAGE: ${{ needs.macos-coverage.result }}
           SMOKE: ${{ needs.macos-smoke.result }}
         run: |
-          for result in "$CORE" "$COVERAGE" "$SMOKE" "$TOOLING"; do
+          for result in "$CORE" "$SMOKE" "$TOOLING"; do
             test "$result" = "success"
           done
 
@@ -1224,6 +1197,64 @@ jobs:
             test "$result" = "success"
           done
 
+  linux-coverage:
+    name: Linux logic coverage
+    # Logic coverage runs on Linux, where the macOS runner pool is not shared with the perf comparison. The
+    # macOS-only logic it cannot see keeps its own floor in macos-core.
+    runs-on: ubuntu-latest
+    steps:
+      # The packages linux-core installs, on the runner host so its image identity reaches the provenance record.
+      - name: Install native dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libcairo2-dev libfontconfig1-dev libwayland-dev libx11-dev \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-0 \
+            mesa-vulkan-drivers libvulkan1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+
+      - name: Restore Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-instrumented-ubuntu-latest
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # The pinned release's prebuilt x86_64 binary saves the minute a source build takes. The script takes its
+      # version, URL and this host's SHA-256 from scripts/pinned-tools.json and checks the digest before it unpacks.
+      - name: Install cargo-llvm-cov
+        run: bash scripts/install-pinned-tool.sh cargo-llvm-cov
+
+      # The pull-request head reaches provenance through env; the runner supplies other run metadata.
+      - name: Run Rust logic coverage gate
+        id: coverage
+        shell: bash
+        env:
+          COVERAGE_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: scripts/rust-logic-coverage.sh
+
+      # One artifact per run attempt whose coverage step started, after success
+      # and after failure: the provenance record, plus measurement/ with the
+      # report and inventory once they are published. A failure before the
+      # coverage step leaves no artifact; its job log is the only diagnostic.
+      - name: Upload coverage evidence
+        if: ${{ !cancelled() && steps.coverage.conclusion != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-logic-coverage-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rust-logic-coverage-evidence
+          retention-days: 90
+          if-no-files-found: error
+
   linux-core:
     name: Ubuntu core gates
     runs-on: ubuntu-latest
@@ -1449,15 +1480,16 @@ jobs:
   linux:
     name: ubuntu 22.04 / workspace, packages, X11, Wayland
     runs-on: ubuntu-latest
-    needs: [linux-core, linux-packages]
+    needs: [linux-core, linux-coverage, linux-packages]
     if: always()
     steps:
       - name: Verify Ubuntu shards
         shell: bash
         env:
           CORE: ${{ needs.linux-core.result }}
+          COVERAGE: ${{ needs.linux-coverage.result }}
           PACKAGES: ${{ needs.linux-packages.result }}
         run: |
-          for result in "$CORE" "$PACKAGES"; do
+          for result in "$CORE" "$COVERAGE" "$PACKAGES"; do
             test "$result" = "success"
           done

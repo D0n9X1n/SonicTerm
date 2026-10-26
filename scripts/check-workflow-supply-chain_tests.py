@@ -736,6 +736,31 @@ class PinnedToolTests(unittest.TestCase):
                                          {"scripts/pinned-tools.json": manifest(drop, **changes)}))
                 self.assertIn(expected, found)
 
+    def test_per_platform_pins_are_checked_one_by_one(self):
+        # Protect the per-host form: each pin needs its own digest, host, member and release URL, no two
+        # pins may name one host, and a per-host list may not sit beside a top-level pin.
+        flat = json.loads(manifest())["cargo-deny"]
+        pin = {key: flat.pop(key) for key in ("os", "arch", "url", "sha256", "member")}
+        other = dict(pin, os="macos", arch="aarch64")
+
+        def platform_manifest(pins, **changes) -> str:
+            """A one-tool manifest whose cargo-deny entry pins `pins`, with `changes` applied."""
+            return json.dumps({"cargo-deny": dict(flat, platforms=pins, **changes)})
+
+        workflow = {"ci.yml": run_workflow(INSTALL)}
+        self.assertEqual(checked(workflow, {"scripts/pinned-tools.json": platform_manifest([pin, other])}), [])
+        for case, text, expected in (
+            ("empty list", platform_manifest([]), "cargo-deny: platforms must be a non-empty list"),
+            ("duplicate host", platform_manifest([pin, dict(pin)]), "one archive per os and arch"),
+            ("beside a top-level pin", platform_manifest([pin], sha256=DIGEST), "cannot both pin an archive"),
+            ("bad digest", platform_manifest([pin, dict(other, sha256="abc")]), "cargo-deny platforms[1]: sha256"),
+            ("bad host", platform_manifest([dict(pin, os="windows")]), "cargo-deny platforms[0]: os"),
+            ("bad url", platform_manifest([dict(pin, url="https://example.com/{version}/deny.tar.gz")]),
+             "cargo-deny platforms[0]: url"),
+        ):
+            with self.subTest(case=case):
+                self.assertIn(expected, messages(checked(workflow, {"scripts/pinned-tools.json": text})))
+
     def test_a_tool_is_installed_only_by_the_script_with_its_name_alone(self):
         # Protect the single install path: extra arguments, an unknown tool, another installer,
         # or a manifest tool no workflow installs are each rejected.
@@ -873,7 +898,7 @@ class RepositoryTests(unittest.TestCase):
         contracts = {
             "macos": (
                 "macos-14 / unit tests",
-                ("macos-core", "macos-coverage", "macos-smoke", "tooling"),
+                ("macos-core", "macos-smoke", "tooling"),
             ),
             "windows": (
                 "windows-latest / unit tests",
@@ -881,7 +906,7 @@ class RepositoryTests(unittest.TestCase):
             ),
             "linux": (
                 "ubuntu 22.04 / workspace, packages, X11, Wayland",
-                ("linux-core", "linux-packages"),
+                ("linux-core", "linux-coverage", "linux-packages"),
             ),
         }
 
@@ -1148,7 +1173,7 @@ jobs:
         intel = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.runner == 'macos-15-intel' }}"
         contracts = {
             "macos-core": ("unit-macos-14", main),
-            "macos-coverage": ("instrumented-macos-14", main),
+            "linux-coverage": ("instrumented-ubuntu-latest", main),
             "macos-smoke": ("unit-${{ matrix.runner }}", intel),
             "windows-checks": ("check-windows-latest", main),
             "windows-tests-workspace": ("test-windows-latest", main),

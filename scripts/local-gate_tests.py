@@ -1704,11 +1704,11 @@ class CiParityTests(unittest.TestCase):
         self.assertEqual(
             set(jobs),
             {
-                "macos-core", "macos-coverage", "macos-smoke", "macos", "tooling",
+                "macos-core", "macos-smoke", "macos", "tooling",
                 "windows-native", "windows-glyph-oracle", "windows-checks", "windows-tests-workspace", "windows-tests-harness",
                 "windows-tests-harness-features", "windows-tests-harness-api", "windows-tests-runtime",
                 "windows-smoke", "windows",
-                "linux-core", "linux-packages", "linux",
+                "linux-core", "linux-coverage", "linux-packages", "linux",
             },
         )
         commands = {job: [command for _label, command in pairs] for job, pairs in jobs.items()}
@@ -2179,7 +2179,7 @@ class CiParserTests(unittest.TestCase):
 
     def test_every_unmodeled_job_form_raises(self):
         # Protect parity from jobs whose steps the reader cannot see: each form raises.
-        anchor = "  macos-coverage:\n"
+        anchor = "  linux-coverage:\n"
         self.assertEqual(WORKFLOW.count(anchor), 1)
         forms = {
             "reusable workflow job": "  reusable:\n    uses: ./.github/workflows/other.yml\n\n",

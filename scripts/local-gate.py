@@ -570,7 +570,10 @@ STEPS = (
          ("rust", "bash"), _SCRIPT_TESTS),
     # Executed directly, as ci.yml does, so it needs a POSIX host.
     Step("logic-coverage", ("scripts/rust-logic-coverage.sh",), ("macos", "linux"), 1200,
-         "local", ("rust", "native", "llvm-cov"), ("macos-coverage",)),
+         "local", ("rust", "native", "llvm-cov"), ("linux-coverage",)),
+    # The macOS-only floor instruments one crate: a cold build plus its tests, well inside the workspace run's budget.
+    Step("macos-logic-coverage", ("scripts/macos-logic-coverage.sh",), ("macos",), 900,
+         "local", ("rust", "llvm-cov"), ("macos-core",)),
     Step("windows-warp-allocator",
          ("cargo", "test", "-p", "sonicterm-gpu", "--test", "windows_warp_allocator_baseline",
           "--", "--nocapture"),
@@ -833,7 +836,7 @@ CI_ONLY = (
            ("windows-native", "windows-checks", _WINDOWS_WORKSPACE, _WINDOWS_HARNESS, _WINDOWS_HARNESS_FEATURES,
             _WINDOWS_HARNESS_API, _WINDOWS_RUNTIME, "windows-smoke", "windows-glyph-oracle"),
            "installs the vcpkg Cairo that the native prerequisite names; it checks nothing"),
-    CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-llvm-cov", ("macos-coverage",),
+    CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-llvm-cov", ("macos-core", "linux-coverage"),
            "installs the pinned cargo-llvm-cov that the llvm-cov prerequisite names; it checks nothing"),
     CiOnly("setup", "bash scripts/install-pinned-tool.sh cargo-deny", ("linux-core",),
            "installs the pinned cargo-deny that the cargo-deny prerequisite names; it checks nothing"),

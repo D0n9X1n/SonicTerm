@@ -36,9 +36,13 @@ use std::io;
 #[cfg(not(target_os = "windows"))]
 use std::process::{Command, Stdio};
 
-#[cfg(all(unix, not(target_os = "macos")))]
+// Both Unix builders compile on every Unix host so either host's tests and coverage check both argv shapes;
+// only the host's own builder is exported below.
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 mod linux;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod macos;
 #[cfg(target_os = "windows")]
 #[path = "url_open/windows.rs"]

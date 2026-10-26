@@ -187,6 +187,22 @@ class InstallPinnedToolTests(unittest.TestCase):
         self.assert_refused_before(self.install(TOOL, entry=self.entry(version_first_line="true")),
                                    "curl", "version_first_line must be boolean")
 
+    def test_a_per_platform_entry_installs_only_this_hosts_pin(self):
+        # Protect the per-host form: the pin naming this host's os and arch is the one downloaded and
+        # checked, and an entry with no pin for this host is refused before any download.
+        flat = self.entry()
+        shared = {key: flat[key] for key in ("version", "version_args", "version_output")}
+        here = {key: flat[key] for key in ("os", "arch", "url", "sha256", "member")}
+        elsewhere = dict(here, os="macos" if host_os() == "linux" else "linux", sha256="0" * 64)
+        completed = self.install(TOOL, entry=dict(shared, platforms=[elsewhere, here]))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(os.access(self.installed(), os.X_OK))
+        self.installed().unlink()
+        for marker in self.markers.iterdir():
+            marker.unlink()
+        self.assert_refused_before(self.install(TOOL, entry=dict(shared, platforms=[elsewhere])),
+                                   "curl", f"no single pin for {host_os()}/{host_arch()}")
+
     def test_a_binary_reporting_another_version_is_removed(self):
         # Protect against an archive whose binary is not the pinned release.
         self.archive.write_bytes(release_archive(f"{TOOL} 0.0.1"))

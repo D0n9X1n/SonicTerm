@@ -287,7 +287,8 @@ fn previous_unicode_word_boundary(text: &str, cursor: usize) -> Option<usize> {
     utf16_boundary_to_utf8(prefix, boundary)
 }
 
-#[cfg(target_os = "macos")]
+// Platform-independent so every host's tests and coverage exercise it; only the AppKit boundary query calls it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn utf16_boundary_to_utf8(text: &str, boundary: usize) -> Option<usize> {
     let mut utf16_index = 0;
     for (byte_index, character) in text.char_indices() {

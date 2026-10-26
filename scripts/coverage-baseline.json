@@ -116,5 +116,24 @@
   "not_measured": {
     "sonicterm-fontconfig": "declarations only: src/lib.rs holds hand-written Fontconfig FFI types, constants, and extern declarations with no function body, so it has no instrumented line; sonicterm-font links it only on non-macOS Unix, so it is also target-inapplicable on this host.",
     "sonicterm-harfbuzz": "generated only: src/lib.rs, its only library source, is rust-bindgen output counted under generated code; build.rs compiles the HarfBuzz C/C++ sources, which Rust coverage does not instrument."
+  },
+  "macos": {
+    "host": {
+      "target": "aarch64-apple-darwin",
+      "runner": "macos14/ARM64"
+    },
+    "reason": "Seed floors for the macOS-only logic in the 80% subset (the AppKit word boundary in text_edit.rs and the macOS arms of command_label.rs), which the Linux crate floors cannot see. Measured locally on aarch64-apple-darwin with cargo-llvm-cov 0.8.7 by scripts/macos-logic-coverage.sh's command; re-record from the macos-core job's uploaded macos-logic-coverage-report when CI's numbers differ.",
+    "files": {
+      "crates/sonicterm-ui/src/command_label.rs": {
+        "lines": 561,
+        "covered": 554,
+        "percent": 98.75
+      },
+      "crates/sonicterm-ui/src/text_edit.rs": {
+        "lines": 160,
+        "covered": 159,
+        "percent": 99.38
+      }
+    }
   }
 }

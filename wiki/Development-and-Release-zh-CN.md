@@ -62,7 +62,8 @@ python3 scripts/local-gate.py
 | `release-assets-tests` | `bash scripts/test-release-assets.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `linux-core` |
 | `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS、Windows、Linux | `local` | `bash` | `tooling`、`windows-tests-workspace`、`linux-core` |
 | `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS、Windows、Linux | `local` | `rust`、`bash` | `tooling`、`windows-tests-workspace`、`linux-core` |
-| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS、Linux | `local` | `rust`、`native`、`llvm-cov` | `macos-coverage` |
+| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS、Linux | `local` | `rust`、`native`、`llvm-cov` | `linux-coverage` |
+| `macos-logic-coverage` | `scripts/macos-logic-coverage.sh` | macOS | `local` | `rust`、`llvm-cov` | `macos-core` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`、`native`、`warp` | `windows-tests-runtime` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests-workspace` |
 | `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`、`native` | `windows-tests-runtime` |
@@ -818,7 +819,7 @@ stable 版本或 runner 镜像可能在源码不变时改变 crate 的测量覆�
 
 ### 证据 artifact
 
-`macOS logic coverage` job 为每个 coverage 步骤已开始的 run attempt，在成功和失败后，只要 runner
+`Linux logic coverage` job 为每个 coverage 步骤已开始的 run attempt，在成功和失败后，只要 runner
 仍能执行清理步骤，就上传一个 artifact：`rust-logic-coverage-evidence-<run id>-<attempt>`。在该步骤
 之前失败（checkout、工具链、缓存或 `cargo-llvm-cov` 安装）不会留下 artifact；它的 job 日志是唯一的
 诊断信息。上传步骤保留 90 天（受仓库策略限制），并设置 `if-no-files-found: error`，
@@ -895,7 +896,7 @@ gh run download "$run" -R D0n9X1n/SonicTerm \
 gh api "repos/D0n9X1n/SonicTerm/actions/runs/$run/attempts/$attempt" \
   --jq '[.repository.full_name, .path, .run_attempt, .event, .status, .head_sha] | @tsv'
 gh api "repos/D0n9X1n/SonicTerm/actions/runs/$run/attempts/$attempt/jobs?per_page=100" \
-  --jq '.jobs[] | select(.name == "macOS logic coverage") | [.conclusion, .head_sha] | @tsv'
+  --jq '.jobs[] | select(.name == "Linux logic coverage") | [.conclusion, .head_sha] | @tsv'
 python3 -c 'import json, sys; record = json.load(open(sys.argv[1])); record.pop("tree_entries"); print(json.dumps(record, indent=2))' \
   "$dir/coverage-provenance.json"
 commit="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["commit"])' "$dir/coverage-provenance.json")"
@@ -908,8 +909,8 @@ gh api "repos/D0n9X1n/SonicTerm/git/commits/$commit" \
 - `.repository.full_name` 等于 `repository`，`.path` 等于 `workflow`，即
   `.github/workflows/ci.yml`。
 - `.run_attempt` 等于 `run_attempt`，artifact 名称等于 `artifact`。
-- 该 attempt 的 `.status` 为 `completed`；`macOS logic coverage` job（记录中的 `job`，即
-  `macos-coverage`）存在，且两项检查都为 `exit status 0` 时结论为 `success`，否则为 `failure`。
+- 该 attempt 的 `.status` 为 `completed`；`Linux logic coverage` job（记录中的 `job`，即
+  `linux-coverage`）存在，且两项检查都为 `exit status 0` 时结论为 `success`，否则为 `failure`。
 - 记录写明 `measurement: complete`。
 - push 运行中，`commit` 等于该 attempt 的 `.head_sha`。pull request 运行中，`commit` 是 GitHub 的
   测试 merge commit，且 `.head_sha` 等于 `pull_request_head`。
@@ -931,7 +932,7 @@ gh api "repos/D0n9X1n/SonicTerm/git/commits/$commit" \
    python3 scripts/coverage-floor.py --update-baseline \
      --report "$dir/measurement/coverage-summary.json" \
      --metadata "$dir/measurement/workspace-metadata.json" \
-     --baseline scripts/coverage-baseline.json --target aarch64-apple-darwin \
+     --baseline scripts/coverage-baseline.json --target x86_64-unknown-linux-gnu \
      --provenance "$dir/coverage-provenance.json" \
      --crate NAME --reason "CAUSE"
    ```
@@ -941,6 +942,23 @@ gh api "repos/D0n9X1n/SonicTerm/git/commits/$commit" \
 4. 工具会在所述原因后追加运行、attempt、job、artifact、host、镜像、工具链与 commit。所述原因必须
    说明起因：工具链或镜像变化可能导致 DROP，但仅凭这一点不能成为降低下限的理由。
 5. 像其它下限变更一样评审并提交 diff。
+
+### macOS 专用下限
+
+baseline 的 `macos` 段为 80% 子集中的 macOS 专用逻辑保存逐文件下限，由 `macos-core` 中的
+`scripts/macos-logic-coverage.sh` 在 `aarch64-apple-darwin` 上测量。该 job 在成功和失败后都把报告上传为
+`macos-logic-coverage-report-<run id>-<attempt>`。要修改该段，从精确评审 head 的运行中下载该报告，只重写
+这一段；所有 crate 下限保持不变：
+
+```bash
+python3 scripts/coverage-floor.py macos-floor --update \
+  --report "$dir/coverage-summary.json" --baseline scripts/coverage-baseline.json \
+  --target aarch64-apple-darwin --source-root "$PWD" --runner macos14/ARM64 \
+  --reason "CAUSE. Measured by run <run id> attempt <attempt>."
+```
+
+`--file PATH` 向该段添加文件。更新会记录报告中的数字、所述 host 与原因。它没有 provenance 记录，因此
+原因必须写明来源运行，评审者需核对该运行的报告。
 
 ### 拒绝条件
 

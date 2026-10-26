@@ -78,7 +78,7 @@ any stash.
 ### macOS 14 and Windows latest
 
 The stable required checks are fail-closed aggregate jobs: `macos-14 / unit
-tests` requires `macos-core`, `macos-coverage`, `macos-smoke`, and `tooling`, while
+tests` requires `macos-core`, `macos-smoke`, and `tooling`, while
 `windows-latest / unit tests` requires `windows-native`, `windows-glyph-oracle`, `windows-checks`, the
 five Windows test shards (`windows-tests-workspace`, `windows-tests-harness`,
 `windows-tests-harness-features`, `windows-tests-harness-api` and
@@ -96,11 +96,31 @@ checks, plus release-note, wiki-publish, resource-inventory, soak and resource-b
 script tests. These commands remain local gates on every supported host; the existing
 macOS aggregate requires the tooling job, so none became optional. The working-set
 measurement stays in macos-core to reuse its compiled harness without adding a cold
-macOS build or competing with perf for another runner slot. Its independent coverage shard installs the pinned
-`cargo-llvm-cov` release's prebuilt Apple Silicon binary with
-`scripts/install-pinned-tool.sh`, which checks its SHA-256 before unpacking it
+macOS build or competing with perf for another runner slot. Logic coverage runs in its own
+`linux-coverage` job on `ubuntu-latest`, outside the macOS runner pool the perf comparison
+waits for. It installs the pinned `cargo-llvm-cov` release's prebuilt x86_64 Linux binary with
+`scripts/install-pinned-tool.sh`, which checks that host's SHA-256 before unpacking it
 (expected to save the minute a source build takes), then runs the deterministic logic coverage gate, and uploads its
-evidence artifact after success and after failure once the coverage step has started. The
+evidence artifact after success and after failure once the coverage step has started.
+
+Because the floors are measured on Linux, the per-crate floors in
+`scripts/coverage-baseline.json` no longer measure macOS-only code: CoreText font
+discovery, the macOS PTY and IO paths, macOS logging, and the `sonicterm-mac` binary
+compile out there, and the Linux-only code (Fontconfig discovery, `sonicterm-linux`)
+is measured instead. The 80% gate and its crate list are unchanged. Platform-independent
+logic that used to sit behind `cfg(target_os = "macos")`, the UTF-16 to UTF-8 boundary
+conversion and the `open` and `xdg-open` URL command builders, now compiles and is
+tested on every Unix host, so the Linux run measures it. The macOS-only logic left in
+the 80% subset, the AppKit word boundary in `sonicterm-ui`'s `text_edit.rs` and the
+macOS arms of `command_label.rs`, keeps its own floor: `macos-core` installs the macOS
+pin of the same tool, runs `scripts/macos-logic-coverage.sh`, which instruments
+`sonicterm-ui` alone, holds each file to the baseline's `macos` section with the same
+1 pp tolerance, and uploads its report after success and after failure. A file floor
+catches a loss larger than the tolerance: losing the AppKit boundary's coverage, 7 of
+`text_edit.rs`'s 160 lines, moves it by about 4 pp, while one macOS arm of `command_label.rs` is below 1 pp
+of that file and is not caught.
+
+The
 native runtime smoke builds shipping release binaries on macOS 14 Apple Silicon,
 as steps at the end of `macos-core`, and on macOS 15 Intel, in the one-leg
 `macos-smoke` matrix, with distinct dependency-cache keys. The Intel lane may save
@@ -177,8 +197,8 @@ built-in font identity is bound by the source digest, and GDI memory-face names 
 
 Windows cache families are `check-windows-latest` (written by `windows-checks`),
 `test-windows-latest` (written by `windows-tests-workspace`, restored by the oracle and all
-test shards), and `release-windows-latest` (written by `windows-smoke`). The macOS coverage
-job uses its separate `instrumented-macos-14` family. Its coverage script still discards instrumented
+test shards), and `release-windows-latest` (written by `windows-smoke`). The Linux coverage
+job uses its separate `instrumented-ubuntu-latest` family. Its coverage script still discards instrumented
 outputs before measurement, so that family provides no warm instrumented-build guarantee. No workspace artifacts are cached;
 every writer saves only after a successful push to `main`, never on a pull request. The
 other macOS and Linux cache policies are unchanged. Compiler/environment hashing remains
@@ -223,7 +243,7 @@ progress, not a passing check.
 ### Ubuntu 22.04
 
 The stable `ubuntu 22.04 / workspace, packages, X11, Wayland` aggregate requires
-`linux-core` and `linux-packages`, using the same fail-closed result check as
+`linux-core`, `linux-coverage`, and `linux-packages`, using the same fail-closed result check as
 the macOS and Windows aggregates. The core shard installs the compile-time Linux
 dependencies plus Vulkan/lavapipe for GPU tests and adapter probes, measures the
 real PTY close baseline after Cargo restore, then runs format, Clippy, Rustdoc (including `sonicterm-resource` with its `test-util`

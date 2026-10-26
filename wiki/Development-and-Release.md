@@ -64,7 +64,8 @@ python3 scripts/local-gate.py
 | `release-assets-tests` | `bash scripts/test-release-assets.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `linux-core` |
 | `release-notes-tests` | `bash scripts/test-release-notes.sh` | macOS, Windows, Linux | `local` | `bash` | `tooling`, `windows-tests-workspace`, `linux-core` |
 | `wiki-publish-tests` | `bash scripts/test-wiki-publish.sh` | macOS, Windows, Linux | `local` | `rust`, `bash` | `tooling`, `windows-tests-workspace`, `linux-core` |
-| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `macos-coverage` |
+| `logic-coverage` | `scripts/rust-logic-coverage.sh` | macOS, Linux | `local` | `rust`, `native`, `llvm-cov` | `linux-coverage` |
+| `macos-logic-coverage` | `scripts/macos-logic-coverage.sh` | macOS | `local` | `rust`, `llvm-cov` | `macos-core` |
 | `windows-warp-allocator` | `cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture` | Windows | `local` | `rust`, `native`, `warp` | `windows-tests-runtime` |
 | `msi-validator-tests` | `.\scripts\validate-windows-msi_tests.ps1` | Windows | `local` | `pwsh` | `windows-tests-workspace` |
 | `windows-perf-build` | `cargo build --locked -p sonicterm-app --example perf_scenarios` | Windows | `local` | `rust`, `native` | `windows-tests-runtime` |
@@ -1258,7 +1259,7 @@ evidence.
 
 ### Evidence artifact
 
-The `macOS logic coverage` job uploads one artifact per run attempt whose
+The `Linux logic coverage` job uploads one artifact per run attempt whose
 coverage step started, `rust-logic-coverage-evidence-<run id>-<attempt>`, after
 success and after failure whenever the runner can still run cleanup steps. A
 failure before that step (checkout, toolchain, cache, or the `cargo-llvm-cov`
@@ -1362,7 +1363,7 @@ gh run download "$run" -R D0n9X1n/SonicTerm \
 gh api "repos/D0n9X1n/SonicTerm/actions/runs/$run/attempts/$attempt" \
   --jq '[.repository.full_name, .path, .run_attempt, .event, .status, .head_sha] | @tsv'
 gh api "repos/D0n9X1n/SonicTerm/actions/runs/$run/attempts/$attempt/jobs?per_page=100" \
-  --jq '.jobs[] | select(.name == "macOS logic coverage") | [.conclusion, .head_sha] | @tsv'
+  --jq '.jobs[] | select(.name == "Linux logic coverage") | [.conclusion, .head_sha] | @tsv'
 python3 -c 'import json, sys; record = json.load(open(sys.argv[1])); record.pop("tree_entries"); print(json.dumps(record, indent=2))' \
   "$dir/coverage-provenance.json"
 commit="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["commit"])' "$dir/coverage-provenance.json")"
@@ -1376,8 +1377,8 @@ When the run published them, the report and inventory are in
 - `.repository.full_name` equals `repository`, and `.path` equals `workflow`,
   `.github/workflows/ci.yml`.
 - `.run_attempt` equals `run_attempt`, and the artifact name equals `artifact`.
-- The attempt's `.status` is `completed`, and the `macOS logic coverage` job
-  (the record's `job`, `macos-coverage`) exists with conclusion `success` when
+- The attempt's `.status` is `completed`, and the `Linux logic coverage` job
+  (the record's `job`, `linux-coverage`) exists with conclusion `success` when
   both checks read `exit status 0`, and `failure` otherwise.
 - The record says `measurement: complete`.
 - On a push run, `commit` equals the attempt's `.head_sha`. On a pull-request
@@ -1404,7 +1405,7 @@ commit, and its tree.
    python3 scripts/coverage-floor.py --update-baseline \
      --report "$dir/measurement/coverage-summary.json" \
      --metadata "$dir/measurement/workspace-metadata.json" \
-     --baseline scripts/coverage-baseline.json --target aarch64-apple-darwin \
+     --baseline scripts/coverage-baseline.json --target x86_64-unknown-linux-gnu \
      --provenance "$dir/coverage-provenance.json" \
      --crate NAME --reason "CAUSE"
    ```
@@ -1417,6 +1418,26 @@ commit, and its tree.
    toolchain or image change can cause a DROP, but that alone does not justify
    lowering a floor.
 5. Review and commit the diff like any other floor change.
+
+### macOS-only floor
+
+The baseline's `macos` section holds per-file floors for the macOS-only logic in the
+80% subset, measured on `aarch64-apple-darwin` by `scripts/macos-logic-coverage.sh`
+in `macos-core`. That job uploads its report as
+`macos-logic-coverage-report-<run id>-<attempt>` after success and after failure.
+To change the section, download that report from a run on the exact reviewed head
+and rewrite the section alone; every crate floor stays verbatim:
+
+```bash
+python3 scripts/coverage-floor.py macos-floor --update \
+  --report "$dir/coverage-summary.json" --baseline scripts/coverage-baseline.json \
+  --target aarch64-apple-darwin --source-root "$PWD" --runner macos14/ARM64 \
+  --reason "CAUSE. Measured by run <run id> attempt <attempt>."
+```
+
+`--file PATH` adds a file to the section. The update records the report's numbers,
+the stated host, and the reason. It has no provenance record, so the reason must name
+the run it came from, and the reviewer checks that run's report.
 
 ### Refusals
 

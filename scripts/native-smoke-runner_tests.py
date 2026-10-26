@@ -460,7 +460,8 @@ class WorkflowShapeTests(unittest.TestCase):
         # New dependencies must be checked, not merely scheduled: a failed portable gate or
         # helper producer must fail its platform aggregate even when every native smoke passed.
         for job, needs, variable, dependency in (
-            ("macos", "macos-core, macos-coverage, macos-smoke, tooling", "TOOLING", "tooling"),
+            ("macos", "macos-core, macos-smoke, tooling", "TOOLING", "tooling"),
+            ("linux", "linux-core, linux-coverage, linux-packages", "COVERAGE", "linux-coverage"),
             ("windows", "windows-native, windows-glyph-oracle, windows-checks, windows-tests-workspace, "
              "windows-tests-harness, windows-tests-harness-features, windows-tests-harness-api, "
              "windows-tests-runtime, windows-smoke", "ORACLE", "windows-glyph-oracle"),

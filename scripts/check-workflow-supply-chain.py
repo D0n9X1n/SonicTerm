@@ -99,6 +99,8 @@ EXACT_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 PINNED_OS = frozenset({"linux", "macos"})
 PINNED_ARCH = frozenset({"aarch64", "x86_64"})
 SHA256_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+# The keys that pin one release archive, at an entry's top level or in each of its `platforms` pins.
+ARCHIVE_PIN_KEYS = ("os", "arch", "url", "sha256", "member")
 RELEASE_URL = re.compile(
     r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[^/]*\{version\}[^/]*/[^/]+$"
 )
@@ -805,17 +807,23 @@ def _manifest(root: Path) -> tuple[dict, list[Finding]]:
         entry = entry if isinstance(entry, dict) else {}
         if not EXACT_VERSION.fullmatch(str(entry.get("version", ""))):
             findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: version must be an exact X.Y.Z"))
-        if not SHA256_DIGEST.fullmatch(str(entry.get("sha256", ""))):
-            findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: sha256 must be 64 lowercase hex digits"))
-        if entry.get("os") not in PINNED_OS:
-            findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: os must be one of {sorted(PINNED_OS)}"))
-        if entry.get("arch") not in PINNED_ARCH:
-            findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: arch must be one of {sorted(PINNED_ARCH)}"))
-        member = entry.get("member")
-        if (not isinstance(member, str) or not member or "\n" in member or member.startswith("/")
-                or ".." in member.split("/")):
-            findings.append(Finding(PINNED_MANIFEST, 1,
-                                    f"{tool}: member must be a relative path inside the archive"))
+        platforms = entry.get("platforms")
+        if platforms is None:
+            findings.extend(_archive_pin_findings(tool, entry))
+        elif (not isinstance(platforms, list) or not platforms
+              or not all(isinstance(pin, dict) for pin in platforms)):
+            findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: platforms must be a non-empty list of pins"))
+        else:
+            # Per-host pins: each is checked alone, no two name one host, and none sits beside a top-level pin.
+            mixed = sorted(set(entry) & set(ARCHIVE_PIN_KEYS))
+            if mixed:
+                findings.append(Finding(PINNED_MANIFEST, 1,
+                                        f"{tool}: platforms and top-level {mixed} cannot both pin an archive"))
+            hosts = [(pin.get("os"), pin.get("arch")) for pin in platforms]
+            if len(set(hosts)) != len(hosts):
+                findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: platforms pins one archive per os and arch"))
+            for index, pin in enumerate(platforms):
+                findings.extend(_archive_pin_findings(f"{tool} platforms[{index}]", pin))
         arguments = entry.get("version_args")
         if not isinstance(arguments, list) or not arguments or not all(
             isinstance(argument, str) and argument and "\n" not in argument for argument in arguments
@@ -827,13 +835,29 @@ def _manifest(root: Path) -> tuple[dict, list[Finding]]:
         output = entry.get("version_output")
         if not isinstance(output, str) or not output or "\n" in output:
             findings.append(Finding(PINNED_MANIFEST, 1, f"{tool}: version_output must be a non-empty string"))
-        if not RELEASE_URL.fullmatch(str(entry.get("url", ""))):
-            findings.append(Finding(
-                PINNED_MANIFEST, 1,
-                f"{tool}: url must be a pinned https release URL "
-                "(https://github.com/<owner>/<repo>/releases/download/<tag with {version}>/<asset>)",
-            ))
     return tools, findings
+
+
+def _archive_pin_findings(label: str, pin: dict) -> list[Finding]:
+    """Findings for one release archive's pin: its digest, host, archive member and release URL."""
+    findings = []
+    if not SHA256_DIGEST.fullmatch(str(pin.get("sha256", ""))):
+        findings.append(Finding(PINNED_MANIFEST, 1, f"{label}: sha256 must be 64 lowercase hex digits"))
+    if pin.get("os") not in PINNED_OS:
+        findings.append(Finding(PINNED_MANIFEST, 1, f"{label}: os must be one of {sorted(PINNED_OS)}"))
+    if pin.get("arch") not in PINNED_ARCH:
+        findings.append(Finding(PINNED_MANIFEST, 1, f"{label}: arch must be one of {sorted(PINNED_ARCH)}"))
+    member = pin.get("member")
+    if (not isinstance(member, str) or not member or "\n" in member or member.startswith("/")
+            or ".." in member.split("/")):
+        findings.append(Finding(PINNED_MANIFEST, 1, f"{label}: member must be a relative path inside the archive"))
+    if not RELEASE_URL.fullmatch(str(pin.get("url", ""))):
+        findings.append(Finding(
+            PINNED_MANIFEST, 1,
+            f"{label}: url must be a pinned https release URL "
+            "(https://github.com/<owner>/<repo>/releases/download/<tag with {version}>/<asset>)",
+        ))
+    return findings
 
 
 def check_pinned_tools(root: Path, workflows: dict[str, list[str]]) -> list[Finding]:

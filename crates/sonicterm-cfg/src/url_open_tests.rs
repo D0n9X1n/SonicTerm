@@ -231,6 +231,21 @@ fn build_command_targets_platform_handler_with_url_as_arg() {
     assert_ne!(program, url);
 }
 
+// Both Unix builders compile on every Unix host, so Linux checks the macOS argv and macOS the freedesktop one.
+#[cfg(unix)]
+#[test]
+fn each_unix_builder_passes_the_url_as_one_argument_on_every_unix_host() {
+    let url = "https://example.com/a b?q=%41&x=\u{e9}";
+    for (cmd, expected_program) in
+        [(linux::build_command(url), "xdg-open"), (macos::build_command(url), "open")]
+    {
+        let args: Vec<String> =
+            cmd.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
+        assert_eq!(cmd.get_program().to_string_lossy(), expected_program);
+        assert_eq!(args, vec![url.to_string()]);
+    }
+}
+
 // ---- dispatch_modifier_click: capturing closure, no OS handler ---------
 
 #[test]
